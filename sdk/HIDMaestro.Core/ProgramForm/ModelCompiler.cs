@@ -129,9 +129,7 @@ internal static class ModelCompiler
                     _ => throw new FormException(path + ".send", $"\"{spec.Send}\" is not one of clock, change, submit"),
                 };
                 var when = spec.While == null ? null : ConditionParser.Parse(spec.While, regs, path + ".while");
-                var program = Program(spec.Name, spec.Size, stateSize, regs, counterNames, spec.Program, path + ".program", path + ".size");
-                if (id >= 0 && program.Template[0] != id && !WritesByteZero(program))
-                    throw new FormException(path + ".program", $"byte 0 is the report ID 0x{id:X2}: a const must put it there");
+                var program = Program(spec.Name, spec.Size, stateSize, regs, counterNames, spec.Program, path + ".program", path + ".size", reportId: id);
                 layouts.Add(new LayoutForm(spec.Name, id, spec.Size, when, send, program));
             }
             // Two layouts on one report ID may share it only when their
@@ -191,19 +189,38 @@ internal static class ModelCompiler
         };
     }
 
-    static bool WritesByteZero(ValidProgram p)
+    /// <summary>Refuses an op other than a top-level const that writes byte 0
+    /// of a report whose byte 0 is its ID, with the op's path in the form.
+    /// Every op's writes start at its destination, so an op writes byte 0
+    /// when its destination is 0, and a bit move when its report bit is below
+    /// 8.</summary>
+    static void ByteZeroIsTheId(ProgramSpec p, int id)
     {
-        foreach (var op in p.Unconditional)
-            switch (op)
+        static bool AtZero(Op op) => op switch
+        {
+            CopyOp c => c.Dst == 0,
+            FieldOp f => f.Dst == 0,
+            CounterOp k => k.Dst == 0,
+            Swap16Op w => w.Dst == 0,
+            Pack12Op k => k.Dst == 0,
+            Hat8Op h => h.Dst == 0,
+            MaxOfOp m => m.Dst == 0,
+            LookupOp l => l.Dst == 0,
+            XorOp x => x.Dst == 0,
+            ConstOp c => c.At == 0,
+            BitsOp b => Enumerable.Range(0, b.Moves.Length / 2).Any(k => b.Moves[2 * k + 1] < 8),
+            _ => false,
+        };
+        string why = $"writes byte 0, the report ID 0x{id:X2} a const puts there";
+        for (int i = 0; i < p.Ops.Length; i++)
+        {
+            if (p.Ops[i] is WhenOp w)
             {
-                case CopyOp c when c.Dst == 0: return true;
-                case FieldOp f when f.Dst == 0: return true;
-                case CounterOp k when k.Dst == 0: return true;
-                case Swap16Op s when s.Dst == 0: return true;
-                case Pack12Op k when k.Dst == 0: return true;
-                case Hat8Op h when h.Dst == 0: return true;
+                for (int j = 0; j < w.Ops.Length; j++)
+                    if (AtZero(w.Ops[j])) throw new FormException($"$.ops[{i}].ops[{j}]", why);
             }
-        return false;
+            else if (p.Ops[i] is not ConstOp && AtZero(p.Ops[i])) throw new FormException($"$.ops[{i}]", why);
+        }
     }
 
     // ── Registers and counters ───────────────────────────────────────────
@@ -286,8 +303,12 @@ internal static class ModelCompiler
     // ── Programs ─────────────────────────────────────────────────────────
 
     /// <summary>One program from its ops as a profile writes them.</summary>
+    /// <summary>A layout's, decoder's or report's program lowered and
+    /// validated. With <paramref name="reportId"/> 0 or more, byte 0 is that
+    /// report ID: a top-level const puts it there, and no other op writes
+    /// it.</summary>
     public static ValidProgram Program(string name, int size, int stateSize, RegisterTable regs, string[] counters,
-        List<ProgramOpSpec>? ops, string path, string sizePath)
+        List<ProgramOpSpec>? ops, string path, string sizePath, int reportId = -1)
     {
         if (ops == null) throw new FormException(path, "a layout needs a program");
         if (size < 1 || size > ProgramForm.MaxReport) throw new FormException(sizePath, $"{size} is outside 1 to {ProgramForm.MaxReport}");
@@ -297,8 +318,16 @@ internal static class ModelCompiler
         for (int i = 0; i < ops.Count; i++)
             Lower(ops[i], $"{path}[{i}]", regs, counters, ir, paths, subPaths, inBlock: false);
         var spec = new ProgramSpec(name, size, stateSize, regs.Bits, ir.ToArray());
-        try { return ProgramForm.Validate(spec); }
+        ValidProgram valid;
+        try
+        {
+            valid = ProgramForm.Validate(spec);
+            if (reportId >= 0) ByteZeroIsTheId(spec, reportId);
+        }
         catch (FormException e) { throw new FormException(MapPath(e.Path, path, sizePath, paths, subPaths, ir, ops), e.Reason, e); }
+        if (reportId >= 0 && valid.Template[0] != reportId)
+            throw new FormException(path, $"byte 0 is the report ID 0x{reportId:X2}: a const must put it there");
+        return valid;
     }
 
     /// <summary>The validator's name for a value of <paramref name="op"/>,

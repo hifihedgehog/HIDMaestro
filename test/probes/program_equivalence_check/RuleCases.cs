@@ -76,6 +76,10 @@ internal static partial class RuleChecks
         yield return E("a layout of 0 bytes", "$.inputReports[0].size", Set($"{L0}.size", "0"));
         yield return E("a layout past 64 bytes", "$.inputReports[0].size", Set($"{L0}.size", "65"));
         yield return E("byte 0 that is not the report ID", "$.inputReports[0].program", Set($"{P0}[0].const[\"0\"]", "\"08\""));
+        yield return E("a block that writes byte 0 over the report ID", $"{P0}[13].ops[2]", Append($"{P0}[13].ops", "{\"const\":{\"0\":\"05\"}}"));
+        yield return E("a field that writes byte 0, the report ID's, with no const", $"{P0}[15]",
+            All(Set($"{P0}[0].const", "{\"2\":\"25\",\"5\":\"0C\"}"), Op("{\"field\":{\"byte\":0},\"to\":0}")));
+        yield return E("a counter that writes byte 0 beside the report ID's const", $"{P0}[15]", Op("{\"counter\":\"reportsSent\",\"at\":0,\"width\":8}"));
         yield return E("two layouts on one ID, one with no condition", "$.inputReports[1].while", All(Set("$.inputReports[1].reportId", "\"0x09\""), Set("$.inputReports[1].program[0].const[\"0\"]", "\"09\""), Remove("$.inputReports[1].while")));
         yield return E("two layouts on one ID whose conditions hold together", "$.inputReports[1].while", All(Set("$.inputReports[1].reportId", "\"0x09\""), Set("$.inputReports[1].program[0].const[\"0\"]", "\"09\""), Set("$.inputReports[1].while", "\"featureEnabled!=0\"")));
         yield return E("two layouts on one ID testing 24 bits", "$.inputReports[1].while", All(Set("$.inputReports[1].reportId", "\"0x09\""), Set("$.inputReports[1].program[0].const[\"0\"]", "\"09\""),
