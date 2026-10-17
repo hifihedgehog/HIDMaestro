@@ -300,16 +300,27 @@ internal static class Strict
         Add("a PID that is not hex", BaseId, o => { o["pid"] = "0x1G"; return o.ToJsonString(); }, "$.pid");
         Add("no VID", BaseId, o => { o.Remove("vid"); return o.ToJsonString(); }, "$.vid");
         Add("an empty PID, spelled PID", BaseId, o => { o.Remove("pid"); o["PID"] = ""; return o.ToJsonString(); }, "$.PID");
+        // The reader takes "ID" as the id, so a file that spells it so is a
+        // profile and its defect is listed as one. At 313a54c2 the loader
+        // looked for the id of a file that did not read with a
+        // case-sensitive match and listed it as no profile.
+        Add("a misspelled key in a file that spells its id ID", BaseId, o =>
+        {
+            o.Remove("id");
+            o["ID"] = "user-path";
+            o["inptuReports"] = new JsonObject();
+            return o.ToJsonString();
+        }, "$.inptuReports");
         foreach (var (name, text, path) in cases)
         {
             c.Run($"{name}: refused at {path}, and the reason does not repeat the path", () =>
             {
                 var db = ProfileDatabase.LoadTexts(new[] { ("user-path.json", text) }, ModelRegistry.Catalog);
                 var issues = Api.Issues(db, "Issues");
-                bool ok = issues.Count == 1 && issues[0].Path == path
+                bool ok = issues.Count == 1 && issues[0].Path == path && issues[0].Kind == "Refused" && issues[0].Id == "user-path"
                           && !issues[0].Reason.Contains("layout/", StringComparison.Ordinal)
                           && !issues[0].Reason.StartsWith(path, StringComparison.Ordinal);
-                return (ok, string.Join("; ", issues.Select(i => $"{i.Path}: {i.Reason}")));
+                return (ok, string.Join("; ", issues.Select(i => $"{i.Kind} {i.Id} {i.Path}: {i.Reason}")));
             });
         }
     }

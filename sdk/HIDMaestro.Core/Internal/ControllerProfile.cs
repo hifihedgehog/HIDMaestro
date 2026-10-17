@@ -1735,8 +1735,12 @@ public sealed class ProfileDatabase
                 AllowTrailingCommas = true,
             });
             if (doc.RootElement.ValueKind != JsonValueKind.Object) return (null, false);
-            return (doc.RootElement.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String
-                    && id.GetString() is { Length: > 0 } s ? s : null, true);
+            // The reader matches keys without regard to case, so "ID" is the
+            // id here too.
+            foreach (var p in doc.RootElement.EnumerateObject())
+                if (string.Equals(p.Name, "id", StringComparison.OrdinalIgnoreCase))
+                    return (p.Value.ValueKind == JsonValueKind.String && p.Value.GetString() is { Length: > 0 } s ? s : null, true);
+            return (null, true);
         }
         catch (JsonException) { return (null, false); }
     }
