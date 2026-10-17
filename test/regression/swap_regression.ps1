@@ -2130,7 +2130,10 @@ function Scenario-Vendor-Blob-Golden {
 }
 
 # S96: catalog data and driver text against the captures and sources they
-# come from. Every comment line of the two driver INFs is plain ASCII.
+# come from. Every comment line of the two driver INFs is plain ASCII. The
+# Xbox 360 profiles carry a real pad's manufacturer string. The flight
+# stick and the PS Move carry their captured descriptors, and the Move's
+# input report puts each control where psmoveapi reads a real Move's.
 # Offline. The INF part reads the source tree and prints [SKIP] without it.
 function Scenario-Capture-Fidelity {
     Invoke-Probe -Dir 'capture_fidelity_check' -Exe 'CaptureFidelityCheck.exe' -Arguments '' `

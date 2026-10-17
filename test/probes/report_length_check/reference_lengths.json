@@ -138,7 +138,7 @@
   {"profile": "p5general-activtor", "source": "descriptor", "sha256": "F4B108F4560AC6F2E9EEE56AE2081BAF2F42BFDD2C1CAF5793119C00BB1AC7D1", "input": {"1": 64}, "output": {"2": 48}, "feature": {"3": 48, "224": 3, "240": 64, "241": 64, "242": 16}},
   {"profile": "phoenixrc-pxrc", "source": "descriptor", "sha256": "D35B870F59BE5F39CC51564D240779856EB86D6C2DCD7F0F7CFDB300A9EE34F0", "input": {"0": 8}, "output": {}, "feature": {}},
   {"profile": "ps-classic", "source": "descriptor", "sha256": "2229E1F9FAA00FF06B4BCE1DAD86D7A5BA1DD182D7883B0B78FC2FA75FE0F527", "input": {"0": 2}, "output": {}, "feature": {}},
-  {"profile": "ps-move", "source": "descriptor", "sha256": "741A8B299811ED6B75AD9D7482E97BAF081E6837AA18BFA1F78441D7E8EA88EC", "input": {"1": 49}, "output": {"1": 49}, "feature": {"1": 49, "2": 49, "238": 49, "239": 49}},
+  {"profile": "ps-move", "source": "descriptor", "sha256": "905578D892EAC45605A38986D9C03E6B905C51F13DD318E1E04FC784738D5A63", "input": {"1": 49}, "output": {"2": 49, "6": 9}, "feature": {"3": 9, "4": 16, "5": 23, "16": 49, "17": 49, "160": 35, "161": 23, "224": 49}},
   {"profile": "ps3-alt-gamepad", "source": "descriptor", "sha256": "80D094FD88FB45CD0E450B4773126CB2BE2C0215D3C4AED2C4D06DB70EA1E149", "input": {"0": 27}, "output": {"0": 15}, "feature": {"0": 8}},
   {"profile": "ps3-remote", "source": "descriptor", "sha256": "E4C1629C9987C0741E7A52430901BAB19478C0D3CAE610EEA31731EC85AA6823", "input": {"0": 12}, "output": {}, "feature": {}},
   {"profile": "pulsar-xlite-wireless", "source": "descriptor", "sha256": "57BA4A24F985A806132A04FEA06BEC3026CB69B12C957A1737A64507148FA968", "input": {"0": 7}, "output": {}, "feature": {}},

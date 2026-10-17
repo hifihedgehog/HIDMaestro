@@ -18,6 +18,11 @@
 //              that capture byte for byte, and the SDK reads from it the
 //              reports, sizes and top-level usage the capture declares,
 //              each worked out by hand from the capture's items.
+//   psmove     ps-move's input report, written whole from its extendedReport,
+//              puts each control where psmoveapi and the moveonpc wiki read
+//              a real Move ZCM1's: the T trigger at bytes 5 and 6 with the T
+//              bit, the buttons in bytes 1 to 4, 0x7F in bytes 7 to 10, the
+//              battery in byte 12 and offset-binary motion in 13 to 36.
 //
 // Exit 0 PASS, 1 FAIL.
 using System;
@@ -26,6 +31,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using HIDMaestro;
 using HIDMaestro.Internal;
 
 internal static partial class Program
@@ -45,6 +51,7 @@ internal static partial class Program
         InfText();
         CatalogStrings();
         CapturedDescriptors();
+        PsMoveReport();
         Console.WriteLine();
         Console.WriteLine($"capture_fidelity_check: {(s_failures == 0 ? "PASS" : "FAIL")}, {s_total - s_failures} of {s_total} checks pass");
         return s_failures == 0 ? 0 : 1;
@@ -158,6 +165,25 @@ internal static partial class Program
             "05010904a10105010932150026ff0095017508810205010935150026ff0095017508810205010901a10009300931150026ffff350046ffff950275108102c0a10009330934150026ffff350046ffff950275108102c005091901290a950a7501810205010939150125083500463b10660e00750495018142750295018103c0",
             "ControllersInfo bfc11b8 xbox360/xusb_flightstick_hid_report_descriptor.bin", 0x01, 0x04,
             new[] { (HidReportKind.Input, (byte)0, 12) }),
+        // The descriptor a real Move (ZCM1, 054C:03D5) serves over USB, read
+        // over hidraw (LKML, Pavel Machek, 2015-03-14, "Re: Fun with sony
+        // motion controllers: motion controller",
+        // lkml.rescloud.iu.edu/1503.1/05461.html), 178 bytes. Game Pad.
+        // Input 0x01: 24 one-bit buttons, 3 vendor bytes, X Y Z Rz at 8
+        // bits, 0x26 vendor bytes: 48 bytes. Output 0x02 (0x30 bytes) and
+        // 0x06 (8). Features 0x03 (8), 0x10, 0xE0 and 0x11 (0x30 each),
+        // then in two vendor collections 0x04 (0x0F), 0x05 (0x16), 0xA0
+        // (0x22) and 0xA1 (0x16). Each length here adds the ID byte.
+        new("ps-move",
+            "05010905a101850105091901291815002501350045017501951881020600ff092475089503810205010930093109320935150026ff00950481020600ff09209526810285020921953091028506092795089102850309239508b102851009229530b10285e009259530b102851109269530b102c00602ff0920a10109218504150026ff007508950fb102092285059516b102c00603ff0920a101092185a0150026ff0075089522b102092285a19516b102c0",
+            "LKML 2015-03-14, a real Move's descriptor over hidraw", 0x01, 0x05,
+            new[]
+            {
+                (HidReportKind.Input, (byte)0x01, 49), (HidReportKind.Output, (byte)0x02, 49), (HidReportKind.Output, (byte)0x06, 9),
+                (HidReportKind.Feature, (byte)0x03, 9), (HidReportKind.Feature, (byte)0x04, 16), (HidReportKind.Feature, (byte)0x05, 23),
+                (HidReportKind.Feature, (byte)0x10, 49), (HidReportKind.Feature, (byte)0x11, 49), (HidReportKind.Feature, (byte)0xA0, 35),
+                (HidReportKind.Feature, (byte)0xA1, 23), (HidReportKind.Feature, (byte)0xE0, 49),
+            }),
     };
 
     static void CapturedDescriptors()
@@ -184,5 +210,80 @@ internal static partial class Program
             string expected = Table(c.Reports);
             Check($"{c.Profile}: reports {expected}", got == expected, got == expected ? "" : $"reads {got}");
         }
+    }
+
+    // ── psmove ───────────────────────────────────────────────────────────
+
+    /// <summary>ps-move's input report for a state, as the SDK writes it
+    /// when its extendedReport is armed: the triggers resolved as
+    /// HMController resolves them, then the codec.</summary>
+    static byte[]? MoveReport(ControllerProfile p, HMGamepadState s, VendorBlobCodec.EncoderState enc)
+    {
+        if (p.ExtendedReport is not { AlwaysArmed: true } spec) return null;
+        var hp = new HMProfile(p);
+        double lt = HMController.ResolveTrigger(s.Axes, hp.Triggers, 0, HMController.ResolveCanonicalAxis(p.AxisMap, "lefttrigger", HMAxis.Z));
+        double rt = HMController.ResolveTrigger(s.Axes, hp.Triggers, 1, HMController.ResolveCanonicalAxis(p.AxisMap, "righttrigger", HMAxis.Rz));
+        var buf = new byte[spec.Size];
+        VendorBlobCodec.EncodeInput(spec, in s, 0.5f, 0.5f, 0.5f, 0.5f, (float)lt, (float)rt, buf, enc);
+        return buf;
+    }
+
+    static void PsMoveReport()
+    {
+        Console.WriteLine();
+        Console.WriteLine("--- psmove: ps-move's input report where a real Move puts each control ---");
+        var p = ProfileDatabase.LoadEmbedded().All.FirstOrDefault(x => x.Id == "ps-move");
+        var enc = new VendorBlobCodec.EncoderState();
+        byte[]? rest = p == null ? null : MoveReport(p, default, enc);
+        Check("ps-move writes its input report 0x01 whole, 49 bytes, from power-on", rest is { Length: 49 } && rest[0] == 0x01,
+              rest == null ? "no always-armed extendedReport" : $"{rest.Length} bytes, ID 0x{rest[0]:X2}");
+        if (rest == null || rest.Length != 49) return;
+        static string Hex(byte[] r, int from, int count) => Convert.ToHexString(r, from, count);
+
+        // At rest: no button, no trigger, 0x7F7F7F7F at 7 to 10 (moveonpc
+        // "always 0x7F7F7F7F"), every motion word 0x8000, zero in offset
+        // binary (psmove_decode_16bit subtracts 0x8000).
+        bool restOk = rest[1] == 0 && rest[2] == 0 && rest[3] == 0 && (rest[4] & 0xF0) == 0 && rest[5] == 0 && rest[6] == 0
+                      && Hex(rest, 7, 4) == "7F7F7F7F"
+                      && Enumerable.Range(0, 12).All(k => rest[13 + 2 * k] == 0x00 && rest[14 + 2 * k] == 0x80);
+        Check("at rest: no button or trigger, 0x7F at bytes 7 to 10, every motion word 0x8000", restOk, Hex(rest, 0, 37));
+
+        var axes = new Dictionary<HMAxis, float> { [HMAxis.Z] = 1.0f };
+        var pulled = MoveReport(p!, new HMGamepadState { Axes = axes }, enc)!;
+        Check("the trigger at 1.0 puts 0xFF at bytes 5 and 6 and the T bit at byte 3 bit 4 and byte 4 bit 7",
+              pulled[5] == 0xFF && pulled[6] == 0xFF && (pulled[3] & 0x10) != 0 && (pulled[4] & 0x80) != 0, Hex(pulled, 1, 6));
+
+        var press = new (HMButton Button, string Label, int Byte, int Mask, string Name)[]
+        {
+            (HMButton.Back, "Back", 1, 0x01, "Select"), (HMButton.Start, "Start", 1, 0x08, "Start"),
+            (HMButton.Y, "Y", 2, 0x10, "Triangle"), (HMButton.B, "B", 2, 0x20, "Circle"),
+            (HMButton.A, "A", 2, 0x40, "Cross"), (HMButton.X, "X", 2, 0x80, "Square"),
+            (HMButton.Guide, "Guide", 3, 0x01, "PS"),
+        };
+        foreach (var (button, label, at, mask, name) in press)
+        {
+            var r = MoveReport(p!, new HMGamepadState { Buttons = button }, enc)!;
+            bool only = Enumerable.Range(1, 3).All(k => r[k] == (k == at ? mask : 0)) && (r[4] & 0xF0) == 0;
+            Check($"HMButton.{label} is {name}: byte {at} = 0x{mask:X2}, nothing else in bytes 1 to 4", only, Hex(r, 1, 4));
+        }
+        var move = MoveReport(p!, new HMGamepadState { Buttons = HMButton.Misc1 }, enc)!;
+        Check("Misc1 is Move: byte 3 bit 3 and byte 4 bit 6 (moveonpc 0x4008)",
+              move[1] == 0 && move[2] == 0 && move[3] == 0x08 && (move[4] & 0xF0) == 0x40, Hex(move, 1, 4));
+
+        var seq = Enumerable.Range(0, 17).Select(_ => MoveReport(p!, default, enc)![4] & 0x0F).ToList();
+        bool steps = Enumerable.Range(1, seq.Count - 1).All(k => seq[k] == ((seq[k - 1] + 1) & 0x0F));
+        Check("byte 4's low nibble is a sequence number that adds 1 a report and wraps at 16", steps, string.Join(",", seq));
+
+        var motion = new HMGamepadState { AccelX = 100, AccelY = -2, AccelZ = 32767, GyroPitch = -32768, GyroYaw = 1, GyroRoll = -1 };
+        var m = MoveReport(p!, motion, enc)!;
+        string want = "6480FE7FFFFF" + "6480FE7FFFFF" + "00000180FF7F" + "00000180FF7F";
+        Check("motion as offset binary, accelerometer x y z at 13 and 19, gyro at 25 and 31", Hex(m, 13, 24) == want, Hex(m, 13, 24));
+
+        var levels = Enumerable.Range(0, 11).Select(l => MoveReport(p!, new HMGamepadState { BatteryLevel = (byte)l }, enc)![12]).ToArray();
+        Check("battery 0 to 10 gives psmoveapi's 0 to 5, at least 20 percent a step (Batt_MIN to Batt_MAX)",
+              Convert.ToHexString(levels) == "0000010102020303040405", Convert.ToHexString(levels));
+        var charging = MoveReport(p!, new HMGamepadState { BatteryLevel = 5, BatteryCharging = true }, enc)![12];
+        var full = MoveReport(p!, new HMGamepadState { BatteryLevel = 10, BatteryCharging = true, BatteryFull = true }, enc)![12];
+        Check("charging gives 0xEE and full gives 0xEF (Batt_CHARGING, Batt_CHARGING_DONE)", charging == 0xEE && full == 0xEF, $"{charging:X2} {full:X2}");
     }
 }
