@@ -1295,7 +1295,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             ClearFrameQueue();
         }
         ResetLayoutState();
-        ResetProtocolState();
+        ResetProtocolState(portReset: true);
     }
 
     /// <summary>Drop the queued reports and keep their buffers. Caller

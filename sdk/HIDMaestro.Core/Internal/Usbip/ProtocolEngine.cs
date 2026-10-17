@@ -165,9 +165,11 @@ internal sealed unsafe class ProtocolEngine
 
     public CompiledProtocol Protocol => _p;
 
-    private void InitialRegistersLocked()
+    private void InitialRegistersLocked(bool portReset = false)
     {
-        _m.Registers.Initial.CopyTo(_regs, 0);
+        var table = _m.Registers;
+        for (int i = 0; i < table.Initial.Length; i++)
+            if (!portReset || !table.KeepOnPortReset[i]) _regs[i] = table.Initial[i];
         Array.Clear(_counters);
         _m.CounterInitial.CopyTo(_counters, 0);
         _inputOpen = _p.InputWhile == null || _p.InputWhile.Holds(_regs);
@@ -200,11 +202,18 @@ internal sealed unsafe class ProtocolEngine
     /// plugged in, and each held port's snapshots are taken again from it.
     /// The state block keeps the consumer's last frame, and the command log
     /// keeps its history.</summary>
-    public void Reset()
+    /// <summary>An attach: power on, every register at its initial value.</summary>
+    public void Reset() => Reset(portReset: false);
+
+    /// <summary>A port reset: as an attach, except that a register the
+    /// profile marks keepOnPortReset keeps its value.</summary>
+    public void ResetPort() => Reset(portReset: true);
+
+    private void Reset(bool portReset)
     {
         lock (_sync)
         {
-            InitialRegistersLocked();
+            InitialRegistersLocked(portReset);
             Array.Clear(_sentOnce);
             _replyHead = _replyCount = _headOffset = 0;
             _messageLength = 0;

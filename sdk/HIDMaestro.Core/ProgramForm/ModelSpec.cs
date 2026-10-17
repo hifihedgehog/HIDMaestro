@@ -100,6 +100,12 @@ public sealed class RegisterSpec
     /// <summary>A number, a hex string, or true and false for 1 and 0.</summary>
     [JsonPropertyName("initial")]
     public HexNumber? Initial { get; set; }
+
+    /// <summary>True for a register a port reset leaves as it is, as a
+    /// setting the device holds while it stays powered. An attach returns
+    /// every register to its initial value.</summary>
+    [JsonPropertyName("keepOnPortReset")]
+    public bool? KeepOnPortReset { get; set; }
 }
 
 /// <summary>A memory image: <see cref="Size"/> bytes of <see cref="Fill"/>

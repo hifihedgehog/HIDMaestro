@@ -77,14 +77,16 @@ internal sealed partial class UsbipEmulatedDevice
         _protocolClock.Start();
     }
 
-    /// <summary>Initial state: at attach, at detach and on a port reset. The
+    /// <summary>Initial state: at attach, at detach and on a port reset, where
+    /// the registers the profile marks keepOnPortReset keep their values. The
     /// host cancels the transfers it had queued, and the reads still parked
     /// here go with them.</summary>
-    private void ResetProtocolState()
+    private void ResetProtocolState(bool portReset = false)
     {
         var engine = _engine;
         if (engine == null) return;
-        engine.Reset();
+        if (portReset) engine.ResetPort();
+        else engine.Reset();
         lock (_hidLock)
         {
             while (_protocolReads.First is { } node)

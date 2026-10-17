@@ -271,7 +271,7 @@
   },
   "protocol": {
     "state": [
-      { "name": "imuMode", "bits": 16, "initial": "0" }
+      { "name": "imuMode", "bits": 16, "initial": "0", "keepOnPortReset": true }
     ],
     "commands": {
       "source": "setReport",

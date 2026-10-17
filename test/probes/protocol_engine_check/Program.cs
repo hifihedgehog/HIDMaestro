@@ -457,6 +457,15 @@ internal static class Engine
         Check("a record cut short by the command's end is not read", e.GetRegister(imu) == 0x18);
         Send(e, "01 86 03 30 00 00");
         Check("another command leaves it", e.GetRegister(imu) == 0x18);
+        // A port reset keeps the setting, which the firmware holds in RAM
+        // with no bus-reset handler (sc26re transport_usb.c:261-300), and SDL
+        // does not send again while it holds the device open
+        // (SDL_hidapi_steam_triton.c:653-677). An attach powers the
+        // controller on, which loads the defaults (ibex_settings_registry.c:232-237).
+        e.ResetPort();
+        Check("a port reset keeps imuMode", e.GetRegister(imu) == 0x18, $"0x{e.GetRegister(imu):X}");
+        e.Reset();
+        Check("an attach returns imuMode to 0", e.GetRegister(imu) == 0);
     }
 }
 

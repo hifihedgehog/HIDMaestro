@@ -39,8 +39,13 @@ internal sealed class RegisterTable
     public string[] Names { get; }
     public int[] Bits { get; }
     public uint[] Initial { get; }
+    /// <summary>The registers a port reset leaves as they are.</summary>
+    public bool[] KeepOnPortReset { get; }
 
-    public RegisterTable(string[] names, int[] bits, uint[] initial) { Names = names; Bits = bits; Initial = initial; }
+    public RegisterTable(string[] names, int[] bits, uint[] initial, bool[]? keepOnPortReset = null)
+    {
+        Names = names; Bits = bits; Initial = initial; KeepOnPortReset = keepOnPortReset ?? new bool[names.Length];
+    }
 
     public int IndexOf(string name) => Array.IndexOf(Names, name);
 
@@ -212,6 +217,7 @@ internal static class ModelCompiler
         var names = new string[state.Count];
         var bits = new int[state.Count];
         var initial = new uint[state.Count];
+        var keep = new bool[state.Count];
         for (int i = 0; i < state.Count; i++)
         {
             string path = $"$.protocol.state[{i}]";
@@ -224,8 +230,9 @@ internal static class ModelCompiler
             initial[i] = r.Initial?.Value ?? 0;
             uint mask = bits[i] == 32 ? uint.MaxValue : (1u << bits[i]) - 1;
             if ((initial[i] & ~mask) != 0) throw new FormException(path + ".initial", $"0x{initial[i]:X} does not fit {bits[i]} bits");
+            keep[i] = r.KeepOnPortReset ?? false;
         }
-        return new RegisterTable(names, bits, initial);
+        return new RegisterTable(names, bits, initial, keep);
     }
 
     static (string[], int[], CounterEvent[], double[], uint[]) Counters(ProtocolSpec? protocol)
