@@ -19,7 +19,13 @@ public sealed class ProtocolSpec
     /// <summary>The device's registers. Each returns to its initial value at
     /// attach and at a port reset.</summary>
     [JsonPropertyName("state")]
-    public List<RegisterSpec>? State { get; set; }
+    public List<RegisterSpec>? State { get => _state; set { _state = value; StateWritten = true; } }
+    private List<RegisterSpec>? _state;
+
+    /// <summary>True when the file writes the key, so a null list is told
+    /// apart from a device with no registers, which leaves it out.</summary>
+    [JsonIgnore]
+    public bool StateWritten { get; private set; }
 
     /// <summary>Named memory images a reply reads and a command writes.</summary>
     [JsonPropertyName("memory")]
@@ -989,7 +995,12 @@ public sealed class HexNumberConverter : JsonConverter<HexNumber>
 /// <summary>A condition as a profile writes it: one string in the condition
 /// grammar, or a list of terms that must all hold.</summary>
 [JsonConverter(typeof(ConditionTextConverter))]
-public sealed record ConditionText(string Text);
+public sealed record ConditionText(string Text)
+{
+    /// <summary>The index of the first null in the list, or -1. The parse
+    /// keeps the profile so the create refuses it at the term's path.</summary>
+    public int NullTerm { get; init; } = -1;
+}
 
 public sealed class ConditionTextConverter : JsonConverter<ConditionText>
 {
@@ -999,8 +1010,15 @@ public sealed class ConditionTextConverter : JsonConverter<ConditionText>
         if (reader.TokenType != JsonTokenType.StartArray)
             throw new JsonException("A condition is a string, or a list of terms that must all hold.");
         var terms = new List<string>();
+        int nullTerm = -1;
         while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
         {
+            if (reader.TokenType == JsonTokenType.Null)
+            {
+                if (nullTerm < 0) nullTerm = terms.Count;
+                terms.Add("");
+                continue;
+            }
             if (reader.TokenType != JsonTokenType.String) throw new JsonException("A condition's list holds strings.");
             terms.Add(reader.GetString() ?? "");
         }
@@ -1008,7 +1026,7 @@ public sealed class ConditionTextConverter : JsonConverter<ConditionText>
         foreach (var t in terms)
             if (t.Contains("||", StringComparison.Ordinal) || t.Contains("&&", StringComparison.Ordinal))
                 throw new JsonException("A term in a condition's list joins nothing: write one string to use && or ||.");
-        return new ConditionText(string.Join(" && ", terms));
+        return new ConditionText(string.Join(" && ", terms)) { NullTerm = nullTerm };
     }
 
     public override void Write(Utf8JsonWriter writer, ConditionText value, JsonSerializerOptions options) =>

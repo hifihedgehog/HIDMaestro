@@ -117,7 +117,7 @@ internal static class ModelCompiler
                     "submit" => SendRule.Submit,
                     _ => throw new FormException(path + ".send", $"\"{spec.Send}\" is not one of clock, change, submit"),
                 };
-                var when = spec.While == null ? null : ConditionParser.Parse(spec.While.Text, regs, path + ".while");
+                var when = spec.While == null ? null : ConditionParser.Parse(spec.While, regs, path + ".while");
                 var program = Program(spec.Name, spec.Size, stateSize, regs, counterNames, spec.Program, path + ".program", path + ".size");
                 if (id >= 0 && program.Template[0] != id && !WritesByteZero(program))
                     throw new FormException(path + ".program", $"byte 0 is the report ID 0x{id:X2}: a const must put it there");
@@ -199,6 +199,7 @@ internal static class ModelCompiler
 
     public static RegisterTable Registers(ProtocolSpec? protocol)
     {
+        if (protocol is { StateWritten: true, State: null }) throw new FormException("$.protocol.state", "the list is null: give one, or leave the key out for a device with no registers");
         if (protocol?.State is not { } state) return RegisterTable.Empty;
         if (state.Count > ProgramForm.MaxRegisters)
             throw new FormException("$.protocol.state", $"{state.Count} registers is past the {ProgramForm.MaxRegisters} a device has");
@@ -522,7 +523,7 @@ internal static class ModelCompiler
             {
                 Allowed(o, path, kind, "ops");
                 if (inBlock) throw new FormException(path + ".when", "a conditional block holds no block");
-                var cond = ConditionParser.Parse(o.When!.Text, regs, path + ".when");
+                var cond = ConditionParser.Parse(o.When!, regs, path + ".when");
                 if (o.Ops == null || o.Ops.Count == 0) throw new FormException(path + ".ops", "a block needs an op");
                 var inner = new List<Op>();
                 var innerPaths = new List<string>();
@@ -806,6 +807,13 @@ internal static class PackedMap
 /// <c>name in a,b,c</c>. Every value is hex, with or without 0x.</summary>
 internal static class ConditionParser
 {
+    /// <summary>A condition as a profile writes it.</summary>
+    public static Condition Parse(ConditionText c, RegisterTable regs, string path)
+    {
+        if (c.NullTerm >= 0) throw new FormException($"{path}[{c.NullTerm}]", "the term is null");
+        return Parse(c.Text, regs, path);
+    }
+
     public static Condition Parse(string text, RegisterTable regs, string path)
     {
         if (string.IsNullOrWhiteSpace(text)) throw new FormException(path, "the condition is empty");

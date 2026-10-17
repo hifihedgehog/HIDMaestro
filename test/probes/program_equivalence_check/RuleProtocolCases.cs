@@ -162,6 +162,8 @@ internal static partial class RuleChecks
         yield return G("a halt with no register", $"{Pr}.halt.while", Remove($"{Pr}.halt.while"));
         yield return G("a halt status that is not one", $"{Pr}.halt.status", Set($"{Pr}.halt.status", "\"EIO\""));
         yield return G("a halt condition on a register that does not exist", $"{Pr}.halt.while", Set($"{Pr}.halt.while", "[\"nosuch\"]"));
+        yield return G("a null term in a while list", $"{Pr}.input.while[1]", Set($"{Pr}.input.while", "[\"polling\",null]"));
+        yield return G("a null register list", $"{Pr}.state", Set($"{Pr}.state", "null"));
         yield return G("a setProtocol answer that is not one", $"{Pr}.setProtocol", Set($"{Pr}.setProtocol", "\"nak\""));
         yield return G("a getStatus answer that is not one", $"{Pr}.getStatus", Set($"{Pr}.getStatus", "\"zero\""));
         yield return E("a getReport answer that is not one", $"{Pr}.getReport", Set($"{Pr}.getReport", "\"last\""));

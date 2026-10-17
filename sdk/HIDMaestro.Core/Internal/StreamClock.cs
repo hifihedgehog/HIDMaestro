@@ -50,7 +50,7 @@ internal sealed class StreamClock
         Condition? when = null;
         if (s.While != null)
         {
-            try { when = ConditionParser.Parse(s.While.Text, registers, "$.stream.while"); }
+            try { when = ConditionParser.Parse(s.While, registers, "$.stream.while"); }
             catch (FormException e) { throw new InvalidOperationException(e.ForProfile(profile.Id), e); }
         }
         bool advance = s.Timestamps switch

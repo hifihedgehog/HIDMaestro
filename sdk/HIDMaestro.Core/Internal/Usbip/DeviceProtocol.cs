@@ -890,7 +890,7 @@ internal sealed class CompiledProtocol
     private Condition? Cond(ConditionText? text, string at)
     {
         if (text == null) return null;
-        try { return ConditionParser.Parse(text.Text, Model.Registers, at); }
+        try { return ConditionParser.Parse(text, Model.Registers, at); }
         catch (FormException e) { throw Fail($"{e.Path}: {e.Reason}", e); }
     }
 

@@ -429,7 +429,7 @@ internal static class Program
             "protocol.commands.rules[3].match is empty"),
         ("a null in a while list",
             j => Protocol(j)["input"]!["while"] = Arr("\"polling\"", "null"),
-            Load + "protocol.input.while: A condition's list holds strings"),
+            "protocol.input.while[1]: the term is null"),
         ("a null halt.while",
             j => Protocol(j)["halt"]!["while"] = null,
             "protocol.halt.while names no register"),
@@ -447,7 +447,7 @@ internal static class Program
             "protocol.state[0]: the entry is null"),
         ("null state",
             j => Protocol(j)["state"] = null,
-            "protocol.input.while: 'polling' is not a register protocol.state declares"),
+            "protocol.state: the list is null"),
         ("a null input endpoint",
             j => Protocol(j)["input"]!["endpoint"] = null,
             "protocol.input.endpoint is missing"),
@@ -700,11 +700,6 @@ internal static class Program
         return seen;
     }
 
-    /// <summary>An expectation that starts with this is a refusal at load:
-    /// the shared parse of the model groups (ProfilePrograms) refuses the
-    /// file with the JSON path, before any create.</summary>
-    const string Load = "load: ";
-
     static JsonObject In(JsonObject j) => j["extendedReport"]!.AsObject();
     static JsonObject Out(JsonObject j) => j["extendedOutputReport"]!.AsObject();
     static JsonObject Ports(JsonObject j) => In(j)["ports"]!.AsObject();
@@ -783,17 +778,6 @@ internal static class Program
             {
                 var (title, _, expect) = s_malformed[i];
                 string id = $"s79-malformed-{i}";
-                if (expect.StartsWith(Load, StringComparison.Ordinal))
-                {
-                    // The loader's parse of the file, as the load ran it.
-                    var parse = inner.PropertyType.GetMethod("Parse", BindingFlags.Static | Any)!;
-                    string message = "parsed";
-                    try { parse.Invoke(null, new object[] { (ReadOnlyMemory<byte>)File.ReadAllBytes(Path.Combine(dir, $"{id}.json")) }); }
-                    catch (TargetInvocationException ex) { message = ex.InnerException?.Message ?? "?"; }
-                    Probe.Check($"refused at load: {title}",
-                        ctx.GetProfile(id) == null && message.StartsWith($"Profile '{id}': " + expect[Load.Length..], StringComparison.Ordinal), message);
-                    continue;
-                }
                 var p = ctx.GetProfile(id);
                 if (p == null)
                 {
