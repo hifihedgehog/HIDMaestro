@@ -1860,8 +1860,10 @@ public sealed partial class HMController : IDisposable
                     // v2.0.0: the protocol's decoders (mechanism 3), for an
                     // output report a decoder names or a command whose rule
                     // decodes it. A report shorter than its decoder reads is
-                    // not decoded: a console also sends empty packets.
-                    if (_decoders != null && source == (byte)HMOutputSource.HidOutput && OutputDecoded != null)
+                    // not decoded: a console also sends empty packets. The
+                    // last arm of the chain, so a report raises OutputDecoded
+                    // once, as at v1.12.0.
+                    else if (_decoders != null && source == (byte)HMOutputSource.HidOutput && OutputDecoded != null)
                     {
                         try { RunDecoder(reportId, buf, dataSize); }
                         catch

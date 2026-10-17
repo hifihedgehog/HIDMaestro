@@ -495,6 +495,12 @@ public sealed class ControllerProfile
         CompiledModel model;
         try { model = GetOrCompileModel(); }
         catch (Programs.FormException e) { throw new InvalidOperationException(e.ForProfile(Id), e); }
+        // A report has one decode: OutputDecoded fires once for it.
+        if (ExtendedOutputReport != null)
+            foreach (var d in model.Decoders)
+                if (Array.IndexOf(d.Reports, ExtendedOutputReport.ReportIdByte) is int at and >= 0)
+                    throw new InvalidOperationException(
+                        $"Profile '{Id}': protocol.decoders.{d.Name}.reports[{at}] 0x{d.Reports[at]:X2} is extendedOutputReport's report, which the codec decodes. A report has one decode.");
         if (StateBlock != null)
         {
             if (StateBlockFields == null)
