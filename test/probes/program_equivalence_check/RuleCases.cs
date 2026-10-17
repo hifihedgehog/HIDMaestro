@@ -163,7 +163,8 @@ internal static partial class RuleChecks
         yield return E("a null piece", $"{D}.fields[0].parts[0].pieces[0]", Set($"{D}.fields[0].parts[0].pieces[0]", "null"));
         yield return E("a piece of 0 bits", $"{D}.fields[0].parts[0].pieces[0].count", Set($"{D}.fields[0].parts[0].pieces[0].count", "0"));
         yield return E("a piece before bit 0", $"{D}.fields[0].parts[0].pieces[0].at", Set($"{D}.fields[0].parts[0].pieces[0].at", "-1"));
-        yield return E("a part of 13 bits", $"{D}.fields[0].parts[0].pieces", Set($"{D}.fields[0].parts[0].pieces[0].count", "13"));
+        yield return E("a part of 13 bits", $"{D}.fields[0].parts[0].pieces", Set($"{D}.fields[0].parts[0].pieces", "[{\"at\":46,\"count\":7},{\"at\":53,\"count\":6}]"));
+        yield return E("a piece of 13 bits", $"{D}.fields[0].parts[0].pieces[0].count", Set($"{D}.fields[0].parts[0].pieces[0].count", "13"));
         yield return E("a range high first", $"{D}.fields[0].parts[0].range", Set($"{D}.fields[0].parts[0].range", "[9,1]"));
         yield return E("a part scale over 0", $"{D}.fields[0].parts[0].scale", Set($"{D}.fields[0].parts[0].scale", "[1,0]"));
         yield return E("a rounding that is not one", $"{D}.fields[0].parts[0].round", Set($"{D}.fields[0].parts[0].round", "\"up\""));
@@ -180,5 +181,6 @@ internal static partial class RuleChecks
 
         foreach (var c in ProtocolCases()) yield return c;
         foreach (var c in StreamCases()) yield return c;
+        foreach (var c in BoundsCases()) yield return c;
     }
 }

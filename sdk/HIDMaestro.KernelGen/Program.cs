@@ -60,6 +60,14 @@ switch (args[0])
                 Console.Error.WriteLine($"{path}(1,1): error KG0001: {e.Path}: {e.Reason}");
                 return 1;
             }
+            catch (Exception e)
+            {
+                // Validation refuses every value the paths cannot take, so
+                // this is a defect of the tool. It still fails the build
+                // with the file named, in place of the tool's crash.
+                Console.Error.WriteLine($"{path}(1,1): error KG0001: $: the tool failed on this file: {e.GetType().Name}: {e.Message}");
+                return 1;
+            }
         }
         string text;
         if (args[0] == "catalog")

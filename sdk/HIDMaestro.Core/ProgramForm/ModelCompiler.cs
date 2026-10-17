@@ -394,6 +394,8 @@ internal static class ModelCompiler
                 {
                     if (!int.TryParse(key, NumberStyles.None, I, out int at)) throw new FormException($"{path}.const[\"{key}\"]", "the key is a report offset");
                     if (!ModelText.TryParseBytes(hex, out var bytes)) throw new FormException($"{path}.const[\"{key}\"]", $"\"{hex}\" is not hex bytes");
+                    if ((long)at + bytes.Length > ProgramForm.MaxReport)
+                        throw new FormException($"{path}.const[\"{key}\"]", $"report bytes {at} to {(long)at + bytes.Length - 1} are outside 0 to {ProgramForm.MaxReport - 1}, the most a report holds");
                     entries.Add((at, bytes, key));
                 }
                 foreach (var (at, bytes, _) in entries.OrderBy(e => e.at)) Add(new ConstOp(at, bytes));
@@ -407,6 +409,11 @@ internal static class ModelCompiler
                 if (o.Mask == null) { Add(new CopyOp(lo, to, hi - lo + 1)); break; }
                 if (inBlock) throw new FormException(path + ".mask", "a copy with a mask is bit moves, which a conditional block cannot hold");
                 byte mask = HexByte(o.Mask, path + ".mask");
+                // The bounds before the moves are listed: a range past the
+                // state block would list billions of them.
+                if (hi >= ProgramForm.MaxState) throw new FormException(path + ".copy", $"state bytes {lo} to {hi} are outside 0 to {ProgramForm.MaxState - 1}, the most a state block holds");
+                if (to < 0 || (long)to + (hi - lo) >= ProgramForm.MaxReport)
+                    throw new FormException(path + ".to", $"report bytes {to} to {(long)to + (hi - lo)} are outside 0 to {ProgramForm.MaxReport - 1}");
                 var moves = new List<int>();
                 for (int k = 0; k <= hi - lo; k++)
                     for (int b = 0; b < 8; b++)
@@ -570,6 +577,7 @@ internal static class ModelCompiler
         if (r.Word != null)
         {
             if (r.Bit != null || r.Bits != null || r.Byte != null) throw new FormException(path, "a word read takes \"word\" and \"order\" only");
+            StateByte(r.Word.Value, 2, path + ".word", "word");
             return r.Order switch
             {
                 null or "le" => new Src(r.Word.Value * 8, 16),
@@ -581,10 +589,20 @@ internal static class ModelCompiler
         if (r.Byte != null)
         {
             if (r.Bit != null || r.Bits != null) throw new FormException(path, "a byte read takes \"byte\" only");
+            StateByte(r.Byte.Value, 1, path + ".byte", "byte");
             return new Src(r.Byte.Value * 8, 8);
         }
         if (r.Bit == null || r.Bits == null) throw new FormException(path, "a read is { \"bit\", \"bits\" }, { \"byte\" } or { \"word\", \"order\" }");
         return new Src(r.Bit.Value, r.Bits.Value);
+    }
+
+    /// <summary>A byte offset of a read, refused before it is scaled to bits,
+    /// where an offset past 2^28 would wrap. Validation checks the bit offset
+    /// against the state block's own size.</summary>
+    static void StateByte(long at, int len, string path, string what)
+    {
+        if (at < 0 || at + len > ProgramForm.MaxState)
+            throw new FormException(path, $"{what} {at} is outside 0 to {ProgramForm.MaxState - len}, the most a state block holds");
     }
 
     static (int num, int den) Ratio(ScaleSpec? s, string path)
@@ -720,13 +738,17 @@ internal static class ModelCompiler
         {
             if (part.Frames.Count != 2 || part.Frames[0] < 1 || part.Frames[1] < 0) throw new FormException(path + ".frames", "frames is [count, stride], a count of 1 or more");
             frames = part.Frames[0]; stride = part.Frames[1];
+            if (frames > 1 && stride < 1) throw new FormException(path + ".frames", "a part read over several frames needs a stride of 1 byte or more");
+            // In long: the last frame's offset, scaled to bits, would wrap an int.
+            if ((long)(frames - 1) * stride >= ProgramForm.MaxState)
+                throw new FormException(path + ".frames", $"frame {frames - 1} starts at byte {(long)(frames - 1) * stride}, past the {ProgramForm.MaxState} bytes a report holds");
         }
         int bits = 0;
         for (int k = 0; k < part.Pieces.Count; k++)
         {
             var piece = part.Pieces[k] ?? throw new FormException($"{path}.pieces[{k}]", "the piece is null");
-            if (piece.Count < 1) throw new FormException($"{path}.pieces[{k}].count", "a piece is 1 bit or more");
-            if (piece.At < 0) throw new FormException($"{path}.pieces[{k}].at", "a piece starts at bit 0 or later");
+            if (piece.Count < 1 || piece.Count > ProgramForm.MaxDecodeBits) throw new FormException($"{path}.pieces[{k}].count", $"a piece is 1 to {ProgramForm.MaxDecodeBits} bits");
+            if (piece.At < 0 || piece.At >= ProgramForm.MaxState * 8) throw new FormException($"{path}.pieces[{k}].at", $"a piece starts at bit 0 to {ProgramForm.MaxState * 8 - 1}");
             bits += piece.Count;
         }
         if (bits > ProgramForm.MaxDecodeBits) throw new FormException(path + ".pieces", $"{bits} bits is past the {ProgramForm.MaxDecodeBits} a term indexes");

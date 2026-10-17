@@ -27,6 +27,9 @@ internal static partial class RuleChecks
         /// <summary>Read through the shared parse alone, as the build tool
         /// reads a file, for a file the profile's own parse refuses first.</summary>
         public bool Shared { get; init; }
+        /// <summary>Also read through the shared parse alone, which must refuse
+        /// it at the same path, as the build tool would.</summary>
+        public bool Tool { get; init; }
     }
 
     /// <summary>The run-time loader on one file's text: the profile parse,
@@ -45,6 +48,7 @@ internal static partial class RuleChecks
         catch (FormException e) { return (e.Path, e.Reason, e); }
         catch (InvalidOperationException e) { return Split(e.Message, e); }
         catch (JsonException e) { return ("$" + (e.Path is { Length: > 1 } jp ? jp[1..] : ""), e.Message, e); }
+        catch (Exception e) { return ("(threw " + e.GetType().Name + ")", e.Message, e); }
     }
 
     [GeneratedRegex(@"^Profile '[^']*': (\$?[A-Za-z$][^\s:]*)[:\s]\s*(.*)$", RegexOptions.Singleline)]
@@ -67,6 +71,7 @@ internal static partial class RuleChecks
     {
         try { ModelCompiler.Compile(ProfilePrograms.Read(Encoding.UTF8.GetBytes(text))); return null; }
         catch (FormException e) { return (e.Path, e.Reason, e); }
+        catch (Exception e) { return ("(threw " + e.GetType().Name + ")", e.Message, e); }
     }
 
     /// <summary>One file through the run-time loader, printed as the build
@@ -319,7 +324,7 @@ internal static partial class RuleChecks
                      .Concat(Round5Cases.RefusedOverTemplate.Select(x => (x.program.Name, x.program, x.path))))
             try { ProgramForm.Validate(p); }
             catch (FormException e) { Record(e); }
-        foreach (var (rule, p, path) in FormNegatives())
+        foreach (var (rule, p, path) in FormNegatives().Concat(BoundsNegatives()))
             try { ProgramForm.Validate(p); Fail($"accepted: {rule}"); }
             catch (FormException e)
             {
@@ -327,6 +332,7 @@ internal static partial class RuleChecks
                 if (e.Path == path) Console.WriteLine($"refused: {rule}: {e.Message}");
                 else Fail($"{rule}: refused at {e.Path}, not {path}: {e.Reason}");
             }
+            catch (Exception e) { Fail($"{rule}: threw {e.GetType().Name}, not a refusal: {e.Message}"); }
         foreach (var c in Cases())
         {
             string text = BaseText(c.Base);
@@ -344,6 +350,8 @@ internal static partial class RuleChecks
             Record(r.Value.Error);
             if (r.Value.Path == c.Expect) Console.WriteLine($"refused: {c.Rule}: {r.Value.Path}: {r.Value.Reason}");
             else Fail($"{c.Rule}: refused at {r.Value.Path}, not {c.Expect}: {r.Value.Reason}");
+            if (c.Tool && LoadShared(text) is var t && t?.Path != c.Expect)
+                Fail($"{c.Rule}: the build tool's parse gives {(t == null ? "no refusal" : $"{t.Value.Path}: {t.Value.Reason}")}, not a refusal at {c.Expect}");
         }
         // Every base loads unedited, so each case's refusal is its edit's.
         foreach (var name in Cases().Select(c => c.Base).Distinct())

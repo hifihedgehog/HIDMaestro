@@ -71,7 +71,9 @@ internal static class ProgramForm
         var unconditional = new List<Op>();
         var blocks = new List<WhenOp>();
 
-        void Range(string path, int at, int len, int limit, string what)
+        // Every bound is checked in long: an offset and a length near
+        // int.MaxValue would wrap an int sum negative and pass.
+        void Range(string path, long at, long len, int limit, string what)
         {
             if (len < 1 || at < 0 || at + len > limit)
                 throw new FormException(path, len == 1 ? $"{what} {at} is outside 0 to {limit - 1}" : $"{what} {at} to {at + len - 1} are outside 0 to {limit - 1}");
@@ -102,7 +104,7 @@ internal static class ProgramForm
                 return;
             }
             if (s.Bits < 1 || s.Bits > 25) throw new FormException(path + ".bits", $"{s.Bits} bits is outside 1 to 25, the most one 32-bit load holds at any shift");
-            if (s.BitOffset < 0 || s.BitOffset + s.Bits > p.StateSize * 8) throw new FormException(path + ".bit", $"bits {s.BitOffset} to {s.BitOffset + s.Bits - 1} are outside the {p.StateSize}-byte state block");
+            if (s.BitOffset < 0 || (long)s.BitOffset + s.Bits > p.StateSize * 8) throw new FormException(path + ".bit", $"bits {s.BitOffset} to {(long)s.BitOffset + s.Bits - 1} are outside the {p.StateSize}-byte state block");
             // 25 bits at a shift of at most 7 fit one 32-bit load.
         }
         void Counter(string path, CounterOp c, bool inBlock)
@@ -160,7 +162,7 @@ internal static class ProgramForm
                     break;
                 case LookupOp l:
                     if (l.Bits < 1 || l.Bits > 8) throw new FormException(path + ".bits", "a lookup reads 1 to 8 bits");
-                    if (l.SrcBit < 0 || l.SrcBit + l.Bits > p.StateSize * 8) throw new FormException(path + ".bit", "the bits are outside the state block");
+                    if (l.SrcBit < 0 || (long)l.SrcBit + l.Bits > p.StateSize * 8) throw new FormException(path + ".bit", "the bits are outside the state block");
                     if ((l.SrcBit & 7) + l.Bits > 8) throw new FormException(path + ".bits", $"bits {l.SrcBit} to {l.SrcBit + l.Bits - 1} span two state bytes, and a lookup reads one");
                     if (l.Table.Length != 1 << l.Bits) throw new FormException(path + ".table", $"the table has {l.Table.Length} entries for {l.Bits} bits");
                     {
@@ -179,7 +181,7 @@ internal static class ProgramForm
                     break;
                 case Swap16Op s:
                     if (s.Words < 1) throw new FormException(path + ".words", "a swap16 moves at least one word");
-                    Range(path + ".src", s.Src, s.Words * 2, p.StateSize, "state bytes");
+                    Range(path + ".src", s.Src, s.Words * 2L, p.StateSize, "state bytes");
                     TakeWhole(path, s.Dst, s.Words * 2);
                     unconditional.Add(s);
                     break;
