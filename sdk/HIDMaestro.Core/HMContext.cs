@@ -53,6 +53,10 @@ public sealed class HMContext : IDisposable
     // The named models and identity defaults this context's profiles take:
     // the catalog's, and each loaded directory's models folder.
     private Internal.ModelRegistry? _registry;
+    // Directory loads run one at a time: each reads the registry, loads
+    // under it and writes back the registry with its own models added, and
+    // two at once would keep only the later one's.
+    private readonly object _directoryLoadLock = new();
     private bool _disposed;
 
     /// <summary>Create a new SDK context. Loading profiles and creating
@@ -409,11 +413,17 @@ public sealed class HMContext : IDisposable
         if (!Directory.Exists(profilesDir))
             throw new DirectoryNotFoundException($"Profiles directory not found: {profilesDir}");
 
-        Internal.ModelRegistry registry;
-        lock (_lock) registry = _registry ??= Internal.ModelRegistry.Catalog;
-        var db = ProfileDatabase.Load(profilesDir, registry);
-        lock (_lock) _registry = db.Registry;
-        return Add(db);
+        // The catalog's registry loads the embedded catalog on first use,
+        // outside the context's lock, which creates and disposes wait on.
+        var catalog = Internal.ModelRegistry.Catalog;
+        lock (_directoryLoadLock)
+        {
+            Internal.ModelRegistry registry;
+            lock (_lock) registry = _registry ??= catalog;
+            var db = ProfileDatabase.Load(profilesDir, registry);
+            lock (_lock) _registry = db.Registry;
+            return Add(db);
+        }
     }
 
     /// <summary>Load the default profile catalog embedded in the SDK

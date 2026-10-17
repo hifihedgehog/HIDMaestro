@@ -496,6 +496,14 @@ public sealed class ControllerProfile
     [JsonIgnore]
     internal ResolvedModel? ResolvedCache { get; set; }
 
+    /// <summary>The named models and identity defaults the profile resolved
+    /// under: its load's, which holds the models folder of the directory it
+    /// came from. A copy the builder makes, and ResolveDeviceModel's
+    /// profile, resolve under it too. Null for a profile no loader
+    /// resolved, which takes the catalog's.</summary>
+    [JsonIgnore]
+    internal ModelRegistry? Registry { get; set; }
+
     /// <summary>The device model the profile runs with: its own keys, the
     /// model it names, or its identity default's, group by group.</summary>
     [JsonIgnore]
@@ -1635,6 +1643,7 @@ public sealed class ProfileDatabase
         {
             try
             {
+                p.Registry = registry;
                 p.ResolvedCache = ModelRegistry.Resolve(p, registry, outsideCatalog);
             }
             catch (Exception e)

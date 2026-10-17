@@ -64,6 +64,9 @@ public sealed class HMProfileBuilder
     // JSON. Build starts from it, so every key no setter names comes with
     // the copy: the extended reports, the layout, the USB configuration.
     private ControllerProfile? _copy;
+    // The registry the copied profile resolved under, so a copy of a
+    // directory's profile still finds the directory's models.
+    private ModelRegistry? _registry;
 
     /// <summary>Set the profile ID slug (must be unique if registered with a context).</summary>
     public HMProfileBuilder Id(string id) { _id = id; return this; }
@@ -266,6 +269,7 @@ public sealed class HMProfileBuilder
     public HMProfileBuilder FromProfile(HMProfile source)
     {
         _copy = source.Inner.Clone();
+        _registry = source.Inner.Registry;
         _deviceModelFrom = source.Inner.DeviceModelFrom;
         _deviceModel = source.Inner.DeviceModel;
         _driverPid = source.Inner.DriverPid;
@@ -341,7 +345,8 @@ public sealed class HMProfileBuilder
         try
         {
             inner.ValidateAtLoad();
-            inner.ResolvedCache = ModelRegistry.Resolve(inner, ModelRegistry.Catalog, outsideCatalog: true);
+            inner.Registry = _registry ?? ModelRegistry.Catalog;
+            inner.ResolvedCache = ModelRegistry.Resolve(inner, inner.Registry, outsideCatalog: true);
         }
         catch (Exception e) when (ProfileDefects.IsDefect(e))
         {

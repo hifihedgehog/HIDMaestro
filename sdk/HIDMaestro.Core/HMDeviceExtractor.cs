@@ -177,7 +177,10 @@ public static class HMDeviceExtractor
         copy.DeviceModelFrom = r.IdentityModel;
         string note = $"Device model: {r.IdentityModel}, from the identity default {r.IdentityEntry!.Substring("identity:".Length)}.";
         copy.Notes = string.IsNullOrEmpty(copy.Notes) ? note : copy.Notes + " " + note;
-        copy.ResolvedCache = ModelRegistry.Resolve(copy, ModelRegistry.Catalog, outsideCatalog: true);
+        // The registry the profile took its identity default under, which
+        // holds the model the default names.
+        copy.Registry = inner.Registry ?? ModelRegistry.Catalog;
+        copy.ResolvedCache = ModelRegistry.Resolve(copy, copy.Registry, outsideCatalog: true);
         return new HMProfile(copy);
     }
 

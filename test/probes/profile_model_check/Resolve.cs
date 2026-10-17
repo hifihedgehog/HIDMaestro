@@ -28,6 +28,7 @@ internal static class Resolve
         var c = new Checks("resolve");
         Catalog(c);
         Directory(c);
+        Concurrent(c);
         return c.Failures;
     }
 
@@ -218,6 +219,25 @@ internal static class Resolve
                 ReferenceEquals(HMDeviceExtractor.ResolveDeviceModel(P("user-named")!), P("user-named"))
                 && ReferenceEquals(HMDeviceExtractor.ResolveDeviceModel(P("user-own")!), P("user-own"))
                 && ReferenceEquals(HMDeviceExtractor.ResolveDeviceModel(P("user-none")!), P("user-none")));
+            // A directory's models stay with its profiles through a builder
+            // copy and ResolveDeviceModel. At c1b7475d both resolved against
+            // the catalog's registry alone: the copy lost its named model and
+            // ResolveDeviceModel named one it could not find.
+            c.Run("a FromProfile copy of a profile naming a directory's model keeps it", () =>
+            {
+                var copy = new HMProfileBuilder().FromProfile(P("user-named")!).Id("user-named-copy").Build();
+                string src = Sources(copy).TryGetValue("presentation", out var v) ? v : "none";
+                return (src == "named:user-pid-model" && copy.Inner.ResolvedDriverPid == "0x02FF" && (string?)Api.Prop(copy, "DeviceModelProblem") == null,
+                        $"{src} {copy.Inner.ResolvedDriverPid} {(string?)Api.Prop(copy, "DeviceModelProblem")}");
+            });
+            c.Run("ResolveDeviceModel on a profile the directory's identity default gave a model names a model that resolves", () =>
+            {
+                var r = HMDeviceExtractor.ResolveDeviceModel(P("user-identity")!);
+                string src = Sources(r).TryGetValue("presentation", out var v) ? v : "none";
+                return (r.Inner.DeviceModelFrom == "user-pid-model" && src == "named:user-pid-model"
+                        && (string?)Api.Prop(r, "DeviceModelProblem") == null,
+                        $"{r.Inner.DeviceModelFrom} {src} {(string?)Api.Prop(r, "DeviceModelProblem")}");
+            });
             c.Run("a later load's profile names the earlier directory's model with no rebuild", () =>
             {
                 string later = Path.Combine(dir, "later");
@@ -230,6 +250,57 @@ internal static class Resolve
         finally
         {
             try { System.IO.Directory.Delete(dir, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    /// <summary>Two directories loaded at once into one context each keep
+    /// their models: a profile of a third load names both. At c1b7475d
+    /// each load read the context's registry, loaded, and wrote its own
+    /// back, so the later write dropped the earlier directory's models.</summary>
+    static void Concurrent(Checks c)
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"hm-profile-concurrent-{Environment.ProcessId}");
+        try
+        {
+            string Dir(string name, string model, string pid)
+            {
+                string d = Path.Combine(root, name);
+                System.IO.Directory.CreateDirectory(Path.Combine(d, "models"));
+                File.WriteAllText(Path.Combine(d, "models", model + ".json"),
+                    new JsonObject { ["id"] = model, ["driverPid"] = pid }.ToJsonString());
+                File.WriteAllText(Path.Combine(d, name + ".json"), FromRepo(@"heusinkveld\ultimate-pedals.json", "user-" + name).ToJsonString());
+                return d;
+            }
+            string a = Dir("dir-a", "user-model-a", "0x02FF"), b = Dir("dir-b", "user-model-b", "0x0B00");
+            string later = Path.Combine(root, "later");
+            System.IO.Directory.CreateDirectory(later);
+            File.WriteAllText(Path.Combine(later, "uses-a.json"),
+                FromRepo(@"heusinkveld\ultimate-pedals.json", "user-uses-a", o => o["deviceModelFrom"] = "user-model-a").ToJsonString());
+            File.WriteAllText(Path.Combine(later, "uses-b.json"),
+                FromRepo(@"heusinkveld\ultimate-pedals.json", "user-uses-b", o => o["deviceModelFrom"] = "user-model-b").ToJsonString());
+            int lost = 0;
+            const int Rounds = 40;
+            for (int round = 0; round < Rounds; round++)
+            {
+                using var ctx = new HMContext();
+                ctx.LoadDefaultProfiles();
+                using var go = new System.Threading.Barrier(2);
+                var ta = System.Threading.Tasks.Task.Run(() => { go.SignalAndWait(); ctx.LoadProfilesFromDirectory(a); });
+                var tb = System.Threading.Tasks.Task.Run(() => { go.SignalAndWait(); ctx.LoadProfilesFromDirectory(b); });
+                System.Threading.Tasks.Task.WaitAll(ta, tb);
+                ctx.LoadProfilesFromDirectory(later);
+                if (ctx.GetProfile("user-uses-a")?.Inner.ResolvedDriverPid != "0x02FF"
+                    || ctx.GetProfile("user-uses-b")?.Inner.ResolvedDriverPid != "0x0B00") lost++;
+            }
+            c.Check($"two directories loaded at once keep both models, in each of {Rounds} rounds", lost == 0, $"{lost} round(s) lost one");
+        }
+        catch (Exception e)
+        {
+            c.Check("two directories loaded at once keep both models", false, $"threw {e.GetType().Name}: {e.Message}");
+        }
+        finally
+        {
+            try { System.IO.Directory.Delete(root, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
         }
     }
 }
