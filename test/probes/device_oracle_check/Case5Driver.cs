@@ -169,7 +169,10 @@ internal sealed class Case5Driver : IOracleCase
             Directory.CreateDirectory(options.GoldenDir);
             File.WriteAllText(kept, text, new UTF8Encoding(false));
         }
-        File.WriteAllText(plan, text, new UTF8Encoding(false));
+        // Replay runs every stream not named for a version parameter as the
+        // tree's SDK, under the version contract. The golden file keeps the
+        // plan's text without the line.
+        File.WriteAllText(plan, options.Replay ? AsTreeSdk(text) : text, new UTF8Encoding(false));
 
         // --explain: the plan's text, of which the golden file keeps the
         // digest, and the Switch Pro streams the driver serves from its
@@ -391,6 +394,19 @@ internal sealed class Case5Driver : IOracleCase
         foreach (var (name, body) in SwitchBodies())
             sb.Append("body ").Append(name).Append(' ').Append(Convert.ToHexString(body)).Append('\n');
         return new Built(sb.ToString(), config);
+    }
+
+    /// <summary>A plan whose default streams model this tree's SDK: the
+    /// harness's "sdk 2" line, after the header (hm_harness.h g_sdkV2). The
+    /// tree's SDK writes the version contract, protocols 4 to 4 with the
+    /// controller's identity tag, and the identity entry, before any PnP
+    /// work. 9bd6279's SDK, whose plan the recording kept, wrote protocols 2
+    /// to 3 and no tag.</summary>
+    internal static string AsTreeSdk(string plan)
+    {
+        const string header = "hm-driver-plan 1\n";
+        if (!plan.StartsWith(header, StringComparison.Ordinal)) throw new InvalidDataException("not a driver plan");
+        return header + "sdk 2\n" + plan[header.Length..];
     }
 
     internal static void AddProfile(StringBuilder sb, string group, ControllerProfile p, List<RegValue> values, string? name = null)

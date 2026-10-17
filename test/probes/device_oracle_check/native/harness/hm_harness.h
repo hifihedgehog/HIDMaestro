@@ -534,6 +534,15 @@ const char *VersionLabel(int param);
 /* The parameters that write an identity tag and the identity entry, as
  * the v2.0.0 SDK does. */
 int VersionTagged(int param);
+/* The plan's "sdk 2": the default parameter then writes what this tree's
+ * SDK writes, the contract's section, tag and identity entry, under the
+ * same stream names. Replay's plans carry it, so every stream not named
+ * for a parameter runs as the tree's SDK. The plan a recording kept, from
+ * 9bd6279's SDK, does not. */
+extern int g_sdkV2;
+/* This stream's SDK writes the version contract: a tagged parameter, or
+ * the default one under "sdk 2". */
+int SdkWritesContract(void);
 /* Under a parameter: the section's bytes, then the clear or the close. */
 void SdkVersionMidRun(Sdk *s);
 /* SharedMemoryIO.WriteInputFrame: odd SeqNo, DataSize and Data, the GIP

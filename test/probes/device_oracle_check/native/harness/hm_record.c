@@ -223,6 +223,10 @@ void PlanLoad(const char *path)
         } else if (strcmp(word, "end") == 0) {
             if (p && !p->bluetoothLine) p->bluetooth = (int)PlanDword(p, "Bluetooth", 0);
             p = NULL;
+        } else if (strcmp(word, "sdk") == 0 && !p) {
+            /* The SDK the plan's default streams model: 2 for this tree's,
+             * which writes the version contract (SdkWritesContract). */
+            g_sdkV2 = atoi(strtok_s(NULL, " ", &ctx)) == 2;
         } else if (strcmp(word, "body") == 0) {
             if (g_plan.bodyCount >= (int)ARRAYSIZE(g_plan.bodies)) HmFail("plan: too many bodies");
             PlanBody *b = &g_plan.bodies[g_plan.bodyCount++];
@@ -321,7 +325,7 @@ void SdkCreate(Sdk *s, int index, int flags)
              * when the controller carries a different one, so a driver
              * that builds its expected tag from the index takes the
              * section for its own, and HM_0123456789ABCDEF otherwise. */
-            int tagged = VersionTagged(g_versionParam);
+            int tagged = SdkWritesContract();
             if (tagged) { min = 4; max = 4; }
             if (g_versionParam == VERSION_RANGE5) min = 5, max = 5;
             if (g_versionParam == VERSION_RANGE45) max = 5;
@@ -435,7 +439,7 @@ void ConfigWrite(PlanProfile *p, int index)
      * controller's index under SOFTWARE\HIDMaestro\Identity\<token> before
      * any PnP work (the design note's decision (c), "The index before the
      * first start"), where a driver reads it before WdfDeviceCreate. */
-    if (VersionTagged(g_versionParam) && !p->noIdentity) {
+    if (SdkWritesContract() && !p->noIdentity) {
         WCHAR token[24], idPath[96];
         ControllerToken(index, token, ARRAYSIZE(token));
         swprintf_s(idPath, ARRAYSIZE(idPath), L"SOFTWARE\\HIDMaestro\\Identity\\%s", token);
@@ -467,6 +471,12 @@ void RecordSections(Sdk *s)
 }
 
 int g_versionParam;
+int g_sdkV2;
+
+int SdkWritesContract(void)
+{
+    return VersionTagged(g_versionParam) || (g_versionParam == VERSION_SDK && g_sdkV2);
+}
 
 int VersionTagged(int param)
 {

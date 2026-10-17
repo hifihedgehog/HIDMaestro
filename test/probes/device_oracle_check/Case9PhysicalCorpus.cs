@@ -187,7 +187,10 @@ internal sealed class Case9PhysicalCorpus : IOracleCase
 
         string planPath = Path.Combine(work, "plan.txt");
         string output = Path.Combine(work, options.Replay ? "tree.bin" : "oracle.bin");
-        File.WriteAllText(planPath, text, new UTF8Encoding(false));
+        // Replay runs the corpus as the tree's SDK, under the version
+        // contract, so each extracted profile's answers are the ones its
+        // identity default compiles (Case5Driver.AsTreeSdk).
+        File.WriteAllText(planPath, options.Replay ? Case5Driver.AsTreeSdk(text) : text, new UTF8Encoding(false));
         string exe = Path.Combine(options.NativeDir, options.Replay ? "driver_harness_tree.exe" : "driver_harness_oracle.exe");
         if (!File.Exists(exe)) throw new FileNotFoundException($"{exe} is not built: run native\\build.ps1 -Out {options.NativeDir}");
         Case5Driver.RunHarness(exe, planPath, output, options.Seed, "--corpus");
