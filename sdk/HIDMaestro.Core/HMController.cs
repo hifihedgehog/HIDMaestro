@@ -42,10 +42,16 @@ public sealed partial class HMController : IDisposable
     /// <c>ControllerIndex</c> the driver reads. A program running alone gets
     /// the slot number here, as every release before 1.13.0 did. When another
     /// program on the machine already uses that index, the controller gets the
-    /// lowest free one instead. While a program built on HIDMaestro 1.12.0 has
-    /// a controller present, the controller gets 64 plus the slot when that is
-    /// free, and otherwise the lowest free index from 64 up. A keyed
-    /// controller whose identity has a device a closed program left takes
+    /// lowest free one instead. While a running program built on HIDMaestro
+    /// 1.12.0 has a controller present, the controller gets 64 plus the slot
+    /// when that is free, and otherwise the lowest free index from 64 up.
+    /// One such program goes unseen and sets no floor: one whose
+    /// controllers are all keyboards or mice, or whose ledger write failed,
+    /// while its controller's index cannot be read and it shares an index
+    /// with a running program built on this release
+    /// (docs/design/v1.13.0.md, "Transport index and slot"). A
+    /// device a closed program left keeps at most its own index from use. A
+    /// keyed controller whose identity has a device a closed program left takes
     /// that device's index first, when no one else uses it and it is not
     /// below that floor. The value can therefore differ between runs. Native
     /// writers that open the sections themselves read the names from

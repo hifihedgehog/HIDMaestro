@@ -157,6 +157,23 @@ internal sealed class DeviceIdentity
     public static bool IsIdentityToken(string instanceName)
         => instanceName != null && instanceName.StartsWith(TokenPrefix, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>True when an instance name is the token of a default
+    /// identity, <see cref="TokenPrefix"/> and the index in four or more
+    /// decimal digits, and gives that index. A keyed token is sixteen hex
+    /// digits, so a name of that length is never read as one.</summary>
+    public static bool TryParseDefaultToken(string instanceName, out int index)
+    {
+        index = -1;
+        if (!IsIdentityToken(instanceName)) return false;
+        ReadOnlySpan<char> digits = instanceName.AsSpan(TokenPrefix.Length);
+        if (digits.Length < 4 || digits.Length >= 16) return false;
+        if (!int.TryParse(digits, System.Globalization.NumberStyles.None,
+                          System.Globalization.CultureInfo.InvariantCulture, out int n)) return false;
+        if (!string.Equals(ForIndex(n).Token, instanceName, StringComparison.OrdinalIgnoreCase)) return false;
+        index = n;
+        return true;
+    }
+
     /// <summary>Write <paramref name="prefix"/> as the ParentIdPrefix of the
     /// devnode at <paramref name="instanceId"/> unless it is already there.
     /// Returns the previous value, or null when nothing was written. With

@@ -60,9 +60,10 @@ internal sealed class ControllerLease : IDisposable
     /// <summary>Take a transport index and an identity for a controller at
     /// <paramref name="slot"/>, and record it.</summary>
     /// <exception cref="HMResourceInUseException">A live program holds the
-    /// identity, a v1.12.0 program's present device has it, the key is
-    /// <c>index:&lt;N&gt;</c> with N below the floor a running v1.12.0
-    /// program sets, or every candidate index is held.</exception>
+    /// identity, a running v1.12.0 program's present device has it, the key
+    /// is <c>index:&lt;N&gt;</c> with N below the floor a running v1.12.0
+    /// program sets (a device a closed one left sets none), or every
+    /// candidate index is held.</exception>
     public static ControllerLease Acquire(int slot, string? identityKey, string backend, string profileId)
     {
         MachineClaims.EnsureOwner();
@@ -283,9 +284,33 @@ internal sealed class ControllerLease : IDisposable
     /// <summary>Whether a v1.12.0 program runs: a present device of one, or
     /// a USB/IP import no owner record names whose index's v1.12.0 owner
     /// pipe is held, a composite of one. A v1.12.0 program with no
-    /// controller at this moment leaves no sign.</summary>
+    /// controller at this moment leaves no sign.
+    ///
+    /// <para>A v1.12.0 device whose index cannot be read, as a device whose
+    /// driver install failed reads in Windows Sandbox, is no LiveLegacy
+    /// device: the census cannot tie it to its owner pipe. That holds for a
+    /// keyed one and for one older than identity tokens. A keyless one takes
+    /// its index from its token and is judged as any other. While such a
+    /// device is present, a running v1.12.0 program counts too when its
+    /// registry ledger holder names a running process no live record names,
+    /// on any index, or when it runs on an index no live record and no
+    /// present device's index accounts for
+    /// (OwnerCensus.UnplacedLegacyProgram). A device of a program that has
+    /// exited leaves the floor alone, whether its index reads or not.</para>
+    ///
+    /// <para>The holder is the one sign of such a program on an index this
+    /// release also holds: there its first create opens this release's
+    /// sections and its own owner pipe fails against this release's two
+    /// instances, so every named object carries this release's names. That
+    /// first create is the case outside every gate
+    /// (docs/design/data-driven-devices.md, "One case stays outside every
+    /// gate"). A keyboard or mouse profile writes no holder, and neither
+    /// does a create whose ledger write failed, so such a program there
+    /// stays unseen, and its next create can land on this release's next
+    /// index.</para></summary>
     private static bool LegacyProgramRuns(OwnerCensus census) =>
         census.Devices.Any(g => g.Owner == OwnerCensus.Owner.LiveLegacy)
+        || census.UnplacedLegacyProgram
         || census.ForeignImportIndices.Any(i => MachineClaims.IsHeld(MachineClaims.LegacyOwnerPipeName(i)));
 
     /// <summary>A v1.12.0 program takes no identity claim. Its device of

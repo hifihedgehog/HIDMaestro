@@ -233,14 +233,47 @@ internal static class OwnerSweep
     }
 
     /// <summary>The exit handler's removal. Returns true when the record can
-    /// go: the process has no controller, or every device it removed is out
-    /// of the device tree and its ledger holds are released.</summary>
+    /// go (<see cref="ExitRecordMayGo"/>).</summary>
     private static bool RemoveOwnDevicesAtExitGated()
     {
         var census = OwnerCensus.Take();
         var own = census.Records.FirstOrDefault(r => r.Self);
+        return ExitRecordMayGo(own, () => RemoveOwnDevicesAndRelease(census, own!),
+            Registry.LocalMachine, RegistryLedger.Root, RegistryLedger.ReleaseHolds);
+    }
+
+    /// <summary>Whether an exit may delete the owner record
+    /// <paramref name="own"/>: there is one, the devices of the controllers
+    /// it lists are out of the device tree and their holds released
+    /// (<paramref name="removeAndRelease"/>, run only when it lists one), and
+    /// no hold of this process stands in the ledger at
+    /// <paramref name="root"/> of <paramref name="hive"/> once any that does
+    /// is released through <paramref name="release"/>. That last check runs
+    /// on every exit that would delete the record, one whose controllers
+    /// were all disposed before it included: a dispose's release that failed
+    /// partway leaves its hold behind and its record with no controller.
+    /// A census of another program takes a running process's ledger holder
+    /// that no live record names for a v1.12.0 program's
+    /// (OwnerCensus.Build), and this process runs on after this handler. So
+    /// the record stays while a hold of this process does, until the process
+    /// ends, after which the holder reads gone and the record dead. HKLM's
+    /// ledger for the exit, a scratch key for the coexistence probe's
+    /// OF13.</summary>
+    internal static bool ExitRecordMayGo(MachineClaims.OwnerRecord? own, Func<bool> removeAndRelease,
+        RegistryKey hive, string root, Action<string[]> release)
+    {
         if (own == null) return false;
-        if (own.Controllers.Count == 0) return true;
+        if (own.Controllers.Count > 0 && !removeAndRelease()) return false;
+        if (RegistryLedger.OwnHoldsSettled(hive, root, release)) return true;
+        DeviceOrchestrator.LogDiag("    exit: a ledger hold of this process could not be released, so the record stays until the process ends");
+        return false;
+    }
+
+    /// <summary>Remove the devices of the controllers <paramref name="own"/>
+    /// lists and release their ledger holds. Returns false when a device is
+    /// still in the device tree.</summary>
+    private static bool RemoveOwnDevicesAndRelease(OwnerCensus census, MachineClaims.OwnerRecord own)
+    {
         // No WinUSB re-bind of this process is inside its claim and install
         // when the devices leave (WinUsbBinding.StopKeepingAll), which waits
         // out a bind in progress, as a dispose does. Then the composites:

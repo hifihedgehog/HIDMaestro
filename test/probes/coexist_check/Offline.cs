@@ -80,6 +80,8 @@
 //   OF12 ObjectHolders, which names the processes that hold an object a
 //        live check finds left behind (ObjectHolders.SelfCheck). "offline
 //        holders" runs it alone.
+//   OF13 A devnode whose transport index the census cannot read
+//        (OfflineCensusIndex.cs). "offline census" runs it alone.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -90,9 +92,10 @@ internal static partial class Program
     static int Offline(string? only)
     {
         Console.WriteLine("=== Coexistence checks that need no elevation ===");
-        if (only == "holders")
+        if (only is "holders" or "census")
         {
-            ObjectHolders.SelfCheck(Check);
+            if (only == "holders") ObjectHolders.SelfCheck(Check);
+            else { OfflineCensusIndex(); OfflineLedgerHolders(); OfflineExitRecord(); }
             Console.WriteLine();
             Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");
             return s_failures == 0 ? 0 : 1;
@@ -129,6 +132,9 @@ internal static partial class Program
         OfflineDiagFiles();
         OfflineListings();
         ObjectHolders.SelfCheck(Check);
+        OfflineCensusIndex();
+        OfflineLedgerHolders();
+        OfflineExitRecord();
         Console.WriteLine();
         Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;

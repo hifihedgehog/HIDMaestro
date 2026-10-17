@@ -470,8 +470,9 @@ public sealed class HMContext : IDisposable
     /// <see cref="HMController.TransportIndex"/>), which is what
     /// <see cref="CreateController(HMProfile)"/> does. That index is the
     /// slot number when no other program on the machine uses it and no
-    /// program built on HIDMaestro 1.12.0 has a controller present, so a
-    /// keyless controller's index and default identity can differ between
+    /// running program built on HIDMaestro 1.12.0 has a controller present
+    /// (a device a closed one left keeps at most its own index from use), so
+    /// a keyless controller's index and default identity can differ between
     /// runs when other programs that embed HIDMaestro are running. Pass a
     /// key for paths that must stay put. The form <c>index:&lt;N&gt;</c> is
     /// reserved for the default: it names the identity of index N wherever
@@ -486,11 +487,12 @@ public sealed class HMContext : IDisposable
     /// left under that key, first waits up to 120 seconds for that cleanup.
     /// Thrown when a live controller on this machine, in this program or
     /// another, holds the key, and, before any wait, when the key is
-    /// <c>index:&lt;N&gt;</c> with N below 64 while a program built on
-    /// HIDMaestro 1.12.0 has a controller present, since that program gives
-    /// the identity to its own controller on index N. A controller of a
-    /// context this process dropped without disposing holds its key until
-    /// the process exits.</exception>
+    /// <c>index:&lt;N&gt;</c> with N below 64 while a running program built
+    /// on HIDMaestro 1.12.0 has a controller present, since that program
+    /// gives the identity to its own controller on index N. A device a
+    /// closed program left does not refuse its own key: the create takes
+    /// that device back. A controller of a context this process dropped
+    /// without disposing holds its key until the process exits.</exception>
     /// <exception cref="InvalidOperationException">The profile's device
     /// model does not compile: an extended report, a port block, the USB/IP
     /// protocol or the WinUSB package is mis-authored, and most messages
@@ -653,10 +655,17 @@ public sealed class HMContext : IDisposable
     /// must be free in this context (the previous controller at that slot
     /// must already be disposed). The controller's transport index is N when
     /// no other program on the machine uses N, and otherwise the lowest free
-    /// index. While a program built on HIDMaestro 1.12.0 has a controller
-    /// present, it is 64 plus N when that is free. A keyed create first takes
-    /// back the index of a device a closed program left under its identity
-    /// (see <see cref="HMController.TransportIndex"/>).</summary>
+    /// index. While a running program built on HIDMaestro 1.12.0 has a
+    /// controller present, it is 64 plus N when that is free. One such
+    /// program goes unseen and sets no floor: one whose controllers are all
+    /// keyboards or mice, or whose ledger write failed, while its
+    /// controller's index cannot be read and it shares an index with a
+    /// running program built on this release (docs/design/v1.13.0.md,
+    /// "Transport index and slot"). A device a closed program left
+    /// keeps at most its own index from use.
+    /// A keyed create first takes back the index of a device a closed
+    /// program left under its identity (see
+    /// <see cref="HMController.TransportIndex"/>).</summary>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/>
     /// is negative.</exception>
     /// <exception cref="InvalidOperationException">If the slot is already
@@ -681,11 +690,12 @@ public sealed class HMContext : IDisposable
     /// left under that key, first waits up to 120 seconds for that cleanup.
     /// Thrown when a live controller on this machine, in this program or
     /// another, holds the key, and, before any wait, when the key is
-    /// <c>index:&lt;N&gt;</c> with N below 64 while a program built on
-    /// HIDMaestro 1.12.0 has a controller present, since that program gives
-    /// the identity to its own controller on index N. A controller of a
-    /// context this process dropped without disposing holds its key until
-    /// the process exits.</exception>
+    /// <c>index:&lt;N&gt;</c> with N below 64 while a running program built
+    /// on HIDMaestro 1.12.0 has a controller present, since that program
+    /// gives the identity to its own controller on index N. A device a
+    /// closed program left does not refuse its own key: the create takes
+    /// that device back. A controller of a context this process dropped
+    /// without disposing holds its key until the process exits.</exception>
     public HMController CreateControllerAt(int index, HMProfile profile, string? identityKey)
     {
         if (profile == null) throw new ArgumentNullException(nameof(profile));

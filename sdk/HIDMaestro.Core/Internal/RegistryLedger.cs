@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 using Microsoft.Win32;
 
@@ -34,7 +35,7 @@ namespace HIDMaestro.Internal;
 /// and each consults the other so the value ends at the true pre-HIDMaestro
 /// state in either order of claim and release.</para>
 /// </summary>
-internal static class RegistryLedger
+internal static partial class RegistryLedger
 {
     internal const string Root = @"SOFTWARE\HIDMaestroRegistryLedger";
     internal const string JoystickOemRoot =
@@ -95,21 +96,281 @@ internal static class RegistryLedger
         catch { return long.MinValue; }                       // exists, not queryable
     }
 
-    /// <summary>A holder counts until its process is provably gone: absent,
-    /// or present under the same id with a different start time.</summary>
-    private static bool HolderAlive(string holder)
+    /// <summary>A holder counts while a process runs under its id with its
+    /// start time. The holder's process is opened for
+    /// PROCESS_QUERY_LIMITED_INFORMATION and SYNCHRONIZE, and its creation
+    /// time read (<see cref="OpenedStartTime"/>), a few microseconds. Only a
+    /// process that exists and refuses that open is looked up in the
+    /// system's process list (<see cref="ProcessCreateTimes"/>), read once
+    /// for the walk, so a process this one may not open counts only when the
+    /// list names it with the holder's start time. When neither can be read, the
+    /// holder counts, the side that keeps a key from being restored under a
+    /// live program. A holder carries Process.StartTime.ToFileTimeUtc(),
+    /// which gives the process's creation time back exactly: DateTime keeps
+    /// the hour a clock falls back as ambiguous local time and converts it
+    /// back to the same UTC instant.</summary>
+    private static bool HolderAlive(string holder, StartTimes times)
     {
-        var parts = holder.Split('-');
-        if (parts.Length != 3 || !int.TryParse(parts[0], out int pid)
-            || !long.TryParse(parts[1], System.Globalization.NumberStyles.HexNumber, null, out long start))
-            return false;
-        long? actual = ProcessStartFileTime(pid);
-        if (actual == null) return false;
-        if (actual == long.MinValue) return true;
-        return actual.Value == start;
+        if (!TryParseHolder(holder, out int pid, out long start, out _)) return false;
+        long? opened = OpenedStartTime(pid);
+        if (opened == null) return false;
+        if (opened.Value != long.MinValue) return opened.Value == start;
+        if (times.List is { } list) return list.TryGetValue(pid, out long created) && created == start;
+        return true;
     }
 
+    /// <summary><see cref="HolderAlive(string, StartTimes)"/>, the test the
+    /// census and the dead-holder cleanup make, with the read of the process
+    /// list handed in, for the coexistence probe's OF13.</summary>
+    internal static bool HolderAliveIn(string holder, Func<Dictionary<int, long>?> processTimes) =>
+        HolderAlive(holder, new StartTimes(processTimes));
+
+    private const uint ProcessQueryLimitedInformation = 0x1000;
+    private const uint Synchronize = 0x00100000;
+    private const int ErrorInvalidParameter = 87;
+    private const uint StillActive = 259;
+    private const uint WaitObject0 = 0;
+
+    /// <summary>A running process's creation time as a FILETIME, read
+    /// through a PROCESS_QUERY_LIMITED_INFORMATION and SYNCHRONIZE handle,
+    /// the test the runtime's ProcessManager.IsProcessRunning makes. Null
+    /// when no process has the id (ERROR_INVALID_PARAMETER) or the one that
+    /// has it has exited: an exit code other than STILL_ACTIVE, or a
+    /// signaled handle for a process whose exit code is 259. long.MinValue
+    /// when the process exists and cannot be opened or read.</summary>
+    private static long? OpenedStartTime(int pid)
+    {
+        IntPtr h = OpenProcess(ProcessQueryLimitedInformation | Synchronize, false, (uint)pid);
+        if (h == IntPtr.Zero)
+            return Marshal.GetLastPInvokeError() == ErrorInvalidParameter ? null : long.MinValue;
+        try
+        {
+            if (GetExitCodeProcess(h, out uint code) && code != StillActive) return null;
+            if (WaitForSingleObject(h, 0) == WaitObject0) return null;
+            return GetProcessTimes(h, out long created, out _, out _, out _) ? created : long.MinValue;
+        }
+        finally { CloseHandle(h); }
+    }
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial IntPtr OpenProcess(uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, uint pid);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetProcessTimes(IntPtr process, out long creation, out long exit, out long kernel, out long user);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool CloseHandle(IntPtr handle);
+
+    private static bool TryParseHolder(string holder, out int pid, out long start, out int index)
+    {
+        pid = index = 0;
+        start = 0;
+        var parts = holder.Split('-');
+        return parts.Length == 3 && int.TryParse(parts[0], out pid)
+            && long.TryParse(parts[1], System.Globalization.NumberStyles.HexNumber, null, out start)
+            && int.TryParse(parts[2], out index);
+    }
+
+    /// <summary>The system's process list, read at most once for one walk of
+    /// the holders, and only for a process that refuses the open.</summary>
+    private sealed class StartTimes(Func<Dictionary<int, long>?> read)
+    {
+        private Dictionary<int, long>? _list;
+        private bool _read;
+        public Dictionary<int, long>? List
+        {
+            get
+            {
+                if (!_read) { _list = read(); _read = true; }
+                return _list;
+            }
+        }
+    }
+
+    private const int SystemProcessInformation = 5;
+    private const int StatusInfoLengthMismatch = unchecked((int)0xC0000004);
+
+    /// <summary>The size the last read of the process list needed, plus
+    /// room, so the next read is a single call. 0 before the first.</summary>
+    private static uint s_processListSize;
+
+    /// <summary><paramref name="read"/>, run at most once, on the first call
+    /// of what this returns: one census hands
+    /// <see cref="ProcessCreateTimes"/> through it to both of its holder
+    /// reads.</summary>
+    internal static Func<Dictionary<int, long>?> ReadOnce(Func<Dictionary<int, long>?> read)
+    {
+        Dictionary<int, long>? list = null;
+        bool done = false;
+        return () =>
+        {
+            if (!done) { list = read(); done = true; }
+            return list;
+        };
+    }
+
+    /// <summary>Each running process's creation time, a FILETIME as the
+    /// holder's name carries it, by process id, from
+    /// NtQuerySystemInformation's SystemProcessInformation, which needs no
+    /// handle to any process. Null when the list cannot be read. Its
+    /// SYSTEM_PROCESS_INFORMATION entries carry NextEntryOffset at 0,
+    /// CreateTime at 32 and UniqueProcessId after ImageName and
+    /// BasePriority: at 80 in a 64-bit process, 68 in a 32-bit one
+    /// (winternl.h, and the layout ntexapi.h gives the fields between).</summary>
+    internal static unsafe Dictionary<int, long>? ProcessCreateTimes()
+    {
+        // The returned length sizes the next call. The first call of a
+        // process starts at 1 MB, about what 500 processes need.
+        uint size = Volatile.Read(ref s_processListSize);
+        if (size == 0) size = 1024 * 1024;
+        for (int attempt = 0; attempt < 4; attempt++)
+        {
+            byte* buffer = (byte*)NativeMemory.Alloc(size);
+            try
+            {
+                int status = NtQuerySystemInformation(SystemProcessInformation, buffer, size, out uint needed);
+                if (status == StatusInfoLengthMismatch)
+                {
+                    size = Math.Max(size, needed) + 64 * 1024;
+                    continue;
+                }
+                if (status < 0) return null;
+                Volatile.Write(ref s_processListSize, needed + 64 * 1024);
+                int pidOffset = IntPtr.Size == 8 ? 80 : 68;
+                var list = new Dictionary<int, long>(512);
+                uint offset = 0;
+                while (true)
+                {
+                    byte* entry = buffer + offset;
+                    long created = *(long*)(entry + 32);
+                    int pid = (int)(nint)(*(void**)(entry + pidOffset));
+                    list[pid] = created;
+                    uint next = *(uint*)entry;
+                    if (next == 0) break;
+                    offset += next;
+                    if (offset >= size) break;
+                }
+                return list;
+            }
+            finally { NativeMemory.Free(buffer); }
+        }
+        return null;
+    }
+
+    [LibraryImport("ntdll.dll")]
+    private static unsafe partial int NtQuerySystemInformation(int infoClass, void* buffer, uint length, out uint returnLength);
+
     private static LedgerLock Acquire() => LedgerLock.Acquire();
+
+    /// <summary>The holders of the GameInput and joy.cpl entries whose
+    /// process still runs (<see cref="HolderAlive"/>), as process id and
+    /// controller index. Every SDK from v1.12.0 writes one for each
+    /// controller whose profile is not a keyboard or a mouse, in the same
+    /// form, before the controller's devnode exists, and removes it at the
+    /// controller's teardown (v1.12.0's WriteInstanceConfig and
+    /// TeardownController). This release writes its own only after its
+    /// owner record (ControllerLease.Acquire, then the create's instance
+    /// configuration). The census reads them for a running v1.12.0
+    /// program its devices do not show (OwnerCensus.Build). Read without the
+    /// ledger's lock: a holder written or removed during the read is seen
+    /// or not, as by a read just before or after it. The ledger is the one
+    /// at <paramref name="root"/> of <paramref name="hive"/>, and
+    /// <paramref name="processTimes"/> reads the process list for a process
+    /// that refuses the open: HKLM's ledger and the system's list, read once
+    /// per census, for the census, a scratch key and a list of its own for
+    /// the coexistence probe's OF13.</summary>
+    internal static List<(int Pid, int Index)> LiveHolders(RegistryKey hive, string root, Func<Dictionary<int, long>?> processTimes)
+    {
+        var list = new List<(int Pid, int Index)>();
+        var times = new StartTimes(processTimes);
+        foreach (string kind in new[] { JoystickOemKind, GameInputKind })
+        {
+            string[] entries;
+            try
+            {
+                using var k = hive.OpenSubKey($@"{root}\{kind}");
+                if (k == null) continue;
+                entries = k.GetSubKeyNames();
+            }
+            // OpenSubKey throws SecurityException on a key it may not open,
+            // and GetSubKeyNames IOException on a key deleted during the
+            // read.
+            catch (Exception e) when (e is System.Security.SecurityException or UnauthorizedAccessException or System.IO.IOException) { continue; }
+            // One entry at a time, as MachineClaims.ReadAll reads records:
+            // another program's teardown restores an entry, and deletes it,
+            // when its last holder goes, and the entries after it still count.
+            foreach (string entry in entries)
+            {
+                try
+                {
+                    using var h = hive.OpenSubKey($@"{root}\{kind}\{entry}\{HoldersKey}");
+                    if (h == null) continue;
+                    foreach (string holder in h.GetValueNames())
+                        if (TryParseHolder(holder, out int pid, out _, out int index) && HolderAlive(holder, times))
+                            list.Add((pid, index));
+                }
+                catch (Exception e) when (e is System.Security.SecurityException or UnauthorizedAccessException or System.IO.IOException) { }
+            }
+        }
+        return list;
+    }
+
+    /// <summary>Whether no GameInput or joy.cpl hold of this process stands
+    /// in the ledger at <paramref name="root"/> of <paramref name="hive"/>,
+    /// once any that does is released through <paramref name="release"/>,
+    /// which gets their names. An exit deletes its owner record only then
+    /// (OwnerSweep.ExitRecordMayGo): the census takes a running process's
+    /// holder that no live record names for a v1.12.0 program's. A ledger
+    /// that cannot be read counts as holding. HKLM's ledger and
+    /// <see cref="ReleaseHolds"/> for the exit, a scratch key and a release
+    /// of its own for the coexistence probe's OF13.</summary>
+    internal static bool OwnHoldsSettled(RegistryKey hive, string root, Action<string[]> release)
+    {
+        string[]? held = OwnHolds(hive, root);
+        if (held is { Length: 0 }) return true;
+        if (held != null)
+        {
+            try { release(held); } catch { }
+        }
+        return OwnHolds(hive, root) is { Length: 0 };
+    }
+
+    /// <summary>Release the named holds: the dispose's release, for every
+    /// controller index they name.</summary>
+    internal static void ReleaseHolds(string[] holders) => Sweep(holders);
+
+    /// <summary>The names of this process's holds in the ledger at
+    /// <paramref name="root"/> of <paramref name="hive"/>, or null when a
+    /// part of it cannot be read.</summary>
+    private static string[]? OwnHolds(RegistryKey hive, string root)
+    {
+        string prefix = $"{Environment.ProcessId}-{s_selfStart:X}-";
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string kind in new[] { JoystickOemKind, GameInputKind })
+        {
+            try
+            {
+                using var k = hive.OpenSubKey($@"{root}\{kind}");
+                if (k == null) continue;
+                foreach (string entry in k.GetSubKeyNames())
+                {
+                    using var h = k.OpenSubKey($@"{entry}\{HoldersKey}");
+                    if (h != null) names.UnionWith(h.GetValueNames().Where(n => n.StartsWith(prefix, StringComparison.Ordinal)));
+                }
+            }
+            catch (Exception e) when (e is System.Security.SecurityException or UnauthorizedAccessException or System.IO.IOException) { return null; }
+        }
+        return names.ToArray();
+    }
 
     // ── GameInput mapping ────────────────────────────────────────────────
 
@@ -709,6 +970,7 @@ internal static class RegistryLedger
         {
             try
             {
+                var times = new StartTimes(ProcessCreateTimes);
                 foreach (var kind in AllKinds)
                 {
                     using var kindKey = Registry.LocalMachine.OpenSubKey($@"{Root}\{kind}", writable: true);
@@ -723,7 +985,7 @@ internal static class RegistryLedger
                                 {
                                     bool released = releasing != null && Array.IndexOf(releasing, h) >= 0;
                                     if (released) own = true;
-                                    if (released || !HolderAlive(h))
+                                    if (released || !HolderAlive(h, times))
                                         holders.DeleteValue(h, throwOnMissingValue: false);
                                 }
                             restore = holders == null || holders.GetValueNames().Length == 0;
@@ -1097,8 +1359,9 @@ internal static class RegistryLedger
             if (entry == null) return false;
             using var holders = entry.OpenSubKey(HoldersKey, writable: true);
             if (holders == null) return true;
+            var times = new StartTimes(ProcessCreateTimes);
             foreach (var h in holders.GetValueNames())
-                if (!HolderAlive(h)) holders.DeleteValue(h, throwOnMissingValue: false);
+                if (!HolderAlive(h, times)) holders.DeleteValue(h, throwOnMissingValue: false);
             var live = holders.GetValueNames();
             return ignoreHolders
                 ? live.All(h => seen.Contains(HolderClaim(holders, h), StringComparer.Ordinal))

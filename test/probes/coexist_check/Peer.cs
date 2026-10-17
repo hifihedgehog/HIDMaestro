@@ -87,7 +87,9 @@
 //                               (OwnerSweep.LastPhantomCleanup): removed,
 //                               totalms, ids, waitedms, unsettled
 //   census                      the SDK's census of present devices, one
-//                               token|index|owner|watch per device group
+//                               token|index|owner|watch per device group,
+//                               the index -1/<why> when the SDK could not
+//                               read it
 //   releases <index>            SharedMemoryIO.ReleaseOnExitSupported, the
 //                               read behind HMController.ReleasesOnConsumerExit
 //   outputs on                  note the Stopwatch timestamp of every
@@ -930,7 +932,12 @@ internal static class Peer
         foreach (object g in (System.Collections.IEnumerable)census.GetType().GetProperty("Devices")!.GetValue(census)!)
         {
             string watch = describe == null ? "unsupported" : (string)describe.Invoke(null, new[] { g })!;
-            parts.Add($"{Get(g, "Key")}|{Get(g, "ControllerIndex")}|{Get(g, "Owner")}|watch={watch}");
+            // Why the index is -1, where the SDK keeps the reason
+            // (OwnerCensus.IndexRead, v1.13.0): -1/NoValue, -1/NoKey or
+            // -1/Unreadable.
+            string? how = Get(g, "IndexRead");
+            string index = Get(g, "ControllerIndex") + (how != null && how != "Read" ? "/" + how : "");
+            parts.Add($"{Get(g, "Key")}|{index}|{Get(g, "Owner")}|watch={watch}");
         }
         return parts.Count == 0 ? "OK census" : "OK census " + string.Join(' ', parts);
     }

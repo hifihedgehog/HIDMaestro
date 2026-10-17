@@ -44,9 +44,22 @@ internal sealed partial class OwnerCensus
     internal enum Owner { Self, Live, Dead, LiveLegacy, DeadLegacy, Unknown }
 
     /// <summary>One controller's present devnodes, grouped by identity
-    /// token (or by index for devices older than identity tokens).</summary>
+    /// token (or by index for devices older than identity tokens).
+    /// <see cref="IndexRead"/> says why <see cref="ControllerIndex"/> is -1
+    /// when it is.</summary>
     internal sealed record DeviceGroup(string Key, int ControllerIndex, List<string> InstanceIds, Owner Owner,
-        MachineClaims.OwnerRecord? Record);
+        MachineClaims.OwnerRecord? Record)
+    {
+        public IndexRead IndexRead { get; init; } = IndexRead.Read;
+    }
+
+    /// <summary>What <see cref="ReadControllerIndex(string, Func{string, RegistryKey?}, out IndexRead)"/>
+    /// found in a devnode's Device Parameters: the value, a key without a
+    /// DWORD ControllerIndex, no key, or a key this process may not open or
+    /// read. Token: the value could not be read, and the index came from the
+    /// devnode's name, a default identity's token (HM_&lt;index&gt;, every
+    /// release from v1.8.0), which names its index by construction.</summary>
+    internal enum IndexRead { Read, NoValue, NoKey, Unreadable, Token }
 
     public List<MachineClaims.OwnerRecord> Records { get; } = new();
     public List<DeviceGroup> Devices { get; } = new();
@@ -56,6 +69,20 @@ internal sealed partial class OwnerCensus
     /// older SDK whose composite has no devnode of its own to record the
     /// index. The bus id <c>1-&lt;N+1&gt;</c> carries it.</summary>
     public HashSet<int> ForeignImportIndices { get; } = new();
+
+    /// <summary>A present device no record names has no readable index,
+    /// and a v1.12.0 program runs on an index below
+    /// <see cref="ControllerLease.LegacyClearance"/>. Either a registry
+    /// ledger holder on that index names a running process no live record
+    /// names (<see cref="RegistryLedger.LiveHolders"/>), on any index, one
+    /// this release also holds included, or, on an index no live record and
+    /// no present device's index accounts for, its owner pipe is held beside
+    /// its input section and an acknowledgement section without the
+    /// driver's ended marker, the evidence <see cref="LegacyPipeLive"/>
+    /// takes when no driver reports on the pipe. That program's device can
+    /// be the one whose index cannot be read. Tested only while such a
+    /// device is present.</summary>
+    public bool UnplacedLegacyProgram { get; private set; }
 
     public IEnumerable<MachineClaims.OwnerRecord> DeadRecords => Records.Where(r => !r.Live);
     public bool AnyUnknown => Devices.Any(d => d.Owner == Owner.Unknown);
@@ -81,8 +108,39 @@ internal sealed partial class OwnerCensus
     /// HIDMaestro devnode, and a registry read per present one.</summary>
     public static OwnerCensus Take()
     {
+        // Both holder reads share one read of the process list, needed only
+        // for a holder's process that refuses the open.
+        var processList = RegistryLedger.ReadOnce(RegistryLedger.ProcessCreateTimes);
+        var census = Build(PresentOwnedDevnodes(), s_openDeviceParameters, MachineClaims.ReadAll(), LegacyProgramOn,
+            () => RegistryLedger.LiveHolders(Registry.LocalMachine, RegistryLedger.Root, processList), MachineClaims.ReadAll);
+
+        var recordedPorts = new HashSet<int>();
+        foreach (var r in census.Records)
+            if (r.UsbipPort > 0) recordedPorts.Add(r.UsbipPort);
+        foreach (var row in Usbip.VhciClient.GetImportedDevices())
+        {
+            if (row.Host != "127.0.0.1" || !int.TryParse(row.Service, out int port)) continue;
+            if (port < Usbip.UsbipServer.BasePort || port >= Usbip.UsbipServer.BasePort + Usbip.UsbipServer.PortRange) continue;
+            if (recordedPorts.Contains(port)) continue;
+            if (row.BusId.StartsWith("1-", StringComparison.Ordinal) && int.TryParse(row.BusId.AsSpan(2), out int dev) && dev >= 1)
+                census.ForeignImportIndices.Add(dev - 1);
+        }
+        return census;
+    }
+
+    /// <summary><see cref="Take"/>'s records and device groups from what it
+    /// is handed: the present devnodes, the opener of their Device
+    /// Parameters, the owner records, the test of whether a v1.12.0 program
+    /// runs on a transport index (<see cref="LegacyProgramOn"/>), the ledger
+    /// holders whose process runs (<see cref="RegistryLedger.LiveHolders"/>),
+    /// read before and after the records, and that read of the records. The coexistence probe's
+    /// OF13 hands it devnodes, keys, holders and records of its own.</summary>
+    internal static OwnerCensus Build(IEnumerable<string> presentIds, Func<string, RegistryKey?> openDeviceParameters,
+        IEnumerable<MachineClaims.OwnerRecord> records, Func<int, bool> legacyProgramOn,
+        Func<IEnumerable<(int Pid, int Index)>> ledgerHolders, Func<IEnumerable<MachineClaims.OwnerRecord>> recordsNow)
+    {
         var census = new OwnerCensus();
-        census.Records.AddRange(MachineClaims.ReadAll());
+        census.Records.AddRange(records);
 
         var byToken = new Dictionary<string, MachineClaims.OwnerRecord>(StringComparer.OrdinalIgnoreCase);
         var byIndex = new Dictionary<int, MachineClaims.OwnerRecord>();
@@ -94,14 +152,14 @@ internal sealed partial class OwnerCensus
                     byIndex[c.TransportIndex] = r;
             }
 
-        var groups = new Dictionary<string, (int Index, List<string> Ids)>(StringComparer.OrdinalIgnoreCase);
-        foreach (string id in PresentOwnedDevnodes())
+        var groups = new Dictionary<string, (int Index, IndexRead Read, List<string> Ids)>(StringComparer.OrdinalIgnoreCase);
+        foreach (string id in presentIds)
         {
             string name = id.Substring(id.LastIndexOf('\\') + 1);
-            int index = ReadControllerIndex(id);
+            int index = CensusIndex(id, name, openDeviceParameters, out IndexRead read);
             string key = DeviceIdentity.IsIdentityToken(name) ? name : $"#index:{index}";
-            if (!groups.TryGetValue(key, out var g)) g = (index, new List<string>());
-            if (g.Index < 0) g.Index = index;
+            if (!groups.TryGetValue(key, out var g)) g = (index, read, new List<string>());
+            if (g.Index < 0) (g.Index, g.Read) = (index, read);
             g.Ids.Add(id);
             groups[key] = g;
         }
@@ -124,29 +182,77 @@ internal sealed partial class OwnerCensus
                 owner = WithoutLiveRecord(key, g.Index, dead: rec != null, () => g.Ids);
                 if (owner != Owner.Dead) rec = null;
             }
-            census.Devices.Add(new DeviceGroup(key, g.Index, g.Ids, owner, rec));
+            if (g.Read != IndexRead.Read)
+                DeviceOrchestrator.LogDiag($"    transport index {g.Index} for {string.Join(", ", g.Ids)}: {Describe(g.Read)}, read as {owner}");
+            census.Devices.Add(new DeviceGroup(key, g.Index, g.Ids, owner, rec) { IndexRead = g.Read });
         }
 
-        var recordedPorts = new HashSet<int>();
-        foreach (var r in census.Records)
-            if (r.UsbipPort > 0) recordedPorts.Add(r.UsbipPort);
-        foreach (var row in Usbip.VhciClient.GetImportedDevices())
+        // A device whose index cannot be read cannot be tied to its owner
+        // pipe. Whether its program runs is read from the indices a v1.12.0
+        // program reaches that nothing else accounts for. A present device's
+        // own index was judged with its group, through its driver's report
+        // where there is one, and this release's own controllers hold the
+        // same pipe name on the indices their live records list.
+        if (census.Devices.Any(d => d.Owner == Owner.Unknown && d.ControllerIndex < 0))
         {
-            if (row.Host != "127.0.0.1" || !int.TryParse(row.Service, out int port)) continue;
-            if (port < Usbip.UsbipServer.BasePort || port >= Usbip.UsbipServer.BasePort + Usbip.UsbipServer.PortRange) continue;
-            if (recordedPorts.Contains(port)) continue;
-            if (row.BusId.StartsWith("1-", StringComparison.Ordinal) && int.TryParse(row.BusId.AsSpan(2), out int dev) && dev >= 1)
-                census.ForeignImportIndices.Add(dev - 1);
+            // A v1.12.0 program holds a ledger entry for each controller
+            // that is not a keyboard or a mouse, written before its devnode,
+            // in the same form as this release's. Its process is in no live
+            // record, which tells it from this release's program even on an
+            // index both hold, where every named object carries the same
+            // name. The holders are read, then the records, then the holders
+            // again, and a holder counts only when both reads have it. This
+            // release writes its record before any holder, so a program of
+            // this release whose holder the first read has is in the
+            // records. Its exit deletes its record only after its holders
+            // are gone (OwnerSweep.ExitRecordMayGo), so one whose
+            // record the census missed has no holder in the second read.
+            var first = ledgerHolders().Where(h => h.Index >= 0 && h.Index < ControllerLease.LegacyClearance).ToHashSet();
+            if (first.Count > 0)
+            {
+                var livePids = new HashSet<int>(recordsNow().Where(r => r.Live).Select(r => r.Pid));
+                var holders = ledgerHolders().Where(first.Contains).ToList();
+                foreach (var h in holders)
+                {
+                    if (livePids.Contains(h.Pid)) continue;
+                    census.UnplacedLegacyProgram = true;
+                    DeviceOrchestrator.LogDiag($"    a v1.12.0 program, process {h.Pid}, holds transport index {h.Index} in the registry ledger, beside a device whose index cannot be read");
+                    return census;
+                }
+            }
+
+            var accounted = new HashSet<int>();
+            foreach (var d in census.Devices) if (d.ControllerIndex >= 0) accounted.Add(d.ControllerIndex);
+            foreach (var r in census.Records)
+                if (r.Live) foreach (var c in r.Controllers) accounted.Add(c.TransportIndex);
+            for (int n = 0; n < ControllerLease.LegacyClearance; n++)
+            {
+                if (accounted.Contains(n) || !legacyProgramOn(n)) continue;
+                census.UnplacedLegacyProgram = true;
+                DeviceOrchestrator.LogDiag($"    a v1.12.0 program runs on transport index {n}, beside a device whose index cannot be read");
+                break;
+            }
         }
         return census;
     }
+
+    /// <summary>Whether a v1.12.0 program runs on <paramref name="index"/>,
+    /// read where no driver reports on its owner pipe: the pipe held, the
+    /// input section a running program creates before it, and an
+    /// acknowledgement section without the driver's ended marker, as in
+    /// <see cref="LegacyPipeLive"/>. A program that is not elevated can make
+    /// the pipe name but neither section.</summary>
+    private static bool LegacyProgramOn(int index) =>
+        MachineClaims.IsHeld(MachineClaims.LegacyOwnerPipeName(index))
+        && SectionExists($@"Global\HIDMaestroInput{index}")
+        && AckWatchEnded(index) == false;
 
     /// <summary>The owner of one present devnode, by the same rules as
     /// <see cref="Take"/>.</summary>
     public static Owner Classify(string instanceId)
     {
         string name = instanceId.Substring(instanceId.LastIndexOf('\\') + 1);
-        int index = ReadControllerIndex(instanceId);
+        int index = CensusIndex(instanceId, name, s_openDeviceParameters, out _);
         bool token = DeviceIdentity.IsIdentityToken(name);
         Func<IReadOnlyList<string>> members = () => GroupMembers(instanceId, name, token, index);
         bool dead = false;
@@ -173,7 +279,7 @@ internal sealed partial class OwnerCensus
             string n = id.Substring(id.LastIndexOf('\\') + 1);
             bool same = token
                 ? string.Equals(n, name, StringComparison.OrdinalIgnoreCase)
-                : !DeviceIdentity.IsIdentityToken(n) && ReadControllerIndex(id) == index;
+                : !DeviceIdentity.IsIdentityToken(n) && CensusIndex(id, n, s_openDeviceParameters, out _) == index;
             if (same) ids.Add(id);
         }
         if (!ids.Contains(instanceId, StringComparer.OrdinalIgnoreCase)) ids.Add(instanceId);
@@ -719,15 +825,69 @@ internal sealed partial class OwnerCensus
             && ushort.TryParse(s.Slice(13, 4), System.Globalization.NumberStyles.HexNumber, null, out pid);
     }
 
-    internal static int ReadControllerIndex(string instanceId)
+    internal static int ReadControllerIndex(string instanceId) => ReadControllerIndex(instanceId, s_openDeviceParameters, out _);
+
+    private static readonly Func<string, RegistryKey?> s_openDeviceParameters =
+        DeviceParametersOpener(Registry.LocalMachine, @"SYSTEM\CurrentControlSet\Enum");
+
+    /// <summary>The census's opener of a devnode's Device Parameters under
+    /// <paramref name="enumPath"/> of <paramref name="hive"/>: HKLM's Enum
+    /// for the census, a scratch key for the coexistence probe's OF13.</summary>
+    internal static Func<string, RegistryKey?> DeviceParametersOpener(RegistryKey hive, string enumPath) =>
+        id => hive.OpenSubKey($@"{enumPath}\{id}\Device Parameters");
+
+    /// <summary>The index the census gives a devnode: its ControllerIndex
+    /// value, or, when that cannot be read, the index its name carries as a
+    /// default identity's token, which a keyless controller of every release
+    /// from v1.8.0 has. A keyed devnode whose value cannot be read has none
+    /// (-1).</summary>
+    private static int CensusIndex(string instanceId, string name, Func<string, RegistryKey?> openDeviceParameters, out IndexRead read)
+    {
+        int index = ReadControllerIndex(instanceId, openDeviceParameters, out read);
+        if (index < 0 && DeviceIdentity.TryParseDefaultToken(name, out int fromToken))
+        {
+            read = IndexRead.Token;
+            return fromToken;
+        }
+        return index;
+    }
+
+    /// <summary>A devnode's Device Parameters\ControllerIndex, which every
+    /// SDK writes at create, or -1 with the reason in
+    /// <paramref name="read"/>. <paramref name="openDeviceParameters"/>
+    /// opens the key: the census's opener, or one the coexistence probe's
+    /// OF13 hands it. A v1.12.0 program's devnode whose driver install
+    /// failed (its staging had no catalog) has read -1 in the census while
+    /// its program ran, measured in Windows Sandbox, though its create had
+    /// written the value.</summary>
+    internal static int ReadControllerIndex(string instanceId, Func<string, RegistryKey?> openDeviceParameters, out IndexRead read)
     {
         try
         {
-            using var dp = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{instanceId}\Device Parameters");
-            return dp?.GetValue("ControllerIndex") is int ci ? ci : -1;
+            using var dp = openDeviceParameters(instanceId);
+            if (dp == null) { read = IndexRead.NoKey; return -1; }
+            if (dp.GetValue("ControllerIndex") is int ci) { read = IndexRead.Read; return ci; }
+            read = IndexRead.NoValue;
+            return -1;
         }
-        catch { return -1; }
+        // OpenSubKey throws SecurityException on a key it may not open, and
+        // GetValue IOException on a key deleted under it. Any failure reads
+        // as no index, as before this reason was kept.
+        catch (Exception)
+        {
+            read = IndexRead.Unreadable;
+            return -1;
+        }
     }
+
+    private static string Describe(IndexRead read) => read switch
+    {
+        IndexRead.NoValue => "Device Parameters has no DWORD ControllerIndex",
+        IndexRead.NoKey => "the devnode has no Device Parameters key",
+        IndexRead.Unreadable => "Device Parameters cannot be read",
+        IndexRead.Token => "Device Parameters has no readable ControllerIndex, and the index came from the default identity's token",
+        _ => "read",
+    };
 
     /// <summary>Present device instance ids under one enumerator root.</summary>
     internal static List<string> PresentDeviceIds(string enumeratorRoot)
