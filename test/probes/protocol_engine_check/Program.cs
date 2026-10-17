@@ -563,12 +563,18 @@ internal static class Clock
         Check("a run's first tick is one period after the origin", run1.Count > 0 && run1[0].Due == origin + box.Period);
         Check("a run ticks on its grid, each grid point at most once and in order", onGrid && increasing, $"{run1.Count} ticks");
         Check("a run never ticks more often than its grid allows", run1.Count <= points + 1, $"{run1.Count} ticks for {points} grid points");
-        // Owe: the grid point the stall made late is owed and sent at once,
-        // and the points after it that passed during the stall are skipped.
-        bool owed = run1.Count > 6 && run1[5].Due == run1[4].Due + box.Period;
+        // Owe: one grid point that fell due during the stall is owed and
+        // sent at once, and the points after it that passed during the
+        // stall are skipped. Held to what any schedule keeps: the stall ends
+        // no sooner than 7 ms after the fifth tick began, so the owed tick
+        // was due before that end, and the tick after it is due after it,
+        // more than 5 ms and so at least three periods on. A clock late to
+        // the fifth tick itself owes a later point, still due in the stall.
+        long stallEnd = run1.Count > 4 ? run1[4].At + box.StallMs * f / 1000 : 0;
+        bool owed = run1.Count > 6 && run1[5].Due > run1[4].Due && run1[5].Due < stallEnd;
         long gap = run1.Count > 6 ? (run1[6].Due - run1[5].Due) / box.Period : 0;
         Check("a tick held up over three periods owes one report and skips the grid points that passed, with no burst",
-            owed && gap >= 3 && run1[6].Due > run1[5].At, $"owed {owed}, then {gap} periods on");
+            owed && gap >= 3 && run1[6].Due >= stallEnd, $"owed {owed}, then {gap} periods on");
         Check("no tick runs before its time", notEarly);
         Check("the end of a run is seen once", ended && box.Ends == 1, $"{box.Ends}");
         Thread.Sleep(20);
