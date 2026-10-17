@@ -571,10 +571,16 @@ internal static class VendorBlobCodec
                     if (f.B < 0 || f.ButtonBits == null) break;
                     uint mask = (uint)state.Buttons;
                     ulong packed = 0;
-                    for (int i = 0; i < f.ButtonBits.Length && (f.BitLo + i) <= f.BitHi; i++)
+                    // The buttons that are one HMButton bit each, a masked
+                    // shift per distance from HMButton bit to wire bit.
+                    foreach (var g in f.ButtonGroups!)
+                    {
+                        ulong moved = mask & g.Mask;
+                        packed |= g.Shift >= 0 ? moved << g.Shift : moved >> -g.Shift;
+                    }
+                    foreach (int i in f.ButtonSingles!)
                     {
                         ulong bits = f.ButtonBits[i];
-                        if (bits == 0) continue;
                         // Magic trigger-engaged digital buttons: DS4/DS5
                         // report L2/R2 as both analog axis AND digital button.
                         // D-pad directions come from state.Hat, not from the

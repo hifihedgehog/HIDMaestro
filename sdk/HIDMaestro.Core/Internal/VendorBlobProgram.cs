@@ -208,6 +208,15 @@ internal sealed class VendorBlobProgram
         /// <summary>The scale, repeat, level table and packed parts of the
         /// few fields that set them, null for every other field.</summary>
         public FieldExtras? Extras { get; init; }
+        /// <summary>A button-mask's buttons that are one HMButton bit each,
+        /// grouped by the distance from their HMButton bit to their wire bit:
+        /// each group is one masked shift of the button mask. Null for any
+        /// other field.</summary>
+        public ButtonGroup[]? ButtonGroups { get; init; }
+        /// <summary>A button-mask's other positions, each read on its own:
+        /// the trigger, d-pad and pad-touch bits and any position that names
+        /// more than one HMButton bit. Null for any other field.</summary>
+        public int[]? ButtonSingles { get; init; }
 
         /// <summary>A calibrated int16-le field's counts per unit, as a
         /// ratio. Numerator 0 for any other field.</summary>
@@ -238,6 +247,30 @@ internal sealed class VendorBlobProgram
             Resolution = resolution; SourceResolution = sourceResolution; Invert = invert;
             Min = 0; Max = 0; DpadResolved = false; Accumulate = false; CounterSlot = -1; Extras = null;
         }
+    }
+
+    /// <summary>Buttons whose wire bit is their HMButton bit moved by
+    /// <see cref="Shift"/>: <c>(mask &amp; Mask)</c> shifted left by Shift,
+    /// or right by -Shift.</summary>
+    public readonly record struct ButtonGroup(int Shift, ulong Mask);
+
+    /// <summary>The groups and singles of a button-mask field's positions,
+    /// in the range its bits declare.</summary>
+    internal static (ButtonGroup[] Groups, int[] Singles) GroupButtons(ulong[] bits, int bitLo, int bitHi)
+    {
+        var groups = new List<ButtonGroup>();
+        var singles = new List<int>();
+        for (int i = 0; i < bits.Length && bitLo + i <= bitHi; i++)
+        {
+            ulong b = bits[i];
+            if (b == 0) continue;
+            if (b >= 1UL << 32 || (b & (b - 1)) != 0) { singles.Add(i); continue; }
+            int shift = bitLo + i - System.Numerics.BitOperations.TrailingZeroCount(b);
+            int at = groups.FindIndex(g => g.Shift == shift);
+            if (at < 0) groups.Add(new ButtonGroup(shift, b));
+            else groups[at] = groups[at] with { Mask = groups[at].Mask | b };
+        }
+        return (groups.ToArray(), singles.ToArray());
     }
 
     public readonly CompiledField[] Fields;
@@ -540,6 +573,9 @@ internal sealed class VendorBlobProgram
             bool accumulate = f.Clock == "accumulate";
             accumulates |= accumulate;
             if (accumulate && f.HoldWhile != null) holdWhile = f.HoldWhile;
+            var (buttonGroups, buttonSingles) = buttonBits != null
+                ? GroupButtons(buttonBits, bitLo, bitHi)
+                : (null, null);
             fields[i] = new CompiledField(f, op, source, b, rangeLo, rangeHi,
                 bitLo, bitHi, hasBits,
                 f.Center ?? (op == FieldOp.U10BE ? 512 : op == FieldOp.I16 ? 0 : 128), f.NeutralValue ?? 8,
@@ -551,6 +587,8 @@ internal sealed class VendorBlobProgram
                 Min = f.Min ?? defMin,
                 Max = f.Max ?? defMax,
                 DpadResolved = dpad,
+                ButtonGroups = buttonGroups,
+                ButtonSingles = buttonSingles,
                 CounterSlot = counterSlot,
                 Accumulate = accumulate,
                 Levels = f.Levels?.ConvertAll(x => (byte)x).ToArray(),
