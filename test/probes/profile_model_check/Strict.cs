@@ -401,6 +401,13 @@ internal static class Strict
                 "{\"reportId\":\"0x01\",\"size\":8,\"fields\":[{\"byte\":1,\"type\":\"uint16-trigger\",\"semantic\":\"leftTrigger\"}]}");
             return o.ToJsonString().Replace("\"extendedReport\"", "\"ExtendedReport\"").Replace("\"fields\"", "\"Fields\"");
         }, "$.ExtendedReport.Fields[0]");
+        // The layout's kind is read in any case, as every other key is. At
+        // fa4202f8 "Kind" was a missing kind.
+        Add("a layout whose Kind is spelled in another case, with a pedal on an axis the descriptor lacks", BaseId, o =>
+        {
+            o["layout"]!["pedals"]![1]!["axis"] = "Slider";
+            return o.ToJsonString().Replace("\"kind\"", "\"Kind\"");
+        }, "$.layout.pedals[1].axis");
         // An axisMap names each usage once, with a name a slot takes. At
         // c3697a89 a second spelling of 0x32 put the field in two slots,
         // and a name no slot takes left it in none.

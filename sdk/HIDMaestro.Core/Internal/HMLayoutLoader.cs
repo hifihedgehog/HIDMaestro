@@ -14,6 +14,16 @@ namespace HIDMaestro.Internal;
 /// values (matching <see cref="JsonNamingPolicy.SnakeCaseLower"/>).</summary>
 internal sealed class HMLayoutJsonConverter : JsonConverter<HMLayout>
 {
+    private static bool TryGetKind(JsonElement root, bool anyCase, out JsonElement kind)
+    {
+        if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("kind", out kind)) return true;
+        if (anyCase && root.ValueKind == JsonValueKind.Object)
+            foreach (var p in root.EnumerateObject())
+                if (string.Equals(p.Name, "kind", StringComparison.OrdinalIgnoreCase)) { kind = p.Value; return true; }
+        kind = default;
+        return false;
+    }
+
     public override HMLayout? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
     {
         if (reader.TokenType == JsonTokenType.Null) return null;
@@ -21,7 +31,9 @@ internal sealed class HMLayoutJsonConverter : JsonConverter<HMLayout>
         using var doc = JsonDocument.ParseValue(ref reader);
         var root = doc.RootElement;
 
-        if (!root.TryGetProperty("kind", out var kindElem))
+        // The kind is read as the reader reads every other key: in any case
+        // when the options say so, as the SDK's own do.
+        if (!TryGetKind(root, options.PropertyNameCaseInsensitive, out var kindElem))
             throw new JsonException("HMLayout: missing required 'kind' property");
         var kindStr = kindElem.ValueKind == JsonValueKind.String ? kindElem.GetString() : null;
         if (string.IsNullOrEmpty(kindStr))
