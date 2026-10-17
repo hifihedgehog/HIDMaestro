@@ -183,6 +183,7 @@ internal static class ModelCompiler
         if (g.LiveFeatureReports != null)
         {
             if (g.StateBlock == null) throw new FormException("$.liveFeatureReports", "a live feature report needs a stateBlock to build from");
+            if (g.LiveFeatureReports.Count == 0) throw new FormException("$.liveFeatureReports", "the list is empty: leave it out for a device with no live feature report");
             for (int i = 0; i < g.LiveFeatureReports.Count; i++)
             {
                 string path = $"$.liveFeatureReports[{i}]";
