@@ -1841,13 +1841,24 @@ internal static partial class DeviceOrchestrator
             problem = failedChild.Problem;
         }
         if (half.ConfigError != 0)
+        {
+            // InstallDriver helps only where it replaces the driver: one of
+            // an older release than this SDK's. A newer one is kept
+            // (DriverDeploy.Run), and one of this release reads what this
+            // SDK writes.
+            var ours = DriverDeploy.EmbeddedDriver().Release;
+            var theirs = half.Version is { } hv ? new Version(hv.Major, hv.Minor, Math.Max(0, hv.Build)) : null;
+            string advice = theirs == null || theirs < ours
+                ? " This SDK and that driver disagree on the value's format: InstallDriver puts this SDK's driver in place once nothing runs on the installed one."
+                : theirs > ours
+                    ? " That driver is newer and is never replaced by this SDK's: use an SDK of its release."
+                    : "";
             return new HMDriverVersionException(HMDriverVersionProblem.ValueNotRead,
                 $"The HIDMaestro driver {half.Version?.ToString() ?? "(no version written)"} could not read the value " +
                 $"{ConfigErrorValue(half.ConfigError)} this create wrote for {instanceId}, so the device did not start " +
-                $"(problem code {problem}) " +
-                "and the create removed it. This SDK and that driver disagree on the value's format: InstallDriver puts " +
-                "this SDK's driver in place once nothing runs on the installed one.",
+                $"(problem code {problem}) and the create removed it.{advice}",
                 half.Version ?? new Version(0, 0, 0), DriverDeploy.MinimumDriverVersion, new[] { instanceId });
+        }
         return new InvalidOperationException($"The device {instanceId} failed its start, problem code {problem}.");
     }
 

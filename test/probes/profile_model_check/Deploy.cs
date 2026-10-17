@@ -510,6 +510,18 @@ internal static class Deploy
             return (error is HMDriverVersionException v && Problem(v) == "ValueNotRead" && v.Blockers.SequenceEqual(new[] { Node })
                     && !v.Message.Contains("older", StringComparison.Ordinal), $"{(error is HMDriverVersionException x ? Problem(x) : error.GetType().Name)}: {error.Message}");
         });
+        // InstallDriver advice only where it would replace the driver. At
+        // b92e3d0c a value a newer driver, or one of this release, could
+        // not read always asked for InstallDriver, which keeps both.
+        foreach (var (name, version, wantAdvice) in new[] { ("a newer 3.0.0", new Version(3, 0, 0), false), ("this release's", new Version(2, 0, 0), false), ("an older release's", new Version(1, 99, 0), true) })
+            c.Run($"a value {name} driver could not read: the message {(wantAdvice ? "asks" : "does not ask")} for InstallDriver", () =>
+            {
+                // This SDK's driver is the fake machine's, 2.0.0.
+                var error = On(new FakeMachine(), DriverDeploy.CoexistenceRule.RefuseEveryCreate, () =>
+                    With(_ => (true, HasProblem, 10u), _ => null, _ => (4, 4, version, 1), () => DeviceOrchestrator.StartError(Node, 3)));
+                bool asks = error.Message.Contains("InstallDriver", StringComparison.Ordinal);
+                return (asks == wantAdvice && (wantAdvice || version.Major < 3 || error.Message.Contains("SDK of its release", StringComparison.Ordinal)), error.Message);
+            });
         c.Run("a newer driver that dropped protocol 4: Problem ProtocolNotServed, and the message does not ask for InstallDriver", () =>
         {
             var e = Half(5, 5, new Version(3, 0, 0));
