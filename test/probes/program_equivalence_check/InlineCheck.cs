@@ -135,9 +135,12 @@ internal static class InlineCheck
     }
 
     /// <summary>dumpbin from the newest Visual Studio C++ toolset for this
-    /// machine, or null.</summary>
+    /// machine, or null. HM_PEC_DUMPBIN names another, for the check that a
+    /// missing dumpbin fails the probe.</summary>
     static string? Dumpbin()
     {
+        if (Environment.GetEnvironmentVariable("HM_PEC_DUMPBIN") is { Length: > 0 } named)
+            return File.Exists(named) ? named : null;
         string host = RuntimeInformation.OSArchitecture == Architecture.Arm64 ? Path.Combine("HostARM64", "arm64") : Path.Combine("Hostx64", "x64");
         var found = new List<string>();
         foreach (var root in new[] { Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86) })
@@ -161,11 +164,17 @@ internal static class InlineCheck
         string arch = RuntimeInformation.OSArchitecture == Architecture.Arm64 ? "arm64" : "x64";
         string aot = Path.Combine(AppContext.BaseDirectory, "aot-" + arch, "ProgramEquivalenceCheck.exe");
         string? dumpbin = Dumpbin();
-        if (!File.Exists(aot) || dumpbin == null)
+        // The check reads the NativeAOT build or fails: a machine without the
+        // build or without dumpbin cannot tell an inlined kernel from a call.
+        // HM_PEC_NO_AOT=1 leaves it out by name, for a build made with
+        // -p:PecSkipAot=true.
+        if (Environment.GetEnvironmentVariable("HM_PEC_NO_AOT") == "1")
         {
-            Console.WriteLine($"inline, NativeAOT: {(File.Exists(aot) ? "no Visual Studio C++ toolset holds dumpbin" : "no NativeAOT build beside the probe")}, so its listing is not read here");
+            Console.WriteLine("inline, NativeAOT: left out, HM_PEC_NO_AOT=1");
             return;
         }
+        if (!File.Exists(aot)) { Checks.Fail($"inline, NativeAOT: no NativeAOT build at {aot}"); return; }
+        if (dumpbin == null) { Checks.Fail("inline, NativeAOT: no dumpbin: install a Visual Studio C++ toolset, or name one in HM_PEC_DUMPBIN"); return; }
         var start = new ProcessStartInfo(dumpbin) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
         start.ArgumentList.Add("/disasm:nobytes");
         start.ArgumentList.Add(aot);
