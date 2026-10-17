@@ -33,8 +33,8 @@
 //         takes that lock only when no one holds it, so it does not wait.
 //         The ledger's lock stays free and the entry stays while the locks
 //         are held. Once they are free, and with no devnode to wait for, the
-//         follow-up the sweep started restores the entry, or the next sweep
-//         does (docs/design/v1.13.0.md, "Zero setup for Dolphin and
+//         follow-up the sweep started restores the entry, with no second
+//         sweep (docs/design/v1.13.0.md, "Zero setup for Dolphin and
 //         Slippi").
 //      8. A WinUSB bind waits for the deploy lock to add its package, and two
 //         programs bind at the same moment and both bind.
@@ -425,9 +425,9 @@ internal static partial class Program
         Check("Z7: the ledger's lock stays free while they are held", ledger >= 0 && ledger < 1000, r);
         Check("Z7: the entry stays while they are held",
               PeerProcess.Field(r, "during") == "True" && PeerProcess.Field(r, "aftersweep") == "True", r);
-        Check("Z7: once they are free, the follow-up restores the entry, or the next sweep does",
+        Check("Z7: once they are free, the follow-up the sweep started restores the entry",
               PeerProcess.Field(r, "gone") == "True" && PeerProcess.Field(r, "restored") == "after"
-              && PeerProcess.Field(r, "via") is "followup" or "sweep2", r);
+              && PeerProcess.Field(r, "via") == "followup", r);
     }
 
     // ── Z8 ─────────────────────────────────────────────────────────────
@@ -987,9 +987,10 @@ internal static partial class Program
 ///                         not exist, swept while another thread holds the
 ///                         binding's locks &lt;ms&gt;, with follow-ups on.
 ///                         order=before when the sweep ended before the hold
-///                         let go, via= who restored the entry (sweep,
-///                         followup, sweep2 or none), restored=after when
-///                         that was after the hold let go
+///                         let go, via= who restored the entry (sweep, hold
+///                         for a restore while the locks were held, followup,
+///                         or none within 10 s), restored=after when that was
+///                         after the hold let go
 ///   zfollow queue|claim|check|end  the follow-up's decision: queue holds
 ///                         the WinUSB lock on a thread, claims the entry,
 ///                         and runs the full cleanup, which leaves the entry
@@ -1315,22 +1316,31 @@ internal static class PeerZ
             ReleaseLedger(l);
             sweeper.Join();
             bool afterSweep = Present();
+            string via = afterSweep ? "none" : "sweep";
+            long goneAt = afterSweep ? 0 : sweptAt;
+            // Watched while the holder runs. A restore before its release
+            // stamp did not wait for the locks. One after it is the
+            // follow-up's, which waited for them.
+            while (afterSweep && holder.IsAlive)
+            {
+                if (!Present())
+                {
+                    goneAt = Stopwatch.GetTimestamp();
+                    via = Interlocked.Read(ref releasedAt) == 0 ? "hold" : "followup";
+                    break;
+                }
+                Thread.Sleep(10);
+            }
             holder.Join();
             // Once the locks are free the entry's follow-up, which waits for
             // the devnode lock, restores it. This devnode does not exist, so
-            // there is nothing else to wait for.
-            string via = afterSweep ? "none" : "sweep";
-            long goneAt = afterSweep ? 0 : sweptAt;
-            if (afterSweep)
+            // there is nothing else to wait for. No second sweep runs: a
+            // build that starts no follow-up leaves the entry.
+            if (via == "none")
             {
                 var wait = Stopwatch.StartNew();
                 while (Present() && wait.ElapsedMilliseconds < 10_000) Thread.Sleep(20);
                 if (!Present()) { via = "followup"; goneAt = Stopwatch.GetTimestamp(); }
-                else
-                {
-                    M(Ledger, "PruneDead").Invoke(null, null);
-                    if (!Present()) { via = "sweep2"; goneAt = Stopwatch.GetTimestamp(); }
-                }
             }
             bool gone = !Present();
             // Both threads are joined, so both stamps are written.
