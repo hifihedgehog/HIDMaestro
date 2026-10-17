@@ -28,6 +28,9 @@
 //              its model does not fit, ClearDeviceModel, DriverPid,
 //              FeatureAnswers and BuildsItsOwnReports (Builder.cs)
 //   check      every mode above, the battery's run (S92), the default
+//   cost       one launch's cost of a GET through the answer tables and of
+//              their compile at create, for a script's p50 and p95 over
+//              30 launches or more (Cost.cs), outside check
 //
 // Creates no device, opens no section and needs no elevation. Exit 0 PASS,
 // 1 FAIL.
@@ -46,6 +49,8 @@ internal static class Program
         CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
         Thread.CurrentThread.CurrentCulture = CultureInfo.InvariantCulture;
         string mode = args.Length > 0 ? args[0] : "check";
+        // A measurement with no verdict, outside check.
+        if (mode == "cost") return Cost.Run();
         var modes = new (string Name, Func<int> Run)[]
         {
             ("strict", Strict.Run),
