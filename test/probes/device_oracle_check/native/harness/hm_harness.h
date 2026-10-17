@@ -280,7 +280,6 @@ typedef struct HmTimer {
     PFN_WDF_TIMER fn;
     ULONG      period;
     int        started;
-    int        disposed;      /* the device's removal ran its rundown */
 } HmTimer;
 
 typedef struct HmWdfKey {
@@ -567,6 +566,16 @@ int  CaseLifecycle(void);
  * a named object (a pipe client by its server's name) and per mapped view
  * of a section, written to out. Returns the count. */
 int  HeldObjects(char *out, size_t cap);
+/* The device whose PnP or cleanup callbacks run now, on the scenario's
+ * fiber (hm_wdf.c), else NULL. An unmap from that context while a thread
+ * of the device has not returned or a timer of it is started is the
+ * release order broken: a reader could still touch the view. Each such
+ * unmap is noted, and UnmapsWhileRunning writes them to out ("; " between
+ * entries) and returns the count since the world's reset. The view's
+ * buffer itself stays readable, since the SDK's side of the section shares
+ * it. */
+extern HmDevice *g_releasingDevice;
+int  UnmapsWhileRunning(char *out, size_t cap);
 
 /* Companion entry point: companion.c is compiled with
  * /DDriverEntry=CompanionDriverEntry so both drivers link into one exe. */

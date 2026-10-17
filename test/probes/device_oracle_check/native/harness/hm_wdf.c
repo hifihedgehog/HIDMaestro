@@ -860,22 +860,27 @@ void DeviceStop(HmDevice *dev)
     if (!dev->started || dev->stopped || dev->surprised || dev->removed) HmFail("a stop of a device that is not running");
     if (dev->pnp.EvtDeviceQueryStop && !NT_SUCCESS(dev->pnp.EvtDeviceQueryStop((WDFDEVICE)dev)))
         HmFail("EvtDeviceQueryStop refused the stop");
+    g_releasingDevice = dev;
     PowerDownAndRelease(dev);
+    g_releasingDevice = NULL;
     dev->stopped = 1;
 }
 
 void DeviceSurpriseRemove(HmDevice *dev)
 {
     if (!dev->started || dev->surprised || dev->removed) HmFail("a surprise removal the harness does not model");
+    g_releasingDevice = dev;
     if (dev->pnp.EvtDeviceSurpriseRemoval) dev->pnp.EvtDeviceSurpriseRemoval((WDFDEVICE)dev);
     if (!dev->stopped) PowerDownAndRelease(dev);
     CleanupForRemove(dev);
+    g_releasingDevice = NULL;
     dev->surprised = 1;
 }
 
 void DeviceRemove(HmDevice *dev)
 {
     if (dev->removed) return;
+    g_releasingDevice = dev;
     if (dev->started && !dev->surprised) {
         if (!dev->stopped) PowerDownAndRelease(dev);
         CleanupForRemove(dev);
@@ -888,8 +893,9 @@ void DeviceRemove(HmDevice *dev)
     if (dev->smioStarted && dev->pnp.EvtDeviceSelfManagedIoCleanup)
         dev->pnp.EvtDeviceSelfManagedIoCleanup((WDFDEVICE)dev);
     if (dev->started)
-        for (int i = 0; i < dev->timerCount; i++) { dev->timers[i]->started = 0; dev->timers[i]->disposed = 1; }
+        for (int i = 0; i < dev->timerCount; i++) dev->timers[i]->started = 0;
     if (dev->cleanup) dev->cleanup((WDFOBJECT)dev);
+    g_releasingDevice = NULL;
     RecOut("device.removed", NULL, 0);
 }
 

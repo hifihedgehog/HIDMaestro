@@ -53,8 +53,10 @@
 // Replay also runs the tree's harness in its lifecycle mode on the same
 // plan (hm_case_lifecycle.c), which checks rather than records: after a
 // surprise removal with no removal after it, both drivers hold nothing of
-// their index and their threads and timer have ended, a rebalance stop and
-// restart leaves the device working, and nothing is closed twice. Record
+// their index, their threads and timer have ended and a parked read is
+// canceled, a rebalance stop and restart leaves the device working, no
+// view is unmapped while a thread or timer that reads it runs, and nothing
+// is closed twice. Record
 // does not run it: 9bd6279's drivers keep everything until the removal.
 using System;
 using System.Collections.Generic;

@@ -13,8 +13,9 @@
  * PID sections) and for the XUSB companion:
  *   - start, then a surprise removal and no removal: the process holds
  *     no handle to a named object and no view of a section, every thread
- *     of the device has returned and its timer is stopped, and a request
- *     sent after it is refused and opens nothing again;
+ *     of the device has returned and its timer is stopped, a read parked
+ *     when it came is canceled, and a request sent after it is refused
+ *     and opens nothing again;
  *   - start, a rebalance stop and a restart: the device still holds its
  *     objects, its threads still run, and a frame, a read and an output
  *     report still pass through it;
@@ -22,6 +23,9 @@
  *     orderly removal: nothing is left and nothing is closed twice (the
  *     stand-ins stop the run on a second CloseHandle, UnmapViewOfFile or
  *     DeleteCriticalSection).
+ * Every release also checks its order: no view unmapped while a thread or
+ * the timer of the device still runs. The HID sequences run as a filter
+ * (FunctionMode 0, the plan's) and the DualSense's again as no filter.
  * Before each removal the same check lists what the device holds, the
  * positive control that the list shows a held object at all. */
 #include "hm_scenario.h"
@@ -75,6 +79,11 @@ static void CheckReleased(const char *label, HmDevice *dev)
         snprintf(what, sizeof(what), "%s: timer %d of the device is stopped", label, i);
         Check(what, !dev->timers[i]->started, "it still runs");
     }
+    /* The release order: every thread joined and the timer stopped
+     * before any view they read is unmapped (hm_win32.c NoteUnmap). */
+    n = UnmapsWhileRunning(held, sizeof(held));
+    snprintf(what, sizeof(what), "%s: no view is unmapped while a thread or the timer of the device runs", label);
+    Check(what, n == 0, held);
 }
 
 /* A request after the surprise removal: the I/O queues are purged, so the
@@ -120,19 +129,31 @@ static const char *const k_pidNames[] = {
 };
 
 /* The SDK's objects with the PID section, the configuration, the add and
- * the start. */
-static int HidStart(Ctl *c, PlanProfile *p)
+ * the start. With fm, FunctionMode 1 as the SDK writes it for an Xbox
+ * profile without xinputhid (DeviceOrchestrator.cs:687-699): the driver
+ * is no filter (driver.c EvtDeviceAdd), so its queues are power managed
+ * and the framework purges them before the flush. The plan's profiles
+ * carry FunctionMode 0, a filter with queues that are not power managed.
+ * Checks the mode took. */
+static int HidStart(Ctl *c, PlanProfile *p, int fm, const char *label)
 {
+    char what[192];
     memset(c, 0, sizeof(*c));
     c->p = p;
     SdkCreate(&c->sdk, 0, SDK_ALL);
     if (p->hasPidRids) SdkPidCreate(&c->sdk, p->pidRids);
     ConfigWrite(p, 0);
+    if (fm) ConfigOverrideDword(0, "FunctionMode", 1);
     c->dev = DeviceAdd(0);
     if (!c->dev) return 0;
+    snprintf(what, sizeof(what), "%s: the driver is %s", label, fm ? "no filter" : "a filter");
+    Check(what, c->dev->filter == !fm, NULL);
     DeviceStart(c->dev);
     return 1;
 }
+
+static const char *FmLabel(int fm) { return fm ? " (FunctionMode 1)" : ""; }
+static const char *FmStream(int fm) { return fm ? "-fm1" : ""; }
 
 static int IsSwitch(Ctl *c) { return !strcmp(c->p->group, "switch"); }
 
@@ -170,31 +191,40 @@ static void HidHolds(Ctl *c, const char *label)
     if (c->p->hasPidRids) CheckHolds(label, k_pidNames, (int)ARRAYSIZE(k_pidNames));
 }
 
-static void HidSurpriseNoRemove(PlanProfile *p)
+static void HidSurpriseNoRemove(PlanProfile *p, int fm)
 {
     Ctl c;
-    char label[128];
-    snprintf(label, sizeof(label), "%s surprise removal, no removal", p->id);
-    StreamBegin("lifecycle/%s/surprise-no-remove", p->id);
-    if (!HidStart(&c, p)) { Check(label, 0, "the device add failed"); return; }
+    char label[128], what[192];
+    snprintf(label, sizeof(label), "%s%s surprise removal, no removal", p->id, FmLabel(fm));
+    StreamBegin("lifecycle/%s/surprise-no-remove%s", p->id, FmStream(fm));
+    if (!HidStart(&c, p, fm, label)) { Check(label, 0, "the device add failed"); return; }
     Check("the read takes the frame", HidFrame(&c, 1), NULL);
     Check("the output report reaches the ring", HidOutput(&c), NULL);
     HidHolds(&c, label);
+    /* A read the HID class keeps pending, parked in the manual queue when
+     * the removal comes. Nothing completes it once the worker is joined,
+     * so the flush must cancel it rather than leave it to a removal that
+     * may never come. */
+    HmRequest *parked = HidRead(&c, c.p->readLength ? c.p->readLength : 64);
+    snprintf(what, sizeof(what), "%s: a read is parked when it comes", label);
+    Check(what, parked->inQueue && !parked->completed, NULL);
     DeviceSurpriseRemove(c.dev);
     CheckReleased(label, c.dev);
+    snprintf(what, sizeof(what), "%s: the parked read is canceled, and no read is left in a queue", label);
+    Check(what, parked->completed && !parked->inQueue && Parked(&c) == 0, "it still waits in the manual queue");
     uint8_t report[48] = { 0 };
     report[0] = IsSwitch(&c) ? 0x10 : 0x02;
     CheckRefused(label, "an output report", HidWrite(&c, report, sizeof(report)));
     if (p->hasPidRids) CheckRefused(label, "a PID feature read", HidGetFeature(&c, p->pidRids[0], 64));
 }
 
-static void HidRebalance(PlanProfile *p)
+static void HidRebalance(PlanProfile *p, int fm)
 {
     Ctl c;
     char label[128];
-    snprintf(label, sizeof(label), "%s stop and restart", p->id);
-    StreamBegin("lifecycle/%s/rebalance", p->id);
-    if (!HidStart(&c, p)) { Check(label, 0, "the device add failed"); return; }
+    snprintf(label, sizeof(label), "%s%s stop and restart", p->id, FmLabel(fm));
+    StreamBegin("lifecycle/%s/rebalance%s", p->id, FmStream(fm));
+    if (!HidStart(&c, p, fm, label)) { Check(label, 0, "the device add failed"); return; }
     HidFrame(&c, 1);
     HidOutput(&c);
     DeviceStop(c.dev);
@@ -205,22 +235,22 @@ static void HidRebalance(PlanProfile *p)
         snprintf(what, sizeof(what), "%s: thread %d still runs", label, i);
         Check(what, !c.dev->threads[i]->exited, "it returned");
     }
-    snprintf(label, sizeof(label), "%s stop and restart: a read takes the next frame", p->id);
+    snprintf(label, sizeof(label), "%s%s stop and restart: a read takes the next frame", p->id, FmLabel(fm));
     Check(label, HidFrame(&c, 2), NULL);
-    snprintf(label, sizeof(label), "%s stop and restart: an output report reaches the ring", p->id);
+    snprintf(label, sizeof(label), "%s%s stop and restart: an output report reaches the ring", p->id, FmLabel(fm));
     Check(label, HidOutput(&c), NULL);
     DeviceRemove(c.dev);
-    snprintf(label, sizeof(label), "%s stop, restart, removal", p->id);
+    snprintf(label, sizeof(label), "%s%s stop, restart, removal", p->id, FmLabel(fm));
     CheckReleased(label, c.dev);
 }
 
-static void HidSurpriseThenRemove(PlanProfile *p, int surprise)
+static void HidSurpriseThenRemove(PlanProfile *p, int surprise, int fm)
 {
     Ctl c;
     char label[128];
-    snprintf(label, sizeof(label), "%s %s", p->id, surprise ? "surprise removal, then removal" : "orderly removal");
-    StreamBegin("lifecycle/%s/%s", p->id, surprise ? "surprise-then-remove" : "remove");
-    if (!HidStart(&c, p)) { Check(label, 0, "the device add failed"); return; }
+    snprintf(label, sizeof(label), "%s%s %s", p->id, FmLabel(fm), surprise ? "surprise removal, then removal" : "orderly removal");
+    StreamBegin("lifecycle/%s/%s%s", p->id, surprise ? "surprise-then-remove" : "remove", FmStream(fm));
+    if (!HidStart(&c, p, fm, label)) { Check(label, 0, "the device add failed"); return; }
     HidFrame(&c, 1);
     HidOutput(&c);
     HidHolds(&c, label);
@@ -332,11 +362,16 @@ int CaseLifecycle(void)
     PlanProfile *xusb = PlanFind("xusb", "xbox-360-wired");
     for (int i = 0; i < (int)ARRAYSIZE(hid); i++) {
         if (!hid[i]) HmFail("the plan lacks a lifecycle profile");
-        HidSurpriseNoRemove(hid[i]);
-        HidRebalance(hid[i]);
-        HidSurpriseThenRemove(hid[i], 1);
-        HidSurpriseThenRemove(hid[i], 0);
+        HidSurpriseNoRemove(hid[i], 0);
+        HidRebalance(hid[i], 0);
+        HidSurpriseThenRemove(hid[i], 1, 0);
+        HidSurpriseThenRemove(hid[i], 0, 0);
     }
+    /* The DualSense once more as no filter. */
+    HidSurpriseNoRemove(hid[1], 1);
+    HidRebalance(hid[1], 1);
+    HidSurpriseThenRemove(hid[1], 1, 1);
+    HidSurpriseThenRemove(hid[1], 0, 1);
     if (!xusb) HmFail("the plan lacks xbox-360-wired");
     CompanionSurpriseNoRemove(xusb);
     CompanionRebalance(xusb);

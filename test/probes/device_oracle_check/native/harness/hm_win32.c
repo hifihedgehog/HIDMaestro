@@ -580,12 +580,39 @@ LPVOID WINAPI HmMapViewOfFile(HANDLE hFileMappingObject, DWORD dwDesiredAccess, 
     return s->buf;
 }
 
+HmDevice *g_releasingDevice;
+static char g_unmapNotes[4096];
+static size_t g_unmapNoteLen;
+static int g_unmapNoteCount;
+
+static void NoteUnmap(const WCHAR *name, const char *what, int index)
+{
+    g_unmapNoteCount++;
+    if (g_unmapNoteLen >= sizeof(g_unmapNotes)) return;
+    int n = _snprintf_s(g_unmapNotes + g_unmapNoteLen, sizeof(g_unmapNotes) - g_unmapNoteLen, _TRUNCATE,
+                        "%s%ls unmapped while %s %d still runs", g_unmapNoteLen ? "; " : "", name, what, index);
+    g_unmapNoteLen = n < 0 ? sizeof(g_unmapNotes) : g_unmapNoteLen + (size_t)n;
+}
+
+int UnmapsWhileRunning(char *out, size_t cap)
+{
+    if (cap) strncpy_s(out, cap, g_unmapNotes, _TRUNCATE);
+    return g_unmapNoteCount;
+}
+
 BOOL WINAPI HmUnmapViewOfFile(LPCVOID lpBaseAddress)
 {
     for (HmObj *o = g_allObjs; o; o = o->nextAll)
         if (o->kind == HK_SECTION && ((HmSection *)o)->buf == lpBaseAddress) {
             if (((HmSection *)o)->views <= 0) HmFail("UnmapViewOfFile of a view already unmapped");
             ((HmSection *)o)->views--;
+            if (!g_current && g_releasingDevice) {
+                HmDevice *d = g_releasingDevice;
+                for (int i = 0; i < d->threadCount; i++)
+                    if (!d->threads[i]->exited) NoteUnmap(o->name, "thread", i);
+                for (int i = 0; i < d->timerCount; i++)
+                    if (d->timers[i]->started) NoteUnmap(o->name, "timer", i);
+            }
             return TRUE;
         }
     HmFail("UnmapViewOfFile of an address that is no view");
@@ -973,6 +1000,10 @@ void WorldReset(void)
     if (!sids) { SidsInit(); sids = 1; }
     if (g_current) HmFail("world reset inside a thread");
     WdfReset();
+    g_releasingDevice = NULL;
+    g_unmapNotes[0] = 0;
+    g_unmapNoteLen = 0;
+    g_unmapNoteCount = 0;
     while (g_allObjs) {
         HmObj *n = g_allObjs->nextAll;
         if (g_allObjs->kind == HK_THREAD && ((HmThread *)g_allObjs)->fiber)
