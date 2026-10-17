@@ -582,7 +582,9 @@ public sealed class HMDeviceProtocol
     }
 
     /// <summary>The host poll period the device's input endpoint
-    /// descriptor gives, as Windows schedules it.</summary>
+    /// descriptor gives, as Windows schedules it. Zero when the protocol
+    /// names no input endpoint, as on steam-controller-2, whose protocol
+    /// answers commands and leaves its reports to the SDK.</summary>
     public TimeSpan DescriptorPollInterval => TimeSpan.FromTicks(_engine.Protocol.DescriptorPollMicros * 10L);
 
     /// <summary>The host poll period the device is served at: the
@@ -592,14 +594,27 @@ public sealed class HMDeviceProtocol
     /// a low-speed interrupt endpoint every 8, 16 or 32 ms, a full-speed one
     /// every 1, 2, 4, 8, 16 or 32 ms and a high-speed one every 125, 250 or
     /// 500 microseconds or 1, 2 or 4 ms (USB_ENDPOINT_DESCRIPTOR, Microsoft
-    /// Learn), and the period is one of those.</summary>
+    /// Learn), and the period is one of those. Only a device whose protocol
+    /// sends the SDK's report on each host poll of its input endpoint, such
+    /// as gamecube-adapter, runs on this period.</summary>
     /// <exception cref="ArgumentOutOfRangeException">A period Windows does
     /// not schedule at the device's speed.</exception>
+    /// <exception cref="InvalidOperationException">The device runs no clock
+    /// on the host's poll: it builds its reports and sends them on its own
+    /// clock (switch2-pro-controller-composite), or its protocol names no
+    /// input endpoint (steam-controller-2).</exception>
     public TimeSpan HostPollInterval
     {
         get => TimeSpan.FromTicks(_engine.HostPollMicros * 10L);
         set
         {
+            var p = _engine.Protocol;
+            if (p.BuildsReports)
+                throw new InvalidOperationException(
+                    $"This device builds its reports and sends them every {p.ClockPeriodMs} ms on its own clock (protocol.input.clock.periodMs), whatever the host polls.");
+            if (p.InputEndpoint == 0)
+                throw new InvalidOperationException(
+                    "This device's protocol names no input endpoint: its reports go out as the host reads them, with no clock of the protocol's.");
             long micros = value.Ticks / 10;
             bool exact = value.Ticks % 10 == 0;
             uint speed = _engine.Protocol.Speed;

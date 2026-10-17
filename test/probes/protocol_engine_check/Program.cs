@@ -335,6 +335,17 @@ internal static class Engine
             Check("HMDeviceProtocol refuses a register the device does not declare", unknown);
         }
 
+        Console.WriteLine("-- the host poll period, on a device that runs a host-poll clock and on two that do not");
+        foreach (var (id, polls) in new[] { ("gamecube-adapter", true), ("switch2-pro-controller-composite", false), ("steam-controller-2", false) })
+        {
+            var view = new HMDeviceProtocol(Device.Build(Device.Catalog(id)).Engine);
+            string outcome;
+            try { view.HostPollInterval = TimeSpan.FromMilliseconds(2); outcome = $"set, reads {view.HostPollInterval.TotalMilliseconds} ms"; }
+            catch (InvalidOperationException ex) { outcome = "refused: " + ex.Message; }
+            Check(polls ? $"{id}: HostPollInterval takes a period Windows schedules" : $"{id}: HostPollInterval refuses a period, since no host-poll clock reads it",
+                polls ? outcome == "set, reads 2 ms" : outcome.StartsWith("refused: ", StringComparison.Ordinal), outcome);
+        }
+
         Triton();
     }
 

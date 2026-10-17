@@ -318,7 +318,15 @@ public sealed partial class HMController : IDisposable
     public HMPortSet Ports { get; }
 
     /// <summary>The protocol of a USB/IP device whose profile declares a
-    /// <c>protocol</c>, else null.</summary>
+    /// <c>protocol</c>, else null: its registers, counters and poll periods.
+    /// On switch2-pro-controller-composite the protocol answers the host's
+    /// bulk commands and builds the input reports from the state block on
+    /// its own clock. On steam-controller-2 it reads SDL's settings writes
+    /// into the <c>imuMode</c> register, which holds the IMU timestamp while
+    /// the IMU is off, and the SDK's reports go out as the host reads them.
+    /// Neither runs a clock on the host's poll, so
+    /// <see cref="HMDeviceProtocol.HostPollInterval"/> refuses a period on
+    /// both.</summary>
     public HMDeviceProtocol? DeviceProtocol { get; }
 
     // Cached layout projections (audit 1n): Profile.Sticks / Profile.Triggers
