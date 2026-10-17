@@ -2150,6 +2150,19 @@ function Scenario-Program-Equivalence {
                  -Message 'under NativeAOT, a report program gives different bytes or binds no generated kernel (see probe stdout)'
 }
 
+# S93: the protocol engine and the device clock, offline: conditions with ||,
+# != and in on 16-bit registers, two layouts on one report ID, masked
+# matches, store, storeRecord, or and andNot, memory, bitmap, prefix and
+# status replies, bulk replies in read-sized chunks, the three overflow
+# rules, GET_REPORT of the layout that would go out, a clock counter, no
+# allocation per command or report, the Triton's IMU register, the clock's
+# grid under each missed-tick rule with start, stop and restart, and the
+# idle repeat's period, condition and timestamps.
+function Scenario-Protocol-Engine {
+    Invoke-Probe -Dir 'protocol_engine_check' -Exe 'ProtocolEngineCheck.exe' `
+                 -Message 'the protocol engine or the device clock no longer behaves as its profile states (see probe stdout)'
+}
+
 # S96: catalog data and driver text against the captures and sources they
 # come from. Every comment line of the two driver INFs is plain ASCII. The
 # Xbox 360 profiles carry a real pad's manufacturer string. The flight
@@ -2270,6 +2283,7 @@ $scenarios = @(
     @{ Name = 'S90_Arith_Roundtrip';             Body = ${function:Scenario-Arith-Roundtrip} },
     @{ Name = 'S91_Vendor_Blob_Golden';          Body = ${function:Scenario-Vendor-Blob-Golden} },
     @{ Name = 'S92_Program_Equivalence';         Body = ${function:Scenario-Program-Equivalence} },
+    @{ Name = 'S93_Protocol_Engine';             Body = ${function:Scenario-Protocol-Engine} },
     @{ Name = 'S96_Capture_Fidelity';            Body = ${function:Scenario-Capture-Fidelity} }
 )
 
