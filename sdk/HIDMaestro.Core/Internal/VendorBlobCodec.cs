@@ -321,7 +321,8 @@ internal static class VendorBlobCodec
                 {
                     if (f.B < 0 || f.B + 1 >= buffer.Length) break;
                     // A calibrated, repeated or offset field: its own method,
-                    // so the few profiles that set them keep this loop short.
+                    // inlined here, so a field without extras pays one null
+                    // check and the few profiles that set them no call.
                     if (f.Extras != null) { WriteCalibratedI16(in f, in state, buffer); break; }
                     short v = f.Source switch
                     {
@@ -965,8 +966,10 @@ internal static class VendorBlobCodec
     /// <summary>An int16-le field with a scale, a repeat or a center: a
     /// calibrated value as counts by the one arithmetic (WireArith.Scaled),
     /// or a raw one, offset by the center and written in each motion frame
-    /// the repeat gives.</summary>
-    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    /// the repeat gives. Inlined into the encode loop: out of line it cost
+    /// about 2.6 ns a field in calls, and inline it leaves the other
+    /// profiles' encodes as they were (perf_budget_check report).</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
     private static void WriteCalibratedI16(in VendorBlobProgram.CompiledField f, in HMGamepadState state, byte[] buffer)
     {
         // Every field here has its extras: read them once.
