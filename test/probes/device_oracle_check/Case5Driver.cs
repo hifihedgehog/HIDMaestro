@@ -408,6 +408,9 @@ internal sealed class Case5Driver : IOracleCase
         foreach (byte id in features) sb.Append(' ').Append(id.ToString("X2"));
         sb.Append('\n');
         sb.Append("reportids ").Append(map.UsesReportIds ? 1 : 0).Append('\n');
+        // v2.0.0 writes no Bluetooth value, so the plan carries the
+        // connection the Sony cases name their streams by.
+        sb.Append("bluetooth ").Append(string.Equals(p.Connection, "bluetooth", StringComparison.OrdinalIgnoreCase) ? 1 : 0).Append('\n');
         int readLength = map.Reports.Where(r => r.Kind == HidReportKind.Input).Select(r => r.FrameBytes).DefaultIfEmpty(0).Max();
         sb.Append("readlength ").Append(readLength).Append('\n');
         // The ids HMController writes into the PID section when a consumer

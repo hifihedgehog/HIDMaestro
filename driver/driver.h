@@ -33,6 +33,75 @@
 #define HIDMAESTRO_RELEASE_SLOTS         8
 #define HIDMAESTRO_RELEASE_FRAME_CAP     80
 
+/* v2.0.0: FeatureAnswers, REG_BINARY in SOFTWARE\HIDMaestro\Controller<N>,
+ * the answers to GET_FEATURE the SDK compiles for one controller (the design
+ * note's mechanism 4, FeatureStubTable.ToBlob). Every value little-endian.
+ *
+ * Header, 16 bytes: ULONG Length (the whole blob), ULONG Format (4), USHORT
+ * EntryCount, UCHAR OnReportCount, UCHAR reserved, UCHAR OnReports[4], the
+ * reports message entries follow.
+ *
+ * Entries, 16 bytes each (HM_FEATURE_ENTRY), then the arena: each entry's
+ * message bytes, its sizes largest first, then its pages, Size bytes each.
+ * An echo entry has no page and answers with the last SET on its report.
+ *
+ * The SDK carries the same limits (FeatureStubTable.Max*) and refuses a
+ * model past one at load. A blob past one fails the start. */
+#define HM_FEATURE_FORMAT           4
+#define HM_FEATURE_HEADER           16
+#define HM_FEATURE_ENTRY_SIZE       16
+#define HM_FEATURE_MAX_ENTRIES      64
+#define HM_FEATURE_MAX_DATA         64
+#define HM_FEATURE_MAX_PAGES        16
+#define HM_FEATURE_MAX_ONREPORTS    4
+#define HM_FEATURE_MAX_ARENA        16384
+#define HM_FEATURE_MAX_MESSAGE      8
+#define HM_FEATURE_MAX_SIZES        4
+#define HM_FEATURE_MAX_BLOB         (HM_FEATURE_HEADER + HM_FEATURE_MAX_ENTRIES * HM_FEATURE_ENTRY_SIZE + HM_FEATURE_MAX_ARENA)
+#define HM_FEATURE_FLAG_MESSAGE     0x01
+#define HM_FEATURE_FLAG_PARAM       0x02
+#define HM_FEATURE_FLAG_ECHO        0x04
+#define HM_FEATURE_FLAG_REPLY_HEAD  0x08
+#define HM_FEATURE_FLAG_NOTIFY      0x10
+#define HM_FEATURE_FLAGS_KNOWN      0x1F
+
+#pragma pack(push, 1)
+typedef struct _HM_FEATURE_ENTRY {
+    UCHAR   Id;             /* the report ID the GET arrives on, 0 without IDs */
+    UCHAR   Flags;          /* HM_FEATURE_FLAG_* */
+    UCHAR   OnSlot;         /* index into OnReports, message entries */
+    UCHAR   At;             /* the message's offset in the kept SET */
+    UCHAR   ValueLength;    /* the message's length */
+    UCHAR   ParamAt;        /* the parameter's offset, HM_FEATURE_FLAG_PARAM */
+    UCHAR   ParamValue;
+    UCHAR   PageCount;
+    UCHAR   Size;           /* each page's length */
+    UCHAR   MinLength;      /* a shorter request is too small */
+    UCHAR   SizeCount;      /* the sizes served, largest first, or 0 */
+    UCHAR   Reserved1;
+    USHORT  ArenaOffset;    /* the message's first byte in the arena */
+    USHORT  Reserved2;
+} HM_FEATURE_ENTRY;
+#pragma pack(pop)
+C_ASSERT(sizeof(HM_FEATURE_ENTRY) == HM_FEATURE_ENTRY_SIZE);
+
+/* v2.0.0: CachedInputReportIds, REG_BINARY beside it: the input report IDs
+ * whose frames the polled GET_INPUT_REPORT answers from. Empty caches every
+ * frame, as every earlier driver did. */
+#define HM_CACHED_INPUT_IDS_MAX     16
+
+/* v2.0.0: what the driver writes into DriverConfigError before it fails a
+ * start under the version contract, naming the value it could not read. */
+#define HIDMAESTRO_CONFIG_ERROR_FEATURE_ANSWERS     1
+#define HIDMAESTRO_CONFIG_ERROR_CACHED_INPUT_IDS    2
+
+/* v2.0.0: SOFTWARE\HIDMaestro\Identity\<token>, value ControllerIndex
+ * (REG_DWORD): the index the SDK gave the controller whose devnodes carry
+ * the token, written before any PnP work (decision (c), "The index before
+ * the first start"). */
+#define HIDMAESTRO_IDENTITY_ROOT    L"SOFTWARE\\HIDMaestro\\Identity\\"
+#define HIDMAESTRO_IDENTITY_VALUE   L"ControllerIndex"
+
 /*
  * Common definitions shared with the vhidmini2 sample.
  * These must match what MsHidUmdf.sys expects.
@@ -98,12 +167,50 @@ typedef struct _DEVICE_CONTEXT {
     /* FirstInputReportId came from the registry's InputReportId. */
     BOOLEAN InputReportIdConfigured;
 
-    /* The profile's connection is Bluetooth (registry value Bluetooth,
-     * written by the SDK from the profile's "connection"). Sony pads end
-     * their Bluetooth feature reports with a CRC-32 that USB forms do not
-     * carry, so the feature stubs append one only when this is set
-     * (issue #64). */
-    BOOLEAN Bluetooth;
+    /* v2.0.0: the descriptor declares report IDs, and each input report's
+     * declared length, its ID byte included, by ID. Without IDs the one
+     * input report's length is at [0]. Built from the descriptor at add
+     * (BuildInputLengths). An extended frame goes out only at its report's
+     * length. */
+    BOOLEAN UsesReportIds;
+    USHORT  InputLengths[256];
+
+    /* v2.0.0: the version contract held at add (decision (c)): the version
+     * section of the index the identity entry names speaks protocol 4 and
+     * carries this devnode's identity tag. Only then does the driver read
+     * the controller's v2.0.0 values. Set once, for the devnode's life. */
+    BOOLEAN Contract;
+    WCHAR   IdentityToken[40];
+
+    /* v2.0.0: FeatureAnswers, parsed at add under the contract. The data
+     * of the last SET_FEATURE on each report a message entry follows, up
+     * to HM_FEATURE_MAX_DATA bytes, from the report ID for a descriptor
+     * with IDs and from the first data byte for one without, and each
+     * entry's next page. FeatureLock guards the kept data and the pages. */
+    WDFWAITLOCK FeatureLock;
+    ULONG   FeatureCount;
+    ULONG   FeatureOnReportCount;
+    UCHAR   FeatureOnReports[HM_FEATURE_MAX_ONREPORTS];
+    HM_FEATURE_ENTRY FeatureEntries[HM_FEATURE_MAX_ENTRIES];
+    UCHAR   FeatureArena[HM_FEATURE_MAX_ARENA];
+    ULONG   FeatureArenaSize;
+    UCHAR   FeatureKept[HM_FEATURE_MAX_ONREPORTS][HM_FEATURE_MAX_DATA];
+    ULONG   FeatureKeptLength[HM_FEATURE_MAX_ONREPORTS];
+    UCHAR   FeaturePage[HM_FEATURE_MAX_ENTRIES];
+
+    /* v2.0.0: CachedInputReportIds, read under the contract. With a list,
+     * the polled GET_INPUT_REPORT answers from PolledReport, which keeps
+     * only frames of the listed IDs. Under InputLock. */
+    ULONG   CachedInputIdCount;
+    UCHAR   CachedInputIds[HM_CACHED_INPUT_IDS_MAX];
+    UCHAR   PolledReport[HIDMAESTRO_MAX_REPORT_SIZE];
+    ULONG   PolledReportSize;
+    BOOLEAN PolledReportReady;
+
+    /* The last shared-input SeqNo the worker read, sent or not. A frame
+     * the driver does not send leaves SharedMemSeqNo and the cache as they
+     * were. */
+    ULONG   SeenSeqNo;
 
     /* A DualShock 3 in the form Sony's sixaxis.sys and DsHidMini's SXS mode
      * present (registry value Ds3Sixaxis, from the profile's
@@ -381,19 +488,28 @@ typedef struct _HIDMAESTRO_INPUT_ACK {
 } HIDMAESTRO_INPUT_ACK, *PHIDMAESTRO_INPUT_ACK;
 
 /* Version handshake (v1.13.0): Global\HIDMaestroVersion<N>, 64 bytes,
- * created by the SDK. The SDK writes the first 20 bytes before the device
- * exists. The driver writes the next 16 whenever it opens the input
- * section: DriverVersion first, DriverProtocol last, so a reader that sees
- * a nonzero protocol sees the version that goes with it.
+ * created by the SDK. The SDK writes its half before the device exists:
+ * the first 20 bytes and, from protocol 4, the identity tag. The driver
+ * writes its half at add and whenever it opens the input section, the
+ * same values each time: DriverVersion first, DriverProtocol last, so a
+ * reader that sees a nonzero protocol sees the version that goes with it.
+ * It clears nothing in its cleanup. The XUSB companion writes its own
+ * field at 40 and nothing of the HID driver's.
  *
  * Protocol 1: the input and output sections, the events and the PID state,
  *             through v1.11.0.
  * Protocol 2: adds InputAck and the owner pipe, v1.12.0.
- * Protocol 3: adds this section, v1.13.0.
- * A driver keeps every older layout, so an SDK runs on any driver whose
- * protocol is at least its SdkProtocolMin. */
-#define HIDMAESTRO_VERSION_LAYOUT    1
-#define HIDMAESTRO_DRIVER_PROTOCOL   3
+ * Protocol 3: adds this section, v1.13.0, which never shipped.
+ * Protocol 4: the version contract, v2.0.0 (the design note's decision
+ *             (c)): the identity tag and the identity entry, under which
+ *             a driver reads a controller's v2.0.0 values.
+ * A driver keeps every older layout. The SDK runs on a driver whose range
+ * from DriverProtocolMin to DriverProtocol holds its protocol. */
+#define HIDMAESTRO_VERSION_LAYOUT       1
+#define HIDMAESTRO_DRIVER_PROTOCOL      4
+#define HIDMAESTRO_DRIVER_PROTOCOL_MIN  4
+/* The protocol whose SDK's values this driver reads. */
+#define HIDMAESTRO_CONTRACT_PROTOCOL    4
 typedef struct _HIDMAESTRO_VERSION_INFO {
     volatile LONG   LayoutVersion;       /* SDK: HIDMAESTRO_VERSION_LAYOUT */
     volatile LONG   SdkProtocolMin;      /* SDK: the oldest driver protocol it runs on */
@@ -402,10 +518,34 @@ typedef struct _HIDMAESTRO_VERSION_INFO {
     volatile LONG   DriverProtocol;      /* driver: 0 until it has written its half */
     USHORT          DriverVersion[4];    /* driver: major, minor, patch, 0 */
     volatile LONG   DriverCapabilities;  /* driver: HIDMAESTRO_INPUT_ACK_CAP_* it supports */
-    LONG            Reserved[7];
+    volatile LONG   DriverProtocolMin;   /* driver: the oldest SDK protocol it serves */
+    volatile LONG   CompanionProtocol;   /* companion: its protocol */
+    volatile LONG   CompanionProtocolMin;/* companion: the oldest SDK protocol it serves */
+    ULONGLONG       IdentityTag;         /* SDK: HmIdentityTag of the controller's token */
+    volatile LONG   DriverConfigError;   /* driver: HIDMAESTRO_CONFIG_ERROR_* before a failed start */
+    volatile LONG   CompanionConfigError;/* companion: the same for its values */
 } HIDMAESTRO_VERSION_INFO, *PHIDMAESTRO_VERSION_INFO;
 C_ASSERT(sizeof(HIDMAESTRO_VERSION_INFO) == 64);
+C_ASSERT(FIELD_OFFSET(HIDMAESTRO_VERSION_INFO, DriverProtocolMin) == 36);
+C_ASSERT(FIELD_OFFSET(HIDMAESTRO_VERSION_INFO, IdentityTag) == 48);
+C_ASSERT(FIELD_OFFSET(HIDMAESTRO_VERSION_INFO, DriverConfigError) == 56);
 #pragma pack(pop)
+
+/* The identity tag (decision (c)): the 64-bit FNV-1a hash of the token's
+ * UTF-16LE code units, no terminator, as the SDK's DeviceIdentity.TagOf
+ * computes it. HM_0000 gives 0x1FD048916B8D461F and HM_0123456789ABCDEF
+ * 0x3B86F3634086D831. */
+static __inline ULONGLONG HmIdentityTag(_In_z_ const WCHAR *token)
+{
+    ULONGLONG h = 0xCBF29CE484222325ULL;
+    for (SIZE_T i = 0; token[i]; i++) {
+        h ^= (UCHAR)(token[i] & 0xFF);
+        h *= 0x100000001B3ULL;
+        h ^= (UCHAR)((token[i] >> 8) & 0xFF);
+        h *= 0x100000001B3ULL;
+    }
+    return h;
+}
 
 /* Output passthrough section: written by driver/companion, read by consumer.
  * Game sends rumble/haptics/FFB → we capture bytes and publish here.

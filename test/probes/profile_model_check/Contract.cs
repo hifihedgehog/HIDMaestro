@@ -26,6 +26,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using System.Runtime.InteropServices;
 using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
@@ -39,6 +40,8 @@ internal static class Contract
         var c = new Checks("contract");
         Tags(c);
         Protocols(c);
+        DriverHeader(c);
+        ExtendedLengths(c);
         // The catalog loads before HKLM maps to the hive.
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
@@ -76,6 +79,89 @@ internal static class Contract
                           Const("VERSION_OFFSET_DRIVER_CONFIG_ERROR"), Const("VERSION_OFFSET_COMPANION_CONFIG_ERROR") };
             return (got.SequenceEqual(new[] { 36, 40, 44, 48, 56, 60 }), string.Join(" ", got));
         });
+    }
+
+    // ── driver.h against the SDK ─────────────────────────────────────────
+
+    /// <summary>The numbers both sides of the contract carry: the blob's
+    /// limits and layout, the protocols, the version section's offsets and
+    /// the identity entry's key and value, read from driver\driver.h's
+    /// text.</summary>
+    static void DriverHeader(Checks c)
+    {
+        string h = File.ReadAllText(Path.Combine(Program.RepoRoot(), "driver", "driver.h"));
+        long? Define(string name)
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(h, @"#define\s+" + name + @"\s+(0x[0-9A-Fa-f]+|\d+)\b");
+            if (!m.Success) return null;
+            string v = m.Groups[1].Value;
+            return v.StartsWith("0x", StringComparison.Ordinal) ? Convert.ToInt64(v[2..], 16) : long.Parse(v);
+        }
+        object? Sdk(Type t, string field) =>
+            t.GetField(field, BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+        var table = typeof(HIDMaestro.Internal.Usbip.FeatureStubTable);
+        var pairs = new (string Driver, Type Type, string Field)[]
+        {
+            ("HM_FEATURE_FORMAT", table, "BlobFormat"), ("HM_FEATURE_HEADER", table, "BlobHeader"),
+            ("HM_FEATURE_ENTRY_SIZE", table, "BlobEntry"), ("HM_FEATURE_MAX_ENTRIES", table, "MaxEntries"),
+            ("HM_FEATURE_MAX_DATA", table, "MaxData"), ("HM_FEATURE_MAX_PAGES", table, "MaxPages"),
+            ("HM_FEATURE_MAX_ONREPORTS", table, "MaxOnReports"), ("HM_FEATURE_MAX_ARENA", table, "MaxArena"),
+            ("HM_FEATURE_MAX_MESSAGE", table, "MaxMessage"), ("HM_FEATURE_MAX_SIZES", table, "MaxSizes"),
+            ("HM_FEATURE_FLAG_MESSAGE", table, "FlagMessage"), ("HM_FEATURE_FLAG_PARAM", table, "FlagParam"),
+            ("HM_FEATURE_FLAG_ECHO", table, "FlagEcho"), ("HM_FEATURE_FLAG_REPLY_HEAD", table, "FlagReplyHead"),
+            ("HM_FEATURE_FLAG_NOTIFY", table, "FlagNotify"),
+            ("HIDMAESTRO_DRIVER_PROTOCOL", typeof(SharedMemoryIO), "SDK_PROTOCOL"),
+            ("HIDMAESTRO_DRIVER_PROTOCOL_MIN", typeof(SharedMemoryIO), "SDK_PROTOCOL_MIN"),
+            ("HIDMAESTRO_CONTRACT_PROTOCOL", typeof(SharedMemoryIO), "SDK_PROTOCOL"),
+        };
+        foreach (var (d, t, f) in pairs)
+            c.Run($"driver.h's {d} equals the SDK's {t.Name}.{f}", () =>
+            {
+                long? dv = Define(d);
+                object? sv = Sdk(t, f);
+                return (dv != null && sv != null && Convert.ToInt64(sv) == dv, $"{dv?.ToString() ?? "absent"} and {sv ?? "absent"}");
+            });
+        foreach (var (field, sdk) in new[] { ("DriverProtocolMin", "VERSION_OFFSET_DRIVER_PROTOCOL_MIN"), ("IdentityTag", "VERSION_OFFSET_IDENTITY_TAG"),
+                                             ("DriverConfigError", "VERSION_OFFSET_DRIVER_CONFIG_ERROR") })
+            c.Run($"driver.h holds {field} at the SDK's {sdk}", () =>
+            {
+                object? sv = Sdk(typeof(SharedMemoryIO), sdk);
+                bool ok = sv != null && h.Contains($"C_ASSERT(FIELD_OFFSET(HIDMAESTRO_VERSION_INFO, {field}) == {sv});", StringComparison.Ordinal);
+                return (ok, $"{sv ?? "absent"}");
+            });
+        c.Run(@"driver.h's identity entry is the SDK's: SOFTWARE\HIDMaestro\Identity\<token>, value ControllerIndex", () =>
+        {
+            object? root = Sdk(typeof(DeviceOrchestrator), "IdentityRoot"), value = Sdk(typeof(DeviceOrchestrator), "IdentityIndexValue");
+            string want = $"#define HIDMAESTRO_IDENTITY_ROOT    L\"{((string?)root ?? "").Replace("\\", "\\\\")}\\\\\"";
+            bool ok = root != null && value != null && h.Contains(want, StringComparison.Ordinal)
+                      && h.Contains($"#define HIDMAESTRO_IDENTITY_VALUE   L\"{value}\"", StringComparison.Ordinal);
+            return (ok, $"{root ?? "absent"} {value ?? "absent"}");
+        });
+    }
+
+    // ── The catalog's extended reports against their declared lengths ────
+
+    /// <summary>The v2.0.0 driver sends an extended frame only at the
+    /// declared length of the input report its first byte names, or of a
+    /// descriptor's one input report without report IDs. Every UMDF2
+    /// catalog profile's extended report is that long, but for a DualShock
+    /// 3 in the sixaxis form, whose 49-byte native report the driver reads
+    /// apart from the lane.</summary>
+    static void ExtendedLengths(Checks c)
+    {
+        var bad = new List<string>();
+        int n = 0;
+        foreach (var p in ProfileDatabase.LoadEmbedded().All.Where(p => !p.RequiresUsbipBackend && p.ExtendedReport != null && p.SixaxisCompatible != true))
+        {
+            n++;
+            var map = p.GetOrBuildReportMap();
+            var inputs = map.Reports.Where(r => r.Kind == HidReportKind.Input).ToList();
+            byte id = p.ExtendedReport!.ReportIdByte;
+            int declared = map.UsesReportIds ? inputs.Where(r => r.ReportId == id).Select(r => r.FrameBytes).DefaultIfEmpty(0).First()
+                                             : inputs.Select(r => r.FrameBytes).DefaultIfEmpty(0).First();
+            if (declared != p.ExtendedReport.Size) bad.Add($"{p.Id} 0x{id:X2} {p.ExtendedReport.Size} against {declared}");
+        }
+        c.Check($"every UMDF2 catalog extended report ({n}) is its input report's declared length", bad.Count == 0 && n > 0, string.Join("; ", bad));
     }
 
     // ── The configuration, in a hive this check owns ─────────────────────

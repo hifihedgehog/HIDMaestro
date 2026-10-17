@@ -672,9 +672,9 @@ internal static partial class Program
                 Check("E2: the new driver reports its version through the handshake",
                       dv == $"OK driverversion {release}", $"{dv}, the devnode says {ver}");
                 var vs = Native.VersionSection(int.Parse(PeerProcess.Field(cn, "transport")!));
-                Check("E2: the handshake section carries layout 1, the SDK's protocols 2 to 3, its version and the driver's protocol 3",
-                      vs != null && vs.Value.Layout == 1 && vs.Value.SdkMin == 2 && vs.Value.SdkMax == 3
-                      && vs.Value.DriverProtocol == 3 && vs.Value.Driver == release
+                Check("E2: the handshake section carries layout 1, the SDK's protocols 4 to 4, its version and the driver's protocols 4 to 4",
+                      vs != null && vs.Value.Layout == 1 && vs.Value.SdkMin == 4 && vs.Value.SdkMax == 4
+                      && vs.Value.DriverProtocol == 4 && vs.Value.DriverProtocolMin == 4 && vs.Value.Driver == release
                       && nu.SdkVersion.StartsWith(vs.Value.Sdk + ".", StringComparison.Ordinal),
                       vs == null ? "no section" : $"{vs}, the peer's SDK is {nu.SdkVersion}");
             }

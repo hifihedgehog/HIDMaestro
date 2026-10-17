@@ -449,6 +449,15 @@ typedef struct PlanProfile {
     uint8_t   features[64];    /* feature report ids the descriptor declares */
     int       featureCount;
     int       usesReportIds;
+    int       bluetooth;       /* the profile's connection is Bluetooth: its
+                                * "bluetooth" line, or without one (a plan
+                                * of an SDK before v2.0.0) its Bluetooth value */
+    int       bluetoothLine;
+    int       noHardwareIndex; /* "nohwindex": ConfigWrite leaves the device
+                                * node's hardware key without ControllerIndex,
+                                * as an SWD device node's first start finds it */
+    int       noIdentity;      /* "noidentity": ConfigWrite writes no identity
+                                * entry under the tag parameters */
     uint32_t  readLength;      /* the HID class's read buffer: the largest input report */
     uint8_t   pidRids[6];      /* Pool, State, BlockLoad, CreateNewEffect, BlockFree, DeviceControl */
     int       hasPidRids;
@@ -513,10 +522,18 @@ enum VersionParam {
     VERSION_TAG_OTHER,    /* protocols 4 to 4 and another token's tag: the
                              index's HM_<index> when the devnode carries
                              another token (SdkCreate) */
+    /* The parameters above run in CaseVersion. These two only in scripts
+     * (device_oracle_check's feature-contract mode): */
+    VERSION_RANGE5,       /* protocols 5 to 5 and this devnode's tag */
+    VERSION_RANGE45,      /* protocols 4 to 5 and this devnode's tag */
     VERSION_PARAMS
 };
+#define VERSION_CASE_PARAMS VERSION_RANGE5
 extern int g_versionParam;
 const char *VersionLabel(int param);
+/* The parameters that write an identity tag and the identity entry, as
+ * the v2.0.0 SDK does. */
+int VersionTagged(int param);
 /* Under a parameter: the section's bytes, then the clear or the close. */
 void SdkVersionMidRun(Sdk *s);
 /* SharedMemoryIO.WriteInputFrame: odd SeqNo, DataSize and Data, the GIP

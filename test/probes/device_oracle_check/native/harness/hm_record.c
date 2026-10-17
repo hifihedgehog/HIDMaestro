@@ -12,6 +12,11 @@
  *   value <name> <registry type> <hex bytes, or - for none>
  *   features <hex ids>       the feature report ids the descriptor declares
  *   reportids <0|1>          the descriptor uses report ids
+ *   bluetooth <0|1>          the profile's connection is Bluetooth, which
+ *                            a plan from before v2.0.0 gives as the
+ *                            Bluetooth value instead
+ *   nohwindex                no ControllerIndex in the hardware key
+ *   noidentity               no identity entry under the tag parameters
  *   readlength <n>           the largest input report, report id included
  *   pidrids <6 hex>          PidReportIdExtractor's ids for the PID section
  *   end
@@ -203,12 +208,20 @@ void PlanLoad(const char *path)
             }
         } else if (strcmp(word, "reportids") == 0 && p) {
             p->usesReportIds = atoi(strtok_s(NULL, " ", &ctx));
+        } else if (strcmp(word, "nohwindex") == 0 && p) {
+            p->noHardwareIndex = 1;
+        } else if (strcmp(word, "noidentity") == 0 && p) {
+            p->noIdentity = 1;
+        } else if (strcmp(word, "bluetooth") == 0 && p) {
+            p->bluetooth = atoi(strtok_s(NULL, " ", &ctx));
+            p->bluetoothLine = 1;
         } else if (strcmp(word, "readlength") == 0 && p) {
             p->readLength = (uint32_t)strtoul(strtok_s(NULL, " ", &ctx), NULL, 10);
         } else if (strcmp(word, "pidrids") == 0 && p) {
             for (int i = 0; i < 6; i++) p->pidRids[i] = (uint8_t)strtoul(strtok_s(NULL, " ", &ctx), NULL, 16);
             p->hasPidRids = 1;
         } else if (strcmp(word, "end") == 0) {
+            if (p && !p->bluetoothLine) p->bluetooth = (int)PlanDword(p, "Bluetooth", 0);
             p = NULL;
         } else if (strcmp(word, "body") == 0) {
             if (g_plan.bodyCount >= (int)ARRAYSIZE(g_plan.bodies)) HmFail("plan: too many bodies");
@@ -308,8 +321,10 @@ void SdkCreate(Sdk *s, int index, int flags)
              * when the controller carries a different one, so a driver
              * that builds its expected tag from the index takes the
              * section for its own, and HM_0123456789ABCDEF otherwise. */
-            int tagged = g_versionParam == VERSION_TAG_OWN || g_versionParam == VERSION_TAG_OTHER;
+            int tagged = VersionTagged(g_versionParam);
             if (tagged) { min = 4; max = 4; }
+            if (g_versionParam == VERSION_RANGE5) min = 5, max = 5;
+            if (g_versionParam == VERSION_RANGE45) max = 5;
             memcpy(s->version->buf + 0, &layout, 4);
             memcpy(s->version->buf + 4, &min, 4);
             memcpy(s->version->buf + 8, &max, 4);
@@ -318,7 +333,7 @@ void SdkCreate(Sdk *s, int index, int flags)
                 WCHAR token[24], byIndex[24];
                 ControllerToken(index, token, ARRAYSIZE(token));
                 HarnessToken(index, byIndex, ARRAYSIZE(byIndex));
-                uint64_t tag = g_versionParam == VERSION_TAG_OWN ? IdentityTag(token)
+                uint64_t tag = g_versionParam != VERSION_TAG_OTHER ? IdentityTag(token)
                              : wcscmp(token, byIndex) != 0 ? IdentityTag(byIndex)
                              : IdentityTag(L"HM_0123456789ABCDEF");
                 memcpy(s->version->buf + 48, &tag, 8);
@@ -415,7 +430,17 @@ void ConfigWrite(PlanProfile *p, int index)
     g_nextDevnodeProfile = p;
     g_nextDevnodeIndex = index;
     DWORD idx = (DWORD)index;
-    ValueSet(g_nextHwKey, L"ControllerIndex", REG_DWORD, &idx, 4);
+    if (!p->noHardwareIndex) ValueSet(g_nextHwKey, L"ControllerIndex", REG_DWORD, &idx, 4);
+    /* The tag parameters model the v2.0.0 SDK, which also writes the
+     * controller's index under SOFTWARE\HIDMaestro\Identity\<token> before
+     * any PnP work (the design note's decision (c), "The index before the
+     * first start"), where a driver reads it before WdfDeviceCreate. */
+    if (VersionTagged(g_versionParam) && !p->noIdentity) {
+        WCHAR token[24], idPath[96];
+        ControllerToken(index, token, ARRAYSIZE(token));
+        swprintf_s(idPath, ARRAYSIZE(idPath), L"SOFTWARE\\HIDMaestro\\Identity\\%s", token);
+        ValueSet(KeyMake(idPath), L"ControllerIndex", REG_DWORD, &idx, 4);
+    }
 }
 
 void ConfigOverrideDword(int index, const char *name, DWORD value)
@@ -443,9 +468,16 @@ void RecordSections(Sdk *s)
 
 int g_versionParam;
 
+int VersionTagged(int param)
+{
+    return param == VERSION_TAG_OWN || param == VERSION_TAG_OTHER
+        || param == VERSION_RANGE5 || param == VERSION_RANGE45;
+}
+
 const char *VersionLabel(int param)
 {
-    static const char *const labels[VERSION_PARAMS] = { "sdk", "absent", "max3", "max4", "cleared", "closed", "tag-own", "tag-other" };
+    static const char *const labels[VERSION_PARAMS] = { "sdk", "absent", "max3", "max4", "cleared", "closed", "tag-own", "tag-other",
+                                                         "range5", "range45" };
     if (param < 0 || param >= VERSION_PARAMS) HmFail("no version parameter %d", param);
     return labels[param];
 }

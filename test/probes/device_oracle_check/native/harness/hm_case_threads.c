@@ -110,7 +110,7 @@ void CaseThreads(void)
     PlanProfile *sw = PlanFind("switch", NULL);
     PlanProfile *ds = NULL;
     for (int i = 0; i < g_plan.profileCount && !ds; i++)
-        if (!strcmp(g_plan.profiles[i].group, "sony") && PlanDword(&g_plan.profiles[i], "Bluetooth", 0))
+        if (!strcmp(g_plan.profiles[i].group, "sony") && g_plan.profiles[i].bluetooth)
             ds = &g_plan.profiles[i];
     PlanProfile *xusb = PlanFind("xusb", NULL);
     if (!sw || !ds || !xusb) HmFail("the plan lacks a profile the threads case needs");

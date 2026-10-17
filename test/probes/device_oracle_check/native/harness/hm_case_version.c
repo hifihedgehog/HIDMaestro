@@ -16,7 +16,7 @@
 
 void CaseVersion(void)
 {
-    for (int param = VERSION_ABSENT; param < VERSION_PARAMS; param++) {
+    for (int param = VERSION_ABSENT; param < VERSION_CASE_PARAMS; param++) {
         g_versionParam = param;
         CaseSonyVersion();
         CaseSwitchVersion();

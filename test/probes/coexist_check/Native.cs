@@ -270,7 +270,7 @@ internal static class Native
     /// <summary>Global\HIDMaestroVersion&lt;N&gt; as HIDMAESTRO_VERSION_INFO
     /// (driver/driver.h) lays it out, or null when the section does not
     /// exist.</summary>
-    internal static (int Layout, int SdkMin, int SdkMax, string Sdk, int DriverProtocol, string Driver)? VersionSection(int transport)
+    internal static (int Layout, int SdkMin, int SdkMax, string Sdk, int DriverProtocol, string Driver, int DriverProtocolMin)? VersionSection(int transport)
     {
         IntPtr h = OpenFileMappingW(0x0004 /*FILE_MAP_READ*/, false, $@"Global\HIDMaestroVersion{transport}");
         if (h == IntPtr.Zero) return null;
@@ -282,7 +282,7 @@ internal static class Native
             {
                 string Ver(int at) => $"{(ushort)Marshal.ReadInt16(v, at)}.{(ushort)Marshal.ReadInt16(v, at + 2)}.{(ushort)Marshal.ReadInt16(v, at + 4)}";
                 return (Marshal.ReadInt32(v, 0), Marshal.ReadInt32(v, 4), Marshal.ReadInt32(v, 8), Ver(12),
-                        Marshal.ReadInt32(v, 20), Ver(24));
+                        Marshal.ReadInt32(v, 20), Ver(24), Marshal.ReadInt32(v, 36));
             }
             finally { UnmapViewOfFile(v); }
         }

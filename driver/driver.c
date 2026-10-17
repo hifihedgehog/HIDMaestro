@@ -21,111 +21,6 @@
 #include <aclapi.h>   /* GetSecurityInfo */
 #include "version_gen.h"   /* HM_VER_*, generated into the build directory from Directory.Build.props */
 
-/* Sony motion calibration, 34 bytes, written at offset 1 of the
- * calibration feature report (the report id occupies byte 0). Issue #43
- * made it non-degenerate and issue #64 set its scale.
- *
- * Calibration is a DIVISOR, not decoration. Every parser builds a
- * sensitivity from the plus/minus pairs, so the all-zero blob this used to
- * serve produced a zero denominator: SDL's HIDAPI_DriverPS5_LoadCalibrationData
- * computes 0.0f/0 and lands on NaN, and hid-playstation.c classifies it as
- * invalid outright ("Invalid gyro calibration data for axis (%d), disabling
- * calibration") at four sites. Games with native PlayStation support reject
- * the pad on it, while consumers that never read calibration never noticed.
- *
- * The values are the identity calibration for the pad's nominal units: 8192
- * per g and 16 per degree/second. Those are the units a host assumes when a
- * pad has no usable calibration (hid-playstation.c DS4_ACC_RANGE and
- * DS4_GYRO_RANGE over S16_MAX, SDL_hidapi_ps4.c accel_denominator 8192 and
- * gyro_denominator 16, SDL_hidapi_ps5.c's uncalibrated value * 64 / 1024),
- * and the units consumers submit (PadForge scales g by 8192 and deg/s by
- * 16). Accel plus and minus are +-8192, so range_2g is 16384 and the
- * sensitivity 2 * 8192 / 16384 = 1. Gyro speed is 500 each way, so speed_2x
- * is 1000, and plus and minus are +-8000, so the denominator 16000 is
- * 16 * speed_2x: raw / 16 degree/second in every reader. v1.4.4 to v1.9.2
- * served WinUHid's +-10000 (WinUHidDevs/WinUHidPS4.cpp), which is identity
- * only for WinUHid's own encoder at 10000 per g and 20 per degree/second,
- * so hosts read nominal-unit motion at 0.82 and 0.8 of its size.
- *
- * Field offsets verified against hid-playstation.c: bias at buf[1..6],
- * plus/minus at buf[7..18], speed at buf[19..22], accel at buf[23..34].
- * The gyro pairs here are in the order pitch+ pitch- yaw+ yaw- roll+
- * roll-, which is the DualSense's report 0x05 and the DS4's USB report
- * 0x02. A DS4's Bluetooth report 0x05 uses another order, in
- * g_SonyCalibrationDs4Bt. */
-static const UCHAR g_SonyCalibration[34] = {
-    0x00, 0x00,  /* gyro_pitch_bias  */
-    0x00, 0x00,  /* gyro_yaw_bias    */
-    0x00, 0x00,  /* gyro_roll_bias   */
-    0x40, 0x1F,  /* gyro_pitch_plus    +8000 */
-    0xC0, 0xE0,  /* gyro_pitch_minus   -8000 */
-    0x40, 0x1F,  /* gyro_yaw_plus      +8000 */
-    0xC0, 0xE0,  /* gyro_yaw_minus     -8000 */
-    0x40, 0x1F,  /* gyro_roll_plus     +8000 */
-    0xC0, 0xE0,  /* gyro_roll_minus    -8000 */
-    0xF4, 0x01,  /* gyro_speed_plus     +500 */
-    0xF4, 0x01,  /* gyro_speed_minus    +500 */
-    0x00, 0x20,  /* acc_x_plus         +8192 */
-    0x00, 0xE0,  /* acc_x_minus        -8192 */
-    0x00, 0x20,  /* acc_y_plus         +8192 */
-    0x00, 0xE0,  /* acc_y_minus        -8192 */
-    0x00, 0x20,  /* acc_z_plus         +8192 */
-    0x00, 0xE0,  /* acc_z_minus        -8192 */
-};
-
-/* The same calibration in the order a DualShock 4's Bluetooth report 0x05
- * carries it: pitch+ yaw+ roll+, then pitch- yaw- roll-. hid-playstation.c
- * (dualshock4_get_calibration_data, the "BT + Dongle" branch), DS4Windows
- * (DS4SixAxis.setCalibrationData with useAltGyroCalib false) and RPCS3
- * (ds4_pad_handler.cpp GetCalibrationData) all read it that way. DS4Windows
- * subtracts minus from plus without taking the absolute value, so serving
- * the order above here read yaw plus as -8000 and yaw minus as +8000, and
- * DS4Windows turned yaw backwards (issue #64). */
-static const UCHAR g_SonyCalibrationDs4Bt[34] = {
-    0x00, 0x00,  /* gyro_pitch_bias  */
-    0x00, 0x00,  /* gyro_yaw_bias    */
-    0x00, 0x00,  /* gyro_roll_bias   */
-    0x40, 0x1F,  /* gyro_pitch_plus    +8000 */
-    0x40, 0x1F,  /* gyro_yaw_plus      +8000 */
-    0x40, 0x1F,  /* gyro_roll_plus     +8000 */
-    0xC0, 0xE0,  /* gyro_pitch_minus   -8000 */
-    0xC0, 0xE0,  /* gyro_yaw_minus     -8000 */
-    0xC0, 0xE0,  /* gyro_roll_minus    -8000 */
-    0xF4, 0x01,  /* gyro_speed_plus     +500 */
-    0xF4, 0x01,  /* gyro_speed_minus    +500 */
-    0x00, 0x20,  /* acc_x_plus         +8192 */
-    0x00, 0xE0,  /* acc_x_minus        -8192 */
-    0x00, 0x20,  /* acc_y_plus         +8192 */
-    0x00, 0xE0,  /* acc_y_minus        -8192 */
-    0x00, 0x20,  /* acc_z_plus         +8192 */
-    0x00, 0xE0,  /* acc_z_minus        -8192 */
-};
-
-/* One byte of CRC-32 (reflected polynomial 0xEDB88320). */
-static ULONG
-SonyCrc32Byte(_In_ ULONG crc, _In_ UCHAR b)
-{
-    int bit;
-    crc ^= b;
-    for (bit = 0; bit < 8; bit++)
-        crc = (crc & 1) ? ((crc >> 1) ^ 0xEDB88320) : (crc >> 1);
-    return crc;
-}
-
-/* The CRC-32 a Sony pad appends to a feature report over Bluetooth: the
- * seed byte 0xA3 followed by the report from its id onward
- * (hid-playstation.c PS_FEATURE_CRC32_SEED and ps_check_crc32, RPCS3
- * GetCalibrationData's btHdr 0xA3). */
-static ULONG
-SonyFeatureCrc32(_In_reads_bytes_(len) const UCHAR *data, _In_ ULONG len)
-{
-    ULONG crc = SonyCrc32Byte(0xFFFFFFFF, 0xA3);
-    ULONG i;
-    for (i = 0; i < len; i++)
-        crc = SonyCrc32Byte(crc, data[i]);
-    return ~crc;
-}
-
 /* ---- DualShock 3 in sixaxis.sys form (PadForge discussion 476) -------- *
  *
  * The SDK sends the native 49-byte DS3 input report: report id 0x01, a
@@ -240,30 +135,13 @@ AppendUlongDecimal(_Inout_ WCHAR *dest, _In_ ULONG value, _In_ SIZE_T maxChars)
     dest[len] = 0;
 }
 
-/* Initialize per-instance paths from ControllerIndex.
- * Reads ControllerIndex from device HW key (written by test app at device creation).
- * Falls back to index 0 / legacy global paths if not found. */
+/* Initialize per-instance paths from the controller index EvtDeviceAdd
+ * chose before WdfDeviceCreate (ChooseControllerIndex). */
 static VOID
 InitInstancePaths(
     _In_ PDEVICE_CONTEXT ctx,
-    _In_ WDFDEVICE       device)
+    _In_ ULONG           index)
 {
-    ULONG index = 0;
-
-    /* Try reading ControllerIndex from device's HW registry key */
-    {
-        WDFKEY hKey;
-        if (NT_SUCCESS(WdfDeviceOpenRegistryKey(device, PLUGPLAY_REGKEY_DEVICE,
-                KEY_READ, WDF_NO_OBJECT_ATTRIBUTES, &hKey))) {
-            UNICODE_STRING valueName;
-            RtlInitUnicodeString(&valueName, L"ControllerIndex");
-            ULONG val = 0;
-            if (NT_SUCCESS(WdfRegistryQueryULong(hKey, &valueName, &val)))
-                index = val;
-            WdfRegistryClose(hKey);
-        }
-    }
-
     ctx->ControllerIndex = index;
 
     /* Build per-instance paths. Multi-digit indices fully supported: there's
@@ -361,6 +239,412 @@ InitInstancePaths(
         while (slen < cap && ctx->SerialString[slen] != 0) slen++;
         ctx->SerialStringBytes = (ULONG)((slen + 1) * sizeof(WCHAR));
     }
+}
+
+/* ================================================================== */
+/*  v2.0.0: the version contract (the design note's decision (c))      */
+/* ================================================================== */
+
+/* DEVPKEY_Device_InstanceId (devpkey.h), written out so this file needs no
+ * initguid.h. */
+static const DEVPROPKEY g_InstanceIdKey =
+    { { 0x78c34fc8, 0x104a, 0x4aca, { 0x9e, 0xa4, 0x52, 0x4d, 0x52, 0x99, 0x6e, 0x57 } }, 256 };
+
+/* The identity token, the last segment of the devnode's instance ID
+ * (ROOT\<enumerator>\<token> or SWD\<enumerator>\<token>, issue #60), read
+ * through WdfFdoInitQueryPropertyEx before WdfDeviceCreate, as Learn says
+ * a driver calls it. Empty when the query fails. */
+static VOID
+ReadInstanceToken(_In_ PWDFDEVICE_INIT DeviceInit, _Out_writes_(cap) WCHAR *token, _In_ SIZE_T cap)
+{
+    WCHAR id[200];
+    ULONG len = 0;
+    DEVPROPTYPE type = 0;
+    WDF_DEVICE_PROPERTY_DATA data;
+    token[0] = 0;
+    WDF_DEVICE_PROPERTY_DATA_INIT(&data, &g_InstanceIdKey);
+    if (!NT_SUCCESS(WdfFdoInitQueryPropertyEx(DeviceInit, &data, sizeof(id), id, &len, &type))
+        || type != DEVPROP_TYPE_STRING || len < sizeof(WCHAR))
+        return;
+    id[ARRAYSIZE(id) - 1] = 0;
+    SIZE_T n = 0, last = 0;
+    while (id[n]) { if (id[n] == L'\\') last = n + 1; n++; }
+    SIZE_T t = 0;
+    while (id[last + t] && t + 1 < cap) { token[t] = id[last + t]; t++; }
+    token[t] = 0;
+}
+
+/* The index the SDK wrote under SOFTWARE\HIDMaestro\Identity\<token>
+ * before any PnP work. */
+static BOOLEAN
+ReadIdentityIndex(_In_ const WCHAR *token, _Out_ ULONG *index)
+{
+    static const WCHAR prefix[] = HIDMAESTRO_IDENTITY_ROOT;
+    WCHAR path[96];
+    HKEY hKey;
+    DWORD val = 0, sz = sizeof(val), type = 0;
+    SIZE_T n = 0;
+    *index = 0;
+    if (!token[0]) return FALSE;
+    for (SIZE_T i = 0; prefix[i]; i++) path[n++] = prefix[i];
+    for (SIZE_T i = 0; token[i] && n + 1 < ARRAYSIZE(path); i++) path[n++] = token[i];
+    path[n] = 0;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, path, 0, KEY_READ, &hKey) != ERROR_SUCCESS) return FALSE;
+    BOOLEAN ok = RegQueryValueExW(hKey, HIDMAESTRO_IDENTITY_VALUE, NULL, &type, (LPBYTE)&val, &sz) == ERROR_SUCCESS
+              && type == REG_DWORD && sz == sizeof(val);
+    RegCloseKey(hKey);
+    if (ok) *index = val;
+    return ok;
+}
+
+/* ControllerIndex from the device's hardware key, where every SDK version
+ * writes it, through WdfFdoInitOpenRegistryKey before WdfDeviceCreate.
+ * 0 when there is none, as every earlier driver read it. */
+static ULONG
+ReadHardwareIndex(_In_ PWDFDEVICE_INIT DeviceInit)
+{
+    ULONG index = 0;
+    WDFKEY hKey;
+    if (NT_SUCCESS(WdfFdoInitOpenRegistryKey(DeviceInit, PLUGPLAY_REGKEY_DEVICE,
+            KEY_READ, WDF_NO_OBJECT_ATTRIBUTES, &hKey))) {
+        UNICODE_STRING valueName;
+        RtlInitUnicodeString(&valueName, L"ControllerIndex");
+        ULONG val = 0;
+        if (NT_SUCCESS(WdfRegistryQueryULong(hKey, &valueName, &val)))
+            index = val;
+        WdfRegistryClose(hKey);
+    }
+    return index;
+}
+
+/* The version section of an index, mapped read-write, or NULL when there
+ * is none. */
+static PHIDMAESTRO_VERSION_INFO
+MapVersionSection(_In_ ULONG index, _Out_ HANDLE *handle)
+{
+    WCHAR name[64];
+    static const WCHAR prefix[] = L"Global\\HIDMaestroVersion";
+    RtlCopyMemory(name, prefix, sizeof(prefix));
+    AppendUlongDecimal(name, index, ARRAYSIZE(name));
+    *handle = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, name);
+    if (*handle == NULL) return NULL;
+    PHIDMAESTRO_VERSION_INFO v = (PHIDMAESTRO_VERSION_INFO)MapViewOfFile(
+        *handle, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(HIDMAESTRO_VERSION_INFO));
+    if (v == NULL) { CloseHandle(*handle); *handle = NULL; }
+    return v;
+}
+
+static VOID
+UnmapVersionSection(_In_opt_ PHIDMAESTRO_VERSION_INFO view, _In_opt_ HANDLE handle)
+{
+    if (view) UnmapViewOfFile(view);
+    if (handle) CloseHandle(handle);
+}
+
+/* The index this devnode serves and whether the contract holds. The
+ * identity entry names the index, and the contract holds when that
+ * index's section speaks protocol 4 and carries this devnode's identity
+ * tag. Otherwise the devnode is a v1 program's: it keeps the index of its
+ * hardware key, and fails its start when that index's section carries
+ * another token's tag, since it is then not that controller (a v1
+ * program's restart after its index write recovers it). The companion
+ * decides the same way (companion.c CompanionDeviceAdd). */
+static NTSTATUS
+ChooseControllerIndex(_In_ const WCHAR *token, _In_ BOOLEAN haveIdentityIndex, _In_ ULONG identityIndex,
+                      _In_ ULONG hardwareIndex, _Out_ ULONG *index, _Out_ BOOLEAN *contract)
+{
+    ULONGLONG ownTag = HmIdentityTag(token);
+    HANDLE h;
+    PHIDMAESTRO_VERSION_INFO v;
+    *index = hardwareIndex;
+    *contract = FALSE;
+    if (haveIdentityIndex && token[0]) {
+        v = MapVersionSection(identityIndex, &h);
+        if (v != NULL) {
+            LONG sdkMin = v->SdkProtocolMin, sdkMax = v->SdkProtocolMax;
+            ULONGLONG tag = *(volatile ULONGLONG *)&v->IdentityTag;
+            UnmapVersionSection(v, h);
+            if (sdkMin <= HIDMAESTRO_CONTRACT_PROTOCOL && HIDMAESTRO_CONTRACT_PROTOCOL <= sdkMax && tag == ownTag) {
+                *index = identityIndex;
+                *contract = TRUE;
+                return STATUS_SUCCESS;
+            }
+        }
+    }
+    v = MapVersionSection(hardwareIndex, &h);
+    if (v != NULL) {
+        ULONGLONG tag = *(volatile ULONGLONG *)&v->IdentityTag;
+        UnmapVersionSection(v, h);
+        if (tag != 0 && tag != ownTag) return STATUS_DEVICE_CONFIGURATION_ERROR;
+    }
+    return STATUS_SUCCESS;
+}
+
+/* Writes which value this driver could not read into its error word,
+ * before it fails its start, so the create names the value. */
+static VOID
+WriteConfigError(_In_ PDEVICE_CONTEXT ctx, _In_ LONG error)
+{
+    HANDLE h;
+    PHIDMAESTRO_VERSION_INFO v = MapVersionSection(ctx->ControllerIndex, &h);
+    if (v == NULL) return;
+    InterlockedExchange(&v->DriverConfigError, error);
+    UnmapVersionSection(v, h);
+}
+
+/* FeatureAnswers into the context. FALSE when it is missing, not its own
+ * length, of another format, past a limit, or an entry's bytes leave it. */
+static BOOLEAN
+LoadFeatureAnswers(_In_ PDEVICE_CONTEXT ctx, _In_ HKEY hKey)
+{
+    UCHAR blob[HM_FEATURE_MAX_BLOB];
+    DWORD size = sizeof(blob), type = 0;
+    if (RegQueryValueExW(hKey, L"FeatureAnswers", NULL, &type, blob, &size) != ERROR_SUCCESS
+        || type != REG_BINARY || size < HM_FEATURE_HEADER)
+        return FALSE;
+    ULONG length = *(ULONG UNALIGNED *)&blob[0];
+    ULONG format = *(ULONG UNALIGNED *)&blob[4];
+    ULONG count = *(USHORT UNALIGNED *)&blob[8];
+    ULONG onCount = blob[10];
+    if (length != size || format != HM_FEATURE_FORMAT || count > HM_FEATURE_MAX_ENTRIES
+        || onCount > HM_FEATURE_MAX_ONREPORTS)
+        return FALSE;
+    ULONG arenaStart = HM_FEATURE_HEADER + count * HM_FEATURE_ENTRY_SIZE;
+    if (arenaStart > size || size - arenaStart > HM_FEATURE_MAX_ARENA) return FALSE;
+    ULONG arenaSize = size - arenaStart;
+    for (ULONG i = 0; i < count; i++) {
+        HM_FEATURE_ENTRY e;
+        RtlCopyMemory(&e, &blob[HM_FEATURE_HEADER + i * HM_FEATURE_ENTRY_SIZE], sizeof(e));
+        BOOLEAN message = (e.Flags & HM_FEATURE_FLAG_MESSAGE) != 0;
+        BOOLEAN echo = (e.Flags & HM_FEATURE_FLAG_ECHO) != 0;
+        if (e.Flags & ~HM_FEATURE_FLAGS_KNOWN) return FALSE;
+        if (message) {
+            if (e.OnSlot >= onCount || e.ValueLength == 0 || e.ValueLength > HM_FEATURE_MAX_MESSAGE
+                || (ULONG)e.At + e.ValueLength > HM_FEATURE_MAX_DATA)
+                return FALSE;
+        } else if (e.ValueLength != 0 || (e.Flags & HM_FEATURE_FLAG_PARAM) || echo || e.PageCount != 1) {
+            return FALSE;
+        }
+        if ((e.Flags & HM_FEATURE_FLAG_PARAM) && e.ParamAt >= HM_FEATURE_MAX_DATA) return FALSE;
+        if (echo ? e.PageCount != 0 : (e.PageCount == 0 || e.PageCount > HM_FEATURE_MAX_PAGES)) return FALSE;
+        if (e.Size == 0 || e.Size > HM_FEATURE_MAX_DATA || e.MinLength > e.Size || e.SizeCount > HM_FEATURE_MAX_SIZES)
+            return FALSE;
+        ULONG need = (ULONG)e.ValueLength + e.SizeCount + (ULONG)e.PageCount * e.Size;
+        if ((ULONG)e.ArenaOffset + need > arenaSize) return FALSE;
+        const UCHAR *sizes = &blob[arenaStart + e.ArenaOffset + e.ValueLength];
+        for (ULONG k = 0; k < e.SizeCount; k++)
+            if (sizes[k] == 0 || sizes[k] > e.Size || (k > 0 && sizes[k] > sizes[k - 1])) return FALSE;
+        ctx->FeatureEntries[i] = e;
+        ctx->FeaturePage[i] = 0;
+    }
+    for (ULONG i = 0; i < onCount; i++) ctx->FeatureOnReports[i] = blob[12 + i];
+    RtlCopyMemory(ctx->FeatureArena, &blob[arenaStart], arenaSize);
+    ctx->FeatureArenaSize = arenaSize;
+    ctx->FeatureOnReportCount = onCount;
+    ctx->FeatureCount = count;
+    return TRUE;
+}
+
+/* CachedInputReportIds into the context. FALSE when it is missing or
+ * longer than the driver keeps. */
+static BOOLEAN
+LoadCachedInputIds(_In_ PDEVICE_CONTEXT ctx, _In_ HKEY hKey)
+{
+    UCHAR ids[HM_CACHED_INPUT_IDS_MAX];
+    DWORD size = sizeof(ids), type = 0;
+    if (RegQueryValueExW(hKey, L"CachedInputReportIds", NULL, &type, ids, &size) != ERROR_SUCCESS
+        || type != REG_BINARY || size > HM_CACHED_INPUT_IDS_MAX)
+        return FALSE;
+    RtlCopyMemory(ctx->CachedInputIds, ids, size);
+    ctx->CachedInputIdCount = size;
+    return TRUE;
+}
+
+/* The controller's v2.0.0 values, read only under the contract. Returns
+ * 0 or the HIDMAESTRO_CONFIG_ERROR_* of the value it could not read. */
+static LONG
+LoadContractValues(_In_ PDEVICE_CONTEXT ctx)
+{
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, ctx->ConfigRegPath, 0, KEY_READ, &hKey) != ERROR_SUCCESS)
+        return HIDMAESTRO_CONFIG_ERROR_FEATURE_ANSWERS;
+    LONG error = !LoadFeatureAnswers(ctx, hKey) ? HIDMAESTRO_CONFIG_ERROR_FEATURE_ANSWERS
+               : !LoadCachedInputIds(ctx, hKey) ? HIDMAESTRO_CONFIG_ERROR_CACHED_INPUT_IDS
+               : 0;
+    RegCloseKey(hKey);
+    return error;
+}
+
+/* Each input report's declared length from the descriptor, its ID byte
+ * included when the descriptor declares IDs: the bits of its Input main
+ * items, ReportSize times ReportCount, with Push and Pop honored. */
+static VOID
+BuildInputLengths(_In_ PDEVICE_CONTEXT ctx)
+{
+    ULONG bits[256];
+    struct { ULONG size, count; UCHAR id; } stack[8];
+    int depth = 0;
+    ULONG reportSize = 0, reportCount = 0;
+    UCHAR reportId = 0;
+    BOOLEAN ids = FALSE;
+    const UCHAR *d = ctx->ReportDescriptor;
+    ULONG n = ctx->ReportDescriptorSize, i = 0;
+    RtlZeroMemory(bits, sizeof(bits));
+    while (i < n) {
+        UCHAR prefix = d[i];
+        if (prefix == 0xFE) {                       /* long item: size, tag, data */
+            if (i + 1 >= n) break;
+            i += 3 + (ULONG)d[i + 1];
+            continue;
+        }
+        ULONG sz = prefix & 0x03;
+        if (sz == 3) sz = 4;
+        if (i + 1 + sz > n) break;
+        ULONG val = 0;
+        for (ULONG k = 0; k < sz; k++) val |= (ULONG)d[i + 1 + k] << (8 * k);
+        UCHAR type = (prefix >> 2) & 0x03, tag = prefix >> 4;
+        if (type == 1) {                            /* global */
+            if (tag == 7) reportSize = val;
+            else if (tag == 9) reportCount = val;
+            else if (tag == 8) { reportId = (UCHAR)val; ids = TRUE; }
+            else if (tag == 10 && depth < (int)ARRAYSIZE(stack)) {
+                stack[depth].size = reportSize; stack[depth].count = reportCount; stack[depth].id = reportId; depth++;
+            } else if (tag == 11 && depth > 0) {
+                depth--; reportSize = stack[depth].size; reportCount = stack[depth].count; reportId = stack[depth].id;
+            }
+        } else if (type == 0 && tag == 8) {         /* Input */
+            bits[reportId] += reportSize * reportCount;
+        }
+        i += 1 + sz;
+    }
+    ctx->UsesReportIds = ids;
+    for (ULONG id = 0; id < 256; id++) {
+        if (bits[id] == 0) { ctx->InputLengths[id] = 0; continue; }
+        ULONG bytes = (bits[id] + 7) / 8 + (ids ? 1 : 0);
+        ctx->InputLengths[id] = (USHORT)(bytes > 0xFFFF ? 0xFFFF : bytes);
+    }
+}
+
+/* An extended frame goes out only at the declared length of the input
+ * report its first byte names, or for a descriptor without IDs of its one
+ * input report (the design note, "A v1 program on the v2.0.0 driver"). */
+static BOOLEAN
+ExtendedFrameDeclared(_In_ PDEVICE_CONTEXT ctx, _In_reads_(size) const UCHAR *frame, _In_ ULONG size)
+{
+    USHORT declared = ctx->UsesReportIds ? ctx->InputLengths[frame[0]] : ctx->InputLengths[0];
+    return declared != 0 && declared == size;
+}
+
+static BOOLEAN
+InputIdCached(_In_ PDEVICE_CONTEXT ctx, _In_ UCHAR id)
+{
+    for (ULONG i = 0; i < ctx->CachedInputIdCount; i++)
+        if (ctx->CachedInputIds[i] == id) return TRUE;
+    return FALSE;
+}
+
+/* ------------------------------------------------------------------ */
+/*  FeatureAnswers at run time                                         */
+/* ------------------------------------------------------------------ */
+
+/* A SET_FEATURE on a report a message entry follows: its data is kept,
+ * from the report ID for a descriptor that declares IDs and from the
+ * first data byte for one that declares none (HID class hands the driver
+ * a leading 0 for an unnumbered report), up to HM_FEATURE_MAX_DATA bytes,
+ * and the pages of that report's entries start again. */
+static VOID
+KeepFeatureSet(_In_ PDEVICE_CONTEXT ctx, _In_reads_(size) const UCHAR *buf, _In_ ULONG size)
+{
+    if (ctx->FeatureOnReportCount == 0 || size == 0) return;
+    UCHAR rid = ctx->UsesReportIds ? buf[0] : 0;
+    const UCHAR *data = ctx->UsesReportIds ? buf : buf + 1;
+    ULONG len = ctx->UsesReportIds ? size : size - 1;
+    ULONG slot;
+    for (slot = 0; slot < ctx->FeatureOnReportCount; slot++)
+        if (ctx->FeatureOnReports[slot] == rid) break;
+    if (slot == ctx->FeatureOnReportCount) return;
+    if (len > HM_FEATURE_MAX_DATA) len = HM_FEATURE_MAX_DATA;
+    WdfWaitLockAcquire(ctx->FeatureLock, NULL);
+    RtlCopyMemory(ctx->FeatureKept[slot], data, len);
+    ctx->FeatureKeptLength[slot] = len;
+    for (ULONG i = 0; i < ctx->FeatureCount; i++)
+        if ((ctx->FeatureEntries[i].Flags & HM_FEATURE_FLAG_MESSAGE) && ctx->FeatureEntries[i].OnSlot == slot)
+            ctx->FeaturePage[i] = 0;
+    WdfWaitLockRelease(ctx->FeatureLock);
+}
+
+/* The entry a GET on a report takes: a message entry whose message and
+ * parameter match the last SET on its report, then one whose message
+ * matches and that takes no parameter, then a plain entry. -1 when none
+ * does. Under FeatureLock. FeatureStubTable.Find is the same walk. */
+static LONG
+FindFeatureEntry(_In_ PDEVICE_CONTEXT ctx, _In_ UCHAR id)
+{
+    LONG noParam = -1, plain = -1;
+    for (ULONG i = 0; i < ctx->FeatureCount; i++) {
+        const HM_FEATURE_ENTRY *e = &ctx->FeatureEntries[i];
+        if (e->Id != id) continue;
+        if (!(e->Flags & HM_FEATURE_FLAG_MESSAGE)) { if (plain < 0) plain = (LONG)i; continue; }
+        ULONG len = ctx->FeatureKeptLength[e->OnSlot];
+        const UCHAR *kept = ctx->FeatureKept[e->OnSlot];
+        if (len < (ULONG)e->At + e->ValueLength
+            || RtlCompareMemory(kept + e->At, ctx->FeatureArena + e->ArenaOffset, e->ValueLength) != e->ValueLength)
+            continue;
+        if (!(e->Flags & HM_FEATURE_FLAG_PARAM)) { if (noParam < 0) noParam = (LONG)i; continue; }
+        if (e->ParamAt < len && kept[e->ParamAt] == e->ParamValue) return (LONG)i;
+    }
+    return noParam >= 0 ? noParam : plain;
+}
+
+/* The answer to a GET_FEATURE from the table. FALSE when no entry
+ * answers, so the request goes on to the PID block. Otherwise *status is
+ * STATUS_SUCCESS with *written bytes in out, or STATUS_BUFFER_TOO_SMALL
+ * for a buffer shorter than the entry serves. */
+static BOOLEAN
+ServeFeature(_In_ PDEVICE_CONTEXT ctx, _In_ UCHAR requestId, _Out_writes_(outSize) UCHAR *out, _In_ ULONG outSize,
+             _Out_ ULONG *written, _Out_ BOOLEAN *notify, _Out_ NTSTATUS *status)
+{
+    UCHAR full[HM_FEATURE_MAX_DATA];
+    UCHAR id = ctx->UsesReportIds ? requestId : 0;
+    *written = 0;
+    *notify = FALSE;
+    *status = STATUS_SUCCESS;
+    WdfWaitLockAcquire(ctx->FeatureLock, NULL);
+    LONG at = FindFeatureEntry(ctx, id);
+    if (at < 0) { WdfWaitLockRelease(ctx->FeatureLock); return FALSE; }
+    const HM_FEATURE_ENTRY *e = &ctx->FeatureEntries[at];
+    const UCHAR *arena = ctx->FeatureArena + e->ArenaOffset;
+    const UCHAR *sizes = arena + e->ValueLength;
+    ULONG n = 0;
+    if (e->SizeCount > 0) {
+        for (ULONG k = 0; k < e->SizeCount; k++)
+            if (sizes[k] <= outSize) { n = sizes[k]; break; }
+    } else if (outSize >= e->MinLength) {
+        n = e->Size < outSize ? e->Size : outSize;
+    }
+    if (n == 0) {
+        WdfWaitLockRelease(ctx->FeatureLock);
+        *status = STATUS_BUFFER_TOO_SMALL;
+        return TRUE;
+    }
+    if (e->Flags & HM_FEATURE_FLAG_ECHO) {
+        ULONG k = ctx->FeatureKeptLength[e->OnSlot];
+        if (k > e->Size) k = e->Size;
+        RtlZeroMemory(full, e->Size);
+        RtlCopyMemory(full, ctx->FeatureKept[e->OnSlot], k);
+    } else {
+        ULONG page = ctx->FeaturePage[at];
+        if (page > (ULONG)e->PageCount - 1) page = (ULONG)e->PageCount - 1;
+        RtlCopyMemory(full, sizes + e->SizeCount + page * e->Size, e->Size);
+        if ((e->Flags & HM_FEATURE_FLAG_MESSAGE) && e->PageCount > 1 && ctx->FeaturePage[at] < e->PageCount - 1)
+            ctx->FeaturePage[at]++;
+    }
+    if (e->Flags & HM_FEATURE_FLAG_REPLY_HEAD) full[0] = requestId;
+    *notify = (e->Flags & HM_FEATURE_FLAG_NOTIFY) != 0;
+    WdfWaitLockRelease(ctx->FeatureLock);
+    RtlCopyMemory(out, full, n);
+    *written = n;
+    return TRUE;
 }
 
 /* ================================================================== */
@@ -525,13 +809,6 @@ ReadConfigFromRegistry(
         ctx->HidDeviceAttributes.VersionNumber = (USHORT)dwordVal;
     }
 
-    /* Read Bluetooth (REG_DWORD). Absent reads as USB, which is what every
-     * driver before v1.10.0 assumed. */
-    dwordSize = sizeof(dwordVal);
-    result = RegQueryValueExW(hKey, L"Bluetooth", NULL,
-                              &regType, (LPBYTE)&dwordVal, &dwordSize);
-    ctx->Bluetooth = (result == ERROR_SUCCESS && regType == REG_DWORD && dwordVal != 0);
-
     /* Read Ds3Sixaxis (REG_DWORD). Absent reads as off. */
     dwordSize = sizeof(dwordVal);
     result = RegQueryValueExW(hKey, L"Ds3Sixaxis", NULL,
@@ -645,7 +922,9 @@ TryOpenSharedMapping(_In_ PDEVICE_CONTEXT ctx)
 
 /* v1.13.0: write this driver's half of the version handshake, then let go
  * of the section. The SDK keeps it alive. Best effort, like the InputAck
- * open: an SDK that predates it creates no section. */
+ * open: an SDK that predates it creates no section. v2.0.0 writes it at
+ * add as well, and DriverProtocolMin with it. Nothing is cleared at
+ * cleanup, and each call writes the same values. */
 static VOID
 AnnounceVersion(_In_ PDEVICE_CONTEXT ctx)
 {
@@ -661,6 +940,7 @@ AnnounceVersion(_In_ PDEVICE_CONTEXT ctx)
         info->DriverVersion[3] = 0;
         InterlockedExchange(&info->DriverCapabilities,
             (LONG)(HIDMAESTRO_INPUT_ACK_CAP_DELIVERED | HIDMAESTRO_INPUT_ACK_CAP_RELEASE));
+        InterlockedExchange(&info->DriverProtocolMin, HIDMAESTRO_DRIVER_PROTOCOL_MIN);
         MemoryBarrier();
         InterlockedExchange(&info->DriverProtocol, HIDMAESTRO_DRIVER_PROTOCOL);
         UnmapViewOfFile(info);
@@ -955,6 +1235,13 @@ OwnerGone(_In_ PDEVICE_CONTEXT ctx)
         if (ctx->ReleaseSizes[i] == ctx->InputReportSize
             && (ctx->FirstInputReportId == 0 || ctx->ReleaseFrames[i][0] == ctx->InputReport[0])) {
             RtlCopyMemory(ctx->InputReport, ctx->ReleaseFrames[i], ctx->ReleaseSizes[i]);
+            break;
+        }
+    }
+    for (ULONG i = 0; i < count && ctx->CachedInputIdCount > 0 && ctx->PolledReportReady; i++) {
+        if (ctx->ReleaseSizes[i] == ctx->PolledReportSize
+            && (ctx->FirstInputReportId == 0 || ctx->ReleaseFrames[i][0] == ctx->PolledReport[0])) {
+            RtlCopyMemory(ctx->PolledReport, ctx->ReleaseFrames[i], ctx->ReleaseSizes[i]);
             break;
         }
     }
@@ -1909,7 +2196,10 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
     if (!ReadSharedInput(ctx, &shared)) return;
 
     ULONG seqNo = shared.SeqNo;
-    if (seqNo == ctx->SharedMemSeqNo) return; /* No new data */
+    if (seqNo == ctx->SeenSeqNo) return; /* No new data */
+    /* v2.0.0: the worker's stale-wakeup count reads SeenSeqNo, since a
+     * frame the driver does not send leaves SharedMemSeqNo alone. */
+    ctx->SeenSeqNo = seqNo;
     /* NOTE: SharedMemSeqNo is advanced LATER, under InputLock, together
      * with the InputReport cache write (see the completion block below).
      * Publishing it here would let a concurrent IOCTL_HID_READ_REPORT
@@ -1980,6 +2270,13 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
         && shared.ExtendedReportSize <= sizeof(shared.ExtendedReportData)
         && shared.ExtendedReportSize <= sizeof(inputReport))
     {
+        /* v2.0.0: only at its report's declared length. Any other frame
+         * is not sent, and the last sent report stands. The DualShock 3
+         * form below reads its native report, which no input report of
+         * its descriptor declares. */
+        if (!ctx->Ds3Sixaxis
+            && !ExtendedFrameDeclared(ctx, shared.ExtendedReportData, shared.ExtendedReportSize))
+            return;
         RtlZeroMemory(inputReport, inputSize);
         RtlCopyMemory(inputReport, shared.ExtendedReportData, shared.ExtendedReportSize);
         inputSize = shared.ExtendedReportSize;
@@ -2034,6 +2331,12 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
         RtlCopyMemory(ctx->InputReport, inputReport, inputSize);
         ctx->InputReportSize = inputSize;
         ctx->InputReportReady = TRUE;
+        if (ctx->CachedInputIdCount > 0
+            && InputIdCached(ctx, ctx->UsesReportIds ? inputReport[0] : (UCHAR)0)) {
+            RtlCopyMemory(ctx->PolledReport, inputReport, inputSize);
+            ctx->PolledReportSize = inputSize;
+            ctx->PolledReportReady = TRUE;
+        }
         if (ds3Fresh)
             RtlCopyMemory(ctx->Ds3Raw, ds3Raw, DS3_RAW_REPORT_SIZE);
         /* Publish the seqno LAST, under the same lock IOCTL_HID_READ_REPORT
@@ -2234,9 +2537,9 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
 
             if (rc == WAIT_OBJECT_0 + 1) {
                 idleTimeouts = 0;
-                ULONG prevSeq = ctx->SharedMemSeqNo;
+                ULONG prevSeq = ctx->SeenSeqNo;
                 ProcessSharedInput(ctx);
-                if (ctx->SharedMemSeqNo == prevSeq) {
+                if (ctx->SeenSeqNo == prevSeq) {
                     if (++staleWakeups > 250) { recycle = TRUE; break; }
                 } else {
                     staleWakeups = 0;
@@ -2534,15 +2837,34 @@ EvtDeviceAdd(
     /* HIDMaestro.dll only loads for HIDClass devices (gamepad companion).
      * XUSB companion uses HMXInput.dll: separate DLL, no shared code. */
 
+    /* v2.0.0, before WdfDeviceCreate: the devnode's token, the index the
+     * identity entry names, the hardware key's index, and from those the
+     * controller index and whether the version contract holds (decision
+     * (c)). A devnode that is not the controller its section names fails
+     * its start here. */
+    WCHAR token[40];
+    ULONG identityIndex = 0, controllerIndex = 0;
+    BOOLEAN haveIdentityIndex, contract = FALSE;
+    ReadInstanceToken(DeviceInit, token, ARRAYSIZE(token));
+    haveIdentityIndex = ReadIdentityIndex(token, &identityIndex);
+    status = ChooseControllerIndex(token, haveIdentityIndex, identityIndex,
+                                   ReadHardwareIndex(DeviceInit), &controllerIndex, &contract);
+    if (!NT_SUCCESS(status)) return status;
+
     /* FunctionMode=1 skips filter mode so we can register XUSB on the HID device.
      * This tells DI to use XInput mapping (5 axes) instead of raw HID.
      * Also used later to skip WinExInput on main device (companion handles it). */
     DWORD functionMode = 0;
     {
         HKEY hFm;
-        /* FunctionMode is read BEFORE device creation: ctx not yet available.
-         * Use Controller0 as default (test app writes here for the primary device). */
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro\\Controller0", 0, KEY_READ, &hFm) == ERROR_SUCCESS
+        /* FunctionMode is read BEFORE device creation, from the key of the
+         * controller index chosen above. Through v1.13.0 it was always
+         * Controller0's. */
+        WCHAR fmPath[64];
+        static const WCHAR fmPrefix[] = L"SOFTWARE\\HIDMaestro\\Controller";
+        RtlCopyMemory(fmPath, fmPrefix, sizeof(fmPrefix));
+        AppendUlongDecimal(fmPath, controllerIndex, ARRAYSIZE(fmPath));
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, fmPath, 0, KEY_READ, &hFm) == ERROR_SUCCESS
             || RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro", 0, KEY_READ, &hFm) == ERROR_SUCCESS) {
             DWORD val, sz = sizeof(val);
             if (RegQueryValueExW(hFm, L"FunctionMode", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS)
@@ -2570,8 +2892,11 @@ EvtDeviceAdd(
     RtlZeroMemory(ctx, sizeof(DEVICE_CONTEXT));
     ctx->Device = device;
 
-    /* Initialize per-instance paths (registry key, shared file) from ControllerIndex */
-    InitInstancePaths(ctx, device);
+    /* Initialize per-instance paths (registry key, shared file) from the
+     * controller index */
+    InitInstancePaths(ctx, controllerIndex);
+    ctx->Contract = contract;
+    for (SIZE_T i = 0; i < ARRAYSIZE(token); i++) ctx->IdentityToken[i] = token[i];
 
     /* Initialize defaults */
     RtlCopyMemory(ctx->ReportDescriptor,
@@ -2641,6 +2966,23 @@ EvtDeviceAdd(
         }
     }
 
+    /* v2.0.0: each input report's declared length, for the extended lane's
+     * bound. */
+    BuildInputLengths(ctx);
+
+    /* v2.0.0: this driver's half of the version section at add, then the
+     * controller's v2.0.0 values under the contract. A value it cannot
+     * read fails the start, named in DriverConfigError first, so the
+     * create names it rather than leaving a device that answers nothing. */
+    AnnounceVersion(ctx);
+    if (ctx->Contract) {
+        LONG error = LoadContractValues(ctx);
+        if (error != 0) {
+            WriteConfigError(ctx, error);
+            return STATUS_DEVICE_CONFIGURATION_ERROR;
+        }
+    }
+
     /*
      * Set BusReportedDeviceDesc so joy.cpl shows the profile name.
      * DEVPKEY_Device_BusReportedDeviceDesc = {540b947e-8b40-45bc-a8a2-6a0b894cbda2}, 4
@@ -2683,6 +3025,8 @@ EvtDeviceAdd(
     status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->InputLock);
     if (!NT_SUCCESS(status)) return status;
     status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->OutputLock);
+    if (!NT_SUCCESS(status)) return status;
+    status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->FeatureLock);
     if (!NT_SUCCESS(status)) return status;
 
     /* Default queue (parallel): HID IOCTLs from MsHidUmdf */
@@ -3009,6 +3353,9 @@ EvtIoDeviceControl(
             const UCHAR *payload = (featureSize > 0) ? p + 1 : p;
             ULONG payloadLen = (ULONG)((featureSize > 0) ? featureSize - 1 : 0);
 
+            /* v2.0.0: the data a message entry of FeatureAnswers follows. */
+            KeepFeatureSet(ctx, p, (ULONG)featureSize);
+
             /* PID FFB report routing inside SetFeature. v1.1.39 covers
              * all three Set-direction PID handshake reports here because
              * the canonical PID descriptor declares 0x11/0x1B/0x1C as
@@ -3163,276 +3510,25 @@ EvtIoDeviceControl(
             break;
         }
 
-        /* Sony BT extended-mode handshake. Real DualSense / DualShock 4
-         * firmware switches from emitting Report 0x01 (basic) to Report
-         * 0x31 / 0x11 (vendor blob with CRC32) once the host issues
-         * specific Get_Feature reads:
-         *   DS5: 0x05 (calibration), 0x09 (pairing/MAC), 0x20 (firmware)
-         *   DS4: 0x02 (calibration), 0xA3 (firmware/HW info)
-         * See Linux drivers/hid/hid-playstation.c dualsense_create /
-         * dualshock4_get_calibration init flows. We serve minimal stubs
-         * so consumers (Steam Input, dualsense-tester, ds.daidr.me,
-         * Chrome's Gamepad API, WGI's GameInput DS4 protocol selector)
-         * don't error on the read, AND publish a feature-read
-         * notification to the SDK so the extendedReport.armOn watcher
-         * can flip vendor-blob emission on. Notification is fired ONLY
-         * for these arm IDs to keep the Get_Feature hot path cheap for
-         * PID polling consumers (DInput / Steam Input).
-         *
-         * GATED on Sony VID (0x054C): only Sony BT profiles declare
-         * extendedReport.armOn, so only they need these stubs. Without
-         * the gate, feature IDs 0x02 (DS4 calibration) and 0xA3 collide
-         * with unrelated profiles' declared feature reports. The Xbox 360
-         * descriptor declares Feature Report ID 0x02 (driver.h), so a
-         * non-Sony HidD_GetFeature(0x02) was getting a zero-filled DS4
-         * calibration blob instead of falling through to the PID / vJoy
-         * handlers below. */
-        if (ctx->HidDeviceAttributes.VendorID == 0x054C
-         && (reportId == 0x05 || reportId == 0x09 || reportId == 0x20
-          || reportId == 0x22 || reportId == 0x02 || reportId == 0xA3
-          || reportId == 0x12)) {
-            UCHAR *p = (UCHAR *)outBuf;
-            ULONG stubSize = 0;
-            if (reportId == 0x05) {
-                /* Sony motion calibration. DS5 uses report 0x05 at 41
-                 * bytes; a DS4 over Bluetooth uses the SAME report id and
-                 * size (DS4_FEATURE_REPORT_CALIBRATION_BT), so one branch
-                 * serves both. Both of our descriptors declare 41. The
-                 * DS4's field order differs from the DualSense's. The DS4
-                 * product ids are the v1 pad 0x05C4, the v2 pad 0x09CC and
-                 * the wireless adapter 0x0BA0. */
-                USHORT pid = ctx->HidDeviceAttributes.ProductID;
-                BOOLEAN ds4 = (pid == 0x05C4 || pid == 0x09CC || pid == 0x0BA0);
-                if (outSize < 41) { status = STATUS_BUFFER_TOO_SMALL; break; }
-                stubSize = 41;
-                RtlZeroMemory(p, stubSize);
-                p[0] = reportId;
-                RtlCopyMemory(p + 1, ds4 ? g_SonyCalibrationDs4Bt : g_SonyCalibration,
-                              sizeof(g_SonyCalibration));
-            } else if (reportId == 0x09) {
-                /* DS5 pairing info. 20 bytes, which is what BOTH our own
-                 * descriptor declares for report 0x09 and what
-                 * hid-playstation.c asks for; it requires the transferred
-                 * count to equal the requested size exactly, so the 17 this
-                 * used to serve failed that check outright. MAC lives at
-                 * bytes 1..6 (hid-playstation.c: memcpy(mac, &buf[1], 6)).
-                 * An all-zero MAC is not a valid address, so synthesize a
-                 * stable one per controller in the locally-administered
-                 * range (second bit of the first octet set), which cannot
-                 * collide with a real Sony pad's globally-assigned MAC. */
-                if (outSize < 20) { status = STATUS_BUFFER_TOO_SMALL; break; }
-                stubSize = 20;
-                RtlZeroMemory(p, stubSize);
-                p[0] = reportId;
-                p[1] = 0x02; p[2] = 0x48; p[3] = 0x4D; /* locally administered, 'H' 'M' */
-                p[4] = 0x00; p[5] = 0x00;
-                p[6] = (UCHAR)ctx->ControllerIndex;
-            } else if (reportId == 0x20) {
-                /* DS5 firmware info: 64 bytes
-                 * (DS_FEATURE_REPORT_FIRMWARE_INFO_SIZE). Captured from a
-                 * real wired DualSense during an F1 22 startup trace (#43).
-                 *
-                 * This was zero-filled but for fwType, on the theory that
-                 * the only consumer then known needed nothing else. F1 22
-                 * validates the blob: it issues 0x09, the report
-                 * descriptor, then 0x20, and on a zeroed 0x20 it abandons
-                 * the device and retries the whole sequence every 500 ms
-                 * forever. It never reaches the calibration read, which is
-                 * why the v1.4.4 and v1.4.5 fixes changed nothing for it.
-                 *
-                 * Field offsets agree across two independent consumers, so
-                 * the layout is not inferred. Linux hid-playstation.c
-                 * dualsense_get_firmware_info reads hw_version at le32
-                 * buf[24], fw_version at le32 buf[28], update_version at
-                 * le16 buf[44]. dualsense-tester's FactoryInfo.vue reads
-                 * build date at 1..11, build time at 12..19, fwType le16
-                 * at 20, swSeries le16 at 22, hwInfo le32 at 24,
-                 * mainFwVersion le32 at 28, deviceInfo 32..43,
-                 * updateVersion le16 at 44, then three more versions.
-                 *
-                 * Served verbatim rather than field-by-field. Which field
-                 * F1 22 validates is not known, and inventing values for
-                 * the ones it might read is the same mistake at a smaller
-                 * scale. WinUHid's WinUHidPS5.cpp k_DefaultFirmwareInfo is
-                 * the same shape and equally real, but reports fwType=4,
-                 * which fails dualsense-tester's fwType ∈ {2,3} render
-                 * gate; this capture reports 3 and satisfies both.
-                 *
-                 * Consequence worth stating: the build date below belongs
-                 * to the unit that was captured, so every virtual DualSense
-                 * reports it. That matches how WinUHid ships a single fixed
-                 * default for every emulated pad. */
-                static const UCHAR ds5FirmwareInfo[64] = {
-                    0x20, 0x4A, 0x75, 0x6C, 0x20, 0x20, 0x34, 0x20,
-                    0x32, 0x30, 0x32, 0x35, 0x31, 0x30, 0x3A, 0x31,
-                    0x30, 0x3A, 0x33, 0x32, 0x03, 0x00, 0x04, 0x00,
-                    0x10, 0x13, 0x00, 0x00, 0x2A, 0x00, 0x10, 0x01,
-                    0x01, 0xC8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                    0x00, 0x00, 0x00, 0x00, 0x30, 0x06, 0x00, 0x00,
-                    0x3C, 0x00, 0x01, 0x00, 0x0A, 0x00, 0x02, 0x00,
-                    0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-                };
-                if (outSize < 64) { status = STATUS_BUFFER_TOO_SMALL; break; }
-                stubSize = 64;
-                RtlCopyMemory(p, ds5FirmwareInfo, stubSize);
-                p[0] = reportId;
-
-                /* DualSense Edge (PID 0x0DF2) is a different firmware line
-                 * and must not claim the base pad's. Two fields are known
-                 * from Sony's own firmware updater data, published in
-                 * Paliverse/DualSense-List-of-Firmwares: the base DualSense
-                 * is type 0x0004 and the Edge is type 0x0044.
-                 *
-                 * That mapping is not inferred from the name. The captured
-                 * base blob carries swSeries 0x0004 at bytes 22..23 and
-                 * updateVersion 0x0630 at bytes 44..45, and Sony's list
-                 * records exactly "DualSense, Type 0004, version 0x0630".
-                 * Both fields agreeing with an independent source is what
-                 * identifies these two offsets as the type and version, and
-                 * is also a second confirmation that the capture is real.
-                 *
-                 * The Edge's corresponding entry is type 0x0044 at version
-                 * 0x0217, so those two are corrected here.
-                 *
-                 * The rest of the blob is still the base pad's and is NOT
-                 * verified for an Edge: no public dump of an Edge's 0x20
-                 * exists, and dualshock-tools does not even map the Edge's
-                 * hwinfo (it skips Board Model when is_edge). Build date,
-                 * hwInfo, mainFwVersion and the three sub-versions are
-                 * therefore inherited rather than known. Nothing observed
-                 * reads them on an Edge: hid-playstation takes
-                 * use_vibration_v2 and is_edge from the PID rather than
-                 * update_version, and dualsense-tester's Edge page hardcodes
-                 * its traceability gate instead of testing hwInfo. Replace
-                 * this table wholesale if a real Edge dump ever turns up. */
-                if (ctx->HidDeviceAttributes.ProductID == 0x0DF2) {
-                    p[22] = 0x44; p[23] = 0x00;   /* swSeries      0x0044 */
-                    p[44] = 0x17; p[45] = 0x02;   /* updateVersion 0x0217 */
+        /* v2.0.0: FeatureAnswers, the controller's answers the SDK compiled
+         * (the design note's mechanism 4), parsed at add under the version
+         * contract. A GET no entry answers goes on to the PID block and
+         * then fails with STATUS_NOT_SUPPORTED, publishing nothing. On a
+         * descriptor without report IDs every GET is report 0's. */
+        {
+            ULONG written;
+            BOOLEAN notify;
+            NTSTATUS answered;
+            if (ctx->FeatureCount > 0
+                && ServeFeature(ctx, reportId, (UCHAR *)outBuf, (ULONG)outSize, &written, &notify, &answered)) {
+                if (NT_SUCCESS(answered)) {
+                    WdfRequestSetInformation(Request, written);
+                    if (notify)
+                        PublishOutput(ctx, HIDMAESTRO_OUTPUT_SOURCE_HID_FEATURE_READ, reportId, NULL, 0);
                 }
-            } else if (reportId == 0x12) {
-                /* DS4 pairing info over USB: 16 bytes
-                 * (DS4_FEATURE_REPORT_PAIRING_INFO_SIZE). The DS4's
-                 * equivalent of the DS5's 0x09, and every USB DualShock 4
-                 * descriptor we ship already declares it, so leaving it
-                 * unserved meant a declared report that answered
-                 * STATUS_NOT_SUPPORTED.
-                 *
-                 * This is the most severe of the Sony reads to omit.
-                 * hid-playstation.c dualshock4_get_mac_address requests it
-                 * on USB and its caller treats failure as fatal
-                 * (`return ERR_PTR(ret)`), so the canonical Linux driver
-                 * refuses to instantiate the device at all. By contrast the
-                 * 0xA3 firmware read only warns. SDL reads the same report
-                 * as k_ePS4FeatureReportIdSerialNumber in ReadWiredSerial.
-                 *
-                 * MAC lives at bytes 1..6 in both consumers, and both
-                 * reject an all-zero address: the kernel copies it as the
-                 * device's unique id, and SDL's ReadWiredSerial requires at
-                 * least one of bytes 1..6 to be non-zero before it accepts
-                 * the serial. So synthesize the same stable per-controller
-                 * address the 0x09 path uses, in the locally-administered
-                 * range so it cannot collide with a real pad's
-                 * globally-assigned MAC.
-                 *
-                 * Bluetooth does not need this: hid-playstation takes the
-                 * DS4's BT address from HIDP's hdev->uniq instead, which is
-                 * why dualshock-4-v2-bt does not declare 0x12. */
-                if (outSize < 16) { status = STATUS_BUFFER_TOO_SMALL; break; }
-                stubSize = 16;
-                RtlZeroMemory(p, stubSize);
-                p[0] = reportId;
-                p[1] = 0x02; p[2] = 0x48; p[3] = 0x4D; /* locally administered, 'H' 'M' */
-                p[4] = 0x00; p[5] = 0x00;
-                p[6] = (UCHAR)ctx->ControllerIndex;
-            } else if (reportId == 0x22) {
-                /* DS5 Bluetooth patch info: 64 bytes, which is what our own
-                 * DualSense descriptor declares for this report.
-                 *
-                 * Only reachable because 0x20 above now reports real
-                 * values. dualsense-tester runs its traceability branch
-                 * when hwInfo & 0xFFFF >= 777 and mainFwVersion >= 65655,
-                 * both true of the captured blob and both false of the old
-                 * zeros, and that branch opens by reading 0x22. Every
-                 * feature ID outside this gate falls through to
-                 * STATUS_NOT_SUPPORTED, so without this the Factory Info
-                 * panel that renders today would start failing outright:
-                 * the fix for one consumer would have broken another.
-                 *
-                 * The payload is deliberately zero past the report ID, and
-                 * that is a real value here rather than a stub. ds.util.ts
-                 * getBtPatchInfo returns le32 at offset 31 and the caller
-                 * skips the row on a falsy result, so zero reads as "this
-                 * pad carries no Bluetooth patch", which is true of it. The
-                 * report ID must still be present: getBtPatchInfo bails
-                 * when byte 0 is not 0x22. */
-                if (outSize < 64) { status = STATUS_BUFFER_TOO_SMALL; break; }
-                stubSize = 64;
-                RtlZeroMemory(p, stubSize);
-                p[0] = reportId;
-            } else if (reportId == 0x02) {
-                /* DS4 calibration, 37 bytes
-                 * (DS4_FEATURE_REPORT_CALIBRATION_SIZE), or 41 for a caller
-                 * whose buffer holds that much. Only USB hosts parse this
-                 * report: over Bluetooth, hid-playstation.c, DS4Windows and
-                 * RPCS3 read calibration from 0x05, and SDL reads 0x02 only
-                 * to switch the pad to report 0x11 before it parses 0x05
-                 * (HIDAPI_DriverPS4_LoadOfficialCalibrationData). The
-                 * outSize parameter from the caller's BufferSize lets us
-                 * serve whichever variant they asked for. */
-                if (outSize >= 41) {
-                    stubSize = 41;
-                } else if (outSize >= 37) {
-                    stubSize = 37;
-                } else {
-                    status = STATUS_BUFFER_TOO_SMALL;
-                    break;
-                }
-                RtlZeroMemory(p, stubSize);
-                p[0] = reportId;
-                RtlCopyMemory(p + 1, g_SonyCalibration, sizeof(g_SonyCalibration));
-            } else /* 0xA3 */ {
-                /* DS4 firmware/HW info: 49 bytes
-                 * (DS4_FEATURE_REPORT_FIRMWARE_INFO_SIZE). Same byte
-                 * count on USB and BT. Payload verbatim from WinUHid's
-                 * WinUHidPS4.cpp: ASCII build date "Aug  3 2013" and time
-                 * "07:01:12" followed by the hardware and firmware words.
-                 * Zeros here left consumers reading a device with no
-                 * firmware identity at all. */
-                static const UCHAR ds4FirmwareInfo[49] = {
-                    0xA3, 0x41, 0x75, 0x67, 0x20, 0x20, 0x33, 0x20,
-                    0x32, 0x30, 0x31, 0x33, 0x00, 0x00, 0x00, 0x00,
-                    0x00, 0x30, 0x37, 0x3A, 0x30, 0x31, 0x3A, 0x31,
-                    0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                    0x00, 0x00, 0x01, 0x00, 0x31, 0x03, 0x00, 0x00,
-                    0x00, 0x49, 0x00, 0x05, 0x00, 0x00, 0x80, 0x03,
-                    0x00
-                };
-                if (outSize < 49) { status = STATUS_BUFFER_TOO_SMALL; break; }
-                stubSize = 49;
-                RtlCopyMemory(p, ds4FirmwareInfo, stubSize);
-                p[0] = reportId;
+                status = answered;
+                break;
             }
-            /* Over Bluetooth these reports end in a CRC-32 that USB forms do
-             * not carry (issue #64). hid-playstation.c ps_get_report checks it
-             * on 0x05 for both pads and on 0x09 and 0x20 for the DualSense.
-             * RPCS3 checks it on 0x05 and drops the pad after three failures
-             * (ds4_pad_handler.cpp and dualsense_pad_handler.cpp,
-             * GetCalibrationData). The last four bytes of each stub are free:
-             * calibration ends at byte 34, the pairing MAC at byte 6, and the
-             * firmware capture is zero from byte 60. */
-            if (ctx->Bluetooth && stubSize > 4
-             && (reportId == 0x05 || reportId == 0x09 || reportId == 0x20)) {
-                ULONG crc = SonyFeatureCrc32(p, stubSize - 4);
-                p[stubSize - 4] = (UCHAR)(crc & 0xFF);
-                p[stubSize - 3] = (UCHAR)((crc >> 8) & 0xFF);
-                p[stubSize - 2] = (UCHAR)((crc >> 16) & 0xFF);
-                p[stubSize - 1] = (UCHAR)((crc >> 24) & 0xFF);
-            }
-            WdfRequestSetInformation(Request, stubSize);
-            PublishOutput(ctx, HIDMAESTRO_OUTPUT_SOURCE_HID_FEATURE_READ,
-                          reportId, NULL, 0);
-            status = STATUS_SUCCESS;
-            break;
         }
 
         /* v1.3.7: descriptor-driven PID Report ID overrides for
@@ -3665,15 +3761,20 @@ EvtIoDeviceControl(
         }
 
         /* Standard input report (Report ID 1 or no-RID descriptors): return
-         * the latest cached input frame the SDK published. */
+         * the latest cached input frame the SDK published. v2.0.0: with a
+         * cached-ID list, the latest frame of a listed report. */
         WdfWaitLockAcquire(ctx->InputLock, NULL);
-        if (ctx->InputReportReady
-            && (inReportId == 0x01 || inReportId == 0x00))
         {
-            status = RequestCopyFromBuffer(Request,
-                ctx->InputReport, ctx->InputReportSize);
-            WdfWaitLockRelease(ctx->InputLock);
-            break;
+            BOOLEAN listed = ctx->CachedInputIdCount > 0;
+            BOOLEAN ready = listed ? ctx->PolledReportReady : ctx->InputReportReady;
+            if (ready && (inReportId == 0x01 || inReportId == 0x00))
+            {
+                status = RequestCopyFromBuffer(Request,
+                    listed ? ctx->PolledReport : ctx->InputReport,
+                    listed ? ctx->PolledReportSize : ctx->InputReportSize);
+                WdfWaitLockRelease(ctx->InputLock);
+                break;
+            }
         }
         WdfWaitLockRelease(ctx->InputLock);
 

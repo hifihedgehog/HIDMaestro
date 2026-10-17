@@ -719,13 +719,6 @@ internal static partial class DeviceOrchestrator
         // override via the JSON `versionNumber` field.
         key.SetValue("VersionNumber", (int)(profile.VersionNumber ?? 0x0100),
                      RegistryValueKind.DWord);
-        // v1.10.0: a Sony pad ends its Bluetooth feature reports with a
-        // CRC-32 the USB forms lack, and the driver appends one only for a
-        // Bluetooth profile. Written as 0 as well, so an index a USB
-        // profile reuses never inherits the flag.
-        key.SetValue("Bluetooth",
-                     string.Equals(profile.Connection, "bluetooth", StringComparison.OrdinalIgnoreCase) ? 1 : 0,
-                     RegistryValueKind.DWord);
         // v2.0.0: the answers to GET_FEATURE, compiled for this controller
         // (mechanism 4): the index and the serial the driver serves
         // patched in, CRCs final. A profile without answers writes the

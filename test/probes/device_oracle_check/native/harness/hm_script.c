@@ -29,6 +29,12 @@
  *   getinput <input> <length> <init>    IOCTL_UMDF_HID_GET_INPUT_REPORT
  *   ioctl <code> <input> <length>       any other IOCTL, tagged "ioctl"
  *   remove                              the device's removal
+ *   version <label>                     the version-section parameter the
+ *                                       next device runs under
+ *                                       (VersionLabel: sdk, absent, max3,
+ *                                       max4, cleared, closed, tag-own,
+ *                                       tag-other, range5, range45), sdk
+ *                                       at each stream
  * Completions record the whole output buffer (g_fullBuffers). */
 #include "hm_scenario.h"
 
@@ -86,9 +92,19 @@ int ScriptRun(const char *plan, const char *script, const char *output)
         if (strcmp(cmd, "stream") == 0) {
             if (c.dev) CtlStop(&c);
             if (!x1) HmFail("script line %d: a stream needs a name", lineNo);
+            g_versionParam = VERSION_SDK;
             StreamBegin("%s", x1);
             memset(&c, 0, sizeof(c));
             inStream = 1;
+            continue;
+        }
+        if (strcmp(cmd, "version") == 0) {
+            if (!inStream || c.dev) HmFail("script line %d: version comes before the stream's device", lineNo);
+            int found = -1;
+            for (int v = 0; v < VERSION_PARAMS; v++)
+                if (x1 && strcmp(x1, VersionLabel(v)) == 0) found = v;
+            if (found < 0) HmFail("script line %d: no version parameter '%s'", lineNo, x1 ? x1 : "");
+            g_versionParam = found;
             continue;
         }
         if (!inStream) HmFail("script line %d: '%s' before any stream", lineNo, cmd);
@@ -142,6 +158,7 @@ int ScriptRun(const char *plan, const char *script, const char *output)
     }
     fclose(f);
     if (c.dev) CtlStop(&c);
+    g_versionParam = VERSION_SDK;
     WorldReset();
     RecEnd();
     fprintf(stdout, "streams %u outputs %llu\n", RecStreamCount(), (unsigned long long)RecOutputCount());

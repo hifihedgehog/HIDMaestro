@@ -147,7 +147,7 @@ void CaseSonyVersion(void)
     for (int i = 0; i < g_plan.profileCount; i++) {
         PlanProfile *p = &g_plan.profiles[i];
         if (strcmp(p->group, "sony")) continue;
-        StreamFeatures(p, (int)PlanDword(p, "Bluetooth", 0), 0, 0);
+        StreamFeatures(p, p->bluetooth, 0, 0);
     }
     PlanProfile *control = PlanFind("control", NULL);
     if (!control) HmFail("the plan has no control profile");
