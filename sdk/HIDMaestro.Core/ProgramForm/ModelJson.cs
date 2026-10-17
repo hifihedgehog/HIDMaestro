@@ -70,6 +70,16 @@ public static class ProfilePrograms
         foreach (var prop in root.EnumerateObject())
         {
             string key = prop.Name;
+            if (string.Equals(key, "usbConfiguration", StringComparison.OrdinalIgnoreCase) && prop.Value.ValueKind == JsonValueKind.Object)
+            {
+                // Before v2.0.0 the protocol sat here. The SDK's context no
+                // longer maps it and would skip it, leaving a device with no
+                // protocol.
+                foreach (var inner in prop.Value.EnumerateObject())
+                    if (string.Equals(inner.Name, "protocol", StringComparison.OrdinalIgnoreCase))
+                        throw new FormException($"$.{key}.{inner.Name}", "the protocol is the root key \"protocol\" since v2.0.0, beside usbConfiguration");
+                continue;
+            }
             if (Array.IndexOf(GroupKeys, key) < 0)
             {
                 // The SDK's context reads a profile's keys in any case and

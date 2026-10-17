@@ -164,6 +164,14 @@ internal static partial class RuleChecks
         yield return G("a halt condition on a register that does not exist", $"{Pr}.halt.while", Set($"{Pr}.halt.while", "[\"nosuch\"]"));
         yield return G("a null term in a while list", $"{Pr}.input.while[1]", Set($"{Pr}.input.while", "[\"polling\",null]"));
         yield return G("a null register list", $"{Pr}.state", Set($"{Pr}.state", "null"));
+        yield return new Case("a protocol under usbConfiguration, where the tree before v2.0.0 read it", GC, "$.usbConfiguration.protocol", Set("$.usbConfiguration.protocol", "{}")) { Tool = true };
+        yield return new Case("a protocol under UsbConfiguration, in another case", GC, "$.UsbConfiguration.Protocol", root =>
+        {
+            var cfg = root["usbConfiguration"]!.DeepClone().AsObject();
+            cfg["Protocol"] = new System.Text.Json.Nodes.JsonObject();
+            root.AsObject().Remove("usbConfiguration");
+            root["UsbConfiguration"] = cfg;
+        }) { Tool = true };
         yield return G("a setProtocol answer that is not one", $"{Pr}.setProtocol", Set($"{Pr}.setProtocol", "\"nak\""));
         yield return G("a getStatus answer that is not one", $"{Pr}.getStatus", Set($"{Pr}.getStatus", "\"zero\""));
         yield return E("a getReport answer that is not one", $"{Pr}.getReport", Set($"{Pr}.getReport", "\"last\""));
