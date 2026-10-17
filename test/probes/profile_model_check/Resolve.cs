@@ -112,6 +112,11 @@ internal static class Resolve
                     ["name"] = "user-1234",
                     ["match"] = new JsonObject { ["vid"] = "0x1234", ["pid"] = new JsonArray("0x5678", "0x5679") },
                     ["model"] = "user-pid-model",
+                }, new JsonObject
+                {
+                    ["name"] = "user-misfit-id",
+                    ["match"] = new JsonObject { ["vid"] = "0x1234", ["pid"] = "0x5680" },
+                    ["model"] = "user-file-model",
                 }),
             }.ToJsonString());
 
@@ -127,6 +132,7 @@ internal static class Resolve
                 ("own-and-name.json", Pedals("user-own", o => { o["driverPid"] = "0x0B12"; o["deviceModelFrom"] = "user-pid-model"; })),
                 ("none-and-name.json", Pedals("user-both", o => { o["deviceModel"] = "none"; o["deviceModelFrom"] = "user-pid-model"; })),
                 ("bad-none.json", Pedals("user-bad-none", o => o["deviceModel"] = "some")),
+                ("ident-misfit.json", Pedals("user-ident-misfit", o => { o["vid"] = "0x1234"; o["pid"] = "0x5680"; })),
             };
             foreach (var (name, json) in files) File.WriteAllText(Path.Combine(dir, name), json.ToJsonString());
 
@@ -171,6 +177,25 @@ internal static class Resolve
                 (Src("user-misfit", "answers") == "none" && Src("user-misfit", "presentation").StartsWith("identity:", StringComparison.Ordinal)
                  && Problem("user-misfit") is string pr && pr.Contains("$.valueSources.steamUpdater", StringComparison.Ordinal),
                  Problem("user-misfit") ?? "no problem"));
+            // A listed model problem names the value that went wrong where
+            // its file holds it: the profile's deviceModelFrom for a name
+            // that finds no model, and the model's own key for a model that
+            // does not fit. At 08fd21f3 every model problem was listed at
+            // the profile's $.deviceModelFrom, one the profile taking a
+            // model by identity does not have.
+            Api.Issue? ProblemIssue(string id) => issues.FirstOrDefault(i => i.Id == id && i.Kind == "ModelProblem");
+            string modelFile = Path.Combine(dir, "models", "c-file-model.json");
+            c.Run("a name nothing holds is listed at the profile's $.deviceModelFrom", () =>
+                (ProblemIssue("user-missing") is { } i && i.Path == "$.deviceModelFrom" && i.File == Path.Combine(dir, "missing.json"),
+                 ProblemIssue("user-missing")?.ToString() ?? "none"));
+            c.Run("a named model that does not fit is listed at the model file's key that does not fit", () =>
+                (ProblemIssue("user-misfit") is { } i && i.Path == "$.valueSources.steamUpdater" && i.File == modelFile
+                 && i.Reason.Contains("user-misfit", StringComparison.Ordinal),
+                 ProblemIssue("user-misfit") is { } x ? $"{x.File} {x.Path} {x.Reason}" : "none"));
+            c.Run("an identity default's model that does not fit is listed at the model file's key, naming the entry and the profile", () =>
+                (ProblemIssue("user-ident-misfit") is { } i && i.Path == "$.valueSources.steamUpdater" && i.File == modelFile
+                 && i.Reason.Contains("user-misfit-id", StringComparison.Ordinal) && i.Reason.Contains("user-ident-misfit", StringComparison.Ordinal),
+                 ProblemIssue("user-ident-misfit") is { } x ? $"{x.File} {x.Path} {x.Reason}" : "none"));
             c.Run("own keys win over a name, and the unused name is noted", () =>
                 (Src("user-own", "presentation") == "own" && Pid("user-own") == "0x0B12"
                  && P("user-own")!.Inner.Resolved.Notes.Any(n => n.Contains("unused", StringComparison.Ordinal)),

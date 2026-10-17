@@ -1648,8 +1648,24 @@ public sealed class ProfileDatabase
                 continue;
             }
             if (p.ResolvedCache.Problem != null)
-                _issues.Add(new HIDMaestro.HMProfileLoadIssue(p.SourceFile ?? p.Id, p.Id, "$.deviceModelFrom",
-                    p.ResolvedCache.Problem, HIDMaestro.HMProfileLoadIssueKind.ModelProblem));
+            {
+                // The value that went wrong where its file holds it: the
+                // profile's own deviceModelFrom, or the key of a model file.
+                var r = p.ResolvedCache;
+                string path = r.ProblemPath;
+                if (r.ProblemFile == null && _texts.TryGetValue(p, out var own)) path = ProfileDefects.Spell(own, path);
+                else if (r.ProblemFile != null && File.Exists(r.ProblemFile))
+                {
+                    try { path = ProfileDefects.Spell(File.ReadAllText(r.ProblemFile), path); }
+                    catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+                    {
+                        // The model file is gone or locked since it loaded: the
+                        // path keeps the schema's spelling, which names the same key.
+                    }
+                }
+                _issues.Add(new HIDMaestro.HMProfileLoadIssue(r.ProblemFile ?? p.SourceFile ?? p.Id, p.Id, path,
+                    r.Problem, HIDMaestro.HMProfileLoadIssueKind.ModelProblem));
+            }
         }
         foreach (var p in refused) _profiles.Remove(p);
         _texts.Clear();

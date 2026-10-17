@@ -110,6 +110,14 @@ internal sealed class ResolvedModel
     /// not taken. Null when nothing went wrong.</summary>
     public string? Problem { get; init; }
 
+    /// <summary>Where <see cref="Problem"/> lives: the file of a model that
+    /// does not fit, null for the profile's own file, and the JSON path in
+    /// that file. A name that finds no model is the profile's
+    /// <c>$.deviceModelFrom</c>, a model that does not fit is the model's key
+    /// that does not.</summary>
+    public string? ProblemFile { get; init; }
+    public string ProblemPath { get; init; } = "$.deviceModelFrom";
+
     /// <summary>What resolution noted without refusing: an answer for a
     /// report the profile's descriptor does not declare, kept because
     /// today's code keeps it, and a name that filled no group.</summary>
@@ -470,7 +478,8 @@ internal sealed class ModelRegistry
 
         DeviceModel? named = null;
         string? namedSource = null;
-        string? problem = null;
+        string? problem = null, problemFile = null;
+        string problemPath = "$.deviceModelFrom";
         if (p.DeviceModelFrom is { } name)
         {
             if (string.IsNullOrWhiteSpace(name))
@@ -493,7 +502,9 @@ internal sealed class ModelRegistry
                 catch (Exception e) when (ProfileDefects.IsDefect(e))
                 {
                     var (path, reason) = ProfileDefects.Locate(e);
-                    problem = $"deviceModelFrom names '{name}', whose model does not fit this profile at {path}: {reason} The profile takes the model its identity gives it.";
+                    problem = $"{ProfileLabel(p)} names '{name}' in deviceModelFrom, and the model does not fit it at {path}: {reason} The profile takes the model its identity gives it.";
+                    problemFile = found.Value.Source;
+                    problemPath = path;
                 }
             }
         }
@@ -520,7 +531,12 @@ internal sealed class ModelRegistry
                 catch (Exception e) when (ProfileDefects.IsDefect(e))
                 {
                     var (path, reason) = ProfileDefects.Locate(e);
-                    problem ??= $"the identity default {hit.Label} gives '{hit.Entry.Model}', whose model does not fit this profile at {path}: {reason}";
+                    if (problem == null)
+                    {
+                        problem = $"the identity default {hit.Label} gives {ProfileLabel(p)} '{hit.Entry.Model}', and the model does not fit it at {path}: {reason}";
+                        problemFile = found.Value.Source;
+                        problemPath = path;
+                    }
                 }
             }
         }
@@ -551,9 +567,15 @@ internal sealed class ModelRegistry
             IdentityModel = none ? null : identityModel,
             IdentityMatched = matched != null,
             Problem = problem,
+            ProblemFile = problemFile,
+            ProblemPath = problemPath,
             Notes = notes,
         };
     }
+
+    /// <summary>A profile as a problem names it: its id and its file.</summary>
+    private static string ProfileLabel(ControllerProfile p) =>
+        p.SourceFile != null ? $"profile '{p.Id}' ({p.SourceFile})" : $"profile '{p.Id}'";
 
     /// <summary>The catalog's registry, built once with the embedded
     /// catalog. Profiles built in code and profiles a program constructs
