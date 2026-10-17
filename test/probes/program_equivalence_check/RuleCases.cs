@@ -63,6 +63,7 @@ internal static partial class RuleChecks
         // ── The state block and layouts ──────────────────────────────────
         yield return E("a state block of 0 bytes", "$.stateBlock.size", Set("$.stateBlock.size", "0"));
         yield return E("layouts with no state block", "$.inputReports", Remove("$.stateBlock"));
+        yield return E("a state block that no layout or live feature report reads", "$.stateBlock", All(Remove("$.inputReports"), Remove("$.protocol.input.clock"), Remove("$.protocol.getReport")));
         yield return E("an empty layout list", "$.inputReports", Set("$.inputReports", "[]"));
         yield return E("a null layout", "$.inputReports[0]", Set(L0, "null"));
         yield return E("a layout with no name", "$.inputReports[0].name", Set($"{L0}.name", "\"\""));

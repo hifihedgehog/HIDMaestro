@@ -97,6 +97,12 @@ internal static class ModelCompiler
                 throw new FormException("$.stateBlock.size", $"{stateSize} is outside 1 to {ProgramForm.MaxState}");
         }
 
+        // A state block is what a device's own reports are built from. With
+        // nothing to build, SubmitState would hand the bare block to the
+        // transport as the input report.
+        if (g.StateBlock != null && g.InputReports == null && g.LiveFeatureReports == null)
+            throw new FormException("$.stateBlock", "no inputReports or liveFeatureReports reads it: a state block goes with the reports a device builds from it");
+
         var layouts = new List<LayoutForm>();
         if (g.InputReports != null)
         {
