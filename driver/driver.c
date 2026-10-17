@@ -547,18 +547,22 @@ InputIdCached(_In_ PDEVICE_CONTEXT ctx, _In_ UCHAR id)
 /*  FeatureAnswers at run time                                         */
 /* ------------------------------------------------------------------ */
 
-/* A SET_FEATURE on a report a message entry follows: its data is kept,
- * from the report ID for a descriptor that declares IDs and from the
- * first data byte for one that declares none (HID class hands the driver
- * a leading 0 for an unnumbered report), up to HM_FEATURE_MAX_DATA bytes,
- * and the pages of that report's entries start again. */
+/* A SET_FEATURE on a report a message entry follows: its buffer is kept
+ * whole, up to HM_FEATURE_MAX_DATA bytes, and the pages of that report's
+ * entries start again. For a descriptor that declares report IDs the
+ * buffer starts with the ID. For one that declares none HID class hands
+ * the minidriver the report without an ID byte, in both directions: the
+ * caller's leading 0 is left out (Wine 2df1ee2 hidclass.sys device.c:485,
+ * offset = report->ReportID ? 0 : 1, and vhidmini2 197ba21 vhidmini.c:765-767),
+ * as ServeFeature answers from the buffer's first byte and as the USB/IP
+ * device's data stage carries it (FeatureStubTable.OnSetFeature). */
 static VOID
 KeepFeatureSet(_In_ PDEVICE_CONTEXT ctx, _In_reads_(size) const UCHAR *buf, _In_ ULONG size)
 {
     if (ctx->FeatureOnReportCount == 0 || size == 0) return;
     UCHAR rid = ctx->UsesReportIds ? buf[0] : 0;
-    const UCHAR *data = ctx->UsesReportIds ? buf : buf + 1;
-    ULONG len = ctx->UsesReportIds ? size : size - 1;
+    const UCHAR *data = buf;
+    ULONG len = size;
     ULONG slot;
     for (slot = 0; slot < ctx->FeatureOnReportCount; slot++)
         if (ctx->FeatureOnReports[slot] == rid) break;

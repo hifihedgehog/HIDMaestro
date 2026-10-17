@@ -17,10 +17,13 @@
 //                the later lanes stop until the design names another
 //                source for the index.
 //   unnumbered   A profile without report IDs that carries the Deck's
-//                message entries: HidD_SetFeature with HID class's leading
-//                0 and the message 0x83, then HidD_GetFeature, which must
-//                answer 0x83's attributes. This tests the leading 0 the
-//                driver drops (R3-N9).
+//                message entries: HidD_SetFeature of the caller's leading 0
+//                and the message 0x83, then HidD_GetFeature, which must
+//                answer 0x83's attributes at the caller's byte 1, and the
+//                string request for index 1, answered with the index at the
+//                caller's byte 3. This tests that HID class hands the
+//                driver an unnumbered report without the caller's 0 in both
+//                directions, as Wine's HID class and vhidmini2 say (R3-N9).
 //   extract      Each UMDF2 catalog profile with a model is created, read
 //                back with HMDeviceExtractor.Extract, and the extracted
 //                profile must name the model its identity gives it, with
@@ -166,14 +169,31 @@ internal static class Program
         using var c = ctx.CreateControllerAt(3, p, Key());
         using var h = Open(Find(3));
         if (h == null) { Check("the unnumbered profile's HID device opens", false); return; }
-        var set = new byte[65];
-        set[1] = 0x83;
-        bool sent = HidD_SetFeature(h, set, set.Length);
-        var get = new byte[65];
-        bool got = HidD_GetFeature(h, get, get.Length);
-        Check("HidD_SetFeature of message 0x83 with HID class's leading 0, then HidD_GetFeature, answers 0x83's attributes",
-              sent && got && get[1] == 0x83 && get[2] == 0x2D,
-              $"set {sent} ({Marshal.GetLastPInvokeError()}), get {got}: {Convert.ToHexString(get, 0, 8)}");
+        // The caller writes report 0's leading 0 as SDL does, and HID class
+        // leaves it out of the minidriver's buffer in both directions (Wine
+        // 2df1ee2 hidclass.sys device.c:485, vhidmini2 197ba21
+        // vhidmini.c:765-767): the driver keeps [83 00 ...], matches the
+        // message at byte 0, and its answer lands at the caller's byte 1.
+        // The string request [00 AE 14 01] reaches it as [AE 14 01], index 1
+        // at byte 2, and its answer echoes the index at the caller's byte 3.
+        (bool Sent, bool Got, byte[] Get, int Error) Ask(params byte[] request)
+        {
+            var set = new byte[65];
+            request.CopyTo(set, 0);
+            bool sent = HidD_SetFeature(h, set, set.Length);
+            int error = sent ? 0 : Marshal.GetLastPInvokeError();
+            var get = new byte[65];
+            bool got = HidD_GetFeature(h, get, get.Length);
+            return (sent, got, get, error != 0 ? error : got ? 0 : Marshal.GetLastPInvokeError());
+        }
+        var a = Ask(0x00, 0x83);
+        Check("HidD_SetFeature of message 0x83 after the caller's leading 0, then HidD_GetFeature, answers 0x83's attributes at the caller's byte 1",
+              a.Sent && a.Got && a.Get[1] == 0x83 && a.Get[2] == 0x2D,
+              $"set {a.Sent}, get {a.Got}, error {a.Error}: {Convert.ToHexString(a.Get, 0, 8)}");
+        var b = Ask(0x00, 0xAE, 0x14, 0x01);
+        Check("the string request for index 1 answers index 1's string, the index at the caller's byte 3",
+              b.Sent && b.Got && b.Get[1] == 0xAE && b.Get[3] == 0x01,
+              $"set {b.Sent}, get {b.Got}, error {b.Error}: {Convert.ToHexString(b.Get, 0, 8)}");
     }
 
     static void Extract(HMContext ctx)

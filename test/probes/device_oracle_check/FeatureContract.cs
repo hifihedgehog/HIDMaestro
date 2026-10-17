@@ -384,8 +384,6 @@ internal static class FeatureContract
             ["type"] = "gamepad", ["descriptor"] = deckJson["descriptor"]!.GetValue<string>(),
             ["featureStubs"] = deckJson["featureStubs"]!.DeepClone(),
         };
-        foreach (var r in deck["featureStubs"]!["reports"]!.AsArray())
-            if (r!["param"] is JsonObject param) param["at"] = 3;
         var deckProfile = Load(work, deck);
         var chanConfig = InstanceConfig(new List<ControllerProfile> { channel, deckProfile }, work);
 
@@ -422,7 +420,7 @@ internal static class FeatureContract
          .Append("getfeature 81 64 81\nsetfeature 800104\n").Append(Asks(0x81, 0x81, 0x81, 0x81))
          .Append("setfeature 800104\n").Append(Asks(0x81)).Append("setfeature 800999\n").Append(Asks(0x81, 0x05)).Append("remove\n");
         s.Append("stream deck\nversion tag-own\ndevice deck 0 driver\n")
-         .Append("setfeature 008300\ngetfeature 00 64 00\nsetfeature 00AE14FF01\ngetfeature 00 64 00\nsetfeature 00AE1401FF\ngetfeature 00 64 00\nremove\n");
+         .Append("setfeature 8300\ngetfeature 00 64 00\nsetfeature AE1401\ngetfeature 00 64 00\nsetfeature AE14FF\ngetfeature 00 64 00\nremove\n");
         string Ext(byte id, int len) => string.Concat(Enumerable.Range(0, len).Select(i => i == 0 ? id.ToString("X2") : ((byte)(i * 5)).ToString("X2")));
         s.Append("stream extended\nversion tag-own\ndevice ds0 0 driver\n")
          .Append($"read 78\nframe - {Ext(0x31, 78)}\nread 78\nframe - {Ext(0x31, 77)}\nframe - {Ext(0x32, 78)}\nremove\n");
@@ -509,7 +507,14 @@ internal static class FeatureContract
                    && shown[4] == "8101040233" && shown[5] == "8101040311" && Status(g[6]) == NotSupported && Status(g[7]) == 0 && Body(g[7])[0] == 0x05;
             return (ok, string.Join(" ", shown));
         });
-        Add("the Deck's unnumbered channel with HID class's leading 0: 0x83 answers, and 0xAE 0x14 answers by its parameter at byte 3", () =>
+        // HID class hands a minidriver an unnumbered report without the
+        // caller's leading 0, in both directions (Wine 2df1ee2 hidclass.sys
+        // device.c:485, vhidmini2 197ba21 vhidmini.c:765-767): SDL's
+        // [00 83 00 ...] arrives as [83 00 ...], and a string request
+        // [00 AE len index] as [AE len index], its index at byte 2 as the
+        // Deck's table says. At 807a3d4a the driver dropped the first byte
+        // of that buffer, so 0x83 at byte 0 never matched.
+        Add("the Deck's unnumbered channel as HID class hands it over: 0x83 answers, and 0xAE answers by its index at byte 2", () =>
         {
             var g = Of(r["deck"], "getfeature");
             string Show(byte[] x) => Status(x) == 0 ? Convert.ToHexString(Body(x)[..4]) : Status(x).ToString("X8");
