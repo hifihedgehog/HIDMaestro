@@ -246,6 +246,19 @@ internal static class Builder
                 bool got = (bool)Api.Prop(P(id), "BuildsItsOwnReports")!;
                 return (got == want, got.ToString());
             });
+        // A null descriptor clears the copy's, as it did before v2.0.0, with
+        // the keys it governed, and the profile builds with none, as one
+        // never given a descriptor does (its create refuses it). At 9dac4573
+        // the setter threw NullReferenceException.
+        c.Run("DescriptorHex(null) on a copy clears its descriptor and the keys it governed", () =>
+        {
+            try
+            {
+                var p = new HMProfileBuilder().FromProfile(P("dualsense")).Id("user-no-descriptor").DescriptorHex(null!).Build();
+                return (p.DescriptorHex == null && p.AxisMap == null, $"descriptor {p.DescriptorHex ?? "null"}, axisMap {(p.AxisMap == null ? "null" : "kept")}");
+            }
+            catch (Exception e) { return (false, $"{e.GetType().Name}: {e.Message}"); }
+        });
         // A copy of a USB/IP persona given another PID builds, with the PID
         // in its USB device descriptor, and the source keeps its own. At
         // 31efc70f the copy's descriptor kept the source's PID and its

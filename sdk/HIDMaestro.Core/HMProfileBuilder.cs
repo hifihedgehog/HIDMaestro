@@ -148,9 +148,11 @@ public sealed class HMProfileBuilder
         return this;
     }
 
-    private void SetDescriptor(string hex)
+    private void SetDescriptor(string? hex)
     {
-        if (_descriptorHex != null && !SameBytes(_descriptorHex, hex)) DropReportFormat();
+        // Null clears the descriptor, as before v2.0.0, and a cleared
+        // descriptor governs no report format either.
+        if (_descriptorHex != null && (hex == null || !SameBytes(_descriptorHex, hex))) DropReportFormat();
         _descriptorHex = hex;
     }
 
