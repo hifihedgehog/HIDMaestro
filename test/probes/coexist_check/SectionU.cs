@@ -9,7 +9,8 @@
 //    no claim pipe, no device, no record entry and no section, the program
 //    keeps running, and the same identity creates again at once, in the
 //    same program and in another. Before each lock every object of the
-//    index is gone, the name the lock takes included. Last, a v1.12.0
+//    index is gone, the name the lock takes included, and the program
+//    whose controller was disposed holds none of them. Last, a v1.12.0
 //    program starts an Xbox 360 controller on the index while a create
 //    waits before its mapping: the create is refused, and the v1.12.0
 //    program's devices, configuration and sections stay as they were.
@@ -147,7 +148,8 @@ internal static partial class Program
         // create's open of it is refused after every other object of the
         // mapping exists. Only index t carries the event, so the denial in
         // the reply shows the create reached index t and failed there.
-        bool clear5 = WaitInputObjectsGone(t, output: false, out string trace5);
+        bool clear5 = WaitInputObjectsGone(t, output: false, out string trace5, out var holders5);
+        Check($"U: after its dispose the program holds no object of index {t}", !holders5.Contains(a.Pid), $"program {a.Pid}");
         Check($"U: before the next create no object of index {t}'s input mapping exists", clear5, trace5);
         string f5;
         using (LockedEvent($@"Global\HIDMaestroInputEvent{t}", t))
@@ -175,7 +177,8 @@ internal static partial class Program
         string tc = PeerProcess.Field(c4, "transport")!;
         a.Send("dispose");
         WaitFor(() => Native.HidPaths(0x054C, 0x0CE6).Except(before, StringComparer.OrdinalIgnoreCase).Count() == 0, 15_000);
-        bool clear4 = WaitInputObjectsGone(tc, output: true, out string trace4);
+        bool clear4 = WaitInputObjectsGone(tc, output: true, out string trace4, out var holders4);
+        Check($"U: after the composite's dispose the program holds no object of index {tc}", !holders4.Contains(a.Pid), $"program {a.Pid}");
         Check($"U: before the next composite no section or event of index {tc} exists", clear4, trace4);
         string f4;
         using (LockedEvent($@"Global\HIDMaestroOutputEvent{tc}", tc))
@@ -419,13 +422,15 @@ internal static partial class Program
     /// how long their scan took, when each object went, came back or first
     /// appeared, who holds any still there after 10 s, and the present
     /// devices on the index, so a check that finds one left says what kept
-    /// it.</summary>
-    static bool WaitInputObjectsGone(string index, bool output, out string trace)
+    /// it. <paramref name="firstHolders"/> is every process the scan found
+    /// holding one of them.</summary>
+    static bool WaitInputObjectsGone(string index, bool output, out string trace, out HashSet<int> firstHolders)
     {
         var clock = System.Diagnostics.Stopwatch.StartNew();
         var first = InputObjectsPresent(index, output);
         var reports = ObjectHolders.DescribeAll(first.Select(o => ($@"Global\{o}", IsSection(o))).ToList());
         long scanned = clock.ElapsedMilliseconds;
+        firstHolders = reports.SelectMany(r => r.Holders).Select(h => h.Pid).ToHashSet();
         string devices = first.Count == 0 ? "" : DevicesText(index);
         var changes = new List<string>();
         var previous = new HashSet<string>(first);
