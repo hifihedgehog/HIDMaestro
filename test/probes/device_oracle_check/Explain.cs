@@ -90,7 +90,9 @@ internal interface IExplainer
 /// (GoldenCase.Note), the base's and the tree's.</summary>
 internal interface INoteReader
 {
-    void Note(string tag, byte[] before, byte[] after);
+    /// <summary>Reads the note. Returns what is wrong with the base's note,
+    /// which fails the run whatever the list claims, or null.</summary>
+    string? Note(string tag, byte[] before, byte[] after);
 }
 
 /// <summary>The rules of the lane --lane names, from its "rule" lines.</summary>
@@ -246,7 +248,7 @@ internal sealed class ExplainSession
     /// <summary>What one stream did against the base: its outputs by
     /// category, "other" counting those the rules do not account
     /// for.</summary>
-    public sealed record StreamResult(long Same, long Changed, SortedDictionary<string, long> Categories);
+    public sealed record StreamResult(long Same, long Changed, SortedDictionary<string, long> Categories, string? Rebuild);
 
     readonly BinaryReader _base;
     readonly string _case;
@@ -265,6 +267,7 @@ internal sealed class ExplainSession
     // lane's, and this lane's are rebuilt from the base by its rules.
     bool _later;
     GoldenStream? _rebuilt;
+    byte[]? _noteText;
     string? _rebuildBroken;
 
     public ExplainSession(string dir, string caseName)
@@ -287,7 +290,7 @@ internal sealed class ExplainSession
         var chain = Changes?.Chain($"{_case}/{name}") ?? new List<ChangeList.Entry>();
         int order = Changes?.LaneOrder(Lane) ?? int.MaxValue;
         _later = Earlier && chain.Any(e => e.Lane != Lane && Changes!.LaneOrder(e.Lane) > order);
-        _rebuilt = _later ? new GoldenStream(name) : null;
+        _rebuilt = new GoldenStream(name);
         _rebuildBroken = null;
     }
 
@@ -298,14 +301,31 @@ internal sealed class ExplainSession
         string baseTag = Encoding.ASCII.GetString(_base.ReadBytes(_base.ReadByte()));
         byte[] before = _base.ReadBytes(checked((int)_base.ReadUInt32()));
         _baseStream!.Add(baseTag, before);
+        // A note named text is the text the stream's sha256 output hashes
+        // (case 5's plan), so the base's note is held to the base's output.
+        if (baseTag == "sha256" && _noteText != null)
+        {
+            if (!System.Security.Cryptography.SHA256.HashData(_noteText).AsSpan().SequenceEqual(before))
+                Fail($"{_stream}: the base dump's text note is not the text its sha256 output hashes");
+            _noteText = null;
+        }
         bool rules = ExplainRules.Active.Any;
         if (_later)
         {
             Rebuild(baseTag, before, rules ? explainer : null, input);
             return;
         }
+        _rebuilt!.Add(baseTag, Compare(tag, data, baseTag, before, explainer, input, rules));
+    }
+
+    /// <summary>One output against the base and the rules. Returns the
+    /// output the rules rebuild from the base: what they give where they
+    /// give it, the base's bytes elsewhere.</summary>
+    byte[] Compare(string tag, ReadOnlySpan<byte> data, string baseTag, byte[] before, IExplainer? explainer, ExplainInput input, bool rules)
+    {
         bool same = baseTag == tag && data.SequenceEqual(before);
-        if (same && (!rules || explainer == null)) { _same++; return; }
+        if (same && (!rules || explainer == null)) { _same++; return before; }
+        byte[] rebuilt = before;
         string why;
         if (baseTag != tag) why = $"tag {baseTag} became {tag}";
         else if (explainer == null) why = "no explainer lays out this stream";
@@ -316,12 +336,13 @@ internal sealed class ExplainSession
             _tally.Reset();
             explainer.Expect(tag, before, expected, input, _tally);
             if (_tally.Raw) _raw++;
+            if (_tally.Why == null) rebuilt = expected;
             if (_tally.Why == null && data.SequenceEqual(expected))
             {
-                if (same) { _same++; return; }
+                if (same) { _same++; return rebuilt; }
                 _changed++;
                 foreach (var c in _tally.Cats) _categories[c] = _categories.GetValueOrDefault(c) + 1;
-                return;
+                return rebuilt;
             }
             if (_tally.Why != null) why = _tally.Why;
             else
@@ -335,6 +356,7 @@ internal sealed class ExplainSession
         if (_unexplained.Count < 4)
             _unexplained.Add($"{tag}{(same ? ", unchanged," : "")} {why}: base {Convert.ToHexString(before)}, tree {Convert.ToHexString(data)}");
         _unexplainedCount++;
+        return rebuilt;
     }
 
     /// <summary>This lane's output rebuilt from the base by its rules, for a
@@ -374,7 +396,8 @@ internal sealed class ExplainSession
         string baseTag = Encoding.ASCII.GetString(_base.ReadBytes(_base.ReadByte()));
         byte[] before = _base.ReadBytes(checked((int)_base.ReadUInt32()));
         if (baseTag != tag) { Fail($"{_stream}: note {tag}, the base has note {baseTag} here"); return; }
-        (explainer as INoteReader)?.Note(tag, before, data.ToArray());
+        if ((explainer as INoteReader)?.Note(tag, before, data.ToArray()) is { } wrong) Fail($"{_stream}: {wrong}");
+        if (tag == "text") _noteText = before;
     }
 
     /// <summary>The pin a stream had before this lane: the last entry of a
@@ -421,7 +444,14 @@ internal sealed class ExplainSession
             var claimed = own?.Categories ?? new SortedDictionary<string, long>(StringComparer.Ordinal);
             string? problem = null;
             string verdict = "REBUILT";
-            if (claimed.ContainsKey("other")) verdict = "KEPT";
+            if (claimed.ContainsKey("other"))
+            {
+                // The outputs no rule gives were held at the lane's own tip.
+                // What the rules give is held to the entry's rebuild pin.
+                verdict = "KEPT";
+                if (own!.Rebuild != _rebuilt!.Digest)
+                    problem = $"{own.Source} claims outputs no rule gives with rebuild pin {Short(own.Rebuild ?? "none")}, and the rules rebuild {Short(_rebuilt.Digest)}";
+            }
             else if (_rebuildBroken != null)
                 problem = $"the rules cannot rebuild lane {Lane}'s output, {_rebuildBroken}";
             else if (_rebuilt!.Count != pin.Item1 || _rebuilt.Digest != pin.Item2)
@@ -435,7 +465,8 @@ internal sealed class ExplainSession
         }
         else if (_changed > 0 || _unexplainedCount > 0)
         {
-            Results[_stream] = new StreamResult(_same, _changed, counts);
+            string? rebuild = counts.ContainsKey("other") ? _rebuilt!.Digest : null;
+            Results[_stream] = new StreamResult(_same, _changed, counts, rebuild);
             string? problem = null;
             var last = chain.LastOrDefault();
             if (last != null && last != own && Changes!.LaneOrder(last.Lane) > Changes.LaneOrder(Lane))
@@ -444,6 +475,8 @@ internal sealed class ExplainSession
                 problem = chain.Count == 0 ? "no entry names it" : $"no entry of lane {Lane} names it";
             else if (!counts.SequenceEqual(own.Categories))
                 problem = $"{own.Source} claims {(own.Fields.Count == 0 ? "no categories" : string.Join(" ", own.Fields.Select(kv => $"{kv.Key}={kv.Value}")))}";
+            else if (own.Rebuild != rebuild)
+                problem = $"{own.Source} pins the rules' rebuild as {Short(own.Rebuild ?? "none")}, and they rebuild {Short(rebuild ?? "none")}: an entry that claims other pins the rebuild, and only such an entry";
             string verdict = problem != null ? "FAIL" : _unexplainedCount == 0 ? "EXPLAINED" : "CLAIMED";
             if (problem != null) Failures++;
             Lines.Add($"  [{verdict}] {where}: {tally}{(problem == null ? "" : $". {problem}")}");
@@ -1603,7 +1636,7 @@ internal sealed class PlanExplainer : IExplainer, INoteReader
     readonly Dictionary<string, (byte[] Base, byte[] Expected, SortedSet<string> Cats)> _bodies = new(StringComparer.Ordinal);
     string? _why;
 
-    public void Note(string tag, byte[] before, byte[] after)
+    public string? Note(string tag, byte[] before, byte[] after)
     {
         _before = Encoding.UTF8.GetString(before).Split('\n');
         _after = Encoding.UTF8.GetString(after).Split('\n');
@@ -1623,6 +1656,42 @@ internal sealed class PlanExplainer : IExplainer, INoteReader
             if (t.Why != null) _why ??= $"body {b[1]}: {t.Why}";
             _bodies[b[1]] = (b0, b1, new SortedSet<string>(t.Cats, StringComparer.Ordinal));
         }
+        return ConfigAgainstList();
+    }
+
+    /// <summary>The base plan's configured values against what the list
+    /// pinned before the lane: the last config entry of an earlier lane for
+    /// each value. A value an earlier lane's entry names that the base
+    /// writes otherwise means the list or the dump is not the lane's
+    /// base.</summary>
+    string? ConfigAgainstList()
+    {
+        if (ExplainSession.Changes is not { } list) return null;
+        var values = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        string? profile = null;
+        foreach (var line in _before!)
+        {
+            var w = line.Split(' ');
+            if (w.Length >= 3 && w[0] == "profile") profile = w[2];
+            else if (w.Length == 4 && w[0] == "value" && profile != null)
+            {
+                string key = $"{profile} {w[1]}";
+                if (!values.TryGetValue(key, out var set)) values[key] = set = new HashSet<string>(StringComparer.Ordinal);
+                set.Add($"{w[2]}:{w[3]}");
+            }
+        }
+        int order = list.LaneOrder(ExplainSession.Lane);
+        foreach (var chain in list.Config.GroupBy(e => e.Key, StringComparer.Ordinal))
+        {
+            var pin = chain.LastOrDefault(e => e.Lane != ExplainSession.Lane && list.LaneOrder(e.Lane) < order);
+            if (pin == null) continue;
+            var parts = pin.Target.Split(' ', 3);
+            string want = parts.Length == 3 ? parts[2] : "";
+            bool held = values.TryGetValue(chain.Key, out var have);
+            if (want == "absent" ? !held : held && have!.Contains(want)) continue;
+            return $"the base's plan writes {chain.Key} as {(held ? string.Join(" or ", have!) : "absent")}, and {pin.Source} (lane {pin.Lane}) pins {want} before lane {ExplainSession.Lane}";
+        }
+        return null;
     }
 
     /// <summary>The plan's text with each body the rules give.</summary>

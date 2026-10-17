@@ -16,6 +16,8 @@
 //            dropped a line of another lane since its base list in git.
 //   base     --explain refuses a base dump whose stream is not what the list
 //            pinned before the lane, or the golden file where nothing did.
+//   rebuild  an entry that claims other also pins what the rules rebuild,
+//            which --explain checks at the lane's tip and with --earlier.
 //   later    --explain --earlier re-runs a lane after a later lane pinned
 //            the same stream: it rebuilds the lane's bytes from the base and
 //            holds them to the lane's own pin. Without --earlier the stream
@@ -42,6 +44,7 @@ internal static class SelfTest
 
     public static int Run()
     {
+        s_failures = 0;
         string dir = Path.Combine(Path.GetTempPath(), $"hmoracle-selftest-{Environment.ProcessId}");
         Directory.CreateDirectory(dir);
         try
@@ -52,12 +55,16 @@ internal static class SelfTest
             History(dir);
             Base(dir);
             Later(dir);
+            Rebuilds(dir);
         }
         finally
         {
             // git writes its objects read-only.
             foreach (var f in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories)) File.SetAttributes(f, FileAttributes.Normal);
             Directory.Delete(dir, recursive: true);
+            ExplainSession.Changes = null;
+            ExplainSession.Lane = "";
+            ExplainSession.Golden = new Dictionary<string, (long, string)>();
         }
         Console.WriteLine($"device_oracle_check selftest: {(s_failures == 0 ? "PASS" : $"FAIL, {s_failures} check(s)")}");
         return s_failures == 0 ? 0 : 1;
@@ -103,7 +110,7 @@ internal static class SelfTest
         Check(lines.Count == 2 && lines[0] == w3 && lines[1] == $"stream c/s count 2 digest {B} | X | ?",
               "writer with --lane X and no --explain keeps lane W3's entry and adds one of lane X");
 
-        lines = Write(dir, List(dir, w3), lane: "X", (2, B), new ExplainSession.StreamResult(0, 5, counts));
+        lines = Write(dir, List(dir, w3), lane: "X", (2, B), new ExplainSession.StreamResult(0, 5, counts, null));
         Check(lines.Count == 2 && lines[0] == w3 && lines[1] == $"stream c/s count 2 digest {B} round=7 | X | ?",
               "writer with --explain adds lane X's entry with its counts after lane W3's");
 
@@ -115,7 +122,7 @@ internal static class SelfTest
         Check(lines.Count == 2 && lines[1] == $"stream c/s count 2 digest {B} | X | the lane's own change",
               "writer re-pins lane X's own entry in place, without the stale categories, with no --explain");
 
-        lines = Write(dir, List(dir, w3.Replace("count 1", "count 9"), own), lane: "X", (2, B), new ExplainSession.StreamResult(0, 5, counts));
+        lines = Write(dir, List(dir, w3.Replace("count 1", "count 9"), own), lane: "X", (2, B), new ExplainSession.StreamResult(0, 5, counts, null));
         Check(lines.Count == 2 && lines[1] == $"stream c/s count 2 digest {B} round=7 | X | the lane's own change",
               "writer re-pins lane X's own entry with --explain's counts");
 
@@ -160,6 +167,10 @@ internal static class SelfTest
         foreach (var (t, d) in outputs) s.Add(t, d);
         return (s.Count, s.Digest);
     }
+
+    /// <summary>The rebuild pin of an entry that claims other: with no rule,
+    /// the base's bytes.</summary>
+    static string Rebuild((string Tag, byte[] Data)[] @base) => $" rebuild {Pin(@base).Digest}";
 
     static string Entry((string Tag, byte[] Data)[] outputs, string lane, string fields = "") =>
         $"stream c/s count {Pin(outputs).Count} digest {Pin(outputs).Digest}{fields} | {lane} | r";
@@ -207,13 +218,28 @@ internal static class SelfTest
         Check(Explain(dir, B0, B0, golden: B0, "X") == 0, "base: a dump equal to the golden file passes");
         Check(Explain(dir, T1, T1, golden: B0, "X", Entry(T1, "X", " other=1")) > 0,
               "base: a dump of the lane's own tree fails, though the lane's entry pins its bytes");
-        Check(Explain(dir, T1, T2, golden: B0, "X", Entry(T1, "W3"), Entry(T2, "X", " other=1")) == 0,
+        Check(Explain(dir, T1, T2, golden: B0, "X", Entry(T1, "W3"), Entry(T2, "X", Rebuild(T1) + " other=1")) == 0,
               "base: a dump equal to lane W3's pin before lane X passes");
         Check(Explain(dir, B0, T2, golden: B0, "X", Entry(T1, "W3"), Entry(T2, "X", " other=1")) > 0,
               "base: a dump from before lane W3's pin fails");
     }
 
     static bool s_earlier;
+
+    static void Rebuilds(string dir)
+    {
+        Check(Explain(dir, T1, T2, golden: B0, "X", Entry(T1, "W3"), Entry(T2, "X", " other=1")) > 0,
+              "rebuild: an entry that claims other without its rebuild pin fails");
+        Check(Explain(dir, T1, T2, golden: B0, "X", Entry(T1, "W3"), Entry(T2, "X", Rebuild(T2) + " other=1")) > 0,
+              "rebuild: an entry whose rebuild pin is not what the rules rebuild fails");
+        s_earlier = true;
+        try
+        {
+            Check(Explain(dir, B0, T2, golden: B0, "X", Entry(T1, "X", Rebuild(T1) + " other=1"), Entry(T2, "Y")) > 0,
+                  "rebuild: at a later tip, lane X's claim of other is held to its rebuild pin");
+        }
+        finally { s_earlier = false; }
+    }
 
     static void Later(string dir)
     {
@@ -226,7 +252,7 @@ internal static class SelfTest
 
     static void LaterEarlier(string dir)
     {
-        Check(Explain(dir, B0, T2, golden: B0, "X", Entry(T1, "X", " other=1"), Entry(T2, "Y")) == 0,
+        Check(Explain(dir, B0, T2, golden: B0, "X", Entry(T1, "X", Rebuild(B0) + " other=1"), Entry(T2, "Y")) == 0,
               "later: lane X's claim of outputs no rule gives is kept once lane Y pins the stream");
         Check(Explain(dir, B0, T2, golden: B0, "X", "rule round | X | r", Entry(T2, "Y")) == 0,
               "later: a stream lane X left alone and lane Y pinned since rebuilds to the golden bytes");

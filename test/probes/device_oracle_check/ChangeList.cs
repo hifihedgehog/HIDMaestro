@@ -59,6 +59,11 @@ internal sealed class ChangeList
         public long Count;
         public string Digest = "";
 
+        /// <summary>For an entry that claims other outputs: the digest of the
+        /// stream the lane's rules rebuild from its base, which --explain
+        /// --earlier holds at a later tip.</summary>
+        public string? Rebuild;
+
         /// <summary>A stream entry's categories, or a rule entry's keys.</summary>
         public readonly SortedDictionary<string, string> Fields = new(StringComparer.Ordinal);
 
@@ -87,7 +92,7 @@ internal sealed class ChangeList
             string head = Kind switch
             {
                 "lane" => $"lane {Target}",
-                "stream" => $"stream {Target} count {Count} digest {Digest}{fields}",
+                "stream" => $"stream {Target} count {Count} digest {Digest}{(Rebuild != null ? $" rebuild {Rebuild}" : "")}{fields}",
                 "rule" => $"rule {Target}{fields}",
                 _ => $"{Kind} {Target}",
             };
@@ -98,7 +103,7 @@ internal sealed class ChangeList
     public readonly List<Entry> Entries = new();
 
     static readonly Regex StreamHead = new(
-        @"^stream (?<t>[^ *]+/[^ *]+) count (?<n>\d+) digest (?<d>[0-9A-F]{64}|none)(?<f>( [a-z][a-z-]*=\d+)*)$",
+        @"^stream (?<t>[^ *]+/[^ *]+) count (?<n>\d+) digest (?<d>[0-9A-F]{64}|none)( rebuild (?<r>[0-9A-F]{64}))?(?<f>( [a-z][a-z-]*=\d+)*)$",
         RegexOptions.CultureInvariant);
     static readonly Regex LaneHead = new(@"^lane (?<t>[A-Za-z0-9][A-Za-z0-9.-]*)$", RegexOptions.CultureInvariant);
     static readonly Regex RuleHead = new(
@@ -133,6 +138,7 @@ internal sealed class ChangeList
                     e.Target = m.Groups["t"].Value;
                     e.Count = long.Parse(m.Groups["n"].Value);
                     e.Digest = m.Groups["d"].Value;
+                    if (m.Groups["r"].Success) e.Rebuild = m.Groups["r"].Value;
                     if ((e.Digest == "none") != (e.Count == 0))
                         throw new InvalidDataException($"{where}: digest none goes with count 0 and only with it");
                     AddFields(e, m.Groups["f"].Value, where);
@@ -315,7 +321,11 @@ internal static class ChangeWriter
                     continue;
                 }
                 var copy = new ChangeList.Entry { Kind = "stream", Target = e.Target, Lane = e.Lane, Reason = e.Reason, Count = pin.Count, Digest = pin.Digest };
-                if (x != null) foreach (var kv in x.Categories) copy.Fields[kv.Key] = kv.Value.ToString();
+                if (x != null)
+                {
+                    foreach (var kv in x.Categories) copy.Fields[kv.Key] = kv.Value.ToString();
+                    copy.Rebuild = x.Rebuild;
+                }
                 lines.Add(copy.Line());
                 continue;
             }
@@ -341,7 +351,11 @@ internal static class ChangeWriter
     static IEnumerable<string> New(string target, (long Count, string Digest) pin, ExplainSession.StreamResult? x, string lane)
     {
         var e = new ChangeList.Entry { Kind = "stream", Target = target, Lane = lane, Reason = "?", Count = pin.Count, Digest = pin.Digest };
-        if (x != null && lane != "?") foreach (var kv in x.Categories) e.Fields[kv.Key] = kv.Value.ToString();
+        if (x != null && lane != "?")
+        {
+            foreach (var kv in x.Categories) e.Fields[kv.Key] = kv.Value.ToString();
+            e.Rebuild = x.Rebuild;
+        }
         yield return e.Line();
     }
 }
