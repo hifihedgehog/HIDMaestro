@@ -82,6 +82,7 @@ internal static class FeatureContract
             var keptPlan = File.ReadAllText(Path.Combine(goldenDir, "case5-plan.txt"), Encoding.UTF8);
             Matrix(c, catalog, keptPlan, tree, oracle, work);
             Cases(c, catalog, tree, oracle, work);
+            InputLengths(c, catalog, tree, oracle, work);
         }
         catch (Exception e)
         {
@@ -93,6 +94,73 @@ internal static class FeatureContract
         }
         Console.WriteLine($"  feature-contract: {(c.Failures == 0 ? "PASS" : $"FAIL, {c.Failures}")}");
         return c.Failures;
+    }
+
+    /// <summary>The driver's own walk of each descriptor's input reports
+    /// (driver.c BuildInputLengths) against the SDK's (HidReportMap's
+    /// FrameBytes), on every UMDF2 catalog profile: an extended-lane frame of
+    /// each input report at the SDK's length must go out at that length. A
+    /// shape the two walks read differently drops every extended frame of
+    /// that report on UMDF2. The DualShock 3 sixaxis form is left out: the
+    /// driver reads its native report apart. So is the Switch Pro, whose
+    /// input the driver's responder serves. A report longer than the
+    /// extended lane's 80 bytes never travels it. At e34be99b the harness
+    /// ran the walk on four profiles (case 5's extended-lengths).</summary>
+    static void InputLengths(Checks c, IReadOnlyList<ControllerProfile> catalog, string tree, string oracle, string work)
+    {
+        // The Switch Pro identity's driver serves its input from the
+        // protocol responder's stream, never from the extended lane
+        // (driver.c SwitchFillLatestState), until DD-5 moves the responder
+        // to data.
+        var profiles = catalog.Where(p => !p.RequiresUsbipBackend && p.HasDescriptor && p.SixaxisCompatible != true
+                                          && p.Resolved.IdentityEntry != "identity:nintendo-switch-pro")
+            .OrderBy(p => p.Id, StringComparer.Ordinal).ToList();
+        var config = Case5Driver.InstanceConfig(profiles, work);
+        var plan = new StringBuilder();
+        var script = new StringBuilder();
+        // One stream a frame: the declared length must go out, and one byte
+        // more must not, so a walk that read the report longer fails too.
+        var asked = new List<(string Stream, string Profile, byte Id, int Length, bool Declared)>();
+        foreach (var p in profiles)
+        {
+            plan.Append(Block("plain", p, config[p.Id], p.Id));
+            var map = HidReportMap.Parse(p.GetDescriptorBytes()!);
+            foreach (var r in map.Reports.Where(r => r.Kind == HidReportKind.Input).GroupBy(r => r.ReportId).Select(g => g.First()))
+            {
+                int len = r.FrameBytes;
+                if (len <= 0 || len > 80) continue;
+                byte first = map.UsesReportIds ? r.ReportId : (byte)0x5A;
+                string Frame(int n) => string.Concat(Enumerable.Range(0, n).Select(i => i == 0 ? first.ToString("X2") : ((byte)(i * 7)).ToString("X2")));
+                foreach (int n in len < 80 ? new[] { len, len + 1 } : new[] { len })
+                {
+                    string name = $"lengths/{p.Id}/{first:X2}/{n}";
+                    script.Append($"stream {name}\ndevice {p.Id} 0 driver\nread {n}\nframe - {Frame(n)}\nremove\n");
+                    asked.Add((name, p.Id, first, n, n == len));
+                }
+            }
+        }
+        var run = RunScript(tree, plan.ToString(), script.ToString(), work, "lengths");
+        var dropped = new List<string>();
+        var leaked = new List<string>();
+        foreach (var (name, profile, id, n, declared) in asked)
+        {
+            var done = (run.TryGetValue(name, out var outs) ? Of(outs, "read") : new List<byte[]>()).Where(x => Status(x) == 0).ToList();
+            if (declared && !(done.Count == 1 && Info(done[0]) == n && Body(done[0])[0] == id))
+                dropped.Add($"{profile} 0x{id:X2} at {n}: {(done.Count == 0 ? "no read" : $"{Info(done[0])} bytes")}");
+            if (!declared && done.Count != 0)
+                leaked.Add($"{profile} 0x{id:X2} at {n}: {Info(done[0])} bytes went out");
+        }
+        int declaredCount = asked.Count(a => a.Declared);
+        c.Check($"each UMDF2 catalog profile's input reports, {declaredCount} on {profiles.Count} profiles, go out on the extended lane at the length the SDK reads",
+                dropped.Count == 0, dropped.Count == 0 ? "" : $"{dropped.Count} dropped: {string.Join("; ", dropped.Take(8))}");
+        c.Check($"and a frame one byte longer, {asked.Count - declaredCount} of them, goes out for none", leaked.Count == 0,
+                leaked.Count == 0 ? "" : $"{leaked.Count} went out: {string.Join("; ", leaked.Take(8))}");
+        // The control: 9bd6279's driver had no length bound and sends the
+        // longer frames, so the check above tells a bound from none.
+        var o = RunScript(oracle, plan.ToString(), script.ToString(), work, "lengths-oracle");
+        int oracleLeaks = asked.Count(a => !a.Declared && o.TryGetValue(a.Stream, out var outs) && Of(outs, "read").Any(x => Status(x) == 0));
+        c.Check("9bd6279's driver, which has no bound, sends the longer frames, so the check fails without one", oracleLeaks > 0,
+                $"{oracleLeaks} of {asked.Count - declaredCount} went out");
     }
 
     // ── plans and scripts ────────────────────────────────────────────────
