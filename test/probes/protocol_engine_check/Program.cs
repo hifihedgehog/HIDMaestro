@@ -466,6 +466,9 @@ internal static class Engine
         Check("a port reset keeps imuMode", e.GetRegister(imu) == 0x18, $"0x{e.GetRegister(imu):X}");
         e.Reset();
         Check("an attach returns imuMode to 0", e.GetRegister(imu) == 0);
+        Send(e, "01 87 03 30 18 00");
+        Send(e, "01 8E");
+        Check("LOAD_DEFAULT_SETTINGS (0x8E) returns imuMode to 0", e.GetRegister(imu) == 0, $"0x{e.GetRegister(imu):X}");
     }
 }
 

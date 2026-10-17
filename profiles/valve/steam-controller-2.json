@@ -286,6 +286,10 @@
             "key": { "offset": 0, "value": "30" },
             "store": { "imuMode": { "offset": 1, "bytes": 2, "order": "le" } }
           }
+        },
+        {
+          "match": "01 8E",
+          "set": { "imuMode": 0 }
         }
       ]
     }
