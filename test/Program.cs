@@ -878,8 +878,11 @@ partial class Program
         };
     }
 
-    /// <summary>Best-effort one-line decode of common output packet types.
-    /// Falls back to a hex dump for unrecognized payloads.</summary>
+    /// <summary>One-line decode of an output packet. An XInput rumble packet
+    /// is read by its source. A HID output report the profile's
+    /// extendedOutputReport describes is decoded with that spec, the decode
+    /// that raises <see cref="HMController.OutputDecoded"/>, so each field is
+    /// read where the profile says it is. Anything else is a hex dump.</summary>
     static string DecodeOutputPacket(HMProfile profile, in HMOutputPacket pkt)
     {
         var data = pkt.Data.Span;
@@ -888,35 +891,25 @@ partial class Program
         if (pkt.Source == HMOutputSource.XInput && data.Length >= 5)
             return $"XInput rumble lo={data[2]} hi={data[3]}";
 
-        // DualSense / DS4 output report (HID OUTPUT). Motor offsets differ
-        // between USB and BT report formats:
-        //   DS5 USB Report 0x02: motors at data[2..3]
-        //   DS5 BT  Report 0x31: BT framing prefix shifts motors to data[3..4]
-        //   DS4 USB Report 0x05: motors at data[3..4] (byte 1 = enable flags)
-        //   DS4 BT  Report 0x11: Sony BT 0xC0 0x20 framing → motors at data[5..6]
-        //                        (per Chromium dualshock4_controller.cc
-        //                         SetVibrationBluetooth: bytes 6/7 of the
-        //                         RID-included buffer = data[5..6] post-strip).
-        if (pkt.Source == HMOutputSource.HidOutput
-            && profile.VendorId == 0x054C && data.Length >= 4)
+        var spec = profile.Inner.ExtendedOutputReport;
+        if (pkt.Source == HMOutputSource.HidOutput && spec != null && pkt.ReportId == spec.ReportIdByte)
         {
-            int rumbleOffset;
-            switch (pkt.ReportId)
+            // The codec reads the report with its ID at byte 0, as the
+            // controller hands it over (HMController's output thread).
+            var full = new byte[data.Length + 1];
+            full[0] = pkt.ReportId;
+            data.CopyTo(full.AsSpan(1));
+            try
             {
-                case 0x02: rumbleOffset = 2; break; // DS5 USB
-                case 0x31: rumbleOffset = 3; break; // DS5 BT
-                case 0x05: rumbleOffset = 3; break; // DS4 USB
-                case 0x11: rumbleOffset = 5; break; // DS4 BT
-                default:   rumbleOffset = 2; break; // best-effort fallback
+                var (fields, _) = VendorBlobCodec.Decode(spec, full);
+                return DecodedLine(fields, full.Length);
             }
-            if (rumbleOffset + 1 < data.Length)
-                return $"PS rumble weak={data[rumbleOffset]} strong={data[rumbleOffset + 1]} ({data.Length}B)";
+            catch (Exception)
+            {
+                // The controller swallows any decode that fails and raises no
+                // OutputDecoded. The hex dump below stands in for it.
+            }
         }
-
-        // Xbox 360 / One HID rumble output report (when sent via HID OUTPUT)
-        if (pkt.Source == HMOutputSource.HidOutput
-            && profile.VendorId == 0x045E && data.Length >= 8)
-            return $"XB rumble {data[3]:X2} {data[4]:X2} {data[5]:X2} {data[6]:X2} ({data.Length}B)";
 
         // Fallback: hex dump first 16 bytes
         int n = Math.Min(data.Length, 16);
@@ -924,6 +917,29 @@ partial class Program
         for (int i = 0; i < n; i++) { if (i > 0) sb.Append(' '); sb.Append(data[i].ToString("X2")); }
         if (data.Length > n) sb.Append(" …");
         sb.Append(']');
+        return sb.ToString();
+    }
+
+    /// <summary>The fields OutputDecoded carries for one report: the two
+    /// motors as "rumble left= right=" when the profile names them, then
+    /// every other field by name.</summary>
+    static string DecodedLine(IReadOnlyDictionary<string, object> fields, int length)
+    {
+        var sb = new System.Text.StringBuilder();
+        if (fields.TryGetValue("leftMotor", out var l) && fields.TryGetValue("rightMotor", out var r))
+            sb.Append($"rumble left={l} right={r} ");
+        sb.Append('(').Append(length).Append("B)");
+        foreach (var (k, v) in fields.OrderBy(f => f.Key, StringComparer.Ordinal))
+        {
+            if (k is "leftMotor" or "rightMotor") continue;
+            sb.Append(' ').Append(k).Append('=').Append(v switch
+            {
+                byte[] b => Convert.ToHexString(b),
+                IEnumerable<string> names => string.Join("+", names),
+                IFormattable f => f.ToString(null, System.Globalization.CultureInfo.InvariantCulture),
+                _ => v?.ToString() ?? "null",
+            });
+        }
         return sb.ToString();
     }
 
