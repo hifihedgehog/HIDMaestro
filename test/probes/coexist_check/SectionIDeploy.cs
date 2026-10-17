@@ -36,8 +36,10 @@
 //        even by an elevated process. Until v1.13.0 the helper was checked
 //        and then run with nothing held.
 //
-// I10 and I11 set the machine's %ProgramData%\HIDMaestro aside first and put
-// it back at the end, with the OpenVR install record as it was.
+// I10 and I11 set the machine's %ProgramData%\HIDMaestro aside first, when
+// there is one, and at the end remove what they made and put it back, with
+// the OpenVR install record as it was. Since staging moved under
+// %ProgramFiles%, a fresh machine has none.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -201,11 +203,16 @@ internal static partial class Program
         string saved = root + ".coexist-saved-" + Guid.NewGuid().ToString("N");
         var asideBefore = Directory.GetDirectories(programData, "HIDMaestro.untrusted-*").ToHashSet(StringComparer.OrdinalIgnoreCase);
         string? vrRecord = OpenVrRecord();
-        bool setAside = false;
+        bool existed = Directory.Exists(root);
+        bool started = false;
         try
         {
-            try { Directory.Move(root, saved); setAside = true; }
-            catch (Exception e) { Check("I10: the machine's %ProgramData%\\HIDMaestro is set aside for the section", false, e.Message); return; }
+            if (existed)
+            {
+                try { Directory.Move(root, saved); }
+                catch (Exception e) { Check("I10: the machine's %ProgramData%\\HIDMaestro is set aside for the section", false, e.Message); return; }
+            }
+            started = true;
 
             // I10a. The upgrade case: a root an elevated program created, so
             // owned by Administrators with the DACL it inherits from
@@ -285,7 +292,7 @@ internal static partial class Program
         }
         finally
         {
-            if (setAside)
+            if (started)
             {
                 // Everything under these was made in this section, by the
                 // impersonating thread, this probe or the SDK under test.
@@ -293,8 +300,12 @@ internal static partial class Program
                 foreach (string aside in Directory.GetDirectories(programData, "HIDMaestro.untrusted-*"))
                     if (!asideBefore.Contains(aside))
                         try { Directory.Delete(aside, true); } catch (Exception e) { Console.WriteLine($"    could not remove {aside}: {e.Message}"); }
-                try { Directory.Move(saved, root); }
-                catch (Exception e) { Check("I10: the machine's %ProgramData%\\HIDMaestro is put back", false, $"{saved}: {e.Message}"); }
+                if (existed)
+                {
+                    try { Directory.Move(saved, root); }
+                    catch (Exception e) { Check("I10: the machine's %ProgramData%\\HIDMaestro is put back", false, $"{saved}: {e.Message}"); }
+                }
+                else Check("I10: the machine is left with no %ProgramData%\\HIDMaestro, as the section found it", !Directory.Exists(root), root);
                 using var k = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\HIDMaestro");
                 if (vrRecord == null) k.DeleteValue("InstalledVrManifestSha256", throwOnMissingValue: false);
                 else k.SetValue("InstalledVrManifestSha256", vrRecord, RegistryValueKind.String);
