@@ -203,6 +203,10 @@ internal static partial class RegistryLedger
     /// room, so the next read is a single call. 0 before the first.</summary>
     private static uint s_processListSize;
 
+    /// <summary>The buffer of a process's first read of the process
+    /// list.</summary>
+    private const uint FirstProcessListSize = 4 * 1024 * 1024;
+
     /// <summary><paramref name="read"/>, run at most once, on the first call
     /// of what this returns: one census hands
     /// <see cref="ProcessCreateTimes"/> through it to both of its holder
@@ -226,17 +230,26 @@ internal static partial class RegistryLedger
     /// CreateTime at 32 and UniqueProcessId after ImageName and
     /// BasePriority: at 80 in a 64-bit process, 68 in a 32-bit one
     /// (winternl.h, and the layout ntexapi.h gives the fields between).</summary>
-    internal static unsafe Dictionary<int, long>? ProcessCreateTimes()
+    internal static Dictionary<int, long>? ProcessCreateTimes() => ProcessCreateTimes(out _);
+
+    /// <summary><see cref="ProcessCreateTimes()"/>, with the number of
+    /// kernel queries it made: 1 unless the list outgrew the buffer. For the
+    /// coexistence probe's OF13.</summary>
+    internal static unsafe Dictionary<int, long>? ProcessCreateTimes(out int queries)
     {
-        // The returned length sizes the next call. The first call of a
-        // process starts at 1 MB, about what 500 processes need.
+        // A read starts at the size the last read of this process needed,
+        // plus room. The first starts at 4 MB: a machine with 527 processes
+        // needed 1,267,688 bytes, about 2.4 KB a process, so 4 MB holds some
+        // 1,600 processes without a second query.
+        queries = 0;
         uint size = Volatile.Read(ref s_processListSize);
-        if (size == 0) size = 1024 * 1024;
+        if (size == 0) size = FirstProcessListSize;
         for (int attempt = 0; attempt < 4; attempt++)
         {
             byte* buffer = (byte*)NativeMemory.Alloc(size);
             try
             {
+                queries++;
                 int status = NtQuerySystemInformation(SystemProcessInformation, buffer, size, out uint needed);
                 if (status == StatusInfoLengthMismatch)
                 {

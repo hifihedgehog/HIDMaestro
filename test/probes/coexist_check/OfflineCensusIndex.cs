@@ -297,7 +297,7 @@ internal static partial class Program
         Assembly sdk = typeof(HIDMaestro.HMContext).Assembly;
         Type? ledger = sdk.GetType("HIDMaestro.Internal.RegistryLedger");
         MethodInfo? live = ledger?.GetMethods(AnyStaticMember).FirstOrDefault(m => m.Name == "LiveHolders" && m.GetParameters().Length == 3);
-        MethodInfo? times = ledger?.GetMethod("ProcessCreateTimes", AnyStaticMember);
+        MethodInfo? times = ledger?.GetMethod("ProcessCreateTimes", AnyStaticMember, Type.EmptyTypes);
         MethodInfo? alive = ledger?.GetMethod("HolderAliveIn", AnyStaticMember);
         Check("OF13: RegistryLedger.LiveHolders over a given ledger, ProcessCreateTimes and HolderAliveIn exist",
               live != null && times != null && alive != null);
@@ -346,6 +346,24 @@ internal static partial class Program
         listReads = 0;
         AliveWith("4-1-3", list);
         Check("OF13: a holder of a process that refuses the open reads the process list once", listReads == 1, $"list read {listReads} times");
+        // A process's first read of the list fits its buffer on a machine
+        // with this many processes, and so does the next.
+        var sizeField = ledger!.GetField("s_processListSize", AnyStaticMember);
+        var countedRead = ledger.GetMethods(AnyStaticMember).FirstOrDefault(m => m.Name == "ProcessCreateTimes" && m.GetParameters().Length == 1);
+        if (sizeField != null && countedRead != null)
+        {
+            object saved = sizeField.GetValue(null)!;
+            sizeField.SetValue(null, 0u);
+            var args = new object?[] { null };
+            countedRead.Invoke(null, args);
+            int first = (int)args[0]!;
+            countedRead.Invoke(null, args);
+            int next = (int)args[0]!;
+            Check("OF13: a process's first read of the process list, and its next, each make one kernel query",
+                  first == 1 && next == 1, $"{first} and {next} queries, {list.Count} processes, buffer now {sizeField.GetValue(null)} bytes");
+            sizeField.SetValue(null, saved);
+        }
+        else Check("OF13: RegistryLedger.ProcessCreateTimes(out int) and its size exist", false);
 
         const string root = @"Software\HIDMaestroCoexistOF13Ledger";
         string denied = $@"{root}\JoystickOem\VID_BEEF&PID_0000\Holders";
