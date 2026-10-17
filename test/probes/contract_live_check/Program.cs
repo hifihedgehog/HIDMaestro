@@ -162,7 +162,7 @@ internal static class Program
     {
         var deck = ctx.GetProfile("steam-deck-composite")!;
         var p = new HMProfileBuilder().Id("contract-live-unnumbered").Vid(0x28DE).Pid(0x1205)
-            .DescriptorHex(deck.DescriptorHex!).FeatureAnswers(deck.Inner.FeatureStubs).Build();
+            .DescriptorHex(deck.DescriptorHex!).FeatureAnswers(System.Text.Json.JsonSerializer.Serialize(deck.Inner.FeatureStubs!, HMJsonContext.Default.FeatureStubSpec)).Build();
         using var c = ctx.CreateControllerAt(3, p, Key());
         using var h = Open(Find(3));
         if (h == null) { Check("the unnumbered profile's HID device opens", false); return; }

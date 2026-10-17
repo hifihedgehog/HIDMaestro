@@ -34,6 +34,19 @@ internal static class Builder
 
     static string Json(ControllerProfile p) => JsonSerializer.Serialize(p, HMJsonContext.Default.ControllerProfile);
 
+    static string Json(FeatureStubSpec s) => JsonSerializer.Serialize(s, HMJsonContext.Default.FeatureStubSpec);
+
+    /// <summary>HMProfileBuilder.FeatureAnswers(string), read by reflection so
+    /// the probe also runs against an SDK whose setter took the internal
+    /// FeatureStubSpec.</summary>
+    static HMProfileBuilder Answers(this HMProfileBuilder b, string json) =>
+        (HMProfileBuilder)(typeof(HMProfileBuilder).GetMethod("FeatureAnswers", new[] { typeof(string) })
+            ?? throw new MissingMethodException("HMProfileBuilder", "FeatureAnswers(string)")).Invoke(b, new object?[] { json })!;
+
+    static HMProfileBuilder Model(this HMProfileBuilder b, string? value) =>
+        (HMProfileBuilder)(typeof(HMProfileBuilder).GetMethod("DeviceModel", new[] { typeof(string) })
+            ?? throw new MissingMethodException("HMProfileBuilder", "DeviceModel(string)")).Invoke(b, new object?[] { value })!;
+
     static IReadOnlyDictionary<string, string> Sources(HMProfile p) =>
         (IReadOnlyDictionary<string, string>)Api.Prop(p, "DeviceModelSource")!;
 
@@ -138,7 +151,7 @@ internal static class Builder
             try
             {
                 new HMProfileBuilder().FromProfile(P("steam-controller-2")).Id("user-triton-bad")
-                    .DescriptorHex(P("ps-classic").DescriptorHex!).FeatureAnswers(P("steam-controller-2").Inner.FeatureStubs).Build();
+                    .DescriptorHex(P("ps-classic").DescriptorHex!).Answers(Json(P("steam-controller-2").Inner.FeatureStubs!)).Build();
                 return (false, "built");
             }
             catch (Exception e) when (Api.ProfileError(e) is { } err)
@@ -163,7 +176,7 @@ internal static class Builder
             var answers = P("steam-controller-composite").Inner.FeatureStubs!;
             var p = new HMProfileBuilder().Id("user-own").Vid(0x1234).Pid(0x5678)
                 .DescriptorHex(P("steam-controller-composite").DescriptorHex!)
-                .DriverPid("0x0B12").FeatureAnswers(answers).Build();
+                .DriverPid("0x0B12").Answers(Json(answers)).Build();
             return (Sources(p)["answers"] == "own" && Sources(p)["presentation"] == "own" && p.Inner.ResolvedDriverPid == "0x0B12",
                     $"{Sources(p)["answers"]} {Sources(p)["presentation"]}");
         });
@@ -173,6 +186,54 @@ internal static class Builder
             var one = b.Build();
             var two = b.Build();
             return (!ReferenceEquals(one.Inner.FeatureStubs, two.Inner.FeatureStubs) && !ReferenceEquals(one.Inner.ExtendedReport, two.Inner.ExtendedReport), "");
+        });
+        // The builder's public surface names no type of HIDMaestro.Internal,
+        // takes the answers as the JSON the profile key holds, and says
+        // "deviceModel": "none" as a file does. At 5fa368e3 FeatureAnswers
+        // took FeatureStubSpec and no setter said "none".
+        c.Run("no public HMProfileBuilder member takes or returns a type of HIDMaestro.Internal", () =>
+        {
+            var hits = typeof(HMProfileBuilder).GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static)
+                .Where(m => m.GetParameters().Select(x => x.ParameterType).Append(m.ReturnType)
+                    .Any(t => (Nullable.GetUnderlyingType(t) ?? t).Namespace == "HIDMaestro.Internal"))
+                .Select(m => m.Name).ToList();
+            return (hits.Count == 0, string.Join(", ", hits));
+        });
+        c.Run("FeatureAnswers with malformed JSON throws HMProfileException at the path inside featureStubs", () =>
+        {
+            try
+            {
+                new HMProfileBuilder().Answers("{\"reports\":[{\"id\":\"0x05\",\"sise\":41}]}");
+                return (false, "accepted");
+            }
+            catch (System.Reflection.TargetInvocationException e) when (Api.ProfileError(e.InnerException!) is { } err)
+            {
+                return (err.Path == "$.featureStubs.reports[0].sise", $"{err.Path}: {err.Reason}");
+            }
+        });
+        string sony = P("dualsense").DescriptorHex!;
+        c.Run("a Sony identity built in code takes sony-dualsense, and DeviceModel(\"none\") takes nothing", () =>
+        {
+            HMProfileBuilder B() => new HMProfileBuilder().Id("user-sony").Vid(0x054C).Pid(0x0CE6).DescriptorHex(sony);
+            var with = B().Build();
+            var none = B().Model("none").Build();
+            return (Sources(with)["answers"] == "identity:sony-dualsense" && Sources(none)["answers"] == "none"
+                    && none.Inner.Resolved.Model.FeatureStubs == null, $"{Sources(with)["answers"]} {Sources(none)["answers"]}");
+        });
+        c.Run("DeviceModel with another value throws HMProfileException at $.deviceModel", () =>
+        {
+            try { new HMProfileBuilder().Id("user-bad-model").Vid(0x1234).Pid(0x5678).DescriptorHex(sony).Model("some").Build(); return (false, "built"); }
+            catch (Exception e) when (Api.ProfileError(e is System.Reflection.TargetInvocationException t ? t.InnerException! : e) is { } err)
+            {
+                return (err.Path == "$.deviceModel", $"{err.Path}: {err.Reason}");
+            }
+        });
+        c.Run("ControllerProfile.BuiltInCode keeps its public init accessor", () =>
+        {
+            var set = typeof(ControllerProfile).GetProperty("BuiltInCode")!.SetMethod;
+            bool init = set != null && set.IsPublic
+                        && set.ReturnParameter.GetRequiredCustomModifiers().Any(m => m.FullName == "System.Runtime.CompilerServices.IsExternalInit");
+            return (init, set == null ? "no setter" : set.IsPublic ? "public, not init" : "not public");
         });
         foreach (var (id, want) in new[] { ("switch2-pro-controller-composite", true), ("switch2-pro-controller", false), ("dualsense-bt", false), ("steam-controller-2", false) })
             c.Run($"{id} {(want ? "builds" : "does not build")} its own reports", () =>

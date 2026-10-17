@@ -228,8 +228,27 @@ public sealed class HMProfileBuilder
     /// <summary>Name the device model the profile takes for the groups its
     /// own keys leave empty: a named model a loaded models folder holds, or
     /// a catalog profile (<see cref="HMProfile.DeviceModelSource"/>). Null
-    /// takes the model the profile's identity gives it.</summary>
-    public HMProfileBuilder DeviceModelFrom(string? name) { _deviceModelFrom = name; return this; }
+    /// takes the model the profile's identity gives it. A name drops an
+    /// earlier <see cref="DeviceModel"/> "none".</summary>
+    public HMProfileBuilder DeviceModelFrom(string? name)
+    {
+        _deviceModelFrom = name;
+        if (name != null) _deviceModel = null;
+        return this;
+    }
+
+    /// <summary>The profile's <c>deviceModel</c>: "none" takes no model by
+    /// name or by identity, so a profile built in code with a Sony or
+    /// Nintendo identity gets no answers it did not set itself. It drops
+    /// a name <see cref="DeviceModelFrom"/> set. Null takes what the name
+    /// or the identity gives. Build refuses any other value at
+    /// <c>$.deviceModel</c>.</summary>
+    public HMProfileBuilder DeviceModel(string? value)
+    {
+        _deviceModel = value;
+        if (value != null) _deviceModelFrom = null;
+        return this;
+    }
 
     /// <summary>The product ID the driver presents in the HID attributes,
     /// where an XInput presentation through xinputhid binds only on a PID
@@ -237,11 +256,27 @@ public sealed class HMProfileBuilder
     /// Hex, as the profile's <c>driverPid</c>. Null takes none.</summary>
     public HMProfileBuilder DriverPid(string? pid) { _driverPid = pid; return this; }
 
-    /// <summary>The answers the device gives to GET_REPORT(Feature), the
-    /// profile's <c>featureStubs</c> (the design note's mechanism 4). Null
-    /// takes the answers of the model the profile names or its identity
-    /// gives it.</summary>
-    public HMProfileBuilder FeatureAnswers(FeatureStubSpec? answers) { _featureStubs = answers; return this; }
+    /// <summary>The answers the device gives to GET_REPORT(Feature): the
+    /// JSON of the profile's <c>featureStubs</c> key (the design note's
+    /// mechanism 4), read as a profile file's is. Null takes the answers
+    /// of the model the profile names or its identity gives it.</summary>
+    /// <exception cref="HMProfileException">The JSON does not read as an
+    /// answer table, at its path under <c>$.featureStubs</c>.</exception>
+    public HMProfileBuilder FeatureAnswers(string? json)
+    {
+        if (json == null) { _featureStubs = null; return this; }
+        try
+        {
+            _featureStubs = System.Text.Json.JsonSerializer.Deserialize(json, HMJsonContext.Default.FeatureStubSpec)
+                ?? throw new HMProfileException(_id, null, "$.featureStubs", "is null. Pass null to take the model's answers.");
+        }
+        catch (System.Text.Json.JsonException e)
+        {
+            string inner = string.IsNullOrEmpty(e.Path) || e.Path == "$" ? "" : e.Path[1..];
+            throw new HMProfileException(_id, null, "$.featureStubs" + inner, ProfileDefects.Locate(e).Reason, e);
+        }
+        return this;
+    }
 
     /// <summary>Drops the device model keys tied to the descriptor's
     /// reports, the answers and their value sources, and the model the
@@ -340,7 +375,7 @@ public sealed class HMProfileBuilder
         // and a builder's caller, share no object with the profile.
         inner = inner.Clone();
         inner.SourceFile = null;
-        inner.BuiltInCode = true;
+        inner.MarkBuiltInCode(true);
 
         try
         {

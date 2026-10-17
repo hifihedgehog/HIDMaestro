@@ -726,7 +726,13 @@ public sealed class ControllerProfile
     /// built in code can get the GameInput table
     /// (<see cref="GameInputMapping.Applies"/>).</summary>
     [JsonIgnore]
-    public bool BuiltInCode { get; internal set; }
+    public bool BuiltInCode { get => _builtInCode; init => _builtInCode = value; }
+    private bool _builtInCode;
+
+    /// <summary>Sets <see cref="BuiltInCode"/> on a profile already made,
+    /// as a copy and the builder do. The public accessor stays init, as it
+    /// was through v1.13.0.</summary>
+    internal void MarkBuiltInCode(bool value) => _builtInCode = value;
 
     /// <summary>A copy of the profile's JSON keys, read again, with where it
     /// came from and whether it was built in code. Nothing a create or a
@@ -736,7 +742,7 @@ public sealed class ControllerProfile
         var copy = JsonSerializer.Deserialize(JsonSerializer.Serialize(this, HMJsonContext.Default.ControllerProfile),
             HMJsonContext.Default.ControllerProfile)!;
         copy.SourceFile = SourceFile;
-        copy.BuiltInCode = BuiltInCode;
+        copy.MarkBuiltInCode(BuiltInCode);
         return copy;
     }
 
