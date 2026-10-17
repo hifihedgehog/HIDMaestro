@@ -1,0 +1,72 @@
+{
+  "comment": "The answers an XUSB companion gives, as data, in xusbAnswers: the four replies the companion served from its own code before v2.0.0 (companion.c:834-1039 at 9bd6279), a wired gamepad's. Each answer is its bytes, zero-filled to size, with the profile's resolved xinput values written at the offsets fields names. The layouts are xinput1_4's as OpenXInput reads them (OpenXinput.cpp:238-283 at 6af3c14): GamepadCapabilities0101 for the 24-byte reply and GamepadCapabilities0102 for the 36-byte one. xusbAnswers.defaults are the values a profile's xinput block leaves out. The model fills no group of a profile's device model: every XUSB companion serves it.",
+  "id": "xusb-companion",
+  "xusbAnswers": {
+    "defaults": {
+      "via": "xusbCompanion",
+      "subType": "gamepad",
+      "flags": [ "voice", "pmd" ],
+      "battery": { "type": "wired", "level": "full" }
+    },
+    "answers": [
+      {
+        "name": "GET_INFORMATION",
+        "ioctl": "0x80006000",
+        "minOutput": 0,
+        "mode": "exact",
+        "bytes": "03 01 01 00 00 00 00 00 00 00 00 00",
+        "fields": [
+          { "at": 8, "value": "information.vid" },
+          { "at": 10, "value": "information.pid" }
+        ]
+      },
+      {
+        "name": "GET_CAPABILITIES, GamepadCapabilities0101",
+        "ioctl": "0x8000E004",
+        "minOutput": 0,
+        "mode": "exact",
+        "bytes": "03 01 00 00 FF F7 FF FF C0 FF C0 FF C0 FF C0 FF FF FF FF FF 00 00 FF FF",
+        "fields": [
+          { "at": 3, "value": "subType" }
+        ]
+      },
+      {
+        "name": "GET_CAPABILITIES, GamepadCapabilities0102",
+        "ioctl": "0x8000E004",
+        "minOutput": 36,
+        "mode": "exact",
+        "bytes": "03 01 01 00 00 00 00 00 00 00 10 01 00 FA 34 22 FF F7 FF FF C0 FF C0 FF C0 FF C0 FF FF FF FF FF 00 00 FF FF",
+        "fields": [
+          { "at": 3, "value": "subType" },
+          { "at": 4, "value": "flags" },
+          { "at": 6, "value": "capabilities.vid" },
+          { "at": 8, "value": "capabilities.pid" },
+          { "at": 12, "value": "controllerIndex" }
+        ]
+      },
+      {
+        "name": "GET_BATTERY_INFORMATION",
+        "ioctl": "0x8000E018",
+        "minOutput": 0,
+        "mode": "exact",
+        "bytes": "00 00 00 00",
+        "fields": [
+          { "at": 2, "value": "battery.type" },
+          { "at": 3, "value": "battery.level" }
+        ]
+      },
+      {
+        "name": "GET_INFORMATION_EX",
+        "ioctl": "0x8000E3FC",
+        "minOutput": 0,
+        "mode": "upTo",
+        "bytes": "03 01 01 01",
+        "size": 64,
+        "fields": [
+          { "at": 8, "value": "information.vid" },
+          { "at": 10, "value": "information.pid" }
+        ]
+      }
+    ]
+  }
+}

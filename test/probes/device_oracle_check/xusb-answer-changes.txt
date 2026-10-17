@@ -1,0 +1,3 @@
+# Bytes of the XUSB companion's answers the tree gives on purpose where 9bd6279
+# gave others (XusbContract.cs). One line each:
+#   <profile> 0x<ioctl> <offset>=<byte> | <lane> | <reason>

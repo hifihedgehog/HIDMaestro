@@ -193,7 +193,7 @@ internal static class CompareLive
 
     // ── records ──────────────────────────────────────────────────────────
 
-    sealed class Stream
+    internal sealed class Stream
     {
         public readonly string Name;
         public readonly List<(string Tag, byte[] Data)> Outs = new();
@@ -201,7 +201,7 @@ internal static class CompareLive
         public void Out(string tag, byte[] data) => Outs.Add((tag, data));
     }
 
-    static List<Stream> ReadRecords(string path)
+    internal static List<Stream> ReadRecords(string path)
     {
         var list = new List<Stream>();
         using var br = new BinaryReader(File.OpenRead(path), Encoding.ASCII);
@@ -418,7 +418,7 @@ internal static class CompareLive
 
     static uint Win32Error(int status) => status >= 0 ? 0 : RtlNtStatusToDosError(status);
 
-    static List<Stream> RunHarness(string exe, string plan, string script, string work)
+    internal static List<Stream> RunHarness(string exe, string plan, string script, string work)
     {
         string output = Path.Combine(work, "harness.bin");
         if (File.Exists(output)) File.Delete(output);

@@ -65,24 +65,26 @@ internal static class XInputPresentation
         return new Resolved(x.Via == null ? null : x, source);
     }
 
-    /// <summary>Checks every value of a block against what it may hold.</summary>
+    /// <summary>Checks every value of a block against what it may hold.
+    /// Throws <see cref="ProfileDefectException"/> at the value's JSON path
+    /// under <paramref name="path"/>.</summary>
     internal static void Validate(string profileId, XInputSpec x, string path)
     {
-        string Where(string key) => $"Profile '{profileId}': {path}.{key}";
+        string Where(string key) => $"{path}.{key}";
         if (x.Via != null && x.Via != XInputSpec.ViaXusbCompanion && x.Via != XInputSpec.ViaXinputhid)
-            throw new InvalidOperationException($"{Where("via")} is \"{x.Via}\", not \"xusbCompanion\" or \"xinputhid\".");
+            throw new ProfileDefectException(Where("via"), $"is \"{x.Via}\", not \"xusbCompanion\" or \"xinputhid\".");
         if (x.Via == null && (x.SubType != null || x.Flags != null || x.Battery != null || x.Information != null || x.Capabilities != null))
-            throw new InvalidOperationException($"{Where("via")} is absent, so the block describes no XInput device and takes nothing else.");
+            throw new ProfileDefectException(Where("via"), "is absent, so the block describes no XInput device and takes nothing else.");
         if (x.Via == XInputSpec.ViaXinputhid && (x.SubType != null || x.Flags != null || x.Battery != null || x.Information != null || x.Capabilities != null))
-            throw new InvalidOperationException(
-                $"{Where("via")} is \"xinputhid\", whose replies xinputhid makes, so the block takes no subType, flags, battery, information or capabilities.");
+            throw new ProfileDefectException(Where("via"),
+                "is \"xinputhid\", whose replies xinputhid makes, so the block takes no subType, flags, battery, information or capabilities.");
         _ = SubTypeByte(profileId, x, path);
         _ = FlagWord(profileId, x, path);
         _ = BatteryBytes(profileId, x, path);
         if (x.Information != null)
         {
-            _ = ParseId(x.Information.Vid ?? throw new InvalidOperationException($"{Where("information.vid")} is missing."), Where("information.vid"));
-            _ = ParseId(x.Information.Pid ?? throw new InvalidOperationException($"{Where("information.pid")} is missing."), Where("information.pid"));
+            _ = ParseId(x.Information.Vid ?? throw new ProfileDefectException(Where("information.vid"), "is missing."), Where("information.vid"));
+            _ = ParseId(x.Information.Pid ?? throw new ProfileDefectException(Where("information.pid"), "is missing."), Where("information.pid"));
         }
         if (x.Capabilities != null)
         {
@@ -91,56 +93,73 @@ internal static class XInputPresentation
         }
     }
 
-    internal static byte SubTypeByte(string profileId, XInputSpec x, string path = "$.xinput")
+    /// <summary>The block's subtype byte, or null when it gives none and
+    /// the XUSB model's default applies (<see cref="XusbAnswers.Model"/>).</summary>
+    internal static byte? SubTypeByte(string profileId, XInputSpec x, string path = "$.xinput")
     {
-        if (x.SubType == null) return XInputSpec.SubTypes["gamepad"];
+        if (x.SubType == null) return null;
         if (XInputSpec.SubTypes.TryGetValue(x.SubType, out byte named)) return named;
         string s = x.SubType;
         bool hex = s.StartsWith("0x", StringComparison.OrdinalIgnoreCase);
         if (byte.TryParse(hex ? s.AsSpan(2) : s.AsSpan(), hex ? NumberStyles.AllowHexSpecifier : NumberStyles.None,
                           CultureInfo.InvariantCulture, out byte n))
             return n;
-        throw new InvalidOperationException(
-            $"Profile '{profileId}': {path}.subType is \"{s}\", neither a subtype name ({string.Join(", ", XInputSpec.SubTypes.Keys)}) nor a number 0 to 255.");
+        throw new ProfileDefectException($"{path}.subType",
+            $"is \"{s}\", neither a subtype name ({string.Join(", ", XInputSpec.SubTypes.Keys)}) nor a number 0 to 255.");
     }
 
-    internal static ushort FlagWord(string profileId, XInputSpec x, string path = "$.xinput")
+    /// <summary>The block's capability flag word, or null when it names
+    /// none and the XUSB model's default applies.</summary>
+    internal static ushort? FlagWord(string profileId, XInputSpec x, string path = "$.xinput")
     {
         if (x.Flags != null && x.Capabilities?.Flags != null)
-            throw new InvalidOperationException($"Profile '{profileId}': {path}.flags and {path}.capabilities.flags are both given. Give the flags once.");
+            throw new ProfileDefectException($"{path}.flags", $"and {path}.capabilities.flags are both given. Give the flags once.");
         var names = x.Capabilities?.Flags ?? x.Flags;
         string at = x.Capabilities?.Flags != null ? path + ".capabilities.flags" : path + ".flags";
-        if (names == null) return (ushort)(XInputSpec.FlagBits["voice"] | XInputSpec.FlagBits["pmd"]);
+        if (names == null) return null;
         ushort word = 0;
-        foreach (string f in names)
+        for (int i = 0; i < names.Count; i++)
         {
+            string? f = names[i];
+            if (f == null) throw new ProfileDefectException($"{at}[{i}]", "is null.");
             if (!XInputSpec.FlagBits.TryGetValue(f, out ushort bit))
-                throw new InvalidOperationException(
-                    $"Profile '{profileId}': {at} names \"{f}\", not one of {string.Join(", ", XInputSpec.FlagBits.Keys)}.");
+                throw new ProfileDefectException(at,
+                    $"names \"{f}\", not one of {string.Join(", ", XInputSpec.FlagBits.Keys)}.");
             word |= bit;
         }
         return word;
     }
 
-    internal static (byte Type, byte Level) BatteryBytes(string profileId, XInputSpec x, string path = "$.xinput")
+    /// <summary>The block's battery type and level bytes, each null when
+    /// the block gives none and the XUSB model's default applies.</summary>
+    internal static (byte? Type, byte? Level) BatteryBytes(string profileId, XInputSpec x, string path = "$.xinput")
     {
-        byte type = XInputSpec.BatteryTypes["wired"], level = XInputSpec.BatteryLevels["full"];
-        if (x.Battery?.Type != null && !XInputSpec.BatteryTypes.TryGetValue(x.Battery.Type, out type))
-            throw new InvalidOperationException(
-                $"Profile '{profileId}': {path}.battery.type is \"{x.Battery.Type}\", not one of {string.Join(", ", XInputSpec.BatteryTypes.Keys)}.");
-        if (x.Battery?.Level != null && !XInputSpec.BatteryLevels.TryGetValue(x.Battery.Level, out level))
-            throw new InvalidOperationException(
-                $"Profile '{profileId}': {path}.battery.level is \"{x.Battery.Level}\", not one of {string.Join(", ", XInputSpec.BatteryLevels.Keys)}.");
+        byte? type = null, level = null;
+        if (x.Battery?.Type != null)
+        {
+            if (!XInputSpec.BatteryTypes.TryGetValue(x.Battery.Type, out byte t))
+                throw new ProfileDefectException($"{path}.battery.type",
+                    $"is \"{x.Battery.Type}\", not one of {string.Join(", ", XInputSpec.BatteryTypes.Keys)}.");
+            type = t;
+        }
+        if (x.Battery?.Level != null)
+        {
+            if (!XInputSpec.BatteryLevels.TryGetValue(x.Battery.Level, out byte l))
+                throw new ProfileDefectException($"{path}.battery.level",
+                    $"is \"{x.Battery.Level}\", not one of {string.Join(", ", XInputSpec.BatteryLevels.Keys)}.");
+            level = l;
+        }
         return (type, level);
     }
 
-    /// <summary>A vendor or product ID written as hex, <c>"0x045E"</c>.</summary>
-    internal static ushort ParseId(string s, string where)
+    /// <summary>A vendor or product ID written as hex, <c>"0x045E"</c>, at
+    /// the JSON path <paramref name="path"/>.</summary>
+    internal static ushort ParseId(string s, string path)
     {
         string digits = s.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? s.Substring(2) : s;
         if (digits.Length is < 1 or > 4
             || !ushort.TryParse(digits, NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out ushort v))
-            throw new InvalidOperationException($"{where} is \"{s}\", not a hex ID of one to four digits.");
+            throw new ProfileDefectException(path, $"is \"{s}\", not a hex ID of one to four digits.");
         return v;
     }
 }

@@ -165,6 +165,8 @@ internal static class Program
             }
             return FeatureContract.Run(fcNative, fcGolden) == 0 ? 0 : 1;
         }
+        if (mode == "xusb-contract")
+            return XusbContract.Run(Path.Combine(AppContext.BaseDirectory, "native"), ProbeDir()) == 0 ? 0 : 1;
         if (mode != "record" && mode != "replay") return Usage();
         // The change list's own rules first, as selftest runs them.
         bool selfTestFailed = mode == "replay" && SelfTest.RunQuiet() != 0;
@@ -372,6 +374,10 @@ internal static class Program
         var ran = compared;
         // The driver's answers under the version contract, beside case 5.
         if (mode == "replay" && ran.Contains("case5-driver") && FeatureContract.Run(native, golden) != 0) failures++;
+        // The XUSB companion under the version contract, beside case 5's
+        // replay of it (XusbContract.cs).
+        if (mode == "replay" && ran.Contains("case5-driver"))
+            failures += XusbContract.Run(native, ProbeDir());
         foreach (var e in changes.Entries.Where(e => !e.Used && e.Kind != "rule" && (e.Kind == "config" ? ran.Contains("case5-driver") : ran.Contains(e.Case))))
         {
             Console.WriteLine($"  [FAIL] {e.Source}: the listed change {e.Kind} {e.Target} ({e.Lane}) matched no difference");

@@ -245,58 +245,6 @@ InitInstancePaths(
 /*  v2.0.0: the version contract (the design note's decision (c))      */
 /* ================================================================== */
 
-/* DEVPKEY_Device_InstanceId (devpkey.h), written out so this file needs no
- * initguid.h. */
-static const DEVPROPKEY g_InstanceIdKey =
-    { { 0x78c34fc8, 0x104a, 0x4aca, { 0x9e, 0xa4, 0x52, 0x4d, 0x52, 0x99, 0x6e, 0x57 } }, 256 };
-
-/* The identity token, the last segment of the devnode's instance ID
- * (ROOT\<enumerator>\<token> or SWD\<enumerator>\<token>, issue #60), read
- * through WdfFdoInitQueryPropertyEx before WdfDeviceCreate, as Learn says
- * a driver calls it. Empty when the query fails. */
-static VOID
-ReadInstanceToken(_In_ PWDFDEVICE_INIT DeviceInit, _Out_writes_(cap) WCHAR *token, _In_ SIZE_T cap)
-{
-    WCHAR id[200];
-    ULONG len = 0;
-    DEVPROPTYPE type = 0;
-    WDF_DEVICE_PROPERTY_DATA data;
-    token[0] = 0;
-    WDF_DEVICE_PROPERTY_DATA_INIT(&data, &g_InstanceIdKey);
-    if (!NT_SUCCESS(WdfFdoInitQueryPropertyEx(DeviceInit, &data, sizeof(id), id, &len, &type))
-        || type != DEVPROP_TYPE_STRING || len < sizeof(WCHAR))
-        return;
-    id[ARRAYSIZE(id) - 1] = 0;
-    SIZE_T n = 0, last = 0;
-    while (id[n]) { if (id[n] == L'\\') last = n + 1; n++; }
-    SIZE_T t = 0;
-    while (id[last + t] && t + 1 < cap) { token[t] = id[last + t]; t++; }
-    token[t] = 0;
-}
-
-/* The index the SDK wrote under SOFTWARE\HIDMaestro\Identity\<token>
- * before any PnP work. */
-static BOOLEAN
-ReadIdentityIndex(_In_ const WCHAR *token, _Out_ ULONG *index)
-{
-    static const WCHAR prefix[] = HIDMAESTRO_IDENTITY_ROOT;
-    WCHAR path[96];
-    HKEY hKey;
-    DWORD val = 0, sz = sizeof(val), type = 0;
-    SIZE_T n = 0;
-    *index = 0;
-    if (!token[0]) return FALSE;
-    for (SIZE_T i = 0; prefix[i]; i++) path[n++] = prefix[i];
-    for (SIZE_T i = 0; token[i] && n + 1 < ARRAYSIZE(path); i++) path[n++] = token[i];
-    path[n] = 0;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, path, 0, KEY_READ, &hKey) != ERROR_SUCCESS) return FALSE;
-    BOOLEAN ok = RegQueryValueExW(hKey, HIDMAESTRO_IDENTITY_VALUE, NULL, &type, (LPBYTE)&val, &sz) == ERROR_SUCCESS
-              && type == REG_DWORD && sz == sizeof(val);
-    RegCloseKey(hKey);
-    if (ok) *index = val;
-    return ok;
-}
-
 /* ControllerIndex from the device's hardware key, where every SDK version
  * writes it, through WdfFdoInitOpenRegistryKey before WdfDeviceCreate.
  * 0 when there is none, as every earlier driver read it. */
@@ -2863,8 +2811,8 @@ EvtDeviceAdd(
     WCHAR token[40];
     ULONG identityIndex = 0, controllerIndex = 0;
     BOOLEAN haveIdentityIndex, contract = FALSE;
-    ReadInstanceToken(DeviceInit, token, ARRAYSIZE(token));
-    haveIdentityIndex = ReadIdentityIndex(token, &identityIndex);
+    HmReadInstanceToken(DeviceInit, token, ARRAYSIZE(token));
+    haveIdentityIndex = HmReadIdentityIndex(token, &identityIndex);
     status = ChooseControllerIndex(token, haveIdentityIndex, identityIndex,
                                    ReadHardwareIndex(DeviceInit), &controllerIndex, &contract);
     if (!NT_SUCCESS(status)) return status;

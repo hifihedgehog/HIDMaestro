@@ -702,6 +702,15 @@ internal static partial class DeviceOrchestrator
         key.SetValue("VendorId", (int)profile.VendorId, RegistryValueKind.DWord);
         key.SetValue("ProductId", (int)profile.ProductId, RegistryValueKind.DWord);
         key.SetValue("FunctionMode", plan.FunctionMode, RegistryValueKind.DWord);
+        // The XUSB companion's answers and its rumble gate, from the
+        // profile's xinput block (XusbAnswers), for a profile that makes a
+        // companion. The key was deleted above, so an index an Xbox 360
+        // controller used never hands them to the next one.
+        if (XusbAnswers.Compile(profile, controllerIndex) is { } answers)
+        {
+            key.SetValue("XusbAnswers", answers, RegistryValueKind.Binary);
+            key.SetValue("XusbCompanion", 1, RegistryValueKind.DWord);
+        }
         key.SetValue("ReportDescriptor", descriptor, RegistryValueKind.Binary);
         // v1.3.5: VersionNumber default 0x0100 (real Sony USB convention).
         // BT profiles that emulate a real Sony controller need 0 here so

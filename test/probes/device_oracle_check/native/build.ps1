@@ -140,6 +140,9 @@ foreach ($f in $flavors) {
     $stampPath = Join-Path $Out "driver_harness_$($f.Name).stamp"
     $sources = @('driver.c', 'driver.h', 'companion.c') | ForEach-Object { Join-Path $f.Dir $_ }
     foreach ($s in $sources) { if (-not (Test-Path $s)) { throw "Driver source missing: $s" } }
+    # The tree's drivers share hm_contract.h, which 9bd6279 lacks.
+    $contractH = Join-Path $f.Dir 'hm_contract.h'
+    if (Test-Path $contractH) { $sources += $contractH }
     $srcIds = ($sources | ForEach-Object { BlobId $_ }) -join ' '
     $stamp = "$srcIds $ownHash $kit $vs"
     if ((Test-Path $exe) -and (Test-Path $stampPath) -and ((Get-Content $stampPath -Raw).Trim() -eq $stamp)) {
@@ -158,7 +161,10 @@ foreach ($f in $flavors) {
     # harness's vector stream (hm_case_identity.c). 9bd6279's driver.h has
     # no tag, and its unit says so.
     $tagC = Join-Path $work 'driver_tag.c'
-    $hasTag = (Get-Content (Join-Path $f.Dir 'driver.h') -Raw) -match 'HmIdentityTag'
+    # The tag lives in driver.h, or in hm_contract.h, which driver.h
+    # includes, from lane DD-3 on.
+    $hasTag = @('driver.h', 'hm_contract.h') | Where-Object { Test-Path (Join-Path $f.Dir $_) } |
+        Where-Object { (Get-Content (Join-Path $f.Dir $_) -Raw) -match 'HmIdentityTag' } | Select-Object -First 1
     $tagSource = if ($hasTag) {
         "#include `"driver.h`"`nint HmDriverHasIdentityTag = 1;`nunsigned long long HmDriverIdentityTag(const unsigned short *t) { return HmIdentityTag((const WCHAR *)t); }`n"
     } else {

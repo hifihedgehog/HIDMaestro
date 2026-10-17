@@ -437,3 +437,20 @@ xbox-series-xs busType=ParentUsb | DD-3 | GUID_BUS_TYPE_USB on the parent the cr
 xbox-series-xs-bt busType=None | DD-3 | no bus type, as none of the present BTHENUM and BTHLEDevice devnodes carries one (or a USB/IP persona, which this create path never stamped), where every create stamped every HIDMaestro devnode and its first child
 xiaomi-mi-wireless-mouse busType=ParentUsb | DD-3 | GUID_BUS_TYPE_USB on the parent the create made, as present USB HID devices carry it, where every create stamped every HIDMaestro devnode and its first child
 zowie-gaming-mouse busType=ParentUsb | DD-3 | GUID_BUS_TYPE_USB on the parent the create made, as present USB HID devices carry it, where every create stamped every HIDMaestro devnode and its first child
+
+# DD-2: HMProfileBuilder.FromProfile copies the whole profile, driverPid included (decision (d)).
+builder/copy-xbox-elite-v2-bt enumerator=HIDMAESTRO_VID_045E_PID_02FF&IG_00 | DD-2 | FromProfile copies driverPid, so a builder copy of an xinputhid profile presents the PID xinputhid binds (02FF), as its source does
+builder/copy-xbox-elite-v2-bt hardwareIds=root\VID_045E&PID_02FF&IG_00|root\HIDMaestroGamepad|root\HIDMaestro | DD-2 | FromProfile copies driverPid, so a builder copy of an xinputhid profile presents the PID xinputhid binds (02FF), as its source does
+builder/copy-xbox-elite-v2-bt hardwarePid=02FF | DD-2 | FromProfile copies driverPid, so a builder copy of an xinputhid profile presents the PID xinputhid binds (02FF), as its source does
+builder/copy-xbox-elite-v2-bt-v2 enumerator=HIDMAESTRO_VID_045E_PID_02FF&IG_00 | DD-2 | FromProfile copies driverPid, so a builder copy of an xinputhid profile presents the PID xinputhid binds (02FF), as its source does
+builder/copy-xbox-elite-v2-bt-v2 hardwareIds=root\VID_045E&PID_02FF&IG_00|root\HIDMaestroGamepad|root\HIDMaestro | DD-2 | FromProfile copies driverPid, so a builder copy of an xinputhid profile presents the PID xinputhid binds (02FF), as its source does
+builder/copy-xbox-elite-v2-bt-v2 hardwarePid=02FF | DD-2 | FromProfile copies driverPid, so a builder copy of an xinputhid profile presents the PID xinputhid binds (02FF), as its source does
+builder/copy-xbox-one-s-bt enumerator=HIDMAESTRO_VID_045E_PID_02FF&IG_00 | DD-2 | FromProfile copies driverPid, so a builder copy of an xinputhid profile presents the PID xinputhid binds (02FF), as its source does
+builder/copy-xbox-one-s-bt hardwareIds=root\VID_045E&PID_02FF&IG_00|root\HIDMaestroGamepad|root\HIDMaestro | DD-2 | FromProfile copies driverPid, so a builder copy of an xinputhid profile presents the PID xinputhid binds (02FF), as its source does
+builder/copy-xbox-one-s-bt hardwarePid=02FF | DD-2 | FromProfile copies driverPid, so a builder copy of an xinputhid profile presents the PID xinputhid binds (02FF), as its source does
+builder/copy-xbox-one-s-bt-full enumerator=HIDMAESTRO_VID_045E_PID_02FF&IG_00 | DD-2 | FromProfile copies driverPid, so a builder copy of an xinputhid profile presents the PID xinputhid binds (02FF), as its source does
+builder/copy-xbox-one-s-bt-full hardwareIds=root\VID_045E&PID_02FF&IG_00|root\HIDMaestroGamepad|root\HIDMaestro | DD-2 | FromProfile copies driverPid, so a builder copy of an xinputhid profile presents the PID xinputhid binds (02FF), as its source does
+builder/copy-xbox-one-s-bt-full hardwarePid=02FF | DD-2 | FromProfile copies driverPid, so a builder copy of an xinputhid profile presents the PID xinputhid binds (02FF), as its source does
+builder/copy-xbox-series-xs enumerator=HIDMAESTRO_VID_045E_PID_02FF&IG_00 | DD-2 | FromProfile copies driverPid, so a builder copy of an xinputhid profile presents the PID xinputhid binds (02FF), as its source does
+builder/copy-xbox-series-xs hardwareIds=root\VID_045E&PID_02FF&IG_00|root\HIDMaestroGamepad|root\HIDMaestro | DD-2 | FromProfile copies driverPid, so a builder copy of an xinputhid profile presents the PID xinputhid binds (02FF), as its source does
+builder/copy-xbox-series-xs hardwarePid=02FF | DD-2 | FromProfile copies driverPid, so a builder copy of an xinputhid profile presents the PID xinputhid binds (02FF), as its source does

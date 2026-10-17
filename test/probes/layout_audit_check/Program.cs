@@ -163,12 +163,81 @@ internal static class Program
         Check("HMProfile.XInput: changing the copy leaves the catalog profile",
               Shape(fresh) == before && fresh.Via == "xusbCompanion" && wheel.Inner.RequiresXusbCompanion,
               $"{before} -> {Shape(fresh)}");
-        var spec = new XInputSpec { Via = "xusbCompanion", Flags = new() { "voice" } };
-        var built = new HMProfileBuilder().FromProfile(wheel).Id("xinput-copy-check").XInput(spec).Build();
-        spec.Via = "xinputhid";
-        spec.Flags.Add("wireless");
-        Check("HMProfileBuilder.XInput: changing the block afterward leaves the built profile",
+        var built = new HMProfileBuilder().FromProfile(wheel).Id("xinput-copy-check")
+            .XInput("{\"via\":\"xusbCompanion\",\"flags\":[\"voice\"]}").Build();
+        built.XInput!.Flags!.Add("wireless");
+        Check("HMProfileBuilder.XInput: the block is read from JSON, and the built profile's copy changes nothing",
               built.XInput!.Via == "xusbCompanion" && built.XInput.Flags!.SequenceEqual(new[] { "voice" }), "");
+        string? BuilderRefusal(string json)
+        {
+            try { new HMProfileBuilder().FromProfile(wheel).Id("xinput-json-check").XInput(json); return null; }
+            catch (HMProfileException e) { return e.Message; }
+        }
+        string? typo = BuilderRefusal("{\"via\":\"xusbCompanion\",\"subTyp\":\"wheel\"}");
+        Check("HMProfileBuilder.XInput: a key the block lacks is refused at its path", typo != null && typo.Contains("$.xinput.subTyp"), typo ?? "accepted");
+
+        // The companion's answers are the catalog's XUSB model
+        // (profiles/models/xusb-companion.json), read once. A model the SDK
+        // cannot use fails naming the JSON path.
+        var model = XusbAnswers.Model;
+        Check("XUSB model: the catalog's model gives five answers and the wired gamepad's defaults",
+              model.Id == "xusb-companion" && model.Answers.Length == 5 && model.SubType == 0x01
+              && model.Flags == 0x000C && model.BatteryType == 0x01 && model.BatteryLevel == 0x03,
+              $"{model.Id} {model.Answers.Length} {model.SubType} 0x{model.Flags:X4} {model.BatteryType} {model.BatteryLevel}");
+        XusbModelSpec Bad(Action<XusbModelSpec> change)
+        {
+            var f = new XusbModelSpec
+            {
+                Defaults = new XInputSpec { Via = "xusbCompanion", SubType = "gamepad", Flags = new() { "voice" },
+                                            Battery = new XInputBatterySpec { Type = "wired", Level = "full" } },
+                Answers = new() { new XusbAnswerSpec { Ioctl = "0x80006000", Mode = "exact", Bytes = "03 01 01 00",
+                                                       Fields = new() { new XusbFieldSpec { At = 2, Value = "information.vid" } } } },
+            };
+            change(f);
+            return f;
+        }
+        string? Refusal(XusbModelSpec f)
+        {
+            try { XusbAnswers.CompileModel(f, "bad", "bad.json"); return null; }
+            catch (InvalidOperationException e) { return e.Message; }
+        }
+        Check("XUSB model: a well-formed model compiles", Refusal(Bad(_ => { })) == null, Refusal(Bad(_ => { })) ?? "");
+        foreach (var (what, change, path) in new (string, Action<XusbModelSpec>, string)[]
+        {
+            ("a value no source gives", f => f.Answers![0].Fields![0].Value = "rumbleLevel", "$.xusbAnswers.answers[0].fields[0].value"),
+            ("a field past the answer's end", f => f.Answers![0].Fields![0].At = 3, "$.xusbAnswers.answers[0].fields[0]"),
+            ("a mode the companion lacks", f => f.Answers![0].Mode = "atLeast", "$.xusbAnswers.answers[0].mode"),
+            ("an answer past the companion's 64 bytes", f => f.Answers![0].Size = 65, "$.xusbAnswers.answers[0].size"),
+            ("a control code not in hex", f => f.Answers![0].Ioctl = "32768", "$.xusbAnswers.answers[0].ioctl"),
+            ("defaults with no subtype", f => f.Defaults!.SubType = null, "$.xusbAnswers.defaults.subType"),
+            ("defaults with no battery level", f => f.Defaults!.Battery!.Level = null, "$.xusbAnswers.defaults.battery"),
+            ("answers past the companion's 512-byte blob", f => f.Answers = Enumerable.Range(0, 7)
+                .Select(_ => new XusbAnswerSpec { Ioctl = "0x80006000", Mode = "exact", Bytes = "00", Size = 64 }).ToList(), "$.xusbAnswers.answers make a blob"),
+        })
+        {
+            string? why = Refusal(Bad(change));
+            Check($"XUSB model: {what} is refused at {path}", why != null && why.Contains(path), why ?? "accepted");
+        }
+        // The model file reads through the catalog's strict options.
+        string? JsonRefusal(string json)
+        {
+            try { XusbAnswers.CompileModelJson(json, "bad.json"); return null; }
+            catch (InvalidOperationException e) { return e.Message; }
+        }
+        const string Good = "{\"id\":\"bad\",\"xusbAnswers\":{\"defaults\":{\"via\":\"xusbCompanion\",\"subType\":\"gamepad\",\"flags\":[\"voice\"],"
+            + "\"battery\":{\"type\":\"wired\",\"level\":\"full\"}},\"answers\":[{\"ioctl\":\"0x80006000\",\"mode\":\"exact\",\"bytes\":\"03010100\"MINOUT}]}TOP}";
+        Check("XUSB model: a well-formed model file compiles", JsonRefusal(Good.Replace("MINOUT", "").Replace("TOP", "")) == null,
+              JsonRefusal(Good.Replace("MINOUT", "").Replace("TOP", "")) ?? "");
+        foreach (var (what, json, path) in new[]
+        {
+            ("a key the format lacks", Good.Replace("MINOUT", ",\"minOuptut\":36").Replace("TOP", ""), "$.xusbAnswers.answers[0].minOuptut"),
+            ("a key the format lacks at the top", Good.Replace("MINOUT", "").Replace("TOP", ",\"answer\":1"), "$.answer"),
+            ("a key written twice", Good.Replace("MINOUT", ",\"mode\":\"exact\"").Replace("TOP", ""), "$.xusbAnswers.answers[0].mode"),
+        })
+        {
+            string? why = JsonRefusal(json);
+            Check($"XUSB model: {what} is refused at {path}", why != null && why.Contains(path), why ?? "accepted");
+        }
 
         // How every profile's devnodes present themselves (PresentationPlan),
         // against the record of master 3dd5e2a and the listed changes.

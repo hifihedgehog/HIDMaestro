@@ -86,10 +86,14 @@ internal static class Contract
     /// <summary>The numbers both sides of the contract carry: the blob's
     /// limits and layout, the protocols, the version section's offsets and
     /// the identity entry's key and value, read from driver\driver.h's
-    /// text.</summary>
+    /// text and hm_contract.h's, which it includes.</summary>
     static void DriverHeader(Checks c)
     {
-        string h = File.ReadAllText(Path.Combine(Program.RepoRoot(), "driver", "driver.h"));
+        // driver.h, and hm_contract.h, which it includes: the version
+        // section, the identity tag and the identity entry both drivers share.
+        string dir = Path.Combine(Program.RepoRoot(), "driver");
+        string h = File.ReadAllText(Path.Combine(dir, "driver.h"))
+                 + (File.Exists(Path.Combine(dir, "hm_contract.h")) ? "\n" + File.ReadAllText(Path.Combine(dir, "hm_contract.h")) : "");
         long? Define(string name)
         {
             var m = System.Text.RegularExpressions.Regex.Match(h, @"#define\s+" + name + @"\s+(0x[0-9A-Fa-f]+|\d+)\b");

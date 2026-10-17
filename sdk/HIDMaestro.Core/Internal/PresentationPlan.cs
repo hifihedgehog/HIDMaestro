@@ -110,8 +110,8 @@ internal sealed class PresentationPlan
             string infoVid = vid, infoPid = pid;
             if (xi.Spec!.Information is { } info)
             {
-                infoVid = $"{XInputPresentation.ParseId(info.Vid!, "information.vid"):X4}";
-                infoPid = $"{XInputPresentation.ParseId(info.Pid!, "information.pid"):X4}";
+                infoVid = $"{XInputPresentation.ParseId(info.Vid!, "$.xinput.information.vid"):X4}";
+                infoPid = $"{XInputPresentation.ParseId(info.Pid!, "$.xinput.information.pid"):X4}";
             }
             companionHw = new[] { $"root\\VID_{infoVid}&PID_{infoPid}&XI_00", "root\\HIDMaestroXUSB" };
             companionCompat = new[] { "USB\\MS_COMP_XUSB10", "USB\\Class_FF&SubClass_5D&Prot_01", "USB\\Class_FF&SubClass_5D", "USB\\Class_FF" };

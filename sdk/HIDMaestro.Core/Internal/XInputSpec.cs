@@ -12,10 +12,12 @@ namespace HIDMaestro.Internal;
 /// pad), <c>"xinputhid"</c> (Microsoft's xinputhid binds above the HID
 /// child, what <c>driverMode: "xinputhid"</c> says, which stays an alias)
 /// or absent for no XInput. An empty block says the device has no XInput
-/// presentation. The rest describes the companion's replies and defaults
-/// to a wired gamepad's, the answers the companion gave every profile
-/// before v2.0.0: subtype gamepad, flags voice and PMD, battery wired and
-/// full, the profile's VID and PID in every reply.</para></summary>
+/// presentation. The rest describes the companion's replies. What a block
+/// leaves out comes from the catalog's XUSB model
+/// (<c>profiles/models/xusb-companion.json</c>, <see cref="XusbAnswers"/>),
+/// a wired gamepad's, the answers the companion gave every profile before
+/// v2.0.0: subtype gamepad, flags voice and PMD, battery wired and full,
+/// the profile's VID and PID in every reply.</para></summary>
 public sealed class XInputSpec
 {
     /// <summary><c>"xusbCompanion"</c>, <c>"xinputhid"</c> or absent.</summary>

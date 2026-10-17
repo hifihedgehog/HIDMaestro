@@ -155,6 +155,12 @@ internal sealed class DeviceModelFile
     /// <summary>The <c>xinput</c> block of the presentation group.</summary>
     [JsonPropertyName("xinput")]
     public XInputSpec? XInput { get; set; }
+
+    /// <summary>The answers an XUSB companion gives (XusbAnswers). Part of
+    /// no group: the catalog's one model of them serves every
+    /// companion.</summary>
+    [JsonPropertyName("xusbAnswers")]
+    public XusbModelSpec? XusbAnswers { get; set; }
 }
 
 /// <summary><c>identity-defaults.json</c>: what a profile with no keys of

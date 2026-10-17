@@ -11,6 +11,7 @@
 #undef WIN32_NO_STATUS
 #include <ntstatus.h>
 #include <wdf.h>
+#include "hm_contract.h"
 #include <sddl.h>     /* ConvertStringSecurityDescriptorToSecurityDescriptorW */
 #include <aclapi.h>   /* GetSecurityInfo */
 
@@ -38,11 +39,49 @@ static const GUID XUSB_GUID =
 #define IOCTL_XUSB_WAIT_FOR_INPUT    0x8000E3AC
 #define IOCTL_XUSB_POWER_INFO        0x80006380
 
+/* v2.0.0: the version contract of the design note's decision (c), as
+ * hm_contract.h lays it out for both drivers. The companion reads a
+ * controller's v2.0.0 values only when, at add, the controller's version
+ * section exists, its range holds HM_COMPANION_PROTOCOL and its identity
+ * tag is this devnode's own. It writes its own field and its error word,
+ * and nothing of the HID driver's. */
+#define HM_COMPANION_PROTOCOL           4
+#define HM_COMPANION_PROTOCOL_MIN       4
+/* CompanionConfigError: which value the companion could not read. */
+#define HM_CONFIG_ERROR_XUSB_ANSWERS    1
+
+/* The XusbAnswers blob the SDK compiles from the profile's xinput block
+ * (XusbAnswers.cs, which carries the same limits and the layout): a
+ * 12-byte header (Length, Format, Count), Count entries of 12 bytes
+ * (IoControlCode, MinOutput, Mode, Offset, Size) and the answers' bytes. */
+#define HM_XUSB_ANSWERS_FORMAT          4
+#define HM_XUSB_ANSWERS_MAX_ENTRIES     8
+#define HM_XUSB_ANSWERS_MAX_DATA        64
+#define HM_XUSB_ANSWERS_MAX_BLOB        512
+#define HM_XUSB_ANSWERS_HEADER          12
+#define HM_XUSB_ANSWERS_ENTRY           12
+#define HM_XUSB_ANSWER_EXACT            0   /* all Size bytes, or STATUS_BUFFER_TOO_SMALL */
+#define HM_XUSB_ANSWER_UP_TO            1   /* as many of Size as the buffer holds */
+
+typedef struct _XUSB_ANSWER {
+    ULONG  IoControlCode;
+    USHORT MinOutput;
+    USHORT Mode;
+    USHORT Size;
+    UCHAR  Data[HM_XUSB_ANSWERS_MAX_DATA];
+} XUSB_ANSWER;
+
 typedef struct _COMPANION_CTX {
     ULONG PacketCount;
-    USHORT VendorId;
-    USHORT ProductId;
     ULONG ControllerIndex;
+    /* v2.0.0: this devnode's identity token, from its instance ID, and
+     * whether the version contract holds. Without it the companion reads no
+     * v2.0.0 value, registers no XUSB interface and answers nothing. */
+    WCHAR Token[40];
+    BOOLEAN Contract;
+    WCHAR VersionMappingName[64]; /* e.g. L"Global\HIDMaestroVersion0" */
+    ULONG AnswerCount;
+    XUSB_ANSWER Answers[HM_XUSB_ANSWERS_MAX_ENTRIES];
     WCHAR ConfigRegPath[64];   /* e.g. L"SOFTWARE\HIDMaestro\Controller0" */
     WCHAR SharedMappingName[64]; /* e.g. L"Global\HIDMaestroInput0" */
     WCHAR OutputMappingName[64]; /* e.g. L"Global\HIDMaestroOutput0" */
@@ -67,14 +106,15 @@ typedef struct _COMPANION_CTX {
     ULONG LastGipSeqNo;        /* Stale-detection: last SeqNo seen from GIP shared memory */
     ULONG GipStaleCount;       /* Consecutive reads with unchanged SeqNo */
 
-    /* Throttled live-swap VID gate (IOCTL_XUSB_SET_STATE). The registry
-     * VendorId is re-read at most every 500 ms instead of every IOCTL, so
-     * a per-frame XInputSetState no longer forces a per-frame registry
-     * round-trip. A live-swap that re-profiles this index is still caught
-     * within one throttle window (a transient phantom is bounded). */
-    ULONGLONG LastVidCheckTick;
-    BOOLEAN   CachedIsXbox;
-    BOOLEAN   VidCheckValid;
+    /* Throttled live-swap gate (IOCTL_XUSB_SET_STATE). The registry's
+     * XusbCompanion for this index is re-read at most every 500 ms instead
+     * of every IOCTL, so a per-frame XInputSetState does not force a
+     * per-frame registry round-trip. A live-swap that re-profiles this
+     * index is still caught within one throttle window (a transient
+     * phantom is bounded). */
+    ULONGLONG LastGateCheckTick;
+    BOOLEAN   CachedGateOpen;
+    BOOLEAN   GateCheckValid;
     /* Async XUSB input pump: holds pended IOCTL_XUSB_WAIT_FOR_INPUT
      * requests. WGI's XusbDevice::QueueInputBuffer (Windows.Gaming.Input.dll
      * @ 0x18006af0c) issues this IOCTL async via InputOutputIoctlAsync and
@@ -464,12 +504,86 @@ static VOID PublishOutput(PCOMPANION_CTX ctx, UCHAR source, UCHAR reportId,
     if (ctx->OutputSignalEvent) SetEvent(ctx->OutputSignalEvent);
 }
 
+/* The version section of the controller's index, mapped read-write, or
+ * NULL when there is none. */
+static PHIDMAESTRO_VERSION_INFO MapVersionSection(_In_ PCOMPANION_CTX ctx, _Out_ HANDLE *handle)
+{
+    *handle = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, ctx->VersionMappingName);
+    if (*handle == NULL) return NULL;
+    PHIDMAESTRO_VERSION_INFO v = (PHIDMAESTRO_VERSION_INFO)MapViewOfFile(
+        *handle, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(HIDMAESTRO_VERSION_INFO));
+    if (v == NULL) { CloseHandle(*handle); *handle = NULL; }
+    return v;
+}
+
+static VOID UnmapVersionSection(_In_opt_ PHIDMAESTRO_VERSION_INFO view, _In_opt_ HANDLE handle)
+{
+    if (view) UnmapViewOfFile(view);
+    if (handle) CloseHandle(handle);
+}
+
+/* Reads the controller's XusbAnswers blob into the context. FALSE when it
+ * is missing, shorter than its header or its Length, of another format,
+ * past a limit, or an entry's bytes leave the blob. */
+static BOOLEAN LoadAnswers(_In_ PCOMPANION_CTX ctx)
+{
+    UCHAR blob[HM_XUSB_ANSWERS_MAX_BLOB];
+    DWORD size = sizeof(blob), type = 0;
+    HKEY hKey;
+    ctx->AnswerCount = 0;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, ctx->ConfigRegPath, 0, KEY_READ, &hKey) != ERROR_SUCCESS) return FALSE;
+    LSTATUS rs = RegQueryValueExW(hKey, L"XusbAnswers", NULL, &type, blob, &size);
+    RegCloseKey(hKey);
+    if (rs != ERROR_SUCCESS || type != REG_BINARY || size < HM_XUSB_ANSWERS_HEADER) return FALSE;
+    ULONG length = *(ULONG UNALIGNED *)&blob[0];
+    ULONG format = *(ULONG UNALIGNED *)&blob[4];
+    ULONG count = *(ULONG UNALIGNED *)&blob[8];
+    if (length != size || format != HM_XUSB_ANSWERS_FORMAT || count > HM_XUSB_ANSWERS_MAX_ENTRIES) return FALSE;
+    ULONG arena = HM_XUSB_ANSWERS_HEADER + count * HM_XUSB_ANSWERS_ENTRY;
+    if (arena > size) return FALSE;
+    for (ULONG i = 0; i < count; i++) {
+        PUCHAR e = &blob[HM_XUSB_ANSWERS_HEADER + i * HM_XUSB_ANSWERS_ENTRY];
+        USHORT mode = *(USHORT UNALIGNED *)&e[6];
+        USHORT offset = *(USHORT UNALIGNED *)&e[8];
+        USHORT bytes = *(USHORT UNALIGNED *)&e[10];
+        if (bytes > HM_XUSB_ANSWERS_MAX_DATA || (ULONG)arena + offset + bytes > size
+            || (mode != HM_XUSB_ANSWER_EXACT && mode != HM_XUSB_ANSWER_UP_TO))
+            return FALSE;
+        XUSB_ANSWER *a = &ctx->Answers[i];
+        a->IoControlCode = *(ULONG UNALIGNED *)&e[0];
+        a->MinOutput = *(USHORT UNALIGNED *)&e[4];
+        a->Mode = mode;
+        a->Size = bytes;
+        RtlCopyMemory(a->Data, &blob[arena + offset], bytes);
+    }
+    ctx->AnswerCount = count;
+    return TRUE;
+}
+
+/* The answer to an IOCTL of this code: the entry with the largest
+ * MinOutput the caller's buffer meets, or the smallest MinOutput when it
+ * meets none. NULL for a code the blob does not answer. */
+static const XUSB_ANSWER *FindAnswer(_In_ PCOMPANION_CTX ctx, ULONG code, size_t outLen)
+{
+    const XUSB_ANSWER *best = NULL, *smallest = NULL;
+    for (ULONG i = 0; i < ctx->AnswerCount; i++) {
+        const XUSB_ANSWER *a = &ctx->Answers[i];
+        if (a->IoControlCode != code) continue;
+        if (!smallest || a->MinOutput < smallest->MinOutput) smallest = a;
+        if (a->MinOutput <= outLen && (!best || a->MinOutput > best->MinOutput)) best = a;
+    }
+    return best ? best : smallest;
+}
+
 NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT DeviceInit)
 {
     NTSTATUS status;
     WDFDEVICE device;
     WDF_OBJECT_ATTRIBUTES attributes;
     WDF_IO_QUEUE_CONFIG queueConfig;
+    WCHAR token[40];
+    ULONG identityIndex = 0;
+    BOOLEAN haveIdentityIndex;
 
     UNREFERENCED_PARAMETER(Driver);
 
@@ -479,6 +593,10 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
         pnpPower.EvtDeviceSelfManagedIoFlush = CompanionSelfManagedIoFlush;
         WdfDeviceInitSetPnpPowerEventCallbacks(DeviceInit, &pnpPower);
     }
+    /* Before WdfDeviceCreate: the devnode's token and the index the SDK
+     * wrote for it (decision (c)). */
+    HmReadInstanceToken(DeviceInit, token, ARRAYSIZE(token));
+    haveIdentityIndex = HmReadIdentityIndex(token, &identityIndex);
 
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, COMPANION_CTX);
     attributes.EvtCleanupCallback = CompanionDeviceCleanup;
@@ -488,13 +606,11 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
     {
         PCOMPANION_CTX ctx = GetCompanionCtx(device);
         ctx->PacketCount = 0;
-        ctx->VendorId = 0x045E;
-        ctx->ProductId = 0x028E;
         ctx->ControllerIndex = 0;
+        for (SIZE_T i = 0; i < ARRAYSIZE(token); i++) ctx->Token[i] = token[i];
 
-        /* Read ControllerIndex from Device Parameters.
-         * Try WDF API first, fall back to direct registry via device instance ID
-         * parsed from WdfDeviceGetDeviceProperty. */
+        /* A v1 program's devnode: ControllerIndex from Device Parameters,
+         * as every version reads it. */
         {
             NTSTATUS rkStatus;
             WDFKEY hkDevice;
@@ -508,6 +624,40 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
                 if (NT_SUCCESS(WdfRegistryQueryULong(hkDevice, &valueName, &idx)))
                     ctx->ControllerIndex = idx;
                 WdfRegistryClose(hkDevice);
+            }
+        }
+
+        /* v2.0.0: the identity entry names the index, and the contract holds
+         * when that index's version section speaks this companion's protocol
+         * and carries this devnode's identity tag. Otherwise the devnode is
+         * a v1 program's: it keeps the index of its hardware key, and fails
+         * its start when that index's section carries another token's tag,
+         * since it is then not that controller. */
+        {
+            ULONGLONG ownTag = HmIdentityTag(ctx->Token);
+            ULONG candidates[2] = { identityIndex, ctx->ControllerIndex };
+            for (int pass = haveIdentityIndex && ctx->Token[0] ? 0 : 1; pass < 2; pass++) {
+                static const WCHAR verPrefix[] = L"Global\\HIDMaestroVersion";
+                SIZE_T cap = sizeof(ctx->VersionMappingName) / sizeof(WCHAR);
+                for (int i = 0; verPrefix[i]; i++) ctx->VersionMappingName[i] = verPrefix[i];
+                ctx->VersionMappingName[(sizeof(verPrefix) / sizeof(WCHAR)) - 1] = L'\0';
+                AppendUlongDecimal(ctx->VersionMappingName, candidates[pass], cap);
+                HANDLE vh;
+                PHIDMAESTRO_VERSION_INFO v = MapVersionSection(ctx, &vh);
+                if (v == NULL) continue;
+                LONG sdkMin = v->SdkProtocolMin;
+                LONG sdkMax = v->SdkProtocolMax;
+                ULONGLONG tag = *(volatile ULONGLONG UNALIGNED *)&v->IdentityTag;
+                UnmapVersionSection(v, vh);
+                if (pass == 0) {
+                    if (sdkMin <= HM_COMPANION_PROTOCOL && HM_COMPANION_PROTOCOL <= sdkMax && tag == ownTag) {
+                        ctx->ControllerIndex = identityIndex;
+                        ctx->Contract = TRUE;
+                        break;
+                    }
+                } else if (tag != 0 && tag != ownTag) {
+                    return STATUS_DEVICE_CONFIGURATION_ERROR;
+                }
             }
         }
 
@@ -548,24 +698,30 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
             AppendUlongDecimal(ctx->CompanionInputEventName, ctx->ControllerIndex, cap);
         }
 
-        /* Read VID/PID from per-instance registry (falls back to global) */
-        HKEY hKey;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, ctx->ConfigRegPath, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-            DWORD val, sz = sizeof(val);
-            if (RegQueryValueExW(hKey, L"VendorId", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS)
-                ctx->VendorId = (USHORT)val;
-            sz = sizeof(val);
-            if (RegQueryValueExW(hKey, L"ProductId", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS)
-                ctx->ProductId = (USHORT)val;
-            RegCloseKey(hKey);
-        } else if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-            DWORD val, sz = sizeof(val);
-            if (RegQueryValueExW(hKey, L"VendorId", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS)
-                ctx->VendorId = (USHORT)val;
-            sz = sizeof(val);
-            if (RegQueryValueExW(hKey, L"ProductId", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS)
-                ctx->ProductId = (USHORT)val;
-            RegCloseKey(hKey);
+        /* Under the contract: this companion's own field of the version
+         * section, the oldest SDK protocol first and its protocol last, so a
+         * reader that sees the protocol sees the minimum with it, and then
+         * the controller's answers. A blob it cannot read fails the start,
+         * with the value named in its error word first, and the create then
+         * names it rather than leaving a companion that answers nothing.
+         * Nothing of the HID driver's is written, and nothing is cleared
+         * at cleanup. */
+        if (ctx->Contract) {
+            HANDLE vh;
+            PHIDMAESTRO_VERSION_INFO v = MapVersionSection(ctx, &vh);
+            if (v != NULL) {
+                InterlockedExchange(&v->CompanionProtocolMin, HM_COMPANION_PROTOCOL_MIN);
+                MemoryBarrier();
+                InterlockedExchange(&v->CompanionProtocol, HM_COMPANION_PROTOCOL);
+                if (!LoadAnswers(ctx)) {
+                    InterlockedExchange(&v->CompanionConfigError, HM_CONFIG_ERROR_XUSB_ANSWERS);
+                    UnmapVersionSection(v, vh);
+                    return STATUS_DEVICE_CONFIGURATION_ERROR;
+                }
+                UnmapVersionSection(v, vh);
+            } else {
+                ctx->Contract = FALSE;
+            }
         }
     }
 
@@ -611,7 +767,11 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
         }
     }
 
-    /* HIDMAESTRO publishes ONLY GUID_DEVINTERFACE_XUSB. With our INF's
+    /* v2.0.0: the XUSB interface is registered only for a controller whose
+     * answers the companion holds, so no reader opens a device that would
+     * answer nothing (a v1 program's, decision (c)).
+     *
+     * HIDMAESTRO publishes ONLY GUID_DEVINTERFACE_XUSB. With our INF's
      * UpperFilters="xinputhid" tripwire, ProviderManagerWorker::OnPnpDeviceAdded
      * sees cVar3=true AND interface==XUSB {ec87f1e3}, and dispatches via the
      * XUSB path (LAB_18005f241). Publishing additional interfaces (WinExInput,
@@ -619,7 +779,8 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
      * into classifying our one logical controller as multiple WGI entities
      * the known hang mode documented in
      * memory:feedback-one-wgi-device-per-controller.md. */
-    WdfDeviceCreateDeviceInterface(device, (LPGUID)&XUSB_GUID, NULL);
+    if (GetCompanionCtx(device)->Contract)
+        WdfDeviceCreateDeviceInterface(device, (LPGUID)&XUSB_GUID, NULL);
 
     return STATUS_SUCCESS;
 }
@@ -864,89 +1025,24 @@ void CompanionIoControl(
 
     switch (IoControlCode)
     {
-    case IOCTL_XUSB_GET_INFORMATION: {
-        /* OutDeviceInfos_t: 12 bytes (matches driver.c format exactly) */
-        UCHAR info[12];
-        RtlZeroMemory(info, sizeof(info));
-        *(USHORT*)&info[0] = 0x0103;  /* XUSBVersion 0x0103. 2026-04-23 empirical: 0x0101 lets WGI poll state but not dispatch put_Vibration; 0x0103 matches physical Xbox 360 USB and HIDMaestro BT (both work): flip to unblock SET_STATE dispatch. */
-        info[2] = 0x01; /* device count: always 1 (each companion hosts one controller) */
-        /* Revert to 0: pre-regression value (before commit a19861b). Setting
-         * this to 0x01 during the WGI vibration work was my speculative change
-         * ("may read it as 'device is usable' flag"), and empirical testing
-         * 2026-04-23 showed it didn't actually affect vibration dispatch while
-         * it DID coincide with the 4-player XInput slot-1 regression.
-         * Per-instance uniqueness tested (ControllerIndex+1): no effect.
-         * Out-of-range value tested (0x09): no effect. Testing the straight
-         * revert to 0x00 to confirm this single byte is the regression. */
-        info[3] = 0x00;
-        info[4] = 0x00;                /* unk2: bit 7 clear = don't skip */
-        *(USHORT*)&info[8] = ctx->VendorId;
-        *(USHORT*)&info[10] = ctx->ProductId;
-        CopyToRequest(Request, info, 12);
-        break;
-    }
-
-    case IOCTL_XUSB_GET_CAPABILITIES: {
-        /* GamepadCapabilities0101: 24-byte wire: [0-1]Version, then the
-         * XINPUT_CAPABILITIES struct starting at [2]:
-         *   [2]Type [3]SubType [4-5]Flags [6-7]wButtons [8]LT [9]RT
-         *   [10-17]sThumbLX/LY/RX/RY (4xi16) [18-19]wLeftMotorSpeed
-         *   [20-21]wRightMotorSpeed [22-23]reserved.
-         *
-         * Prior bug: motors were at [22-23] and wButtons at [4-5]. WGI
-         * read motor maxes from [18-21] -> zeros -> ForceFeedbackMotors=0
-         * -> silently dropped put_Vibration. */
-        /* Two distinct wire formats, verified 2026-04-23 against a live
-         * physical Xbox 360 wired controller's xusb22.sys 36-byte response.
-         * V1 (24-byte) layout: subtype/flags/buttons/triggers/axes/motors.
-         * V2 (36-byte) layout: 16-byte header + V1 struct at byte 16.
-         * When WGI calls GET_CAPABILITIES with output size 36, it expects V2
-         * extended format. Returning V1-shaped data in a 36-byte buffer makes
-         * WGI read garbage at the V2 field offsets and the device looks
-         * malformed. */
-        /* Motor max speed fields set to 0xFFFF to advertise rumble capability.
-         * Previous zero values made WGI's QueryDeviceCapabilities report
-         * supportedRumble=0x3 but mappedRumble=0x0 (motors detected but not
-         * wired to an actuator). */
-        UCHAR caps_v1[24] = {
-            0x03, 0x01,
-            0x00, 0x01,
-            0xFF, 0xF7,
-            0xFF, 0xFF,
-            0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF,
-            0xFF, 0xFF, 0xFF, 0xFF,    /* LeftMotor, RightMotor max speeds */
-            0x00, 0x00,                /* pad */
-            0xFF, 0xFF                 /* trailer */
-        };
-        UCHAR caps_v2[36] = {
-            0x03, 0x01,
-            0x01, 0x01,
-            0x0C, 0x00,
-            (UCHAR)(ctx->VendorId & 0xFF), (UCHAR)((ctx->VendorId >> 8) & 0xFF),
-            (UCHAR)(ctx->ProductId & 0xFF), (UCHAR)((ctx->ProductId >> 8) & 0xFF),
-            0x10, 0x01,
-            (UCHAR)(ctx->ControllerIndex & 0xFF), 0xFA, 0x34, 0x22,
-            0xFF, 0xF7,
-            0xFF,
-            0xFF,
-            0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF,
-            0xFF, 0xFF, 0xFF, 0xFF,    /* LeftMotor, RightMotor max speeds */
-            0x00, 0x00,                /* pad */
-            0xFF, 0xFF                 /* motor-present trailer */
-        };
-        PVOID outBuf; size_t outLen;
-        if (NT_SUCCESS(WdfRequestRetrieveOutputBuffer(Request, 24, &outBuf, &outLen))) {
-            SIZE_T copy;
-            if (outLen >= 36) {
-                copy = 36;
-                RtlCopyMemory(outBuf, caps_v2, copy);
-            } else {
-                copy = outLen > 24 ? 24 : outLen;
-                RtlCopyMemory(outBuf, caps_v1, copy);
-            }
-            WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, copy);
+    case IOCTL_XUSB_GET_INFORMATION:
+    case IOCTL_XUSB_GET_CAPABILITIES:
+    case IOCTL_XUSB_GET_BATTERY_INFO:
+    case IOCTL_XUSB_GET_INFORMATION_EX: {
+        /* v2.0.0: the controller's answers, from the XusbAnswers blob the
+         * SDK compiles from the profile's xinput block (XusbAnswers.cs):
+         * GET_INFORMATION's 12 bytes, GET_CAPABILITIES in its 24-byte form
+         * (GamepadCapabilities0101) or, for a buffer of 36 or more, its
+         * 36-byte form (GamepadCapabilities0102), GET_BATTERY_INFORMATION's
+         * four bytes and GET_INFORMATION_EX's 64. A v1 program's companion
+         * holds none and answers nothing (decision (c)). */
+        const XUSB_ANSWER *a = ctx->Contract ? FindAnswer(ctx, IoControlCode, OutputBufferLength) : NULL;
+        if (a == NULL) {
+            WdfRequestComplete(Request, STATUS_INVALID_DEVICE_REQUEST);
+        } else if (a->Mode == HM_XUSB_ANSWER_UP_TO) {
+            CopyToRequest(Request, a->Data, OutputBufferLength < a->Size ? OutputBufferLength : a->Size);
         } else {
-            WdfRequestComplete(Request, STATUS_BUFFER_TOO_SMALL);
+            CopyToRequest(Request, a->Data, a->Size);
         }
         break;
     }
@@ -965,48 +1061,50 @@ void CompanionIoControl(
          * hi motor + reserved, or 4 bytes for the raw XINPUT_VIBRATION).
          *
          * CRITICAL: a stale-HIDMAESTRO-after-live-swap gate. When the user
-         * live-swaps from Xbox 360 → DS4, TeardownController removes the
-         * Xbox 360 HIDMAESTRO, but devcon can return "Removed on reboot"
+         * live-swaps from an Xbox 360 profile to another, TeardownController
+         * removes the companion, but devcon can return "Removed on reboot"
          * and the companion persists as a phantom still serving IOCTLs.
          * xinput1_4 / GameInputSvc keep sending IOCTL_XUSB_SET_STATE here;
          * without this gate we publish Source=XInput to the SAME shared
-         * output section that the new DS4 is reading from: so the user's
-         * DS4 SDK surfaces phantom XInput rumble packets. Fix: re-read the
-         * CURRENT registry VendorId for this ControllerIndex every IOCTL.
-         * If the index has been re-profiled to a non-Xbox controller, the
-         * current VendorId will not be 0x045E and we silently drop. Safer
-         * than sampling ONCE at init because live-swap DOES update the
-         * registry before creating the new controller. Throttled to one
-         * read per 500 ms so a per-frame XInputSetState (many games call
-         * it every frame regardless of rumble change) does not force a
-         * per-frame registry round-trip; a re-profiled index is still
-         * caught within one window. */
-        BOOLEAN isXboxNow;
-        {
+         * output section the new controller is reading from: so its SDK
+         * surfaces phantom XInput rumble packets. Fix: re-read the CURRENT
+         * registry XusbCompanion for this ControllerIndex, which the SDK
+         * writes 1 for a profile with a companion and deletes for any
+         * other. If the index has been re-profiled, it is no longer 1 and
+         * we silently drop. Safer than sampling ONCE at init because
+         * live-swap DOES update the registry before creating the new
+         * controller. Throttled to one read per 500 ms so a per-frame
+         * XInputSetState (many games call it every frame regardless of
+         * rumble change) does not force a per-frame registry round-trip;
+         * a re-profiled index is still caught within one window. A v1
+         * program's companion publishes nothing (decision (c)). */
+        BOOLEAN gateOpen = FALSE;
+        if (ctx->Contract) {
             ULONGLONG now = GetTickCount64();
-            if (!ctx->VidCheckValid || (now - ctx->LastVidCheckTick) >= 500) {
-                BOOLEAN xbox = FALSE;
+            if (!ctx->GateCheckValid || (now - ctx->LastGateCheckTick) >= 500) {
+                BOOLEAN open = FALSE;
                 HKEY hKey;
-                DWORD val = 0, sz = sizeof(val);
+                DWORD val = 0, sz = sizeof(val), type = 0;
                 if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, ctx->ConfigRegPath,
                                   0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-                    if (RegQueryValueExW(hKey, L"VendorId", NULL, NULL,
-                                         (LPBYTE)&val, &sz) == ERROR_SUCCESS) {
-                        if ((USHORT)val == 0x045E) xbox = TRUE;
+                    if (RegQueryValueExW(hKey, L"XusbCompanion", NULL, &type,
+                                         (LPBYTE)&val, &sz) == ERROR_SUCCESS
+                        && type == REG_DWORD && val != 0) {
+                        open = TRUE;
                     }
                     RegCloseKey(hKey);
                 }
-                ctx->CachedIsXbox = xbox;
-                ctx->VidCheckValid = TRUE;
-                ctx->LastVidCheckTick = now;
+                ctx->CachedGateOpen = open;
+                ctx->GateCheckValid = TRUE;
+                ctx->LastGateCheckTick = now;
             }
-            isXboxNow = ctx->CachedIsXbox;
+            gateOpen = ctx->CachedGateOpen;
         }
 
         PVOID rumbleBuf; size_t rumbleSize;
         if (NT_SUCCESS(WdfRequestRetrieveInputBuffer(Request, 1, &rumbleBuf, &rumbleSize))
             && rumbleSize >= 1) {
-            if (isXboxNow) {
+            if (gateOpen) {
                 PublishOutput(ctx, OUT_SOURCE_XINPUT, 0,
                               (const UCHAR*)rumbleBuf, (ULONG)rumbleSize);
             }
@@ -1022,21 +1120,6 @@ void CompanionIoControl(
     case IOCTL_XUSB_GET_LED_STATE: {
         UCHAR led[3] = { 0, 0, 0x06 };
         CopyToRequest(Request, led, 3);
-        break;
-    }
-
-    case IOCTL_XUSB_GET_BATTERY_INFO: {
-        /* XUSBVersion occupies bytes 0-1 and the type and level follow it,
-         * the same header the LED reply above uses. Callers copy from
-         * &OutBuffer.BatteryType, so packing the pair at 1 and 2 read back
-         * as NIMH/EMPTY: SDL maps any type that is not WIRED, UNKNOWN or
-         * DISCONNECTED to on-battery, and EMPTY to 10 percent, so every
-         * SDL game showed a virtual pad as a flat battery. WIRED/FULL is
-         * the same answer OpenXInput fabricates for a device with no
-         * battery to report. The version word is left zero because no
-         * caller reads it back. */
-        UCHAR batt[4] = { 0, 0, 0x01, 0x03 };
-        CopyToRequest(Request, batt, 4);
         break;
     }
 
@@ -1057,19 +1140,6 @@ void CompanionIoControl(
          * back to GET_STATE polling when this returns INVALID_DEVICE_REQUEST. */
         WdfRequestComplete(Request, STATUS_INVALID_DEVICE_REQUEST);
         break;
-
-    case IOCTL_XUSB_GET_INFORMATION_EX: {
-        UCHAR infoEx[64];
-        RtlZeroMemory(infoEx, sizeof(infoEx));
-        *(USHORT*)&infoEx[0] = 0x0103;      /* Version 0x0103: match GET_INFORMATION. */
-        infoEx[2] = 0x01;
-        infoEx[3] = 0x01;  /* slot/capability marker: mirror GET_INFORMATION */
-        *(USHORT*)&infoEx[8] = ctx->VendorId;
-        *(USHORT*)&infoEx[10] = ctx->ProductId;
-        ULONG outLen = OutputBufferLength < 64 ? (ULONG)OutputBufferLength : 64;
-        CopyToRequest(Request, infoEx, outLen);
-        break;
-    }
 
     default:
         WdfRequestComplete(Request, STATUS_INVALID_DEVICE_REQUEST);
