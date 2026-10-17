@@ -35,6 +35,7 @@ internal static class Answers
         Section(c, "refusals", Refusals);
         Section(c, "the blob", Blob);
         Section(c, "identity defaults", Identity);
+        Section(c, "the feature-read notification", Notify);
         return c.Failures;
     }
 
@@ -389,6 +390,55 @@ internal static class Answers
         {
             var p = Build(0x1234, 0x0CE6, "usb");
             return (!(bool)Api.Prop(p, "HasDeviceModel")!, "");
+        });
+    }
+
+    // ── The feature-read notification ────────────────────────────────────
+
+    /// <summary>Through v1.13.0 the usbip backend published a feature-read
+    /// notification on every answered GET, and a table had no notify key.
+    /// notify defaults to true on usbip, so a user's table from v1.7 to
+    /// v1.13 keeps its notifications, and to false on UMDF2, where the
+    /// driver notified only the Sony reads the Sony models now name. At
+    /// b2797055 a usbip table without notify published none.</summary>
+    static void Notify(Checks c)
+    {
+        // A v1.13 usbip table: plain answers keyed by report ID, no notify.
+        JsonObject V1(string id, bool? notify)
+        {
+            var o = FromRepo(@"sony\dualsense-composite.json", id);
+            o.Remove("deviceModelFrom");
+            string table = "{\"reports\":[{\"id\":\"0x05\",\"size\":41,\"data\":\"05" + new string('0', 80) + "\""
+                + (notify is bool n ? $",\"notify\":{(n ? "true" : "false")}" : "")
+                + "},{\"id\":\"0x20\",\"size\":64,\"data\":\"20" + new string('0', 126) + "\"}]}";
+            o["featureStubs"] = JsonNode.Parse(table);
+            return o;
+        }
+        var (p, issue) = Load(V1("user-v1-table", null));
+        c.Run("a usbip table with no notify keys loads", () => (p != null, issue?.ToString() ?? ""));
+        if (p == null) return;
+        var t = FeatureStubTable.From(p.Inner, 0, null, _ => null)!;
+        c.Run("every GET it answers publishes the feature-read notification, as v1.13.0's did", () =>
+        {
+            bool a5 = Get(t, 0x05, 64, out bool n5) != null, a20 = Get(t, 0x20, 64, out bool n20) != null;
+            return (a5 && a20 && n5 && n20, $"0x05 answered {a5} notify {n5}, 0x20 answered {a20} notify {n20}");
+        });
+        var (q, _) = Load(V1("user-v1-off", false));
+        c.Run("notify: false on usbip publishes none", () =>
+        {
+            var u = FeatureStubTable.From(q!.Inner, 0, null, _ => null)!;
+            return (Get(u, 0x05, 64, out bool notify) != null && !notify, "");
+        });
+        c.Run("on UMDF2 an answer without notify publishes none", () =>
+        {
+            var umdf = FromRepo(@"heusinkveld\ultimate-pedals.json", "user-umdf-answer");
+            umdf["descriptor"] = FromRepo(@"sony\dualsense.json", "x")["descriptor"]!.DeepClone();
+            umdf["featureStubs"] = JsonNode.Parse("{\"reports\":[{\"id\":\"0x05\",\"size\":41,\"data\":\"" + new string('0', 80) + "\"}]}");
+            umdf.Remove("layout");
+            var (u, why) = Load(umdf);
+            if (u == null) return (false, why?.ToString() ?? "not loaded");
+            var ut = FeatureStubTable.From(u.Inner, 0, null, _ => null)!;
+            return (Get(ut, 0x05, 64, out bool notify) != null && !notify, "");
         });
     }
 }

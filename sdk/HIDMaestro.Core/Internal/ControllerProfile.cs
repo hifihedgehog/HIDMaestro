@@ -1121,9 +1121,12 @@ public sealed class FeatureStubReport
     public AnswerCrcSpec? Crc32 { get; set; }
 
     /// <summary>Serving the answer publishes a feature-read notification,
-    /// which arms an extended report whose <c>armOn</c> names the read.</summary>
+    /// which arms an extended report whose <c>armOn</c> names the read.
+    /// Absent, it is true on the usbip backend, which through v1.13.0
+    /// published one on every answered GET, and false on UMDF2, whose
+    /// driver notified only the Sony reads the Sony models name.</summary>
     [JsonPropertyName("notify")]
-    public bool Notify { get; set; }
+    public bool? Notify { get; set; }
 
     /// <summary>v2.0.0: bytes of the answer that differ per controller,
     /// each from a value source (<see cref="AnswerPatchSpec"/>). Absent for

@@ -135,7 +135,7 @@ internal sealed class FeatureStubTable
         try
         {
             Validate(spec, model.ValueSources, profile.RequiresUsbipBackend);
-            entries = Normalize(spec, map);
+            entries = Normalize(spec, map, profile.RequiresUsbipBackend);
         }
         catch (ProfileDefectException e)
         {
@@ -360,7 +360,7 @@ internal sealed class FeatureStubTable
     internal static List<Normal> ValidateAgainst(ControllerProfile p, FeatureStubSpec spec, bool taken, List<string> notes)
     {
         var map = p.GetOrBuildReportMap();
-        var list = Normalize(spec, map);
+        var list = Normalize(spec, map, p.RequiresUsbipBackend);
         var pid = PidReportIds(map);
         foreach (var n in list)
         {
@@ -424,7 +424,7 @@ internal sealed class FeatureStubTable
     /// <c>lastMessage</c> form of earlier releases becomes message entries
     /// on the channel report: report 0 for a descriptor without report IDs,
     /// else the first feature report it declares.</summary>
-    internal static List<Normal> Normalize(FeatureStubSpec spec, HidReportMap map)
+    internal static List<Normal> Normalize(FeatureStubSpec spec, HidReportMap map, bool usbip)
     {
         bool legacy = spec.Match != null;
         bool lastMessage = spec.Match == "lastMessage";
@@ -441,7 +441,7 @@ internal sealed class FeatureStubTable
         {
             var r = spec.Reports[i];
             string at = $"$.featureStubs.reports[{i}]";
-            var n = new Normal { Index = i, Echo = r.Echo, ReplyHead = r.ReplyHead != null, Notify = r.Notify || legacy };
+            var n = new Normal { Index = i, Echo = r.Echo, ReplyHead = r.ReplyHead != null, Notify = r.Notify ?? (legacy || usbip) };
             byte id = Hex(r.Id, at + ".id");
             if (lastMessage && r.Message == null)
             {
