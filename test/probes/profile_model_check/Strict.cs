@@ -29,33 +29,7 @@ internal static class Strict
     public static int Run()
     {
         var c = new Checks("strict");
-        // A catalog profile looked up by name while the catalog itself
-        // loads would load it again on that thread, or wait on the load's
-        // lock from one of its parallel workers. The lookup refuses with a
-        // message instead. At 4a42386d nothing refused it.
-        c.Run("a catalog lookup made during the catalog's own load is refused, not run", () =>
-        {
-            var flag = typeof(ProfileDatabase).GetField("s_loadingEmbedded", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)
-                ?? throw new MissingFieldException("ProfileDatabase", "s_loadingEmbedded");
-            var cached = typeof(ProfileDatabase).GetField("s_cachedEmbedded", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
-            var keep = cached.GetValue(null);
-            cached.SetValue(null, null);
-            flag.SetValue(null, true);
-            try
-            {
-                var lookup = typeof(ProfileDatabase).GetMethod("EmbeddedProfile", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
-                try { lookup.Invoke(null, new object[] { "dualsense" }); return (false, "ran"); }
-                catch (System.Reflection.TargetInvocationException e) when (e.InnerException is InvalidOperationException io)
-                {
-                    return (io.Message.Contains("catalog", StringComparison.Ordinal), io.Message);
-                }
-            }
-            finally
-            {
-                flag.SetValue(null, false);
-                cached.SetValue(null, keep);
-            }
-        });
+        CatalogLoadGuard(c);
         Catalog(c);
         UserFiles(c);
         Paths(c);
@@ -63,6 +37,71 @@ internal static class Strict
         try { EarlierTags(c); }
         catch (Exception e) { c.Check("earlier tags' profile files go through the loader", false, $"threw {e.GetType().Name}: {e.Message}"); }
         return c.Failures;
+    }
+
+    /// <summary>A catalog profile looked up by name from inside the
+    /// catalog's own load would load it again on that thread, or wait on
+    /// the load's lock from one of its parallel workers, so the lookup
+    /// refuses with a message (4a42386d refused nothing). A lookup from any
+    /// other thread during the load waits for it and gets the profile: at
+    /// e7a7a2e4 the flag was process-wide, so a Build on the caller's
+    /// thread while HMContext's constructor loaded the catalog in the
+    /// background, or a directory load's parallel workers, were refused.</summary>
+    static void CatalogLoadGuard(Checks c)
+    {
+        const System.Reflection.BindingFlags Statics = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic;
+        var flag = typeof(ProfileDatabase).GetField("s_loadingEmbedded", Statics)
+            ?? throw new MissingFieldException("ProfileDatabase", "s_loadingEmbedded");
+        var cached = typeof(ProfileDatabase).GetField("s_cachedEmbedded", Statics)!;
+        var lookup = typeof(ProfileDatabase).GetMethod("EmbeddedProfile", Statics)!;
+        // The flag as this SDK keeps it: a process-wide bool, or a value
+        // that flows only into the load's own work.
+        void Set(bool on)
+        {
+            if (flag.FieldType == typeof(bool)) flag.SetValue(null, on);
+            else ((System.Threading.AsyncLocal<bool>)flag.GetValue(null)!).Value = on;
+        }
+        (bool Ok, string Detail) Look(bool wantRefused)
+        {
+            try
+            {
+                var p = (ControllerProfile?)lookup.Invoke(null, new object[] { "dualsense" });
+                return wantRefused ? (false, "ran") : (p?.Id == "dualsense", p?.Id ?? "null");
+            }
+            catch (System.Reflection.TargetInvocationException e) when (e.InnerException is InvalidOperationException io)
+            {
+                return (wantRefused && io.Message.Contains("catalog", StringComparison.Ordinal), io.Message);
+            }
+        }
+        var keep = cached.GetValue(null);
+        c.Run("a catalog lookup made during the catalog's own load is refused, not run", () =>
+        {
+            cached.SetValue(null, null);
+            Set(true);
+            try { return Look(wantRefused: true); }
+            finally { Set(false); cached.SetValue(null, keep); }
+        });
+        c.Run("a catalog lookup from another thread while the catalog loads waits for the load and gets the profile", () =>
+        {
+            cached.SetValue(null, null);
+            Set(true);
+            try
+            {
+                (bool, string) result = (false, "did not run");
+                // A thread that does not inherit this one's execution
+                // context, as the caller's thread does not inherit
+                // HMContext's background load.
+                System.Threading.Thread t;
+                using (System.Threading.ExecutionContext.SuppressFlow())
+                {
+                    t = new System.Threading.Thread(() => result = Look(wantRefused: false));
+                    t.Start();
+                }
+                t.Join();
+                return result;
+            }
+            finally { Set(false); cached.SetValue(null, keep); }
+        });
     }
 
     // ── The catalog ──────────────────────────────────────────────────────
