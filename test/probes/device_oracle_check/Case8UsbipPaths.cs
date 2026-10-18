@@ -111,6 +111,7 @@ internal sealed class Case8UsbipPaths : IOracleCase
         using (var host = new Host(sock)) LayoutEndpoint(host);
         using (var host = new Host(sock)) EmitAndLiveFeature(host);
         using (var host = new Host(sock)) SetReportCommands(host);
+        using (var host = new Host(sock)) SetReportHalt(host);
     }
 
     /// <summary>The composite's JSON, from the SDK's embedded catalog.</summary>
@@ -190,6 +191,53 @@ internal sealed class Case8UsbipPaths : IOracleCase
             var emitted = Last();
             if (emitted != (Feature, 0x31, "F1CC"))
                 throw new InvalidOperationException($"SET_REPORT check: a write whose rule emits a report reaches the ring as source {emitted.Source}, report 0x{emitted.Id:X2}, {emitted.Data}, where it must be feature report 0x31 with F1CC.");
+        }
+        finally
+        {
+            dev?.Dispose();
+            Marshal.FreeHGlobal(view);
+            Marshal.FreeHGlobal(ring);
+        }
+    }
+
+    /// <summary>A halt from a SET_REPORT command, a check beside the
+    /// recording that adds nothing to the streams. On a copy of
+    /// steam-controller-2 given an input endpoint, a register and a halt, a
+    /// feature write whose rule sets the register fails the read parked on
+    /// the input endpoint at once, as a bulk or interrupt command's halt
+    /// does. At f00f0482 the SET_REPORT path applied no effect, so the read
+    /// stayed parked. Throws on any other result.</summary>
+    static void SetReportHalt(Host host)
+    {
+        var json = CatalogJson("steam-controller-2");
+        json["id"] = "setreport-halt-check";
+        var protocol = json["protocol"]!.AsObject();
+        protocol["state"]!.AsArray().Add(JsonNode.Parse("{\"name\":\"halted\",\"initial\":false}"));
+        protocol["input"] = JsonNode.Parse("{\"endpoint\":\"0x81\"}");
+        protocol["halt"] = JsonNode.Parse("{\"while\":[\"halted\"],\"status\":\"EPROTO\"}");
+        protocol["commands"]!["rules"]!.AsArray().Insert(0, JsonNode.Parse("{\"match\":\"01 F2\",\"set\":{\"halted\":true}}"));
+        var p = ControllerProfile.Parse(Encoding.UTF8.GetBytes(json.ToJsonString()))!;
+        p.ValidateDeviceModel();
+
+        IntPtr view = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_INPUT_SIZE);
+        IntPtr ring = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_OUTPUT_SIZE);
+        Marshal.Copy(new byte[SharedMemoryIO.SHARED_INPUT_SIZE], 0, view, SharedMemoryIO.SHARED_INPUT_SIZE);
+        Marshal.Copy(new byte[SharedMemoryIO.SHARED_OUTPUT_SIZE], 0, ring, SharedMemoryIO.SHARED_OUTPUT_SIZE);
+        UsbipEmulatedDevice? dev = null;
+        try
+        {
+            dev = CompositeRig.NewDevice(p, view, ring, IntPtr.Zero, host.Connection, out _, pollClockUnbuilt: true);
+            ushort iface = dev.Descriptors.HidInterfaceNumber;
+            uint read = host.Submit(dev, 0x01, isIn: true, 64, ReadOnlySpan<byte>.Empty);
+            var before = host.DrainReplies().Where(x => x.Kind == UsbipProtocol.RetSubmit && x.Seq == read).ToList();
+            if (before.Count != 0)
+                throw new InvalidOperationException($"SET_REPORT halt check: the read on 0x81 was answered before any command (status {before[0].Status}).");
+            var b = Convert.FromHexString("01F2");
+            host.Submit(dev, 0x00, isIn: false, b.Length, b, setup: Setup(0x21, 0x09, (ushort)((3 << 8) | b[0]), iface, (ushort)b.Length));
+            var after = host.DrainReplies().Where(x => x.Kind == UsbipProtocol.RetSubmit && x.Seq == read).ToList();
+            if (after.Count != 1 || after[0].Status == 0)
+                throw new InvalidOperationException(
+                    $"SET_REPORT halt check: after the write that halts the device the read on 0x81 is {(after.Count == 0 ? "still parked" : $"answered with status {after[0].Status}")}, where it must fail.");
         }
         finally
         {
@@ -698,7 +746,8 @@ internal sealed class Case8UsbipPaths : IOracleCase
         /// bulk IN endpoint, the responder and the report buffer (293-304,
         /// 326), the gate the constructor applies.</summary>
         internal static UsbipEmulatedDevice NewDevice(ControllerProfile p, IntPtr view, IntPtr ring, IntPtr ev,
-                                             UsbipServer.Connection? connection, out byte inEndpoint)
+                                             UsbipServer.Connection? connection, out byte inEndpoint,
+                                             bool pollClockUnbuilt = false)
         {
             var t = typeof(UsbipEmulatedDevice);
             var dev = (UsbipEmulatedDevice)RuntimeHelpers.GetUninitializedObject(t);
@@ -711,12 +760,14 @@ internal sealed class Case8UsbipPaths : IOracleCase
             // constructor), to the generated kernels or, with
             // HM_ORACLE_INTERPRET, the interpreter. A device that builds its
             // reports gets its clock made and never started: the case ticks
-            // it.
+            // it. A device on a host poll clock is refused unless the caller
+            // asks for it unbuilt, and then its reads stay parked until a
+            // command fails them.
             var compiled = CompiledProtocol.Compile(p, descriptors);
             LayoutRunner? runner = null;
             if (compiled != null)
             {
-                if (!compiled.BuildsReports && compiled.InputEndpoint != 0)
+                if (!compiled.BuildsReports && compiled.InputEndpoint != 0 && !pollClockUnbuilt)
                     throw new InvalidOperationException($"{p.Id} sends its report on a host poll clock, which this case does not build.");
                 runner = ProgramBinder.BindLayouts(compiled.Model, Environment.GetEnvironmentVariable("HM_ORACLE_INTERPRET") == "1");
                 var engine = new ProtocolEngine(compiled, descriptors.SerialString, 0, runner);

@@ -1073,6 +1073,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 byte source = reportType == 0x03 ? SourceHidFeature : SourceHidOutput;
                 if (command is { } c && payload.Length > 0) PublishCommand(c, payload, source);
                 else PublishOutput(source, rid, data);
+                // What the command did, as on the OUT endpoint and the
+                // SET_REPORT(Output) path: a halt fails the parked reads, and
+                // a change wakes the clocks.
+                if (command is { } applied) ProtocolApply(applied.Effect);
                 SendRetSubmit(cmd.Seqnum, 0, payload.Length, null);
                 return;
             }
