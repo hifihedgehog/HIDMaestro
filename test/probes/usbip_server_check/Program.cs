@@ -1817,12 +1817,28 @@ internal static partial class Program
         // (HIDMAESTRO_DIAG_READS) takes a lock there, so this runs in a child
         // with it set. Before this release the pump then read the unmapped
         // section, an access violation.
+        // A run proves something only when its hold took and its guard
+        // landed: the pump stamps its dump time and then waits for the lock,
+        // so a stamp written just before the child read it hides a hold that
+        // did take, and another allocation in the process can take the freed
+        // address before the child reserves it. Such a run is made again, up
+        // to three times. A crash, a Dispose that does not return or a pump
+        // that does not end fails at once.
         {
-            string diag = Path.Combine(Path.GetTempPath(), $"hm-usbip-held-pump-{Environment.ProcessId}.log");
-            var (code, line) = RunChild("--held-pump", ("HIDMAESTRO_DIAG_READS", diag));
-            try { File.Delete(diag); } catch (IOException) { }
-            Check("the input pump held past Dispose's join ends without reading the unmapped section",
-                  code == 0 && line == "CHILD held-pump held=True disposed=True ended=True", $"exit {code}: {line}");
+            const int Tries = 3;
+            string detail = "";
+            bool proved = false;
+            for (int run = 1; run <= Tries && !proved; run++)
+            {
+                string diag = Path.Combine(Path.GetTempPath(), $"hm-usbip-held-pump-{Environment.ProcessId}-{run}.log");
+                var (code, line) = RunChild("--held-pump", ("HIDMAESTRO_DIAG_READS", diag));
+                try { File.Delete(diag); } catch (IOException) { }
+                detail += (detail.Length > 0 ? ", " : "") + $"run {run}: exit {code}: {line}";
+                bool done = code == 0 && line.Contains(" disposed=True ended=True", StringComparison.Ordinal);
+                if (!done) break;
+                proved = line == "CHILD held-pump held=True guarded=True disposed=True ended=True";
+            }
+            Check("the input pump held past Dispose's join ends without reading the unmapped section", proved, detail);
         }
 
         // A consumer's handler on the connection thread that waits for a
@@ -1975,7 +1991,7 @@ internal static partial class Program
         }
         finally { Monitor.Exit(hidLock); }
         bool ended = WaitUntil(() => !pump.IsAlive, 3000);
-        Console.WriteLine($"CHILD held-pump held={held && guarded} disposed={disposed} ended={ended}");
+        Console.WriteLine($"CHILD held-pump held={held} guarded={guarded} disposed={disposed} ended={ended}");
         return 0;
     }
 
