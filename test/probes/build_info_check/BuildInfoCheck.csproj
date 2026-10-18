@@ -26,12 +26,19 @@
     <ItemGroup>
       <_HMVariantSdk Include="$(_HMRepo)sdk\HIDMaestro.Core\**\*"
                      Exclude="$(_HMRepo)sdk\HIDMaestro.Core\bin\**;$(_HMRepo)sdk\HIDMaestro.Core\obj\**;$(_HMRepo)sdk\HIDMaestro.Core\Resources\vr\**" />
+      <!-- The SDK imports the build tool that turns catalog programs into
+           code, and the tool compiles the equivalence check's corpus. -->
+      <_HMVariantKernelGen Include="$(_HMRepo)sdk\HIDMaestro.KernelGen\**\*"
+                           Exclude="$(_HMRepo)sdk\HIDMaestro.KernelGen\bin\**;$(_HMRepo)sdk\HIDMaestro.KernelGen\obj\**" />
+      <_HMVariantCorpus Include="$(_HMRepo)test\probes\program_equivalence_check\Corpus\**\*" />
       <_HMVariantProfiles Include="$(_HMRepo)profiles\**\*" />
       <_HMVariantBuild Include="$(_HMRepo)build\*" />
       <_HMVariantProbe Include="$(OutDir)*" />
     </ItemGroup>
     <Copy SourceFiles="$(_HMRepo)Directory.Build.props" DestinationFolder="$(_HMVariant)" />
     <Copy SourceFiles="@(_HMVariantSdk)" DestinationFiles="@(_HMVariantSdk->'$(_HMVariant)sdk\HIDMaestro.Core\%(RecursiveDir)%(Filename)%(Extension)')" />
+    <Copy SourceFiles="@(_HMVariantKernelGen)" DestinationFiles="@(_HMVariantKernelGen->'$(_HMVariant)sdk\HIDMaestro.KernelGen\%(RecursiveDir)%(Filename)%(Extension)')" />
+    <Copy SourceFiles="@(_HMVariantCorpus)" DestinationFiles="@(_HMVariantCorpus->'$(_HMVariant)test\probes\program_equivalence_check\Corpus\%(RecursiveDir)%(Filename)%(Extension)')" />
     <Copy SourceFiles="@(_HMVariantProfiles)" DestinationFiles="@(_HMVariantProfiles->'$(_HMVariant)profiles\%(RecursiveDir)%(Filename)%(Extension)')" />
     <Copy SourceFiles="@(_HMVariantBuild)" DestinationFolder="$(_HMVariant)build\" />
 
