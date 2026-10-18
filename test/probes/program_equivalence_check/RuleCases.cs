@@ -88,6 +88,7 @@ internal static partial class RuleChecks
         yield return E("two layouts on one ID whose conditions hold together", "$.inputReports[1].while", All(Set("$.inputReports[1].reportId", "\"0x09\""), Set("$.inputReports[1].program[0].const[\"0\"]", "\"09\""), Set("$.inputReports[1].while", "\"featureEnabled!=0\"")));
         yield return E("two layouts on one ID testing 24 bits", "$.inputReports[1].while", All(Set("$.inputReports[1].reportId", "\"0x09\""), Set("$.inputReports[1].program[0].const[\"0\"]", "\"09\""),
             Set($"{L0}.while", "\"featureMask!=0 && playerLeds!=0\""), Set("$.inputReports[1].while", "\"featureEnabled==0\"")));
+        yield return E("live feature reports with no protocol", "$.liveFeatureReports", All(Remove("$.protocol"), Remove("$.inputReports"), Set("$.liveFeatureReports", "[{\"reportId\":\"0x32\",\"size\":2,\"program\":[{\"const\":{\"0\":\"32\"}},{\"copy\":\"0\",\"to\":1}]}]")));
         yield return E("layouts with no protocol", "$.inputReports", All(Remove("$.protocol"), Remove("$.liveFeatureReports"), Set("$.inputReports", "[{\"name\":\"pro\",\"reportId\":\"0x09\",\"size\":2,\"program\":[{\"const\":{\"0\":\"09\"}}]}]")));
         yield return E("a state block with no fields", "$.stateBlock.fields", Remove("$.stateBlock.fields"));
 

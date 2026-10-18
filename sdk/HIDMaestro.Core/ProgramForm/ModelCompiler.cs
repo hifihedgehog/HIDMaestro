@@ -183,6 +183,10 @@ internal static class ModelCompiler
         if (g.LiveFeatureReports != null)
         {
             if (g.StateBlock == null) throw new FormException("$.liveFeatureReports", "a live feature report needs a stateBlock to build from");
+            // The protocol engine answers GET_REPORT(Feature) from a live
+            // report. Without a protocol nothing would run it, and SubmitState
+            // would hand the bare state block to the transport.
+            if (g.Protocol == null) throw new FormException("$.liveFeatureReports", "a live feature report is answered by the protocol engine on GET_REPORT(Feature), so it needs a protocol");
             if (g.LiveFeatureReports.Count == 0) throw new FormException("$.liveFeatureReports", "the list is empty: leave it out for a device with no live feature report");
             for (int i = 0; i < g.LiveFeatureReports.Count; i++)
             {
