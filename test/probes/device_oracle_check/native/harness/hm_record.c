@@ -17,6 +17,8 @@
  *                            Bluetooth value instead
  *   nohwindex                no ControllerIndex in the hardware key
  *   noidentity               no identity entry under the tag parameters
+ *   nokey                    no Controller<N> key
+ *   parentkey                with nokey, the values in SOFTWARE\HIDMaestro
  *   readlength <n>           the largest input report, report id included
  *   pidrids <6 hex>          PidReportIdExtractor's ids for the PID section
  *   end
@@ -212,6 +214,10 @@ void PlanLoad(const char *path)
             p->noHardwareIndex = 1;
         } else if (strcmp(word, "noidentity") == 0 && p) {
             p->noIdentity = 1;
+        } else if (strcmp(word, "nokey") == 0 && p) {
+            p->noConfigKey = 1;
+        } else if (strcmp(word, "parentkey") == 0 && p) {
+            p->parentKey = 1;
         } else if (strcmp(word, "bluetooth") == 0 && p) {
             p->bluetooth = atoi(strtok_s(NULL, " ", &ctx));
             p->bluetoothLine = 1;
@@ -422,8 +428,8 @@ void ConfigWrite(PlanProfile *p, int index)
 {
     WCHAR path[96], name[64];
     ConfigPath(path, ARRAYSIZE(path), index);
-    HmRegKey *k = KeyMake(path);
-    for (int i = 0; i < p->valueCount; i++) {
+    HmRegKey *k = p->noConfigKey ? (p->parentKey ? KeyMake(L"SOFTWARE\\HIDMaestro") : NULL) : KeyMake(path);
+    for (int i = 0; k && i < p->valueCount; i++) {
         Widen(p->values[i].name, name, ARRAYSIZE(name));
         ValueSet(k, name, p->values[i].type, p->values[i].data, p->values[i].size);
     }

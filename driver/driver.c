@@ -247,22 +247,26 @@ InitInstancePaths(
 
 /* ControllerIndex from the device's hardware key, where every SDK version
  * writes it, through WdfFdoInitOpenRegistryKey before WdfDeviceCreate.
- * 0 when there is none, as every earlier driver read it. */
-static ULONG
-ReadHardwareIndex(_In_ PWDFDEVICE_INIT DeviceInit)
+ * FALSE when there is none. Earlier drivers read index 0 then, the index
+ * of another controller. */
+static BOOLEAN
+ReadHardwareIndex(_In_ PWDFDEVICE_INIT DeviceInit, _Out_ ULONG *index)
 {
-    ULONG index = 0;
+    BOOLEAN found = FALSE;
     WDFKEY hKey;
+    *index = 0;
     if (NT_SUCCESS(WdfFdoInitOpenRegistryKey(DeviceInit, PLUGPLAY_REGKEY_DEVICE,
             KEY_READ, WDF_NO_OBJECT_ATTRIBUTES, &hKey))) {
         UNICODE_STRING valueName;
         RtlInitUnicodeString(&valueName, L"ControllerIndex");
         ULONG val = 0;
-        if (NT_SUCCESS(WdfRegistryQueryULong(hKey, &valueName, &val)))
-            index = val;
+        if (NT_SUCCESS(WdfRegistryQueryULong(hKey, &valueName, &val))) {
+            *index = val;
+            found = TRUE;
+        }
         WdfRegistryClose(hKey);
     }
-    return index;
+    return found;
 }
 
 /* The version section of an index, mapped read-write, or NULL when there
@@ -293,14 +297,15 @@ UnmapVersionSection(_In_opt_ PHIDMAESTRO_VERSION_INFO view, _In_opt_ HANDLE hand
  * identity entry names the index, and the contract holds when that
  * index's section speaks protocol 4 and carries this devnode's identity
  * tag. Otherwise the devnode is a v1 program's: it keeps the index of its
- * hardware key, and fails its start when that index's section carries
- * another token's tag, since it is then not that controller (a v1
- * program's restart after its index write recovers it). The design note's
- * decision (c) gives the XUSB companion the same rule, which companion.c
- * on this branch does not apply. */
+ * hardware key, and fails its start when its hardware key holds none, or
+ * when that index's section carries another token's tag, since it is then
+ * not that controller (a v1 program's restart after its index write
+ * recovers it). The XUSB companion applies the same rule
+ * (CompanionDeviceAdd), as the design note's decision (c) gives it. */
 static NTSTATUS
 ChooseControllerIndex(_In_ const WCHAR *token, _In_ BOOLEAN haveIdentityIndex, _In_ ULONG identityIndex,
-                      _In_ ULONG hardwareIndex, _Out_ ULONG *index, _Out_ BOOLEAN *contract)
+                      _In_ BOOLEAN haveHardwareIndex, _In_ ULONG hardwareIndex,
+                      _Out_ ULONG *index, _Out_ BOOLEAN *contract)
 {
     ULONGLONG ownTag = HmIdentityTag(token);
     HANDLE h;
@@ -320,6 +325,7 @@ ChooseControllerIndex(_In_ const WCHAR *token, _In_ BOOLEAN haveIdentityIndex, _
             }
         }
     }
+    if (!haveHardwareIndex) return STATUS_DEVICE_CONFIGURATION_ERROR;
     v = MapVersionSection(hardwareIndex, &h);
     if (v != NULL) {
         ULONGLONG tag = *(volatile ULONGLONG *)&v->IdentityTag;
@@ -632,7 +638,10 @@ RequestCopyFromBuffer(
 /*  Registry: read descriptor + VID/PID at device init                 */
 /* ================================================================== */
 
-static VOID
+/* FALSE when Controller<index> does not open or holds no report
+ * descriptor this driver can present. There is no default device to fall
+ * back on. */
+static BOOLEAN
 ReadConfigFromRegistry(
     _In_ PDEVICE_CONTEXT ctx)
 {
@@ -647,16 +656,15 @@ ReadConfigFromRegistry(
     BYTE    binBuf[5 + HIDMAESTRO_MAX_DESCRIPTOR_SIZE];
     DWORD   binSize;
     DWORD   regType;
+    BOOLEAN haveDescriptor = FALSE;
 
-    /* Try per-instance key first, fall back to legacy global key */
+    /* The controller's own key. Drivers before v2.0.0 fell back to the
+     * legacy global key SOFTWARE\HIDMaestro, where v1.12.0's SDK writes no
+     * controller's values. */
     result = RegOpenKeyExW(HKEY_LOCAL_MACHINE, ctx->ConfigRegPath,
                            0, KEY_READ, &hKey);
-    if (result != ERROR_SUCCESS) {
-        result = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro",
-                               0, KEY_READ, &hKey);
-        if (result != ERROR_SUCCESS)
-            return; /* No config key: use defaults */
-    }
+    if (result != ERROR_SUCCESS)
+        return FALSE;
 
     /* Read ReportDescriptor (REG_BINARY) */
     binSize = sizeof(binBuf);
@@ -677,7 +685,7 @@ ReadConfigFromRegistry(
         ctx->ReportDescriptorSize = (ULONG)binSize;
         ctx->HidDescriptor.DescriptorList[0].wReportLength =
             (USHORT)ctx->ReportDescriptorSize;
-
+        haveDescriptor = TRUE;
     }
 
     /* Read VendorId (REG_DWORD) */
@@ -821,6 +829,7 @@ ReadConfigFromRegistry(
     }
 
     RegCloseKey(hKey);
+    return haveDescriptor;
 }
 
 /* ================================================================== */
@@ -2806,15 +2815,16 @@ EvtDeviceAdd(
     /* v2.0.0, before WdfDeviceCreate: the devnode's token, the index the
      * identity entry names, the hardware key's index, and from those the
      * controller index and whether the version contract holds (decision
-     * (c)). A devnode that is not the controller its section names fails
-     * its start here. */
+     * (c)). A devnode with no index, or that is not the controller its
+     * section names, fails its start here. */
     WCHAR token[40];
-    ULONG identityIndex = 0, controllerIndex = 0;
-    BOOLEAN haveIdentityIndex, contract = FALSE;
+    ULONG identityIndex = 0, hardwareIndex = 0, controllerIndex = 0;
+    BOOLEAN haveIdentityIndex, haveHardwareIndex, contract = FALSE;
     HmReadInstanceToken(DeviceInit, token, ARRAYSIZE(token));
     haveIdentityIndex = HmReadIdentityIndex(token, &identityIndex);
+    haveHardwareIndex = ReadHardwareIndex(DeviceInit, &hardwareIndex);
     status = ChooseControllerIndex(token, haveIdentityIndex, identityIndex,
-                                   ReadHardwareIndex(DeviceInit), &controllerIndex, &contract);
+                                   haveHardwareIndex, hardwareIndex, &controllerIndex, &contract);
     if (!NT_SUCCESS(status)) return status;
 
     /* FunctionMode=1 skips filter mode so we can register XUSB on the HID device.
@@ -2825,18 +2835,18 @@ EvtDeviceAdd(
         HKEY hFm;
         /* FunctionMode is read BEFORE device creation, from the key of the
          * controller index chosen above. Through v1.13.0 it was always
-         * Controller0's. */
+         * Controller0's. A devnode whose index has no key is left behind
+         * by a program and fails its start: there is no default device. */
         WCHAR fmPath[64];
         static const WCHAR fmPrefix[] = L"SOFTWARE\\HIDMaestro\\Controller";
         RtlCopyMemory(fmPath, fmPrefix, sizeof(fmPrefix));
         AppendUlongDecimal(fmPath, controllerIndex, ARRAYSIZE(fmPath));
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, fmPath, 0, KEY_READ, &hFm) == ERROR_SUCCESS
-            || RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro", 0, KEY_READ, &hFm) == ERROR_SUCCESS) {
-            DWORD val, sz = sizeof(val);
-            if (RegQueryValueExW(hFm, L"FunctionMode", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS)
-                functionMode = val;
-            RegCloseKey(hFm);
-        }
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, fmPath, 0, KEY_READ, &hFm) != ERROR_SUCCESS)
+            return STATUS_DEVICE_CONFIGURATION_ERROR;
+        DWORD val, sz = sizeof(val);
+        if (RegQueryValueExW(hFm, L"FunctionMode", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS)
+            functionMode = val;
+        RegCloseKey(hFm);
         if (!functionMode)
             WdfFdoInitSetFilter(DeviceInit);
     }
@@ -2864,19 +2874,14 @@ EvtDeviceAdd(
     ctx->Contract = contract;
     for (SIZE_T i = 0; i < ARRAYSIZE(token); i++) ctx->IdentityToken[i] = token[i];
 
-    /* Initialize defaults */
-    RtlCopyMemory(ctx->ReportDescriptor,
-                   G_DefaultReportDescriptor,
-                   sizeof(G_DefaultReportDescriptor));
-    ctx->ReportDescriptorSize = sizeof(G_DefaultReportDescriptor);
-
+    /* The HID descriptor's fixed fields. The report descriptor comes from
+     * Controller<N> alone: there is no default one. */
     ctx->HidDescriptor.bLength          = 0x09;
     ctx->HidDescriptor.bDescriptorType  = 0x21;
     ctx->HidDescriptor.bcdHID           = 0x0100;
     ctx->HidDescriptor.bCountry         = 0x00;
     ctx->HidDescriptor.bNumDescriptors  = 0x01;
     ctx->HidDescriptor.DescriptorList[0].bReportType   = 0x22;
-    ctx->HidDescriptor.DescriptorList[0].wReportLength = (USHORT)ctx->ReportDescriptorSize;
 
     ctx->HidDeviceAttributes.Size          = sizeof(HID_DEVICE_ATTRIBUTES);
     ctx->HidDeviceAttributes.VendorID      = 0x045E;  /* Microsoft */
@@ -2894,7 +2899,8 @@ EvtDeviceAdd(
     }
 
     /* Read config from registry (overrides defaults if present) */
-    ReadConfigFromRegistry(ctx);
+    if (!ReadConfigFromRegistry(ctx))
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
 
     /* Without the SDK's InputReportId (an SDK from before the value), find
      * the first Report ID from the FIRST Application Collection only, the

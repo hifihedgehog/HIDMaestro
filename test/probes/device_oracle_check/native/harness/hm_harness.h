@@ -458,6 +458,12 @@ typedef struct PlanProfile {
                                 * as an SWD device node's first start finds it */
     int       noIdentity;      /* "noidentity": ConfigWrite writes no identity
                                 * entry under the tag parameters */
+    int       noConfigKey;     /* "nokey": ConfigWrite writes no
+                                * Controller<N>, as a device node a program
+                                * left behind finds it */
+    int       parentKey;       /* "parentkey": with nokey, the values go to
+                                * SOFTWARE\HIDMaestro, where drivers before
+                                * v2.0.0 looked when Controller<N> was gone */
     uint32_t  readLength;      /* the HID class's read buffer: the largest input report */
     uint8_t   pidRids[6];      /* Pool, State, BlockLoad, CreateNewEffect, BlockFree, DeviceControl */
     int       hasPidRids;

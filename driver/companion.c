@@ -605,6 +605,7 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
 
     {
         PCOMPANION_CTX ctx = GetCompanionCtx(device);
+        BOOLEAN haveHardwareIndex = FALSE;
         ctx->PacketCount = 0;
         ctx->ControllerIndex = 0;
         for (SIZE_T i = 0; i < ARRAYSIZE(token); i++) ctx->Token[i] = token[i];
@@ -621,8 +622,10 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
                 UNICODE_STRING valueName;
                 RtlInitUnicodeString(&valueName, L"ControllerIndex");
                 ULONG idx = 0;
-                if (NT_SUCCESS(WdfRegistryQueryULong(hkDevice, &valueName, &idx)))
+                if (NT_SUCCESS(WdfRegistryQueryULong(hkDevice, &valueName, &idx))) {
                     ctx->ControllerIndex = idx;
+                    haveHardwareIndex = TRUE;
+                }
                 WdfRegistryClose(hkDevice);
             }
         }
@@ -631,8 +634,10 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
          * when that index's version section speaks this companion's protocol
          * and carries this devnode's identity tag. Otherwise the devnode is
          * a v1 program's: it keeps the index of its hardware key, and fails
-         * its start when that index's section carries another token's tag,
-         * since it is then not that controller. */
+         * its start when its hardware key holds none, as earlier companions
+         * read index 0, another controller's, or when that index's section
+         * carries another token's tag, since it is then not that
+         * controller. */
         {
             ULONGLONG ownTag = HmIdentityTag(ctx->Token);
             ULONG candidates[2] = { identityIndex, ctx->ControllerIndex };
@@ -659,6 +664,7 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
                     return STATUS_DEVICE_CONFIGURATION_ERROR;
                 }
             }
+            if (!ctx->Contract && !haveHardwareIndex) return STATUS_DEVICE_CONFIGURATION_ERROR;
         }
 
         /* Build per-instance paths. Multi-digit indices supported. */
@@ -722,6 +728,17 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
             } else {
                 ctx->Contract = FALSE;
             }
+        }
+
+        /* A v1 program's devnode whose index has no Controller<N> key was
+         * left behind by a program and fails its start: there is no default
+         * device. Under the contract LoadAnswers reads that key and names
+         * a failure in the error word. */
+        if (!ctx->Contract) {
+            HKEY hKey;
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, ctx->ConfigRegPath, 0, KEY_READ, &hKey) != ERROR_SUCCESS)
+                return STATUS_DEVICE_CONFIGURATION_ERROR;
+            RegCloseKey(hKey);
         }
     }
 

@@ -24,7 +24,11 @@
 //   - the driver writes DriverProtocol 4 and DriverProtocolMin 4 at add
 //   - the index before the first start: an identity entry naming index 1
 //     and no hardware value gives index 1 and FunctionMode from Controller1
-//   - an entry whose section carries another tag reads no v2.0.0 value
+//   - an entry whose section carries another tag, with no hardware value,
+//     fails the start and reads no v2.0.0 value
+//   - a device node with no index or no Controller<index> key fails the
+//     start in both drivers, and a key without a report descriptor the
+//     HID driver's
 //   - no entry and a hardware value whose section carries another tag fails
 //     the start
 //   - a blob truncated, of format 3 or past a limit, and no
@@ -82,6 +86,7 @@ internal static class FeatureContract
             var keptPlan = File.ReadAllText(Path.Combine(goldenDir, "case5-plan.txt"), Encoding.UTF8);
             Matrix(c, catalog, keptPlan, tree, oracle, work);
             Cases(c, catalog, tree, oracle, work);
+            Unconfigured(c, catalog, tree, oracle, work);
             InputLengths(c, catalog, tree, oracle, work);
         }
         catch (Exception e)
@@ -480,7 +485,7 @@ internal static class FeatureContract
         s.Append("stream tag-other\nversion tag-other\ndevice ds 0 driver\n");
         s.Append("stream range45\nversion range45\ndevice ds0 0 driver\n").Append(Asks(0x05)).Append("remove\n");
         s.Append("stream index1-no-hardware-value\nversion tag-own\ndevice ds-nohw 1 driver\n").Append(Asks(0x09)).Append("remove\n");
-        s.Append("stream entry-other-tag\nversion tag-other\ndevice ds-nohw 1 driver\n").Append(Asks(0x09)).Append("remove\n");
+        s.Append("stream entry-other-tag\nversion tag-other\ndevice ds-nohw 1 driver\n");
         s.Append("stream no-entry-other-tag\nversion tag-other\ndevice ds-noid 1 driver\n");
         foreach (var bad in new[] { "ds-truncated", "ds-format3", "ds-past", "ds-nocached" })
             s.Append($"stream blob-{bad}\nversion tag-own\ndevice {bad} 0 driver\n");
@@ -526,6 +531,108 @@ internal static class FeatureContract
         }
     }
 
+    /// <summary>A device node without its own configuration (the design
+    /// note's defects table): with no index, neither an identity entry nor a
+    /// ControllerIndex in its hardware key, or with no Controller&lt;index&gt;
+    /// key, both drivers fail the start with
+    /// STATUS_DEVICE_CONFIGURATION_ERROR, where 9bd6279's read Controller0,
+    /// which another controller owns, or started as an Xbox 360 pad on
+    /// defaults, or read SOFTWARE\HIDMaestro. A key without a report
+    /// descriptor fails the HID driver's start too, since no default one is
+    /// left. The configured devices beside them start, in the same
+    /// script.</summary>
+    static void Unconfigured(Checks c, IReadOnlyList<ControllerProfile> catalog, string tree, string oracle, string work)
+    {
+        var ds = catalog.First(p => p.Id == "dualsense-bt");
+        var xbox = catalog.First(p => p.Id == "xbox-360-wired");
+        var config = InstanceConfig(new List<ControllerProfile> { ds, xbox }, work);
+        var dsValues = config[ds.Id];
+        var xboxValues = config[xbox.Id];
+        var plan = new StringBuilder()
+            .Append(Block("sony", ds, dsValues, "ds"))
+            .Append(Block("sony", ds, dsValues, "ds-noindex", "nohwindex", "noidentity"))
+            .Append(Block("sony", ds, dsValues, "ds-nokey", "nokey"))
+            .Append(Block("sony", ds, With(dsValues, "FunctionMode", RegDword, BitConverter.GetBytes(1)), "ds-parent", "nokey", "parentkey"))
+            .Append(Block("sony", ds, With(dsValues, "ReportDescriptor", RegBinary, null), "ds-nodescriptor"))
+            .Append(Block("xusb", xbox, xboxValues, "xbox"))
+            .Append(Block("xusb", xbox, xboxValues, "xbox-noindex", "nohwindex", "noidentity"))
+            .Append(Block("xusb", xbox, xboxValues, "xbox-nokey", "nokey"))
+            .Append(Block("xusb", xbox, xboxValues, "xbox-parent", "nokey", "parentkey"))
+            .ToString();
+        // IOCTL_HID_GET_DEVICE_ATTRIBUTES, HID_CTL_CODE(9) (hidport.h:190).
+        const string Attributes = "ioctl 0x000B0027 - 32\n";
+        var s = new StringBuilder();
+        // A v1 program's device nodes (no version section), then the same
+        // under the tree's SDK, which writes the contract.
+        foreach (var v in new[] { "absent", "sdk" })
+        {
+            s.Append($"stream configured-{v}\nversion {v}\ndevice ds 2 driver\n").Append(Attributes).Append("remove\n");
+            s.Append($"stream companion-configured-{v}\nversion {v}\ndevice xbox 2 companion\nremove\n");
+            s.Append($"stream no-index-{v}\nversion {v}\ndevice ds-noindex 0 driver\n");
+            s.Append($"stream companion-no-index-{v}\nversion {v}\ndevice xbox-noindex 0 companion\n");
+            s.Append($"stream no-key-{v}\nversion {v}\ndevice ds-nokey 2 driver\n");
+            s.Append($"stream companion-no-key-{v}\nversion {v}\ndevice xbox-nokey 2 companion\n");
+        }
+        s.Append("stream parent-key\nversion absent\ndevice ds-parent 2 driver\n");
+        s.Append("stream companion-parent-key\nversion absent\ndevice xbox-parent 2 companion\n");
+        s.Append("stream no-descriptor\nversion absent\ndevice ds-nodescriptor 2 driver\n");
+
+        var t = RunScript(tree, plan, s.ToString(), work, "unconfigured-tree");
+        var o = RunScript(oracle, plan, s.ToString(), work, "unconfigured-oracle");
+        int oracleFails = 0;
+        foreach (var (label, run) in new[] { ("tree", t), ("9bd6279", o) })
+        {
+            bool isTree = label == "tree";
+            var results = UnconfiguredExpectations(run, ds);
+            foreach (var (name, ok, detail) in results)
+            {
+                if (isTree) c.Check(name, ok, detail);
+                else if (!ok) oracleFails++;
+            }
+            if (!isTree)
+                c.Check($"9bd6279's driver fails {oracleFails} of these {results.Count} cases", oracleFails > 0,
+                        string.Join("; ", results.Where(r => r.Ok).Select(r => r.Name)) is { Length: > 0 } passed ? $"it passes: {passed}" : "");
+        }
+    }
+
+    static List<(string Name, bool Ok, string Detail)> UnconfiguredExpectations(Dictionary<string, List<(string Tag, byte[] Data)>> r, ControllerProfile ds)
+    {
+        var res = new List<(string, bool, string)>();
+        void Add(string name, Func<(bool, string)> f)
+        {
+            try { var (ok, d) = f(); res.Add((name, ok, d)); }
+            catch (Exception e) { res.Add((name, false, $"{e.GetType().Name}: {e.Message}")); }
+        }
+        string Pid(string stream)
+        {
+            var a = Of(r[stream], "ioctl")[0];
+            return Status(a) == 0 ? $"{BinaryPrimitives.ReadUInt16LittleEndian(Body(a)[4..]):X4}:{BinaryPrimitives.ReadUInt16LittleEndian(Body(a)[6..]):X4}" : Status(a).ToString("X8");
+        }
+        string want = $"{ds.VendorId:X4}:{ds.ProductId:X4}";
+        foreach (var (v, under) in new[] { ("absent", "a v1 program's device node"), ("sdk", "under the contract") })
+        {
+            Add($"{under}, configured at index 2: the driver starts with the profile's attributes {want}", () =>
+                (Added(r[$"configured-{v}"]) == 0 && Pid($"configured-{v}") == want, $"add {Added(r[$"configured-{v}"]):X8}, attributes {Pid($"configured-{v}")}"));
+            Add($"{under}, configured at index 2: the companion starts", () =>
+                (Added(r[$"companion-configured-{v}"]) == 0, Added(r[$"companion-configured-{v}"]).ToString("X8")));
+            Add($"{under}, no index beside Controller0: the driver's start fails with STATUS_DEVICE_CONFIGURATION_ERROR",
+                () => (Added(r[$"no-index-{v}"]) == ConfigError, Added(r[$"no-index-{v}"]).ToString("X8")));
+            Add($"{under}, no index beside Controller0: the companion's start fails with STATUS_DEVICE_CONFIGURATION_ERROR",
+                () => (Added(r[$"companion-no-index-{v}"]) == ConfigError, Added(r[$"companion-no-index-{v}"]).ToString("X8")));
+            Add($"{under}, index 2 and no Controller2: the driver's start fails with STATUS_DEVICE_CONFIGURATION_ERROR",
+                () => (Added(r[$"no-key-{v}"]) == ConfigError, Added(r[$"no-key-{v}"]).ToString("X8")));
+            Add($"{under}, index 2 and no Controller2: the companion's start fails with STATUS_DEVICE_CONFIGURATION_ERROR",
+                () => (Added(r[$"companion-no-key-{v}"]) == ConfigError, Added(r[$"companion-no-key-{v}"]).ToString("X8")));
+        }
+        Add("the values and FunctionMode 1 in SOFTWARE\\HIDMaestro and no Controller2: the driver's start fails",
+            () => (Added(r["parent-key"]) == ConfigError, Added(r["parent-key"]).ToString("X8")));
+        Add("the values in SOFTWARE\\HIDMaestro and no Controller2: the companion's start fails",
+            () => (Added(r["companion-parent-key"]) == ConfigError, Added(r["companion-parent-key"]).ToString("X8")));
+        Add("Controller2 without ReportDescriptor: the start fails, with no default descriptor to fall back on",
+            () => (Added(r["no-descriptor"]) == ConfigError, Added(r["no-descriptor"]).ToString("X8")));
+        return res;
+    }
+
     /// <summary>What each case of the script must show.</summary>
     static List<(string Name, bool Ok, string Detail)> Expectations(Dictionary<string, List<(string Tag, byte[] Data)>> r)
     {
@@ -562,11 +669,14 @@ internal static class FeatureContract
             return (Added(s) == 0 && Status(g) == 0 && Body(g)[6] == 1 && Of(s, "fdo.filter").Count == 0,
                     $"add {Added(s):X8}, 0x09 {Status(g):X8} byte 6 {(Status(g) == 0 ? Body(g)[6] : -1)}, filter {Of(s, "fdo.filter").Count}");
         });
-        Add("an identity entry whose section carries another token's tag: the device starts and reads no v2.0.0 value", () =>
+        // The entry is a killed program's, so the device node is a v1
+        // program's, and its hardware key holds no index: it has no index of
+        // its own and fails its start. Through 928d03b6 it read index 0 and
+        // started on Controller0, no key of its own.
+        Add("an identity entry whose section carries another token's tag, and no hardware value: the start fails and reads no v2.0.0 value", () =>
         {
             var s = r["entry-other-tag"];
-            var g = Of(s, "getfeature").Single();
-            return (Added(s) == 0 && Status(g) == NotSupported, $"add {Added(s):X8}, 0x09 {Status(g):X8}");
+            return (Added(s) == ConfigError && Of(s, "getfeature").Count == 0, $"add {Added(s):X8}");
         });
         Add("no identity entry and a hardware value whose section carries another tag: the start fails",
             () => (Added(r["no-entry-other-tag"]) == ConfigError, Added(r["no-entry-other-tag"]).ToString("X8")));
