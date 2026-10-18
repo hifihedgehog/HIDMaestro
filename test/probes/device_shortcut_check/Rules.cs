@@ -287,6 +287,14 @@ internal static class Rules
 
     const string XInputIds = "the IDs and flags an XUSB companion reports apart from its HID child's (PresentationPlan, XusbAnswers.Compile), for any pad behind a receiver: xbox-360-wireless today, and every wireless XUSB device PlasticBand captured (ProductId 0 with WIRELESS, the receiver's 045E:0719 in GET_INFORMATION), the Microsoft Wireless Racing Wheel among them (Microsoft Wireless Racing Wheel.txt:1-17)";
 
+    // Discriminators of rule C's per-kind count (Profiles.cs), as
+    // Type.Prop: a key on an object of one kind is counted apart from the
+    // same key on another.
+    public static readonly (string Property, string Reason)[] Discriminators =
+    {
+        ("FieldSpec.Type", "a field's type picks the codec op it compiles to (VendorBlobProgram.Compile), and each op reads its own parameters, so a center on int16-le reaches code a center on uint8-axis does not"),
+    };
+
     // Profile properties one catalog profile sets that the check allows:
     // general mechanisms, and data a second device of the same form uses
     // with no new code. Property is Type.Property, * matching any run.
@@ -368,5 +376,36 @@ internal static class Rules
         new("HM*Layout.*", "the layout vocabulary of a layout kind (HMLayout.cs), which every profile of that kind fills"),
         new("HMImu.Magnetometer", "the layout vocabulary's IMU description (HMLayout.cs)"),
         new("HMTriggerButton.*", "the layout vocabulary's trigger description (HMLayout.cs)"),
+        // v2.0.0, lane DD-7: rule C counts a key per field type and a value
+        // code names (Profiles.cs). Each entry below names the second device
+        // of its form, as the lanes above did for whole keys.
+        new("HM*.Axis=*", "the HID usage a layout control sits on (HMAxis, Generic Desktop X to Dial), read as data: FindByAxis and FindPedal look the control up by it (HidReportBuilder.cs). "
+            + "The SDK names X, Y, Z, Rx, Ry and Rz only as a gamepad's default sticks and triggers (HMGamepadState.cs:288-299, HMController.cs:555-556), never a pedal's, an encoder's or a rudder's"),
+        new("HMRotaryEncoder.Role=*", "the legend of a wheel's rotary encoder, read by no code. The SDK names Accelerator and Brake only when it maps a wheel's or a pedal set's pedals (HidReportBuilder.cs:310-321, FindPedal over Pedals)"),
+        new("ControllerProfile.StateBlockFields", "stateBlock's field list in the codec's vocabulary (mechanism 2), the same key as ControllerProfile.StateBlock. The Switch Pro's and the DualShock 3's state blocks are the second and third (lane DD-5)"),
+        new("FieldSpec.Min", "a field's wire value at the SDK's 0 (decision (a), mechanism 1). The Switch 2 Pro's state block runs its sticks 0 to 4095, and the Switch Pro's stick12-pair runs 512 to 3584 (lane DD-5)"),
+        new("FieldSpec.Min@int16-axis", "a 12-bit stick held in a 16-bit state block word, 0 to 4095, which a program packs into the report (the Switch 2 Pro composite's pack12). "
+            + "The Switch 2 GameCube controller sends its sticks in the same 12-bit form at the same offsets (SDL_hidapi_switch2.c:684-768 at 804cf65, HandleGameCubeState)"),
+        new("FieldSpec.Max@int16-axis", "the top of a 12-bit stick held in a 16-bit state block word. The Switch 2 GameCube controller's sticks are the second (SDL_hidapi_switch2.c:684-768 at 804cf65)"),
+        new("FieldSpec.Clock=accumulate", "the timestamp accumulator (FieldSpec.Clock's entry): steam-controller-2's report 0x42, and the Switch 2 Pro's report 0x05, whose 32-bit timestamp at 0x2B to 0x2E counts microseconds (SDL_hidapi_switch2.c:1148-1157 at 804cf65)"),
+        new("FieldSpec.Clock@uint32-le", "a 32-bit sensor timestamp from the accumulator. The Switch 2 Pro's report 0x05 carries the second (SDL_hidapi_switch2.c:1148-1157 at 804cf65)"),
+        new("FieldSpec.Divisor@uint32-le", "the accumulator's ticks per wire count on a 32-bit timestamp: 3 turns the SDK's 1/3 microsecond ticks into microseconds, the unit of the Switch 2 Pro's report 0x05 timestamp (SDL_hidapi_switch2.c:1148-1157 at 804cf65)"),
+        new("FieldSpec.HoldWhile@uint32-le", "a 32-bit sensor timestamp held while a register's condition holds (FieldSpec.HoldWhile's entry). The Switch 2 Pro's report 0x05 timestamp is written only while its IMU feature is on"),
+        new("FeatureStubReport.ReplyHead=requestReportId", "an answer that starts with the request's report ID (FeatureStubReport.ReplyHead's entry): steam-controller-2 on report 1, and dualsense-tester's test channel on 0x81 (ds.util.ts:165 at ff340fe)"),
+        new("FieldSpec.Center@int16-le", "a 16-bit little-endian motion word in offset binary, at rest at its center (VendorBlobCodec, OffsetBinary): ps-move's at 32768. Third-party PS3 controllers send their accelerometer as a 16-bit "
+            + "little-endian word at rest at 512 (SDL_hidapi_ps3.c:350-353 and 1025-1031 at 804cf65, value - 512 over 113), as do the PS3 instruments (PlasticBand Docs/Base Reports/PS3.md:144-160 at b129263)"),
+        new("FieldSpec.Repeat@int16-le", "an int16-le motion word written in each frame a report carries (FieldSpec.Repeat's entry): ps-move's two half-frames, and the Switch Pro's report 0x30, three frames 12 bytes apart (lane DD-5's switch-pro stateBlock)"),
+        new("FieldSpec.Invert@uint8-axis", "an 8-bit axis that grows upward, the gamecube-adapter's Y. EVORETRO's GameCube adapters in PC mode (0079:1843, 1844, 1846) send the same, and SDL reads them as 0xFF minus the byte "
+            + "(SDL_hidapi_gamecube.c:81-87 and 344-358 at 804cf65)"),
+        new("FieldSpec.Type=uint8-pressure", "a button's pressure, 0 at rest to 0xFF. Third-party PS3 controllers send twelve (SDL_hidapi_ps3.c:992-1023 at 804cf65, button_axis_offsets, read when has_analog_buttons), "
+            + "and so do the PS3 instruments (PlasticBand Docs/Base Reports/PS3.md:105-134 at b129263)"),
+        new("FieldSpec.Semantic=pressure*", "the SDK's button pressures (HMGamepadState), the values a uint8-pressure field reads. Third-party PS3 controllers and the PS3 instruments send the same twelve "
+            + "(SDL_hidapi_ps3.c:992-1023 at 804cf65, PlasticBand Docs/Base Reports/PS3.md:105-134 at b129263)"),
+        new("FieldSpec.Semantic@button-mask", "a name on an input report's button mask, read by no code: an input mask writes the buttons it lists (VendorBlobCodec.Encode's button-mask case), and only an output report's decode takes its semantic as the key. "
+            + "steam-deck-composite names its 64-bit mask"),
+        new("FieldSpec.Type=int16-pad-or-stick", "the 2015 Steam Controller's shared pad and stick pair (VendorBlobCodec's I16PadOrStick). Its wireless receiver (28DE:1142) sends the same report, which hid-steam reads with the wired controller's "
+            + "parser, the touch bit choosing pad or stick (linux-hid-ref drivers/hid/hid-steam.c:2038-2072 and 2736-2745 at d24e8ac)"),
+        new("FieldSpec.Type=uint10-be", "a 10-bit big-endian motion word at rest at 512, the DualShock 3's (SDL_hidapi_ps3.c:343-348 at 804cf65). The Sixaxis, the controller the DualShock 3 replaced, sends the same report under the same "
+            + "054C:0268 (hid-sony.c:2486-2487 at d24e8ac matches both). No device of another line sends this word"),
     };
 }

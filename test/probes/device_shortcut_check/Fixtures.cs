@@ -4,6 +4,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using HIDMaestro.Internal;
 
 internal static class Fixtures
 {
@@ -294,6 +295,7 @@ internal static class Fixtures
             ok = false;
             Console.WriteLine($"  [FAIL] self-test rule D, {name}: expected \"{expected}\", got \"{got}\"");
         }
+        ok &= Census();
         // An allowed string counts only in the file its entry names.
         foreach (var (rel, wantHits, wantAllowed) in new[]
                  {
@@ -310,7 +312,35 @@ internal static class Fixtures
             Console.WriteLine($"  [FAIL] self-test allowed strings, {rel}: expected {wantHits} hits and {wantAllowed} allowed, "
                               + $"got {scan.Failing.Count} hits ({hits} device strings) and {scan.AllowedStrings.Count} allowed");
         }
-        Console.WriteLine(ok ? $"  self-test: the {7 + s_ruleD.Length} fixtures give exactly their expected hits and regions" : "  [FAIL] self-test");
+        Console.WriteLine(ok ? $"  self-test: the {8 + s_ruleD.Length} fixtures give exactly their expected hits and regions" : "  [FAIL] self-test");
+        return ok;
+    }
+
+    // Rule C over three profiles built in code. A center two profiles set on
+    // uint8-axis is general. The same key on int16-le, which two profiles
+    // use and one centers, is not: fx-b's int16-le is in its state block,
+    // which counts as an extended report does. A field type one profile uses
+    // is a value of an enumerated key one profile sets, and a center on it
+    // says no more than that value, so it is not listed apart.
+    public static bool Census()
+    {
+        static FieldSpec F(string type, int? center = null) => new() { Type = type, Center = center };
+        static ControllerProfile P(string id, params FieldSpec[] fields) =>
+            new() { Id = id, ExtendedReport = new ExtendedReportSpec { Fields = fields.ToList() } };
+        var catalog = new[]
+        {
+            P("fx-a", F("uint8-axis", 128), F("int16-le", 0)),
+            P("fx-b", F("uint8-axis", 128)),
+            P("fx-c", F("uint8-axis"), F("stick12-pair", 7)),
+        };
+        catalog[1].StateBlockFields = new() { F("int16-le") };
+        var finer = new Profiles.Finer((key, _, _) => key == "FieldSpec.Type", new[] { "FieldSpec.Type" });
+        var single = Profiles.Census(catalog, finer).Where(u => u.Count == 1 && u.Property.StartsWith("FieldSpec.", StringComparison.Ordinal))
+            .Select(u => $"{u.Property} {u.Profile}").OrderBy(x => x, StringComparer.Ordinal).ToList();
+        string[] want = { "FieldSpec.Center@int16-le fx-a", "FieldSpec.Type=stick12-pair fx-c" };
+        bool ok = single.SequenceEqual(want);
+        if (!ok)
+            Console.WriteLine($"  [FAIL] self-test rule C: expected {string.Join(", ", want)}, got {(single.Count == 0 ? "none" : string.Join(", ", single))}");
         return ok;
     }
 

@@ -174,10 +174,14 @@ internal static class Program
         var scan = new Scan(cat, prints, Rules.Regions, Rules.Names, Rules.InfLines, Rules.Vendored);
         var counts = new Dictionary<SourceKind, int>();
         var generated = new List<string>();
+        var sdkTokens = new List<List<Token>>();
+        string sdkRoot = Path.Combine(root, "sdk", "HIDMaestro.Core");
         foreach (var (path, kind, scanRoot, isGenerated) in Sources(root))
         {
             string rel = Path.GetRelativePath(root, path);
-            scan.Add(rel, Path.GetRelativePath(scanRoot, path), File.ReadAllText(path), kind);
+            string text = File.ReadAllText(path);
+            scan.Add(rel, Path.GetRelativePath(scanRoot, path), text, kind);
+            if (kind == SourceKind.CSharp && scanRoot == sdkRoot) sdkTokens.Add(new Lexer(text, Lang.CSharp).Run().Tokens);
             counts[kind] = counts.GetValueOrDefault(kind) + 1;
             if (isGenerated) generated.Add(rel);
         }
@@ -190,8 +194,14 @@ internal static class Program
         foreach (var (resource, id) in cat.NotLoaded)
             scan.Hits.Add(new Hit("profiles", 0, HitGroups.Catalog, "embedded and not loaded", id, resource));
 
-        // The profile properties one catalog profile sets.
-        var census = Profiles.Census(cat.All);
+        // The profile properties one catalog profile sets, with the values of
+        // enumerated keys and the keys of each field type.
+        var literals = Profiles.ComparedLiterals(sdkTokens);
+        var members = Profiles.MemberReferences(sdkTokens);
+        var census = Profiles.Census(cat.All, new Profiles.Finer(
+            (key, value, type) => type.IsEnum ? members.Contains((type.Name, value))
+                                : literals.TryGetValue(key[(key.IndexOf('.') + 1)..], out var set) && set.Contains(value),
+                                                                 Rules.Discriminators.Select(d => d.Property).ToArray()));
         var single = census.Where(u => u.Count == 1).ToList();
         var general = new List<(PropertyUse Use, GeneralProperty Entry)>();
         foreach (var u in single)
@@ -259,6 +269,10 @@ internal static class Program
                               + (found.Count == 0 ? "gone" : string.Join("; ", found.Select(f => $"{f.Prints} still in {f.File}, from lines {Ranges(f.Lines)}"))));
         }
 
+        Console.WriteLine("-- rule C also counts a key's value that code names as Type.Prop=value (an enum member the SDK writes, "
+                          + $"or one of the {literals.Sum(kv => kv.Value.Count)} literals it compares {literals.Count} property names with), "
+                          + "and a key per kind of its object as Type.Prop@kind, by:");
+        foreach (var (prop, reason) in Rules.Discriminators) Console.WriteLine($"  {prop}. {reason}");
         Console.WriteLine($"-- allowed among the properties one profile sets ({general.Count} of {single.Count})");
         foreach (var (u, e) in general) Console.WriteLine($"  {u.Property} (\"{u.JsonName}\"), set only by {u.Profile}. {e.Reason}");
 
