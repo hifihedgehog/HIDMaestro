@@ -120,6 +120,12 @@
 //        program's OutputReceived. Then it kills the program and times the
 //        sweep that removes the device. The user still cannot open the
 //        OutputEvent, and every output arrives within 20 ms.
+//    Y11b. The same pad held open by the probe across its move, until 1 s
+//        after DiInstallDevice asks for a restart.
+//        DiInstallDevice installs the driver and holds back the restart,
+//        and the move restarts the device once the handle closes. Every
+//        move in this section restarts a device whose restart a handle
+//        held back.
 //    Y21. A v1.12.0 program on a machine where only this release deployed:
 //        its package is not in the driver store and its staging has no
 //        catalog. Its create installs no driver, and its device runs on
@@ -214,6 +220,7 @@ internal static partial class Program
             SectionYPreSquat(user, installed);
             SectionYReused(user);
             SectionYLegacyEvents(user, installed);
+            SectionYMoveHeld(installed);
             SectionYHeldSection(user);
             SectionYNoSection(user);
             SectionYBadTime(user);
@@ -531,11 +538,11 @@ internal static partial class Program
         old.Send("stream 5 0.4 125 0");
         string inst = PeerProcess.Field(co, "instance")!;
         string tok = inst.Substring(inst.LastIndexOf('\\') + 1);
-        bool moved = Y.InstallBestStoreDriver(inst)
-                     && WaitFor(() => Native.DriverVersionOf(inst) == installed && Native.IsStarted(inst), 20_000)
+        bool moved = Y.InstallBestStoreDriver(inst, out string how)
+                     && WaitFor(() => Native.RunsDriver(inst, installed), 20_000)
                      && WaitFor(() => Y.WatchValues(inst) is { Connected: 1 }, 10_000);
         Check("Y9: its controller runs on the installed driver, whose watch connects", moved,
-              $"{Native.DriverVersionOf(inst)}, installed {installed}, {Y.ShowWatch(inst)}");
+              $"{Native.DriverVersionOf(inst)}, installed {installed}, {how}, {Native.StatusOf(inst)}, {Y.ShowWatch(inst)}");
         if (!moved) return;
         var tree = Native.Subtree(inst);
         var path = WaitPaths(0xBEEF, 0xF1F7, 1, 10_000);
@@ -573,11 +580,23 @@ internal static partial class Program
             IntPtr heldStop = Y.AsUser(user, () => Y.OpenEventW(Y.EVENT_ALL_ACCESS, false, stopName));
             Check("Y12: the user opens the v1.12.0 StopEvent for every right (its DACL is null)", heldStop != IntPtr.Zero);
 
-            bool moved = Y.InstallBestStoreDriver(inst)
-                         && WaitFor(() => Native.DriverVersionOf(inst) == installed && Native.IsStarted(inst), 20_000)
+            bool moved = Y.InstallBestStoreDriver(inst, out string how)
+                         && WaitFor(() => Native.RunsDriver(inst, installed), 20_000)
                          && WaitFor(() => Y.WatchValues(inst) is { Connected: 1 }, 10_000);
-            Check("Y11: the controller moves to the installed driver", moved, $"{Native.DriverVersionOf(inst)}, installed {installed}");
-            if (!moved) { if (heldStop != IntPtr.Zero) Y.CloseHandle(heldStop); return; }
+            Check("Y11: the controller moves to the installed driver", moved,
+                  $"{Native.DriverVersionOf(inst)}, installed {installed}, {how}, {Native.StatusOf(inst)}, {Y.ShowWatch(inst)}");
+            if (!moved)
+            {
+                // The device would stay on index 0 for Y13, which judges
+                // that index's sections, so it goes first.
+                if (heldStop != IntPtr.Zero) Y.CloseHandle(heldStop);
+                var left = Native.Subtree(inst);
+                old.Kill();
+                Clean();
+                bool removed = WaitFor(() => left.All(Native.IsGone), 30_000);
+                Console.WriteLine($"    Y11: after the failed move the device is {(removed ? "removed" : "still present")}");
+                return;
+            }
 
             // Y12: signal the held StopEvent while the controller streams
             // input. The refused object is not the worker's, so a signal on
@@ -641,6 +660,58 @@ internal static partial class Program
         bool gone = WaitFor(() => tree.All(Native.IsGone), 30_000);
         Console.WriteLine(FormattableString.Invariant($"    Y11 removal: sweep reply {sw.ElapsedMilliseconds} ms after it was sent, devices gone {(gone ? "yes" : "no")}"));
         Check("Y11: the killed program's controller is removed", Ok(s) && gone, $"{sw.ElapsedMilliseconds} ms");
+    }
+
+    /// <summary>Y11b. A move whose restart an open handle holds back. The
+    /// check holds the v1.12.0 program's DualShock 4 open, moves the device
+    /// to the installed driver and lets the handle go 1 s after
+    /// DiInstallDevice asks for a restart.
+    /// DiInstallDevice installs the driver and asks for a restart, the
+    /// device keeps its old driver until the handle closes, and the move
+    /// then restarts it on the installed one.</summary>
+    static void SectionYMoveHeld(string installed)
+    {
+        Clean();
+        string inst;
+        using (var old = PeerProcess.Start("Y-v1.12.0-held-move", "v1.12.0"))
+        {
+            string co = old.Send("create ds4 - coexist-y-heldmove");
+            if (!Ok(co)) { Check("Y11b: the v1.12.0 program creates a DualShock 4", false, co); return; }
+            inst = PeerProcess.Field(co, "instance")!;
+            // The handle is opened once Windows has finished installing the
+            // new device: an install still running restarts the HID child,
+            // and a handle on the child it removes holds nothing back.
+            WaitFor(() => Y.CMP_WaitNoPendingInstallEvents(0) == 0 && Native.IsStarted(inst), 15_000);
+            string? before = Native.DriverVersionOf(inst);
+            Check("Y11b: before the move the controller runs on the v1.12.0 program's own driver",
+                  before != null && before != installed, $"{before ?? "no driver"}, installed {installed}");
+            string? hid = null;
+            WaitFor(() => (hid = Native.Subtree(inst).Skip(1).SelectMany(c => Native.InterfaceList(Native.HidGuid, c)).FirstOrDefault()) != null, 10_000);
+            IntPtr h = hid == null ? Native.INVALID
+                : Native.CreateFileW(hid, Native.GENERIC_READ, Native.FILE_SHARE_RW, IntPtr.Zero, Native.OPEN_EXISTING, 0, IntPtr.Zero);
+            Check("Y11b: the controller's HID interface opens", h != Native.INVALID, hid ?? "no interface");
+            if (h == Native.INVALID) { old.Kill(); Clean(); return; }
+            // DiInstallDevice tries the restart for some seconds (5.7 s
+            // here) before it gives up and asks for one, which sets
+            // DN_NEED_RESTART. The handle closes 1 s after that, so the
+            // move's own restart is what loads the driver, on any machine.
+            var release = new Thread(() =>
+            {
+                WaitFor(() => Native.NeedsRestart(inst), 30_000);
+                Thread.Sleep(1000);
+                Native.CloseHandle(h);
+            }) { IsBackground = true };
+            release.Start();
+            bool moved = Y.InstallBestStoreDriver(inst, out string how)
+                         && WaitFor(() => Native.RunsDriver(inst, installed), 20_000)
+                         && WaitFor(() => Y.WatchValues(inst) is { Connected: 1 }, 10_000);
+            release.Join();
+            Check("Y11b: a move whose restart an open handle holds back loads the driver once the handle closes",
+                  moved && how.Contains("held back", StringComparison.Ordinal),
+                  $"{Native.DriverVersionOf(inst)}, installed {installed}, {how}, {Native.StatusOf(inst)}, {Y.ShowWatch(inst)}");
+            old.Kill();
+        }
+        Clean();
     }
 
     /// <summary>Y13. A dead program's input section and event held open, and
@@ -1066,11 +1137,11 @@ internal static partial class Program
             inst = PeerProcess.Field(co, "instance")!;
             t = int.Parse(PeerProcess.Field(co, "transport")!);
             tok = inst.Substring(inst.LastIndexOf('\\') + 1);
-            bool moved = Y.InstallBestStoreDriver(inst)
-                         && WaitFor(() => Native.DriverVersionOf(inst) == installed && Native.IsStarted(inst), 20_000)
+            bool moved = Y.InstallBestStoreDriver(inst, out string how)
+                         && WaitFor(() => Native.RunsDriver(inst, installed), 20_000)
                          && WaitFor(() => Y.WatchValues(inst) is { Connected: 1 } v && v.Pid == old.Pid, 10_000);
             Check("Y7: the v1.12.0 program's controller runs on the installed driver, which watches its pipe", moved,
-                  $"{Native.DriverVersionOf(inst)}, installed {installed}, {Y.ShowWatch(inst)}");
+                  $"{Native.DriverVersionOf(inst)}, installed {installed}, {how}, {Native.StatusOf(inst)}, {Y.ShowWatch(inst)}");
             if (!moved) return;
             old.Kill();
         }
@@ -1132,10 +1203,10 @@ internal static partial class Program
             k.SetValue("OwnerProcessId", Environment.ProcessId, RegistryValueKind.DWord);
             k.SetValue("OwnerPipeOwner", "S-1-5-32-544", RegistryValueKind.String);
         }
-        bool moved = Y.InstallBestStoreDriver(inst)
-                     && WaitFor(() => Native.DriverVersionOf(inst) == installed && Native.IsStarted(inst), 20_000);
+        bool moved = Y.InstallBestStoreDriver(inst, out string how)
+                     && WaitFor(() => Native.RunsDriver(inst, installed), 20_000);
         Check("Y6: the v1.11.0 program's controller moves to the installed driver", moved,
-              $"{Native.DriverVersionOf(inst)}, installed {installed}");
+              $"{Native.DriverVersionOf(inst)}, installed {installed}, {how}, {Native.StatusOf(inst)}");
         if (!moved) return;
         Thread.Sleep(1500);   // past the worker's first 200 ms bootstrap waits
         Check("Y6: the values the earlier device left are gone, and none are written", Y.WatchValues(inst) == null, Y.ShowWatch(inst));
@@ -1182,10 +1253,10 @@ internal static partial class Program
 
         // The best driver in the store on that device alone, as this SDK's
         // create installs one (DeviceNodeCreator.InstallBestStoreDriver).
-        bool moved = Y.InstallBestStoreDriver(instOld)
-                     && WaitFor(() => Native.DriverVersionOf(instOld) == installed && Native.IsStarted(instOld), 20_000);
+        bool moved = Y.InstallBestStoreDriver(instOld, out string how)
+                     && WaitFor(() => Native.RunsDriver(instOld, installed), 20_000);
         Check("Y: the v1.12.0 program's controller moves to the installed driver", moved,
-              $"{Native.DriverVersionOf(instOld)}, installed {installed}");
+              $"{Native.DriverVersionOf(instOld)}, installed {installed}, {how}, {Native.StatusOf(instOld)}");
         if (!moved) return null;
 
         var pathOld = WaitPaths(0xBEEF, 0xF1F0, 1, 10_000);
@@ -1483,23 +1554,57 @@ internal static partial class Program
         }
 
         /// <summary>DiInstallDevice with no driver named on one devnode: the
-        /// best match the driver store holds, on that device alone.</summary>
-        internal static bool InstallBestStoreDriver(string instanceId)
+        /// best match the driver store holds, on that device alone, with how
+        /// the move went in <paramref name="how"/>. A handle any process
+        /// holds open on the device when the driver goes in holds back the
+        /// restart that loads it: DiInstallDevice sets NeedReboot, the device
+        /// keeps running its old driver with DN_NEED_RESTART set, and its
+        /// DriverVersion already names the new one. The device is then
+        /// disabled and enabled until it stops and starts again, within
+        /// 20 s. False when the install fails or the device never
+        /// restarts.</summary>
+        internal static bool InstallBestStoreDriver(string instanceId, out string how)
         {
+            bool needReboot;
             IntPtr dis = SetupDiCreateDeviceInfoList(IntPtr.Zero, IntPtr.Zero);
-            if (dis == new IntPtr(-1)) return false;
+            if (dis == new IntPtr(-1)) { how = "no device information set"; return false; }
             byte[] buf = new byte[IntPtr.Size == 8 ? 32 : 28];
             BitConverter.GetBytes(buf.Length).CopyTo(buf, 0);
             var pin = GCHandle.Alloc(buf, GCHandleType.Pinned);
             try
             {
-                if (!SetupDiOpenDeviceInfoW(dis, instanceId, IntPtr.Zero, 0, pin.AddrOfPinnedObject())) return false;
-                return DiInstallDevice(IntPtr.Zero, dis, pin.AddrOfPinnedObject(), IntPtr.Zero, 0x2 /*DIIDFLAG_NOFINISHINSTALLUI*/, out _);
+                if (!SetupDiOpenDeviceInfoW(dis, instanceId, IntPtr.Zero, 0, pin.AddrOfPinnedObject()))
+                {
+                    how = $"the device does not open, Win32 error {Marshal.GetLastWin32Error()}";
+                    return false;
+                }
+                if (!DiInstallDevice(IntPtr.Zero, dis, pin.AddrOfPinnedObject(), IntPtr.Zero, 0x2 /*DIIDFLAG_NOFINISHINSTALLUI*/, out needReboot))
+                {
+                    how = $"DiInstallDevice failed, Win32 error {Marshal.GetLastWin32Error()}";
+                    return false;
+                }
             }
             finally
             {
                 pin.Free();
                 SetupDiDestroyDeviceInfoList(dis);
+            }
+            if (!needReboot) { how = "installed"; return true; }
+            const int Budget = 20_000;
+            var sw = Stopwatch.StartNew();
+            for (int failed = 0; ; failed++)
+            {
+                if (RestartDevice(instanceId, (int)Math.Max(0, Budget - sw.ElapsedMilliseconds)))
+                {
+                    how = $"installed, its restart held back by an open handle, then restarted after {failed} failed restart(s), {sw.ElapsedMilliseconds} ms";
+                    return true;
+                }
+                if (sw.ElapsedMilliseconds >= Budget)
+                {
+                    how = $"installed, its restart held back by an open handle, {failed + 1} restart(s) failed over {sw.ElapsedMilliseconds} ms";
+                    return false;
+                }
+                Thread.Sleep(250);
             }
         }
 
@@ -1780,14 +1885,22 @@ internal static partial class Program
         /// <summary>Disable the device and enable it again, as an
         /// administrator's disable and enable does. False when the device
         /// cannot be found or the disable is refused.</summary>
-        internal static bool RestartDevice(string instanceId)
+        internal static bool RestartDevice(string instanceId) => RestartDevice(instanceId, 10_000);
+
+        /// <summary><see cref="RestartDevice(string)"/> that is true only when
+        /// the device left the started state within
+        /// <paramref name="stopWaitMs"/>. The device is enabled again either
+        /// way, so a refused or late stop leaves it as it was. The disable
+        /// asks for no veto dialog (CM_DISABLE_UI_NOT_OK, cfgmgr32.h).</summary>
+        internal static bool RestartDevice(string instanceId, int stopWaitMs)
         {
             if (CM_Locate_DevNodeW(out uint devInst, instanceId, 0) != 0) return false;
-            if (CM_Disable_DevNode(devInst, 0) != 0) return false;
-            WaitFor(() => !Native.IsStarted(instanceId), 10_000);
+            if (CM_Disable_DevNode(devInst, CM_DISABLE_UI_NOT_OK) != 0) return false;
+            bool stopped = WaitFor(() => !Native.IsStarted(instanceId), stopWaitMs);
             if (CM_Locate_DevNodeW(out devInst, instanceId, 1 /*CM_LOCATE_DEVNODE_PHANTOM*/) != 0) return false;
-            return CM_Enable_DevNode(devInst, 0) == 0;
+            return CM_Enable_DevNode(devInst, 0) == 0 && stopped;
         }
+        const uint CM_DISABLE_UI_NOT_OK = 0x4;
         [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)] static extern uint CM_Locate_DevNodeW(out uint devInst, string deviceId, uint flags);
         [DllImport("cfgmgr32.dll")] static extern uint CM_Disable_DevNode(uint devInst, uint flags);
         [DllImport("cfgmgr32.dll")] static extern uint CM_Enable_DevNode(uint devInst, uint flags);
@@ -1809,6 +1922,11 @@ internal static partial class Program
         [DllImport("setupapi.dll", SetLastError = true)] static extern bool SetupDiDestroyDeviceInfoList(IntPtr set);
         [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         static extern bool SetupDiOpenDeviceInfoW(IntPtr set, string instanceId, IntPtr hwnd, uint flags, IntPtr data);
+        /// <summary>WAIT_OBJECT_0 (0) once Windows has no device installation
+        /// pending, WAIT_TIMEOUT (0x102) while it has one. With 0 it tests
+        /// and returns at once (Learn, CMP_WaitNoPendingInstallEvents).</summary>
+        [DllImport("cfgmgr32.dll")]
+        internal static extern uint CMP_WaitNoPendingInstallEvents(uint timeoutMs);
         [DllImport("newdev.dll", SetLastError = true)]
         static extern bool DiInstallDevice(IntPtr hwnd, IntPtr set, IntPtr data, IntPtr driver, uint flags, out bool needReboot);
         [DllImport("kernel32.dll", SetLastError = true)]

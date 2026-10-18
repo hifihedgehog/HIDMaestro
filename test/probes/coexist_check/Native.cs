@@ -13,6 +13,9 @@ internal static class Native
     internal static readonly IntPtr INVALID = new(-1);
     internal const uint GENERIC_READ = 0x80000000, GENERIC_WRITE = 0x40000000, FILE_SHARE_RW = 3, OPEN_EXISTING = 3;
     internal const uint DN_STARTED = 0x00000008, DN_HAS_PROBLEM = 0x00000400;
+    // cfg.h: DN_NEED_RESTART is DN_LIAR, set on a devnode whose new driver
+    // loads only at its next restart.
+    internal const uint DN_NEED_RESTART = 0x00000100;
     const uint CM_GET_DEVICE_INTERFACE_LIST_PRESENT = 0;
 
     // ── HID ────────────────────────────────────────────────────────────
@@ -165,6 +168,23 @@ internal static class Native
     internal static bool IsStarted(string instanceId) =>
         CM_Locate_DevNodeW(out uint di, instanceId, 0) == 0
         && CM_Get_DevNode_Status(out uint st, out _, di, 0) == 0 && (st & DN_STARTED) != 0;
+
+    /// <summary>Whether the device runs the driver of
+    /// <paramref name="version"/>: its DriverVersion names it, it is started,
+    /// and it waits for no restart. DriverVersion names an installed driver
+    /// at once, while a device whose restart was held back keeps running
+    /// its old one with DN_NEED_RESTART set.</summary>
+    internal static bool RunsDriver(string instanceId, string? version) =>
+        DriverVersionOf(instanceId) == version
+        && CM_Locate_DevNodeW(out uint di, instanceId, 0) == 0
+        && CM_Get_DevNode_Status(out uint st, out _, di, 0) == 0
+        && (st & DN_STARTED) != 0 && (st & DN_NEED_RESTART) == 0;
+
+    /// <summary>Whether the device waits for a restart to load a driver
+    /// installed on it (DN_NEED_RESTART).</summary>
+    internal static bool NeedsRestart(string instanceId) =>
+        CM_Locate_DevNodeW(out uint di, instanceId, 0) == 0
+        && CM_Get_DevNode_Status(out uint st, out _, di, 0) == 0 && (st & DN_NEED_RESTART) != 0;
 
     /// <summary>The instance and its whole subtree, live nodes only.</summary>
     internal static List<string> Subtree(string instanceId)
