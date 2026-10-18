@@ -406,6 +406,17 @@ internal static partial class Program
             int next = (int)args[0]!;
             Check("OF13: a process's first read of the process list, and its next, each make one kernel query",
                   first == 1 && next == 1, $"{first} and {next} queries, {list.Count} processes, buffer now {sizeField.GetValue(null)} bytes");
+            // The check above catches a smaller first buffer only on a
+            // machine with enough processes to outgrow it. This one holds the
+            // first buffer to 1,500 processes at this machine's bytes per
+            // process, whatever the count here (its comment promises some
+            // 1,600): a 1 MB or a 2.5 MB first buffer fails it on any machine.
+            uint needed = (uint)sizeField.GetValue(null)! - 64 * 1024;
+            object? firstSize = ledger.GetField("FirstProcessListSize", AnyStaticMember)?.GetRawConstantValue();
+            double perProcess = list.Count > 0 ? (double)needed / list.Count : 0;
+            double holds = firstSize is uint fs && perProcess > 0 ? fs / perProcess : 0;
+            Check("OF13: the first read's buffer holds at least 1,500 processes at this machine's bytes per process",
+                  holds >= 1500, $"{firstSize ?? "no FirstProcessListSize"} bytes, {perProcess:F0} bytes a process over {list.Count}, holds {holds:F0}");
             sizeField.SetValue(null, saved);
         }
         else Check("OF13: RegistryLedger.ProcessCreateTimes(out int) and its size exist", false);
