@@ -100,11 +100,10 @@ public sealed class ControllerProfile
     /// <summary>v1.10.0 (PadForge discussion 476): a DualShock 3 presented
     /// the way Sony's sixaxis.sys and DsHidMini's SXS mode present one, which
     /// is what PCSX2 (SDL_HINT_JOYSTICK_HIDAPI_PS3_SIXAXIS_DRIVER) and RPCS3
-    /// read on Windows. The profile's extendedReport is the native 49-byte
-    /// DualShock 3 report. The driver serves it as the report 0 feature
-    /// reply, derives the 12-byte joystick input report from it, and folds
-    /// report 0 output commands into the native output report it hands the
-    /// SDK.</summary>
+    /// read on Windows. Since v2.0.0 dualshock-3-full carries that form as
+    /// its own protocol, layout and live feature report, and a profile
+    /// outside the catalog that sets this key takes them from it through
+    /// its identity default.</summary>
     [JsonPropertyName("sixaxisCompatible")]
     public bool? SixaxisCompatible { get; set; }
 
@@ -551,7 +550,50 @@ public sealed class ControllerProfile
     /// in code or constructed by a program, resolves against the catalog's
     /// on first use.</summary>
     [JsonIgnore]
-    internal ResolvedModel? ResolvedCache { get; set; }
+    internal ResolvedModel? ResolvedCache
+    {
+        get => _resolved;
+        set { _resolved = value; ApplyPrograms(value); }
+    }
+
+    private ResolvedModel? _resolved;
+
+    /// <summary>True when the protocol group's keys came from a model the
+    /// profile named or its identity gave it, not from its own file.</summary>
+    [JsonIgnore]
+    internal bool ProgramsTaken { get; private set; }
+
+    /// <summary>The protocol group's keys of a model, in place of the
+    /// profile's: the profile then builds and answers as that model does.</summary>
+    internal void TakePrograms(ModelPrograms g)
+    {
+        Protocol = g.Protocol;
+        StateBlock = g.StateBlock;
+        StateBlockFields = g.StateBlockFields;
+        InputReports = g.InputReports;
+        LiveFeatureReports = g.LiveFeatureReports;
+        ProgramsTaken = true;
+        _model = null;
+    }
+
+    /// <summary>The protocol group a resolution gave: a model's keys when
+    /// the group came from a name or an identity default, and none in place
+    /// of keys a previous resolution took when it no longer gives them.</summary>
+    private void ApplyPrograms(ResolvedModel? r)
+    {
+        if (r == null || !r.Sources.TryGetValue(global::HIDMaestro.Internal.DeviceModel.GroupName(ModelGroup.Protocol), out var source) || source == "own") return;
+        if (source != "none" && r.Model.Programs is { } g) TakePrograms(g);
+        else if (ProgramsTaken)
+        {
+            Protocol = null;
+            StateBlock = null;
+            StateBlockFields = null;
+            InputReports = null;
+            LiveFeatureReports = null;
+            ProgramsTaken = false;
+            _model = null;
+        }
+    }
 
     /// <summary>The named models and identity defaults the profile resolved
     /// under: its load's, which holds the models folder of the directory it
@@ -814,6 +856,7 @@ public sealed class ControllerProfile
         copy.StateBlockFields = StateBlockFields;
         copy.InputReports = InputReports;
         copy.LiveFeatureReports = LiveFeatureReports;
+        copy.ProgramsTaken = ProgramsTaken;
         return copy;
     }
 

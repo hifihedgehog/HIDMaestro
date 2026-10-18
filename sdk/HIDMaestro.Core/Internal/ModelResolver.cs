@@ -18,8 +18,11 @@ internal enum ModelGroup
     /// <summary><c>featureStubs</c> and <c>valueSources</c>.</summary>
     Answers = 0,
 
-    /// <summary>The keys of the protocol engine and report programs. v2.0.0's
-    /// UMDF2 profiles carry none yet, so the group resolves to nothing.</summary>
+    /// <summary>The keys of the protocol engine and report programs:
+    /// <c>protocol</c>, <c>stateBlock</c>, <c>inputReports</c> and
+    /// <c>liveFeatureReports</c>. A catalog profile carries them in its own
+    /// file, and an identity default or a name can give them through a
+    /// catalog profile. A named model file holds none.</summary>
     Protocol = 1,
 
     /// <summary><c>driverPid</c> and <c>xinput</c>.</summary>
@@ -35,6 +38,7 @@ internal sealed class DeviceModel
     public Dictionary<string, ValueSourceSpec>? ValueSources { get; init; }
     public string? DriverPid { get; init; }
     public XInputSpec? XInput { get; init; }
+    public ModelPrograms? Programs { get; init; }
 
     public static readonly DeviceModel Empty = new();
 
@@ -43,7 +47,7 @@ internal sealed class DeviceModel
     public bool Covers(ModelGroup g) => g switch
     {
         ModelGroup.Answers => FeatureStubs != null || ValueSources != null,
-        ModelGroup.Protocol => false,
+        ModelGroup.Protocol => Programs != null,
         ModelGroup.Presentation => DriverPid != null || XInput != null,
         _ => false,
     };
@@ -56,7 +60,7 @@ internal sealed class DeviceModel
     /// (<see cref="XInputPresentation.OwnBlock"/>).</summary>
     public static DeviceModel OwnOf(ControllerProfile p) =>
         new() { FeatureStubs = p.FeatureStubs, ValueSources = p.ValueSources, DriverPid = p.DriverPid,
-                XInput = XInputPresentation.OwnBlock(p) };
+                XInput = XInputPresentation.OwnBlock(p), Programs = ModelPrograms.OwnOf(p) };
 
     public static DeviceModel Of(DeviceModelFile f) =>
         new() { FeatureStubs = f.FeatureStubs, ValueSources = f.ValueSources, DriverPid = f.DriverPid, XInput = f.XInput };
@@ -65,6 +69,7 @@ internal sealed class DeviceModel
     public DeviceModel Only(ModelGroup g) => g switch
     {
         ModelGroup.Answers => new() { FeatureStubs = FeatureStubs, ValueSources = ValueSources },
+        ModelGroup.Protocol => new() { Programs = Programs },
         ModelGroup.Presentation => new() { DriverPid = DriverPid, XInput = XInput },
         _ => Empty,
     };
@@ -72,8 +77,9 @@ internal sealed class DeviceModel
     /// <summary>This model with one group's keys taken from another.</summary>
     public DeviceModel With(ModelGroup g, DeviceModel from) => g switch
     {
-        ModelGroup.Answers => new() { FeatureStubs = from.FeatureStubs, ValueSources = from.ValueSources, DriverPid = DriverPid, XInput = XInput },
-        ModelGroup.Presentation => new() { FeatureStubs = FeatureStubs, ValueSources = ValueSources, DriverPid = from.DriverPid, XInput = from.XInput },
+        ModelGroup.Answers => new() { FeatureStubs = from.FeatureStubs, ValueSources = from.ValueSources, DriverPid = DriverPid, XInput = XInput, Programs = Programs },
+        ModelGroup.Protocol => new() { FeatureStubs = FeatureStubs, ValueSources = ValueSources, DriverPid = DriverPid, XInput = XInput, Programs = from.Programs },
+        ModelGroup.Presentation => new() { FeatureStubs = FeatureStubs, ValueSources = ValueSources, DriverPid = from.DriverPid, XInput = from.XInput, Programs = Programs },
         _ => this,
     };
 
@@ -84,6 +90,35 @@ internal sealed class DeviceModel
         ModelGroup.Presentation => "presentation",
         _ => g.ToString(),
     };
+}
+
+/// <summary>The protocol group's keys, as a profile file reads them. The
+/// specs are shared with the profile they came from, which nothing changes
+/// once they are read.</summary>
+internal sealed class ModelPrograms
+{
+    public ProtocolSpec? Protocol { get; init; }
+    public StateBlockSpec? StateBlock { get; init; }
+    public List<FieldSpec>? StateBlockFields { get; init; }
+    public List<InputReportSpec>? InputReports { get; init; }
+    public List<LiveFeatureReportSpec>? LiveFeatureReports { get; init; }
+
+    /// <summary>The keys a profile carries in its own file, or null for
+    /// none. Keys it took from a model are not its own.</summary>
+    public static ModelPrograms? OwnOf(ControllerProfile p) =>
+        p.ProgramsTaken || (p.Protocol == null && p.StateBlock == null && p.InputReports == null && p.LiveFeatureReports == null)
+            ? null
+            : new() { Protocol = p.Protocol, StateBlock = p.StateBlock, StateBlockFields = p.StateBlockFields, InputReports = p.InputReports, LiveFeatureReports = p.LiveFeatureReports };
+
+    /// <summary>Refuses, as a profile defect, programs that do not fit
+    /// <paramref name="p"/>: they compile for its descriptor and its
+    /// backend as a create compiles them.</summary>
+    public void CheckFits(ControllerProfile p)
+    {
+        var probe = p.Clone();
+        probe.TakePrograms(this);
+        probe.ValidateDeviceModel();
+    }
 }
 
 /// <summary>What a profile resolved to: the model, where each group came
@@ -564,6 +599,7 @@ internal sealed class ModelRegistry
                 try
                 {
                     AnswerModels.Validate(p, found.Value.Model, taken: true, namedNotes);
+                    if (!own.Covers(ModelGroup.Protocol)) found.Value.Model.Programs?.CheckFits(p);
                     named = found.Value.Model;
                     namedFiles = found.Value.Files;
                     namedSource = $"named:{name}";
@@ -595,6 +631,7 @@ internal sealed class ModelRegistry
                 try
                 {
                     AnswerModels.Validate(p, found.Value.Model, taken: true, identityNotes);
+                    if (!own.Covers(ModelGroup.Protocol)) found.Value.Model.Programs?.CheckFits(p);
                     identity = found.Value.Model;
                     identityFiles = found.Value.Files;
                 }

@@ -10,7 +10,10 @@
 // ProfileLoadIssues. A directory's models folder carries named models and
 // an identity-defaults.json, tried before the catalog's for profiles
 // outside the catalog, with no rebuild. No catalog profile takes a group
-// from an identity default. The base has none of these keys: it loads
+// from an identity default. The protocol group comes through a catalog
+// profile: an identity default naming switch-pro, switch-pro-usb or
+// dualshock-3-full gives its protocol, state block and report programs
+// when they fit the profile's descriptor. The base has none of these keys: it loads
 // every profile below without a word and gives each only its own keys.
 using System;
 using System.Collections.Generic;
@@ -31,7 +34,55 @@ internal static class Resolve
         Concurrent(c);
         ThroughCatalog(c);
         RepeatedEntry(c);
+        Protocol(c);
         return c.Failures;
+    }
+
+    /// <summary>The protocol group by identity: a profile outside the
+    /// catalog with no protocol keys of its own takes the protocol, state
+    /// block and report programs of the catalog profile its identity
+    /// default names, as 9bd6279's code gave every 057E:2009 profile the
+    /// Switch Pro's responder and every sixaxisCompatible profile the
+    /// DualShock 3's form. A model whose programs do not fit the profile's
+    /// descriptor is not taken, and says so.</summary>
+    static void Protocol(Checks c)
+    {
+        string Text(string id, Action<JsonObject>? edit = null)
+        {
+            var basis = ProfileDatabase.LoadEmbedded().All.First(p => p.Id == id);
+            // The SDK's own JSON leaves the model groups out.
+            var o = JsonNode.Parse(JsonSerializer.Serialize(basis, HMJsonContext.Default.ControllerProfile))!.AsObject();
+            o["id"] = "user-" + id;
+            edit?.Invoke(o);
+            return o.ToJsonString();
+        }
+        ControllerProfile Load(string text) => ProfileDatabase.LoadTexts(new[] { ("user.json", text) }, ModelRegistry.Catalog).All.Single();
+        string Source(ControllerProfile p) => p.Resolved.Sources.TryGetValue("protocol", out var s) ? s : "absent";
+
+        var sw = Load(Text("switch-pro"));
+        c.Check("a Switch Pro outside the catalog takes switch-pro's protocol by identity",
+                Source(sw) == "identity:nintendo-switch-pro" && sw.Protocol != null && sw.BuildsItsOwnReports && sw.ProgramsTaken,
+                $"{Source(sw)}, protocol {(sw.Protocol != null)}");
+        var usb = Load(Text("switch-pro-usb"));
+        c.Check("one on USB with the USB descriptor takes switch-pro-usb's",
+                Source(usb) == "identity:nintendo-switch-pro-usb" && usb.GetOrCompileModel().Layouts.Single().Size == 64,
+                Source(usb));
+        var mixed = Load(Text("switch-pro", o => o["connection"] = "usb"));
+        c.Check("one on USB with the Bluetooth descriptor takes no protocol, and names the misfit",
+                Source(mixed) == "none" && mixed.Protocol == null && mixed.Resolved.Problem?.Contains("switch-pro-usb", StringComparison.Ordinal) == true,
+                $"{Source(mixed)}: {mixed.Resolved.Problem}");
+        var ds3 = Load(Text("dualshock-3-full"));
+        c.Check("a sixaxisCompatible profile outside the catalog takes dualshock-3-full's form",
+                Source(ds3) == "identity:sony-sixaxis" && ds3.LiveFeatureReports is { Count: 1 } && ds3.Protocol != null,
+                Source(ds3));
+        var none = Load(Text("switch-pro", o => o["deviceModel"] = "none"));
+        c.Check("deviceModel none takes no protocol", Source(none) == "none" && none.Protocol == null, Source(none));
+        var own = ProfileDatabase.LoadEmbedded().All.First(p => p.Id == "switch-pro");
+        c.Check("the catalog's switch-pro carries its own", Source(own) == "own" && !own.ProgramsTaken, Source(own));
+        var copy = sw.Clone();
+        copy.ResolveForCreate();
+        c.Check("a copy resolved again for a create takes the protocol again, not as its own",
+                Source(copy) == "identity:nintendo-switch-pro" && copy.ProgramsTaken && copy.Protocol != null, Source(copy));
     }
 
     /// <summary>An identity default whose name another loaded table holds

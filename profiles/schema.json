@@ -261,7 +261,7 @@
         "boolean",
         "null"
       ],
-      "description": "v1.10.0: if true, the persona is a DualShock 3 presented the way Sony's sixaxis.sys and DsHidMini's SXS mode present one, which is what PCSX2 and RPCS3 read on Windows. The profile's extendedReport is the native 49-byte report 0x01 with alwaysArmed set. The driver serves it as the report 0 feature reply, derives the 12-byte joystick input report from it, and folds report 0 output commands into the native output report that extendedOutputReport decodes. See profiles/sony/dualshock-3-full.json."
+      "description": "v1.10.0: if true, the persona is a DualShock 3 presented the way Sony's sixaxis.sys and DsHidMini's SXS mode present one, which is what PCSX2 and RPCS3 read on Windows. Since v2.0.0 dualshock-3-full carries that form as data: its state block is the native 49-byte report, a layout builds the 12-byte joystick input report, a live feature report the report 0 reply, and its protocol folds report 0 output commands into the native output report that extendedOutputReport decodes. A profile outside the catalog with this key takes them from dualshock-3-full through its identity default. See profiles/sony/dualshock-3-full.json."
     },
     "inputDefaults": {
       "type": [

@@ -121,7 +121,7 @@ internal static class FeatureContract
         // (driver.c SwitchFillLatestState), until DD-5 moves the responder
         // to data.
         var profiles = catalog.Where(p => !p.RequiresUsbipBackend && p.HasDescriptor && p.SixaxisCompatible != true
-                                          && p.Resolved.IdentityEntry != "identity:nintendo-switch-pro")
+                                          && p.Resolved.IdentityEntry?.StartsWith("identity:nintendo-switch-pro", StringComparison.Ordinal) != true)
             .OrderBy(p => p.Id, StringComparer.Ordinal).ToList();
         var config = Case5Driver.InstanceConfig(profiles, work);
         var plan = new StringBuilder();
