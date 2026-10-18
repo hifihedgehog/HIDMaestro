@@ -725,9 +725,13 @@ internal static class ProfileKeys
     private static Dictionary<string, PropertyInfo> Read()
     {
         var byName = new Dictionary<string, PropertyInfo>(StringComparer.OrdinalIgnoreCase);
-        foreach (var pi in typeof(ControllerProfile).GetProperties(BindingFlags.Public | BindingFlags.Instance))
+        // The context's members: public properties, and a non-public one it
+        // reads through [JsonInclude] (CompatModelKey, the sixaxisCompatible
+        // key the sony-sixaxis entry matches).
+        foreach (var pi in typeof(ControllerProfile).GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
         {
-            if (pi.GetMethod is not { IsPublic: true } || pi.GetIndexParameters().Length > 0) continue;
+            bool included = pi.GetCustomAttribute<JsonIncludeAttribute>() != null;
+            if (pi.GetMethod == null || (!pi.GetMethod.IsPublic && !included) || pi.GetIndexParameters().Length > 0) continue;
             if (pi.GetCustomAttribute<JsonIgnoreAttribute>() is { Condition: JsonIgnoreCondition.Always }) continue;
             string name = pi.GetCustomAttribute<JsonPropertyNameAttribute>()?.Name
                           ?? JsonNamingPolicy.CamelCase.ConvertName(pi.Name);
