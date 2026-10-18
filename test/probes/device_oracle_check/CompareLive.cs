@@ -251,7 +251,7 @@ internal static class CompareLive
     /// byte 0 with or without report ids (HidP_GetCaps, Microsoft Learn:
     /// HIDP_CAPS). The S46 recording holds the live value, held against
     /// this one as an M1 observation.</summary>
-    sealed record PlanProfile(string Group, string Id, bool UsesReportIds, int ReadLength, byte[] Features, int FeatureLength,
+    sealed record PlanProfile(string Group, string Id, bool UsesReportIds, int ReadLength, byte[] Features, byte[] Declared, int FeatureLength,
                               int OutputLength, IReadOnlyDictionary<byte, int> OutputReports)
     {
         /// <summary>The buffer length from which a live failure the
@@ -317,9 +317,10 @@ internal static class CompareLive
 
     /// <summary>FeatureReportByteLength and OutputReportByteLength of a
     /// descriptor, each the largest report's data bytes plus the id byte
-    /// (HIDP_CAPS, above), and each output report's own length by its
-    /// id.</summary>
-    static (int Feature, int Output, Dictionary<byte, int> OutputReports) LengthsOf(byte[] descriptor)
+    /// (HIDP_CAPS, above), each output report's own length by its id,
+    /// and its feature report ids in the descriptor's order, as the S46
+    /// recorder lists them (HidReportMap).</summary>
+    static (int Feature, int Output, Dictionary<byte, int> OutputReports, byte[] Declared) LengthsOf(byte[] descriptor)
     {
         var map = HIDMaestro.Internal.HidReportMap.Parse(descriptor);
         int Longest(HIDMaestro.Internal.HidReportKind kind)
@@ -329,7 +330,8 @@ internal static class CompareLive
         }
         var outputReports = map.Reports.Where(r => r.Kind == HIDMaestro.Internal.HidReportKind.Output)
             .GroupBy(r => r.ReportId).ToDictionary(g => g.Key, g => g.Max(r => r.DataBytes) + 1);
-        return (Longest(HIDMaestro.Internal.HidReportKind.Feature), Longest(HIDMaestro.Internal.HidReportKind.Output), outputReports);
+        var declared = map.Reports.Where(r => r.Kind == HIDMaestro.Internal.HidReportKind.Feature).Select(r => r.ReportId).ToArray();
+        return (Longest(HIDMaestro.Internal.HidReportKind.Feature), Longest(HIDMaestro.Internal.HidReportKind.Output), outputReports, declared);
     }
 
     static Dictionary<string, PlanProfile> ParsePlan(string text)
@@ -338,20 +340,20 @@ internal static class CompareLive
         string? group = null, id = null;
         bool ids = false;
         int read = 0;
-        (int Feature, int Output, Dictionary<byte, int> OutputReports) lengths = (0, 0, new());
+        (int Feature, int Output, Dictionary<byte, int> OutputReports, byte[] Declared) lengths = (0, 0, new(), Array.Empty<byte>());
         byte[] feats = Array.Empty<byte>();
         foreach (var raw in text.Split('\n'))
         {
             var w = raw.TrimEnd('\r').Split(' ');
             switch (w[0])
             {
-                case "profile": group = w[1]; id = w[2]; ids = false; read = 0; lengths = (0, 0, new()); feats = Array.Empty<byte>(); break;
+                case "profile": group = w[1]; id = w[2]; ids = false; read = 0; lengths = (0, 0, new(), Array.Empty<byte>()); feats = Array.Empty<byte>(); break;
                 case "value" when w.Length == 4 && w[1] == "ReportDescriptor": lengths = LengthsOf(Convert.FromHexString(w[3])); break;
                 case "reportids": ids = w[1] == "1"; break;
                 case "readlength": read = int.Parse(w[1]); break;
                 case "features": feats = w.Skip(1).Select(x => Convert.ToByte(x, 16)).ToArray(); break;
                 case "end":
-                    if (id != null) map.TryAdd(id, new PlanProfile(group!, id, ids, read, feats, lengths.Feature, lengths.Output, lengths.OutputReports));
+                    if (id != null) map.TryAdd(id, new PlanProfile(group!, id, ids, read, feats, lengths.Declared, lengths.Feature, lengths.Output, lengths.OutputReports));
                     id = null;
                     break;
             }
@@ -918,8 +920,10 @@ internal static class CompareLive
             var h = new Calls(harness[$"live/s46/{g.Profile}/index{g.Index}"]);
             string group = $"{Case}/{g.Head}";
             string setup = group + "/setup";
-            if (!g.Declared.SequenceEqual(p.Features))
-                rep.Diff(setup, $"declared {Hex(g.Declared)} live, the plan's descriptor declares {Hex(p.Features)}");
+            // The recorder lists the descriptor's feature reports in its
+            // order (HidReportMap), and the plan's features line sorts them.
+            if (!g.Declared.SequenceEqual(p.Declared))
+                rep.Diff(setup, $"declared {Hex(g.Declared)} live, the plan's descriptor declares {Hex(p.Declared)}");
             rep.Mapping(LM1Caps, g.FeatureLength == p.FeatureLength,
                 g.FeatureLength == p.FeatureLength ? null : $"{g.Profile}: {g.FeatureLength} live, {p.FeatureLength} from the descriptor");
             if (!p.UsesReportIds)
@@ -1814,6 +1818,26 @@ internal static class CompareLive
                 }
             return null;
         });
+        // The setup stream's declared ids are the feature reports of the
+        // descriptor the SDK gave the device, in the descriptor's order, as
+        // sony_feature_gate_check's RecordProfile lists them. The same ids
+        // in another order, or one id changed, is a [DIFF].
+        foreach (bool swap in new[] { false, true })
+            Mutate(s46, swap ? "two declared ids swapped" : "the declared ids in the descriptor's order", swap ? 1 : 0,
+                swap ? "the plan's descriptor declares" : null, streams =>
+            {
+                foreach (var x in streams.Where(x => x.Name.EndsWith("/setup", StringComparison.Ordinal)))
+                {
+                    var order = (byte[])Profile(plan, x.Name.Split('/')[1]).Declared.Clone();
+                    if (order.Length < 2 || order.SequenceEqual(order.OrderBy(b => b))) continue;
+                    if (swap) (order[0], order[1]) = (order[1], order[0]);
+                    int at = x.Outs.FindIndex(o => o.Tag == "declared");
+                    x.Outs[at] = ("declared", order);
+                    return $"{x.Name}: {Hex(order)}";
+                }
+                return null;
+            });
+
         // M1: a collection that declares no feature report fails each
         // GET_FEATURE before the driver, as the live ps-classic did with
         // ERROR_INVALID_FUNCTION. One that succeeded reached the driver,
@@ -1948,7 +1972,7 @@ internal static class CompareLive
         int index = 0;
         foreach (var p in FeatureSubjects(plan))
         {
-            var g = new FeatureGroup { Profile = p.Id, Index = index, Head = $"feature/{p.Id}/index{index}", Declared = p.Features, FeatureLength = (uint)p.FeatureLength, Attributed = true };
+            var g = new FeatureGroup { Profile = p.Id, Index = index, Head = $"feature/{p.Id}/index{index}", Declared = p.Declared, FeatureLength = (uint)p.FeatureLength, Attributed = true };
             index++;
             foreach (byte id in FeatureIds(p.Features))
                 g.Ids.Add(($"{g.Head}/id{id:X2}", Enumerable.Range(0, FeatureSweepMax(p.FeatureLength, p.FeatureLength) + 1).Select(len => new FeatureCall(id, len, false, 0, new byte[len], Array.Empty<byte>(), null, null)).ToList()));
