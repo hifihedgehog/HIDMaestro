@@ -13,7 +13,11 @@
 //     p95 per report and its compile, a line for each whole model's compile,
 //     and the runtime, tiering, CPU and instruction set lines.
 //
-// The tool is a separate process, as a user runs it, with no window.
+// The tool is a separate process, as a user runs it, with no window. Its
+// build must carry the SDK this probe runs: a tool built before the SDK
+// changed loads profiles as the older SDK did and refuses one the newer
+// SDK loads (a UMDF2 protocol, before the SDK's protocol host), so the
+// check fails first on that, naming both builds.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -36,6 +40,16 @@ internal static class ProfileCheckTool
         if (!File.Exists(exe))
         {
             c.Check("the profile check tool is built", false, $"{exe} is missing. Build tools\\HIDMaestroProfileCheck");
+            return c.Failures;
+        }
+        // The SDK's informational version carries the commit it was built
+        // at (+<sha>), in the tool's copy and in this probe's.
+        string mine = FileVersionInfo.GetVersionInfo(typeof(ProfileDatabase).Assembly.Location).ProductVersion ?? "";
+        string tools = FileVersionInfo.GetVersionInfo(Path.Combine(Path.GetDirectoryName(exe)!, "HIDMaestro.Core.dll")).ProductVersion ?? "";
+        if (mine.Length == 0 || tools != mine)
+        {
+            c.Check("the profile check tool is built from the SDK this probe runs", false,
+                    $"the tool's SDK is {(tools.Length == 0 ? "unknown" : tools)}, this probe's {mine}. Build tools\\HIDMaestroProfileCheck again");
             return c.Failures;
         }
         string root = Path.Combine(Path.GetTempPath(), "HIDMaestro_profile_check_tool_" + Environment.ProcessId);
@@ -143,8 +157,12 @@ internal static class ProfileCheckTool
         }
         c.Check("the catalog has profiles with programs to copy out", want.Count > 0, $"{want.Count} programs");
         var (exit, output) = Tool(exe, "--cost", "--launches", "3", "--runs", "3", "--reports", "20000", dir);
-        c.Check("--cost exits 0", exit == 0, $"exit {exit}");
         var lines = output.Split('\n').Select(l => l.Trim()).ToList();
+        // A refused copy or a failed launch names itself in the tool's output.
+        string why = string.Join(" | ", lines.Where(l => l.StartsWith("refused: ", StringComparison.Ordinal)
+                                                         || l.StartsWith("loaded with a model problem: ", StringComparison.Ordinal)
+                                                         || l.StartsWith("launch ", StringComparison.Ordinal)));
+        c.Check("--cost exits 0", exit == 0, exit == 0 ? "exit 0" : $"exit {exit}: {(why.Length == 0 ? "no issue or launch line" : why)}");
         var costLines = lines.Where(l => l.Contains(" ns per report over 3 launches", StringComparison.Ordinal)).ToList();
         foreach (var id in want.Distinct())
         {
