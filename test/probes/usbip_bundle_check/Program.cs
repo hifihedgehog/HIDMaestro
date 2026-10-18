@@ -12,9 +12,9 @@
 //      requires.
 //   3. A staged copy changed on disk is replaced from the embedded bytes
 //      (ProtectedStaging.StageStream, the step extraction runs, on a
-//      private copy), the hash check the installer's launch runs
-//      (ProtectedStaging.VerifyBeforeUse) refuses tampered bytes, and the
-//      launch itself (RunSilentInstall) refuses them before it starts
+//      private copy), the hash check (ProtectedStaging.VerifyBeforeUse)
+//      refuses tampered bytes, and the launch itself (RunSilentInstall)
+//      refuses a tampered file in the staging directory before it starts
 //      anything.
 //   4. EnsureInstalled is idempotent and returns true on a machine that
 //      already has the transport, without reinstalling.
@@ -28,10 +28,11 @@
 // both test machines.
 //
 // `--offline` runs only what needs no elevation and no transport: the
-// embedded payload, the launch's hash check on copies in %TEMP%, the
-// public contract, and that the deploy and repair steps it reaches exist.
-// The rest requires elevation, since the installer stages in an
-// administrators-only directory. Exit 0 PASS / 1 FAIL.
+// embedded payload, the hash check on copies in %TEMP%, the public
+// contract, and that the deploy and repair steps it reaches exist. The
+// rest requires elevation, since the installer stages in an
+// administrators-only directory and its launch refuses a file anywhere
+// else. Exit 0 PASS / 1 FAIL.
 
 using System;
 using System.IO;
@@ -90,14 +91,13 @@ internal static class Program
         Check("embedded installer is a full binary", embeddedSize > 10_000_000,
               $"{embeddedSize:N0} bytes");
 
-        // ── The launch's hash check ──────────────────────────────────────
+        // ── The hash check ───────────────────────────────────────────────
         //
         // A driver installer that fails its hash must never be executed.
-        // RunSilentInstall checks the staged copy with
-        // ProtectedStaging.VerifyBeforeUse right before it starts it. The
-        // same check runs here on two copies in %TEMP%: the embedded bytes,
-        // and the same bytes with one byte flipped.
-        Console.WriteLine("\n-- Deploy: the launch's hash check --");
+        // ProtectedStaging.VerifyBeforeUse runs here on two copies in
+        // %TEMP%: the embedded bytes, and the same bytes with one byte
+        // flipped.
+        Console.WriteLine("\n-- Deploy: the hash check --");
         byte[] good;
         using (var s = asm.GetManifestResourceStream(InstallerRes)!)
         using (var ms = new MemoryStream())
@@ -105,42 +105,23 @@ internal static class Program
             s.CopyTo(ms);
             good = ms.ToArray();
         }
+        var corrupt = (byte[])good.Clone();
+        corrupt[corrupt.Length / 2] ^= 0xFF;
         string scratch = Path.Combine(Path.GetTempPath(), $"hm-bundle-{Environment.ProcessId}");
         Directory.CreateDirectory(scratch);
         try
         {
             string genuine = Path.Combine(scratch, "genuine.bin"), tampered = Path.Combine(scratch, "tampered.bin");
             File.WriteAllBytes(genuine, good);
-            var corrupt = (byte[])good.Clone();
-            corrupt[corrupt.Length / 2] ^= 0xFF;
             File.WriteAllBytes(tampered, corrupt);
             Check("the hash check accepts the genuine installer", Verifies(genuine));
             Check("the hash check refuses tampered bytes", !Verifies(tampered));
-
-            // The launch itself, on bytes that could never start: the PE
-            // header's first byte is flipped too, so if the launch lost its
-            // hash check, CreateProcess would fail with a bad-format error
-            // and nothing would run. With the check, the launch refuses the
-            // file before it starts anything.
-            var launch = typeof(UsbipDriverInstaller).GetMethod("RunSilentInstall",
-                BindingFlags.NonPublic | BindingFlags.Static, new[] { typeof(string) });
-            Check("deploy path exposes its installer launch", launch != null);
-            if (launch != null)
-            {
-                string unlaunchable = Path.Combine(scratch, "unlaunchable.exe");
-                var bad = (byte[])corrupt.Clone();
-                bad[0] ^= 0xFF;
-                File.WriteAllBytes(unlaunchable, bad);
-                Exception? refused = null;
-                try { launch.Invoke(null, new object[] { unlaunchable }); }
-                catch (TargetInvocationException tie) { refused = tie.InnerException; }
-                Check("the installer launch refuses tampered bytes with its hash check, before it starts anything",
-                      refused is InvalidOperationException ioe && ioe.Message.Contains("does not match its embedded SHA-256"),
-                      refused == null ? "no exception" : $"{refused.GetType().Name}: {refused.Message}");
-            }
         }
         finally { try { Directory.Delete(scratch, recursive: true); } catch { } }
 
+        var launch = typeof(UsbipDriverInstaller).GetMethod("RunSilentInstall",
+            BindingFlags.NonPublic | BindingFlags.Static, new[] { typeof(string) });
+        Check("deploy path exposes its installer launch", launch != null);
         var extract = typeof(UsbipDriverInstaller).GetMethod("ExtractInstaller",
             BindingFlags.NonPublic | BindingFlags.Static, Type.EmptyTypes);
         Check("deploy path exposes its extraction step", extract != null);
@@ -150,7 +131,7 @@ internal static class Program
         var restartDevnode = typeof(UsbipDriverInstaller).GetMethod("RestartHostControllerDevnode",
             BindingFlags.NonPublic | BindingFlags.Static, Type.EmptyTypes);
         Check("deploy path exposes its devnode restart", restartDevnode != null);
-        if (extract == null || restartDevnode == null) { Summary(); return 1; }
+        if (launch == null || extract == null || restartDevnode == null) { Summary(); return 1; }
 
         if (!offline)
         {
@@ -196,6 +177,31 @@ internal static class Program
                 Check("and the launch's hash check accepts it", Verifies(copy));
             }
             finally { try { Directory.Delete(own, recursive: true); } catch { } }
+
+            // ── The launch's refusal ─────────────────────────────────────
+            //
+            // RunSilentInstall pins the installer's directory, which must be
+            // in the administrators-only staging tree, and holds the file to
+            // the pinned hash before it starts it. The file here sits beside
+            // the staged installer and could never start: the PE header's
+            // first byte is flipped too, so if the launch lost its hash
+            // check, CreateProcess would fail with a bad-format error and
+            // nothing would run.
+            Console.WriteLine("\n-- Deploy: the launch's refusal --");
+            string unlaunchable = Path.Combine(Path.GetDirectoryName(extracted)!, $"unlaunchable-{Environment.ProcessId}.exe");
+            try
+            {
+                var bad = (byte[])corrupt.Clone();
+                bad[0] ^= 0xFF;
+                File.WriteAllBytes(unlaunchable, bad);
+                Exception? refused = null;
+                try { launch.Invoke(null, new object[] { unlaunchable }); }
+                catch (TargetInvocationException tie) { refused = tie.InnerException; }
+                Check("the installer launch refuses tampered bytes with its hash check, before it starts anything",
+                      refused is InvalidOperationException ioe && ioe.Message.Contains("does not match its expected SHA-256"),
+                      refused == null ? "no exception" : $"{refused.GetType().Name}: {refused.Message}");
+            }
+            finally { try { File.Delete(unlaunchable); } catch { } }
         }
 
         // ── Idempotence and the public contract ──────────────────────────
