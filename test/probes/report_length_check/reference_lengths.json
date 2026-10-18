@@ -195,6 +195,7 @@
   {"profile": "steelseries-rival-600", "source": "descriptor", "sha256": "C37F36C2EB23FD3A1232978DADDCE463552C590F87BAFB39A9DECDEEBAB1FF6F", "input": {"0": 9}, "output": {}, "feature": {}},
   {"profile": "steelseries-srws1", "source": "descriptor", "sha256": "5DC4D88C19B05D90C31153E059234BB4B6CF870268DFDD8CB5BB912813761F67", "input": {"0": 16}, "output": {"0": 16}, "feature": {}},
   {"profile": "switch-pro", "source": "descriptor", "sha256": "421DBC392EA406CD864C602ACB17E9E5FB24E2D764B61AE80A4F0C60B6252AC8", "input": {"33": 49, "48": 49, "49": 362, "50": 362, "51": 362, "63": 12}, "output": {"1": 49, "16": 49, "17": 49, "18": 49}, "feature": {}},
+  {"profile": "switch-pro-usb", "source": "descriptor", "sha256": "25F0B3B7E59BDFEC05E8CCED16E43A8878509865A0CB223F05025C556F3BEDBA", "input": {"33": 64, "48": 64, "129": 64}, "output": {"1": 64, "16": 64, "128": 64, "130": 64}, "feature": {}},
   {"profile": "switch2-pro-controller", "source": "descriptor", "sha256": "FD41803DCAFB0781EEC1F6CC8E9374C51BAB7DA6ED11BE031C0D1EC323CF3D1C", "input": {"5": 64, "9": 64}, "output": {"2": 64}, "feature": {}},
   {"profile": "switch2-pro-controller-composite", "source": "descriptor", "sha256": "FD41803DCAFB0781EEC1F6CC8E9374C51BAB7DA6ED11BE031C0D1EC323CF3D1C", "input": {"5": 64, "9": 64}, "output": {"2": 64}, "feature": {}},
   {"profile": "taito-egret-ii-mini", "source": "descriptor", "sha256": "20D7398BDF1AECEF47C4CDB8EB79060EFC66299690D6F1AC57DF49768011AA81", "input": {"0": 4}, "output": {}, "feature": {}},
