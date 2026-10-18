@@ -43,6 +43,13 @@
 //                  decode and state block, each variant's median ns per call
 //                  (ProgramCost.cs). Built with -p:HmDd4Base=true
 //                  against the tree before, the code they replace
+//   program-file <profile file> [runs] [reports]
+//                  offline: one launch of each program of the profiles a
+//                  user's file loads, on the interpreter, measured as
+//                  HIDMaestroProfileCheck --cost measures it (the tool's
+//                  InterpreterCost.cs): each variant's median ns per report
+//                  and its compile in microseconds, for a script to take p50
+//                  and p95 over 30 launches
 //   encode [runs] [calls]
 //                  offline: the codec's encode of the budget table's
 //                  codec-encoded input reports, each median ns per call
@@ -93,8 +100,9 @@
 // --trace prints wall-clock times around each Dispose, to set beside the
 // SDK's diag log. Every measurement prints one line with p50 and p95 over
 // all samples.
-// Requires elevation, except census, report-build, selftest and compare.
-// Exit 0 PASS, 1 FAIL (gate, census, selftest, compare) or an argument refused before
+// Requires elevation, except census, report-build, selftest, compare and
+// the offline measuring modes. Exit 0 PASS, 1 FAIL (gate, census,
+// selftest, compare) or an argument refused before
 // anything ran, 2 when another program that embeds HIDMaestro is running, 3
 // when a mode that needs elevation runs without it, 4 when install finds
 // another driver installed, 5 when a measured devnode runs a driver other
@@ -190,6 +198,14 @@ internal static partial class Program
             EncodeCost.Run(runs, args.Length > 2 && int.TryParse(args[2], out int calls) ? calls : 100_000);
             return 0;
         }
+#if HM_PROGRAM_FILE
+        if (mode == "program-file")
+        {
+            if (args.Length < 2) { Console.WriteLine("usage: PerfBudgetCheck program-file <profile file> [runs] [reports]"); return 1; }
+            return ProgramFile(Path.GetFullPath(args[1]), args.Length > 2 && int.TryParse(args[2], out int fr) ? fr : 10,
+                               args.Length > 3 && int.TryParse(args[3], out int fn) ? fn : 100_000);
+        }
+#endif
         if (mode == "program")
         {
             ProgramCost.Run(runs, args.Length > 2 && int.TryParse(args[2], out int calls) ? calls : 100_000);

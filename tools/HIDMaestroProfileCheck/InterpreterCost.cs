@@ -7,6 +7,9 @@
 // at create: validation with its canonical form and SHA-256, and the
 // interpreter's stage arrays, per program and for the whole model, the
 // median of 200 per launch.
+//
+// perf_budget_check's program mode compiles this file too and runs one
+// launch for the battery's scripts.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;

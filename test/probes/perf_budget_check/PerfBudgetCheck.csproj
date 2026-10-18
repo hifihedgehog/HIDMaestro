@@ -28,6 +28,15 @@
   <ItemGroup>
     <ProjectReference Include="$(_HmSdkProject)" />
   </ItemGroup>
+  <!-- The program-file mode measures a profile file's programs on the
+       interpreter with the profile check tool's own code, which only a
+       tree with report programs builds. -->
+  <ItemGroup Condition="'$(HmBaselineTree)' == '' and '$(HmBase)' != 'true' and '$(HmDd4Base)' != 'true'">
+    <Compile Include="..\..\..\tools\HIDMaestroProfileCheck\InterpreterCost.cs" Link="InterpreterCost.cs" />
+  </ItemGroup>
+  <PropertyGroup Condition="'$(HmBaselineTree)' == '' and '$(HmBase)' != 'true' and '$(HmDd4Base)' != 'true'">
+    <DefineConstants>$(DefineConstants);HM_PROGRAM_FILE</DefineConstants>
+  </PropertyGroup>
   <ItemGroup Condition="'$(HmBaselineTree)' != ''">
     <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
       <_Parameter1>HmBaselineTree</_Parameter1>
