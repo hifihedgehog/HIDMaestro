@@ -82,7 +82,11 @@ internal static partial class Program
         int raised = 0;
         dev.C.OutputReceived += (_, p) => { if (p.ReportId == 0x02) Interlocked.Increment(ref raised); };
         Check("both sections are mapped before the sweep", Mapped(dev.Input) && Mapped(dev.Ring));
+        // An index beside it that no controller holds, as a closed
+        // program's or a failed create's: the sweep releases that one.
+        var unheld = Unheld(index + 200);
         Sweep();
+        Check("the sweep releases an index no controller holds, beside the held one", unheld.All(v => !Mapped(v)));
         // A dozen of the repeat's periods before this thread does anything
         // else, so the repeat is the first to touch what the sweep did to
         // its section, as it was in the live run.
@@ -95,6 +99,7 @@ internal static partial class Program
         Check("the output reader still reads its ring after the sweep",
             ring && WaitUntil(() => Volatile.Read(ref raised) == 1, 3000), ring ? $"{raised} raised" : "ring unmapped");
         dev.TearDown();
+        ReleasedOnceUnheld(index);
     }
 
     /// <summary>A consumer's own SubmitState on a controller it still holds
@@ -117,6 +122,7 @@ internal static partial class Program
         dev.C.SubmitState(in s);
         Check("SubmitState after the sweep writes the controller's own section", dev.SeqOrZero == before + 2, $"seq {before} to {dev.SeqOrZero}");
         dev.TearDown();
+        ReleasedOnceUnheld(index);
     }
 
     /// <summary>A PID publish after the sweep, on the PID section the
@@ -135,6 +141,7 @@ internal static partial class Program
         uint after = mapped ? dev.PidSeq : 0;
         Check("PublishPidPool after the sweep writes the controller's own PID section", after == before + 2, $"seq {before} to {after}");
         dev.TearDown();
+        ReleasedOnceUnheld(index);
     }
 
     /// <summary>A UMDF2 protocol host's clock (switch-pro, 15 ms) across the
@@ -157,6 +164,7 @@ internal static partial class Program
         Thread.Sleep(100);
         Check("the protocol clock keeps writing its section after the sweep", dev.Advances(), $"seq {dev.SeqOrZero}");
         dev.TearDown();
+        ReleasedOnceUnheld(index);
     }
 
     /// <summary>A protocol host tick that comes after the teardown unmapped
@@ -285,6 +293,25 @@ internal static partial class Program
             how = e.Message;
             return true;
         }
+    }
+
+    /// <summary>Sections mapped on <paramref name="index"/> with no
+    /// controller, as a closed program or a failed create leaves them.</summary>
+    static IntPtr[] Unheld(int index) => new[]
+    {
+        OfflineController.Plant("s_inputViews", "s_inputHandles", index, SharedMemoryIO.SHARED_INPUT_SIZE),
+        OfflineController.Plant("s_outputViews", "s_outputHandles", index, SharedMemoryIO.SHARED_OUTPUT_SIZE),
+        OfflineController.Plant("s_pidStateViews", "s_pidStateHandles", index, SharedMemoryIO.PID_STATE_SIZE),
+    };
+
+    /// <summary>Once the controller is torn down its index is no longer
+    /// held: fresh sections on it with no controller are the sweep's to
+    /// release. A hold the teardown never ended keeps them mapped.</summary>
+    static void ReleasedOnceUnheld(int index)
+    {
+        var fresh = Unheld(index);
+        Sweep();
+        Check("after the teardown the sweep releases new sections on the index", fresh.All(v => !Mapped(v)));
     }
 
     /// <summary>SharedMemoryIO.Cleanup as the sweep runs it, under
