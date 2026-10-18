@@ -310,9 +310,9 @@ internal static class Program
         // collection, whose upper filter restarts the device. The interface
         // appears between the two, for a real pad as for this one, so the
         // early window opens once no installation is pending.
-        string install = Pnp.InstallState(30_000);
+        string installState = Pnp.InstallState(30_000);
         var installed = DateTime.UtcNow;
-        Note($"{scenario}: device installation {install} at {Pnp.Stamp(installed)}, {(installed - appeared).TotalMilliseconds:F0} ms after the interface was seen");
+        Note($"{scenario}: device installation {installState} at {Pnp.Stamp(installed)}, {(installed - appeared).TotalMilliseconds:F0} ms after the interface was seen");
 
         // The composite sends a report for each submitted frame, and with its
         // idle stream one every 4 ms between them, so a working device
@@ -322,7 +322,7 @@ internal static class Program
         void Submit() { try { c.SubmitState(in state); } catch { } }
         var early = Hid.CountReports(paths[0], 1500, Submit);
         Record($"{p} input arrives as soon as Windows has installed the HID device",
-               install == "none pending" && early.ReadError == 0 && early.Reports * 2 >= early.Ticks, $"installation {install}, {early}");
+               installState == "none pending" && early.ReadError == 0 && early.Reports * 2 >= early.Ticks, $"installation {installState}, {early}");
         Note($"{scenario}: the early window opened at {Pnp.Stamp(early.StartUtc)}, {(early.StartUtc - appeared).TotalMilliseconds:F0} ms after the interface was seen" +
              (early.ErrorMs >= 0 ? $", and its read failed at {Pnp.Stamp(early.StartUtc.AddMilliseconds(early.ErrorMs))}" : ""));
         NoteChain(scenario, "after the early window", chain, null);
