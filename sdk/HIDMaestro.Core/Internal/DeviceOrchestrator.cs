@@ -39,12 +39,12 @@ internal static partial class DeviceOrchestrator
     // nothing here does.
 
     // ════════════════════════════════════════════════════════════════════
-    //  Diagnostic log for teardown investigations: gated by env var
-    //  HIDMAESTRO_DIAG=1. Writes to %TEMP%\HIDMaestro\teardown_diag.log.
-    //  Each TeardownController / RemoveDevice / WaitForDeviceRemoval call
-    //  emits one line with timestamp + elapsed-ms + outcome. Off by default
-    //  to keep production runs file-write-clean; flip the env var to repro
-    //  any future "device left behind after teardown" regression.
+    //  Diagnostic log, gated by env var HIDMAESTRO_DIAG=1. Appends to
+    //  %TEMP%\HIDMaestro\teardown_diag.log, opened once as the user
+    //  (OpenUserLog) and kept open. Each LogDiag call, from any part of the
+    //  SDK, writes one line with its time and thread id. Off by default, so
+    //  a production run writes no file. Set the env var to reproduce a
+    //  device left behind after teardown.
     // ════════════════════════════════════════════════════════════════════
     private static readonly bool s_diagEnabled =
         Environment.GetEnvironmentVariable("HIDMAESTRO_DIAG") == "1";
@@ -118,8 +118,9 @@ internal static partial class DeviceOrchestrator
     // ════════════════════════════════════════════════════════════════════
     //  Timing instrumentation: gated by env var HIDMAESTRO_TIMING=1.
     //  When enabled, each SetupController step's duration is appended to
-    //  %TEMP%\HIDMaestro\setup_timing.log so we can pin regressions across
-    //  runs without polluting stdout. Zero-overhead when disabled.
+    //  %TEMP%\HIDMaestro\setup_timing.log, opened once as the user
+    //  (OpenUserLog), so we can pin regressions across runs without
+    //  polluting stdout. Zero-overhead when disabled.
     // ════════════════════════════════════════════════════════════════════
     private static readonly bool s_timingEnabled =
         Environment.GetEnvironmentVariable("HIDMAESTRO_TIMING") == "1";
