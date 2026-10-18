@@ -2,16 +2,18 @@
 // responder 9bd6279's driver ran (design note, decision (b)).
 //
 // Each sequence below is a host's traffic shaped as Windows hands it to a
-// driver: an output report the Bluetooth descriptor declares at its 49
-// bytes, reads at the input length, SubmitState's 48-byte bodies and the
-// stream's 15 ms periods. The same sequence runs twice.
-// driver_harness_oracle.exe, 9bd6279's driver.c, runs it through
-// hm_script.c on case 5's plan. The engine runs it on the catalog's
-// switch-pro.json, with a read taking a queued reply first and a period's
-// frame reaching a read only when one is parked, as the responder
-// delivered them (driver.c:1489-1548 and 1812-1868 at 9bd6279). Every
-// read's bytes must match: each 0x21 reply, each 0x30 and 0x3F frame and
-// with them the timer byte.
+// driver: an output report the descriptor declares at the descriptor's
+// length (49 bytes on Bluetooth, 64 on USB), reads at the input length,
+// SubmitState's 48-byte bodies and the stream's 15 ms periods. The same
+// sequence runs twice. driver_harness_oracle.exe, 9bd6279's driver.c,
+// runs it through hm_script.c on case 5's plan. The engine runs it on the
+// catalog's switch-pro.json or switch-pro-usb.json, with a read taking a
+// queued reply first and a period's frame reaching a read only when one
+// is parked, as the responder delivered them (driver.c:1489-1548 and
+// 1812-1868 at 9bd6279). Every read's bytes must match: each 0x21 and
+// 0x81 reply, each 0x30 and 0x3F frame and with them the timer byte. On
+// USB the engine's 64-byte report must equal the responder's 49 bytes,
+// then zeros.
 //
 // Case 5's own Switch streams also hold writes Windows never hands a
 // driver: a 0x80 report on the Bluetooth descriptor, lengths other than
@@ -19,7 +21,9 @@
 // HID class refusing or cutting those, so they are not here.
 //
 // Then the check runs with one byte of the SPI image changed, which must
-// make it fail.
+// make it fail, and checks that switch-pro-usb loads on its own descriptor
+// and a profile with Bluetooth's protocol on that descriptor is refused
+// with the path.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -207,7 +211,7 @@ internal static class SwitchEngine
 
     sealed record Sequence(string Name, bool Usb, Sim Sim);
 
-    static List<Sequence> Sequences(ControllerProfile bt, CompiledProtocol btp, ulong seed)
+    static List<Sequence> Sequences(ControllerProfile bt, CompiledProtocol btp, ControllerProfile usb, CompiledProtocol usbp, ulong seed)
     {
         var list = new List<Sequence>();
         var rng = new Rng(seed, 0x5E01);
@@ -215,7 +219,7 @@ internal static class SwitchEngine
         var bodies = Enumerable.Range(0, 8).Select(_ => RandomBody()).ToArray();
         Sim New(string name, int index, bool isUsb)
         {
-            var s = new Sim(bt, btp, name, index, false);
+            var s = isUsb ? new Sim(usb, usbp, name, index, true) : new Sim(bt, btp, name, index, false);
             list.Add(new Sequence(name, isUsb, s));
             return s;
         }
@@ -311,6 +315,49 @@ internal static class SwitchEngine
         for (int part = 0; part < 10; part++)
             Random(New($"bt/random-{part}", part & 1, false), rng, bodies, new byte[] { 0x01, 0x10, 0x11, 0x12 }, 4000);
 
+        // USB: the 0x80 family and the subcommands, at 64 bytes.
+        {
+            var s = New("usb/sdl-init-idx0", 0, true);
+            s.UsbSetup();
+            s.SdlInit();
+            foreach (var b in bodies) { s.Body(b); s.Ticks(1); }
+        }
+        for (int cmd = 0; cmd < 256; cmd++)
+        {
+            var s = New($"usb/usb-command-{cmd:X2}", 0, true);
+            for (int len = 0; len < UsbPacket - 1; len += 7)
+            {
+                var tail = new byte[len];
+                rng.Fill(tail);
+                s.Proprietary((byte)cmd, tail);
+            }
+            s.Ticks(2);
+        }
+        for (int id = 0; id < 256; id++)
+        {
+            var s = New($"usb/subcommand-{id:X2}", 0, true);
+            s.Proprietary(0x02);
+            s.Body(bodies[1]);
+            for (int len = 0; len <= UsbPacket - 11; len += 3)
+            {
+                var data = new byte[len];
+                rng.Fill(data);
+                s.Subcommand((byte)id, data);
+            }
+            s.Ticks(2);
+        }
+        foreach (int index in Enumerable.Range(0, 16).Append(255))
+        {
+            var s = New($"usb/mac-idx{index}", index, true);
+            s.Proprietary(0x01);
+            s.Subcommand(0x02, default);
+        }
+        for (int part = 0; part < 4; part++)
+        {
+            var s = New($"usb/random-{part}", part & 1, true);
+            s.Proprietary(0x02);
+            Random(s, rng, bodies, new byte[] { 0x01, 0x10, 0x80, 0x82 }, 4000);
+        }
         return list;
     }
 
@@ -399,23 +446,33 @@ internal static class SwitchEngine
     public static int Run(string golden, string native, ulong seed)
     {
         s_failures = 0;
-        Console.WriteLine("=== device_oracle_check switch-engine: switch-pro against 9bd6279's responder ===");
+        Console.WriteLine("=== device_oracle_check switch-engine: switch-pro and switch-pro-usb against 9bd6279's responder ===");
         string planPath = Path.Combine(golden, "case5-plan.txt");
         foreach (var need in new[] { planPath, Path.Combine(native, "driver_harness_oracle.exe") })
             if (!File.Exists(need)) { Console.WriteLine($"  [MISSING] {need}"); return 2; }
 
-        string btJson = CatalogJson("switch-pro");
+        string btJson = CatalogJson("switch-pro"), usbJson = CatalogJson("switch-pro-usb");
         var (bt, btp, btRefusal) = Load(btJson);
+        var (usb, usbp, usbRefusal) = Load(usbJson);
         Check("switch-pro loads and its protocol compiles for UMDF2", btp != null, btRefusal ?? "");
-        if (btp == null) return Done();
+        Check("switch-pro-usb loads on its own descriptor and its protocol compiles for UMDF2", usbp != null, usbRefusal ?? "");
+        if (btp == null || usbp == null) return Done();
 
-        var seqs = Sequences(bt!, btp, seed);
+        // Bluetooth's layouts and protocol on the USB descriptor.
+        var mixed = JsonNode.Parse(usbJson)!.AsObject();
+        var btNode = JsonNode.Parse(btJson)!.AsObject();
+        foreach (var k in new[] { "inputReports", "protocol" }) mixed[k] = btNode[k]!.DeepClone();
+        var (_, _, mixedRefusal) = Load(mixed.ToJsonString());
+        Check("switch-pro's protocol on switch-pro-usb's descriptor is refused with the path",
+            mixedRefusal?.Contains("inputReports[0].size 49", StringComparison.Ordinal) == true, mixedRefusal ?? "accepted");
+
+        var seqs = Sequences(bt!, btp, usb!, usbp, seed);
         Drive(seqs, native, planPath, out var oracle);
         int differ = Compare(seqs, oracle, quiet: false);
         Check("every read the responder completed, the engine's profile data completed with the same bytes", differ == 0, $"{differ} of {seqs.Count} sequences differ");
-        bool sawFull = seqs.SelectMany(q => q.Sim.Reads).Any(r => r[0] == 0x30);
-        bool sawSimple = seqs.SelectMany(q => q.Sim.Reads).Any(r => r[0] == 0x3F);
-        Check("the sequences reach both 0x3F and 0x30 frames", sawFull && sawSimple);
+        bool sawUsbFrames = seqs.Where(q => q.Usb).SelectMany(q => q.Sim.Reads).Any(r => r[0] == 0x30);
+        bool sawBtSimple = seqs.Where(q => !q.Usb).SelectMany(q => q.Sim.Reads).Any(r => r[0] == 0x3F);
+        Check("the sequences reach 0x3F frames on Bluetooth and 0x30 frames on USB", sawUsbFrames && sawBtSimple);
 
         // One byte of the SPI image changed: the IMU calibration's first.
         var mutated = JsonNode.Parse(btJson)!.AsObject();
@@ -426,7 +483,7 @@ internal static class SwitchEngine
         if (mproto == null) Check("the mutated profile loads", false, mRefusal ?? "");
         else
         {
-            var mseqs = Sequences(mp!, mproto, seed);
+            var mseqs = Sequences(mp!, mproto, usb!, usbp, seed).Where(q => !q.Usb).ToList();
             int mdiffer = Compare(mseqs, oracle, quiet: true);
             Check("with one SPI byte changed at 0x6020 the comparison fails", mdiffer > 0, $"{mdiffer} sequences differ");
         }
