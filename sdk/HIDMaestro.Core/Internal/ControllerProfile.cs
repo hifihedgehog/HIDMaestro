@@ -681,7 +681,14 @@ public sealed class ControllerProfile
         AnswerModels.Validate(this, global::HIDMaestro.Internal.DeviceModel.OwnOf(this), taken: false, new List<string>());
         if (DeviceModel != null && DeviceModel != "none")
             throw new ProfileDefectException("$.deviceModel", $"\"{DeviceModel}\" is not a value it takes. The one value is \"none\".");
-        if (!HasDescriptor) return;
+        if (!HasDescriptor)
+        {
+            // A USB/IP persona's HID interface presents the descriptor, so
+            // the create's descriptor set would refuse it after the lease.
+            if (RequiresUsbipBackend)
+                throw new ProfileDefectException("$.descriptor", "is required for the usbip backend: the HID interface presents it.");
+            return;
+        }
         ValidateDeviceModel(checkModelGroups);
         _ = GetOrBuildReportBuilder();
     }
@@ -725,12 +732,12 @@ public sealed class ControllerProfile
         XInputPresentation.ValidateOwn(this);
         var cfg = UsbConfiguration;
         bool engine = Protocol != null || cfg?.WinUsb != null;
-        if (RequiresUsbipBackend && (cfg != null || engine))
+        if (RequiresUsbipBackend)
         {
             // The descriptor set a create builds, built here, so a
-            // usbConfiguration it cannot hold is refused at load, with or
-            // without a protocol or a WinUSB package, and a protocol with
-            // no usbConfiguration is refused for the one it lacks.
+            // usbConfiguration it cannot hold, or none, or no descriptor, is
+            // refused at load for what it lacks, with or without a protocol
+            // or a WinUSB package.
             var descriptors = new Usbip.UsbDescriptorSet(this);
             if (!engine) return;
             if (checkModelGroups) Usbip.CompiledProtocol.Compile(this, descriptors);

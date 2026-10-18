@@ -482,6 +482,19 @@ internal static class Strict
             o["usbConfiguration"]!["interfaces"]![0]!.AsObject()["altSettings"] = null;
             return o.ToJsonString();
         }, "$.usbConfiguration.interfaces[0].altSettings");
+        // A USB/IP persona with no protocol or WinUSB package is refused at
+        // load for the usbConfiguration or descriptor it lacks. At f00f0482
+        // each loaded and built, and was refused at create after the lease.
+        Add("a USB/IP persona with no usbConfiguration and no protocol", "steam-controller-composite", o =>
+        {
+            o.Remove("usbConfiguration");
+            return o.ToJsonString();
+        }, "$.usbConfiguration");
+        Add("a USB/IP persona with no descriptor and no protocol", "steam-controller-composite", o =>
+        {
+            o.Remove("descriptor");
+            return o.ToJsonString();
+        }, "$.descriptor");
         // A patch with no source is refused at its source whatever else the
         // entry holds. At c19d24a1 an ascii patch was refused at its
         // encoding, and an entry with a CRC at its crc32, as if the null

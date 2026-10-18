@@ -156,7 +156,7 @@ internal sealed class UsbDescriptorSet
         OtherSpeedConfiguration = cfg.OtherSpeedConfigurationDescriptorHex != null
             ? FromHex(cfg.OtherSpeedConfigurationDescriptorHex, "otherSpeedConfigurationDescriptor") : null;
         ReportDescriptor = profile.GetDescriptorBytes()
-            ?? throw new InvalidOperationException($"Profile '{profile.Id}' has no HID report descriptor.");
+            ?? throw new ProfileDefectException("$.descriptor", "is required for the usbip backend: the HID interface presents it.");
 
         if (DeviceDescriptor.Length != 18 || DeviceDescriptor[0] != 18 || DeviceDescriptor[1] != 0x01)
             throw new ProfileDefectException("$.usbConfiguration.deviceDescriptor", "is not an 18-byte USB device descriptor.");
