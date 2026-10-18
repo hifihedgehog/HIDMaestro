@@ -100,6 +100,18 @@ internal static class Resolve
     {
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
+        // The SDK finds an embedded model by its file name and parses it
+        // when a name asks for it, so each file's id is its name.
+        c.Run("every model the SDK carries parses, with its file's name as its id", () =>
+        {
+            try
+            {
+                var all = ModelRegistry.Catalog.AllModels.ToList();
+                var off = all.Where(m => !m.Source.EndsWith("/" + m.File.Id + ".json", StringComparison.OrdinalIgnoreCase)).Select(m => m.Source).ToList();
+                return (all.Count > 0 && off.Count == 0, off.Count == 0 ? $"{all.Count} models" : string.Join("; ", off));
+            }
+            catch (InvalidOperationException e) { return (false, e.Message); }
+        });
         c.Run("no catalog profile takes a group from an identity default", () =>
         {
             var hits = ctx.AllProfiles.Where(p => Sources(p).Values.Any(s => s.StartsWith("identity:", StringComparison.Ordinal)))

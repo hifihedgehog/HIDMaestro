@@ -263,11 +263,14 @@ internal sealed class ModelRegistry
     /// directory's models folder.</summary>
     internal const string IdentityDefaultsName = "identity-defaults.json";
 
-    private readonly Dictionary<string, (DeviceModelFile File, string Source)> _models;
+    /// <summary>The named models by id, each parsed the first time a name
+    /// asks for it: a profile that names none, and matches no identity
+    /// default, parses none.</summary>
+    private readonly Dictionary<string, (Lazy<DeviceModelFile> File, string Source)> _models;
     private readonly List<(string Label, IdentityDefaultsFile Table, bool OutsideCatalogOnly)> _tables;
     private readonly Func<string, ControllerProfile?> _profiles;
 
-    private ModelRegistry(Dictionary<string, (DeviceModelFile File, string Source)> models,
+    private ModelRegistry(Dictionary<string, (Lazy<DeviceModelFile> File, string Source)> models,
                           List<(string Label, IdentityDefaultsFile Table, bool OutsideCatalogOnly)> tables,
                           Func<string, ControllerProfile?> profiles)
     {
@@ -275,9 +278,6 @@ internal sealed class ModelRegistry
         _tables = tables;
         _profiles = profiles;
     }
-
-    /// <summary>The model ids, for a check that lists them.</summary>
-    internal IEnumerable<string> ModelIds => _models.Keys;
 
     /// <summary>The catalog's registry over the given catalog profiles.
     /// Throws when an embedded model or the table does not load: the SDK
@@ -289,14 +289,15 @@ internal sealed class ModelRegistry
         return new ModelRegistry(models, tables, id => byId.TryGetValue(id, out var p) ? p : null);
     }
 
-    /// <summary>The SDK's embedded models and identity table, read once.</summary>
-    private static readonly Lazy<(Dictionary<string, (DeviceModelFile File, string Source)> Models,
+    /// <summary>The SDK's embedded identity table, read once, and its models,
+    /// each read the first time a name asks for it.</summary>
+    private static readonly Lazy<(Dictionary<string, (Lazy<DeviceModelFile> File, string Source)> Models,
                                   List<(string Label, IdentityDefaultsFile Table, bool OutsideCatalogOnly)> Tables)> s_embedded =
         new(ReadEmbedded, System.Threading.LazyThreadSafetyMode.ExecutionAndPublication);
 
-    private static (Dictionary<string, (DeviceModelFile File, string Source)>, List<(string Label, IdentityDefaultsFile Table, bool OutsideCatalogOnly)>) ReadEmbedded()
+    private static (Dictionary<string, (Lazy<DeviceModelFile> File, string Source)>, List<(string Label, IdentityDefaultsFile Table, bool OutsideCatalogOnly)>) ReadEmbedded()
     {
-        var models = new Dictionary<string, (DeviceModelFile File, string Source)>(StringComparer.OrdinalIgnoreCase);
+        var models = new Dictionary<string, (Lazy<DeviceModelFile> File, string Source)>(StringComparer.OrdinalIgnoreCase);
         var tables = new List<(string Label, IdentityDefaultsFile Table, bool OutsideCatalogOnly)>();
         var asm = typeof(ModelRegistry).Assembly;
         foreach (string name in asm.GetManifestResourceNames()
@@ -304,22 +305,43 @@ internal sealed class ModelRegistry
                      .OrderBy(n => n, StringComparer.Ordinal))
         {
             string label = ProfileDatabase.CatalogLabel + "models/" + name.Substring(ResourcePrefix.Length).Replace('\\', '/');
-            using var s = asm.GetManifestResourceStream(name)
-                ?? throw new InvalidOperationException($"The SDK's {label} cannot be opened.");
-            using var reader = new StreamReader(s);
-            string text = reader.ReadToEnd();
             // The catalog's entries read identity:<entry>, with no file.
             if (label.EndsWith("/" + IdentityDefaultsName, StringComparison.OrdinalIgnoreCase))
             {
-                tables.Add(("", ReadTable(text, label), false));
+                tables.Add(("", ReadTable(ReadResource(asm, name, label), label), false));
                 continue;
             }
-            var file = ReadModel(text, label);
-            if (!models.TryAdd(file.Id, (file, label)))
-                throw new InvalidOperationException($"{label}: the model id '{file.Id}' repeats one the SDK already carries.");
+            // A model is found by its file name, which is its id
+            // (profile_model_check reads every one), and parsed when a name
+            // asks for it.
+            string rest = name.Substring(ResourcePrefix.Length, name.Length - ResourcePrefix.Length - ".json".Length);
+            string id = rest.Substring(rest.LastIndexOfAny(new[] { '\\', '/' }) + 1);
+            string resource = name;
+            var file = new Lazy<DeviceModelFile>(() =>
+            {
+                var m = ReadModel(ReadResource(asm, resource, label), label);
+                if (!string.Equals(m.Id, id, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException($"{label}: the model id '{m.Id}' is not the file's name. The SDK finds a model by its file name.");
+                return m;
+            }, System.Threading.LazyThreadSafetyMode.ExecutionAndPublication);
+            if (!models.TryAdd(id, (file, label)))
+                throw new InvalidOperationException($"{label}: the model id '{id}' repeats one the SDK already carries.");
         }
         return (models, tables);
     }
+
+    private static string ReadResource(System.Reflection.Assembly asm, string name, string label)
+    {
+        using var s = asm.GetManifestResourceStream(name)
+            ?? throw new InvalidOperationException($"The SDK's {label} cannot be opened.");
+        using var reader = new StreamReader(s);
+        return reader.ReadToEnd();
+    }
+
+    /// <summary>Every model this registry holds, each parsed, for a check
+    /// that reads them all.</summary>
+    internal IEnumerable<(string Id, DeviceModelFile File, string Source)> AllModels =>
+        _models.Select(kv => (kv.Key, kv.Value.File.Value, kv.Value.Source));
 
     /// <summary>This registry with a directory's models folder added: its
     /// named models, and its identity table tried before the ones already
@@ -327,7 +349,7 @@ internal sealed class ModelRegistry
     /// load, or repeats a model id already held, is listed and left out.</summary>
     internal ModelRegistry WithDirectory(string modelsDir, List<HIDMaestro.HMProfileLoadIssue> issues)
     {
-        var models = new Dictionary<string, (DeviceModelFile File, string Source)>(_models, StringComparer.OrdinalIgnoreCase);
+        var models = new Dictionary<string, (Lazy<DeviceModelFile> File, string Source)>(_models, StringComparer.OrdinalIgnoreCase);
         var tables = new List<(string Label, IdentityDefaultsFile Table, bool OutsideCatalogOnly)>();
         if (Directory.Exists(modelsDir))
         {
@@ -358,7 +380,7 @@ internal sealed class ModelRegistry
                         continue;
                     }
                     var m = ReadModel(text, file);
-                    if (!models.TryAdd(m.Id, (m, file)))
+                    if (!models.TryAdd(m.Id, (new Lazy<DeviceModelFile>(() => m), file)))
                         issues.Add(new HIDMaestro.HMProfileLoadIssue(file, null, ProfileDefects.Spell(text, "$.id"),
                             $"the model id '{m.Id}' is already loaded from {models[m.Id].Source}. Give the model an id of its own.",
                             HIDMaestro.HMProfileLoadIssueKind.Refused));
@@ -428,7 +450,7 @@ internal sealed class ModelRegistry
     private (DeviceModel Model, IReadOnlyDictionary<ModelGroup, string> Files)? Find(string name, HashSet<string> resolving)
     {
         if (_models.TryGetValue(name, out var m))
-            return (DeviceModel.Of(m.File), DeviceModel.Groups.ToDictionary(g => g, _ => m.Source));
+            return (DeviceModel.Of(m.File.Value), DeviceModel.Groups.ToDictionary(g => g, _ => m.Source));
         var p = _profiles(name);
         if (p == null) return null;
         if (!resolving.Add(p.Id))
