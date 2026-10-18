@@ -1,5 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!-- program_equivalence_check (S92): every report program three ways, the
+  <!-- program_equivalence_check (S94): every report program three ways, the
        generated kernel, the interpreter and a naive evaluator written from
        the design note. It references the SDK as a consumer does, and emits
        kernels of its own for the seeded corpus, the review cases and the

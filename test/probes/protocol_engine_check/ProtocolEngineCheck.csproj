@@ -1,5 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!-- protocol_engine_check (S93): the protocol engine and the device clock
+  <!-- protocol_engine_check (S95): the protocol engine and the device clock
        offline, each check a behavior the engine before v2.0.0 lacked. No
        device is created. -->
   <PropertyGroup>
