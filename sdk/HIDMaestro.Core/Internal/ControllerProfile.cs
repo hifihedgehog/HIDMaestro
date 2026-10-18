@@ -639,11 +639,12 @@ public sealed class ControllerProfile
         ValidateProgramModel();
         var cfg = UsbConfiguration;
         bool engine = Protocol != null || cfg?.WinUsb != null;
-        if (cfg != null && RequiresUsbipBackend)
+        if (RequiresUsbipBackend && (cfg != null || engine))
         {
             // The descriptor set a create builds, built here, so a
             // usbConfiguration it cannot hold is refused at load, with or
-            // without a protocol or a WinUSB package.
+            // without a protocol or a WinUSB package, and a protocol with
+            // no usbConfiguration is refused for the one it lacks.
             var descriptors = new Usbip.UsbDescriptorSet(this);
             if (!engine) return;
             Usbip.CompiledProtocol.Compile(this, descriptors);

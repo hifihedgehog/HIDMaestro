@@ -168,6 +168,15 @@ internal static class Strict
         return JsonNode.Parse(JsonSerializer.Serialize(p, HMJsonContext.Default.ControllerProfile))!.AsObject();
     }
 
+    /// <summary>A catalog file's profile under another id, edited.</summary>
+    static string Catalog(string file, string id, Action<JsonObject> edit)
+    {
+        var o = JsonNode.Parse(File.ReadAllText(Path.Combine(Program.RepoRoot(), "profiles", file)))!.AsObject();
+        o["id"] = id;
+        edit(o);
+        return o.ToJsonString();
+    }
+
     static string WithId(string id, Action<JsonObject>? edit = null)
     {
         var o = BaseJson();
@@ -231,6 +240,13 @@ internal static class Strict
             new("i-bad-input-report.json", WithId("user-bad-input-report", o => o["inputReports"] = JsonNode.Parse(
                 "[{\"name\":\"r\",\"reportId\":\"0x01\",\"size\":8,\"send\":\"clock\",\"program\":[]}]")), "user-bad-input-report",
                 "Refused", "$.inputReports", "needs a stateBlock"),
+            // A USB/IP persona with a protocol and no usbConfiguration is
+            // refused for the configuration it lacks. At a00fb18e the check
+            // said a protocol applies to the usbip backend, which the
+            // profile names.
+            new("i-no-usb-configuration.json", Catalog("nintendo/switch2-pro-composite.json", "user-no-usb-configuration",
+                o => o.Remove("usbConfiguration")), "user-no-usb-configuration",
+                "Refused", "$.usbConfiguration", "is required for the usbip backend"),
             new("j-good.json", WithId("user-good"), null, null, null, null),
         };
     }
