@@ -296,6 +296,24 @@ internal static class Builder
             }
             catch (Exception e) { return (false, $"{e.GetType().Name}: {e.Message}"); }
         });
+        // The Migration list's advice: a copy given another descriptor drops
+        // buttonMap, triggerButtons and axisMap, and keeps the ones set again
+        // after the descriptor.
+        c.Run("a copy of dualsense given dualshock-4-v2's descriptor, then its buttonMap, triggerButtons and axisMap, builds with them", () =>
+        {
+            try
+            {
+                var ds4 = P("dualshock-4-v2");
+                var dropped = new HMProfileBuilder().FromProfile(P("dualsense")).Id("user-ds4-dropped").DescriptorHex(ds4.DescriptorHex!).Build();
+                var copy = new HMProfileBuilder().FromProfile(P("dualsense")).Id("user-ds4-maps").DescriptorHex(ds4.DescriptorHex!)
+                    .ButtonMap(ds4.ButtonMap).TriggerButtons(ds4.Inner.TriggerButtons).AxisMap(ds4.AxisMap).Build();
+                bool gone = dropped.ButtonMap == null && dropped.Inner.TriggerButtons == null && dropped.AxisMap == null;
+                bool set = copy.ButtonMap!.SequenceEqual(ds4.ButtonMap!) && copy.Inner.TriggerButtons!.SequenceEqual(ds4.Inner.TriggerButtons!)
+                           && copy.AxisMap!.OrderBy(kv => kv.Key).SequenceEqual(ds4.AxisMap!.OrderBy(kv => kv.Key));
+                return (gone && set, $"dropped {gone}, set again {set}");
+            }
+            catch (Exception e) { return (false, $"{e.GetType().Name}: {e.Message}"); }
+        });
         // A copy of a USB/IP persona given another PID builds, with the PID
         // in its USB device descriptor, and the source keeps its own. At
         // 31efc70f the copy's descriptor kept the source's PID and its
