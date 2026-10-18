@@ -155,14 +155,17 @@ internal static class SwdDeviceFactory
                 if (proc == null)
                     return new Result(false, null, unchecked((int)0x80070005)); // ACCESS_DENIED
 
+                // Read as the helper writes, so neither pipe fills, and
+                // bounded after its exit (PnputilHelper.Drain).
+                var stdoutRead = proc.StandardOutput.ReadToEndAsync();
+                var stderrRead = proc.StandardError.ReadToEndAsync();
                 if (!proc.WaitForExit(perAttemptTimeoutMs))
                 {
                     try { proc.Kill(entireProcessTree: true); } catch { }
                     return new Result(false, null, unchecked((int)0x80070102)); // WAIT_TIMEOUT
                 }
 
-                string stdoutLocal = proc.StandardOutput.ReadToEnd();
-                string stderrLocal = proc.StandardError.ReadToEnd();
+                var (stdoutLocal, stderrLocal) = PnputilHelper.Drain(stdoutRead, stderrRead);
 
                 // The helper's output goes to the diagnostic log, which is
                 // written as the user (DeviceOrchestrator.LogDiag). Until

@@ -315,8 +315,8 @@ internal static partial class DeviceOrchestrator
             try { proc.Kill(entireProcessTree: true); } catch { }
             proc.WaitForExit(TimeoutScale.Apply(5_000));
         }
-        string stdout = stdoutTask.GetAwaiter().GetResult();
-        string stderr = stderrTask.GetAwaiter().GetResult();
+        // Bounded too: a process the tool started can hold the pipes.
+        var (stdout, stderr) = PnputilHelper.Drain(stdoutTask, stderrTask);
         int exitCode;
         try { exitCode = proc.ExitCode; } catch { exitCode = -1; }
         return (exitCode, stdout + stderr);

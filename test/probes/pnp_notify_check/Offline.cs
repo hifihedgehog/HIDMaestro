@@ -1217,6 +1217,39 @@ internal static class Offline
         }
     }
 
+    /// <summary>The SDK's tool runs, which the removal paths make under the
+    /// PnP lock (DeviceOrchestrator.RunProcess for reg.exe and sc.exe,
+    /// DeviceManager's pnputil and devcon fallbacks), end within their
+    /// bound when the tool leaves a process holding its output pipe: here
+    /// cmd.exe starts ping.exe on the same pipe and ends at once. At
+    /// 17e98e16 RunProcess read to the pipe's end and returned only when
+    /// ping did, 20 s later. ping is ended in the finally.</summary>
+    static void ChildOutputBound()
+    {
+        var run = typeof(DeviceOrchestrator).GetMethod("RunProcess", BindingFlags.Static | BindingFlags.NonPublic);
+        if (run == null) { Check("DeviceOrchestrator.RunProcess exists", false); return; }
+        var started = DateTime.Now.AddSeconds(-1);
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            var result = run.Invoke(null, new object[] { "cmd.exe", "/c start \"\" /b ping.exe -n 21 127.0.0.191", 30_000 });
+            long ms = sw.ElapsedMilliseconds;
+            Check("RunProcess returns within its read bound when the tool leaves a process holding its pipe",
+                  ms < 8_000, $"{ms} ms, {result}");
+        }
+        finally
+        {
+            foreach (var p in Process.GetProcessesByName("PING"))
+            {
+                using (p)
+                {
+                    try { if (p.StartTime >= started) { p.Kill(); p.WaitForExit(2000); } }
+                    catch (Exception e) when (e is InvalidOperationException or System.ComponentModel.Win32Exception) { }
+                }
+            }
+        }
+    }
+
     internal static int Run()
     {
         Console.WriteLine("=== Removal test and registration gate, offline ===");
@@ -2115,6 +2148,8 @@ internal static class Offline
         }
         Check("the waits and the gate located through the hook", locates > 0, $"{locates} locates");
         Check("no CM_LOCATE_DEVNODE_CANCELREMOVE locate was issued", cancels == 0, $"{cancels} of {locates}");
+
+        ChildOutputBound();
 
         Console.WriteLine();
         Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");

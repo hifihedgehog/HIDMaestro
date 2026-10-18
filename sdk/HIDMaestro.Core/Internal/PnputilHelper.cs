@@ -74,6 +74,21 @@ internal static class PnputilHelper
     /// output is read as it comes, and a program that outlives the timeout
     /// is ended. Coexistence probe section Z calls this through reflection
     /// with a program that hangs.</summary>
+    /// <summary>The text a child's two redirected streams gave once the
+    /// child has ended or been killed, both waited for at most 5 s (scaled)
+    /// together, and "" for a stream not ended by then. A stream ends when
+    /// every process holding its pipe has closed it, and a process the child
+    /// started can hold it long after the child ends: an unbounded read
+    /// would hold the caller, and any lock it holds, as long as that process
+    /// runs.</summary>
+    internal static (string Out, string Err) Drain(System.Threading.Tasks.Task<string> stdout, System.Threading.Tasks.Task<string> stderr)
+    {
+        try { System.Threading.Tasks.Task.WaitAll(new System.Threading.Tasks.Task[] { stdout, stderr }, TimeoutScale.Apply(5_000)); }
+        catch (AggregateException) { }
+        return (Ended(stdout), Ended(stderr));
+        static string Ended(System.Threading.Tasks.Task<string> t) => t.IsCompletedSuccessfully ? t.Result : "";
+    }
+
     internal static (int exitCode, string output) RunTool(string path, string args, int timeoutMs)
     {
         var psi = new ProcessStartInfo
@@ -99,11 +114,7 @@ internal static class PnputilHelper
             try { p.Kill(entireProcessTree: true); } catch { }
             p.WaitForExit(TimeoutScale.Apply(5_000));
         }
-        // The kill closes the pipes unless a process the program started
-        // still holds them, so the reads are bounded too.
-        int drainMs = TimeoutScale.Apply(5_000);
-        string stdout = stdoutTask.Wait(drainMs) ? stdoutTask.Result : "";
-        string stderr = stderrTask.Wait(drainMs) ? stderrTask.Result : "";
+        var (stdout, stderr) = Drain(stdoutTask, stderrTask);
         int exitCode;
         try { exitCode = p.ExitCode; } catch { exitCode = -1; }
         return (exitCode, stdout + stderr);

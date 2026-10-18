@@ -2647,8 +2647,7 @@ public static partial class DeviceManager
                             try { proc.Kill(entireProcessTree: true); } catch { }
                             proc.WaitForExit(TimeoutScale.Apply(2000));
                         }
-                        try { outTask.GetAwaiter().GetResult(); } catch { }
-                        try { errTask.GetAwaiter().GetResult(); } catch { }
+                        PnputilHelper.Drain(outTask, errTask);
                     }
                 }
                 catch { }
@@ -2698,8 +2697,7 @@ public static partial class DeviceManager
                                 try { proc.Kill(entireProcessTree: true); } catch { }
                                 proc.WaitForExit(TimeoutScale.Apply(2000));
                             }
-                            try { outTask.GetAwaiter().GetResult(); } catch { }
-                            try { errTask.GetAwaiter().GetResult(); } catch { }
+                            PnputilHelper.Drain(outTask, errTask);
                         }
                     }
                     catch { }
