@@ -151,9 +151,13 @@ internal sealed class Case8UsbipPaths : IOracleCase
         IntPtr ring = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_OUTPUT_SIZE);
         Marshal.Copy(new byte[SharedMemoryIO.SHARED_INPUT_SIZE], 0, view, SharedMemoryIO.SHARED_INPUT_SIZE);
         Marshal.Copy(new byte[SharedMemoryIO.SHARED_OUTPUT_SIZE], 0, ring, SharedMemoryIO.SHARED_OUTPUT_SIZE);
+        // The device is disposed whatever the check finds: a failing check
+        // left its timer and threads to the finalizer, reading the view and
+        // the ring the finally frees.
+        UsbipEmulatedDevice? dev = null;
         try
         {
-            var dev = CompositeRig.NewDevice(p, view, ring, IntPtr.Zero, host.Connection, out _);
+            dev = CompositeRig.NewDevice(p, view, ring, IntPtr.Zero, host.Connection, out _);
             ushort iface = dev.Descriptors.HidInterfaceNumber;
             uint Head() => (uint)Marshal.ReadInt32(ring);
             (byte Source, byte Id, string Data) Last()
@@ -186,10 +190,10 @@ internal sealed class Case8UsbipPaths : IOracleCase
             var emitted = Last();
             if (emitted != (Feature, 0x31, "F1CC"))
                 throw new InvalidOperationException($"SET_REPORT check: a write whose rule emits a report reaches the ring as source {emitted.Source}, report 0x{emitted.Id:X2}, {emitted.Data}, where it must be feature report 0x31 with F1CC.");
-            dev.Dispose();
         }
         finally
         {
+            dev?.Dispose();
             Marshal.FreeHGlobal(view);
             Marshal.FreeHGlobal(ring);
         }
@@ -219,9 +223,10 @@ internal sealed class Case8UsbipPaths : IOracleCase
         IntPtr ring = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_OUTPUT_SIZE);
         Marshal.Copy(new byte[SharedMemoryIO.SHARED_INPUT_SIZE], 0, view, SharedMemoryIO.SHARED_INPUT_SIZE);
         Marshal.Copy(new byte[SharedMemoryIO.SHARED_OUTPUT_SIZE], 0, ring, SharedMemoryIO.SHARED_OUTPUT_SIZE);
+        UsbipEmulatedDevice? dev = null;
         try
         {
-            var dev = CompositeRig.NewDevice(p, view, ring, IntPtr.Zero, host.Connection, out _);
+            dev = CompositeRig.NewDevice(p, view, ring, IntPtr.Zero, host.Connection, out _);
             (byte Source, byte Id, byte[] Data) Last()
             {
                 uint head = (uint)Marshal.ReadInt32(ring);
@@ -255,10 +260,10 @@ internal sealed class Case8UsbipPaths : IOracleCase
             string answer = got.Count == 1 ? Convert.ToHexString(got[0].Data) : "nothing";
             if (got.Count != 1 || got[0].Status != 0 || answer != "32C0C1C2C3")
                 throw new InvalidOperationException($"liveFeatureReports check: GET_REPORT(Feature 0x32) answered {answer} (status {(got.Count == 1 ? got[0].Status : 0)}), where it must answer 32C0C1C2C3.");
-            dev.Dispose();
         }
         finally
         {
+            dev?.Dispose();
             Marshal.FreeHGlobal(view);
             Marshal.FreeHGlobal(ring);
         }
@@ -295,9 +300,10 @@ internal sealed class Case8UsbipPaths : IOracleCase
         IntPtr ring = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_OUTPUT_SIZE);
         Marshal.Copy(new byte[SharedMemoryIO.SHARED_INPUT_SIZE], 0, view, SharedMemoryIO.SHARED_INPUT_SIZE);
         Marshal.Copy(new byte[SharedMemoryIO.SHARED_OUTPUT_SIZE], 0, ring, SharedMemoryIO.SHARED_OUTPUT_SIZE);
+        UsbipEmulatedDevice? dev = null;
         try
         {
-            var dev = CompositeRig.NewDevice(p, view, ring, IntPtr.Zero, host.Connection, out byte hidIn);
+            dev = CompositeRig.NewDevice(p, view, ring, IntPtr.Zero, host.Connection, out byte hidIn);
             var clock = (IDeviceClock)typeof(UsbipEmulatedDevice).GetField("_layoutClock", Instance)!.GetValue(dev)!;
             host.Submit(dev, 0x02, isIn: false, 16, Convert.FromHexString("0391000D000800000100FFFFFFFFFFFF"));
             host.DrainReplies();
@@ -313,10 +319,10 @@ internal sealed class Case8UsbipPaths : IOracleCase
                 throw new InvalidOperationException(
                     $"Layout endpoint check: a tick answered {string.Join(", ", got.Select(x => $"seq {x.Seq} ({x.Data.Length} bytes)"))}, " +
                     $"where it must answer the read on 0x83 (seq {onLayout}) with report 0x09 and leave the read on 0x{hidIn:X2} (seq {onHid}).");
-            dev.Dispose();
         }
         finally
         {
+            dev?.Dispose();
             Marshal.FreeHGlobal(view);
             Marshal.FreeHGlobal(ring);
         }
