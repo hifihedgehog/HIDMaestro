@@ -708,7 +708,9 @@ internal static class Program
             s_hid?.Dispose();
             if (s_readEvent != IntPtr.Zero) CloseHandle(s_readEvent);
             if (s_writeEvent != IntPtr.Zero) CloseHandle(s_writeEvent);
-            try { HMContext.RemoveAllVirtualControllers(); } catch { }
+            // The batch checks the driver store between steps, so record keeps
+            // the driver packages, as the batch's cleanup --keep-install does.
+            try { HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall: true); } catch { }
         }
     }
 
