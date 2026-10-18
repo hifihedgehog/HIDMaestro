@@ -28,11 +28,13 @@
 //    Both wait for the first and finish.
 //  - a program killed while bound: an adapter that arrives on the same
 //    instance before any reclaim finds WinUSB, as after Zadig, and the
-//    reclaim leaves it on WinUSB until it leaves, when a sweep flags it.
-//    When the reclaim comes first, the arrival gets input.inf. When the
-//    arrival binds, BindWinUsb finds it already bound and holds it, a sweep
-//    leaves it on WinUSB, and once it is disposed and gone a sweep flags
-//    it.
+//    reclaim leaves it on WinUSB until it leaves, when the follow-up the
+//    reclaim started flags it. When the reclaim comes first, the arrival
+//    gets input.inf. When the arrival binds, BindWinUsb finds it already
+//    bound and holds it, a sweep leaves it on WinUSB, and once it is
+//    disposed and gone its dispose, or the follow-up the dispose started,
+//    flags it. Each flag check waits for the follow-up, which polls every
+//    250 ms, since a sweep leaves an entry a follow-up watches to it.
 //
 // Requires elevation. Exit 0 PASS, 1 FAIL, 2 when another program that embeds
 // HIDMaestro is running.
@@ -134,11 +136,10 @@ internal static class Program
             !RegistryLedger.HeldWinUsbDevnodes().Contains(first!, StringComparer.OrdinalIgnoreCase));
         Probe.Check("its devnode leaves", Probe.WaitFor(() => !Devnodes.IsPresent(first!), 10_000));
         // A devnode still present when the teardown restored it keeps its
-        // entry until a sweep finds it gone, as this one does.
+        // entry, and the follow-up that restore started flags it once it is
+        // gone. A sweep leaves an entry a follow-up watches to it.
         RegistryLedger.PruneDead();
-        Probe.Check("and the restore gives the gone devnode the reinstall flag for its next arrival",
-            ((Devnodes.ConfigFlags(first!) ?? 0) & CONFIGFLAG_REINSTALL) != 0,
-            $"ConfigFlags 0x{Devnodes.ConfigFlags(first!) ?? 0:X}");
+        FlaggedOnceGone(first!, "and the restore gives the gone devnode the reinstall flag for its next arrival, and the entry goes");
     }
 
     // ── Repeated cycles ─────────────────────────────────────────────────
@@ -365,12 +366,14 @@ internal static class Program
         }
         if (!reclaimFirst)
         {
-            // As at the first dispose: a devnode the teardown found present
-            // is flagged by the first sweep that finds it gone.
+            // Before any reclaim, the reclaim found the stand-in present and
+            // started a follow-up, which flags the devnode once it is gone
+            // and which the sweep here leaves the entry to. When the arrival
+            // bound, its dispose flags it, or the follow-up the dispose
+            // started does when the devnode took longer than 2 s to leave.
             Probe.WaitFor(() => !Devnodes.IsPresent(id), 10_000);
             RegistryLedger.PruneDead();
-            Probe.Check("once it is gone, a sweep flags it for reinstall", ((Devnodes.ConfigFlags(id) ?? 0) & CONFIGFLAG_REINSTALL) != 0,
-                $"ConfigFlags 0x{Devnodes.ConfigFlags(id) ?? 0:X}");
+            FlaggedOnceGone(id, "once it is gone, the follow-up or a sweep flags it for reinstall, and the entry goes");
         }
         Probe.Check("no hold left", RegistryLedger.HeldWinUsbDevnodes().Count == 0, string.Join(", ", RegistryLedger.HeldWinUsbDevnodes()));
         // The child's controller record and its import: the orphan-safe
@@ -392,6 +395,23 @@ internal static class Program
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────
+
+    /// <summary>Check that a gone devnode gets the reinstall flag and loses
+    /// its entry. A restore that found it present started a follow-up,
+    /// which polls every 250 ms and flags it once it has left, and a sweep
+    /// skips an entry a follow-up of any program watches
+    /// (RegistryLedger.RestoreWinUsbEntries). So the flag can land after the
+    /// sweep returns, and the check waits up to 15 s for it: the poll, the
+    /// devnode lock and a pnputil listing of the driver store. It prints
+    /// what the sweep's return found and how long the flag took.</summary>
+    static void FlaggedOnceGone(string id, string label)
+    {
+        uint atSweep = Devnodes.ConfigFlags(id) ?? 0;
+        var sw = Stopwatch.StartNew();
+        bool done = Probe.WaitFor(() => ((Devnodes.ConfigFlags(id) ?? 0) & CONFIGFLAG_REINSTALL) != 0 && !HasWinUsbEntry(id), 15_000);
+        Probe.Check(label, done,
+            $"ConfigFlags 0x{Devnodes.ConfigFlags(id) ?? 0:X} (0x{atSweep:X} as the sweep returned), entry {(HasWinUsbEntry(id) ? "kept" : "gone")}, {sw.ElapsedMilliseconds} ms");
+    }
 
     /// <summary>Whether the ledger has a WinUSB entry for the devnode, held
     /// or not.</summary>
