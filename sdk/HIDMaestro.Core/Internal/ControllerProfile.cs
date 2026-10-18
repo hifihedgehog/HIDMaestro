@@ -749,8 +749,9 @@ public sealed class ControllerProfile
             throw new InvalidOperationException(
                 $"Profile '{Id}': usbConfiguration.winUsb applies to the usbip backend, where the SDK serves the device's endpoints.");
         // A UMDF2 device's protocol runs in the SDK behind the HID driver
-        // (design note, decision (b)).
-        Usbip.CompiledProtocol.Compile(this, null);
+        // (design note, decision (b)). Its compile is one of the group
+        // checks the built-in catalog's load leaves to the build step.
+        if (checkModelGroups) Usbip.CompiledProtocol.Compile(this, null);
     }
 
     /// <summary>v2.0.0: the model groups compile, the state block's fields fit
