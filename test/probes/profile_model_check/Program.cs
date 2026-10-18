@@ -17,7 +17,9 @@
 //              through an identity default (Resolve.cs)
 //   answers    answer tables: per-entry matching, pages, a parameter at
 //              its own offset, the Sony models, each refusal at load, the
-//              blob the driver reads, identity defaults (Answers.cs)
+//              blob the driver reads, identity defaults, and the profile
+//              the extractor reads from each catalog profile's device
+//              (Answers.cs)
 //   contract   the SDK's half of the version contract: the identity tag,
 //              protocol 4, and the configuration and identity entry each
 //              create writes anew, in a hive the check owns (Contract.cs)

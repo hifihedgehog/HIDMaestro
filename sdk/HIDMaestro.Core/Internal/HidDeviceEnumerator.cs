@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 
 namespace HIDMaestro.Internal;
@@ -241,4 +242,129 @@ internal static partial class HidDeviceEnumerator
         int n = s.IndexOf('\0');
         return n >= 0 ? s.Substring(0, n) : s;
     }
+
+    // ── The bus ─────────────────────────────────────────────────
+
+    /// <summary>A device's bus as a profile states it: <c>connection</c>,
+    /// and for a Bluetooth device <c>bluetoothTransport</c> and
+    /// <c>bluetoothVendorIdSource</c>.</summary>
+    public readonly record struct Bus(string Connection, string? BluetoothTransport, string? BluetoothVendorIdSource)
+    {
+        public static readonly Bus Usb = new("usb", null, null);
+    }
+
+    /// <summary>The bus of the HID device at <paramref name="devicePath"/>,
+    /// read as hidapi's hid_internal_detect_bus_type and SDL's copy of it
+    /// read it (hidapi windows/hid.c:630-705 at c3509c1, SDL
+    /// src/hidapi/windows/hid.c:741-816 at 804cf65): the interface's instance ID, that devnode's parent, and
+    /// the parent's compatible IDs (<see cref="BusFromIds"/>). A device
+    /// whose parent cannot be read is USB, the connection the extractor
+    /// gives every device it does not find on Bluetooth.</summary>
+    public static Bus BusOf(string devicePath)
+    {
+        var instanceKey = DEVPKEY_Device_InstanceId;
+        string? instanceId = MultiSz(InterfaceProperty(devicePath, ref instanceKey)).FirstOrDefault();
+        if (instanceId == null
+            || CM_Locate_DevNodeW(out uint dev, instanceId, 0) != CR_SUCCESS
+            || CM_Get_Parent(out uint parent, dev, 0) != CR_SUCCESS)
+            return Bus.Usb;
+        var compatibleKey = DEVPKEY_Device_CompatibleIds;
+        var hardwareKey = DEVPKEY_Device_HardwareIds;
+        return BusFromIds(MultiSz(DevnodeProperty(parent, ref compatibleKey)), MultiSz(DevnodeProperty(parent, ref hardwareKey)));
+    }
+
+    /// <summary>hidapi's test, in its order: the first of the parent's
+    /// compatible IDs that holds USB, BTHENUM or BTHLEDEVICE, upper-cased,
+    /// names the bus, Bluetooth LE for the last. PNP0C50 (I2C), PNP0C51
+    /// (SPI) and none of them read as USB, since no profile tells those
+    /// apart. For Bluetooth, the parent's hardware IDs give the vendor ID
+    /// source, the digits before the VID that a real device carries and
+    /// <see cref="PresentationPlan"/> writes the same way: 0001 before the
+    /// four VID digits after <c>_VID&amp;</c> (classic), or 01 after
+    /// <c>_Dev_VID&amp;</c> (LE), is the Bluetooth SIG's, and any other
+    /// source the USB-IF's.</summary>
+    internal static Bus BusFromIds(IReadOnlyList<string> compatibleIds, IReadOnlyList<string> hardwareIds)
+    {
+        foreach (string id in compatibleIds)
+        {
+            string up = id.ToUpperInvariant();
+            if (up.Contains("USB", StringComparison.Ordinal)) return Bus.Usb;
+            bool classic = up.Contains("BTHENUM", StringComparison.Ordinal);
+            if (classic || up.Contains("BTHLEDEVICE", StringComparison.Ordinal))
+                return new Bus("bluetooth", classic ? "classic" : "le", VendorIdSource(hardwareIds, classic ? 4 : 2));
+            if (up.Contains("PNP0C50", StringComparison.Ordinal) || up.Contains("PNP0C51", StringComparison.Ordinal)) return Bus.Usb;
+        }
+        return Bus.Usb;
+    }
+
+    /// <summary>"bluetooth" when the first hardware ID with <c>VID&amp;</c>
+    /// has a source of <paramref name="digits"/> hex digits equal to 1
+    /// before its four VID digits, else null, the USB-IF source a profile
+    /// defaults to.</summary>
+    private static string? VendorIdSource(IReadOnlyList<string> hardwareIds, int digits)
+    {
+        foreach (string id in hardwareIds)
+        {
+            int at = id.IndexOf("VID&", StringComparison.OrdinalIgnoreCase);
+            if (at < 0 || at + 4 + digits + 4 > id.Length) continue;
+            if (!int.TryParse(id.AsSpan(at + 4, digits), System.Globalization.NumberStyles.HexNumber, null, out int source)) continue;
+            return source == 1 ? "bluetooth" : null;
+        }
+        return null;
+    }
+
+    private static string[] MultiSz(byte[]? buf) => buf == null
+        ? Array.Empty<string>()
+        : System.Text.Encoding.Unicode.GetString(buf).Split('\0', StringSplitOptions.RemoveEmptyEntries);
+
+    private static byte[]? InterfaceProperty(string path, ref DEVPROPKEY key)
+    {
+        uint size = 0;
+        CM_Get_Device_Interface_PropertyW(path, ref key, out _, null, ref size, 0);
+        if (size == 0) return null;
+        var buf = new byte[size];
+        return CM_Get_Device_Interface_PropertyW(path, ref key, out _, buf, ref size, 0) == CR_SUCCESS ? buf : null;
+    }
+
+    private static byte[]? DevnodeProperty(uint dev, ref DEVPROPKEY key)
+    {
+        uint size = 0;
+        CM_Get_DevNode_PropertyW(dev, ref key, out _, null, ref size, 0);
+        if (size == 0) return null;
+        var buf = new byte[size];
+        return CM_Get_DevNode_PropertyW(dev, ref key, out _, buf, ref size, 0) == CR_SUCCESS ? buf : null;
+    }
+
+    /// <summary>DEVPROPKEY (devpropdef.h): the property set and the
+    /// property's number in it.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    private struct DEVPROPKEY
+    {
+        public Guid fmtid;
+        public uint propertyId;
+    }
+
+    // devpkey.h (Windows SDK 10.0.26100.0), lines 46, 47 and 86.
+    private static readonly DEVPROPKEY DEVPKEY_Device_InstanceId =
+        new() { fmtid = new Guid("78c34fc8-104a-4aca-9ea4-524d52996e57"), propertyId = 256 };
+    private static readonly DEVPROPKEY DEVPKEY_Device_HardwareIds =
+        new() { fmtid = new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"), propertyId = 3 };
+    private static readonly DEVPROPKEY DEVPKEY_Device_CompatibleIds =
+        new() { fmtid = new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"), propertyId = 4 };
+
+    private const uint CR_SUCCESS = 0;
+
+    [LibraryImport("CfgMgr32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial uint CM_Get_Device_Interface_PropertyW(string pszDeviceInterface, ref DEVPROPKEY propertyKey,
+        out uint propertyType, byte[]? propertyBuffer, ref uint propertyBufferSize, uint ulFlags);
+
+    [LibraryImport("CfgMgr32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial uint CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);
+
+    [LibraryImport("CfgMgr32.dll")]
+    private static partial uint CM_Get_Parent(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+
+    [LibraryImport("CfgMgr32.dll")]
+    private static partial uint CM_Get_DevNode_PropertyW(uint dnDevInst, ref DEVPROPKEY propertyKey,
+        out uint propertyType, byte[]? propertyBuffer, ref uint propertyBufferSize, uint ulFlags);
 }

@@ -77,7 +77,14 @@ public static class HMDeviceExtractor
         if (matches.Count == 0)
             throw new InvalidOperationException($"Device at path '{device.DevicePath}' is no longer connected.");
         var raw = matches[0];
+        return FromDevice(raw, HidDeviceEnumerator.BusOf(raw.DevicePath));
+    }
 
+    /// <summary>The profile of a device read from Windows, on the bus its
+    /// devnode's parent names. A check gives it a device of its
+    /// own.</summary>
+    internal static HMProfile FromDevice(HidDeviceEnumerator.RawHidDevice raw, HidDeviceEnumerator.Bus bus)
+    {
         if (raw.ReconstructedDescriptor.Length == 0)
             throw new InvalidOperationException(
                 "Descriptor reconstruction returned 0 bytes. The device's preparsed data " +
@@ -99,13 +106,13 @@ public static class HMDeviceExtractor
             _ => "other",
         };
 
-        // Connection inference: peek at the DevicePath. Windows-canonical
-        // paths contain \\?\HID#VID_...  for direct HID, \\?\HID#{GUID}&...
-        // for Bluetooth LE HID. Not perfect; best-effort.
-        string connection = raw.DevicePath.Contains("{0000", StringComparison.Ordinal)
-                         || raw.DevicePath.Contains("&Dev&", StringComparison.OrdinalIgnoreCase)
-            ? "bluetooth"
-            : "usb";
+        // v2.0.0: the bus comes from the parent devnode's IDs, as hidapi and
+        // SDL read it (HidDeviceEnumerator.BusOf). Before, it came from the
+        // device path, where a Bluetooth device's HID child shows its
+        // parent's {00001124-...} or _Dev_ form. A HIDMaestro Bluetooth
+        // controller's child is HID\HIDCLASS\..., so its extracted profile
+        // said usb, took the identity default without the CRC, and gave other
+        // answers than the device.
 
         // Slug the ID from the product string or fall back to VID:PID.
         string idSeed = raw.ProductString ?? $"vid{raw.VendorId:x4}pid{raw.ProductId:x4}";
@@ -147,7 +154,9 @@ public static class HMDeviceExtractor
             .ManufacturerString(raw.ManufacturerString ?? "")
             .DeviceDescription(resolvedProductString)
             .Type(type)
-            .Connection(connection)
+            .Connection(bus.Connection)
+            .BluetoothTransport(bus.BluetoothTransport)
+            .BluetoothVendorIdSource(bus.BluetoothVendorIdSource)
             .Descriptor(raw.ReconstructedDescriptor)
             .Notes(notes)
             .Build();
@@ -217,6 +226,10 @@ public static class HMDeviceExtractor
         AppendField(sb, "deviceDescription", profile.Inner.DeviceDescription);
         AppendField(sb, "type", profile.Type);
         AppendField(sb, "connection", profile.Connection);
+        if (profile.Inner.BluetoothTransport != null)
+            AppendField(sb, "bluetoothTransport", profile.Inner.BluetoothTransport);
+        if (profile.Inner.BluetoothVendorIdSource != null)
+            AppendField(sb, "bluetoothVendorIdSource", profile.Inner.BluetoothVendorIdSource);
         AppendField(sb, "descriptor", profile.Inner.Descriptor);
         AppendRawField(sb, "inputReportSize", profile.InputReportSize > 0 ? profile.InputReportSize.ToString() : "null");
         if (profile.Inner.DeviceModelFrom != null)

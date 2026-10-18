@@ -9,8 +9,9 @@
 // entries. Here: matching on a profile that carries Sony report-ID answers
 // and a DualSense-style test channel together, a parameter at an offset of
 // its own, the Sony models, each refusal at load with its JSON path, the
-// blob the UMDF2 driver reads, and the identity defaults for a profile
-// outside the catalog. The base fails every check: it has one match rule a
+// blob the UMDF2 driver reads, the identity defaults for a profile outside
+// the catalog, and the profile HMDeviceExtractor reads from each catalog
+// profile's device. The base fails every check: it has one match rule a
 // table and its Sony answers in code, loads each refused table below, and
 // skips the Valve table with its parameters moved.
 using System;
@@ -35,6 +36,7 @@ internal static class Answers
         Section(c, "refusals", Refusals);
         Section(c, "the blob", Blob);
         Section(c, "identity defaults", Identity);
+        Section(c, "extraction", Extraction);
         Section(c, "the feature-read notification", Notify);
         return c.Failures;
     }
@@ -392,6 +394,126 @@ internal static class Answers
             return (!(bool)Api.Prop(p, "HasDeviceModel")!, "");
         });
     }
+
+    // ── Extraction ───────────────────────────────────────────────────────
+
+    /// <summary>A profile HMDeviceExtractor reads from a catalog profile's
+    /// device must give that device's answers on the same index (S93's
+    /// extract lane, offline). The device here is what Windows reports for
+    /// the controller the profile creates: its identity, its descriptor,
+    /// and the IDs its plan gives the HID child's parent, from which the
+    /// extractor reads the bus as hidapi does. At b7b19bf7 the extractor
+    /// read the bus from the device path, which for a HIDMaestro Bluetooth
+    /// controller is HID\HIDCLASS\..., so the profile it read said usb and
+    /// took the answers without the CRC: S93 failed dualsense-bt,
+    /// dualsense-bt-full, dualsense-edge-bt and dualshock-4-v2-bt
+    /// there.</summary>
+    static void Extraction(Checks c)
+    {
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        const int Index = 1;
+        string serial = $"HM-CTL-{Index:D4}";
+        var withAnswers = ctx.AllProfiles.Where(p => !p.Inner.RequiresUsbipBackend && p.HasDeviceModel
+                                                     && p.Inner.Resolved.Model.FeatureStubs != null)
+            .OrderBy(p => p.Id, StringComparer.Ordinal).ToList();
+        c.Check("the catalog has UMDF2 profiles with answers to extract", withAnswers.Count > 0, withAnswers.Count.ToString());
+        foreach (var p in withAnswers)
+        {
+            c.Run($"{p.Id}: the profile extracted from its device states its bus and names the model its identity gives", () =>
+            {
+                var x = Extracted(p);
+                return (x.Connection == p.Inner.Connection
+                        && x.Inner.BluetoothTransport == (p.Inner.Connection == "bluetooth" ? p.Inner.BluetoothTransport ?? "classic" : null)
+                        && x.Inner.DeviceModelFrom == p.Inner.Resolved.IdentityModel,
+                        $"{x.Connection} {x.Inner.BluetoothTransport ?? "-"} {x.Inner.DeviceModelFrom ?? "none"}, the device {p.Inner.Connection} {p.Inner.BluetoothTransport ?? "-"} {p.Inner.Resolved.IdentityModel ?? "none"}");
+            });
+            c.Run($"{p.Id}: the extracted profile answers each feature report as the device does on index {Index}", () =>
+            {
+                var x = Extracted(p);
+                var mine = FeatureStubTable.From(p.Inner, Index, serial, _ => null);
+                var theirs = FeatureStubTable.From(x.Inner, Index, serial, _ => null);
+                var differ = new List<string>();
+                foreach (byte r in p.Inner.GetOrBuildReportMap().Reports.Where(r => r.Kind == HidReportKind.Feature).Select(r => r.ReportId).Distinct())
+                {
+                    string a = mine == null ? "stall" : Hex(Get(mine, r, 65, out _));
+                    string b = theirs == null ? "stall" : Hex(Get(theirs, r, 65, out _));
+                    if (a != b) differ.Add($"0x{r:X2}");
+                }
+                return (differ.Count == 0, string.Join(" ", differ));
+            });
+        }
+        // The control: dualsense-bt's device read as usb, the bus the device
+        // path gave at b7b19bf7, names the USB model, whose answers carry no
+        // CRC, so the comparison above tells the two apart.
+        c.Run("control: dualsense-bt's device read as usb names sony-dualsense and answers 0x05, 0x09 and 0x20 otherwise", () =>
+        {
+            var p = ctx.AllProfiles.First(x => x.Id == "dualsense-bt");
+            var x = FromDevice(Device(p), BusFromIds(Array.Empty<string>(), Array.Empty<string>()));
+            var mine = FeatureStubTable.From(p.Inner, Index, serial, _ => null)!;
+            var theirs = FeatureStubTable.From(x.Inner, Index, serial, _ => null)!;
+            var differ = new byte[] { 0x05, 0x08, 0x09, 0x20, 0x22 }
+                .Where(r => Hex(Get(mine, r, 65, out _)) != Hex(Get(theirs, r, 65, out _))).Select(r => $"0x{r:X2}").ToList();
+            return (x.Inner.DeviceModelFrom == "sony-dualsense" && string.Join(" ", differ) == "0x05 0x09 0x20",
+                    $"{x.Inner.DeviceModelFrom} {string.Join(" ", differ)}");
+        });
+        c.Run("a saved extracted profile keeps its Bluetooth transport and vendor ID source", () =>
+        {
+            var p = ctx.AllProfiles.First(x => x.Id == "dualsense-bt");
+            var x = FromDevice(Device(p), BusFromIds(
+                new[] { @"BTHLEDevice\{00001812-0000-1000-8000-00805f9b34fb}" },
+                new[] { @"BTHLEDevice\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&01054c_PID&0ce6" }));
+            string json = HMDeviceExtractor.ToJson(x);
+            return (json.Contains("\"bluetoothTransport\": \"le\"", StringComparison.Ordinal)
+                    && json.Contains("\"bluetoothVendorIdSource\": \"bluetooth\"", StringComparison.Ordinal),
+                    string.Join(" ", json.Split('\n').Where(l => l.Contains("\"connection\"", StringComparison.Ordinal)
+                                                              || l.Contains("\"bluetooth", StringComparison.Ordinal)).Select(l => l.Trim())));
+        });
+        c.Run("a device whose parent names USB, or no bus, extracts as usb", () =>
+        {
+            var usb = BusFromIds(new[] { @"USB\Class_03&SubClass_00&Prot_00", @"USB\Class_03" }, Array.Empty<string>());
+            var none = BusFromIds(Array.Empty<string>(), new[] { @"root\VID_054C&PID_0CE6", @"root\HIDMaestro" });
+            bool Usb(object b) => (string?)Api.Prop(b, "Connection") == "usb" && Api.Prop(b, "BluetoothTransport") == null
+                                  && Api.Prop(b, "BluetoothVendorIdSource") == null;
+            return (Usb(usb) && Usb(none), $"{usb} {none}");
+        });
+    }
+
+    /// <summary>What Windows reports for the controller a profile
+    /// creates.</summary>
+    static HidDeviceEnumerator.RawHidDevice Device(HMProfile p) => new()
+    {
+        DevicePath = @"\\?\HID#HIDCLASS#check",
+        VendorId = p.VendorId,
+        ProductId = p.ProductId,
+        ProductString = p.ProductString,
+        ManufacturerString = p.Inner.ManufacturerString,
+        TopLevelUsagePage = 0x01,
+        TopLevelUsage = 0x05,
+        ReconstructedDescriptor = p.Inner.GetDescriptorBytes()!,
+    };
+
+    /// <summary>The profile the extractor reads from the controller a
+    /// profile creates, on the bus the plan's IDs for the HID child's
+    /// parent give.</summary>
+    static HMProfile Extracted(HMProfile p)
+    {
+        var plan = PresentationPlan.Of(p.Inner);
+        return FromDevice(Device(p), BusFromIds(plan.CompatibleIds, plan.HardwareIds));
+    }
+
+    // HidDeviceEnumerator.BusFromIds and HMDeviceExtractor.FromDevice are new
+    // in v2.0.0, read by reflection so the check runs against an SDK without
+    // them and fails the section by name.
+    static object BusFromIds(IReadOnlyList<string> compatibleIds, IReadOnlyList<string> hardwareIds) =>
+        (typeof(HidDeviceEnumerator).GetMethod("BusFromIds", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
+            ?? throw new MissingMemberException(nameof(HidDeviceEnumerator), "BusFromIds"))
+        .Invoke(null, new object[] { compatibleIds, hardwareIds })!;
+
+    static HMProfile FromDevice(HidDeviceEnumerator.RawHidDevice raw, object bus) =>
+        (HMProfile)(typeof(HMDeviceExtractor).GetMethod("FromDevice", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
+            ?? throw new MissingMemberException(nameof(HMDeviceExtractor), "FromDevice"))
+        .Invoke(null, new[] { raw, bus })!;
 
     // ── The feature-read notification ────────────────────────────────────
 
