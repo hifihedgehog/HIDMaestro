@@ -1422,7 +1422,7 @@ internal static partial class DeviceOrchestrator
             // Plain HID or non-xinputhid Xbox: create main device node
             var createSw = Stopwatch.StartNew();
             using var _ts = new TimingScope(controllerIndex, profile.Id, "3.create_main_devnode");
-            var result = DeviceNodeCreator.CreateDeviceNode(profile, plan, controllerIndex, identity);
+            var result = DeviceNodeCreator.CreateDeviceNode(profile, plan, controllerIndex, identity, registered: created);
             if (!result.Success || result.InstanceId == null)
             {
                 LogDiag($"    DeviceNodeCreator.CreateDeviceNode FAILED after {createSw.ElapsedMilliseconds}ms");
@@ -1431,7 +1431,6 @@ internal static partial class DeviceOrchestrator
                     $"'{profile.Id}' at index {controllerIndex}.");
             }
             mainInstanceId = result.InstanceId;
-            created?.Invoke(mainInstanceId);
             LogDiag($"    CreateDeviceNode -> {mainInstanceId} in {createSw.ElapsedMilliseconds}ms");
         }
 

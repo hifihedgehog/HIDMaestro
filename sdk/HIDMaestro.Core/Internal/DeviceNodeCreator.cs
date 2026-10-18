@@ -79,9 +79,13 @@ internal static partial class DeviceNodeCreator
     /// <item>The HID child interface has arrived (so the next per-controller
     ///       setup can start without racing PnP)</item>
     /// </list>
+    /// <paramref name="registered"/> is called with the instance ID as soon
+    /// as DIF_REGISTERDEVICE has made the device, so a caller whose create
+    /// fails at any later step, this method's lookup included, removes the
+    /// device by that ID.
     /// </summary>
     public static Result CreateDeviceNode(ControllerProfile profile, PresentationPlan plan, int controllerIndex,
-                                          DeviceIdentity? identity = null)
+                                          DeviceIdentity? identity = null, Action<string>? registered = null)
     {
         if (profile == null) throw new ArgumentNullException(nameof(profile));
         if (plan == null) throw new ArgumentNullException(nameof(plan));
@@ -272,6 +276,7 @@ internal static partial class DeviceNodeCreator
                 if (!SetupDiCallClassInstaller(0x19 /*DIF_REGISTERDEVICE*/, dis,
                         devInfoHandle.AddrOfPinnedObject()))
                     return new Result(false, null);
+                registered?.Invoke(instId);
                 pnp.Dispose();
             }
             finally
