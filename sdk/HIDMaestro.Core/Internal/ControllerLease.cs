@@ -60,10 +60,8 @@ internal sealed class ControllerLease : IDisposable
     /// <summary>Take a transport index and an identity for a controller at
     /// <paramref name="slot"/>, and record it.</summary>
     /// <exception cref="HMResourceInUseException">A live program holds the
-    /// identity, a running v1.12.0 program's present device has it, the key
-    /// is <c>index:&lt;N&gt;</c> with N below the floor a running v1.12.0
-    /// program sets (a device a closed one left sets none), or every
-    /// candidate index is held.</exception>
+    /// identity, a running v1.12.0 program's present device has it, or
+    /// every candidate index is held.</exception>
     public static ControllerLease Acquire(int slot, string? identityKey, string backend, string profileId)
     {
         MachineClaims.EnsureOwner();
@@ -75,12 +73,7 @@ internal sealed class ControllerLease : IDisposable
             OwnerCensus census = OwnerCensus.Take();
             if (keyed)
             {
-                // The slot is only a placeholder here: a keyed identity
-                // does not depend on where it lands.
-                keyedIdentity = DeviceIdentity.ForKey(identityKey!, slot);
-                // Refused before the claim, so a refused create never first
-                // waits for a sweep that holds the identity.
-                RefuseDefaultBelowFloor(keyedIdentity, identityKey!, Floor(census));
+                keyedIdentity = KeyedIdentity(identityKey!, slot, census);
                 identityClaim = ClaimIdentity(keyedIdentity, identityKey!.Trim(), ref census);
             }
 
@@ -125,8 +118,6 @@ internal sealed class ControllerLease : IDisposable
             int floor = Floor(census);
             if (floor > 0)
                 DeviceOrchestrator.LogDiag($"    a v1.12.0 program runs: transport indices from {floor}");
-            // Again, for the census a wait for a sweep took again.
-            if (keyedIdentity != null) RefuseDefaultBelowFloor(keyedIdentity, identityKey!, floor);
             // Indices skipped for an object this release did not create, and
             // for an object nothing about whose maker was read.
             int squattedCount = 0, unreadCount = 0;
@@ -269,19 +260,22 @@ internal sealed class ControllerLease : IDisposable
 
     private static int Floor(OwnerCensus census) => LegacyProgramRuns(census) ? LegacyClearance : 0;
 
-    /// <summary>A key of the form index:N is index N's default identity
-    /// wherever the controller lands (DeviceIdentity.ForKey): the devnode
-    /// name a v1.12.0 program gives its controller on index N, which its next
-    /// create replaces as its own prior life. The floor cannot move that
-    /// name, so below the floor the create is refused.</summary>
-    private static void RefuseDefaultBelowFloor(DeviceIdentity identity, string key, int floor)
+    /// <summary>The identity a keyed create takes: its key's, wherever the
+    /// controller lands (the slot is only a placeholder). The floor orders
+    /// the transport indices a create tries and refuses no key. A key of the
+    /// form index:N is index N's default identity, and below the floor it is
+    /// the devnode name a running v1.12.0 program gives its own controller
+    /// on index N, which that program's next create on N replaces as its
+    /// own prior life. The program asked for that identity and the newer
+    /// release takes precedence (design note, decision (c)), so the create
+    /// takes it, and the log names the overlap.</summary>
+    internal static DeviceIdentity KeyedIdentity(string key, int slot, OwnerCensus census)
     {
-        if (!identity.IsDefault || identity.Index >= floor) return;
-        throw new HMResourceInUseException(
-            $"Identity key '{key.Trim()}' is the default identity of transport index {identity.Index}, and a running program " +
-            $"built on HIDMaestro 1.12.0 that has a controller present gives that identity to its own controller on index {identity.Index}, " +
-            "replacing any device that has it. While that program runs, create this controller with no key or with a key of your own, or close that program first.",
-            $"identity key '{key.Trim()}'", null);
+        var identity = DeviceIdentity.ForKey(key, slot);
+        if (identity.IsDefault && identity.Index < Floor(census))
+            DeviceOrchestrator.LogDiag($"    identity key '{key.Trim()}' is the default identity of transport index {identity.Index}, " +
+                                       "which a running v1.12.0 program gives its own controller on that index: created as asked");
+        return identity;
     }
 
     /// <summary>Whether a v1.12.0 program runs: a present device of one, or

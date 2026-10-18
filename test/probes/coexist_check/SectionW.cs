@@ -22,7 +22,10 @@
 //        them lands on the new program's, the new program's devices stay,
 //        and its exit removes its own devices and none of the v1.12.0
 //        program's. A create with the key index:1, which names the identity
-//        the v1.12.0 program gives its next controller, is refused.
+//        the v1.12.0 program gives its next controller, takes that identity
+//        on an index from 64, as asked (decision (c), the newer release
+//        takes precedence), and is disposed before the v1.12.0 program's
+//        next creates.
 //    W6. A v1.12.0 program with no controller at the moment leaves no sign,
 //        so its next create lands on the index a program on this SDK took.
 //        The new program's exit still removes only its own device.
@@ -191,14 +194,21 @@ internal static partial class Program
         string o1 = old.Send("create pad F204 -");
         if (!Ok(o1)) { Check("W5: the v1.12.0 program creates", false, o1); return; }
         using var nu = PeerProcess.Start("W5-new");
+        // index:1 is the identity the v1.12.0 program gives its next
+        // controller, whatever index this one lands on. The create takes it,
+        // on an index from the floor, and is disposed at once: the v1.12.0
+        // program's next create on index 1 replaces a devnode of that name.
+        string nk = nu.Send("create pad F211 index:1");
+        string? nkT = PeerProcess.Field(nk, "transport");
+        string? nkInst = PeerProcess.Field(nk, "instance");
+        Check("W5: a create with the key index:1 takes index 1's default identity on a transport index from 64",
+              Ok(nk) && int.TryParse(nkT, out int nkIndex) && nkIndex >= 64
+              && nkInst != null && nkInst.EndsWith(@"\HM_0001", StringComparison.OrdinalIgnoreCase), nk);
+        string nd = nu.Send("dispose");
+        Check("W5: and its dispose removes it", nd == "OK dispose" && (nkInst == null || WaitFor(() => !Native.IsPresent(nkInst), 15_000)), nd);
         string n1 = nu.Send("create pad F205 -");
         string n2 = nu.Send("create pad F206 coexist-w5");
         if (!Ok(n1) || !Ok(n2)) { Check("W5: the new program creates beside it", false, $"{n1} / {n2}"); return; }
-        // index:1 is the identity the v1.12.0 program gives its next
-        // controller, whatever index this one would land on.
-        string nk = nu.Send("create pad F211 index:1");
-        Check("W5: a create with the key index:1 is refused with HMResourceInUseException",
-              nk.StartsWith("ERR create", StringComparison.Ordinal) && nk.Contains("HMResourceInUseException"), nk);
         string[] newInst = { PeerProcess.Field(n1, "instance")!, PeerProcess.Field(n2, "instance")! };
         string[] newT = { PeerProcess.Field(n1, "transport")!, PeerProcess.Field(n2, "transport")! };
         var pathA = WaitPaths(0xBEEF, 0xF205, 1, 10_000);

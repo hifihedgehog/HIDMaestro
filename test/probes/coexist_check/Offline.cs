@@ -82,6 +82,10 @@
 //        holders" runs it alone.
 //   OF13 A devnode whose transport index the census cannot read
 //        (OfflineCensusIndex.cs). "offline census" runs it alone.
+//   OF14 The floor refuses no identity key: with a v1.12.0 program's
+//        device present the floor is 64, and a keyed create's identity is
+//        its key's, index:1 included (OfflineCensusIndex.cs, run with
+//        OF13).
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -95,7 +99,7 @@ internal static partial class Program
         if (only is "holders" or "census")
         {
             if (only == "holders") ObjectHolders.SelfCheck(Check);
-            else { OfflineCensusIndex(); OfflineLedgerHolders(); OfflineExitRecord(); }
+            else { OfflineCensusIndex(); OfflineKeyBelowFloor(); OfflineLedgerHolders(); OfflineExitRecord(); }
             Console.WriteLine();
             Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");
             return s_failures == 0 ? 0 : 1;
@@ -133,6 +137,7 @@ internal static partial class Program
         OfflineListings();
         ObjectHolders.SelfCheck(Check);
         OfflineCensusIndex();
+        OfflineKeyBelowFloor();
         OfflineLedgerHolders();
         OfflineExitRecord();
         Console.WriteLine();

@@ -556,12 +556,12 @@ public sealed class HMContext : IDisposable
     /// program's cleanup holds, while it removes a device a closed program
     /// left under that key, first waits up to 120 seconds for that cleanup.
     /// Thrown when a live controller on this machine, in this program or
-    /// another, holds the key, and, before any wait, when the key is
-    /// <c>index:&lt;N&gt;</c> with N below 64 while a running program built
-    /// on HIDMaestro 1.12.0 has a controller present, since that program
-    /// gives the identity to its own controller on index N. A device a
-    /// closed program left does not refuse its own key: the create takes
-    /// that device back. A controller of a context this process dropped
+    /// another, holds the key. A key <c>index:&lt;N&gt;</c> with N below 64
+    /// is taken as asked while a running program built on HIDMaestro 1.12.0
+    /// has a controller present, though that program gives the identity to
+    /// its own controller on index N and its next create there replaces a
+    /// device of that name. A device a closed program left does not refuse
+    /// its own key: the create takes that device back. A controller of a context this process dropped
     /// without disposing holds its key until the process exits.</exception>
     /// <exception cref="InvalidOperationException">This build lacks the
     /// profile's payload (<see cref="HMPayloadMissingException"/>), the
@@ -761,12 +761,12 @@ public sealed class HMContext : IDisposable
     /// program's cleanup holds, while it removes a device a closed program
     /// left under that key, first waits up to 120 seconds for that cleanup.
     /// Thrown when a live controller on this machine, in this program or
-    /// another, holds the key, and, before any wait, when the key is
-    /// <c>index:&lt;N&gt;</c> with N below 64 while a running program built
-    /// on HIDMaestro 1.12.0 has a controller present, since that program
-    /// gives the identity to its own controller on index N. A device a
-    /// closed program left does not refuse its own key: the create takes
-    /// that device back. A controller of a context this process dropped
+    /// another, holds the key. A key <c>index:&lt;N&gt;</c> with N below 64
+    /// is taken as asked while a running program built on HIDMaestro 1.12.0
+    /// has a controller present, though that program gives the identity to
+    /// its own controller on index N and its next create there replaces a
+    /// device of that name. A device a closed program left does not refuse
+    /// its own key: the create takes that device back. A controller of a context this process dropped
     /// without disposing holds its key until the process exits.</exception>
     public HMController CreateControllerAt(int index, HMProfile profile, string? identityKey)
     {

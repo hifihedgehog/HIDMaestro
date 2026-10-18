@@ -48,6 +48,42 @@ internal static partial class Program
 {
     const BindingFlags AnyStaticMember = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
 
+    /// <summary>OF14. While a v1.12.0 program has a device present the
+    /// floor is 64, and an identity key is the create's all the same:
+    /// index:1, which that program gives its own controller on index 1, is
+    /// index 1's default identity, as the program asked (decision (c), the
+    /// newer release takes precedence). At 454ecb22 the lease refused the
+    /// key with HMResourceInUseException.</summary>
+    static void OfflineKeyBelowFloor()
+    {
+        Assembly sdk = typeof(HIDMaestro.HMContext).Assembly;
+        Type? census = sdk.GetType("HIDMaestro.Internal.OwnerCensus");
+        Type? lease = sdk.GetType("HIDMaestro.Internal.ControllerLease");
+        MethodInfo? floor = lease?.GetMethod("Floor", AnyStaticMember);
+        MethodInfo? keyed = lease?.GetMethod("KeyedIdentity", AnyStaticMember);
+        Type? group = census?.GetNestedType("DeviceGroup", BindingFlags.NonPublic | BindingFlags.Public);
+        Type? owner = census?.GetNestedType("Owner", BindingFlags.NonPublic | BindingFlags.Public);
+        Check("OF14: ControllerLease.KeyedIdentity, its floor and the census's DeviceGroup exist",
+              census != null && floor != null && keyed != null && group != null && owner != null);
+        if (census == null || floor == null || keyed == null || group == null || owner == null) return;
+        object c = Activator.CreateInstance(census, nonPublic: true)!;
+        ((IList)census.GetProperty("Devices")!.GetValue(c)!).Add(Activator.CreateInstance(group, "HM_0000", 0,
+            new List<string> { @"ROOT\HIDClass\HM_0000" }, Enum.Parse(owner, "LiveLegacy"), null)!);
+        int f = (int)floor.Invoke(null, new[] { c })!;
+        Check("OF14: a v1.12.0 program's present device sets the floor at 64", f == 64, $"{f}");
+        foreach (var (key, index) in new[] { ("index:1", 1), ("index:0", 0), ("index:70", 70) })
+        {
+            object? id = null;
+            string error = "";
+            try { id = keyed.Invoke(null, new object[] { key, 0, c }); }
+            catch (TargetInvocationException t) { error = $"{t.InnerException!.GetType().Name}: {t.InnerException.Message}"; }
+            bool isDefault = id != null && (bool)id.GetType().GetProperty("IsDefault")!.GetValue(id)!;
+            int at = id == null ? -1 : (int)id.GetType().GetProperty("Index")!.GetValue(id)!;
+            Check($"OF14: with the floor at 64, the key {key} is index {index}'s default identity, not refused",
+                  isDefault && at == index, id == null ? error : $"default {isDefault}, index {at}");
+        }
+    }
+
     static void OfflineCensusIndex()
     {
         Assembly sdk = typeof(HIDMaestro.HMContext).Assembly;
