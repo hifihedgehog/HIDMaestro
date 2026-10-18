@@ -1,6 +1,6 @@
 ﻿# swap_regression.ps1: live-swap teardown regression battery
 
-Drives `HIDMaestroTest.exe` through 95 single- and multi-controller
+Drives `HIDMaestroTest.exe` through 96 single- and multi-controller
 create/swap/remove/force-kill sequences and verifies every scenario
 leaves zero HIDMaestro PnP devnodes in the `PRESENT` state. Catches
 the symptom that v1.1.31 fixed (`SwDeviceLifetimeParentPresent`
@@ -34,7 +34,7 @@ custom profile (BEEF:F000) authored via the SDK's `HMProfileBuilder`
 Exit code: `0` if every scenario passed, `1` if any failed.
 
 Total wall time: [D4-PLACEHOLDER: minutes from the v2.0.0 release battery] for the full
-95-scenario battery on a 16-core laptop. Most of it is deliberate cascade-settle waits (Series BT teardown takes about 10s
+96-scenario battery on a 16-core laptop. Most of it is deliberate cascade-settle waits (Series BT teardown takes about 10s
 of xinputhid filter unbinding regardless of code path). Slow machines
 with profile-extraction or PnP-quiesce overhead may push this longer.
 Use `-Filter` to run a single scenario in 1-2 minutes when iterating.
@@ -137,7 +137,7 @@ not run elevated.
 | `S84_Perf_Budget`                 | No submit path allocates | `SubmitState` and `SubmitRawReport` on a DualShock 4, `SubmitState` on an Xbox 360, `SubmitKeyboard`, `SubmitMouse`, and a GameCube adapter port's `SubmitState` and the controller's, each called thousands of times on a live controller. A USB/IP device's frames on its three send paths and a DualSense composite's output and audio transfers allocate nothing in the median run. With an Xbox 360 up, the census finds what the configuration manager lists. |
 | `S85_Handler_Isolation`           | An exception an event handler throws stops nothing else | A throwing handler ahead of a counting one on `OutputReceived`, `OutputDecoded` and `KeyboardLedsChanged`: the counting handler gets every event, the keyboard's LED state follows Scroll Lock, and a Bluetooth DualSense still switches to report 0x31. A handler still running when Dispose's join gives up meets nothing Dispose released, and a handler that disposes its own controller does not wait for its own thread. Offline, a `DisposeControllersInParallel` callback that throws for each of 256 controllers, or for a set of one, still has every controller disposed and comes out as one `AggregateException`. |
 | `S87_Interop_Decl`                | Interop declarations and the method names in the SDK's text | No `DllImport` is left, `SetupDiGetClassDevsW` takes its Enumerator as a pointer, and every method a message or XML doc names exists as written. 33 string-form fixtures check the argument counter. The live run reads the SDK's own XInput slot count on an Xbox 360 persona and runs the phantom sweep. There is no S86. |
-| `S88_Device_Shortcut`             | No device shortcut in the SDK or the drivers | No declared name, file name or string carries a device or vendor word from the catalog outside the probe's allowed names, no vendor or product ID is compared, switched on or assigned in any form, no device name is searched, no profile field set by one catalog profile alone is read, and no region of the 24 device regions and the default device's five is left in a driver source. Fails by design until the last device code is profile data. Offline |
+| `S88_Device_Shortcut`             | No device shortcut in the SDK or the drivers | No declared name, file name or string carries a device or vendor word from the catalog outside the probe's allowed names, no vendor or product ID is compared, switched on or assigned in any form, no device name is searched, no profile field set by one catalog profile alone is read, and no region of the 24 device regions and the default device's five is left in a driver source. It failed by design until the last device code became profile data, and passes at 2.0.0. Offline |
 | `S89_Device_Oracle`               | The device code gives the bytes it gave before the conversion | Replays nine recorded cases, the submit and decode paths, the packers, the Switch 2 Pro responder, the USB/IP feature answers, the UMDF2 driver and companion compiled natively, and the physical descriptors of the reference clones, and passes a difference only when `changes.txt` lists it with its lane and reason. Offline |
 | `S90_Arith_Roundtrip`             | Every raw value comes back | Every raw value of every catalog conversion, normalized three ways, returns through the SDK's own code. A NaN writes the rest, an unwritten stick rests at its center, the rounding matches `Math.Round`, and `diff` holds every float in [0, 1] to the design note's table. Offline, about 9 minutes for `diff` |
 | `S91_Vendor_Blob_Golden`          | Vendor-blob reports against golden bytes | Every Sony, Valve and Nintendo vendor-blob report encodes and decodes to its golden SHA-256, and the codec vocabulary refuses the removed `ds3-battery` type, a missing `max` or `invert`, and parameters an output field ignores. Offline |
@@ -146,6 +146,7 @@ not run elevated.
 | `S94_Program_Equivalence`         | Every report program three ways | Each catalog program, decoder and layout set through its generated kernel, the interpreter and a naive evaluator written from the design note, on random states and recorded inputs, a seeded corpus of 1,000 random programs, the negative corpus and planted defects, every validation rule with its JSON path, under the JIT and NativeAOT, where every catalog program must bind its generated kernel. Offline |
 | `S95_Protocol_Engine`             | The protocol engine and the device clock | Conditions, matches, register stores, memory, bitmap and prefix replies, bulk replies in read-sized chunks, the overflow rules, GET_REPORT of the layout that would go out, counters, no allocation per command, reply or report, the Triton's IMU register, the clock's grid under each missed-tick rule, and the idle repeat's period, condition and timestamps. Offline |
 | `S96_Capture_Fidelity`            | Catalog data and driver text against their sources | The INF comments are ASCII, the Xbox 360 profiles carry a real pad's manufacturer string, and xbox-360-flight-stick and ps-move carry their captured descriptors, with the Move's controls, battery and motion where psmoveapi and RPCS3 read them. Offline |
+| `S97_Switch_Family`               | A second device on the Switch Pro's mechanisms | `joycon-l-proof`, a Joy-Con (L) built from `switch-pro`'s protocol, state block and report programs, loads, answers SDL's Joy-Con open with nxbt's device info, and its 0x3F stick hat follows dekuNukem's grid in all eight directions and reads centered inside its dead zone. Offline |
 
 ## What "PASS" means
 
