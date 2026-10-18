@@ -1565,10 +1565,18 @@ internal static class Offline
               q5.WithParent == 0 && q5.Without == 2 && Within(q5.Ms, 600 + 2 * RemovedBoundMs)
               && HeldBound(sw5, ChildId, BeforeCall),
               $"{q5.Ms} ms, {q5.WithParent} on the parent's, {q5.Without} without, {LinesText(sw5)}");
+        // The parent leaves the tree and sends its second REMOVED at the same
+        // 600 ms, so either can reach the SDK first. When the parent's test
+        // sees it gone first, it ends on the REMOVED at 100, and the first
+        // child's hold then ends on the second one as it arrives. Either way
+        // the latest REMOVED proves both children, and neither is held to
+        // the bound.
         var sw6 = Shape(KidGone(), new Sequence { LeavesTree = 600, RecordGoneAt = 600, RemovedAt = 100, RemovedAgainAt = 600 }, SwdId, KidGone());
         var q6 = RunRemoval(sw6, SwdId, fast: true, timeoutMs: 300);
-        Check("software parent, fast: REMOVED at 100 ms during the close, and again at 600 as it leaves -> both children on the latest",
-              q6.WithParent == 2 && q6.Without == 0 && Says(sw6, ChildId, OnParent),
+        bool OnLatest(Tree t, string id) =>
+            Says(t, id, OnParent) || HeldMs(t, id, OnParent) is >= 0 and < RemovedBoundMs - TimerSlack;
+        Check("software parent, fast: REMOVED at 100 ms during the close, and again at 600 as it leaves -> both children on the latest, whichever of the two the SDK sees first",
+              q6.WithParent == 2 && q6.Without == 0 && OnLatest(sw6, ChildId) && OnLatest(sw6, Kid2) && Within(q6.Ms, 600),
               $"{q6.Ms} ms, {q6.WithParent} on the parent's, {q6.Without} without, {LinesText(sw6)}");
 
         // A close whose registration Windows refused leaves no watch to
