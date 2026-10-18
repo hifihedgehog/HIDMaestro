@@ -272,6 +272,13 @@ internal sealed unsafe class ProtocolHost : IDisposable
 
     public void Dispose() => _clock?.Stop(2000);
 
+    /// <summary>The device is gone: a reply it never delivered is not
+    /// waited for by the next send.</summary>
+    public void DeviceRemoved()
+    {
+        lock (_sendLock) _replyPending = false;
+    }
+
     /// <summary>The clock's thread, or null before a start that needed one.</summary>
     internal Thread? ClockThread => _clock?.Thread;
 }

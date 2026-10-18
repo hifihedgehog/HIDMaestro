@@ -585,7 +585,7 @@ public sealed partial class HMController : IDisposable
         // ones this controller's threads write until its own Dispose
         // (SharedMemoryIO.Hold). The create mapped them before this, and
         // its hold on CreateGate's read side kept the release out until now.
-        SharedMemoryIO.Hold(index);
+        SharedMemoryIO.Hold(index, OnDeviceRemoved);
         _inputView = SharedMemoryIO.EnsureInputMapping(index);
         _inputEvent = SharedMemoryIO.GetInputEvent(index);
         _companionInputEvent = _packsGipBuffer
@@ -2134,6 +2134,27 @@ public sealed partial class HMController : IDisposable
         // no path takes the submit lock while it holds the PID lock.
         lock (_submitLock)
             lock (_pidStateLock) _disposed = true;
+        StopWorkers();
+    }
+
+    /// <summary>The sweep removed this controller's device and left its
+    /// sections to it (SharedMemoryIO.Cleanup). Nothing reads what the idle
+    /// repeat and a protocol host's clock write, and nothing writes the
+    /// output ring, so those threads stop. A protocol reply the driver never
+    /// delivered is not waited for. Submits and PID calls keep writing the
+    /// controller's own sections until Dispose. Runs on the sweep's thread,
+    /// under CreateGate's write side, with no lock of this controller held.</summary>
+    private void OnDeviceRemoved()
+    {
+        StopWorkers();
+        _host?.DeviceRemoved();
+    }
+
+    /// <summary>Stops the idle repeat, a protocol host's clock and the
+    /// output reader. Runs again harmlessly: Dispose after a sweep runs it a
+    /// second time.</summary>
+    private void StopWorkers()
+    {
         // Idle frames stop before the output pump, so no repeat can
         // land on a section the teardown is about to unmap.
         try { _idleClock?.Stop(Internal.TimeoutScale.Apply(500)); } catch { }

@@ -300,21 +300,24 @@ internal static partial class SharedMemoryIO
     /// violation that takes the process down (issue #45 for the output
     /// reader, then the idle repeat of a USB/IP DualSense). So the sweep
     /// leaves a held index alone, as it leaves another program's sections,
-    /// and the controller's own Dispose releases them.</para></summary>
-    private static readonly HashSet<int> s_held = new();
+    /// and the controller's own Dispose releases them. Each holder gives
+    /// what it runs once the sweep has removed its device.</para></summary>
+    private static readonly Dictionary<int, Action> s_held = new();
 
     /// <summary>Marks the index's objects as a live controller's, so
     /// <see cref="Cleanup"/> leaves them. Called by the controller's
     /// constructor, under the create's hold on CreateGate's read side.
-    /// <see cref="DestroyController"/> ends the hold.</summary>
-    public static void Hold(int controllerIndex)
+    /// <see cref="DestroyController"/> ends the hold. Cleanup runs
+    /// <paramref name="deviceRemoved"/> for a held index, whose device the
+    /// sweep has removed.</summary>
+    public static void Hold(int controllerIndex, Action deviceRemoved)
     {
-        lock (s_held) s_held.Add(controllerIndex);
+        lock (s_held) s_held[controllerIndex] = deviceRemoved;
     }
 
     private static bool IsHeld(int controllerIndex)
     {
-        lock (s_held) return s_held.Contains(controllerIndex);
+        lock (s_held) return s_held.ContainsKey(controllerIndex);
     }
 
     /// <summary>Live output-poll threads, keyed by controller index (issue
@@ -1136,7 +1139,10 @@ internal static partial class SharedMemoryIO
     /// index no live controller holds. The device sweep's last step. A held
     /// index keeps its objects: its controller's threads and the consumer's
     /// submits still use them, and its Dispose releases them
-    /// (<see cref="s_held"/>). An index a create has mapped and its
+    /// (<see cref="s_held"/>). The sweep removed every device, so for a held
+    /// index this clears what the driver announced in those objects
+    /// (<see cref="ForgetDriverLocked"/>) and runs the holder's
+    /// device-removed action. An index a create has mapped and its
     /// controller does not hold yet is not told apart from one nothing
     /// uses, so this runs only under <see cref="OwnerSweep.CreateGate"/>'s
     /// write side, as DeviceOrchestrator.RemoveEverything calls it, and
@@ -1154,6 +1160,7 @@ internal static partial class SharedMemoryIO
                                       s_companionInputEvents.Keys, s_inputAckViews.Keys, s_inputAckHandles.Keys,
                                       s_inputAckEvents.Keys, s_ownerPipes.Keys, s_versionViews.Keys, s_versionHandles.Keys))
                 if (!IsHeld(i)) ReleaseInputLocked(i);
+                else ForgetDriverLocked(i);
         }
         lock (s_outputViews)
         {
@@ -1165,6 +1172,33 @@ internal static partial class SharedMemoryIO
             foreach (int i in Indexes(s_pidStateViews.Keys, s_pidStateHandles.Keys))
                 if (!IsHeld(i)) ReleasePidStateLocked(i);
         }
+        // Outside the locks above: a holder stops threads that take them.
+        Action[] removed;
+        lock (s_held)
+        {
+            removed = new Action[s_held.Count];
+            s_held.Values.CopyTo(removed, 0);
+        }
+        foreach (var deviceRemoved in removed)
+            try { deviceRemoved(); } catch { }
+    }
+
+    /// <summary>For a held index whose device the sweep removed: the
+    /// delivery acknowledgement and release-on-exit bits of the
+    /// acknowledgement's capability word, and the driver's protocol word of
+    /// the version section, which marks its half written. Without them a
+    /// keyboard or mouse frame waits for an acknowledgement no driver will
+    /// write, and DriverVersion names a driver that is gone. Bit 31, the
+    /// driver's own marker, stays. A driver that still serves the index
+    /// writes all of them again when its worker next opens the sections
+    /// (driver.c, TryOpenInputAck and AnnounceVersion). Caller holds
+    /// s_inputViews.</summary>
+    private static unsafe void ForgetDriverLocked(int controllerIndex)
+    {
+        if (s_inputAckViews.TryGetValue(controllerIndex, out IntPtr av) && av != IntPtr.Zero)
+            Interlocked.And(ref *(int*)(av + INPUT_ACK_OFFSET_CAPS), ~(INPUT_ACK_CAP_DELIVERED | INPUT_ACK_CAP_RELEASE));
+        if (s_versionViews.TryGetValue(controllerIndex, out IntPtr vv) && vv != IntPtr.Zero)
+            Interlocked.Exchange(ref *(int*)(vv + VERSION_OFFSET_DRIVER_PROTOCOL), 0);
     }
 
     /// <summary>Every index the key sets name, copied, so the caller can

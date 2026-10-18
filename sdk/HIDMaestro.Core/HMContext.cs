@@ -288,7 +288,16 @@ public sealed class HMContext : IDisposable
     /// it and whether or not that program still runs, which is what an
     /// uninstall, a test harness or a support tool wants. With
     /// <paramref name="preserveInstall"/> false it also removes the driver
-    /// packages and <c>HKLM\SOFTWARE\HIDMaestro</c>.</summary>
+    /// packages and <c>HKLM\SOFTWARE\HIDMaestro</c>.
+    ///
+    /// <para>A controller the calling program still holds stays a usable
+    /// object with no device behind it. Its submits and PID calls return
+    /// normally and reach nothing. Its output events stop.
+    /// <see cref="HMController.DriverVersion"/> is null,
+    /// <see cref="HMController.ReleasesOnConsumerExit"/> is false, and a
+    /// keyboard or mouse submit no longer waits for delivery. The device
+    /// does not come back. Dispose the controller: until then it keeps its
+    /// transport index and its sections.</para></summary>
     public static void RemoveAllVirtualControllers(HMCleanupScope scope, bool preserveInstall)
     {
         if (scope == HMCleanupScope.Everything)

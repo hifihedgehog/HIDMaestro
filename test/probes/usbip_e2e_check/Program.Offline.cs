@@ -46,6 +46,7 @@ internal static partial class Program
         ("stop", OfflineStopThreads),
         ("gate", OfflineCleanupGate),
         ("create", OfflineCreateRefusedAfterHold),
+        ("removed", OfflineDriverRemoved),
     };
 
     static int Offline(string? only)
@@ -72,33 +73,29 @@ internal static partial class Program
 
     /// <summary>S45's crash: dualsense-composite's idle repeat (stream
     /// periodMs 4) writes its input section every 4 ms on the device clock's
-    /// thread, and the sweep ran SharedMemoryIO.Cleanup under it. The output
-    /// reader, which #45 stopped before the unmap, must still read its ring
-    /// afterward.</summary>
+    /// thread, and the sweep ran SharedMemoryIO.Cleanup under it. The sweep
+    /// leaves the sections mapped, stops the repeat and the output reader of
+    /// the device it removed, and SubmitState still writes the section.</summary>
     static void OfflineIdleRepeat(int index)
     {
         Console.WriteLine("\n-- The idle repeat across a sweep's release --");
         using var dev = new OfflineController("dualsense-composite", index);
         Check("the idle repeat writes the input section before the sweep", dev.Advances(), $"seq {dev.Seq}");
-        int raised = 0;
-        dev.C.OutputReceived += (_, p) => { if (p.ReportId == 0x02) Interlocked.Increment(ref raised); };
+        var threads = dev.Threads();
         Check("both sections are mapped before the sweep", Mapped(dev.Input) && Mapped(dev.Ring));
         // An index beside it that no controller holds, as a closed
         // program's or a failed create's: the sweep releases that one.
         var unheld = Unheld(index + 200);
         Sweep();
         Check("the sweep releases an index no controller holds, beside the held one", unheld.All(v => !Mapped(v)));
-        // A dozen of the repeat's periods before this thread does anything
-        // else, so the repeat is the first to touch what the sweep did to
-        // its section, as it was in the live run.
-        Thread.Sleep(50);
         Check("the sweep leaves a live controller's input and output sections mapped",
             Mapped(dev.Input) && Mapped(dev.Ring));
-        Check("the idle repeat keeps writing its section after the sweep", dev.Advances(), $"seq {dev.SeqOrZero}");
-        bool ring = Mapped(dev.Ring);
-        if (ring) dev.Output(0x02, new byte[47]);
-        Check("the output reader still reads its ring after the sweep",
-            ring && WaitUntil(() => Volatile.Read(ref raised) == 1, 3000), ring ? $"{raised} raised" : "ring unmapped");
+        Check("the sweep stops the idle repeat and the output reader of the device it removed",
+            threads.Count == 2 && threads.All(t => !t.IsAlive), string.Join(", ", threads.Where(t => t.IsAlive).Select(t => t.Name)));
+        var s = new HMGamepadState { Buttons = HMButton.A };
+        uint before = dev.SeqOrZero;
+        dev.C.SubmitState(in s);
+        Check("SubmitState after the sweep writes the controller's own section", dev.SeqOrZero == before + 2, $"seq {before} to {dev.SeqOrZero}");
         dev.TearDown();
         ReleasedOnceUnheld(index);
     }
@@ -146,7 +143,7 @@ internal static partial class Program
     }
 
     /// <summary>A UMDF2 protocol host's clock (switch-pro, 15 ms) across the
-    /// sweep's release. Report 0x30 goes out on the clock once a subcommand
+    /// sweep's release, which stops it with the device. Report 0x30 goes out on the clock once a subcommand
     /// sets protocolSeen, so one goes through the ring first, as SDL's open
     /// sends them.</summary>
     static void OfflineHostClock(int index)
@@ -160,10 +157,15 @@ internal static partial class Program
         dev.Output(0x01, subcommand);
         Thread.Sleep(100);
         Check("the protocol clock writes the input section before the sweep", dev.Advances(), $"seq {dev.Seq}");
+        var threads = dev.Threads();
         Sweep();
-        // Several clock periods before this thread touches anything.
-        Thread.Sleep(100);
-        Check("the protocol clock keeps writing its section after the sweep", dev.Advances(), $"seq {dev.SeqOrZero}");
+        Check("the sweep stops the protocol clock and the output reader of the device it removed",
+            threads.Count == 2 && threads.All(t => !t.IsAlive), string.Join(", ", threads.Where(t => t.IsAlive).Select(t => t.Name)));
+        var host = (ProtocolHost)typeof(HMController).GetField("_host", AnyInstance)!.GetValue(dev.C)!;
+        uint before = dev.SeqOrZero;
+        host.Tick(0);
+        Check("a protocol tick after the sweep writes the controller's own section", Mapped(dev.Input) && dev.Seq != before,
+            $"seq {before} to {dev.SeqOrZero}");
         dev.TearDown();
         ReleasedOnceUnheld(index);
     }
@@ -422,6 +424,75 @@ internal static partial class Program
         }
     }
 
+    /// <summary>A controller the sweep kept while it removed the device:
+    /// nothing waits for, or reports, the driver that served it. A keyboard
+    /// and a protocol host, each on a planted acknowledgement and version
+    /// section a driver has announced itself in, as driver.c's
+    /// TryOpenInputAck and AnnounceVersion write them.</summary>
+    static void OfflineDriverRemoved(int index)
+    {
+        Console.WriteLine("\n-- What a kept controller reads of a removed driver --");
+        using (var dev = new OfflineController("apple-keyboard-a1243", index))
+        {
+            var (ack, _) = dev.Announce(SharedMemoryIO.INPUT_ACK_CAP_DELIVERED | SharedMemoryIO.INPUT_ACK_CAP_RELEASE | SharedMemoryIO.INPUT_ACK_WATCH_ENDED);
+            Check("before the sweep the controller reports the driver's version", dev.C.DriverVersion == new Version(2, 0, 0), $"{dev.C.DriverVersion}");
+            Check("and that the driver releases its keys if the program ends", dev.C.ReleasesOnConsumerExit);
+            HMKey[] key = { HMKey.A };
+            dev.C.SubmitKeyboard(HMKeyModifiers.None, key);
+            long waited = Timed(() => dev.C.SubmitKeyboard(HMKeyModifiers.None, Array.Empty<HMKey>()));
+            Check("before the sweep a frame waits for the acknowledgement of the one before it", waited >= 150, $"{waited} ms");
+            // The driver acknowledges, so the next frame finds no miss.
+            Marshal.WriteInt32(ack, SharedMemoryIO.INPUT_ACK_OFFSET_DELIVERED, (int)dev.Seq);
+            dev.C.SubmitKeyboard(HMKeyModifiers.None, key);
+            Sweep();
+            Check("after the sweep the controller reports no driver version", dev.C.DriverVersion == null, $"{dev.C.DriverVersion}");
+            Check("and no release on exit", !dev.C.ReleasesOnConsumerExit);
+            Check("and the driver's own marker bit stays",
+                (Marshal.ReadInt32(ack, SharedMemoryIO.INPUT_ACK_OFFSET_CAPS) & SharedMemoryIO.INPUT_ACK_WATCH_ENDED) != 0);
+            uint before = dev.Seq;
+            long three = Timed(() =>
+            {
+                dev.C.SubmitKeyboard(HMKeyModifiers.None, Array.Empty<HMKey>());
+                dev.C.SubmitKeyboard(HMKeyModifiers.None, key);
+                dev.C.SubmitKeyboard(HMKeyModifiers.None, Array.Empty<HMKey>());
+            });
+            Check("three keyboard frames after the sweep wait for no acknowledgement", three < 100, $"{three} ms");
+            Check("and each one writes the controller's own section", dev.Seq == before + 6, $"seq {before} to {dev.Seq}");
+            dev.TearDown();
+        }
+        using (var dev = new OfflineController("switch-pro", index + 100))
+        {
+            var (_, version) = dev.Announce(SharedMemoryIO.INPUT_ACK_CAP_DELIVERED);
+            dev.StopIdleRepeat();
+            dev.StartProtocol();
+            var subcommand = new byte[48];
+            subcommand[9] = 0x48;
+            dev.Output(0x01, subcommand);
+            Thread.Sleep(100);
+            var host = (ProtocolHost)typeof(HMController).GetField("_host", AnyInstance)!.GetValue(dev.C)!;
+            // The clock stops first, so the reply set out below is still
+            // waiting when the sweep runs: one the driver never delivered.
+            host.Dispose();
+            typeof(ProtocolHost).GetField("_replySeq", AnyInstance)!.SetValue(host, dev.Seq + 1000);
+            typeof(ProtocolHost).GetField("_replyPending", AnyInstance)!.SetValue(host, true);
+            Sweep();
+            Check("after the sweep the protocol host's controller reports no driver",
+                Marshal.ReadInt32(version, SharedMemoryIO.VERSION_OFFSET_DRIVER_PROTOCOL) == 0 && dev.C.DriverVersion == null);
+            uint before = dev.Seq;
+            long tick = Timed(() => host.Tick(200));
+            Check("a protocol send after the sweep waits for no reply the removed driver never delivered", tick < 100, $"{tick} ms");
+            Check("and writes the controller's own section", dev.Seq != before, $"seq {before} to {dev.Seq}");
+            dev.TearDown();
+        }
+    }
+
+    static long Timed(Action a)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        a();
+        return sw.ElapsedMilliseconds;
+    }
+
     /// <summary>Sections mapped on <paramref name="index"/> with no
     /// controller, as a closed program or a failed create leaves them.</summary>
     static IntPtr[] Unheld(int index) => new[]
@@ -497,6 +568,21 @@ internal static partial class Program
             Cache(views)[index] = v;
             Cache(handles)[index] = h;
             return v;
+        }
+
+        /// <summary>The acknowledgement and version sections, planted, with
+        /// a driver's announcement in them: <paramref name="caps"/> in the
+        /// acknowledgement, and version 2.0.0 with protocol 4 in the driver's
+        /// half of the version section, protocol last as driver.c's
+        /// AnnounceVersion writes it.</summary>
+        public (IntPtr Ack, IntPtr Version) Announce(int caps)
+        {
+            IntPtr ack = Plant("s_inputAckViews", "s_inputAckHandles", _index, SharedMemoryIO.INPUT_ACK_SIZE);
+            IntPtr version = Plant("s_versionViews", "s_versionHandles", _index, SharedMemoryIO.VERSION_INFO_SIZE);
+            Marshal.WriteInt32(ack, SharedMemoryIO.INPUT_ACK_OFFSET_CAPS, caps);
+            Marshal.WriteInt16(version, SharedMemoryIO.VERSION_OFFSET_DRIVER_VERSION, 2);
+            Marshal.WriteInt32(version, SharedMemoryIO.VERSION_OFFSET_DRIVER_PROTOCOL, 4);
+            return (ack, version);
         }
 
         public uint Seq => (uint)Marshal.ReadInt32(Input, 0);
