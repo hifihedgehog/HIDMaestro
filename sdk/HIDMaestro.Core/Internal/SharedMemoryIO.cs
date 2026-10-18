@@ -283,9 +283,14 @@ internal static partial class SharedMemoryIO
     private static readonly Dictionary<int, IntPtr> s_pidStateViews   = new();
 
     /// <summary>The indexes whose objects a live controller in this process
-    /// holds: from its constructor, before it maps them, until
-    /// <see cref="DestroyController"/>, which its teardown calls once its
-    /// threads have stopped.
+    /// holds: from its constructor until <see cref="DestroyController"/>,
+    /// which its teardown calls once its threads have stopped. The create
+    /// maps the index before the constructor runs (DeviceOrchestrator's
+    /// SetupController, or the USB/IP device, whose input pump reads the
+    /// mapping from then on), so between that mapping and the hold only
+    /// <see cref="OwnerSweep.CreateGate"/> keeps <see cref="Cleanup"/> out:
+    /// the create holds its read side throughout, and Cleanup runs only
+    /// under its write side.
     ///
     /// <para>A controller caches its views and events and uses them from
     /// threads it alone stops: the output reader, the idle repeat's clock,
@@ -300,8 +305,8 @@ internal static partial class SharedMemoryIO
 
     /// <summary>Marks the index's objects as a live controller's, so
     /// <see cref="Cleanup"/> leaves them. Called by the controller's
-    /// constructor before it maps them. <see cref="DestroyController"/> ends
-    /// the hold.</summary>
+    /// constructor, under the create's hold on CreateGate's read side.
+    /// <see cref="DestroyController"/> ends the hold.</summary>
     public static void Hold(int controllerIndex)
     {
         lock (s_held) s_held.Add(controllerIndex);
@@ -1131,11 +1136,18 @@ internal static partial class SharedMemoryIO
     /// index no live controller holds. The device sweep's last step. A held
     /// index keeps its objects: its controller's threads and the consumer's
     /// submits still use them, and its Dispose releases them
-    /// (<see cref="s_held"/>). Each group decides under its own lock, so an
-    /// index a constructor holds before it maps is either released before
-    /// that mapping or kept. Safe to call multiple times.</summary>
+    /// (<see cref="s_held"/>). An index a create has mapped and its
+    /// controller does not hold yet is not told apart from one nothing
+    /// uses, so this runs only under <see cref="OwnerSweep.CreateGate"/>'s
+    /// write side, as DeviceOrchestrator.RemoveEverything calls it, and
+    /// refuses to run without it. Safe to call multiple times.</summary>
+    /// <exception cref="InvalidOperationException">The calling thread does
+    /// not hold CreateGate's write side.</exception>
     public static void Cleanup()
     {
+        if (!OwnerSweep.CreateGate.IsWriteLockHeld)
+            throw new InvalidOperationException(
+                "SharedMemoryIO.Cleanup runs only under OwnerSweep.CreateGate's write side: a create maps its index before its controller holds it.");
         lock (s_inputViews)
         {
             foreach (int i in Indexes(s_inputViews.Keys, s_inputHandles.Keys, s_inputEvents.Keys,

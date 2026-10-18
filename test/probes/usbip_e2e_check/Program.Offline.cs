@@ -44,6 +44,7 @@ internal static partial class Program
         ("late-tick", OfflineLateTick),
         ("pid-dispose", OfflinePidDuringDispose),
         ("stop", OfflineStopThreads),
+        ("gate", OfflineCleanupGate),
     };
 
     static int Offline(string? only)
@@ -81,7 +82,7 @@ internal static partial class Program
         int raised = 0;
         dev.C.OutputReceived += (_, p) => { if (p.ReportId == 0x02) Interlocked.Increment(ref raised); };
         Check("both sections are mapped before the sweep", Mapped(dev.Input) && Mapped(dev.Ring));
-        SharedMemoryIO.Cleanup();
+        Sweep();
         // A dozen of the repeat's periods before this thread does anything
         // else, so the repeat is the first to touch what the sweep did to
         // its section, as it was in the live run.
@@ -110,7 +111,7 @@ internal static partial class Program
         uint first = dev.Seq;
         dev.C.SubmitState(in s);
         Check("SubmitState writes the controller's section before the sweep", dev.Seq == first + 2, $"seq {first} to {dev.Seq}");
-        SharedMemoryIO.Cleanup();
+        Sweep();
         Check("the sweep leaves a live controller's input section mapped", Mapped(dev.Input));
         uint before = dev.SeqOrZero;
         dev.C.SubmitState(in s);
@@ -127,7 +128,7 @@ internal static partial class Program
         dev.StopIdleRepeat();
         dev.C.PublishPidPool(0xFFFF, 10, false, false);
         uint before = dev.PidSeq;
-        SharedMemoryIO.Cleanup();
+        Sweep();
         bool mapped = Mapped(dev.Pid);
         Check("the sweep leaves a live controller's PID section mapped", mapped);
         dev.C.PublishPidPool(0xFFFF, 10, false, false);
@@ -151,7 +152,7 @@ internal static partial class Program
         dev.Output(0x01, subcommand);
         Thread.Sleep(100);
         Check("the protocol clock writes the input section before the sweep", dev.Advances(), $"seq {dev.Seq}");
-        SharedMemoryIO.Cleanup();
+        Sweep();
         // Several clock periods before this thread touches anything.
         Thread.Sleep(100);
         Check("the protocol clock keeps writing its section after the sweep", dev.Advances(), $"seq {dev.SeqOrZero}");
@@ -248,7 +249,54 @@ internal static partial class Program
         }
     }
 
-    // â”€â”€ The offline controller â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    /// <summary>A create maps its index before its controller holds it, and
+    /// only CreateGate keeps the sweep's release out of that window: the
+    /// create holds the read side, the sweep the write side. So the release
+    /// refuses to run without the write side, and leaves the mapping.</summary>
+    static void OfflineCleanupGate(int index)
+    {
+        Console.WriteLine("\n-- The release outside the sweep's gate --");
+        // An index mapped and not held, as a create's is before its
+        // controller's constructor.
+        IntPtr input = OfflineController.Plant("s_inputViews", "s_inputHandles", index, SharedMemoryIO.SHARED_INPUT_SIZE);
+        Check("the release refuses to run without CreateGate", CleanupRefused(out string how), how);
+        Check("and leaves the mapping", Mapped(input));
+        OwnerSweep.CreateGate.EnterReadLock();
+        try
+        {
+            Check("the release refuses to run under the read side a create holds", CleanupRefused(out how), how);
+            Check("and leaves the create's mapping", Mapped(input));
+        }
+        finally { OwnerSweep.CreateGate.ExitReadLock(); }
+        Sweep();
+        Check("under the write side, as the sweep runs it, it releases the mapping", !Mapped(input));
+    }
+
+    static bool CleanupRefused(out string how)
+    {
+        try
+        {
+            SharedMemoryIO.Cleanup();
+            how = "it ran";
+            return false;
+        }
+        catch (InvalidOperationException e)
+        {
+            how = e.Message;
+            return true;
+        }
+    }
+
+    /// <summary>SharedMemoryIO.Cleanup as the sweep runs it, under
+    /// CreateGate's write side (DeviceOrchestrator.RemoveEverything).</summary>
+    static void Sweep()
+    {
+        OwnerSweep.CreateGate.EnterWriteLock();
+        try { SharedMemoryIO.Cleanup(); }
+        finally { OwnerSweep.CreateGate.ExitWriteLock(); }
+    }
+
+    // ── The offline controller ─────────────────────────────────────────
 
     sealed class OfflineController : IDisposable
     {
@@ -280,7 +328,7 @@ internal static partial class Program
         /// <summary>An unnamed pagefile-backed section, mapped and handed to
         /// SharedMemoryIO's caches as its own mapping, so its release unmaps
         /// it and closes the handle.</summary>
-        static IntPtr Plant(string views, string handles, int index, int size)
+        public static IntPtr Plant(string views, string handles, int index, int size)
         {
             IntPtr h = CreateFileMappingW(new IntPtr(-1), IntPtr.Zero, PAGE_READWRITE, 0, (uint)size, null);
             if (h == IntPtr.Zero) throw new InvalidOperationException($"CreateFileMappingW failed: {Marshal.GetLastWin32Error()}");

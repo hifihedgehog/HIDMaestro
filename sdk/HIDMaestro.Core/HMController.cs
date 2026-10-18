@@ -570,9 +570,10 @@ public sealed partial class HMController : IDisposable
         // packing is skipped for them: the presentation plan decides it
         // with the companion it makes (PresentationPlan.PacksGip).
         _packsGipBuffer = PresentationPlan.Of(profile.Inner).PacksGip;
-        // Held before it is mapped, so a sweep's release of this process's
-        // sections leaves the ones this controller's threads write until
-        // its own Dispose (SharedMemoryIO.Hold).
+        // From here a sweep's release of this process's sections leaves the
+        // ones this controller's threads write until its own Dispose
+        // (SharedMemoryIO.Hold). The create mapped them before this, and
+        // its hold on CreateGate's read side kept the release out until now.
         SharedMemoryIO.Hold(index);
         _inputView = SharedMemoryIO.EnsureInputMapping(index);
         _inputEvent = SharedMemoryIO.GetInputEvent(index);
@@ -694,9 +695,9 @@ public sealed partial class HMController : IDisposable
             };
             output.Start();
             _outputThread = output;
-            // Publish the thread so any unmap stops it first. Without this a
-            // sweep that runs while this controller is still alive frees the
-            // view underneath the loop below (issue #45).
+            // Publish the thread so the teardown's unmap
+            // (SharedMemoryIO.DestroyController) stops it first (issue #45).
+            // The sweep leaves a held index's view alone.
             SharedMemoryIO.RegisterOutputPump(index, _outputCts, _outputThread);
         }
         catch
