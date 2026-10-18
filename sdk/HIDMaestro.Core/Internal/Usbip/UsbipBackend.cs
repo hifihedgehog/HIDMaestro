@@ -393,13 +393,13 @@ internal static class UsbipBackend
     {
         try
         {
-            // Stop this process's emulated devices FIRST. Their input pump
-            // threads map the shared input section directly and read it in a
-            // loop, and they take no part in the stop-event drain the UMDF2
-            // controllers use. The sweep destroys those sections moments
-            // later, so leaving a pump running here is not a leak, it is an
-            // access violation on a background thread that kills the whole
-            // process. Disposing joins the pumps before anything is unmapped.
+            // Stop this process's emulated devices FIRST. They take no part
+            // in the stop-event drain the UMDF2 controllers use, and a device
+            // left registered answers an import of the bus id the detach
+            // below removes. Disposing ends its pumps and audio. The sections
+            // they read stay mapped until their controller's own Dispose:
+            // the sweep's SharedMemoryIO.Cleanup leaves a live controller's
+            // sections alone.
             var server = UsbipServer.Current;
             if (server != null)
             {

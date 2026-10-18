@@ -282,20 +282,44 @@ internal static partial class SharedMemoryIO
     private static readonly Dictionary<int, IntPtr> s_pidStateHandles = new();
     private static readonly Dictionary<int, IntPtr> s_pidStateViews   = new();
 
+    /// <summary>The indexes whose objects a live controller in this process
+    /// holds: from its constructor, before it maps them, until
+    /// <see cref="DestroyController"/>, which its teardown calls once its
+    /// threads have stopped.
+    ///
+    /// <para>A controller caches its views and events and uses them from
+    /// threads it alone stops: the output reader, the idle repeat's clock,
+    /// a protocol host's clock, and the consumer's own submits. The device
+    /// sweep ends in <see cref="Cleanup"/> while such a controller can still
+    /// be alive, and a view unmapped under any of those threads is an access
+    /// violation that takes the process down (issue #45 for the output
+    /// reader, then the idle repeat of a USB/IP DualSense). So the sweep
+    /// leaves a held index alone, as it leaves another program's sections,
+    /// and the controller's own Dispose releases them.</para></summary>
+    private static readonly HashSet<int> s_held = new();
+
+    /// <summary>Marks the index's objects as a live controller's, so
+    /// <see cref="Cleanup"/> leaves them. Called by the controller's
+    /// constructor before it maps them. <see cref="DestroyController"/> ends
+    /// the hold.</summary>
+    public static void Hold(int controllerIndex)
+    {
+        lock (s_held) s_held.Add(controllerIndex);
+    }
+
+    private static bool IsHeld(int controllerIndex)
+    {
+        lock (s_held) return s_held.Contains(controllerIndex);
+    }
+
     /// <summary>Live output-poll threads, keyed by controller index (issue
     /// #45).
     ///
     /// <para>A poll thread dereferences its output view on every iteration
     /// and is stopped only by its owning <c>HMController.Dispose</c>.
     /// Unmapping that view while the thread runs is an access violation on a
-    /// background thread, which takes the process down from a call the
-    /// consumer never associated with a controller: the device sweep ends in
-    /// <see cref="Cleanup"/>, and a consumer that swept while still holding a
-    /// controller crashed there reproducibly.</para>
-    ///
-    /// <para>Registering the threads here puts the fix at the point of
-    /// danger rather than at one call site, so every unmap path is covered
-    /// and not just the sweep that happened to expose it.</para></summary>
+    /// background thread, so <see cref="DestroyController"/> stops the
+    /// index's registered thread before it unmaps anything.</para></summary>
     private static readonly Dictionary<int, (CancellationTokenSource Cts, Thread Thread)> s_outputPumps = new();
 
     /// <summary>Records a controller's output-poll thread so any later unmap
@@ -327,29 +351,15 @@ internal static partial class SharedMemoryIO
         JoinPump(pump);
     }
 
-    /// <summary>Cancels and joins every registered poll thread.</summary>
-    private static void StopAllOutputPumps()
-    {
-        (CancellationTokenSource Cts, Thread Thread)[] pumps;
-        lock (s_outputPumps)
-        {
-            pumps = new (CancellationTokenSource, Thread)[s_outputPumps.Count];
-            s_outputPumps.Values.CopyTo(pumps, 0);
-            s_outputPumps.Clear();
-        }
-        foreach (var pump in pumps) JoinPump(pump);
-    }
-
     /// <summary>Cancel then join, outside the registry lock.
     ///
     /// <para>The join must not happen under <c>s_outputPumps</c>: the poll
     /// loop calls back into this class, so holding a lock across the join
     /// invites a deadlock with a thread that is trying to acquire it. The
-    /// snapshot-then-join shape above is what keeps that impossible.</para>
+    /// remove-then-join shape above is what keeps that impossible.</para>
     ///
-    /// <para>Joining the current thread would deadlock outright, which is
-    /// reachable if a consumer's OutputReceived handler triggers a sweep, so
-    /// that case cancels and returns rather than waiting on itself.</para></summary>
+    /// <para>Joining the current thread would deadlock outright, so that
+    /// case cancels and returns rather than waiting on itself.</para></summary>
     private static void JoinPump((CancellationTokenSource Cts, Thread Thread) pump)
     {
         try { pump.Cts?.Cancel(); } catch { /* already disposed */ }
@@ -1064,124 +1074,94 @@ internal static partial class SharedMemoryIO
             CloseHandle(vh);
     }
 
-    /// <summary>Releases the input and output sections for a single controller.
-    /// Called when an HMController is disposed. Idempotent.</summary>
+    /// <summary>The input section, its event and the objects mapped beside
+    /// it, for one index. Caller holds s_inputViews.</summary>
+    private static void ReleaseInputLocked(int controllerIndex)
+    {
+        if (s_inputViews.Remove(controllerIndex, out IntPtr v) && v != IntPtr.Zero)
+            UnmapViewOfFile(v);
+        if (s_inputHandles.Remove(controllerIndex, out IntPtr h) && h != IntPtr.Zero)
+            CloseHandle(h);
+        if (s_inputEvents.Remove(controllerIndex, out IntPtr ev) && ev != IntPtr.Zero)
+            CloseHandle(ev);
+        ReleaseInputExtrasLocked(controllerIndex);
+    }
+
+    /// <summary>The output section and its event, for one index. Caller
+    /// holds s_outputViews.</summary>
+    private static void ReleaseOutputLocked(int controllerIndex)
+    {
+        if (s_outputViews.Remove(controllerIndex, out IntPtr v) && v != IntPtr.Zero)
+            UnmapViewOfFile(v);
+        if (s_outputHandles.Remove(controllerIndex, out IntPtr h) && h != IntPtr.Zero)
+            CloseHandle(h);
+        if (s_outputEvents.Remove(controllerIndex, out IntPtr oe) && oe != IntPtr.Zero)
+            CloseHandle(oe);
+        s_outputStartSeq.Remove(controllerIndex);
+    }
+
+    /// <summary>The PID state section, for one index. Caller holds
+    /// s_pidStateViews.</summary>
+    private static void ReleasePidStateLocked(int controllerIndex)
+    {
+        if (s_pidStateViews.Remove(controllerIndex, out IntPtr v) && v != IntPtr.Zero)
+            UnmapViewOfFile(v);
+        if (s_pidStateHandles.Remove(controllerIndex, out IntPtr h) && h != IntPtr.Zero)
+            CloseHandle(h);
+    }
+
+    /// <summary>Releases the input and output sections for a single
+    /// controller, and ends its hold (<see cref="Hold"/>). Called by the
+    /// controller's teardown once its threads have stopped, and by a create
+    /// that failed before a controller held the index. Idempotent.</summary>
     public static void DestroyController(int controllerIndex)
     {
         // Before any unmap: this controller's poll thread reads the output
-        // view every iteration (issue #45).
+        // view every iteration (issue #45). The hold ends after it, so a
+        // sweep running now leaves the view until the thread has stopped.
         StopOutputPump(controllerIndex);
+        lock (s_held) s_held.Remove(controllerIndex);
 
+        lock (s_inputViews) ReleaseInputLocked(controllerIndex);
+        lock (s_outputViews) ReleaseOutputLocked(controllerIndex);
+        lock (s_pidStateViews) ReleasePidStateLocked(controllerIndex);
+    }
+
+    /// <summary>Releases every section and event the process maps for an
+    /// index no live controller holds. The device sweep's last step. A held
+    /// index keeps its objects: its controller's threads and the consumer's
+    /// submits still use them, and its Dispose releases them
+    /// (<see cref="s_held"/>). Each group decides under its own lock, so an
+    /// index a constructor holds before it maps is either released before
+    /// that mapping or kept. Safe to call multiple times.</summary>
+    public static void Cleanup()
+    {
         lock (s_inputViews)
         {
-            if (s_inputViews.TryGetValue(controllerIndex, out IntPtr v) && v != IntPtr.Zero)
-                UnmapViewOfFile(v);
-            s_inputViews.Remove(controllerIndex);
-
-            if (s_inputHandles.TryGetValue(controllerIndex, out IntPtr h) && h != IntPtr.Zero)
-                CloseHandle(h);
-            s_inputHandles.Remove(controllerIndex);
-
-            if (s_inputEvents.TryGetValue(controllerIndex, out IntPtr ev) && ev != IntPtr.Zero)
-                CloseHandle(ev);
-            s_inputEvents.Remove(controllerIndex);
-
-            ReleaseInputExtrasLocked(controllerIndex);
+            foreach (int i in Indexes(s_inputViews.Keys, s_inputHandles.Keys, s_inputEvents.Keys,
+                                      s_companionInputEvents.Keys, s_inputAckViews.Keys, s_inputAckHandles.Keys,
+                                      s_inputAckEvents.Keys, s_ownerPipes.Keys, s_versionViews.Keys, s_versionHandles.Keys))
+                if (!IsHeld(i)) ReleaseInputLocked(i);
         }
         lock (s_outputViews)
         {
-            if (s_outputViews.TryGetValue(controllerIndex, out IntPtr v) && v != IntPtr.Zero)
-                UnmapViewOfFile(v);
-            s_outputViews.Remove(controllerIndex);
-
-            if (s_outputHandles.TryGetValue(controllerIndex, out IntPtr h) && h != IntPtr.Zero)
-                CloseHandle(h);
-            s_outputHandles.Remove(controllerIndex);
-
-            if (s_outputEvents.TryGetValue(controllerIndex, out IntPtr oe) && oe != IntPtr.Zero)
-                CloseHandle(oe);
-            s_outputEvents.Remove(controllerIndex);
-            s_outputStartSeq.Remove(controllerIndex);
+            foreach (int i in Indexes(s_outputViews.Keys, s_outputHandles.Keys, s_outputEvents.Keys, s_outputStartSeq.Keys))
+                if (!IsHeld(i)) ReleaseOutputLocked(i);
         }
         lock (s_pidStateViews)
         {
-            if (s_pidStateViews.TryGetValue(controllerIndex, out IntPtr v) && v != IntPtr.Zero)
-                UnmapViewOfFile(v);
-            s_pidStateViews.Remove(controllerIndex);
-
-            if (s_pidStateHandles.TryGetValue(controllerIndex, out IntPtr h) && h != IntPtr.Zero)
-                CloseHandle(h);
-            s_pidStateHandles.Remove(controllerIndex);
+            foreach (int i in Indexes(s_pidStateViews.Keys, s_pidStateHandles.Keys))
+                if (!IsHeld(i)) ReleasePidStateLocked(i);
         }
     }
 
-    /// <summary>Releases all input and output sections owned by the process.
-    /// Safe to call multiple times. Called on process exit and on
-    /// HMContext.Dispose.</summary>
-    public static void Cleanup()
+    /// <summary>Every index the key sets name, copied, so the caller can
+    /// remove entries as it walks them.</summary>
+    private static HashSet<int> Indexes(params IEnumerable<int>[] keySets)
     {
-        // Before any unmap: poll threads for controllers the caller has NOT
-        // disposed are still dereferencing their output views (issue #45).
-        // This is the path the device sweep ends on, so a consumer that
-        // sweeps while holding a live controller reaches here with threads
-        // running.
-        StopAllOutputPumps();
-
-        lock (s_inputViews)
-        {
-            foreach (var v in s_inputViews.Values)
-                if (v != IntPtr.Zero) UnmapViewOfFile(v);
-            s_inputViews.Clear();
-            foreach (var h in s_inputHandles.Values)
-                if (h != IntPtr.Zero) CloseHandle(h);
-            s_inputHandles.Clear();
-            foreach (var ev in s_inputEvents.Values)
-                if (ev != IntPtr.Zero) CloseHandle(ev);
-            s_inputEvents.Clear();
-            foreach (var ev in s_companionInputEvents.Values)
-                if (ev != IntPtr.Zero) CloseHandle(ev);
-            s_companionInputEvents.Clear();
-            foreach (var v in s_inputAckViews.Values)
-                if (v != IntPtr.Zero) UnmapViewOfFile(v);
-            s_inputAckViews.Clear();
-            foreach (var h in s_inputAckHandles.Values)
-                if (h != IntPtr.Zero) CloseHandle(h);
-            s_inputAckHandles.Clear();
-            foreach (var ev in s_inputAckEvents.Values)
-                if (ev != IntPtr.Zero) CloseHandle(ev);
-            s_inputAckEvents.Clear();
-            foreach (var pipes in s_ownerPipes.Values)
-                foreach (var ph in pipes) CloseHandle(ph);
-            s_ownerPipes.Clear();
-            foreach (var v in s_versionViews.Values)
-                if (v != IntPtr.Zero) UnmapViewOfFile(v);
-            s_versionViews.Clear();
-            foreach (var h in s_versionHandles.Values)
-                if (h != IntPtr.Zero) CloseHandle(h);
-            s_versionHandles.Clear();
-        }
-        lock (s_outputViews)
-        {
-            foreach (var v in s_outputViews.Values)
-                if (v != IntPtr.Zero) UnmapViewOfFile(v);
-            s_outputViews.Clear();
-            foreach (var h in s_outputHandles.Values)
-                if (h != IntPtr.Zero) CloseHandle(h);
-            s_outputHandles.Clear();
-            foreach (var ev in s_outputEvents.Values)
-                if (ev != IntPtr.Zero) CloseHandle(ev);
-            s_outputEvents.Clear();
-            s_outputStartSeq.Clear();
-        }
-        lock (s_pidStateViews)
-        {
-            foreach (var v in s_pidStateViews.Values)
-                if (v != IntPtr.Zero) UnmapViewOfFile(v);
-            s_pidStateViews.Clear();
-            foreach (var h in s_pidStateHandles.Values)
-                if (h != IntPtr.Zero) CloseHandle(h);
-            s_pidStateHandles.Clear();
-        }
+        var all = new HashSet<int>();
+        foreach (var keys in keySets) all.UnionWith(keys);
+        return all;
     }
 
     // ── private helpers ───────────────────────────────────────────────────

@@ -427,6 +427,10 @@ public sealed partial class HMController : IDisposable
         ThrowIfDisposed();
         lock (_pidStateLock)
         {
+            // Again under the lock: StopThreads marks the controller
+            // disposed under it before the teardown unmaps the section, as
+            // it does under the submit lock for the submit paths.
+            ThrowIfDisposed();
             IntPtr view = EnsurePidStateViewLocked();
             if (view == IntPtr.Zero) return;
             SharedMemoryIO.WritePidPool(view, ref _pidStateSeqNo,
@@ -452,6 +456,7 @@ public sealed partial class HMController : IDisposable
         ThrowIfDisposed();
         lock (_pidStateLock)
         {
+            ThrowIfDisposed();
             IntPtr view = EnsurePidStateViewLocked();
             if (view == IntPtr.Zero) return default;
             var (ebi, stat, ram) = SharedMemoryIO.ReadPidBlockLoad(view);
@@ -485,6 +490,7 @@ public sealed partial class HMController : IDisposable
         ThrowIfDisposed();
         lock (_pidStateLock)
         {
+            ThrowIfDisposed();
             IntPtr view = EnsurePidStateViewLocked();
             if (view == IntPtr.Zero) return;
             SharedMemoryIO.WritePidBlockLoad(view, ref _pidStateSeqNo,
@@ -503,6 +509,7 @@ public sealed partial class HMController : IDisposable
         ThrowIfDisposed();
         lock (_pidStateLock)
         {
+            ThrowIfDisposed();
             IntPtr view = EnsurePidStateViewLocked();
             if (view == IntPtr.Zero) return;
             SharedMemoryIO.WritePidState(view, ref _pidStateSeqNo,
@@ -563,6 +570,10 @@ public sealed partial class HMController : IDisposable
         // packing is skipped for them: the presentation plan decides it
         // with the companion it makes (PresentationPlan.PacksGip).
         _packsGipBuffer = PresentationPlan.Of(profile.Inner).PacksGip;
+        // Held before it is mapped, so a sweep's release of this process's
+        // sections leaves the ones this controller's threads write until
+        // its own Dispose (SharedMemoryIO.Hold).
+        SharedMemoryIO.Hold(index);
         _inputView = SharedMemoryIO.EnsureInputMapping(index);
         _inputEvent = SharedMemoryIO.GetInputEvent(index);
         _companionInputEvent = _packsGipBuffer
@@ -2049,7 +2060,10 @@ public sealed partial class HMController : IDisposable
 
     /// <summary>The input section as a protocol host's channel: the
     /// controller's own view, event and sequence number, written under its
-    /// submit lock, which the host holds for every send.</summary>
+    /// submit lock, which the host holds for every send. Once the controller
+    /// is disposed it writes and waits for nothing, as RepeatLastFrame does:
+    /// a clock tick that outlived Dispose's bounded join of the host's clock
+    /// finds the section unmapped.</summary>
     private sealed class SectionChannel : Internal.IHostChannel
     {
         private readonly HMController _c;
@@ -2057,12 +2071,14 @@ public sealed partial class HMController : IDisposable
 
         public uint Write(byte[] data, int dataLen, byte[] extended, int extendedLen)
         {
+            if (_c._disposed) return _c._inputSeqNo;
             SharedMemoryIO.WriteInputFrame(_c._inputView, _c._inputEvent, ref _c._inputSeqNo,
                 data, dataLen, null, extendedData: extendedLen > 0 ? extended : null, extendedLen: extendedLen);
             return _c._inputSeqNo;
         }
 
-        public bool Delivered(uint seq, int waitMs) => SharedMemoryIO.WaitInputDelivered(_c.Index, seq, waitMs);
+        public bool Delivered(uint seq, int waitMs) =>
+            !_c._disposed && SharedMemoryIO.WaitInputDelivered(_c.Index, seq, waitMs);
 
         public bool AcknowledgesDelivery => SharedMemoryIO.InputAckSupported(_c.Index);
     }
@@ -2088,13 +2104,26 @@ public sealed partial class HMController : IDisposable
         // Issue #67: a key or button still held goes up before the device
         // goes away, as it would if the hardware were unplugged.
         try { SendReleaseFrames(); } catch { }
-        // Under the submit lock, so a submit that passed its in-lock check
-        // has finished writing before anything below unmaps the section,
-        // and every later one sees the controller disposed. No path holds
-        // this lock while it calls Dispose.
-        lock (_submitLock) _disposed = true;
+        StopThreads();
+        _context.OnControllerDisposing(this);
+    }
+
+    /// <summary>Marks the controller disposed and ends every thread it
+    /// started that uses its sections, so the teardown that follows can
+    /// unmap them. Dispose runs it, and so does a create that fails once
+    /// the controller is built (HMContext.CreateUnderLease), whose own
+    /// teardown then unmaps the sections.</summary>
+    internal void StopThreads()
+    {
+        // Under the submit and PID locks, so a submit or a PID call that
+        // passed its in-lock check has finished writing before the teardown
+        // unmaps the sections, and every later one sees the controller
+        // disposed. No path holds either lock while it calls Dispose, and
+        // no path takes the submit lock while it holds the PID lock.
+        lock (_submitLock)
+            lock (_pidStateLock) _disposed = true;
         // Idle frames stop before the output pump, so no repeat can
-        // land on a section this Dispose is about to unmap.
+        // land on a section the teardown is about to unmap.
         try { _idleClock?.Stop(Internal.TimeoutScale.Apply(500)); } catch { }
         try { _host?.Dispose(); } catch { }
         lock (_outputCtsLock)
@@ -2117,7 +2146,6 @@ public sealed partial class HMController : IDisposable
         // The thread is canceled and joined above, so this only needs to
         // forget it, not stop it again.
         try { Internal.SharedMemoryIO.UnregisterOutputPump(Index); } catch { }
-        _context.OnControllerDisposing(this);
     }
 
     [LibraryImport("kernel32.dll", SetLastError = true)]

@@ -668,7 +668,16 @@ public sealed class HMContext : IDisposable
                     Internal.MachineClaims.SetControllerValue(lease.Identity.Token, "InstanceId", instanceId);
 
                 var controller = new HMController(this, slot, lease, profile, instanceId, identityKey: lease.Identity.Key);
-                controller.StartProtocol();
+                try { controller.StartProtocol(); }
+                catch
+                {
+                    // The controller's output reader and any idle repeat or
+                    // protocol clock already run, and the teardown below
+                    // unmaps the sections they use. Nothing else would ever
+                    // stop them. The create's own failure is what goes out.
+                    try { controller.StopThreads(); } catch { }
+                    throw;
+                }
                 lock (_lock) _controllers[slot] = controller;
                 return controller;
             }

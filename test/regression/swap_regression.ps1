@@ -1682,9 +1682,24 @@ function Scenario-Xusb-Wgi-Single {
     }
 }
 
+# S45: a composite persona end to end through the real USB stack (issue
+# #39), then a sweep with that controller still alive. The probe's offline
+# run, which needs no device, checks that the sweep leaves the sections a
+# live controller's threads and submits use, and that a teardown stops a
+# protocol tick or a PID call before it unmaps. Both runs always run, and a
+# failure of either is reported.
 function Scenario-Usbip-E2E-Composite {
-    Invoke-Probe -Dir 'usbip_e2e_check' -Exe 'UsbipE2ECheck.exe' `
-                 -Message 'a composite persona failed end to end through the real USB stack (enumeration, the owner of the import connection, an import past full handshake slots, HID, audio endpoints, teardown, an attach racing the stale sweep or another import, or a FramesReceived handler that disposed its controller and waited for the audio pump), see probe stdout' -SkipCodes 2
+    $failed = @()
+    try {
+        Invoke-Probe -Dir 'usbip_e2e_check' -Exe 'UsbipE2ECheck.exe' -Arguments '--offline' -Tag 'offline' `
+                     -Message ('a sweep released a live controller''s sections under its idle repeat, protocol clock, output reader, a submit or a PID call, ' +
+                               'a protocol tick or a PID call wrote a section after the teardown, or StopThreads left a thread running (see probe stdout)')
+    } catch { $failed += $_.Exception.Message }
+    try {
+        Invoke-Probe -Dir 'usbip_e2e_check' -Exe 'UsbipE2ECheck.exe' `
+                     -Message 'a composite persona failed end to end through the real USB stack (enumeration, the owner of the import connection, an import past full handshake slots, HID, audio endpoints, teardown, an attach racing the stale sweep or another import, a FramesReceived handler that disposed its controller and waited for the audio pump, or a sweep with a live controller), see probe stdout' -SkipCodes 2
+    } catch { $failed += $_.Exception.Message }
+    if ($failed.Count -gt 0) { throw ($failed -join ' AND ') }
 }
 
 # S58: identity derivation (issue #60). No device. The default key

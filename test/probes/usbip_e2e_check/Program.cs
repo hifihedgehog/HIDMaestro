@@ -20,9 +20,12 @@
 //   8. A FramesReceived handler can dispose its controller with another,
 //      through DisposeControllersInParallel and then HMContext.Dispose,
 //      without waiting for the audio pump it runs on.
+//   9. A sweep with a live controller evicts its persona and leaves the
+//      process running, and so does a submit on that controller after it.
 //
 // Requires elevation. The transport is bundled, so no preinstall is
 // needed: a machine without it exercises the self-deploy path.
+// --offline needs neither (Program.Offline.cs).
 // Exit 0 PASS / 1 FAIL.
 
 
@@ -60,6 +63,12 @@ internal static partial class Program
             return DumpWire();
         if (Environment.GetCommandLineArgs().Contains("--hid-caps"))
             return HidCaps();
+        // --offline [case]: the sweep's release and a teardown against
+        // controllers on this probe's own sections. No device, no elevation.
+        var argv = Environment.GetCommandLineArgs();
+        int offline = Array.IndexOf(argv, "--offline");
+        if (offline >= 0)
+            return Offline(offline + 1 < argv.Length ? argv[offline + 1] : null);
 
         Console.WriteLine("=== USB/IP backend end-to-end (issue #39) ===");
 
@@ -162,14 +171,16 @@ internal static partial class Program
         double setMs = AudioHandlerDispose(ctx, HandlerDispose.Set, setMs: 0);
 
         // ── Sweep while still holding a live controller (issues #44, #45) ──
-        // This could not be tested until #45 was fixed. Sweeping unmaps every
-        // shared view the process owns, and a live controller's output poll
-        // thread reads its view on every iteration, so this exact sequence
-        // used to end the process with an access violation on a background
-        // thread (exit -1073741819, reproducible). SharedMemoryIO now stops
-        // and joins the registered poll threads before unmapping, so the
-        // sweep is survivable and its persona eviction is finally reachable
-        // from a test.
+        // This could not be tested until #45 was fixed. Sweeping used to
+        // unmap every shared view the process owns while a live controller's
+        // threads still used them: its output poll thread (#45), then the
+        // idle repeat dualsense-composite gained in 2.0.0, so this exact
+        // sequence ended the process with an access violation on a
+        // background thread (exit -1073741819). The sweep now leaves the
+        // sections a live controller holds, and its Dispose releases them,
+        // so the sweep is survivable and its persona eviction is reachable
+        // from a test. --offline checks the release itself, thread by
+        // thread.
         //
         // Both halves matter and both are asserted: the process must still be
         // alive afterwards (#45), and the composite persona must actually be
@@ -190,18 +201,23 @@ internal static partial class Program
             // default overload leaves a running program's controllers alone,
             // this program's own included (S71 section D). The Everything
             // scope removes every device and import on the machine, so it is
-            // the sweep that evicts a live persona and unmaps a live view.
+            // the sweep that evicts a live persona under a live controller.
             HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall: true);
 
-            Check("process survived a sweep that unmapped a live view", true,
+            Check("process survived a sweep with a live controller", true,
                   "reaching this line at all is the assertion");
+            // 2.5 s of the idle repeat's 4 ms frames on the swept
+            // controller's section.
             Thread.Sleep(2500);
             Check("composite persona evicted by the sweep",
                   FindHidDevicePath(0x054C, 0x0CE6) == null);
+            try { var s = new HMGamepadState(); live.SubmitState(in s); Check("SubmitState after the sweep is harmless", true); }
+            catch (Exception ex) { Check("SubmitState after the sweep is harmless", false, ex.GetType().Name); }
 
-            // Disposing after the sweep must also not fault: the poll thread
-            // is already stopped and the views are already gone, so this
-            // exercises the idempotent path.
+            // Disposing after the sweep must also not fault: the sweep
+            // already detached the device, so this exercises the idempotent
+            // path, and Dispose stops the controller's threads before it
+            // releases its sections.
             try { live.Dispose(); Check("dispose after sweep is clean", true); }
             catch (Exception ex) { Check("dispose after sweep is clean", false, ex.GetType().Name); }
         }
