@@ -2,17 +2,20 @@
 //
 // The live probes (LiveRecorder.cs) record what the 9bd6279 driver answered
 // to requests made through the HID class and the I/O manager. Their inputs
-// are not case 5's, so this mode re-drives the tree's harness
-// (driver_harness_tree.exe --script, native\harness\hm_script.c) with
-// exactly the requests each live call became, then holds every live output
-// against what the harness's driver produced. The profile configuration is
+// are not case 5's, so this mode re-drives a harness (hm_script.c, through
+// --script) with exactly the requests each live call became, then holds
+// every live output against what the harness's driver produced. The harness
+// is driver_harness_oracle.exe, 9bd6279's own sources from native\oracle,
+// the driver the live run recorded. --driver tree drives
+// driver_harness_tree.exe, built from the repository's driver sources,
+// instead, which holds the tree's driver to the live 9bd6279 answers. The profile configuration is
 // the plan case 5 recorded with (case5-plan.txt in the golden directory),
 // so the harness runs the values the SDK writes.
 //
 // Usage:
-//   compare-live <out dir> [--golden <dir>] [--native <dir>]
+//   compare-live <out dir> [--golden <dir>] [--native <dir>] [--driver oracle|tree]
 //                [--write-ledger <file>] [--pinned-ledger <file>]
-//   compare-live --selftest <scratch dir> [--golden <dir>] [--native <dir>]
+//   compare-live --selftest <scratch dir> [--golden <dir>] [--native <dir>] [--driver oracle|tree]
 // <out dir> holds live_batch.ps1's steps: s46\live-s46-sony-features.records,
 // switch-pro\live-switch-pro.records, ds3\live-ds3-sixaxis.records and
 // xusb\live-xusb-<profile>.records for each XUSB profile of the plan.
@@ -1424,7 +1427,7 @@ internal static class CompareLive
     public static int Run(string[] args, string defaultGolden, string defaultNative)
     {
         string? outDir = null, selftest = null, writeLedger = null, pinnedLedger = null;
-        string golden = defaultGolden, native = defaultNative;
+        string golden = defaultGolden, native = defaultNative, driver = "oracle";
         for (int i = 0; i < args.Length; i++)
         {
             string Value() => i + 1 < args.Length ? args[++i] : throw new ArgumentException($"{args[i]} needs a value.");
@@ -1435,6 +1438,10 @@ internal static class CompareLive
                 case "--selftest": selftest = Path.GetFullPath(Value()); break;
                 case "--write-ledger": writeLedger = Path.GetFullPath(Value()); break;
                 case "--pinned-ledger": pinnedLedger = Path.GetFullPath(Value()); break;
+                case "--driver":
+                    driver = Value();
+                    if (driver is not ("oracle" or "tree")) throw new ArgumentException($"compare-live: --driver is oracle or tree, not {driver}");
+                    break;
                 default:
                     if (outDir != null || args[i].StartsWith("--")) throw new ArgumentException($"compare-live: unexpected {args[i]}");
                     outDir = Path.GetFullPath(args[i]);
@@ -1442,7 +1449,9 @@ internal static class CompareLive
             }
         }
         string planPath = Path.Combine(golden, "case5-plan.txt");
-        string exe = Path.Combine(native, "driver_harness_tree.exe");
+        // The live run records 9bd6279's driver, so its own sources are the
+        // oracle by default.
+        string exe = Path.Combine(native, $"driver_harness_{driver}.exe");
         Console.WriteLine($"=== device_oracle_check compare-live, plan {planPath} ===");
         foreach (var need in new[] { planPath, exe }.Concat(pinnedLedger != null ? new[] { pinnedLedger } : Array.Empty<string>()))
             if (!File.Exists(need)) { Console.WriteLine($"  [MISSING] {need}"); return 2; }

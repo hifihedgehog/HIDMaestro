@@ -67,7 +67,7 @@
 //                                   list and --explain must catch
 //   selftest                      the change list's own rules (SelfTest.cs)
 //   compare <dirA> <dirB>
-//   compare-live <out dir> | --selftest <dir> [--golden <dir>] [--native <dir>]
+//   compare-live <out dir> | --selftest <dir> [--golden <dir>] [--native <dir>] [--driver oracle|tree]
 //                         the live run against the native harness
 //                         (CompareLive.cs), exit 2 when a step is missing
 // The golden directory defaults to golden\ beside this source. Every run
@@ -476,7 +476,7 @@ internal static class Program
         Console.WriteLine("       DeviceOracleCheck replay ... [--explain <base dump dir> --lane <lane> [--earlier]] [--write-changes <file>] [--profile-patch <file>]");
         Console.WriteLine("       DeviceOracleCheck selftest");
         Console.WriteLine("       DeviceOracleCheck compare <dirA> <dirB>");
-        Console.WriteLine("       DeviceOracleCheck compare-live <out dir> | --selftest <dir> [--golden <dir>] [--native <dir>]");
+        Console.WriteLine("       DeviceOracleCheck compare-live <out dir> | --selftest <dir> [--golden <dir>] [--native <dir>] [--driver oracle|tree]");
         Console.WriteLine("cases: " + string.Join(", ", Cases.Select(c => c.Name)));
         return 1;
     }
