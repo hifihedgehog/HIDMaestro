@@ -57,6 +57,17 @@
 //      arrives, which vhidmini.c:745-746 says a UMDF driver cannot read ("any read
 //      from output buffer would be reading garbage"). The harness hands the
 //      driver the caller's bytes.
+//      A collection that declares no feature report, FeatureReportByteLength
+//      0, passes no GET_FEATURE to the driver. Wine's hidclass.sys finds no
+//      feature report and fails the call itself (device.c:484). On the B0
+//      session's ps-classic every id at every length from 1 to 65 failed
+//      with ERROR_INVALID_FUNCTION, where 9bd6279's GET_FEATURE handler
+//      fails only with STATUS_BUFFER_TOO_SMALL, STATUS_NOT_SUPPORTED or
+//      STATUS_NO_SUCH_DEVICE (driver.c:3004-3460), so the handler never ran.
+//      Such a call is not driven. It must fail with nothing published, and
+//      its error goes to the ledger (LM1NoFeature): Wine's is
+//      ERROR_INVALID_PARAMETER and the live run's is ERROR_INVALID_FUNCTION,
+//      so only a live run settles it.
 //   M2 ReadFile of the collection's InputReportByteLength (the read length
 //      must be at least that, Microsoft Learn, Obtaining HID Reports) is one
 //      IOCTL_HID_READ_REPORT completion. The driver's bytes, up to the
@@ -251,6 +262,11 @@ internal static class CompareLive
         /// The review's "plus 1 without report ids" would count that byte
         /// twice.</summary>
         public int RefusalBound => FeatureLength;
+
+        /// <summary>Whether the descriptor declares any feature report. The
+        /// HID class passes no GET_FEATURE of a collection without one to the
+        /// driver (M1).</summary>
+        public bool DeclaresFeature => FeatureLength > 0;
 
         /// <summary>Whether the HID class may fail a GET_FEATURE before the
         /// driver sees it: a buffer shorter than FeatureReportByteLength
@@ -626,14 +642,19 @@ internal static class CompareLive
     const string LXusbIndex = "XUSB controller index 0: the companion's answers for index 0 are the live ones";
     const string LM1Refused = "M1 refusals: a GET_FEATURE the HID class may refuse, short or of an undeclared id, failed live with ERROR_INVALID_PARAMETER";
     const string LM1Undeclared = "M1 undeclared ids: with report ids, a GET_FEATURE of an id the descriptor does not declare fails live with nothing published";
+    const string LM1NoFeature = "M1 no feature report: a GET_FEATURE of a collection that declares none fails live before the driver with ERROR_INVALID_FUNCTION";
 
     static readonly string[] Mappings =
-        { LM0Start, LM1Length, LM1Caps, LM1Passes, LM1Byte0, LM1Refused, LM1Undeclared, LM2Length, LM2Byte0, LM3Passes, LM4Hid, LM4Xusb,
+        { LM0Start, LM1Length, LM1Caps, LM1Passes, LM1Byte0, LM1Refused, LM1Undeclared, LM1NoFeature, LM2Length, LM2Byte0, LM3Passes, LM4Hid, LM4Xusb,
           LM6Feature, LM6Read, LXusbIndex };
 
     /// <summary>ERROR_INVALID_PARAMETER: what HidD_GetFeature gives when the
     /// HID class refuses the call before the driver (ClassMayRefuseFeature).</summary>
     const uint ErrorInvalidParameter = 87;
+
+    /// <summary>ERROR_INVALID_FUNCTION: what HidD_GetFeature gave live on a
+    /// collection that declares no feature report (LM1NoFeature).</summary>
+    const uint ErrorInvalidFunction = 1;
 
     /// <summary>A failed GET_FEATURE whose error is neither the driver's own
     /// nor, where the HID class may refuse the call, the class's
@@ -773,7 +794,7 @@ internal static class CompareLive
     /// not driven.</summary>
     static (byte[] Input, int Length, byte[] Init)? FeatureRequest(PlanProfile p, byte id, int len)
     {
-        if (len == 0) return null;
+        if (len == 0 || !p.DeclaresFeature) return null;
         if (p.UsesReportIds) { var init = new byte[len]; init[0] = id; return (new[] { id }, len, init); }
         return (new byte[] { 0 }, len - 1, new byte[len - 1]);
     }
@@ -921,6 +942,21 @@ internal static class CompareLive
                     string at = $"length {call.Length}";
                     string idAt = $"id{call.Id:X2} {at}";
                     if (call.Overrun != null) rep.Unverified(group, "bytes past the caller's length changed (M1: the output length)", idAt);
+                    if (call.Length > 0 && !p.DeclaresFeature)
+                    {
+                        // M1: the HID class keeps it from the driver, so it
+                        // fails with nothing published. A call that succeeded
+                        // or published reached the driver after all.
+                        if (call.Ok || call.Notify.Length > 0)
+                            rep.Diff(where, $"{at}: ok {(call.Ok ? 1 : 0)} notify {Hex(call.Notify)} live, on a collection that declares no feature report");
+                        else
+                        {
+                            rep.Mapping(LM1NoFeature, call.Error == ErrorInvalidFunction, call.Error == ErrorInvalidFunction ? null : $"{g.Profile} {idAt}: error {call.Error}");
+                            rep.Unverified(group, "a collection with no feature report, not driven (M1)", idAt);
+                            rep.Same();
+                        }
+                        continue;
+                    }
                     if (FeatureRequest(p, call.Id, call.Length) == null)
                     {
                         if (call.Ok || call.Notify.Length > 0)
@@ -1778,6 +1814,32 @@ internal static class CompareLive
                 }
             return null;
         });
+        // M1: a collection that declares no feature report fails each
+        // GET_FEATURE before the driver, as the live ps-classic did with
+        // ERROR_INVALID_FUNCTION. One that succeeded reached the driver,
+        // which the harness does not model, so it is a [DIFF].
+        foreach (bool succeed in new[] { false, true })
+            Mutate(s46, succeed ? "a GET_FEATURE that succeeded on a collection with no feature report"
+                                : "every GET_FEATURE of a collection with no feature report failed with ERROR_INVALID_FUNCTION",
+                succeed ? 1 : 0, succeed ? "declares no feature report" : null, streams =>
+            {
+                int changed = 0;
+                foreach (var t in S46Calls(streams))
+                {
+                    if (Profile(plan, t.Profile).DeclaresFeature || t.Length == 0) continue;
+                    if (succeed)
+                    {
+                        t.S.Outs[t.I].Data[0] = 1;
+                        BitConverter.GetBytes(0u).CopyTo(t.S.Outs[t.I + 1].Data, 0);
+                        return $"{t.S.Name} length {t.Length} succeeded";
+                    }
+                    t.S.Outs[t.I].Data[0] = 0;
+                    BitConverter.GetBytes(ErrorInvalidFunction).CopyTo(t.S.Outs[t.I + 1].Data, 0);
+                    changed++;
+                }
+                return changed == 0 ? null : $"{changed} call(s) failed with error {ErrorInvalidFunction}";
+            });
+
         // M3: the HID class hands the driver the output report's length of
         // a longer write, so each write past it publishes the packet the
         // report's length does, as the live DualShock 3 run recorded.
@@ -1989,7 +2051,7 @@ internal static class CompareLive
                     if (call.Length > 0) buf[0] = call.Id;
                     if (ok) buf = FeatureSeen(p, call.Id, c);
                     s.Out("ok", new[] { (byte)(ok ? 1 : 0) });
-                    s.Out("error", U32(!driven ? 87u : Win32Error(c.Status)));
+                    s.Out("error", U32(!driven ? (call.Length > 0 && !p.DeclaresFeature ? ErrorInvalidFunction : ErrorInvalidParameter) : Win32Error(c.Status)));
                     s.Out("buffer", buf);
                     s.Out("notify", Ring(outs).Where(r => r[0] == 3).Select(r => r[1]).ToArray());
                 }
