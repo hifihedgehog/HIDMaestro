@@ -37,9 +37,9 @@ internal static partial class ProfileDefects
 
     // "layout/sticks[1].x: ...", HMLayoutValidator's form. A map's key is
     // written as System.Text.Json writes it (HMLayoutValidator.Member): a
-    // dash or a colon stays in a dotted segment, and a key with a dot or a
-    // space is a bracketed one.
-    [GeneratedRegex(@"^layout/(?<path>[^.\[\s']+(?:\.[^.\[\s']+|\[[0-9]+\]|\['.*?'\])*):(?=\s|$)")]
+    // dash or a colon stays in a dotted segment, an empty key is an empty
+    // one, and a key with a dot, a space or a newline is a bracketed one.
+    [GeneratedRegex(@"^layout/(?<path>[^.\[\s']+(?:\.[^.\[\s']*|\[[0-9]+\]|\['[\s\S]*?'\])*):(?=\s|$)")]
     private static partial Regex LayoutPrefixed();
 
     [GeneratedRegex(@"^Profile '[^']*':\s+")]

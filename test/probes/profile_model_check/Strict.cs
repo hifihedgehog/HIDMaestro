@@ -431,6 +431,19 @@ internal static class Strict
             o["layout"]!["pads"]!.AsObject()["up left"] = JsonNode.Parse("{\"role\":\"dpad_up\",\"buttonIndex\":99}");
             return o.ToJsonString();
         }, "$.layout.pads['up left'].buttonIndex");
+        // An empty key is an empty dotted step and a newline stays inside
+        // its brackets, as System.Text.Json writes them. At f00f0482 both
+        // were refused at $.layout.
+        Add("an empty dance pad key, written null", "xbox-360-dance-pad", o =>
+        {
+            o["layout"]!["pads"]!.AsObject()[""] = null;
+            return o.ToJsonString();
+        }, "$.layout.pads.");
+        Add("a dance pad key with a newline, on a button the descriptor lacks", "xbox-360-dance-pad", o =>
+        {
+            o["layout"]!["pads"]!.AsObject()["up\nleft"] = JsonNode.Parse("{\"role\":\"dpad_up\",\"buttonIndex\":99}");
+            return o.ToJsonString();
+        }, "$.layout.pads['up\nleft'].buttonIndex");
         Add("a shifter gear key with a dot, written null", "thrustmaster-th8a-shifter", o =>
         {
             o["layout"]!["hPatternGears"]!.AsObject()["1.5"] = null;
