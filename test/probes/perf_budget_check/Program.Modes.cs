@@ -196,6 +196,10 @@ internal static partial class Program
             }
             var hidInterfaces = HidInterfaceNumbers(w.LastData.ToArray());
             if (hidInterfaces.Count == 0) { Check($"{p.Text}: a HID interface", false, "the configuration declares none"); return; }
+            // Each SET and GET pair goes to the interfaces that declare its
+            // feature report, as SDL sends it to the one that carries the
+            // vendor report. Another interface stalls the SET.
+            var measured = new HashSet<byte>();
             foreach (byte iface in hidInterfaces)
             {
                 if (w.WaitFor(w.SubmitControlIn(0x81, 0x06, 0x2200, iface, 4096)) != 0)
@@ -217,6 +221,8 @@ internal static partial class Program
                 foreach (var set in p.Reports)
                 {
                     byte id = set[0];
+                    if (!declared.ContainsKey(id)) continue;
+                    measured.Add(id);
                     // A descriptor without report IDs puts no ID byte on the
                     // wire, so the 0 hidapi carries in front goes.
                     var data = ids ? set : set[1..];
@@ -234,6 +240,9 @@ internal static partial class Program
                     }, timeGetOnly: true, allocations: true);
                 }
             }
+            foreach (var set in p.Reports)
+                if (!measured.Contains(set[0]))
+                    Check($"{p.Text}: feature report 0x{set[0]:X2}", false, "no HID interface declares it");
         }
         finally
         {
