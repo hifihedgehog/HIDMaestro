@@ -29,6 +29,8 @@
 //   - a device node with no index or no Controller<index> key fails the
 //     start in both drivers, and a key without a report descriptor the
 //     HID driver's
+//   - a key without the identity values gives zeros and no string, not
+//     an Xbox 360 pad's
 //   - no entry and a hardware value whose section carries another tag fails
 //     the start
 //   - a blob truncated, of format 3 or past a limit, and no
@@ -539,8 +541,10 @@ internal static class FeatureContract
     /// which another controller owns, or started as an Xbox 360 pad on
     /// defaults, or read SOFTWARE\HIDMaestro. A key without a report
     /// descriptor fails the HID driver's start too, since no default one is
-    /// left. The configured devices beside them start, in the same
-    /// script.</summary>
+    /// left. A key without the identity values gives zeros and no string,
+    /// where 9bd6279's driver gave an Xbox 360 pad's 045E:028E, version
+    /// 0x0114 and "Controller (XBOX 360 For Windows)". The configured
+    /// devices beside them start, in the same script.</summary>
     static void Unconfigured(Checks c, IReadOnlyList<ControllerProfile> catalog, string tree, string oracle, string work)
     {
         var ds = catalog.First(p => p.Id == "dualsense-bt");
@@ -554,6 +558,8 @@ internal static class FeatureContract
             .Append(Block("sony", ds, dsValues, "ds-nokey", "nokey"))
             .Append(Block("sony", ds, With(dsValues, "FunctionMode", RegDword, BitConverter.GetBytes(1)), "ds-parent", "nokey", "parentkey"))
             .Append(Block("sony", ds, With(dsValues, "ReportDescriptor", RegBinary, null), "ds-nodescriptor"))
+            .Append(Block("sony", ds, With(With(With(With(dsValues, "VendorId", RegDword, null), "ProductId", RegDword, null),
+                "VersionNumber", RegDword, null), "ProductString", 1, null), "ds-noidentityvalues"))
             .Append(Block("xusb", xbox, xboxValues, "xbox"))
             .Append(Block("xusb", xbox, xboxValues, "xbox-noindex", "nohwindex", "noidentity"))
             .Append(Block("xusb", xbox, xboxValues, "xbox-nokey", "nokey"))
@@ -576,6 +582,10 @@ internal static class FeatureContract
         s.Append("stream parent-key\nversion absent\ndevice ds-parent 2 driver\n");
         s.Append("stream companion-parent-key\nversion absent\ndevice xbox-parent 2 companion\n");
         s.Append("stream no-descriptor\nversion absent\ndevice ds-nodescriptor 2 driver\n");
+        // IOCTL_HID_GET_STRING, HID_CTL_CODE(4) (hidport.h), for string 14,
+        // the product string under MsHidUmdf.
+        s.Append("stream no-identity-values\nversion absent\ndevice ds-noidentityvalues 2 driver\n").Append(Attributes)
+         .Append("ioctl 0x000B0013 0E000000 256\nremove\n");
 
         var t = RunScript(tree, plan, s.ToString(), work, "unconfigured-tree");
         var o = RunScript(oracle, plan, s.ToString(), work, "unconfigured-oracle");
@@ -630,6 +640,15 @@ internal static class FeatureContract
             () => (Added(r["companion-parent-key"]) == ConfigError, Added(r["companion-parent-key"]).ToString("X8")));
         Add("Controller2 without ReportDescriptor: the start fails, with no default descriptor to fall back on",
             () => (Added(r["no-descriptor"]) == ConfigError, Added(r["no-descriptor"]).ToString("X8")));
+        Add("Controller2 without VendorId, ProductId, VersionNumber and ProductString: attributes 0000:0000 version 0, no product string", () =>
+        {
+            var io = Of(r["no-identity-values"], "ioctl");
+            var a = io[0];
+            var str = io[1];
+            ushort ver = BinaryPrimitives.ReadUInt16LittleEndian(Body(a)[8..]);
+            bool ok = Added(r["no-identity-values"]) == 0 && Pid("no-identity-values") == "0000:0000" && ver == 0 && Info(str) == 0;
+            return (ok, $"attributes {Pid("no-identity-values")} version {ver:X4}, string {Status(str):X8} {Info(str)} bytes");
+        });
         return res;
     }
 

@@ -2874,31 +2874,17 @@ EvtDeviceAdd(
     ctx->Contract = contract;
     for (SIZE_T i = 0; i < ARRAYSIZE(token); i++) ctx->IdentityToken[i] = token[i];
 
-    /* The HID descriptor's fixed fields. The report descriptor comes from
-     * Controller<N> alone: there is no default one. */
+    /* The HID descriptor's fixed fields. The report descriptor, the
+     * attributes, the input length and the strings come from Controller<N>
+     * alone: there is no default device. */
     ctx->HidDescriptor.bLength          = 0x09;
     ctx->HidDescriptor.bDescriptorType  = 0x21;
     ctx->HidDescriptor.bcdHID           = 0x0100;
     ctx->HidDescriptor.bCountry         = 0x00;
     ctx->HidDescriptor.bNumDescriptors  = 0x01;
     ctx->HidDescriptor.DescriptorList[0].bReportType   = 0x22;
-
     ctx->HidDeviceAttributes.Size          = sizeof(HID_DEVICE_ATTRIBUTES);
-    ctx->HidDeviceAttributes.VendorID      = 0x045E;  /* Microsoft */
-    ctx->HidDeviceAttributes.ProductID     = 0x028E;  /* Xbox 360 Controller */
-    ctx->HidDeviceAttributes.VersionNumber = 0x0114;
 
-    /* Default input report byte length (Report ID + data) */
-    ctx->InputReportByteLength = 17; /* safe default */
-
-    /* Default product string */
-    {
-        static const WCHAR defaultStr[] = L"Controller (XBOX 360 For Windows)";
-        RtlCopyMemory(ctx->ProductString, defaultStr, sizeof(defaultStr));
-        ctx->ProductStringBytes = sizeof(defaultStr);
-    }
-
-    /* Read config from registry (overrides defaults if present) */
     if (!ReadConfigFromRegistry(ctx))
         return STATUS_DEVICE_CONFIGURATION_ERROR;
 
@@ -2956,10 +2942,11 @@ EvtDeviceAdd(
     }
 
     /*
-     * Set BusReportedDeviceDesc so joy.cpl shows the profile name.
+     * Set BusReportedDeviceDesc so joy.cpl shows the profile name, when
+     * the profile has one.
      * DEVPKEY_Device_BusReportedDeviceDesc = {540b947e-8b40-45bc-a8a2-6a0b894cbda2}, 4
      */
-    {
+    if (ctx->ProductStringBytes > 0) {
         static const DEVPROPKEY busDescKey = {
             { 0x540b947e, 0x8b40, 0x45bc, { 0xa8, 0xa2, 0x6a, 0x0b, 0x89, 0x4c, 0xbd, 0xa2 } },
             4
