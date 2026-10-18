@@ -135,7 +135,11 @@ static void StreamRandomStates(void)
 
 /* Output commands 1, 2, 3, 9 and 10 at lengths 0 to 49, and the
  * 0x00-led 49-byte form, through one write IOCTL. Each is followed by
- * the ring slot PublishOutput wrote. */
+ * the ring slot PublishOutput wrote. These are the driver's inputs, not a
+ * host's writes: live, HID class hands the driver the output report's
+ * declared length, cutting a longer write and refusing a shorter one
+ * (Wine hidclass.sys device.c:484, 500-506, and the B0 recording), so
+ * only the 48-byte form reaches it from a program. */
 static void StreamOutput(int viaSetOutput)
 {
     Ctl c;

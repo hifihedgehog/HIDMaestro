@@ -190,7 +190,10 @@ static void StreamGetInputAfterReply(void)
 }
 
 /* One subcommand id at every argument length the 49-byte report allows,
- * delivered both cut to its length and padded to 49 as SDL pads it. */
+ * delivered both cut to its length and padded to 49 as SDL pads it. The
+ * cut writes are the driver's inputs here only: live, HID class hands the
+ * driver the report's declared length (Wine hidclass.sys device.c:484,
+ * 500-506), so a program's write arrives padded or not at all. */
 static void StreamSubcommand(int id)
 {
     Ctl c;
@@ -428,7 +431,11 @@ static void StreamRandom(int part, int reports)
  * ResetMCU 0x06 (:118-126). The 0x01 reports carry device info 0x02, an
  * SPI read and SetInputMode 0x30 as ConstructSubcommand lays them out
  * (:469-484). Lengths: the report id alone, the header, SDL's Bluetooth
- * 49 and USB 64 (:128-129), and their neighbors. */
+ * 49 and USB 64 (:128-129), and their neighbors. Those are the driver's
+ * inputs, not what HID class passes on for a program's write: live it
+ * hands the driver the declared report's length and refuses an ID the
+ * descriptor does not declare, as 0x80 is here (Wine hidclass.sys
+ * device.c:484, 500-506). */
 static void StreamGateClosed(PlanProfile *p, const char *label, DWORD pidValue, int viaSetOutput)
 {
     static const uint32_t lengths[] = { 1, 2, 11, 48, 49, 50, 64, 65 };
