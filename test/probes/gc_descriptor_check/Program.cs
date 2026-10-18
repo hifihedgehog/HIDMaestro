@@ -27,14 +27,16 @@
 // failing with Code 10.
 //
 // The malformed part copies gamecube-adapter with one mistake each and checks
-// that the device model refuses every copy at create, before anything
-// machine-wide, with an InvalidOperationException naming the profile, the
-// JSON path and the limit broken: an unknown field type or semantic, a field
-// wider than its block or report, a report larger than the extended lane, a
-// command rule longer than the OUT endpoint's packets, a null where a value
-// belongs, and their siblings. A HID descriptor string with an odd number
-// of hex digits, or a character that is not one, is refused the same way
-// with a FormatException that names the profile and the descriptor field.
+// that every copy is refused before anything machine-wide, naming the
+// profile, the JSON path and the limit broken: an unknown field type or
+// semantic, a field wider than its block or report, a report larger than
+// the extended lane, a command rule longer than the OUT endpoint's packets,
+// a null where a value belongs, and their siblings. A HID descriptor string
+// with an odd number of hex digits, or a character that is not one, is
+// refused the same way. A file from a directory gets every check at load,
+// so the load refuses each copy with a load issue. A copy the load passed
+// would be refused at create, by the device model check with an
+// InvalidOperationException, or a FormatException for the descriptor.
 //
 // Members newer than b4d29d9 are reached by reflection, so the probe builds
 // against b4d29d9 and fails there at run time.
@@ -168,10 +170,23 @@ internal static class Program
         foreach (var p in ctx.AllProfiles)
         {
             count++;
-            try { validate.Invoke(inner.GetValue(p), null); }
+            try { validate.Invoke(inner.GetValue(p), new object[] { true }); }
             catch (TargetInvocationException ex) { failures.Append($" {p.Id}: {ex.InnerException?.Message}"); }
         }
         Probe.Check($"every catalog profile compiles as a device model ({count})", failures.Length == 0, failures.ToString());
+    }
+
+    /// <summary>A copy the load refused. A file from a directory gets every
+    /// check at load, so a mistake the device model would refuse at create
+    /// is refused there instead, before any create: a Refused load issue
+    /// that names the copy, whose reason starts with the text the create's
+    /// refusal carried after the profile's name.</summary>
+    static void CheckLoadRefusal(HMContext ctx, string id, string title, string expect)
+    {
+        var issue = ctx.ProfileLoadIssues.FirstOrDefault(x => x.ProfileId == id);
+        Probe.Check($"refused: {title}",
+            issue is { Kind: HMProfileLoadIssueKind.Refused } && issue.Reason.StartsWith(expect, StringComparison.Ordinal),
+            issue == null ? "the copy did not load and no load issue names it" : $"{issue.Kind} at {issue.JsonPath}: {issue.Reason}");
     }
 
     /// <summary>One mistake each in a copy of gamecube-adapter, and the text
@@ -769,7 +784,7 @@ internal static class Program
                 if (p == null) result = "did not load";
                 else
                 {
-                    try { validate.Invoke(inner.GetValue(p), null); }
+                    try { validate.Invoke(inner.GetValue(p), new object[] { true }); }
                     catch (TargetInvocationException ex) { result = $"{ex.InnerException?.GetType().Name}: {ex.InnerException?.Message}"; }
                 }
                 Probe.Check($"compiles: {s_accepted[i].Name}", result == "accepted", result);
@@ -781,13 +796,13 @@ internal static class Program
                 var p = ctx.GetProfile(id);
                 if (p == null)
                 {
-                    Probe.Check($"refused: {title}", false, "the profile did not load");
+                    CheckLoadRefusal(ctx, id, title, expect);
                     continue;
                 }
                 string want = $"Profile '{id}': {expect}";
                 try
                 {
-                    validate.Invoke(inner.GetValue(p), null);
+                    validate.Invoke(inner.GetValue(p), new object[] { true });
                     Probe.Check($"refused: {title}", false, "accepted");
                 }
                 catch (TargetInvocationException ex)
@@ -805,13 +820,13 @@ internal static class Program
                 var p = ctx.GetProfile(id);
                 if (p == null)
                 {
-                    Probe.Check($"refused: {title}", false, "the profile did not load");
+                    CheckLoadRefusal(ctx, id, title, expect);
                     continue;
                 }
                 string want = $"Profile '{id}': {expect}";
                 try
                 {
-                    validate.Invoke(inner.GetValue(p), null);
+                    validate.Invoke(inner.GetValue(p), new object[] { true });
                     Probe.Check($"refused: {title}", false, $"accepted, {p.GetDescriptorBytes()?.Length} bytes");
                 }
                 catch (TargetInvocationException ex)
