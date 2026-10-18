@@ -294,7 +294,8 @@ public sealed class HMContext : IDisposable
     /// object with no device behind it. Its submits and PID calls return
     /// normally and reach nothing. Its output events stop.
     /// <see cref="HMController.DriverVersion"/> is null,
-    /// <see cref="HMController.ReleasesOnConsumerExit"/> is false, and a
+    /// <see cref="HMController.DeliversEveryReport"/> and
+    /// <see cref="HMController.ReleasesOnConsumerExit"/> are false, and a
     /// keyboard or mouse submit no longer waits for delivery. The device
     /// does not come back. Dispose the controller: until then it keeps its
     /// transport index and its sections.</para></summary>

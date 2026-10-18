@@ -72,8 +72,12 @@ public sealed partial class HMController : IDisposable
     /// <summary>The version of the HIDMaestro driver this controller runs
     /// on, as the driver reports it in <c>Global\HIDMaestroVersion&lt;N&gt;</c>.
     /// Null until the driver has started the device, on a driver older than
-    /// 2.0.0, which does not report one, and on a composite persona, which
-    /// runs on the USB/IP transport instead of the HIDMaestro driver.</summary>
+    /// 2.0.0, which does not report one, on a composite persona, which
+    /// runs on the USB/IP transport instead of the HIDMaestro driver, and
+    /// once this program's own
+    /// <see cref="HMContext.RemoveAllVirtualControllers(HMCleanupScope, bool)"/>
+    /// with <see cref="HMCleanupScope.Everything"/> has removed the
+    /// device.</summary>
     public Version? DriverVersion => Internal.SharedMemoryIO.DriverVersion(Index)?.Version;
 
     /// <summary>The identity key this controller was created with. Every
@@ -1376,7 +1380,8 @@ public sealed partial class HMController : IDisposable
     /// in order instead of the latest one: a keyboard or mouse profile (or
     /// an "other" profile whose descriptor is a keyboard or mouse) on a
     /// driver that acknowledges delivery. Gamepads keep latest-wins, which
-    /// suits state.</summary>
+    /// suits state. False once this program's own Everything sweep has
+    /// removed the device.</summary>
     public bool DeliversEveryReport =>
         _deliverEvery && SharedMemoryIO.InputAckSupported(Index);
 
@@ -1385,7 +1390,8 @@ public sealed partial class HMController : IDisposable
     /// disposing it, however it ends: keys and buttons go up, relative
     /// motion stops, and an absolute pointer stays where it was. Without
     /// it a held key repeats until the device is removed.
-    /// <see cref="Dispose"/> sends the same release itself.</summary>
+    /// <see cref="Dispose"/> sends the same release itself. False once this
+    /// program's own Everything sweep has removed the device.</summary>
     public bool ReleasesOnConsumerExit =>
         _deliverEvery && SharedMemoryIO.ReleaseOnExitSupported(Index);
 
