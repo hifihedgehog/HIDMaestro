@@ -163,7 +163,7 @@ The `HidDescriptorBuilder`, `HMProfileBuilder`, and `HMDeviceExtractor` APIs let
 
 - **Clone and modify.** Take a DualSense (15 buttons) and ship a 16-button variant. Windows, Steam, and games still see "DualSense" because the VID/PID and product string are preserved.
 - **Build from scratch.** Define a flight stick, racing wheel, or arcade panel with arbitrary VID/PID, axis count, button count, and resolution. No hex editing.
-- **Capture a real device.** `HMDeviceExtractor.Extract` reads the HID descriptor Windows parsed from any device you have plugged in and returns a ready-to-deploy profile. Point it at the controller, get a matching virtual.
+- **Capture a real device.** `HMDeviceExtractor.Extract` reads the HID descriptor Windows parsed from any device you have plugged in and returns a ready-to-deploy profile. Point it at the controller, get a matching virtual. It reads the bus from the parent devnode's compatible IDs, as hidapi and SDL do, so a Bluetooth controller extracts as Bluetooth with its transport.
 
 ```csharp
 // Clone a DualSense and add a button

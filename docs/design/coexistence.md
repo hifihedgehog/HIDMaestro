@@ -91,7 +91,7 @@ The identity claim `HIDMaestro.Identity.<token>` is taken before any PnP work. A
 
 A v1.12.0 program takes no identity claim. When a present devnode carries the identity's token and no record lists it, the create asks the census whether a running v1.12.0 program holds the devnode's `ControllerIndex` (the rule under Sweeps). While one does, the create is refused with the same exception.
 
-A create that fails gives back everything it took before it throws: a UMDF2 controller's devices are removed, its sections, events and owner pipe closed, its configuration key deleted and its registry ledger holds released, then its record entry, identity claim and index claim go, keyed or keyless, so a retry or another program can take the index at once. A composite's device is disposed and its emulator's threads stop, even when its constructor threw. A create refused because a running v1.12.0 program took the index during the create, or because the device of a running program, or of one whose owner cannot be known, holds the ParentIdPrefix, removes nothing of that program: it releases only what the refused call itself made.
+A create that fails gives back everything it took before it throws: a UMDF2 controller's devices are removed, its sections, events and owner pipe closed, its configuration key deleted and its registry ledger holds released, then its record entry, identity claim and index claim go, keyed or keyless, so a retry or another program can take the index at once. The devices go by the parent's instance ID, which `SetupController` hands the cleanup as soon as the registration gives it, so a parent under `ROOT\HIDClass`, which no sweep by index reaches, goes too when the create throws on a failed start. A composite's device is disposed and its emulator's threads stop, even when its constructor threw. A create refused because a running v1.12.0 program took the index during the create, or because the device of a running program, or of one whose owner cannot be known, holds the ParentIdPrefix, removes nothing of that program: it releases only what the refused call itself made.
 
 `ClearParentIdPrefixRivals` keeps the 0xCA invariant: never two parents with one ParentIdPrefix. A present rival is removed only when its owner is provably dead. When its owner is running, here or in another program, or cannot be known, the create is refused with `HMResourceInUseException` instead, and the message names the rival devnode. When the owner cannot be known, it also names the cleanup call that removes the device. A rival that is not present is removed as before, because a ROOT record re-enumerates at boot.
 
@@ -496,7 +496,7 @@ Controllers and events:
 - `HMButton` bits 23 and 24 gain names, `LeftTriggerClick` and `RightTriggerClick`. A descriptor-built report maps them to buttons 24 and 25, as it mapped those bits before.
 - An output button mask wider than one byte reports its bits 8 and up on `OutputDecoded`.
 - `SubmitMouse` on a profile whose relative field excludes zero, such as `corsair-k70-rgb-mk2-low-profile`, no longer splits a movement the field cannot carry without end.
-- Sixteen catalog profiles send their data-only frames as a different input report or at a different length on a UMDF2 controller (The report a data frame fills): `logitech-wingman-formula-gp`, `gamecube-adapter-hid`, `joypad-gc-adapter`, `microsoft-designer-keyboard`, `genesis-nso`, `n64-nso`, `snes-nso`, `joycon-l`, `joycon-charging-grip`, `switch2-pro-controller`, `joypad-steam-input`, `ps3-remote`, `circuitpython-gamepad`, `pxn-vd6`, `thrustmaster-t16000m` and `vader-4-pro`. `HMProfile.InputReportSize` is 7 for `circuitpython-gamepad`, 63 for `pxn-vd6`, 9 for `thrustmaster-t16000m` and 9 for `vader-4-pro`. `ps3-remote`, `saitek-x52`, `thrustmaster-t80` and `joypad-steam-input` present corrected report descriptors.
+- Sixteen catalog profiles send their data-only frames as a different input report or at a different length on a UMDF2 controller (The report a data frame fills): `logitech-wingman-formula-gp`, `gamecube-adapter-hid`, `joypad-gc-adapter`, `microsoft-designer-keyboard`, `genesis-nso`, `n64-nso`, `snes-nso`, `joycon-l`, `joycon-charging-grip`, `switch2-pro-controller`, `joypad-steam-input`, `ps3-remote`, `circuitpython-gamepad`, `pxn-vd6`, `thrustmaster-t16000m` and `vader-4-pro`. `HMProfile.InputReportSize` is 7 for `circuitpython-gamepad`, 63 for `pxn-vd6`, 9 for `thrustmaster-t16000m` and 9 for `vader-4-pro`. `ps3-remote`, `saitek-x52`, `thrustmaster-t80` and `joypad-steam-input` present corrected report descriptors. `tinyusb-generic-gamepad` and `nacon-bigben-ps4` present descriptors Windows' HID parser accepts, where their devices failed their start, with new report shapes, and `nacon-bigben-ps4` takes the name and USB strings of the pad its IDs belong to (The report a data frame fills).
 
 JSON, VR and the other APIs:
 
@@ -579,10 +579,18 @@ Every descriptor walker keeps the global item stack of HID 1.11 section 6.2.2.7,
 
 Four catalog descriptors held main items of tag 0, which HID 1.11 section 6.2.2.4 does not define, and hid-tools refused them. Each now holds its source's bytes:
 
-- `ps3-remote`: the 67 bytes of hid-sony.c `ps3remote_rdesc`, which the profile names as its source. The catalog copy had 90, with bytes doubled.
+- `ps3-remote`: hid-sony.c `ps3remote_rdesc`, which the profile names as its source, with two items given a data byte (below). The catalog copy had 90 bytes, with bytes doubled.
 - `saitek-x52`: the 119 bytes of Launchpad bug 492056 comment 14. One byte was missing and three were changed.
 - `thrustmaster-t80`: byte 79 is 09, so Rx and Ry follow as in the T-Flight HOTAS 4 and T300RS descriptors the profile says it shares. No dump of a T80's own bytes is published.
 - `joypad-steam-input`: joypad-os `sinput_descriptors.h` at 9fa79f45. The copy had lost the three report ID values its macros stand for.
+
+Windows' own parser refused three catalog descriptors. HID class runs it on the descriptor at the device's start (`HidP_GetCollectionDescription`), so each of these devices failed its start with problem code 10. S37's `report_length_check` loads the machine's hidparse.sys into its process and runs that call on every descriptor the SDK gives the driver:
+
+- `ps3-remote`: hid-sony.c writes its Usage Minimum and one Input item with no data byte, and hidparse refuses both (0xC000001D). HID 1.11 section 6.2.2.2 gives such an item the value 0, so the profile writes both with a data byte of 0: 69 bytes and the same 12-byte report.
+- `tinyusb-generic-gamepad`: its reports were not whole bytes. It now serves TinyUSB's `TUD_HID_REPORT_DESC_GAMEPAD` with its report ID 2: a 12-byte input report of six 8-bit axes, an 8-bit hat and 32 buttons, and no output or feature report, where it declared a 14-byte input, a 9-byte output and a 2-byte feature report.
+- `nacon-bigben-ps4`: Linux's fixed descriptor, whose Feature item has no usage. It now serves the descriptor the pad serves (hid-bigbenff.c): a 27-byte input report with X, Y, Z and Rz and with L2 and R2 as buttons 7 and 8, beside 8-byte vendor output and feature reports, where it declared a 35-byte input report. 146B:0902 is BigBen's wired game pad for the PS3, so the profile is now "BigBen Game Pad for PS3", with "Bigben Interactive" and "Bigben Game Pad" as its USB strings. Its id is unchanged.
+
+The GameCube adapter profiles stay refused, as the real adapter's descriptor is.
 
 Sixteen profiles send a different data report on a UMDF2 controller:
 
