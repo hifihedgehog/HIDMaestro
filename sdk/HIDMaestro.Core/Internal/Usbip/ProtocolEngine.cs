@@ -482,6 +482,13 @@ internal sealed unsafe class ProtocolEngine
         {
             var img = _images[w.Memory]!;
             uint address = w.Address.Read(cmd);
+            if (w.Flags is { } flags)
+            {
+                int bits = 0;
+                foreach (var (b, bit) in flags) if (cmd[b] != 0) bits |= 1 << bit;
+                img[(int)(address % (uint)img.Length)] = (byte)bits;
+                continue;
+            }
             for (int k = 0; k <= w.Hi - w.Lo; k++) img[(int)((address + (uint)k) % (uint)img.Length)] = cmd[w.Lo + k];
         }
     }

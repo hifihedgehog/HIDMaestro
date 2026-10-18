@@ -69,6 +69,46 @@ internal static class Umdf2
         FrameCounter();
         AddressSpace();
         EmitFromMemory();
+        NonzeroFlags();
+    }
+
+    /// <summary>A write of one byte of flags, a bit for each nonzero command
+    /// byte: the DualShock 3's LED command gives each light a mode, 0 off, 1
+    /// on, 2 flashing, and its native output report keeps only a bit per
+    /// light, LED 1 at 0x02 to LED 4 at 0x10 (driver.c:1308-1316 at 9bd6279,
+    /// hid-sony.c LED_1).</summary>
+    static void NonzeroFlags()
+    {
+        Console.WriteLine("-- a byte of flags for the nonzero command bytes");
+        var (proto, refusal) = Compile(Folding("""
+        [ { "match": "01", "minLength": 8, "write": [ { "memory": "body", "address": { "value": 9 }, "nonzero": [ [7, 1], [6, 2], [5, 3], [4, 4] ] } ],
+            "emitOutput": { "reportId": "0x01", "size": 49, "memory": "body" } } ]
+        """));
+        if (proto == null) { Check("the flags profile compiles", false, refusal ?? ""); return; }
+        var e = new ProtocolEngine(proto, "HM-TEST-0001", 0, ProgramBinder.BindLayouts(proto.Model));
+        byte Led(params byte[] modes)
+        {
+            var cmd = new byte[48];
+            cmd[0] = 0x01;
+            modes.CopyTo(cmd, 4);
+            var r = e.HandleCommand(cmd, Stopwatch.GetTimestamp());
+            var dst = new byte[64];
+            return r.Emit < 0 ? (byte)0xFF : (e.BuildEmit(r.Emit, cmd, dst) == 49 ? dst[10] : (byte)0xFE);
+        }
+        byte on = Led(1, 0, 2, 1);
+        Check("LED modes 1, 0, 2, 1 for lights 4 to 1 set bits 0x10, 0x04 and 0x02", on == 0x16, $"0x{on:X2}");
+        byte off = Led(0, 0, 0, 0);
+        Check("the next command's flags replace them", off == 0x00, $"0x{off:X2}");
+        foreach (var (what, write, path) in new[]
+        {
+            ("from and nonzero together", """{ "memory": "body", "address": { "value": 9 }, "from": "4-7", "nonzero": [ [4, 1] ] }""", "write[0]"),
+            ("a bit past 7", """{ "memory": "body", "address": { "value": 9 }, "nonzero": [ [4, 8] ] }""", "write[0].nonzero[0]"),
+            ("a command byte past the minLength", """{ "memory": "body", "address": { "value": 9 }, "nonzero": [ [8, 1] ] }""", "write[0].nonzero[0]"),
+        })
+        {
+            var (_, r) = Compile(Folding($$"""[ { "match": "01", "minLength": 8, "write": [ {{write}} ] } ]"""));
+            Check($"refused with its path: {what}", r?.Contains($"protocol.commands.rules[0].{path}", StringComparison.Ordinal) == true, r ?? "accepted");
+        }
     }
 
     /// <summary>A profile on the descriptor without report IDs whose

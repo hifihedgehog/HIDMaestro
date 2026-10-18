@@ -98,6 +98,13 @@ internal static partial class RuleChecks
         yield return E("a null memory write", $"{R0}.write[0]", Rule("{\"match\":\"7F\",\"minLength\":16,\"write\":[null]}"));
         yield return E("a write to a memory that does not exist", $"{R0}.write[0].memory", Rule("{\"match\":\"7F\",\"minLength\":16,\"write\":[{\"memory\":\"eeprom\",\"address\":{\"le32\":4},\"from\":\"8-15\"}]}"));
         yield return E("a write from past the minLength", $"{R0}.write[0].from", Rule("{\"match\":\"7F\",\"minLength\":16,\"write\":[{\"memory\":\"flash\",\"address\":{\"le32\":4},\"from\":\"8-16\"}]}"));
+        yield return E("a write of both from and nonzero", $"{R0}.write[0]", Rule("{\"match\":\"7F\",\"minLength\":16,\"write\":[{\"memory\":\"flash\",\"address\":{\"le32\":4},\"from\":\"8-15\",\"nonzero\":[[8,1]]}]}"));
+        yield return E("a write with a null address", $"{R0}.write[0].address", Rule("{\"match\":\"7F\",\"minLength\":16,\"write\":[{\"memory\":\"flash\",\"address\":null,\"from\":\"8-15\"}]}"));
+        yield return E("a write of neither from nor nonzero", $"{R0}.write[0]", Rule("{\"match\":\"7F\",\"minLength\":16,\"write\":[{\"memory\":\"flash\",\"address\":{\"le32\":4}}]}"));
+        yield return E("an empty nonzero list", $"{R0}.write[0].nonzero", Rule("{\"match\":\"7F\",\"minLength\":16,\"write\":[{\"memory\":\"flash\",\"address\":{\"le32\":4},\"nonzero\":[]}]}"));
+        yield return E("a nonzero bit of 8", $"{R0}.write[0].nonzero[0]", Rule("{\"match\":\"7F\",\"minLength\":16,\"write\":[{\"memory\":\"flash\",\"address\":{\"le32\":4},\"nonzero\":[[8,8]]}]}"));
+        yield return E("a nonzero pair of three numbers", $"{R0}.write[0].nonzero[0]", Rule("{\"match\":\"7F\",\"minLength\":16,\"write\":[{\"memory\":\"flash\",\"address\":{\"le32\":4},\"nonzero\":[[8,1,2]]}]}"));
+        yield return E("a nonzero byte past the minLength", $"{R0}.write[0].nonzero[0]", Rule("{\"match\":\"7F\",\"minLength\":16,\"write\":[{\"memory\":\"flash\",\"address\":{\"le32\":4},\"nonzero\":[[16,1]]}]}"));
         yield return E("a decode that does not exist", $"{R0}.decode", Rule("{\"match\":\"7F\",\"decode\":\"nosuch\"}"));
         yield return E("a decode past the minLength", $"{R0}.decode", Rule("{\"match\":\"7F\",\"minLength\":9,\"decode\":\"rumble\"}"));
         yield return E("an empty reply", $"{R0}.reply", All(Remove($"{Cm}.replyPrefix"), Rule("{\"match\":\"7F\",\"reply\":[]}")));

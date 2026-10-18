@@ -139,7 +139,10 @@ internal sealed class CompiledProtocol
     internal sealed record Record(int At, int Size, int CountByte, int DivideBy, int KeyOffset, byte KeyValue,
                                   (int Reg, int Offset, int Bytes, bool BigEndian)[] Fields);
 
-    internal readonly record struct MemoryWrite(int Memory, NumberSource Address, int Lo, int Hi);
+    /// <summary>A write of command bytes Lo to Hi, or with
+    /// <see cref="Flags"/> one byte of bits set for the nonzero command
+    /// bytes.</summary>
+    internal readonly record struct MemoryWrite(int Memory, NumberSource Address, int Lo, int Hi, (int Byte, int Bit)[]? Flags = null);
 
     /// <summary>A number from the command or given.</summary>
     internal readonly record struct NumberSource(int Kind, int Offset, uint Value, int Max)
@@ -797,9 +800,27 @@ internal sealed class CompiledProtocol
                 string wat = $"{at}.write[{k}]";
                 var w = r.Write[k] ?? throw Fail($"{wat} is null.");
                 int mem = MemoryIndex(w.Memory, $"{wat}.memory");
+                if ((w.From == null) == (w.Nonzero == null)) throw Fail($"{wat} gives exactly one of from and nonzero.");
+                var address = Number(w.Address ?? throw Fail($"{wat}.address is null."), $"{wat}.address", rule.MinLength);
+                if (w.Nonzero != null)
+                {
+                    if (w.Nonzero.Count == 0) throw Fail($"{wat}.nonzero is empty.");
+                    var flags = new (int, int)[w.Nonzero.Count];
+                    for (int k2 = 0; k2 < flags.Length; k2++)
+                    {
+                        var pair = w.Nonzero[k2];
+                        if (pair is not { Count: 2 } || pair[1] < 0 || pair[1] > 7)
+                            throw Fail($"{wat}.nonzero[{k2}] is a [command byte, bit] pair with a bit of 0 to 7.");
+                        if (pair[0] < 0 || pair[0] >= rule.MinLength)
+                            throw Fail($"{wat}.nonzero[{k2}] reads command byte {pair[0]}, past the rule's minLength {rule.MinLength}.");
+                        flags[k2] = (pair[0], pair[1]);
+                    }
+                    writes.Add(new MemoryWrite(mem, address, 0, 0, flags));
+                    continue;
+                }
                 if (!ModelText.TryParseRange(w.From, out int lo, out int hi) || hi >= rule.MinLength)
                     throw Fail($"{wat}.from \"{w.From}\" is not a range inside the rule's minLength {rule.MinLength}.");
-                writes.Add(new MemoryWrite(mem, Number(w.Address, $"{wat}.address", rule.MinLength), lo, hi));
+                writes.Add(new MemoryWrite(mem, address, lo, hi));
             }
             rule.Writes = writes.ToArray();
         }

@@ -470,7 +470,15 @@ public sealed class MemoryWriteSpec
 
     /// <summary>The command bytes written, a range such as "16-31".</summary>
     [JsonPropertyName("from")]
-    public string From { get; set; } = "";
+    public string? From { get; set; }
+
+    /// <summary>In place of <see cref="From"/>: one byte, written whole,
+    /// whose bits are set for the command bytes that are nonzero, as
+    /// [command byte, bit] pairs. A command that gives each of a device's
+    /// lights a mode byte, of which the device keeps only on or off, writes
+    /// its light bits this way.</summary>
+    [JsonPropertyName("nonzero")]
+    public List<List<int>>? Nonzero { get; set; }
 }
 
 /// <summary>A report raised in place of the command: a program over the
