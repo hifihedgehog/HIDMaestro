@@ -294,6 +294,8 @@ internal static class Strict
             Directory.CreateDirectory(Path.Combine(dir, "models"));
             File.WriteAllText(Path.Combine(dir, "models", "k-in-models.json"),
                 "{ \"id\": \"user-in-models\", \"driverPid\": \"0x02FF\" }");
+            File.WriteAllText(Path.Combine(dir, "models", "identity-defaults.json"),
+                "{ \"entries\": [ { \"name\": \"user-entry\", \"match\": { \"vid\": \"0x1209\", \"pid\": [\"0x0001\"] }, \"model\": \"user-in-models\" } ] }");
 
             using var ctx = new HMContext();
             ctx.LoadDefaultProfiles();
@@ -332,6 +334,19 @@ internal static class Strict
             c.Check("nothing in the models folder is read as a profile", !loaded.Contains("user-in-models")
                     && !issues.Any(i => i.File.Contains("k-in-models", StringComparison.Ordinal)));
             c.Check("LoadProfilesFromDirectory counts the two profiles it added", added == 2, $"{added}");
+            // A directory loaded again: its own model files and identity
+            // entries are not repeats of themselves, and a repeat across
+            // loads is listed once. At f00f0482 the second load refused the
+            // models folder's files as loaded from themselves, and listed
+            // f-catalog-copy.json's repeat of the catalog's id a second time.
+            c.Run("loading a directory again adds nothing and lists nothing", () =>
+            {
+                int before = Api.Issues(ctx, "ProfileLoadIssues").Count;
+                int again = ctx.LoadProfilesFromDirectory(dir);
+                var issuesAfter = Api.Issues(ctx, "ProfileLoadIssues");
+                return (again == 0 && issuesAfter.Count == before,
+                        $"{again} added, {issuesAfter.Count - before} issue(s): " + string.Join("; ", issuesAfter.Skip(before).Select(i => $"{i.File} {i.Path} {i.Reason}")));
+            });
             // Across loads too: a later directory's copy of a catalog id that
             // spells its key ID. At 7d62b08f it was listed at $.id.
             c.Run("a later load's repeat of a catalog id is refused at the key the file writes", () =>

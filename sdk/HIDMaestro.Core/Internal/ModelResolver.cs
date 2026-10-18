@@ -394,6 +394,12 @@ internal sealed class ModelRegistry
                 string? text = null;
                 try
                 {
+                    // The same directory loaded again: what its files gave
+                    // the first time stays, as a profile file's profile does
+                    // (HMContext.Add), and nothing is a repeat of itself.
+                    if (_tables.Any(t => string.Equals(t.Label, file, StringComparison.OrdinalIgnoreCase))
+                        || _models.Values.Any(m => string.Equals(m.Source, file, StringComparison.OrdinalIgnoreCase)))
+                        continue;
                     text = File.ReadAllText(file);
                     if (Path.GetFileName(file).Equals(IdentityDefaultsName, StringComparison.OrdinalIgnoreCase))
                     {

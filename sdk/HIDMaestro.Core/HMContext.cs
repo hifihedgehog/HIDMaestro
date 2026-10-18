@@ -465,9 +465,12 @@ public sealed class HMContext : IDisposable
                 if (_profileSources.TryGetValue(inner.Id, out var earlier))
                 {
                     if (string.Equals(earlier, source, StringComparison.OrdinalIgnoreCase)) continue;
-                    _loadIssues.Add(new HMProfileLoadIssue(source, inner.Id, IdPath(inner.SourceFile),
+                    // Listed once, however often the file is loaded again.
+                    var repeat = new HMProfileLoadIssue(source, inner.Id, IdPath(inner.SourceFile),
                         $"the id '{inner.Id}' is already loaded from {earlier}. Give the profile an id of its own.",
-                        HMProfileLoadIssueKind.Refused));
+                        HMProfileLoadIssueKind.Refused);
+                    if (!_loadIssues.Any(x => x.File == repeat.File && x.JsonPath == repeat.JsonPath && x.Reason == repeat.Reason))
+                        _loadIssues.Add(repeat);
                     continue;
                 }
                 var pub = new HMProfile(inner);
