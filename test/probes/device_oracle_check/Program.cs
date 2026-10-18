@@ -167,6 +167,8 @@ internal static class Program
         }
         if (mode == "xusb-contract")
             return XusbContract.Run(Path.Combine(AppContext.BaseDirectory, "native"), ProbeDir()) == 0 ? 0 : 1;
+        if (mode == "switch-engine")
+            return args.Length == 1 ? SwitchEngine.Run(Path.Combine(ProbeDir(), "golden"), Path.Combine(AppContext.BaseDirectory, "native"), DefaultSeed) : Usage();
         if (mode != "record" && mode != "replay") return Usage();
         // The change list's own rules first, as selftest runs them.
         bool selfTestFailed = mode == "replay" && SelfTest.RunQuiet() != 0;
@@ -361,6 +363,9 @@ internal static class Program
                 failures++;
             }
         }
+        // A replay that runs case 5 also holds the Switch Pro's profile data
+        // to 9bd6279's responder (SwitchEngine.cs).
+        if (mode == "replay" && compared.Contains("case5-driver") && SwitchEngine.Run(golden, native, seed) != 0) failures++;
         foreach (var (id, text) in CatalogText())
             if (!catalog.TryGetValue(id, out var was) || was != text)
             {
@@ -500,6 +505,7 @@ internal static class Program
         Console.WriteLine("       DeviceOracleCheck replay ... [--explain <base dump dir> --lane <lane> [--earlier]] [--write-changes <file>] [--profile-patch <file>]");
         Console.WriteLine("       DeviceOracleCheck selftest");
         Console.WriteLine("       DeviceOracleCheck compare <dirA> <dirB>");
+        Console.WriteLine("       DeviceOracleCheck switch-engine");
         Console.WriteLine("       DeviceOracleCheck compare-live <out dir> | --selftest <dir> [--golden <dir>] [--native <dir>] [--driver oracle|tree]");
         Console.WriteLine("       DeviceOracleCheck feature-contract [--golden <dir>] [--native <dir>]");
         Console.WriteLine("cases: " + string.Join(", ", Cases.Select(c => c.Name)));

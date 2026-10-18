@@ -399,7 +399,7 @@ internal static class CompareLive
 
     /// <summary>A completion as hm_wdf.c records it in a script run: serial,
     /// status, information, then the whole output buffer.</summary>
-    readonly record struct Completion(string Tag, int Status, uint Info, byte[] Buffer)
+    internal readonly record struct Completion(string Tag, int Status, uint Info, byte[] Buffer)
     {
         public bool Ok => Status >= 0;
         public byte[] Reported => Buffer.AsSpan(0, (int)Math.Min(Info, (uint)Buffer.Length)).ToArray();
