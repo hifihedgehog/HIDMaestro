@@ -571,6 +571,14 @@ internal static class Strict
             o["axisCenters"]!.AsObject()["X.Y"] = 127;
             return o.ToJsonString();
         }, "$.axisCenters['X.Y']");
+        // A profile with no descriptor still has its extended reports
+        // checked: HMOutputEncoder encodes its extendedOutputReport. At
+        // 17e98e16 the load skipped every device check without a descriptor.
+        Add("a field type that is none, on an extendedOutputReport of a profile with no descriptor", "winwing-ursa-minor", o =>
+        {
+            o["extendedOutputReport"] = JsonNode.Parse("{\"reportId\":\"0x02\",\"size\":8,\"fields\":[{\"byte\":1,\"type\":\"uint9\",\"semantic\":\"leftMotor\"}]}");
+            return o.ToJsonString();
+        }, "$.extendedOutputReport.fields[0].type");
         // A field's initial is the byte the field starts from, a rolling
         // counter's included. At 17e98e16 256 started a uint8-rolling
         // counter at 0 and -1 at 255, with no word.

@@ -687,6 +687,9 @@ public sealed class ControllerProfile
             // the create's descriptor set would refuse it after the lease.
             if (RequiresUsbipBackend)
                 throw new ProfileDefectException("$.descriptor", "is required for the usbip backend: the HID interface presents it.");
+            // The extended reports need no descriptor, and HMOutputEncoder
+            // encodes a profile's extendedOutputReport whether it has one.
+            ValidateExtendedReports();
             return;
         }
         ValidateDeviceModel(checkModelGroups);
