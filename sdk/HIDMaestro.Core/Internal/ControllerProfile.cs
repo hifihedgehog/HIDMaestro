@@ -307,16 +307,39 @@ public sealed class ControllerProfile
         utf8 = ProfilePrograms.WithoutBom(utf8);
         var profile = JsonSerializer.Deserialize(utf8.Span, HMJsonContext.Default.ControllerProfile);
         if (profile == null) return null;
-        DeviceModelGroups groups;
-        try { groups = ProfilePrograms.Read(utf8); }
-        catch (Programs.FormException e) { throw new InvalidOperationException(e.ForProfile(profile.Id), e); }
-        profile.Protocol = groups.Protocol;
-        profile.StateBlock = groups.StateBlock;
-        profile.InputReports = groups.InputReports;
-        profile.LiveFeatureReports = groups.LiveFeatureReports;
-        if (groups.StateBlock?.Fields is { } fields)
-            profile.StateBlockFields = fields.Deserialize(HMJsonContext.Default.ListFieldSpec);
+        profile.ReadModelGroups(utf8);
         return profile;
+    }
+
+    /// <summary>Reads the model groups (protocol, stateBlock, inputReports,
+    /// liveFeatureReports) of the profile's file through the shared parse
+    /// the build tool runs, which this object's own JSON context leaves
+    /// out. A value the parse refuses throws
+    /// <see cref="InvalidOperationException"/> worded for
+    /// <see cref="ProfileDefects.Locate"/>, so a profile load lists it at
+    /// its path.</summary>
+    internal void ReadModelGroups(ReadOnlyMemory<byte> utf8)
+    {
+        DeviceModelGroups groups;
+        try { groups = ProfilePrograms.Read(ProfilePrograms.WithoutBom(utf8)); }
+        catch (Programs.FormException e) { throw new InvalidOperationException(e.ForProfile(Id), e); }
+        Protocol = groups.Protocol;
+        StateBlock = groups.StateBlock;
+        InputReports = groups.InputReports;
+        LiveFeatureReports = groups.LiveFeatureReports;
+        try
+        {
+            StateBlockFields = groups.StateBlock?.Fields is { } fields
+                ? fields.Deserialize(HMJsonContext.Default.ListFieldSpec) : null;
+        }
+        catch (JsonException j)
+        {
+            // The fields are read from their own node, so the reader's path
+            // starts inside them.
+            string inner = string.IsNullOrEmpty(j.Path) || j.Path == "$" ? "" : j.Path[1..];
+            throw new JsonException(j.Message, "$.stateBlock.fields" + inner, j.LineNumber, j.BytePositionInLine, j);
+        }
+        _model = null;
     }
 
     /// <summary>Issue #56. Feature-report answers this persona serves, for
@@ -532,6 +555,7 @@ public sealed class ControllerProfile
         _cachedDescriptor = null;
         _descriptorCached = false;
         _cachedReportBuilder = null;
+        _model = null;
         foreach (var spec in new[] { ExtendedReport, ExtendedOutputReport })
         {
             if (spec == null) continue;
@@ -777,6 +801,14 @@ public sealed class ControllerProfile
             HMJsonContext.Default.ControllerProfile)!;
         copy.SourceFile = SourceFile;
         copy.MarkBuiltInCode(BuiltInCode);
+        // The model groups are outside the JSON context, so the round trip
+        // drops them. The copy takes the same specs, which nothing changes
+        // once they are read, and compiles its own model from them.
+        copy.Protocol = Protocol;
+        copy.StateBlock = StateBlock;
+        copy.StateBlockFields = StateBlockFields;
+        copy.InputReports = InputReports;
+        copy.LiveFeatureReports = LiveFeatureReports;
         return copy;
     }
 
@@ -1771,6 +1803,10 @@ public sealed class ProfileDatabase
         profile.SourceFile = file;
         try
         {
+            // The model groups come from the shared parse, as
+            // ControllerProfile.Parse reads them, and a refusal of theirs is
+            // listed at its path like any other.
+            profile.ReadModelGroups(System.Text.Encoding.UTF8.GetBytes(text));
             profile.ValidateAtLoad();
         }
         catch (Exception e)

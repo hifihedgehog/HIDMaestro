@@ -246,6 +246,43 @@ internal static class Builder
                 bool got = (bool)Api.Prop(P(id), "BuildsItsOwnReports")!;
                 return (got == want, got.ToString());
             });
+        // A copy keeps the model groups its source reads (the input reports,
+        // the state block and the protocol), and a descriptor of other bytes
+        // or ClearDeviceModel drops them with the other keys tied to the
+        // reports. At a00fb18e the strict load never read them, so the
+        // composite built none of its reports.
+        {
+            const string sw2 = "switch2-pro-controller-composite";
+            static string Groups(HMProfile p) => $"inputReports {(p.Inner.InputReports == null ? "null" : p.Inner.InputReports.Count)}, "
+                + $"stateBlock {(p.Inner.StateBlock == null ? "null" : "set")}, protocol {(p.Inner.Protocol == null ? "null" : "set")}";
+            c.Run($"a FromProfile copy of {sw2} keeps its input reports, state block and protocol", () =>
+            {
+                try
+                {
+                    var copy = new HMProfileBuilder().FromProfile(P(sw2)).Id(sw2 + "-copy").Build();
+                    return (copy.BuildsItsOwnReports && copy.Inner.StateBlock != null && copy.Inner.Protocol != null, Groups(copy));
+                }
+                catch (Exception e) { return (false, $"{e.GetType().Name}: {e.Message}"); }
+            });
+            c.Run($"a copy of {sw2} given another descriptor drops its input reports, state block and protocol", () =>
+            {
+                try
+                {
+                    var copy = new HMProfileBuilder().FromProfile(P(sw2)).Id(sw2 + "-other").DescriptorHex(P("dualsense").DescriptorHex!).Build();
+                    return (!copy.BuildsItsOwnReports && copy.Inner.StateBlock == null && copy.Inner.Protocol == null, Groups(copy));
+                }
+                catch (Exception e) { return (false, $"{e.GetType().Name}: {e.Message}"); }
+            });
+            c.Run($"ClearDeviceModel on a copy of {sw2} drops its input reports, state block and protocol", () =>
+            {
+                try
+                {
+                    var copy = new HMProfileBuilder().FromProfile(P(sw2)).Id(sw2 + "-clear").ClearDeviceModel().Build();
+                    return (!copy.BuildsItsOwnReports && copy.Inner.StateBlock == null && copy.Inner.Protocol == null, Groups(copy));
+                }
+                catch (Exception e) { return (false, $"{e.GetType().Name}: {e.Message}"); }
+            });
+        }
         // A null descriptor clears the copy's, as it did before v2.0.0, with
         // the keys it governed, and the profile builds with none, as one
         // never given a descriptor does (its create refuses it). At 9dac4573

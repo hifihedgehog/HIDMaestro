@@ -225,6 +225,12 @@ internal static class Strict
             new("i-no-max.json", WithId("user-no-max", o => o["extendedReport"] = JsonNode.Parse(
                 "{\"reportId\":\"0x01\",\"size\":8,\"fields\":[{\"byte\":1,\"type\":\"uint16-trigger\",\"semantic\":\"leftTrigger\"}]}")), "user-no-max",
                 "Refused", "$.extendedReport.fields[0]", "max is required"),
+            // A model group's refusal, worded by the shared parse, is listed
+            // at its path. At a00fb18e the strict load never read the
+            // group, so the file loaded with its input reports dropped.
+            new("i-bad-input-report.json", WithId("user-bad-input-report", o => o["inputReports"] = JsonNode.Parse(
+                "[{\"name\":\"r\",\"reportId\":\"0x01\",\"size\":8,\"send\":\"clock\",\"program\":[]}]")), "user-bad-input-report",
+                "Refused", "$.inputReports", "needs a stateBlock"),
             new("j-good.json", WithId("user-good"), null, null, null, null),
         };
     }

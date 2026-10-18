@@ -125,8 +125,10 @@ public sealed class HMProfileBuilder
     /// reports), <c>sixaxisCompatible</c> (the DualShock 3 reports it
     /// carries), <c>featureStubs</c> and <c>valueSources</c> (answers for
     /// its feature reports), <c>nativeDescriptor</c> (the real device's copy
-    /// of it), and <c>usbConfiguration</c> with <c>backend</c>, whose HID class
-    /// descriptor declares its length and which the usbip backend serves.
+    /// of it), <c>usbConfiguration</c> with <c>backend</c>, whose HID class
+    /// descriptor declares its length and which the usbip backend serves,
+    /// and <c>protocol</c>, <c>stateBlock</c>, <c>inputReports</c> and
+    /// <c>liveFeatureReports</c> (its reports' contents and timing).
     /// The identity, the presentation (<c>driverMode</c>, <c>driverPid</c>,
     /// <c>versionNumber</c>, <c>companionOnly</c>) and the model the profile
     /// names stay. Set any dropped key again after the descriptor. The same
@@ -189,6 +191,19 @@ public sealed class HMProfileBuilder
         _copy.NativeDescriptor = null;
         _copy.UsbConfiguration = null;
         _copy.Backend = null;
+        DropModelGroups(_copy);
+    }
+
+    /// <summary>The model groups a profile's reports are built and answered
+    /// by: the protocol, the state block and the input and live feature
+    /// reports.</summary>
+    private static void DropModelGroups(ControllerProfile p)
+    {
+        p.Protocol = null;
+        p.StateBlock = null;
+        p.StateBlockFields = null;
+        p.InputReports = null;
+        p.LiveFeatureReports = null;
     }
 
     /// <summary>Set the input report size in bytes.</summary>
@@ -289,8 +304,9 @@ public sealed class HMProfileBuilder
     }
 
     /// <summary>Drops the device model keys tied to the descriptor's
-    /// reports, the answers and their value sources, and the model the
-    /// profile names or its "none", and keeps the presentation
+    /// reports, the answers and their value sources, the protocol, the
+    /// state block and the input and live feature reports, and the model
+    /// the profile names or its "none", and keeps the presentation
     /// (<c>driverPid</c>), which describes the device node rather than its
     /// reports. The model the identity the builder sets gives then applies,
     /// as for any profile made outside the catalog. Replacing the
@@ -302,6 +318,7 @@ public sealed class HMProfileBuilder
         _valueSources = null;
         _deviceModelFrom = null;
         _deviceModel = null;
+        if (_copy != null) DropModelGroups(_copy);
         return this;
     }
 
