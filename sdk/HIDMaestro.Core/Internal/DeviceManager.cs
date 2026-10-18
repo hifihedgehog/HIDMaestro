@@ -1246,6 +1246,13 @@ public static partial class DeviceManager
     static uint InstallQueue(uint timeoutMs) =>
         InstallQueueHook?.Invoke(timeoutMs) ?? CMP_WaitNoPendingInstallEvents(timeoutMs);
 
+    /// <summary>Whether Windows has a device installation pending, any
+    /// device's, at this moment: CMP_WaitNoPendingInstallEvents with 0
+    /// "tests whether there are pending installation events and returns
+    /// immediately" (Learn). A failed wait reads as none pending, so it
+    /// never holds back a verdict.</summary>
+    internal static bool InstallsPending() => InstallQueue(0) == WAIT_TIMEOUT;
+
     /// <summary>Waits up to <paramref name="installWaitMs"/> for Windows to
     /// have no device install pending, the registration gate's wait outside
     /// the lock.

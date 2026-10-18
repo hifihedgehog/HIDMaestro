@@ -13,8 +13,10 @@
 // also ends at once when the driver failed its add or start, by the
 // devnode's problem or the driver's error word, and the create then throws
 // HMDriverVersionException naming the value the driver could not read. A
-// device that started is checked for a driver whose range of protocols
-// holds 4.
+// failed start the devnode shows while Windows has a device installation
+// pending is held until the queue empties, and a wait that runs out takes
+// any problem the devnode shows as the verdict. A device that started is
+// checked for a driver whose range of protocols holds 4.
 //
 // The checks run the gate on machines of their own (DriverDeploy.Machine):
 // a driver store, a census and a lock the check gives, the deploy steps
@@ -254,19 +256,68 @@ internal static class Deploy
     /// <summary>The waits and the post-start check on a devnode the check
     /// gives (DeviceOrchestrator's DevnodeStatus, HidChildOf and
     /// DriverHalf), the real ones put back after.</summary>
+    /// <summary>Runs <paramref name="body"/> on a machine given by the
+    /// functions: a devnode's status, its HID child, the driver's half of
+    /// the version section, and Windows' installation queue, which answers
+    /// CMP_WaitNoPendingInstallEvents (none pending unless
+    /// <paramref name="installs"/> says otherwise).</summary>
     static T With<T>(Func<string, (bool, uint, uint)> status, Func<string, string?> child,
-                     Func<int, (int, int, Version?, int)> half, Func<T> body)
+                     Func<int, (int, int, Version?, int)> half, Func<T> body, Func<uint, uint>? installs = null)
     {
         var (s0, c0, h0) = (DeviceOrchestrator.DevnodeStatus, DeviceOrchestrator.HidChildOf, DeviceOrchestrator.DriverHalf);
+        var q0 = DeviceManager.InstallQueueHook;
         DeviceOrchestrator.DevnodeStatus = id => status(id);
         DeviceOrchestrator.HidChildOf = child;
         DeviceOrchestrator.DriverHalf = i => half(i);
+        DeviceManager.InstallQueueHook = installs ?? (_ => NonePending);
         try { return body(); }
-        finally { (DeviceOrchestrator.DevnodeStatus, DeviceOrchestrator.HidChildOf, DeviceOrchestrator.DriverHalf) = (s0, c0, h0); }
+        finally
+        {
+            (DeviceOrchestrator.DevnodeStatus, DeviceOrchestrator.HidChildOf, DeviceOrchestrator.DriverHalf) = (s0, c0, h0);
+            DeviceManager.InstallQueueHook = q0;
+        }
     }
+
+    // CMP_WaitNoPendingInstallEvents' answers: WAIT_OBJECT_0 and WAIT_TIMEOUT.
+    const uint NonePending = 0x0, Pending = 0x102;
 
     const uint HasProblem = 0x400, Started = 0x8;
     const string Node = @"ROOT\HIDCLASS\HM_0003";
+
+    /// <summary>Runs DeviceOrchestrator.AwaitCompanionInterface on a
+    /// companion the check gives: whether the interface is there at each
+    /// wait, the devnode's status and Windows' installation queue as the
+    /// waits go by. Returns the waits, the restarts between them and what
+    /// the call threw. By reflection, so the probe builds against an SDK
+    /// that lacks the members.</summary>
+    static (int Waits, int Restarts, Exception? Error) Companion(Func<int, bool> arrives, Func<int, (bool, uint, uint)> status, Func<int, uint> installs)
+    {
+        const System.Reflection.BindingFlags F = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public;
+        var t = typeof(DeviceOrchestrator);
+        var waitField = t.GetField("CompanionInterfaceWait", F) ?? throw new MissingMemberException("DeviceOrchestrator", "CompanionInterfaceWait");
+        var restartField = t.GetField("CompanionRestart", F) ?? throw new MissingMemberException("DeviceOrchestrator", "CompanionRestart");
+        var awaitInterface = t.GetMethod("AwaitCompanionInterface", F) ?? throw new MissingMethodException("DeviceOrchestrator", "AwaitCompanionInterface");
+        object? w0 = waitField.GetValue(null), r0 = restartField.GetValue(null);
+        int waits = 0, restarts = 0;
+        waitField.SetValue(null, (Func<string, int, bool>)((_, _) => arrives(++waits)));
+        restartField.SetValue(null, (Func<string, bool>)(_ => { restarts++; return true; }));
+        try
+        {
+            Exception? error = null;
+            With(_ => status(waits), _ => null, _ => (0, 0, null, 0), () =>
+            {
+                try { awaitInterface.Invoke(null, new object[] { @"SWD\HIDMAESTRO\HM_XUSB_7777", 3 }); }
+                catch (System.Reflection.TargetInvocationException x) { error = x.InnerException; }
+                return 0;
+            }, _ => installs(waits));
+            return (waits, restarts, error);
+        }
+        finally
+        {
+            waitField.SetValue(null, w0);
+            restartField.SetValue(null, r0);
+        }
+    }
 
     static void Start(Checks c)
     {
@@ -302,6 +353,127 @@ internal static class Deploy
                 return (wait == DeviceOrchestrator.StartWait.Failed && ms < 1000 && error.Message.Contains($"problem code {code}", StringComparison.Ordinal),
                         $"{wait} in {ms} ms: {error.Message}");
             });
+        // A record Windows flagged for reinstall comes back with
+        // CM_PROB_REINSTALL, then a failed start, until the install it queues
+        // restarts the device: S59 measured problem 10 for 100 ms on the
+        // Series pad's record after its package came back. At ba94d207 the
+        // first poll ended the create.
+        c.Run("a failed start while Windows has an installation pending does not end the wait, and the child that then appears ends it", () =>
+        {
+            int polls = 0;
+            var wait = With(_ => polls < 4 ? (true, HasProblem, 10u) : (true, Started, 0u),
+                            _ => ++polls >= 5 ? @"HID\HM_0003\1" : null, _ => (0, 0, null, 0),
+                            () => DeviceOrchestrator.WaitForHidChild(Node, 3, 10_000),
+                            _ => polls < 4 ? Pending : NonePending);
+            return (wait == DeviceOrchestrator.StartWait.Done && polls == 5, $"{wait} after {polls} polls");
+        });
+        c.Run("a parent that fails its start while an installation is pending does not end the child's start wait, and its start does", () =>
+        {
+            int polls = 0;
+            const string Child = @"HID\HM_0003\1";
+            var wait = With(id => id == Child ? (++polls >= 4 ? (true, Started, 0u) : (true, 0u, 0u)) : (polls < 3 ? (true, HasProblem, 10u) : (true, Started, 0u)),
+                            _ => Child, _ => (0, 0, null, 0),
+                            () => DeviceOrchestrator.WaitForDeviceStarted(Child, Node, 3, 10_000),
+                            _ => polls < 3 ? Pending : NonePending);
+            // polls counts the child's status reads, two a poll.
+            return (wait == DeviceOrchestrator.StartWait.Done && polls >= 4, $"{wait} after {polls} status reads");
+        });
+        // A failure that lasts the whole wait stands, an installation pending
+        // or not, so a device that never starts still fails the create.
+        c.Run("a failed start that outlasts the wait is the verdict while an installation stays pending", () =>
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var (wait, started) = With(_ => (true, HasProblem, 10u), _ => null, _ => (0, 0, null, 0),
+                () => (DeviceOrchestrator.WaitForHidChild(Node, 3, 300), DeviceOrchestrator.WaitForDeviceStarted(@"HID\HM_0003\1", Node, 3, 300)),
+                _ => Pending);
+            long ms = sw.ElapsedMilliseconds;
+            return (wait == DeviceOrchestrator.StartWait.Failed && started == DeviceOrchestrator.StartWait.Failed, $"{wait} and {started} in {ms} ms");
+        });
+        c.Run("the error word ends the wait at once even while an installation is pending", () =>
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var wait = With(_ => (true, HasProblem, 10u), _ => null, _ => (4, 4, new Version(2, 0, 0), 1),
+                () => DeviceOrchestrator.WaitForHidChild(Node, 3, 10_000), _ => Pending);
+            long ms = sw.ElapsedMilliseconds;
+            return (wait == DeviceOrchestrator.StartWait.Failed && ms < 1000, $"{wait} in {ms} ms");
+        });
+        // The queue is the hold's reason. A failure held for longer than any
+        // fixed grace, then a start, ends the wait on the child, and the poll
+        // at which the queue empties under a failure still showing ends it
+        // as failed.
+        c.Run("a failed start held 1.2 s while an installation stays pending, then the child: the wait follows the queue", () =>
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var wait = With(_ => sw.ElapsedMilliseconds < 1200 ? (true, HasProblem, 10u) : (true, Started, 0u),
+                            _ => sw.ElapsedMilliseconds >= 1250 ? @"HID\HM_0003\1" : null, _ => (0, 0, null, 0),
+                            () => DeviceOrchestrator.WaitForHidChild(Node, 3, 5_000),
+                            _ => sw.ElapsedMilliseconds < 1200 ? Pending : NonePending);
+            long ms = sw.ElapsedMilliseconds;
+            return (wait == DeviceOrchestrator.StartWait.Done && ms >= 1250, $"{wait} in {ms} ms");
+        });
+        c.Run("a failed start still showing when the installation queue empties ends the wait at that poll", () =>
+        {
+            int reads = 0;
+            var wait = With(_ => { reads++; return (true, HasProblem, 10u); }, _ => null, _ => (0, 0, null, 0),
+                            () => DeviceOrchestrator.WaitForHidChild(Node, 3, 10_000),
+                            _ => reads < 6 ? Pending : NonePending);
+            return (wait == DeviceOrchestrator.StartWait.Failed && reads == 6, $"{wait} after {reads} status reads");
+        });
+        // A held failure whose queued install fails moves to
+        // CM_PROB_FAILED_INSTALL (28), or stays at CM_PROB_REINSTALL (18)
+        // when Windows puts the install off. Neither is a failed start while
+        // the wait runs, since a device being installed shows 28 too, and
+        // neither device starts on its own, so the wait's end is the verdict.
+        // At f977bb39 both ended as a timeout, and the create went on with a
+        // device that never started.
+        foreach (uint after in new uint[] { 28, 18 })
+            c.Run($"a held failed start whose queued install ends in problem {after} fails the create when the wait runs out", () =>
+            {
+                int reads = 0;
+                var wait = With(_ => ++reads <= 3 ? (true, HasProblem, 10u) : (true, HasProblem, after), _ => null, _ => (0, 0, null, 0),
+                                () => DeviceOrchestrator.WaitForHidChild(Node, 3, 500),
+                                _ => reads <= 3 ? Pending : NonePending);
+                var started = With(_ => (true, HasProblem, after), _ => @"HID\HM_0003\1", _ => (0, 0, null, 0),
+                                   () => DeviceOrchestrator.WaitForDeviceStarted(@"HID\HM_0003\1", Node, 3, 300));
+                return (wait == DeviceOrchestrator.StartWait.Failed && reads > 3 && started == DeviceOrchestrator.StartWait.Failed,
+                        $"{wait} after {reads} status reads, the start wait {started}");
+            });
+        // The XUSB companion's three waits for its interface
+        // (AwaitCompanionInterface), each followed by a restart.
+        c.Run("a companion's failed start while an installation is pending does not fail the create, and the interface that then arrives ends the waits", () =>
+        {
+            var (waits, restarts, error) = Companion(w => w >= 2, w => w < 2 ? (true, HasProblem, 10u) : (true, Started, 0u), w => w < 2 ? Pending : NonePending);
+            return (error == null && waits == 2 && restarts == 1, $"{waits} wait(s), {restarts} restart(s), {error?.Message ?? "no error"}");
+        });
+        c.Run("a companion's failed start with no installation pending fails the create at its first wait", () =>
+        {
+            var (waits, restarts, error) = Companion(_ => false, _ => (true, HasProblem, 10u), _ => NonePending);
+            return (error != null && error.Message.Contains("problem code 10", StringComparison.Ordinal) && waits == 1 && restarts == 0,
+                    $"{waits} wait(s), {restarts} restart(s), {error?.Message ?? "no error"}");
+        });
+        // The last wait's verdict reads the devnode as that wait left it,
+        // before a third restart. At f977bb39 it read the devnode right after
+        // that restart's CM_Enable_DevNode.
+        c.Run("a companion's failed start that outlasts its three waits while an installation stays pending fails the create, read before a third restart", () =>
+        {
+            var (waits, restarts, error) = Companion(_ => false, _ => (true, HasProblem, 10u), _ => Pending);
+            return (error != null && error.Message.Contains("problem code 10", StringComparison.Ordinal) && waits == 3 && restarts == 2,
+                    $"{waits} wait(s), {restarts} restart(s), {error?.Message ?? "no error"}");
+        });
+        c.Run("a companion whose queued install ends in problem 28 fails the create at its last wait", () =>
+        {
+            var (waits, restarts, error) = Companion(_ => false, w => w < 2 ? (true, HasProblem, 10u) : (true, HasProblem, 28u), w => w < 2 ? Pending : NonePending);
+            return (error != null && error.Message.Contains("problem code 28", StringComparison.Ordinal) && waits == 3 && restarts == 2,
+                    $"{waits} wait(s), {restarts} restart(s), {error?.Message ?? "no error"}");
+        });
+        // A companion that shows no problem and never publishes its
+        // interface lets the create go on, and step 7 logs the XInput slot
+        // that never came.
+        c.Run("a companion with no problem and no interface after three waits lets the create go on, restarted three times", () =>
+        {
+            var (waits, restarts, error) = Companion(_ => false, _ => (true, 0u, 0u), _ => NonePending);
+            return (error == null && waits == 3 && restarts == 3, $"{waits} wait(s), {restarts} restart(s), {error?.Message ?? "no error"}");
+        });
         // A value the driver could not read names the device's problem code
         // too, the record a live run keeps of what Windows saw. At fe9134b9
         // only a failure with no error word named it.

@@ -1077,17 +1077,7 @@ internal static partial class DeviceOrchestrator
                 // fast hw; some XUSB coinstallers can take 1–4 s to register
                 // the interface even after the SwDeviceCreate callback fires.
                 // Scaling is layered on top of the 5 s base by DeviceManager.
-                // A companion whose start failed ends the wait within one
-                // poll and fails the create, as the HID device's start does:
-                // a restart does not mend a failed add or start.
-                for (int attempt = 0; attempt < 3; attempt++)
-                {
-                    if (CompanionInterfaceWait(xusbInstId, controllerIndex))
-                        break;
-                    if (StartFailed(xusbInstId, controllerIndex))
-                        throw StartError(xusbInstId, controllerIndex);
-                    DeviceManager.RestartDevice(xusbInstId);
-                }
+                AwaitCompanionInterface(xusbInstId, controllerIndex);
             }
             else if (!result.Success)
             {
@@ -1752,14 +1742,26 @@ internal static partial class DeviceOrchestrator
 
     /// <summary>The device's driver failed its add or start: the devnode
     /// reports one of the problems above, or the driver set its error word
-    /// in the controller's version section.</summary>
-    private static bool StartFailed(string instanceId, int controllerIndex)
+    /// in the controller's version section. A record Windows flagged for
+    /// reinstall (CONFIGFLAG_REINSTALL, which it sets when the driver
+    /// package the record named is removed, as a full sweep removes it)
+    /// comes back reporting CM_PROB_REINSTALL and then a failed start until
+    /// the install it queues restarts it. So while Windows has a device
+    /// installation pending a failed start is not yet final. With
+    /// <paramref name="final"/>, for a wait whose time ran out, any problem
+    /// the devnode reports is the verdict: a held failure whose queued
+    /// install then failed reads CM_PROB_FAILED_INSTALL (28), or still
+    /// CM_PROB_REINSTALL (18) when Windows put the install off, and neither
+    /// device starts on its own.</summary>
+    private static bool StartFailed(string instanceId, int controllerIndex, bool final = false)
     {
         if (DriverHalf(controllerIndex).ConfigError != 0) return true;
         var (present, status, problem) = DevnodeStatus(instanceId);
-        return present && (status & DN_HAS_PROBLEM) != 0
-            && problem is CM_PROB_FAILED_START or CM_PROB_FAILED_ADD or CM_PROB_FAILED_DRIVER_ENTRY
-                or CM_PROB_DRIVER_FAILED_LOAD or CM_PROB_FAILED_POST_START;
+        if (!present || (status & DN_HAS_PROBLEM) == 0) return false;
+        if (final) return true;
+        return problem is CM_PROB_FAILED_START or CM_PROB_FAILED_ADD or CM_PROB_FAILED_DRIVER_ENTRY
+                or CM_PROB_DRIVER_FAILED_LOAD or CM_PROB_FAILED_POST_START
+            && !DeviceManager.InstallsPending();
     }
 
     /// <summary>The ROOT path's wait for its HID child, inside
@@ -1776,6 +1778,32 @@ internal static partial class DeviceOrchestrator
     /// interface is there. A field, so a check gives it a machine.</summary>
     internal static Func<string, int, bool> CompanionInterfaceWait = (instanceId, controllerIndex) =>
         DeviceManager.WaitForDeviceInterface(instanceId, XusbInterfaceGuid, 5000, () => StartFailed(instanceId, controllerIndex));
+
+    /// <summary>The XUSB companion's restart between its waits. A field, so
+    /// a check counts the restarts.</summary>
+    internal static Func<string, bool> CompanionRestart = DeviceManager.RestartDevice;
+
+    /// <summary>Three waits for the companion's XUSB interface, with a
+    /// restart after each wait that ends without it. A companion whose start
+    /// failed fails the create, as the HID device's start does: a restart
+    /// does not mend a failed add or start. While Windows has an
+    /// installation pending the failure is not final (StartFailed). The
+    /// last wait's verdict is final and reads the devnode as that wait left
+    /// it, before the last restart: Learn's CM_Enable_DevNode page does not
+    /// say the call returns only once the start it begins has ended. A
+    /// companion that never publishes the interface and shows no problem
+    /// lets the create go on, and step 7 logs the XInput slot that never
+    /// came.</summary>
+    internal static void AwaitCompanionInterface(string xusbInstId, int controllerIndex)
+    {
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            if (CompanionInterfaceWait(xusbInstId, controllerIndex)) return;
+            if (StartFailed(xusbInstId, controllerIndex, final: attempt == 2))
+                throw StartError(xusbInstId, controllerIndex);
+            CompanionRestart(xusbInstId);
+        }
+    }
 
     /// <summary>The value a driver's error word names (driver.h
     /// HIDMAESTRO_CONFIG_ERROR_*).</summary>
@@ -1885,7 +1913,7 @@ internal static partial class DeviceOrchestrator
                 return StartWait.Failed;
             Thread.Sleep(25);
         }
-        return StartWait.TimedOut;
+        return StartFailed(parentInstanceId, controllerIndex, final: true) ? StartWait.Failed : StartWait.TimedOut;
     }
 
     /// <summary>
@@ -1914,7 +1942,8 @@ internal static partial class DeviceOrchestrator
                 return StartWait.Failed;
             Thread.Sleep(25);
         }
-        return StartWait.TimedOut;
+        return StartFailed(instanceId, controllerIndex, final: true) || StartFailed(parentInstanceId, controllerIndex, final: true)
+            ? StartWait.Failed : StartWait.TimedOut;
     }
 
     /// <summary>Count XInput slots currently reporting connected. Used by
