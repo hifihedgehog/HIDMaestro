@@ -122,7 +122,7 @@ Class       = USBDevice
 ClassGuid   = {{88BAE032-5A81-49f0-BC3D-A4FF138216D6}}
 Provider    = %Provider%
 CatalogFile = {p.CatalogName}
-DriverVer   = 10/14/2026,1.13.0.0
+DriverVer   = 10/18/2026,2.0.0.0
 PnpLockdown = 1
 
 [Manufacturer]
