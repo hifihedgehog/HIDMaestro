@@ -1047,7 +1047,9 @@ internal static class PeerZ
             case "zproduct":
             {
                 var sw = Stopwatch.StartNew();
-                bool v = (bool)M(Installer, "IsProductInstalled").Invoke(null, null)!;
+                // The overload with no parameters, the one that runs
+                // System32's pnputil. The other takes the run to make.
+                bool v = (bool)Exact(Installer, "IsProductInstalled").Invoke(null, null)!;
                 return $"OK zproduct installed={v} ms={sw.ElapsedMilliseconds}";
             }
             case "zpnputil":
