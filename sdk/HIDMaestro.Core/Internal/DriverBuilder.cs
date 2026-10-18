@@ -155,7 +155,7 @@ public static class DriverBuilder
     /// run under Windows 11's x64 emulation, which Windows 10 on ARM does
     /// not have. One copy serves both targets. These six are the files
     /// Inf2Cat loads or reads. inf2cat.exe.manifest and
-    /// Microsoft.Kits.Logger.dll, staged until v1.13.0, did nothing: no
+    /// Microsoft.Kits.Logger.dll, staged until v2.0.0, did nothing: no
     /// assembly here references the logger, and Inf2Cat.exe's embedded
     /// manifest takes precedence over an external one.</summary>
     static readonly string[] NeutralFiles = new[]
@@ -190,14 +190,14 @@ public static class DriverBuilder
     /// <see cref="EmbeddedManifest.Sha256Hex"/>, so different builds land in
     /// different directories and an identical build reuses its own. A file
     /// already staged is reused only when its SHA-256 still matches the
-    /// embedded bytes, so a warm launch rewrites nothing. Until v1.13.0 the
+    /// embedded bytes, so a warm launch rewrites nothing. Until v2.0.0 the
     /// directory was under <c>%TEMP%</c> and reuse trusted a matching file
     /// size.</para>
     ///
     /// <para>Every call checks every staged file again, signtool's and
     /// Inf2Cat's libraries and manifests included, and restages any that is
     /// missing or differs, so each deploy and each caller that runs the tools
-    /// uses files verified for that use. Until v1.13.0 the directory was
+    /// uses files verified for that use. Until v2.0.0 the directory was
     /// cached for the life of the process, and only signtool.exe and
     /// Inf2Cat.exe were checked again, so a library another program's prune
     /// or anyone else removed stayed missing for every later deploy. The
@@ -311,7 +311,7 @@ public static class DriverBuilder
     /// staged fresh from the embedded bytes, with the staged signtool.exe and
     /// the test certificate from LocalMachine\My. Holds the machine-wide
     /// deploy lock, since the package directory is the one every program of
-    /// this build deploys from. Until v1.13.0 it took no lock, and a later
+    /// this build deploys from. Until v2.0.0 it took no lock, and a later
     /// call reused the package one call before had staged.
     ///
     /// <para><see cref="GenerateCatalogs"/> and a deploy later in the same
@@ -444,7 +444,7 @@ public static class DriverBuilder
     /// deploy lock, like <see cref="SignDrivers"/>. It catalogs the binaries
     /// <see cref="SignDrivers"/> signed in this process when they are still
     /// in place, and otherwise stages and signs the package first, so the
-    /// catalogs always hash signed binaries. Until v1.13.0 it cataloged
+    /// catalogs always hash signed binaries. Until v2.0.0 it cataloged
     /// whatever package an earlier call in the process had staged, signed or
     /// not.</summary>
     /// <returns>Always true. A failure throws.</returns>
@@ -539,7 +539,7 @@ public static class DriverBuilder
     /// <c>HMContext.InstallDriver</c>: under the deploy lock, never a
     /// downgrade, and over an older driver another program's controllers
     /// run on, this SDK's packages added beside it with no device updated
-    /// and nothing removed. Until v1.13.0 it added whatever package an earlier call
+    /// and nothing removed. Until v2.0.0 it added whatever package an earlier call
     /// had staged, with no lock and no policy. The package it installs is
     /// the one <see cref="SignDrivers"/> signed in this process when that is
     /// still in place.</summary>
@@ -547,7 +547,7 @@ public static class DriverBuilder
     /// when the policy kept the installed one, the same build
     /// (<see cref="HMDriverInstallOutcome.AlreadyCurrent"/>) or a newer one
     /// (<see cref="HMDriverInstallOutcome.KeptNewer"/>), and installed
-    /// nothing. Until v1.13.0 it returned true after every install.</returns>
+    /// nothing. Until v2.0.0 it returned true after every install.</returns>
     /// <exception cref="UnauthorizedAccessException">A deploy was needed and
     /// the process is not elevated (see <see cref="SignDrivers"/>). With
     /// this build's driver already installed it returns false without
@@ -610,10 +610,10 @@ public static class DriverBuilder
     /// has no controller: the rule <c>RemoveAllVirtualControllers()</c>
     /// follows for the packages. Otherwise it removes nothing and throws
     /// <see cref="InvalidOperationException"/> naming what holds them. Until
-    /// v1.13.0 it removed them unconditionally, from under running
+    /// v2.0.0 it removed them unconditionally, from under running
     /// controllers.</para></summary>
     /// <exception cref="UnauthorizedAccessException">The process is not
-    /// elevated (see <see cref="SignDrivers"/>). Until v1.13.0 such a call
+    /// elevated (see <see cref="SignDrivers"/>). Until v2.0.0 such a call
     /// reached pnputil and threw <see cref="InvalidOperationException"/>
     /// from its check of the store.</exception>
     /// <exception cref="InvalidOperationException">The packages were kept,
@@ -655,7 +655,7 @@ public static class DriverBuilder
     public static bool FullDeploy(bool rebuild = true)
     {
         _ = rebuild; // intentionally unused
-        // v1.13.0: every deploy goes through the machine-wide policy and its
+        // v2.0.0: every deploy goes through the machine-wide policy and its
         // lock (DriverDeploy): never a downgrade, and an older driver gives
         // way to this release's, installed outright when nothing runs on it
         // and added beside it while a program's controllers do.

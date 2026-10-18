@@ -109,7 +109,7 @@ internal sealed class UsbipServer : IDisposable
             // port in DetachDeadImport, both the same way a range port is.
             // The sweeps that walk the ranges take every port an owner
             // record names as well. Only the bus ids a server before
-            // v1.13.0 canceled itself are tried on the first range alone,
+            // v2.0.0 canceled itself are tried on the first range alone,
             // since such a server never binds outside it.
             try
             {

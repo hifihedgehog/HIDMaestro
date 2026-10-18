@@ -20,7 +20,7 @@ namespace HIDMaestro.Internal;
 /// device's transport index or identity: an index or identity outlives the
 /// program that had it, and a program started since, of any version, may
 /// have taken it. A present device no record names was made by a program
-/// before v1.13.0, or belongs to one started since. A program on this
+/// before v2.0.0, or belongs to one started since. A program on this
 /// release takes its claims before its record entry, and the census reads
 /// the records before it lists the devices, so a device whose index or
 /// identity claim is held counts as a running program's whether a record
@@ -65,7 +65,7 @@ internal sealed partial class OwnerCensus
     public List<DeviceGroup> Devices { get; } = new();
 
     /// <summary>Transport indices of USB/IP imports in the SDK's port range
-    /// whose server port no v1.13.0 record names: a program built on an
+    /// whose server port no v2.0.0 record names: a program built on an
     /// older SDK whose composite has no devnode of its own to record the
     /// index. The bus id <c>1-&lt;N+1&gt;</c> carries it.</summary>
     public HashSet<int> ForeignImportIndices { get; } = new();
@@ -305,7 +305,7 @@ internal sealed partial class OwnerCensus
     /// controller (<see cref="LegacyPipeLive"/>), or through this release's
     /// index or identity claim, which a create takes before its record
     /// entry and a sweep holds while it removes the device. Otherwise the
-    /// dead record decides, and without one what a program before v1.13.0
+    /// dead record decides, and without one what a program before v2.0.0
     /// leaves: the acknowledgement section its driver keeps after a v1.12.0
     /// program ends.</summary>
     private static Owner WithoutLiveRecord(string key, int index, bool dead, Func<IReadOnlyList<string>> members)
@@ -327,7 +327,7 @@ internal sealed partial class OwnerCensus
     /// <summary>Whether the v1.12.0 owner pipe of <paramref name="index"/>
     /// shows a running program. A v1.12.0 program creates that name
     /// unprotected, so any program can create it too. The device's own
-    /// driver is the pipe's client, and from v1.13.0 it records the server
+    /// driver is the pipe's client, and from v2.0.0 it records the server
     /// it is connected to (driver.c RecordOwnerConnected). A held pipe stops
     /// counting only on proof that the program the driver watched is gone:
     /// the watch has ended, or the server it named no longer runs
@@ -335,7 +335,7 @@ internal sealed partial class OwnerCensus
     /// keeps the pipe counting, trusted or not: a program that made the
     /// name first can leave a v1.12.0 program's watch on its own pipe, and
     /// that proves nothing about the program writing the device's sections.
-    /// Where no driver recorded anything, one older than v1.13.0 or one
+    /// Where no driver recorded anything, one older than v2.0.0 or one
     /// whose watch has not connected yet, the held pipe counts only beside
     /// the index's input section and an acknowledgement section that does
     /// not carry the driver's ended marker.
@@ -374,7 +374,7 @@ internal sealed partial class OwnerCensus
             DeviceOrchestrator.LogDiag($"    the v1.12.0 owner pipe of transport index {index} is not a running program's: {gone}");
             return false;
         }
-        // No v1.13.0 driver reported on the pipe (an older driver, or a
+        // No v2.0.0 driver reported on the pipe (an older driver, or a
         // device added again before its watch reconnected). A running
         // program creates Global\HIDMaestroInput<N> before its owner pipe,
         // and a program that is not elevated cannot create a Global\
@@ -389,7 +389,7 @@ internal sealed partial class OwnerCensus
         // Every SDK that makes the owner pipe makes the acknowledgement
         // section beside the input section and zeroes it. A program that is
         // not elevated can neither create it nor write it. With no section,
-        // or with the ended marker set (a v1.13.0 driver saw the watch end
+        // or with the ended marker set (a v2.0.0 driver saw the watch end
         // and no program has started on the index since), the pipe and the
         // input section are a squatter's hold on a dead program's objects.
         bool? ended = AckWatchEnded(index);

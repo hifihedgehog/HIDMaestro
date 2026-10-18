@@ -355,7 +355,7 @@ internal static partial class Program
         int port = RecordUsbipPort(p.Pid);
         touched.Add((port, bus));
         // The program's own sweep cancels 1-1 to 1-8 on its port, a server
-        // before v1.13.0 having left no record. Only on one of those does
+        // before v2.0.0 having left no record. Only on one of those does
         // the comeback check tell a sweep that leaves the program's exports
         // from one that does not.
         Check("V5: the composite has bus id 1-1, which the own-port sweep would cancel", bus == "1-1", bus);

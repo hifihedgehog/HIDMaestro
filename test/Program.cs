@@ -1204,7 +1204,7 @@ partial class Program
     {
         // Uninstall-grade: every HIDMaestro controller on the machine,
         // whoever made it, then the driver packages. The overload without a
-        // scope leaves running programs' controllers alone since v1.13.0.
+        // scope leaves running programs' controllers alone since v2.0.0.
         // --keep-install removes the same controllers and keeps the driver
         // packages and the install record, so a bench run that installed
         // the build under test cleans up without losing it.

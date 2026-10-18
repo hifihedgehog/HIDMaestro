@@ -311,7 +311,7 @@ typedef struct _DEVICE_CONTEXT {
     UCHAR   OwnerReadByte;
     WCHAR   OwnerPipeName[64];            /* e.g. L"\\\\.\\pipe\\HIDMaestroOwner0" */
 
-    /* Version handshake (v1.13.0). The SDK creates
+    /* Version handshake (v2.0.0). The SDK creates
      * Global\HIDMaestroVersion<N> (HIDMAESTRO_VERSION_INFO) beside the input
      * section with its own half filled in. The driver writes its half each
      * time it opens the input section, then lets go of the section. An SDK

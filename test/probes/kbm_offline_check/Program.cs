@@ -290,7 +290,7 @@ internal static class Program
         // relative X and Y of 16 bits declared 1 to 32767 as the keyboard
         // declares them, and an 8-bit wheel of -127 to 127. A click moves
         // nothing and a movement left or up has no value in that range:
-        // each is one report with X and Y at 0, no motion. Until v1.13.0
+        // each is one report with X and Y at 0, no motion. Until v2.0.0
         // each split forever.
         var k70 = ctx.GetProfile("corsair-k70-rgb-mk2-low-profile")!.Inner.GetOrBuildKeyboardMousePacker();
         var click = Bounded(() => Mouse(k70, new HMMouseState { Buttons = HMMouseButtons.Left }));

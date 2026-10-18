@@ -62,7 +62,7 @@ public sealed class HMDriverVersionException : InvalidOperationException
     public HMDriverVersionProblem Problem { get; }
 
     /// <summary>The installed or started driver's version: 0.0.0 when the
-    /// driver wrote none, as a driver older than 1.13.0 does.</summary>
+    /// driver wrote none, as a driver older than 2.0.0 does.</summary>
     public Version InstalledVersion { get; }
 
     /// <summary>The oldest driver this SDK runs on.</summary>

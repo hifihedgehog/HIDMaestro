@@ -1,5 +1,5 @@
 // Source-generated JSON reads the catalog into the same objects reflection
-// did. v1.13.0 moved every profile read from reflection-based
+// did. v2.0.0 moved every profile read from reflection-based
 // System.Text.Json to HMJsonContext, and both loaders drop a profile that
 // fails to parse without a word, so a type or enum the context missed would
 // shrink the catalog silently. This probe rebuilds the v1.12.0 reflection

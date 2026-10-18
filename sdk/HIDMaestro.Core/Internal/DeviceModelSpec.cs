@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 
 namespace HIDMaestro.Internal;
 
-// v1.13.0. The device model a profile describes in JSON, so a device's wire
+// v2.0.0. The device model a profile describes in JSON, so a device's wire
 // format and protocol are data and the SDK holds only general mechanisms:
 //
 //  - Ports (ExtendedReportSpec.Ports): one report that repeats a block per

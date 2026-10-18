@@ -40,7 +40,7 @@ public sealed partial class HMController : IDisposable
     /// <summary>The machine-wide index this controller's shared sections,
     /// events, owner pipe and registry key are named with, and the
     /// <c>ControllerIndex</c> the driver reads. A program running alone gets
-    /// the slot number here, as every release before 1.13.0 did. When another
+    /// the slot number here, as every release before 2.0.0 did. When another
     /// program on the machine already uses that index, the controller gets the
     /// lowest free one instead. While a running program built on HIDMaestro
     /// 1.12.0 has a controller present, the controller gets 64 plus the slot
@@ -72,7 +72,7 @@ public sealed partial class HMController : IDisposable
     /// <summary>The version of the HIDMaestro driver this controller runs
     /// on, as the driver reports it in <c>Global\HIDMaestroVersion&lt;N&gt;</c>.
     /// Null until the driver has started the device, on a driver older than
-    /// 1.13.0, which does not report one, and on a composite persona, which
+    /// 2.0.0, which does not report one, and on a composite persona, which
     /// runs on the USB/IP transport instead of the HIDMaestro driver.</summary>
     public Version? DriverVersion => Internal.SharedMemoryIO.DriverVersion(Index)?.Version;
 
@@ -314,7 +314,7 @@ public sealed partial class HMController : IDisposable
     // the ring slot's bytes, or the report a rule emits in their place.
     private readonly byte[]? _hostCommand;
 
-    /// <summary>v1.13.0: the controller ports of a device that carries
+    /// <summary>v2.0.0: the controller ports of a device that carries
     /// several controllers in one report, as the profile's
     /// <c>extendedReport.ports</c> declares them. Empty for a profile with
     /// one controller. On a device with ports, <see cref="SubmitState"/>
@@ -642,7 +642,7 @@ public sealed partial class HMController : IDisposable
             _extEncoderState.HoldRegisters = _protocolEngine?.RegisterWords ?? model.Registers.Initial;
         }
 
-        // v1.13.0: the profile's controller ports, whose report goes out
+        // v2.0.0: the profile's controller ports, whose report goes out
         // once now so the device starts from it, and its USB/IP protocol.
         Ports = new HMPortSet(this, profile.Inner);
         lock (_submitLock) Ports.PublishInitialLocked();
@@ -1146,7 +1146,7 @@ public sealed partial class HMController : IDisposable
     /// <see cref="SubmitLock"/>.</summary>
     internal void RememberPortsReportLocked(byte[] report) => RememberRawFrame(report, extended: true);
 
-    /// <summary>v1.13.0: bind WinUSB to this controller's virtual USB/IP
+    /// <summary>v2.0.0: bind WinUSB to this controller's virtual USB/IP
     /// device, so libusb hosts can open it, for a profile that declares
     /// <c>usbConfiguration.winUsb</c>. Nothing the device reports changes,
     /// and the driver goes on this device's devnode alone. The binding is

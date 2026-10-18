@@ -166,7 +166,7 @@
          microsoft.kits.drivers.apivalidator.dll and
          Microsoft.Extensions.CommandLineUtils.dll were tested and are NOT
          required for /os:10_X64 catalog generation. inf2cat.exe.manifest
-         and Microsoft.Kits.Logger.dll, carried until v1.13.0, do nothing:
+         and Microsoft.Kits.Logger.dll, carried until v2.0.0, do nothing:
          no assembly here references the logger, Inf2Cat.exe's embedded
          manifest takes precedence over an external one, and the NuGet WDK
          carries neither (docs/design/coexistence.md). -->

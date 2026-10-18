@@ -1,4 +1,4 @@
-// The budgets of the v1.13.0 design, measured the same way before and after
+// The budgets of the coexistence design, measured the same way before and after
 // on one machine: built against this tree, and with -p:HmBase=true against a
 // b4d29d9 tree. The parts that measure what b4d29d9 lacks, the ownership
 // claims and the controller ports, are left out of that build. The budgets

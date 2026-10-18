@@ -538,7 +538,7 @@ internal static partial class MachineClaims
         return null;
     }
 
-    /// <summary>"process 1234 (C:\Apps\PadForge.exe, HIDMaestro 1.13.0)".</summary>
+    /// <summary>"process 1234 (C:\Apps\PadForge.exe, HIDMaestro 2.0.0)".</summary>
     internal static string Describe(OwnerRecord r) =>
         $"process {r.Pid} ({(string.IsNullOrEmpty(r.Image) ? "unknown image" : r.Image)}, HIDMaestro {r.SdkVersion ?? "unknown"})";
 

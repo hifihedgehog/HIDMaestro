@@ -197,7 +197,7 @@ internal static partial class Program
             LegacyStagingCataloged("Y");
             string? installed = SectionYBody(user);
             if (installed == null) return;
-            // Programs before v1.13.0 take index 0 whatever runs, so these
+            // Programs before v2.0.0 take index 0 whatever runs, so these
             // run alone.
             SectionYStale(installed);
             SectionYAckKept(installed);
@@ -1147,7 +1147,7 @@ internal static partial class Program
               $"{Native.DriverVersionOf(instOld)} beside {installed}, {Y.ShowWatch(instOld)}");
         // The v1.12.0 driver made its OutputEvent with a NULL DACL, owned by
         // LocalService. This SDK's reader takes that event (the arm in
-        // SharedMemoryIO.TryOpenOutputEvent), as a v1.13.0 program running
+        // SharedMemoryIO.TryOpenOutputEvent), as a v2.0.0 program running
         // on an earlier driver must, or it would poll at 8 ms.
         string legacyOpen = live.Send($"sdkevents {tOld}");
         Check("Y5: this SDK's reader opens the v1.12.0 driver's NULL-DACL OutputEvent",

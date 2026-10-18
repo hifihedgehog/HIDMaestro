@@ -1,4 +1,4 @@
-// The modes the v2.0.0 conversion's baselines need beside the v1.13.0
+// The modes the v2.0.0 conversion's baselines need beside the coexistence
 // ones: feature answers on both transports, a device-built USB/IP report,
 // the driver install a baseline session starts with, and the offline
 // self-test of the parsing these modes share.

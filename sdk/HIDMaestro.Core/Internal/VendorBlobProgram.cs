@@ -23,7 +23,7 @@ internal sealed class VendorBlobProgram
     /// <summary>Field type, numeric. One value per wire-format family the
     /// codec understands; <see cref="FieldOp.Unknown"/> preserves the
     /// string implementation's silent-no-op contract for unrecognized
-    /// type strings in the codec. Since v1.13.0 a create refuses a profile
+    /// type strings in the codec. Since v2.0.0 a create refuses a profile
     /// that declares one (<see cref="Check"/>).</summary>
     public enum FieldOp : byte
     {
@@ -665,7 +665,7 @@ internal sealed class VendorBlobProgram
         return parts;
     }
 
-    /// <summary>v1.13.0: refuse a field the codec would skip, cut short or
+    /// <summary>v2.0.0: refuse a field the codec would skip, cut short or
     /// read past the end of its report, rather than let it compile into a
     /// field that is silently never written or that throws on the first
     /// report. Runs where a create compiles the device model, before

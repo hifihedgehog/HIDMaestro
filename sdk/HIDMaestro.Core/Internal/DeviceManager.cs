@@ -552,7 +552,7 @@ public static partial class DeviceManager
     /// <summary>How long a removal test waits for the REMOVED notification
     /// once the devnode has left the tree and, for an uninstall, its record
     /// is gone. The same 2 s RemoveDevice has given a child's removal since
-    /// before v1.13.0. In the bench's diag log of 2026-10-14 and 10-15 the
+    /// before v2.0.0. In the bench's diag log of 2026-10-14 and 10-15 the
     /// wait after a software device's close ended within 471 ms of the start
     /// of the close in 688 of 688 removals, the hmswd.exe run included. It
     /// applies to a devnode removed directly. A child removed while a ROOT
@@ -592,7 +592,7 @@ public static partial class DeviceManager
     /// your filter criteria is no longer present" (CM_NOTIFY_ACTION). It is
     /// the signal that Windows has delivered the devnode's removal, and it is
     /// waited for when the devnode was in the tree when the watch registered:
-    /// until v1.13.0 a failed NORMAL locate stood in for it, and on the bench
+    /// until v2.0.0 a failed NORMAL locate stood in for it, and on the bench
     /// it ended 2343 of 2343 waits for a ROOT parent at 0 ms. A devnode that
     /// is gone but whose notification has not come within
     /// <see cref="RemovedBoundMs"/> is GoneWithoutRemoved: gone by every
@@ -1175,7 +1175,7 @@ public static partial class DeviceManager
     /// id's locates. What it cannot see is a removal Windows has not
     /// finished after the devnode and its record went: a program of this
     /// release holds the lock until its removal test has an outcome, and a
-    /// program before v1.13.0 takes no lock.</para></summary>
+    /// program before v2.0.0 takes no lock.</para></summary>
     internal static PnpLockHold? EnterRegistrationGate(string instanceId, RegistrationKind kind,
         Func<RemovalOutcome?> removePriorLife, Func<bool, bool>? clearRivals,
         out RegistrationGate decision, int installWaitMs = InstallQueueWaitMs)
@@ -1364,7 +1364,7 @@ public static partial class DeviceManager
     /// ended, on the controller's own devnode. Its HID child is linked into
     /// the HIDClass list by Plug and Play after the hold, with no lock: the
     /// lock covers the parent's registration, not its children's.</item>
-    /// <item>Any program built on HIDMaestro before v1.13.0.</item>
+    /// <item>Any program built on HIDMaestro before v2.0.0.</item>
     /// </list>
     ///
     /// <para>Direct registry writes to devnode keys hold the lock where they
@@ -2391,7 +2391,7 @@ public static partial class DeviceManager
         // more: the caller's timeoutMs for a parent that SetupDiRemoveDevice
         // or SwDeviceClose removes, which can wait on open handles, and
         // QuickRemovalMs for a call that finishes its work before it
-        // returns, a fast removal of any caller among them. Until v1.13.0
+        // returns, a fast removal of any caller among them. Until v2.0.0
         // fast mode waited for nothing, so the next registration could
         // follow a removal Windows was still processing. Each watch starts
         // right before its devnode's removal call, so the REMOVED

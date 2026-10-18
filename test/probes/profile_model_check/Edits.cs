@@ -6,7 +6,7 @@
 // load. They keep none of it: a program can edit a loaded profile through
 // its public objects (HMProfile.ExtendedReport, ButtonMap, AxisMap, and
 // ControllerProfile's setters) before its first create, as it could
-// through v1.13.0, and the first create compiles from what the profile then
+// before v2.0.0, and the first create compiles from what the profile then
 // holds. At 4d4199ce the load kept every compile on the profile, so the
 // device harness, which sets steam-controller-2's idle interval to 0 after
 // the catalog loads, met the load's program with the catalog's 4 ms

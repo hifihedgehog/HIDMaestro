@@ -816,7 +816,7 @@ internal static partial class Program
     // ── Audio handlers that throw ───────────────────────────────────────
 
     /// <summary>Each public audio event, with a throwing handler ahead of a
-    /// counting one, in a child process of its own. Before v1.13.0 a
+    /// counting one, in a child process of its own. Before v2.0.0 a
     /// throwing handler on the connection thread closed the device's
     /// connection, and one on the audio pump or the thread pool ended the
     /// process.</summary>

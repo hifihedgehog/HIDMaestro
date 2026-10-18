@@ -5,7 +5,7 @@
 // get every event, and the SDK must still apply every packet: a keyboard's
 // LED state, OutputDecoded on the profile codec's path and on Switch Pro
 // rumble, and a Bluetooth DualSense's switch to report 0x31 on the feature
-// read that arms it. Before v1.13.0 a throwing handler stopped the handlers
+// read that arms it. Before v2.0.0 a throwing handler stopped the handlers
 // after it, and a throwing OutputReceived handler skipped the rest of the
 // packet.
 //

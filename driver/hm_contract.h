@@ -16,7 +16,7 @@
 #define HIDMAESTRO_IDENTITY_VALUE   L"ControllerIndex"
 
 #pragma pack(push, 1)
-/* Version handshake (v1.13.0): Global\HIDMaestroVersion<N>, 64 bytes,
+/* Version handshake (v2.0.0): Global\HIDMaestroVersion<N>, 64 bytes,
  * created by the SDK. The SDK writes its half before the device exists:
  * the first 20 bytes and, from protocol 4, the identity tag. The driver
  * writes its half at add and whenever it opens the input section, the

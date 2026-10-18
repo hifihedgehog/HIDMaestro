@@ -162,7 +162,7 @@ internal static partial class SharedMemoryIO
     // Issue #67: the server ends of each controller's owner pipe, guarded by
     // the s_inputViews lock.
     private static readonly Dictionary<int, List<IntPtr>> s_ownerPipes = new();
-    // v1.13.0: the version handshake, guarded by the s_inputViews lock.
+    // v2.0.0: the version handshake, guarded by the s_inputViews lock.
     private static readonly Dictionary<int, IntPtr> s_versionHandles = new();
     private static readonly Dictionary<int, IntPtr> s_versionViews = new();
 
@@ -455,7 +455,7 @@ internal static partial class SharedMemoryIO
                 s_inputAckViews[controllerIndex] = av;
                 s_inputAckEvents[controllerIndex] = CreateNamedEvent($@"Global\HIDMaestroInputAckEvent{controllerIndex}");
 
-                // v1.13.0: the version handshake (HIDMAESTRO_VERSION_INFO in
+                // v2.0.0: the version handshake (HIDMAESTRO_VERSION_INFO in
                 // driver.h). This SDK's half goes in now. The driver writes its
                 // half when it opens the input section, so the section must
                 // exist before the event below, like the acknowledgement.
@@ -513,7 +513,7 @@ internal static partial class SharedMemoryIO
     /// <para>Any program can create a <c>Global\</c> event. The driver
     /// uses an existing one only when a driver host or an elevated program
     /// made it under a DACL, or a driver host made it under the NULL DACL a
-    /// driver before v1.13.0 gave it (driver.c CreateHostEvent). The driver
+    /// driver before v2.0.0 gave it (driver.c CreateHostEvent). The driver
     /// never signals one that fails the same test, so the reader keeps the
     /// poll cadence instead of waiting on it.</para></summary>
     public static IntPtr TryOpenOutputEvent(int controllerIndex)

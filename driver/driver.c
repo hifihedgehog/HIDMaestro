@@ -745,7 +745,7 @@ TryOpenSharedMapping(_In_ PDEVICE_CONTEXT ctx)
     return TRUE;
 }
 
-/* v1.13.0: write this driver's half of the version handshake, then let go
+/* v2.0.0: write this driver's half of the version handshake, then let go
  * of the section. The SDK keeps it alive. Best effort, like the InputAck
  * open: an SDK that predates it creates no section. v2.0.0 writes it at
  * add as well, and DriverProtocolMin with it. Nothing is cleared at
@@ -837,7 +837,7 @@ NoteFrameCompletedLocked(_In_ PDEVICE_CONTEXT ctx, _In_ ULONG seqNo)
     ctx->AckPendingSeqNo = seqNo;
 }
 
-/* v1.13.0: the owner watch's state, for the SDK's census of who owns each
+/* v2.0.0: the owner watch's state, for the SDK's census of who owns each
  * device (sdk OwnerCensus.cs). Any program can create the v1.12.0 owner
  * pipe's name, \\.\pipe\HIDMaestroOwner<N>, so the name alone does not show
  * that a program runs on index N. The driver is the pipe's client and asks
@@ -1980,7 +1980,7 @@ DriverEntry(
  * Administrators and LocalService: the SDK's own descriptor without the
  * read for everyone (SharedMemoryIO.Sddl). The SDK, v1.12.0's included,
  * opens them elevated, and both driver hosts run as LocalService. Until
- * v1.13.0 they had a NULL DACL, which let any local program signal a
+ * v2.0.0 they had a NULL DACL, which let any local program signal a
  * controller's StopEvent or wait on and reset its OutputEvent.
  * companion.c makes its OutputEvent the same way. */
 static const WCHAR g_HostEventSddl[] = L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)";
@@ -1992,14 +1992,14 @@ static const WCHAR g_HostEventSddl[] = L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)
  * give an object: LocalService, SYSTEM or Administrators with a DACL.
  *
  * With takeOverNullDacl and a LocalService or SYSTEM owner, a NULL DACL is
- * also taken: a driver before v1.13.0 made the object that way, and this
+ * also taken: a driver before v2.0.0 made the object that way, and this
  * host, which runs as that account, replaces the DACL with its own. This is
  * for the output doorbell only. A program that opened the old NULL-DACL
  * object keeps every right its handle was granted, WRITE_DAC included, so a
  * holder of the StopEvent could put the NULL DACL back and signal the
  * worker through its old handle. The doorbell is read-only to a consumer
  * and carries no such risk. The StopEvent therefore passes FALSE and falls
- * back to an unnamed event, as before v1.13.0 took the NULL DACL at all.
+ * back to an unnamed event, as before v2.0.0 took the NULL DACL at all.
  * The SDK's reader applies the same rule for the doorbell
  * (SharedMemoryIO.TryOpenOutputEvent). NULL when the name is unusable or
  * the create fails. */
@@ -2037,7 +2037,7 @@ CreateHostEvent(_In_ BOOL manualReset, _In_ BOOL takeOverNullDacl, _In_ LPCWSTR 
                 usable = hostOwner || adminOwner;
             } else if (hostOwner && takeOverNullDacl) {
                 /* The output doorbell only (see the header). A driver before
-                 * v1.13.0 made it with a NULL DACL, and a program still
+                 * v2.0.0 made it with a NULL DACL, and a program still
                  * holds it, the SDK's output reader most often. A program
                  * that is not elevated cannot own an object as LocalService
                  * or SYSTEM. The owner's account may rewrite the DACL, so
@@ -2106,7 +2106,7 @@ EvtDeviceAdd(
     {
         HKEY hFm;
         /* FunctionMode is read BEFORE device creation, from the key of the
-         * controller index chosen above. Through v1.13.0 it was always
+         * controller index chosen above. Before v2.0.0 it was always
          * Controller0's. A devnode whose index has no key is left behind
          * by a program and fails its start: there is no default device. */
         WCHAR fmPath[64];
@@ -2288,7 +2288,7 @@ EvtDeviceAdd(
      * CPU-saturation root cause. */
     ctx->InputDataEvent = NULL;
     /* Nothing an earlier device on this instance recorded about its owner
-     * watch describes this one (v1.13.0, RecordOwnerConnected). */
+     * watch describes this one (v2.0.0, RecordOwnerConnected). */
     ForgetOwnerWatch(ctx);
     /* Create a NAMED StopEvent so external cleanup code (SDK's
      * RemoveAllVirtualControllers) can signal it after a force-kill,
@@ -2301,7 +2301,7 @@ EvtDeviceAdd(
      *
      * CreateHostEvent admits the elevated SDK and the driver hosts only.
      * The StopEvent passes takeOverNullDacl=FALSE: an event a program that
-     * is not a driver host made first, or one a driver before v1.13.0 made
+     * is not a driver host made first, or one a driver before v2.0.0 made
      * with a NULL DACL, is refused, and the worker gets an unnamed event
      * instead. It still stops at teardown, and a sweep after a force-kill
      * takes the slow removal path for this device. Taking over the old

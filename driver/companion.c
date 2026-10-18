@@ -336,7 +336,7 @@ void CompanionDeviceCleanup(_In_ WDFOBJECT Object)
  * as driver.c's CreateHostEvent with takeOverNullDacl set: SYSTEM,
  * Administrators and LocalService. An object that exists already is used
  * when one of those three owns it under a DACL, or LocalService or SYSTEM
- * owns it under the NULL DACL a driver before v1.13.0 gave it, which is
+ * owns it under the NULL DACL a driver before v2.0.0 gave it, which is
  * then replaced with the descriptor above. The doorbell is read-only to a
  * consumer, so a program holding it from before the takeover gains nothing.
  * driver.c keeps refusing the StopEvent for the opposite reason. NULL when
@@ -375,7 +375,7 @@ static HANDLE CreateHostEvent(BOOL manualReset, BOOL takeOverNullDacl, LPCWSTR n
             if (dacl != NULL) {
                 usable = hostOwner || adminOwner;
             } else if (hostOwner && takeOverNullDacl) {
-                /* The output doorbell. A driver before v1.13.0 made it with
+                /* The output doorbell. A driver before v2.0.0 made it with
                  * a NULL DACL, and a program still holds it, the SDK's output
                  * reader most often. A program that is not elevated cannot
                  * own an object as LocalService or SYSTEM. The owner's

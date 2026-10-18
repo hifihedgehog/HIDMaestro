@@ -166,7 +166,7 @@ internal static class SwdDeviceFactory
 
                 // The helper's output goes to the diagnostic log, which is
                 // written as the user (DeviceOrchestrator.LogDiag). Until
-                // v1.13.0 it went to its own file under %TEMP%\HIDMaestro,
+                // v2.0.0 it went to its own file under %TEMP%\HIDMaestro,
                 // written elevated into a folder the user's programs can
                 // change.
                 DeviceOrchestrator.LogDiag(

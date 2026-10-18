@@ -384,7 +384,7 @@ internal static class Program
         using (var again = new HMVRController())
             Check("channel re-claimable after Dispose (pid released)", true);
 
-        // A throwing haptic handler, in a child: before v1.13.0 its
+        // A throwing haptic handler, in a child: before v2.0.0 its
         // exception ended the haptic reader's thread and the process.
         var (hapticCode, hapticLine) = RunThrowingHapticChild();
         Check("behind a throwing HapticReceived handler, the next one gets both pulses and the reader goes on",

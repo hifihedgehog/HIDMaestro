@@ -37,7 +37,7 @@ internal sealed class CompiledProtocol
     private readonly (byte Id, string By)[] _decodedFirst;
     public CompiledModel Model { get; }
     public RegisterTable Registers => Model.Registers;
-    /// <summary>The register names, which v1.13.0's one-bit states became.</summary>
+    /// <summary>The register names, which the never-shipped 1.13.0 builds' one-bit states became.</summary>
     public string[] StateNames => Model.Registers.Names;
 
     // ── Input ──

@@ -514,7 +514,7 @@ void SdkCreate(Sdk *s, int index, int flags);
  * design note's decision (c). VERSION_SDK is what the SDK at 9bd6279
  * makes (SharedMemoryIO.cs:410-421), and every stream not named for a
  * parameter runs under it. The others: no section beside a live input
- * section, as an SDK before v1.13.0 makes; the section with SdkProtocolMax
+ * section, as an SDK before v2.0.0 makes; the section with SdkProtocolMax
  * 3 or 4; and the section at 4, cleared to zeros or closed by the SDK
  * part way through the stream (VersionMidRun). */
 enum VersionParam {

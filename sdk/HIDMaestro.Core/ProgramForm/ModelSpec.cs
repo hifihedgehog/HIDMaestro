@@ -87,7 +87,7 @@ public sealed class ProtocolSpec
 }
 
 /// <summary>One register: a name, a width of 1 to 32 bits, and an initial
-/// value. A one-bit register is the on/off state v1.13.0 called a state.</summary>
+/// value. A one-bit register is the on/off state the never-shipped 1.13.0 builds called a state.</summary>
 public sealed class RegisterSpec
 {
     [JsonPropertyName("name")]

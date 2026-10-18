@@ -5,7 +5,7 @@
 //   I8   A running program's staged signtool manifest removed and another
 //        staged tool file changed to bytes of the same length. Its next
 //        deploy restores both from the embedded bytes before it runs the
-//        tools. Until v1.13.0 the staging directory was trusted for the
+//        tools. Until v2.0.0 the staging directory was trusted for the
 //        life of the process and only signtool.exe and Inf2Cat.exe were
 //        checked again.
 //   I9   A deploy's prune paused after it read the owner records, and a
@@ -33,7 +33,7 @@
 //        cannot be written or renamed, and its directory, the build's
 //        directory above it, Staging and the folder above Staging cannot be
 //        renamed,
-//        even by an elevated process. Until v1.13.0 the helper was checked
+//        even by an elevated process. Until v2.0.0 the helper was checked
 //        and then run with nothing held.
 //
 // I10 and I11 set the machine's %ProgramData%\HIDMaestro aside first, when

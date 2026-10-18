@@ -200,7 +200,7 @@ internal static class Rules
         new(new[] { "steamRoot" }, new[] { @"sdk\HIDMaestro.Core\Internal\VrDriverBuilder.cs" },
             "the Steam client's install directory, read only to find the library that holds SteamVR (VrDriverBuilder.cs:105)"),
         new(new[] { "RemovedSteamFirmwareStamp" }, new[] { @"sdk\HIDMaestro.Core\Internal\ControllerProfile.cs" },
-            "the steamFirmwareStamp key v1.9.1 to v1.13.0 wrote, read only so a profile that carries it is refused with its replacement named (ValueSources.Validate). "
+            "the steamFirmwareStamp key v1.9.1 to v1.12.0 wrote, read only so a profile that carries it is refused with its replacement named (ValueSources.Validate). "
             + "No answer, report or device reads it. Design note, decision (d) and \"Where errors appear\""),
     };
 

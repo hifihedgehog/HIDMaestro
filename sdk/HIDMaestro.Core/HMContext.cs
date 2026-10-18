@@ -233,7 +233,7 @@ public sealed class HMContext : IDisposable
     /// included, are never touched: dispose a controller to remove it.
     /// Static (no HMContext instance needed). Requires admin.
     ///
-    /// <para>Before 1.13.0 this removed every HIDMaestro controller on the
+    /// <para>Before 2.0.0 this removed every HIDMaestro controller on the
     /// machine. That is now
     /// <see cref="RemoveAllVirtualControllers(HMCleanupScope, bool)"/> with
     /// <see cref="HMCleanupScope.Everything"/>. A program that exits without

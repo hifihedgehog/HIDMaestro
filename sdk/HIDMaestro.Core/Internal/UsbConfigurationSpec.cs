@@ -99,7 +99,7 @@ public sealed class UsbConfigurationSpec
     [JsonPropertyName("sharedSerial")]
     public bool SharedSerial { get; set; }
 
-    /// <summary>v1.13.0: the device takes a WinUSB binding on request
+    /// <summary>v2.0.0: the device takes a WinUSB binding on request
     /// (HMController.BindWinUsb), for libusb hosts. See
     /// <see cref="WinUsbSpec"/>.</summary>
     [JsonPropertyName("winUsb")]

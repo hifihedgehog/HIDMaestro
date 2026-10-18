@@ -1,6 +1,6 @@
 // One program that embeds HIDMaestro, driven line by line over stdin by the
 // probe. Each reply is one stdout line starting with OK or ERR. Everything
-// a release before v1.13.0 lacks is read through reflection, so this file
+// a release before v2.0.0 lacks is read through reflection, so this file
 // compiles unchanged against an older HIDMaestro.Core.dll and runs as a
 // program built on that release.
 //
@@ -55,7 +55,7 @@
 //                               and reply with it, last on the line
 //   swdhelper                   stage hmswd.exe the way a device create does
 //                               (SwdDeviceFactory.PinHelper, or
-//                               EnsureHelperExtracted before v1.13.0) and
+//                               EnsureHelperExtracted before v2.0.0) and
 //                               reply with its path, last on the line
 //   swdpin                      take the hold a device create runs hmswd.exe
 //                               under (SwdDeviceFactory.PinHelper) and, while
@@ -968,7 +968,7 @@ internal static class Peer
         return ctx;
     }
 
-    /// <summary>The uninstall-grade cleanup. From v1.13.0 the existing
+    /// <summary>The uninstall-grade cleanup. From v2.0.0 the existing
     /// overloads leave live programs' controllers alone, and the scope
     /// argument asks for everything. Before it they removed everything.</summary>
     static void RemoveEverything(bool preserveInstall)
@@ -1077,7 +1077,7 @@ internal static class Peer
         {
             string watch = describe == null ? "unsupported" : (string)describe.Invoke(null, new[] { g })!;
             // Why the index is -1, where the SDK keeps the reason
-            // (OwnerCensus.IndexRead, v1.13.0): -1/NoValue, -1/NoKey or
+            // (OwnerCensus.IndexRead, v2.0.0): -1/NoValue, -1/NoKey or
             // -1/Unreadable.
             string? how = Get(g, "IndexRead");
             string index = Get(g, "ControllerIndex") + (how != null && how != "Read" ? "/" + how : "");

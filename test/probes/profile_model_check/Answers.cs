@@ -395,15 +395,15 @@ internal static class Answers
 
     // ── The feature-read notification ────────────────────────────────────
 
-    /// <summary>Through v1.13.0 the usbip backend published a feature-read
+    /// <summary>Before v2.0.0 the usbip backend published a feature-read
     /// notification on every answered GET, and a table had no notify key.
     /// notify defaults to true on usbip, so a user's table from v1.7 to
-    /// v1.13 keeps its notifications, and to false on UMDF2, where the
+    /// before v2.0.0 keeps its notifications, and to false on UMDF2, where the
     /// driver notified only the Sony reads the Sony models now name. At
     /// b2797055 a usbip table without notify published none.</summary>
     static void Notify(Checks c)
     {
-        // A v1.13 usbip table: plain answers keyed by report ID, no notify.
+        // A usbip table from before v2.0.0: plain answers keyed by report ID, no notify.
         JsonObject V1(string id, bool? notify)
         {
             var o = FromRepo(@"sony\dualsense-composite.json", id);
@@ -418,7 +418,7 @@ internal static class Answers
         c.Run("a usbip table with no notify keys loads", () => (p != null, issue?.ToString() ?? ""));
         if (p == null) return;
         var t = FeatureStubTable.From(p.Inner, 0, null, _ => null)!;
-        c.Run("every GET it answers publishes the feature-read notification, as v1.13.0's did", () =>
+        c.Run("every GET it answers publishes the feature-read notification, as the releases before v2.0.0 did", () =>
         {
             bool a5 = Get(t, 0x05, 64, out bool n5) != null, a20 = Get(t, 0x20, 64, out bool n20) != null;
             return (a5 && a20 && n5 && n20, $"0x05 answered {a5} notify {n5}, 0x20 answered {a20} notify {n20}");

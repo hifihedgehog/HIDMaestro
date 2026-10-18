@@ -160,7 +160,7 @@ internal static class UsbipBackend
         catch { /* best-effort recovery */ }
     }
 
-    // The bus ids a server before v1.13.0 canceled in its own sweep.
+    // The bus ids a server before v2.0.0 canceled in its own sweep.
     private static readonly string[] s_legacyBusIds = { "1-1", "1-2", "1-3", "1-4", "1-5", "1-6", "1-7", "1-8" };
 
     /// <summary>The locations whose re-attach attempts a sweep cancels. A
@@ -168,7 +168,7 @@ internal static class UsbipBackend
     /// whose bus id is 1-&lt;index+1&gt;, any of 1-1 to 1-4096
     /// (<see cref="ControllerLease"/>). The driver lists no attempts, so
     /// once an import has dropped nothing else names its bus id. A server
-    /// before v1.13.0 leaves no record, and for the ports
+    /// before v2.0.0 leaves no record, and for the ports
     /// <paramref name="portGone"/> picks, the bus ids that release canceled
     /// itself are added. An attempt none of these name is canceled by a
     /// server this SDK runs when the attempt reaches it with a bus id the

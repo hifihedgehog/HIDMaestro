@@ -18,7 +18,7 @@
 # once, as HM_STAMP_TIME, for both architectures, and build.cmd and
 # build_companion.cmd each take it at their start when run alone. A
 # companion build run alone stamps both INFs of its architecture, so its
-# package is newer than the one installed and deploys. Until v1.13.0 each
+# package is newer than the one installed and deploys. Until v2.0.0 each
 # script read the clock as it stamped, and a build whose stamps fell in
 # two minutes carried two DriverVers.
 #

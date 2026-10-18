@@ -325,7 +325,7 @@ internal static class Deploy
             return (error.Message.Contains(Child, StringComparison.Ordinal) && error.Message.Contains("problem code 43", StringComparison.Ordinal),
                     error.Message);
         });
-        // The public wait keeps the form v1.13.0 had, so a caller built
+        // The public wait keeps the form v1.12.0 had, so a caller built
         // against it still binds. At de87fa90 a third optional parameter
         // replaced it.
         c.Run("DeviceManager.WaitForHidChild keeps its (string, int) form beside the one with a failure test", () =>

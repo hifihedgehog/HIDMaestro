@@ -26,7 +26,7 @@ namespace HIDMaestro.Internal;
 /// <c>%ProgramData%\HIDMaestro</c> comes to exist before this build
 /// runs.</para>
 ///
-/// <para>v1.13.0 stages under
+/// <para>v2.0.0 stages under
 /// <c>%ProgramFiles%\HIDMaestro\Staging\&lt;version&gt;-&lt;hash&gt;\&lt;operation&gt;</c>.
 /// Program Files grants Users read and execute and nothing else, so no
 /// program without elevation can create a folder there before HIDMaestro

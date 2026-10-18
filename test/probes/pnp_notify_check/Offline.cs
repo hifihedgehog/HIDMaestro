@@ -6,7 +6,7 @@
 // The sequence the 0x139 investigation asked for: the devnode leaves the
 // device tree at 0 ms, its DEVICEINSTANCEREMOVED notification arrives at
 // 200 ms, and its PHANTOM record goes at 300 ms. A removal is complete, and
-// the id may be registered again, only at 300 ms. Before v1.13.0 the wait's
+// the id may be registered again, only at 300 ms. Before v2.0.0 the wait's
 // test was "REMOVED delivered, or a NORMAL locate fails" and the gate had no
 // test of its own, so both answered at 0 ms. No check here may see a
 // CM_LOCATE_DEVNODE_CANCELREMOVE locate, which cancels a removal in progress.

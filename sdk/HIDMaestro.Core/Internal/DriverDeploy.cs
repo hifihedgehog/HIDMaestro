@@ -163,7 +163,7 @@ internal static partial class DriverDeploy
 
     /// <summary>This build's INFs that have no package of this build's stamp
     /// in the driver store. Each INF is compared with its own embedded
-    /// stamp: a build made before v1.13.0 stamped its two INFs at two
+    /// stamp: a build made before v2.0.0 stamped its two INFs at two
     /// moments, and when those fell in two minutes the XUSB package never
     /// carried the driver INF's stamp, so it read as missing after every
     /// add.</summary>

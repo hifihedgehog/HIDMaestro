@@ -23,7 +23,7 @@
 // answers every subcommand and never leaves the 0x3F stream. A Chromium
 // browser handshakes every new Switch Pro within milliseconds, as it does
 // real hardware, so the catalog profile could leave 0x3F before phase 1
-// reads it. Through v1.13.0 a registry value the driver read at its add
+// reads it. Before v2.0.0 a registry value the driver read at its add
 // held the pad.
 //
 // Headless, elevation-required, exit 0 PASS / 1 FAIL.

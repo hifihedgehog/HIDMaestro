@@ -297,7 +297,7 @@ internal sealed class HMLayoutJsonConverter : JsonConverter<HMLayout>
 /// <summary>JSON serializer options preconfigured for HMLayout
 /// deserialization. Registered once per ControllerProfile load.
 ///
-/// <para>Since v1.13.0 these are the options of the SDK's source-generated
+/// <para>Since v2.0.0 these are the options of the SDK's source-generated
 /// context, with no reflection behind them, so they work in NativeAOT and
 /// trimmed apps. They read and write profiles and every <see cref="HMLayout"/>
 /// type. A type outside the SDK needs options of its own.</para></summary>
@@ -358,7 +358,7 @@ public static class HMLayoutValidator
 
             case HMGamepadLayout g:
                 Present(g.Sticks, "sticks"); Present(g.Triggers, "triggers");
-                // Every stick's x, and the first stick's y, as through v1.13.0.
+                // Every stick's x, and the first stick's y, as before v2.0.0.
                 for (int i = 0; i < g.Sticks.Count; i++) CheckAxis(ctx, g.Sticks[i].XAxis, $"sticks[{i}].xAxis");
                 if (g.Sticks.Count > 0) CheckAxis(ctx, g.Sticks[0].YAxis, "sticks[0].yAxis");
                 for (int i = 0; i < g.Triggers.Count; i++) CheckAxis(ctx, g.Triggers[i].Axis, $"triggers[{i}].axis");

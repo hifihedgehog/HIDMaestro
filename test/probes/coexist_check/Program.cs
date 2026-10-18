@@ -1384,7 +1384,7 @@ internal static partial class Program
 
         // I2. hmswd.exe stages under the protected directory too, and the
         // SDK no longer writes it to the user-writable %TEMP%\HIDMaestro it
-        // used before. The stale copy a pre-v1.13.0 run leaves there is
+        // used before. The stale copy a pre-2.0.0 run leaves there is
         // removed first, so the check reflects only what this SDK does.
         string legacyTemp = Path.Combine(Path.GetTempPath(), "HIDMaestro", "hmswd.exe");
         try { if (File.Exists(legacyTemp)) File.Delete(legacyTemp); } catch { }
@@ -1669,7 +1669,7 @@ internal static partial class Program
     /// <summary>This build's packages installed and the record of them
     /// gone: the deploy finds both INFs at their own stamps and reinstalls
     /// nothing. A build whose two INFs carry different stamps, as one before
-    /// v1.13.0 could, failed here and in T: each INF was compared with the
+    /// v2.0.0 could, failed here and in T: each INF was compared with the
     /// driver INF's stamp.</summary>
     static void SectionT2()
     {

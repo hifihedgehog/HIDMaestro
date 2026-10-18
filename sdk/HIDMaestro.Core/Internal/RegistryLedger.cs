@@ -42,7 +42,7 @@ internal static partial class RegistryLedger
         @"SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM";
     private const string GameInputKind = "GameInput";
     private const string JoystickOemKind = "JoystickOem";
-    // v1.13.0: a devnode HIDMaestro bound WinUSB to (WinUsbBinding).
+    // v2.0.0: a devnode HIDMaestro bound WinUSB to (WinUsbBinding).
     private const string WinUsbKind = "WinUsb";
     private static readonly string[] AllKinds = { GameInputKind, JoystickOemKind, WinUsbKind };
     private const string V_InstanceId = "InstanceId";

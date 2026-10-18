@@ -37,7 +37,7 @@ internal sealed class SnakeCaseEnumConverter<TEnum> : JsonStringEnumConverter<TE
 ///
 /// <para>v2.0.0 reads strictly: a key no type maps and a key written twice
 /// in one object are refused, with the JSON path in the exception. Through
-/// v1.13.0 the first was dropped and the second replaced the first, so a
+/// v2.0.0 the first was dropped and the second replaced the first, so a
 /// misspelled key left a profile without what it meant to say.</para></summary>
 [JsonSourceGenerationOptions(
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,

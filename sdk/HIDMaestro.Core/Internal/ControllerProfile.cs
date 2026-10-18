@@ -392,7 +392,7 @@ public sealed class ControllerProfile
     public bool RequiresUsbipBackend =>
         Backend?.Equals("usbip", StringComparison.OrdinalIgnoreCase) == true;
 
-    /// <summary>v1.13.0: check the profile's port blocks. They fit their
+    /// <summary>v2.0.0: check the profile's port blocks. They fit their
     /// reports, an output report's ports pair with the input report's, every
     /// port field compiles, and a report's own fields leave the blocks to
     /// them. Throws <see cref="InvalidOperationException"/> naming the JSON
@@ -465,7 +465,7 @@ public sealed class ControllerProfile
                 $"Profile '{Id}': dataReportId 0x{id:X2} is not an input report of the profile's descriptor.");
     }
 
-    /// <summary>v1.13.0: check the profile's vendor-blob reports, the top
+    /// <summary>v2.0.0: check the profile's vendor-blob reports, the top
     /// level of <see cref="ExtendedReport"/> and <see cref="ExtendedOutputReport"/>,
     /// with the field rules <see cref="VendorBlobProgram.Check"/> applies to
     /// port blocks. An input report the SDK sends must fit the shared
@@ -620,7 +620,7 @@ public sealed class ControllerProfile
     /// reports. The load's checks compile them to refuse a bad file, and
     /// keep none of it, so the first create compiles from what the profile
     /// holds then, edits since the load included, as it did through
-    /// v1.13.0.</summary>
+    /// v2.0.0.</summary>
     internal void ForgetCompiled()
     {
         _cachedKbmPacker = null;
@@ -706,7 +706,7 @@ public sealed class ControllerProfile
         }
     }
 
-    /// <summary>v1.13.0: compile everything the profile declares about its
+    /// <summary>v2.0.0: compile everything the profile declares about its
     /// device beyond the descriptors: the port blocks, the USB/IP protocol
     /// against the profile's own descriptors, and the WinUSB package. Runs
     /// before a create takes anything machine-wide, so a mis-authored
@@ -842,7 +842,7 @@ public sealed class ControllerProfile
 
     /// <summary>Sets <see cref="BuiltInCode"/> on a profile already made,
     /// as a copy and the builder do. The public accessor stays init, as it
-    /// was through v1.13.0.</summary>
+    /// was before v2.0.0.</summary>
     internal void MarkBuiltInCode(bool value) => _builtInCode = value;
 
     /// <summary>A copy of the profile's JSON keys, read again, with where it
@@ -936,7 +936,7 @@ public sealed class ControllerProfile
             return null;
         }
         var hex = Descriptor.Replace(" ", "").Replace("-", "");
-        // Refused whole, never cut to whole bytes: until v1.13.0 an odd
+        // Refused whole, never cut to whole bytes: until v2.0.0 an odd
         // count dropped the last digit and the device served a descriptor a
         // byte short.
         if (hex.Length % 2 != 0)
@@ -1119,7 +1119,7 @@ public sealed class ExtendedReportSpec
     [JsonPropertyName("fields")]
     public List<FieldSpec> Fields { get; set; } = new();
 
-    /// <summary>v1.13.0: the report's repeated per-port blocks, for a device
+    /// <summary>v2.0.0: the report's repeated per-port blocks, for a device
     /// that carries several controllers in one report (a multi-port adapter,
     /// a multitap, a receiver). An input report with ports has no fields
     /// of its own: <see cref="Fields"/> stays empty. An output report's
@@ -1144,7 +1144,7 @@ public sealed class ExtendedReportSpec
 /// Valve's command channel are both entries of this table.</summary>
 public sealed class FeatureStubSpec
 {
-    /// <summary>The table-level matching of v1.7.0 to v1.13.0, read so a
+    /// <summary>The table-level matching of v1.7.0 to v1.12.0, read so a
     /// copy of a profile from those releases keeps loading.
     /// <c>"lastMessage"</c> makes every entry without a <c>message</c> a
     /// message entry whose message is its <c>id</c>, at
@@ -1251,7 +1251,7 @@ public sealed class FeatureStubReport
 
     /// <summary>Serving the answer publishes a feature-read notification,
     /// which arms an extended report whose <c>armOn</c> names the read.
-    /// Absent, it is true on the usbip backend, which through v1.13.0
+    /// Absent, it is true on the usbip backend, which before v2.0.0
     /// published one on every answered GET, and false on UMDF2, whose
     /// driver notified only the Sony reads the Sony models name.</summary>
     [JsonPropertyName("notify")]
@@ -1263,7 +1263,7 @@ public sealed class FeatureStubReport
     [JsonPropertyName("patch")]
     public List<AnswerPatchSpec>? Patch { get; set; }
 
-    /// <summary>The key v1.9.1 to v1.13.0 used for Steam's firmware stamp,
+    /// <summary>The key v1.9.1 to v1.12.0 used for Steam's firmware stamp,
     /// read only so a profile that carries it is refused naming its
     /// replacement, a <see cref="Patch"/> from a keyedHexFile value
     /// source.</summary>
@@ -1471,7 +1471,7 @@ internal static class ReportIds
 {
     /// <summary>Parse without allocating: the codec reads the ID on every
     /// frame it encodes and the output reader on every packet. Until
-    /// v1.13.0 each read cut the "0x" off with Substring, 32 bytes a time.</summary>
+    /// v2.0.0 each read cut the "0x" off with Substring, 32 bytes a time.</summary>
     public static byte Parse(string? id)
     {
         if (string.IsNullOrEmpty(id)) return 0;
@@ -1686,7 +1686,7 @@ public sealed class CrcScope
 /// refused, a file with no <c>id</c> is not a profile, and a second file
 /// with an id already read is refused and names the first. Each becomes an
 /// entry of <see cref="Issues"/> with the file, the JSON path and the
-/// reason. Through v1.13.0 such a file was skipped without a word.</para>
+/// reason. Before v2.0.0 such a file was skipped without a word.</para>
 /// </summary>
 public sealed class ProfileDatabase
 {

@@ -323,7 +323,7 @@ internal static partial class DeviceOrchestrator
     }
 
     // ════════════════════════════════════════════════════════════════════
-    //  Cleanup-paths topology (v1.13.0)
+    //  Cleanup-paths topology (v2.0.0)
     //
     //  Every sweep but one acts only on proof that a device's owner is gone
     //  (OwnerCensus). Reading order: triggered earliest first.
@@ -359,7 +359,7 @@ internal static partial class DeviceOrchestrator
     //   3. RemoveEverything
     //        Trigger:  RemoveAllVirtualControllers(HMCleanupScope.Everything, bool)
     //        Scope:    every HIDMaestro device, import and ledger entry on
-    //                  the machine, whoever made it. The pre-1.13.0 sweep.
+    //                  the machine, whoever made it. The pre-2.0.0 sweep.
     //                  It holds OwnerSweep.CreateGate for writing, so it
     //                  never runs beside (5) or a create of this process
     //
@@ -509,7 +509,7 @@ internal static partial class DeviceOrchestrator
     /// <summary>Disable HIDMaestro HID devnodes that carry the xinputhid
     /// filter and are no longer present, and delete their XUSB and
     /// WinExInput registrations, which otherwise keep an XInput slot
-    /// occupied. Before v1.13.0 this also disabled present devnodes that had
+    /// occupied. Before v2.0.0 this also disabled present devnodes that had
     /// a problem or had not started yet, which is what another program's
     /// controller looks like in the middle of its create. A present
     /// devnode of a dead program is removed outright by the reclaim.
@@ -895,7 +895,7 @@ internal static partial class DeviceOrchestrator
             // its removal test: Learn's promise that a create after
             // SwDeviceClose "will be queued until the previous removal
             // processing completes" covers SwDeviceClose only, and the SDK
-            // and programs before v1.13.0 remove these devnodes other ways
+            // and programs before v2.0.0 remove these devnodes other ways
             // too. Its record stays, since SwDeviceCreate takes it over. This
             // parent has a HID child, so the one-parent-per-prefix rule
             // applies to it exactly as it does to a ROOT parent.
@@ -2514,7 +2514,7 @@ internal static partial class DeviceOrchestrator
     /// every HIDMaestro device and USB/IP import on the machine, whoever made
     /// it, then the ledger, and with <paramref name="preserveInstall"/> false
     /// the driver packages and <c>SOFTWARE\HIDMaestro</c>. Running programs
-    /// lose their controllers. Before v1.13.0 this was what InstallDriver and
+    /// lose their controllers. Before v2.0.0 this was what InstallDriver and
     /// every RemoveAllVirtualControllers overload ran. The 2026-07-21 perf
     /// audit's <paramref name="preserveInstall"/> keeps the packages and the
     /// manifest-hash fast path, which a battery or support tool resetting

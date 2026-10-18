@@ -216,7 +216,7 @@ internal static class Program
     }
 
     /// <summary>Another running program that embeds HIDMaestro: one with
-    /// HIDMaestro.Core.dll loaded, or one a v1.13.0 owner record names. The
+    /// HIDMaestro.Core.dll loaded, or one a v2.0.0 owner record names. The
     /// record catches NativeAOT and single-file programs, which load no such
     /// DLL.</summary>
     static string? OtherSdkConsumer()

@@ -12,7 +12,7 @@ namespace HIDMaestro;
 /// side. Each identity is held by one live controller on the whole machine,
 /// in whichever program created it. The message names the holder: its
 /// process id, image path and SDK version, when the holder is a program
-/// built on HIDMaestro 1.13.0 or later.</para>
+/// built on HIDMaestro 2.0.0 or later.</para>
 /// </summary>
 public sealed class HMResourceInUseException : InvalidOperationException
 {

@@ -441,7 +441,7 @@ internal sealed class FeatureStubTable
             var r = spec.Reports[i];
             string at = $"$.featureStubs.reports[{i}]";
             // Without notify an answer publishes on usbip, as every answered
-            // GET did through v1.13.0, a table-level match included, and not
+            // GET did before v2.0.0, a table-level match included, and not
             // on UMDF2, whose v1 driver had no tables.
             var n = new Normal { Index = i, Echo = r.Echo, ReplyHead = r.ReplyHead != null, Notify = r.Notify ?? usbip };
             byte id = Hex(r.Id, at + ".id");

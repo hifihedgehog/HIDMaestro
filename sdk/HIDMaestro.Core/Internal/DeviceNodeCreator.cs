@@ -313,7 +313,7 @@ internal static partial class DeviceNodeCreator
             // driver named takes the best match the driver store holds, which
             // is the package DriverDeploy left there: this SDK's, or the one it
             // kept because running programs use it or because it is newer.
-            // Until v1.13.0 this was UpdateDriverForPlugAndPlayDevices with the
+            // Until v2.0.0 this was UpdateDriverForPlugAndPlayDevices with the
             // VID/PID hardware id and this SDK's own INF, which installs on
             // every present device with that id whenever the INF ranks better
             // ("installs the driver package on all devices present in the
