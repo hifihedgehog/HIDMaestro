@@ -13,9 +13,14 @@ using HIDMaestro.Internal.Usbip;
 /// <summary>One OutputDecoded per output report, when a profile's
 /// extendedOutputReport and a protocol decoder both name its ID: the codec's
 /// decode, as at v1.12.0, where the Switch 2 decode was the last arm of the
-/// chain. The controller runs offline on process memory, its output thread
-/// reading a ring this check writes as the driver's PublishOutput does
-/// (driver.c:1252-1261), as device_oracle_check's case 7 does.</summary>
+/// chain. A create refuses such a profile (ControllerProfile
+/// .ValidateProgramModel), so the check holds the chain itself, on a
+/// controller built past that refusal: the refusal is checked first. The
+/// controller runs offline on process memory, its output thread reading a
+/// ring this check writes as the driver's PublishOutput does
+/// (driver.c:1252-1261), as device_oracle_check's case 7 does, and its
+/// threads and clock are stopped as case 1 stops them, since a controller of
+/// a context that never initialized cannot be disposed.</summary>
 internal static class OutputOnce
 {
     static void Check(string what, bool ok, string detail = "") => Checks.Check(what, ok, detail);
@@ -29,6 +34,10 @@ internal static class OutputOnce
         o["id"] = "output-once-test";
         o["extendedOutputReport"] = JsonNode.Parse("""{ "reportId": "0x02", "size": 33, "fields": [ { "byte": 1, "type": "uint8", "semantic": "first" } ] }""");
         var p = ControllerProfile.Parse(Encoding.UTF8.GetBytes(o.ToJsonString()))!;
+        string refusal = "loads";
+        try { p.ValidateDeviceModel(); }
+        catch (InvalidOperationException e) { refusal = e.Message; }
+        Check("a create refuses the profile: a decoder on extendedOutputReport's report", refusal.Contains("A report has one decode", StringComparison.Ordinal), refusal);
         const int index = 7950;
         IntPtr view = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_INPUT_SIZE);
         IntPtr ring = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_OUTPUT_SIZE);
@@ -55,6 +64,12 @@ internal static class OutputOnce
         bool reached = done.Wait(10_000);
         ((CancellationTokenSource)typeof(HMController).GetField("_outputCts", Instance)!.GetValue(c)!).Cancel();
         ((Thread?)typeof(HMController).GetField("_outputThread", Instance)!.GetValue(c))?.Join(5000);
+        if (typeof(HMController).GetField("_idleClock", Instance)?.GetValue(c) is IDeviceClock clock)
+        {
+            clock.Stop(1000);
+            typeof(HMController).GetField("_idleClock", Instance)!.SetValue(c, null);
+        }
+        SharedMemoryIO.UnregisterOutputPump(index);
         Cache("s_inputViews").Remove(index);
         Cache("s_outputViews").Remove(index);
         Marshal.FreeHGlobal(view);
