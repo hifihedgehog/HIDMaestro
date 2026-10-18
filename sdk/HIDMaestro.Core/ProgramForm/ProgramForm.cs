@@ -26,6 +26,17 @@ internal sealed class FormException : Exception
     public static string ProfileText(string profileId, string message) =>
         $"Profile '{profileId}': " + (message.StartsWith("$.", StringComparison.Ordinal) ? message[2..]
             : message.StartsWith("$: ", StringComparison.Ordinal) ? message[3..] : message);
+
+    /// <summary>The path of a map's member as System.Text.Json writes it
+    /// (ReadStack.AppendPropertyName): <c>pads.up-left</c>, or
+    /// <c>pads['up left']</c> for a key holding one of the characters
+    /// JsonReaderHelper.SpecialCharacters lists, so a dot or a space in a
+    /// key is not read as the path's own punctuation.</summary>
+    public static string Member(string path, string key) =>
+        key.AsSpan().IndexOfAny(PathSpecials) >= 0 ? $"{path}['{key}']" : $"{path}.{key}";
+
+    /// <summary>JsonReaderHelper.SpecialCharacters, System.Text.Json 10.0.</summary>
+    private const string PathSpecials = ". '/\"[]()\t\n\r\f\b\\\u0085\u2028\u2029";
 }
 
 /// <summary>The one validated form the generated and interpreted paths start

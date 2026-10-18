@@ -1010,9 +1010,9 @@ public sealed class ControllerProfile
             // name is.
             if (name.Length == 0 || !char.IsLetter(name[0]) || name.Contains(',')
                 || !Enum.TryParse<HMAxis>(name, ignoreCase: true, out var axis) || axis == HMAxis.None || !Enum.IsDefined(axis))
-                throw new InvalidOperationException($"axisCenters.{name}: not an axis name such as X, Y, Z or Rz.");
+                throw new InvalidOperationException($"{HMLayoutValidator.Member("axisCenters", name)}: not an axis name such as X, Y, Z or Rz.");
             if (!centers.TryAdd(axis, center))
-                throw new InvalidOperationException($"axisCenters.{name}: the axis {axis} is named twice.");
+                throw new InvalidOperationException($"{HMLayoutValidator.Member("axisCenters", name)}: the axis {axis} is named twice.");
         }
         return centers;
     }

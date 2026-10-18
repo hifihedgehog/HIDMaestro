@@ -512,15 +512,8 @@ public static class HMLayoutValidator
     }
 
     /// <summary>The path of a map's member as System.Text.Json writes it
-    /// (ReadStack.AppendPropertyName): <c>pads.up-left</c>, or
-    /// <c>pads['up left']</c> for a key holding one of the characters
-    /// JsonReaderHelper.SpecialCharacters lists, so a dot or a space in a
-    /// key is not read as the path's own punctuation.</summary>
-    internal static string Member(string path, string key) =>
-        key.AsSpan().IndexOfAny(PathSpecials) >= 0 ? $"{path}['{key}']" : $"{path}.{key}";
-
-    /// <summary>JsonReaderHelper.SpecialCharacters, System.Text.Json 10.0.</summary>
-    private const string PathSpecials = ". '/\"[]()\t\n\r\f\b\\\u0085\u2028\u2029";
+    /// (<see cref="Programs.FormException.Member"/>).</summary>
+    internal static string Member(string path, string key) => Programs.FormException.Member(path, key);
 
     private static void CheckAxis(ValidationContext ctx, HMAxis axis, string path)
     {

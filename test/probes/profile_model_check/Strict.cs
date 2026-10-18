@@ -482,6 +482,50 @@ internal static class Strict
             o["usbConfiguration"]!["interfaces"]![0]!.AsObject()["altSettings"] = null;
             return o.ToJsonString();
         }, "$.usbConfiguration.interfaces[0].altSettings");
+        // A map's key holding a dot stays one segment of the path in the
+        // protocol's decoders and in axisCenters. At f00f0482 the dot split
+        // it in two.
+        Add("a decoder whose name holds a dot", "switch2-pro-controller-composite", _ =>
+        {
+            // The file as written: the catalog's copy keeps its protocol in
+            // its compiled model, not in the keys it serializes.
+            var o = JsonNode.Parse(File.ReadAllText(Path.Combine(Program.RepoRoot(), "profiles", "nintendo", "switch2-pro-composite.json")))!.AsObject();
+            o["id"] = "user-path";
+            var d = o["protocol"]!["decoders"]!.AsObject();
+            d["rumble.copy"] = d["rumble"]!.DeepClone();
+            return o.ToJsonString();
+        }, "$.protocol.decoders['rumble.copy']");
+        // A dash stays in a dotted step, and a program's const key keeps its
+        // brackets. At f00f0482 the path ended before the dash or the
+        // bracket: $.protocol.decoders.rumble, $.inputReports[0].program[0].
+        Add("a decoder whose name holds a dash", "switch2-pro-controller-composite", _ =>
+        {
+            var o = JsonNode.Parse(File.ReadAllText(Path.Combine(Program.RepoRoot(), "profiles", "nintendo", "switch2-pro-composite.json")))!.AsObject();
+            o["id"] = "user-path";
+            var d = o["protocol"]!["decoders"]!.AsObject();
+            d["rumble-copy"] = d["rumble"]!.DeepClone();
+            return o.ToJsonString();
+        }, "$.protocol.decoders.rumble-copy");
+        Add("a decoder whose name holds a colon", "switch2-pro-controller-composite", _ =>
+        {
+            var o = JsonNode.Parse(File.ReadAllText(Path.Combine(Program.RepoRoot(), "profiles", "nintendo", "switch2-pro-composite.json")))!.AsObject();
+            o["id"] = "user-path";
+            var d = o["protocol"]!["decoders"]!.AsObject();
+            d["rumble:copy"] = d["rumble"]!.DeepClone();
+            return o.ToJsonString();
+        }, "$.protocol.decoders.rumble:copy");
+        Add("a program const keyed by a word", "switch2-pro-controller-composite", _ =>
+        {
+            var o = JsonNode.Parse(File.ReadAllText(Path.Combine(Program.RepoRoot(), "profiles", "nintendo", "switch2-pro-composite.json")))!.AsObject();
+            o["id"] = "user-path";
+            o["inputReports"]![0]!["program"]![0]!.AsObject()["const"]!.AsObject()["x"] = "01";
+            return o.ToJsonString();
+        }, "$.inputReports[0].program[0].const[\"x\"]");
+        Add("an axisCenters key holding a dot", "amazon-luna-usb", o =>
+        {
+            o["axisCenters"]!.AsObject()["X.Y"] = 127;
+            return o.ToJsonString();
+        }, "$.axisCenters['X.Y']");
         // A USB/IP persona with no protocol or WinUSB package is refused at
         // load for the usbConfiguration or descriptor it lacks. At f00f0482
         // each loaded and built, and was refused at create after the lease.

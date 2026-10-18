@@ -160,7 +160,7 @@ internal static class ModelCompiler
         if (g.Protocol?.Decoders is { } decs)
         {
             foreach (var (name, spec) in decs)
-                decoders.Add(Decoder(name, spec, $"$.protocol.decoders.{name}"));
+                decoders.Add(Decoder(name, spec, FormException.Member("$.protocol.decoders", name)));
         }
 
         var emits = new List<EmitForm?>();

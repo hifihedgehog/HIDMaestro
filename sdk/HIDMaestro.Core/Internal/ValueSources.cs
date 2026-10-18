@@ -40,7 +40,7 @@ internal static class ValueSources
         if (sources != null)
             foreach (var (name, s) in sources)
             {
-                string at = $"$.valueSources.{name}";
+                string at = HMLayoutValidator.Member("$.valueSources", name);
                 if (s == null) throw new ProfileDefectException(at, "is null.");
                 if (name is Index or Serial)
                     throw new ProfileDefectException(at, $"'{name}' is a built-in source's name. Give the source another.");

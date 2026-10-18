@@ -27,8 +27,12 @@ internal sealed class ProfileDefectException : InvalidOperationException
 internal static partial class ProfileDefects
 {
     // "Profile 'id': extendedReport.fields[2] ('uint8').bytes ...", the form
-    // every check before v2.0.0 writes.
-    [GeneratedRegex(@"^Profile '[^']*':\s+(?<path>[A-Za-z][A-Za-z0-9_]*(?:(?:\.[A-Za-z][A-Za-z0-9_]*)|(?:\[[0-9]*\]))*)")]
+    // every check before v2.0.0 writes. A map's key is a step as
+    // System.Text.Json writes it (FormException.Member): a dash, a digit or
+    // a colon not before a space stays in a dotted step, and a key with a
+    // dot or a space is a bracketed one. A program's const key is bracketed
+    // in double quotes.
+    [GeneratedRegex(@"^Profile '[^']*':\s+(?<path>[A-Za-z][A-Za-z0-9_]*(?:\.(?:[^\s.\[\]'""():,]|:(?!\s|$))+|\[[0-9]*\]|\['[^']*'\]|\[""[^""]*""\])*)")]
     private static partial Regex ProfilePrefixed();
 
     // "layout/sticks[1].x: ...", HMLayoutValidator's form. A map's key is

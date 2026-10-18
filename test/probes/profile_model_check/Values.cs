@@ -116,6 +116,16 @@ internal static class Values
             o["valueSources"]!["steamUpdater"]!["roots"] = new JsonArray();
             return o;
         }, "$.valueSources.steamUpdater.roots", "root");
+        // A source's name is written into the path as System.Text.Json
+        // writes a key. At f00f0482 a dot split it into two segments.
+        Add("a keyedHexFile with no root, its name holding a dot", () =>
+        {
+            var o = Triton();
+            var s = o["valueSources"]!["steamUpdater"]!.DeepClone().AsObject();
+            s["roots"] = new JsonArray();
+            o["valueSources"]!["steam.updater"] = s;
+            return o;
+        }, "$.valueSources['steam.updater'].roots", "root");
 
         string dir = Path.Combine(Path.GetTempPath(), $"hm-profile-values-{Environment.ProcessId}");
         Directory.CreateDirectory(dir);
