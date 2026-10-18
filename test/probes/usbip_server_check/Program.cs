@@ -89,8 +89,12 @@ internal static partial class Program
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
         {
             Interlocked.Increment(ref s_unhandled);
+            // The full text (type, message, inner exceptions, stack) so a
+            // battery transcript names the throwing frame without a rerun.
+            // The managed ID tells the main thread, 1, from a thread-pool
+            // thread, which has no name either.
             Console.WriteLine($"  [FAIL] unhandled {e.ExceptionObject.GetType().Name} on thread " +
-                              $"{Thread.CurrentThread.Name ?? "(unnamed)"}: {(e.ExceptionObject as Exception)?.Message}");
+                              $"{Thread.CurrentThread.Name ?? "(unnamed)"} (managed ID {Environment.CurrentManagedThreadId}): {e.ExceptionObject}");
             Console.WriteLine($"\n=== {s_total - s_failures}/{s_total + 1} checks passed, the process ended by an unhandled exception ===");
             Console.Out.Flush();
             TerminateProcess(GetCurrentProcess(), 3);
@@ -1200,6 +1204,9 @@ internal static partial class Program
 
         InputPumpWakeOffline();
 
+        Console.WriteLine("\n-- the protocol GET_REPORT section's copy of gamecube-adapter --");
+        ProtocolInputOffline(ctx);
+
         // The server's connection owner lookup and the location match the
         // sweeps detach by, which need no device either (Program.Lookup.cs).
         OwnerLookup();
@@ -1377,29 +1384,24 @@ internal static partial class Program
     static void ProtocolInputGetReport(HMContext ctx, UsbipServer server)
     {
         Console.WriteLine("\n-- GET_REPORT(Input) on a protocol device, getReport \"input\" --");
-        string? name = typeof(HMContext).Assembly.GetManifestResourceNames()
-            .FirstOrDefault(n => n.Replace('\\', '/').EndsWith("/gamecube-adapter.json", StringComparison.Ordinal));
-        if (name == null)
-        {
-            Check("gamecube-adapter.json is embedded", false);
-            return;
-        }
-        string json;
-        using (var stream = typeof(HMContext).Assembly.GetManifestResourceStream(name)!)
-        using (var reader = new StreamReader(stream))
-            json = reader.ReadToEnd();
-        var j = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
-        j["id"] = "s43-protocol-input";
-        j["usbConfiguration"]!["protocol"]!["getReport"] = "input";
         string dir = Path.Combine(Path.GetTempPath(), "hm-s43-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
         UsbipEmulatedDevice? device = null;
         try
         {
-            File.WriteAllText(Path.Combine(dir, "s43-protocol-input.json"), j.ToJsonString());
-            ctx.LoadProfilesFromDirectory(dir);
-            var profile = ctx.GetProfile("s43-protocol-input")!.Inner;
+            var profile = ProtocolInputCopy(ctx, dir, out string problem);
+            if (profile == null)
+            {
+                Check("a copy of gamecube-adapter with getReport \"input\" loads", false, problem);
+                return;
+            }
             var declared = profile.GetOrBuildReportBuilder().InputReports;
+            if (!declared.Any(r => r.Id != 0x21))
+            {
+                Check("the copy's descriptor declares an input report besides 0x21", false,
+                      string.Join(" ", declared.Select(r => $"{r.Id:X2}:{r.ByteSize}")));
+                return;
+            }
             device = new UsbipEmulatedDevice(profile, Index);
             server.Register(device);
             using var cl = new Client(server.Port);
@@ -1430,6 +1432,87 @@ internal static partial class Program
                 device.Dispose();
             }
             SharedMemoryIO.DestroyController(Index);
+            try { Directory.Delete(dir, true); } catch (IOException) { }
+        }
+    }
+
+    /// <summary>A copy of gamecube-adapter whose protocol's getReport is
+    /// "input", id s43-protocol-input, written to <paramref name="dir"/> and
+    /// loaded into <paramref name="ctx"/>. Null, with the reason in
+    /// <paramref name="problem"/>, when the catalog file or its protocol is
+    /// missing or the copy does not load, so the caller reports a failed
+    /// check instead of ending the probe.</summary>
+    static ControllerProfile? ProtocolInputCopy(HMContext ctx, string dir, out string problem)
+    {
+        string? name = typeof(HMContext).Assembly.GetManifestResourceNames()
+            .FirstOrDefault(n => n.Replace('\\', '/').EndsWith("/gamecube-adapter.json", StringComparison.Ordinal));
+        if (name == null)
+        {
+            problem = "gamecube-adapter.json is not embedded";
+            return null;
+        }
+        string json;
+        using (var stream = typeof(HMContext).Assembly.GetManifestResourceStream(name)!)
+        using (var reader = new StreamReader(stream))
+            json = reader.ReadToEnd();
+        var j = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
+        j["id"] = "s43-protocol-input";
+        // The protocol is a key of the profile itself since eecfd3bb, no
+        // longer of usbConfiguration (profiles/schema.json).
+        if (j["protocol"] is not System.Text.Json.Nodes.JsonObject protocol)
+        {
+            problem = "gamecube-adapter.json has no protocol object at $.protocol";
+            return null;
+        }
+        protocol["getReport"] = "input";
+        File.WriteAllText(Path.Combine(dir, "s43-protocol-input.json"), j.ToJsonString());
+        ctx.LoadProfilesFromDirectory(dir);
+        var profile = ctx.GetProfile("s43-protocol-input")?.Inner;
+        problem = profile != null ? "" : "not loaded: " + string.Join("; ",
+            ctx.ProfileLoadIssues.Where(i => i.ProfileId == "s43-protocol-input").Select(i => $"{i.JsonPath} {i.Reason}"));
+        return profile;
+    }
+
+    /// <summary>S43's protocol GET_REPORT section without the server: the
+    /// copy it imports loads, its protocol compiles with getReport "input"
+    /// against the copy's descriptors, and the engine the device answers
+    /// GET_REPORT(Input) from holds report 0x21 at its 37 bytes before any
+    /// frame, as UsbipEmulatedDevice.ProtocolGetReport sends it.</summary>
+    static void ProtocolInputOffline(HMContext ctx)
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "hm-s43-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            ControllerProfile? profile;
+            string problem;
+            try
+            {
+                profile = ProtocolInputCopy(ctx, dir, out problem);
+            }
+            catch (Exception e)
+            {
+                profile = null;
+                problem = e.ToString();
+            }
+            Check("a copy of gamecube-adapter with getReport \"input\" loads", profile != null, problem);
+            if (profile == null) return;
+            var declared = profile.GetOrBuildReportBuilder().InputReports;
+            Check("its descriptor declares an input report besides 0x21, which S43 reads as never sent",
+                  declared.Any(r => r.Id == 0x21) && declared.Any(r => r.Id != 0x21),
+                  string.Join(" ", declared.Select(r => $"{r.Id:X2}:{r.ByteSize}")));
+            var protocol = CompiledProtocol.Compile(profile, new UsbDescriptorSet(profile, Index));
+            Check("its protocol compiles with getReport \"input\" on an input endpoint, sending its own report",
+                  protocol is { GetReport: GetReportMode.Input, BuildsReports: false, InputEndpoint: > 0, ReportId: 0x21 },
+                  protocol == null ? "no protocol" : $"getReport {protocol.GetReport}, builds {protocol.BuildsReports}, endpoint 0x{protocol.InputEndpoint:X2}, report 0x{protocol.ReportId:X2}");
+            if (protocol == null) return;
+            var engine = new ProtocolEngine(protocol, profile.SerialString, Index);
+            var report = engine.CopyReport();
+            Check("before any frame the engine's report is 0x21 at 37 bytes",
+                  report.Length == 37 && report[0] == 0x21, $"{report.Length} bytes, first {(report.Length > 0 ? report[0] : 0):X2}");
+        }
+        finally
+        {
             try { Directory.Delete(dir, true); } catch (IOException) { }
         }
     }

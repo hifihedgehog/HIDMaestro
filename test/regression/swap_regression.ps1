@@ -1493,7 +1493,8 @@ function Scenario-Usb-Composite-Schema {
 }
 
 # S43 runs the probe twice: the checks that need no device (the audio
-# engine, the connection owner lookup and the location match), then the
+# engine, the connection owner lookup, the location match and the copy of
+# gamecube-adapter the protocol GET_REPORT section imports), then the
 # protocol against a live import. Both runs
 # always run, and a failure of either is reported.
 function Scenario-Usbip-Server-Protocol {
@@ -1505,7 +1506,7 @@ function Scenario-Usbip-Server-Protocol {
                                'a change made before Dispose not raised, more than one waiting write per control, ' +
                                'a failed start missing from the diagnostic log, its event thread not counted as its own, ' +
                                'a Dispose that waits out the input pump, a wrong connection owner, ' +
-                               'or an import service string matched to the wrong port (see probe stdout)')
+                               'an import service string matched to the wrong port, or a gamecube-adapter copy with getReport "input" that does not load or compile (see probe stdout)')
     } catch { $failed += $_.Exception.Message }
     try {
         Invoke-Probe -Dir 'usbip_server_check' -Exe 'UsbipServerCheck.exe' `
