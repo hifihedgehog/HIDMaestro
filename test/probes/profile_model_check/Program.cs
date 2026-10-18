@@ -34,6 +34,10 @@
 //              exception out of a load (Mutate.cs)
 //   edits      a profile edited after it loads creates with its edited
 //              values: the load keeps no compile (Edits.cs)
+//   tool       the profile check tool the release ZIP ships, from its own
+//              build: each load issue of a broken file with its file and
+//              JSON path, a good file, and --cost on the catalog's programs
+//              copied out as user files (ProfileCheckTool.cs)
 //   check      every mode above, the battery's run (S92), the default
 //
 //   startup    one launch's cold first Build and catalog load (Startup.cs),
@@ -70,6 +74,7 @@ internal static class Program
             ("builder", Builder.Run),
             ("mutate", Mutate.Run),
             ("edits", Edits.Run),
+            ("tool", ProfileCheckTool.Run),
         };
         int fail = 0;
         if (mode == "check")
