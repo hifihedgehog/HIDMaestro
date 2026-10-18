@@ -13,6 +13,21 @@
 //               moment on a clean machine. One installs, the other waits for
 //               it under the deploy lock: one host controller, and both
 //               composites appear.
+//   N. nostream A, with the composite's profile loaded from a file without
+//               its idle stream ("stream"), the one change in what the
+//               device sends between v1.12.0 and 2.0.0. Runs only when named.
+//
+// --offline checks, on this machine with no sandbox, no device and no
+// elevation, the parts of A and N that can be: N's profile differs from the
+// catalog's only in its stream, and the devnode chain, arrival times and
+// Kernel-PnP events read back from this machine's own HID devices.
+//
+// Scenarios A and N also note what Windows did to the composite's devnodes
+// while the probe read it (Pnp.cs): each node from the HID interface up to
+// the host controller with its last arrival and removal, read when the
+// interface appears and after each read window, whether device installation
+// was pending, and the Kernel-PnP configuration events that name them.
+// Notes print as [NOTE] and are not checks.
 //
 // The host role starts a fresh sandbox for each scenario with wsb.exe,
 // which opens no window, runs this program inside it as SYSTEM, and reports
@@ -60,6 +75,8 @@ internal static class Program
             return InSandbox(args[1], args[2]);
         if (args.Length >= 3 && args[0] == "--create-composite")
             return CreateComposite(args[1], args[2]);
+        if (args.Length > 0 && args[0] == "--offline")
+            return Offline();
         return Host(args.Length > 0 ? args[0].ToUpperInvariant() : "ABC");
     }
 
@@ -86,6 +103,7 @@ internal static class Program
             ('A', "clean", "a clean machine"),
             ('B', "record", "an uninstall entry without the driver package"),
             ('C', "together", "two programs' first composites at the same moment"),
+            ('N', "nostream", "a clean machine, the composite without its idle stream"),
         };
         foreach (var (id, name, title) in scenarios)
         {
@@ -139,6 +157,7 @@ internal static class Program
                 int sp = line.IndexOf(' ');
                 if (sp < 0) continue;
                 string verdict = line[..sp], rest = line[(sp + 1)..];
+                if (verdict == "NOTE") { Console.WriteLine($"  [NOTE] {rest}"); continue; }
                 int bar = rest.IndexOf(" | ", StringComparison.Ordinal);
                 Check(bar < 0 ? rest : rest[..bar], verdict == "PASS", bar < 0 ? "" : rest[(bar + 3)..]);
             }
@@ -155,6 +174,8 @@ internal static class Program
     // ── Inside the sandbox ─────────────────────────────────────────────
 
     static readonly List<string> s_lines = new();
+
+    static void Note(string text) => s_lines.Add("NOTE " + text.Replace('\r', ' ').Replace('\n', ' '));
 
     static void Record(string name, bool ok, string detail = "")
     {
@@ -189,13 +210,15 @@ internal static class Program
             using var ctx = new HMContext();
             ctx.LoadDefaultProfiles();
             ctx.InstallDriver();
+            HMProfile profile = scenario == "nostream" ? WithoutStream(ctx) : ctx.GetProfile("dualsense-composite")!;
             HMController? c = null;
             Exception? error = null;
-            try { c = ctx.CreateController(ctx.GetProfile("dualsense-composite")!, "sandbox-composite"); }
+            DateTime createdFrom = DateTime.UtcNow;
+            try { c = ctx.CreateController(profile, "sandbox-composite"); }
             catch (Exception ex) { error = ex; }
 
-            if (scenario == "clean") CleanChecks(c, error);
-            else RecordChecks(error);
+            if (scenario == "record") RecordChecks(error);
+            else CleanChecks(scenario, c, error, createdFrom);
 
             c?.Dispose();
         }
@@ -208,16 +231,41 @@ internal static class Program
         return s_lines.Any(l => l.StartsWith("FAIL", StringComparison.Ordinal)) ? 1 : 0;
     }
 
-    static void CleanChecks(HMController? c, Exception? error)
+    /// <summary>The catalog's dualsense-composite with its "stream" taken
+    /// out, under an id of its own, loaded from a file the way a program
+    /// loads its own profiles.</summary>
+    static HMProfile WithoutStream(HMContext ctx)
     {
-        Record("clean: the composite creates", c != null, error == null ? "" : $"{error.GetType().Name}: {error.Message}");
+        var asm = typeof(HMContext).Assembly;
+        string name = asm.GetManifestResourceNames().Single(n =>
+            n.StartsWith("HIDMaestro.Profiles.", StringComparison.Ordinal) &&
+            (n.EndsWith("\\dualsense-composite.json", StringComparison.OrdinalIgnoreCase) ||
+             n.EndsWith("/dualsense-composite.json", StringComparison.OrdinalIgnoreCase) ||
+             n.EndsWith(".dualsense-composite.json", StringComparison.OrdinalIgnoreCase)));
+        using var s = asm.GetManifestResourceStream(name)!;
+        using var reader = new StreamReader(s);
+        var json = System.Text.Json.Nodes.JsonNode.Parse(reader.ReadToEnd())!.AsObject();
+        json.Remove("stream");
+        json["id"] = "dualsense-composite-nostream";
+        string dir = Path.Combine(Path.GetTempPath(), "HIDMaestro_nostream");
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "dualsense-composite-nostream.json"), json.ToJsonString());
+        ctx.LoadProfilesFromDirectory(dir);
+        return ctx.GetProfile("dualsense-composite-nostream")
+            ?? throw new InvalidOperationException("the profile without its stream did not load");
+    }
+
+    static void CleanChecks(string scenario, HMController? c, Exception? error, DateTime createdFrom)
+    {
+        string p = scenario + ":";
+        Record($"{p} the composite creates", c != null, error == null ? "" : $"{error.GetType().Name}: {error.Message}");
 
         // The positive controls: the install happened.
-        Record("clean: usbip-win2's driver package is installed", DriverPackagePresent());
-        Record("clean: its uninstall entry is there", UninstallerPath() != null);
-        Record("clean: devnode.exe and usbip.exe are installed",
+        Record($"{p} usbip-win2's driver package is installed", DriverPackagePresent());
+        Record($"{p} its uninstall entry is there", UninstallerPath() != null);
+        Record($"{p} devnode.exe and usbip.exe are installed",
                File.Exists(Path.Combine(InstallDir, "devnode.exe")) && File.Exists(Path.Combine(InstallDir, "usbip.exe")), InstallDir);
-        Record("clean: the VC++ runtime devnode.exe imports is installed",
+        Record($"{p} the VC++ runtime devnode.exe imports is installed",
                File.Exists(Path.Combine(Environment.SystemDirectory, "vcruntime140.dll")) &&
                File.Exists(Path.Combine(Environment.SystemDirectory, "msvcp140.dll")));
 
@@ -227,18 +275,18 @@ internal static class Program
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonPrograms), "USBip"),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "USBip"),
         };
-        Record("clean: no Start menu folder", !menus.Any(Directory.Exists), string.Join(", ", menus.Where(Directory.Exists)));
+        Record($"{p} no Start menu folder", !menus.Any(Directory.Exists), string.Join(", ", menus.Where(Directory.Exists)));
         string[] shortcuts =
         {
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), "USBip.lnk"),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "USBip.lnk"),
         };
-        Record("clean: no desktop shortcut", !shortcuts.Any(File.Exists), string.Join(", ", shortcuts.Where(File.Exists)));
-        Record("clean: no GUI", !File.Exists(Path.Combine(InstallDir, "wusbip.exe")));
-        Record("clean: no SDK headers or library",
+        Record($"{p} no desktop shortcut", !shortcuts.Any(File.Exists), string.Join(", ", shortcuts.Where(File.Exists)));
+        Record($"{p} no GUI", !File.Exists(Path.Combine(InstallDir, "wusbip.exe")));
+        Record($"{p} no SDK headers or library",
                !Directory.Exists(Path.Combine(InstallDir, "include")) && !Directory.Exists(Path.Combine(InstallDir, "lib")));
         string[] pdbs = Directory.Exists(InstallDir) ? Directory.GetFiles(InstallDir, "*.pdb") : Array.Empty<string>();
-        Record("clean: no PDB files", pdbs.Length == 0, string.Join(", ", pdbs.Select(Path.GetFileName)));
+        Record($"{p} no PDB files", pdbs.Length == 0, string.Join(", ", pdbs.Select(Path.GetFileName)));
 
         // The composite works end to end.
         if (c == null) return;
@@ -250,21 +298,29 @@ internal static class Program
             paths = Hid.Paths(0x054C, 0x0CE6);
             if (paths.Count == 0) Thread.Sleep(250);
         }
-        Record("clean: the composite's HID interface appears", paths.Count > 0, $"{paths.Count} interface(s)");
+        Record($"{p} the composite's HID interface appears", paths.Count > 0, $"{paths.Count} interface(s)");
         if (paths.Count == 0) return;
+        var appeared = DateTime.UtcNow;
+        var chain = Pnp.Chain(paths[0]);
+        NoteChain(scenario, "when the interface appeared", chain, appeared);
 
-        // The composite sends one report per submitted frame, so a working
-        // device returns a report for nearly every submit. Half is the bar,
+        // The composite sends a report for each submitted frame, and with its
+        // idle stream one every 4 ms between them, so a working device
+        // returns at least a report for nearly every submit. Half is the bar,
         // and a read that fails means the device went away mid-window.
         var state = new HMGamepadState { Buttons = HMButton.A };
         void Submit() { try { c.SubmitState(in state); } catch { } }
         var early = Hid.CountReports(paths[0], 1500, Submit);
-        Record("clean: input arrives as soon as the interface appears",
+        Record($"{p} input arrives as soon as the interface appears",
                early.ReadError == 0 && early.Reports * 2 >= early.Ticks, early.ToString());
+        Note($"{scenario}: the early window opened at {Pnp.Stamp(early.StartUtc)}, {(early.StartUtc - appeared).TotalMilliseconds:F0} ms after the interface was seen" +
+             (early.ErrorMs >= 0 ? $", and its read failed at {Pnp.Stamp(early.StartUtc.AddMilliseconds(early.ErrorMs))}" : ""));
+        NoteChain(scenario, "after the early window", chain, null);
         Thread.Sleep(3000);
         var steady = Hid.CountReports(paths[0], 2000, Submit);
-        Record("clean: input keeps arriving once the device has settled",
+        Record($"{p} input keeps arriving once the device has settled",
                steady.ReadError == 0 && steady.Reports * 2 >= steady.Ticks, steady.ToString());
+        NoteChain(scenario, "after the settled window", chain, null);
 
         // The composite streams reports whether or not a state was submitted,
         // so a count cannot show the submitted state arrived. Three windows:
@@ -281,12 +337,37 @@ internal static class Program
         });
         var idleAgain = ReadWith(paths[0], new HMGamepadState());
         var changed = SteadyDifferences(idle, held);
-        Record("clean: the submitted state is what the host reads", changed.Count > 0,
+        Record($"{p} the submitted state is what the host reads", changed.Count > 0,
                changed.Count > 0 ? $"byte(s) {string.Join(",", changed)} differ between the neutral and pressed windows"
                                  : $"no byte that is steady in each window differs between them ({idle.Reports} and {held.Reports} report(s))");
         var spurious = SteadyDifferences(idle, idleAgain);
-        Record("clean: two neutral windows show no difference", idle.Reports > 0 && idleAgain.Reports > 0 && spurious.Count == 0,
+        Record($"{p} two neutral windows show no difference", idle.Reports > 0 && idleAgain.Reports > 0 && spurious.Count == 0,
                spurious.Count == 0 ? "" : $"byte(s) {string.Join(",", spurious)} differ");
+
+        // When device installation ended, then every configuration event since
+        // the create that names a node of the chain or a function of the
+        // composite. A node started twice, or deleted and configured again,
+        // was restarted by Windows.
+        var waited = Stopwatch.StartNew();
+        string install = Pnp.InstallState(60_000);
+        Note($"{scenario}: device installation {install} at {Pnp.Stamp(DateTime.UtcNow)}, after a wait of {waited.ElapsedMilliseconds} ms");
+        var match = new List<string>(chain);
+        // The composite's VID and PID with no interface number name its audio
+        // functions too.
+        string? usb = chain.FirstOrDefault(id => id.StartsWith(@"USB\VID_", StringComparison.OrdinalIgnoreCase) && !id.Contains("&MI_", StringComparison.OrdinalIgnoreCase));
+        if (usb != null) match.Add(usb.Split('\\')[1]);
+        foreach (string e in Pnp.Events(createdFrom, match, Run))
+            Note($"{scenario}: event {e}");
+    }
+
+    /// <summary>Each node of the chain as it stands, and whether Windows had
+    /// device installation pending at that moment.</summary>
+    static void NoteChain(string scenario, string when, List<string> chain, DateTime? at)
+    {
+        Note($"{scenario}: {when}{(at is DateTime t ? $" ({Pnp.Stamp(t)})" : "")}, device installation {Pnp.InstallState(0)}");
+        if (chain.Count == 0) Note($"{scenario}:   the interface's devnode could not be read");
+        foreach (string id in chain)
+            Note($"{scenario}:   {id}: {Pnp.Read(id)}");
     }
 
     /// <summary>Submits <paramref name="state"/> for a short settle, then
@@ -313,6 +394,66 @@ internal static class Program
         for (int i = 0; i < n; i++)
             if (a.Frames.All(r => r[i] == a.Frames[0][i]) && b.Frames.All(r => r[i] == b.Frames[0][i]) && a.Frames[0][i] != b.Frames[0][i]) found.Add(i);
         return found;
+    }
+
+    // ── Offline ────────────────────────────────────────────────────────
+
+    static int Offline()
+    {
+        Console.WriteLine("=== The usbip-win2 install check's offline parts ===");
+
+        using (var ctx = new HMContext())
+        {
+            ctx.LoadDefaultProfiles();
+            var full = ctx.GetProfile("dualsense-composite")!;
+            HMProfile? bare = null;
+            string why = "";
+            try { bare = WithoutStream(ctx); }
+            catch (Exception ex) { why = $"{ex.GetType().Name}: {ex.Message}"; }
+            Check("the catalog's composite has an idle stream (the control)", StreamOf(full) != null);
+            Check("scenario N's profile loads", bare != null, why);
+            if (bare != null)
+            {
+                Check("scenario N's profile has no idle stream", StreamOf(bare) == null);
+                Check("and is the catalog's composite in all else",
+                      bare.VendorId == full.VendorId && bare.ProductId == full.ProductId &&
+                      bare.DescriptorHex == full.DescriptorHex && bare.Backend == full.Backend &&
+                      bare.ProductString == full.ProductString && bare.RequiresUsbipBackend &&
+                      bare.DeviceModelSource.Count == full.DeviceModelSource.Count &&
+                      bare.DeviceModelSource.All(kv => full.DeviceModelSource.TryGetValue(kv.Key, out var v) && v == kv.Value),
+                      $"{bare.Id}, model from {string.Join(", ", bare.DeviceModelSource.Select(kv => kv.Key + "=" + kv.Value))}");
+            }
+        }
+
+        // Any present HID device of this machine stands in for the composite.
+        string? path = Hid.AllPaths().FirstOrDefault(x => Pnp.Chain(x).Count > 1);
+        Check("a HID interface on this machine to read", path != null);
+        if (path != null)
+        {
+            var chain = Pnp.Chain(path);
+            var first = Pnp.Read(chain[0]);
+            Check("its devnode chain reads up to a root-enumerated node or the tree root",
+                  chain[^1].StartsWith(@"ROOT\", StringComparison.OrdinalIgnoreCase) || chain[^1].StartsWith(@"HTREE\", StringComparison.OrdinalIgnoreCase) || chain.Count == 8,
+                  string.Join(" <- ", chain));
+            Check("its devnode reads as present with a last arrival", first.Present && first.Arrived != null, first.ToString());
+            Check("the install state reads", !Pnp.InstallState(0).StartsWith("unknown", StringComparison.Ordinal), Pnp.InstallState(0));
+        }
+        var events = Pnp.Events(DateTime.UtcNow.AddDays(-7), new[] { "HID", "USB" }, Run);
+        Check("Kernel-PnP configuration events read and parse",
+              events.Count > 0 && events.All(e => e.Length > 0 && char.IsDigit(e[0])) && !events[0].StartsWith("wevtutil", StringComparison.Ordinal),
+              events.Count > 0 ? $"{events.Count} event(s), the first: {events[0]}" : "none");
+
+        Console.WriteLine();
+        Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");
+        return s_failures == 0 ? 0 : 1;
+    }
+
+    /// <summary>The profile's idle stream, read from the SDK's own model of
+    /// it, which the probe has no public property for.</summary>
+    static object? StreamOf(HMProfile profile)
+    {
+        var inner = typeof(HMProfile).GetProperty("Inner", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(profile)!;
+        return inner.GetType().GetProperty("Stream")!.GetValue(inner);
     }
 
     // ── Two programs at once ───────────────────────────────────────────

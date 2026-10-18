@@ -31,6 +31,16 @@ internal static class Hid
     [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
     static extern uint CM_Get_Device_Interface_ListW(ref Guid g, string? deviceId, char[] buffer, uint len, uint flags);
 
+    /// <summary>Every present HID interface.</summary>
+    internal static List<string> AllPaths()
+    {
+        Guid g = HidGuid;
+        if (CM_Get_Device_Interface_List_SizeW(out uint len, ref g, null, 0) != 0 || len <= 1) return new List<string>();
+        var buf = new char[len];
+        if (CM_Get_Device_Interface_ListW(ref g, null, buf, len, 0) != 0) return new List<string>();
+        return new List<string>(new string(buf).Split('\0', StringSplitOptions.RemoveEmptyEntries));
+    }
+
     /// <summary>Present HID interfaces with this VID and PID.</summary>
     internal static List<string> Paths(ushort vid, ushort pid)
     {
@@ -54,12 +64,15 @@ internal static class Hid
     /// 8 ms: the input reports, the submits, and the Win32 error of a read
     /// that failed before the window ended (0 when none did, which tells a
     /// device that stopped sending from one that went away). Frames holds the
-    /// bytes of each report read, the report id first.</summary>
-    internal readonly record struct Reading(int Reports, int Ticks, int ReadError, long FirstMs, long LastMs, List<byte[]>? Frames = null)
+    /// bytes of each report read, the report id first. StartUtc is when the
+    /// window opened and ErrorMs when the failed read returned, -1 when none
+    /// did.</summary>
+    internal readonly record struct Reading(int Reports, int Ticks, int ReadError, long FirstMs, long LastMs, List<byte[]>? Frames = null,
+                                            DateTime StartUtc = default, long ErrorMs = -1)
     {
         public override string ToString() =>
             $"{Reports} report(s) for {Ticks} submit(s), first at {FirstMs} ms, last at {LastMs} ms" +
-            (ReadError != 0 ? $", a read failed with Win32 error {ReadError}" : "");
+            (ReadError != 0 ? $", a read failed with Win32 error {ReadError}" + (ErrorMs >= 0 ? $" at {ErrorMs} ms" : "") : "");
     }
 
     /// <summary>Input reports read from the interface in <paramref name="ms"/>
@@ -78,9 +91,10 @@ internal static class Hid
         if (len == 0) { CloseHandle(h); return new Reading(-1, 0, 0, 0, 0); }
 
         int count = 0, readError = 0;
-        long first = -1, last = -1;
+        long first = -1, last = -1, errorAt = -1;
         var frames = new List<byte[]>();
         var stop = new StopFlag();
+        var startUtc = DateTime.UtcNow;
         var sw = Stopwatch.StartNew();
         var reader = new Thread(() =>
         {
@@ -89,7 +103,7 @@ internal static class Hid
             {
                 if (!ReadFile(h, buf, len, out int read, IntPtr.Zero))
                 {
-                    if (!stop.Set) readError = Marshal.GetLastWin32Error();
+                    if (!stop.Set) { readError = Marshal.GetLastWin32Error(); errorAt = sw.ElapsedMilliseconds; }
                     break;
                 }
                 if (read <= 0) continue;
@@ -107,7 +121,7 @@ internal static class Hid
         CancelIoEx(h, IntPtr.Zero);
         reader.Join(2000);
         CloseHandle(h);
-        lock (frames) return new Reading(count, ticks, readError, first, last, new List<byte[]>(frames));
+        lock (frames) return new Reading(count, ticks, readError, first, last, new List<byte[]>(frames), startUtc, errorAt);
     }
 
     sealed class StopFlag { public volatile bool Set; }
