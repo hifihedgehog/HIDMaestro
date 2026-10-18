@@ -767,7 +767,15 @@ internal static partial class UsbipDriverInstaller
     /// usbip2_ude.inf. Any other result is unknown, and unknown is never
     /// "absent": absent leads to the vendor installer, which must not run
     /// over an existing install. A listing that fails throws with the
-    /// reason, and nothing is installed.</para></summary>
+    /// reason, and nothing is installed.</para>
+    ///
+    /// <para>A usbip2_ude.inf entry the driver store keeps after its INF
+    /// file and FileRepository folder are gone is not listed, so it reads
+    /// as absent. Nothing of it is left to repair. The installer then runs
+    /// only when usbip-win2's uninstall entry is gone as well
+    /// (<see cref="InstallLocked"/>), and the installer's uninstall of an
+    /// earlier copy, which detaches the root-hub filter, runs only from
+    /// that entry.</para></summary>
     /// <exception cref="InvalidOperationException">The driver store could not
     /// be read.</exception>
     private static bool IsProductInstalled() =>

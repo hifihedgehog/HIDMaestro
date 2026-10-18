@@ -353,19 +353,34 @@ internal static partial class Program
         // name, and the note loses the add's own name and keeps the rest.
         var added = new System.Collections.Generic.List<RegistryLedger.NoteChange>();
         RegistryLedger.NoteForProbe = c => added.Add(c);
-        string? addedAs = null;
-        bool addThrew = false;
+        string? addedAs = null, ownOfTwo = null;
+        bool addThrew = false, otherThrew = false;
+        int afterFirst = -1, afterMissing = -1, afterOwn = -1, afterOther = -1;
         try
         {
-            addedAs = WinUsbBinding.RecordAdd("HMWINUSB_X.INF", new() { Rec("oem7.inf", X), Rec("oem8.inf", Y) }, 0, "");
-            try { WinUsbBinding.RecordAdd(Z, new() { Rec("oem7.inf", X) }, 1, "failed"); }
+            addedAs = WinUsbBinding.RecordAdd("HMWINUSB_X.INF", new() { Rec("oem7.inf", X), Rec("oem8.inf", Y) }, 0, "", _ => true);
+            afterFirst = added.Count;
+            try { WinUsbBinding.RecordAdd(Z, new() { Rec("oem7.inf", X) }, 1, "failed", _ => true); }
             catch (InvalidOperationException) { addThrew = true; }
+            afterMissing = added.Count;
+            // Two packages of one INF name, as from two builds whose INF
+            // text differs: the add's own is the one whose published INF is
+            // the INF it staged, wherever the listing puts it.
+            ownOfTwo = WinUsbBinding.RecordAdd(X, new() { Rec("oem7.inf", X), Rec("oem12.inf", X) }, 0, "", p => p == "oem12.inf");
+            afterOwn = added.Count;
+            try { WinUsbBinding.RecordAdd(X, new() { Rec("oem7.inf", X) }, 0, "", _ => false); }
+            catch (InvalidOperationException) { otherThrew = true; }
+            afterOther = added.Count;
         }
         finally { RegistryLedger.NoteForProbe = null; }
         Check("an add finds its package by INF name in any case and takes only that name out of the note",
-              addedAs == "oem7.inf" && added.Count == 1 && NoteFrom(added, X, Y).SequenceEqual(new[] { Y }),
-              $"{addedAs}, note {Show(NoteFrom(added, X, Y))}");
-        Check("an add whose package is not in the listing throws and changes no note", addThrew && added.Count == 1);
+              addedAs == "oem7.inf" && afterFirst == 1 && NoteFrom(added.Take(1).ToList(), X, Y).SequenceEqual(new[] { Y }),
+              $"{addedAs}, note {Show(NoteFrom(added.Take(1).ToList(), X, Y))}");
+        Check("an add whose package is not in the listing throws and changes no note", addThrew && afterMissing == 1);
+        Check("of two packages of one INF name, an add records the one whose INF it staged, not the first listed",
+              ownOfTwo == "oem12.inf" && afterOwn == 2, ownOfTwo ?? "none");
+        Check("an add whose INF name is listed only with another build's INF throws and changes no note",
+              otherThrew && afterOther == 2);
 
         // The note's write (RegistryLedger.NoteWithin), the call that decides
         // whether the deferred run is due (LeftToRemove) and the one that

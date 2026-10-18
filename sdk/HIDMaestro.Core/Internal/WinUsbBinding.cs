@@ -636,7 +636,8 @@ DeviceName = ""{deviceName}""
     ///
     /// <para>A devnode on a driver other than HIDMaestro's WinUSB packages is
     /// someone else's and is left alone. When its driver cannot be told, as
-    /// when pnputil fails, nothing changes and the entry stays.</para>
+    /// when the driver store cannot be read, nothing changes and the entry
+    /// stays.</para>
     ///
     /// <para>A devnode that has left (<see cref="HasLeft"/>) gets
     /// <c>CONFIGFLAG_REINSTALL</c>, which makes Plug and Play install it
@@ -1000,21 +1001,36 @@ DeviceName = ""{deviceName}""
             DriverBuilder.CatalogAndSignPackage(dir, pin);
             (rc, output) = PnputilHelper.AddDriver(infPath);
         }
-        return RecordAdd(p.InfName, OurPackages(), rc, output);
+        string staged = Sha256Hex(inf);
+        return RecordAdd(p.InfName, OurPackages(), rc, output, published => PublishedHash(published) == staged);
+    }
+
+    /// <summary>The SHA-256 of a published INF, or null when it cannot be
+    /// read. The driver store publishes the INF it was given byte for byte:
+    /// the staged INF, its FileRepository copy and its published copy read
+    /// the same.</summary>
+    private static string? PublishedHash(string published)
+    {
+        try { return Sha256Hex(File.ReadAllBytes(Path.Combine(InfDirectory, published))); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
     }
 
     /// <summary>A package add's outcome from the driver store listed after
     /// it: the package's published name, kept for this process, and the
     /// note change, which takes the add's own INF name out of the cleanup's
     /// note. A package a program adds again is not an uninstall's leftover,
-    /// and the note keeps every other package it names. registry_ownership_check's
-    /// offline part checks it.</summary>
-    internal static string RecordAdd(string infName, List<PnputilHelper.DriverRecord> ours, int rc, string output)
+    /// and the note keeps every other package it names. Two packages can
+    /// carry one INF name, as from two builds whose INF text differs, so the
+    /// published name is the one <paramref name="isAdded"/> takes for this
+    /// add's own: the package whose INF is the one staged.
+    /// registry_ownership_check's offline part checks it.</summary>
+    internal static string RecordAdd(string infName, List<PnputilHelper.DriverRecord> ours, int rc, string output,
+        Func<string, bool> isAdded)
     {
         string? published = ours
             .Where(r => r.OriginalName.Equals(infName, StringComparison.OrdinalIgnoreCase))
             .Select(r => r.PublishedName)
-            .FirstOrDefault();
+            .FirstOrDefault(isAdded);
         if (published == null)
             throw new InvalidOperationException($"pnputil did not add {infName} (exit {rc}): {output.Trim()}");
         lock (s_lock) s_published[infName] = published;
@@ -1046,19 +1062,29 @@ DeviceName = ""{deviceName}""
     private static bool IsPackageName(string original)
         => original.StartsWith(PackagePrefix, StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>True when <paramref name="inf"/> is one of HIDMaestro's
-    /// WinUSB packages, null when that cannot be told: the driver store
-    /// could not be listed, though <paramref name="inf"/> is a third-party
-    /// package it holds.</summary>
-    private static bool? IsOurPackage(string? inf)
+    /// <summary>True when <paramref name="inf"/>, a devnode's driver INF, is
+    /// one of HIDMaestro's WinUSB packages, null when that cannot be told
+    /// because the driver store could not be read. Its published name is
+    /// looked up in the driver store (<see cref="PnputilHelper.OriginalNameOf"/>),
+    /// which finds a package whose INF file and FileRepository folder are
+    /// gone while the store keeps its entry for the devnode. Such a package
+    /// is told by its INF name alone. One whose INF file is there must also
+    /// name HIDMaestro as its provider, as <see cref="Ours"/> requires.
+    /// registry_ownership_check's offline part checks it.</summary>
+    internal static bool? IsOurPackage(string? inf)
     {
         if (string.IsNullOrEmpty(inf) || IsInboxOrNone(inf)) return false;
         string file = Path.GetFileName(inf);
         lock (s_lock)
             foreach (var known in s_published.Values)
                 if (string.Equals(file, known, StringComparison.OrdinalIgnoreCase)) return true;
-        if (TryOurPackages() is not { } ours) return null;
-        return ours.Any(r => string.Equals(file, r.PublishedName, StringComparison.OrdinalIgnoreCase));
+        try
+        {
+            if (PnputilHelper.OriginalNameOf(file) is not { } original || !IsPackageName(original)) return false;
+            return PnputilHelper.ProviderOf(file) is not { } provider
+                || provider.Equals(Provider, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (InvalidOperationException) { return null; }
     }
 
     private static string Sha256Hex(byte[] data)

@@ -836,16 +836,16 @@ public static class DriverBuilder
     /// cache (instant after first confirmation); (2) DriverStore filesystem
     /// check (~1 ms); (3) the driver store listing through SetupAPI
     /// (<see cref="PnputilHelper.ListPackages"/>, about 15 ms at p50 on a
-    /// desktop and 120 ms on an Atom). Most calls
-    /// hit (1) or (2); the listing is only read when neither shortcut
-    /// applies, e.g. cold start with no prior HKLM hash.</para></summary>
+    /// desktop and 120 ms on an Atom). Most calls hit (1) or (2). The
+    /// listing is only read when neither shortcut applies, e.g. cold start
+    /// with no prior HKLM hash.</para></summary>
     /// <exception cref="InvalidOperationException">The driver store listing
     /// failed. The message names the failure.</exception>
     public static bool IsDriverInstalled()
     {
         // Perf audit 2026-07-21: PnputilHelper.IsHidMaestroDriverInstalled
         // already runs the same ladder with a per-process positive cache in
-        // front (cache -> filesystem -> pnputil). The duplicate filesystem
+        // front (cache -> filesystem -> listing). The duplicate filesystem
         // walk here cost a FileRepository enumeration per controller create
         // after the first.
         return PnputilHelper.IsHidMaestroDriverInstalled();

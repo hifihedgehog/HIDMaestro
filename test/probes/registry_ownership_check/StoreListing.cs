@@ -1,7 +1,8 @@
 // The driver store listing (PnputilHelper.ListPackages). It reads SetupAPI,
 // so it answers the same way on every Windows version: pnputil prints its
-// locale-stable form, /format xml, only on Windows 11, and Windows 10's
-// pnputil answers that option with its usage text and exit code 1.
+// locale-stable form, /format xml, on Windows 11 build 26200, and the pnputil
+// of Windows 10 build 19044 answers that option with its usage text and exit
+// code 1.
 
 using System;
 using System.Collections.Generic;
@@ -10,6 +11,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Xml.Linq;
 using HIDMaestro.Internal;
 
 internal static partial class Program
@@ -29,7 +31,7 @@ internal static partial class Program
               thrown == null ? "returned" : $"{thrown.GetType().Name}: {thrown.Message}");
         Check("and is no listing at TryEnumerateDrivers", PnputilHelper.TryEnumerateDrivers(_ => true, missing) == null);
 
-        // A published INF the driver store holds no package of
+        // A published INF the driver store places no package for
         // (ERROR_NOT_FOUND) is not listed, and the listing stays whole.
         string dir = Path.Combine(Path.GetTempPath(), "hm-list-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
@@ -38,7 +40,7 @@ internal static partial class Program
             const string inf = "[Version]\r\nSignature=\"$Windows NT$\"\r\nProvider=%P%\r\nDriverVer=8/7/2026,1.0005.0.46\r\n[Strings]\r\nP=\"HIDMaestro\"\r\n";
             File.WriteAllText(Path.Combine(dir, "oem98765.inf"), inf);
             var none = PnputilHelper.TryEnumerateDrivers(_ => true, dir);
-            Check("a published INF whose package the driver store does not hold is not listed, and the listing is whole",
+            Check("a published INF the driver store places no package for is not listed, and the listing is whole",
                   none is { Count: 0 }, none == null ? "the listing failed" : $"{none.Count} package(s)");
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
@@ -53,9 +55,10 @@ internal static partial class Program
     }
 
     /// <summary>The listing against pnputil's own on this machine's driver
-    /// store. pnputil's plain text, the form every Windows version prints,
-    /// names its fields in the system's language; this reads the English
-    /// labels of both bench machines.</summary>
+    /// store: pnputil's XML where it prints one, which names its fields the
+    /// same in every language, and its plain text otherwise. The plain text
+    /// is read by its English labels, the language of both bench
+    /// machines.</summary>
     static void StoreListingAgainstPnputil()
     {
         var mine = PnputilHelper.TryEnumerateDrivers(_ => true);
@@ -63,11 +66,9 @@ internal static partial class Program
               mine == null ? "the listing failed" : $"{mine.Count} package(s)");
         if (mine == null) return;
 
-        var (rc, text) = PnputilHelper.Run("/enum-drivers", timeoutMs: 60_000);
-        var theirs = PnputilText(text);
-        Check("pnputil /enum-drivers lists this driver store with English labels", rc == 0 && theirs.Count > 0,
-              $"exit {rc}, {theirs.Count} record(s)");
-        if (rc != 0 || theirs.Count == 0) return;
+        var (form, theirs) = PnputilListing();
+        Check($"pnputil /enum-drivers lists this driver store ({form})", theirs.Count > 0, $"{theirs.Count} record(s)");
+        if (theirs.Count == 0) return;
 
         var theirsByKey = new Dictionary<(string, string), (string Provider, string Version)>();
         foreach (var t in theirs) theirsByKey[(t.Published.ToLowerInvariant(), t.Original.ToLowerInvariant())] = (t.Provider, t.Version);
@@ -84,21 +85,60 @@ internal static partial class Program
         Check($"every package the listing names, {mine.Count}, pnputil lists with the same original name, provider and DriverVer",
               unmatched.Count == 0, string.Join(" | ", unmatched.Take(8)));
 
-        // What pnputil lists and the listing leaves out must be a package
-        // of another architecture, which its FileRepository folder, named
-        // with the architecture, publishes, or a published name whose INF is
-        // gone from the INF directory.
+        // What pnputil lists and the listing leaves out must be a package of
+        // another architecture, which its FileRepository folder, named with
+        // the architecture, publishes, or a driver store entry whose INF
+        // file and FileRepository folder are both gone. Such an entry must
+        // still resolve by its published name, as a devnode's driver is
+        // looked up (WinUsbBinding.IsOurPackage).
         var foreign = ForeignArchitecturePublished();
         string infDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "INF");
         var missed = theirsByKey.Keys.Where(k => !mineKeys.Contains(k)).ToList();
         var otherArch = missed.Where(k => foreign.Contains(k.Item1)).ToList();
-        var noInf = missed.Where(k => !foreign.Contains(k.Item1) && !File.Exists(Path.Combine(infDir, k.Item1))).ToList();
-        var unexplained = missed.Except(otherArch).Except(noInf).Select(k => $"{k.Item1} ({k.Item2})").ToList();
-        Check($"every package pnputil lists, {theirsByKey.Count}, is in the listing, of another architecture ({otherArch.Count}), or has no published INF left ({noInf.Count})",
+        var entryOnly = new List<(string, string)>();
+        var unexplained = new List<string>();
+        foreach (var k in missed.Except(otherArch))
+        {
+            string? store = null;
+            try { store = PnputilHelper.DriverStorePathOf(k.Item1); }
+            catch (InvalidOperationException e) { unexplained.Add($"{k.Item1} ({k.Item2}): {e.Message}"); continue; }
+            bool infGone = !File.Exists(Path.Combine(infDir, k.Item1));
+            bool folderGone = store != null && !Directory.Exists(Path.GetDirectoryName(store));
+            if (infGone && folderGone && string.Equals(Path.GetFileName(store), k.Item2, StringComparison.OrdinalIgnoreCase)
+                && PnputilHelper.ProviderOf(k.Item1) == null)
+                entryOnly.Add(k);
+            else
+                unexplained.Add($"{k.Item1} ({k.Item2}): INF {(infGone ? "gone" : "present")}, store path {store ?? "none"}, folder {(folderGone ? "gone" : "present")}");
+        }
+        Check($"every package pnputil lists, {theirsByKey.Count}, is in the listing, of another architecture ({otherArch.Count}), or an entry whose files are gone that resolves by its published name ({entryOnly.Count})",
               unexplained.Count == 0,
               unexplained.Count == 0
                   ? $"other architecture: {string.Join(", ", otherArch.Select(k => $"{k.Item1} ({k.Item2})"))}"
-                  : string.Join(", ", unexplained));
+                  : string.Join(" | ", unexplained.Take(8)));
+
+        // A devnode's driver is told HIDMaestro's by its published name
+        // (WinUsbBinding.IsOurPackage): a package of HIDMaestro's WinUSB INF
+        // name and provider, or an entry of that name whose files are gone.
+        // Every other package is not.
+        var wrong = new List<string>();
+        int ourListed = 0, ourEntries = 0;
+        foreach (var r in mine)
+        {
+            bool expected = r.OriginalName.StartsWith(WinUsbBinding.PackagePrefix, StringComparison.OrdinalIgnoreCase)
+                            && r.ProviderName.Equals(WinUsbBinding.Provider, StringComparison.OrdinalIgnoreCase);
+            if (expected) ourListed++;
+            if (WinUsbBinding.IsOurPackage(r.PublishedName) is var got && got != expected)
+                wrong.Add($"{r.PublishedName} ({r.OriginalName}, {r.ProviderName}): {got?.ToString() ?? "unknown"}");
+        }
+        foreach (var k in entryOnly)
+        {
+            bool expected = k.Item2.StartsWith(WinUsbBinding.PackagePrefix, StringComparison.OrdinalIgnoreCase);
+            if (expected) ourEntries++;
+            if (WinUsbBinding.IsOurPackage(k.Item1) is var got && got != expected)
+                wrong.Add($"{k.Item1} ({k.Item2}, files gone): {got?.ToString() ?? "unknown"}");
+        }
+        Check($"a devnode's driver is told HIDMaestro's by its published name: {ourListed} of {mine.Count} listed packages, {ourEntries} of {entryOnly.Count} entries whose files are gone",
+              wrong.Count == 0, string.Join(" | ", wrong.Take(8)));
 
         // HIDMaestro's own names, the ones its listings ask for.
         bool Ours(string original) =>
@@ -123,6 +163,30 @@ internal static partial class Program
         ms.Sort();
         Console.WriteLine(FormattableString.Invariant(
             $"  the listing of HIDMaestro's two INFs, 30 runs: p50 {ms[14]:F1} ms, p95 {ms[28]:F1} ms, max {ms[29]:F1} ms"));
+    }
+
+    /// <summary>pnputil's listing of the driver store and the form it was
+    /// read in: /format xml where pnputil prints it, else the plain text
+    /// read by its English labels.</summary>
+    static (string Form, List<(string Published, string Original, string Provider, string Version)> Records) PnputilListing()
+    {
+        var (xrc, xml) = PnputilHelper.Run("/enum-drivers /format xml", timeoutMs: 60_000);
+        if (xrc == 0)
+        {
+            try
+            {
+                var records = XDocument.Parse(xml).Root?.Elements("Driver")
+                    .Select(d => ((string?)d.Attribute("DriverName") ?? "", (string?)d.Element("OriginalName") ?? "",
+                                  (string?)d.Element("ProviderName") ?? "", (string?)d.Element("DriverVersion") ?? ""))
+                    .Where(r => r.Item1.Length > 0)
+                    .ToList();
+                if (records != null) return ("/format xml", records);
+            }
+            catch (System.Xml.XmlException) { }
+        }
+        var (rc, text) = PnputilHelper.Run("/enum-drivers", timeoutMs: 60_000);
+        return (rc == 0 ? $"plain text with English labels, /format xml exited {xrc}" : $"plain text exited {rc}",
+                rc == 0 ? PnputilText(text) : new());
     }
 
     /// <summary>pnputil's plain-text listing: one record per package, read

@@ -129,9 +129,9 @@ internal static partial class PnputilHelper
     /// and DriverVer lines: the packages <c>pnputil /enum-drivers</c> lists
     /// for this machine's architecture, read the same way on every Windows
     /// version. pnputil prints its locale-stable form, <c>/format xml</c>,
-    /// only on Windows 11, and Windows 10's pnputil answers that option with
-    /// its usage text and exit code 1. Its plain text names each field in
-    /// the system's language (#17).
+    /// on Windows 11 build 26200, and the pnputil of Windows 10 build 19044
+    /// answers that option with its usage text and exit code 1. Its plain
+    /// text names each field in the system's language (#17).
     ///
     /// <para>The published INFs are the <c>oem*.inf</c> files of the
     /// Windows INF directory, the set devcon's dp_enum walks
@@ -145,10 +145,15 @@ internal static partial class PnputilHelper
     /// <para>A published INF with no package of this machine's architecture
     /// (ERROR_NOT_FOUND), such as an x86 package of ntprint.inf on an x64
     /// machine, is not listed. Neither is one removed while the listing
-    /// reads it (ERROR_FILE_NOT_FOUND). pnputil also lists a published
-    /// name whose INF is gone from the INF directory, with no FileRepository
-    /// folder either: nothing is left to install from or to delete, and
-    /// this listing leaves it out.</para></summary>
+    /// reads it (ERROR_FILE_NOT_FOUND).</para>
+    ///
+    /// <para>pnputil also lists a published name whose INF file and
+    /// FileRepository folder are both gone while the driver store keeps its
+    /// entry, and a devnode can still name such a package as its driver.
+    /// This listing reads the INF files and leaves it out: nothing of it is
+    /// left to install from. A question about one devnode's driver looks
+    /// its published name up instead (<see cref="DriverStorePathOf"/>),
+    /// which finds such an entry.</para></summary>
     /// <param name="infDirectory">Where the published INFs are read: the
     /// Windows INF directory when null. registry_ownership_check's offline
     /// part names a directory of its own.</param>
@@ -187,6 +192,34 @@ internal static partial class PnputilHelper
         try { return ListPackages(originalName, infDirectory); }
         catch (InvalidOperationException) { return null; }
     }
+
+    /// <summary>The package INF in the driver store of the published INF
+    /// <paramref name="publishedInf"/> (a name such as oem12.inf, or its
+    /// path), or null when the driver store holds no package of it for this
+    /// machine's architecture. SetupGetInfDriverStoreLocation reads no INF
+    /// file, so a published name whose INF file is gone while the driver
+    /// store keeps its entry still resolves.</summary>
+    /// <exception cref="InvalidOperationException">The driver store could not
+    /// be read for another reason. The message names it.</exception>
+    internal static string? DriverStorePathOf(string publishedInf) =>
+        StoreLocation(PublishedPath(publishedInf));
+
+    /// <summary>The original INF name of the published INF
+    /// <paramref name="publishedInf"/>, or null as
+    /// <see cref="DriverStorePathOf"/>.</summary>
+    internal static string? OriginalNameOf(string publishedInf) =>
+        DriverStorePathOf(publishedInf) is { } store ? Path.GetFileName(store) : null;
+
+    /// <summary>The provider the published INF <paramref name="publishedInf"/>
+    /// names, or null when its INF file is gone.</summary>
+    /// <exception cref="InvalidOperationException">The INF could not be
+    /// opened for another reason.</exception>
+    internal static string? ProviderOf(string publishedInf) =>
+        VersionSection(PublishedPath(publishedInf))?.Provider;
+
+    /// <summary>A published INF's path in the Windows INF directory.</summary>
+    private static string PublishedPath(string publishedInf) =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "INF", Path.GetFileName(publishedInf));
 
     /// <summary>A published INF's file name: <c>oem</c>, a number,
     /// <c>.inf</c>.</summary>
@@ -306,7 +339,7 @@ internal static partial class PnputilHelper
         // same signal the driver store listing would surface, but in ~5 ms.
         // d3xMachina's gh#18 log showed "driver install check
         // (deployed=True) in 1695ms" on the first call when this check ran
-        // pnputil; this fast path eliminates that. Falls through to the
+        // pnputil. This fast path eliminates that. Falls through to the
         // listing on filesystem-check failure (e.g., DriverStore
         // inaccessible) so the strict provider-name filter still validates
         // correctness in edge cases.
