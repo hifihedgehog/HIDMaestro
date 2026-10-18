@@ -101,12 +101,19 @@ internal sealed unsafe class ProtocolHost : IDisposable
         else _feature = Array.Empty<byte>();
     }
 
-    /// <summary>Starts the device clock, when a layout goes out on it. Its
-    /// origin is this start: on UMDF2 the device's attach is when the create
-    /// has read the driver's half of the version section.</summary>
+    /// <summary>Sends the state at rest and starts the device clock, when a
+    /// layout goes out on it. Its origin is this start: on UMDF2 the
+    /// device's attach is when the create has read the driver's half of
+    /// the version section.</summary>
     public void Start()
     {
         if (Interlocked.Exchange(ref _started, 1) != 0) return;
+        // A device that sends on submit or answers a live feature report
+        // reports its state block, at rest until a submit, once it starts:
+        // a read or a GET before the first SubmitState finds that state,
+        // where the driver would have nothing to give.
+        if (Protocol.Model.LiveFeatures.Length > 0 || Array.Exists(Protocol.Model.Layouts, l => l.Send == SendRule.Submit))
+            OnState(Engine.CopyStateBlock());
         if (!NeedsClock()) return;
         _clock = new Thread(ClockLoop)
         {

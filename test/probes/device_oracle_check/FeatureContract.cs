@@ -61,16 +61,18 @@ using static Case5Driver;
 
 internal static class FeatureContract
 {
-    const uint NotSupported = 0xC00000BB, ConfigError = 0xC0000182, TooSmall = 0xC0000023;
+    internal const uint NotSupported = 0xC00000BB, ConfigError = 0xC0000182, TooSmall = 0xC0000023;
     static readonly byte[] SonyIds = { 0x02, 0x05, 0x09, 0x12, 0x20, 0x22, 0xA3 };
 
-    sealed class Checks
+    internal sealed class Checks
     {
         public int Failures;
+        /// <summary>The mode each line names.</summary>
+        public string Mode = "feature-contract";
         public void Check(string name, bool ok, string detail = "")
         {
             if (!ok) Failures++;
-            Console.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] feature-contract: {name}{(detail.Length > 0 ? "  " + detail : "")}");
+            Console.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] {Mode}: {name}{(detail.Length > 0 ? "  " + detail : "")}");
         }
         public void Info(string line) => Console.WriteLine($"    {line}");
     }
@@ -109,19 +111,12 @@ internal static class FeatureContract
     /// FrameBytes), on every UMDF2 catalog profile: an extended-lane frame of
     /// each input report at the SDK's length must go out at that length. A
     /// shape the two walks read differently drops every extended frame of
-    /// that report on UMDF2. The DualShock 3 sixaxis form is left out: the
-    /// driver reads its native report apart. So is the Switch Pro, whose
-    /// input the driver's responder serves. A report longer than the
+    /// that report on UMDF2. A report longer than the
     /// extended lane's 80 bytes never travels it. At e34be99b the harness
     /// ran the walk on four profiles (case 5's extended-lengths).</summary>
     static void InputLengths(Checks c, IReadOnlyList<ControllerProfile> catalog, string tree, string oracle, string work)
     {
-        // The Switch Pro identity's driver serves its input from the
-        // protocol responder's stream, never from the extended lane
-        // (driver.c SwitchFillLatestState), until DD-5 moves the responder
-        // to data.
-        var profiles = catalog.Where(p => !p.RequiresUsbipBackend && p.HasDescriptor && p.SixaxisCompatible != true
-                                          && p.Resolved.IdentityEntry?.StartsWith("identity:nintendo-switch-pro", StringComparison.Ordinal) != true)
+        var profiles = catalog.Where(p => !p.RequiresUsbipBackend && p.HasDescriptor)
             .OrderBy(p => p.Id, StringComparer.Ordinal).ToList();
         var config = Case5Driver.InstanceConfig(profiles, work);
         var plan = new StringBuilder();
@@ -174,7 +169,7 @@ internal static class FeatureContract
     // ── plans and scripts ────────────────────────────────────────────────
 
     /// <summary>The values a plan holds for each profile, by name.</summary>
-    static Dictionary<string, List<RegValue>> PlanValues(string plan)
+    internal static Dictionary<string, List<RegValue>> PlanValues(string plan)
     {
         var map = new Dictionary<string, List<RegValue>>(StringComparer.Ordinal);
         List<RegValue>? cur = null;
@@ -189,16 +184,16 @@ internal static class FeatureContract
         return map;
     }
 
-    static List<RegValue> With(List<RegValue> values, string name, int kind, byte[]? data)
+    internal static List<RegValue> With(List<RegValue> values, string name, int kind, byte[]? data)
     {
         var list = values.Where(v => v.Name != name).ToList();
         if (data != null) list.Add(new RegValue(name, kind, data));
         return list;
     }
 
-    const int RegBinary = 3, RegDword = 4;
+    internal const int RegBinary = 3, RegDword = 4;
 
-    static string Block(string group, ControllerProfile p, List<RegValue> values, string name, params string[] flags)
+    internal static string Block(string group, ControllerProfile p, List<RegValue> values, string name, params string[] flags)
     {
         var sb = new StringBuilder();
         AddProfile(sb, group, p, values, name);
@@ -207,7 +202,7 @@ internal static class FeatureContract
     }
 
     /// <summary>The harness on a plan and a script, its streams read whole.</summary>
-    static Dictionary<string, List<(string Tag, byte[] Data)>> RunScript(string exe, string plan, string script, string work, string label)
+    internal static Dictionary<string, List<(string Tag, byte[] Data)>> RunScript(string exe, string plan, string script, string work, string label)
     {
         string planFile = Path.Combine(work, label + ".plan"), scriptFile = Path.Combine(work, label + ".script"), output = Path.Combine(work, label + ".bin");
         File.WriteAllText(planFile, "hm-driver-plan 1\n" + plan, new UTF8Encoding(false));
@@ -283,7 +278,11 @@ internal static class FeatureContract
     static void Matrix(Checks c, IReadOnlyList<ControllerProfile> catalog, string keptPlan, string tree, string oracle, string work)
     {
         var kept = PlanValues(keptPlan);
-        var sony = catalog.Where(p => p.VendorId == 0x054C && !p.RequiresUsbipBackend).OrderBy(p => p.Id, StringComparer.Ordinal).ToList();
+        // A profile whose live feature report answers GET_FEATURE with its
+        // state is left out: its answer is the frame the SDK wrote, which
+        // ds3-engine and host-contract compare (DD-5).
+        var sony = catalog.Where(p => p.VendorId == 0x054C && !p.RequiresUsbipBackend && DeviceOrchestrator.LiveFeatureReportValue(p) == null)
+            .OrderBy(p => p.Id, StringComparer.Ordinal).ToList();
         var control = catalog.First(p => p.Id == "heusinkveld-ultimate-pedals");
         var treeConfig = InstanceConfig(sony.Append(control).ToList(), work);
         var oPlan = new StringBuilder();
@@ -374,11 +373,11 @@ internal static class FeatureContract
 
     // ── the contract's cases ─────────────────────────────────────────────
 
-    static uint Status(byte[] completion) => BinaryPrimitives.ReadUInt32LittleEndian(completion.AsSpan(4));
-    static uint Info(byte[] completion) => BinaryPrimitives.ReadUInt32LittleEndian(completion.AsSpan(8));
-    static ReadOnlySpan<byte> Body(byte[] completion) => completion.AsSpan(12);
+    internal static uint Status(byte[] completion) => BinaryPrimitives.ReadUInt32LittleEndian(completion.AsSpan(4));
+    internal static uint Info(byte[] completion) => BinaryPrimitives.ReadUInt32LittleEndian(completion.AsSpan(8));
+    internal static ReadOnlySpan<byte> Body(byte[] completion) => completion.AsSpan(12);
 
-    static List<byte[]> Of(List<(string Tag, byte[] Data)> s, string tag) => s.Where(x => x.Tag == tag).Select(x => x.Data).ToList();
+    internal static List<byte[]> Of(List<(string Tag, byte[] Data)> s, string tag) => s.Where(x => x.Tag == tag).Select(x => x.Data).ToList();
 
     static uint Added(List<(string Tag, byte[] Data)> s) => BinaryPrimitives.ReadUInt32LittleEndian(Of(s, "device.add")[0]);
 

@@ -18,6 +18,14 @@
 //   4. Unheld pad flips to 49-byte 0x30 full-mode on the first
 //      subcommand (timer advancing, battery byte, A at byte3 bit3).
 //
+// The held pad of phases 1 to 3 is a copy of switch-pro.json, loaded from
+// a directory of the probe's own, whose rules set no protocolSeen: it
+// answers every subcommand and never leaves the 0x3F stream. A Chromium
+// browser handshakes every new Switch Pro within milliseconds, as it does
+// real hardware, so the catalog profile could leave 0x3F before phase 1
+// reads it. Through v1.13.0 a registry value the driver read at its add
+// held the pad.
+//
 // Headless, elevation-required, exit 0 PASS / 1 FAIL.
 
 using System;
@@ -142,24 +150,29 @@ internal static class Program
         var profile = ctx.GetProfile("switch-pro")
             ?? throw new InvalidOperationException("switch-pro profile missing");
 
-        // Descriptor-idle hold (TTL-gated, see driver.c DeviceAdd): keeps
-        // THIS pad in descriptor mode even when a Chromium browser is
-        // running. Chromium's gamepad service is a legitimate Switch
-        // protocol host and handshakes every new Pro within milliseconds
-        // (2026-07-21 audit: msedge.exe armed the pad before the first
-        // stream tick, exactly as it does real hardware), which would
-        // otherwise make phases 1-2 unobservable. Deleted in the finally
-        // below; the driver additionally ignores values older than 60 s.
-        const string HmKey = @"HKEY_LOCAL_MACHINE\SOFTWARE\HIDMaestro";
-        const string HoldValue = "SwitchDescriptorIdleHold";
-        Microsoft.Win32.Registry.SetValue(HmKey, HoldValue,
-            (long)DateTime.UtcNow.ToFileTimeUtc(),
-            Microsoft.Win32.RegistryValueKind.QWord);
+        // The held pad: switch-pro.json with no rule setting protocolSeen.
+        string heldDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"hm-switch-held-{Environment.ProcessId}");
+        System.IO.Directory.CreateDirectory(heldDir);
         try
         {
+        var asm = typeof(HMContext).Assembly;
+        string? text = null;
+        foreach (var res in asm.GetManifestResourceNames().Where(n => n.StartsWith("HIDMaestro.Profiles.", StringComparison.Ordinal)))
+        {
+            using var st = asm.GetManifestResourceStream(res)!;
+            string t = new System.IO.StreamReader(st, System.Text.Encoding.UTF8).ReadToEnd();
+            if (System.Text.Json.Nodes.JsonNode.Parse(t) is System.Text.Json.Nodes.JsonObject o && (string?)o["id"] == "switch-pro") { text = t; break; }
+        }
+        var held = System.Text.Json.Nodes.JsonNode.Parse(text ?? throw new InvalidOperationException("switch-pro.json is not embedded"))!.AsObject();
+        held["id"] = "switch-pro-held";
+        foreach (var rule in held["protocol"]!["commands"]!["rules"]!.AsArray()) rule!.AsObject().Remove("set");
+        System.IO.File.WriteAllText(System.IO.Path.Combine(heldDir, "switch-pro-held.json"), held.ToJsonString());
+        ctx.LoadProfilesFromDirectory(heldDir);
+        var heldProfile = ctx.GetProfile("switch-pro-held")
+            ?? throw new InvalidOperationException("the held copy of switch-pro did not load");
 
-        Console.WriteLine("  Creating switch-pro virtual controller (hold armed)...");
-        using var ctrl = ctx.CreateController(profile);
+        Console.WriteLine("  Creating the held copy of switch-pro...");
+        using var ctrl = ctx.CreateController(heldProfile);
 
         // Neutral pump keeps the shared body populated. NO protocol traffic
         // is written until phase 3, so the stream must stay in descriptor
@@ -291,11 +304,11 @@ internal static class Program
         cmd[10] = 0x02;                 // subcommand: device info
         Check("0x01 subcommand write (49-byte BT framing)", HidWrite(cmd));
         var ack = ReadUntil(0x21, 1000);
-        Check("0x21 subcommand reply (responder alive under hold)",
+        Check("0x21 subcommand reply (the held copy answers)",
               ack != null && ack[14] == 0x02, ack != null ? $"len={s_lastReadLen}" : "no reply");
         Check("0x21 reply completes at 362 (padded)", ack != null && s_lastReadLen == 362, $"{s_lastReadLen}");
         var still = ReadUntil(0x3F, 800);
-        Check("stream stays 0x3F under hold", still != null,
+        Check("stream stays 0x3F on the held copy", still != null,
               still != null ? $"len={s_lastReadLen}" : "no frame");
 
         Volatile.Write(ref pumpStop, true);
@@ -303,19 +316,8 @@ internal static class Program
         s_hid.Dispose();
         ctrl.Dispose();
 
-        // Drop the hold BEFORE the phase-4 create: the TTL window is 60 s
-        // and the driver reads the value at every Switch DeviceAdd, so a
-        // still-present value would hold the second pad too.
-        try
-        {
-            using var hmEarly = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
-                @"SOFTWARE\HIDMaestro", writable: true);
-            hmEarly?.DeleteValue(HoldValue, throwOnMissingValue: false);
-        }
-        catch { }
-
         // ── Phase 4: unheld pad flips to BT full-mode 0x30 on protocol ──
-        // A fresh pad WITHOUT the hold. On a box with a Chromium browser
+        // A fresh pad of the catalog's switch-pro. On a box with a Chromium browser
         // running, Edge/Chrome arms it within milliseconds; otherwise our
         // own 0x01 subcommand does. Either way the stream must be the
         // 49-byte BT full-mode 0x30: timer at byte 1, battery at byte 2.
@@ -386,13 +388,9 @@ internal static class Program
         }
         finally
         {
-            try
-            {
-                using var hm = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
-                    @"SOFTWARE\HIDMaestro", writable: true);
-                hm?.DeleteValue(HoldValue, throwOnMissingValue: false);
-            }
-            catch { }
+            try { System.IO.Directory.Delete(heldDir, true); }
+            catch (System.IO.IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
 
         Console.WriteLine(s_failures == 0

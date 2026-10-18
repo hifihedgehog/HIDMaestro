@@ -164,6 +164,12 @@ internal static class Host
         var o = JsonNode.Parse(json)!.AsObject();
         o["liveFeatureReports"] = JsonNode.Parse("""[ { "reportId": "0x00", "size": 6, "program": [ { "const": { "0": "003F" } }, { "copy": "0-1", "to": 2 } ] } ]""");
         using var dev = new Offline(o.ToJsonString(), 7961);
+        uint before = dev.Frame().Seq;
+        typeof(HMController).GetMethod("StartProtocol", Instance)?.Invoke(dev.C, null);
+        var rest = dev.Frame();
+        Check("StartProtocol sends the state at rest: the submit layout and the live feature report, before any SubmitState",
+            rest.Seq != before && rest.Ext.Length == 12 && rest.Data.Length == 6 && rest.Data[1] == 0x3F,
+            $"seq {before} to {rest.Seq}, data {Checks.Hex(rest.Data)}, extended {Checks.Hex(rest.Ext)}");
         var s = new HMGamepadState { Buttons = (HMButton)3 };
         dev.C.SubmitState(in s);
         var f = dev.Frame();

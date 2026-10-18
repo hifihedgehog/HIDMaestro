@@ -71,6 +71,11 @@
 //                         version contract against 9bd6279's Sony table,
 //                         and the contract's cases (FeatureContract.cs).
 //                         Replay runs it too whenever case 5 runs
+//   host-contract [--golden <dir>] [--native <dir>]
+//                         the UMDF2 driver's half of a device whose protocol
+//                         runs in the SDK, and a v1 program's data path for
+//                         the same profiles (HostContract.cs). Replay runs it
+//                         too whenever case 5 runs
 //   compare <dirA> <dirB>
 //   compare-live <out dir> | --selftest <dir> [--golden <dir>] [--native <dir>] [--driver oracle|tree]
 //                         the live run against the native harness
@@ -171,6 +176,17 @@ internal static class Program
             return args.Length == 1 ? SwitchEngine.Run(Path.Combine(ProbeDir(), "golden"), Path.Combine(AppContext.BaseDirectory, "native"), DefaultSeed) : Usage();
         if (mode == "ds3-engine")
             return args.Length == 1 ? Ds3Engine.Run(Path.Combine(ProbeDir(), "golden"), Path.Combine(AppContext.BaseDirectory, "native"), DefaultSeed) : Usage();
+        if (mode == "host-contract")
+        {
+            string hcGolden = Path.Combine(ProbeDir(), "golden"), hcNative = Path.Combine(AppContext.BaseDirectory, "native");
+            for (int i = 1; i < args.Length; i++)
+            {
+                if (args[i] == "--golden" && i + 1 < args.Length) hcGolden = Path.GetFullPath(args[++i]);
+                else if (args[i] == "--native" && i + 1 < args.Length) hcNative = Path.GetFullPath(args[++i]);
+                else return Usage();
+            }
+            return HostContract.Run(hcNative, hcGolden) == 0 ? 0 : 1;
+        }
         if (mode != "record" && mode != "replay") return Usage();
         // The change list's own rules first, as selftest runs them.
         bool selfTestFailed = mode == "replay" && SelfTest.RunQuiet() != 0;
@@ -390,6 +406,8 @@ internal static class Program
         // replay of it (XusbContract.cs).
         if (mode == "replay" && ran.Contains("case5-driver"))
             failures += XusbContract.Run(native, ProbeDir());
+        // The driver's half of a device whose protocol runs in the SDK.
+        if (mode == "replay" && ran.Contains("case5-driver") && HostContract.Run(native, golden) != 0) failures++;
         foreach (var e in changes.Entries.Where(e => !e.Used && e.Kind != "rule" && (e.Kind == "config" ? ran.Contains("case5-driver") : ran.Contains(e.Case))))
         {
             Console.WriteLine($"  [FAIL] {e.Source}: the listed change {e.Kind} {e.Target} ({e.Lane}) matched no difference");
@@ -515,6 +533,7 @@ internal static class Program
         Console.WriteLine("       DeviceOracleCheck switch-engine | ds3-engine");
         Console.WriteLine("       DeviceOracleCheck compare-live <out dir> | --selftest <dir> [--golden <dir>] [--native <dir>] [--driver oracle|tree]");
         Console.WriteLine("       DeviceOracleCheck feature-contract [--golden <dir>] [--native <dir>]");
+        Console.WriteLine("       DeviceOracleCheck host-contract [--golden <dir>] [--native <dir>]");
         Console.WriteLine("cases: " + string.Join(", ", Cases.Select(c => c.Name)));
         return 1;
     }

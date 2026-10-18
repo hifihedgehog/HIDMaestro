@@ -21,94 +21,6 @@
 #include <aclapi.h>   /* GetSecurityInfo */
 #include "version_gen.h"   /* HM_VER_*, generated into the build directory from Directory.Build.props */
 
-/* ---- DualShock 3 in sixaxis.sys form (PadForge discussion 476) -------- *
- *
- * The SDK sends the native 49-byte DS3 input report: report id 0x01, a
- * reserved byte, buttons at 2-4, sticks at 6-9, the twelve pressure bytes at
- * 14-25, battery at 30 and big-endian 10-bit motion at 41-48 (DsHidMini
- * Ds3Types.h DS3_RAW_INPUT_REPORT, SDL_hidapi_ps3.c HandleStatePacket,
- * hid-sony.c sixaxis_raw_event, RPCS3 ds3_pad_handler.h ds3_input_report).
- * The two views below are the ones DsHidMini's SXS mode serves, which is the
- * mode PCSX2's docs prescribe for pressure on Windows. */
-
-#define DS3_RAW_REPORT_SIZE     49
-#define DS3_SXS_INPUT_SIZE      12
-#define DS3_OUT_BODY_SIZE       48
-
-static USHORT Ds3Be16(_In_reads_bytes_(2) const UCHAR *p)
-{
-    return (USHORT)((p[0] << 8) | p[1]);
-}
-
-static VOID Ds3PutLe16(_Out_writes_bytes_(2) UCHAR *p, _In_ USHORT v)
-{
-    p[0] = (UCHAR)(v & 0xFF);
-    p[1] = (UCHAR)((v >> 8) & 0xFF);
-}
-
-/* The 12-byte joystick input report the SXS descriptor declares, derived as
- * DsHidMini's DS3_RAW_TO_SIXAXIS_HID_INPUT_REPORT derives it (DsHid.c):
- * byte 0 triangle, circle, cross, square, L2, R2, L1, R1; byte 1 start,
- * select, L3, R3, PS; byte 3 the hat (8 released); 4-7 the sticks; 8-11
- * circle and cross pressure and L2 and R2, each inverted. DsHidMini also
- * applies its own dead zone setting to the sticks. The consumer has already
- * applied one, so the sticks pass through. */
-static VOID
-Ds3BuildSixaxisInput(_In_reads_bytes_(DS3_RAW_REPORT_SIZE) const UCHAR *raw,
-                     _Out_writes_bytes_(DS3_SXS_INPUT_SIZE) UCHAR *out)
-{
-    const UCHAR b0 = raw[2], b1 = raw[3], b2 = raw[4];
-    UCHAR hat;
-
-    RtlZeroMemory(out, DS3_SXS_INPUT_SIZE);
-    out[0] = (UCHAR)(((b1 & 0xF0) >> 4) | ((b1 & 0x0F) << 4));
-    out[1] = (UCHAR)(((b0 & 0x08) >> 3)     /* start  */
-                   | ((b0 & 0x01) << 1)     /* select */
-                   | ((b0 & 0x02) << 1)     /* L3     */
-                   | ((b0 & 0x04) << 1)     /* R3     */
-                   | ((b2 & 0x01) << 4));   /* PS     */
-    switch (b0 & 0xF0) {
-    case 0x10: hat = 0; break;  /* up         */
-    case 0x30: hat = 1; break;  /* up right   */
-    case 0x20: hat = 2; break;  /* right      */
-    case 0x60: hat = 3; break;  /* down right */
-    case 0x40: hat = 4; break;  /* down       */
-    case 0xC0: hat = 5; break;  /* down left  */
-    case 0x80: hat = 6; break;  /* left       */
-    case 0x90: hat = 7; break;  /* up left    */
-    default:   hat = 8; break;  /* released   */
-    }
-    out[3]  = hat;
-    out[4]  = raw[6];
-    out[5]  = raw[7];
-    out[6]  = raw[8];
-    out[7]  = raw[9];
-    out[8]  = (UCHAR)(0xFF - raw[23]);  /* circle pressure */
-    out[9]  = (UCHAR)(0xFF - raw[24]);  /* cross pressure  */
-    out[10] = (UCHAR)(0xFF - raw[18]);  /* L2              */
-    out[11] = (UCHAR)(0xFF - raw[19]);  /* R2              */
-}
-
-/* The report 0 feature reply, as DsHidMini builds it: the native report
- * with its first two bytes set to 0x00 and 0x3F (HID.FeatureReport.c) and
- * the motion words turned little-endian, accelerometer X mirrored as
- * 0x3FF - x (DsHidMiniDrv.c). RPCS3 reads that X as is on Windows, where
- * "the official Sony Windows DS3 driver seems to do the same modification"
- * (ds3_pad_handler.cpp get_extended_info). The caller's buffer holds the
- * report without an id byte, since a descriptor with no report ids gets
- * none (vhidmini2 vhidmini.c GetFeature). The byte the reader sees in front
- * of it is the id the reader wrote. */
-static VOID
-Ds3BuildSixaxisFeature(_Inout_updates_bytes_(DS3_RAW_REPORT_SIZE) UCHAR *f)
-{
-    f[0] = 0x00;
-    f[1] = 0x3F;
-    Ds3PutLe16(&f[41], (USHORT)(0x03FF - Ds3Be16(&f[41])));
-    Ds3PutLe16(&f[43], Ds3Be16(&f[43]));
-    Ds3PutLe16(&f[45], Ds3Be16(&f[45]));
-    Ds3PutLe16(&f[47], Ds3Be16(&f[47]));
-}
-
 /* Append the decimal representation of a ULONG to a wide-string buffer.
  * Self-contained: no C runtime dependency. The driver doesn't link against
  * MSVCRT, so swprintf/wsprintf aren't available. Buffer must be NUL-terminated. */
@@ -415,6 +327,20 @@ LoadCachedInputIds(_In_ PDEVICE_CONTEXT ctx, _In_ HKEY hKey)
     return TRUE;
 }
 
+/* LiveFeatureReport into the context: absent is none. FALSE when it is
+ * not a REG_DWORD of 0 to 256, one plus a report ID. */
+static BOOLEAN
+LoadLiveFeature(_In_ PDEVICE_CONTEXT ctx, _In_ HKEY hKey)
+{
+    DWORD value = 0, size = sizeof(value), type = 0;
+    LONG rc = RegQueryValueExW(hKey, L"LiveFeatureReport", NULL, &type, (LPBYTE)&value, &size);
+    if (rc == ERROR_FILE_NOT_FOUND) { ctx->LiveFeatureReport = 0; return TRUE; }
+    if (rc != ERROR_SUCCESS || type != REG_DWORD || size != sizeof(value) || value > 256)
+        return FALSE;
+    ctx->LiveFeatureReport = value;
+    return TRUE;
+}
+
 /* The controller's v2.0.0 values, read only under the contract. Returns
  * 0 or the HIDMAESTRO_CONFIG_ERROR_* of the value it could not read. */
 static LONG
@@ -425,6 +351,7 @@ LoadContractValues(_In_ PDEVICE_CONTEXT ctx)
         return HIDMAESTRO_CONFIG_ERROR_FEATURE_ANSWERS;
     LONG error = !LoadFeatureAnswers(ctx, hKey) ? HIDMAESTRO_CONFIG_ERROR_FEATURE_ANSWERS
                : !LoadCachedInputIds(ctx, hKey) ? HIDMAESTRO_CONFIG_ERROR_CACHED_INPUT_IDS
+               : !LoadLiveFeature(ctx, hKey) ? HIDMAESTRO_CONFIG_ERROR_LIVE_FEATURE
                : 0;
     RegCloseKey(hKey);
     return error;
@@ -704,54 +631,6 @@ ReadConfigFromRegistry(
         ctx->HidDeviceAttributes.ProductID = (USHORT)dwordVal;
     }
 
-    /* Switch Pro protocol responder (issue #33): keyed on the Nintendo
-     * VID/PID family, per the spec's "hardcode the responder; the state
-     * machine is protocol, not layout". The MAC is fabricated but stable
-     * per controller index so a host that caches by MAC (Steam) sees the
-     * same identity across sessions. Starts in full-report mode: real
-     * hardware waits for `80 04`, but streaming immediately lets SDL's
-     * GetInitialInputMode lock mode 0x30 from the first read
-     * (SDL_hidapi_switch.c ReadInput report-ID sniff). */
-    if (ctx->HidDeviceAttributes.VendorID == 0x057E
-        && ctx->HidDeviceAttributes.ProductID == 0x2009) {
-        ctx->SwitchProtocol = TRUE;
-        ctx->SwitchInputMode = 0x30;
-        ctx->SwitchMac[0] = 0x98; ctx->SwitchMac[1] = 0xB6;
-        ctx->SwitchMac[2] = 0xE9; ctx->SwitchMac[3] = 0x48;
-        ctx->SwitchMac[4] = 0x4D; ctx->SwitchMac[5] = (UCHAR)(0x30 + ctx->ControllerIndex);
-
-        /* Descriptor-idle hold, TTL-gated (2026-07-21 audit): the
-         * switch_descriptor_idle_check probe writes this global value
-         * (REG_QWORD, the probe's current FILETIME) just before creating
-         * its pad so phases 1-2 stay hermetic when a Chromium browser is
-         * running (Chromium legitimately handshakes every new Switch Pro
-         * within milliseconds, exactly as it does real hardware). The
-         * hold is honored only within 60 s of the write: WUDFHost runs
-         * as LOCAL SERVICE and cannot delete the value, so a TTL (plus
-         * the probe's own best-effort delete) keeps a crashed probe from
-         * wedging later creates. See driver.h SwitchProtocolHold. */
-        {
-            HKEY holdKey;
-            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro", 0,
-                              KEY_QUERY_VALUE | KEY_WOW64_64KEY,
-                              &holdKey) == ERROR_SUCCESS) {
-                ULONGLONG holdVal = 0; DWORD holdSize = sizeof(holdVal), holdType = 0;
-                if (RegQueryValueExW(holdKey, L"SwitchDescriptorIdleHold", NULL,
-                                     &holdType, (LPBYTE)&holdVal, &holdSize) == ERROR_SUCCESS
-                    && holdType == REG_QWORD && holdVal != 0) {
-                    FILETIME nowFt;
-                    GetSystemTimeAsFileTime(&nowFt);
-                    ULONGLONG now = ((ULONGLONG)nowFt.dwHighDateTime << 32)
-                                  | nowFt.dwLowDateTime;
-                    /* 60 s in 100 ns units. Reject clock-skewed futures. */
-                    if (now >= holdVal && (now - holdVal) < 600000000ULL)
-                        ctx->SwitchProtocolHold = TRUE;
-                }
-                RegCloseKey(holdKey);
-            }
-        }
-    }
-
     /* Read VersionNumber (REG_DWORD) */
     dwordSize = sizeof(dwordVal);
     result = RegQueryValueExW(hKey, L"VersionNumber", NULL,
@@ -759,12 +638,6 @@ ReadConfigFromRegistry(
     if (result == ERROR_SUCCESS && regType == REG_DWORD) {
         ctx->HidDeviceAttributes.VersionNumber = (USHORT)dwordVal;
     }
-
-    /* Read Ds3Sixaxis (REG_DWORD). Absent reads as off. */
-    dwordSize = sizeof(dwordVal);
-    result = RegQueryValueExW(hKey, L"Ds3Sixaxis", NULL,
-                              &regType, (LPBYTE)&dwordVal, &dwordSize);
-    ctx->Ds3Sixaxis = (result == ERROR_SUCCESS && regType == REG_DWORD && dwordVal != 0);
 
     /* Read ProductString (REG_SZ) */
     {
@@ -1546,59 +1419,6 @@ PublishOutput(_In_ PDEVICE_CONTEXT ctx,
     if (ctx->OutputSignalEvent) SetEvent(ctx->OutputSignalEvent);
 }
 
-/* DualShock 3 in sixaxis.sys form: an output report 0, which carries a
- * sixaxis.sys command in its first data byte (SDL_hidapi_ps3.c
- * EPS3SixaxisDriverCommands). The command is folded into the native output
- * report body and the native report 0x01 is published, so the SDK decodes
- * one format whichever form the reader wrote.
- *
- *  2, set motors: everything from data byte 3 is the native body, which is
- *     how DsHidMini applies it (HID.Reports.c, &Packet->reportBuffer[3]).
- *     SDL's motor command and RPCS3's Windows output report
- *     (ds3_pad_handler.h, 0x02 0x00 0x00 ahead of the rumble block) both
- *     line up with the body that way.
- *  1, set LEDs: data bytes 4-7 are LED 4, 3, 2 and 1 (0 off, 1 on, 2
- *     flashing). DsHidMini copies this one as a body too, which lands the
- *     LED modes on the motor bytes, so it is applied as the LED bitmap the
- *     native report carries at byte 10 instead (hid-sony.c, LED_1 = 0x02).
- *
- * Other commands (3 block LEDs, 9 refresh settings, 10 clear pairing) change
- * nothing a consumer drives. The data arrives without a report id byte for a
- * descriptor that declares none. A 49-byte buffer led by 0x00 is the same
- * report with the id kept, and is accepted too. */
-static VOID
-Ds3HandleSixaxisOutput(_In_ PDEVICE_CONTEXT ctx,
-                       _In_reads_bytes_(len) const UCHAR *buf,
-                       _In_ ULONG len)
-{
-    UCHAR body[DS3_OUT_BODY_SIZE];
-    const UCHAR *data = buf;
-
-    if (len == DS3_OUT_BODY_SIZE + 1 && buf[0] == 0x00) {
-        data = buf + 1;
-        len -= 1;
-    }
-    if (len < 1) return;
-
-    WdfWaitLockAcquire(ctx->InputLock, NULL);
-    if (data[0] == 2 && len > 3) {
-        ULONG n = len - 3;
-        if (n > DS3_OUT_BODY_SIZE) n = DS3_OUT_BODY_SIZE;
-        RtlCopyMemory(ctx->Ds3OutBody, data + 3, n);
-    } else if (data[0] == 1 && len >= 8) {
-        UCHAR bits = 0;
-        if (data[7]) bits |= 0x02;  /* LED 1 */
-        if (data[6]) bits |= 0x04;  /* LED 2 */
-        if (data[5]) bits |= 0x08;  /* LED 3 */
-        if (data[4]) bits |= 0x10;  /* LED 4 */
-        ctx->Ds3OutBody[9] = bits;  /* native byte 10 */
-    }
-    RtlCopyMemory(body, ctx->Ds3OutBody, DS3_OUT_BODY_SIZE);
-    WdfWaitLockRelease(ctx->InputLock);
-
-    PublishOutput(ctx, HIDMAESTRO_OUTPUT_SOURCE_HID_OUTPUT, 0x01, body, DS3_OUT_BODY_SIZE);
-}
-
 /* Read shared input via memory mapping. RAM-only: no disk fallback.
  * Output: *out is filled with the shared struct on success. */
 static BOOLEAN
@@ -1630,518 +1450,16 @@ ReadSharedInput(_In_ PDEVICE_CONTEXT ctx, _Out_ HIDMAESTRO_SHARED_INPUT *out)
     return TRUE;
 }
 
-/* ================================================================== */
-/*  Switch Pro protocol responder (issue #33)                          */
-/*                                                                     */
-/*  Device-side implementation of the Nintendo Switch init +           */
-/*  subcommand protocol, so SDL's HIDAPI_DriverSwitch / Steam /        */
-/*  BetterJoy complete their handshake against the virtual pad.        */
-/*  Grounded in the cloned references:                                 */
-/*    - nxbt protocol.py (authoritative responder: ACK bytes, reply    */
-/*      payloads, fabricated SPI content)                              */
-/*    - dekuNukem USB-HID-Notes.md (0x80 init commands + 81 01 reply)  */
-/*    - dekuNukem spi_flash_notes.md (calibration addresses)           */
-/*    - SDL_hidapi_switch.c (the client under test: reply framing it   */
-/*      validates, SPI address echo, calibration decode)               */
-/* ================================================================== */
-
-/* Battery/connection byte: high nibble 9 = full + charging (USB          */
-/* powered), low nibble 1 = wired. SDL ignores it; Steam reads it.        */
-#define SWITCH_BATTERY_CONN 0x91
-/* Vibrator status byte. SDL ignores; nxbt rotates A0/B0/C0/90.           */
-#define SWITCH_VIBRATOR     0xB0
-
-/* Fabricated SPI flash image, served byte-wise so ANY (address, length)
- * read a host issues gets a consistent answer. 0xFF = unwritten flash,
- * the convention real controllers use for absent regions; this covers
- * the serial (0x6000, "no serial" per nxbt spi_read) and both user
- * calibration regions (0x8010 stick / 0x8026 IMU, no 0xB2A1/0xA1B2
- * magic), steering SDL to the factory data below. */
-static UCHAR SwitchSpiByte(_In_ ULONG a)
+/* The frame's data lane as the live feature report's answer. Under
+ * InputLock. */
+static VOID
+KeepLiveFeatureLocked(_In_ PDEVICE_CONTEXT ctx, _In_ const HIDMAESTRO_SHARED_INPUT *shared)
 {
-    /* IMU factory calibration @0x6020 (24 bytes): accel origin 0,
-     * accel coeff 0x4000, gyro origin 0, gyro coeff 0x343B. With zero
-     * origins these coefficients reduce SDL's LoadIMUCalibration math
-     * to exactly its own default scales (SWITCH_ACCEL_SCALE 4096,
-     * SWITCH_GYRO_SCALE 14.2842), so the SDK's g / deg/s conversions
-     * hold whether or not the host reads calibration. Coefficients per
-     * nxbt sa_calibration. */
-    static const UCHAR imuCal[24] = {
-        0x00,0x00, 0x00,0x00, 0x00,0x00,
-        0x00,0x40, 0x00,0x40, 0x00,0x40,
-        0x00,0x00, 0x00,0x00, 0x00,0x00,
-        0x3B,0x34, 0x3B,0x34, 0x3B,0x34,
-    };
-    /* Stick factory calibration @0x603D (9 bytes per stick). 12-bit
-     * packed pairs; field ORDER differs per stick (SDL
-     * LoadStickCalibration comment): Left = max/center/min,
-     * Right = center/min/max. Values: center 0x800, range 0x600, so
-     * the SDK packer's 2048 +/- 1536*v lands exactly on SDL's
-     * normalized full scale. pack12(0x600,0x600)=00 06 60,
-     * pack12(0x800,0x800)=00 08 80. */
-    static const UCHAR stickCal[18] = {
-        0x00,0x06,0x60,  0x00,0x08,0x80,  0x00,0x06,0x60,   /* left  */
-        0x00,0x08,0x80,  0x00,0x06,0x60,  0x00,0x06,0x60,   /* right */
-    };
-    /* Colors @0x6050: body #323232, buttons #FFFFFF, grips absent. */
-    static const UCHAR colors[12] = {
-        0x32,0x32,0x32, 0xFF,0xFF,0xFF, 0xFF,0xFF,0xFF, 0xFF,0xFF,0xFF,
-    };
-    /* Six-axis + stick device parameters @0x6080/@0x6098, nxbt's Pro
-     * Controller bytes (spi_read :414-443), with ONE deliberate change
-     * (issue #36): byte 3 is 0x00 instead of nxbt's captured 0x96, which
-     * zeroes the packed 12-bit stick dead zone (was 0x096 = 150 counts,
-     * ~10% of the fabricated 1536-count range). Chromium's Nintendo
-     * driver (nintendo_controller.cc UnpackSwitchAnalogStickParameters)
-     * reads the dead zone from bytes 3-5 of this block and applies it as
-     * a radial snap-to-center before normalization; its only validity
-     * check is against 0xFFF, so zero passes through and ApplyDeadZone
-     * can never fire. Browsers get the full linear range from center.
-     * The neighboring nibble (byte 4 low) carries the range-ratio low
-     * bits, so range ratio 0xF33 survives intact. SDL and Steam's SDL
-     * lineage never read this block (only 0x603D factory and 0x8010
-     * user cal). A real Pro reports ~150 here: deliberate fidelity
-     * departure, guarded by switch_pro_check's zero-dead-zone assert. */
-    static const UCHAR sixAxisParams[6] = { 0x50,0xFD,0x00,0x00,0xC6,0x0F };
-    static const UCHAR stickParams[18] = {
-        0x0F,0x30,0x61, 0x00,0x30,0xF3, 0xD4,0x14,0x54,
-        0x41,0x15,0x54, 0xC7,0x79,0x9C, 0x33,0x36,0x63,
-    };
-
-    if (a >= 0x6020 && a < 0x6020 + 24) return imuCal[a - 0x6020];
-    if (a >= 0x603D && a < 0x603D + 18) return stickCal[a - 0x603D];
-    if (a >= 0x6050 && a < 0x6050 + 12) return colors[a - 0x6050];
-    if (a >= 0x6080 && a < 0x6080 + 6)  return sixAxisParams[a - 0x6080];
-    if (a >= 0x6086 && a < 0x6086 + 18) return stickParams[a - 0x6086];
-    if (a >= 0x6098 && a < 0x6098 + 18) return stickParams[a - 0x6098];
-    return 0xFF;
-}
-
-/* Copy the latest consumer-submitted 0x30 body fields (buttons 3B +
- * sticks 6B) into a reply/stream frame at frame[3..11]. The SDK's
- * Switch packer writes the body as
- *   Data[0]=counter, [1]=battery, [2..4]=buttons, [5..10]=sticks,
- *   [11]=vibrator, [12..47]=IMU (3 frames x 12 bytes)
- * (SwitchProPacker.cs). Neutral = no buttons, both sticks centered
- * at 0x800 (packed 00 08 80). */
-static VOID SwitchFillLatestState(_In_ PDEVICE_CONTEXT ctx, _Out_writes_(46) UCHAR *dst)
-{
-    HIDMAESTRO_SHARED_INPUT shared;
-    RtlZeroMemory(dst, 46);
-    dst[3] = 0x00; dst[4] = 0x08; dst[5] = 0x80;   /* left stick neutral  */
-    dst[6] = 0x00; dst[7] = 0x08; dst[8] = 0x80;   /* right stick neutral */
-
-    /* The WORKER thread owns the lazy TryOpenSharedMapping (via
-     * ProcessSharedInput's ReadSharedInput); calling ReadSharedInput
-     * here before the mapping exists would race two threads through
-     * the open. Until the worker has mapped (no consumer yet), neutral
-     * frames are the correct output anyway. */
-    if (ctx->SharedMemPtr == NULL) return;
-
-    if (ReadSharedInput(ctx, &shared) && shared.DataSize >= 11) {
-        RtlCopyMemory(dst, shared.Data + 2, 9);    /* buttons + sticks */
-        if (ctx->SwitchImuEnabled && shared.DataSize >= 48) {
-            RtlCopyMemory(dst + 10, shared.Data + 12, 36); /* IMU x3 */
-        }
-    }
-}
-
-/* Per-report completion length under the BLUETOOTH descriptor (issue
- * #37): report 0x3F is the 12-byte simple-mode gamepad report (ID +
- * 2 button bytes + hat/pad + four 16-bit axes); everything else in
- * the input direction (0x21 subcommand replies, 0x30 full-mode
- * stream, and the undeclared best-effort 0x81) is the 48-byte vendor
- * blob + ID = 49. Sizes verified against a live Pro Controller's SDP
- * descriptor (0x21/0x30 declared 75 08 95 30). */
-static ULONG SwitchReportLen(UCHAR reportId)
-{
-    return (reportId == 0x3F) ? 12u : 49u;
-}
-
-/* Queue a synthesized input report (0x81 / 0x21) and complete one
- * pending READ_REPORT with the oldest queued reply if HidClass has a
- * read parked. Ring + indices are guarded by InputLock, the same lock
- * the READ_REPORT dispatch takes. */
-static VOID SwitchQueueReply(_In_ PDEVICE_CONTEXT ctx, _In_reads_(64) const UCHAR *report)
-{
-    WDFREQUEST pendingRead = NULL;
-    UCHAR out[64];
-    BOOLEAN haveOut = FALSE;
-
-    WdfWaitLockAcquire(ctx->InputLock, NULL);
-    if (ctx->SwitchReplyCount == HIDMAESTRO_SWITCH_REPLY_SLOTS) {
-        /* Drop the oldest (host stopped reading; keep newest replies). */
-        ctx->SwitchReplyRead = (ctx->SwitchReplyRead + 1) % HIDMAESTRO_SWITCH_REPLY_SLOTS;
-        ctx->SwitchReplyCount--;
-    }
-    RtlCopyMemory(
-        ctx->SwitchReplies[(ctx->SwitchReplyRead + ctx->SwitchReplyCount) % HIDMAESTRO_SWITCH_REPLY_SLOTS],
-        report, 64);
-    ctx->SwitchReplyCount++;
-
-    if (NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead))) {
-        RtlCopyMemory(out, ctx->SwitchReplies[ctx->SwitchReplyRead], 64);
-        ctx->SwitchReplyRead = (ctx->SwitchReplyRead + 1) % HIDMAESTRO_SWITCH_REPLY_SLOTS;
-        ctx->SwitchReplyCount--;
-        haveOut = TRUE;
-    }
-    WdfWaitLockRelease(ctx->InputLock);
-
-    if (haveOut) {
-        NTSTATUS cs = RequestCopyFromBuffer(pendingRead, out, SwitchReportLen(out[0]));
-        WdfRequestComplete(pendingRead, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
-    }
-}
-
-/* READ_REPORT fast path: serve a queued reply if one is pending.
- * Returns TRUE when the request was completed here. Caller holds
- * nothing; InputLock is taken inside. */
-static BOOLEAN SwitchTryServeReply(_In_ PDEVICE_CONTEXT ctx, _In_ WDFREQUEST Request)
-{
-    UCHAR out[64];
-    BOOLEAN haveOut = FALSE;
-
-    WdfWaitLockAcquire(ctx->InputLock, NULL);
-    if (ctx->SwitchReplyCount > 0) {
-        RtlCopyMemory(out, ctx->SwitchReplies[ctx->SwitchReplyRead], 64);
-        ctx->SwitchReplyRead = (ctx->SwitchReplyRead + 1) % HIDMAESTRO_SWITCH_REPLY_SLOTS;
-        ctx->SwitchReplyCount--;
-        haveOut = TRUE;
-    }
-    WdfWaitLockRelease(ctx->InputLock);
-
-    if (haveOut) {
-        NTSTATUS cs = RequestCopyFromBuffer(Request, out, SwitchReportLen(out[0]));
-        WdfRequestComplete(Request, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
-        return TRUE;
-    }
-    return FALSE;
-}
-
-/* USB init commands, output report 0x80 (dekuNukem USB-HID-Notes.md).
- * payload[0] is the proprietary command id (report ID already
- * stripped by the caller). Unreachable under the shipped BT descriptor
- * (issue #37: no 0x80 output report declared, HidClass rejects the
- * write, verified 2026-07-22), but live for custom profiles that
- * declare the USB family, e.g. cloned from switch-pro's
- * nativeDescriptor. */
-static VOID SwitchHandleProprietary(_In_ PDEVICE_CONTEXT ctx,
-                                    _In_reads_(payloadLen) const UCHAR *payload,
-                                    _In_ ULONG payloadLen)
-{
-    UCHAR reply[64];
-    UCHAR cmd = (payloadLen > 0) ? payload[0] : 0;
-
-    /* Issue #35: first Switch-protocol traffic locks the 0x30 stream
-     * into the Nintendo full-mode layout permanently. SwitchProtocolHold
-     * (the TTL-gated test hook, see DeviceAdd) keeps a probe's device
-     * in descriptor mode: protocol replies still work so the prober can
-     * exercise the responder, but the layout stays put. */
-    if (!ctx->SwitchProtocolHold)
-        ctx->SwitchProtocolSeen = TRUE;
-
-    RtlZeroMemory(reply, sizeof(reply));
-    reply[0] = 0x81;
-    reply[1] = cmd;
-
-    switch (cmd) {
-    case 0x01: {
-        /* Status: 81 01 00 <type> <MAC LSB-first>. Sample in
-         * USB-HID-Notes.md: "81 01 00 02 57 30 ea 8a bb 7c" for a
-         * right Joy-Con with MAC 7c:bb:8a:ea:30:57. Type 0x03 = Pro.
-         * SDL re-reverses the bytes (BReadDeviceInfo USB path). */
-        int i;
-        reply[2] = 0x00;
-        reply[3] = 0x03;
-        for (i = 0; i < 6; i++) reply[4 + i] = ctx->SwitchMac[5 - i];
-        SwitchQueueReply(ctx, reply);
-        break;
-    }
-    case 0x02:  /* Handshake ack: 81 02. Load-bearing for BTrySetupUSB. */
-    case 0x03:  /* Baud-switch ack: 81 03. SDL tolerates absence; cheap. */
-        SwitchQueueReply(ctx, reply);
-        break;
-    case 0x04:  /* ForceUSB: no reply defined; keep streaming. */
-    case 0x05:  /* ClearUSB: tolerated unanswered. */
-    case 0x06:  /* ResetMCU: tolerated unanswered. */
-    default:
-        break;
-    }
-}
-
-/* Subcommand request-reply, output report 0x01 -> input report 0x21.
- * Reply layout (SDL SwitchSubcommandInputPacket_t after the report ID):
- *   [1]=timer  [2]=battery/conn  [3..5]=buttons  [6..11]=sticks
- *   [12]=vibrator  [13]=ACK  [14]=subcommand id  [15..]=payload
- * ACK values per nxbt protocol.py (0x82 device info, 0x90 SPI, 0x83
- * trigger-elapsed, 0x82 vibration, 0x80 the rest). Unknown subcommands
- * get a generic 0x80 ACK with the id echoed: nxbt ignores unknowns to
- * avoid arguing with the CONSOLE, but SDL's WriteSubcommand retries an
- * unanswered subcommand for ~100 ms x 5 attempts, so a generic ACK is
- * the fast, loop-free answer for a PC host. */
-static VOID SwitchHandleSubcommand(_In_ PDEVICE_CONTEXT ctx,
-                                   _In_reads_(payloadLen) const UCHAR *payload,
-                                   _In_ ULONG payloadLen)
-{
-    UCHAR reply[64];
-
-    /* Issue #35: see SwitchHandleProprietary. */
-    if (!ctx->SwitchProtocolHold)
-        ctx->SwitchProtocolSeen = TRUE;
-    UCHAR subcmd;
-    const UCHAR *args;
-    ULONG argLen;
-    UCHAR state[46];
-
-    /* payload = [counter, rumble 8B, subcmd, args...] with the report
-     * ID already stripped. */
-    if (payloadLen < 10) return;
-    subcmd = payload[9];
-    args = payload + 10;
-    argLen = payloadLen - 10;
-
-    RtlZeroMemory(reply, sizeof(reply));
-    SwitchFillLatestState(ctx, state);
-    reply[0] = 0x21;
-    WdfWaitLockAcquire(ctx->InputLock, NULL);
-    reply[1] = ctx->SwitchTimer++;
-    WdfWaitLockRelease(ctx->InputLock);
-    reply[2] = SWITCH_BATTERY_CONN;
-    RtlCopyMemory(reply + 3, state, 9);     /* buttons + sticks */
-    reply[12] = SWITCH_VIBRATOR;
-    reply[13] = 0x80;                        /* generic ACK default */
-    reply[14] = subcmd;
-
-    switch (subcmd) {
-    case 0x02:  /* Request device info (nxbt set_device_info) */
-        reply[13] = 0x82;
-        reply[15] = 0x03;                    /* firmware 03.8B */
-        reply[16] = 0x8B;
-        reply[17] = 0x03;                    /* type: Pro Controller */
-        reply[18] = 0x02;                    /* always 0x02 */
-        RtlCopyMemory(reply + 19, ctx->SwitchMac, 6);
-        reply[25] = 0x01;                    /* always 0x01 */
-        reply[26] = 0x01;                    /* colors live in SPI */
-        break;
-
-    case 0x03:  /* Set input report mode */
-        if (argLen >= 1 &&
-            (args[0] == 0x30 || args[0] == 0x31 || args[0] == 0x3F)) {
-            ctx->SwitchInputMode = args[0];
-        }
-        break;
-
-    case 0x04:  /* Trigger buttons elapsed time (nxbt: ACK 0x83, zeros) */
-        reply[13] = 0x83;
-        break;
-
-    case 0x10: { /* SPI flash read: echo address+length, serve the image */
-        ULONG addr, i;
-        UCHAR len;
-        if (argLen < 5) break;
-        addr = (ULONG)args[0] | ((ULONG)args[1] << 8)
-             | ((ULONG)args[2] << 16) | ((ULONG)args[3] << 24);
-        len = args[4];
-        if (len > 0x1D) len = 0x1D;          /* dekuNukem: max SPI read */
-        reply[13] = 0x90;
-        RtlCopyMemory(reply + 15, args, 5);  /* SDL memcmp's this echo */
-        for (i = 0; i < len; i++) reply[20 + i] = SwitchSpiByte(addr + i);
-        break;
-    }
-
-    case 0x21:  /* Set NFC/IR MCU config (nxbt set_nfc_ir_config) */
-        reply[13] = 0xA0;
-        reply[15] = 0x01; reply[16] = 0x00; reply[17] = 0xFF;
-        reply[18] = 0x00; reply[19] = 0x08; reply[20] = 0x00;
-        reply[21] = 0x1B; reply[22] = 0x01;
-        reply[48] = 0xC8;                    /* nxbt report[49], -1 for RID */
-        break;
-
-    case 0x40:  /* Enable/disable IMU streaming */
-        if (argLen >= 1) ctx->SwitchImuEnabled = (args[0] != 0);
-        break;
-
-    case 0x48:  /* Enable vibration (nxbt: ACK 0x82). The arg is not
-                 * tracked driver-side: rumble decode is SDK-side off the
-                 * raw 0x01/0x10 publish, and player lights (0x30 below)
-                 * likewise reach consumers through the raw 0x01 lane. */
-        reply[13] = 0x82;
-        break;
-
-    case 0x06:  /* Set HCI state     */
-    case 0x08:  /* Set shipment      */
-    case 0x22:  /* Set NFC/IR state  */
-    case 0x30:  /* Set player lights */
-    case 0x38:  /* Set HOME light    */
-    case 0x41:  /* IMU sensitivity   */
-    default:    /* Unknown: generic ACK, keep streaming, never NACK. */
-        break;
-    }
-
-    SwitchQueueReply(ctx, reply);
-}
-
-/* Pre-handshake 0x3F simple-mode report (issue #37, superseding the
- * #35 synthetic 0x30). Under the real BLUETOOTH descriptor (extracted
- * byte-exact from a live Pro Controller's SDP cache), report 0x3F is
- * the only report DirectInput can parse: 16 buttons, a null-state hat,
- * and X/Y/Rx/Ry as 16-bit 0..65535. The full-mode family (0x21/0x30/
- * 0x31-0x33) is vendor-blob, so once a protocol host arms full mode,
- * joy.cpl simply sees a calm centered pad forever, exactly like real
- * Bluetooth hardware. Until then we stream genuine simple-mode frames
- * from the submitted state.
- *
- * Wire map (12 bytes, verified against the live descriptor and SDL's
- * HandleSimpleControllerState / SwitchSimpleStatePacket_t):
- *   [0]    report ID 0x3F
- *   [1]    B A Y X L R ZL ZR        (bits 0-7)
- *   [2]    - + LStick RStick Home Capture  (bits 0-5; 6-7 unused)
- *   [3]    hat low nibble (0-7 clockwise from up, 8 = null state),
- *          high nibble = declared 4-bit constant pad
- *   [4..11] X, Y, Rx, Ry 16-bit LE; HID down-positive Y (the packed
- *          Nintendo body is up-positive, so Y/Ry mirror), rescaled
- *          from the packed 12-bit calibration range (0x800 +/- 0x600)
- *          to the descriptor's full 0..65535.
- *
- * A real Pro sends 0x3F on change only; we stream at the timer cadence,
- * which descriptor-driven consumers accept and SDL only uses for its
- * first-read report-ID sniff before arming full mode. */
-static USHORT SwitchScaleStick12(USHORT v12, BOOLEAN invert)
-{
-    LONG defl = (LONG)v12 - 0x800;
-    if (invert) defl = -defl;
-    LONG v = 32768 + defl * 32768 / 0x600;
-    if (v < 0) v = 0;
-    if (v > 65535) v = 65535;
-    return (USHORT)v;
-}
-
-static VOID SwitchBuildSimpleFrame(_In_ PDEVICE_CONTEXT ctx,
-                                   _Out_writes_(12) UCHAR *frame)
-{
-    UCHAR state[46];
-    SwitchFillLatestState(ctx, state);
-
-    RtlZeroMemory(frame, 12);
-    frame[0] = 0x3F;
-
-    {
-        UCHAR n0 = state[0], n1 = state[1], n2 = state[2];
-        UCHAR b1 = 0, b2 = 0;
-        if (n0 & 0x04) b1 |= 0x01;   /* B  -> button 1 */
-        if (n0 & 0x08) b1 |= 0x02;   /* A  -> button 2 */
-        if (n0 & 0x01) b1 |= 0x04;   /* Y  -> button 3 */
-        if (n0 & 0x02) b1 |= 0x08;   /* X  -> button 4 */
-        if (n2 & 0x40) b1 |= 0x10;   /* L  -> button 5 */
-        if (n0 & 0x40) b1 |= 0x20;   /* R  -> button 6 */
-        if (n2 & 0x80) b1 |= 0x40;   /* ZL -> button 7 */
-        if (n0 & 0x80) b1 |= 0x80;   /* ZR -> button 8 */
-        if (n1 & 0x01) b2 |= 0x01;   /* Minus   -> button 9  */
-        if (n1 & 0x02) b2 |= 0x02;   /* Plus    -> button 10 */
-        if (n1 & 0x08) b2 |= 0x04;   /* LStick  -> button 11 */
-        if (n1 & 0x04) b2 |= 0x08;   /* RStick  -> button 12 */
-        if (n1 & 0x10) b2 |= 0x10;   /* Home    -> button 13 */
-        if (n1 & 0x20) b2 |= 0x20;   /* Capture -> button 14 */
-        frame[1] = b1;
-        frame[2] = b2;
-
-        {
-            BOOLEAN dDown  = (n2 & 0x01) != 0;
-            BOOLEAN dUp    = (n2 & 0x02) != 0;
-            BOOLEAN dRight = (n2 & 0x04) != 0;
-            BOOLEAN dLeft  = (n2 & 0x08) != 0;
-            UCHAR hat = 8;                       /* null state */
-            if (dUp && dRight)        hat = 1;
-            else if (dRight && dDown) hat = 3;
-            else if (dDown && dLeft)  hat = 5;
-            else if (dLeft && dUp)    hat = 7;
-            else if (dUp)             hat = 0;
-            else if (dRight)          hat = 2;
-            else if (dDown)           hat = 4;
-            else if (dLeft)           hat = 6;
-            frame[3] = hat;                      /* pad nibble = 0 */
-        }
-
-        {
-            USHORT lx = (USHORT)(state[3] | ((state[4] & 0x0F) << 8));
-            USHORT ly = (USHORT)((state[4] >> 4) | (state[5] << 4));
-            USHORT rx = (USHORT)(state[6] | ((state[7] & 0x0F) << 8));
-            USHORT ry = (USHORT)((state[7] >> 4) | (state[8] << 4));
-            USHORT ax  = SwitchScaleStick12(lx, FALSE);
-            USHORT ay  = SwitchScaleStick12(ly, TRUE);
-            USHORT arx = SwitchScaleStick12(rx, FALSE);
-            USHORT ary = SwitchScaleStick12(ry, TRUE);
-            frame[4]  = (UCHAR)(ax  & 0xFF); frame[5]  = (UCHAR)(ax  >> 8);
-            frame[6]  = (UCHAR)(ay  & 0xFF); frame[7]  = (UCHAR)(ay  >> 8);
-            frame[8]  = (UCHAR)(arx & 0xFF); frame[9]  = (UCHAR)(arx >> 8);
-            frame[10] = (UCHAR)(ary & 0xFF); frame[11] = (UCHAR)(ary >> 8);
-        }
-    }
-}
-
-/* 60 Hz input report 0x30 streamer. Real Pro Controller cadence is
- * 15 ms; WaitForSingleObject's default timer resolution gives ~15.6 ms
- * which SDL treats identically. Serves ONE pending READ_REPORT per tick
- * (the one-report-per-frame discipline ProcessSharedInput documents)
- * and refreshes the GET_INPUT_REPORT cache. Exits on SwitchStreamStop.
- * Until the first protocol traffic, frames are genuine 12-byte 0x3F
- * simple-mode reports via SwitchBuildSimpleFrame (issue #37); after,
- * the 49-byte BT full-mode 0x30 layout protocol hosts expect. */
-static DWORD WINAPI SwitchStreamProc(_In_ LPVOID Parameter)
-{
-    PDEVICE_CONTEXT ctx = (PDEVICE_CONTEXT)Parameter;
-
-    for (;;) {
-        if (WaitForSingleObject(ctx->SwitchStreamStop, 15) == WAIT_OBJECT_0)
-            return 0;
-
-        if (ctx->SwitchInputMode != 0x30 && ctx->SwitchInputMode != 0x31)
-            continue;
-
-        {
-            UCHAR frame[64];
-            UCHAR state[46];
-            WDFREQUEST pendingRead = NULL;
-            BOOLEAN nintendoLayout = ctx->SwitchProtocolSeen;
-
-            if (nintendoLayout) {
-                /* BT full-mode 0x30: 48 vendor bytes + ID = 49. The
-                 * content layout is unchanged from the USB era (timer,
-                 * battery, buttons+sticks, vibrator, 3 IMU frames);
-                 * 13 + 36 fills the 48-byte payload exactly. */
-                RtlZeroMemory(frame, sizeof(frame));
-                SwitchFillLatestState(ctx, state);
-                frame[0] = 0x30;
-                frame[2] = SWITCH_BATTERY_CONN;
-                RtlCopyMemory(frame + 3, state, 9);        /* buttons+sticks */
-                frame[12] = SWITCH_VIBRATOR;
-                RtlCopyMemory(frame + 13, state + 10, 36); /* IMU (zeros when disabled) */
-            } else {
-                /* Issue #37: no protocol traffic yet, stream genuine
-                 * 0x3F simple-mode frames (the only report DirectInput
-                 * can parse under the BT descriptor). No timer byte in
-                 * this shape. */
-                SwitchBuildSimpleFrame(ctx, frame);
-            }
-
-            {
-            ULONG frameLen = SwitchReportLen(frame[0]);
-            WdfWaitLockAcquire(ctx->InputLock, NULL);
-            if (nintendoLayout)
-                frame[1] = ctx->SwitchTimer++;
-            /* Refresh the polled GET_INPUT_REPORT cache with the frame. */
-            RtlCopyMemory(ctx->InputReport, frame, frameLen);
-            ctx->InputReportSize = frameLen;
-            ctx->InputReportReady = TRUE;
-            WdfWaitLockRelease(ctx->InputLock);
-
-            if (NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead))) {
-                NTSTATUS cs = RequestCopyFromBuffer(pendingRead, frame, frameLen);
-                WdfRequestComplete(pendingRead, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
-            }
-            }
-        }
-    }
+    ULONG n = shared->DataSize;
+    if (n > sizeof(shared->Data)) n = sizeof(shared->Data);
+    if (n > sizeof(ctx->LiveFeature)) n = sizeof(ctx->LiveFeature);
+    RtlCopyMemory(ctx->LiveFeature, shared->Data, n);
+    ctx->LiveFeatureSize = n;
 }
 
 /* Core per-frame work extracted from the old EvtSharedMemTimer.
@@ -2168,16 +1486,15 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
      * cached report tagged as the new one (stale-frame TOCTOU). The
      * local `seqNo` drives the rest of this call. */
 
-    /* Switch Pro mode: the protocol stream owns pacing and completion.
-     * SwitchStreamProc serves 0x30 frames at the wire's 15 ms cadence
-     * (reading the same shared body via SwitchFillLatestState), and
-     * subcommand replies preempt via SwitchQueueReply. Completing reads
-     * here as well would serve SDK-cadence duplicates interleaved into
-     * the protocol stream. Advance the cached seqno here (the Switch
-     * path has no InputReport-cache TOCTOU: its reader is the stream
-     * thread reading the view directly, never SharedMemSeqNo), so the
-     * worker's stale-wakeup counter still resets on new frames. */
-    if (ctx->SwitchProtocol) { ctx->SharedMemSeqNo = seqNo; return; }
+    /* v2.0.0: with LiveFeatureReport the data lane is the answer to that
+     * feature report, never an input report. A frame that carries nothing
+     * else only replaces the answer. */
+    if (ctx->LiveFeatureReport != 0 && shared.ExtendedReportSize == 0) {
+        WdfWaitLockAcquire(ctx->InputLock, NULL);
+        KeepLiveFeatureLocked(ctx, &shared);
+        WdfWaitLockRelease(ctx->InputLock);
+        return;
+    }
 
     /* Build HID input report from shared file Data (native descriptor format).
      * Report MUST be exactly InputReportByteLength bytes: HidClass rejects
@@ -2232,31 +1549,12 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
         && shared.ExtendedReportSize <= sizeof(inputReport))
     {
         /* v2.0.0: only at its report's declared length. Any other frame
-         * is not sent, and the last sent report stands. The DualShock 3
-         * form below reads its native report, which no input report of
-         * its descriptor declares. */
-        if (!ctx->Ds3Sixaxis
-            && !ExtendedFrameDeclared(ctx, shared.ExtendedReportData, shared.ExtendedReportSize))
+         * is not sent, and the last sent report stands. */
+        if (!ExtendedFrameDeclared(ctx, shared.ExtendedReportData, shared.ExtendedReportSize))
             return;
         RtlZeroMemory(inputReport, inputSize);
         RtlCopyMemory(inputReport, shared.ExtendedReportData, shared.ExtendedReportSize);
         inputSize = shared.ExtendedReportSize;
-    }
-
-    /* DualShock 3 in sixaxis.sys form: the extended report is the native
-     * DS3 report. Keep it for the report 0 feature reply, stored below
-     * under InputLock with the input cache, and send the joystick report
-     * derived from it. */
-    UCHAR ds3Raw[DS3_RAW_REPORT_SIZE] = { 0 };
-    BOOLEAN ds3Fresh = FALSE;
-    if (ctx->Ds3Sixaxis
-        && shared.ExtendedReportSize >= DS3_RAW_REPORT_SIZE
-        && shared.ExtendedReportSize <= sizeof(shared.ExtendedReportData))
-    {
-        RtlCopyMemory(ds3Raw, shared.ExtendedReportData, DS3_RAW_REPORT_SIZE);
-        Ds3BuildSixaxisInput(ds3Raw, inputReport);
-        inputSize = DS3_SXS_INPUT_SIZE;
-        ds3Fresh = TRUE;
     }
 
     /* Complete exactly ONE pending READ_REPORT per shared-memory state
@@ -2298,8 +1596,8 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
             ctx->PolledReportSize = inputSize;
             ctx->PolledReportReady = TRUE;
         }
-        if (ds3Fresh)
-            RtlCopyMemory(ctx->Ds3Raw, ds3Raw, DS3_RAW_REPORT_SIZE);
+        if (ctx->LiveFeatureReport != 0)
+            KeepLiveFeatureLocked(ctx, &shared);
         /* Publish the seqno LAST, under the same lock IOCTL_HID_READ_REPORT
          * takes, so a concurrent read sees either the old seqno (and parks)
          * or the new seqno paired with the freshly-written InputReport.
@@ -2507,7 +1805,6 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                 }
                 /* Every 256 frames, after the frame so neither attempt adds
                  * to its latency, retry what a map would otherwise retry. A
-                 * Switch Pro device never recycles its mapping, and a
                  * streaming consumer never idles into a recycle.
                  *   The output doorbell, which the device could not make
                  *   while a program held the name.
@@ -2564,30 +1861,17 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
             CloseHandle(ctx->InputDataEvent);
             ctx->InputDataEvent = NULL;
 
-            /* Switch Pro: the SEPARATE SwitchStreamProc thread reads
-             * SharedMemPtr via SwitchFillLatestState at 15 ms cadence,
-             * so the worker must NOT unmap the view out from under it
-             * (use-after-unmap). For the standard HID path the worker is
-             * the sole reader of the view, so recycling it here is safe.
-             * The named section is a stable kernel object; the driver's
-             * own handle keeps the view valid regardless of SDK restarts,
-             * so keeping it mapped for the device lifetime is correct.
-             * The view is unmapped exclusively in ReleaseIndexObjects
-             * after both threads join, mirroring the VR transport's
-             * publish-vs-unmap discipline. */
-            if (!ctx->SwitchProtocol) {
-                if (ctx->SharedMemPtr)    { UnmapViewOfFile(ctx->SharedMemPtr);    ctx->SharedMemPtr = NULL; }
-                if (ctx->SharedMemHandle) { CloseHandle(ctx->SharedMemHandle);     ctx->SharedMemHandle = NULL; }
-                /* The acknowledgement stays mapped until the device goes.
-                 * Its section is how the SDK's census tells a v1.12.0
-                 * program that has exited from one older than v1.12.0
-                 * (OwnerCensus.ByLegacySigns), so it must outlive the
-                 * program for as long as the device exists. The name stays
-                 * bound to this object while the driver holds it, so the
-                 * next SDK on this index opens the same section, and
-                 * TryOpenSharedMapping maps it again with the input
-                 * section. */
-            }
+            if (ctx->SharedMemPtr)    { UnmapViewOfFile(ctx->SharedMemPtr);    ctx->SharedMemPtr = NULL; }
+            if (ctx->SharedMemHandle) { CloseHandle(ctx->SharedMemHandle);     ctx->SharedMemHandle = NULL; }
+            /* The acknowledgement stays mapped until the device goes.
+             * Its section is how the SDK's census tells a v1.12.0
+             * program that has exited from one older than v1.12.0
+             * (OwnerCensus.ByLegacySigns), so it must outlive the
+             * program for as long as the device exists. The name stays
+             * bound to this object while the driver holds it, so the
+             * next SDK on this index opens the same section, and
+             * TryOpenSharedMapping maps it again with the input
+             * section. */
             /* Also reset the cached SeqNos so the fresh mapping's first read
              * (even if it happens to land on a SeqNo matching our previous
              * cached value by chance) is treated as new data. SeenSeqNo is
@@ -2620,16 +1904,6 @@ static VOID ReleaseIndexObjects(_In_ PDEVICE_CONTEXT ctx)
         ctx->WorkerThread = NULL;
     }
 
-    /* Same discipline for the Switch 0x30 streamer: it reads
-     * SharedMemPtr via SwitchFillLatestState, so it must be joined
-     * before the unmaps below. */
-    if (ctx->SwitchStreamStop) SetEvent(ctx->SwitchStreamStop);
-    if (ctx->SwitchStreamThread) {
-        WaitForSingleObject(ctx->SwitchStreamThread, 2000);
-        CloseHandle(ctx->SwitchStreamThread);
-        ctx->SwitchStreamThread = NULL;
-    }
-    if (ctx->SwitchStreamStop) { CloseHandle(ctx->SwitchStreamStop); ctx->SwitchStreamStop = NULL; }
     if (ctx->InputDataEvent) { CloseHandle(ctx->InputDataEvent); ctx->InputDataEvent = NULL; }
     if (ctx->StopEvent)      { CloseHandle(ctx->StopEvent);      ctx->StopEvent = NULL; }
     if (ctx->OutputSignalEvent) { CloseHandle(ctx->OutputSignalEvent); ctx->OutputSignalEvent = NULL; }
@@ -3062,17 +2336,6 @@ EvtDeviceAdd(
         ctx->WorkerThread = CreateThread(NULL, 0, SharedInputWorkerProc, ctx, 0, NULL);
     }
 
-    /* Switch Pro mode: start the 0x30 streamer. Unnamed stop event, so
-     * none of the live-swap stale-signal hazards the named StopEvent
-     * comment above documents apply; created-then-thread ordering per
-     * the driver.c:1110 stop-event-before-worker rule. */
-    if (ctx->SwitchProtocol) {
-        ctx->SwitchStreamStop = CreateEventW(NULL, TRUE, FALSE, NULL);
-        if (ctx->SwitchStreamStop != NULL) {
-            ctx->SwitchStreamThread = CreateThread(NULL, 0, SwitchStreamProc, ctx, 0, NULL);
-        }
-    }
-
     return STATUS_SUCCESS;
 }
 
@@ -3175,22 +2438,6 @@ EvtIoDeviceControl(
          * GET_INPUT_REPORT (a different IOCTL, polled diagnostic path) is
          * unaffected: it still reads the cache directly.
          */
-        /* Switch Pro mode: pending 0x81/0x21 replies preempt; otherwise
-         * every read parks and the 60 Hz stream thread completes it on
-         * its next tick, giving the wire the real controller's cadence
-         * instead of the SDK's submit rate. */
-        if (ctx->SwitchProtocol) {
-            if (SwitchTryServeReply(ctx, Request)) {
-                completeRequest = FALSE; /* completed inside */
-                break;
-            }
-            status = WdfRequestForwardToIoQueue(Request, ctx->ManualQueue);
-            if (NT_SUCCESS(status)) {
-                completeRequest = FALSE;
-            }
-            break;
-        }
-
         WdfWaitLockAcquire(ctx->InputLock, NULL);
 
         /* HID class asks again only after its completion routine has put
@@ -3239,34 +2486,11 @@ EvtIoDeviceControl(
         status = WdfRequestRetrieveInputBuffer(Request, 1, &wrBuf, &wrSize);
         if (!NT_SUCCESS(status)) break;
 
-        if (ctx->Ds3Sixaxis) {
-            Ds3HandleSixaxisOutput(ctx, (const UCHAR *)wrBuf, (ULONG)wrSize);
-            status = STATUS_SUCCESS;
-            break;
-        }
-
         {
             const UCHAR *p = (const UCHAR *)wrBuf;
             UCHAR  reportId = (wrSize > 0) ? p[0] : 0;
             const UCHAR *payload = (wrSize > 0) ? p + 1 : p;
             ULONG payloadLen = (ULONG)((wrSize > 0) ? wrSize - 1 : 0);
-
-            /* Switch Pro protocol interception (issue #33):
-             *   0x80  USB init command -> synthesize the 0x81 reply;
-             *         pure protocol noise, not published to consumers.
-             *   0x01  rumble + subcommand -> synthesize the 0x21 reply
-             *         AND publish raw (the rumble bytes ride it; the
-             *         SDK decodes them onto OutputDecoded).
-             *   0x10  rumble only -> publish raw, no reply (real
-             *         hardware sends none and SDL never waits). */
-            if (ctx->SwitchProtocol && reportId == 0x80) {
-                SwitchHandleProprietary(ctx, payload, payloadLen);
-                status = STATUS_SUCCESS;
-                break;
-            }
-            if (ctx->SwitchProtocol && reportId == 0x01) {
-                SwitchHandleSubcommand(ctx, payload, payloadLen);
-            }
 
             PublishOutput(ctx, HIDMAESTRO_OUTPUT_SOURCE_HID_OUTPUT,
                           reportId, payload, payloadLen);
@@ -3436,24 +2660,18 @@ EvtIoDeviceControl(
             reportId = ((UCHAR *)outBuf)[0];
         }
 
-        /* DualShock 3 in sixaxis.sys form: report 0 is the whole native
-         * report, the read SDL's sixaxis driver and RPCS3 poll for state
-         * (SDL_hidapi_ps3.c HIDAPI_DriverPS3SonySixaxis_UpdateDevice, RPCS3
-         * ds3_pad_handler.cpp get_data). The descriptor declares no report
-         * ids, so the HID class delivers every feature read here as report
-         * 0, whatever id the caller put in its buffer, and leaves that byte
-         * as the caller wrote it. Both readers try 0xF2 first: it answers
-         * with this report behind their 0xF2, exactly as it does on
-         * DsHidMini, SDL then polls 0 and RPCS3 keeps polling 0xF2, and both
-         * read the same bytes. */
-        if (ctx->Ds3Sixaxis) {
-            UCHAR feat[DS3_RAW_REPORT_SIZE];
-            ULONG n = (ULONG)(outSize < DS3_RAW_REPORT_SIZE ? outSize : DS3_RAW_REPORT_SIZE);
+        /* v2.0.0: LiveFeatureReport, the feature report whose answer is the
+         * device's state: the latest the SDK wrote on the data lane, as
+         * far as the caller's buffer holds it. On a descriptor without
+         * report IDs the HID class hands every GET here as report 0,
+         * whatever ID the caller put in its buffer. */
+        if (ctx->LiveFeatureReport != 0
+            && (!ctx->UsesReportIds || reportId == (UCHAR)(ctx->LiveFeatureReport - 1))) {
+            ULONG n;
             WdfWaitLockAcquire(ctx->InputLock, NULL);
-            RtlCopyMemory(feat, ctx->Ds3Raw, DS3_RAW_REPORT_SIZE);
+            n = ctx->LiveFeatureSize < (ULONG)outSize ? ctx->LiveFeatureSize : (ULONG)outSize;
+            RtlCopyMemory(outBuf, ctx->LiveFeature, n);
             WdfWaitLockRelease(ctx->InputLock);
-            Ds3BuildSixaxisFeature(feat);
-            RtlCopyMemory(outBuf, feat, n);
             WdfRequestSetInformation(Request, n);
             status = STATUS_SUCCESS;
             break;
@@ -3597,32 +2815,11 @@ EvtIoDeviceControl(
         status = WdfRequestRetrieveInputBuffer(Request, 1, &outBuf, &outBufSize);
         if (!NT_SUCCESS(status)) break;
 
-        if (ctx->Ds3Sixaxis) {
-            Ds3HandleSixaxisOutput(ctx, (const UCHAR *)outBuf, (ULONG)outBufSize);
-            status = STATUS_SUCCESS;
-            break;
-        }
-
         {
             const UCHAR *p = (const UCHAR *)outBuf;
             UCHAR  reportId = (outBufSize > 0) ? p[0] : 0;
             const UCHAR *payload = (outBufSize > 0) ? p + 1 : p;
             ULONG payloadLen = (ULONG)((outBufSize > 0) ? outBufSize - 1 : 0);
-
-            /* Switch Pro protocol interception, mirroring the
-             * IOCTL_HID_WRITE_REPORT branch verbatim: SDL/Steam write
-             * through WriteFile -> WRITE_REPORT today, but any host
-             * routing via HidD_SetOutputReport lands here instead, and
-             * an unmirrored sibling would stall that host's handshake
-             * with no diagnostic. */
-            if (ctx->SwitchProtocol && reportId == 0x80) {
-                SwitchHandleProprietary(ctx, payload, payloadLen);
-                status = STATUS_SUCCESS;
-                break;
-            }
-            if (ctx->SwitchProtocol && reportId == 0x01) {
-                SwitchHandleSubcommand(ctx, payload, payloadLen);
-            }
 
             BOOLEAN haveOutMap = EnsurePidStateMapping(ctx);
             UCHAR blockFreeRid     = HIDMAESTRO_PID_BLOCK_FREE_REPORT_ID;

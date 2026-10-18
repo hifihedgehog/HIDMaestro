@@ -28,7 +28,7 @@ HmThread *CtlThread(Ctl *c, int i);
 void RunWorker(Ctl *c);
 /* One period of the Switch stream thread: its wait times out at the
  * deadline the driver set. */
-void SwitchTick(Ctl *c);
+int SwitchTick(Ctl *c);
 void Frame(Ctl *c, const uint8_t *data, uint32_t len, const uint8_t *gip, const uint8_t *ext, uint32_t extLen);
 
 /* MsHidUmdf's requests (Windows-driver-samples hid/vhidmini2/driver/

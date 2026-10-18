@@ -341,7 +341,7 @@ static void StreamReplyOverflow(void)
         }
         for (int i = 0; i < n + 2; i++) HidRead(&c, ReadLen());
         Ticks(&c, 2);
-        while (Parked(&c) > 0) SwitchTick(&c);
+        while (Parked(&c) > 0 && SwitchTick(&c)) { }
     }
     CtlStop(&c);
 }
@@ -411,7 +411,7 @@ static void StreamRandom(int part, int reports)
             HidGetInput(&c, id, (uint32_t)RngNext(&g_rng, 65));
         }
     }
-    while (Parked(&c) > 0 && sent < reports + 64) { SwitchTick(&c); sent++; }
+    while (Parked(&c) > 0 && sent < reports + 64 && SwitchTick(&c)) sent++;
     CtlStop(&c);
 }
 

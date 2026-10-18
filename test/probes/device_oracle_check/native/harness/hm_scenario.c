@@ -71,10 +71,14 @@ void RunWorker(Ctl *c)
 }
 
 /* The stream thread's wait times out: the clock runs to the deadline the
- * driver's own wait set (driver.c:1819 waits 15 ms), not a constant. */
-void SwitchTick(Ctl *c)
+ * driver's own wait set (driver.c:1819 waits 15 ms at 9bd6279), not a
+ * constant. A driver with no stream thread, one that leaves the Switch Pro
+ * to the SDK's protocol host, has no period to run: 0, and nothing runs. */
+int SwitchTick(Ctl *c)
 {
-    ThreadResume(CtlThread(c, 1));
+    if (!c->dev || c->dev->threadCount < 2) return 0;
+    ThreadResume(c->dev->threads[1]);
+    return 1;
 }
 
 void Frame(Ctl *c, const uint8_t *data, uint32_t len, const uint8_t *gip, const uint8_t *ext, uint32_t extLen)

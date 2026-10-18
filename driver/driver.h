@@ -94,6 +94,7 @@ C_ASSERT(sizeof(HM_FEATURE_ENTRY) == HM_FEATURE_ENTRY_SIZE);
  * start under the version contract, naming the value it could not read. */
 #define HIDMAESTRO_CONFIG_ERROR_FEATURE_ANSWERS     1
 #define HIDMAESTRO_CONFIG_ERROR_CACHED_INPUT_IDS    2
+#define HIDMAESTRO_CONFIG_ERROR_LIVE_FEATURE        3
 
 /*
  * Common definitions shared with the vhidmini2 sample.
@@ -205,17 +206,15 @@ typedef struct _DEVICE_CONTEXT {
      * were. */
     ULONG   SeenSeqNo;
 
-    /* A DualShock 3 in the form Sony's sixaxis.sys and DsHidMini's SXS mode
-     * present (registry value Ds3Sixaxis, from the profile's
-     * "sixaxisCompatible"). The SDK sends the native 49-byte DS3 report as
-     * the extended report. The driver keeps the latest one for the report 0
-     * feature reply PCSX2 (through SDL) and RPCS3 poll, derives the 12-byte
-     * joystick input report from it, and folds report 0 output commands into
-     * a native output report body. Ds3Raw and Ds3OutBody are guarded by
-     * InputLock. */
-    BOOLEAN Ds3Sixaxis;
-    UCHAR   Ds3Raw[49];
-    UCHAR   Ds3OutBody[48];
+    /* v2.0.0: LiveFeatureReport, read under the contract: one plus the
+     * ID of the feature report whose answer is the device's state, or 0
+     * for none. The SDK writes that answer on each frame's data lane, and
+     * the worker keeps the latest in LiveFeature, under InputLock, for
+     * GET_FEATURE to copy out. On a descriptor without report IDs every
+     * GET is report 0's. */
+    ULONG   LiveFeatureReport;
+    UCHAR   LiveFeature[256];
+    ULONG   LiveFeatureSize;
 
     /* Latest raw input report for HID READ_REPORT (native descriptor format) */
     UCHAR   InputReport[HIDMAESTRO_MAX_REPORT_SIZE];
@@ -359,62 +358,6 @@ typedef struct _DEVICE_CONTEXT {
     HANDLE  PidStateMemHandle;
     PVOID   PidStateMemPtr;
     WCHAR   PidStateMappingName[64]; /* e.g. L"Global\\HIDMaestroPidState0" */
-
-    /* ── Switch Pro protocol responder (issue #33) ─────────────────────
-     * Keyed on VID 0x057E PID 0x2009 at config-read time. The host
-     * (SDL's HIDAPI_DriverSwitch, Steam, BetterJoy) drives a Nintendo
-     * init + subcommand stream that a generic pass-through cannot
-     * answer; this state machine implements the device side per the
-     * cloned references (nxbt protocol.py, dekuNukem notes, SDL as the
-     * client under test).
-     *
-     * Reply injection: WRITE_REPORT synthesizes 0x81/0x21 input reports
-     * into a small ring; READ_REPORT serves ring entries ahead of the
-     * stream. The ring + state bytes are guarded by InputLock (same
-     * lock READ_REPORT already takes). SwitchStreamThread streams at
-     * ~60 Hz from the latest shared-memory body: 12-byte 0x3F
-     * simple-mode frames pre-handshake, 49-byte BT full-mode 0x30
-     * after (issue #37 BT wire sizes via SwitchReportLen). */
-    BOOLEAN SwitchProtocol;         /* VID 0x057E && PID 0x2009 */
-    BOOLEAN SwitchProtocolSeen;     /* issues #35/#37: any 0x80 USB
-                                     * command or 0x01 subcommand
-                                     * arrived. Until then the stream is
-                                     * genuine 12-byte 0x3F simple-mode
-                                     * (the only report DirectInput can
-                                     * parse under the BT descriptor);
-                                     * after, permanently the 49-byte BT
-                                     * full-mode 0x30. Monotonic
-                                     * FALSE->TRUE; benign cross-thread
-                                     * race (one frame). */
-    BOOLEAN SwitchProtocolHold;     /* TTL-gated test hook (2026-07-21
-                                     * audit): HKLM\SOFTWARE\HIDMaestro
-                                     * value SwitchDescriptorIdleHold
-                                     * (REG_QWORD FILETIME), read at
-                                     * DeviceAdd and honored only within
-                                     * 60 s of its write. While set,
-                                     * protocol traffic is answered but
-                                     * never flips the stream to
-                                     * full-mode 0x30, so the 0x3F-idle
-                                     * probe can verify
-                                     * its idle phases hermetically even
-                                     * when a Chromium browser (a
-                                     * legitimate Switch-protocol host)
-                                     * handshakes every new pad within
-                                     * ms. WUDFHost (LOCAL SERVICE)
-                                     * cannot delete the value; the TTL
-                                     * plus the probe's own delete keep
-                                     * a crashed probe from wedging
-                                     * later creates. */
-    UCHAR   SwitchInputMode;        /* 0x30 full / 0x3F simple; starts 0x30 */
-    BOOLEAN SwitchImuEnabled;       /* subcommand 0x40 arg */
-    UCHAR   SwitchTimer;            /* timer byte, ++ per served report */
-    UCHAR   SwitchMac[6];           /* fabricated, stable per index */
-#define HIDMAESTRO_SWITCH_REPLY_SLOTS 4
-    UCHAR   SwitchReplies[HIDMAESTRO_SWITCH_REPLY_SLOTS][64];
-    ULONG   SwitchReplyCount;       /* pending replies in the ring */
-    ULONG   SwitchReplyRead;        /* next slot to serve */
-    HANDLE  SwitchStreamThread;
-    HANDLE  SwitchStreamStop;       /* unnamed manual-reset event */
 
 } DEVICE_CONTEXT, *PDEVICE_CONTEXT;
 

@@ -727,14 +727,18 @@ internal static partial class DeviceOrchestrator
         // contract.
         key.SetValue("FeatureAnswers", FeatureAnswersBlob(profile, controllerIndex), RegistryValueKind.Binary);
         // v2.0.0: the input report IDs a polled GET_INPUT_REPORT answers
-        // from a cache of their own. No profile names any yet, so the
-        // value is empty, and the driver answers IDs 0 and 1 from the last
-        // frame as before.
-        key.SetValue("CachedInputReportIds", Array.Empty<byte>(), RegistryValueKind.Binary);
-        // PadForge discussion 476: a DualShock 3 in the form sixaxis.sys and
-        // DsHidMini's SXS mode present. The driver derives that form's
-        // input, feature and output handling from the native report.
-        key.SetValue("Ds3Sixaxis", profile.SixaxisCompatible == true ? 1 : 0, RegistryValueKind.DWord);
+        // from a cache of their own: the report IDs of a protocol host's
+        // layouts, so a reply the host sends never becomes the polled
+        // report, as the Switch Pro's 0x21 never did (driver.c:1856-1859
+        // and 3603-3613 at 9bd6279). Empty for every other profile, and
+        // the driver answers IDs 0 and 1 from the last frame as before.
+        key.SetValue("CachedInputReportIds", CachedInputReportIds(profile), RegistryValueKind.Binary);
+        // v2.0.0: the feature report whose answer is the device's state,
+        // one plus its ID: the protocol host writes it on the data lane and
+        // the driver answers GET_FEATURE from the latest (the DualShock 3's
+        // report 0, which 9bd6279's driver derived itself under Ds3Sixaxis).
+        if (LiveFeatureReportValue(profile) is { } live)
+            key.SetValue("LiveFeatureReport", live, RegistryValueKind.DWord);
         if (profile.ProductString != null)
             key.SetValue("ProductString", profile.ProductString, RegistryValueKind.String);
         // Both written or cleared every time, so an index another profile
@@ -763,6 +767,27 @@ internal static partial class DeviceOrchestrator
             RegistryLedger.ClaimJoystickOem(profile.VendorId, profile.ProductId, displayName, controllerIndex);
 
         WriteIdentityEntry(identity.Token, controllerIndex);
+    }
+
+    /// <summary>The CachedInputReportIds value: the report IDs of a UMDF2
+    /// protocol host's layouts in their order, each once, when the
+    /// descriptor numbers its reports, else empty.</summary>
+    internal static byte[] CachedInputReportIds(ControllerProfile profile)
+    {
+        if (profile.RequiresUsbipBackend || profile.Protocol == null || !profile.BuildsItsOwnReports) return Array.Empty<byte>();
+        var ids = new List<byte>();
+        foreach (var l in profile.GetOrCompileModel().Layouts)
+            if (l.ReportId >= 0 && !ids.Contains((byte)l.ReportId)) ids.Add((byte)l.ReportId);
+        return ids.ToArray();
+    }
+
+    /// <summary>The LiveFeatureReport value: one plus the ID of a UMDF2
+    /// protocol host's live feature report, or null for none.</summary>
+    internal static int? LiveFeatureReportValue(ControllerProfile profile)
+    {
+        if (profile.RequiresUsbipBackend || profile.Protocol == null) return null;
+        var ids = profile.GetOrCompileModel().LiveFeatureIds;
+        return ids.Length > 0 ? ids[0] + 1 : null;
     }
 
     /// <summary>The serial the UMDF2 driver serves for an index
@@ -1757,6 +1782,7 @@ internal static partial class DeviceOrchestrator
     {
         1 => "FeatureAnswers",
         2 => "CachedInputReportIds",
+        3 => "LiveFeatureReport",
         _ => $"error {error}",
     };
 

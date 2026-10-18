@@ -37,6 +37,8 @@
  *                                       on arrival
  *   getinput <input> <length> <init>    IOCTL_UMDF_HID_GET_INPUT_REPORT
  *   ioctl <code> <input> <length>       any other IOCTL, tagged "ioctl"
+ *   threads                             records "threads" with how many
+ *                                       threads the device has started
  *   remove                              the device's removal
  *   version <label>                     the version-section parameter the
  *                                       next device runs under
@@ -178,6 +180,9 @@ int ScriptRun(const char *plan, const char *script, const char *output)
             uint32_t code = ScriptNumber(x1, lineNo);
             size_t na = ScriptHex(x2, a, sizeof(a), lineNo);
             Ioctl(c.dev, "ioctl", code, a, na, ScriptNumber(x3, lineNo), NULL, 0);
+        } else if (strcmp(cmd, "threads") == 0) {
+            uint32_t k = (uint32_t)c.dev->threadCount;
+            RecOut("threads", &k, 4);
         } else if (strcmp(cmd, "remove") == 0) {
             CtlStop(&c);
         } else {
