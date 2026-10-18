@@ -405,6 +405,7 @@ internal static class Rules
             + "steam-deck-composite names its 64-bit mask"),
         new("FieldSpec.Type=int16-pad-or-stick", "the 2015 Steam Controller's shared pad and stick pair (VendorBlobCodec's I16PadOrStick). Its wireless receiver (28DE:1142) sends the same report, which hid-steam reads with the wired controller's "
             + "parser, the touch bit choosing pad or stick (linux-hid-ref drivers/hid/hid-steam.c:2038-2072 and 2736-2745 at d24e8ac)"),
+        new("ControllerProfile.BluetoothVendorIdSource=bluetooth", "the Bluetooth SIG as the Device ID's vendor ID source (PresentationPlan.BluetoothIds' sig branch), ControllerProfile.BluetoothVendorIdSource's entry: amazon-luna-ble's 0x0171, and Apple's Bluetooth keyboards and mice under 0x004C (Linux hid-ids.h:98, hid-apple.c:1084)"),
         new("FieldSpec.Type=uint10-be", "a 10-bit big-endian motion word at rest at 512, the DualShock 3's (SDL_hidapi_ps3.c:343-348 at 804cf65). The Sixaxis, the controller the DualShock 3 replaced, sends the same report under the same "
             + "054C:0268 (hid-sony.c:2486-2487 at d24e8ac matches both). No device of another line sends this word"),
     };
