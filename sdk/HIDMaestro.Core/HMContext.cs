@@ -203,9 +203,6 @@ public sealed class HMContext : IDisposable
     /// directory for its child processes that it cannot protect. Also thrown
     /// when another program held the deploy lock for ten minutes or the
     /// staging lock for two.</exception>
-    /// <exception cref="HMDriverVersionException">The installed driver is
-    /// older than this SDK supports, and controllers of running programs
-    /// keep it from being replaced.</exception>
     /// <exception cref="HMPayloadMissingException">This build carries no
     /// driver for this machine's architecture.</exception>
     public void InstallDriver()
@@ -510,10 +507,11 @@ public sealed class HMContext : IDisposable
     /// descriptor lacks, or its device model does not compile. The exception
     /// names the profile's file and the JSON path. That refusal comes before
     /// the create takes anything machine-wide.</exception>
-    /// <exception cref="HMDriverVersionException">A UMDF2 create met an
-    /// installed driver older than 2.0.0 that other programs' controllers
-    /// keep from being replaced. The deploy gate refuses it before any PnP
-    /// work, and the exception names the holders.</exception>
+    /// <exception cref="HMDriverVersionException">The driver that started
+    /// a UMDF2 create's device does not serve protocol 4, or could not read
+    /// a value the create wrote. The create installs this SDK's driver over
+    /// an older one first, whoever runs on it, so this is a newer driver
+    /// that dropped protocol 4, or a mis-stamped one.</exception>
     /// <exception cref="InvalidOperationException">This build lacks the
     /// profile's payload (<see cref="HMPayloadMissingException"/>), the
     /// driver install failed, or the device node creation failed.</exception>
@@ -549,10 +547,11 @@ public sealed class HMContext : IDisposable
     /// descriptor lacks, or its device model does not compile. The exception
     /// names the profile's file and the JSON path. That refusal comes before
     /// the create takes anything machine-wide.</exception>
-    /// <exception cref="HMDriverVersionException">A UMDF2 create met an
-    /// installed driver older than 2.0.0 that other programs' controllers
-    /// keep from being replaced. The deploy gate refuses it before any PnP
-    /// work, and the exception names the holders.</exception>
+    /// <exception cref="HMDriverVersionException">The driver that started
+    /// a UMDF2 create's device does not serve protocol 4, or could not read
+    /// a value the create wrote. The create installs this SDK's driver over
+    /// an older one first, whoever runs on it, so this is a newer driver
+    /// that dropped protocol 4, or a mis-stamped one.</exception>
     /// <exception cref="HMResourceInUseException">A create whose key another
     /// program's cleanup holds, while it removes a device a closed program
     /// left under that key, first waits up to 120 seconds for that cleanup.
@@ -672,9 +671,8 @@ public sealed class HMContext : IDisposable
             {
                 // SetupController refused before it made a device and took
                 // back what it wrote: a resource another running program
-                // holds, or the deploy gate's refusal of an older driver
-                // programs hold. The index's devices and configuration can
-                // be another running program's.
+                // holds. The index's devices and configuration can be
+                // another running program's.
                 throw;
             }
             catch

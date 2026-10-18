@@ -14,12 +14,15 @@
 //      program, or the start of a new one, removes the killed program's
 //      devices and releases its registry ledger holds, and leaves the live
 //      program's controller running.
-//   E. Mixed SDK versions. A v1.12.0 program and a v1.13.0 program side by
-//      side keep each other's controllers and the installed driver. Then
-//      each install policy branch: upgrade when nobody uses the older
-//      driver, a v1.12.0 program on a machine with a newer driver, a
-//      v1.11.0 program whose driver the new SDK cannot run on, and a
-//      driver newer than the SDK, which is never replaced.
+//   E. Mixed SDK versions, under the design note's decision (c): "the V2
+//      controllers take precedence over and supersede the V1". Beside a
+//      live v1.12.0 program the new SDK adds its driver and its
+//      controllers run on it, and the v1.12.0 program's controller keeps
+//      its device and driver. Then each install policy branch: upgrade
+//      when nobody uses the older driver, a v1.12.0 program on a machine
+//      with a newer driver, a live v1.11.0 program, beside which the new
+//      SDK adds its driver too, and a driver newer than the SDK, which is
+//      never replaced.
 //   F. Two programs call InstallDriver at the same moment on a machine
 //      without the driver. One deploys, the other finds it current, and
 //      both succeed.
@@ -62,8 +65,8 @@
 //      its XUSB companion over, restarts it on the new index, and XInput
 //      reads the new program's input.
 //   N. A running program's controller whose devices are not present yet
-//      holds an older driver: InstallDriver keeps it, and upgrades it once
-//      that program is gone.
+//      holds an older driver: InstallDriver adds its own beside it and
+//      removes nothing, and once that program is gone finds it current.
 //   O. Another running program, with no controller, keeps the driver
 //      packages through RemoveAllVirtualControllers(). Once it is gone they
 //      go. The public DriverBuilder.RemoveOldDriverPackages() follows the
@@ -629,34 +632,23 @@ internal static partial class Program
             var treeOld = Native.Subtree(instOld);
 
             using var nu = PeerProcess.Start("E1-new");
-            // v2.0.0 runs on no driver older than 2.0.0 (decision (c)). What
-            // a create does on one that a live program holds is the rule
-            // DriverDeploy.Coexistence holds: alternative A refuses every
-            // create, alternative B runs a profile with no model there.
-            bool ruleB = PeerProcess.Field(nu.Send("coexistence"), "rule") == "AllowModelFreeProfiles";
+            // Decision (c): "the V2 controllers take precedence over and
+            // supersede the V1". The new SDK adds its packages beside the
+            // held v1.12.0 ones, with no device updated and nothing removed,
+            // and its controllers bind its driver, the newest in the store.
             string ri = nu.Send("install");
-            Check("E1: beside a live v1.12.0 program the new SDK's InstallDriver refuses the held driver with HMDriverVersionException",
-                  ri.StartsWith("ERR install", StringComparison.Ordinal) && ri.Contains("HMDriverVersionException"), ri);
+            Check("E1: beside a live v1.12.0 program the new SDK's InstallDriver adds its own driver, outcome Upgraded",
+                  PeerProcess.Field(ri, "outcome") == "Upgraded", ri);
             string cn = nu.Send("create pad F0E1 coexist-e-new");
-            if (!ruleB)
-                Check("E1: under alternative A the new program's generic create is refused, naming the v1.12.0 program",
-                      cn.StartsWith("ERR create", StringComparison.Ordinal) && cn.Contains("HMDriverVersionException")
-                      && cn.Contains("a running program built on HIDMaestro 1.12.0"), cn);
-            else
-            {
-                Check("E1: under alternative B the new program creates a generic pad", Ok(cn), cn);
-                string cs = nu.Send("create profile dualsense-bt coexist-e-sony");
-                Check("E1: under alternative B its dualsense-bt create is refused with HMDriverVersionException",
-                      cs.StartsWith("ERR create", StringComparison.Ordinal) && cs.Contains("HMDriverVersionException"), cs);
-            }
-            if (ruleB && Ok(cn))
+            Check("E1: the new program creates a generic pad", Ok(cn), cn);
+            string cs = nu.Send("create profile dualsense-bt coexist-e-sony");
+            Check("E1: and a dualsense-bt", Ok(cs), cs);
+            if (Ok(cn))
             {
                 string instNew = PeerProcess.Field(cn, "instance")!;
-                Check("E1: the new program's controller runs on the installed v1.12.0 driver",
-                      Native.DriverVersionOf(instNew) == verOld, $"{Native.DriverVersionOf(instNew)} vs {verOld}");
-                string dv = nu.Send("driverversion");
-                Check("E1: the v1.12.0 driver reports no version through the handshake",
-                      dv == "OK driverversion none", dv);
+                string? verNew = Native.DriverVersionOf(instNew);
+                Check("E1: the new program's controller runs on the new driver, not the v1.12.0 one",
+                      verNew != null && verNew != verOld, $"{verNew} vs {verOld}");
                 nu.Send("stream 6 0.8 125 0");
                 var pathNew = WaitPaths(0xBEEF, 0xF0E1, 1, 10_000);
                 using var capNew = pathNew.Count == 1 ? HidCapture.Open(pathNew[0]) : null;
@@ -669,7 +661,10 @@ internal static partial class Program
                   capOld.Broken ? $"read error {capOld.ReadError}" : $"driver {Native.DriverVersionOf(instOld)}");
         }
 
-        // E2. The older driver, nobody on it: the new SDK upgrades.
+        // E2. The older driver alone, nobody on it: the new SDK upgrades.
+        Uninstall();
+        using (var old = PeerProcess.Start("E2-v1.12.0", "v1.12.0"))
+            old.Send("install");
         using (var nu = PeerProcess.Start("E2-new"))
         {
             string ri = nu.Send("install");
@@ -723,15 +718,16 @@ internal static partial class Program
 
             using var nu = PeerProcess.Start("E4-new");
             string ri = nu.Send("install");
-            Check("E4: the new SDK refuses with HMDriverVersionException, an InvalidOperationException",
-                  ri.StartsWith("ERR install", StringComparison.Ordinal) && ri.Contains("HMDriverVersionException") && ri.Contains("InvalidOperationException"), ri);
-            Check("E4: the refusal names the device holding the old driver", ri.Contains(instV, StringComparison.OrdinalIgnoreCase), ri);
+            Check("E4: the new SDK adds its own driver beside the held v1.11.0 one and refuses nothing",
+                  PeerProcess.Field(ri, "outcome") == "Upgraded", ri);
+            string cn = nu.Send("create pad F0E6 coexist-e-over-v11");
+            Check("E4: the new program creates beside the v1.11.0 program", Ok(cn), cn);
             Check("E4: the v1.11.0 program's controller is untouched", !cap.Broken && Native.IsStarted(instV) && Flows(cap));
         }
         using (var nu = PeerProcess.Start("E4-new-after"))
         {
             string ri = nu.Send("install");
-            Check("E4: once the v1.11.0 program is gone the new SDK upgrades", PeerProcess.Field(ri, "outcome") == "Upgraded", ri);
+            Check("E4: once the v1.11.0 program is gone the new SDK's driver is current", PeerProcess.Field(ri, "outcome") == "AlreadyCurrent", ri);
         }
 
         // E5. A driver newer than the SDK is never replaced.
@@ -1101,15 +1097,16 @@ internal static partial class Program
             {
                 using var nu = PeerProcess.Start("N1-new");
                 string ri = nu.Send("install");
-                // The older driver is v1.12.0, below the 2.0.0 floor
-                // (decision (c)), so a holder refuses the install.
-                Check("N1: a running program's controller with no device yet holds the older driver, and the install is refused naming it",
-                      ri.StartsWith("ERR install", StringComparison.Ordinal) && ri.Contains("HMDriverVersionException") && ri.Contains("HM_0042"), ri);
+                // Decision (c): a holder refuses nothing. The install adds
+                // this SDK's packages beside v1.12.0's, since a full deploy
+                // would remove the package the holder's devices will use.
+                Check("N1: a running program's controller with no device yet holds the older driver, and the install adds its own beside it",
+                      PeerProcess.Field(ri, "outcome") == "Upgraded", ri);
             }
             using (var nu = PeerProcess.Start("N2-new"))
             {
                 string ri = nu.Send("install");
-                Check("N2: once that program is gone the driver is upgraded", PeerProcess.Field(ri, "outcome") == "Upgraded", ri);
+                Check("N2: once that program is gone the driver is current", PeerProcess.Field(ri, "outcome") == "AlreadyCurrent", ri);
             }
         }
         finally { Native.DeleteRecord(ownerId); }

@@ -491,16 +491,6 @@ internal static class Peer
                         Reply("OK fakebuild");
                         break;
                     }
-                    case "coexistence":
-                    {
-                        // The rule a create follows on an older driver other
-                        // programs hold (DriverDeploy.Coexistence, the design
-                        // note's decision (c)).
-                        var rule = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.DriverDeploy")
-                            ?.GetField("Coexistence", BindingFlags.NonPublic | BindingFlags.Static)?.GetValue(null);
-                        Reply(rule == null ? "ERR coexistence no DriverDeploy.Coexistence" : $"OK coexistence rule={rule}");
-                        break;
-                    }
                     case "addpackages":
                     {
                         // The deploy policy's add of a package a set lacks,

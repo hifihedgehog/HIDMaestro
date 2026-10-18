@@ -18,18 +18,16 @@ namespace HIDMaestro.Internal;
 /// <item>The same payload: nothing, the fast path, outside any lock.</item>
 /// <item>A newer driver: never downgraded. This SDK runs on it.</item>
 /// <item>An older driver with nothing on it: upgrade.</item>
-/// <item>An older driver that controllers of running programs (or of
-/// programs whose state cannot be known) run on: kept, and this SDK runs on
-/// it when it is <see cref="MinimumDriverVersion"/>, 2.0.0, or later, the
-/// first driver of protocol 4. Otherwise
-/// <see cref="HMDriverVersionException"/> names what holds it, and a
-/// create meets the same rule at its deploy gate
+/// <item>An older driver, either INF, that controllers of running programs
+/// (or of programs whose state cannot be known) run on: this SDK's packages
+/// are added to the driver store beside it, with no device updated and no
+/// package removed. Every device this SDK creates then binds its driver,
+/// the newest in the store, and theirs keep the driver they loaded until
+/// they restart. Nothing is refused for a holder: the design note's
+/// decision (c), "the V2 controllers take precedence over and supersede
+/// the V1". A create meets the same rule at its deploy gate
 /// (<see cref="EnsureForCreate"/>), before any PnP work.</item>
 /// </list>
-///
-/// <para>Whether a create may run on such a driver anyway is the owner's
-/// choice between the design note's two alternatives, decision (c):
-/// <see cref="Coexistence"/>.</para>
 ///
 /// <para>Every deploy of this driver, every WinUSB package add, every
 /// cleanup that removes the packages, and every change to the note of
@@ -50,33 +48,11 @@ internal static partial class DriverDeploy
 
     /// <summary>The oldest driver this SDK runs on: 2.0.0, the first of
     /// protocol 4, the version contract under which a driver reads a
-    /// controller's v2.0.0 values (decision (c)).</summary>
+    /// controller's v2.0.0 values (decision (c)). Every create installs its
+    /// own driver over an older one, so a started device that does not
+    /// serve protocol 4 is a newer driver that dropped it, or a mis-stamped
+    /// one.</summary>
     internal static readonly Version MinimumDriverVersion = new(2, 0, 0);
-
-    /// <summary>What a create does on a driver older than
-    /// <see cref="MinimumDriverVersion"/> that controllers of other programs
-    /// hold: the owner's choice between the design note's alternatives A
-    /// and B of decision (c), and the one place it is made.</summary>
-    internal enum CoexistenceRule
-    {
-        /// <summary>Alternative A: every UMDF2 create throws
-        /// <see cref="HMDriverVersionException"/>, whatever the profile.
-        /// No v2.0.0 controller runs on a driver older than 2.0.0, and the
-        /// post-start check requires protocol 4 on every create.</summary>
-        RefuseEveryCreate,
-
-        /// <summary>Alternative B: a create of a profile that passes
-        /// <see cref="ControllerProfile.RunsOnOlderDriver"/> runs on that
-        /// driver, and the post-start check accepts a driver that writes no
-        /// version section for it. Every other create throws.</summary>
-        AllowModelFreeProfiles,
-    }
-
-    /// <summary>The coexistence rule in force. The owner has not chosen
-    /// yet: this is alternative A, and initializing it to
-    /// <see cref="CoexistenceRule.AllowModelFreeProfiles"/> is the whole
-    /// switch to B. A field, so a check runs the gate under both.</summary>
-    internal static CoexistenceRule Coexistence = CoexistenceRule.RefuseEveryCreate;
 
     /// <summary>The driver store, the census, the deploy lock and the
     /// deploy steps, behind one object a check can replace to give the
@@ -156,12 +132,13 @@ internal static partial class DriverDeploy
         return stamps.Count == 0 ? null : stamps.Max();
     }
 
-    /// <summary>True when either INF's newest package in the driver store
-    /// is older than <see cref="MinimumDriverVersion"/>, or one has none.
-    /// Both count: a half-failed install can leave a 2.0.0
-    /// <c>hidmaestro.inf</c> beside an older <c>hidmaestro_xusb.inf</c>.</summary>
-    internal static bool StoreBelowFloor() =>
-        DriverBuilder.PackageInfs.Any(inf => Machine.Stamps(inf) is var s && (s.Count == 0 || s.Max().Release < MinimumDriverVersion));
+    /// <summary>This build's INFs whose newest package in the driver store
+    /// is older than this build's, or which have none: a 1.x release, an
+    /// older 2.x build, or a half-failed install that left one INF behind
+    /// the other.</summary>
+    internal static List<string> OlderThanBuild() =>
+        DriverBuilder.PackageInfs.Where(inf => Machine.Stamps(inf) is var s
+            && (s.Count == 0 || s.Max().CompareTo(Machine.Embedded(inf)) < 0)).ToList();
 
     /// <summary>The stamps of every package of one of the two INFs in the
     /// driver store, read from the INF in each package's FileRepository
@@ -231,11 +208,8 @@ internal static partial class DriverDeploy
     /// <paramref name="creatingToken"/> is the identity of the create whose
     /// deploy gate calls this (<see cref="EnsureForCreate"/>). That create's
     /// own record entry is written before the gate, and it needs the driver
-    /// this call installs, so it does not hold the installed one.
-    /// <paramref name="allowHeldOlder"/> keeps a held driver older than
-    /// <see cref="MinimumDriverVersion"/> rather than refusing it, for a
-    /// create alternative B lets run there.</summary>
-    internal static HMDriverInstallOutcome Run(string? creatingToken = null, bool allowHeldOlder = false)
+    /// this call installs, so it does not hold the installed one.</summary>
+    internal static HMDriverInstallOutcome Run(string? creatingToken = null)
     {
         if (Machine.FastPath())
         {
@@ -278,103 +252,58 @@ internal static partial class DriverDeploy
                 .ToList();
             bool held = holders.Count > 0 || pending.Count > 0;
 
-            // The lowest of the INFs' newest packages, null when neither has
-            // one. A half-failed install, or a program of another release,
-            // can leave one below the floor beside another that meets it.
-            var lowestPresent = DriverBuilder.PackageInfs
-                .Select(inf => Machine.Stamps(inf) is { Count: > 0 } s ? s.Max() : (DriverStamp?)null)
-                .Where(s => s != null).Select(s => s!.Value)
-                .DefaultIfEmpty().Min();
-            // An INF with no package at all: adding this build's touches
-            // nothing installed, held or not.
-            var absent = DriverBuilder.PackageInfs.Where(inf => Machine.Stamps(inf).Count == 0).ToList();
+            // An INF whose newest package is older than this build's, or
+            // which has none. This build's package of each goes in.
+            var older = OlderThanBuild();
 
-            if (installed == null)
+            if (installed == null || installed.Value.CompareTo(embedded) < 0)
             {
-                // No main package. With nothing on the driver, a full deploy.
-                // With devices on a lone XUSB package, only what this build
-                // lacks is added: a full deploy would remove that package and
-                // its hosts under them. A held lone package below the floor
-                // is refused under alternative A, as beside a main package,
-                // and under B keeps the held package alone.
-                if (held && absent.Count < DriverBuilder.PackageInfs.Length)
+                // No main package, or an older one. With nothing on the
+                // driver, a full deploy, which removes the old packages. With
+                // devices on it, this build's packages are added beside the
+                // old ones (AddPackagesLocked: no /install, so no device is
+                // updated and nothing asks for a restart, and no package is
+                // removed). The store's newest package ranks first for every
+                // device this SDK creates (Windows selects the most recent
+                // DriverVer date among equally ranked drivers), and the
+                // devices on the old package keep it until they restart.
+                bool present = DriverBuilder.PackageInfs.Any(inf => Machine.Stamps(inf).Count > 0);
+                if (!held || !present)
                 {
-                    if (lowestPresent.Release < MinimumDriverVersion)
-                    {
-                        if (!allowHeldOlder) throw Refuse(lowestPresent.Release, holders, pending);
-                        Machine.AddPackages(absent);
-                    }
-                    else
-                        Machine.AddPackages(MissingOfBuild());
-                }
-                else
                     Machine.Deploy();
-                return HMDriverInstallOutcome.Installed;
+                    return installed == null ? HMDriverInstallOutcome.Installed : HMDriverInstallOutcome.Upgraded;
+                }
+                Machine.AddPackages(older);
+                Machine.RecordPayload();
+                return installed == null ? HMDriverInstallOutcome.Installed : HMDriverInstallOutcome.Upgraded;
             }
 
-            var lowest = lowestPresent;
-            bool otherBelow = lowest.Release < MinimumDriverVersion && installed.Value.Release >= MinimumDriverVersion;
-
-            int cmp = installed.Value.CompareTo(embedded);
-            if (cmp > 0)
+            if (installed.Value.CompareTo(embedded) > 0)
             {
                 // The main package is newer and stays: a newer driver is
-                // never replaced. This build's package of an INF below the
-                // floor is added beside it unless a program holds the old
-                // one, and of an INF with none, always.
-                if (otherBelow && held && !allowHeldOlder)
-                    throw Refuse(lowest.Release, holders, pending);
-                var add = new List<string>(absent);
-                if (otherBelow && !held)
-                    add.AddRange(DriverBuilder.PackageInfs.Where(inf => Machine.Stamps(inf) is { Count: > 0 } s && s.Max().Release < MinimumDriverVersion));
-                if (add.Count == 0) return HMDriverInstallOutcome.KeptNewer;
-                Machine.AddPackages(add);
+                // never replaced. This build's package of an XUSB INF older
+                // than it, or absent, is added beside it, held or not.
+                if (older.Count == 0) return HMDriverInstallOutcome.KeptNewer;
+                Machine.AddPackages(older);
                 return HMDriverInstallOutcome.Installed;
-            }
-            if (cmp == 0)
-            {
-                // The same build. A held package of the other INF below the
-                // floor is refused under alternative A, as beside a newer or
-                // an older main package, and under B stays alone, with only
-                // an INF that has no package given this build's.
-                if (otherBelow && held)
-                {
-                    if (!allowHeldOlder) throw Refuse(lowest.Release, holders, pending);
-                    if (absent.Count == 0) return HMDriverInstallOutcome.KeptInUse;
-                    Machine.AddPackages(absent);
-                    return HMDriverInstallOutcome.Installed;
-                }
-                // A deploy cut off between its two adds, or a package of it
-                // removed since, leaves the set incomplete, and the fast path
-                // needs both. Adding what is missing touches nothing
-                // installed. Otherwise only the record of the install is
-                // missing, as after SOFTWARE\HIDMaestro was deleted: it is
-                // restored rather than reinstalled under running devices.
-                var missing = MissingOfBuild();
-                if (missing.Count > 0)
-                {
-                    Machine.AddPackages(missing);
-                    Machine.RecordPayload();
-                    return HMDriverInstallOutcome.Installed;
-                }
-                Machine.RecordPayload();
-                return HMDriverInstallOutcome.AlreadyCurrent;
             }
 
-            // Older.
-            if (!held)
+            // The same build. A deploy cut off between its two adds, a
+            // package of it removed since, or an older XUSB package beside
+            // it leaves the set incomplete, and the fast path needs both.
+            // Adding what is missing touches nothing installed. Otherwise
+            // only the record of the install is missing, as after
+            // SOFTWARE\HIDMaestro was deleted: it is restored rather than
+            // reinstalled under running devices.
+            var missing = MissingOfBuild();
+            if (missing.Count > 0)
             {
-                Machine.Deploy();
-                return HMDriverInstallOutcome.Upgraded;
-            }
-            // Held: kept in use when both INFs meet the floor.
-            if (lowest.Release >= MinimumDriverVersion || allowHeldOlder)
-            {
-                if (absent.Count == 0) return HMDriverInstallOutcome.KeptInUse;
-                Machine.AddPackages(absent);
+                Machine.AddPackages(missing);
+                Machine.RecordPayload();
                 return HMDriverInstallOutcome.Installed;
             }
-            throw Refuse(lowest.Release, holders, pending);
+            Machine.RecordPayload();
+            return HMDriverInstallOutcome.AlreadyCurrent;
         }
         finally
         {
@@ -385,17 +314,6 @@ internal static partial class DriverDeploy
         }
     }
 
-    /// <summary>The refusal of a held driver below the floor, naming the
-    /// older INF's version and every holder.</summary>
-    private static HMDriverVersionException Refuse(Version installed, List<OwnerCensus.DeviceGroup> holders,
-        List<(MachineClaims.OwnerRecord Record, MachineClaims.ControllerEntry Controller)> pending)
-    {
-        var blockers = Describe(holders);
-        foreach (var (r, c) in pending)
-            blockers.Add($"identity {c.Token} on transport index {c.TransportIndex}, being created ({(r.Self ? "this program" : MachineClaims.Describe(r))})");
-        return new HMDriverVersionException(installed, MinimumDriverVersion, blockers);
-    }
-
     // The installed-payload record this process last saw with both
     // packages in the store. Every deploy and package removal rewrites or
     // deletes it, so a create finds it unchanged only while the store is as
@@ -404,38 +322,35 @@ internal static partial class DriverDeploy
 
     /// <summary>The deploy gate of a create, run after the controller's
     /// record entry and before its PnP work. Under the deploy lock: when the
-    /// installed-payload record changed since this process last saw the
-    /// packages at <see cref="MinimumDriverVersion"/> or later, or is
-    /// missing, the driver store is read again, and the policy above runs
-    /// when it lacks a package of either INF or the newest package of
-    /// either is older than the floor. A deploy of another program
-    /// therefore either finished before this create's PnP work or saw its
-    /// entry, and a create meets the same rule on an older driver that
-    /// InstallDriver does. The record is confirmed only when both packages
-    /// meet the floor, so a driver older than 2.0.0, whose program writes
-    /// the same record, never takes the fast return.
+    /// installed-payload record changed since this process last saw this
+    /// build's packages in the store, or is missing, the driver store is
+    /// read again, and the policy above runs when the newest package of
+    /// either INF is older than this build's or one has none. A deploy of
+    /// another program therefore either finished before this create's PnP
+    /// work or saw its entry, and a create installs its own driver over an
+    /// older one as InstallDriver does, whoever runs on the older one. The
+    /// record is confirmed only when neither INF is older than this build,
+    /// so an older driver, whose program writes the same record, never
+    /// takes the fast return.
     /// <paramref name="identityToken"/> is the create's own identity, whose
-    /// entry the policy does not count as a holder.
-    /// <paramref name="runsOnOlderDriver"/> is the profile's
-    /// <see cref="ControllerProfile.RunsOnOlderDriver"/>, which
-    /// alternative B reads. Returns true when this call deployed.</summary>
-    internal static bool EnsureForCreate(string identityToken, bool runsOnOlderDriver)
+    /// entry the policy does not count as a holder. Returns true when this
+    /// call deployed.</summary>
+    internal static bool EnsureForCreate(string identityToken)
     {
         using var deployLock = Machine.Lock();
         string? recorded = Machine.ManifestHash();
         if (recorded != null && string.Equals(recorded, Volatile.Read(ref s_confirmedManifest), StringComparison.OrdinalIgnoreCase))
             return false;
         bool deployed = false;
-        if (!Machine.StoreHasBothPackages() || StoreBelowFloor())
+        if (!Machine.StoreHasBothPackages() || OlderThanBuild().Count > 0)
         {
-            var outcome = Run(identityToken,
-                allowHeldOlder: Coexistence == CoexistenceRule.AllowModelFreeProfiles && runsOnOlderDriver);
+            var outcome = Run(identityToken);
             deployed = outcome is HMDriverInstallOutcome.Installed or HMDriverInstallOutcome.Upgraded;
             if (!Machine.StoreHasBothPackages())
                 throw new InvalidOperationException(
                     $"The HIDMaestro driver is not in the driver store, and a deploy for this create ended with {outcome}.");
         }
-        if (!StoreBelowFloor())
+        if (OlderThanBuild().Count == 0)
             Volatile.Write(ref s_confirmedManifest, Machine.ManifestHash());
         return deployed;
     }

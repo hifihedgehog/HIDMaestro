@@ -537,19 +537,17 @@ public static class DriverBuilder
     /// <summary>Installs the driver through the machine-wide install policy,
     /// the same call as <see cref="FullDeploy"/> and
     /// <c>HMContext.InstallDriver</c>: under the deploy lock, never a
-    /// downgrade, and never a replacement under another program's
-    /// controllers. Throws <see cref="HMDriverVersionException"/> where that
-    /// policy does. Until v1.13.0 it added whatever package an earlier call
+    /// downgrade, and over an older driver another program's controllers
+    /// run on, this SDK's packages added beside it with no device updated
+    /// and nothing removed. Until v1.13.0 it added whatever package an earlier call
     /// had staged, with no lock and no policy. The package it installs is
     /// the one <see cref="SignDrivers"/> signed in this process when that is
     /// still in place.</summary>
     /// <returns>True when this call installed or upgraded the driver. False
     /// when the policy kept the installed one, the same build
-    /// (<see cref="HMDriverInstallOutcome.AlreadyCurrent"/>), a newer one
-    /// (<see cref="HMDriverInstallOutcome.KeptNewer"/>) or an older one that
-    /// running controllers hold (<see cref="HMDriverInstallOutcome.KeptInUse"/>),
-    /// and installed nothing. Until v1.13.0 it returned true after every
-    /// install.</returns>
+    /// (<see cref="HMDriverInstallOutcome.AlreadyCurrent"/>) or a newer one
+    /// (<see cref="HMDriverInstallOutcome.KeptNewer"/>), and installed
+    /// nothing. Until v1.13.0 it returned true after every install.</returns>
     /// <exception cref="UnauthorizedAccessException">A deploy was needed and
     /// the process is not elevated (see <see cref="SignDrivers"/>). With
     /// this build's driver already installed it returns false without

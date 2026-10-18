@@ -21,9 +21,9 @@
 //   contract   the SDK's half of the version contract: the identity tag,
 //              protocol 4, and the configuration and identity entry each
 //              create writes anew, in a hive the check owns (Contract.cs)
-//   deploy     the deploy floor at 2.0.0 through the create's gate on a
-//              machine the check gives, under alternatives A and B, and B's
-//              predicate against a golden list (Deploy.cs)
+//   deploy     the deploy policy of decision (c) through the create's gate
+//              on a machine the check gives: this build's driver goes in
+//              over an older one whoever holds it (Deploy.cs)
 //   builder    FromProfile's whole copy, a copy refused for a descriptor
 //              its model does not fit, ClearDeviceModel, DriverPid,
 //              FeatureAnswers and BuildsItsOwnReports (Builder.cs)

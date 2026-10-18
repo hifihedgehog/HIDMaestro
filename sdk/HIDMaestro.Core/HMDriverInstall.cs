@@ -17,36 +17,26 @@ public enum HMDriverInstallOutcome
     /// packages.</summary>
     Installed = 1,
 
-    /// <summary>An older driver was installed and nothing was running on
-    /// it. This SDK replaced it with its own.</summary>
+    /// <summary>An older driver was installed. This SDK replaced it with
+    /// its own when nothing ran on it, and otherwise added its own beside
+    /// it: the devices it creates bind its driver, and the controllers
+    /// already running keep the one they loaded until they restart.</summary>
     Upgraded = 2,
 
     /// <summary>A newer driver is installed. A driver is never downgraded,
     /// and this SDK runs on the newer one.</summary>
     KeptNewer = 3,
-
-    /// <summary>An older driver is installed and controllers on this
-    /// machine run on it, this program's own or another program's. It was
-    /// kept, and this SDK runs on it. The next InstallDriver with nothing
-    /// running on the driver upgrades it.</summary>
-    KeptInUse = 4,
 }
 
 /// <summary>What an <see cref="HMDriverVersionException"/> is about.</summary>
 public enum HMDriverVersionProblem
 {
-    /// <summary>The installed driver is older than this SDK supports, and
-    /// controllers of running programs keep it from being replaced, by
-    /// InstallDriver or by a create's deploy gate.
-    /// <see cref="HMDriverVersionException.Blockers"/> names those devices and
-    /// programs. Once they are gone, InstallDriver upgrades the driver.</summary>
-    HeldOlderDriver = 0,
-
     /// <summary>v2.0.0: the driver that started a create's device does not
-    /// serve this SDK's protocol 4. An older driver is upgraded by
-    /// InstallDriver once nothing holds it. A newer one that dropped
-    /// protocol 4 is never replaced by an older SDK: the program needs an SDK
-    /// of that driver's release. The create removed its device.</summary>
+    /// serve this SDK's protocol 4. A create installs its own driver over an
+    /// older one first, so this is a newer driver that dropped protocol 4,
+    /// which an older SDK never replaces (the program needs an SDK of that
+    /// driver's release), or a mis-stamped one. The create removed its
+    /// device.</summary>
     ProtocolNotServed = 1,
 
     /// <summary>v2.0.0: the driver failed the start of a create's device
@@ -57,18 +47,18 @@ public enum HMDriverVersionProblem
 }
 
 /// <summary>
-/// A driver this SDK cannot run on. Derived from
-/// <see cref="InvalidOperationException"/>. <see cref="Problem"/> says which
-/// of three things it is: an older driver held by running programs, which a
-/// create's deploy gate and InstallDriver meet, or, once a create's device
-/// started, a driver that does not serve protocol 4 or that could not read a
-/// value the create wrote. A start that fails with no value named throws a
-/// plain <see cref="InvalidOperationException"/> naming the device's problem
-/// code instead.
+/// A driver this SDK cannot run on, met once a create's device started:
+/// one that does not serve protocol 4, or one that could not read a value
+/// the create wrote. Derived from <see cref="InvalidOperationException"/>,
+/// and <see cref="Problem"/> says which. An older driver is never a reason:
+/// a create and InstallDriver install this SDK's own over it, whoever runs
+/// on it. A start that fails with no value named throws a plain
+/// <see cref="InvalidOperationException"/> naming the device's problem code
+/// instead.
 /// </summary>
 public sealed class HMDriverVersionException : InvalidOperationException
 {
-    /// <summary>Which of the three cases this is.</summary>
+    /// <summary>Which of the two cases this is.</summary>
     public HMDriverVersionProblem Problem { get; }
 
     /// <summary>The installed or started driver's version: 0.0.0 when the
@@ -78,22 +68,9 @@ public sealed class HMDriverVersionException : InvalidOperationException
     /// <summary>The oldest driver this SDK runs on.</summary>
     public Version MinimumVersion { get; }
 
-    /// <summary>For <see cref="HMDriverVersionProblem.HeldOlderDriver"/>, what
-    /// holds the installed driver: a program, or a device whose program
-    /// cannot be identified, which a program closes to let InstallDriver
-    /// upgrade it. For the two start cases, the create's own device, which
-    /// the create removed: nothing to close.</summary>
+    /// <summary>The create's own device, which the create removed: nothing
+    /// to close.</summary>
     public IReadOnlyList<string> Blockers { get; }
-
-    internal HMDriverVersionException(Version installed, Version minimum, IReadOnlyList<string> blockers)
-        : this(HMDriverVersionProblem.HeldOlderDriver,
-               $"The installed HIDMaestro driver {installed} is older than {minimum}, the oldest this SDK runs on, " +
-               $"and it cannot be replaced while these use it: {string.Join("; ", blockers)}. " +
-               "Close those programs, or remove their controllers with " +
-               "HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall: true), and call InstallDriver again.",
-               installed, minimum, blockers)
-    {
-    }
 
     internal HMDriverVersionException(HMDriverVersionProblem problem, string message, Version installed, Version minimum, IReadOnlyList<string> blockers)
         : base(message)

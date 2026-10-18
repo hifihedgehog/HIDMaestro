@@ -1446,7 +1446,7 @@ internal static partial class DeviceOrchestrator
         using (var _ts = new TimingScope(controllerIndex, profile.Id, "2.driver_install_check"))
         {
             var driverSw = Stopwatch.StartNew();
-            bool deployed = DriverDeploy.EnsureForCreate(identity.Token, profile.RunsOnOlderDriver);
+            bool deployed = DriverDeploy.EnsureForCreate(identity.Token);
             LogDiag($"    driver install check (deployed={deployed}) in {driverSw.ElapsedMilliseconds}ms");
         }
 
@@ -1551,7 +1551,7 @@ internal static partial class DeviceOrchestrator
         {
             string? parentId = mainInstanceId ?? companionId;
             if (parentId != null)
-                CheckStartedDriver(controllerIndex, parentId, childSeen, profile);
+                CheckStartedDriver(controllerIndex, parentId, childSeen);
         }
 
         // Post-WaitForDeviceStarted name re-application: by this point the
@@ -1739,9 +1739,8 @@ internal static partial class DeviceOrchestrator
             // A refusal: a running program started on this index during
             // the create (SharedMemoryIO.EnsureInputMapping), holds the
             // ParentIdPrefix this identity derives
-            // (DeviceManager.ClearParentIdPrefixRivals), or holds an older
-            // driver the deploy gate will not replace. Each comes before this
-            // create made a device. Only what this call wrote goes.
+            // (DeviceManager.ClearParentIdPrefixRivals). Each comes before
+            // this create made a device. Only what this call wrote goes.
             // TeardownController would remove every device and the
             // configuration on the index, and those can be the other
             // program's.
@@ -1762,13 +1761,10 @@ internal static partial class DeviceOrchestrator
     // ════════════════════════════════════════════════════════════════════
 
     /// <summary>A refusal that comes before a create makes any device: a
-    /// resource another running program holds, or the deploy gate's
-    /// refusal of an older driver programs hold. Its cleanup takes back
-    /// what the create wrote and never removes devices by the index, which
-    /// can be another program's.</summary>
-    internal static bool RefusedBeforeDevices(Exception e) =>
-        e is HMResourceInUseException
-        || e is HMDriverVersionException { Problem: HMDriverVersionProblem.HeldOlderDriver };
+    /// resource another running program holds. Its cleanup takes back what
+    /// the create wrote and never removes devices by the index, which can be
+    /// another program's.</summary>
+    internal static bool RefusedBeforeDevices(Exception e) => e is HMResourceInUseException;
 
     /// <summary>How a wait for a device ended.</summary>
     internal enum StartWait { Done, Failed, TimedOut }
@@ -1861,7 +1857,7 @@ internal static partial class DeviceOrchestrator
             var ours = DriverDeploy.EmbeddedDriver().Release;
             var theirs = half.Version is { } hv ? new Version(hv.Major, hv.Minor, Math.Max(0, hv.Build)) : null;
             string advice = theirs == null || theirs < ours
-                ? " This SDK and that driver disagree on the value's format: InstallDriver puts this SDK's driver in place once nothing runs on the installed one."
+                ? " This SDK and that driver disagree on the value's format: InstallDriver puts this SDK's driver in place."
                 : theirs > ours
                     ? " That driver is newer and is never replaced by this SDK's: use an SDK of its release."
                     : "";
@@ -1879,8 +1875,8 @@ internal static partial class DeviceOrchestrator
     /// from <c>DriverProtocolMin</c> to <c>DriverProtocol</c>, so a
     /// mis-stamped driver or a later one that dropped protocol 4 is refused
     /// rather than passing a check of the maximum alone. A driver that wrote
-    /// no section passes only for a profile alternative B lets run on an
-    /// older driver (<paramref name="acceptNoSection"/>).</summary>
+    /// no section passes only where the add may not have run yet
+    /// (<paramref name="acceptNoSection"/>, <see cref="CheckStartedDriver"/>).</summary>
     internal static void CheckDriverHalf(int controllerIndex, string instanceId, bool acceptNoSection)
     {
         var half = DriverHalf(controllerIndex);
@@ -1892,7 +1888,7 @@ internal static partial class DeviceOrchestrator
         // newer driver is never replaced by an older SDK's.
         string advice = half.ProtocolMin > SharedMemoryIO.SDK_PROTOCOL
             ? "That driver is newer and is never replaced by this SDK's: use an SDK of its release."
-            : "InstallDriver puts this SDK's driver in place once nothing runs on the installed one.";
+            : "InstallDriver puts this SDK's driver in place.";
         throw new HMDriverVersionException(HMDriverVersionProblem.ProtocolNotServed,
             $"The HIDMaestro driver {half.Version?.ToString() ?? "of an older release"} on {instanceId} {range}, " +
             $"and this SDK speaks protocol {SharedMemoryIO.SDK_PROTOCOL}. The create removed the device. {advice}",
@@ -1904,10 +1900,8 @@ internal static partial class DeviceOrchestrator
     /// a driver that wrote nothing is an older one. With no child seen
     /// within the wait the add may not have run yet: an empty section
     /// passes, and a written range without protocol 4 still fails.</summary>
-    internal static void CheckStartedDriver(int controllerIndex, string parentId, bool childSeen, ControllerProfile profile) =>
-        CheckDriverHalf(controllerIndex, parentId,
-            acceptNoSection: !childSeen
-                || DriverDeploy.Coexistence == DriverDeploy.CoexistenceRule.AllowModelFreeProfiles && profile.RunsOnOlderDriver);
+    internal static void CheckStartedDriver(int controllerIndex, string parentId, bool childSeen) =>
+        CheckDriverHalf(controllerIndex, parentId, acceptNoSection: !childSeen);
 
     /// <summary>
     /// Polls for a HID child PDO to appear under the given parent devnode.
