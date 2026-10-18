@@ -576,6 +576,7 @@ internal static class CompareLive
 
     // The unverified parts of M1 to M6 a live run can settle, as the
     // [MAPPING] lines name them (review F6).
+    const string LM0Start = "M0 start: the HID class starts a plan profile's device, as the harness assumes";
     const string LM1Length = "M1 output length: a caller's buffer of L bytes reaches the driver as L bytes, L - 1 without report ids";
     const string LM1Caps = "M1 FeatureReportByteLength: the live value is the largest feature report's data bytes plus 1";
     const string LM1Passes = "M1 lengths the HID class passes: a GET_FEATURE the harness's driver answers succeeds live";
@@ -592,7 +593,7 @@ internal static class CompareLive
     const string LM1Undeclared = "M1 undeclared ids: with report ids, a GET_FEATURE of an id the descriptor does not declare fails live with nothing published";
 
     static readonly string[] Mappings =
-        { LM1Length, LM1Caps, LM1Passes, LM1Byte0, LM1Refused, LM1Undeclared, LM2Length, LM2Byte0, LM3Passes, LM4Hid, LM4Xusb,
+        { LM0Start, LM1Length, LM1Caps, LM1Passes, LM1Byte0, LM1Refused, LM1Undeclared, LM2Length, LM2Byte0, LM3Passes, LM4Hid, LM4Xusb,
           LM6Feature, LM6Read, LXusbIndex };
 
     /// <summary>ERROR_INVALID_PARAMETER: what HidD_GetFeature gives when the
@@ -680,6 +681,10 @@ internal static class CompareLive
         public bool Attributed;
         public byte[] Unattributed = Array.Empty<byte>();
         public readonly List<(string Stream, List<FeatureCall> Calls)> Ids = new();
+        // A start stream in place of setup: the devnode did not start, with
+        // this problem code and problem status, and no call was made.
+        public uint? StartProblem;
+        public uint StartStatus;
     }
 
     static List<FeatureGroup> ParseFeatures(List<Stream> streams)
@@ -700,6 +705,16 @@ internal static class CompareLive
                 g.FeatureLength = c.U32("featureLength");
                 g.Attributed = c.Take("attribution")[0] == 1;
                 groups.Add(g);
+                continue;
+            }
+            if (parts[3] == "start")
+            {
+                g = new FeatureGroup { Profile = parts[1], Index = int.Parse(parts[2].Substring(5)), Head = head };
+                g.StartProblem = c.U32("problem");
+                g.StartStatus = c.U32("status");
+                groups.Add(g);
+                // Nothing else belongs to a group whose device did not start.
+                g = null;
                 continue;
             }
             if (g == null || g.Head != head) throw new InvalidDataException($"live-s46-sony-features: {s.Name} has no setup stream ahead of it");
@@ -741,7 +756,7 @@ internal static class CompareLive
     /// first of any that repeat a profile and index. CheckFeatureMatrix
     /// reports the rest.</summary>
     static IEnumerable<FeatureGroup> DrivenGroups(List<FeatureGroup> groups, Dictionary<string, PlanProfile> plan) =>
-        groups.Where(g => plan.ContainsKey(g.Profile)).GroupBy(g => g.Head, StringComparer.Ordinal).Select(x => x.First());
+        groups.Where(g => plan.ContainsKey(g.Profile) && g.StartProblem == null).GroupBy(g => g.Head, StringComparer.Ordinal).Select(x => x.First());
 
     static void ScriptFeatures(StringBuilder sc, List<FeatureGroup> groups, Dictionary<string, PlanProfile> plan)
     {
@@ -796,6 +811,19 @@ internal static class CompareLive
                 continue;
             }
             var g = mine[0];
+            // M0: the harness assumes the HID class starts every plan
+            // profile's device. It runs no descriptor parse, so a device the
+            // class did not start has no calls to compare. Its problem code
+            // and status go to the ledger, which holds a later run to them.
+            if (g.StartProblem is uint problem)
+            {
+                string seen = $"{p.Id}: problem {problem}, status 0x{g.StartStatus:X8}";
+                rep.Mapping(LM0Start, false, seen);
+                if (problem == 0) rep.Diff($"{Case}/{g.Head}/start", "a start failure recorded with no problem code");
+                else rep.Unverified($"{Case}/{g.Head}/start", "the device did not start, so no call was made (M0)", seen);
+                continue;
+            }
+            rep.Mapping(LM0Start, true);
             var want = FeatureIds(p.Features).ToList();
             var got = g.Ids.Select(x => x.Calls.Count > 0 ? x.Calls[0].Id : (byte)0).ToList();
             if (!want.SequenceEqual(got) || g.Ids.Any(x => x.Calls.Any(c => c.Id != x.Calls[0].Id)))
@@ -819,6 +847,8 @@ internal static class CompareLive
         int Expected(PlanProfile p)
         {
             var mine = groups.Where(g => g.Profile == p.Id).ToList();
+            // A device that did not start gets no request from the probe.
+            if (mine.Count == 1 && mine[0].StartProblem != null) return 0;
             int live = mine.Count == 1 ? (int)mine[0].FeatureLength : 0;
             return FeatureIds(p.Features).Count() * (FeatureSweepMax(p.FeatureLength, live) + 1);
         }
@@ -1740,6 +1770,26 @@ internal static class CompareLive
                         return c;
                     }));
                 return twice ? $"{drop} dropped, {dup} recorded again at index 99" : $"{drop} dropped";
+            });
+
+        // M0: a plan profile whose device did not start is recorded as its
+        // problem code and status in place of the matrix, and passes with
+        // the verdict in the ledger. A start failure with no problem code
+        // fails.
+        foreach (uint problem in new uint[] { 10, 0 })
+            Mutate(s46, problem != 0 ? "a profile whose device did not start" : "a start failure with no problem code",
+                problem != 0 ? 0 : 1, problem != 0 ? null : "no problem code", streams =>
+            {
+                var heads = streams.Select(x => x.Name.Split('/')).Select(n => (Profile: n[1], Index: n[2])).Distinct().ToList();
+                if (heads.Count < 2) return null;
+                var (profile, index) = heads[^1];
+                int at = streams.FindIndex(x => x.Name.Split('/')[1] == profile);
+                streams.RemoveAll(x => x.Name.Split('/')[1] == profile);
+                var s = new Stream($"feature/{profile}/{index}/start");
+                s.Out("problem", U32(problem));
+                s.Out("status", U32(problem != 0 ? 0xC00000B9u : 0u));
+                streams.Insert(at, s);
+                return $"{profile}'s matrix replaced by a start stream, problem {problem}";
             });
 
         // Review finding 10: the ledger of a run, pinned, holds a later run to

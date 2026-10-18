@@ -66,6 +66,38 @@ internal static class Program
     const uint GENERIC_READ = 0x80000000, GENERIC_WRITE = 0x40000000;
     const uint FILE_SHARE_RW = 0x3, OPEN_EXISTING = 3;
 
+    [StructLayout(LayoutKind.Sequential)]
+    struct DEVPROPKEY { public Guid Fmtid; public uint Pid; }
+
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    static extern uint CM_Locate_DevNodeW(out uint devInst, string deviceId, uint flags);
+
+    [DllImport("cfgmgr32.dll")]
+    static extern uint CM_Get_DevNode_PropertyW(uint devInst, ref DEVPROPKEY key, out uint type,
+        byte[] buffer, ref uint size, uint flags);
+
+    // devpkey.h: DEVPKEY_Device_ProblemCode (pid 3, DEVPROP_TYPE_UINT32 7) and
+    // DEVPKEY_Device_ProblemStatus (pid 12, DEVPROP_TYPE_NTSTATUS 0x18).
+    static readonly Guid DeviceProblemFmtid = new("4340a6c5-93fa-4706-972c-7b648008a5a7");
+
+    static uint DevnodeU32(uint devInst, uint pid, uint wantType)
+    {
+        var key = new DEVPROPKEY { Fmtid = DeviceProblemFmtid, Pid = pid };
+        var buf = new byte[4];
+        uint size = 4;
+        if (CM_Get_DevNode_PropertyW(devInst, ref key, out uint type, buf, ref size, 0) != 0
+            || type != wantType || size != 4) return 0;
+        return BitConverter.ToUInt32(buf);
+    }
+
+    /// <summary>The devnode's problem code and problem status, (0, 0) when
+    /// it has none or cannot be found.</summary>
+    static (uint Problem, uint Status) DevnodeProblem(string? instanceId)
+    {
+        if (instanceId == null || CM_Locate_DevNodeW(out uint dn, instanceId, 0) != 0) return (0, 0);
+        return (DevnodeU32(dn, 3, 0x07), DevnodeU32(dn, 12, 0x18));
+    }
+
     /// <summary>Device-interface paths matching a VID/PID that already
     /// existed before this probe created anything.</summary>
     static readonly System.Collections.Generic.HashSet<string> s_preexistingHid =
@@ -751,8 +783,21 @@ internal static class Program
         SnapshotPreexistingHid(prof.VendorId, prof.ProductId);
         using var ctrl = ctx.CreateController(prof);
         ctrl.OutputReceived += tap.On;
-        using var h = Open(prof.VendorId, prof.ProductId)
-            ?? throw new InvalidOperationException($"{prof.Id}: the HID interface did not open");
+        using var h = Open(prof.VendorId, prof.ProductId);
+        if (h == null)
+        {
+            // A devnode the HID class did not start is the driver's outcome
+            // for this profile, recorded as its group in place of the
+            // matrix. ps-move on 9bd6279: problem 10, status 0xC00000B9
+            // (STATUS_COULD_NOT_INTERPRET), its descriptor refused.
+            var (problem, status) = DevnodeProblem(ctrl.InstanceId);
+            if (problem == 0) throw new InvalidOperationException($"{prof.Id}: the HID interface did not open");
+            rec.Stream($"feature/{prof.Id}/index{ctrl.TransportIndex}/start");
+            rec.OutU32("problem", problem);
+            rec.OutU32("status", status);
+            Console.WriteLine($"  [START] {prof.Id}: the devnode did not start, problem {problem}, status 0x{status:X8}");
+            return;
+        }
         int featLen = FeatureReportByteLength(h);
         string head = $"feature/{prof.Id}/index{ctrl.TransportIndex}";
 
