@@ -648,7 +648,7 @@ internal static class Strict
     /// null when it loads, else its issue.</summary>
     static Api.Issue? ParseOne(string file, string text)
     {
-        var parse = typeof(ProfileDatabase).GetMethod("Parse", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
+        var parse = typeof(ProfileDatabase).GetMethod("Parse", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static, new[] { typeof(string), typeof(string) })
             ?? throw new MissingMethodException("ProfileDatabase", "Parse");
         object parsed = parse.Invoke(null, new object[] { file, text })!;
         object? issue = Api.Prop(parsed, "Issue");

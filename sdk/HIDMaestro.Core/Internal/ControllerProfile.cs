@@ -629,8 +629,11 @@ public sealed class ControllerProfile
     /// (<see cref="ValidateDeviceModel"/>) and the layout against the
     /// descriptor, which until v2.0.0 a create checked only once it built
     /// its first report. Throws what the failing check throws, with the
-    /// JSON path in its message (<see cref="ProfileDefects.Locate"/>).</summary>
-    internal void ValidateAtLoad()
+    /// JSON path in its message (<see cref="ProfileDefects.Locate"/>).
+    /// <paramref name="checkModelGroups"/> false leaves out the checks of
+    /// the model groups (<see cref="ValidateDeviceModel"/>), for the
+    /// built-in catalog's load alone.</summary>
+    internal void ValidateAtLoad(bool checkModelGroups = true)
     {
         // The identity first: the identity defaults match on it below.
         CheckHexId(Vid, "$.vid");
@@ -639,7 +642,7 @@ public sealed class ControllerProfile
         if (DeviceModel != null && DeviceModel != "none")
             throw new ProfileDefectException("$.deviceModel", $"\"{DeviceModel}\" is not a value it takes. The one value is \"none\".");
         if (!HasDescriptor) return;
-        ValidateDeviceModel();
+        ValidateDeviceModel(checkModelGroups);
         _ = GetOrBuildReportBuilder();
     }
 
@@ -660,8 +663,17 @@ public sealed class ControllerProfile
     /// device beyond the descriptors: the port blocks, the USB/IP protocol
     /// against the profile's own descriptors, and the WinUSB package. Runs
     /// before a create takes anything machine-wide, so a mis-authored
-    /// profile is refused with nothing to undo.</summary>
-    internal void ValidateDeviceModel()
+    /// profile is refused with nothing to undo.
+    /// <para><paramref name="checkModelGroups"/> false leaves out the checks
+    /// of the protocol, the state block and the input and live feature
+    /// reports: the programs' compile with their stream, and the protocol's
+    /// compile against the USB/IP descriptors. The built-in catalog's load
+    /// passes false. Its files are embedded at build, where the build step
+    /// refuses a program or model that does not compile (KG0001), and the
+    /// battery's S92 loads the same files from the profiles folder with
+    /// every check. A create checks the groups of every profile, the
+    /// catalog's included.</para></summary>
+    internal void ValidateDeviceModel(bool checkModelGroups = true)
     {
         // The HID descriptor first: a string that is not whole hex bytes
         // throws FormatException here rather than after the lease.
@@ -669,7 +681,7 @@ public sealed class ControllerProfile
         ValidateDataReport();
         ValidateExtendedReports();
         ValidatePorts();
-        ValidateProgramModel();
+        if (checkModelGroups) ValidateProgramModel();
         XInputPresentation.ValidateOwn(this);
         var cfg = UsbConfiguration;
         bool engine = Protocol != null || cfg?.WinUsb != null;
@@ -681,7 +693,7 @@ public sealed class ControllerProfile
             // no usbConfiguration is refused for the one it lacks.
             var descriptors = new Usbip.UsbDescriptorSet(this);
             if (!engine) return;
-            Usbip.CompiledProtocol.Compile(this, descriptors);
+            if (checkModelGroups) Usbip.CompiledProtocol.Compile(this, descriptors);
             WinUsbBinding.PackageFor(this, descriptors);
             return;
         }
@@ -1777,7 +1789,13 @@ public sealed class ProfileDatabase
     /// The text is parsed once: a file that can hold a model group is read
     /// into one document, which gives the profile and the groups, and any
     /// other file is read straight into the profile.</summary>
-    internal static Parsed Parse(string file, string text)
+    internal static Parsed Parse(string file, string text) => Parse(file, text, builtIn: false);
+
+    /// <summary><see cref="Parse(string, string)"/>, for a file of the
+    /// built-in catalog when <paramref name="builtIn"/> is true: the model
+    /// groups are read and not checked again
+    /// (<see cref="ValidateDeviceModel(bool)"/>).</summary>
+    internal static Parsed Parse(string file, string text, bool builtIn)
     {
         ControllerProfile? profile;
         JsonDocument? doc = null;
@@ -1815,7 +1833,7 @@ public sealed class ProfileDatabase
                 // ControllerProfile.Parse reads them, and a refusal of theirs
                 // is listed at its path like any other.
                 if (doc != null) profile.ReadModelGroups(doc.RootElement);
-                profile.ValidateAtLoad();
+                profile.ValidateAtLoad(checkModelGroups: !builtIn);
             }
             catch (Exception e)
             {
@@ -1981,7 +1999,7 @@ public sealed class ProfileDatabase
         {
             string label = CatalogLabel + names[i].Substring(prefix.Length).Replace('\\', '/');
             read[i] = texts[i] is { } text
-                ? Parse(label, text)
+                ? Parse(label, text, builtIn: true)
                 : new Parsed(label, null, new HIDMaestro.HMProfileLoadIssue(
                     label, null, "$", "the embedded resource cannot be opened", HIDMaestro.HMProfileLoadIssueKind.Refused));
         });

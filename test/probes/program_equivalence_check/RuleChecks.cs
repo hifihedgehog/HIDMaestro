@@ -316,6 +316,16 @@ internal static partial class RuleChecks
 
     // ── The run ──────────────────────────────────────────────────────────
 
+    /// <summary>The file without its model groups: the protocol, the state
+    /// block and the input and live feature reports, keys of any case.</summary>
+    static string WithoutGroups(string text)
+    {
+        var root = JsonNode.Parse(text, documentOptions: new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true })!.AsObject();
+        foreach (var key in root.Select(kv => kv.Key).Where(k => ProfilePrograms.GroupKeys.Contains(k, StringComparer.OrdinalIgnoreCase)).ToList())
+            root.Remove(key);
+        return root.ToJsonString();
+    }
+
     public static int Run()
     {
         int before = Checks.Failures;
@@ -336,6 +346,7 @@ internal static partial class RuleChecks
                 else Fail($"{rule}: refused at {e.Path}, not {path}: {e.Reason}");
             }
             catch (Exception e) { Fail($"{rule}: threw {e.GetType().Name}, not a refusal: {e.Message}"); }
+        int catalogCases = 0, byTool = 0, unchecked_ = 0, toolOnly = 0;
         foreach (var c in Cases())
         {
             string text = BaseText(c.Base);
@@ -375,7 +386,40 @@ internal static partial class RuleChecks
                 if (t?.Path != c.Expect)
                     Fail($"{c.Rule}: the build tool's parse gives {(t == null ? "no refusal" : $"{t.Value.Path}: {t.Value.Reason}")}, not a refusal at {c.Expect}");
             }
+            // The built-in catalog's load leaves its files' model groups
+            // unchecked. A catalog file with this edit is still refused
+            // before it ships: by the build step's parse and compile
+            // (KG0001), or by battery S92, which loads the profiles folder
+            // with every check, as any folder loads.
+            // A case only the shared parse runs was refused above by the
+            // build step's own parse and compile.
+            if (c.Shared && c.Base != "every-op") toolOnly++;
+            if (!c.Shared && c.Base != "every-op")
+            {
+                catalogCases++;
+                var folder = ProfileDatabase.Parse(c.Base + ".json", text);
+                var builtIn = ProfileDatabase.Parse("catalog:" + c.Base + ".json", text, builtIn: true);
+                bool tool = LoadShared(text) != null;
+                if (tool) byTool++;
+                if (builtIn.Issue == null) unchecked_++;
+                if (folder.Issue == null)
+                    Fail($"{c.Rule}: a folder load, S92's, accepts the catalog file the run time refused at {c.Expect}");
+                else if (folder.Issue.JsonPath != c.Expect && folder.Issue.JsonPath != Dd2View.Reachable(c.Expect))
+                    Fail($"{c.Rule}: a folder load, S92's, refuses at {folder.Issue.JsonPath}, not {c.Expect}: {folder.Issue.Reason}");
+                // What the built-in load leaves out is the groups' checks
+                // alone. A defect is theirs when the same file without its
+                // groups loads from a folder: the built-in load accepts it,
+                // and refuses every other as a folder load does.
+                bool groupsFind = ProfileDatabase.Parse(c.Base + ".json", WithoutGroups(text)).Issue == null;
+                if (groupsFind && builtIn.Issue != null)
+                    Fail($"{c.Rule}: the built-in catalog's load checks the groups and refuses at {builtIn.Issue.JsonPath}: {builtIn.Issue.Reason}");
+                if (!groupsFind && builtIn.Issue == null)
+                    Fail($"{c.Rule}: the built-in catalog's load accepts a defect at {c.Expect} that the file without its groups still has");
+            }
         }
+        Console.WriteLine($"catalog files with a defect the run time refuses: {catalogCases}, every one refused by a folder load (S92), " +
+                          $"{byTool} also by the build step's parse and compile (KG0001), {unchecked_} accepted by the built-in catalog's load. " +
+                          $"Catalog files with a defect only the shared parse sees: {toolOnly}, each refused by the build step");
         // Every base loads unedited, so each case's refusal is its edit's.
         foreach (var name in Cases().Select(c => c.Base).Distinct())
             if (Load(BaseText(name)) is { } r) Fail($"the base {name} itself is refused at {r.Path}: {r.Reason}");
