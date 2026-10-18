@@ -1,17 +1,36 @@
 // The budgets of the v1.13.0 design, measured the same way before and after
 // on one machine: built against this tree, and with -p:HmBase=true against a
 // b4d29d9 tree. The parts that measure what b4d29d9 lacks, the ownership
-// claims and the controller ports, are left out of that build.
+// claims and the controller ports, are left out of that build. The budgets
+// of the v2.0.0 conversion (docs/design/data-driven-devices.md, "Budgets")
+// take their baseline from a 9bd6279 tree: -p:HmBaselineTree=<checkout>
+// builds this source against that checkout's SDK (PerfBudgetCheck.csproj).
 //
-//   frame [runs]   time and bytes allocated per call on each submit path
-//   e2e [runs]     SubmitState to the driver's acknowledgement that a read
-//                  carried the frame
-//   output [runs]  an output report to OutputReceived, and bytes allocated
-//                  per report anywhere in the process
+//   frame [runs]   time and bytes allocated per call on each submit path,
+//                  and outside the gate SubmitState on dualsense-bt once
+//                  its feature reads have armed it, steam-controller-2, the
+//                  Switch 2 Pro composite and the two Luna profiles
+//   e2e [runs] [profile[@report...] ...]
+//                  SubmitState to the driver's acknowledgement that a read
+//                  carried the frame, on a DualShock 4 and an Xbox 360 pad,
+//                  or the profiles named. A profile named is also read as a
+//                  host reads it: each output report given is written
+//                  first, then the time runs from SubmitState to the
+//                  ReadFile that returns a report carrying the new state
+//   feature [runs] [profile[@report...] ...]
+//                  feature answers as a host asks for them: HidD_GetFeature
+//                  on a UMDF2 profile, GET_REPORT(Feature) on a USB/IP one
+//                  in this process. dualsense-bt, dualshock-3-full and
+//                  dualsense-composite unless profiles are named
+//   output [runs] [profile@report ...]
+//                  an output report to OutputReceived, and bytes allocated
+//                  per report anywhere in the process: report 05 on a
+//                  DualShock 4, or the report given for each profile
 //   create [runs] [profile ...] [--settle=<ms>]
 //                  CreateController and Dispose for five kinds of device, or
-//                  the ones named, with the SDK's own step timings
-//                  (HIDMAESTRO_TIMING), each controller up for <ms> first
+//                  the catalog profiles named, with the SDK's own step
+//                  timings (HIDMAESTRO_TIMING), each controller up for <ms>
+//                  first
 //   report [runs] [calls]
 //                  offline, no elevation: one launch of the hot path's cost
 //                  under the one arithmetic, BuildReportInto, EncodeInput and
@@ -24,6 +43,13 @@
 //                  decode and state block, each variant's median ns per call
 //                  (ProgramCost.cs). Built with -p:HmDd4Base=true
 //                  against the tree before, the code they replace
+//   program-file <profile file> [runs] [reports]
+//                  offline: one launch of each program of the profiles a
+//                  user's file loads, on the interpreter, measured as
+//                  HIDMaestroProfileCheck --cost measures it (the tool's
+//                  InterpreterCost.cs): each variant's median ns per report
+//                  and its compile in microseconds, for a script to take p50
+//                  and p95 over 30 launches
 //   encode [runs] [calls]
 //                  offline: the codec's encode of the budget table's
 //                  codec-encoded input reports, each median ns per call
@@ -37,6 +63,16 @@
 //                  in a child process, the CPU cycles per second of the SDK's
 //                  process, the reader and the WUDFHost processes, and the
 //                  reports read per second (IdleLive.cs)
+//   report-build [runs]
+//                  the Switch 2 Pro composite's device-built report in each
+//                  layout, offline
+//   install        InstallDriver, then proof that the driver installed is
+//                  the one this SDK embeds (exit 4 when it is not)
+//   selftest       the parsing the modes above share, offline
+//   compare <before> <after>
+//                  offline: the budgets' non-inferiority rule over two
+//                  sides' measurements, the offline modes' launch lines or a
+//                  live mode's summaries (Compare.cs)
 //   start [runs]   process start to the first controller, each run in a
 //                  fresh process, with the session cleanup step's time
 //   claim [runs]   the owner claim, the census and the lease (this release)
@@ -64,8 +100,13 @@
 // --trace prints wall-clock times around each Dispose, to set beside the
 // SDK's diag log. Every measurement prints one line with p50 and p95 over
 // all samples.
-// Requires elevation, except census. Exit 0 PASS, 1 FAIL (gate, census), 2
-// when another program that embeds HIDMaestro is running.
+// Requires elevation, except census, report-build, selftest, compare and
+// the offline measuring modes. Exit 0 PASS, 1 FAIL (gate, census,
+// selftest, compare) or an argument refused before
+// anything ran, 2 when another program that embeds HIDMaestro is running, 3
+// when a mode that needs elevation runs without it, 4 when install finds
+// another driver installed, 5 when a measured devnode runs a driver other
+// than the one this SDK embeds.
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -84,7 +125,7 @@ using HIDMaestro.Internal;
 using HIDMaestro.Internal.Usbip;
 using Microsoft.Win32.SafeHandles;
 
-internal static class Program
+internal static partial class Program
 {
     const BindingFlags Any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
 
@@ -101,11 +142,18 @@ internal static class Program
 
 #if HM_BASE
     const string Build = "b4d29d9";
+#elif HM_BASELINE
+    static readonly string Build = "the baseline, " + string.Join(" at ", typeof(Program).Assembly
+        .GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false)
+        .Cast<System.Reflection.AssemblyMetadataAttribute>()
+        .Where(m => m.Key is "HmBaselineTree" or "HmBaselineCommit").OrderByDescending(m => m.Key).Select(m => m.Value));
 #else
     const string Build = "this release";
 #endif
 
     static int s_failures;
+    // A measured devnode ran a driver other than the one this SDK embeds.
+    static bool s_wrongDriver;
     // --trace: wall-clock times around each Dispose, to set beside the SDK's
     // diag log.
     static bool s_trace;
@@ -124,7 +172,22 @@ internal static class Program
         // The usbip mode plays the host controller from this process.
         UsbipServer.AdmitImportsFromThisProcess = true;
 #endif
-        // Offline: no device, so another program's devices do not matter.
+        // The offline modes touch no device, so another program's
+        // controllers do not matter to them.
+        if (mode == "selftest") return SelfTest();
+        if (mode == "compare")
+        {
+            if (args.Length != 3) { Console.WriteLine("usage: PerfBudgetCheck compare <before file or dir> <after file or dir>"); return 1; }
+            return BudgetCompare.Run(args[1], args[2]);
+        }
+#if HM_BASELINE
+        if (mode == "report-build")
+        {
+            Console.WriteLine($"=== budgets, {Build}, mode {mode} ===");
+            ReportBuild(runs);
+            return s_failures == 0 ? 0 : 1;
+        }
+#endif
         if (mode == "report")
         {
             ReportCost.Run(runs, args.Length > 2 && int.TryParse(args[2], out int calls) ? calls : 100_000);
@@ -135,6 +198,14 @@ internal static class Program
             EncodeCost.Run(runs, args.Length > 2 && int.TryParse(args[2], out int calls) ? calls : 100_000);
             return 0;
         }
+#if HM_PROGRAM_FILE
+        if (mode == "program-file")
+        {
+            if (args.Length < 2) { Console.WriteLine("usage: PerfBudgetCheck program-file <profile file> [runs] [reports]"); return 1; }
+            return ProgramFile(Path.GetFullPath(args[1]), args.Length > 2 && int.TryParse(args[2], out int fr) ? fr : 10,
+                               args.Length > 3 && int.TryParse(args[3], out int fn) ? fn : 100_000);
+        }
+#endif
         if (mode == "program")
         {
             ProgramCost.Run(runs, args.Length > 2 && int.TryParse(args[2], out int calls) ? calls : 100_000);
@@ -154,14 +225,32 @@ internal static class Program
             return 0;
         }
 
+        var sdk = typeof(HMContext).Assembly;
         Console.WriteLine($"=== budgets, {Build}, mode {mode} ===");
+        Console.WriteLine($"  SDK {sdk.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).Cast<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion} at {sdk.Location}");
         switch (mode)
         {
             case "frame": Frame(runs, gate: false); break;
-            case "e2e": EndToEnd(runs); break;
-            case "output": Output(runs); break;
-            case "create": Create(runs, args.Skip(2).Where(a => !a.StartsWith("--settle=", StringComparison.Ordinal)).ToArray(),
-                SettleMs(args)); break;
+            case "e2e":
+                int e2e = EndToEnd(runs, args.Skip(2).ToArray());
+                if (e2e != 0) return e2e;
+                break;
+            case "feature":
+                int feature = Feature(runs, args.Skip(2).ToArray());
+                if (feature != 0) return feature;
+                break;
+            case "output":
+                int output = Output(runs, args.Skip(2).ToArray());
+                if (output != 0) return output;
+                break;
+            case "create":
+                int create = Create(runs, args.Skip(2).Where(a => !a.StartsWith("--settle=", StringComparison.Ordinal)).ToArray(),
+                    SettleMs(args));
+                if (create != 0) return create;
+                break;
+#if !HM_BASE
+            case "install": return Install();
+#endif
             case "start": Start(runs); break;
             case "usbip": Usbip(runs, gate: false); break;
 #if !HM_BASE
@@ -189,6 +278,12 @@ internal static class Program
             Console.WriteLine($"S84: {(s_failures == 0 ? "PASS" : $"{s_failures} FAIL")}");
             return s_failures == 0 ? 0 : 1;
         }
+        if (s_wrongDriver) return 5;
+        if (s_failures > 0)
+        {
+            Console.WriteLine($"{mode}: {s_failures} FAIL");
+            return 1;
+        }
         return 0;
     }
 
@@ -211,6 +306,7 @@ internal static class Program
 
         using (var ds4 = ctx.CreateController(ctx.GetProfile(Ds4)!))
         {
+            if (!gate && !OnEmbeddedDriver(ds4, Ds4)) return;
             bool flip = false;
             Measure("SubmitState, dualshock-4-v2", runs, 20_000, () => { ds4.SubmitState(flip ? a : b); flip = !flip; }, gate);
             var raw = new byte[63];
@@ -344,6 +440,72 @@ internal static class Program
             Measure("SubmitState, gamecube-adapter", runs, 20_000, () => { gc.SubmitState(flip ? a : b); flip = !flip; }, gate);
         }
 #endif
+        if (!gate) FrameConversionProfiles(ctx, runs, a, b);
+    }
+
+    /// <summary>The submit paths the v2.0.0 conversion's budget names that
+    /// the frame mode did not measure: dualsense-bt in its extended mode,
+    /// the Valve and Switch 2 Pro composites, which build their reports
+    /// through the codec and the device, and the Luna profiles, whose
+    /// sticks the conversion centers (data-driven-devices.md, decision
+    /// (a)). Outside the gate, so S84 is unchanged.</summary>
+    static void FrameConversionProfiles(HMContext ctx, int runs, HMGamepadState a, HMGamepadState b)
+    {
+        using (var ds = ctx.CreateController(ctx.GetProfile("dualsense-bt")!))
+        {
+            if (!OnEmbeddedDriver(ds, "dualsense-bt")) return;
+            string armed = ArmByFeatureReads(ds, a, b);
+            bool flip = false;
+            Measure($"SubmitState, dualsense-bt {armed}", runs, 20_000, () => { ds.SubmitState(flip ? a : b); flip = !flip; }, gate: false);
+        }
+        foreach (string id in new[] { "steam-controller-2", "switch2-pro-controller-composite", "amazon-luna-usb", "amazon-luna-ble" })
+        {
+            using var c = ctx.CreateController(ctx.GetProfile(id)!);
+            if (!OnEmbeddedDriver(c, id)) return;
+            bool flip = false;
+            Measure("SubmitState, " + id, runs, 20_000, () => { c.SubmitState(flip ? a : b); flip = !flip; }, gate: false);
+        }
+    }
+
+    /// <summary>A host's first feature reads, every feature report ID the
+    /// descriptor declares once, which is what arms a Sony Bluetooth
+    /// profile's extended report (the driver's feature-read notification).
+    /// Returns how the frames read afterwards say it went: the report ID
+    /// they carry beside the descriptor's first input ID.</summary>
+    static string ArmByFeatureReads(HMController c, HMGamepadState a, HMGamepadState b)
+    {
+        using var dev = OpenOwnInterface(c, d => d.FeatureLength > 0 && d.InputLength > 0, out string why);
+        if (dev == null) return $"(not armed: {why})";
+        var descriptor = c.Profile.GetDescriptorBytes()!;
+        var buf = new byte[dev.FeatureLength];
+        foreach (byte id in DeclaredReports(descriptor, ReportKind.Feature).Keys)
+        {
+            Array.Clear(buf);
+            buf[0] = id;
+            HidD_GetFeature(dev.Handle, buf, buf.Length);
+        }
+        using var reader = new HidReader(dev);
+        long before = reader.Count;
+        c.SubmitState(a);
+        c.SubmitState(b);
+        Thread.Sleep(150);
+        var (last, count) = reader.Last();
+        byte firstInput = DeclaredReports(descriptor, ReportKind.Input).Keys.FirstOrDefault();
+        if (count == before || last.Length == 0) return "(arming not seen: no report read in 150 ms)";
+        return last[0] != firstInput
+            ? $"armed (frames carry report 0x{last[0]:X2} of {last.Length} bytes, not 0x{firstInput:X2})"
+            : $"(not armed: frames still carry report 0x{last[0]:X2})";
+    }
+
+    /// <summary>Whether the controller's devnode runs this SDK's driver,
+    /// printed. A measurement on another driver would be filed under the
+    /// wrong tree, so the mode stops and exits 5.</summary>
+    static bool OnEmbeddedDriver(HMController c, string label)
+    {
+        bool ok = RunsEmbeddedDriver(c, out string detail);
+        Console.WriteLine($"  {label}: {(ok ? "" : "[WRONG DRIVER] ")}{detail}");
+        if (!ok) s_wrongDriver = true;
+        return ok;
     }
 
     static void Measure(string name, int runs, int calls, Action call, bool gate)
@@ -372,75 +534,188 @@ internal static class Program
     /// acknowledgement that a READ_REPORT carried the frame, read from the
     /// acknowledgement section the SDK and driver share
     /// (Global\HIDMaestroInputAck&lt;N&gt;, DeliveredSeqNo at offset 0).
-    /// Fifty submits per run, each at a random offset.</summary>
-    static void EndToEnd(int runs)
+    /// Fifty submits per run, each at a random offset. With profiles named,
+    /// each is then read as a host reads it (HostReadPass). Returns 1 when a
+    /// profile argument is refused and 3 without elevation, both before
+    /// anything is created.</summary>
+    static int EndToEnd(int runs, string[] args)
     {
+        var named = ParseProfileArgs(args, "e2e");
+        if (named == null) return 1;
+        if (!Elevated("e2e")) return 3;
+        var list = named.Count > 0 ? named : new List<ProfileArg> { new(Ds4, Ds4, Array.Empty<byte[]>()), new(Xbox360, Xbox360, Array.Empty<byte[]>()) };
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
         ctx.InstallDriver();
-        foreach (string id in new[] { Ds4, Xbox360 })
+        foreach (var p in list)
         {
-            using var c = ctx.CreateController(ctx.GetProfile(id)!);
-            int index = (int)typeof(HMController).GetProperty("Index", Any)!.GetValue(c)!;
-            var seqField = typeof(HMController).GetField("_inputSeqNo", Any)!;
-            IntPtr map = OpenFileMappingW(FILE_MAP_READ, false, $@"Global\HIDMaestroInputAck{index}");
-            if (map == IntPtr.Zero)
+            using var c = ctx.CreateController(ctx.GetProfile(p.Id)!);
+            if (named.Count > 0 && !OnEmbeddedDriver(c, p.Text)) return 5;
+            AckPass(c, p.Text, runs);
+            if (named.Count > 0) HostReadPass(c, p, runs);
+        }
+        return 0;
+    }
+
+    static void AckPass(HMController c, string id, int runs)
+    {
+        int index = (int)typeof(HMController).GetProperty("Index", Any)!.GetValue(c)!;
+        var seqField = typeof(HMController).GetField("_inputSeqNo", Any)!;
+        IntPtr map = OpenFileMappingW(FILE_MAP_READ, false, $@"Global\HIDMaestroInputAck{index}");
+        if (map == IntPtr.Zero)
+        {
+            Console.WriteLine($"{id}: no acknowledgement section (error {Marshal.GetLastWin32Error()})");
+            return;
+        }
+        IntPtr view = MapViewOfFile(map, FILE_MAP_READ, 0, 0, UIntPtr.Zero);
+        try
+        {
+            var a = new HMGamepadState { Buttons = HMButton.A };
+            var b = new HMGamepadState { Buttons = HMButton.B };
+            Thread.Sleep(500);
+            var rng = new Random(84);
+            var samples = new List<double>(runs * 50);
+            int missed = 0;
+            bool flip = false;
+            for (int run = 0; run < runs; run++)
             {
-                Console.WriteLine($"{id}: no acknowledgement section (error {Marshal.GetLastWin32Error()})");
-                continue;
-            }
-            IntPtr view = MapViewOfFile(map, FILE_MAP_READ, 0, 0, UIntPtr.Zero);
-            try
-            {
-                var a = new HMGamepadState { Buttons = HMButton.A };
-                var b = new HMGamepadState { Buttons = HMButton.B };
-                Thread.Sleep(500);
-                var rng = new Random(84);
-                var samples = new List<double>(runs * 50);
-                int missed = 0;
-                bool flip = false;
-                for (int run = 0; run < runs; run++)
+                for (int i = 0; i < 50; i++)
                 {
-                    for (int i = 0; i < 50; i++)
+                    Spin(rng.Next(2_000, 4_000));
+                    long t0 = Stopwatch.GetTimestamp();
+                    c.SubmitState(flip ? a : b);
+                    flip = !flip;
+                    uint seq = (uint)seqField.GetValue(c)!;
+                    long deadline = t0 + Stopwatch.Frequency / 20;
+                    bool seen = false;
+                    while (Stopwatch.GetTimestamp() < deadline)
                     {
-                        Spin(rng.Next(2_000, 4_000));
-                        long t0 = Stopwatch.GetTimestamp();
-                        c.SubmitState(flip ? a : b);
-                        flip = !flip;
-                        uint seq = (uint)seqField.GetValue(c)!;
-                        long deadline = t0 + Stopwatch.Frequency / 20;
-                        bool seen = false;
-                        while (Stopwatch.GetTimestamp() < deadline)
-                        {
-                            if ((int)((uint)Marshal.ReadInt32(view, 0) - seq) >= 0) { seen = true; break; }
-                            Thread.SpinWait(16);
-                        }
-                        if (seen) samples.Add((Stopwatch.GetTimestamp() - t0) * 1e6 / Stopwatch.Frequency);
-                        else missed++;
+                        if ((int)((uint)Marshal.ReadInt32(view, 0) - seq) >= 0) { seen = true; break; }
+                        Thread.SpinWait(16);
                     }
+                    if (seen) samples.Add((Stopwatch.GetTimestamp() - t0) * 1e6 / Stopwatch.Frequency);
+                    else missed++;
                 }
-                Report($"{id}: SubmitState to the driver's delivery, microseconds", samples, runs, $", {missed} not acknowledged within 50 ms");
+                // A driver that acknowledges none of a profile's frames (the
+                // 9bd6279 Switch Pro stream sends them from its own thread)
+                // would cost each submit the whole 50 ms.
+                if (run == 0 && samples.Count == 0)
+                {
+                    Console.WriteLine($"  {id}: the driver acknowledged none of the first 50 frames, so the acknowledgement is not measured");
+                    return;
+                }
             }
-            finally
+            Report($"{id}: SubmitState to the driver's delivery, microseconds", samples, runs, $", {missed} not acknowledged within 50 ms");
+        }
+        finally
+        {
+            UnmapViewOfFile(view);
+            CloseHandle(map);
+        }
+    }
+
+    // ── Submit to a host's read ──────────────────────────────────────────
+
+    /// <summary>The time from SubmitState to the moment a host's ReadFile
+    /// on the controller's own HID interface returns a report that carries
+    /// the new state, which needs nothing of the driver but its input
+    /// reports, so it measures a 9bd6279 driver and a converted one alike.
+    /// The profile's output reports, if any, are written first, as a host
+    /// writes them (SDL's input-mode subcommand on a Switch Pro, which
+    /// starts the 0x30 stream). Calibrate learns which bytes tell the two
+    /// states apart. Fifty submits per run, each after a random pause of 2
+    /// to 19 ms, so a device that sends on a 15 ms clock is caught at every
+    /// phase of it. A report not seen within 100 ms counts as missed, and
+    /// the next submit waits 200 ms more so a late one cannot match
+    /// it.</summary>
+    static void HostReadPass(HMController c, ProfileArg p, int runs)
+    {
+        using var dev = OpenOwnInterface(c, d => d.InputLength > 0, out string why);
+        if (dev == null) { Check($"{p.Text}: a HID interface with input reports", false, why); return; }
+        // The writes go first: the handle is synchronous, so the I/O manager
+        // runs one request on it at a time, and a write would wait behind
+        // the reader's pending ReadFile.
+        foreach (var report in p.Reports)
+        {
+            if (!WriteOutput(dev, report, out int error))
             {
-                UnmapViewOfFile(view);
-                CloseHandle(map);
+                Check($"{p.Text}: output report 0x{report[0]:X2} written", false, $"WriteFile error {error}");
+                return;
+            }
+            Thread.Sleep(100);
+        }
+        using var reader = new HidReader(dev);
+        var a = new HMGamepadState { Buttons = HMButton.A };
+        var b = new HMGamepadState { Buttons = HMButton.B };
+        var patterns = Calibrate(c, reader, a, b, out string learned);
+        if (patterns == null) { Check($"{p.Text}: the two states tell apart in its reports", false, learned); return; }
+        Console.WriteLine($"  {p.Text}: report 0x{patterns.Value.A.Expect[0]:X2} of {patterns.Value.A.Expect.Length} bytes, {learned}");
+        var rng = new Random(84);
+        var samples = new List<double>(runs * 50);
+        int missed = 0;
+        // Calibration left state b in place, so the first submit is a.
+        bool flip = true;
+        for (int run = 0; run < runs; run++)
+        {
+            for (int i = 0; i < 50; i++)
+            {
+                Spin(rng.Next(2_000, 19_000));
+                flip = !flip;
+                reader.Arm(flip ? patterns.Value.B : patterns.Value.A);
+                long t0 = Stopwatch.GetTimestamp();
+                c.SubmitState(flip ? b : a);
+                long deadline = t0 + Stopwatch.Frequency / 10;
+                long hit = 0;
+                while (Stopwatch.GetTimestamp() < deadline && (hit = reader.Hit) == 0) Thread.SpinWait(16);
+                reader.Disarm();
+                if (hit != 0) samples.Add((hit - t0) * 1e6 / Stopwatch.Frequency);
+                else { missed++; Thread.Sleep(200); }
             }
         }
+        if (reader.ReadError != 0) Check($"{p.Text}: the reader read to the end", false, $"ReadFile error {reader.ReadError}");
+        Report($"{p.Text}: SubmitState to a host's ReadFile of the report that carries it, microseconds", samples, runs,
+            $", {missed} not seen within 100 ms");
     }
 
     // ── The output reader ───────────────────────────────────────────────
 
-    /// <summary>Output reports sent to a DualShock 4 through HID, each
-    /// timed to OutputReceived, and the bytes the whole process allocated
-    /// per report while the SDK's reader handled them.</summary>
-    static void Output(int runs)
+    /// <summary>Output reports sent through HID, each timed to
+    /// OutputReceived, and the bytes the whole process allocated per report
+    /// while the SDK's reader handled them: report 05 of 32 bytes on a
+    /// DualShock 4, or for each profile named the report given, padded to
+    /// its interface's output report length. Byte 4 changes with every
+    /// report, so no two in a row are the same. Returns 1 when an argument
+    /// is refused, 3 without elevation, 5 on another driver.</summary>
+    static int Output(int runs, string[] args)
     {
+        var named = ParseProfileArgs(args, "output");
+        if (named == null) return 1;
+        if (named.Any(p => p.Reports.Length != 1))
+        {
+            Console.WriteLine("output: each profile named needs one report, as <profile>@<report hex>");
+            return 1;
+        }
+        if (!Elevated("output")) return 3;
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
         ctx.InstallDriver();
-        var profile = ctx.GetProfile(Ds4)!;
-        using var c = ctx.CreateController(profile);
+        if (named.Count == 0)
+        {
+            var report = new byte[32];
+            report[0] = 0x05;
+            named.Add(new ProfileArg(Ds4, Ds4, new[] { report }));
+        }
+        foreach (var p in named)
+        {
+            using var c = ctx.CreateController(ctx.GetProfile(p.Id)!);
+            if (!OnEmbeddedDriver(c, p.Text)) return 5;
+            OutputOne(c, p, runs);
+        }
+        return 0;
+    }
+
+    static void OutputOne(HMController c, ProfileArg p, int runs)
+    {
         long sent = 0;
         using var got = new AutoResetEvent(false);
         var rtts = new List<double>(runs * 100);
@@ -454,17 +729,11 @@ internal static class Program
                 got.Set();
             }
         };
-        string? path = null;
-        for (int i = 0; i < 50 && path == null; i++)
-        {
-            path = HidPaths(profile.VendorId, profile.ProductId).FirstOrDefault();
-            if (path == null) Thread.Sleep(100);
-        }
-        if (path == null) { Console.WriteLine("output: the DualShock 4's HID device did not appear"); return; }
-        using var h = CreateFileW(path, 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
-        if (h.IsInvalid) { Console.WriteLine($"output: CreateFile failed, error {Marshal.GetLastWin32Error()}"); return; }
-        var report = new byte[32];
-        report[0] = 0x05;
+        using var dev = OpenOwnInterface(c, d => d.OutputLength > 0, out string why);
+        if (dev == null) { Check($"{p.Text}: a HID interface with output reports", false, why); return; }
+        var report = new byte[Math.Max(dev.OutputLength, p.Reports[0].Length)];
+        p.Reports[0].CopyTo(report, 0);
+        int vary = Math.Min(4, report.Length - 1);
         var perReport = new List<double>(runs);
         int lost = 0;
         for (int run = 0; run < runs; run++)
@@ -473,9 +742,9 @@ internal static class Program
             long bytes0 = GC.GetTotalAllocatedBytes(precise: true);
             for (int i = 0; i < 100; i++)
             {
-                report[4] = (byte)(1 + ((run * 100 + i) % 254));
+                report[vary] = (byte)(1 + ((run * 100 + i) % 254));
                 Interlocked.Exchange(ref sent, Stopwatch.GetTimestamp());
-                if (!HidD_SetOutputReport(h, report, report.Length)) { Interlocked.Exchange(ref sent, 0); lost++; continue; }
+                if (!HidD_SetOutputReport(dev.Handle, report, report.Length)) { Interlocked.Exchange(ref sent, 0); lost++; continue; }
                 if (got.WaitOne(500)) delivered++;
                 else { Interlocked.Exchange(ref sent, 0); lost++; }
                 Spin(1_000);
@@ -483,15 +752,24 @@ internal static class Program
             long bytes = GC.GetTotalAllocatedBytes(precise: true) - bytes0;
             if (delivered > 0) perReport.Add((double)bytes / delivered);
         }
-        Report("dualshock-4-v2: output report to OutputReceived, microseconds", rtts, runs, $", {lost} lost");
-        Report("dualshock-4-v2: bytes the process allocated per output report", perReport, runs, "");
+        Report($"{p.Text}: output report 0x{report[0]:X2} to OutputReceived, microseconds", rtts, runs, $", {lost} lost");
+        Report($"{p.Text}: bytes the process allocated per output report", perReport, runs, "");
     }
 
     // ── Create and dispose ──────────────────────────────────────────────
 
-    /// <summary>The profiles named after the run count, or all five.</summary>
-    static void Create(int runs, string[] only, int settleMs)
+    /// <summary>The catalog profiles named after the run count, in that
+    /// order, or all five. Returns 1 when a name is refused, 5 when a
+    /// devnode runs another driver.</summary>
+    static int Create(int runs, string[] only, int settleMs)
     {
+        var named = ParseProfileArgs(only, "create");
+        if (named == null) return 1;
+        if (named.Any(p => p.Reports.Length > 0))
+        {
+            Console.WriteLine("create: a profile takes no report here");
+            return 1;
+        }
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
         ctx.InstallDriver();
@@ -499,14 +777,15 @@ internal static class Program
 #if !HM_BASE
         ids.Add(GameCube);
 #endif
-        if (only.Length > 0) ids = ids.Where(only.Contains).ToList();
+        if (named.Count > 0) ids = named.Select(p => p.Id).ToList();
         string log = TimingLog();
         foreach (string id in ids)
         {
             var profile = ctx.GetProfile(id)!;
             // One create and dispose first, so a cold first create (driver
             // binding, the USB/IP server's first start) is not a sample.
-            ctx.CreateController(profile).Dispose();
+            using (var first = ctx.CreateController(profile))
+                if (!OnEmbeddedDriver(first, id)) return 5;
             long logStart = new FileInfo(log).Exists ? new FileInfo(log).Length : 0;
             var create = new List<double>(runs);
             var dispose = new List<double>(runs);
@@ -529,6 +808,7 @@ internal static class Program
             foreach (var (step, values) in TimingSteps(log, logStart, id))
                 Report($"{id}: step {step}, ms", values, runs, "");
         }
+        return 0;
     }
 
     /// <summary>--settle=&lt;ms&gt;: the time each created controller stays up
@@ -1174,7 +1454,7 @@ internal static class Program
             return s;
         }
 
-        void Submit(uint seq, bool isIn, uint ep, int length, int packets = -1)
+        void Submit(uint seq, bool isIn, uint ep, int length, int packets = -1, ulong setup = 0)
         {
             Array.Clear(_header);
             BinaryPrimitives.WriteUInt32BigEndian(_header, 1);                  // CMD_SUBMIT
@@ -1183,8 +1463,38 @@ internal static class Program
             BinaryPrimitives.WriteUInt32BigEndian(_header.AsSpan(16), ep);
             BinaryPrimitives.WriteInt32BigEndian(_header.AsSpan(24), length);
             BinaryPrimitives.WriteInt32BigEndian(_header.AsSpan(32), packets);  // -1: not isochronous
+            BinaryPrimitives.WriteUInt64LittleEndian(_header.AsSpan(40), setup); // the setup packet, wire order
             Send(_header);
         }
+
+        /// <summary>The 8 setup bytes as the header carries them: in wire
+        /// order, as usbip_server_check's client builds them (USB 2.0
+        /// section 9.3).</summary>
+        static ulong Setup(byte requestType, byte request, ushort value, ushort index, ushort length) =>
+            requestType | (ulong)request << 8 | (ulong)value << 16 | (ulong)index << 32 | (ulong)length << 48;
+
+        /// <summary>A control transfer to the host on endpoint 0. Its data
+        /// is LastData once WaitFor returns.</summary>
+        public uint SubmitControlIn(byte requestType, byte request, ushort value, ushort index, ushort length)
+        {
+            uint s = Next(true);
+            Submit(s, true, 0, length, setup: Setup(requestType, request, value, index, length));
+            return s;
+        }
+
+        /// <summary>A control transfer from the host on endpoint 0, with its
+        /// data stage.</summary>
+        public uint SubmitControlOut(byte requestType, byte request, ushort value, ushort index, ReadOnlySpan<byte> data)
+        {
+            uint s = Next(false);
+            Submit(s, false, 0, data.Length, setup: Setup(requestType, request, value, index, (ushort)data.Length));
+            Send(data);
+            return s;
+        }
+
+        /// <summary>The data of the last IN reply read.</summary>
+        public ReadOnlySpan<byte> LastData => _data.AsSpan(0, _lastActual);
+        int _lastActual;
 
         public uint SubmitIn(uint ep, int length)
         {
@@ -1265,6 +1575,7 @@ internal static class Program
             int actual = BinaryPrimitives.ReadInt32BigEndian(_header.AsSpan(24));
             int packets = BinaryPrimitives.ReadInt32BigEndian(_header.AsSpan(32));
             if ((got & 1) == 1 && actual > 0) Receive(_data.AsSpan(0, actual));
+            if ((got & 1) == 1) _lastActual = Math.Max(0, actual);
             if (packets > 0) Receive(_descs.AsSpan(0, packets * 16));
             return got;
         }
@@ -1364,18 +1675,33 @@ internal static class Program
         return steps.OrderBy(k => k.Key, StringComparer.Ordinal).Select(k => (k.Key, k.Value)).ToList();
     }
 
-    /// <summary>The HID device paths of one VID and PID, through the SDK's
-    /// own enumerator, reached by reflection so this builds on b4d29d9.</summary>
-    static IEnumerable<string> HidPaths(ushort vid, ushort pid)
+    /// <summary>Whether a process runs elevated. An unelevated process
+    /// cannot create, remove or sweep a device, so another lane's offline
+    /// probe with the SDK loaded is no consumer while a live run holds the
+    /// bench. A token that cannot be read counts as elevated.</summary>
+    static class ConsumerElevation
     {
-        var t = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.HidDeviceEnumerator")!;
-        var list = (System.Collections.IEnumerable)t.GetMethod("Enumerate", Any)!.Invoke(null, null)!;
-        foreach (var d in list)
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        static extern System.IntPtr OpenProcess(uint access, bool inherit, int pid);
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        static extern bool CloseHandle(System.IntPtr h);
+        [System.Runtime.InteropServices.DllImport("advapi32.dll", SetLastError = true)]
+        static extern bool OpenProcessToken(System.IntPtr process, uint access, out System.IntPtr token);
+        [System.Runtime.InteropServices.DllImport("advapi32.dll", SetLastError = true)]
+        static extern bool GetTokenInformation(System.IntPtr token, int cls, out int value, int length, out int returned);
+
+        // PROCESS_QUERY_LIMITED_INFORMATION, TOKEN_QUERY, TokenElevation (20).
+        public static bool IsElevated(int pid)
         {
-            var dt = d.GetType();
-            if (Convert.ToUInt16(dt.GetField("VendorId")!.GetValue(d)) != vid) continue;
-            if (Convert.ToUInt16(dt.GetField("ProductId")!.GetValue(d)) != pid) continue;
-            if (dt.GetField("DevicePath")!.GetValue(d) is string path) yield return path;
+            System.IntPtr p = OpenProcess(0x1000, false, pid);
+            if (p == System.IntPtr.Zero) return true;
+            try
+            {
+                if (!OpenProcessToken(p, 0x0008, out System.IntPtr t)) return true;
+                try { return !GetTokenInformation(t, 20, out int v, 4, out _) || v != 0; }
+                finally { CloseHandle(t); }
+            }
+            finally { CloseHandle(p); }
         }
     }
 
@@ -1385,7 +1711,7 @@ internal static class Program
         {
             try
             {
-                if (p.Id == Environment.ProcessId) continue;
+                if (p.Id == Environment.ProcessId || !ConsumerElevation.IsElevated(p.Id)) continue;
                 foreach (ProcessModule m in p.Modules)
                     if (string.Equals(m.ModuleName, "HIDMaestro.Core.dll", StringComparison.OrdinalIgnoreCase))
                     {

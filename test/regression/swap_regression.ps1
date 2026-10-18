@@ -2082,9 +2082,13 @@ function Scenario-Interop-Decl {
 # an INF model line with its [Strings] tokens read, except the INF lines
 # the probe allows. No device name is compared, searched, given to a name
 # or written into a regular expression, with strings folded across +,
-# interpolation, string.Concat and adjacent C literals. No catalog profile
-# id is a string, and no profile field is set by one catalog profile alone
-# unless the probe's table allows it. No region is exempt: a frozen-compat
+# interpolation, string.Concat and adjacent C literals, except a removed
+# spelling the probe allows in the file that refuses it. No catalog
+# profile id is a string, and no profile field is set by one catalog profile
+# alone unless the probe's table allows it, counted per key, per field type
+# (a center on int16-le apart from one on uint8-axis), per value the SDK
+# names (a string it compares the property with, an enum member it writes),
+# and over the state block's fields too. No region is exempt: a frozen-compat
 # marker in any spelling fails, and each region of 9bd6279's drivers that
 # v2.0.0 deletes (the 24 device regions and the default device's five)
 # fails while any of its token-stream prints is in a C or C++ source under

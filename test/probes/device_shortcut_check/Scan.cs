@@ -55,6 +55,7 @@ internal sealed class Scan
     public readonly List<RegionFound> Regions = new();
     public readonly List<(AllowedName Entry, string File, int Line, string Name)> AllowedNames = new();
     public readonly List<(AllowedInfLine Entry, string File, int Line)> AllowedInf = new();
+    public readonly List<(AllowedString Entry, Hit Hit)> AllowedStrings = new();
     public readonly List<(string File, int Line, string Kind, string Text)> Infos = new();
     public readonly List<string> Coincidences = new();
     public readonly List<(string File, Decl D)> Names = new();
@@ -62,10 +63,12 @@ internal sealed class Scan
     public readonly List<(VendoredFile Entry, Hit Hit)> VendoredHits = new();
 
     readonly AllowedInfLine[] allowedInf;
+    readonly AllowedString[] allowedStrings;
 
     public Scan(Catalog catalog, RegionPrints prints, IReadOnlyList<RemovedRegion> regions, AllowedName[] allowed, AllowedInfLine[] allowedInf,
-                VendoredFile[] vendored)
+                VendoredFile[] vendored, AllowedString[]? allowedStrings = null)
     {
+        this.allowedStrings = allowedStrings ?? Rules.Strings;
         cat = catalog;
         this.prints = prints;
         this.regions = regions;
@@ -129,6 +132,11 @@ internal sealed class Scan
         }
         // A string a constant carries is a hit once the constant is used, not information.
         Infos.RemoveAll(i => Hits.Any(h => h.Group == HitGroups.DeviceString && h.File == i.File && h.Line == i.Line));
+        // A string the table allows, in the file it names, is listed with
+        // its reason instead.
+        foreach (var h in Hits.Distinct())
+            if (allowedStrings.FirstOrDefault(a => a.Matches(h)) is { } entry) AllowedStrings.Add((entry, h));
+        Hits.RemoveAll(h => allowedStrings.Any(a => a.Matches(h)));
     }
 
     sealed class Sink : ILiteralSink

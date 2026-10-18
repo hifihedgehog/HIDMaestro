@@ -22,7 +22,11 @@
 //      when nobody uses the older driver, a v1.12.0 program on a machine
 //      with a newer driver, a live v1.11.0 program, beside which the new
 //      SDK adds its driver too, and a driver newer than the SDK, which is
-//      never replaced.
+//      never replaced. A program that never calls InstallDriver gets the
+//      same from its first create, beside a running v1.12.0 program's
+//      controller and once every v1.12.0 controller is gone, and its
+//      controllers work: input, a Sony feature answer, an XUSB interface
+//      (SectionECreate.cs).
 //   F. Two programs call InstallDriver at the same moment on a machine
 //      without the driver. One deploys, the other finds it current, and
 //      both succeed.
@@ -735,6 +739,9 @@ internal static partial class Program
             string ri = nu.Send("install");
             Check("E4: once the v1.11.0 program is gone the new SDK's driver is current", PeerProcess.Field(ri, "outcome") == "AlreadyCurrent", ri);
         }
+
+        // E6 and E7: the same through a create, with no InstallDriver.
+        SectionECreate();
 
         // E5. A driver newer than the SDK is never replaced.
         Uninstall();

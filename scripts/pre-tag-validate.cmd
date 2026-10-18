@@ -84,6 +84,14 @@ if errorlevel 1 (
     popd
     exit /b 2
 )
+rem The profile check tool ships in the release ZIP beside the extractor,
+rem and profile_model_check (S92) runs this build of it.
+dotnet build tools\HIDMaestroProfileCheck\HIDMaestroProfileCheck.csproj -c Release --nologo -v:minimal >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] HIDMaestroProfileCheck build failed.
+    popd
+    exit /b 2
+)
 rem Rebuild every managed probe so the battery's probe scenarios (S24+)
 rem run the SDK built THIS run, not whatever a prior iteration left in
 rem bin\. RID-agnostic (plain dotnet build): the harness consumes that
