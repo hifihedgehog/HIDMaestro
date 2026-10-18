@@ -62,6 +62,10 @@
 //   install        InstallDriver, then proof that the driver installed is
 //                  the one this SDK embeds (exit 4 when it is not)
 //   selftest       the parsing the modes above share, offline
+//   compare <before> <after>
+//                  offline: the budgets' non-inferiority rule over two
+//                  sides' measurements, the offline modes' launch lines or a
+//                  live mode's summaries (Compare.cs)
 //   start [runs]   process start to the first controller, each run in a
 //                  fresh process, with the session cleanup step's time
 //   claim [runs]   the owner claim, the census and the lease (this release)
@@ -89,8 +93,8 @@
 // --trace prints wall-clock times around each Dispose, to set beside the
 // SDK's diag log. Every measurement prints one line with p50 and p95 over
 // all samples.
-// Requires elevation, except census, report-build and selftest. Exit 0
-// PASS, 1 FAIL (gate, census, selftest) or an argument refused before
+// Requires elevation, except census, report-build, selftest and compare.
+// Exit 0 PASS, 1 FAIL (gate, census, selftest, compare) or an argument refused before
 // anything ran, 2 when another program that embeds HIDMaestro is running, 3
 // when a mode that needs elevation runs without it, 4 when install finds
 // another driver installed, 5 when a measured devnode runs a driver other
@@ -163,6 +167,11 @@ internal static partial class Program
         // The offline modes touch no device, so another program's
         // controllers do not matter to them.
         if (mode == "selftest") return SelfTest();
+        if (mode == "compare")
+        {
+            if (args.Length != 3) { Console.WriteLine("usage: PerfBudgetCheck compare <before file or dir> <after file or dir>"); return 1; }
+            return BudgetCompare.Run(args[1], args[2]);
+        }
 #if HM_BASELINE
         if (mode == "report-build")
         {

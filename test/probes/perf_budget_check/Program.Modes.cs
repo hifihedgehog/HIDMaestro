@@ -510,6 +510,9 @@ internal static partial class Program
                 string.Join("; ", detail.Select(x => $"interface {x.Iface}: feature {(x.Report == null ? "(none)" : string.Join(" ", DeclaredReports(x.Report, ReportKind.Feature).Select(k => $"0x{k.Key:X2}/{k.Value}")))}")));
         }
 
+        // The budgets' non-inferiority rule (Compare.cs).
+        foreach (var (name, ok, detail) in BudgetCompare.SelfTest()) Check("compare: " + name, ok, detail);
+
         // Profile arguments.
         var args = ParseProfileArgs(new[] { "switch-pro@010000014040000140400330", "dualsense-bt" }, "selftest");
         Check("a profile argument with a report", args != null && args[0].Id == "switch-pro" && args[0].Reports.Length == 1
