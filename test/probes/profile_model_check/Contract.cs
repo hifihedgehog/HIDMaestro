@@ -155,7 +155,7 @@ internal static class Contract
     {
         var bad = new List<string>();
         int n = 0;
-        foreach (var p in ProfileDatabase.LoadEmbedded().All.Where(p => !p.RequiresUsbipBackend && p.ExtendedReport != null && p.SixaxisCompatible != true))
+        foreach (var p in ProfileDatabase.LoadEmbedded().All.Where(p => !p.RequiresUsbipBackend && p.ExtendedReport != null && p.CompatModelKey != true))
         {
             n++;
             var map = p.GetOrBuildReportMap();

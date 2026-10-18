@@ -107,7 +107,7 @@ internal static class Builder
                 if (q.AxisCenters != null) kept.Add("axisCenters");
                 if (q.InputDefaults != null) kept.Add("inputDefaults");
                 if (q.SdlMapping != null) kept.Add("sdlMapping");
-                if (q.SixaxisCompatible == true) kept.Add("sixaxisCompatible");
+                if (q.CompatModelKey == true) kept.Add("sixaxisCompatible");
                 if (q.NativeDescriptor != null) kept.Add("nativeDescriptor");
                 if (q.UsbConfiguration != null) kept.Add("usbConfiguration");
                 if (q.RequiresUsbipBackend) kept.Add("backend");

@@ -659,7 +659,12 @@ internal sealed class Case9PhysicalCorpus : IOracleCase
         var sb = new StringBuilder(p.Id);
         foreach (var name in names)
         {
-            var prop = typeof(ControllerProfile).GetProperty(name, BindingFlags.Instance | BindingFlags.Public);
+            // v2.0.0 keeps the sixaxisCompatible key on an internal member
+                // with a name of no device's, read here under the old name so
+                // the line stays the same (CompatModelKey).
+                var prop = name == "SixaxisCompatible"
+                    ? typeof(ControllerProfile).GetProperty("CompatModelKey", BindingFlags.Instance | BindingFlags.NonPublic)
+                    : typeof(ControllerProfile).GetProperty(name, BindingFlags.Instance | BindingFlags.Public);
             object? v = prop?.GetValue(p);
             string text = prop == null ? "absent" : v switch
             {

@@ -144,7 +144,7 @@ internal static class Program
         var inner = prof.Inner;
         Check("it is a Sony DualShock, so PadForge's PlayStation list offers it",
               prof.Vendor == "Sony" && prof.Name.Contains("DualShock"), prof.Name);
-        Check("it is marked sixaxis-compatible", inner.SixaxisCompatible == true);
+        Check("it is marked sixaxis-compatible", inner.CompatModelKey == true);
         var (ids, sizes) = DescriptorSizes(inner.GetDescriptorBytes()!);
         Check("its descriptor declares no report ids, like DsHidMini's SXS descriptor", !ids);
         Check("input 12, output 48 and feature 49 data bytes (DsHid.h SIXAXIS_* sizes)",

@@ -225,7 +225,7 @@ public sealed class HMProfileBuilder
         _copy.SdlMapping = null;
         _copy.ExtendedReport = null;
         _copy.ExtendedOutputReport = null;
-        _copy.SixaxisCompatible = null;
+        _copy.CompatModelKey = null;
         _copy.NativeDescriptor = null;
         _copy.UsbConfiguration = null;
         _copy.Backend = null;

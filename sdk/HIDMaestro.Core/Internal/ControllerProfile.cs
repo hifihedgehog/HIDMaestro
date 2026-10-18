@@ -97,15 +97,13 @@ public sealed class ControllerProfile
     [JsonPropertyName("versionNumber")]
     public ushort? VersionNumber { get; set; }
 
-    /// <summary>v1.10.0 (PadForge discussion 476): a DualShock 3 presented
-    /// the way Sony's sixaxis.sys and DsHidMini's SXS mode present one, which
-    /// is what PCSX2 (SDL_HINT_JOYSTICK_HIDAPI_PS3_SIXAXIS_DRIVER) and RPCS3
-    /// read on Windows. Since v2.0.0 dualshock-3-full carries that form as
-    /// its own protocol, layout and live feature report, and a profile
-    /// outside the catalog that sets this key takes them from it through
-    /// its identity default.</summary>
+    /// <summary>A key v1.10.0 profiles carry (PadForge discussion 476),
+    /// kept so such a profile still loads. Since v2.0.0 no code reads it: an
+    /// identity default matches on it by its JSON name and gives the profile
+    /// the model that entry names (profiles/models/identity-defaults.json).</summary>
+    [JsonInclude]
     [JsonPropertyName("sixaxisCompatible")]
-    public bool? SixaxisCompatible { get; set; }
+    internal bool? CompatModelKey { get; set; }
 
     /// <summary>v1.3.5: fixed bytes the SDK overlays into the legacy input
     /// report after the descriptor-driven encoder fills it. Each entry is
