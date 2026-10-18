@@ -632,37 +632,54 @@ internal static class Program
 
     /// <summary>CreateController refuses a malformed profile before it
     /// claims anything: no claim pipe, no owner record and no devnode
-    /// appear. The copy is one af1e3d4 accepted and created.</summary>
+    /// appear. A file from a directory gets every check at load, so no
+    /// malformed file becomes a profile. The create's own check stands
+    /// behind the load for a profile changed in code after it: the
+    /// unaltered copy, its first rule's match made longer than the OUT
+    /// endpoint's packets as the malformed copy of that name is, with its
+    /// compiled model dropped so the create compiles the change.</summary>
     static void CheckCreateRefusedFirst(HMContext ctx)
     {
         Console.WriteLine("-- a create refuses a malformed profile first");
-        int index = Array.FindIndex(s_malformed, c => c.Name == "a rule match longer than a packet");
-        string id = $"s79-malformed-{index}";
+        int index = Array.FindIndex(s_accepted, c => c.Name == "an unaltered copy of gamecube-adapter");
+        string id = $"s79-accepted-{index}";
         var profile = ctx.GetProfile(id);
-        if (profile == null)
+        object? inner = profile == null ? null : typeof(HMProfile).GetProperty("Inner", Any)?.GetValue(profile);
+        object? protocol = inner?.GetType().GetProperty("Protocol", Any)?.GetValue(inner);
+        object? commands = protocol?.GetType().GetProperty("Commands", Any)?.GetValue(protocol);
+        var rules = commands?.GetType().GetProperty("Rules", Any)?.GetValue(commands) as System.Collections.IList;
+        var model = inner?.GetType().GetField("_model", Any);
+        if (profile == null || rules is not { Count: > 0 } || model == null)
         {
-            Probe.Check("CreateController refuses a malformed profile", false, $"{id} is not loaded");
+            Probe.Check("CreateController refuses a malformed profile", false,
+                profile == null ? $"{id} is not loaded" : model == null ? "no compiled-model field" : "no command rule");
             return;
         }
+        object rule = rules[0]!;
+        rule.GetType().GetProperty("Match", Any)!.SetValue(rule, "110000000000");
+        model.SetValue(inner, null);
         var pipes = ClaimPipes();
         var records = OwnerRecords();
         var devnodes = Devnodes.PresentAdapters();
-        string outcome;
+        Exception? refused = null;
         HMController? created = null;
         try
         {
             created = ctx.CreateController(profile);
-            outcome = "created";
         }
         catch (Exception ex)
         {
-            outcome = $"{ex.GetType().Name}: {ex.Message}";
+            refused = ex;
         }
         try
         {
-            Probe.Check("CreateController refuses a malformed profile, naming it",
-                outcome.StartsWith($"InvalidOperationException: Profile '{id}': protocol.commands.rules[0].match", StringComparison.Ordinal),
-                outcome);
+            // HMProfileException, an InvalidOperationException, by its
+            // ProfileId, JsonPath and Reason.
+            string? Field(string name) => refused?.GetType().GetProperty(name)?.GetValue(refused) as string;
+            Probe.Check("CreateController refuses a malformed profile, naming it and the JSON path",
+                refused is InvalidOperationException && Field("ProfileId") == id && Field("JsonPath") == "$.protocol.commands.rules[0].match"
+                    && (Field("Reason") ?? "").StartsWith("protocol.commands.rules[0].match ends at byte 6", StringComparison.Ordinal),
+                refused == null ? "created" : $"{refused.GetType().Name}: {refused.Message}");
             // Read before any dispose. A device a create made arrives
             // asynchronously, so give it the time the device part gives a
             // real create.
