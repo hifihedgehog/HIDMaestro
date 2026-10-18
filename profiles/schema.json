@@ -326,7 +326,7 @@
     },
     "protocol": {
       "type": "object",
-      "description": "The device's protocol (docs/design/data-driven-devices.md, mechanism 3): registers (state), counters, memory images, the input endpoint and its clock, the commands and their rules, replies, decoders, halt, setProtocol, getStatus, getReport and the command log. On the usbip backend in this release. A value the load refuses is named by its JSON path."
+      "description": "The device's protocol (docs/design/data-driven-devices.md, mechanism 3): registers (state), counters, memory images, the input endpoint and its clock, the commands and their rules, replies, decoders, halt, setProtocol, getStatus, getReport and the command log. A usbip device runs it on its endpoints. On a UMDF2 device the SDK runs it behind the HID driver: its commands are the output reports the driver hands on (source outputReport), its reports and replies are input reports the HID descriptor declares, each at its declared length, and an endpoint, bulk replies, halt, setProtocol, getStatus and getReport are refused. A value the load refuses is named by its JSON path."
     },
     "stateBlock": {
       "type": "object",

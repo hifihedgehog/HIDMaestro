@@ -1,0 +1,122 @@
+using System;
+using System.Diagnostics;
+using System.Text;
+using System.Text.Json.Nodes;
+using HIDMaestro.Internal;
+using HIDMaestro.Internal.Usbip;
+
+/// <summary>The protocol of a UMDF2 device, which the SDK runs behind the HID
+/// driver (design note, decision (b)): its commands are the output reports
+/// the driver hands on, and its reports and replies are input reports the
+/// HID descriptor declares, each at its declared length. The test profiles
+/// are built on the Bluetooth descriptor switch-pro carries (outputs 0x01,
+/// 0x10 to 0x12, inputs 0x21, 0x30 to 0x33 and 0x3F) and on the report-ID-less
+/// descriptor of dualshock-3-full (a 12-byte input, a 48-byte output).</summary>
+internal static class Umdf2
+{
+    static void Check(string what, bool ok, string detail = "") => Checks.Check(what, ok, detail);
+
+    /// <summary>A UMDF2 test profile: switch-pro's identity and descriptor
+    /// with a small protocol of its own, edited by <paramref name="edit"/>.</summary>
+    internal static string Profile(Action<JsonObject>? edit = null)
+    {
+        var o = JsonNode.Parse(Device.Catalog("switch-pro"))!.AsObject();
+        o["id"] = "umdf2-test";
+        foreach (var k in new[] { "stateBlock", "inputReports", "liveFeatureReports", "protocol" }) o.Remove(k);
+        o["stateBlock"] = JsonNode.Parse("""{ "size": 4, "fields": [ { "byte": 0, "type": "button-mask", "buttons": [ "#0", "#1" ] } ] }""");
+        o["inputReports"] = JsonNode.Parse("""
+        [ { "name": "full", "reportId": "0x30", "size": 49, "while": "seen", "program": [ { "const": { "0": "30" } }, { "copy": "0-1", "to": 3 } ] } ]
+        """);
+        o["protocol"] = JsonNode.Parse("""
+        {
+          "state": [ { "name": "seen" } ],
+          "input": { "clock": { "periodMs": 15 } },
+          "commands": {
+            "rules": [
+              { "match": "01", "minLength": 11, "set": { "seen": 1 }, "reply": [ { "hex": "21" }, { "echo": "10" } ], "replyLength": 49 },
+              { "match": "10" }
+            ]
+          },
+          "replies": { "pending": 4, "overflow": "dropOldest" }
+        }
+        """);
+        edit?.Invoke(o);
+        return o.ToJsonString();
+    }
+
+    /// <summary>The profile validated as a create validates it, then its
+    /// protocol compiled. The refusal's message, or null.</summary>
+    static (CompiledProtocol? Protocol, string? Refusal) Compile(string json)
+    {
+        try
+        {
+            var p = ControllerProfile.Parse(Encoding.UTF8.GetBytes(json)) ?? throw new InvalidOperationException("no profile");
+            p.ValidateDeviceModel();
+            return (CompiledProtocol.Compile(p, null), null);
+        }
+        catch (InvalidOperationException e) { return (null, e.Message); }
+    }
+
+    static void Refused(string what, Action<JsonObject> edit, string path)
+    {
+        var (_, refusal) = Compile(Profile(edit));
+        Check($"refused with its path: {what}", refusal != null && refusal.Contains(path, StringComparison.Ordinal), refusal ?? "accepted");
+    }
+
+    public static void Run()
+    {
+        Console.WriteLine("-- a UMDF2 device's protocol");
+        var (proto, refusal) = Compile(Profile());
+        Check("a UMDF2 profile's protocol compiles, its commands its output reports", proto is { Source: CommandSource.OutputReport }, refusal ?? "");
+        if (proto != null)
+        {
+            var e = new ProtocolEngine(proto, "HM-TEST-0001", 0, ProgramBinder.BindLayouts(proto.Model));
+            var cmd = new byte[49];
+            cmd[0] = 0x01; cmd[10] = 0x48;
+            var r = e.HandleCommand(cmd, Stopwatch.GetTimestamp());
+            var reply = new byte[64];
+            int n = e.TakeReply(64, reply);
+            Check("its engine answers an output report with an input report of the declared length", r.Rule == 0 && n == 49 && reply[0] == 0x21 && reply[1] == 0x48,
+                $"rule {r.Rule}, {n} bytes {Checks.Hex(reply.AsSpan(0, Math.Max(0, n)))}");
+        }
+        Refused("a rule on output report 0x80, which the Bluetooth descriptor does not declare",
+            o => o["protocol"]!["commands"]!["rules"]!.AsArray().Add(JsonNode.Parse("""{ "match": "80 02" }""")), "protocol.commands.rules[2].match");
+        Refused("a layout of 48 bytes for input report 0x30, declared at 49",
+            o => o["inputReports"]![0]!["size"] = 48, "inputReports[0].size");
+        Refused("a layout on input report 0x40, which the descriptor does not declare",
+            o => { o["inputReports"]![0]!["reportId"] = "0x40"; o["inputReports"]![0]!["program"]![0]!["const"]!["0"] = "40"; }, "inputReports[0].reportId");
+        Refused("a reply of 48 bytes for input report 0x21, declared at 49",
+            o => o["protocol"]!["commands"]!["rules"]![0]!["replyLength"] = 48, "protocol.commands.rules[0].replyLength");
+        Refused("a reply on input report 0x81, which the Bluetooth descriptor does not declare",
+            o => o["protocol"]!["commands"]!["rules"]![0]!["reply"]![0]!["hex"] = "81", "protocol.commands.rules[0].reply");
+        Refused("an input endpoint", o => o["protocol"]!["input"]!["endpoint"] = "0x81", "protocol.input.endpoint");
+        Refused("a command endpoint", o => o["protocol"]!["commands"]!["endpoint"] = "0x01", "protocol.commands.endpoint");
+        Refused("commands from an interrupt endpoint", o => o["protocol"]!["commands"]!["source"] = "interruptOut", "protocol.commands.source");
+        Refused("replies on a bulk endpoint", o => o["protocol"]!["replies"]!["channel"] = "bulkIn", "protocol.replies.channel");
+        Refused("a halt", o => o["protocol"]!["halt"] = JsonNode.Parse("""{ "while": "seen" }"""), "protocol.halt");
+        Refused("a getReport answer, which the driver gives from its frames", o => o["protocol"]!["getReport"] = "deviceReport", "protocol.getReport");
+        Refused("a clock layout with no clock", o => ((JsonObject)o["protocol"]!).Remove("input"), "protocol.input.clock");
+
+        // The descriptor with no report IDs: one 12-byte input, one 48-byte
+        // output.
+        string Ds3(Action<JsonObject> edit)
+        {
+            var o = JsonNode.Parse(Profile())!.AsObject();
+            var ds3 = JsonNode.Parse(Device.Catalog("dualshock-3-full"))!.AsObject();
+            o["descriptor"] = (string)ds3["descriptor"]!;
+            o["inputReportSize"] = null;
+            o["inputReports"] = JsonNode.Parse("""[ { "name": "sixaxis", "size": 12, "send": "submit", "program": [ { "copy": "0-1", "to": 0 } ] } ]""");
+            o["protocol"] = JsonNode.Parse("""{ "commands": { "rules": [ { "match": "02" } ] } }""");
+            edit(o);
+            return o.ToJsonString();
+        }
+        var (ds3, ds3Refusal) = Compile(Ds3(_ => { }));
+        Check("a descriptor without report IDs: a submit layout of its 12-byte input compiles with no clock", ds3 != null, ds3Refusal ?? "");
+        {
+            var (_, r) = Compile(Ds3(o => o["inputReports"] = JsonNode.Parse("""[ { "name": "sixaxis", "reportId": "0x01", "size": 12, "send": "submit", "program": [ { "const": { "0": "01" } }, { "copy": "0-1", "to": 1 } ] } ]""")));
+            Check("refused with its path: a report ID on a descriptor without them", r?.Contains("inputReports[0].reportId", StringComparison.Ordinal) == true, r ?? "accepted");
+            (_, r) = Compile(Ds3(o => o["inputReports"]![0]!["size"] = 13));
+            Check("refused with its path: a 13-byte layout for the 12-byte input report", r?.Contains("inputReports[0].size", StringComparison.Ordinal) == true, r ?? "accepted");
+        }
+    }
+}

@@ -1,10 +1,14 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json.Nodes;
 
 /// <summary>The protocol's rules (DeviceProtocol.cs) and the stream's
 /// (StreamClock.cs), each broken by one edit.</summary>
 internal static partial class RuleChecks
 {
+    static Case U(string rule, string expect, Action<JsonNode> edit) => new(rule, "umdf2", expect, edit);
+
     static IEnumerable<Case> ProtocolCases()
     {
         const string In = "$.protocol.input", R0 = "$.protocol.commands.rules[0]", M = "$.protocol.memory[0]";
@@ -177,6 +181,27 @@ internal static partial class RuleChecks
         yield return E("a getReport answer that is not one", $"{Pr}.getReport", Set($"{Pr}.getReport", "\"last\""));
         yield return G("deviceReport with no layouts", $"{Pr}.getReport", Set($"{Pr}.getReport", "\"deviceReport\""));
         yield return E("a log of 100,000 entries", $"{Pr}.log", Set($"{Pr}.log", "100000"));
+
+        // A UMDF2 device's protocol (base "umdf2"): what goes with the
+        // usbip backend, and reports and replies the HID descriptor does not
+        // declare at their length.
+        yield return U("an input endpoint on a UMDF2 device", $"{In}.endpoint", Set($"{In}.endpoint", "\"0x81\""));
+        yield return U("a clock layout on a UMDF2 device with no clock", $"{In}.clock", Remove(In));
+        yield return U("bulk replies on a UMDF2 device", $"{Pr}.replies.channel", Set($"{Pr}.replies.channel", "\"bulkIn\""));
+        yield return U("a command endpoint on a UMDF2 device", $"{Cm}.endpoint", Set($"{Cm}.endpoint", "\"0x01\""));
+        yield return U("interrupt OUT commands on a UMDF2 device", $"{Cm}.source", Set($"{Cm}.source", "\"interruptOut\""));
+        yield return U("setReport commands on a UMDF2 device", Cm, Set($"{Cm}.setReport", "true"));
+        yield return U("a halt on a UMDF2 device", $"{Pr}.halt", Set($"{Pr}.halt", "{\"while\":[\"seen\"],\"status\":\"EPROTO\"}"));
+        yield return U("a setProtocol answer on a UMDF2 device", $"{Pr}.setProtocol", Set($"{Pr}.setProtocol", "\"ack\""));
+        yield return U("a getStatus answer on a UMDF2 device", $"{Pr}.getStatus", Set($"{Pr}.getStatus", "\"descriptor\""));
+        yield return U("a getReport answer on a UMDF2 device", $"{Pr}.getReport", Set($"{Pr}.getReport", "\"reportId\""));
+        yield return U("a layout with no report ID on a numbered descriptor", $"{L0}.reportId", Remove($"{L0}.reportId"));
+        yield return U("a layout of an input report the descriptor lacks", $"{L0}.reportId", All(Set($"{L0}.reportId", "\"0x25\""), Set($"{L0}.program[0].const", "{\"0\":\"25\"}")));
+        yield return U("a layout shorter than its declared report", $"{L0}.size", Set($"{L0}.size", "48"));
+        yield return U("a rule on an output report the descriptor lacks", "$.protocol.commands.rules[1].match", Set("$.protocol.commands.rules[1].match", "\"05\""));
+        yield return U("a reply whose report ID is not hex", $"{R0}.reply", Set($"{R0}.reply[0]", "{\"echo\":\"0\"}"));
+        yield return U("a reply of an input report the descriptor lacks", $"{R0}.reply", Set($"{R0}.reply[0]", "{\"hex\":\"22\"}"));
+        yield return U("a reply shorter than its declared report", $"{R0}.replyLength", Set($"{R0}.replyLength", "48"));
     }
 
     static IEnumerable<Case> StreamCases()

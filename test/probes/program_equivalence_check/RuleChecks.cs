@@ -92,12 +92,14 @@ internal static partial class RuleChecks
 
     static readonly Dictionary<string, string> s_bases = new(StringComparer.Ordinal);
 
-    /// <summary>A base profile's text: "every-op" is user/every-op.json, any
+    /// <summary>A base profile's text: "every-op" is user/every-op.json,
+    /// "umdf2" a UMDF2 device with a protocol (<see cref="Umdf2Base"/>), any
     /// other name a catalog profile id.</summary>
     static string BaseText(string name)
     {
         if (s_bases.TryGetValue(name, out var text)) return text;
         if (name == "every-op") text = File.ReadAllText(Path.Combine(UserChecks.DefaultDir(), "every-op.json"));
+        else if (name == "umdf2") text = Umdf2Base();
         else
         {
             var asm = typeof(HMContext).Assembly;
@@ -112,6 +114,23 @@ internal static partial class RuleChecks
             if (text == null) throw new InvalidOperationException($"no catalog profile {name}");
         }
         return s_bases[name] = text;
+    }
+
+    /// <summary>switch-pro's identity and Bluetooth HID descriptor (outputs
+    /// 0x01 and 0x10 to 0x12, inputs 0x21, 0x30 to 0x33 and 0x3F) under a
+    /// product ID of its own, with a small protocol the SDK runs behind the
+    /// HID driver: a 49-byte layout 0x30 on the clock and a subcommand rule
+    /// that replies with a 49-byte 0x21.</summary>
+    static string Umdf2Base()
+    {
+        var o = JsonNode.Parse(BaseText("switch-pro"))!.AsObject();
+        o["id"] = "umdf2-test";
+        o["pid"] = "0xF0F0";
+        foreach (var k in new[] { "stateBlock", "inputReports", "liveFeatureReports", "protocol" }) o.Remove(k);
+        o["stateBlock"] = JsonNode.Parse("{\"size\":4,\"fields\":[{\"byte\":0,\"type\":\"button-mask\",\"buttons\":[\"#0\",\"#1\"]}]}");
+        o["inputReports"] = JsonNode.Parse("[{\"name\":\"full\",\"reportId\":\"0x30\",\"size\":49,\"while\":\"seen\",\"program\":[{\"const\":{\"0\":\"30\"}},{\"copy\":\"0-1\",\"to\":3}]}]");
+        o["protocol"] = JsonNode.Parse("{\"state\":[{\"name\":\"seen\"}],\"input\":{\"clock\":{\"periodMs\":15}},\"commands\":{\"rules\":[{\"match\":\"01\",\"minLength\":11,\"set\":{\"seen\":1},\"reply\":[{\"hex\":\"21\"},{\"echo\":\"10\"}],\"replyLength\":49},{\"match\":\"10\"}]},\"replies\":{\"pending\":4,\"overflow\":\"dropOldest\"}}");
+        return o.ToJsonString();
     }
 
     // ── Editing a profile by path ────────────────────────────────────────

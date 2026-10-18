@@ -188,11 +188,18 @@ internal sealed class CompiledProtocol
     /// address. A value segment's bytes are resolved per engine.</summary>
     internal sealed record MemoryImage(string Name, int Size, byte Fill, (int At, byte[]? Bytes, string? Value, string? Encoding, int Length, int Add)[] Segments);
 
-    private CompiledProtocol(ControllerProfile profile, UsbDescriptorSet descriptors, CompiledModel model)
+    /// <summary>True for a UMDF2 device, whose protocol the SDK runs behind
+    /// the HID driver: its commands are the output reports the driver hands
+    /// on, and its reports and replies go to the driver as input reports
+    /// (design note, decision (b)).</summary>
+    public bool Umdf2 { get; }
+
+    private CompiledProtocol(ControllerProfile profile, UsbDescriptorSet? descriptors, CompiledModel model)
     {
         var spec = profile.Protocol!;
         ProfileId = profile.Id;
         Model = model;
+        Umdf2 = descriptors == null;
         const string root = "$.protocol";
         var regs = model.Registers;
 
@@ -212,7 +219,7 @@ internal sealed class CompiledProtocol
         SnapshotNames = Ports != null ? new List<string>(Ports.Snapshots).ToArray() : Array.Empty<string>();
         ReportId = profile.ExtendedReport?.ReportIdByte ?? 0;
         ReportSize = profile.ExtendedReport?.Size ?? profile.GetOrBuildReportBuilder().InputReportByteSize;
-        Speed = descriptors.Speed;
+        Speed = descriptors?.Speed ?? 0;
 
         // Memory.
         var memories = new List<MemoryImage>();
@@ -225,12 +232,22 @@ internal sealed class CompiledProtocol
         if (spec.Input != null)
         {
             string at = $"{root}.input";
-            if (spec.Input.Endpoint == null) throw Fail($"{at}.endpoint is missing: a USB/IP device reports on an interrupt IN endpoint.");
-            InputEndpoint = Endpoint(descriptors, spec.Input.Endpoint, $"{at}.endpoint", wantIn: true, transferType: 3);
-            var ep = descriptors.Endpoints[InputEndpoint];
-            InputPacketSize = ep.MaxPacketSize & 0x7FF;
-            if (InputPacketSize == 0) throw Fail($"{at}.endpoint 0x{InputEndpoint:X2} has a wMaxPacketSize of 0.");
-            DescriptorPollMicros = DescriptorPeriodMicros(ep.Interval, Speed);
+            if (descriptors == null)
+            {
+                // A UMDF2 device's reports go to its HID driver through the
+                // input section, so there is no endpoint to name.
+                if (spec.Input.Endpoint != null)
+                    throw Fail($"{at}.endpoint goes with the usbip backend. A UMDF2 device's reports go through its HID driver, which has no endpoint to name.");
+            }
+            else
+            {
+                if (spec.Input.Endpoint == null) throw Fail($"{at}.endpoint is missing: a USB/IP device reports on an interrupt IN endpoint.");
+                InputEndpoint = Endpoint(descriptors, spec.Input.Endpoint, $"{at}.endpoint", wantIn: true, transferType: 3);
+                var ep = descriptors.Endpoints[InputEndpoint];
+                InputPacketSize = ep.MaxPacketSize & 0x7FF;
+                if (InputPacketSize == 0) throw Fail($"{at}.endpoint 0x{InputEndpoint:X2} has a wMaxPacketSize of 0.");
+                DescriptorPollMicros = DescriptorPeriodMicros(ep.Interval, Speed);
+            }
             InputWhile = Cond(spec.Input.While, $"{at}.while");
             var clock = spec.Input.Clock;
             SourcePollRules = Array.Empty<(uint, double)>();
@@ -286,7 +303,11 @@ internal sealed class CompiledProtocol
         else
         {
             SourcePollRules = Array.Empty<(uint, double)>();
-            if (BuildsReports) throw Fail($"{root}.input is missing: a device that builds its reports sends them on an input endpoint.");
+            // A UMDF2 device whose layouts all go out on submit needs no
+            // clock: SubmitState sends them.
+            if (descriptors == null && BuildsReports && Array.Exists(model.Layouts, l => l.Send != SendRule.Submit))
+                throw Fail($"{root}.input.clock is missing: a layout sent on the clock or on change needs the device clock's period.");
+            if (descriptors != null && BuildsReports) throw Fail($"{root}.input is missing: a device that builds its reports sends them on an input endpoint.");
         }
 
         // Replies.
@@ -297,10 +318,12 @@ internal sealed class CompiledProtocol
             "bulkIn" => ReplyChannel.BulkIn,
             _ => throw Fail($"{root}.replies.channel \"{replies!.Channel}\" is not one of input, bulkIn."),
         };
+        if (Channel == ReplyChannel.BulkIn && descriptors == null)
+            throw Fail($"{root}.replies.channel \"bulkIn\" goes with the usbip backend. A UMDF2 device's replies are input reports.");
         if (Channel == ReplyChannel.BulkIn)
         {
             if (replies!.Endpoint == null) throw Fail($"{root}.replies.endpoint is missing: bulk replies need a bulk IN endpoint.");
-            ReplyEndpoint = Endpoint(descriptors, replies.Endpoint, $"{root}.replies.endpoint", wantIn: true, transferType: 2);
+            ReplyEndpoint = Endpoint(descriptors!, replies.Endpoint, $"{root}.replies.endpoint", wantIn: true, transferType: 2);
         }
         else if (replies?.Endpoint != null) throw Fail($"{root}.replies.endpoint goes with the bulkIn channel.");
         PendingReplies = replies?.Pending ?? 1;
@@ -318,10 +341,12 @@ internal sealed class CompiledProtocol
         if (commands != null)
         {
             string at = $"{root}.commands";
+            if (descriptors == null && commands.Endpoint != null)
+                throw Fail($"{at}.endpoint goes with the usbip backend. A UMDF2 device's commands are the output reports its HID driver hands on.");
             if (commands.Endpoint != null)
             {
                 byte address = PortLayout.ParseByte(commands.Endpoint, FormException.ProfileText(ProfileId, $"{at}.endpoint"));
-                if (!descriptors.Endpoints.TryGetValue(address, out var ep) || ep.IsIn || ep.TransferType is not (2 or 3))
+                if (!descriptors!.Endpoints.TryGetValue(address, out var ep) || ep.IsIn || ep.TransferType is not (2 or 3))
                     throw Fail($"{at}.endpoint 0x{address:X2} is not an interrupt or bulk OUT endpoint of the configuration descriptor.");
                 CommandEndpoint = address;
                 CommandPacketSize = ep.MaxPacketSize & 0x7FF;
@@ -337,9 +362,17 @@ internal sealed class CompiledProtocol
                 "outputReport" => CommandSource.OutputReport,
                 _ => throw Fail($"{at}.source \"{commands.Source}\" is not one of interruptOut, bulkOut, setReport, outputReport."),
             };
-            if (named == CommandSource.OutputReport)
+            if (descriptors == null)
+            {
+                if (named is not (CommandSource.None or CommandSource.OutputReport))
+                    throw Fail($"{at}.source \"{commands.Source}\" goes with the usbip backend. A UMDF2 device's commands are its output reports, source \"outputReport\".");
+                if (commands.SetReport || commands.SetReportStripsId)
+                    throw Fail($"{at}: setReport and setReportStripsId go with the usbip backend.");
+                Source = CommandSource.OutputReport;
+            }
+            else if (named == CommandSource.OutputReport)
                 throw Fail($"{at}.source \"outputReport\" is a UMDF2 device's, and this profile runs on USB/IP.");
-            if (named == CommandSource.SetReport)
+            else if (named == CommandSource.SetReport)
             {
                 if (CommandEndpoint != 0) throw Fail($"{at}.source \"setReport\" takes no endpoint: give the endpoint's source and \"setReport\": true for both.");
                 Source = CommandSource.SetReport;
@@ -380,7 +413,7 @@ internal sealed class CompiledProtocol
             {
                 var outPorts = PortLayout.Of(profile.ExtendedOutputReport, $"Profile '{profile.Id}': extendedOutputReport", output: true);
                 bool noWholeReport = SetReportStripsId
-                    && descriptors.Endpoints[CommandEndpoint].InterfaceNumber == descriptors.HidInterfaceNumber;
+                    && descriptors!.Endpoints[CommandEndpoint].InterfaceNumber == descriptors.HidInterfaceNumber;
                 if (noWholeReport && outPorts != null && outPorts.BlockAt(outPorts.Count) > CommandPacketSize)
                     throw Fail(
                         $"extendedOutputReport.ports end at byte {outPorts.BlockAt(outPorts.Count)}, past the " +
@@ -410,9 +443,21 @@ internal sealed class CompiledProtocol
         foreach (var r in Rules)
         {
             if (r.Reply == null) continue;
-            if (Channel == ReplyChannel.Input && InputEndpoint == 0)
+            if (Channel == ReplyChannel.Input && InputEndpoint == 0 && descriptors != null)
                 throw Fail($"{root}.commands has a rule with a reply, and the protocol declares no input endpoint to send it on.");
             MaxReplyLength = Math.Max(MaxReplyLength, Largest(r));
+        }
+
+        if (descriptors == null)
+        {
+            // What the HID class and the HID driver answer for a UMDF2
+            // device: no transfer fails on its own, and GET_INPUT_REPORT
+            // comes from the frames the driver sent.
+            if (spec.Halt != null) throw Fail($"{root}.halt goes with the usbip backend. On UMDF2 the HID class owns the transfers.");
+            if (spec.SetProtocol != null) throw Fail($"{root}.setProtocol goes with the usbip backend.");
+            if (spec.GetStatus != null) throw Fail($"{root}.getStatus goes with the usbip backend.");
+            if (spec.GetReport != null) throw Fail($"{root}.getReport goes with the usbip backend. On UMDF2 the driver answers GET_INPUT_REPORT from the frames it sent.");
+            Umdf2Reports(profile);
         }
 
         // Halt.
@@ -451,12 +496,65 @@ internal sealed class CompiledProtocol
             throw Fail($"{root}.getReport \"deviceReport\" builds a layout, and the profile declares no inputReports.");
         LogCapacity = spec.Log ?? 0;
         if (LogCapacity < 0 || LogCapacity > MaxLog) throw Fail($"{root}.log {LogCapacity} is outside 0 to {MaxLog}.");
-        SelfPowered = (descriptors.ConfigurationDescriptor[7] & 0x40) != 0;
+        SelfPowered = descriptors != null && (descriptors.ConfigurationDescriptor[7] & 0x40) != 0;
+    }
+
+    /// <summary>On UMDF2 each report the device sends and each command it
+    /// reads is one its HID descriptor declares, at that report's length:
+    /// HID class refuses a write of an undeclared output report, and the
+    /// driver sends an input report only at its declared length (design note,
+    /// mechanism 3's validation). A layout's report ID is its first byte, and
+    /// a reply's is the byte its first part writes.</summary>
+    private void Umdf2Reports(ControllerProfile profile)
+    {
+        var map = profile.GetOrBuildReportMap();
+        int InputLength(int id)
+        {
+            foreach (var r in map.Reports)
+                if (r.Kind == HidReportKind.Input && r.ReportId == (map.UsesReportIds ? id : 0)) return r.FrameBytes;
+            return -1;
+        }
+        for (int i = 0; i < Model.Layouts.Length; i++)
+        {
+            var l = Model.Layouts[i];
+            string at = $"$.inputReports[{i}]";
+            if (map.UsesReportIds != (l.ReportId >= 0))
+                throw Fail(map.UsesReportIds
+                    ? $"{at}.reportId is missing: the HID descriptor numbers its reports."
+                    : $"{at}.reportId 0x{l.ReportId:X2}: the HID descriptor declares no report IDs.");
+            int declared = InputLength(l.ReportId);
+            if (declared < 0) throw Fail($"{at}.reportId 0x{l.ReportId:X2} is no input report the HID descriptor declares.");
+            if (declared != l.Size)
+                throw Fail($"{at}.size {l.Size}: the HID descriptor declares this input report at {declared} bytes, and the driver sends a report only at that length.");
+        }
+        for (int i = 0; i < Rules.Length; i++)
+        {
+            var r = Rules[i];
+            string at = $"$.protocol.commands.rules[{i}]";
+            if (map.UsesReportIds && r.At == 0 && r.MatchMask.Length > 0 && r.MatchMask[0] == 0xFF
+                && map.Find(HidReportKind.Output, r.Match[0]) == null)
+                throw Fail($"{at}.match: output report 0x{r.Match[0]:X2} is not one the HID descriptor declares, and HID class refuses a write of it.");
+            if (r.Reply == null) continue;
+            var first = r.UsePrefix && ReplyPrefix is { Length: > 0 } ? ReplyPrefix[0] : r.Reply[0];
+            int id = 0;
+            if (map.UsesReportIds)
+            {
+                if (first.Kind != PartKind.Hex)
+                    throw Fail($"{at}.reply: a reply's first byte is its report ID, so its first part is hex.");
+                id = first.Bytes![0];
+            }
+            int declared = InputLength(id);
+            if (declared < 0) throw Fail($"{at}.reply: input report 0x{id:X2} is no input report the HID descriptor declares.");
+            bool fixedLength = r.ReplyLength >= 0 || Array.TrueForAll(r.Reply, p => p.FixedLength >= 0);
+            int len = Largest(r);
+            if (!fixedLength || len != declared)
+                throw Fail($"{at}.replyLength: the reply runs {(fixedLength ? $"{len} bytes" : "to a length the command sets")}, and the HID descriptor declares input report 0x{id:X2} at {declared}. Give a replyLength of {declared}.");
+        }
     }
 
     /// <summary>The protocol of <paramref name="profile"/>, or null when it
     /// declares none.</summary>
-    public static CompiledProtocol? Compile(ControllerProfile profile, UsbDescriptorSet descriptors)
+    public static CompiledProtocol? Compile(ControllerProfile profile, UsbDescriptorSet? descriptors)
     {
         if (profile.Protocol == null) return null;
         CompiledModel model;
