@@ -69,7 +69,14 @@
 //      HidD_SetOutputReport(buffer, L) is IOCTL_UMDF_HID_SET_OUTPUT_REPORT
 //      (vhidmini.c:389-462), the report as the input buffer
 //      (util.c:97-160), id first with ids and without the 0 without them
-//      (driver.c:1290-1292). A write of OutputReportByteLength or more,
+//      (driver.c:1290-1292). The driver gets the output report's length,
+//      whatever the caller's: Wine's hidclass.sys sets the packet's
+//      reportBufferLen to the report's OutputLength less the id byte when
+//      the collection has no ids, from the caller's buffer past that byte
+//      (dlls/hidclass.sys/device.c:485-489, 500-506 at 2df1ee2), so bytes
+//      past the report never reach the driver. The live DualShock 3 run shows it:
+//      writes of 50 to 65 bytes publish the packet a 49-byte write does.
+//      A write of the report's length or more,
 //      led with report ids by an output id the descriptor declares, reaches
 //      the driver: Wine's hidclass.sys refuses only a shorter write or an
 //      undeclared id (dlls/hidclass.sys/device.c:473-484 at 2df1ee2), and
@@ -234,7 +241,7 @@ internal static class CompareLive
     /// HIDP_CAPS). The S46 recording holds the live value, held against
     /// this one as an M1 observation.</summary>
     sealed record PlanProfile(string Group, string Id, bool UsesReportIds, int ReadLength, byte[] Features, int FeatureLength,
-                              int OutputLength, byte[] OutputIds)
+                              int OutputLength, IReadOnlyDictionary<byte, int> OutputReports)
     {
         /// <summary>The buffer length from which a live failure the
         /// harness's driver answered is a [DIFF] (review F10):
@@ -258,20 +265,45 @@ internal static class CompareLive
             length < bound || (UsesReportIds && Array.IndexOf(Features, id) < 0);
 
         /// <summary>Whether a write of these bytes surely reaches the driver:
-        /// at least OutputReportByteLength long and, with report ids, led by
-        /// an output report id the descriptor declares. Wine's hidclass.sys
+        /// at least its output report's length long (OutputLengthOf) and,
+        /// with report ids, led by an output report id the descriptor
+        /// declares. Wine's hidclass.sys
         /// passes every such write and refuses the rest (device.c:473-484),
         /// and its test on Windows writes twice the report's length without
         /// report ids and succeeds (dlls/dinput/tests/hid.c:1452-1465).</summary>
-        public bool WriteReachesDriver(byte[] bytes, int length) =>
-            OutputLength > 0 && length >= OutputLength
-            && (!UsesReportIds || (length > 0 && Array.IndexOf(OutputIds, bytes[0]) >= 0));
+        public bool WriteReachesDriver(byte[] bytes, int length)
+        {
+            int report = OutputLengthOf(bytes, length);
+            return report > 0 && length >= report;
+        }
+
+        /// <summary>The length of the output report a write of these bytes
+        /// is, its data bytes plus the id byte: the report of the id in
+        /// byte 0 with report ids, the one report without them. 0 when the
+        /// descriptor declares no such report.</summary>
+        public int OutputLengthOf(byte[] bytes, int length) =>
+            UsesReportIds ? (length > 0 && OutputReports.TryGetValue(bytes[0], out int n) ? n : 0)
+                          : OutputReports.TryGetValue(0, out int m) ? m : 0;
+
+        /// <summary>M3: the bytes a driven write hands the driver, the
+        /// output report's length of the caller's buffer, without the id
+        /// byte 0 when the collection has no report ids (Wine's hidclass.sys
+        /// device.c:485-489, 500-506). A write the descriptor declares no
+        /// report for hands over the caller's bytes.</summary>
+        public byte[] WriteReport(byte[] bytes)
+        {
+            int report = OutputLengthOf(bytes, bytes.Length);
+            int end = report > 0 ? Math.Min(report, bytes.Length) : bytes.Length;
+            int from = UsesReportIds ? 0 : Math.Min(1, end);
+            return bytes.AsSpan(from, end - from).ToArray();
+        }
     }
 
     /// <summary>FeatureReportByteLength and OutputReportByteLength of a
     /// descriptor, each the largest report's data bytes plus the id byte
-    /// (HIDP_CAPS, above), and the output report ids it declares.</summary>
-    static (int Feature, int Output, byte[] OutputIds) LengthsOf(byte[] descriptor)
+    /// (HIDP_CAPS, above), and each output report's own length by its
+    /// id.</summary>
+    static (int Feature, int Output, Dictionary<byte, int> OutputReports) LengthsOf(byte[] descriptor)
     {
         var map = HIDMaestro.Internal.HidReportMap.Parse(descriptor);
         int Longest(HIDMaestro.Internal.HidReportKind kind)
@@ -279,9 +311,9 @@ internal static class CompareLive
             var reports = map.Reports.Where(r => r.Kind == kind).ToList();
             return reports.Count == 0 ? 0 : reports.Max(r => r.DataBytes) + 1;
         }
-        var outputIds = map.Reports.Where(r => r.Kind == HIDMaestro.Internal.HidReportKind.Output)
-            .Select(r => r.ReportId).Distinct().OrderBy(b => b).ToArray();
-        return (Longest(HIDMaestro.Internal.HidReportKind.Feature), Longest(HIDMaestro.Internal.HidReportKind.Output), outputIds);
+        var outputReports = map.Reports.Where(r => r.Kind == HIDMaestro.Internal.HidReportKind.Output)
+            .GroupBy(r => r.ReportId).ToDictionary(g => g.Key, g => g.Max(r => r.DataBytes) + 1);
+        return (Longest(HIDMaestro.Internal.HidReportKind.Feature), Longest(HIDMaestro.Internal.HidReportKind.Output), outputReports);
     }
 
     static Dictionary<string, PlanProfile> ParsePlan(string text)
@@ -290,20 +322,20 @@ internal static class CompareLive
         string? group = null, id = null;
         bool ids = false;
         int read = 0;
-        (int Feature, int Output, byte[] OutputIds) lengths = (0, 0, Array.Empty<byte>());
+        (int Feature, int Output, Dictionary<byte, int> OutputReports) lengths = (0, 0, new());
         byte[] feats = Array.Empty<byte>();
         foreach (var raw in text.Split('\n'))
         {
             var w = raw.TrimEnd('\r').Split(' ');
             switch (w[0])
             {
-                case "profile": group = w[1]; id = w[2]; ids = false; read = 0; lengths = (0, 0, Array.Empty<byte>()); feats = Array.Empty<byte>(); break;
+                case "profile": group = w[1]; id = w[2]; ids = false; read = 0; lengths = (0, 0, new()); feats = Array.Empty<byte>(); break;
                 case "value" when w.Length == 4 && w[1] == "ReportDescriptor": lengths = LengthsOf(Convert.FromHexString(w[3])); break;
                 case "reportids": ids = w[1] == "1"; break;
                 case "readlength": read = int.Parse(w[1]); break;
                 case "features": feats = w.Skip(1).Select(x => Convert.ToByte(x, 16)).ToArray(); break;
                 case "end":
-                    if (id != null) map.TryAdd(id, new PlanProfile(group!, id, ids, read, feats, lengths.Feature, lengths.Output, lengths.OutputIds));
+                    if (id != null) map.TryAdd(id, new PlanProfile(group!, id, ids, read, feats, lengths.Feature, lengths.Output, lengths.OutputReports));
                     id = null;
                     break;
             }
@@ -1046,7 +1078,7 @@ internal static class CompareLive
             for (int i = 0; i < r.Writes.Count; i++)
             {
                 sc.Append($"call {i + 1}\n");
-                if (SwitchDriven(p, r.Writes[i])) sc.Append($"write {Hex(r.Writes[i].Bytes)}\nread {p.ReadLength}\ntick\n");
+                if (SwitchDriven(p, r.Writes[i])) sc.Append($"write {Hex(p.WriteReport(r.Writes[i].Bytes))}\nread {p.ReadLength}\ntick\n");
             }
             sc.Append($"call {SwitchFinal}\nread {p.ReadLength}\ntick\n");
         }
@@ -1230,9 +1262,9 @@ internal static class CompareLive
                 {
                     sc.Append($"call {k++}\n");
                     if (!Ds3Driven(p, w)) continue;
-                    // M3 without report ids: the report without its 0.
-                    byte[] report = p.UsesReportIds ? w.Bytes : w.Bytes.AsSpan(1).ToArray();
-                    sc.Append($"{(setOutput ? "setoutput" : "write")} {Hex(report)}\n");
+                    // M3: the report's length of the caller's bytes, without
+                    // the 0 without report ids.
+                    sc.Append($"{(setOutput ? "setoutput" : "write")} {Hex(p.WriteReport(w.Bytes))}\n");
                 }
         }
     }
@@ -1745,6 +1777,28 @@ internal static class CompareLive
                     return $"{x.Name} length {p3.OutputLength}, {n} packet(s) dropped";
                 }
             return null;
+        });
+        // M3: the HID class hands the driver the output report's length of
+        // a longer write, so each write past it publishes the packet the
+        // report's length does, as the live DualShock 3 run recorded.
+        Mutate(ds3, "DualShock 3 writes past the output report, each publishing the report's packet", 0, null, streams =>
+        {
+            var p3 = Ds3Profile(plan);
+            int changed = 0;
+            foreach (var x in streams.Where(x => x.Name.Contains("/output/", StringComparison.Ordinal)))
+            {
+                byte[][]? atReport = null;
+                for (int i = 0; i < x.Outs.Count; i++)
+                {
+                    if (x.Outs[i].Tag != "write" || x.Outs[i + 1].Data[0] != 1) continue;
+                    int n = (int)BitConverter.ToUInt32(x.Outs[i + 3].Data);
+                    int length = x.Outs[i].Data.Length;
+                    if (length == p3.OutputLength) atReport = x.Outs.GetRange(i + 4, n).Select(o => o.Data).ToArray();
+                    else if (length > p3.OutputLength && atReport != null && atReport.Length == n)
+                        for (int j = 0; j < n; j++) { x.Outs[i + 4 + j] = ("output", (byte[])atReport[j].Clone()); changed++; }
+                }
+            }
+            return changed == 0 ? null : $"{changed} packet(s) of writes past {p3.OutputLength} bytes set to the {p3.OutputLength}-byte write's";
         });
         Mutate(Path.Combine(dir, "switch-pro", "live-switch-pro.records"), "a Switch subcommand write that failed with its reply gone", 1,
             "the driver accepted it", streams =>
