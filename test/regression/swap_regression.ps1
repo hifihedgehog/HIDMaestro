@@ -2170,6 +2170,15 @@ function Scenario-Capture-Fidelity {
                  -Message 'catalog data or driver text differs from the capture or source it comes from (see probe stdout)'
 }
 
+# S97: the Switch family's protocol mechanisms carry a second device, offline:
+# joycon-l-proof, a Joy-Con (L) built from switch-pro's mechanisms, loads,
+# answers SDL's Joy-Con open with nxbt's device info, and its 0x3F stick
+# hat follows dekuNukem's grid in all eight directions.
+function Scenario-Switch-Family {
+    Invoke-Probe -Dir 'switch_family_check' -Exe 'SwitchFamilyCheck.exe' -Arguments '' `
+                 -Message 'a Joy-Con built from the Switch Pro mechanisms no longer answers or reports as its sources state (see probe stdout)'
+}
+
 function Scenario-Arith-Roundtrip {
     Invoke-Probe -Dir 'arith_roundtrip_check' -Exe 'ArithRoundtripCheck.exe' -Arguments 'check' `
                  -Message 'a raw value a consumer reads from a device no longer returns through the SDK as that value (see probe stdout for the conversion)'
@@ -2303,6 +2312,7 @@ $scenarios = @(
     @{ Name = 'S94_Program_Equivalence';         Body = ${function:Scenario-Program-Equivalence} },
     @{ Name = 'S95_Protocol_Engine';             Body = ${function:Scenario-Protocol-Engine} },
     @{ Name = 'S96_Capture_Fidelity';            Body = ${function:Scenario-Capture-Fidelity} },
+    @{ Name = 'S97_Switch_Family';               Body = ${function:Scenario-Switch-Family} },
     @{ Name = 'S92_Profile_Model';               Body = ${function:Scenario-Profile-Model} },
     @{ Name = 'S93_Contract_Live';               Body = ${function:Scenario-Contract-Live} }
 )
