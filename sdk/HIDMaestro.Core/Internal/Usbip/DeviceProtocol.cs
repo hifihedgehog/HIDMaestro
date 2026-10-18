@@ -186,7 +186,7 @@ internal sealed class CompiledProtocol
 
     /// <summary>A memory image: a size, a fill byte and segments, sorted by
     /// address. A value segment's bytes are resolved per engine.</summary>
-    internal sealed record MemoryImage(string Name, int Size, byte Fill, (int At, byte[]? Bytes, string? Value, string? Encoding, int Length, int Add)[] Segments);
+    internal sealed record MemoryImage(string Name, long Size, byte Fill, (uint At, byte[]? Bytes, string? Value, string? Encoding, int Length, int Add)[] Segments);
 
     /// <summary>True for a UMDF2 device, whose protocol the SDK runs behind
     /// the HID driver: its commands are the output reports the driver hands
@@ -440,6 +440,11 @@ internal sealed class CompiledProtocol
         {
             Rules = Array.Empty<Rule>();
         }
+        // An image a rule writes is held whole.
+        foreach (var r in Rules)
+            foreach (var w in r.Writes)
+                if (Memories[w.Memory].Size > MaxMemory)
+                    throw Fail($"{root}.memory[{w.Memory}].size 0x{Memories[w.Memory].Size:X}: a rule writes this image, so it is held whole, at most 0x{MaxMemory:X} bytes.");
         foreach (var r in Rules)
         {
             if (r.Reply == null) continue;
@@ -587,17 +592,17 @@ internal sealed class CompiledProtocol
         if (m == null) throw Fail($"{at} is null.");
         if (string.IsNullOrWhiteSpace(m.Name)) throw Fail($"{at}.name: a memory image needs a name.");
         foreach (var e in earlier) if (e.Name == m.Name) throw Fail($"{at}.name '{m.Name}' names two memory images.");
-        if (m.Size.Value < 1 || m.Size.Value > MaxMemory) throw Fail($"{at}.size 0x{m.Size.Value:X} is outside 1 to 0x{MaxMemory:X}.");
-        int size = (int)m.Size.Value;
+        if (m.Size.Value < 1 || m.Size.Value > HexSizeConverter.Max) throw Fail($"{at}.size 0x{m.Size.Value:X} is outside 1 to 0x{HexSizeConverter.Max:X}.");
+        long size = (long)m.Size.Value;
         byte fill = m.Fill == null ? (byte)0 : HexByte(m.Fill, $"{at}.fill");
-        var segs = new List<(int, byte[]?, string?, string?, int, int)>();
+        var segs = new List<(uint, byte[]?, string?, string?, int, int)>();
         if (m.Segments != null)
         {
             for (int i = 0; i < m.Segments.Count; i++)
             {
                 string sat = $"{at}.segments[{i}]";
                 var s = m.Segments[i] ?? throw Fail($"{sat} is null.");
-                int start = (int)Math.Min(s.At.Value, int.MaxValue);
+                uint start = s.At.Value;
                 if ((s.Hex == null) == (s.Value == null)) throw Fail($"{sat} gives exactly one of hex and value.");
                 if (s.Hex != null)
                 {
@@ -616,7 +621,7 @@ internal sealed class CompiledProtocol
         }
         segs.Sort((a, b) => a.Item1.CompareTo(b.Item1));
         for (int i = 1; i < segs.Count; i++)
-            if (segs[i - 1].Item1 + segs[i - 1].Item5 > segs[i].Item1)
+            if ((long)segs[i - 1].Item1 + segs[i - 1].Item5 > segs[i].Item1)
                 throw Fail($"{at}.segments: the segment at 0x{segs[i - 1].Item1:X} overlaps the one at 0x{segs[i].Item1:X}.");
         return new MemoryImage(m.Name, size, fill, segs.ToArray());
     }

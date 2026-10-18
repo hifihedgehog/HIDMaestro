@@ -153,6 +153,7 @@ internal static partial class RuleChecks
         yield return E("a memory image with no name", $"{M}.name", Set($"{M}.name", "\"\""));
         yield return E("two memory images of one name", "$.protocol.memory[1].name", Append($"{Pr}.memory", "{\"name\":\"flash\",\"size\":16}"));
         yield return E("a memory image of 0 bytes", $"{M}.size", Set($"{M}.size", "0"));
+        yield return E("a memory image a rule writes, past 0x1000000 bytes", $"{M}.size", All(Set($"{M}.size", "\"0x1000001\""), Rule("{\"match\":\"7F\",\"minLength\":16,\"write\":[{\"memory\":\"flash\",\"address\":{\"le32\":4},\"from\":\"8-15\"}]}")));
         yield return E("a memory fill that is not one byte", $"{M}.fill", Set($"{M}.fill", "\"FFFF\""));
         yield return E("a null segment", $"{M}.segments[0]", Set($"{M}.segments[0]", "null"));
         yield return E("a segment of hex and value", $"{M}.segments[0]", Set($"{M}.segments[0].value", "\"serial\""));

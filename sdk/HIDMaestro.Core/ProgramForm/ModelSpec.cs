@@ -116,8 +116,12 @@ public sealed class MemorySpec
     [JsonPropertyName("name")]
     public string Name { get; set; } = "";
 
+    /// <summary>1 to 0x100000000 bytes. An image a rule writes is held whole
+    /// and has at most 0x1000000. An image only replies read is held as its
+    /// segments, so it can span the whole 32-bit address space, where an
+    /// address and a length wrap as 32-bit sums do.</summary>
     [JsonPropertyName("size")]
-    public HexNumber Size { get; set; }
+    public HexSize Size { get; set; }
 
     /// <summary>One hex byte, what an address no segment covers reads.
     /// Absent is 00.</summary>
@@ -997,6 +1001,36 @@ public sealed class HexNumberConverter : JsonConverter<HexNumber>
     }
 
     public override void Write(Utf8JsonWriter writer, HexNumber value, JsonSerializerOptions options) =>
+        writer.WriteStringValue("0x" + value.Value.ToString("X", System.Globalization.CultureInfo.InvariantCulture));
+}
+
+/// <summary>A memory image's size: a JSON number or a hex string, up to
+/// 0x100000000, one more than a 32-bit number holds.</summary>
+[JsonConverter(typeof(HexSizeConverter))]
+public readonly record struct HexSize(ulong Value);
+
+public sealed class HexSizeConverter : JsonConverter<HexSize>
+{
+    public const ulong Max = 0x1_0000_0000UL;
+
+    public override HexSize Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        switch (reader.TokenType)
+        {
+            case JsonTokenType.Number:
+                if (reader.TryGetUInt64(out ulong n) && n <= Max) return new HexSize(n);
+                break;
+            case JsonTokenType.String:
+                string s = (reader.GetString() ?? "").Trim();
+                if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) s = s[2..];
+                if (s.Length is > 0 and <= 9 && ulong.TryParse(s, System.Globalization.NumberStyles.AllowHexSpecifier, System.Globalization.CultureInfo.InvariantCulture, out ulong h) && h <= Max)
+                    return new HexSize(h);
+                break;
+        }
+        throw new JsonException("A size is a number or a hex string from 1 to 0x100000000.");
+    }
+
+    public override void Write(Utf8JsonWriter writer, HexSize value, JsonSerializerOptions options) =>
         writer.WriteStringValue("0x" + value.Value.ToString("X", System.Globalization.CultureInfo.InvariantCulture));
 }
 

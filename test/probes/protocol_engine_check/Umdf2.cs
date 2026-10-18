@@ -67,6 +67,62 @@ internal static class Umdf2
     {
         Compiles();
         FrameCounter();
+        AddressSpace();
+    }
+
+    /// <summary>An image only replies read spans the whole 32-bit address
+    /// space, so an address and a length wrap as the 32-bit sums of the
+    /// Switch Pro's SPI read did (driver.c:1667-1674 at 9bd6279, ULONG
+    /// arithmetic), and an address past the flash reads the fill.</summary>
+    static void AddressSpace()
+    {
+        Console.WriteLine("-- a memory image of the whole 32-bit address space");
+        string Spi(string size, bool written = false, bool top = true) => Profile(o =>
+        {
+            var pr = o["protocol"]!.AsObject();
+            pr["memory"] = JsonNode.Parse($$"""
+            [ { "name": "spi", "size": "{{size}}", "fill": "FF",
+                "segments": [ { "at": "0x0", "hex": "AB" }, { "at": "0x6020", "hex": "0102030405" } ] } ]
+            """);
+            if (top) pr["memory"]![0]!["segments"]!.AsArray().Add(JsonNode.Parse("""{ "at": "0xFFFFFFFE", "hex": "CDEF" }"""));
+            var rules = pr["commands"]!["rules"]!.AsArray();
+            rules.Insert(0, JsonNode.Parse("""
+            { "match": "01 .. .. .. .. .. .. .. .. .. 10", "minLength": 16,
+              "reply": [ { "hex": "21" }, { "echo": "11-15" }, { "memory": "spi", "address": { "le32": 11 }, "length": { "byte": 15, "max": 29 } } ],
+              "replyLength": 49 }
+            """));
+            if (written) rules.Insert(0, JsonNode.Parse("""{ "match": "12", "minLength": 4, "write": [ { "memory": "spi", "address": { "value": 0 }, "from": "1-3" } ] }"""));
+        });
+        byte[] Read(ProtocolEngine e, uint address, byte length)
+        {
+            var cmd = new byte[49];
+            cmd[0] = 0x01; cmd[10] = 0x10;
+            cmd[11] = (byte)address; cmd[12] = (byte)(address >> 8); cmd[13] = (byte)(address >> 16); cmd[14] = (byte)(address >> 24);
+            cmd[15] = length;
+            e.HandleCommand(cmd, Stopwatch.GetTimestamp());
+            var reply = new byte[64];
+            int n = e.TakeReply(64, reply);
+            return n < 6 ? Array.Empty<byte>() : reply.AsSpan(6, length).ToArray();
+        }
+        var (whole, refusal) = Compile(Spi("0x100000000"));
+        if (whole == null) { Check("an image of 0x100000000 bytes compiles", false, refusal ?? ""); return; }
+        var e = new ProtocolEngine(whole, "HM-TEST-0001", 0, ProgramBinder.BindLayouts(whole.Model));
+        Check("a read inside a segment", Checks.Hex(Read(e, 0x6020, 5)) == "0102030405");
+        Check("an address past 0x80000 reads the fill, not a segment it would wrap onto", Checks.Hex(Read(e, 0x01006020, 5)) == "FFFFFFFFFF", Checks.Hex(Read(e, 0x01006020, 5)));
+        Check("a read across 0xFFFFFFFF wraps to address 0", Checks.Hex(Read(e, 0xFFFFFFFD, 4)) == "FFCDEFAB", Checks.Hex(Read(e, 0xFFFFFFFD, 4)));
+        // The largest image the engine held before: an address wraps at its
+        // size, so 0x01006020 reads the segment at 0x6020.
+        var (wrapped, why) = Compile(Spi("0x1000000", top: false));
+        if (wrapped == null) Check("the contrast's image of 0x1000000 bytes compiles", false, why ?? "");
+        else
+        {
+            var w = new ProtocolEngine(wrapped, "HM-TEST-0001", 0, ProgramBinder.BindLayouts(wrapped.Model));
+            Check("the contrast: an image of 0x1000000 bytes wraps 0x01006020 onto 0x6020", Checks.Hex(Read(w, 0x01006020, 5)) == "0102030405", Checks.Hex(Read(w, 0x01006020, 5)));
+        }
+        var (_, written) = Compile(Spi("0x100000000", written: true));
+        Check("refused with its path: a rule that writes an image larger than 0x1000000 bytes", written?.Contains("protocol.memory[0].size", StringComparison.Ordinal) == true, written ?? "accepted");
+        var (_, past) = Compile(Spi("0x100000001"));
+        Check("refused: a size past 0x100000000", past != null, past ?? "accepted");
     }
 
     /// <summary>A frame counter numbers the messages that carry it, as the

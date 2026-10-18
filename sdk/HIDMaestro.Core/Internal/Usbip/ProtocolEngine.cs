@@ -27,7 +27,7 @@ internal sealed unsafe class ProtocolEngine
     private readonly uint[] _counterMask;
 
     // Memory images: segment-backed unless a rule writes one, then whole.
-    private readonly (int At, byte[] Bytes)[][] _segments;
+    private readonly (uint At, byte[] Bytes)[][] _segments;
     private readonly byte[]?[] _images;
 
     // Value parts' bytes, per rule and part, resolved for this device.
@@ -105,12 +105,12 @@ internal sealed unsafe class ProtocolEngine
 
         var written = new bool[protocol.Memories.Length];
         foreach (var r in protocol.Rules) foreach (var w in r.Writes) written[w.Memory] = true;
-        _segments = new (int, byte[])[protocol.Memories.Length][];
+        _segments = new (uint, byte[])[protocol.Memories.Length][];
         _images = new byte[]?[protocol.Memories.Length];
         for (int i = 0; i < protocol.Memories.Length; i++)
         {
             var img = protocol.Memories[i];
-            var segs = new (int, byte[])[img.Segments.Length];
+            var segs = new (uint, byte[])[img.Segments.Length];
             for (int k = 0; k < segs.Length; k++)
             {
                 var s = img.Segments[k];
@@ -121,7 +121,7 @@ internal sealed unsafe class ProtocolEngine
             {
                 var whole = new byte[img.Size];
                 Array.Fill(whole, img.Fill);
-                foreach (var (at, bytes) in segs) bytes.CopyTo(whole, at);
+                foreach (var (at, bytes) in segs) bytes.CopyTo(whole, (int)at);
                 _images[i] = whole;
             }
         }
@@ -613,8 +613,9 @@ internal sealed unsafe class ProtocolEngine
     }
 
     /// <summary>A memory image's bytes from <paramref name="address"/>,
-    /// addresses wrapping at the image's size. A byte no segment covers reads
-    /// as the image's fill.</summary>
+    /// addresses wrapping at the image's size, and an image of 0x100000000
+    /// bytes at the 32-bit sum. A byte no segment covers reads as the
+    /// image's fill.</summary>
     public void ReadMemory(int memory, uint address, Span<byte> dst)
     {
         lock (_sync) ReadMemoryLocked(memory, address, dst);
@@ -625,13 +626,13 @@ internal sealed unsafe class ProtocolEngine
         var img = _p.Memories[memory];
         if (_images[memory] is { } whole)
         {
-            for (int i = 0; i < dst.Length; i++) dst[i] = whole[(int)((address + (uint)i) % (uint)img.Size)];
+            for (int i = 0; i < dst.Length; i++) dst[i] = whole[(int)((address + (uint)i) % (ulong)img.Size)];
             return;
         }
         var segs = _segments[memory];
         for (int i = 0; i < dst.Length; i++)
         {
-            uint a = (address + (uint)i) % (uint)img.Size;
+            uint a = (uint)((address + (uint)i) % (ulong)img.Size);
             byte value = img.Fill;
             foreach (var (start, bytes) in segs)
             {
