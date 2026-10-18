@@ -1156,8 +1156,8 @@ public sealed partial class HMController : IDisposable
     /// controller, its cleanup, its reclaim of the controllers of a program
     /// that has ended, a binding that moves to the devnode a dropped adapter
     /// came back on, or the follow-up that watches the devnode for five
-    /// minutes after its holder lets go. HIDMaestro never changes the driver
-    /// of a present devnode, so a device that sits on the devnode keeps
+    /// minutes after its holder lets go. None of these changes the driver of
+    /// a present devnode, so a device that sits on the devnode keeps
     /// WinUSB: a real adapter of the same serial that takes the instance
     /// while the virtual one is gone opens on WinUSB until it is unplugged,
     /// and comes back on WinUSB if it is plugged in again before any of

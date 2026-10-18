@@ -199,6 +199,7 @@ public sealed class HMContext : IDisposable
     /// failed: staging, the certificate install, signing or pnputil. Staging
     /// refuses a directory on its path that it can neither reset nor move
     /// aside, one another program created while HIDMaestro was creating it,
+    /// one it could not hold or found changed between its repair and its use,
     /// a staged file that no longer matches its embedded SHA-256, and a TEMP
     /// directory for its child processes that it cannot protect. Also thrown
     /// when another program held the deploy lock for ten minutes or the
@@ -506,10 +507,10 @@ public sealed class HMContext : IDisposable
     /// </summary>
     /// <exception cref="ArgumentNullException"><paramref name="profile"/> is null.</exception>
     /// <exception cref="HMProfileException">A defect of the profile itself:
-    /// it has no descriptor, its layout names an axis or button the
-    /// descriptor lacks, or its device model does not compile. The exception
-    /// names the profile's file and the JSON path. That refusal comes before
-    /// the create takes anything machine-wide.</exception>
+    /// it has no descriptor, its descriptor's hex does not parse, its layout
+    /// names an axis or button the descriptor lacks, or its device model does
+    /// not compile. The exception names the profile's file and the JSON path.
+    /// That refusal comes before the create takes anything machine-wide.</exception>
     /// <exception cref="HMDriverVersionException">The driver that started
     /// a UMDF2 create's device does not serve protocol 4, or could not read
     /// a value the create wrote. The create installs this SDK's driver over
@@ -546,10 +547,10 @@ public sealed class HMContext : IDisposable
     /// keeps the identity and refreshes the descriptor.</para></summary>
     /// <exception cref="ArgumentNullException"><paramref name="profile"/> is null.</exception>
     /// <exception cref="HMProfileException">A defect of the profile itself:
-    /// it has no descriptor, its layout names an axis or button the
-    /// descriptor lacks, or its device model does not compile. The exception
-    /// names the profile's file and the JSON path. That refusal comes before
-    /// the create takes anything machine-wide.</exception>
+    /// it has no descriptor, its descriptor's hex does not parse, its layout
+    /// names an axis or button the descriptor lacks, or its device model does
+    /// not compile. The exception names the profile's file and the JSON path.
+    /// That refusal comes before the create takes anything machine-wide.</exception>
     /// <exception cref="HMDriverVersionException">The driver that started
     /// a UMDF2 create's device does not serve protocol 4, or could not read
     /// a value the create wrote. The create installs this SDK's driver over
