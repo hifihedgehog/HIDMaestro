@@ -67,20 +67,22 @@
 //         neither adds it while the lock is held, and one certificate is in
 //         each store after.
 //      c. A bind waiting for the WinUSB lock while its adapter's connection
-//         drops. The bind changes nothing on the devnode that left and holds
-//         no ledger entry for it, and the re-import 30 s later is bound.
+//         drops. The bind throws, changes nothing on the devnode that left
+//         and holds no ledger entry for it. A bind that threw binds nothing
+//         later, so the re-import 30 s later keeps input.inf for 15 s, and
+//         the program's next bind binds it.
 //      d. A program disposes its adapter while a bind waits for the WinUSB
 //         lock. The dispose does not wait for the bind.
 //      e. A bound adapter's WinUSB interface held open by the probe across
 //         its program's dispose, and another program's adapter on the vhci
-//         port it frees. While the devnode stays present, at every sample,
-//         nothing changes its driver, its setup class or its ConfigFlags,
-//         and the ledger keeps its entry. Once the handle closes and it has
-//         left, it gets the reinstall flag and the entry goes. The run logs
-//         the devnode's arrival before and after the bind, its PnP status
-//         while it lingers, and the other adapter's instance. It plugs a
-//         device into a port whose last device is pending removal, so it
-//         runs alone first, in lane T's sandbox.
+//         port it frees. The open handle does not keep the devnode: it
+//         leaves at the dispose, and before the other adapter arrives it has
+//         the reinstall flag, the entry is gone and its driver and setup
+//         class are still WinUSB's. The other adapter, of the same serial,
+//         arrives on that instance and installs by rank, and stays on
+//         input.inf with no flag and no entry while the stale handle is
+//         held and after it closes. The run logs the devnode's arrival
+//         before and after the bind and the other adapter's PnP status.
 //    "--z-parts=<characters>" after the section letters runs only those
 //    parts. Parts 8, 9, c, d and e bind a real adapter and dispose it, which
 //    on an SDK below the departing-devnode rule they were written for
@@ -796,9 +798,31 @@ internal static partial class Program
                     (int)Math.Max(0, 45_000 - dropped.ElapsedMilliseconds));
             string? dev2 = null;
             if (y > 0) WaitFor(() => (dev2 = Usb.OnVhciPort(0x057E, 0x0337, y)) != null, 15_000);
-            Check("Zc: the import that comes back is bound to WinUSB",
-                  dev2 != null && WaitFor(() => string.Equals(Usb.Service(dev2), "WinUSB", StringComparison.OrdinalIgnoreCase), 30_000),
-                  dev2 == null ? $"vhci {y}, no devnode" : Usb.Service(dev2) ?? "no driver");
+            // The bind threw, so the program was told nothing is bound, and a
+            // BindWinUsb that threw binds nothing at a later re-import
+            // (WinUsbBinding.Bind, BindPhase.Refused). The import that comes
+            // back keeps the driver Windows gives it: input.inf, which the
+            // adapter fails to start on (problem 10). A re-bind on the pool
+            // thread lands within seconds of the re-import, so 15 s of
+            // samples on the settled devnode would see one.
+            bool settled = dev2 != null && WaitFor(() => string.Equals(Usb.Service(dev2), "HidUsb", StringComparison.OrdinalIgnoreCase), 30_000);
+            bool stayed = settled;
+            var keep = Stopwatch.StartNew();
+            while (stayed && keep.ElapsedMilliseconds < 15_000)
+            {
+                stayed = !string.Equals(Usb.Service(dev2!), "WinUSB", StringComparison.OrdinalIgnoreCase)
+                         && !WinUsbHolders(dev2!).Any(h => h.StartsWith(self, StringComparison.Ordinal));
+                Thread.Sleep(100);
+            }
+            Check("Zc: the import that comes back keeps input.inf for 15 s, since a bind that threw binds nothing later",
+                  stayed, dev2 == null ? $"vhci {y}, no devnode" : $"{Usb.Service(dev2) ?? "no driver"}, holders {string.Join(",", WinUsbHolders(dev2))}");
+            // The positive control: the re-import takes a binding, so the
+            // input.inf above is the rule's, not a device that cannot bind.
+            string again = dev2 == null ? "no devnode" : a.Send("bindwinusb", 120_000);
+            Check("Zc: the program's next BindWinUsb binds the import that came back",
+                  again == "OK bindwinusb Bound"
+                  && WaitFor(() => string.Equals(Usb.Service(dev2!), "WinUSB", StringComparison.OrdinalIgnoreCase), 10_000),
+                  $"{again}; {(dev2 == null ? "" : Usb.Service(dev2) ?? "no driver")}");
             a.Send("dispose");
         }
         finally
@@ -821,6 +845,18 @@ internal static partial class Program
     {
         if (Native.CM_Locate_DevNodeW(out uint dev, instanceId, 0) != 0) return null;
         return Native.CM_Get_DevNode_Status(out uint status, out uint problem, dev, 0) == 0 ? (status, problem) : null;
+    }
+
+    /// <summary>Learn's test for an unplugged device's devnode ("Determining
+    /// Whether a Device is Plugged In"), the one WinUsbBinding.HasLeft
+    /// makes: not in the tree, and CM_Get_DevNode_Status on its phantom
+    /// answers CR_NO_SUCH_DEVINST.</summary>
+    static bool HasLeft(string instanceId)
+    {
+        const uint CM_LOCATE_DEVNODE_PHANTOM = 1, CR_NO_SUCH_DEVINST = 0x0D;
+        if (Native.IsPresent(instanceId)) return false;
+        if (Native.CM_Locate_DevNodeW(out uint dev, instanceId, CM_LOCATE_DEVNODE_PHANTOM) != 0) return false;
+        return Native.CM_Get_DevNode_Status(out _, out _, dev, 0) == CR_NO_SUCH_DEVINST;
     }
 
     static void ZHeldOpenAtTeardown()
@@ -860,54 +896,67 @@ internal static partial class Program
             string d = a.Send("dispose", 120_000);
             Check("Ze: the program disposes its adapter while the probe holds it open", Ok(d), d);
 
+            // An open handle does not keep the devnode in the device tree:
+            // the PnP manager holds back only IRP_MN_REMOVE_DEVICE until the
+            // handles close (Microsoft Learn, "Handling an
+            // IRP_MN_SURPRISE_REMOVAL Request"), and the devnode reads as
+            // gone at once (CR_NO_SUCH_DEVINST, "Determining Whether a Device
+            // is Plugged In"). The handle the probe holds is stale from here.
+            var left = Stopwatch.StartNew();
+            bool leftAtDispose = WaitFor(() => HasLeft(devA), 5000);
+            Check("Ze: with the probe's handle open, the devnode leaves at the dispose", leftAtDispose,
+                  leftAtDispose ? $"{left.ElapsedMilliseconds} ms" : $"{(DevnodeStatus(devA) is var (s0, p0) ? $"status 0x{s0:X8} problem {p0}" : "status unreadable")}");
+            // Before another device arrives on the instance: the dispose's
+            // restore, or the follow-up it started, flagged it and dropped
+            // the entry, and installed nothing on it.
+            Check("Ze: before another device arrives, it has the reinstall flag and the entry is gone",
+                  WaitFor(() => ((ConfigFlags(devA) ?? 0) & CONFIGFLAG_REINSTALL) != 0 && !WinUsbEntryExists(devA), 35_000),
+                  $"ConfigFlags 0x{ConfigFlags(devA) ?? 0:X}, was 0x{flags:X}, entry {(WinUsbEntryExists(devA) ? "kept" : "gone")}");
+            Check("Ze: and its driver and setup class are still what WinUSB gave it",
+                  string.Equals(EnumDriver(devA).Service, driver.Service, StringComparison.OrdinalIgnoreCase)
+                  && string.Equals(EnumDriver(devA).Class, driver.Class, StringComparison.OrdinalIgnoreCase),
+                  $"{driver.Service} {driver.Class} -> {EnumDriver(devA).Service} {EnumDriver(devA).Class}");
+
             using var b = PeerProcess.Start("Ze-other");
             if (!ZGuarded(b, "Ze")) return;
             string cb = b.Send("create gc -");
             var (_, _, xb) = Ok(cb) ? GcImport(b, cb, touched) : (0, "", 0);
-            string? devB = xb > 0 ? Usb.OnVhciPort(0x057E, 0x0337, xb) : null;
-            Console.WriteLine($"    Ze: another program's adapter is {devB ?? "not enumerated"} on vhci port {xb} (the bound one was {devA} on {x})");
             Check($"Ze: another program's adapter takes the vhci port {x} the bound one freed", Ok(cb) && xb == x, $"{cb}; vhci {xb}");
+            string? devB = null;
+            if (xb > 0) WaitFor(() => (devB = Usb.OnVhciPort(0x057E, 0x0337, xb)) != null, 15_000);
+            Console.WriteLine($"    Ze: another program's adapter is {devB ?? "not enumerated"} on vhci port {xb} (the bound one was {devA} on {x})");
+            // Same serial, so the same instance. The flag reinstalls it by
+            // rank: input.inf, problem 10, and the install spends the flag.
+            Check("Ze: it arrives on the instance the bound one left and installs by rank, the flag spent",
+                  string.Equals(devB, devA, StringComparison.OrdinalIgnoreCase)
+                  && WaitFor(() => string.Equals(Usb.Service(devA), "HidUsb", StringComparison.OrdinalIgnoreCase)
+                                   && DevnodeStatus(devA) is { Problem: 10 }
+                                   && ((ConfigFlags(devA) ?? 0) & CONFIGFLAG_REINSTALL) == 0, 15_000),
+                  $"{devB ?? "none"}: {Usb.Service(devA) ?? "no driver"}, ConfigFlags 0x{ConfigFlags(devA) ?? 0:X}");
 
-            // While the handle is held: sample the devnode for 15 s. It must
-            // be present at every sample.
-            bool changed = false, flagged = false;
-            int samples = 0, presentSamples = 0;
+            // While the stale handle is still held, then after it closes:
+            // nothing installs a driver on the other program's present
+            // devnode, flags it, or claims it for the binding that left.
+            bool kept = true;
             var statuses = new HashSet<string>();
             var sw = Stopwatch.StartNew();
-            while (sw.ElapsedMilliseconds < 15_000)
+            while (sw.ElapsedMilliseconds < 10_000)
             {
-                samples++;
-                if (Native.IsPresent(devA))
+                if (sw.ElapsedMilliseconds >= 5000 && handle != IntPtr.Zero)
                 {
-                    presentSamples++;
-                    if (DevnodeStatus(devA) is var (st, pr)) statuses.Add($"status 0x{st:X8} problem {pr}");
+                    Native.CloseHandle(handle);
+                    handle = IntPtr.Zero;
                 }
-                var now = EnumDriver(devA);
-                if (!string.Equals(now.Service, driver.Service, StringComparison.OrdinalIgnoreCase)
-                    || !string.Equals(now.Class, driver.Class, StringComparison.OrdinalIgnoreCase)) changed = true;
-                if (((ConfigFlags(devA) ?? 0) & CONFIGFLAG_REINSTALL) != 0 && Native.IsPresent(devA)) flagged = true;
+                if (DevnodeStatus(devA) is var (st, pr)) statuses.Add($"status 0x{st:X8} problem {pr}");
+                kept &= Native.IsPresent(devA)
+                        && string.Equals(Usb.Service(devA), "HidUsb", StringComparison.OrdinalIgnoreCase)
+                        && ((ConfigFlags(devA) ?? 0) & CONFIGFLAG_REINSTALL) == 0
+                        && !WinUsbEntryExists(devA);
                 Thread.Sleep(100);
             }
-            Console.WriteLine($"    Ze: while held: {(statuses.Count == 0 ? "never present" : string.Join("; ", statuses))}");
-            bool present = samples > 0 && presentSamples == samples;
-            Check("Ze: the held devnode stays present after the dispose, at every sample", present,
-                  $"present at {presentSamples} of {samples} samples");
-            Check("Ze: nothing changes its driver or setup class while it lingers", !changed,
-                  $"{driver.Service} {driver.Class} -> {EnumDriver(devA).Service} {EnumDriver(devA).Class}");
-            Check("Ze: no reinstall flag lands on it while it is present", !flagged, $"ConfigFlags 0x{ConfigFlags(devA) ?? 0:X}, was 0x{flags:X}");
-            Check("Ze: the ledger keeps its entry while it lingers", WinUsbEntryExists(devA), "");
-
-            Native.CloseHandle(handle);
-            handle = IntPtr.Zero;
-            bool gone = WaitFor(() => !Native.IsPresent(devA), 15_000);
-            Check("Ze: once the handle closes the devnode leaves", gone);
-            Check("Ze: then it gets the reinstall flag and the entry goes, from the follow-up that polls for it to leave",
-                  WaitFor(() => ((ConfigFlags(devA) ?? 0) & CONFIGFLAG_REINSTALL) != 0 && !WinUsbEntryExists(devA), 35_000),
-                  $"ConfigFlags 0x{ConfigFlags(devA) ?? 0:X}, entry {(WinUsbEntryExists(devA) ? "kept" : "gone")}");
-            Check("Ze: its driver and setup class are still what WinUSB gave it",
-                  string.Equals(EnumDriver(devA).Service, driver.Service, StringComparison.OrdinalIgnoreCase)
-                  && string.Equals(EnumDriver(devA).Class, driver.Class, StringComparison.OrdinalIgnoreCase),
-                  $"{EnumDriver(devA).Service} {EnumDriver(devA).Class}");
+            Console.WriteLine($"    Ze: the other adapter, 5 s with the stale handle held and 5 s after it closed: {(statuses.Count == 0 ? "never present" : string.Join("; ", statuses))}");
+            Check("Ze: the other program's adapter stays present on input.inf, with no flag and no entry, as the stale handle closes",
+                  kept, $"{Usb.Service(devA) ?? "no driver"}, ConfigFlags 0x{ConfigFlags(devA) ?? 0:X}, entry {WinUsbEntryExists(devA)}");
             if (Ok(cb)) b.Send("dispose");
         }
         finally
