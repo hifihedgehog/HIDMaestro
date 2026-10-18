@@ -195,40 +195,77 @@ internal static partial class Program
         Check("a tick after the teardown writes nothing and the process lives", true);
     }
 
-    /// <summary>A PID publish that passed its first disposed check and waits
-    /// for the PID lock while the controller is torn down. This check holds
-    /// the lock, so the publish waits at that point every run.</summary>
+    /// <summary>A PID call that passed its first disposed check while the
+    /// controller is torn down. The SDK's hook holds the call between that
+    /// check and the PID lock until the teardown has taken the lock, marked
+    /// the controller disposed and unmapped the section, so on every run
+    /// the check inside the lock is what refuses it. Each of the four PID
+    /// members in turn.</summary>
     static void OfflinePidDuringDispose(int index)
     {
-        Console.WriteLine("\n-- A PID publish in flight during the teardown --");
-        using var dev = new OfflineController("dualsense-composite", index, pid: true);
-        dev.StopIdleRepeat();
-        dev.C.PublishPidPool(0xFFFF, 10, false, false);
-        object pidLock = typeof(HMController).GetField("_pidStateLock", AnyInstance)!.GetValue(dev.C)!;
-        string outcome = "none";
-        Thread publisher, teardown;
-        using var tornDown = new ManualResetEventSlim();
-        Monitor.Enter(pidLock);
-        try
+        Console.WriteLine("\n-- A PID call in flight during the teardown --");
+        var hook = typeof(HMController).GetField("BeforePidLock", AnyStatic);
+        Check("HMController has the hook that holds a PID call before its lock", hook != null);
+        if (hook == null) return;
+        var calls = new (string Name, Action<HMController> Call)[]
         {
-            publisher = new Thread(() =>
+            ("PublishPidPool", c => c.PublishPidPool(0x00FF, 4, false, false)),
+            ("PublishPidBlockLoad", c => c.PublishPidBlockLoad(1, PidLoadStatus.Success, 0x00FF)),
+            ("PublishPidState", c => c.PublishPidState(1, PidStateFlags.ActuatorsEnabled)),
+            ("GetCurrentPidBlockLoad", c => c.GetCurrentPidBlockLoad()),
+        };
+        foreach (var (name, call) in calls)
+        {
+            using var dev = new OfflineController("dualsense-composite", index, pid: true);
+            dev.StopIdleRepeat();
+            // Maps the PID view and compiles the paths before the race.
+            dev.C.PublishPidPool(0xFFFF, 10, false, false);
+            object pidLock = typeof(HMController).GetField("_pidStateLock", AnyInstance)!.GetValue(dev.C)!;
+            using var parked = new ManualResetEventSlim();
+            using var go = new ManualResetEventSlim();
+            using var tornDown = new ManualResetEventSlim();
+            string outcome = "none";
+            Thread? caller = null;
+            caller = new Thread(() =>
             {
-                try { dev.C.PublishPidPool(0x00FF, 4, false, false); outcome = "published"; }
+                try { call(dev.C); outcome = "completed"; }
                 catch (ObjectDisposedException) { outcome = "refused as disposed"; }
-            }) { IsBackground = true, Name = "S45 offline PID publish" };
-            publisher.Start();
-            WaitUntil(() => (publisher.ThreadState & ThreadState.WaitSleepJoin) != 0, 3000);
-            Thread.Sleep(50);
-            teardown = new Thread(() => { dev.TearDown(); tornDown.Set(); }) { IsBackground = true, Name = "S45 offline teardown" };
-            teardown.Start();
-            Check("the teardown waits for a PID publish in flight before the section goes",
-                !tornDown.Wait(1000));
+                catch (Exception e) { outcome = e.GetType().Name; }
+            }) { IsBackground = true, Name = "S45 offline PID call" };
+            var teardown = new Thread(() => { dev.TearDown(); tornDown.Set(); }) { IsBackground = true, Name = "S45 offline teardown" };
+            hook.SetValue(null, (Action)(() =>
+            {
+                if (Thread.CurrentThread != caller) return;
+                parked.Set();
+                go.Wait(5000);
+            }));
+            bool waited;
+            try
+            {
+                caller.Start();
+                Check($"{name}: the call passed its first disposed check and waits before the PID lock", parked.Wait(3000));
+                // The teardown takes the PID lock after the submit lock, so
+                // while this thread holds it the teardown cannot finish.
+                Monitor.Enter(pidLock);
+                try
+                {
+                    teardown.Start();
+                    waited = !tornDown.Wait(250);
+                }
+                finally { Monitor.Exit(pidLock); }
+                Check($"{name}: the teardown waits for the PID lock before the section goes", waited);
+                Check($"{name}: the teardown ends while the call waits", tornDown.Wait(5000));
+                Check($"{name}: the teardown unmapped the PID section", !Mapped(dev.Pid));
+            }
+            finally
+            {
+                go.Set();
+                hook.SetValue(null, null);
+            }
+            bool joined = caller.Join(5000) & teardown.Join(5000);
+            Check($"{name}: the call then takes the lock and the check inside it refuses it, and the process lives",
+                joined && outcome == "refused as disposed", outcome);
         }
-        finally { Monitor.Exit(pidLock); }
-        bool joined = publisher.Join(5000) & teardown.Join(5000);
-        Check("the publish either wrote before the teardown or was refused, and the process lives",
-            joined && outcome != "none", outcome);
-        Check("the teardown unmapped the PID section", !Mapped(dev.Pid));
     }
 
     /// <summary>What a create whose controller fails after its constructor

@@ -371,6 +371,13 @@ public sealed partial class HMController : IDisposable
     private uint _pidStateSeqNo;
     private readonly object _pidStateLock = new();
 
+    /// <summary>Run by each PID member between its first disposed check and
+    /// its lock. usbip_e2e_check's offline pid-dispose case sets it through
+    /// reflection to hold a call there while the controller is torn down,
+    /// so the check inside the lock is what refuses the call. Null outside
+    /// the probe.</summary>
+    internal static Action? BeforePidLock;
+
     private IntPtr EnsurePidStateViewLocked()
     {
         if (_pidStateView == IntPtr.Zero)
@@ -425,6 +432,7 @@ public sealed partial class HMController : IDisposable
                                bool deviceManagedPool, bool sharedParameterBlocks)
     {
         ThrowIfDisposed();
+        BeforePidLock?.Invoke();
         lock (_pidStateLock)
         {
             // Again under the lock: StopThreads marks the controller
@@ -454,6 +462,7 @@ public sealed partial class HMController : IDisposable
     public HMPidBlockLoad GetCurrentPidBlockLoad()
     {
         ThrowIfDisposed();
+        BeforePidLock?.Invoke();
         lock (_pidStateLock)
         {
             ThrowIfDisposed();
@@ -488,6 +497,7 @@ public sealed partial class HMController : IDisposable
                                     ushort ramPoolAvailable)
     {
         ThrowIfDisposed();
+        BeforePidLock?.Invoke();
         lock (_pidStateLock)
         {
             ThrowIfDisposed();
@@ -507,6 +517,7 @@ public sealed partial class HMController : IDisposable
     public void PublishPidState(byte effectBlockIndex, PidStateFlags flags)
     {
         ThrowIfDisposed();
+        BeforePidLock?.Invoke();
         lock (_pidStateLock)
         {
             ThrowIfDisposed();
