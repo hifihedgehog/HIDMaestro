@@ -514,6 +514,14 @@ internal static class FeatureContract
         s.Append("stream exit-same-seq\nversion tag-own\ndevice ds0 0 driver\n")
          .Append("read 78\nframe 01A1000000000000 -\nread 78\nframe 01A2000000000000 -\nsdkexit\nsdkrestart\n")
          .Append("read 78\nframequeued 01B1000000000000 -\nframe 01B2000000000000 -\ngetinput 01 78 01\nremove\n");
+        // The old program's last frame went to a read that came after it,
+        // and the new program's first frame comes before any read: the read
+        // that follows takes it from the cache, after a recycle and after
+        // the owner pipe's close.
+        foreach (var (name, gap) in new[] { ("recycle-late-read", "idle 8\n"), ("exit-late-read", "sdkexit\n") })
+            s.Append($"stream {name}\nversion tag-own\ndevice ds0 0 driver\n")
+             .Append("read 78\nframe 01A1000000000000 -\nframe 01A2000000000000 -\nread 78\n")
+             .Append(gap).Append("sdkrestart\nframe 01B1000000000000 -\nread 78\nremove\n");
 
         var t = RunScript(tree, plan, s.ToString(), work, "cases-tree");
         var o = RunScript(oracle, plan, s.ToString(), work, "cases-oracle");
@@ -764,6 +772,18 @@ internal static class FeatureContract
                       && g.Count == 1 && Holds(g[0], 0xB2);
             return (ok, $"reads {string.Join(" ", all.Select(Show))}, polled {string.Join(" ", g.Select(Show))}");
         });
+        // The delivered gate is forgotten with the SeqNo. At f00f0482 it
+        // kept the old program's last, so a read after the new program's
+        // first frame parked until the new SeqNo passed the old one.
+        foreach (var (name, what) in new[] { ("recycle-late-read", "a recycle"), ("exit-late-read", "a program's end") })
+            Add($"after {what} the next program's first frame goes to a read that comes after it, from the cache", () =>
+            {
+                var all = Of(r[name], "read");
+                string Show(byte[] x) => Status(x) == 0 ? Convert.ToHexString(Body(x)[..Math.Min(4, Body(x).Length)]) : Status(x).ToString("X8");
+                bool Holds(byte[] x, byte b) => Status(x) == 0 && Body(x).IndexOf(b) is >= 0 and < 4;
+                bool ok = all.Count == 3 && Holds(all[0], 0xA1) && Holds(all[1], 0xA2) && Holds(all[2], 0xB1);
+                return (ok, $"reads {string.Join(" ", all.Select(Show))}");
+            });
         Add("an extended frame goes out only at its report's declared length: 0x31 at 78 does, 0x31 at 77 and 0x32 at 78 do not", () =>
         {
             var reads = Of(r["extended"], "read").Where(x => Status(x) == 0).ToList();

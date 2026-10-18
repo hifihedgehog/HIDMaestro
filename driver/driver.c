@@ -1062,7 +1062,11 @@ OwnerGone(_In_ PDEVICE_CONTEXT ctx)
     }
     ctx->ReleaseCount = count;
     ctx->ReleaseNext = 0;
+    /* The delivered gate goes with the SeqNo: kept, it parked a read the
+     * next program's first frame in the cache could serve, until that
+     * program's SeqNo passed this one's last. */
     ctx->SharedMemSeqNo = 0;
+    ctx->LastDeliveredInputSeqNo = 0;
     /* Polled reads (IOCTL_UMDF_HID_GET_INPUT_REPORT) see the released
      * state too: the frame for the cached report's ID replaces it. */
     for (ULONG i = 0; i < count; i++) {
@@ -1876,8 +1880,13 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
              * (even if it happens to land on a SeqNo matching our previous
              * cached value by chance) is treated as new data. SeenSeqNo is
              * the one ReadSharedInput's gate reads, and a program that
-             * starts again on the index counts its frames from the start. */
+             * starts again on the index counts its frames from the start.
+             * The delivered gate goes with SharedMemSeqNo, under the lock
+             * READ_REPORT reads both under, as OwnerGone resets them. */
+            WdfWaitLockAcquire(ctx->InputLock, NULL);
             ctx->SharedMemSeqNo = 0;
+            ctx->LastDeliveredInputSeqNo = 0;
+            WdfWaitLockRelease(ctx->InputLock);
             ctx->SeenSeqNo = 0;
         }
     }
