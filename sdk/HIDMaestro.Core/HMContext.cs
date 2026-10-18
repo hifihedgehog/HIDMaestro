@@ -664,6 +664,7 @@ public sealed class HMContext : IDisposable
                     Internal.MachineClaims.SetControllerValue(lease.Identity.Token, "InstanceId", instanceId);
 
                 var controller = new HMController(this, slot, lease, profile, instanceId, identityKey: lease.Identity.Key);
+                controller.StartProtocol();
                 lock (_lock) _controllers[slot] = controller;
                 return controller;
             }

@@ -38,6 +38,7 @@ Clock.Run();
 DeviceLifetime.Run();
 OutputOnce.Run();
 Umdf2.Run();
+Host.Run();
 Console.WriteLine(Checks.Failed == 0 ? "protocol_engine_check: PASS" : $"protocol_engine_check: {Checks.Failed} FAILED");
 return Checks.Failed == 0 ? 0 : 1;
 

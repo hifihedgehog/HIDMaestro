@@ -9,9 +9,10 @@ using HIDMaestro.Internal.Usbip;
 /// driver (design note, decision (b)): its commands are the output reports
 /// the driver hands on, and its reports and replies are input reports the
 /// HID descriptor declares, each at its declared length. The test profiles
-/// are built on the Bluetooth descriptor switch-pro carries (outputs 0x01,
+/// are built on the Bluetooth descriptor switch-pro carries (outputs 0x01 and
 /// 0x10 to 0x12, inputs 0x21, 0x30 to 0x33 and 0x3F) and on the report-ID-less
-/// descriptor of dualshock-3-full (a 12-byte input, a 48-byte output).</summary>
+/// descriptor of dualshock-3-full (a 12-byte input, a 48-byte output), each
+/// under a product ID of its own.</summary>
 internal static class Umdf2
 {
     static void Check(string what, bool ok, string detail = "") => Checks.Check(what, ok, detail);
@@ -22,6 +23,9 @@ internal static class Umdf2
     {
         var o = JsonNode.Parse(Device.Catalog("switch-pro"))!.AsObject();
         o["id"] = "umdf2-test";
+        // A product ID of its own, so nothing the SDK keys on the Switch
+        // Pro's applies.
+        o["pid"] = "0xF0F0";
         foreach (var k in new[] { "stateBlock", "inputReports", "liveFeatureReports", "protocol" }) o.Remove(k);
         o["stateBlock"] = JsonNode.Parse("""{ "size": 4, "fields": [ { "byte": 0, "type": "button-mask", "buttons": [ "#0", "#1" ] } ] }""");
         o["inputReports"] = JsonNode.Parse("""

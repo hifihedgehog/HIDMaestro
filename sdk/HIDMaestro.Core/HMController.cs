@@ -312,6 +312,12 @@ public sealed partial class HMController : IDisposable
     // The protocol a USB/IP device runs, whose registers a stream's
     // condition and a codec field's holdWhile read.
     private readonly Internal.Usbip.ProtocolEngine? _protocolEngine;
+    // v2.0.0: a UMDF2 device's protocol, run here behind the HID driver
+    // (design note, decision (b)).
+    private readonly Internal.ProtocolHost? _host;
+    // The output reader's command buffer for the host: the report ID, then
+    // the ring slot's bytes, or the report a rule emits in their place.
+    private readonly byte[]? _hostCommand;
 
     /// <summary>v1.13.0: the controller ports of a device that carries
     /// several controllers in one report, as the profile's
@@ -615,7 +621,13 @@ public sealed partial class HMController : IDisposable
         // v2.0.0: the device model. The profile compiled at load and at
         // create's validation, so this reuses that work.
         var model = profile.Inner.GetOrCompileModel();
-        _protocolEngine = usbipHandle?.Device.Protocol;
+        if (!profile.Inner.RequiresUsbipBackend && profile.Inner.Protocol != null)
+        {
+            var compiled = Internal.Usbip.CompiledProtocol.Compile(profile.Inner, null)!;
+            _host = new Internal.ProtocolHost(profile.Inner, compiled, index, new SectionChannel(this), _submitLock);
+            _hostCommand = new byte[Math.Max(SharedMemoryIO.DATA_CAPACITY + 1, Internal.Programs.ProgramForm.MaxReport)];
+        }
+        _protocolEngine = usbipHandle?.Device.Protocol ?? _host?.Engine;
         if (profile.Inner.StateBlock != null)
         {
             _stateBlockSpec = profile.Inner.StateBlockSpecForCodec();
@@ -647,7 +659,7 @@ public sealed partial class HMController : IDisposable
         // once now so the device starts from it, and its USB/IP protocol.
         Ports = new HMPortSet(this, profile.Inner);
         lock (_submitLock) Ports.PublishInitialLocked();
-        if (usbipHandle?.Device.Protocol is { } engine)
+        if (_protocolEngine is { } engine)
             DeviceProtocol = new HMDeviceProtocol(engine);
 
         // Output passthrough is best-effort. If the section can't be created
@@ -694,6 +706,13 @@ public sealed partial class HMController : IDisposable
             _outputView = IntPtr.Zero;
         }
     }
+
+    /// <summary>Starts the protocol host's clock. The create calls it once
+    /// the device has started and this controller runs its output reader,
+    /// so a command a host wrote while the device started waits in the
+    /// output ring. A controller built on process memory, as the probes
+    /// build one, runs no clock.</summary>
+    internal void StartProtocol() => _host?.Start();
 
     // Resolve a canonical trigger axis from a profile's axisMap: the
     // axisMap-declared role position wins, else the given default. Runs
@@ -837,6 +856,13 @@ public sealed partial class HMController : IDisposable
             {
                 VendorBlobCodec.EncodeInput(_stateBlockSpec, in state, (float)mlx, (float)mly, (float)mrx, (float)mry,
                     (float)mlt, (float)mrt, _stateBlockBuffer!, _stateBlockEncoder!);
+            }
+            // On UMDF2 the block stays here: the protocol host builds the
+            // reports the driver sends from it.
+            if (_host != null)
+            {
+                _host.OnState(_stateBlockBuffer!);
+                return ElapsedMicros(startTicks);
             }
             SharedMemoryIO.WriteInputFrame(
                 _inputView, _inputEvent, ref _inputSeqNo,
@@ -1778,6 +1804,25 @@ public sealed partial class HMController : IDisposable
                         if (ct.IsCancellationRequested) break;
                         continue;
                     }
+                    // v2.0.0: a UMDF2 device's protocol reads each output
+                    // report first (decision (b)). What the events raise is
+                    // the report as written, the report the rule emits in
+                    // its place, or nothing when the rule consumes it.
+                    if (_host != null && source == (byte)HMOutputSource.HidOutput)
+                    {
+                        var command = _hostCommand!;
+                        command[0] = reportId;
+                        Buffer.BlockCopy(buf, 0, command, 1, dataSize);
+                        int n = _host.OnOutput(command, dataSize + 1, Internal.ProtocolHost.DeliveryTimeoutMs);
+                        if (n == 0)
+                        {
+                            if (ct.IsCancellationRequested) break;
+                            continue;
+                        }
+                        reportId = command[0];
+                        dataSize = Math.Min(n - 1, buf.Length);
+                        Buffer.BlockCopy(command, 1, buf, 0, dataSize);
+                    }
                     var data = new ReadOnlyMemory<byte>(buf, 0, dataSize);
                     var pkt = new HMOutputPacket((HMOutputSource)source, reportId, data, lastSeq);
                     EventRaise.Each(OutputReceived, this, pkt, nameof(OutputReceived));
@@ -2064,6 +2109,11 @@ public sealed partial class HMController : IDisposable
         lock (_submitLock)
         {
             ThrowIfDisposed();
+            if (_host != null)
+            {
+                _host.OnState(block);
+                return true;
+            }
             AwaitPreviousDelivery();
             SubmitRawExtendedReportCore(block);
             NoteFrameWritten();
@@ -2071,6 +2121,26 @@ public sealed partial class HMController : IDisposable
                 RememberRawFrame(block, extended: true);
         }
         return true;
+    }
+
+    /// <summary>The input section as a protocol host's channel: the
+    /// controller's own view, event and sequence number, written under its
+    /// submit lock, which the host holds for every send.</summary>
+    private sealed class SectionChannel : Internal.IHostChannel
+    {
+        private readonly HMController _c;
+        public SectionChannel(HMController c) { _c = c; }
+
+        public uint Write(byte[] data, int dataLen, byte[] extended, int extendedLen)
+        {
+            SharedMemoryIO.WriteInputFrame(_c._inputView, _c._inputEvent, ref _c._inputSeqNo,
+                data, dataLen, null, extendedData: extendedLen > 0 ? extended : null, extendedLen: extendedLen);
+            return _c._inputSeqNo;
+        }
+
+        public bool Delivered(uint seq, int waitMs) => SharedMemoryIO.WaitInputDelivered(_c.Index, seq, waitMs);
+
+        public bool AcknowledgesDelivery => SharedMemoryIO.InputAckSupported(_c.Index);
     }
 
     /// <summary>True on a thread that raises this controller's events: its
@@ -2102,6 +2172,7 @@ public sealed partial class HMController : IDisposable
         // Idle frames stop before the output pump, so no repeat can
         // land on a section this Dispose is about to unmap.
         try { _idleClock?.Stop(Internal.TimeoutScale.Apply(500)); } catch { }
+        try { _host?.Dispose(); } catch { }
         lock (_outputCtsLock)
             if (!_outputCtsClosed) _outputCts.Cancel();
         // The reader disposes the cancellation source as it ends. A reader
