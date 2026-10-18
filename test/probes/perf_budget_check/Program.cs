@@ -211,6 +211,11 @@ internal static partial class Program
             ProgramCost.Run(runs, args.Length > 2 && int.TryParse(args[2], out int calls) ? calls : 100_000);
             return 0;
         }
+        if (mode == "ds3cost")
+        {
+            Ds3Cost.Run(runs, args.Length > 2 && int.TryParse(args[2], out int calls) ? calls : 100_000);
+            return 0;
+        }
         if (mode == "idle")
         {
             double period = args.Length > 1 ? double.Parse(args[1], System.Globalization.CultureInfo.InvariantCulture) : 4;

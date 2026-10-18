@@ -63,4 +63,10 @@
     </Exec>
     <Error Condition="'$(_HmBaselineUntracked)' != ''" Text="HmBaselineTree: $(HmBaselineTree) holds files under sdk, driver or profiles that $(HmBaselineCommit) does not: $(_HmBaselineUntracked)" />
   </Target>
+
+  <!-- ds3cost's native half: 9bd6279's DualShock 3 and Switch Pro frame code
+       and this tree's frame, built by native\build.ps1 into the output. -->
+  <Target Name="BuildNativeFrames" AfterTargets="Build" Condition="'$(SkipNativeFrames)' != 'true'">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\native\build.ps1&quot; -Out &quot;$([System.IO.Path]::Combine('$(MSBuildProjectDirectory)', '$(OutDir)')).&quot;" />
+  </Target>
 </Project>
