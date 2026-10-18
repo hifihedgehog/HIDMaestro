@@ -1289,18 +1289,25 @@ internal static partial class DeviceOrchestrator
     /// outside the probe.</summary>
     internal static Action<int>? BeforeInputMapping;
 
+    /// <summary>Creates the controller's devices on an index.
+    /// <paramref name="created"/> is called with the parent's instance ID
+    /// as soon as the parent exists, before any later step can throw, so
+    /// the caller's cleanup of a failed create removes that device by its
+    /// ID: TeardownController's sweeps by index cover the HIDMAESTRO and
+    /// IG_00 enumerators and not ROOT\HIDClass, the shared enumerator a
+    /// plain HID parent is created under.</summary>
     public static string? SetupController(
-        int controllerIndex, ControllerProfile profile, DeviceIdentity? identity = null)
+        int controllerIndex, ControllerProfile profile, DeviceIdentity? identity = null, Action<string>? created = null)
     {
         // The read side of the gate the background phantom cleanup takes for
         // writing: creates run together, the cleanup never during one.
         OwnerSweep.CreateGate.EnterReadLock();
-        try { return SetupControllerCore(controllerIndex, profile, identity); }
+        try { return SetupControllerCore(controllerIndex, profile, identity, created); }
         finally { OwnerSweep.CreateGate.ExitReadLock(); }
     }
 
     private static string? SetupControllerCore(
-        int controllerIndex, ControllerProfile profile, DeviceIdentity? identity)
+        int controllerIndex, ControllerProfile profile, DeviceIdentity? identity, Action<string>? created)
     {
         if (profile == null) throw new ArgumentNullException(nameof(profile));
         if (controllerIndex < 0) throw new ArgumentOutOfRangeException(nameof(controllerIndex));
@@ -1407,6 +1414,7 @@ internal static partial class DeviceOrchestrator
             var createSw = Stopwatch.StartNew();
             using var _ts = new TimingScope(controllerIndex, profile.Id, "3.create_gamepad_companion");
             companionId = CreateGamepadCompanion(controllerIndex, profile, plan, identity);
+            if (companionId != null) created?.Invoke(companionId);
             LogDiag($"    CreateGamepadCompanion -> {(companionId ?? "(null)")} in {createSw.ElapsedMilliseconds}ms");
         }
         else if (plan.Path == PresentationPlan.CreatePath.Root)
@@ -1423,6 +1431,7 @@ internal static partial class DeviceOrchestrator
                     $"'{profile.Id}' at index {controllerIndex}.");
             }
             mainInstanceId = result.InstanceId;
+            created?.Invoke(mainInstanceId);
             LogDiag($"    CreateDeviceNode -> {mainInstanceId} in {createSw.ElapsedMilliseconds}ms");
         }
 

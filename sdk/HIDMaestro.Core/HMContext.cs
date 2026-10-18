@@ -662,8 +662,10 @@ public sealed class HMContext : IDisposable
             long refused = Internal.DeviceManager.LockTakesRefusedHere;
             try
             {
+                // The parent's ID arrives as soon as the parent exists, so a
+                // start that fails after it is torn down by that ID below.
                 instanceId = Internal.DeviceOrchestrator.SetupController(
-                    lease.TransportIndex, profile.Inner, lease.Identity);
+                    lease.TransportIndex, profile.Inner, lease.Identity, created: id => instanceId = id);
                 if (instanceId != null)
                     Internal.MachineClaims.SetControllerValue(lease.Identity.Token, "InstanceId", instanceId);
 
