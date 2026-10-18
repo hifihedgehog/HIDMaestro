@@ -1422,19 +1422,20 @@ function Scenario-Axis-Addressing-Check {
 # input, output and feature lengths against hid-tools', the report and
 # length the driver is given for each profile, and hand-made descriptors
 # for Push and Pop, long items and the other items a descriptor walker can
-# get wrong. Those parts
-# need no device. Last, live, with three controllers read in one window:
-# genesis-nso as 0x3F, never 0x21, and microsoft-designer-keyboard's raw
-# frame as its keyboard report 0x01 (Raw Input), beside dualshock-4-v2's
-# unchanged 0x01. Then the 5-byte wingman report. Then ps-move and
-# xbox-360-flight-stick: each collection's HidP_GetCaps against the
-# captured descriptor, and the input report with the trigger where the
-# capture puts it.
+# get wrong, and every catalog descriptor through Windows' own parser, the
+# machine's hidparse.sys loaded into the probe, which refuses at the start
+# what it refuses there. Those parts need no device. Last, live, with
+# three controllers read in one window: genesis-nso as 0x3F, never 0x21,
+# and microsoft-designer-keyboard's raw frame as its keyboard report 0x01
+# (Raw Input), beside dualshock-4-v2's unchanged 0x01. Then the 5-byte
+# wingman report. Then ps-move and xbox-360-flight-stick: each
+# collection's HidP_GetCaps against the captured descriptor, and the
+# input report with the trigger where the capture puts it.
 function Scenario-Layout-Audit-Check {
     Invoke-Probe -Dir 'layout_audit_check' -Exe 'LayoutAuditCheck.exe' `
                  -Message 'layout schema/descriptor mismatch (see probe stdout)'
     Invoke-Probe -Dir 'report_length_check' -Exe 'ReportLengthCheck.exe' `
-                 -Message 'a report length or ID the SDK reads from a descriptor differs from the independent parser (see probe stdout)'
+                 -Message 'a report length or ID the SDK reads from a descriptor differs from the independent parser, or Windows refuses a catalog descriptor (see probe stdout)'
     Invoke-Probe -Dir 'report_length_check' -Exe 'ReportLengthCheck.exe' -Arguments 'live' -Tag 'live' `
                  -Message 'the driver sent a data-only frame under another report or at another length (see probe stdout)'
 }

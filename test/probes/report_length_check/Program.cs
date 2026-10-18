@@ -24,6 +24,14 @@
 //      hid-core.c applies it.
 //   5. The other walkers on the same items: PidReportIdExtractor,
 //      GameInputMapping.HasMeasuredShape and HidDescriptorBuilder.AddRaw.
+//   6. Windows' own parser, the machine's hidparse.sys loaded into this
+//      process (WindowsParser.cs): every catalog report descriptor the SDK
+//      serves must parse as HID class parses it at the device's start,
+//      where a refusal fails the start with problem code 10, except the
+//      two GameCube adapter profiles, whose real device's descriptor
+//      Windows refuses as well. Controls first: ps3-remote's descriptor
+//      as 755bfbc1 wrote it, refused for its Usage Minimum and its Input
+//      item without a data byte, and the same items with one.
 //
 // No device, no elevation. Exit 0 PASS / 1 FAIL.
 //
@@ -47,6 +55,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using HIDMaestro;
@@ -310,6 +319,75 @@ internal static class Program
         Console.WriteLine($"  [INFO] no InputReportId, so the driver's own scan names the report: {string.Join(", ", unvalued)}");
     }
 
+    // ── 6: Windows' own parser ───────────────────────────────────────────
+
+    /// <summary>Catalog profiles whose descriptor Windows refuses because the
+    /// real device's own does. The Wii U GameCube adapter declares each of its
+    /// ten Application collections with Usage 0 (the bytes nine
+    /// linux-hardware.org dumps print), which hidparse refuses as a top-level
+    /// collection without a usage, so a real adapter fails its start on
+    /// Windows too. Dolphin, Slippi and SDL open it through libusb.</summary>
+    static readonly Dictionary<string, (uint Status, uint Code)> s_refusedAsTheRealDevice = new()
+    {
+        ["gamecube-adapter"] = (WindowsParser.STATUS_COULD_NOT_INTERPRET, WindowsParser.HIDP_GETCOLDESC_TOP_COLLECTION_USAGE),
+        ["gamecube-adapter-hid"] = (WindowsParser.STATUS_COULD_NOT_INTERPRET, WindowsParser.HIDP_GETCOLDESC_TOP_COLLECTION_USAGE),
+    };
+
+    static void WindowsParse()
+    {
+        Console.WriteLine("\n--- the catalog against Windows' own parser ---");
+        // The loader binds an x64 image. The catalog's bytes are the same on
+        // every architecture, so an x64 run checks them for all.
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        {
+            Console.WriteLine($"  [INFO] not run in a {RuntimeInformation.ProcessArchitecture} process: the loader binds x64 images only");
+            return;
+        }
+        bool loaded = WindowsParser.TryLoad(out string why);
+        Check($"Windows' HID parser loads in this process from {WindowsParser.ImagePath}", loaded, why);
+        if (!loaded) return;
+
+        // ps3-remote as 755bfbc1 wrote it: hid-sony.c's ps3remote_rdesc,
+        // whose Usage Minimum (0x18) and Input (0x80) carry no data byte.
+        // HID 1.11 section 6.2.2.2 gives such an item the value 0, and
+        // hidparse knows neither item without its data byte. The same
+        // device failed its start in S93 with problem status 0xC000001D.
+        const string ps3Remote755 = "05010905a101a102750895018101050919012918142501750195188102c0a10205091829fe1426fe00750895018075089506810105060920142505750895018102c0c0";
+        var bare = WindowsParser.Parse(H(ps3Remote755));
+        Check("a Usage Minimum without its data byte is an item Windows does not know: STATUS_ILLEGAL_INSTRUCTION, HIDP_GETCOLDESC_ITEM_UNKNOWN, item 0x18",
+              bare is { Status: WindowsParser.STATUS_ILLEGAL_INSTRUCTION, ErrorCode: WindowsParser.HIDP_GETCOLDESC_ITEM_UNKNOWN, Arg0: 0x18 }, bare.ToString());
+        var input = WindowsParser.Parse(H(ps3Remote755.Replace("1829fe", "190029fe")));
+        Check("with that Usage Minimum given its byte, the Input item without its data byte is the next unknown item, 0x80",
+              input is { Status: WindowsParser.STATUS_ILLEGAL_INSTRUCTION, ErrorCode: WindowsParser.HIDP_GETCOLDESC_ITEM_UNKNOWN, Arg0: 0x80 }, input.ToString());
+        var both = WindowsParser.Parse(H(ps3Remote755.Replace("1829fe", "190029fe").Replace("950180750895", "95018100750895")));
+        Check("with both items given a data byte of 0, the same descriptor parses", both.Ok, both.ToString());
+
+        var catalog = ProfileDatabase.LoadEmbedded().All;
+        var refused = new List<string>();
+        var asTheDevice = new List<string>();
+        int parsed = 0;
+        foreach (var p in catalog)
+            foreach (var (source, d) in Sources(p))
+            {
+                parsed++;
+                var r = WindowsParser.Parse(d);
+                if (s_refusedAsTheRealDevice.TryGetValue(p.Id, out var want))
+                {
+                    if (r.Status != want.Status || r.ErrorCode != want.Code)
+                        refused.Add($"{p.Id} {source}: {r}, the real device's {want.Status:X8} code 0x{want.Code:X2}");
+                    else asTheDevice.Add($"{p.Id} {source}");
+                }
+                else if (!r.Ok)
+                    refused.Add($"{p.Id} {source}: {r}");
+            }
+        Check($"every catalog report descriptor the SDK serves parses as HID class parses it at the start, on {parsed} descriptors",
+              parsed > 0 && refused.Count == 0, string.Join("; ", refused));
+        Check("the GameCube adapter profiles are refused as their real device is, and no other profile",
+              asTheDevice.Count == s_refusedAsTheRealDevice.Count, string.Join(", ", asTheDevice));
+        Check("the parser called no import this check does not bind", WindowsParser.UnexpectedCalls == 0,
+              $"{WindowsParser.UnexpectedCalls} calls");
+    }
+
     // ── 4: descriptors made by hand ──────────────────────────────────────
 
     static void HandMade()
@@ -548,6 +626,7 @@ internal static class Program
         if (args.Length == 1 && args[0] == "live") return Live.Run();
         Console.WriteLine("=== Report lengths against an independent parser ===");
         Catalog();
+        WindowsParse();
         HandMade();
         DriverValue();
         OtherWalkers();
