@@ -642,9 +642,19 @@ public sealed class HMContext : IDisposable
         finally { Internal.OwnerSweep.CreateGate.ExitReadLock(); }
     }
 
+    /// <summary>The create's steps that act on the machine: the lease, the
+    /// devices and their teardown, and a point after the controller is built.
+    /// usbip_e2e_check's offline create case sets them through reflection to
+    /// drive a create that fails once its controller holds its index, with no
+    /// device. The SDK's own steps, and no hook, outside the probe.</summary>
+    internal static Func<int, string?, string, string, Internal.ControllerLease> AcquireLease = Internal.ControllerLease.Acquire;
+    internal static Func<int, ControllerProfile, DeviceIdentity?, Action<string>?, string?> SetupDevices = Internal.DeviceOrchestrator.SetupController;
+    internal static Action<int, string?> TeardownDevices = Internal.DeviceOrchestrator.TeardownController;
+    internal static Action<HMController>? AfterControllerBuilt;
+
     private HMController CreateUnderLease(int slot, HMProfile profile, string? identityKey)
     {
-        var lease = Internal.ControllerLease.Acquire(slot, identityKey,
+        var lease = AcquireLease(slot, identityKey,
             profile.RequiresUsbipBackend ? "usbip" : "umdf", profile.Id);
         bool keepLease = false;
         try
@@ -660,17 +670,25 @@ public sealed class HMContext : IDisposable
 
             string? instanceId = null;
             long refused = Internal.DeviceManager.LockTakesRefusedHere;
+            // Set once SetupController returns. From then on the index's
+            // devices and sections are this create's, and so is the
+            // controller's hold once its constructor runs.
+            bool setUp = false;
             try
             {
                 // The parent's ID arrives as soon as the parent exists, so a
                 // start that fails after it is torn down by that ID below.
-                instanceId = Internal.DeviceOrchestrator.SetupController(
-                    lease.TransportIndex, profile.Inner, lease.Identity, created: id => instanceId = id);
+                instanceId = SetupDevices(lease.TransportIndex, profile.Inner, lease.Identity, id => instanceId = id);
+                setUp = true;
                 if (instanceId != null)
                     Internal.MachineClaims.SetControllerValue(lease.Identity.Token, "InstanceId", instanceId);
 
                 var controller = new HMController(this, slot, lease, profile, instanceId, identityKey: lease.Identity.Key);
-                try { controller.StartProtocol(); }
+                try
+                {
+                    AfterControllerBuilt?.Invoke(controller);
+                    controller.StartProtocol();
+                }
                 catch
                 {
                     // The controller's output reader and any idle repeat or
@@ -683,12 +701,16 @@ public sealed class HMContext : IDisposable
                 lock (_lock) _controllers[slot] = controller;
                 return controller;
             }
-            catch (Exception e) when (Internal.DeviceOrchestrator.RefusedBeforeDevices(e))
+            catch (Exception e) when (!setUp && Internal.DeviceOrchestrator.RefusedBeforeDevices(e))
             {
                 // SetupController refused before it made a device and took
                 // back what it wrote: a resource another running program
                 // holds. The index's devices and configuration can be
-                // another running program's.
+                // another running program's. Only SetupController's own
+                // refusal: the same exception from anything after it, the
+                // controller's constructor or StartProtocol, goes to the
+                // teardown below, which ends the controller's hold and
+                // unmaps its sections.
                 throw;
             }
             catch
@@ -696,7 +718,7 @@ public sealed class HMContext : IDisposable
                 // Best-effort cleanup of any partial state, then rethrow.
                 // The devices go before the lease below gives their index
                 // and identity back to the machine.
-                try { Internal.DeviceOrchestrator.TeardownController(lease.TransportIndex, instanceId); } catch { }
+                try { TeardownDevices(lease.TransportIndex, instanceId); } catch { }
                 // A create cut short by the exit's bound on the PnP lock keeps
                 // its lease, as a dispose does, so the record names what it
                 // made for the next sweep.

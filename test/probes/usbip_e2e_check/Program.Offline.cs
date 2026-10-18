@@ -45,6 +45,7 @@ internal static partial class Program
         ("pid-dispose", OfflinePidDuringDispose),
         ("stop", OfflineStopThreads),
         ("gate", OfflineCleanupGate),
+        ("create", OfflineCreateRefusedAfterHold),
     };
 
     static int Offline(string? only)
@@ -317,6 +318,95 @@ internal static partial class Program
         Check("under the write side, as the sweep runs it, it releases the mapping", !Mapped(input));
     }
 
+    /// <summary>A create whose controller exists and holds its index, and
+    /// then meets HMResourceInUseException: the type SetupController throws
+    /// when it refuses before it makes a device, which the create rethrows
+    /// without a teardown. Thrown after the constructor, as StartProtocol
+    /// would throw it, the create must still tear down: the hold ends, the
+    /// sections unmap and the output reader stops. The create runs through
+    /// HMContext.CreateUnderLease with its machine steps replaced: a lease
+    /// on a probe index, sections the probe maps for the devices, and a
+    /// teardown that does what TeardownController does first
+    /// (SharedMemoryIO.DestroyController).</summary>
+    static void OfflineCreateRefusedAfterHold(int index)
+    {
+        Console.WriteLine("\n-- A create refused once its controller holds its index --");
+        var t = typeof(HMContext);
+        var acquire = t.GetField("AcquireLease", AnyStatic);
+        var setup = t.GetField("SetupDevices", AnyStatic);
+        var teardown = t.GetField("TeardownDevices", AnyStatic);
+        var built = t.GetField("AfterControllerBuilt", AnyStatic);
+        var create = t.GetMethod("CreateUnderLease", AnyInstance);
+        Check("HMContext has the create's machine steps a check can replace",
+            acquire != null && setup != null && teardown != null && built != null && create != null);
+        if (acquire == null || setup == null || teardown == null || built == null || create == null) return;
+        object?[] saved = { acquire.GetValue(null), setup.GetValue(null), teardown.GetValue(null), built.GetValue(null) };
+        IntPtr input = IntPtr.Zero, ring = IntPtr.Zero;
+        int teardowns = 0;
+        List<Thread> threads = new();
+        Exception? thrown = null;
+        try
+        {
+            acquire.SetValue(null, (Func<int, string?, string, string, ControllerLease>)((slot, key, backend, id) => OfflineLease(index)));
+            setup.SetValue(null, (Func<int, ControllerProfile, DeviceIdentity?, Action<string>?, string?>)((i, p, identity, created) =>
+            {
+                input = OfflineController.Plant("s_inputViews", "s_inputHandles", i, SharedMemoryIO.SHARED_INPUT_SIZE);
+                ring = OfflineController.Plant("s_outputViews", "s_outputHandles", i, SharedMemoryIO.SHARED_OUTPUT_SIZE);
+                SharedMemoryIO.MarkOutputStart(i);
+                return null;
+            }));
+            teardown.SetValue(null, (Action<int, string?>)((i, instanceId) =>
+            {
+                teardowns++;
+                SharedMemoryIO.DestroyController(i);
+            }));
+            built.SetValue(null, (Action<HMController>)(c =>
+            {
+                if (typeof(HMController).GetField("_outputThread", AnyInstance)!.GetValue(c) is Thread o) threads.Add(o);
+                throw new HMResourceInUseException("refused after the controller holds its index", "probe", null);
+            }));
+            var p = ControllerProfile.Parse(Encoding.UTF8.GetBytes(CatalogJson("switch-pro")))!;
+            p.ValidateDeviceModel();
+            var context = (HMContext)RuntimeHelpers.GetUninitializedObject(typeof(HMContext));
+            try { create.Invoke(context, new object?[] { 0, new HMProfile(p), null }); }
+            catch (TargetInvocationException e) { thrown = e.InnerException; }
+        }
+        finally
+        {
+            acquire.SetValue(null, saved[0]);
+            setup.SetValue(null, saved[1]);
+            teardown.SetValue(null, saved[2]);
+            built.SetValue(null, saved[3]);
+        }
+        Check("the create throws the refusal", thrown is HMResourceInUseException, thrown?.GetType().Name ?? "nothing");
+        Check("the controller ran its output reader before the refusal", threads.Count == 1);
+        Check("the create tore down what it made", teardowns == 1, $"{teardowns} teardown(s)");
+        bool held = Held(index);
+        Check("the controller's hold ended", !held);
+        Check("its input and output sections are unmapped", input != IntPtr.Zero && !Mapped(input) && !Mapped(ring));
+        Check("its output reader ended", threads.All(o => !o.IsAlive));
+        // What the old code leaves, so the cases after this one start clean.
+        if (held || teardowns == 0) SharedMemoryIO.DestroyController(index);
+    }
+
+    /// <summary>A lease on <paramref name="index"/> that holds no machine
+    /// claim and wrote no record, so its Dispose has nothing to give back.</summary>
+    static ControllerLease OfflineLease(int index)
+    {
+        var ctor = typeof(ControllerLease).GetConstructor(AnyInstance, new[]
+        {
+            typeof(int), typeof(DeviceIdentity), typeof(Microsoft.Win32.SafeHandles.SafeFileHandle), typeof(Microsoft.Win32.SafeHandles.SafeFileHandle),
+        }) ?? throw new MissingMethodException("ControllerLease's private constructor changed.");
+        return (ControllerLease)ctor.Invoke(new object[]
+        {
+            index, DeviceIdentity.ForIndex(index),
+            new Microsoft.Win32.SafeHandles.SafeFileHandle(IntPtr.Zero, false), new Microsoft.Win32.SafeHandles.SafeFileHandle(IntPtr.Zero, false),
+        });
+    }
+
+    static bool Held(int index) =>
+        (bool)typeof(SharedMemoryIO).GetMethod("IsHeld", AnyStatic)!.Invoke(null, new object[] { index })!;
+
     static bool CleanupRefused(out string how)
     {
         try
@@ -391,13 +481,19 @@ internal static partial class Program
 
         /// <summary>An unnamed pagefile-backed section, mapped and handed to
         /// SharedMemoryIO's caches as its own mapping, so its release unmaps
-        /// it and closes the handle.</summary>
+        /// it and closes the handle. A mark past the bytes the SDK uses tells
+        /// this view from another mapping at its address once it is
+        /// unmapped: a 64 KiB pagefile-backed view of this process's own has
+        /// been seen there.</summary>
         public static IntPtr Plant(string views, string handles, int index, int size)
         {
-            IntPtr h = CreateFileMappingW(new IntPtr(-1), IntPtr.Zero, PAGE_READWRITE, 0, (uint)size, null);
+            IntPtr h = CreateFileMappingW(new IntPtr(-1), IntPtr.Zero, PAGE_READWRITE, 0, (uint)(size + 8), null);
             if (h == IntPtr.Zero) throw new InvalidOperationException($"CreateFileMappingW failed: {Marshal.GetLastWin32Error()}");
             IntPtr v = MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, UIntPtr.Zero);
             if (v == IntPtr.Zero) throw new InvalidOperationException($"MapViewOfFile failed: {Marshal.GetLastWin32Error()}");
+            long mark = Random.Shared.NextInt64() ^ (long)v;
+            Marshal.WriteInt64(v, size, mark);
+            lock (s_planted) s_planted[v] = (size, mark);
             Cache(views)[index] = v;
             Cache(handles)[index] = h;
             return v;
@@ -524,15 +620,27 @@ internal static partial class Program
         return true;
     }
 
-    /// <summary>Whether <paramref name="view"/> is committed memory, as a
-    /// mapped view is and an unmapped one is not.</summary>
-    static bool Mapped(IntPtr view) =>
-        VirtualQuery(view, out var mbi, (UIntPtr)Marshal.SizeOf<MEMORY_BASIC_INFORMATION>()) != UIntPtr.Zero
-        && mbi.State == MEM_COMMIT;
+    static readonly Dictionary<IntPtr, (int Size, long Mark)> s_planted = new();
+
+    /// <summary>Whether the section this probe planted at
+    /// <paramref name="view"/> is still mapped there: committed memory of a
+    /// mapped view based at that address, carrying the plant's mark. An
+    /// unmapped view's range can hold another mapping at once.</summary>
+    static bool Mapped(IntPtr view)
+    {
+        if (VirtualQuery(view, out var mbi, (UIntPtr)Marshal.SizeOf<MEMORY_BASIC_INFORMATION>()) == UIntPtr.Zero
+            || mbi.State != MEM_COMMIT || mbi.Type != MEM_MAPPED || mbi.AllocationBase != view)
+            return false;
+        (int Size, long Mark) plant;
+        lock (s_planted)
+            if (!s_planted.TryGetValue(view, out plant)) return true;
+        return (ulong)mbi.RegionSize >= (ulong)plant.Size + 8 && Marshal.ReadInt64(view, plant.Size) == plant.Mark;
+    }
 
     const uint PAGE_READWRITE = 0x04;
     const uint FILE_MAP_ALL_ACCESS = 0xF001F;
     const uint MEM_COMMIT = 0x1000;
+    const uint MEM_MAPPED = 0x40000;
     const uint QuietErrorMode = 0x0001 | 0x0002 | 0x8000; // SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SEM_NOOPENFILEERRORBOX
 
     [StructLayout(LayoutKind.Sequential)]
