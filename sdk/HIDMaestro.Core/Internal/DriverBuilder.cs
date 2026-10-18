@@ -656,8 +656,9 @@ public static class DriverBuilder
     {
         _ = rebuild; // intentionally unused
         // v1.13.0: every deploy goes through the machine-wide policy and its
-        // lock (DriverDeploy): never a downgrade, never an upgrade under a
-        // running program's controllers.
+        // lock (DriverDeploy): never a downgrade, and an older driver gives
+        // way to this release's, installed outright when nothing runs on it
+        // and added beside it while a program's controllers do.
         DriverDeploy.Run();
         return true;
     }

@@ -372,26 +372,4 @@ internal static partial class DriverDeploy
                 + (ownHeld ? ", and this program's own controllers" : "");
         return census.Devices.Count == 0 && others == 0 && !ownHeld;
     }
-
-    private static List<string> Describe(List<OwnerCensus.DeviceGroup> holders)
-    {
-        var list = new List<string>();
-        foreach (var g in holders)
-        {
-            string node = g.InstanceIds.OrderBy(id => id.StartsWith(@"ROOT\", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
-                .FirstOrDefault() ?? g.Key;
-            string who = g.Owner switch
-            {
-                OwnerCensus.Owner.Self => "this program",
-                OwnerCensus.Owner.Live when g.Record != null => MachineClaims.Describe(g.Record),
-                // Claimed now by a program on this release that no record
-                // names yet: a create in flight, or a sweep removing it.
-                OwnerCensus.Owner.Live => "a running program",
-                OwnerCensus.Owner.LiveLegacy => "a running program built on HIDMaestro 1.12.0",
-                _ => "a program built on HIDMaestro older than 1.12.0, which may still be running",
-            };
-            list.Add($"{node} ({who})");
-        }
-        return list;
-    }
 }

@@ -35,6 +35,14 @@ internal static class Deploy
         Section(c, "the deploy lock", LockHandle);
         Section(c, "what HMDriverVersionException says", Cases);
         Section(c, "a refused create", RefusedCreate);
+        // The deploy refuses no holder (decision (c)), so the list of holders
+        // that refusal named went with it. Until this check DriverDeploy
+        // still carried Describe, with no caller.
+        c.Run("DriverDeploy carries no holder list for a refusal it no longer makes", () =>
+        {
+            var m = typeof(DriverDeploy).GetMethod("Describe", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+            return (m == null, m == null ? "none" : m.ToString()!);
+        });
         return c.Failures;
     }
 

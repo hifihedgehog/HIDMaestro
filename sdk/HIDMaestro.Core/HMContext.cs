@@ -211,11 +211,11 @@ public sealed class HMContext : IDisposable
         HMBuildInfo.ThrowIfMissing(HMPayload.Driver);
 
         // Devices of programs that have exited go first: a device bound to
-        // the old INF keeps pnputil from replacing the package, and a
-        // driver upgrade below needs nothing left on it. Only provably dead
-        // owners' devices are removed. A running program's controllers,
-        // this one's included, stay, and the deploy below keeps the
-        // installed driver for them.
+        // the old INF keeps pnputil from replacing the package. Only
+        // provably dead owners' devices are removed. A running program's
+        // controllers, this one's included, stay. When they run on an older
+        // driver, the deploy below adds this release's packages beside it,
+        // and those devices keep the binary they loaded until they restart.
         Internal.OwnerSweep.ReclaimDeadOwners();
 
         LastDriverInstall = Internal.DriverDeploy.Run();
