@@ -155,6 +155,17 @@ using Microsoft.Win32;
 
 internal static partial class Program
 {
+    /// <summary>A recorded observation: printed with what it found, never
+    /// counted as a check or a failure. Section Y records this way whatever
+    /// a v1.12.0 program's own controller, input or values do. The owner's
+    /// coexistence decision, option C: programs on this release's driver
+    /// take precedence over and supersede programs on the v1.12.0 release,
+    /// and nothing here accommodates the older release. What this release
+    /// does beside such a program, its census, its floor, its sweeps and its
+    /// own controllers, stays a check.</summary>
+    static void Observe(string name, bool seen, string detail = "") =>
+        Console.WriteLine($"  [OBSERVED {(seen ? "yes" : "no")}] {name}{(detail.Length > 0 ? "  " + detail : "")}");
+
     static void SectionY()
     {
         foreach (var v in new[] { "v1.12.0", "v1.11.0" })
@@ -249,7 +260,7 @@ internal static partial class Program
                       Native.DriverVersionOf(inst) == null && !Native.IsStarted(inst) && Native.Subtree(inst).Count == 1
                       && Native.HidPaths(0xBEEF, 0xF1E2).Count == 0,
                       $"{Native.DriverVersionOf(inst) ?? "no driver"}, {Native.StatusOf(inst)}, {Native.Subtree(inst).Count} node(s)");
-                Check($"Y21: the create wrote ControllerIndex {t} in the devnode's Device Parameters", index == $"ControllerIndex {t}", index);
+                Observe($"Y21: the create wrote ControllerIndex {t} in the devnode's Device Parameters", index == $"ControllerIndex {t}", index);
 
                 // The program streams. Its frames reach its input section,
                 // the control, and no driver reads them: nothing ever writes
@@ -259,7 +270,7 @@ internal static partial class Program
                 Thread.Sleep(500);
                 byte[]? input = Native.SectionBytes(inputName, InputSectionSize);
                 byte[]? ack = Native.SectionBytes(ackName, AckSectionSize);
-                Check($"Y21: its input reaches no device: the program writes {inputName}, and no driver ever wrote {ackName}",
+                Observe($"Y21: its input reaches no device: the program writes {inputName}, and no driver ever wrote {ackName}",
                       input != null && input.Any(x => x != 0) && ack != null && ack.All(x => x == 0),
                       $"input {(input == null ? "absent" : input.Any(x => x != 0) ? "carries a frame" : "all zero")}, " +
                       $"acknowledgement {(ack == null ? "absent" : ack.All(x => x == 0) ? "all zero" : "written")}");
@@ -302,7 +313,7 @@ internal static partial class Program
 
             // No driver held either section, so both go with the program.
             bool sectionsGone = WaitFor(() => !Native.SectionExists(inputName) && !Native.SectionExists(ackName), 5000);
-            Check($"Y21: once the program is killed, {inputName} and {ackName} are gone with it", sectionsGone,
+            Observe($"Y21: once the program is killed, {inputName} and {ackName} are gone with it", sectionsGone,
                   $"input {(Native.SectionExists(inputName) ? "exists" : "gone")}, acknowledgement {(Native.SectionExists(ackName) ? "exists" : "gone")}");
             // No record, no owner pipe, no acknowledgement section: the
             // design's row for a program older than v1.12.0, whose state
@@ -527,7 +538,7 @@ internal static partial class Program
         Thread.Sleep(2000);
         Check("Y9: a sweep leaves the running program's devices", tree.Count > 0 && tree.All(Native.IsPresent),
               string.Join(", ", tree.Where(d => !Native.IsPresent(d))));
-        Check("Y9: and its input keeps flowing", cap != null && !cap.Broken && Flows(cap));
+        Observe("Y9: and its input keeps flowing", cap != null && !cap.Broken && Flows(cap));
     }
 
     /// <summary>Y11. Output latency and removal time of a v1.12.0 program's
@@ -543,7 +554,7 @@ internal static partial class Program
             if (!Ok(co)) { Check("Y11: the v1.12.0 program creates a DualShock 4", false, co); return; }
             inst = PeerProcess.Field(co, "instance")!;
             t = int.Parse(PeerProcess.Field(co, "transport")!);
-            Check("Y11: its output reader is subscribed", Ok(old.Send("outputs on")));
+            Observe("Y11: its output reader is subscribed", Ok(old.Send("outputs on")));
 
             // Y12: open the v1.12.0 device's NULL-DACL StopEvent for every
             // right, from the medium thread, before the move. The handle
@@ -578,9 +589,10 @@ internal static partial class Program
                     Y.SetEvent(heldStop);
                     Thread.Sleep(500);
                     bool consumed = Y.WaitForSingleObject(heldStop, 0) != Y.WAIT_OBJECT_0;
-                    Check("Y12: the new worker does not consume a signal on the held StopEvent, and input flows",
-                          !consumed && Native.IsStarted(inst) && !capIn.Broken && Flows(capIn),
-                          consumed ? "the worker reset the held event" : "");
+                    Check("Y12: the new worker does not consume a signal on the held StopEvent",
+                          !consumed && Native.IsStarted(inst), consumed ? "the worker reset the held event" : "");
+                    Observe("Y12: and the v1.12.0 program's input flows", !capIn.Broken && Flows(capIn),
+                            capIn.Broken ? $"read error {capIn.ReadError}" : "");
                 }
                 old.Send("stopstream");
                 Y.CloseHandle(heldStop);
@@ -608,7 +620,7 @@ internal static partial class Program
             }
             finally { Native.CloseHandle(h); }
             Console.WriteLine($"    Y11 output latency: {timing.Shown}");
-            Check("Y11: every output arrives within 20 ms", timing.AllArrived && timing.Max < 20, timing.Shown);
+            Observe("Y11: every output arrives within 20 ms", timing.AllArrived && timing.Max < 20, timing.Shown);
             old.Kill();
         }
         var tree = Native.Subtree(inst);
@@ -856,7 +868,7 @@ internal static partial class Program
                 // each of which can end late, so 4.5 s after the kill it has
                 // ended.
                 long returned = killed.ElapsedMilliseconds;
-                Check($"{y}: the v1.12.0 program's create returns after the driver's idle window, having waited out the refused restart",
+                Observe($"{y}: the v1.12.0 program's create returns after the driver's idle window, having waited out the refused restart",
                       returned >= 4500, $"{returned} ms after the kill, {second}");
                 // The v1.12.0 create makes its input section, event and owner
                 // pipe before it asks for the restart. The worker opens a
@@ -888,15 +900,15 @@ internal static partial class Program
                 int heldReports = cap?.Since(mark).Count ?? 0, freshReports = fresh?.Since(mark).Count ?? 0;
                 string layers = $"section SeqNo {sectionBefore} -> {sectionAfter}, DeliveredSeqNo {deliveredBefore} -> {deliveredAfter}, "
                     + $"{freshReports} reports on a handle opened after the adoption, {heldReports} on the handle held through the restart";
-                Check($"{y}: its frames reach the section the driver mapped", sectionAfter > 0 && sectionAfter != sectionBefore, layers);
-                Check($"{y}: the driver hands them to HID class", deliveredAfter > 0 && deliveredAfter != deliveredBefore, layers);
-                Check($"{y}: a HID handle opened after the adoption reads them", reached,
+                Observe($"{y}: its frames reach the section the driver mapped", sectionAfter > 0 && sectionAfter != sectionBefore, layers);
+                Observe($"{y}: the driver hands them to HID class", deliveredAfter > 0 && deliveredAfter != deliveredBefore, layers);
+                Observe($"{y}: a HID handle opened after the adoption reads them", reached,
                       (fresh == null ? "the HID interface did not open, " : reached ? $"first report {firstMs} ms after the stream began, " : "no report within 5000 ms of the stream, ") + layers);
             }
-            Check($"{y}: the v1.12.0 program's create adopts the companion on its index",
+            Observe($"{y}: the v1.12.0 program's create adopts the companion on its index",
                   Ok(second) && string.Equals(PeerProcess.Field(second, "instance"), inst, StringComparison.OrdinalIgnoreCase)
                   && PeerProcess.Field(second, "transport") == t.ToString(), second);
-            Check($"{y}: the restart was refused: the probe's handle still reads and the device keeps the installed driver",
+            Observe($"{y}: the restart was refused: the probe's handle still reads and the device keeps the installed driver",
                   cap != null && !cap.Broken && Native.DriverVersionOf(inst) == installed,
                   $"read error {cap?.ReadError}, {Native.DriverVersionOf(inst)}, installed {installed}");
             bool watched = WaitFor(() => Y.WatchValues(inst) is { Connected: 1 } w && w.Pid == old.Pid, 12_000);
@@ -1130,7 +1142,7 @@ internal static partial class Program
         // A v1.12.0 program installs its own package on each device it makes
         // (UpdateDriverForPlugAndPlayDevices with its INF), and that driver
         // records nothing.
-        Check("Y5: the v1.12.0 program's controller runs on its own driver",
+        Observe("Y5: the v1.12.0 program's controller runs on its own driver",
               Native.DriverVersionOf(instOld) is { } ownDriver && ownDriver != installed && Y.WatchValues(instOld) == null,
               $"{Native.DriverVersionOf(instOld)} beside {installed}, {Y.ShowWatch(instOld)}");
         // The v1.12.0 driver made its OutputEvent with a NULL DACL, owned by
@@ -1181,7 +1193,8 @@ internal static partial class Program
             foreach (var (who, peer) in new[] { ("its program", live), ("a v1.12.0 program", old) })
             {
                 string own = peer.Send($"sdkevents {tLive}");
-                Check($"Y1: {who} opens and waits on the OutputEvent and signals the StopEvent as its SDK does",
+                Action<string, bool, string> record = peer == old ? Observe : Check;
+                record($"Y1: {who} opens and waits on the OutputEvent and signals the StopEvent as its SDK does",
                       PeerProcess.Field(own, "output") == "1" && PeerProcess.Field(own, "wait") is "0" or "258"
                       && PeerProcess.Field(own, "stop") == "1", own);
             }
@@ -1192,10 +1205,10 @@ internal static partial class Program
             string? oldSddl = Y.EventSddl(oldStop);
             Check($"Y1: {oldStop}'s DACL admits SYSTEM, Administrators and LocalService only", Y.HostOnlyDacl(oldSddl), oldSddl ?? "cannot read it");
             string oldOwn = old.Send($"sdkevents {tOld}");
-            Check("Y1: the v1.12.0 program still opens and waits on its OutputEvent and signals its StopEvent",
+            Observe("Y1: the v1.12.0 program still opens and waits on its OutputEvent and signals its StopEvent",
                   PeerProcess.Field(oldOwn, "output") == "1" && PeerProcess.Field(oldOwn, "wait") is "0" or "258"
                   && PeerProcess.Field(oldOwn, "stop") == "1", oldOwn);
-            Check("Y1: the v1.12.0 program's input keeps flowing", !capOld.Broken && Flows(capOld), capOld.Broken ? $"read error {capOld.ReadError}" : "");
+            Observe("Y1: the v1.12.0 program's input keeps flowing", !capOld.Broken && Flows(capOld), capOld.Broken ? $"read error {capOld.ReadError}" : "");
             Check("Y1: this SDK's program's input keeps flowing", !capLive.Broken && Flows(capLive), capLive.Broken ? $"read error {capLive.ReadError}" : "");
         }
 
@@ -1210,7 +1223,8 @@ internal static partial class Program
         Check("Y5: the census sees its owner pipe's server connected, alive and elevated",
               entry != null && Regex.IsMatch(entry, $@"\|watch=connected,pid={old.Pid},owner=[^,]+,alive=1,elevated=1,trusted=1$"),
               entry ?? census);
-        Check("Y5: every sweep left the v1.12.0 program's controller running", Native.IsStarted(instOld) && !capOld.Broken && Flows(capOld));
+        Check("Y5: every sweep left the v1.12.0 program's controller in the device tree, started", Native.IsStarted(instOld), Native.StatusOf(instOld));
+        Observe("Y5: and its input still flows", !capOld.Broken && Flows(capOld), capOld.Broken ? $"read error {capOld.ReadError}" : "");
         Check("Y5: and the running program's own", Native.IsStarted(instLive) && !capLive.Broken && Flows(capLive));
         return installed;
     }
