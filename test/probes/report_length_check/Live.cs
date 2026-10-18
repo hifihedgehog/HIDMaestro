@@ -46,8 +46,10 @@ internal static partial class Live
             Persona(ctx, "logitech-wingman-formula-gp", (p, c) =>
             {
                 var st = new HMGamepadState { Axes = new Dictionary<HMAxis, float> { [HMAxis.X] = 0.2f, [HMAxis.Y] = 0.8f } };
-                // Y is 8 bits at bit 16 of the 5-byte report: 0.8 of 255.
-                return (st, r => r.Length >= 5 && r[2] == 204, "the 5-byte report with Y 204 at byte 2");
+                // Y is 8 bits at bit 16 of the 5-byte report: 0.8 of 255. The
+                // report has no ID, so HID class hands it over after a zero
+                // ID byte, as xbox-360-flight-stick's below.
+                return (st, r => r.Length == 6 && r[0] == 0 && r[3] == 204, "the 5-byte report after HID class's zero ID byte, with Y 204 at its byte 2");
             });
             CapturedDescriptors(ctx);
         }
@@ -88,9 +90,12 @@ internal static partial class Live
             var wait = Stopwatch.StartNew();
             while (keyboard == IntPtr.Zero && wait.ElapsedMilliseconds < 15000)
             {
+                // By the collection's HID attributes, as kbm_live_check finds
+                // its keyboards: a device on ROOT\HIDClass has no VID or PID
+                // in its path.
                 keyboard = RawInputSink.Devices()
                     .Where(d => d.Type == RawInputSink.RIM_TYPEKEYBOARD && !keyboardsBefore.Contains(d.Handle)
-                                && d.Name.Contains("VID_045E&PID_0806", StringComparison.OrdinalIgnoreCase))
+                                && RawInputSink.Attributes(d.Name) is { } a && a.Vid == kbp.VendorId && a.Pid == kbp.ProductId)
                     .Select(d => d.Handle).FirstOrDefault();
                 if (keyboard == IntPtr.Zero) Thread.Sleep(100);
             }
