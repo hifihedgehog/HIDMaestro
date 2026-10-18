@@ -112,6 +112,22 @@ internal static class Resolve
             }
             catch (InvalidOperationException e) { return (false, e.Message); }
         });
+        // An identity default's keys match finds a profile key by the name
+        // its JSON gives it, read from the type rather than the context's
+        // metadata. The two give one set of names, each for one property.
+        // The context also lists the ignored properties, with no getter,
+        // which a keys match never read.
+        c.Run("an identity default's keys name the profile's keys as its JSON context does", () =>
+        {
+            var context = HMJsonContext.Default.ControllerProfile.Properties.Where(x => x.Get != null)
+                .ToDictionary(x => x.Name, x => x.AttributeProvider as System.Reflection.PropertyInfo, StringComparer.OrdinalIgnoreCase);
+            var mine = ProfileKeys.All;
+            var missing = context.Keys.Where(k => !mine.ContainsKey(k)).ToList();
+            var extra = mine.Keys.Where(k => !context.ContainsKey(k)).ToList();
+            var other = context.Where(kv => mine.TryGetValue(kv.Key, out var pi) && pi != kv.Value).Select(kv => kv.Key).ToList();
+            return (missing.Count == 0 && extra.Count == 0 && other.Count == 0 && context.Count > 0,
+                    $"{context.Count} keys, missing {string.Join(",", missing)}, extra {string.Join(",", extra)}, other property {string.Join(",", other)}");
+        });
         c.Run("no catalog profile takes a group from an identity default", () =>
         {
             var hits = ctx.AllProfiles.Where(p => Sources(p).Values.Any(s => s.StartsWith("identity:", StringComparison.Ordinal)))

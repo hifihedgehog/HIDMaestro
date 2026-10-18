@@ -496,17 +496,11 @@ internal sealed class ModelRegistry
         if (m.Connection != null && !string.Equals(m.Connection, p.Connection, StringComparison.OrdinalIgnoreCase)) return false;
         if (m.Keys is { Count: > 0 })
         {
-            // Each key's value as the profile's JSON writes it, read through
-            // the key's own property alone: serializing the whole profile
-            // for every entry cost the catalog's load about 13 ms.
-            var info = HMJsonContext.Default.ControllerProfile;
             foreach (var (key, want) in m.Keys)
             {
-                var prop = info.Properties.FirstOrDefault(x => string.Equals(x.Name, key, StringComparison.OrdinalIgnoreCase));
-                object? value = prop?.Get?.Invoke(p);
-                if (value == null) return false;
-                var have = JsonSerializer.SerializeToNode(value, HMJsonContext.Default.GetTypeInfo(prop!.PropertyType)!);
-                if (have == null || !JsonNode.DeepEquals(have, JsonNode.Parse(want.GetRawText()))) return false;
+                var prop = ProfileKeys.Find(key);
+                object? value = prop?.GetValue(p);
+                if (value == null || !ProfileKeys.Holds(value, prop!.PropertyType, want)) return false;
             }
         }
         if (m.TextContains != null)
@@ -679,6 +673,51 @@ internal sealed class ModelRegistry
         var (models, tables) = s_embedded.Value;
         return new ModelRegistry(models, tables, id => ProfileDatabase.EmbeddedProfile(id));
     }, System.Threading.LazyThreadSafetyMode.ExecutionAndPublication);
+}
+
+/// <summary>A profile's keys as its JSON names them, for an identity
+/// default's <c>keys</c> match. The names are the context's (a
+/// <see cref="JsonPropertyNameAttribute"/>, else the camel-case name, any
+/// case, ignored properties left out), read from the type, since the
+/// context's metadata for the whole profile cost a program's first Build
+/// about 30 ms. profile_model_check holds the two to one set of names.</summary>
+internal static class ProfileKeys
+{
+    private static readonly Dictionary<string, PropertyInfo> s_byName = Read();
+
+    private static Dictionary<string, PropertyInfo> Read()
+    {
+        var byName = new Dictionary<string, PropertyInfo>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pi in typeof(ControllerProfile).GetProperties(BindingFlags.Public | BindingFlags.Instance))
+        {
+            if (pi.GetMethod is not { IsPublic: true } || pi.GetIndexParameters().Length > 0) continue;
+            if (pi.GetCustomAttribute<JsonIgnoreAttribute>() is { Condition: JsonIgnoreCondition.Always }) continue;
+            string name = pi.GetCustomAttribute<JsonPropertyNameAttribute>()?.Name
+                          ?? JsonNamingPolicy.CamelCase.ConvertName(pi.Name);
+            byName.TryAdd(name, pi);
+        }
+        return byName;
+    }
+
+    /// <summary>Every key and its property, for the check that holds them
+    /// to the context's.</summary>
+    internal static IReadOnlyDictionary<string, PropertyInfo> All => s_byName;
+
+    internal static PropertyInfo? Find(string key) => s_byName.TryGetValue(key, out var pi) ? pi : null;
+
+    /// <summary>Whether a value is the one the JSON writes, as the context
+    /// writes the value. A true or false and a string compare as they
+    /// stand, and any other value as the context serializes it.</summary>
+    internal static bool Holds(object value, Type type, JsonElement want)
+    {
+        switch (value)
+        {
+            case bool b: return want.ValueKind == (b ? JsonValueKind.True : JsonValueKind.False);
+            case string s: return want.ValueKind == JsonValueKind.String && want.ValueEquals(s);
+        }
+        var have = JsonSerializer.SerializeToNode(value, HMJsonContext.Default.GetTypeInfo(type)!);
+        return have != null && JsonNode.DeepEquals(have, JsonNode.Parse(want.GetRawText()));
+    }
 }
 
 /// <summary>The checks a device model's keys meet, the profile's own when
