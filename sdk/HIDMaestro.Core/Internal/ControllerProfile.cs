@@ -341,6 +341,21 @@ public sealed class ControllerProfile
         DeviceModelGroups groups;
         try { groups = ProfilePrograms.Read(ProfilePrograms.WithoutBom(utf8)); }
         catch (Programs.FormException e) { throw new InvalidOperationException(e.ForProfile(Id), e); }
+        TakeModelGroups(groups);
+    }
+
+    /// <summary><see cref="ReadModelGroups(ReadOnlyMemory{byte})"/> from a
+    /// document already parsed.</summary>
+    internal void ReadModelGroups(JsonElement root)
+    {
+        DeviceModelGroups groups;
+        try { groups = ProfilePrograms.Read(root); }
+        catch (Programs.FormException e) { throw new InvalidOperationException(e.ForProfile(Id), e); }
+        TakeModelGroups(groups);
+    }
+
+    private void TakeModelGroups(DeviceModelGroups groups)
+    {
         Protocol = groups.Protocol;
         StateBlock = groups.StateBlock;
         InputReports = groups.InputReports;
@@ -1758,16 +1773,26 @@ public sealed class ProfileDatabase
     /// spells it.</summary>
     private readonly Dictionary<ControllerProfile, string> _texts = new(ReferenceEqualityComparer.Instance);
 
-    /// <summary>Reads one profile file strictly and runs the load checks.</summary>
+    /// <summary>Reads one profile file strictly and runs the load checks.
+    /// The text is parsed once: a file that can hold a model group is read
+    /// into one document, which gives the profile and the groups, and any
+    /// other file is read straight into the profile.</summary>
     internal static Parsed Parse(string file, string text)
     {
         ControllerProfile? profile;
+        JsonDocument? doc = null;
         try
         {
-            profile = JsonSerializer.Deserialize(text, HMJsonContext.Default.ControllerProfile);
+            if (MayHoldModelGroup(text))
+            {
+                doc = JsonDocument.Parse(text, ProfilePrograms.DocumentOptions);
+                profile = doc.RootElement.Deserialize(HMJsonContext.Default.ControllerProfile);
+            }
+            else profile = JsonSerializer.Deserialize(text, HMJsonContext.Default.ControllerProfile);
         }
         catch (Exception e)
         {
+            doc?.Dispose();
             // A JSON file with no id is not a profile, whatever else it
             // carries: the catalog's folder keeps descriptor collections
             // beside the profiles. Anything a converter throws refuses this
@@ -1779,27 +1804,46 @@ public sealed class ProfileDatabase
             return new Parsed(file, null, new HIDMaestro.HMProfileLoadIssue(
                 file, id, ProfileDefects.Spell(text, path), reason, HIDMaestro.HMProfileLoadIssueKind.Refused));
         }
-        if (profile == null || string.IsNullOrEmpty(profile.Id))
-            return new Parsed(file, null, NotAProfile(file));
-        profile.SourceFile = file;
-        try
+        using (doc)
         {
-            // The model groups come from the shared parse, as
-            // ControllerProfile.Parse reads them, and a refusal of theirs is
-            // listed at its path like any other.
-            profile.ReadModelGroups(System.Text.Encoding.UTF8.GetBytes(text));
-            profile.ValidateAtLoad();
-        }
-        catch (Exception e)
-        {
-            // A check that fails on this file's content, in whatever way,
-            // refuses this file and never the load.
-            var (path, reason) = ProfileDefects.LocateAny(e);
-            return new Parsed(file, null, new HIDMaestro.HMProfileLoadIssue(
-                file, profile.Id, ProfileDefects.Spell(text, path), reason, HIDMaestro.HMProfileLoadIssueKind.Refused));
+            if (profile == null || string.IsNullOrEmpty(profile.Id))
+                return new Parsed(file, null, NotAProfile(file));
+            profile.SourceFile = file;
+            try
+            {
+                // The model groups come from the shared parse, as
+                // ControllerProfile.Parse reads them, and a refusal of theirs
+                // is listed at its path like any other.
+                if (doc != null) profile.ReadModelGroups(doc.RootElement);
+                profile.ValidateAtLoad();
+            }
+            catch (Exception e)
+            {
+                // A check that fails on this file's content, in whatever way,
+                // refuses this file and never the load.
+                var (path, reason) = ProfileDefects.LocateAny(e);
+                return new Parsed(file, null, new HIDMaestro.HMProfileLoadIssue(
+                    file, profile.Id, ProfileDefects.Spell(text, path), reason, HIDMaestro.HMProfileLoadIssueKind.Refused));
+            }
         }
         return new Parsed(file, profile, null, text);
     }
+
+    /// <summary>Whether the shared parse can find anything in this text: a
+    /// group key in quotes, written in any case, as the parse refuses a case
+    /// variant and a protocol under usbConfiguration, or an escape, which
+    /// can spell a key. Text with none of them holds no group, so the parse
+    /// would read nothing and refuse nothing. The quotes keep a longer key
+    /// out, such as inputReportSize.</summary>
+    private static bool MayHoldModelGroup(string text)
+    {
+        if (text.Contains("\\u", StringComparison.Ordinal)) return true;
+        foreach (string key in s_quotedGroupKeys)
+            if (text.Contains(key, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
+    private static readonly string[] s_quotedGroupKeys = ProfilePrograms.GroupKeys.Select(k => "\"" + k + "\"").ToArray();
 
     private static HIDMaestro.HMProfileLoadIssue NotAProfile(string file) =>
         new(file, null, "$.id", "the file has no id, so it is not a profile", HIDMaestro.HMProfileLoadIssueKind.NotAProfile);

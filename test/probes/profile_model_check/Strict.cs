@@ -193,6 +193,18 @@ internal static class Strict
         return json[..at] + "\"ID\":" + json[(at + 5)..];
     }
 
+    /// <summary>A profile whose inputReports key is written
+    /// <c>\u0069nputReports</c>, the one escape in its text, with
+    /// input reports and no state block.</summary>
+    internal static string EscapedKey()
+    {
+        var o = BaseJson();
+        o["id"] = "user-escaped-key";
+        o["inputReports"] = JsonNode.Parse("[{\"name\":\"r\",\"reportId\":\"0x01\",\"size\":8,\"send\":\"clock\",\"program\":[]}]");
+        string text = o.ToJsonString(new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
+        return text.Replace("\"inputReports\"", "\"\\u0069nputReports\"", StringComparison.Ordinal);
+    }
+
     static List<Case> Cases()
     {
         string extended = "\"extendedReport\":{\"reportId\":\"0x01\",\"size\":8,\"fields\":[]}";
@@ -247,6 +259,11 @@ internal static class Strict
             new("i-no-usb-configuration.json", Catalog("nintendo/switch2-pro-composite.json", "user-no-usb-configuration",
                 o => o.Remove("usbConfiguration")), "user-no-usb-configuration",
                 "Refused", "$.usbConfiguration", "is required for the usbip backend"),
+            // The same group with its key spelled through an escape, which
+            // the reader decodes, in a file with no other escape: the load
+            // still reads the group.
+            new("i-escaped-key.json", EscapedKey(), "user-escaped-key",
+                "Refused", "$.inputReports", "needs a stateBlock"),
             new("j-good.json", WithId("user-good"), null, null, null, null),
         };
     }
@@ -269,6 +286,8 @@ internal static class Strict
         try
         {
             var cases = Cases();
+            c.Check("i-escaped-key.json's text holds one escape, its key's",
+                    EscapedKey().Split("\\u").Length == 2 && EscapedKey().Contains("\\u0069nputReports", StringComparison.Ordinal));
             foreach (var k in cases) File.WriteAllText(Path.Combine(dir, k.File), k.Text);
             // A models folder holds models, never profiles: a named model
             // there loads as one, and nothing in it becomes a profile.
