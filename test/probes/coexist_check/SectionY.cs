@@ -97,8 +97,11 @@
 //        it streams after that window has ended and the driver has dropped
 //        the dead program's section. Before the program sends a frame, the
 //        driver maps its section again and watches its pipe: the map is the
-//        only place the driver opens a watch without input. Its input then
-//        reaches the device.
+//        only place the driver opens a watch without input. Its frames then
+//        reach the section, the driver hands them to HID class (the
+//        acknowledgement section's DeliveredSeqNo), and a HID handle opened
+//        after the adoption reads them. The probe's own handle, held through
+//        the refused restart, is reported beside them.
 //    Y19. Y13's squatter, holding the acknowledgement section as well, and
 //        then the dead program's device is added again, so a new driver
 //        context starts with no values. The section still carries the
@@ -864,12 +867,31 @@ internal static partial class Program
                 bool mapped = WaitFor(() => Y.WatchValues(inst) is { Connected: 1 } w && w.Pid == old.Pid, 2000);
                 Check($"{y}: before the program sends a frame, the driver maps its section again and watches its pipe",
                       mapped, Y.ShowWatch(inst) + $", program {old.Pid}, {killed.ElapsedMilliseconds} ms after the kill");
-                long mark = cap?.Mark() ?? 0;
+                // Three layers, read in the same window: the program's
+                // frames in the input section, the driver's hand-off to HID
+                // class (DeliveredSeqNo, which the driver writes only when it
+                // completes a HID read), and a HID handle opened now. XInput
+                // lost its slot at the refused restart (v1.12.0's "XInput
+                // slot wait: before=1 after=0"), so the handle the probe held
+                // through it is reported, not judged.
+                int SeqOf(string section) => Native.SectionBytes(section, 4) is { } b ? BitConverter.ToInt32(b, 0) : -1;
+                string inputName = $@"Global\HIDMaestroInput{t}", ackName = $@"Global\HIDMaestroInputAck{t}";
+                using var fresh = cap != null ? HidCapture.Open(cap.Path) : null;
+                int sectionBefore = SeqOf(inputName), deliveredBefore = SeqOf(ackName);
+                long mark = Stopwatch.GetTimestamp();
                 old.Send("stream 1 0.5 250 1");
                 var toFirst = Stopwatch.StartNew();
-                bool reached = cap != null && WaitFor(() => cap.Since(mark).Count > 0, 5000);
-                Check($"{y}: its input reaches the device through that map", reached,
-                      reached ? $"first report {toFirst.ElapsedMilliseconds} ms after the stream began" : "no report within 5000 ms of the stream");
+                bool reached = fresh != null && WaitFor(() => fresh.Since(mark).Count > 0, 5000);
+                long firstMs = toFirst.ElapsedMilliseconds;
+                Thread.Sleep(200);
+                int sectionAfter = SeqOf(inputName), deliveredAfter = SeqOf(ackName);
+                int heldReports = cap?.Since(mark).Count ?? 0, freshReports = fresh?.Since(mark).Count ?? 0;
+                string layers = $"section SeqNo {sectionBefore} -> {sectionAfter}, DeliveredSeqNo {deliveredBefore} -> {deliveredAfter}, "
+                    + $"{freshReports} reports on a handle opened after the adoption, {heldReports} on the handle held through the restart";
+                Check($"{y}: its frames reach the section the driver mapped", sectionAfter > 0 && sectionAfter != sectionBefore, layers);
+                Check($"{y}: the driver hands them to HID class", deliveredAfter > 0 && deliveredAfter != deliveredBefore, layers);
+                Check($"{y}: a HID handle opened after the adoption reads them", reached,
+                      (fresh == null ? "the HID interface did not open, " : reached ? $"first report {firstMs} ms after the stream began, " : "no report within 5000 ms of the stream, ") + layers);
             }
             Check($"{y}: the v1.12.0 program's create adopts the companion on its index",
                   Ok(second) && string.Equals(PeerProcess.Field(second, "instance"), inst, StringComparison.OrdinalIgnoreCase)
