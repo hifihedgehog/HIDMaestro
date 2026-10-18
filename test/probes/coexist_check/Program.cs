@@ -782,7 +782,12 @@ internal static partial class Program
         Directory.CreateDirectory(dir);
         foreach (var f in Directory.GetFiles(staging)) File.Copy(f, Path.Combine(dir, Path.GetFileName(f)));
         foreach (var f in Directory.GetFiles(dir, "*.cat")) File.Delete(f);
-        const string version = "1.99.0.0";
+        // One major version above the staged driver's own, so the package is
+        // newer whatever this release's version is.
+        var own = Regex.Match(File.ReadAllText(Path.Combine(dir, "hidmaestro.inf")),
+            @"(?m)^DriverVer\s*=\s*\d{2}/\d{2}/\d{4}\s*,\s*(\d+)\.");
+        if (!own.Success) throw new InvalidOperationException("the staged hidmaestro.inf has no DriverVer");
+        string version = $"{int.Parse(own.Groups[1].Value) + 1}.0.0.0";
         foreach (var inf in new[] { "hidmaestro.inf", "hidmaestro_xusb.inf" })
         {
             string p = Path.Combine(dir, inf);
@@ -1048,9 +1053,12 @@ internal static partial class Program
             if (!Ok(co)) { Check("M: the v1.11.0 program creates its Xbox 360 controller", false, co); return; }
             old.Kill();
         }
-        string? companion = Native.InterfaceList(XusbGuid, null).Select(Native.InstanceOfInterface)
-            .FirstOrDefault(id => id != null && id.StartsWith(@"SWD\HIDMAESTRO\", StringComparison.OrdinalIgnoreCase));
-        Check("M: the killed program's companion is still started", companion != null && Native.IsStarted(companion), companion ?? "none");
+        // The companion by its identity's name. Under this release's driver
+        // a v1 program's companion registers no XUSB interface (driver
+        // companion.c, decision (c)), so its interface cannot name it.
+        string companion = $@"SWD\HIDMAESTRO\{IdentityToken("coexist-m")}";
+        Check("M: the killed program's companion is still started", Native.IsStarted(companion),
+              $"{companion} {Native.StatusOf(companion)}");
 
         using (var claim = Native.HoldPipe("HIDMaestro.Index.0"))
         {

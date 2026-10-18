@@ -803,8 +803,11 @@ internal static class Peer
                         break;
                 }
             }
-            catch (Exception ex)
+            catch (Exception caught)
             {
+                // A command that calls the SDK through reflection gets the
+                // SDK's exception wrapped. The SDK's is the one to report.
+                Exception ex = caught is System.Reflection.TargetInvocationException { InnerException: { } inner } ? inner : caught;
                 var chain = new List<string>();
                 for (var t = ex.GetType(); t != null && t != typeof(object); t = t.BaseType) chain.Add(t.Name);
                 // The Win32 error code, which reads the same in every
