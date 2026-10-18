@@ -24,7 +24,7 @@ The HID `productString` on a HIDMaestro profile controls what `IOCTL_HID_GET_STR
 
 ## API surface
 
-All methods are static and require admin (HKLM + HKCU write). They throw `UnauthorizedAccessException` otherwise.
+All methods are static. `Set` needs an elevated process and throws `UnauthorizedAccessException` without one. `Clear` and `RecoverOrphans` need one only when a record is pending: with nothing pending they return without taking the lock. `ListActive` takes no lock.
 
 ```csharp
 public static class HMOemNameOverride
@@ -52,11 +52,11 @@ Every `Set` is a two-phase write:
    - `ClaimedAtFileTime` (REG_QWORD)
 2. Write the new label to all three target paths.
 
-If a consumer crashes between step 1 and step 2, the record's targets match what's already on disk, so `RecoverOrphans` is an idempotent no-op for each field. If a crash happens after step 2, the record drives a full three-way restore on next startup. Every claim, release, and recovery sweep is serialized by the `Global\HIDMaestro-OEM-Recovery` named mutex.
+If a consumer crashes between step 1 and step 2, the record's targets match what's already on disk, so `RecoverOrphans` is an idempotent no-op for each field. If a crash happens after step 2, the record drives a full three-way restore on next startup. Every claim, release, and recovery sweep is serialized by the registry ledger's lock, `HIDMaestro.Admin\Ledger`, a mutex in a namespace only an elevated process can open. The lock also takes `Global\HIDMaestro-OEM-Recovery`, the mutex v1.12.0 serializes these writes under, so a v1.12.0 program on the same machine waits for this one. Any program can create that name first. When SYSTEM or Administrators owns it the lock waits for it without a bound. When anyone else owns it, or its owner cannot be read, the lock waits five seconds and goes on without it, and later acquisitions in the same process wait 500 ms until one takes the mutex or finds it owned by SYSTEM or Administrators. The override calls set no bound of their own, so this mutex never makes them throw. While such a program holds the name, a v1.12.0 write can overlap this one.
 
 **Backward compatibility**: records written by a previous build that only tracked the DirectInput target are still replayed correctly: missing Joystick fields are treated as "no restore needed" for that target (which is the correct default, since that earlier build did not write those targets to begin with).
 
-**Sibling-path design**: the pending hive lives at `HKLM\SOFTWARE\HIDMaestroOemOverrides`, deliberately NOT under `HKLM\SOFTWARE\HIDMaestro`. `DeviceOrchestrator.RemoveAllVirtualControllers` recursively wipes the HIDMaestro subtree as part of normal cleanup, which would otherwise silently drop pending records on every SDK restart.
+**Sibling-path design**: the pending hive lives at `HKLM\SOFTWARE\HIDMaestroOemOverrides`, deliberately NOT under `HKLM\SOFTWARE\HIDMaestro`. The uninstall-grade cleanup deletes the HIDMaestro subtree, which would otherwise drop pending records with it.
 
 ## Usage pattern
 
