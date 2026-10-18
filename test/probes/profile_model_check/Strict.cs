@@ -462,6 +462,18 @@ internal static class Strict
             o["axisMap"]!["0x32"] = "rightStickx2";
             return o.ToJsonString();
         }, "$.axisMap.0x32");
+        // A name takes one usage. At f00f0482 a second usage given
+        // rightStickX took the slot, and the first usage ended in none.
+        Add("a second axisMap usage given a name another usage has", "dualsense", o =>
+        {
+            o["axisMap"]!.AsObject()["0x30"] = "rightStickX";
+            return o.ToJsonString();
+        }, "$.axisMap.0x30");
+        Add("the same, the name in another case", "dualsense", o =>
+        {
+            o["axisMap"]!.AsObject()["0x30"] = "RIGHTSTICKX";
+            return o.ToJsonString();
+        }, "$.axisMap.0x30");
         // A usbConfiguration the descriptor set cannot hold is refused at
         // load on a persona with no protocol or WinUSB package too. At
         // 8debad63 it loaded and failed at create, after the lease.

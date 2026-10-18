@@ -153,7 +153,7 @@
         "object",
         "null"
       ],
-      "description": "Maps HID usage (hex-string key) to a role name (e.g. 'leftTrigger'), overriding descriptor-derived axis roles. The names are leftStickX, leftStickY, rightStickX, rightStickY, leftTrigger and rightTrigger, in any case, and each usage is named once: a key in another spelling of a usage already named, or any other name, is refused."
+      "description": "Maps HID usage (hex-string key) to a role name (e.g. 'leftTrigger'), overriding descriptor-derived axis roles. The names are leftStickX, leftStickY, rightStickX, rightStickY, leftTrigger and rightTrigger, in any case, each usage is named once and each name given to one usage: a key in another spelling of a usage already named, a name another usage has, or any other name, is refused."
     },
     "axisCenters": {
       "type": [

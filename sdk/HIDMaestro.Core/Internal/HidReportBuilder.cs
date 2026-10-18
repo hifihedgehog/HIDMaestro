@@ -367,10 +367,12 @@ public class HidReportBuilder
     void ApplyAxisMap(Dictionary<string, string> map)
     {
         // A profile's axisMap: each key a hex usage, named once, each value
-        // one of the six names the assignment below reads. An unknown name
-        // left its usage in no slot at all, and two spellings of one usage
-        // put it in two.
+        // one of the six names the assignment below reads, given to one
+        // usage. An unknown name left its usage in no slot at all, two
+        // spellings of one usage put it in two, and a name given twice left
+        // the first usage in none.
         var keyOf = new Dictionary<ushort, string>();
+        var keyOfName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var kvp in map)
         {
             if (kvp.Value == null)
@@ -387,6 +389,10 @@ public class HidReportBuilder
             if (!Array.Exists(AxisMapNames, n => string.Equals(n, kvp.Value, StringComparison.OrdinalIgnoreCase)))
                 throw new ProfileDefectException(HMLayoutValidator.Member("$.axisMap", kvp.Key),
                     $"\"{kvp.Value}\" is not one of {string.Join(", ", AxisMapNames)}.");
+            if (keyOfName.TryGetValue(kvp.Value, out var named))
+                throw new ProfileDefectException(HMLayoutValidator.Member("$.axisMap", kvp.Key),
+                    $"names {kvp.Value}, which the key \"{named}\" gives its usage. A name takes one usage.");
+            keyOfName[kvp.Value] = kvp.Key;
         }
         // Build a lookup from usage code → InputField
         var fieldByUsage = new Dictionary<ushort, InputField>();
