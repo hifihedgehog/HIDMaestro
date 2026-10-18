@@ -27,9 +27,28 @@
 //                vhidmini2 says for a GET (R3-N9).
 //   extract      Each UMDF2 catalog profile with a model is created, read
 //                back with HMDeviceExtractor.Extract, and the extracted
-//                profile must name the model its identity gives it, with
-//                the answers the device gave.
-//   check        the three, the default.
+//                profile must name the model the device's identity gives
+//                it. The extracted profile is then created on the same
+//                index, and each feature report the device declares must
+//                get the answer the device gave, read through the HID
+//                collection the extractor read. At b7b19bf7 this held the
+//                device's answers to the extracted profile's table, which
+//                leaves out what the driver answers past the table (a GET
+//                of 0x11 that no entry answers succeeds with the caller's
+//                buffer, driver.c's Create New Effect case, so the
+//                DualShock 4 profiles and ps-move failed on 0x11) and the
+//                reports of collections the extractor did not read
+//                (ps-move's 0x05).
+//   starts       The three catalog profiles whose descriptors Windows'
+//                HID parser refused at b7b19bf7, ps3-remote,
+//                tinyusb-generic-gamepad and nacon-bigben-ps4, start. Then
+//                a profile with ps3-remote's descriptor as 755bfbc1 wrote
+//                it fails its create with problem code 10, and the create
+//                removes the device it made. At b7b19bf7 the create's
+//                cleanup had no instance ID for the ROOT\HIDClass parent,
+//                which no sweep by index covers, and the device stayed
+//                present.
+//   check        the four, the default.
 //   selftest     the version-section watch on a section this check makes,
 //                no device and no elevation.
 // Each create that throws is a named failure with the exception, the
@@ -308,6 +327,7 @@ internal static class Program
         if (mode is "identity" or "check") Lane("identity", () => Identity(ctx));
         if (mode is "unnumbered" or "check") Lane("unnumbered", () => Unnumbered(ctx));
         if (mode is "extract" or "check") Lane("extract", () => Extract(ctx));
+        if (mode is "starts" or "check") Lane("starts", () => Starts(ctx));
         Console.WriteLine($"contract_live_check {mode}: {(s_failures == 0 ? "PASS" : $"FAIL, {s_failures}")}");
         return s_failures == 0 ? 0 : 1;
     }
@@ -396,33 +416,81 @@ internal static class Program
               $"set {b.Sent}, get {b.Got}, error {b.Error}: {Convert.ToHexString(b.Get, 0, 8)}");
     }
 
+    /// <summary>The answer the device at an index gives to each report,
+    /// read through the HID collection whose serial names the index, in
+    /// the order given. Null for a GET that fails.</summary>
+    static List<byte[]?> Answers(int index, IEnumerable<byte> reports)
+    {
+        var d = Find(index);
+        using var h = Open(d);
+        return reports.Select(r => h == null ? null : Get(h, r, 65)).ToList();
+    }
+
     static void Extract(HMContext ctx)
     {
         foreach (var p in ctx.AllProfiles.Where(x => !x.Inner.RequiresUsbipBackend && x.HasDeviceModel && x.Inner.Resolved.Model.FeatureStubs != null)
                      .OrderBy(x => x.Id, StringComparer.Ordinal))
         {
-            using var c = Create(ctx, 0, p, p.Id);
-            if (c == null) continue;
-            var d = Find(0);
-            if (d == null) { Check($"{p.Id}: its HID device is listed", false, Node(c)); continue; }
-            var x = HMDeviceExtractor.Extract(d);
-            string? named = x.Inner.DeviceModelFrom;
-            var model = x.Inner.Resolved.Model.FeatureStubs;
-            Check($"{p.Id}: the extracted profile names the model its identity gives it", named != null && x.Inner.Resolved.IdentityModel == named,
-                  $"{named ?? "none"} (identity gives {x.Inner.Resolved.IdentityModel ?? "none"})");
-            using var h = Open(d);
-            var table = FeatureStubTable.From(x.Inner, 0, d.SerialNumberString);
-            var differ = new List<string>();
-            foreach (var r in p.Inner.GetOrBuildReportMap().Reports.Where(r => r.Kind == HidReportKind.Feature).Select(r => r.ReportId).Distinct())
+            var reports = p.Inner.GetOrBuildReportMap().Reports.Where(r => r.Kind == HidReportKind.Feature).Select(r => r.ReportId).Distinct().ToList();
+            HMProfile x;
+            List<byte[]?> device;
+            using (var c = Create(ctx, 0, p, p.Id))
             {
-                var live = h == null ? null : Get(h, r, 65);
-                int n = table?.Lookup(r, 65, out _) ?? -1;
-                byte[]? want = n < 0 ? null : table!.Answer(n).ToArray();
-                if (live == null && want == null) continue;
-                if (live == null || want == null || !live.AsSpan(0, want.Length).SequenceEqual(want))
-                    differ.Add($"0x{r:X2}");
+                if (c == null) continue;
+                var d = Find(0);
+                if (d == null) { Check($"{p.Id}: its HID device is listed", false, Node(c)); continue; }
+                x = HMDeviceExtractor.Extract(d);
+                device = Answers(0, reports);
             }
-            Check($"{p.Id}: the extracted profile's answers are the ones the device gave", differ.Count == 0, string.Join(" ", differ));
+            Check($"{p.Id}: the extracted profile names the model the device's identity gives it",
+                  x.Inner.DeviceModelFrom != null && x.Inner.DeviceModelFrom == p.Inner.Resolved.IdentityModel,
+                  $"{x.Inner.DeviceModelFrom ?? "none"}, {x.Connection} (the device's identity gives {p.Inner.Resolved.IdentityModel ?? "none"}, {p.Inner.Connection})");
+            using (var c = Create(ctx, 0, x, $"{p.Id}: the extracted profile"))
+            {
+                if (c == null) continue;
+                var extracted = Answers(0, reports);
+                var differ = new List<string>();
+                for (int i = 0; i < reports.Count; i++)
+                    if (device[i] == null ? extracted[i] != null : extracted[i] == null || !device[i]!.AsSpan().SequenceEqual(extracted[i]))
+                        differ.Add($"0x{reports[i]:X2} {(device[i] == null ? "fails" : Convert.ToHexString(device[i]!))} / {(extracted[i] == null ? "fails" : Convert.ToHexString(extracted[i]!))}");
+                Check($"{p.Id}: created on the same index, the extracted profile answers each feature report as the device did",
+                      differ.Count == 0, string.Join("; ", differ));
+            }
+        }
+    }
+
+    /// <summary>ps3-remote's descriptor as 755bfbc1 wrote it, with a Usage
+    /// Minimum and an Input item that carry no data byte, which Windows'
+    /// HID parser refuses (report_length_check, section 6).</summary>
+    const string Ps3Remote755 = "05010905a101a102750895018101050919012918142501750195188102c0a10205091829fe1426fe00750895018075089506810105060920142505750895018102c0c0";
+
+    const uint DN_STARTED = 0x00000008;
+
+    static void Starts(HMContext ctx)
+    {
+        foreach (string id in new[] { "ps3-remote", "tinyusb-generic-gamepad", "nacon-bigben-ps4" })
+        {
+            using var started = Create(ctx, 0, ctx.GetProfile(id)!, id);
+            if (started == null) continue;
+            var (present, status, problem) = started.InstanceId is { } node ? DeviceOrchestrator.DevnodeStatus(node) : (false, 0u, 0u);
+            Check($"{id}: its device starts, its descriptor parsed by Windows' HID class", present && (status & DN_STARTED) != 0 && problem == 0,
+                  Node(started));
+        }
+
+        var p = new HMProfileBuilder().Id("contract-live-failed-start").Vid(0xBEEF).Pid(0xF0C1).DescriptorHex(Ps3Remote755).Build();
+        HMController? c = null;
+        Exception? error = null;
+        try { c = ctx.CreateControllerAt(0, p, Key()); }
+        catch (Exception e) { error = e; }
+        using (c)
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(error?.Message ?? "", @"The device (\S+) failed its start, problem code (\d+)\.");
+            Check("a profile whose descriptor Windows' HID parser refuses fails its create with problem code 10",
+                  m.Success && m.Groups[2].Value == "10", error == null ? $"created: {Node(c!)}" : $"{error.GetType().Name}: {error.Message}");
+            if (!m.Success) return;
+            var (present, status, problem) = DeviceOrchestrator.DevnodeStatus(m.Groups[1].Value);
+            Check("the failed create removed the device it made", !present,
+                  present ? $"{m.Groups[1].Value} status 0x{status:X} problem {problem}" : $"{m.Groups[1].Value} not present");
         }
     }
 }

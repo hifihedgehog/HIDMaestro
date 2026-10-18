@@ -2226,9 +2226,12 @@ function Scenario-Profile-Model {
 # S93: the version contract on the live UMDF2 driver. A fresh-token
 # controller's driver reads its index from the identity entry before its
 # first start, on the ROOT path and on the SWD xinputhid path, a device
-# without report IDs answers its message after HID class's leading 0, and
-# each catalog profile with a model, read back by HMDeviceExtractor, names
-# the model its identity gives it with the answers the device gave.
+# without report IDs answers its message after HID class's leading 0, each
+# catalog profile with a model, read back by HMDeviceExtractor, names the
+# model its identity gives it and, created on the same index, answers as
+# the device did, the three profiles whose descriptors Windows refused
+# start, and a create whose descriptor Windows refuses fails with problem
+# code 10 and removes its device.
 function Scenario-Contract-Live {
     Invoke-Probe -Dir 'contract_live_check' -Exe 'ContractLiveCheck.exe' -Arguments 'check' `
                  -Message 'the live driver does not hold the version contract or FeatureAnswers as the design states (see probe stdout for the check)'
