@@ -129,10 +129,10 @@ internal static class Program
         ctrl.PublishPidPool(kRamPoolSize, kSimMax, deviceManagedPool: true,
                             sharedParameterBlocks: true);
 
-        // Open SideWinder VID/PID HID handle.
-        SafeFileHandle? hid = OpenHmHidByVidPid(0x045E, 0x001B);
+        // Open the virtual SideWinder's HID handle.
+        SafeFileHandle? hid = OpenHmHidByVidPid(0x045E, 0x001B, kIndex);
         bool hidOpen = hid != null && !hid.IsInvalid;
-        Check("HID handle opened", hidOpen);
+        Check("HID handle opened", hidOpen, $"serial HM-CTL-{kIndex:D4}");
         if (!hidOpen) return s_failures > 0 ? 1 : 0;
 
         // SetFeature(CreateNewEffect at canonical RID 0x11): driver must
@@ -177,14 +177,21 @@ internal static class Program
         return s_failures == 0 ? 0 : 1;
     }
 
-    static SafeFileHandle? OpenHmHidByVidPid(ushort vid, ushort pid)
+    static SafeFileHandle? OpenHmHidByVidPid(ushort vid, ushort pid, int index)
     {
-        // HM's virtual SideWinder uses the &IG_00 enumerator marker;
-        // a real connected SideWinder doesn't. Filter so we don't open
-        // the user's physical pad if it happens to be plugged in.
-        var match = HMDeviceExtractor.ListDevices()
-            .Where(d => d.VendorId == vid && d.ProductId == pid)
-            .FirstOrDefault(d => d.DevicePath.Contains("&IG_", StringComparison.OrdinalIgnoreCase));
+        // The driver serves HM-CTL- and the controller's index as the serial
+        // (driver.c InitInstancePaths), so a physical SideWinder plugged in
+        // beside the virtual one is never opened. The path cannot tell them
+        // apart: the virtual SideWinder is not an XInput device, so its path
+        // has no &IG_, the same as the real joystick's.
+        string serial = $"HM-CTL-{index:D4}";
+        HMHidDeviceInfo? match = null;
+        for (int i = 0; i < 50 && match == null; i++)
+        {
+            match = HMDeviceExtractor.ListDevices()
+                .FirstOrDefault(d => d.VendorId == vid && d.ProductId == pid && d.SerialNumberString == serial);
+            if (match == null) Thread.Sleep(100);
+        }
         if (match == null) return null;
         var h = CreateFile(match.DevicePath, GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
