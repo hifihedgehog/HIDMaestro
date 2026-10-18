@@ -871,6 +871,11 @@ internal static class CompareLive
                 .Append(new Case5Driver.RegValue("FeatureAnswers", 3, HIDMaestro.Internal.DeviceOrchestrator.FeatureAnswersBlob(p, g.Index))).ToList();
             Case5Driver.AddProfile(sb, plan[g.Profile].Group, p, values, ContractName(g));
         }
+        // Each XUSB profile's companion as the tree's SDK configures it under
+        // the contract, which its stream's version line selects. 9bd6279's
+        // companion reads the same IDs and ignores the rest.
+        foreach (var (id, _) in live.Xusb)
+            XusbContract.AppendContractProfile(sb, keptPlan, XusbContractName(id), catalog.First(x => x.Id == id), 0);
         return sb.ToString();
     }
 
@@ -1541,9 +1546,12 @@ internal static class CompareLive
         return calls;
     }
 
+    /// <summary>The plan profile an XUSB stream runs on under the contract.</summary>
+    static string XusbContractName(string profile) => $"{profile}#xusb";
+
     static void ScriptXusb(StringBuilder sc, string profile, List<XusbCall> calls)
     {
-        sc.Append($"stream live/xusb/{profile}\ndevice {profile} 0 companion\n");
+        sc.Append($"stream live/xusb/{profile}\nversion tag-own\ndevice {XusbContractName(profile)} 0 companion\n");
         for (int k = 0; k < calls.Count; k++)
         {
             var (code, outLen) = XusbRequests[calls[k].Name];

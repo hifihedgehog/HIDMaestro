@@ -276,13 +276,15 @@ internal static class XusbContract
     /// changes is compared with what 9bd6279 gave the profile as it was.</summary>
     static Dictionary<string, (string Vid, string Pid)> s_keptIds = new();
 
-    static Dictionary<string, (string Vid, string Pid)> KeptIds(string path)
+    static Dictionary<string, (string Vid, string Pid)> KeptIds(string path) => KeptIds(File.ReadAllLines(path));
+
+    static Dictionary<string, (string Vid, string Pid)> KeptIds(IEnumerable<string> lines)
     {
         var d = new Dictionary<string, (string, string)>(StringComparer.Ordinal);
         string? id = null, vid = null, pid = null;
-        foreach (var line in File.ReadAllLines(path))
+        foreach (var line in lines)
         {
-            string[] w = line.Split(' ');
+            string[] w = line.TrimEnd('\r').Split(' ');
             if (w[0] == "profile") { id = w[2]; vid = pid = null; }
             else if (w[0] == "value" && w[1] == "VendorId") vid = w[3];
             else if (w[0] == "value" && w[1] == "ProductId") pid = w[3];
@@ -291,10 +293,19 @@ internal static class XusbContract
         return d;
     }
 
-    static void PlanProfile(StringBuilder plan, string id, ControllerProfile p, int index, byte[] answers, int companion)
+    /// <summary>A plan profile <paramref name="id"/> for <paramref name="p"/>'s
+    /// companion at <paramref name="index"/> as the tree's SDK writes it under
+    /// the contract, for compare-live's XUSB streams: the kept plan's IDs from
+    /// <paramref name="keptPlan"/>, the answers XusbAnswers compiles and the
+    /// companion on.</summary>
+    internal static void AppendContractProfile(StringBuilder plan, string keptPlan, string id, ControllerProfile p, int index) =>
+        PlanProfile(plan, id, p, index, XusbAnswers.Compile(p, index)!, 1, KeptIds(keptPlan.Split('\n')));
+
+    static void PlanProfile(StringBuilder plan, string id, ControllerProfile p, int index, byte[] answers, int companion,
+                            Dictionary<string, (string Vid, string Pid)>? keptIds = null)
     {
         plan.Append($"profile xusb {id}\n");
-        var kept = s_keptIds.TryGetValue(p.Id, out var k) ? k
+        var kept = (keptIds ?? s_keptIds).TryGetValue(p.Id, out var k) ? k
             : (Convert.ToHexString(BitConverter.GetBytes((uint)p.VendorId)), Convert.ToHexString(BitConverter.GetBytes((uint)p.ProductId)));
         plan.Append($"value VendorId 4 {kept.Item1}\n");
         plan.Append($"value ProductId 4 {kept.Item2}\n");
