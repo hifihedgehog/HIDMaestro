@@ -90,7 +90,10 @@
 //        program's pipe, the census reads its controller as a running
 //        program's, and a sweep leaves it.
 //    Y18. The same, with the dead program streaming input until it is
-//        killed, so the driver's idle window starts at the kill. The
+//        killed, so the driver's idle window starts at the kill. The kill
+//        waits for the driver to hand a frame to HID class, since the
+//        probe's HID handle reads no report through xinputhid above the
+//        child. The
 //        v1.12.0 program's adopting create returns only after its restart
 //        has waited out its 5 s bound for the device to stop, which the
 //        probe's handle refuses (v1.12.0 DeviceManager.RestartDevice), so
@@ -99,9 +102,10 @@
 //        driver maps its section again and watches its pipe: the map is the
 //        only place the driver opens a watch without input. Its frames then
 //        reach the section, the driver hands them to HID class (the
-//        acknowledgement section's DeliveredSeqNo), and a HID handle opened
-//        after the adoption reads them. The probe's own handle, held through
-//        the refused restart, is reported beside them.
+//        acknowledgement section's DeliveredSeqNo), and a HID handle opens
+//        on the child after the adoption. The report counts of that handle
+//        and of the probe's own, held through the refused restart, are
+//        reported beside them.
 //    Y19. Y13's squatter, holding the acknowledgement section as well, and
 //        then the dead program's device is added again, so a new driver
 //        context starts with no values. The section still carries the
@@ -165,6 +169,12 @@ internal static partial class Program
     /// own controllers, stays a check.</summary>
     static void Observe(string name, bool seen, string detail = "") =>
         Console.WriteLine($"  [OBSERVED {(seen ? "yes" : "no")}] {name}{(detail.Length > 0 ? "  " + detail : "")}");
+
+    /// <summary>The first 32 bits of a section: SeqNo of an input section,
+    /// DeliveredSeqNo of an acknowledgement section. -1 when it does not
+    /// open.</summary>
+    static int SectionSeqNo(string section) =>
+        Native.SectionBytes(section, 4) is { } b ? BitConverter.ToInt32(b, 0) : -1;
 
     static void SectionY()
     {
@@ -830,7 +840,16 @@ internal static partial class Program
             if (t != 0) { p.Kill(); return; }
             Check($"{y}: the driver watches the program", WaitFor(() => Y.WatchValues(inst) is { Connected: 1 }, 10_000), Y.ShowWatch(inst));
             // A handle on the HID child makes Windows refuse the polite
-            // disable a restart begins with, as an XInput handle does.
+            // disable a restart begins with, as an XInput handle does. It
+            // reads no report. Microsoft's xinputhid sits above the child
+            // (xinputhid.inf [GIP_Hid] binds HID\VID_045E&PID_0B00&IG_00),
+            // and a HID read from this windowless process returns nothing
+            // there: in the window after the adoption, DeliveredSeqNo moves
+            // with every frame and this handle reads none. A real Xbox One
+            // pad gives a process without the foreground no HID input either
+            // (SDL_rawinputjoystick.c: "DirectInput does not get inputs from
+            // XBox One controllers when not in the foreground", though
+            // SDL_dinputjoystick.c asks for DISCL_BACKGROUND).
             var path = WaitPaths(0x045E, 0x0B00, 1, 10_000);
             cap = path.Count == 1 ? HidCapture.Open(path[0]) : null;
             Check($"{y}: the probe holds the companion's HID child open", cap != null, string.Join(", ", path));
@@ -841,15 +860,20 @@ internal static partial class Program
             // again every 200 ms.
             if (stream)
             {
-                long mark = cap?.Mark() ?? 0;
+                string inputName = $@"Global\HIDMaestroInput{t}", ackName = $@"Global\HIDMaestroInputAck{t}";
+                int sectionBefore = SectionSeqNo(inputName), deliveredBefore = SectionSeqNo(ackName);
                 p.Send("stream 1 0.5 250 1");
                 // Kill only once frames have reached the driver: the peer
-                // reports frames submitted, and the probe's handle on the
-                // HID child reads them back. The kill then lands within a
-                // frame of the last input.
-                bool landed = WaitFor(() => int.TryParse(PeerProcess.Field(p.Send("frames"), "n"), out int sent) && sent > 0
-                                            && cap != null && cap.Since(mark).Count > 0, 5000);
-                Check($"{y}: the dead program's frames reach the device before the kill", landed);
+                // reports frames submitted, and the driver has handed one
+                // to HID class (DeliveredSeqNo, which it writes only when
+                // HID class takes a completed read). The kill then lands
+                // within a frame of the last input.
+                int sent = 0;
+                bool landed = WaitFor(() => int.TryParse(PeerProcess.Field(p.Send("frames"), "n"), out sent) && sent > 0
+                                            && SectionSeqNo(ackName) is int d && d > 0 && d != deliveredBefore, 5000);
+                Check($"{y}: the dead program's frames reach the device before the kill", landed,
+                      $"{sent} frames submitted, section SeqNo {sectionBefore} -> {SectionSeqNo(inputName)}, "
+                      + $"DeliveredSeqNo {deliveredBefore} -> {SectionSeqNo(ackName)}");
             }
             p.Kill();
         }
@@ -879,36 +903,36 @@ internal static partial class Program
                 bool mapped = WaitFor(() => Y.WatchValues(inst) is { Connected: 1 } w && w.Pid == old.Pid, 2000);
                 Check($"{y}: before the program sends a frame, the driver maps its section again and watches its pipe",
                       mapped, Y.ShowWatch(inst) + $", program {old.Pid}, {killed.ElapsedMilliseconds} ms after the kill");
-                // Three layers, read in the same window: the program's
-                // frames in the input section, the driver's hand-off to HID
-                // class (DeliveredSeqNo, which the driver writes only when it
-                // completes a HID read), and a HID handle opened now. XInput
-                // lost its slot at the refused restart (v1.12.0's "XInput
-                // slot wait: before=1 after=0"), so the handle the probe held
-                // through it is reported, not judged.
-                int SeqOf(string section) => Native.SectionBytes(section, 4) is { } b ? BitConverter.ToInt32(b, 0) : -1;
+                // Two layers carry the frames, read in the same window: the
+                // program's frames in the input section and the driver's
+                // hand-off to HID class (DeliveredSeqNo, which the driver
+                // writes only when HID class takes a completed read). A HID
+                // handle reads none through xinputhid (see the held handle
+                // above), so a handle opened now is judged on its open, and
+                // both handles' report counts are reported.
                 string inputName = $@"Global\HIDMaestroInput{t}", ackName = $@"Global\HIDMaestroInputAck{t}";
                 using var fresh = cap != null ? HidCapture.Open(cap.Path) : null;
-                int sectionBefore = SeqOf(inputName), deliveredBefore = SeqOf(ackName);
+                int sectionBefore = SectionSeqNo(inputName), deliveredBefore = SectionSeqNo(ackName);
                 long mark = Stopwatch.GetTimestamp();
                 old.Send("stream 1 0.5 250 1");
                 var toFirst = Stopwatch.StartNew();
-                bool reached = fresh != null && WaitFor(() => fresh.Since(mark).Count > 0, 5000);
+                bool reached = WaitFor(() => SectionSeqNo(ackName) is int d && d > 0 && d != deliveredBefore, 5000);
                 long firstMs = toFirst.ElapsedMilliseconds;
                 Thread.Sleep(200);
-                int sectionAfter = SeqOf(inputName), deliveredAfter = SeqOf(ackName);
+                int sectionAfter = SectionSeqNo(inputName), deliveredAfter = SectionSeqNo(ackName);
                 int heldReports = cap?.Since(mark).Count ?? 0, freshReports = fresh?.Since(mark).Count ?? 0;
-                string layers = $"section SeqNo {sectionBefore} -> {sectionAfter}, DeliveredSeqNo {deliveredBefore} -> {deliveredAfter}, "
+                string layers = (reached ? $"first frame handed to HID class {firstMs} ms after the stream began, " : "no frame handed to HID class within 5000 ms of the stream, ")
+                    + $"section SeqNo {sectionBefore} -> {sectionAfter}, DeliveredSeqNo {deliveredBefore} -> {deliveredAfter}, "
                     + $"{freshReports} reports on a handle opened after the adoption, {heldReports} on the handle held through the restart";
                 Observe($"{y}: its frames reach the section the driver mapped", sectionAfter > 0 && sectionAfter != sectionBefore, layers);
                 Observe($"{y}: the driver hands them to HID class", deliveredAfter > 0 && deliveredAfter != deliveredBefore, layers);
-                Observe($"{y}: a HID handle opened after the adoption reads them", reached,
-                      (fresh == null ? "the HID interface did not open, " : reached ? $"first report {firstMs} ms after the stream began, " : "no report within 5000 ms of the stream, ") + layers);
+                Observe($"{y}: a HID handle opens on the child after the adoption", fresh != null,
+                      (fresh == null ? "the HID interface did not open, " : "") + layers);
             }
             Observe($"{y}: the v1.12.0 program's create adopts the companion on its index",
                   Ok(second) && string.Equals(PeerProcess.Field(second, "instance"), inst, StringComparison.OrdinalIgnoreCase)
                   && PeerProcess.Field(second, "transport") == t.ToString(), second);
-            Observe($"{y}: the restart was refused: the probe's handle still reads and the device keeps the installed driver",
+            Observe($"{y}: the restart was refused: the probe's handle stays open with no read error and the device keeps the installed driver",
                   cap != null && !cap.Broken && Native.DriverVersionOf(inst) == installed,
                   $"read error {cap?.ReadError}, {Native.DriverVersionOf(inst)}, installed {installed}");
             bool watched = WaitFor(() => Y.WatchValues(inst) is { Connected: 1 } w && w.Pid == old.Pid, 12_000);
