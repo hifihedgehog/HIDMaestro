@@ -590,7 +590,10 @@ function Test-Scenario {
 
     # Anything PRESENT after that was not PRESENT before is a leftover
     # (the scenario created it and did not clean it up).
-    $leftovers = @(Get-HMLeftovers -Baseline $baseline -After $after)
+    # Get-HMLeftovers already returns one array. Wrapping its output in
+    # @() would make that array the single element of another, so an
+    # empty result would count as one leftover.
+    $leftovers = Get-HMLeftovers -Baseline $baseline -After $after
 
     $sw.Stop()
     $result = [PSCustomObject]@{
