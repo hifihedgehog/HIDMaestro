@@ -42,6 +42,7 @@ using System.Reflection;
 using System.Security;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Threading;
 using Microsoft.Win32;
 
 internal static partial class Program
@@ -329,8 +330,32 @@ internal static partial class Program
     /// <summary>OF13's ledger: RegistryLedger.LiveHolders over a scratch
     /// ledger under HKCU and the system's process list, and the test of a
     /// holder the census and the dead-holder cleanup share
-    /// (RegistryLedger.HolderAliveIn).</summary>
+    /// (RegistryLedger.HolderAliveIn). Its holders of pid 4, the System
+    /// process, stand for a process this one cannot open, which holds only
+    /// for a program that is not elevated, so the checks run on a thread
+    /// under that program's token whether or not the probe is elevated (the
+    /// battery runs it elevated).</summary>
     static void OfflineLedgerHolders()
+    {
+        Exception? failure = null;
+        var t = new Thread(() =>
+        {
+            IntPtr token = Native.MediumToken();
+            try
+            {
+                if (!Native.SetThreadToken(IntPtr.Zero, token)) throw new System.ComponentModel.Win32Exception();
+                try { OfflineLedgerHoldersAsUser(); }
+                finally { Native.RevertToSelf(); }
+            }
+            catch (Exception e) { failure = e; }
+            finally { Native.CloseHandle(token); }
+        });
+        t.Start();
+        t.Join();
+        if (failure != null) Check("OF13: the ledger checks run as a program that is not elevated", false, failure.ToString());
+    }
+
+    static void OfflineLedgerHoldersAsUser()
     {
         Assembly sdk = typeof(HIDMaestro.HMContext).Assembly;
         Type? ledger = sdk.GetType("HIDMaestro.Internal.RegistryLedger");

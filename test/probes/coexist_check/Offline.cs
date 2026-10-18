@@ -440,6 +440,11 @@ internal static partial class Program
         }
         string dir = Path.Combine(Path.GetTempPath(), "HIDMaestro_offline_" + Guid.NewGuid().ToString("N"));
         string file = Path.Combine(dir, "held", "file");
+        // Made as the user runs without elevation, so the user owns it when
+        // the probe runs elevated too, where a new folder can be owned by
+        // Administrators and the refusal would name a grant instead.
+        string made = CreateUnder(Native.MediumToken(), dir);
+        if (made != "created") { Check("OF4: the user makes the folder", false, made); return; }
         Directory.CreateDirectory(Path.GetDirectoryName(file)!);
         File.WriteAllText(file, "held");
         string owner = System.Security.Principal.WindowsIdentity.GetCurrent().Name;
