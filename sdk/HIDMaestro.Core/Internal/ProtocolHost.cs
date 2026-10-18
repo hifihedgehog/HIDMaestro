@@ -55,6 +55,7 @@ internal sealed unsafe class ProtocolHost : IDisposable
     private readonly byte[] _feature;
     private readonly byte _featureId;
     private readonly bool _hasFeature;
+    private readonly bool _sendsOnSubmit;
 
     // The last reply written, whose delivery the next message waits for.
     private uint _replySeq;
@@ -85,8 +86,14 @@ internal sealed unsafe class ProtocolHost : IDisposable
         public ProtocolEngine Engine = null!;
         public byte[] Buffer = Array.Empty<byte>();
         public bool Submit;
+        // A submit's block, the live feature report's ID or -1, its buffer
+        // and the length Engine.Submit gave it.
+        public byte[] Block = Array.Empty<byte>();
+        public int FeatureId = -1;
+        public byte[] Feature = Array.Empty<byte>();
+        public int FeatureLength;
         public int Visit<TSet>(ref TSet set) where TSet : struct, IReportSet =>
-            Submit ? Engine.BuildOnSubmit(ref set, Buffer) : Engine.BuildNext(ref set, Buffer);
+            Submit ? Engine.Submit(ref set, Block, Buffer, FeatureId, Feature, out FeatureLength) : Engine.BuildNext(ref set, Buffer);
     }
 
     public ProtocolHost(ControllerProfile profile, CompiledProtocol protocol, int index, IHostChannel channel, object sendLock)
@@ -103,14 +110,17 @@ internal sealed unsafe class ProtocolHost : IDisposable
         int largest = 1;
         foreach (var l in protocol.Model.Layouts) largest = Math.Max(largest, l.Size);
         _clockBuilder = new Builder { Engine = Engine, Buffer = new byte[largest] };
-        _submitBuilder = new Builder { Engine = Engine, Buffer = new byte[largest], Submit = true };
+        _submitBuilder = new Builder { Engine = Engine, Buffer = new byte[largest], Submit = true, Block = new byte[protocol.Model.StateSize] };
         _reply = new byte[Math.Max(1, protocol.MaxReplyLength)];
         var model = protocol.Model;
         _hasFeature = model.LiveFeatures.Length > 0;
+        _sendsOnSubmit = Array.Exists(model.Layouts, l => l.Send == SendRule.Submit);
         if (_hasFeature)
         {
             _featureId = (byte)model.LiveFeatureIds[0];
             _feature = new byte[model.LiveFeatures[0].Spec.Size];
+            _submitBuilder.FeatureId = _featureId;
+            _submitBuilder.Feature = _feature;
         }
         else _feature = Array.Empty<byte>();
     }
@@ -194,7 +204,7 @@ internal sealed unsafe class ProtocolHost : IDisposable
 
     private void PumpLocked(int waitMs)
     {
-        while (Engine.HasReply)
+        while (Engine.ReplyWaiting)
         {
             if (!AwaitReplyLocked(waitMs)) return;
             int n = Engine.TakeReply(_reply.Length, _reply);
@@ -230,12 +240,30 @@ internal sealed unsafe class ProtocolHost : IDisposable
     /// with the live feature report on the data lane, in one frame.</summary>
     public void OnState(ReadOnlySpan<byte> block)
     {
-        lock (_sendLock)
+        // A device whose reports all go out on its clock sends nothing on a
+        // submit: the block is all it takes.
+        if (!_sendsOnSubmit && !_hasFeature)
         {
             Engine.SetStateBlock(block);
-            int n = 0;
-            if (_runner != null && Engine.SendsOnSubmit) n = _runner.Visit(_submitBuilder);
-            int f = _hasFeature ? Engine.BuildLiveFeature(_featureId, _feature) : 0;
+            return;
+        }
+        lock (_sendLock)
+        {
+            int n, f;
+            if (_runner != null && block.Length == _submitBuilder.Block.Length)
+            {
+                // The block, the submit layout and the live feature report
+                // under the engine's one lock.
+                block.CopyTo(_submitBuilder.Block);
+                n = _runner.Visit(_submitBuilder);
+                f = _submitBuilder.FeatureLength;
+            }
+            else
+            {
+                Engine.SetStateBlock(block);
+                n = 0;
+                f = _hasFeature ? Engine.BuildLiveFeature(_featureId, _feature) : 0;
+            }
             if (n <= 0 && f <= 0) return;
             if (!AwaitReplyLocked(DeliveryTimeoutMs)) return;
             _channel.Write(_feature, Math.Max(0, f), _submitBuilder.Buffer, Math.Max(0, n));

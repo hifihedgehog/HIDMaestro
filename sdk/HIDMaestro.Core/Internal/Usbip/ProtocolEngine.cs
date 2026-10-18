@@ -269,6 +269,12 @@ internal sealed unsafe class ProtocolEngine
 
     public bool HasReply { get { lock (_sync) return _replyCount > 0; } }
 
+    /// <summary>Whether a reply waits, read without the lock: the protocol
+    /// host's clock reads it on every tick, where a lock costs more than the
+    /// report it builds. A reply queued as it reads goes out on the next
+    /// tick, and TakeReply, under the lock, says whether one is there.</summary>
+    public bool ReplyWaiting => System.Threading.Volatile.Read(ref _replyCount) > 0;
+
     /// <summary>True while a poll can get something: a reply, a message
     /// under way, or reports the registers allow.</summary>
     public bool CanSend
@@ -723,20 +729,42 @@ internal sealed unsafe class ProtocolEngine
     /// first, or -1 when the profile declares none for it.</summary>
     public int BuildLiveFeature(byte reportId, Span<byte> dst)
     {
+        lock (_sync) return LiveFeatureLocked(reportId, dst);
+    }
+
+    private int LiveFeatureLocked(byte reportId, Span<byte> dst)
+    {
         int i = Array.IndexOf(_m.LiveFeatureIds, reportId);
         if (i < 0) return -1;
         var bound = _live[i];
         int size = bound.Program.Spec.Size;
+        UpdateClockCountersLocked();
+        fixed (byte* s = _state)
+        fixed (byte* d = _built)
+        fixed (uint* r = _regs, c = _counters)
+            bound.Run(s, d, r, c);
+        _built.AsSpan(0, Math.Min(size, dst.Length)).CopyTo(dst);
+        return size;
+    }
+
+    /// <summary>A submit under one lock: the state block replaced, the report
+    /// the selected layout sends on submit built and counted into
+    /// <paramref name="dst"/>, and the live feature report of
+    /// <paramref name="featureId"/> built into <paramref name="feature"/>.
+    /// Returns the report's length, 0 when the selected layout goes out on
+    /// the clock or on change or none holds, and sets
+    /// <paramref name="featureLength"/> to the feature's, or -1 for none.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    public int Submit<TSet>(ref TSet set, ReadOnlySpan<byte> block, Span<byte> dst, int featureId, Span<byte> feature, out int featureLength)
+        where TSet : struct, IReportSet
+    {
         lock (_sync)
         {
-            UpdateClockCountersLocked();
-            fixed (byte* s = _state)
-            fixed (byte* d = _built)
-            fixed (uint* r = _regs, c = _counters)
-                bound.Run(s, d, r, c);
-            _built.AsSpan(0, Math.Min(size, dst.Length)).CopyTo(dst);
+            if (block.Length == _m.StateSize) block.CopyTo(_state);
+            int n = BuildLocked(ref set, dst, SendRule.Submit, commit: true);
+            featureLength = featureId >= 0 ? LiveFeatureLocked((byte)featureId, feature) : -1;
+            return n;
         }
-        return size;
     }
 
     /// <summary>The state block as it stands.</summary>
