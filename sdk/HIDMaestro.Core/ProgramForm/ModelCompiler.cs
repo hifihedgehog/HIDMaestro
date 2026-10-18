@@ -467,10 +467,10 @@ internal static class ModelCompiler
                 var entries = new List<(int at, byte[] bytes, string key)>();
                 foreach (var (key, hex) in o.Const)
                 {
-                    if (!int.TryParse(key, NumberStyles.None, I, out int at)) throw new FormException($"{path}.const[\"{key}\"]", "the key is a report offset");
-                    if (!ModelText.TryParseBytes(hex, out var bytes)) throw new FormException($"{path}.const[\"{key}\"]", $"\"{hex}\" is not hex bytes");
+                    if (!int.TryParse(key, NumberStyles.None, I, out int at)) throw new FormException(FormException.Member($"{path}.const", key), "the key is a report offset");
+                    if (!ModelText.TryParseBytes(hex, out var bytes)) throw new FormException(FormException.Member($"{path}.const", key), $"\"{hex}\" is not hex bytes");
                     if ((long)at + bytes.Length > ProgramForm.MaxReport)
-                        throw new FormException($"{path}.const[\"{key}\"]", $"report bytes {at} to {(long)at + bytes.Length - 1} are outside 0 to {ProgramForm.MaxReport - 1}, the most a report holds");
+                        throw new FormException(FormException.Member($"{path}.const", key), $"report bytes {at} to {(long)at + bytes.Length - 1} are outside 0 to {ProgramForm.MaxReport - 1}, the most a report holds");
                     entries.Add((at, bytes, key));
                 }
                 foreach (var (at, bytes, _) in entries.OrderBy(e => e.at)) Add(new ConstOp(at, bytes));

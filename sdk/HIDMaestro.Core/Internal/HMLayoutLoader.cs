@@ -511,7 +511,7 @@ public static class HMLayoutValidator
         return map;
     }
 
-    /// <summary>The path of a map's member as System.Text.Json writes it
+    /// <summary>The path of a map's member as JSONPath writes it
     /// (<see cref="Programs.FormException.Member"/>).</summary>
     internal static string Member(string path, string key) => Programs.FormException.Member(path, key);
 

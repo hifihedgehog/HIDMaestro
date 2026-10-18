@@ -434,31 +434,48 @@ internal static class Strict
             return o.ToJsonString();
         }, "$.layout.faceButtons[2].buttonIndex");
         // A map's key keeps its path whatever it holds, written as
-        // System.Text.Json writes one. At d69bfd0a a dash ended the path at
+        // JSONPath writes a name. At d69bfd0a a dash ended the path at
         // the map and the reason repeated it, and a dot split the key.
         Add("a dance pad key with a dash, written null", "xbox-360-dance-pad", o =>
         {
             o["layout"]!["pads"]!.AsObject()["up-left"] = null;
             return o.ToJsonString();
-        }, "$.layout.pads.up-left");
+        }, "$.layout.pads['up-left']");
         Add("a dance pad key with a space, on a button the descriptor lacks", "xbox-360-dance-pad", o =>
         {
             o["layout"]!["pads"]!.AsObject()["up left"] = JsonNode.Parse("{\"role\":\"dpad_up\",\"buttonIndex\":99}");
             return o.ToJsonString();
         }, "$.layout.pads['up left'].buttonIndex");
-        // An empty key is an empty dotted step and a newline stays inside
-        // its brackets, as System.Text.Json writes them. At f00f0482 both
+        // An empty key and one with a newline are bracketed, the newline
+        // escaped, as JSONPath writes them. At f00f0482 both
         // were refused at $.layout.
         Add("an empty dance pad key, written null", "xbox-360-dance-pad", o =>
         {
             o["layout"]!["pads"]!.AsObject()[""] = null;
             return o.ToJsonString();
-        }, "$.layout.pads.");
+        }, "$.layout.pads['']");
         Add("a dance pad key with a newline, on a button the descriptor lacks", "xbox-360-dance-pad", o =>
         {
             o["layout"]!["pads"]!.AsObject()["up\nleft"] = JsonNode.Parse("{\"role\":\"dpad_up\",\"buttonIndex\":99}");
             return o.ToJsonString();
-        }, "$.layout.pads['up\nleft'].buttonIndex");
+        }, "$.layout.pads['up\\nleft'].buttonIndex");
+        // A quote and a bracket in a key are escaped, so the path reads back
+        // one way. At 17e98e16 a key holding "'] " cut the path short.
+        Add("a dance pad key holding a quote and a bracket, written null", "xbox-360-dance-pad", o =>
+        {
+            o["layout"]!["pads"]!.AsObject()["a'] b"] = null;
+            return o.ToJsonString();
+        }, "$.layout.pads['a\\'] b']");
+        // A path System.Text.Json writes, for a key it cannot map, is written
+        // in the same form. At 17e98e16 it kept the serializer's dotted dash.
+        Add("a misspelled key under a value source whose name holds a dash", "steam-controller-2", o =>
+        {
+            var vs = o["valueSources"]!.AsObject();
+            var src = vs["steamUpdater"]!.DeepClone().AsObject();
+            src["rots"] = new JsonArray();
+            vs["steam-updater"] = src;
+            return o.ToJsonString();
+        }, "$.valueSources['steam-updater'].rots");
         Add("a shifter gear key with a dot, written null", "thrustmaster-th8a-shifter", o =>
         {
             o["layout"]!["hPatternGears"]!.AsObject()["1.5"] = null;
@@ -484,24 +501,24 @@ internal static class Strict
         {
             o["axisMap"]!.AsObject()["0X32"] = "leftTrigger";
             return o.ToJsonString();
-        }, "$.axisMap.0X32");
+        }, "$.axisMap['0X32']");
         Add("an axisMap name no slot takes", "dualsense", o =>
         {
             o["axisMap"]!["0x32"] = "rightStickx2";
             return o.ToJsonString();
-        }, "$.axisMap.0x32");
+        }, "$.axisMap['0x32']");
         // A name takes one usage. At f00f0482 a second usage given
         // rightStickX took the slot, and the first usage ended in none.
         Add("a second axisMap usage given a name another usage has", "dualsense", o =>
         {
             o["axisMap"]!.AsObject()["0x30"] = "rightStickX";
             return o.ToJsonString();
-        }, "$.axisMap.0x30");
+        }, "$.axisMap['0x30']");
         Add("the same, the name in another case", "dualsense", o =>
         {
             o["axisMap"]!.AsObject()["0x30"] = "RIGHTSTICKX";
             return o.ToJsonString();
-        }, "$.axisMap.0x30");
+        }, "$.axisMap['0x30']");
         // A usbConfiguration the descriptor set cannot hold is refused at
         // load on a persona with no protocol or WinUSB package too. At
         // 8debad63 it loaded and failed at create, after the lease.
@@ -533,7 +550,7 @@ internal static class Strict
             var d = o["protocol"]!["decoders"]!.AsObject();
             d["rumble-copy"] = d["rumble"]!.DeepClone();
             return o.ToJsonString();
-        }, "$.protocol.decoders.rumble-copy");
+        }, "$.protocol.decoders['rumble-copy']");
         Add("a decoder whose name holds a colon", "switch2-pro-controller-composite", _ =>
         {
             var o = JsonNode.Parse(File.ReadAllText(Path.Combine(Program.RepoRoot(), "profiles", "nintendo", "switch2-pro-composite.json")))!.AsObject();
@@ -541,14 +558,14 @@ internal static class Strict
             var d = o["protocol"]!["decoders"]!.AsObject();
             d["rumble:copy"] = d["rumble"]!.DeepClone();
             return o.ToJsonString();
-        }, "$.protocol.decoders.rumble:copy");
+        }, "$.protocol.decoders['rumble:copy']");
         Add("a program const keyed by a word", "switch2-pro-controller-composite", _ =>
         {
             var o = JsonNode.Parse(File.ReadAllText(Path.Combine(Program.RepoRoot(), "profiles", "nintendo", "switch2-pro-composite.json")))!.AsObject();
             o["id"] = "user-path";
             o["inputReports"]![0]!["program"]![0]!.AsObject()["const"]!.AsObject()["x"] = "01";
             return o.ToJsonString();
-        }, "$.inputReports[0].program[0].const[\"x\"]");
+        }, "$.inputReports[0].program[0].const.x");
         Add("an axisCenters key holding a dot", "amazon-luna-usb", o =>
         {
             o["axisCenters"]!.AsObject()["X.Y"] = 127;

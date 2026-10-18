@@ -62,7 +62,7 @@ internal static class Rest
             string? refused = null;
             try { p.GetOrBuildReportBuilder(); }
             catch (InvalidOperationException e) { refused = e.Message; }
-            bool ok = refused != null && refused.Contains("amazon-luna-usb", StringComparison.Ordinal) && refused.Contains("axisCenters.", StringComparison.Ordinal);
+            bool ok = refused != null && refused.Contains("amazon-luna-usb", StringComparison.Ordinal) && (refused.Contains("axisCenters.", StringComparison.Ordinal) || refused.Contains("axisCenters['", StringComparison.Ordinal));
             if (!ok) fail++;
             Console.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] {why} is refused: {refused ?? "accepted"}");
         }

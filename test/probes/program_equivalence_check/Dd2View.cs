@@ -7,11 +7,11 @@ using System.Text.RegularExpressions;
 /// (sdk\HIDMaestro.Core\Internal\ProfileDefects.cs), copied here so the
 /// program refusals can be held to them. Locate takes the path from a
 /// message "Profile 'id': path ..." whose path starts with a letter, its
-/// steps names as System.Text.Json writes them, [n] indexes, ['key'] and
-/// a const's ["n"], and reads any other message as naming the root.</summary>
+/// steps names as JSONPath writes them, [n] indexes and ['key'] with its
+/// escapes, and reads any other message as naming the root.</summary>
 internal static partial class Dd2View
 {
-    [GeneratedRegex(@"^Profile '[^']*':\s+(?<path>[A-Za-z][A-Za-z0-9_]*(?:\.(?:[^\s.\[\]'""():,]|:(?!\s|$))+|\[[0-9]*\]|\['[^']*'\]|\[""[^""]*""\])*)")]
+    [GeneratedRegex(@"^Profile '[^']*':\s+(?<path>[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[0-9]*\]|\['(?:[^'\\]|\\.)*'\])*)")]
     private static partial Regex ProfilePrefixed();
 
     public static string Locate(Exception e)
@@ -24,7 +24,7 @@ internal static partial class Dd2View
     public static bool IsDefect(Exception e) =>
         e is InvalidOperationException or FormatException or OverflowException or JsonException or ArgumentException;
 
-    [GeneratedRegex(@"^[A-Za-z][A-Za-z0-9_]*(?:\.(?:[^\s.\[\]'""():,]|:(?!\s|$))+|\[[0-9]*\]|\['[^']*'\]|\[""[^""]*""\])*")]
+    [GeneratedRegex(@"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[0-9]*\]|\['(?:[^'\\]|\\.)*'\])*")]
     private static partial Regex Steps();
 
     /// <summary>The path Locate can give for <paramref name="path"/>: the

@@ -150,14 +150,14 @@ internal static class Mutate
         var files = CatalogFiles();
         foreach (var (profile, path, site) in CrashPoints)
         {
-            c.Run($"{profile} with {path} null ({site}) is refused at {path}", () =>
+            c.Run($"{profile} with {path} null ({site}) is refused at {ProfileDefects.FromJsonPath(path)}", () =>
             {
                 var root = JsonNode.Parse(File.ReadAllText(files[profile]), documentOptions: DocOptions)!;
                 root["id"] = "user-" + profile;
                 Set(root, path, null);
                 var (issue, escaped) = LoadOne(Path.Combine(Path.GetTempPath(), "user-" + profile + ".json"), root.ToJsonString());
                 if (escaped != null) return (false, $"the load threw {escaped.GetType().Name}: {escaped.Message}");
-                return (issue != null && issue.Path == path, issue == null ? "loaded" : $"{issue.Path}: {issue.Reason}");
+                return (issue != null && issue.Path == ProfileDefects.FromJsonPath(path), issue == null ? "loaded" : $"{issue.Path}: {issue.Reason}");
             });
         }
         c.Run("a directory holding a profile with a null layout list and a good profile: the good one loads and the bad one is listed at its path", () =>

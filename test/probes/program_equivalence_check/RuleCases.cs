@@ -96,8 +96,8 @@ internal static partial class RuleChecks
         yield return E("an op of two kinds", $"{P0}[15]", Op("{\"copy\":\"0\",\"xor\":\"1\",\"to\":3}"));
         yield return E("a parameter the op does not take", $"{P0}[2].deadzone", Set($"{P0}[2].deadzone", "3"));
         yield return E("a const with no bytes", $"{P0}[0].const", Set($"{P0}[0].const", "{}"));
-        yield return E("a const keyed by a word", $"{P0}[0].const[\"x\"]", Set($"{P0}[0].const[\"x\"]", "\"01\""));
-        yield return E("a const that is not hex", $"{P0}[0].const[\"2\"]", Set($"{P0}[0].const[\"2\"]", "\"2G\""));
+        yield return E("a const keyed by a word", $"{P0}[0].const.x", Set($"{P0}[0].const[\"x\"]", "\"01\""));
+        yield return E("a const that is not hex", $"{P0}[0].const['2']", Set($"{P0}[0].const[\"2\"]", "\"2G\""));
         yield return E("a copy range that is not one", $"{P0}[2].copy", Set($"{P0}[2].copy", "\"0-x\""));
         yield return E("a copy with no destination", $"{P0}[2].to", Remove($"{P0}[2].to"));
         yield return E("a masked copy inside a block", $"{P0}[13].ops[1].mask", Set($"{P0}[13].ops[1].mask", "\"0F\""));
@@ -163,7 +163,7 @@ internal static partial class RuleChecks
         // ── Decoders ─────────────────────────────────────────────────────
         const string D = "$.protocol.decoders.rumble";
         yield return E("a null decoder", D, Set(D, "null"));
-        yield return E("a decoder name with a dash", "$.protocol.decoders.rum-ble", Set("$.protocol.decoders[\"rum-ble\"]", "{\"minLength\":2,\"fields\":[{\"semantic\":\"x\",\"type\":\"packed-uint\",\"parts\":[{\"pieces\":[{\"at\":8,\"count\":4}]}]}]}"));
+        yield return E("a decoder name with a dash", "$.protocol.decoders['rum-ble']", Set("$.protocol.decoders[\"rum-ble\"]", "{\"minLength\":2,\"fields\":[{\"semantic\":\"x\",\"type\":\"packed-uint\",\"parts\":[{\"pieces\":[{\"at\":8,\"count\":4}]}]}]}"));
         yield return E("a decoder that reads no byte", $"{D}.minLength", Set($"{D}.minLength", "0"));
         yield return E("a decoder with no fields", $"{D}.fields", Set($"{D}.fields", "[]"));
         yield return E("a decoder report that is not a byte", $"{D}.reports[0]", Set($"{D}.reports[0]", "\"0x102\""));

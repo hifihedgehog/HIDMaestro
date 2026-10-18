@@ -27,16 +27,81 @@ internal sealed class FormException : Exception
         $"Profile '{profileId}': " + (message.StartsWith("$.", StringComparison.Ordinal) ? message[2..]
             : message.StartsWith("$: ", StringComparison.Ordinal) ? message[3..] : message);
 
-    /// <summary>The path of a map's member as System.Text.Json writes it
-    /// (ReadStack.AppendPropertyName): <c>pads.up-left</c>, or
-    /// <c>pads['up left']</c> for a key holding one of the characters
-    /// JsonReaderHelper.SpecialCharacters lists, so a dot or a space in a
-    /// key is not read as the path's own punctuation.</summary>
+    /// <summary>The path of a map's member, as RFC 9535 JSONPath writes a
+    /// name: <c>pads.left</c> when the dot shorthand takes it (an ASCII
+    /// letter or _, then ASCII letters, digits and _),
+    /// and <c>pads['up-left']</c> for any other name, an empty one or one
+    /// holding a dot, dash, colon, space or newline among them. In the
+    /// brackets a quote and a backslash are escaped with a backslash, and a
+    /// control character is written as \b, \t, \n, \f, \r or \u and
+    /// four hex digits (RFC 9535 sections 2.3.1.2 and 2.7, the normalized
+    /// path's name selector), so the path reads back one way.</summary>
     public static string Member(string path, string key) =>
-        key.AsSpan().IndexOfAny(PathSpecials) >= 0 ? $"{path}['{key}']" : $"{path}.{key}";
+        IsShorthand(key) ? $"{path}.{key}" : $"{path}['{Escape(key)}']";
 
-    /// <summary>JsonReaderHelper.SpecialCharacters, System.Text.Json 10.0.</summary>
-    private const string PathSpecials = ". '/\"[]()\t\n\r\f\b\\\u0085\u2028\u2029";
+    static bool IsShorthand(string key)
+    {
+        if (key.Length == 0 || !(char.IsAsciiLetter(key[0]) || key[0] == '_')) return false;
+        foreach (char c in key)
+            if (!(char.IsAsciiLetterOrDigit(c) || c == '_')) return false;
+        return true;
+    }
+
+    /// <summary>A name as a bracketed selector holds it (RFC 9535 2.7).</summary>
+    public static string Escape(string key)
+    {
+        var sb = new StringBuilder(key.Length + 4);
+        foreach (char c in key)
+        {
+            switch (c)
+            {
+                case '\'': sb.Append("\\'"); break;
+                case '\\': sb.Append("\\\\"); break;
+                case '\b': sb.Append("\\b"); break;
+                case '\t': sb.Append("\\t"); break;
+                case '\n': sb.Append("\\n"); break;
+                case '\f': sb.Append("\\f"); break;
+                case '\r': sb.Append("\\r"); break;
+                default:
+                    if (c < (char)0x20) sb.Append('\\').Append('u').Append(((int)c).ToString("x4", CultureInfo.InvariantCulture));
+                    else sb.Append(c);
+                    break;
+            }
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>The name a bracketed selector's text holds:
+    /// <see cref="Escape"/> undone. A backslash before anything else stays
+    /// as written.</summary>
+    public static string Unescape(string text)
+    {
+        if (text.IndexOf('\\') < 0) return text;
+        var sb = new StringBuilder(text.Length);
+        for (int i = 0; i < text.Length; i++)
+        {
+            char c = text[i];
+            if (c != '\\' || i + 1 >= text.Length) { sb.Append(c); continue; }
+            char e = text[++i];
+            switch (e)
+            {
+                case '\'': sb.Append('\''); break;
+                case '\\': sb.Append('\\'); break;
+                case 'b': sb.Append('\b'); break;
+                case 't': sb.Append('\t'); break;
+                case 'n': sb.Append('\n'); break;
+                case 'f': sb.Append('\f'); break;
+                case 'r': sb.Append('\r'); break;
+                case 'u' when i + 4 < text.Length
+                              && int.TryParse(text.AsSpan(i + 1, 4), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out int v):
+                    sb.Append((char)v);
+                    i += 4;
+                    break;
+                default: sb.Append(c).Append(e); break;
+            }
+        }
+        return sb.ToString();
+    }
 }
 
 /// <summary>The one validated form the generated and interpreted paths start

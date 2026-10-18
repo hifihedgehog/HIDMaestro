@@ -32,8 +32,8 @@ internal static partial class RuleChecks
         yield return Bound("an xor of byte 2^31-1", $"{P0}[4].xor", Set($"{P0}[4].xor", $"\"{Max}\""));
         yield return Bound("a swap16 of 2^30-1 words", $"{P0}[5].swap16", Set($"{P0}[5].swap16", "\"0-2147483645\""));
         yield return Bound("a bit move to report bit 2^31-1", $"{P0}[3].bits[0][1]", Set($"{P0}[3].bits[0]", $"[16,{Max}]"));
-        yield return Bound("a const at byte 2^31-1", $"{P0}[0].const[\"{Max}\"]", Set($"{P0}[0].const[\"{Max}\"]", "\"01\""));
-        yield return Bound("a block const at byte 2^31-1", $"{P0}[13].ops[0].const[\"{Max}\"]", Set($"{P0}[13].ops[0].const", $"{{\"{Max}\":\"38\"}}"));
+        yield return Bound("a const at byte 2^31-1", $"{P0}[0].const['{Max}']", Set($"{P0}[0].const[\"{Max}\"]", "\"01\""));
+        yield return Bound("a block const at byte 2^31-1", $"{P0}[13].ops[0].const['{Max}']", Set($"{P0}[13].ops[0].const", $"{{\"{Max}\":\"38\"}}"));
         yield return Bound("a destination past int", $"{P0}[2].to", Set($"{P0}[2].to", "2147483648"));
         yield return Bound("a decoder piece at bit 2^31-1", $"{D0}.pieces[0].at", Set($"{D0}.pieces[0].at", Max));
         yield return Bound("decoder pieces whose bit count wraps", $"{D0}.pieces[0].count", Set($"{D0}.pieces", $"[{{\"at\":46,\"count\":{Max}}},{{\"at\":46,\"count\":2}}]"));
