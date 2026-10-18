@@ -1964,18 +1964,26 @@ public sealed class ProfileDatabase
             .ToArray();
 
         var read = new Parsed[names.Length];
-        System.Threading.Tasks.Parallel.For(0, names.Length, i =>
+        var texts = new string?[names.Length];
+        for (int i = 0; i < names.Length; i++)
+        {
+            using var s = asm.GetManifestResourceStream(names[i]);
+            if (s == null) continue;
+            using var reader = new StreamReader(s);
+            texts[i] = reader.ReadToEnd();
+        }
+        // A file with model groups is parsed first: checking its groups
+        // costs a cold process far more than any other file, so the other
+        // files are read while it runs rather than after it.
+        int[] order = Enumerable.Range(0, names.Length)
+            .OrderBy(i => texts[i] != null && MayHoldModelGroup(texts[i]!) ? 0 : 1).ThenBy(i => i).ToArray();
+        System.Threading.Tasks.Parallel.ForEach(System.Collections.Concurrent.Partitioner.Create(order, loadBalance: true), i =>
         {
             string label = CatalogLabel + names[i].Substring(prefix.Length).Replace('\\', '/');
-            using var s = asm.GetManifestResourceStream(names[i]);
-            if (s == null)
-            {
-                read[i] = new Parsed(label, null, new HIDMaestro.HMProfileLoadIssue(
+            read[i] = texts[i] is { } text
+                ? Parse(label, text)
+                : new Parsed(label, null, new HIDMaestro.HMProfileLoadIssue(
                     label, null, "$", "the embedded resource cannot be opened", HIDMaestro.HMProfileLoadIssueKind.Refused));
-                return;
-            }
-            using var reader = new StreamReader(s);
-            read[i] = Parse(label, reader.ReadToEnd());
         });
         var db = Assemble(read);
         // The catalog's own registry, over the profiles just read: a catalog
