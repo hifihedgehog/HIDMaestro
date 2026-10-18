@@ -25,11 +25,14 @@ internal enum GpFloat : byte
 /// <summary>A one-bit value a state program reads: a trigger past the first
 /// step of its 8-bit value (the codec's TriggerOn, v x 255 above 0.5), a
 /// direction of HMGamepadState.Hat (a diagonal sets both of its
-/// components), or a flag of HMGamepadState.</summary>
+/// components), a flag of HMGamepadState, or a direction resolved from
+/// HatDegrees, HatHundredths, HatRaw or Hat, the first set, as the codec
+/// resolves a field with "dpad": "resolved" (VendorBlobCodec.ResolveDpad).</summary>
 internal enum GpFlag : byte
 {
     LeftTriggerOn, RightTriggerOn, DpadUp, DpadDown, DpadLeft, DpadRight,
     Finger0Active, Finger1Active, BatteryCharging, BatteryFull, MicMuted, HeadphonesConnected, CableConnected,
+    DpadUpResolved, DpadDownResolved, DpadLeftResolved, DpadRightResolved,
 }
 
 /// <summary>An integer of HMGamepadState written as it is: the raw motion
@@ -60,6 +63,12 @@ internal sealed record GpFlagsOp(GpFlag[] Flags, int[] Bits) : Op;
 /// the value is clamped to [0, 1], inverted if asked, and min + RoundHalfEven
 /// of it times max - min, stored as <see cref="Store"/> says.</summary>
 internal sealed record GpLinearOp(GpFloat Src, int Min, int Max, bool Invert, double Rest, GpStore Store, int Dst) : Op;
+
+/// <summary>Two 12-bit axes in three bytes, as the codec's stick12-pair
+/// writes them: x and y each WireArith.Linear(slot, min, max, invert, 0.5),
+/// y inverted if asked, x's low 8 bits at Dst, x's high 4 and y's low 4 at
+/// Dst + 1, y's high 8 at Dst + 2.</summary>
+internal sealed record GpStick12Op(GpFloat SrcX, GpFloat SrcY, int Min, int Max, bool InvertY, int Dst) : Op;
 
 /// <summary>WireArith.Scaled: the value, negated if asked, times num / den
 /// rounded to nearest with ties to even and clamped to the int16 range, a
@@ -169,6 +178,14 @@ internal static class StateLowering
         ["LEFTPAD_TOUCH"] = GpFlag.Finger0Active, ["RIGHTPAD_TOUCH"] = GpFlag.Finger1Active,
     };
 
+    /// <summary>A d-pad direction of a field with "dpad": "resolved".</summary>
+    static GpFlag Resolved(GpFlag f) => f switch
+    {
+        GpFlag.DpadUp => GpFlag.DpadUpResolved, GpFlag.DpadDown => GpFlag.DpadDownResolved,
+        GpFlag.DpadLeft => GpFlag.DpadLeftResolved, GpFlag.DpadRight => GpFlag.DpadRightResolved,
+        _ => f,
+    };
+
     static readonly Dictionary<string, GpFlag> s_bitfieldFlags = new(StringComparer.Ordinal)
     {
         ["batteryCharging"] = GpFlag.BatteryCharging, ["batteryFull"] = GpFlag.BatteryFull, ["micMuted"] = GpFlag.MicMuted,
@@ -202,7 +219,8 @@ internal static class StateLowering
     /// is left to the codec.</summary>
     static readonly Dictionary<string, string[]> s_keys = new(StringComparer.Ordinal)
     {
-        ["button-mask"] = new[] { "byte", "type", "semantic", "buttons", "bits" },
+        ["button-mask"] = new[] { "byte", "type", "semantic", "buttons", "bits", "dpad" },
+        ["stick12-pair"] = new[] { "byte", "type", "semantic", "min", "max", "invert" },
         ["uint8-axis"] = new[] { "byte", "type", "semantic", "min", "max", "invert", "center" },
         ["uint8-trigger"] = new[] { "byte", "type", "semantic", "min", "max", "invert" },
         ["uint16-trigger"] = new[] { "byte", "type", "semantic", "min", "max", "invert" },
@@ -342,6 +360,11 @@ internal static class StateLowering
                     // The codec writes every bit of the field's range.
                     for (int bit = lo; bit <= hi; bit++)
                         if (!Claim(b + bit / 8, 1 << (bit & 7))) { reason = $"{where} writes bits another field writes"; return null; }
+                    // "dpad" reads "resolved" or nothing, as the codec's
+                    // check refuses any other value.
+                    bool resolved = Str(keys, "dpad") is string dp
+                        ? (dp == "resolved" ? true : throw new InvalidOperationException($"dpad '{dp}'"))
+                        : false;
                     var moves = new List<int>();
                     var flags = new List<GpFlag>();
                     var flagBits = new List<int>();
@@ -354,7 +377,7 @@ internal static class StateLowering
                         int bit = lo + j;
                         if (bit > hi || b + bit / 8 >= size) continue;
                         int reportBit = b * 8 + bit;
-                        if (s_buttonFlags.TryGetValue(name, out var flag)) { flags.Add(flag); flagBits.Add(reportBit); continue; }
+                        if (s_buttonFlags.TryGetValue(name, out var flag)) { flags.Add(resolved ? Resolved(flag) : flag); flagBits.Add(reportBit); continue; }
                         if (name.Length > 1 && name[0] == '#')
                         {
                             if (!int.TryParse(name.AsSpan(1), NumberStyles.None, CultureInfo.InvariantCulture, out int n) || n >= 32) { reason = $"{where}: '{name}'"; return null; }
@@ -367,6 +390,16 @@ internal static class StateLowering
                     }
                     if (moves.Count > 0) ops.Add(new GpButtonsOp(moves.ToArray()));
                     if (flags.Count > 0) ops.Add(new GpFlagsOp(flags.ToArray(), flagBits.ToArray()));
+                    break;
+                }
+                case "stick12-pair":
+                {
+                    // The codec's left stick for any semantic but rightStick.
+                    bool right = semantic == "rightStick";
+                    if (b + 2 >= size) continue;
+                    if (!ClaimBytes(b, 3)) { reason = $"{where} writes bytes another field writes"; return null; }
+                    ops.Add(new GpStick12Op(right ? GpFloat.RightStickX : GpFloat.LeftStickX, right ? GpFloat.RightStickY : GpFloat.LeftStickY,
+                        Int(keys, "min") ?? 0, Int(keys, "max") ?? 4095, invert, b));
                     break;
                 }
                 case "uint8-axis":

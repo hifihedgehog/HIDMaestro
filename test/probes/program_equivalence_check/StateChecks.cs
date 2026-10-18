@@ -343,6 +343,8 @@ internal static unsafe class StateChecks
         yield return ("gpbuttons", P(new GpButtonsOp(new[] { 0, 3, 31, 12 })));
         yield return ("gpflags", P(new GpFlagsOp(new[] { GpFlag.DpadUp, GpFlag.RightTriggerOn }, new[] { 0, 9 })));
         yield return ("gplinear", P(new GpLinearOp(GpFloat.LeftStickY, -100, 4095, true, 0.5, GpStore.Word, 2)));
+        yield return ("gpstick12", P(new GpStick12Op(GpFloat.RightStickX, GpFloat.RightStickY, 512, 3584, true, 1)));
+        yield return ("gpflags resolved", P(new GpFlagsOp(new[] { GpFlag.DpadUpResolved, GpFlag.DpadDownResolved, GpFlag.DpadLeftResolved, GpFlag.DpadRightResolved }, new[] { 0, 1, 2, 3 })));
         yield return ("gpscaled", P(new GpScaledOp(GpFloat.GyroDpsZ, 16.4, 1, true, 4, 2, 2)));
         yield return ("gpraw", P(new GpRawOp(GpRaw.SensorTimestamp, 0, 4)));
         yield return ("gppressure", P(new GpPressureOp(GpPressure.DpadLeft, 3)));
@@ -384,6 +386,8 @@ internal static unsafe class StateChecks
         yield return ("a full value past a byte", P(new GpTableOp(GpByte.BatteryLevel, new byte[256], 256, -1, 0, 0, 7, true)), "$.ops[0].full");
         yield return ("table bits past a byte", P(new GpTableOp(GpByte.Hat, new byte[256], -1, -1, 0, 4, 8, false)), "$.ops[0].bits");
         yield return ("a third finger", P(new GpFingerOp(2, 0)), "$.ops[0].finger");
+        yield return ("a 12-bit pair of a stick and a trigger", P(new GpStick12Op(GpFloat.RightStickY, GpFloat.LeftTrigger, 0, 4095, false, 0)), "$.ops[0].src");
+        yield return ("a 12-bit pair past 4095", P(new GpStick12Op(GpFloat.LeftStickX, GpFloat.LeftStickY, 0, 4096, false, 0)), "$.ops[0].max");
         yield return ("a third pad", P(new GpPadOp(2, false, false, 0, 0, false, 0)), "$.ops[0].pad");
         yield return ("a selection by a flag the form does not define", P(new GpSelectOp((GpFlag)99, 1, 0, 0)), "$.ops[0].flag");
         yield return ("a ten-bit value of the stamp", P(new GpTenBitOp(GpRaw.SensorTimestamp, 1, 1, 512, false, 0)), "$.ops[0].src");
@@ -395,11 +399,11 @@ internal static unsafe class StateChecks
     /// <summary>State blocks the lowering leaves to the codec.</summary>
     static IEnumerable<(string name, string json, int size)> Unlowered()
     {
-        yield return ("a type the program form does not say", """[ {"byte":0,"type":"stick12-pair","semantic":"leftStick"} ]""", 4);
+        yield return ("a type the program form does not say", """[ {"byte":0,"type":"packed-uint","semantic":"leftMotor","bits":"0-9"} ]""", 4);
         yield return ("a rolling counter in a state block", """[ {"byte":0,"type":"uint8-rolling","semantic":"seq"} ]""", 4);
         yield return ("two rolling fields on one counter", """[ {"byte":0,"type":"uint8-rolling","semantic":"seq"}, {"byte":1,"type":"uint8-rolling","semantic":"seq"} ]""", 4);
         yield return ("a field after the CRC", """[ {"bytes":"0-3","type":"crc32-le","scope":{"from":4,"to":5}}, {"byte":4,"type":"uint8","initial":1} ]""", 6);
-        yield return ("a resolved d-pad", """[ {"byte":0,"type":"button-mask","dpad":"resolved","buttons":["DPAD_UP"]} ]""", 4);
+        yield return ("a resolved d-pad on a hat", """[ {"byte":0,"type":"hat-octant","dpad":"resolved"} ]""", 4);
         yield return ("two fields on one byte", """[ {"byte":0,"type":"uint8","initial":1}, {"byte":0,"type":"button-mask","buttons":["A"]} ]""", 4);
         yield return ("a raw motion value in repeats", """[ {"byte":0,"type":"int16-le","semantic":"gyroPitch","repeat":[2,2]} ]""", 4);
         yield return ("a button name the codec reads as a number", """[ {"byte":0,"type":"button-mask","buttons":["3"]} ]""", 4);
@@ -451,6 +455,22 @@ internal static unsafe class NaiveState
                     // Over the bytes as every other op left them.
                     uint crc = Crc(g.Prefix.Concat(d.Skip(g.From).Take(Math.Max(0, g.To - g.From + 1))));
                     for (int k = 0; k < 4; k++) d[g.Dst + k] = (byte)(crc >> (8 * k));
+                    break;
+                }
+                case GpStick12Op g:
+                {
+                    long Axis(int slot, bool invert)
+                    {
+                        double v = sl[slot];
+                        if (double.IsNaN(v)) v = 0.5;
+                        v = Math.Min(Math.Max(v, 0), 1);
+                        if (invert) v = 1 - v;
+                        return g.Min + (long)Math.Round(v * ((long)g.Max - g.Min), MidpointRounding.ToEven);
+                    }
+                    long x = Axis((int)g.SrcX, false), y = Axis((int)g.SrcY, g.InvertY);
+                    // Three bytes: x's twelve bits, then y's, low first.
+                    long both = x | (y << 12);
+                    for (int k = 0; k < 3; k++) d[g.Dst + k] = (byte)(both >> (8 * k));
                     break;
                 }
                 case GpLinearOp g:
@@ -614,7 +634,25 @@ internal static unsafe class NaiveState
             GpFlag.BatteryFull => st.BatteryFull,
             GpFlag.MicMuted => st.MicMuted,
             GpFlag.HeadphonesConnected => st.HeadphonesConnected,
+            GpFlag.DpadUpResolved or GpFlag.DpadDownResolved or GpFlag.DpadLeftResolved or GpFlag.DpadRightResolved => Resolved(f, in st),
             _ => st.BatteryCharging || st.BatteryFull,
         };
+    }
+
+    /// <summary>A direction of the d-pad an angle gives: HatDegrees, else
+    /// HatHundredths, else HatRaw 0 to 7 clockwise from north, else Hat, the
+    /// first set, and each direction lit within 67.5 degrees of its own.</summary>
+    static bool Resolved(GpFlag f, in HMGamepadState st)
+    {
+        double deg;
+        if (st.HatDegrees.HasValue) deg = st.HatDegrees.Value;
+        else if (st.HatHundredths.HasValue) deg = st.HatHundredths.Value / 100.0;
+        else if (st.HatRaw.HasValue) { if (st.HatRaw.Value >= 8) return false; deg = st.HatRaw.Value * 45.0; }
+        else if (st.Hat != HMHat.None) deg = ((int)st.Hat - 1) * 45.0;
+        else return false;
+        double d = deg - 360.0 * Math.Floor(deg / 360.0);
+        double centre = f switch { GpFlag.DpadUpResolved => 0, GpFlag.DpadRightResolved => 90, GpFlag.DpadDownResolved => 180, _ => 270 };
+        double off = Math.Abs(d - centre);
+        return Math.Min(off, 360 - off) < 67.5;
     }
 }

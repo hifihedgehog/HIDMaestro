@@ -317,7 +317,7 @@ internal static class Emitter
         var body = new List<string>();
         var tail = new List<string>();
         var tables = new List<string>();
-        bool buttons = false, hat = false;
+        bool buttons = false, hat = false, resolved = false;
         void AddOr(int dst, string term) => (orTerms[dst] ??= new List<string>()).Add(term);
         void Whole(int at, int n) { for (int i = 0; i < n; i++) whole[at + i] = true; }
         foreach (var op in v.Unconditional)
@@ -388,6 +388,7 @@ internal static class Emitter
                 case GpSelectOp g:
                     Whole(g.Dst, 2);
                     hat |= g.Flag is GpFlag.DpadUp or GpFlag.DpadDown or GpFlag.DpadLeft or GpFlag.DpadRight;
+                    resolved |= g.Flag >= GpFlag.DpadUpResolved;
                     body.Add(F($"        {{ int v = {Flag(g.Flag)} ? {g.WhenSet} : {g.WhenClear}; d[{g.Dst}] = (byte)v; d[{g.Dst + 1}] = (byte)(v >> 8); }}"));
                     break;
                 case GpTenBitOp g:
@@ -429,6 +430,7 @@ internal static class Emitter
                     for (int i = 0; i < g.Flags.Length; i++)
                     {
                         hat |= g.Flags[i] is GpFlag.DpadUp or GpFlag.DpadDown or GpFlag.DpadLeft or GpFlag.DpadRight;
+                        resolved |= g.Flags[i] >= GpFlag.DpadUpResolved;
                         AddOr(g.Bits[i] >> 3, F($"({Flag(g.Flags[i])} ? 0x{1 << (g.Bits[i] & 7):X2}u : 0u)"));
                     }
                     break;
@@ -442,6 +444,14 @@ internal static class Emitter
                         GpStore.Byte => F($"          d[{g.Dst}] = (byte)v; }}"),
                         _ => F($"          d[{g.Dst}] = (byte)v; d[{g.Dst + 1}] = (byte)(v >> 8); }}"),
                     });
+                    break;
+                case GpStick12Op g:
+                    // VendorBlobCodec's stick12-pair: the middle byte holds
+                    // the high nibble of x and the low nibble of y.
+                    Whole(g.Dst, 3);
+                    body.Add(F($"        {{ int x = global::HIDMaestro.Internal.WireArith.Linear(sl[{(int)g.SrcX}], {g.Min}, {g.Max}, false, 0.5);"));
+                    body.Add(F($"          int y = global::HIDMaestro.Internal.WireArith.Linear(sl[{(int)g.SrcY}], {g.Min}, {g.Max}, {(g.InvertY ? "true" : "false")}, 0.5);"));
+                    body.Add(F($"          d[{g.Dst}] = (byte)x; d[{g.Dst + 1}] = (byte)(((x >> 8) & 0x0F) | ((y & 0x0F) << 4)); d[{g.Dst + 2}] = (byte)(y >> 4); }}"));
                     break;
                 case GpScaledOp g:
                 {
@@ -482,6 +492,7 @@ internal static class Emitter
         sb.AppendLine("    {");
         if (buttons) sb.AppendLine("        uint b = (uint)st.Buttons;");
         if (hat) sb.AppendLine("        uint h = (byte)st.Hat;");
+        if (resolved) sb.AppendLine("        global::HIDMaestro.Internal.VendorBlobCodec.ResolveDpad(in st, out bool ru, out bool rd, out bool rl, out bool rr);");
         sb.Append(string.Join("\n", Head(v.Template, size, whole, orTerms, PathMutation.None))).Append('\n');
         sb.Append(string.Join("\n", body)).Append('\n');
         if (tail.Count > 0) sb.Append(string.Join("\n", tail)).Append('\n');
@@ -523,6 +534,10 @@ internal static class Emitter
         GpFlag.DpadDown => F($"(h < 9u && ((0x{HatMask(4, 5, 6):X}u >> (int)h) & 1u) != 0)"),
         GpFlag.DpadLeft => F($"(h < 9u && ((0x{HatMask(6, 7, 8):X}u >> (int)h) & 1u) != 0)"),
         GpFlag.DpadRight => F($"(h < 9u && ((0x{HatMask(2, 3, 4):X}u >> (int)h) & 1u) != 0)"),
+        GpFlag.DpadUpResolved => "ru",
+        GpFlag.DpadDownResolved => "rd",
+        GpFlag.DpadLeftResolved => "rl",
+        GpFlag.DpadRightResolved => "rr",
         GpFlag.Finger0Active => "st.TouchpadFinger0Active",
         GpFlag.Finger1Active => "st.TouchpadFinger1Active",
         GpFlag.BatteryCharging => "st.BatteryCharging",

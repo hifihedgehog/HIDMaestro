@@ -135,7 +135,7 @@ internal static class ProgramForm
             string path = $"$.ops[{i}]";
             // A state program's ops read HMGamepadState, and its template is
             // its only state-free op. A report program reads its state block.
-            bool gamepadOp = p.Ops[i] is GpButtonsOp or GpFlagsOp or GpLinearOp or GpScaledOp or GpRawOp or GpPressureOp
+            bool gamepadOp = p.Ops[i] is GpButtonsOp or GpFlagsOp or GpLinearOp or GpStick12Op or GpScaledOp or GpRawOp or GpPressureOp
                 or GpTableOp or GpFingerOp or GpPadOp or GpSelectOp or GpTenBitOp or GpCrc32Op;
             if (p.Gamepad && !gamepadOp && p.Ops[i] is not (ConstOp or CounterOp))
                 throw new FormException(path, "a state program reads HMGamepadState and its counter slots over a template");
@@ -169,6 +169,13 @@ internal static class ProgramForm
                     if (!(gl.Rest >= 0 && gl.Rest <= 1)) throw new FormException(path + ".rest", "the rest value is in [0, 1]");
                     TakeWhole(path, gl.Dst, gl.Store == GpStore.Word ? 2 : 1);
                     unconditional.Add(gl);
+                    break;
+                case GpStick12Op gk:
+                    if (gk.SrcX is not (GpFloat.LeftStickX or GpFloat.RightStickX) || gk.SrcY != gk.SrcX + 1)
+                        throw new FormException(path + ".src", "a 12-bit pair reads one stick's two slots");
+                    if (gk.Min < 0 || gk.Max > 4095 || gk.Min > gk.Max) throw new FormException(path + ".max", "a 12-bit pair's range is inside 0 to 4095");
+                    TakeWhole(path, gk.Dst, 3);
+                    unconditional.Add(gk);
                     break;
                 case GpRawOp gr:
                     if (!Enum.IsDefined(gr.Src)) throw new FormException(path + ".src", "no such value");
@@ -438,6 +445,7 @@ internal static class ProgramForm
             case GpButtonsOp g: sb.Append(I, $"gpbuttons({Ints(g.Moves)})"); break;
             case GpFlagsOp g: sb.Append(I, $"gpflags({string.Join(",", g.Flags.Select(f => ((int)f).ToString(I)))};{Ints(g.Bits)})"); break;
             case GpLinearOp g: sb.Append(I, $"gplinear({(int)g.Src},{g.Min},{g.Max},{(g.Invert ? 1 : 0)},{D(g.Rest)},{(int)g.Store},{g.Dst})"); break;
+            case GpStick12Op g: sb.Append(I, $"gpstick12({(int)g.SrcX},{(int)g.SrcY},{g.Min},{g.Max},{(g.InvertY ? 1 : 0)},{g.Dst})"); break;
             case GpScaledOp g: sb.Append(I, $"gpscaled({(int)g.Src},{D(g.Num)},{D(g.Den)},{(g.Negate ? 1 : 0)},{g.Dst},{g.Count},{g.Stride})"); break;
             case GpRawOp g: sb.Append(I, $"gpraw({(int)g.Src},{g.Dst},{g.Bytes})"); break;
             case GpPressureOp g: sb.Append(I, $"gppressure({(int)g.Button},{g.Dst})"); break;

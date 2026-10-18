@@ -55,7 +55,7 @@ internal sealed unsafe class StateProgram
                 case GpLinearOp g: linear.Add(g); break;
                 case GpScaledOp g: scaled.Add(g); break;
                 case GpCrc32Op g: _crc = g; _crcStart = Crc32.Update(0xFFFFFFFFu, g.Prefix); break;
-                case GpRawOp or GpPressureOp or GpTableOp or GpFingerOp or GpPadOp or GpSelectOp or GpTenBitOp or CounterOp: others.Add(op); break;
+                case GpRawOp or GpPressureOp or GpTableOp or GpFingerOp or GpPadOp or GpSelectOp or GpTenBitOp or GpStick12Op or CounterOp: others.Add(op); break;
                 default: throw new InvalidOperationException("no state stage for " + op.GetType().Name);
             }
         }
@@ -150,6 +150,15 @@ internal sealed unsafe class StateProgram
                 d[g.Dst] = (byte)v; d[g.Dst + 1] = (byte)(v >> 8);
                 break;
             }
+            case GpStick12Op g:
+            {
+                int x = WireArith.Linear(sl[(int)g.SrcX], g.Min, g.Max, false, 0.5);
+                int y = WireArith.Linear(sl[(int)g.SrcY], g.Min, g.Max, g.InvertY, 0.5);
+                d[g.Dst] = (byte)x;
+                d[g.Dst + 1] = (byte)(((x >> 8) & 0x0F) | ((y & 0x0F) << 4));
+                d[g.Dst + 2] = (byte)(y >> 4);
+                break;
+            }
             case GpTenBitOp g:
             {
                 int delta = (int)Math.Round((double)Raw(g.Src, in st) * g.Resolution / g.SourceResolution, MidpointRounding.AwayFromZero);
@@ -183,8 +192,15 @@ internal sealed unsafe class StateProgram
         GpFlag.MicMuted => st.MicMuted,
         GpFlag.HeadphonesConnected => st.HeadphonesConnected,
         GpFlag.CableConnected => st.BatteryCharging || st.BatteryFull,
+        >= GpFlag.DpadUpResolved and <= GpFlag.DpadRightResolved => Resolved(f, in st),
         _ => false,
     };
+
+    static bool Resolved(GpFlag f, in HMGamepadState st)
+    {
+        VendorBlobCodec.ResolveDpad(in st, out bool up, out bool down, out bool left, out bool right);
+        return f switch { GpFlag.DpadUpResolved => up, GpFlag.DpadDownResolved => down, GpFlag.DpadLeftResolved => left, _ => right };
+    }
 
     static float Motion(GpFloat src, in HMGamepadState st) => src switch
     {
