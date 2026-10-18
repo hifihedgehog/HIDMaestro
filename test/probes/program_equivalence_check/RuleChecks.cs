@@ -362,8 +362,19 @@ internal static partial class RuleChecks
                 else if (Dd2View.Locate(err) is var at && at != Dd2View.Reachable(c.Expect))
                     Fail($"{c.Rule}: DD-2's load reads the path {at}, not {Dd2View.Reachable(c.Expect)}: {err.Message}");
             }
-            if (c.Tool && LoadShared(text) is var t && t?.Path != c.Expect)
-                Fail($"{c.Rule}: the build tool's parse gives {(t == null ? "no refusal" : $"{t.Value.Path}: {t.Value.Reason}")}, not a refusal at {c.Expect}");
+            if (c.Tool)
+            {
+                // The build tool's parse reads the file apart from the SDK's
+                // load, and a refusal only it reaches counts as reached. The
+                // SDK's strict load refuses a key it does not map before the
+                // groups are read, so a protocol under
+                // usbConfiguration reaches ModelJson's refusal through the
+                // tool alone.
+                var t = LoadShared(text);
+                if (t != null) Record(t.Value.Error);
+                if (t?.Path != c.Expect)
+                    Fail($"{c.Rule}: the build tool's parse gives {(t == null ? "no refusal" : $"{t.Value.Path}: {t.Value.Reason}")}, not a refusal at {c.Expect}");
+            }
         }
         // Every base loads unedited, so each case's refusal is its edit's.
         foreach (var name in Cases().Select(c => c.Base).Distinct())
