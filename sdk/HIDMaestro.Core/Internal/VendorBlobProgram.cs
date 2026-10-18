@@ -712,6 +712,12 @@ internal sealed class VendorBlobProgram
                         $"{where}.fields[{i}] ('{src.Type}').bits \"{src.Bits}\" reaches bit {f.BitHi}. This type holds bits 0 to {maxBit}.");
             }
             CheckVocabulary(in f, i, size, where, output);
+            // The field starts from one byte (CompiledField.Initial), a
+            // rolling counter of either width too, so a value past it was
+            // cut to its low byte.
+            if (src.Initial is < 0 or > 255)
+                throw new InvalidOperationException(
+                    $"{where}.fields[{i}].initial {src.Initial} is not a byte. A field, a rolling counter's included, starts from 0 to 255.");
             if (src.HoldWhile != null && src.Clock != "accumulate")
                 throw new InvalidOperationException($"{where}.fields[{i}].holdWhile goes with \"clock\": \"accumulate\", the stamp it holds.");
             if (src.Clock != null)

@@ -554,6 +554,19 @@ internal static class Strict
             o["axisCenters"]!.AsObject()["X.Y"] = 127;
             return o.ToJsonString();
         }, "$.axisCenters['X.Y']");
+        // A field's initial is the byte the field starts from, a rolling
+        // counter's included. At 17e98e16 256 started a uint8-rolling
+        // counter at 0 and -1 at 255, with no word.
+        Add("a rolling counter's initial past a byte", "dualsense", o =>
+        {
+            o["extendedReport"]!["fields"]![6]!["initial"] = 256;
+            return o.ToJsonString();
+        }, "$.extendedReport.fields[6].initial");
+        Add("a rolling counter's initial below zero", "dualsense", o =>
+        {
+            o["extendedReport"]!["fields"]![6]!["initial"] = -1;
+            return o.ToJsonString();
+        }, "$.extendedReport.fields[6].initial");
         // A USB/IP persona with no protocol or WinUSB package is refused at
         // load for the usbConfiguration or descriptor it lacks. At f00f0482
         // each loaded and built, and was refused at create after the lease.
