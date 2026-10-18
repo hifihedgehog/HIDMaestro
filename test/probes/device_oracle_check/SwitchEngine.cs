@@ -63,7 +63,7 @@ internal static class SwitchEngine
 
     /// <summary>The profile validated as a create validates it, its
     /// protocol compiled for UMDF2, or the refusal.</summary>
-    static (ControllerProfile? Profile, CompiledProtocol? Protocol, string? Refusal) Load(string json)
+    internal static (ControllerProfile? Profile, CompiledProtocol? Protocol, string? Refusal) Load(string json)
     {
         try
         {
