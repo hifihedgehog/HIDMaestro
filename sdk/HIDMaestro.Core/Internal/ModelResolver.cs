@@ -426,9 +426,12 @@ internal sealed class ModelRegistry
                             $"the model id '{m.Id}' is already loaded from {models[m.Id].Source}. Give the model an id of its own.",
                             HIDMaestro.HMProfileLoadIssueKind.Refused));
                 }
-                catch (Exception e) when (e is JsonException or InvalidOperationException or IOException or UnauthorizedAccessException)
+                catch (Exception e)
                 {
-                    var (path, reason) = ProfileDefects.Locate(e);
+                    // Whatever a model file throws refuses that file alone,
+                    // as a profile file's does (ProfileDatabase.Parse).
+                    var (path, reason) = e is IOException or UnauthorizedAccessException
+                        ? ProfileDefects.Locate(e) : ProfileDefects.LocateAny(e);
                     if (text != null) path = ProfileDefects.Spell(text, path);
                     issues.Add(new HIDMaestro.HMProfileLoadIssue(file, null, path, reason, HIDMaestro.HMProfileLoadIssueKind.Refused));
                 }
