@@ -1902,7 +1902,7 @@ internal static partial class Program
                 disposer.Join(10_000);
                 SharedMemoryIO.DestroyController(TeardownIndex);
             }
-            bool clockEnded = WaitUntil(() => !((Thread)clockField.GetValue(device)!).IsAlive, 3000);
+            bool clockEnded = WaitUntil(() => !((IDeviceClock)clockField.GetValue(device)!).Thread.IsAlive, 3000);
             if (detaching && disposed && closed && clockEnded) heldOk++;
             else heldDetail = $"run {i}: detach under way {detaching}, Dispose returned {disposed}, connection closed {closed}, clock ended {clockEnded}";
         }
