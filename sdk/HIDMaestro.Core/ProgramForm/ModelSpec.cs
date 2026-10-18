@@ -474,7 +474,9 @@ public sealed class MemoryWriteSpec
 }
 
 /// <summary>A report raised in place of the command: a program over the
-/// command's bytes.</summary>
+/// command's bytes, or the report ID and then a memory image's first bytes,
+/// read after the rule's writes, for a device that folds each command into
+/// an output report it keeps.</summary>
 public sealed class EmitOutputSpec
 {
     [JsonPropertyName("reportId")]
@@ -482,6 +484,12 @@ public sealed class EmitOutputSpec
 
     [JsonPropertyName("size")]
     public int Size { get; set; }
+
+    /// <summary>A memory image of <see cref="ProtocolSpec.Memory"/>: the
+    /// report is the report ID, then the image's first
+    /// <see cref="Size"/> - 1 bytes. It takes no program.</summary>
+    [JsonPropertyName("memory")]
+    public string? Memory { get; set; }
 
     [JsonPropertyName("program")]
     public List<ProgramOpSpec> Program { get; set; } = new();

@@ -122,6 +122,10 @@ internal sealed class CompiledProtocol
         public MemoryWrite[] Writes = Array.Empty<MemoryWrite>();
         public bool Consume;
         public int Emit = -1;
+        /// <summary>The memory image an emitted report is taken from, or -1.</summary>
+        public int EmitMemory = -1;
+        public byte EmitReportId;
+        public int EmitSize;
         public int Decode = -1;
         public Part[]? Reply;
         public bool UsePrefix = true;
@@ -400,6 +404,18 @@ internal sealed class CompiledProtocol
             {
                 string rat = $"{at}.rules[{i}]";
                 Rules[i] = CompileRule(commands.Rules[i] ?? throw Fail($"{rat} is null."), rat, model.RuleEmits.Length > i ? model.RuleEmits[i] : null);
+                if (commands.Rules[i].EmitOutput is { Memory: { } emitMemory } emitSpec)
+                {
+                    var rule = Rules[i];
+                    rule.EmitMemory = MemoryIndex(emitMemory, $"{rat}.emitOutput.memory");
+                    rule.EmitReportId = HexByte(emitSpec.ReportId, $"{rat}.emitOutput.reportId");
+                    rule.EmitSize = emitSpec.Size;
+                    if (rule.EmitSize < 2 || rule.EmitSize > Programs.ProgramForm.MaxReport)
+                        throw Fail($"{rat}.emitOutput.size {rule.EmitSize} is outside 2 to {Programs.ProgramForm.MaxReport}.");
+                    if (rule.EmitSize - 1 > Memories[rule.EmitMemory].Size)
+                        throw Fail($"{rat}.emitOutput.size {rule.EmitSize} is the report ID and {rule.EmitSize - 1} bytes, past the {Memories[rule.EmitMemory].Size}-byte image '{emitMemory}'.");
+                    rule.Emit = i;
+                }
             }
 
             // An output report written to the HID interface's OUT endpoint

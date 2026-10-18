@@ -162,6 +162,11 @@ internal static partial class RuleChecks
         yield return E("a hex segment past the image", $"{M}.segments[0]", Set($"{M}.segments[0].at", "\"0x1FFFFF\""));
         yield return E("a value segment past the image", $"{M}.segments[1]", Set($"{M}.segments[1].at", "\"0x1FFFFF\""));
         yield return E("two segments that overlap", $"{M}.segments", Set($"{M}.segments[0].at", "\"0x13001\""));
+        yield return E("an emitted report from memory with a program", $"{R0}.emitOutput.program", Rule("{\"match\":\"7F\",\"emitOutput\":{\"reportId\":\"0x01\",\"size\":8,\"memory\":\"flash\",\"program\":[{\"const\":{\"0\":\"01\"}}]}}"));
+        yield return E("an emitted report from memory of 1 byte", $"{R0}.emitOutput.size", Rule("{\"match\":\"7F\",\"emitOutput\":{\"reportId\":\"0x01\",\"size\":1,\"memory\":\"flash\"}}"));
+        yield return E("an emitted report from memory of 65 bytes", $"{R0}.emitOutput.size", Rule("{\"match\":\"7F\",\"emitOutput\":{\"reportId\":\"0x01\",\"size\":65,\"memory\":\"flash\"}}"));
+        yield return E("an emitted report from memory past its image", $"{R0}.emitOutput.size", All(Append($"{Pr}.memory", "{\"name\":\"body\",\"size\":4}"), Rule("{\"match\":\"7F\",\"emitOutput\":{\"reportId\":\"0x01\",\"size\":6,\"memory\":\"body\"}}")));
+        yield return E("an emitted report from a memory that does not exist", $"{R0}.emitOutput.memory", Rule("{\"match\":\"7F\",\"emitOutput\":{\"reportId\":\"0x01\",\"size\":8,\"memory\":\"eeprom\"}}"));
 
         // Halt, setProtocol, getStatus, getReport, log.
         yield return G("a halt with no register", $"{Pr}.halt.while", Remove($"{Pr}.halt.while"));

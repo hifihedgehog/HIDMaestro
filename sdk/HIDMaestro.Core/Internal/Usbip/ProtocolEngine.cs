@@ -681,9 +681,20 @@ internal sealed unsafe class ProtocolEngine
 
     /// <summary>The report a command's rule emits in place of the command:
     /// its program over the command's bytes, the registers and the counters,
-    /// report ID first. Returns its length.</summary>
+    /// or the report ID and a memory image's first bytes as the rule's writes
+    /// left them. Report ID first. Returns its length.</summary>
     public int BuildEmit(int emit, ReadOnlySpan<byte> command, Span<byte> dst)
     {
+        var rule = _p.Rules[emit];
+        if (rule.EmitMemory >= 0)
+        {
+            lock (_sync)
+            {
+                dst[0] = rule.EmitReportId;
+                ReadMemoryLocked(rule.EmitMemory, 0, dst[1..rule.EmitSize]);
+            }
+            return rule.EmitSize;
+        }
         var bound = _emits[emit]!;
         int stateSize = bound.Program.Spec.StateSize, size = bound.Program.Spec.Size;
         lock (_sync)

@@ -171,6 +171,14 @@ internal static class ModelCompiler
                 var rule = rules[i];
                 if (rule?.EmitOutput is not { } e) { emits.Add(null); continue; }
                 string path = $"$.protocol.commands.rules[{i}].emitOutput";
+                // A report taken from a memory image runs no program. The
+                // protocol compiler resolves the image.
+                if (e.Memory != null)
+                {
+                    if (e.Program.Count > 0) throw new FormException(path + ".program", "a report taken from a memory image has no program");
+                    emits.Add(null);
+                    continue;
+                }
                 int state = rule.MinLength ?? 0;
                 if (state < 1) throw new FormException($"$.protocol.commands.rules[{i}].minLength", "a rule that emits a report reads its command, so it needs a minLength");
                 int id = ByteValue(e.ReportId, path + ".reportId");

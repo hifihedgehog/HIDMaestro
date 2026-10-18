@@ -68,6 +68,61 @@ internal static class Umdf2
         Compiles();
         FrameCounter();
         AddressSpace();
+        EmitFromMemory();
+    }
+
+    /// <summary>A profile on the descriptor without report IDs whose
+    /// commands fold into an output report the device keeps, as the
+    /// DualShock 3's sixaxis.sys commands fold into its native output report
+    /// 0x01 (driver.c:1293-1324 at 9bd6279). A write of 48 bytes with no
+    /// report ID reaches the driver as the 48 bytes, command first.</summary>
+    internal static string Folding(string rules) => Profile(o =>
+    {
+        var ds3 = JsonNode.Parse(Device.Catalog("dualshock-3-full"))!.AsObject();
+        o["descriptor"] = (string)ds3["descriptor"]!;
+        o["inputReportSize"] = null;
+        o["inputReports"] = JsonNode.Parse("""[ { "name": "sixaxis", "size": 12, "send": "submit", "program": [ { "copy": "0-1", "to": 0 } ] } ]""");
+        o["protocol"] = JsonNode.Parse($$"""
+        { "memory": [ { "name": "body", "size": 48 } ],
+          "commands": { "rules": {{rules}} } }
+        """);
+    });
+
+    static void EmitFromMemory()
+    {
+        Console.WriteLine("-- a report emitted from a memory image the rules write");
+        var (proto, refusal) = Compile(Folding("""
+        [ { "match": "02", "minLength": 48, "write": [ { "memory": "body", "address": { "value": 0 }, "from": "3-47" } ],
+            "emitOutput": { "reportId": "0x01", "size": 49, "memory": "body" } },
+          { "match": "..", "emitOutput": { "reportId": "0x01", "size": 49, "memory": "body" } } ]
+        """));
+        if (proto == null) { Check("the folding profile compiles", false, refusal ?? ""); return; }
+        var e = new ProtocolEngine(proto, "HM-TEST-0001", 0, ProgramBinder.BindLayouts(proto.Model));
+        byte[] Emit(byte[] cmd)
+        {
+            var r = e.HandleCommand(cmd, Stopwatch.GetTimestamp());
+            if (r.Emit < 0) return Array.Empty<byte>();
+            var dst = new byte[64];
+            int n = e.BuildEmit(r.Emit, cmd, dst);
+            return dst[..n];
+        }
+        var motors = new byte[48];
+        motors[0] = 0x02;
+        for (int i = 3; i < 48; i++) motors[i] = (byte)i;
+        var a = Emit(motors);
+        bool first = a.Length == 49 && a[0] == 0x01 && a[1] == 3 && a[45] == 47 && a[46] == 0 && a[48] == 0;
+        Check("command 2 writes its bytes from the fourth on, and the report is the ID and the image", first, Checks.Hex(a));
+        var other = new byte[48];
+        other[0] = 0x09;
+        var b = Emit(other);
+        Check("another command raises the image as the last command left it", b.AsSpan().SequenceEqual(a), Checks.Hex(b));
+        motors[3] = 0xEE;
+        var c = Emit(motors);
+        Check("the next command 2 replaces the bytes it writes", c.Length == 49 && c[1] == 0xEE && c[2] == 4, Checks.Hex(c));
+        var (_, both) = Compile(Folding("""[ { "match": "02", "minLength": 2, "emitOutput": { "reportId": "0x01", "size": 49, "memory": "body", "program": [ { "copy": "0", "to": 1 } ] } } ]"""));
+        Check("refused with its path: a report from an image that also has a program", both?.Contains("protocol.commands.rules[0].emitOutput.program", StringComparison.Ordinal) == true, both ?? "accepted");
+        var (_, past) = Compile(Folding("""[ { "match": "02", "emitOutput": { "reportId": "0x01", "size": 50, "memory": "body" } } ]"""));
+        Check("refused with its path: a report past the image", past?.Contains("protocol.commands.rules[0].emitOutput.size", StringComparison.Ordinal) == true, past ?? "accepted");
     }
 
     /// <summary>An image only replies read spans the whole 32-bit address
