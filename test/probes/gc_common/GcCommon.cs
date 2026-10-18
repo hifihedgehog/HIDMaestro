@@ -15,7 +15,7 @@ internal static class GcReal
 {
     // The device and configuration descriptors every one of the 57
     // linux-hardware.org dumps of 057E:0337 shows, with the 8-byte control
-    // endpoint the 19 Nintendo-string units report (docs/design/v1.13.0.md).
+    // endpoint the 19 Nintendo-string units report (docs/design/coexistence.md).
     public static readonly byte[] DeviceDescriptor = Convert.FromHexString(
         "12010002000000087E053703000101020301");
 
@@ -30,7 +30,7 @@ internal static class GcReal
     // arithmetic (to_high_speed_interval, patch_config). Microsoft's table
     // gives a high-speed bInterval of 7 a 32-microframe period on a
     // scheduled bus, but nothing is scheduled
-    // here: the persona's own grid sets the rate (docs/design/v1.13.0.md).
+    // here: the persona's own grid sets the rate (docs/design/coexistence.md).
     public static readonly byte[] ConfigurationDescriptorAtHighSpeed = Convert.FromHexString(
         "09022900010100E0FA" + "090400000203000000" + "09211001000122D600" +
         "07058103250007" + "07050203050007");

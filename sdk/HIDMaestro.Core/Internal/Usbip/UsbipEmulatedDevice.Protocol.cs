@@ -9,7 +9,7 @@ namespace HIDMaestro.Internal.Usbip;
 // A device whose profile declares a protocol and sends the SDK's report: its
 // IN endpoint served packet by packet on a modeled host poll clock, its
 // command endpoint, its control answers and its halt. ProtocolEngine holds the
-// state, and CompiledProtocol the profile's rules. docs/design/v1.13.0.md
+// state, and CompiledProtocol the profile's rules. docs/design/coexistence.md
 // describes the model. The poll clock is a DeviceClock with the nextPoll rule.
 internal sealed partial class UsbipEmulatedDevice
 {

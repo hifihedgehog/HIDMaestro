@@ -1,6 +1,6 @@
 {
   "id": "sony-dualshock4-bt",
-  "comment": "The feature answers of the DualShock 4 PIDs 05C4, 09CC and 0BA0, over Bluetooth, byte for byte the table the UMDF2 driver held in code through v1.13.0 (driver.c at 9bd6279) and the USB/IP copy of it. Every answer publishes a feature-read notification, which arms a Bluetooth pad's extended report. Over Bluetooth reports 0x05, 0x09 and 0x20 end in the CRC-32 hid-playstation.c and RPCS3 check, seed 0xA3 then the report from its ID (issue #64).",
+  "comment": "The feature answers of the DualShock 4 PIDs 05C4, 09CC and 0BA0, over Bluetooth, byte for byte the table the UMDF2 driver held in code through v1.12.0 (driver.c at 9bd6279) and the USB/IP copy of it. Every answer publishes a feature-read notification, which arms a Bluetooth pad's extended report. Over Bluetooth reports 0x05, 0x09 and 0x20 end in the CRC-32 hid-playstation.c and RPCS3 check, seed 0xA3 then the report from its ID (issue #64).",
   "featureStubs": {
     "reports": [
       {

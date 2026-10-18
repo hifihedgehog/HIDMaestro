@@ -41,7 +41,7 @@ namespace HIDMaestro.Internal;
 /// last handle closes, which it does when the process ends however it ends.
 /// Liveness is a <c>WaitNamedPipe</c> probe, which opens nothing, so a probe
 /// can never keep a dead owner's claim alive. The design note
-/// docs/design/v1.13.0.md has the measurements behind the choice.</para>
+/// docs/design/coexistence.md has the measurements behind the choice.</para>
 ///
 /// <para>Each process holds one owner claim from its first machine-wide
 /// write until it exits, and one claim per transport index and per

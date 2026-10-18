@@ -34,7 +34,7 @@
 //         The ledger's lock stays free and the entry stays while the locks
 //         are held. Once they are free, and with no devnode to wait for, the
 //         follow-up the sweep started restores the entry, with no second
-//         sweep (docs/design/v1.13.0.md, "Zero setup for Dolphin and
+//         sweep (docs/design/coexistence.md, "Zero setup for Dolphin and
 //         Slippi").
 //      8. A WinUSB bind waits for the deploy lock to add its package, and two
 //         programs bind at the same moment and both bind.

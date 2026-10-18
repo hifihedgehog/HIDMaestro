@@ -1,5 +1,5 @@
 # Build HIDMaestro from copies of this tree under each kit layout the build
-# supports, and check that each setting in docs/design/v1.13.0.md
+# supports, and check that each setting in docs/design/coexistence.md
 # ("Building from source") does what it says. pre-tag-validate.cmd runs this
 # after build_all.cmd, so build\ already holds this tree's release build.
 #

@@ -281,7 +281,7 @@ Programs built on HIDMaestro 1.x must move to 2.0.0. A 2.0.0 program takes prece
 
 A 1.x program makes no such promise. A running v1.12.0 program's `InstallDriver` and its first create in a session each remove every HIDMaestro device on the machine, 2.0.0 controllers included, and its `InstallDriver` replaces the installed driver with its own whenever the payload differs. Every older program does the same. A v1.12.0 program with no controller present leaves no sign, so its next create can take a 2.0.0 program's low index, and its `CreateControllerAt(index)` takes whatever index it is given. A v1.12.0 program whose device's index cannot be read is found by the registry ledger entry each of its creates writes, except one that runs only keyboards and mice. Moving every program on the machine to 2.0.0 is the fix.
 
-Battery scenario S71 runs programs side by side, with peers built on v1.12.0 and v1.11.0, and S72 checks the staging. [How this works](docs/design/v1.13.0.md).
+Battery scenario S71 runs programs side by side, with peers built on v1.12.0 and v1.11.0, and S72 checks the staging. [How this works](docs/design/coexistence.md).
 
 ---
 

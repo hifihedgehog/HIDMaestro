@@ -17,7 +17,7 @@
 // GET_STATUS answers the configuration's self-powered bit. At a 1 ms host
 // poll the adapter answers only when it has read its controllers since its
 // last report: every 1.19971 ms, or every 0.9995 ms with controllers in
-// exactly ports 1 and 2. docs/design/v1.13.0.md has the sources.
+// exactly ports 1 and 2. docs/design/coexistence.md has the sources.
 //
 // Everything the persona does is the profile's data run by the SDK's generic
 // port and protocol model, so this probe also tests that model.

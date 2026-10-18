@@ -4,7 +4,7 @@ setlocal
 ::
 :: Two settings make a smaller build, as environment variables. MSBuild
 :: reads them as properties, so they reach the SDK project too. Official
-:: releases set neither. docs/design/v1.13.0.md ("Building from source")
+:: releases set neither. docs/design/coexistence.md ("Building from source")
 :: lists them with the kit settings.
 ::   HMSkipArm64=true  x64 only: no ARM64 driver, companion or SWD helper,
 ::                     and no ARM64 usbip-win2 installer in the SDK.

@@ -2,7 +2,7 @@
 :: Shared native compiler setup. Called within the build script's setlocal.
 ::
 :: Where the kits and Visual Studio come from. Each setting is an environment
-:: variable, and docs/design/v1.13.0.md ("Building from source") lists them.
+:: variable, and docs/design/coexistence.md ("Building from source") lists them.
 :: A root the build cannot use stops it here, with an error that names the
 :: setting to change.
 ::   HM_SDK_ROOT        The Windows SDK: the um and shared headers, the um

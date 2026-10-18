@@ -2,7 +2,7 @@
 
 Programs built on HIDMaestro 1.x must move to 2.0.0. A 2.0.0 program installs its driver over any older one, whatever runs on it, and refuses nothing because a 1.x program is in the way. A running 1.x program still removes every HIDMaestro device on the machine at its `InstallDriver` and its first create, 2.0.0 controllers included, so a machine works only once every program on it is on 2.0.0.
 
-This page lists what a program built on v1.12.0 meets when it moves. The design notes give the reasons: [programs side by side](design/v1.13.0.md) and [every device as data](design/data-driven-devices.md).
+This page lists what a program built on v1.12.0 meets when it moves. The design notes give the reasons: [programs side by side](design/coexistence.md) and [every device as data](design/data-driven-devices.md).
 
 ## Before you start
 

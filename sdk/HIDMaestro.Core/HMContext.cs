@@ -733,7 +733,7 @@ public sealed class HMContext : IDisposable
     /// program goes unseen and sets no floor: one whose controllers are all
     /// keyboards or mice, or whose ledger write failed, while its
     /// controller's index cannot be read and it shares an index with a
-    /// running program built on this release (docs/design/v1.13.0.md,
+    /// running program built on this release (docs/design/coexistence.md,
     /// "Transport index and slot"). A device a closed program left
     /// keeps at most its own index from use.
     /// A keyed create first takes back the index of a device a closed

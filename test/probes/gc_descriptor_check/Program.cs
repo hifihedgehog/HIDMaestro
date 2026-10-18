@@ -8,7 +8,7 @@
 // WinUSB package.
 //
 // The device part reads the same bytes three ways and compares each with
-// the real adapter's (GcCommon.cs, docs/design/v1.13.0.md):
+// the real adapter's (GcCommon.cs, docs/design/coexistence.md):
 //  - what the persona serves, from the USB/IP device's own descriptor set.
 //  - what Windows enumerates, through the hub the device sits on, before
 //    any driver loads. usbip-win2 gives UdeCx the device's own speed, full

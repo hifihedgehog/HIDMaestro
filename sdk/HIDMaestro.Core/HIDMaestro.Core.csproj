@@ -38,7 +38,7 @@
   <!-- What the build carries, and where the kits come from. MSBuild reads
        environment variables as properties, so each setting works as an
        environment variable for scripts\build_all.cmd and this project alike,
-       or as -p: on this project. docs/design/v1.13.0.md ("Building from
+       or as -p: on this project. docs/design/coexistence.md ("Building from
        source") has the table. Official releases set none of them.
          HMSkipArm64=true  the x64 payload only, and no ARM64 usbip-win2
                            installer.
@@ -169,7 +169,7 @@
          and Microsoft.Kits.Logger.dll, carried until v1.13.0, do nothing:
          no assembly here references the logger, Inf2Cat.exe's embedded
          manifest takes precedence over an external one, and the NuGet WDK
-         carries neither (docs/design/v1.13.0.md). -->
+         carries neither (docs/design/coexistence.md). -->
     <_HMNeutral Include="$(_HMInf2catDir)x86\Inf2Cat.exe;
                          $(_HMInf2catDir)x86\WindowsProtectedFiles.xml;
                          $(_HMInf2catDir)x86\Microsoft.UniversalStore.HardwareWorkflow.Cabinets.dll;

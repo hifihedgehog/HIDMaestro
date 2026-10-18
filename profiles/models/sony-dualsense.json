@@ -1,6 +1,6 @@
 {
   "id": "sony-dualsense",
-  "comment": "The feature answers of the DualSense and every Sony PID without its own branch, byte for byte the table the UMDF2 driver held in code through v1.13.0 (driver.c at 9bd6279) and the USB/IP copy of it. Every answer publishes a feature-read notification, which arms a Bluetooth pad's extended report. Over USB no answer carries a CRC.",
+  "comment": "The feature answers of the DualSense and every Sony PID without its own branch, byte for byte the table the UMDF2 driver held in code through v1.12.0 (driver.c at 9bd6279) and the USB/IP copy of it. Every answer publishes a feature-read notification, which arms a Bluetooth pad's extended report. Over USB no answer carries a CRC.",
   "featureStubs": {
     "reports": [
       {

@@ -20,7 +20,7 @@ namespace HIDMaestro.Internal;
 //  - WinUSB (UsbConfigurationSpec.WinUsb): a USB/IP persona libusb hosts
 //    open, whose real device Windows gives no usable driver.
 //
-// docs/design/v1.13.0.md describes each piece and the Wii U GameCube adapter
+// docs/design/coexistence.md describes each piece and the Wii U GameCube adapter
 // profile that first uses them.
 
 /// <summary>A report made of repeated per-port blocks.</summary>

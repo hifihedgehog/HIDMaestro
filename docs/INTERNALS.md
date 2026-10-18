@@ -249,7 +249,7 @@ The driver also no longer completes a second read with a synthetic report 0x20 b
 
 ### Programs Side by Side
 
-Several programs that embed HIDMaestro share one machine. Through v1.12.0 every machine-wide name was keyed by a controller index that each program numbered for itself, so two programs that each created a first controller wrote the same sections and registry keys, and a driver deploy or sweep in one removed what the other used. The design note, [docs/design/v1.13.0.md](design/v1.13.0.md), has the measurements, the rejected alternatives and the sources behind each choice below.
+Several programs that embed HIDMaestro share one machine. Through v1.12.0 every machine-wide name was keyed by a controller index that each program numbered for itself, so two programs that each created a first controller wrote the same sections and registry keys, and a driver deploy or sweep in one removed what the other used. The design note, [docs/design/coexistence.md](design/coexistence.md), has the measurements, the rejected alternatives and the sources behind each choice below.
 
 #### Ownership Claims
 

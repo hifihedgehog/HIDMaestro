@@ -117,7 +117,7 @@ namespace HIDMaestro.Internal;
 /// Rust setup component, which enforces the same protected setup directory
 /// for the same reason (<c>O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)</c>
 /// for the staging tree, with <c>(A;OICI;FRFX;;;BU)</c> added on the shared
-/// root that must stay readable). See docs/design/v1.13.0.md.</para>
+/// root that must stay readable). See docs/design/coexistence.md.</para>
 /// </summary>
 internal static partial class ProtectedStaging
 {

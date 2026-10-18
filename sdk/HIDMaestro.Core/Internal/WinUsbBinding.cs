@@ -10,7 +10,7 @@ namespace HIDMaestro.Internal;
 
 /// <summary>WinUSB on one virtual USB/IP device whose profile declares
 /// <c>usbConfiguration.winUsb</c>, so libusb hosts can open it with nothing
-/// the device reports changed. docs/design/v1.13.0.md has the measurements
+/// the device reports changed. docs/design/coexistence.md has the measurements
 /// (E1 to E7), taken on the Wii U GameCube adapter, the first profile to use
 /// it.
 ///
