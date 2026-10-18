@@ -403,6 +403,11 @@ internal static unsafe class StateChecks
         yield return ("two fields on one byte", """[ {"byte":0,"type":"uint8","initial":1}, {"byte":0,"type":"button-mask","buttons":["A"]} ]""", 4);
         yield return ("a raw motion value in repeats", """[ {"byte":0,"type":"int16-le","semantic":"gyroPitch","repeat":[2,2]} ]""", 4);
         yield return ("a button name the codec reads as a number", """[ {"byte":0,"type":"button-mask","buttons":["3"]} ]""", 4);
+        // An int16-le field with a center writes offset binary, clamped to
+        // 0 to 65535 (VendorBlobCodec.WriteCalibratedI16), which the form
+        // does not say: the codec keeps it, raw or scaled.
+        yield return ("an int16-le center, offset binary", """[ {"byte":0,"type":"int16-le","semantic":"accelX","center":32768} ]""", 4);
+        yield return ("a scaled int16-le with a center", """[ {"byte":0,"type":"int16-le","semantic":"accelGX","scale":1000,"center":32768,"repeat":[2,2]} ]""", 6);
         yield return ("an axis on a trigger's slot", """[ {"byte":0,"type":"uint8-axis","semantic":"leftTrigger"} ]""", 4);
         // Reads that wrap in int or that a JSON number cannot give: the
         // lowering leaves them to the codec, whose check refuses them at
