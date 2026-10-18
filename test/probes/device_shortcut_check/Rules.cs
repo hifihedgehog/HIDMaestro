@@ -34,6 +34,15 @@ internal sealed record KeptRange(string File, int Begin, int End, string What);
 // An INF model line the check allows, by its text without comments.
 internal sealed record AllowedInfLine(string File, string Text, string Reason);
 
+// A string literal the check allows where rule 3 would count it: the
+// literal as written, without its quotes, in the file its path names.
+internal sealed record AllowedString(string Path, string Text, string Reason)
+{
+    public bool Matches(Hit h) =>
+        h.Group == HitGroups.DeviceString && h.Name == "\"" + Text + "\""
+        && Path.Equals(h.File.Replace('/', '\\'), StringComparison.OrdinalIgnoreCase);
+}
+
 // A vendored file the drivers build, by its path and the SHA-256 of its
 // text with CRLF read as LF. Rules A to C list its hits as allowed while
 // the hash holds. Rule D and the marker rule read it as any other file.
@@ -190,6 +199,17 @@ internal static class Rules
             "the Steam client's registry key, read only to find the library that holds SteamVR (VrDriverBuilder.cs:103)"),
         new(new[] { "steamRoot" }, new[] { @"sdk\HIDMaestro.Core\Internal\VrDriverBuilder.cs" },
             "the Steam client's install directory, read only to find the library that holds SteamVR (VrDriverBuilder.cs:105)"),
+        new(new[] { "RemovedSteamFirmwareStamp" }, new[] { @"sdk\HIDMaestro.Core\Internal\ControllerProfile.cs" },
+            "the steamFirmwareStamp key v1.9.1 to v1.13.0 wrote, read only so a profile that carries it is refused with its replacement named (ValueSources.Validate). "
+            + "No answer, report or device reads it. Design note, decision (d) and \"Where errors appear\""),
+    };
+
+    // String literals the check allows where rule 3 would count them.
+    public static readonly AllowedString[] Strings =
+    {
+        new(@"sdk\HIDMaestro.Core\Internal\VendorBlobProgram.cs", "ds3-battery",
+            "the codec type v2.0.0 drops, compared only to refuse a profile that carries it with its replacement named, uint8-level-map and the "
+            + "table to write (VendorBlobProgram.Compile). No field compiles to it. Design note, mechanism 1 and \"What a program sees change\""),
     };
 
     // The OpenVR SDK header the OpenVR driver builds against. It is Valve's

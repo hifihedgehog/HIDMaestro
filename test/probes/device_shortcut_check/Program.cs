@@ -227,6 +227,14 @@ internal static class Program
             foreach (var u in uses) Console.WriteLine($"    {u.File}:{u.Line}  {u.Name}");
         }
 
+        Console.WriteLine("-- allowed strings");
+        foreach (var entry in Rules.Strings)
+        {
+            var uses = scan.AllowedStrings.Where(a => a.Entry == entry).ToList();
+            Console.WriteLine($"  \"{entry.Text}\" in {entry.Path}: {uses.Count}. {entry.Reason}");
+            foreach (var u in uses) Console.WriteLine($"    {u.Hit.File}:{u.Hit.Line}  {u.Hit.Kind}");
+        }
+
         Console.WriteLine("-- allowed in vendored files (rules A to C)");
         foreach (var entry in Rules.Vendored)
         {

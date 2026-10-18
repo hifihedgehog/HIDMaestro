@@ -294,7 +294,23 @@ internal static class Fixtures
             ok = false;
             Console.WriteLine($"  [FAIL] self-test rule D, {name}: expected \"{expected}\", got \"{got}\"");
         }
-        Console.WriteLine(ok ? $"  self-test: the {5 + s_ruleD.Length} fixtures give exactly their expected hits and regions" : "  [FAIL] self-test");
+        // An allowed string counts only in the file its entry names.
+        foreach (var (rel, wantHits, wantAllowed) in new[]
+                 {
+                     (Path.Combine("sdk", "HIDMaestro.Core", "Internal", "VendorBlobProgram.cs"), 0, 1),
+                     (Path.Combine("sdk", "HIDMaestro.Core", "Internal", "Fixture3.cs"), 1, 0),
+                 })
+        {
+            var scan = new Scan(cat, prints, s_regions, Rules.Names, Rules.InfLines, Rules.Vendored);
+            scan.Add(rel, rel[(Path.Combine("sdk", "HIDMaestro.Core").Length + 1)..], "class F { bool R(string t) => t == \"ds3-battery\"; }", SourceKind.CSharp);
+            scan.Run();
+            int hits = scan.Failing.Count(h => h.Group == HitGroups.DeviceString);
+            if (hits == wantHits && scan.AllowedStrings.Count == wantAllowed && scan.Failing.Count == hits) continue;
+            ok = false;
+            Console.WriteLine($"  [FAIL] self-test allowed strings, {rel}: expected {wantHits} hits and {wantAllowed} allowed, "
+                              + $"got {scan.Failing.Count} hits ({hits} device strings) and {scan.AllowedStrings.Count} allowed");
+        }
+        Console.WriteLine(ok ? $"  self-test: the {7 + s_ruleD.Length} fixtures give exactly their expected hits and regions" : "  [FAIL] self-test");
         return ok;
     }
 
