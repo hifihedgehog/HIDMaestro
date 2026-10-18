@@ -12,7 +12,8 @@
 // Checked over every parent a v1 program (v1.8.0 to v1.12.0) and v2.0.0
 // create for every catalog profile and key form. v1's presentations are
 // the plan record of master 3dd5e2a (layout_audit_check's
-// presentation-plan.txt), whose enumerator rule is v1.12.0's. v2.0.0's are
+// presentation-plan.txt), whose enumerator rule is v1.12.0's, and
+// AddedAfterRecord for a profile the catalog gained later. v2.0.0's are
 // PresentationPlan.Of. The key forms are the default identity of an
 // index, the canonical "index:N" key, which v1.8.0 and v1.8.1 also named
 // HM_<hash> with the same prefix, and consumer keys. v1 derives the same
@@ -66,6 +67,16 @@ internal static class ChildPaths
         }
     }
 
+    // Catalog profiles added after the record's commit, which no v1 release
+    // shipped, each with the parent v1.12.0 makes for it if a v1 program
+    // loads its file: DeviceNodeCreator.CreateDeviceNode at b4d29d9 puts a
+    // profile with no upper filter and a vendor other than Microsoft's
+    // under ROOT\HIDClass.
+    static readonly Dictionary<string, (string Path, string Enumerator)> AddedAfterRecord = new(StringComparer.Ordinal)
+    {
+        ["switch-pro-usb"] = ("Root", "HIDClass"),
+    };
+
     internal static void Run(Action<string, bool, string> check)
     {
         string? planFile = Find(Path.Combine("layout_audit_check", "presentation-plan.txt"));
@@ -94,11 +105,14 @@ internal static class ChildPaths
             profiles++;
             var plan = PresentationPlan.Of(p.Inner);
             if (Slot(plan.Path.ToString(), plan.Enumerator) is { } v2) slots.Add(("v2", v2.Root, v2.Enumerator));
-            if (!v1Slots.TryGetValue(p.Id, out var old)) { v1Missing++; continue; }
+            if (!v1Slots.TryGetValue(p.Id, out var old) && !AddedAfterRecord.TryGetValue(p.Id, out old)) { v1Missing++; continue; }
             if (Slot(old.Path, old.Enumerator) is { } v1) slots.Add(("v1", v1.Root, v1.Enumerator));
         }
-        check($"paths: the plan record holds v1's presentation of every one of {profiles} catalog profiles",
+        check($"paths: the plan record, or the list of profiles added after it, holds v1's presentation of every one of {profiles} catalog profiles",
               v1Missing == 0, $"{v1Missing} without one");
+        var listed = AddedAfterRecord.Keys.Where(id => v1Slots.ContainsKey(id) || ctx.AllProfiles.All(p => p.Id != id)).ToList();
+        check("paths: every profile listed as added after the record is a catalog profile the record lacks",
+              listed.Count == 0, string.Join(", ", listed));
 
         // The segments of ROOT and SWD parents never coincide, so a child
         // path is shared only within one enumerator of one root.
