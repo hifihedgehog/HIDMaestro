@@ -398,7 +398,7 @@ internal static class Vocabulary
     /// with Y up, and three frames of motion.</summary>
     static void SwitchProBody()
     {
-        var spec = Spec(SwitchProPacker.BodySize,
+        var spec = Spec(48,
             """{"byte":2,"type":"button-mask","buttons":["#2","#3","#0","#1","_","_","#5","#7"]}""",
             """{"byte":3,"type":"button-mask","buttons":["#8","#9","#11","#10","#12","#13"]}""",
             """{"byte":4,"type":"button-mask","dpad":"resolved","buttons":["DPAD_DOWN","DPAD_UP","DPAD_RIGHT","DPAD_LEFT","_","_","#4","#6"]}""",
@@ -411,8 +411,12 @@ internal static class Vocabulary
             """{"byte":20,"type":"int16-le","semantic":"gyroDpsX","scale":[13371,936],"negate":true,"repeat":[3,12]}""",
             """{"byte":22,"type":"int16-le","semantic":"gyroDpsY","scale":[13371,936],"repeat":[3,12]}""");
         VendorBlobProgram.Check(spec, spec.Size, "switch-pro body", output: false, portBlock: false);
+        // The profile's own stateBlock, against the list this check held
+        // SwitchProPacker to until v2.0.0 moved the body into the profile.
+        var own = ProfileDatabase.LoadEmbedded().All.First(p => p.Id == "switch-pro").StateBlockSpecForCodec();
+        var enc2 = new VendorBlobCodec.EncoderState();
         var rng = new Random(20261016);
-        var packed = new byte[SwitchProPacker.BodySize];
+        var packed = new byte[48];
         var coded = new byte[spec.Size];
         var enc = new VendorBlobCodec.EncoderState();
         int differ = 0;
@@ -421,14 +425,14 @@ internal static class Vocabulary
         for (int i = 0; i < N; i++)
         {
             var (s, v) = RandomState(rng);
-            SwitchProPacker.BuildBody(in s, v[0], v[1], v[2], v[3], packed);
+            VendorBlobCodec.EncodeInput(own, in s, v[0], v[1], v[2], v[3], v[4], v[5], packed, enc2);
             VendorBlobCodec.EncodeInput(spec, in s, v[0], v[1], v[2], v[3], v[4], v[5], coded, enc);
             if (!packed.AsSpan().SequenceEqual(coded))
             {
                 if (differ++ == 0) first = $"{Convert.ToHexString(packed)} against {Convert.ToHexString(coded)}";
             }
         }
-        Check($"field lists give SwitchProPacker.BuildBody's 48 bytes on {N:N0} random states", differ == 0, differ == 0 ? "" : $"{differ} differ, first {first}");
+        Check($"switch-pro's stateBlock gives the 48 bytes of the list SwitchProPacker.BuildBody was held to, on {N:N0} random states", differ == 0, differ == 0 ? "" : $"{differ} differ, first {first}");
     }
 
     /// <summary>The Switch 2 Pro composite's 24-byte body as field lists.</summary>
@@ -486,8 +490,15 @@ internal static class Vocabulary
         "{\"pieces\":[{\"at\":" + ((block + 2) * 8 + 7) + ",\"count\":1},{\"at\":" + ((block + 3) * 8) + ",\"count\":8}]," +
         "\"offset\":-128,\"range\":[0,101],\"scale\":[255,101],\"round\":\"down\"}]}";
 
-    static void SwitchProRumble()
+    static unsafe void SwitchProRumble()
     {
+        // The profile's own decoder, against the field list this check held
+        // SwitchProPacker.DecodeRumbleAmplitude to until v2.0.0 moved the
+        // decode into the profile.
+        var decoder = ProgramBinder.BindDecoders(ProfileDatabase.LoadEmbedded().All.First(p => p.Id == "switch-pro").GetOrCompileModel())[0];
+        int li = Array.IndexOf(decoder.Form.Semantics, "leftMotor"), ri = Array.IndexOf(decoder.Form.Semantics, "rightMotor");
+        var input = GC.AllocateArray<byte>(10 + 4, pinned: true);
+        var output = GC.AllocateArray<byte>(8, pinned: true);
         var spec = new ExtendedReportSpec { ReportId = "0x10", Size = 10, Fields = new() { Field(SwitchRumbleSide("leftMotor", 2)), Field(SwitchRumbleSide("rightMotor", 6)) } };
         VendorBlobProgram.Check(spec, spec.Size, "switch-pro rumble", output: true, portBlock: false);
         var report = new byte[10];
@@ -504,14 +515,15 @@ internal static class Vocabulary
                     report[2] = 0x5A; report[3] = (byte)b1; report[4] = b2; report[5] = (byte)b3;
                     report[6] = (byte)b3; report[7] = (byte)(255 - b1); report[8] = (byte)(b2 ^ 0x80); report[9] = (byte)b1;
                     var (fields, _) = VendorBlobCodec.Decode(spec, report);
-                    byte l = SwitchProPacker.DecodeRumbleAmplitude(report.AsSpan(2, 4));
-                    byte r = SwitchProPacker.DecodeRumbleAmplitude(report.AsSpan(6, 4));
+                    report.CopyTo(input, 0);
+                    fixed (byte* sp = input) fixed (byte* dp = output) decoder.Run(sp, dp);
+                    byte l = output[li], r = output[ri];
                     n++;
                     boxed &= fields["leftMotor"] is byte && fields["rightMotor"] is byte;
                     if ((byte)fields["leftMotor"] != l || (byte)fields["rightMotor"] != r)
                         if (differ++ == 0) first = $"{Convert.ToHexString(report)}: {l} {r} against {fields["leftMotor"]} {fields["rightMotor"]}";
                 }
-        Check($"packed-uint gives SwitchProPacker.DecodeRumbleAmplitude on both sides of {n:N0} reports, boxed as byte",
+        Check($"packed-uint gives switch-pro's protocol.decoders.rumble on both sides of {n:N0} reports, boxed as byte",
             differ == 0 && boxed, differ == 0 ? (boxed ? "" : "not byte") : $"{differ} differ, first {first}");
     }
 

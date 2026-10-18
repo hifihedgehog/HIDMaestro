@@ -150,9 +150,9 @@ public struct HMGamepadState
     // angular velocity, right-hand rule around the same axes.
     //
     // Consumers that read motion FROM SDL (PadForge's MotionSnapshot)
-    // submit those values verbatim. The per-profile packer owns the
-    // conversion to each wire's native frame and units (Switch:
-    // SwitchProPacker permutes SDL->wire and scales g x 4096,
+    // submit those values verbatim. The profile's fields own the
+    // conversion to each wire's native frame and units (Switch Pro: its
+    // stateBlock permutes SDL->wire and scales g x 4096,
     // deg/s x 13371/936), so an SDL-reading consumer's vector
     // round-trips bit-consistent to SDL on the client side. Distinct
     // from the RAW shorts above, which carry Sony-firmware units for

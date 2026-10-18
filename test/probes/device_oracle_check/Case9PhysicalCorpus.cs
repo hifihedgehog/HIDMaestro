@@ -46,9 +46,11 @@
 //               fixed time, so a run repeats.
 //
 // Per entry, on the SDK side (stream corpus/<id>/sdk): the profile the
-// builder made, the predicates case 1's predicates stream reads, the
-// Switch Pro packer's gate (SwitchProPacker.IsSwitchPro) and the
-// controller's own flag, and the frames the controller writes for the
+// builder made, the predicates case 1's predicates stream reads, whether
+// the SDK runs the Switch Pro's protocol for it (at 9bd6279 the packer's
+// VID and PID gate, SwitchProPacker.IsSwitchPro, and the controller's own
+// flag, from v2.0.0 a UMDF2 protocol in the profile and the controller's
+// protocol host), and the frames the controller writes for the
 // scripted state set (States.Scripted, each state once), built offline as
 // case 1 builds its controllers. Then the instance configuration
 // WriteInstanceConfig writes for it, in the hive case 5 uses
@@ -152,7 +154,7 @@ internal sealed class Case9PhysicalCorpus : IOracleCase
                     $"id={p.Id} name={p.Name} vendor={p.Vendor} vid=0x{p.VendorId:X4} pid=0x{p.ProductId:X4} " +
                     $"product={p.ProductString} manufacturer={p.ManufacturerString} type={p.Type} connection={p.Connection}"));
                 golden.Out("predicates", Encoding.UTF8.GetBytes(Predicates(p)));
-                golden.Out("switch.packer", new[] { (byte)(SwitchProPacker.IsSwitchPro(p.VendorId, p.ProductId) ? 1 : 0) });
+                golden.Out("switch.packer", new[] { (byte)(p.Protocol != null && !p.RequiresUsbipBackend ? 1 : 0) });
                 Submit(golden, p, FirstIndex + n++, view, section, frame);
 
                 // The instance configuration, one profile at a time: two
@@ -688,7 +690,8 @@ internal sealed class Case9PhysicalCorpus : IOracleCase
         try
         {
             golden.Explainer = new FrameExplainer(c);
-            object? flag = typeof(HMController).GetField("_switchProtocol", BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(c);
+            object? flag = typeof(HMController).GetField("_switchProtocol", BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(c)
+                ?? typeof(HMController).GetField("_host", BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(c) is { };
             golden.Out("switch.protocol", new[] { flag is bool on ? (byte)(on ? 1 : 0) : (byte)0xFF });
             IReadOnlyList<HMAxis> axes;
             try { axes = AxesOf(p); }

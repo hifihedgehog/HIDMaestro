@@ -285,11 +285,6 @@ public sealed partial class HMController : IDisposable
     private IDeviceClock? _idleClock;
     private StreamClock? _stream;
 
-    // Switch Pro protocol (issue #33): wire-format packer state. See
-    // SwitchProPacker + the driver-side responder in driver.c.
-    private bool _switchProtocol;
-    private byte[]? _switchBodyBuffer;
-
     // v2.0.0: a device that builds its own reports (design note, mechanism
     // 2). SubmitState encodes the profile's state block, and the device
     // builds each report from it on its own clock, in the layout its
@@ -610,14 +605,6 @@ public sealed partial class HMController : IDisposable
             _extendedModeArmed = alwaysArmed;
         }
 
-        // Switch Pro protocol (issue #33): keyed on the Nintendo VID/PID
-        // family, mirroring the driver-side responder's gate. Pre-allocate
-        // the body buffer only for this family, same rationale as the
-        // extended-report buffer above.
-        _switchProtocol = SwitchProPacker.IsSwitchPro(profile.VendorId, profile.ProductId);
-        if (_switchProtocol)
-            _switchBodyBuffer = new byte[SwitchProPacker.BodySize];
-
         // v2.0.0: the device model. The profile compiled at load and at
         // create's validation, so this reuses that work.
         var model = profile.Inner.GetOrCompileModel();
@@ -821,24 +808,6 @@ public sealed partial class HMController : IDisposable
         {
             Ports.SubmitLocked(0, in state, direct: false,
                 (float)mlx, (float)mly, (float)mrx, (float)mry, (float)mlt, (float)mrt);
-            return ElapsedMicros(startTicks);
-        }
-
-        // Switch Pro protocol path (issue #33): pack the wire-format 0x30
-        // body instead of the descriptor-driven build. The descriptor's
-        // report 0x30 is a vendor-opaque byte array, so BuildReportInto's
-        // semantic packing cannot produce the layout SDL casts the bytes
-        // into; SwitchProPacker owns it (buttons/12-bit sticks/IMU). The
-        // driver's 60 Hz streamer serves this body with its own timer +
-        // battery overlay, and no GIP buffer applies (Nintendo VID has no
-        // XUSB companion).
-        if (_switchProtocol)
-        {
-            SwitchProPacker.BuildBody(in state, mlx, mly, mrx, mry, _switchBodyBuffer!);
-            SharedMemoryIO.WriteInputFrame(
-                _inputView, _inputEvent, ref _inputSeqNo,
-                _switchBodyBuffer!, SwitchProPacker.BodySize, null);
-
             return ElapsedMicros(startTicks);
         }
 
@@ -1875,51 +1844,6 @@ public sealed partial class HMController : IDisposable
                             // that need them have them.
                         }
                     }
-
-                    // Switch Pro rumble decode (issue #33): output 0x01
-                    // (rumble + subcommand) and 0x10 (rumble only) carry
-                    // one 4-byte HD-rumble block per side at payload
-                    // [1..4] / [5..8]. Surface coarse amplitudes through
-                    // the same OutputDecoded lane the Sony profiles use,
-                    // as leftMotor / rightMotor bytes, so PadForge's
-                    // feedback handler works unchanged (spec point 4).
-                    else if (_switchProtocol
-                        && (reportId == 0x01 || reportId == 0x10)
-                        && dataSize >= 9 && OutputDecoded != null)
-                    {
-                        try
-                        {
-                            byte leftAmp = SwitchProPacker.DecodeRumbleAmplitude(
-                                new ReadOnlySpan<byte>(buf, 1, 4));
-                            byte rightAmp = SwitchProPacker.DecodeRumbleAmplitude(
-                                new ReadOnlySpan<byte>(buf, 5, 4));
-                            var full = new byte[dataSize + 1];
-                            full[0] = reportId;
-                            Buffer.BlockCopy(buf, 0, full, 1, dataSize);
-                            EventRaise.Each(OutputDecoded, this, new HMOutputDecodedEventArgs
-                            {
-                                ReportId = reportId,
-                                Fields = new Dictionary<string, object>
-                                {
-                                    ["leftMotor"] = leftAmp,
-                                    ["rightMotor"] = rightAmp,
-                                },
-                                RawBytes = full,
-                                CrcValid = true,
-                            }, nameof(OutputDecoded));
-                        }
-                        catch
-                        {
-                            // Same containment contract as the codec path.
-                        }
-                    }
-
-                    // v2.0.0: the protocol's decoders (mechanism 3), for an
-                    // output report a decoder names or a command whose rule
-                    // decodes it. A report shorter than its decoder reads is
-                    // not decoded: a console also sends empty packets. The
-                    // last arm of the chain, so a report raises OutputDecoded
-                    // once, as at v1.12.0.
                     else if (_decoders != null && source == (byte)HMOutputSource.HidOutput && OutputDecoded != null)
                     {
                         try { RunDecoder(reportId, buf, dataSize); }

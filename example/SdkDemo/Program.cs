@@ -856,9 +856,9 @@ Console.WriteLine("\n  12d. Switch Pro Controller: SubmitState with IMU");
     };
 
     // A pressed (layout buttonIndex 1 = face_a), gentle yaw, gravity at
-    // rest. The SDK's SwitchProPacker converts to the 0x30 wire format
-    // (12-bit packed sticks, int16 IMU at Switch scaling) and the
-    // driver's streamer serves it with live timer/battery bytes.
+    // rest. switch-pro's state block converts it to the 0x30 wire format
+    // (12-bit packed sticks, int16 IMU at Switch scaling), and the SDK's
+    // protocol host sends it on the device clock with the live timer byte.
     var swState = new HMGamepadState
     {
         Buttons = (HMButton)(1u << 1),

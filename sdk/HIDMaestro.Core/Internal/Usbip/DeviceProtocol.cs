@@ -214,11 +214,6 @@ internal sealed class CompiledProtocol
         // the protocol's decoders: a rule's decode never runs on them.
         var decodedFirst = new List<(byte Id, string By)>();
         if (profile.ExtendedOutputReport != null) decodedFirst.Add((profile.ExtendedOutputReport.ReportIdByte, "extendedOutputReport's codec"));
-        if (SwitchProPacker.IsSwitchPro(profile.VendorId, profile.ProductId))
-        {
-            decodedFirst.Add((0x01, "the SDK's Switch Pro rumble decode"));
-            decodedFirst.Add((0x10, "the SDK's Switch Pro rumble decode"));
-        }
         _decodedFirst = decodedFirst.ToArray();
         Ports = PortLayout.Of(profile.ExtendedReport, $"Profile '{profile.Id}': extendedReport", output: false);
         if (Ports != null && Ports.Count > MaxPorts)

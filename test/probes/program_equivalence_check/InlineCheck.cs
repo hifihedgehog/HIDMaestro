@@ -13,7 +13,8 @@ using HIDMaestro.Internal.Usbip;
 
 /// <summary>inline: the generated program inlines into the code that sends
 /// its reports. The device clock and a USB/IP device's reads both build a
-/// report through ProtocolEngine.BuildNext over the device's set type, so
+/// report through ProtocolEngine.BuildNext over the device's set type, as
+/// the protocol host of a UMDF2 device does, so
 /// that method, compiled for each catalog set, must hold no call to a
 /// kernel or to the set's Run. Under the JIT a child process runs BuildNext
 /// for each catalog device and for a set whose kernel is marked NoInlining,
@@ -50,7 +51,10 @@ internal static class InlineCheck
         {
             var model = p.GetOrCompileModel();
             var runner = ProgramBinder.BindLayouts(model)!;
-            var compiled = CompiledProtocol.Compile(p, new UsbDescriptorSet(p, 0))!;
+            // A UMDF2 device has no USB descriptors: its HID driver carries the
+            // reports, which the SDK's protocol host builds through the same
+            // BuildNext.
+            var compiled = CompiledProtocol.Compile(p, p.RequiresUsbipBackend ? new UsbDescriptorSet(p, 0) : null)!;
             var engine = new ProtocolEngine(compiled, "HM-INLINE-0001", 0, runner);
             for (int layout = 0; layout < model.Layouts.Length; layout++)
                 runner.Visit(new Build { Engine = engine });

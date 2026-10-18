@@ -9,11 +9,12 @@
 //
 // The conversion replaces both with a state block and codec fields (design
 // note, mechanisms 1 and 2), which must reproduce these bodies and decodes
-// byte for byte except the listed arithmetic changes. From v2.0.0 the Switch
-// 2 Pro's body is the composite profile's stateBlock through the codec, as
-// HMController encodes it, and its rumble decode the profile's
-// protocol.decoders.rumble through the kernel the build step generated, or
-// the interpreter when HM_ORACLE_INTERPRET is set (Switch2 below).
+// byte for byte except the listed arithmetic changes. From v2.0.0 each
+// body is its profile's stateBlock through the codec, as HMController
+// encodes it, the composite's and switch-pro's, and each rumble decode the
+// profile's protocol.decoders.rumble through the kernel the build step
+// generated, or the interpreter when HM_ORACLE_INTERPRET is set (Switch2 and
+// SwitchPro below).
 using System;
 using System.Collections.Generic;
 using HIDMaestro;
@@ -32,7 +33,7 @@ internal sealed class Case2Packers : IOracleCase
     public void Record(GoldenCase golden, Options options)
     {
         var scratch = new Dictionary<HMAxis, float>();
-        var body = new byte[SwitchProPacker.BodySize];
+        var body = new byte[SwitchPro.BodySize];
         var body2 = new byte[Switch2.BodySize];
 
         // The bodies on case 1's scripted and random states, each body built
@@ -54,7 +55,7 @@ internal sealed class Case2Packers : IOracleCase
         EachState((s, v) =>
         {
             golden.SetInput(in s, v);
-            SwitchProPacker.BuildBody(in s, v[0], v[1], v[2], v[3], body);
+            SwitchPro.BuildBody(in s, v[0], v[1], v[2], v[3], body);
             golden.Out("body", body);
         });
         golden.Stream("switch2-pro/body/states");
@@ -83,7 +84,7 @@ internal sealed class Case2Packers : IOracleCase
             {
                 var a = SlotsAt(slot, v, 4);
                 golden.SetInput(in neutral, a);
-                SwitchProPacker.BuildBody(in neutral, a[0], a[1], a[2], a[3], body);
+                SwitchPro.BuildBody(in neutral, a[0], a[1], a[2], a[3], body);
                 golden.Out(slot == 4 ? "all" : $"slot{slot}", body);
             }
         golden.Stream("switch2-pro/body/slots");
@@ -110,7 +111,7 @@ internal sealed class Case2Packers : IOracleCase
                 {
                     block[0] = 0x00; block[1] = (byte)b1; block[2] = b2; block[3] = (byte)b3;
                     block.CopyTo(outAmp, 0);
-                    outAmp[4] = SwitchProPacker.DecodeRumbleAmplitude(block);
+                    outAmp[4] = SwitchPro.DecodeRumbleAmplitude(block);
                     golden.Out("amp", outAmp);
                 }
         // Byte 0 and the low seven bits of byte 2 are not read: a sample of
@@ -119,11 +120,11 @@ internal sealed class Case2Packers : IOracleCase
         {
             rng.Fill(block);
             block.CopyTo(outAmp, 0);
-            outAmp[4] = SwitchProPacker.DecodeRumbleAmplitude(block);
+            outAmp[4] = SwitchPro.DecodeRumbleAmplitude(block);
             golden.Out("amp", outAmp);
         }
         for (int len = 0; len < 4; len++)
-            golden.Out($"amp-len{len}", new[] { SwitchProPacker.DecodeRumbleAmplitude(new byte[] { 0xFF, 0xC8, 0xFF, 0x72 }.AsSpan(0, len)) });
+            golden.Out($"amp-len{len}", new[] { SwitchPro.DecodeRumbleAmplitude(new byte[] { 0xFF, 0xC8, 0xFF, 0x72 }.AsSpan(0, len)) });
 
         // DecodeRumble: each of the twelve amplitude fields (two actuators,
         // three frames, two fields) alone at 0, 1, 512 and 1023, then a
@@ -184,6 +185,40 @@ internal sealed class Case2Packers : IOracleCase
         if (slot == count) for (int k = 0; k < count; k++) a[k] = v;
         else a[slot] = v;
         return a;
+    }
+
+    /// <summary>What replaced SwitchProPacker: switch-pro's stateBlock,
+    /// encoded by the codec from the four stick slots HMController passes it
+    /// (as floats), and its rumble decoder on a block placed as the left
+    /// side of report 0x10. A block shorter than the decoder reads is not
+    /// decoded, which the recording's packer reported as level 0, and so
+    /// does this.</summary>
+    internal static unsafe class SwitchPro
+    {
+        public const int BodySize = 48;
+        static readonly ControllerProfile s_profile =
+            ProfileDatabase.LoadEmbedded().All.First(p => p.Id == "switch-pro");
+        static readonly ExtendedReportSpec s_spec = s_profile.StateBlockSpecForCodec();
+        static readonly VendorBlobCodec.EncoderState s_enc = new();
+        static readonly DecoderRunner s_decoder = ProgramBinder.BindDecoders(s_profile.GetOrCompileModel(),
+            Environment.GetEnvironmentVariable("HM_ORACLE_INTERPRET") == "1")[0];
+        static readonly byte[] s_in = GC.AllocateArray<byte>(10 + 4, pinned: true);
+        static readonly byte[] s_out = GC.AllocateArray<byte>(8, pinned: true);
+
+        public static void BuildBody(in HMGamepadState state, double lx, double ly, double rx, double ry, byte[] dst) =>
+            VendorBlobCodec.EncodeInput(s_spec, in state, (float)lx, (float)ly, (float)rx, (float)ry, 0f, 0f, dst, s_enc);
+
+        public static byte DecodeRumbleAmplitude(ReadOnlySpan<byte> block)
+        {
+            if (block.Length < 4) return 0;
+            Array.Clear(s_in);
+            s_in[0] = 0x10;
+            block[..4].CopyTo(s_in.AsSpan(2));
+            fixed (byte* sp = s_in)
+            fixed (byte* dp = s_out)
+                s_decoder.Run(sp, dp);
+            return s_out[Array.IndexOf(s_decoder.Form.Semantics, "leftMotor")];
+        }
     }
 
     /// <summary>What replaced Switch2ProPacker: the composite profile's

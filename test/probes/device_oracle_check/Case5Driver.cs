@@ -676,17 +676,18 @@ internal sealed class Case5Driver : IOracleCase
         }
     }
 
-    /// <summary>Switch Pro bodies as SubmitState writes them
-    /// (HMController.cs:757-764): SwitchProPacker.BuildBody on states with
-    /// each button alone, each hat direction, sticks at their edges and
-    /// motion in both directions.</summary>
+    /// <summary>Switch Pro bodies as SubmitState writes them: SwitchProPacker
+    /// at 9bd6279 (HMController.cs:757-764), switch-pro's stateBlock from
+    /// v2.0.0 (Case2Packers.SwitchPro), on states with each button alone,
+    /// each hat direction, sticks at their edges and motion in both
+    /// directions.</summary>
     static IEnumerable<(string, byte[])> SwitchBodies()
     {
         foreach (var x in SwitchBodyInputs())
         {
-            var b = new byte[SwitchProPacker.BodySize];
+            var b = new byte[Case2Packers.SwitchPro.BodySize];
             var s = x.State;
-            SwitchProPacker.BuildBody(in s, x.Lx, x.Ly, x.Rx, x.Ry, b);
+            Case2Packers.SwitchPro.BuildBody(in s, x.Lx, x.Ly, x.Rx, x.Ry, b);
             yield return (x.Name, b);
         }
     }

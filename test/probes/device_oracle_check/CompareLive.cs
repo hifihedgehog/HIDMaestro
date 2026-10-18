@@ -2172,13 +2172,14 @@ internal static class CompareLive
         return new Live(features, new List<SwitchRun> { sw }, new List<Ds3Run> { ds3 }, xusb);
     }
 
-    /// <summary>SwitchProPacker.BuildBody of the neutral state, as the live
-    /// probe's pump submits it.</summary>
+    /// <summary>The neutral state's body, as the live probe's pump submits
+    /// it: SwitchProPacker's at 9bd6279, switch-pro's stateBlock from
+    /// v2.0.0.</summary>
     static byte[] NeutralSwitchBody()
     {
-        var body = new byte[HIDMaestro.Internal.SwitchProPacker.BodySize];
+        var body = new byte[Case2Packers.SwitchPro.BodySize];
         var neutral = new HIDMaestro.HMGamepadState();
-        HIDMaestro.Internal.SwitchProPacker.BuildBody(in neutral, 0.5, 0.5, 0.5, 0.5, body);
+        Case2Packers.SwitchPro.BuildBody(in neutral, 0.5, 0.5, 0.5, 0.5, body);
         return body;
     }
 

@@ -596,8 +596,11 @@ internal static class Program
             pump.Start();
 
             rec.Stream(head + "/state");
-            var body = new byte[SwitchProPacker.BodySize];
-            SwitchProPacker.BuildBody(in neutral, 0.5, 0.5, 0.5, 0.5, body);
+            // The state block the neutral state encodes to: switch-pro's
+            // stateBlock through the codec, as SubmitState encodes it.
+            var stateSpec = ProfileDatabase.LoadEmbedded().All.First(x => x.Id == "switch-pro").StateBlockSpecForCodec();
+            var body = new byte[stateSpec.Size];
+            VendorBlobCodec.EncodeInput(stateSpec, in neutral, 0.5f, 0.5f, 0.5f, 0.5f, 0f, 0f, body, new VendorBlobCodec.EncoderState());
             rec.Out("body", body);
 
             string? path = null;

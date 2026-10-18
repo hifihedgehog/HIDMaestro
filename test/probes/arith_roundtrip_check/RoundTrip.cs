@@ -214,11 +214,14 @@ internal static class RoundTrip
             if (k.StartsWith("switch-pro stick", StringComparison.Ordinal))
             {
                 bool y = k.EndsWith("Y");
-                var body = new byte[SwitchProPacker.BodySize];
+                // The profile's stateBlock through the codec, as
+                // HMController encodes it (v2.0.0, where 9bd6279 had
+                // SwitchProPacker).
+                var body = new byte[SwitchBody.Size];
                 var st = new HMGamepadState();
                 return v =>
                 {
-                    SwitchProPacker.BuildBody(in st, y ? 0.5 : v, y ? v : 0.5, 0.5, 0.5, body);
+                    SwitchBody.Build(in st, y ? 0.5 : v, y ? v : 0.5, 0.5, 0.5, body);
                     return y ? (body[6] >> 4) | (body[7] << 4) : body[5] | ((body[6] & 0x0F) << 8);
                 };
             }
@@ -354,7 +357,7 @@ internal static class RoundTrip
         {
             bool pro = s.Key.StartsWith("switch-pro", StringComparison.Ordinal);
             bool gyro = s.Key.Contains("gyro");
-            var body = new byte[Math.Max(SwitchProPacker.BodySize, Switch2Body.Size)];
+            var body = new byte[Math.Max(SwitchBody.Size, Switch2Body.Size)];
             var misses = new long[3];
             int first = int.MinValue;
             int Pack(float value)
@@ -368,7 +371,7 @@ internal static class RoundTrip
                 else if (gyro) st.GyroDpsX = value;
                 else st.AccelGX = value;
                 int at;
-                if (pro) { SwitchProPacker.BuildBody(in st, 0.5, 0.5, 0.5, 0.5, body); at = 12 + (gyro ? 10 : 4); }
+                if (pro) { SwitchBody.Build(in st, 0.5, 0.5, 0.5, 0.5, body); at = 12 + (gyro ? 10 : 4); }
                 else { Switch2Body.Build(in st, 0.5f, 0.5f, body); at = 12 + (gyro ? 6 : 0); }
                 return (short)(body[at] | (body[at + 1] << 8));
             }
@@ -398,6 +401,23 @@ internal static class RoundTrip
 /// <summary>The Switch 2 Pro composite's state block, its profile's
 /// stateBlock encoded by the codec from the six slot values as floats, as
 /// HMController encodes it.</summary>
+/// <summary>The Switch Pro profile's state block through the codec, as
+/// HMController encodes it (v2.0.0, where 9bd6279 had SwitchProPacker): the
+/// sticks 12-bit at 5 to 10, the motion from 12.</summary>
+internal static class SwitchBody
+{
+    static readonly ExtendedReportSpec s_spec = ProfileDatabase.LoadEmbedded().All
+        .First(p => p.Id == "switch-pro").StateBlockSpecForCodec();
+    static readonly VendorBlobCodec.EncoderState s_enc = new();
+
+    public static int Size => s_spec.Size;
+
+    /// <summary>The body from the four stick slots, as HMController hands
+    /// them to the codec (floats).</summary>
+    public static void Build(in HMGamepadState state, double lx, double ly, double rx, double ry, byte[] dst) =>
+        VendorBlobCodec.EncodeInput(s_spec, in state, (float)lx, (float)ly, (float)rx, (float)ry, 0f, 0f, dst, s_enc);
+}
+
 internal static class Switch2Body
 {
     static readonly ExtendedReportSpec s_spec = ProfileDatabase.LoadEmbedded().All

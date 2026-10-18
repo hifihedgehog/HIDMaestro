@@ -124,15 +124,17 @@ internal static class Nan
             {
                 double[] a = { 0.5, 0.5, 0.5, 0.5 };
                 a[k] = double.NaN;
-                var x = new byte[SwitchProPacker.BodySize];
-                var y = new byte[SwitchProPacker.BodySize];
+                // v2.0.0: the profile's state block through the codec,
+                // which replaced SwitchProPacker.
+                var x = new byte[SwitchBody.Size];
+                var y = new byte[SwitchBody.Size];
                 var s = new HMGamepadState();
-                SwitchProPacker.BuildBody(in s, a[0], a[1], a[2], a[3], x);
-                SwitchProPacker.BuildBody(in s, 0.5, 0.5, 0.5, 0.5, y);
+                SwitchBody.Build(in s, a[0], a[1], a[2], a[3], x);
+                SwitchBody.Build(in s, 0.5, 0.5, 0.5, 0.5, y);
                 if (!x.AsSpan().SequenceEqual(y)) bad++;
             }
             if (bad != 0) fail++;
-            Console.WriteLine($"  [{(bad == 0 ? "PASS" : "FAIL")}] switch-pro packer: {4 - bad} of 4 NaN sticks write the center");
+            Console.WriteLine($"  [{(bad == 0 ? "PASS" : "FAIL")}] switch-pro stateBlock: {4 - bad} of 4 NaN sticks write the center");
         }
         {
             int bad = 0;
