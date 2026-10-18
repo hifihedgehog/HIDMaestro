@@ -31,6 +31,7 @@
 //     HID driver's
 //   - a key without the identity values gives zeros and no string, not
 //     an Xbox 360 pad's
+//   - HidAttrPid no longer replaces the ProductId
 //   - no entry and a hardware value whose section carries another tag fails
 //     the start
 //   - a blob truncated, of format 3 or past a limit, and no
@@ -543,7 +544,8 @@ internal static class FeatureContract
     /// descriptor fails the HID driver's start too, since no default one is
     /// left. A key without the identity values gives zeros and no string,
     /// where 9bd6279's driver gave an Xbox 360 pad's 045E:028E, version
-    /// 0x0114 and "Controller (XBOX 360 For Windows)". The configured
+    /// 0x0114 and "Controller (XBOX 360 For Windows)". HidAttrPid, which
+    /// nothing writes, no longer replaces the ProductId. The configured
     /// devices beside them start, in the same script.</summary>
     static void Unconfigured(Checks c, IReadOnlyList<ControllerProfile> catalog, string tree, string oracle, string work)
     {
@@ -560,6 +562,7 @@ internal static class FeatureContract
             .Append(Block("sony", ds, With(dsValues, "ReportDescriptor", RegBinary, null), "ds-nodescriptor"))
             .Append(Block("sony", ds, With(With(With(With(dsValues, "VendorId", RegDword, null), "ProductId", RegDword, null),
                 "VersionNumber", RegDword, null), "ProductString", 1, null), "ds-noidentityvalues"))
+            .Append(Block("sony", ds, With(dsValues, "HidAttrPid", RegDword, BitConverter.GetBytes(1)), "ds-attrpid"))
             .Append(Block("xusb", xbox, xboxValues, "xbox"))
             .Append(Block("xusb", xbox, xboxValues, "xbox-noindex", "nohwindex", "noidentity"))
             .Append(Block("xusb", xbox, xboxValues, "xbox-nokey", "nokey"))
@@ -586,6 +589,7 @@ internal static class FeatureContract
         // the product string under MsHidUmdf.
         s.Append("stream no-identity-values\nversion absent\ndevice ds-noidentityvalues 2 driver\n").Append(Attributes)
          .Append("ioctl 0x000B0013 0E000000 256\nremove\n");
+        s.Append("stream hidattrpid\nversion absent\ndevice ds-attrpid 2 driver\n").Append(Attributes).Append("remove\n");
 
         var t = RunScript(tree, plan, s.ToString(), work, "unconfigured-tree");
         var o = RunScript(oracle, plan, s.ToString(), work, "unconfigured-oracle");
@@ -649,6 +653,8 @@ internal static class FeatureContract
             bool ok = Added(r["no-identity-values"]) == 0 && Pid("no-identity-values") == "0000:0000" && ver == 0 && Info(str) == 0;
             return (ok, $"attributes {Pid("no-identity-values")} version {ver:X4}, string {Status(str):X8} {Info(str)} bytes");
         });
+        Add($"HidAttrPid 0x0001 beside the profile's ProductId: the attributes stay {want}",
+            () => (Added(r["hidattrpid"]) == 0 && Pid("hidattrpid") == want, $"add {Added(r["hidattrpid"]):X8}, attributes {Pid("hidattrpid")}"));
         return res;
     }
 

@@ -704,17 +704,6 @@ ReadConfigFromRegistry(
         ctx->HidDeviceAttributes.ProductID = (USHORT)dwordVal;
     }
 
-    /* Read HidAttrPid (REG_DWORD). Overrides ProductID in HID attributes only.
-     * Companion still reads ProductId for XUSB identity.
-     * PID 0x0001 prevents GameInput/HIDAPI from claiming xinputhid devices,
-     * so SDL3 falls through to XInput backend (correct identity). */
-    dwordSize = sizeof(dwordVal);
-    result = RegQueryValueExW(hKey, L"HidAttrPid", NULL,
-                              &regType, (LPBYTE)&dwordVal, &dwordSize);
-    if (result == ERROR_SUCCESS && regType == REG_DWORD) {
-        ctx->HidDeviceAttributes.ProductID = (USHORT)dwordVal;
-    }
-
     /* Switch Pro protocol responder (issue #33): keyed on the Nintendo
      * VID/PID family, per the spec's "hardcode the responder; the state
      * machine is protocol, not layout". The MAC is fabricated but stable
