@@ -543,7 +543,7 @@ On the SDK side, `HMController.Ports` is an `HMPortSet`, empty for a profile wit
 
 ### The device protocol
 
-`usbConfiguration.protocol` describes how a USB/IP device behaves beyond its descriptors.
+`protocol` describes how a USB/IP device behaves beyond its descriptors. This design put it under `usbConfiguration`. In 2.0.0 it is a key of the profile itself (data-driven-devices.md, mechanism 3), and the old place is refused at load.
 
 | Key | Meaning |
 |---|---|
