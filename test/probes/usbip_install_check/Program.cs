@@ -304,6 +304,16 @@ internal static class Program
         var chain = Pnp.Chain(paths[0]);
         NoteChain(scenario, "when the interface appeared", chain, appeared);
 
+        // Windows installs a HID game controller it has never seen in two
+        // steps: the HID function on input.inf, then hidgamepad.inf, the
+        // extension Microsoft binds to every HID_DEVICE_SYSTEM_GAME
+        // collection, whose upper filter restarts the device. The interface
+        // appears between the two, for a real pad as for this one, so the
+        // early window opens once no installation is pending.
+        string install = Pnp.InstallState(30_000);
+        var installed = DateTime.UtcNow;
+        Note($"{scenario}: device installation {install} at {Pnp.Stamp(installed)}, {(installed - appeared).TotalMilliseconds:F0} ms after the interface was seen");
+
         // The composite sends a report for each submitted frame, and with its
         // idle stream one every 4 ms between them, so a working device
         // returns at least a report for nearly every submit. Half is the bar,
@@ -311,8 +321,8 @@ internal static class Program
         var state = new HMGamepadState { Buttons = HMButton.A };
         void Submit() { try { c.SubmitState(in state); } catch { } }
         var early = Hid.CountReports(paths[0], 1500, Submit);
-        Record($"{p} input arrives as soon as the interface appears",
-               early.ReadError == 0 && early.Reports * 2 >= early.Ticks, early.ToString());
+        Record($"{p} input arrives as soon as Windows has installed the HID device",
+               install == "none pending" && early.ReadError == 0 && early.Reports * 2 >= early.Ticks, $"installation {install}, {early}");
         Note($"{scenario}: the early window opened at {Pnp.Stamp(early.StartUtc)}, {(early.StartUtc - appeared).TotalMilliseconds:F0} ms after the interface was seen" +
              (early.ErrorMs >= 0 ? $", and its read failed at {Pnp.Stamp(early.StartUtc.AddMilliseconds(early.ErrorMs))}" : ""));
         NoteChain(scenario, "after the early window", chain, null);
