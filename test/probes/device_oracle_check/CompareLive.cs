@@ -153,6 +153,19 @@
 // read takes ahead of a reply (skipped) may be the previous state's or the
 // new one's, which depends on the stream clock: either matches.
 //
+// Live only. Another program on the machine may open a device the probe
+// records, and its requests reach the driver beside the probe's, which the
+// harness never sees. Two shapes are another program's for certain and
+// print as [LIVE-ONLY], with an exception under LForeign in the ledger, in
+// place of a [DIFF]: a feature-read notification of an id other than the
+// call's in a group the fence attributes (with report ids the driver
+// publishes the id the caller's request carries), and a Switch Pro reply,
+// 0x21 or 0x81, read before the probe's first write (the driver queues one
+// only in answer to an output report). The frames from that reply on are
+// not compared. On the B0 session a subcommand 0x02 reached the Switch Pro
+// before the probe's first write, and a read of feature 0x12 reached two
+// DualShock 4 profiles during the probe's 0x04 sweep.
+//
 // The XUSB recordings name no controller index. The emulate holder is the
 // only program on the machine, so its controller takes index 0. The
 // harness runs index 0 and says so as unverified.
@@ -466,6 +479,20 @@ internal static class CompareLive
 
         public void Same() => Compared++;
 
+        /// <summary>Live only: what another program on the machine did to
+        /// the device while it was recorded, which the harness, driven only
+        /// by the probe's requests, cannot hold. Printed, kept under
+        /// LForeign in the ledger, and not a difference.</summary>
+        public int LiveOnlyCount;
+        readonly List<string> _liveOnly = new();
+
+        public void LiveOnly(string where, string what, string ledgerAt)
+        {
+            LiveOnlyCount++;
+            _liveOnly.Add($"{where}: {what}");
+            Mapping(LForeign, false, ledgerAt);
+        }
+
         /// <summary>Gathered by kind and place, printed once each.</summary>
         public void Unverified(string where, string kind, string detail)
         {
@@ -509,6 +536,7 @@ internal static class CompareLive
                 if (details.Count > 12) shown += $", and {details.Count - 12} more";
                 Console.WriteLine($"  [UNVERIFIED-MAPPING] {key} ({shown})");
             }
+            foreach (var line in _liveOnly) Console.WriteLine($"  [LIVE-ONLY] {line}");
             if (Diffs > 200) Console.WriteLine($"  ... {Diffs - 200} more [DIFF] lines not shown");
         }
 
@@ -644,10 +672,11 @@ internal static class CompareLive
     const string LXusbIndex = "XUSB controller index 0: the companion's answers for index 0 are the live ones";
     const string LM1Refused = "M1 refusals: a GET_FEATURE the HID class may refuse, short or of an undeclared id, failed live with ERROR_INVALID_PARAMETER";
     const string LM1Undeclared = "M1 undeclared ids: with report ids, a GET_FEATURE of an id the descriptor does not declare fails live with nothing published";
+    const string LForeign = "live only: no other program read or wrote the device while the probe recorded it";
     const string LM1NoFeature = "M1 no feature report: a GET_FEATURE of a collection that declares none fails live before the driver with ERROR_INVALID_FUNCTION";
 
     static readonly string[] Mappings =
-        { LM0Start, LM1Length, LM1Caps, LM1Passes, LM1Byte0, LM1Refused, LM1Undeclared, LM1NoFeature, LM2Length, LM2Byte0, LM3Passes, LM4Hid, LM4Xusb,
+        { LM0Start, LM1Length, LM1Caps, LM1Passes, LM1Byte0, LM1Refused, LM1Undeclared, LM1NoFeature, LForeign, LM2Length, LM2Byte0, LM3Passes, LM4Hid, LM4Xusb,
           LM6Feature, LM6Read, LXusbIndex };
 
     /// <summary>ERROR_INVALID_PARAMETER: what HidD_GetFeature gives when the
@@ -939,12 +968,25 @@ internal static class CompareLive
             foreach (var (name, calls) in g.Ids)
             {
                 string where = $"{Case}/{name}";
-                foreach (var call in calls)
+                foreach (var recorded in calls)
                 {
                     rep.Call();
                     var outs = h.Of(k++);
-                    string at = $"length {call.Length}";
-                    string idAt = $"id{call.Id:X2} {at}";
+                    string at = $"length {recorded.Length}";
+                    string idAt = $"id{recorded.Id:X2} {at}";
+                    // With report ids the driver publishes the id the HID
+                    // class passes in the input buffer, the caller's
+                    // (driver.c:3066-3073, 3368), so in a group the fence
+                    // attributes, a notification of another id is another
+                    // program's feature read.
+                    var call = recorded;
+                    if (g.Attributed && p.UsesReportIds && recorded.Notify.Any(n => n != recorded.Id))
+                    {
+                        byte[] foreign = recorded.Notify.Where(n => n != recorded.Id).ToArray();
+                        rep.LiveOnly(where, $"{at}: notify {Hex(foreign)}, a feature read another program made", $"{g.Profile} {idAt}: notify {Hex(foreign)}");
+                        call = recorded with { Notify = recorded.Notify.Where(n => n == recorded.Id).ToArray() };
+                    }
+                    else if (g.Attributed && p.UsesReportIds) rep.Mapping(LForeign, true);
                     if (call.Overrun != null) rep.Unverified(group, "bytes past the caller's length changed (M1: the output length)", idAt);
                     if (call.Length > 0 && !p.DeclaresFeature)
                     {
@@ -1154,8 +1196,29 @@ internal static class CompareLive
             if (r.Stream.Count == 0) rep.Diff($"{Case}/{r.Head}/stream", "the recording holds no frame");
             Completion? FrameOf(int k) => Completions(h.Of(k), "read").Where(c => c.Ok && !IsReply(c)).Select(c => (Completion?)c).LastOrDefault();
 
+            // The driver queues a reply, 0x81 or 0x21, only in answer to
+            // an output report (driver.c SwitchQueueReply, called from
+            // SwitchHandleProprietary and SwitchHandleSubcommand on
+            // WRITE_REPORT and SET_OUTPUT_REPORT, 2906-2911, 3510-3515), so
+            // one read before the probe's first write answers another
+            // program's write. That write moved the driver's state, so the
+            // frames from it on are not held to the harness, which saw only
+            // the probe's.
             var pre = FrameOf(0);
-            foreach (var f in r.Pre) { rep.Call(); CompareFrame(rep, $"{Case}/{r.Head}/pre-handshake", "frame", f, pre); }
+            bool foreign = false;
+            foreach (var f in r.Pre)
+            {
+                rep.Call();
+                if (!foreign && f.Length > 0 && (f[0] == 0x21 || f[0] == 0x81))
+                {
+                    foreign = true;
+                    rep.LiveOnly($"{Case}/{r.Head}/pre-handshake", $"frame {Hex(f.AsSpan(0, Math.Min(16, f.Length)))} and the frames after it, answers to another program's write",
+                        $"switch-pro pre-handshake: {Hex(f.AsSpan(0, Math.Min(16, f.Length)))}");
+                }
+                if (foreign) continue;
+                rep.Mapping(LForeign, true);
+                CompareFrame(rep, $"{Case}/{r.Head}/pre-handshake", "frame", f, pre);
+            }
 
             Completion? previous = pre;
             for (int i = 0; i < r.Writes.Count; i++)
@@ -1623,7 +1686,8 @@ internal static class CompareLive
         rep.PrintLedger(Mappings);
         if (writeLedger != null) rep.WriteLedger(writeLedger, Mappings);
         if (pinnedLedger != null) rep.CheckPinned(pinnedLedger, Mappings);
-        Console.WriteLine($"device_oracle_check compare-live: {(rep.Diffs == 0 ? "PASS" : $"FAIL, {rep.Diffs} difference(s)")}, {rep.Compared} comparison(s) matched");
+        Console.WriteLine($"device_oracle_check compare-live: {(rep.Diffs == 0 ? "PASS" : $"FAIL, {rep.Diffs} difference(s)")}, {rep.Compared} comparison(s) matched"
+            + (rep.LiveOnlyCount > 0 ? $", {rep.LiveOnlyCount} live-only" : ""));
         return rep.Diffs == 0 ? 0 : 1;
     }
 
@@ -1862,6 +1926,48 @@ internal static class CompareLive
                     changed++;
                 }
                 return changed == 0 ? null : $"{changed} call(s) failed with error {ErrorInvalidFunction}";
+            });
+
+        // Live only: another program's request on the device. A feature
+        // read notification of an id other than the call's, in a group the
+        // fence attributes, and a Switch Pro reply among the frames read
+        // before the probe's first write, are another program's and pass
+        // as [LIVE-ONLY]. The call's own id added, or a full-mode frame
+        // with no reply ahead of it, is still a [DIFF].
+        foreach (bool own in new[] { false, true })
+            Mutate(s46, own ? "a notification of the call's own id added to a failed call" : "a notification of another declared id added to a failed call",
+                own ? 1 : 0, own ? "both failed, notify" : null, streams =>
+            {
+                foreach (var t in S46Calls(streams))
+                {
+                    var pp = Profile(plan, t.Profile);
+                    if (!pp.UsesReportIds || t.S.Outs[t.I].Data[0] != 0 || t.Length == 0 || t.S.Outs[t.I + 3].Data.Length != 0) continue;
+                    string head = string.Join('/', t.S.Name.Split('/').Take(3));
+                    var att = streams.Single(x => x.Name == head + "/setup").Outs.First(o => o.Tag == "attribution").Data;
+                    if (att[0] != 1) continue;
+                    byte id = IdOf(t.S);
+                    byte other = pp.Features.FirstOrDefault(f => f != id);
+                    if (!own && other == id) continue;
+                    t.S.Outs[t.I + 3] = ("notify", new[] { own ? id : other });
+                    return $"{t.S.Name} length {t.Length}, notify {(own ? id : other):X2}";
+                }
+                return null;
+            });
+        foreach (bool reply in new[] { true, false })
+            Mutate(Path.Combine(dir, "switch-pro", "live-switch-pro.records"),
+                reply ? "a Switch Pro reply and full-mode frames before the probe's first write" : "a full-mode frame with no reply before the probe's first write",
+                reply ? 0 : 1, reply ? null : "pre-handshake", streams =>
+            {
+                var pre = streams.FirstOrDefault(x => x.Name.EndsWith("/pre-handshake", StringComparison.Ordinal));
+                var init = streams.FirstOrDefault(x => x.Name.EndsWith("/init", StringComparison.Ordinal));
+                var answer = init?.Outs.FirstOrDefault(o => o.Tag == "reply").Data;
+                if (pre == null || answer == null || pre.Outs.Count < 2) return null;
+                var full = (byte[])answer.Clone();
+                full[0] = 0x30;
+                if (reply) { pre.Outs.Add(("frame", (byte[])answer.Clone())); pre.Outs.Add(("repeat", U32(3))); }
+                pre.Outs.Add(("frame", full));
+                pre.Outs.Add(("repeat", U32(18)));
+                return reply ? "a 0x21 reply and a 0x30 frame appended" : "a 0x30 frame appended";
             });
 
         // M3: the HID class hands the driver the output report's length of
