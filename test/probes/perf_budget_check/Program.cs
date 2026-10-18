@@ -1578,13 +1578,43 @@ internal static partial class Program
         return steps.OrderBy(k => k.Key, StringComparer.Ordinal).Select(k => (k.Key, k.Value)).ToList();
     }
 
+    /// <summary>Whether a process runs elevated. An unelevated process
+    /// cannot create, remove or sweep a device, so another lane's offline
+    /// probe with the SDK loaded is no consumer while a live run holds the
+    /// bench. A token that cannot be read counts as elevated.</summary>
+    static class ConsumerElevation
+    {
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        static extern System.IntPtr OpenProcess(uint access, bool inherit, int pid);
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        static extern bool CloseHandle(System.IntPtr h);
+        [System.Runtime.InteropServices.DllImport("advapi32.dll", SetLastError = true)]
+        static extern bool OpenProcessToken(System.IntPtr process, uint access, out System.IntPtr token);
+        [System.Runtime.InteropServices.DllImport("advapi32.dll", SetLastError = true)]
+        static extern bool GetTokenInformation(System.IntPtr token, int cls, out int value, int length, out int returned);
+
+        // PROCESS_QUERY_LIMITED_INFORMATION, TOKEN_QUERY, TokenElevation (20).
+        public static bool IsElevated(int pid)
+        {
+            System.IntPtr p = OpenProcess(0x1000, false, pid);
+            if (p == System.IntPtr.Zero) return true;
+            try
+            {
+                if (!OpenProcessToken(p, 0x0008, out System.IntPtr t)) return true;
+                try { return !GetTokenInformation(t, 20, out int v, 4, out _) || v != 0; }
+                finally { CloseHandle(t); }
+            }
+            finally { CloseHandle(p); }
+        }
+    }
+
     static bool OtherSdkRunning()
     {
         foreach (var p in Process.GetProcesses())
         {
             try
             {
-                if (p.Id == Environment.ProcessId) continue;
+                if (p.Id == Environment.ProcessId || !ConsumerElevation.IsElevated(p.Id)) continue;
                 foreach (ProcessModule m in p.Modules)
                     if (string.Equals(m.ModuleName, "HIDMaestro.Core.dll", StringComparison.OrdinalIgnoreCase))
                     {
