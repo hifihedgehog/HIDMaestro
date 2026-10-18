@@ -80,8 +80,8 @@ public sealed class ProtocolSpec
     public string? GetReport { get; set; }
 
     /// <summary>How many of the last commands the device keeps, with their
-    /// arrival times, for a program to read through
-    /// HMDeviceProtocol.CommandLog. Absent keeps none.</summary>
+    /// arrival times, for the SDK's own probes to read. No public member
+    /// returns them. Absent keeps none.</summary>
     [JsonPropertyName("log")]
     public int? Log { get; set; }
 }
