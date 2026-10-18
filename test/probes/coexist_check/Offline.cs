@@ -67,14 +67,11 @@
 //        stand in front of staging. I10 runs it live against the real root.
 //   OF11 An unread driver-store listing is never taken for "absent". The
 //        usbip-win2 check (UsbipDriverInstaller.IsProductInstalled, given a
-//        stand-in run) throws on a nonzero exit, on empty or unparseable
-//        output and on a run that cannot start, rethrows the pnputil
-//        refusal unchanged, and answers from a whole listing only.
-//        PnputilHelper.ListingOf tells a failed listing from an empty one.
-//        RemoveAllHidMaestroPackages, given a failed listing, throws before
-//        any delete, and HIDMaestro's own installed check
-//        (PnputilHelper.InstalledFrom) throws on one, both naming the
-//        failure. HMContext.IsDriverInstalled's answer
+//        stand-in listing) throws on a listing that fails, naming why, and
+//        answers from a whole listing only. RemoveAllHidMaestroPackages,
+//        given a failed listing, throws before any delete, and HIDMaestro's
+//        own installed check (PnputilHelper.InstalledFrom) throws on one,
+//        both naming the failure. HMContext.IsDriverInstalled's answer
 //        (HMContext.AnswerInstalled) is false, not a throw, for each way the
 //        driver store's read fails.
 //   OF12 ObjectHolders, which names the processes that hold an object a
@@ -620,104 +617,92 @@ internal static partial class Program
         var asm = typeof(HIDMaestro.HMContext).Assembly;
         var installer = asm.GetType("HIDMaestro.Internal.Usbip.UsbipDriverInstaller");
         var pnputil = asm.GetType("HIDMaestro.Internal.PnputilHelper");
+        var recordType = pnputil?.GetNestedType("DriverRecord", BindingFlags.Public | BindingFlags.NonPublic);
         var refusalType = asm.GetType("HIDMaestro.Internal.ProtectedStaging+ChildTempUnavailableException");
-        var runType = typeof(Func<(int, string)>);
-        var isProduct = installer?.GetMethod("IsProductInstalled", BindingFlags.NonPublic | BindingFlags.Static, null, new[] { runType }, null);
-        var listingOf = pnputil?.GetMethod("ListingOf", BindingFlags.NonPublic | BindingFlags.Static);
-        var removeAll = pnputil?.GetMethod("RemoveAllHidMaestroPackages", BindingFlags.NonPublic | BindingFlags.Static, null, new[] { runType }, null);
-        var installedFrom = pnputil?.GetMethod("InstalledFrom", BindingFlags.NonPublic | BindingFlags.Static);
+        var listType = recordType == null ? null : typeof(List<>).MakeGenericType(recordType);
+        var listerType = listType == null ? null : typeof(Func<>).MakeGenericType(listType);
+        var isProduct = listerType == null ? null : installer?.GetMethod("IsProductInstalled", BindingFlags.NonPublic | BindingFlags.Static, null, new[] { listerType }, null);
+        var removeAll = listerType == null ? null : pnputil?.GetMethod("RemoveAllHidMaestroPackages", BindingFlags.NonPublic | BindingFlags.Static, null, new[] { listerType }, null);
+        var installedFrom = listerType == null ? null : pnputil?.GetMethod("InstalledFrom", BindingFlags.NonPublic | BindingFlags.Static, null, new[] { listerType }, null);
+        var recordCtor = recordType?.GetConstructor(new[] { typeof(string), typeof(string), typeof(string), typeof(string) });
         var answer = typeof(HIDMaestro.HMContext).GetMethod("AnswerInstalled", BindingFlags.NonPublic | BindingFlags.Static);
         var refusalCtor = refusalType?.GetConstructor(BindingFlags.NonPublic | BindingFlags.Instance, null,
             new[] { typeof(string), typeof(Exception) }, null);
-        if (isProduct == null || listingOf == null || removeAll == null || installedFrom == null || answer == null || refusalCtor == null)
+        if (recordType == null || recordCtor == null || isProduct == null || removeAll == null || installedFrom == null || answer == null || refusalCtor == null)
         {
-            Check("OF11: UsbipDriverInstaller.IsProductInstalled(run), PnputilHelper.ListingOf, RemoveAllHidMaestroPackages(run), InstalledFrom, HMContext.AnswerInstalled and the refusal's type exist", false);
+            Check("OF11: PnputilHelper.DriverRecord, UsbipDriverInstaller.IsProductInstalled(list), RemoveAllHidMaestroPackages(list), InstalledFrom(list), HMContext.AnswerInstalled and the refusal's type exist", false);
             return;
         }
 
-        // pnputil's own shapes, as /enum-drivers /format xml prints them: an
-        // empty listing is the root element around a line saying none were found.
-        const string empty = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n<PnpUtil Version=\"10.0.26200\" Command=\"/enum-drivers /format xml\">\r\nNo published driver packages were found on the system.\r\n</PnpUtil>\r\n";
-        static string Listing(string provider, params string[] originals)
+        // Stand-in listings: the packages of the given original names, or a
+        // listing that fails the way PnputilHelper.ListPackages does, with an
+        // InvalidOperationException that names why.
+        object Listing(string provider, params string[] originals)
         {
-            var sb = new System.Text.StringBuilder("<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n<PnpUtil Version=\"10.0.26200\" Command=\"/enum-drivers /format xml\">\r\n");
+            var list = (System.Collections.IList)Activator.CreateInstance(listType!)!;
             int n = 40;
             foreach (string original in originals)
-                sb.Append($"<Driver DriverName=\"oem{n++}.inf\"><OriginalName>{original}</OriginalName><ProviderName>{provider}</ProviderName><DriverVersion>01/01/2026 1.0.0.0</DriverVersion></Driver>\r\n");
-            return sb.Append("</PnpUtil>\r\n").ToString();
+                list.Add(recordCtor.Invoke(new object[] { $"oem{n++}.inf", original, provider, "01/01/2026 1.0.0.0" }));
+            return typeof(Program).GetMethod(nameof(ListerOf), BindingFlags.NonPublic | BindingFlags.Static)!
+                .MakeGenericMethod(recordType).Invoke(null, new object[] { list })!;
         }
-        static string With(string original) => Listing("Someone", original);
-        var refusal = (Exception)refusalCtor.Invoke(new object[] { "HIDMaestro did not run pnputil.exe: test", new UnauthorizedAccessException("test") });
+        object Failing(string reason) =>
+            typeof(Program).GetMethod(nameof(FailingListerOf), BindingFlags.NonPublic | BindingFlags.Static)!
+                .MakeGenericMethod(recordType).Invoke(null, new object[] { reason })!;
+        const string reason = @"C:\Windows\INF could not be read (test)";
 
-        string Product(Func<(int, string)> run, out Exception? thrown)
+        string Product(object list, out Exception? thrown)
         {
             thrown = null;
-            try { return Call<bool>(isProduct, new object[] { run }) ? "installed" : "not installed"; }
+            try { return Call<bool>(isProduct, new[] { list }) ? "installed" : "not installed"; }
             catch (Exception e) { thrown = e; return $"{e.GetType().Name}: {e.Message}"; }
         }
         Exception? t;
         string r;
-        r = Product(() => (1, empty), out t);
-        Check("OF11: the usbip-win2 check throws on a listing that exited 1, never \"not installed\"",
-              t is InvalidOperationException && t.Message.Contains("exited 1", StringComparison.Ordinal), r);
-        r = Product(() => (-1, ""), out t);
-        Check("OF11: and on a timed-out run (exit -1, no output)", t is InvalidOperationException, r);
-        r = Product(() => (0, ""), out t);
-        Check("OF11: and on exit 0 with no output", t is InvalidOperationException && t.Message.Contains("no listing", StringComparison.Ordinal), r);
-        r = Product(() => (0, "Microsoft PnP Utility\r\nusbip2"), out t);
-        Check("OF11: and on exit 0 with output that is not a listing", t is InvalidOperationException, r);
-        r = Product(() => throw new System.ComponentModel.Win32Exception(5), out t);
-        Check("OF11: and on a run that cannot start, wrapped with its cause",
-              t is InvalidOperationException && t.InnerException is System.ComponentModel.Win32Exception, r);
-        r = Product(() => throw refusal, out t);
-        Check("OF11: and rethrows the pnputil refusal unchanged", ReferenceEquals(t, refusal), r);
-        r = Product(() => (0, empty), out t);
+        r = Product(Failing(reason), out t);
+        Check("OF11: the usbip-win2 check throws on a listing that fails, naming why, never \"not installed\"",
+              t is InvalidOperationException && t.Message.Contains(reason.TrimEnd('.'), StringComparison.Ordinal)
+              && t.Message.Contains("does not install it", StringComparison.Ordinal), r);
+        r = Product(Listing("Someone"), out t);
         Check("OF11: a whole listing with no package answers \"not installed\"", t == null && r == "not installed", r);
-        r = Product(() => (0, With("usbip2_ude.inf")), out t);
+        r = Product(Listing("Someone", "usbip2_ude.inf"), out t);
         Check("OF11: a whole listing that names usbip2_ude.inf answers \"installed\"", t == null && r == "installed", r);
-        r = Product(() => (0, With("usbip2_filter.inf")), out t);
+        r = Product(Listing("Someone", "usbip2_filter.inf"), out t);
         Check("OF11: and one that names another package answers \"not installed\"", t == null && r == "not installed", r);
 
-        int? Count(int exitCode, string output) =>
-            Call<object?>(listingOf, new object[] { exitCode, output }) is System.Collections.ICollection c ? c.Count : null;
-        Check("OF11: ListingOf gives no listing for a nonzero exit, a timeout or no output, and an empty one for none found",
-              Count(1, With("x.inf")) == null && Count(-1, "") == null && Count(0, "") == null && Count(0, "garbage") == null
-              && Count(0, empty) == 0 && Count(0, With("x.inf")) == 1,
-              $"{Count(1, With("x.inf"))?.ToString() ?? "null"}, {Count(-1, "")?.ToString() ?? "null"}, {Count(0, "")?.ToString() ?? "null"}, {Count(0, "garbage")?.ToString() ?? "null"}, {Count(0, empty)}, {Count(0, With("x.inf"))}");
-
         Exception? removal = null;
-        try { Call<object?>(removeAll, new object[] { (Func<(int, string)>)(() => (1, "")) }); }
+        try { Call<object?>(removeAll, new[] { Failing(reason) }); }
         catch (Exception e) { removal = e; }
         Check("OF11: the HIDMaestro package removal throws on a failed listing, naming it, never reading it as nothing to remove",
               removal is InvalidOperationException && removal.Message.Contains("could not list", StringComparison.Ordinal)
-              && removal.Message.Contains("exited 1", StringComparison.Ordinal),
+              && removal.Message.Contains(reason, StringComparison.Ordinal),
               removal == null ? "returned normally" : $"{removal.GetType().Name}: {removal.Message}");
 
         // HIDMaestro's own installed check, past the folder shortcut: a
         // failed listing throws with its failure, so a deploy's post-add
         // check names it, and is never "not installed".
-        string Installed(int exitCode, string output)
+        string Installed(object list)
         {
-            try { return Call<bool>(installedFrom, new object[] { exitCode, output }) ? "installed" : "not installed"; }
+            try { return Call<bool>(installedFrom, new[] { list }) ? "installed" : "not installed"; }
             catch (Exception e) { return $"{e.GetType().Name}: {e.Message}"; }
         }
-        string i1 = Installed(1, empty), iTimeout = Installed(-1, ""), iNone = Installed(0, ""), iGarbage = Installed(0, "garbage");
+        string iFailed = Installed(Failing(reason));
         Check("OF11: HIDMaestro's installed check throws on a failed listing and names it, never \"not installed\"",
-              i1.StartsWith("InvalidOperationException", StringComparison.Ordinal) && i1.Contains("exited 1", StringComparison.Ordinal)
-              && iTimeout.StartsWith("InvalidOperationException", StringComparison.Ordinal) && iTimeout.Contains("did not finish in time", StringComparison.Ordinal)
-              && iNone.StartsWith("InvalidOperationException", StringComparison.Ordinal) && iNone.Contains("no listing it could read", StringComparison.Ordinal)
-              && iGarbage.StartsWith("InvalidOperationException", StringComparison.Ordinal),
-              $"{i1} | {iTimeout} | {iNone} | {iGarbage}");
-        string iEmpty = Installed(0, empty), iOne = Installed(0, Listing("HIDMaestro", "hidmaestro.inf")),
-               iBoth = Installed(0, Listing("HIDMaestro", "hidmaestro.inf", "hidmaestro_xusb.inf"));
-        Check("OF11: and answers from a whole listing: none or one package is \"not installed\", both are \"installed\"",
-              iEmpty == "not installed" && iOne == "not installed" && iBoth == "installed", $"{iEmpty} | {iOne} | {iBoth}");
+              iFailed.StartsWith("InvalidOperationException", StringComparison.Ordinal) && iFailed.Contains("could not list", StringComparison.Ordinal)
+              && iFailed.Contains(reason, StringComparison.Ordinal), iFailed);
+        string iEmpty = Installed(Listing("HIDMaestro")), iOne = Installed(Listing("HIDMaestro", "hidmaestro.inf")),
+               iBoth = Installed(Listing("HIDMaestro", "hidmaestro.inf", "hidmaestro_xusb.inf")),
+               iOther = Installed(Listing("Someone", "hidmaestro.inf", "hidmaestro_xusb.inf"));
+        Check("OF11: and answers from a whole listing: none or one package is \"not installed\", both are \"installed\", another provider's are not HIDMaestro's",
+              iEmpty == "not installed" && iOne == "not installed" && iBoth == "installed" && iOther == "not installed",
+              $"{iEmpty} | {iOne} | {iBoth} | {iOther}");
 
         string Answer(Func<bool> check)
         {
             try { return Call<bool>(answer, new object[] { check }).ToString(); }
             catch (Exception e) { return $"{e.GetType().Name}: {e.Message}"; }
         }
+        var refusal = (Exception)refusalCtor.Invoke(new object[] { "HIDMaestro did not run pnputil.exe: test", new UnauthorizedAccessException("test") });
         var answers = new[]
         {
             Answer(() => throw refusal),
@@ -729,6 +714,13 @@ internal static partial class Program
               Array.TrueForAll(answers, a => a == "False"), string.Join(" | ", answers));
         Check("OF11: control: it answers true from a check that does", Answer(() => true) == "True");
     }
+
+    /// <summary>A stand-in listing that gives <paramref name="list"/>, for
+    /// OF11, built for the SDK's record type through reflection.</summary>
+    static Func<List<T>> ListerOf<T>(List<T> list) => () => list;
+
+    /// <summary>A stand-in listing that fails as the SDK's does.</summary>
+    static Func<List<T>> FailingListerOf<T>(string reason) => () => throw new InvalidOperationException(reason);
 
     static void OfflineSweep()
     {

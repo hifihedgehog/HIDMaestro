@@ -40,6 +40,49 @@ internal static class Pnp
     // cfgmgr32.h defines CM_WaitNoPendingInstallEvents as this export.
     [DllImport("cfgmgr32.dll")]
     static extern uint CMP_WaitNoPendingInstallEvents(uint timeoutMs);
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    static extern uint CM_Get_Device_ID_List_SizeW(out uint length, string? filter, uint flags);
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    static extern uint CM_Get_Device_ID_ListW(string? filter, char[] buffer, uint length, uint flags);
+
+    // devpkey.h: DEVPKEY_Device_HardwareIds {a45c254e-...},3, a
+    // DEVPROP_TYPE_STRING_LIST (devpropdef.h, 0x2012). cfgmgr32.h:
+    // CM_GETIDLIST_FILTER_ENUMERATOR 1, CR_BUFFER_SMALL 0x1A.
+    static readonly DEVPROPKEY HardwareIdsKey = new() { fmtid = new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"), pid = 3 };
+    const uint DEVPROP_TYPE_STRING_LIST = 0x2012, CM_GETIDLIST_FILTER_ENUMERATOR = 1, CR_BUFFER_SMALL = 0x1A;
+
+    /// <summary>The root-enumerated devnodes, present or not, with
+    /// <paramref name="hardwareId"/> among their hardware IDs: what
+    /// <c>pnputil /enum-devices /deviceid</c> lists on Windows 11, read on
+    /// every Windows version (Windows 10's pnputil has no /deviceid). -1
+    /// when the device list cannot be read.</summary>
+    internal static int WithHardwareId(string hardwareId)
+    {
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            if (CM_Get_Device_ID_List_SizeW(out uint length, "ROOT", CM_GETIDLIST_FILTER_ENUMERATOR) != CR_SUCCESS) return -1;
+            var list = new char[length];
+            uint cr = CM_Get_Device_ID_ListW("ROOT", list, length, CM_GETIDLIST_FILTER_ENUMERATOR);
+            // A devnode that arrived between the two calls: read again.
+            if (cr == CR_BUFFER_SMALL) continue;
+            if (cr != CR_SUCCESS) return -1;
+            int count = 0;
+            foreach (string id in new string(list).Split('\0', StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (CM_Locate_DevNodeW(out uint dev, id, CM_LOCATE_DEVNODE_PHANTOM) != CR_SUCCESS) continue;
+                var key = HardwareIdsKey;
+                uint size = 0;
+                CM_Get_DevNode_PropertyW(dev, ref key, out _, null, ref size, 0);
+                if (size == 0) continue;
+                var buf = new byte[size];
+                if (CM_Get_DevNode_PropertyW(dev, ref key, out uint type, buf, ref size, 0) != CR_SUCCESS || type != DEVPROP_TYPE_STRING_LIST) continue;
+                if (Encoding.Unicode.GetString(buf, 0, (int)size).Split('\0').Any(h => h.Equals(hardwareId, StringComparison.OrdinalIgnoreCase)))
+                    count++;
+            }
+            return count;
+        }
+        return -1;
+    }
 
     /// <summary>The devnode of a device interface, then each parent up to the
     /// host controller, a root-enumerated node, which ends the list.</summary>

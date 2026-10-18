@@ -762,38 +762,34 @@ internal static partial class UsbipDriverInstaller
     /// usable. Distinguishes "never installed here" from "installed but
     /// not working", which need different remedies.
     ///
-    /// <para>False only on a whole listing, one that exited with 0 and
-    /// parses, that names no usbip2_ude.inf. Any other result is unknown, and
-    /// unknown is never "absent": absent leads to the vendor installer, which
-    /// must not run over an existing install. A pnputil that could not start,
-    /// exited with an error, timed out or printed no listing it could read,
-    /// or whose protected temporary folder could not be made, throws with the
+    /// <para>False only on a whole listing of the driver store
+    /// (<see cref="PnputilHelper.ListPackages"/>) that names no
+    /// usbip2_ude.inf. Any other result is unknown, and unknown is never
+    /// "absent": absent leads to the vendor installer, which must not run
+    /// over an existing install. A listing that fails throws with the
     /// reason, and nothing is installed.</para></summary>
     /// <exception cref="InvalidOperationException">The driver store could not
     /// be read.</exception>
     private static bool IsProductInstalled() =>
-        IsProductInstalled(() => PnputilHelper.Run("/enum-drivers /format xml", timeoutMs: 30_000));
+        IsProductInstalled(() => PnputilHelper.ListPackages(n => string.Equals(n, ProductInf, StringComparison.OrdinalIgnoreCase)));
 
-    /// <summary>The same, with <paramref name="run"/> for the pnputil run.
-    /// Coexistence probe OF11 calls it through reflection with runs that
-    /// fail.</summary>
-    internal static bool IsProductInstalled(Func<(int ExitCode, string Output)> run)
+    /// <summary>The same, with <paramref name="list"/> for the listing.
+    /// Coexistence probe OF11 calls it through reflection with listings
+    /// that fail.</summary>
+    internal static bool IsProductInstalled(Func<List<PnputilHelper.DriverRecord>> list)
     {
-        int rc;
-        string output;
-        try { (rc, output) = run(); }
-        catch (InvalidOperationException) { throw; }
-        catch (Exception ex)
+        List<PnputilHelper.DriverRecord> listing;
+        try { listing = list(); }
+        catch (InvalidOperationException ex)
         {
             throw new InvalidOperationException(
                 $"HIDMaestro could not read the driver store to tell whether usbip-win2 is installed ({ex.Message.TrimEnd('.')}), so it does not install it.", ex);
         }
-        var listing = PnputilHelper.ListingOf(rc, output)
-            ?? throw new InvalidOperationException(rc != 0
-                ? $"HIDMaestro could not read the driver store to tell whether usbip-win2 is installed (pnputil /enum-drivers exited {rc}), so it does not install it."
-                : "HIDMaestro could not read the driver store to tell whether usbip-win2 is installed (pnputil /enum-drivers printed no listing it could read), so it does not install it.");
-        return listing.Exists(r => string.Equals(r.OriginalName, "usbip2_ude.inf", StringComparison.OrdinalIgnoreCase));
+        return listing.Exists(r => string.Equals(r.OriginalName, ProductInf, StringComparison.OrdinalIgnoreCase));
     }
+
+    /// <summary>The INF of usbip-win2's host controller package.</summary>
+    private const string ProductInf = "usbip2_ude.inf";
 
     /// <summary>Wait up to <paramref name="timeoutMs"/> for every running
     /// usbip-win2 installer to end. Returns false when one still runs. An

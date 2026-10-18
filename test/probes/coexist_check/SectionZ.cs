@@ -2,7 +2,8 @@
 //    WinUSB binding.
 //      1. A pnputil.exe that hangs, planted in an elevated program's current
 //         directory. The SDK's pnputil calls run System32's and return
-//         within their timeout. The probe's own bare launch from that
+//         within their timeout. The usbip-win2 check runs none: it lists
+//         the driver store through SetupAPI. The probe's own bare launch from that
 //         directory, which finds the planted one, is the positive control.
 //         The runner they use, given a program that hangs and leaves a
 //         process holding its output open past the kill, returns within
@@ -232,7 +233,7 @@ internal static partial class Program
             if (!Ok(c)) { Check("Z1: the program's current directory is the planted one's", false, c); return; }
             string r1 = peer.Send("zproduct", 120_000);
             long ms1 = LongField(r1, "ms");
-            Check("Z1: IsProductInstalled runs System32's pnputil and returns within its 30 s timeout",
+            Check("Z1: IsProductInstalled reads the driver store, with no pnputil, planted or not, and answers within 30 s",
                   PeerProcess.Field(r1, "installed") == "True" && ms1 >= 0 && ms1 < 30_000, r1);
             string r2 = peer.Send("zpnputil /enum-drivers", 120_000);
             long ms2 = LongField(r2, "ms");
@@ -1096,8 +1097,8 @@ internal static class PeerZ
             case "zproduct":
             {
                 var sw = Stopwatch.StartNew();
-                // The overload with no parameters, the one that runs
-                // System32's pnputil. The other takes the run to make.
+                // The overload with no parameters, the one that lists the
+                // driver store. The other takes the listing to read.
                 bool v = (bool)Exact(Installer, "IsProductInstalled").Invoke(null, null)!;
                 return $"OK zproduct installed={v} ms={sw.ElapsedMilliseconds}";
             }

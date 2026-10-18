@@ -558,13 +558,9 @@ internal static class Program
         }
     }
 
-    /// <summary>Host controller devnodes usbip-win2's devnode.exe made, as
-    /// pnputil lists the hardware ID of its emulated host controller.</summary>
-    static int HostControllers()
-    {
-        var r = Run("pnputil.exe", 60_000, "/enum-devices", "/deviceid", @"ROOT\USBIP_WIN2\UDE");
-        return r.Output.Split('\n').Count(l => l.TrimStart().StartsWith("Instance ID:", StringComparison.OrdinalIgnoreCase));
-    }
+    /// <summary>Host controller devnodes usbip-win2's devnode.exe made: the
+    /// devnodes with the hardware ID of its emulated host controller.</summary>
+    static int HostControllers() => Pnp.WithHardwareId(@"ROOT\USBIP_WIN2\UDE");
 
     static void RecordChecks(Exception? error)
     {

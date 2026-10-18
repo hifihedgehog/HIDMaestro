@@ -580,8 +580,8 @@ public static class DriverBuilder
             // are locale- and version-keyed and unreliable for success detection
             // (see issue #17). The authoritative success signal is the post-
             // condition check below: did the package land in the driver store?
-            // PnputilHelper.IsHidMaestroDriverInstalled reads /enum-drivers
-            // /format xml which is locale-stable.
+            // PnputilHelper.IsHidMaestroDriverInstalled reads the store's
+            // folders, then its listing through SetupAPI, both locale-stable.
         }
 
         if (!PnputilHelper.IsHidMaestroDriverInstalled())
@@ -746,8 +746,9 @@ public static class DriverBuilder
     /// <summary>True when the installed payload is this SDK's: the manifest
     /// hash recorded at install matches the embedded one, and the driver
     /// store holds both packages. Checking presence with a FileRepository
-    /// directory walk costs about 1 ms, against 200 to 500 ms for pnputil
-    /// /enum-drivers. This is the same-version fast path
+    /// directory walk costs about 1 ms, against a listing of the driver
+    /// store at about 15 ms (p50) on a desktop and 120 ms on an Atom. This
+    /// is the same-version fast path
     /// <see cref="DriverDeploy.Run"/> takes outside any lock.</summary>
     internal static bool WillTakeFastPath()
     {
@@ -833,10 +834,12 @@ public static class DriverBuilder
     ///
     /// <para>v1.3.0: cheap-first lookup ladder: (1) per-process positive
     /// cache (instant after first confirmation); (2) DriverStore filesystem
-    /// check (~1 ms); (3) pnputil enum-drivers /format xml (~200–500 ms).
-    /// Most calls hit (1) or (2); pnputil is only consulted when neither
-    /// shortcut applies, e.g. cold start with no prior HKLM hash.</para></summary>
-    /// <exception cref="InvalidOperationException">The pnputil listing
+    /// check (~1 ms); (3) the driver store listing through SetupAPI
+    /// (<see cref="PnputilHelper.ListPackages"/>, about 15 ms at p50 on a
+    /// desktop and 120 ms on an Atom). Most calls
+    /// hit (1) or (2); the listing is only read when neither shortcut
+    /// applies, e.g. cold start with no prior HKLM hash.</para></summary>
+    /// <exception cref="InvalidOperationException">The driver store listing
     /// failed. The message names the failure.</exception>
     public static bool IsDriverInstalled()
     {

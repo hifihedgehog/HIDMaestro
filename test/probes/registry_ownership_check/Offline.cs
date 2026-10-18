@@ -124,21 +124,10 @@ internal static partial class Program
         Check("two programs' cleanups and an add, in decision order, leave every kept package named",
               e.SequenceEqual(new[] { X, Y }), Show(e));
 
-        // A listing cut short, as when pnputil is ended at its timeout, is
-        // no listing, and the cleanup then removes nothing and leaves the
-        // note. A whole listing with no package is an empty one.
-        const string whole = "<?xml version=\"1.0\"?><PnpUtil><Driver DriverName=\"oem7.inf\"><OriginalName>hmwinusb_x.inf</OriginalName>"
-                           + "<ProviderName>HIDMaestro</ProviderName><DriverVersion>1.13.0.0</DriverVersion></Driver></PnpUtil>";
-        Check("a whole listing parses", PnputilHelper.ParseDrivers(whole) is { Count: 1 } l && l[0].OriginalName == X);
-        Check("a listing cut short is no listing", PnputilHelper.ParseDrivers(whole[..(whole.Length / 2)]) == null);
-        Check("no output is no listing", PnputilHelper.ParseDrivers("") == null);
-        // XDocument.Parse refuses a document with no root element ("Root
-        // element is missing"), so ParseDrivers' own null-root guard is never
-        // the one that answers.
-        Check("output with no root element is no listing", PnputilHelper.ParseDrivers("<!-- pnputil -->") == null);
-        Check("a whole listing with no driver is an empty one", PnputilHelper.ParseDrivers("<?xml version=\"1.0\"?><PnpUtil></PnpUtil>") is { Count: 0 });
-        Check("a run that did not exit with 0 is no listing, whatever it printed", PnputilHelper.ListingOf(1, whole) == null);
-        Check("a run that exited with 0 is its listing", PnputilHelper.ListingOf(0, whole) is { Count: 1 });
+        // A listing that fails is no listing, and the cleanup then removes
+        // nothing and leaves the note. A whole listing with no package is an
+        // empty one.
+        StoreListingOffline();
 
         // The removal's decision, RemovePackage's step from the listing to
         // what it deletes and keeps.
@@ -478,16 +467,10 @@ internal static partial class Program
         Check("a plain delete whose pnputil exits with an error is not done",
               !WinUsbBinding.DeletePlain("oem7.inf", _ => (-1, "")).Deleted);
 
-        // The listing's call: pnputil's exit code reaches ListingOf.
-        Check("a listing whose pnputil run did not exit with 0 is no listing, at TryEnumerateDrivers",
-              PnputilHelper.TryEnumerateDrivers(() => (1, whole)) == null);
-        Check("a listing whose run exited with 0 is read, at TryEnumerateDrivers",
-              PnputilHelper.TryEnumerateDrivers(() => (0, whole)) is { Count: 1 } te
-              && te[0] is { PublishedName: "oem7.inf", OriginalName: X, ProviderName: "HIDMaestro", DriverVersion: "1.13.0.0" });
-
-        var realStore = PnputilHelper.TryEnumerateDrivers();
+        var realStore = PnputilHelper.TryEnumerateDrivers(n => n.StartsWith(WinUsbBinding.PackagePrefix, StringComparison.OrdinalIgnoreCase));
+        Check("the driver store's WinUSB packages can be listed", realStore != null);
         if (realStore == null)
-            Console.WriteLine("  not checked here: pnputil could not list the driver store");
+            Console.WriteLine("  not checked here: the driver store could not be listed");
         else
         {
             Check("the look the sweep calls: a noted name this driver store does not hold makes the run worth it",
@@ -550,8 +533,7 @@ internal static partial class Program
             ms.Add(sw.Elapsed.TotalMilliseconds);
         }
         ms.Sort();
-        bool listed = PnputilHelper.TryEnumerateDrivers() is { } all
-            && all.Any(r => r.OriginalName.Equals(noted[0], StringComparison.OrdinalIgnoreCase));
+        bool listed = PnputilHelper.TryEnumerateDrivers(n => n.Equals(noted[0], StringComparison.OrdinalIgnoreCase)) is { Count: > 0 };
         Console.WriteLine(FormattableString.Invariant(
             $"  the look a deferred run takes before the deploy lock, 10 runs: p50 {ms[5]:F1} ms, max {ms[9]:F1} ms (would run: {can}, {noted[0]} in the store: {listed})"));
     }

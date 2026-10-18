@@ -116,10 +116,9 @@ public sealed class HMContext : IDisposable
 
     /// <summary>True if the HIDMaestro driver is registered in the Windows
     /// driver store. Does not require admin to check. It answers from what it
-    /// can read, and a driver store it cannot read answers false: pnputil
-    /// that cannot start or fails, or, in an elevated process, pnputil's
-    /// protected temporary folder that cannot be made. The reason goes to the
-    /// diagnostic log, and <see cref="InstallDriver"/> then reports it.</summary>
+    /// can read, and a driver store whose packages it cannot list answers
+    /// false. The reason goes to the diagnostic log, and
+    /// <see cref="InstallDriver"/> then reports it.</summary>
     /// <exception cref="ObjectDisposedException">The context was
     /// disposed.</exception>
     public bool IsDriverInstalled

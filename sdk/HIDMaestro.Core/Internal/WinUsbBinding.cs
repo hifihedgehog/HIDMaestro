@@ -675,7 +675,7 @@ DeviceName = ""{deviceName}""
                 DeviceOrchestrator.LogDiag($"    winusb restore of {instanceId}: the driver store could not be read");
                 return false;
         }
-        // Read after the package check, which can run pnputil for seconds.
+        // Read after the package check, which lists the driver store.
         return HasLeft(instanceId) && FlagForNextArrival(instanceId);
     }
 
@@ -758,7 +758,7 @@ DeviceName = ""{deviceName}""
     /// note it writes. <paramref name="readNoted"/>, <paramref name="list"/>,
     /// <paramref name="walk"/>, <paramref name="hasLeft"/>,
     /// <paramref name="flag"/> and <paramref name="delete"/> stand in for
-    /// the ledger's note, pnputil's listing, <see cref="DevnodesByPackage"/>,
+    /// the ledger's note, the driver store's listing, <see cref="DevnodesByPackage"/>,
     /// <see cref="HasLeft"/>, <see cref="FlagForNextArrival"/> and pnputil's
     /// plain delete in registry_ownership_check's offline part, which checks
     /// what this deletes, flags and notes. RemovePackage passes none.</summary>
@@ -776,7 +776,7 @@ DeviceName = ""{deviceName}""
             noted = (readNoted ?? RegistryLedger.WinUsbPackagesLeftToRemove)();
             if (noted.Length == 0) return;
         }
-        var (decided, undecided) = DecideRemoval((list ?? (() => PnputilHelper.TryEnumerateDrivers()))(), deferred, noted, walk);
+        var (decided, undecided) = DecideRemoval((list ?? (() => PnputilHelper.TryEnumerateDrivers(IsPackageName)))(), deferred, noted, walk);
         if (decided is not { } plan)
         {
             DeviceOrchestrator.LogDiag("    winusb cleanup: the driver store or its USB devnodes could not be listed; the packages stay");
@@ -902,7 +902,7 @@ DeviceName = ""{deviceName}""
     /// create waits on, only for a run that can do something. The run reads
     /// all of it again under the locks.</summary>
     internal static bool LeftRemovalCanChange(string[] noted) =>
-        noted.Length > 0 && LeftRemovalWouldChange(noted, PnputilHelper.TryEnumerateDrivers());
+        noted.Length > 0 && LeftRemovalWouldChange(noted, PnputilHelper.TryEnumerateDrivers(IsPackageName));
 
     /// <summary><see cref="LeftRemovalCanChange"/>'s decision from the
     /// <paramref name="store"/>'s listing and one walk of the USB devnodes
@@ -1031,19 +1031,25 @@ DeviceName = ""{deviceName}""
     /// <summary>The same, or null when the driver store could not be listed
     /// (<see cref="PnputilHelper.TryEnumerateDrivers"/>).</summary>
     private static List<PnputilHelper.DriverRecord>? TryOurPackages()
-        => PnputilHelper.TryEnumerateDrivers() is { } store ? Ours(store) : null;
+        => PnputilHelper.TryEnumerateDrivers(IsPackageName) is { } store ? Ours(store) : null;
 
     /// <summary>HIDMaestro's WinUSB packages in a listing: its provider and
     /// the INF name's prefix.</summary>
     private static List<PnputilHelper.DriverRecord> Ours(List<PnputilHelper.DriverRecord> store)
         => store.Where(r => r.ProviderName.Equals(Provider, StringComparison.OrdinalIgnoreCase)
-                         && r.OriginalName.StartsWith(PackagePrefix, StringComparison.OrdinalIgnoreCase))
+                         && IsPackageName(r.OriginalName))
                 .ToList();
+
+    /// <summary>An original INF name of HIDMaestro's WinUSB packages: the
+    /// listings read only those, since <see cref="Ours"/> keeps no
+    /// other.</summary>
+    private static bool IsPackageName(string original)
+        => original.StartsWith(PackagePrefix, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>True when <paramref name="inf"/> is one of HIDMaestro's
     /// WinUSB packages, null when that cannot be told: the driver store
-    /// listed nothing, though <paramref name="inf"/> is a third-party package
-    /// it holds, as when pnputil fails or times out.</summary>
+    /// could not be listed, though <paramref name="inf"/> is a third-party
+    /// package it holds.</summary>
     private static bool? IsOurPackage(string? inf)
     {
         if (string.IsNullOrEmpty(inf) || IsInboxOrNone(inf)) return false;
@@ -1051,11 +1057,8 @@ DeviceName = ""{deviceName}""
         lock (s_lock)
             foreach (var known in s_published.Values)
                 if (string.Equals(file, known, StringComparison.OrdinalIgnoreCase)) return true;
-        var all = PnputilHelper.EnumerateDrivers();
-        if (all.Count == 0) return null;
-        return all.Any(r => r.ProviderName.Equals(Provider, StringComparison.OrdinalIgnoreCase)
-                         && r.OriginalName.StartsWith(PackagePrefix, StringComparison.OrdinalIgnoreCase)
-                         && string.Equals(file, r.PublishedName, StringComparison.OrdinalIgnoreCase));
+        if (TryOurPackages() is not { } ours) return null;
+        return ours.Any(r => string.Equals(file, r.PublishedName, StringComparison.OrdinalIgnoreCase));
     }
 
     private static string Sha256Hex(byte[] data)

@@ -32,7 +32,7 @@ internal static partial class Program
     static string[] Noted() => RegistryLedger.NotedPackages(Registry.LocalMachine);
 
     static string? PublishedOf(string infName) =>
-        PnputilHelper.TryEnumerateDrivers()?.FirstOrDefault(r => r.OriginalName.Equals(infName, StringComparison.OrdinalIgnoreCase))?.PublishedName;
+        PnputilHelper.TryEnumerateDrivers(n => n.Equals(infName, StringComparison.OrdinalIgnoreCase))?.FirstOrDefault()?.PublishedName;
 
     static bool Waited(Func<bool> cond, int ms)
     {

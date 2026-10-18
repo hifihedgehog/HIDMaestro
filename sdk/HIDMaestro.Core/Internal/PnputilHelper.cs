@@ -1,15 +1,17 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
-using System.Xml.Linq;
 
 namespace HIDMaestro.Internal;
 
 /// <summary>
-/// Strict, structured wrapper around <c>pnputil /enum-drivers</c> and
+/// The driver store's published packages and their removal: the listing
+/// reads SetupAPI (<see cref="ListPackages"/>) and the removal runs
 /// <c>pnputil /delete-driver</c>. Replaces a previous substring-based grep
 /// of pnputil output that was vulnerable to two failure modes:
 ///
@@ -25,12 +27,12 @@ namespace HIDMaestro.Internal;
 /// the exit code, so a stale entry would persist forever.</item>
 /// </list>
 ///
-/// This helper parses the output into <see cref="DriverRecord"/> values and
+/// This helper lists packages as <see cref="DriverRecord"/> values and
 /// applies the strict filter <c>Provider Name == "HIDMaestro"</c> with an
 /// explicit allow-list of INF original names. It also retries deletes when
 /// pnputil reports the driver is in use, and verifies removal afterward.
 /// </summary>
-internal static class PnputilHelper
+internal static partial class PnputilHelper
 {
     /// <summary>The INF original names that belong to HIDMaestro. Used as
     /// the strict allow-list when filtering enumerated driver records.
@@ -52,8 +54,10 @@ internal static class PnputilHelper
         "hidmaestro_xusb.inf",
     };
 
-    /// <summary>One enumerated driver package record (a single block of
-    /// <c>pnputil /enum-drivers</c> output between blank lines).</summary>
+    /// <summary>One published driver package: its published INF name
+    /// (oem<i>N</i>.inf), its original INF name, its provider, and its
+    /// DriverVer date and version as <c>pnputil /enum-drivers</c> prints
+    /// them.</summary>
     public sealed record DriverRecord(
         string PublishedName,
         string OriginalName,
@@ -120,62 +124,148 @@ internal static class PnputilHelper
         return (exitCode, stdout + stderr);
     }
 
-    /// <summary>Parses <c>pnputil /enum-drivers /format xml</c> into records.
-    /// XML element names are pnputil's internal identifiers, not localized
-    /// resource strings, so this is locale-stable across Windows installs.
-    /// (The previous plain-text parser matched English-literal field labels
-    /// like "Published Name" and silently returned empty on non-English
-    /// Windows installs, which broke <see cref="IsHidMaestroDriverInstalled"/>
-    ///: see issue #17.)</summary>
-    public static List<DriverRecord> EnumerateDrivers() =>
-        ParseDrivers(Run("/enum-drivers /format xml").output) ?? new List<DriverRecord>();
-
-    /// <summary>The same, or null when the listing failed: pnputil did not
-    /// exit with 0, as when <see cref="RunTool"/> ends it at its timeout, or
-    /// its output is not a whole listing. A caller that acts on what the
-    /// listing leaves out tells a failed listing from an empty one.
-    /// <paramref name="run"/> stands in for the pnputil run in
-    /// registry_ownership_check's offline part and coexistence probe
-    /// OF11.</summary>
-    internal static List<DriverRecord>? TryEnumerateDrivers(Func<(int ExitCode, string Output)>? run = null)
+    /// <summary>The driver store's published packages whose original INF
+    /// name <paramref name="originalName"/> accepts, with their providers
+    /// and DriverVer lines: the packages <c>pnputil /enum-drivers</c> lists
+    /// for this machine's architecture, read the same way on every Windows
+    /// version. pnputil prints its locale-stable form, <c>/format xml</c>,
+    /// only on Windows 11, and Windows 10's pnputil answers that option with
+    /// its usage text and exit code 1. Its plain text names each field in
+    /// the system's language (#17).
+    ///
+    /// <para>The published INFs are the <c>oem*.inf</c> files of the
+    /// Windows INF directory, the set devcon's dp_enum walks
+    /// (Windows-driver-samples setup/devcon cmds.cpp, cmdDPEnumLegacy).
+    /// <c>SetupGetInfDriverStoreLocation</c> gives each one's package INF in
+    /// the driver store, whose file name is the original name. The provider
+    /// and the DriverVer fields come from the published INF through
+    /// <c>SetupFindFirstLine</c> and <c>SetupGetStringField</c>, the way
+    /// devcon's DumpDriverPackageData reads them (dump.cpp).</para>
+    ///
+    /// <para>A published INF with no package of this machine's architecture
+    /// (ERROR_NOT_FOUND), such as an x86 package of ntprint.inf on an x64
+    /// machine, is not listed. Neither is one removed while the listing
+    /// reads it (ERROR_FILE_NOT_FOUND). pnputil also lists a published
+    /// name whose INF is gone from the INF directory, with no FileRepository
+    /// folder either: nothing is left to install from or to delete, and
+    /// this listing leaves it out.</para></summary>
+    /// <param name="infDirectory">Where the published INFs are read: the
+    /// Windows INF directory when null. registry_ownership_check's offline
+    /// part names a directory of its own.</param>
+    /// <exception cref="InvalidOperationException">The listing failed: the
+    /// INF directory could not be read, or a published INF could not be
+    /// placed in the driver store or opened, for a reason other than the two
+    /// above. The message names the failure. A failed listing is never an
+    /// empty one.</exception>
+    internal static List<DriverRecord> ListPackages(Func<string, bool> originalName, string? infDirectory = null)
     {
-        var (exitCode, output) = (run ?? (() => Run("/enum-drivers /format xml")))();
-        return ListingOf(exitCode, output);
-    }
-
-    /// <summary>The records of one pnputil run's listing, or null when it
-    /// did not exit with 0 or its output does not parse.
-    /// registry_ownership_check's offline part and coexistence probe OF11
-    /// check it.</summary>
-    internal static List<DriverRecord>? ListingOf(int exitCode, string output) =>
-        exitCode == 0 ? ParseDrivers(output) : null;
-
-    /// <summary>The records of a listing, or null when it does not parse.
-    /// A listing with no package parses: pnputil prints its root element
-    /// around a line that says none were found.
-    /// registry_ownership_check's offline part checks it.</summary>
-    internal static List<DriverRecord>? ParseDrivers(string output)
-    {
-        if (string.IsNullOrWhiteSpace(output)) return null;
-
-        XDocument doc;
-        try { doc = XDocument.Parse(output); }
-        catch (System.Xml.XmlException) { return null; }
-
-        var root = doc.Root;
-        if (root == null) return null;
-        var records = new List<DriverRecord>();
-
-        foreach (var driver in root.Elements("Driver"))
+        string dir = infDirectory ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "INF");
+        string[] files;
+        try { files = Directory.GetFiles(dir, "oem*"); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            string published = driver.Attribute("DriverName")?.Value ?? "";
-            string original  = driver.Element("OriginalName")?.Value ?? "";
-            string provider  = driver.Element("ProviderName")?.Value ?? "";
-            string version   = driver.Element("DriverVersion")?.Value ?? "";
-            if (!string.IsNullOrEmpty(published))
-                records.Add(new DriverRecord(published, original, provider, version));
+            throw new InvalidOperationException($"{dir} could not be read ({e.Message.TrimEnd('.')})", e);
+        }
+
+        var records = new List<DriverRecord>();
+        foreach (string inf in files)
+        {
+            string published = Path.GetFileName(inf);
+            if (!IsPublishedName(published) || StoreLocation(inf) is not { } store) continue;
+            string original = Path.GetFileName(store);
+            if (!originalName(original) || VersionSection(inf) is not { } version) continue;
+            records.Add(new DriverRecord(published, original, version.Provider, version.DriverVersion));
         }
         return records;
+    }
+
+    /// <summary><see cref="ListPackages"/>, or null when the listing
+    /// failed. A caller that acts on what the listing leaves out tells a
+    /// failed listing from an empty one.</summary>
+    internal static List<DriverRecord>? TryEnumerateDrivers(Func<string, bool> originalName, string? infDirectory = null)
+    {
+        try { return ListPackages(originalName, infDirectory); }
+        catch (InvalidOperationException) { return null; }
+    }
+
+    /// <summary>A published INF's file name: <c>oem</c>, a number,
+    /// <c>.inf</c>.</summary>
+    private static bool IsPublishedName(string name) =>
+        name.Length > 7
+        && name.StartsWith("oem", StringComparison.OrdinalIgnoreCase)
+        && name.EndsWith(".inf", StringComparison.OrdinalIgnoreCase)
+        && name.AsSpan(3, name.Length - 7).IndexOfAnyExceptInRange('0', '9') < 0;
+
+    /// <summary>The package INF in the driver store of the published INF
+    /// <paramref name="inf"/>, or null when it has no package of this
+    /// machine's architecture or is gone.</summary>
+    private static string? StoreLocation(string inf)
+    {
+        var buffer = new char[260];
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            if (SetupGetInfDriverStoreLocation(inf, IntPtr.Zero, null, buffer, (uint)buffer.Length, out uint required))
+                return Terminated(buffer);
+            int error = Marshal.GetLastPInvokeError();
+            if (error == ERROR_INSUFFICIENT_BUFFER && required > buffer.Length)
+            {
+                buffer = new char[required];
+                continue;
+            }
+            if (error is ERROR_NOT_FOUND or ERROR_FILE_NOT_FOUND or ERROR_PATH_NOT_FOUND) return null;
+            throw new InvalidOperationException(
+                $"SetupGetInfDriverStoreLocation failed on {Path.GetFileName(inf)} with error {error}");
+        }
+        throw new InvalidOperationException(
+            $"SetupGetInfDriverStoreLocation asked for a larger buffer three times on {Path.GetFileName(inf)}");
+    }
+
+    /// <summary>The Provider and the DriverVer date and version of a
+    /// published INF, or null when it is gone.</summary>
+    private static (string Provider, string DriverVersion)? VersionSection(string inf)
+    {
+        IntPtr handle = SetupOpenInfFile(inf, null, INF_STYLE_WIN4, out _);
+        if (handle == InvalidInfHandle)
+        {
+            int error = Marshal.GetLastPInvokeError();
+            if (error is ERROR_FILE_NOT_FOUND or ERROR_PATH_NOT_FOUND) return null;
+            throw new InvalidOperationException(
+                $"SetupOpenInfFile failed on {Path.GetFileName(inf)} with error 0x{error:X8}");
+        }
+        try
+        {
+            return (VersionField(handle, "Provider", 1) ?? "",
+                    DriverVersionText(VersionField(handle, "DriverVer", 1) ?? "", VersionField(handle, "DriverVer", 2) ?? ""));
+        }
+        finally { SetupCloseInfFile(handle); }
+    }
+
+    /// <summary>One field of a [Version] line, its %strkey% tokens replaced
+    /// from [Strings], or null when the line or the field is absent.</summary>
+    private static string? VersionField(IntPtr inf, string key, uint field)
+    {
+        if (!SetupFindFirstLine(inf, "Version", key, out INFCONTEXT context)) return null;
+        var buffer = new char[MaxInfStringLength];
+        return SetupGetStringField(ref context, field, buffer, (uint)buffer.Length, out _) ? Terminated(buffer) : null;
+    }
+
+    /// <summary>A DriverVer line's date and version as pnputil prints them:
+    /// the date as MM/dd/yyyy and the version as numbers, so 1.0005.0.46 is
+    /// 1.5.0.46. A part that does not parse is kept as written.</summary>
+    internal static string DriverVersionText(string date, string version)
+    {
+        date = date.Trim();
+        version = version.Trim();
+        if (DateTime.TryParseExact(date, "M/d/yyyy", CultureInfo.InvariantCulture, DateTimeStyles.None, out var day))
+            date = day.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture);
+        if (Version.TryParse(version, out var parsed)) version = parsed.ToString();
+        return $"{date} {version}".Trim();
+    }
+
+    private static string Terminated(char[] buffer)
+    {
+        int end = Array.IndexOf(buffer, '\0');
+        return new string(buffer, 0, end < 0 ? buffer.Length : end);
     }
 
     /// <summary>Returns only the listed records that belong to HIDMaestro,
@@ -192,10 +282,9 @@ internal static class PnputilHelper
     // v1.3.0: per-process positive cache. Once we've confirmed the driver
     // is installed in this process (or successfully installed it), every
     // subsequent IsDriverInstalled / IsHidMaestroDriverInstalled call within
-    // this process can skip the pnputil /enum-drivers /format xml call
-    // (which, on machines with hundreds of drivers, takes 200–500 ms even
-    // on a fast box). The negative case is NOT cached: if the driver isn't
-    // installed yet, we want fresh state on every check until it is.
+    // this process can skip the driver store listing. The negative case is
+    // NOT cached: if the driver isn't installed yet, we want fresh state on
+    // every check until it is.
     private static volatile bool s_installedConfirmed;
     internal static void InvalidateInstalledCache() => s_installedConfirmed = false;
     internal static void MarkInstalledConfirmed() => s_installedConfirmed = true;
@@ -204,8 +293,8 @@ internal static class PnputilHelper
     /// <see cref="HidMaestroInfNames"/> is currently in the driver store.
     /// Replaces the previous substring grep on enum output.</summary>
     /// <exception cref="InvalidOperationException">The driver store's folders
-    /// did not show the packages and pnputil's listing failed. The message
-    /// names the failure. A failed listing is never read as "not
+    /// did not show the packages and the driver store listing failed. The
+    /// message names the failure. A failed listing is never read as "not
     /// installed".</exception>
     public static bool IsHidMaestroDriverInstalled()
     {
@@ -214,13 +303,13 @@ internal static class PnputilHelper
         // T37: cheap filesystem-level fast path. The DriverStore\FileRepository
         // directory layout is stable across every supported Windows version;
         // checking for hidmaestro.inf_* and hidmaestro_xusb.inf_* dirs is the
-        // same signal pnputil /enum-drivers would surface, but in ~5 ms vs
-        // 200–500 ms for the pnputil enum + XML parse. d3xMachina's gh#18
-        // log showed "driver install check (deployed=True) in 1695ms" hitting
-        // the slow path on first call; this fast path eliminates that.
-        // Falls through to the pnputil enum on filesystem-check failure
-        // (e.g., DriverStore inaccessible) so the strict provider-name
-        // filter still validates correctness in edge cases.
+        // same signal the driver store listing would surface, but in ~5 ms.
+        // d3xMachina's gh#18 log showed "driver install check
+        // (deployed=True) in 1695ms" on the first call when this check ran
+        // pnputil; this fast path eliminates that. Falls through to the
+        // listing on filesystem-check failure (e.g., DriverStore
+        // inaccessible) so the strict provider-name filter still validates
+        // correctness in edge cases.
         try
         {
             string fileRepo = System.IO.Path.Combine(
@@ -244,18 +333,18 @@ internal static class PnputilHelper
                 }
             }
         }
-        catch { /* fall through to pnputil enum */ }
+        catch { /* fall through to the driver store listing */ }
 
-        var (exitCode, output) = Run("/enum-drivers /format xml");
-        return InstalledFrom(exitCode, output);
+        return InstalledFrom(() => ListPackages(IsHidMaestroInf));
     }
 
-    /// <summary><see cref="IsHidMaestroDriverInstalled"/>'s answer from one
-    /// pnputil run's listing. Throws, naming the failure, when the listing
-    /// failed. Coexistence probe OF11 calls it through reflection.</summary>
-    internal static bool InstalledFrom(int exitCode, string output)
+    /// <summary><see cref="IsHidMaestroDriverInstalled"/>'s answer from the
+    /// listing <paramref name="list"/> gives. Throws, naming the failure,
+    /// when the listing failed. Coexistence probe OF11 calls it through
+    /// reflection.</summary>
+    internal static bool InstalledFrom(Func<List<DriverRecord>> list)
     {
-        var pkgs = HidMaestroPackagesIn(ListingOrThrow((exitCode, output)));
+        var pkgs = HidMaestroPackagesIn(ListingOrThrow(list));
         bool ok = HidMaestroInfNames.All(name =>
             pkgs.Any(p => string.Equals(p.OriginalName, name, StringComparison.OrdinalIgnoreCase)));
         if (ok) s_installedConfirmed = true;
@@ -318,18 +407,18 @@ internal static class PnputilHelper
     /// empty one, so it never reads as nothing to remove or nothing left.
     /// This is the strict version that prevents the "stale entry blocks
     /// reinstall" failure mode.</summary>
-    public static void RemoveAllHidMaestroPackages() => RemoveAllHidMaestroPackages(() => Run("/enum-drivers /format xml"));
+    public static void RemoveAllHidMaestroPackages() => RemoveAllHidMaestroPackages(() => ListPackages(IsCleanupInf));
 
-    /// <summary>The same, with <paramref name="run"/> for each pnputil
-    /// listing. Coexistence probe OF11 calls it through reflection with a
-    /// listing that failed, which throws before any delete.</summary>
-    internal static void RemoveAllHidMaestroPackages(Func<(int ExitCode, string Output)> run)
+    /// <summary>The same, with <paramref name="list"/> for each listing.
+    /// Coexistence probe OF11 calls it through reflection with a listing
+    /// that fails, which throws before any delete.</summary>
+    internal static void RemoveAllHidMaestroPackages(Func<List<DriverRecord>> list)
     {
         // Removal busts the per-process positive cache; the next
         // IsHidMaestroDriverInstalled call will re-enumerate.
         InvalidateInstalledCache();
 
-        var cleanup = ListingOrThrow(run())
+        var cleanup = ListingOrThrow(list)
             .Where(r => r.ProviderName.Equals("HIDMaestro", StringComparison.OrdinalIgnoreCase)
                      && HidMaestroInfNamesForCleanup.Any(n => string.Equals(r.OriginalName, n,
                                                                              StringComparison.OrdinalIgnoreCase)))
@@ -349,7 +438,7 @@ internal static class PnputilHelper
         // Re-enumerate to verify nothing remains. If something does, throw
         // with detail rather than letting the caller silently proceed and
         // load a stale binary on the next install.
-        var remaining = HidMaestroPackagesIn(ListingOrThrow(run()));
+        var remaining = HidMaestroPackagesIn(ListingOrThrow(list));
         if (remaining.Count > 0)
         {
             string detail = string.Join("; ", remaining.Select(r =>
@@ -361,17 +450,64 @@ internal static class PnputilHelper
         }
     }
 
-    private static List<DriverRecord> ListingOrThrow((int ExitCode, string Output) run) =>
-        ListingOf(run.ExitCode, run.Output) ?? throw new InvalidOperationException(
-            "HIDMaestro could not list the driver store's packages: " + ListingFailure(run.ExitCode) + ".");
-
-    /// <summary>Why a listing <see cref="ListingOf"/> refused failed, from its
-    /// exit code. <see cref="RunTool"/> leaves -1 for a run it ended at its
-    /// timeout.</summary>
-    private static string ListingFailure(int exitCode) => exitCode switch
+    /// <summary>The listing <paramref name="list"/> gives, or an
+    /// <see cref="InvalidOperationException"/> that names why it
+    /// failed.</summary>
+    private static List<DriverRecord> ListingOrThrow(Func<List<DriverRecord>> list)
     {
-        0 => "pnputil /enum-drivers exited 0 but printed no listing it could read",
-        -1 => "pnputil /enum-drivers did not finish in time (exit -1)",
-        _ => $"pnputil /enum-drivers exited {exitCode}",
-    };
+        try { return list(); }
+        catch (InvalidOperationException e)
+        {
+            throw new InvalidOperationException(
+                $"HIDMaestro could not list the driver store's packages: {e.Message.TrimEnd('.')}.", e);
+        }
+    }
+
+    private static bool IsHidMaestroInf(string original) =>
+        HidMaestroInfNames.Any(n => string.Equals(original, n, StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsCleanupInf(string original) =>
+        HidMaestroInfNamesForCleanup.Any(n => string.Equals(original, n, StringComparison.OrdinalIgnoreCase));
+
+    // winerror.h.
+    private const int ERROR_FILE_NOT_FOUND = 2;
+    private const int ERROR_PATH_NOT_FOUND = 3;
+    private const int ERROR_INSUFFICIENT_BUFFER = 122;
+    private const int ERROR_NOT_FOUND = 1168;
+
+    // SetupAPI.h: INF_STYLE_WIN4, MAX_INF_STRING_LENGTH (in characters), and
+    // the HINF SetupOpenInfFile returns on failure, INVALID_HANDLE_VALUE.
+    private const uint INF_STYLE_WIN4 = 0x00000002;
+    private const int MaxInfStringLength = 4096;
+    private static readonly IntPtr InvalidInfHandle = new(-1);
+
+    /// <summary>SetupAPI.h's INFCONTEXT. Opaque to the caller.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    private struct INFCONTEXT
+    {
+        public IntPtr Inf;
+        public IntPtr CurrentInf;
+        public uint Section;
+        public uint Line;
+    }
+
+    [LibraryImport("setupapi.dll", EntryPoint = "SetupGetInfDriverStoreLocationW", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupGetInfDriverStoreLocation(string fileName, IntPtr alternatePlatformInfo, string? localeName,
+        [Out] char[] returnBuffer, uint returnBufferSize, out uint requiredSize);
+
+    [LibraryImport("setupapi.dll", EntryPoint = "SetupOpenInfFileW", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
+    private static partial IntPtr SetupOpenInfFile(string fileName, string? infClass, uint infStyle, out uint errorLine);
+
+    [LibraryImport("setupapi.dll", EntryPoint = "SetupCloseInfFile")]
+    private static partial void SetupCloseInfFile(IntPtr infHandle);
+
+    [LibraryImport("setupapi.dll", EntryPoint = "SetupFindFirstLineW", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupFindFirstLine(IntPtr infHandle, string section, string? key, out INFCONTEXT context);
+
+    [LibraryImport("setupapi.dll", EntryPoint = "SetupGetStringFieldW", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupGetStringField(ref INFCONTEXT context, uint fieldIndex,
+        [Out] char[] returnBuffer, uint returnBufferSize, out uint requiredSize);
 }
