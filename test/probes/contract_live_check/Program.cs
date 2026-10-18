@@ -131,25 +131,48 @@ internal static class Program
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool CloseHandle(IntPtr h);
 
-    /// <summary>The version section of one index, held open by this check
+    /// <summary>The version section a create makes, held open by this check
     /// from the moment the SDK makes it. A failed create tears its section
     /// down (HMContext's cleanup), and the section lives while any handle
-    /// does, so the driver's half is still readable after the failure.</summary>
+    /// does, so the driver's half is still readable after the failure.
+    ///
+    /// <para>The SDK names the section by the lease's transport index, which
+    /// is the slot asked for unless an index another program holds is
+    /// skipped (ControllerLease.Acquire), or a running v1.12.0 program puts
+    /// it at 64 and up. So the watch looks at the slot's index and the ones
+    /// after it, at both bases, and takes the first section that was not
+    /// there when it started: one that was belongs to another program.</para></summary>
     sealed class VersionWatch : IDisposable
     {
         const uint FILE_MAP_READ = 4;
-        readonly string _name;
+        /// <summary>Indices looked at from each base.</summary>
+        const int Span = 64;
+        readonly List<string> _names = new();
         readonly Thread _thread;
         volatile bool _stop;
         volatile bool _holding;
         IntPtr _handle, _view;
 
-        /// <summary>The watch holds the section.</summary>
+        /// <summary>The watch holds a section.</summary>
         public bool Holding => _holding;
 
-        public VersionWatch(string name)
+        /// <summary>The name of the section the watch holds, or null.</summary>
+        public string? Held { get; private set; }
+
+        /// <summary>A watch for the section of a create at
+        /// <paramref name="slot"/>, among the names
+        /// <paramref name="prefix"/>N.</summary>
+        public VersionWatch(string prefix, int slot)
         {
-            _name = name;
+            foreach (int b in new[] { slot, ControllerLease.LegacyClearance + slot })
+                for (int n = b; n < b + Span; n++)
+                {
+                    string name = prefix + n.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    if (_names.Contains(name)) continue;
+                    IntPtr h = OpenFileMappingW(FILE_MAP_READ, false, name);
+                    if (h != IntPtr.Zero) { CloseHandle(h); continue; }
+                    _names.Add(name);
+                }
             _thread = new Thread(Run) { IsBackground = true, Name = "version-watch" };
             _thread.Start();
         }
@@ -158,11 +181,12 @@ internal static class Program
         {
             while (!_stop)
             {
-                IntPtr h = OpenFileMappingW(FILE_MAP_READ, false, _name);
-                if (h != IntPtr.Zero)
+                foreach (string name in _names)
                 {
+                    IntPtr h = OpenFileMappingW(FILE_MAP_READ, false, name);
+                    if (h == IntPtr.Zero) continue;
                     IntPtr v = MapViewOfFile(h, FILE_MAP_READ, 0, 0, (UIntPtr)SharedMemoryIO.VERSION_INFO_SIZE);
-                    if (v != IntPtr.Zero) { _handle = h; _view = v; _holding = true; return; }
+                    if (v != IntPtr.Zero) { _handle = h; _view = v; Held = name; _holding = true; return; }
                     CloseHandle(h);
                 }
                 Thread.Sleep(2);
@@ -182,8 +206,8 @@ internal static class Program
             var version = $"{(ushort)Marshal.ReadInt16(_view, SharedMemoryIO.VERSION_OFFSET_DRIVER_VERSION)}." +
                           $"{(ushort)Marshal.ReadInt16(_view, SharedMemoryIO.VERSION_OFFSET_DRIVER_VERSION + 2)}." +
                           $"{(ushort)Marshal.ReadInt16(_view, SharedMemoryIO.VERSION_OFFSET_DRIVER_VERSION + 4)}";
-            return protocol == 0 && error == 0 ? "the driver wrote nothing"
-                : $"protocols {min} to {protocol}, version {version}, error word {error}";
+            return $"{Held}: " + (protocol == 0 && error == 0 ? "the driver wrote nothing"
+                : $"protocols {min} to {protocol}, version {version}, error word {error}");
         }
 
         public void Dispose()
@@ -201,7 +225,7 @@ internal static class Program
     /// failed create's cleanup releases the SDK's own view of it.</summary>
     static HMController? Create(HMContext ctx, int index, HMProfile profile, string what)
     {
-        using var watch = new VersionWatch($@"Global\HIDMaestroVersion{index}");
+        using var watch = new VersionWatch(@"Global\HIDMaestroVersion", index);
         try { return ctx.CreateControllerAt(index, profile, Key()); }
         catch (Exception e)
         {
@@ -210,24 +234,42 @@ internal static class Program
         }
     }
 
-    /// <summary>The watch reads a section that outlived its maker: a
-    /// section this check makes and fills as a driver would, closed before
-    /// the read. Needs no device and no elevation.</summary>
+    /// <summary>The watch reads the section a create made and not another
+    /// program's: a section this check makes at the slot's index first, as
+    /// another program's, then one at the next index, filled as a driver
+    /// would and closed before the read. At f00f0482 the watch opened the
+    /// slot's name alone and read the other program's section. Needs no
+    /// device and no elevation.</summary>
     static void Selftest()
     {
-        string name = $@"Local\HMContractLiveSelftest{Environment.ProcessId}";
-        using var watch = new VersionWatch(name);
-        IntPtr h = CreateFileMappingW(new IntPtr(-1), IntPtr.Zero, 4 /* PAGE_READWRITE */, 0, (uint)SharedMemoryIO.VERSION_INFO_SIZE, name);
-        IntPtr v = MapViewOfFile(h, 2 /* FILE_MAP_WRITE */, 0, 0, (UIntPtr)SharedMemoryIO.VERSION_INFO_SIZE);
-        Marshal.WriteInt32(v, SharedMemoryIO.VERSION_OFFSET_DRIVER_PROTOCOL, 4);
-        Marshal.WriteInt32(v, SharedMemoryIO.VERSION_OFFSET_DRIVER_PROTOCOL_MIN, 4);
-        Marshal.WriteInt16(v, SharedMemoryIO.VERSION_OFFSET_DRIVER_VERSION, 2);
-        Marshal.WriteInt32(v, SharedMemoryIO.VERSION_OFFSET_DRIVER_CONFIG_ERROR, 1);
-        for (int i = 0; i < 500 && !watch.Holding; i++) Thread.Sleep(2);
-        UnmapViewOfFile(v);
-        CloseHandle(h);
-        string read = watch.Read();
-        Check("selftest: the watch reads a version section its maker closed", read == "protocols 4 to 4, version 2.0.0, error word 1", read);
+        string prefix = $@"Local\HMContractLiveSelftest{Environment.ProcessId}_";
+        (IntPtr H, IntPtr V) Make(int n, int protocol)
+        {
+            IntPtr h = CreateFileMappingW(new IntPtr(-1), IntPtr.Zero, 4 /* PAGE_READWRITE */, 0, (uint)SharedMemoryIO.VERSION_INFO_SIZE, prefix + n);
+            IntPtr v = MapViewOfFile(h, 2 /* FILE_MAP_WRITE */, 0, 0, (UIntPtr)SharedMemoryIO.VERSION_INFO_SIZE);
+            Marshal.WriteInt32(v, SharedMemoryIO.VERSION_OFFSET_DRIVER_PROTOCOL, protocol);
+            Marshal.WriteInt32(v, SharedMemoryIO.VERSION_OFFSET_DRIVER_PROTOCOL_MIN, protocol);
+            Marshal.WriteInt16(v, SharedMemoryIO.VERSION_OFFSET_DRIVER_VERSION, 2);
+            Marshal.WriteInt32(v, SharedMemoryIO.VERSION_OFFSET_DRIVER_CONFIG_ERROR, 1);
+            return (h, v);
+        }
+        var other = Make(0, 9);
+        try
+        {
+            using var watch = new VersionWatch(prefix, 0);
+            var (h, v) = Make(1, 4);
+            for (int i = 0; i < 500 && !watch.Holding; i++) Thread.Sleep(2);
+            UnmapViewOfFile(v);
+            CloseHandle(h);
+            string read = watch.Read();
+            Check("selftest: with another program's section at the slot's index, the watch reads the create's at the next index after its maker closed it",
+                  read == prefix + "1: protocols 4 to 4, version 2.0.0, error word 1", read);
+        }
+        finally
+        {
+            UnmapViewOfFile(other.V);
+            CloseHandle(other.H);
+        }
     }
 
     /// <summary>The device a controller made, as Windows reports it.</summary>
