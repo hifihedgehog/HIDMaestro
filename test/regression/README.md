@@ -1,6 +1,6 @@
 ﻿# swap_regression.ps1: live-swap teardown regression battery
 
-Drives `HIDMaestroTest.exe` through 91 single- and multi-controller
+Drives `HIDMaestroTest.exe` through 95 single- and multi-controller
 create/swap/remove/force-kill sequences and verifies every scenario
 leaves zero HIDMaestro PnP devnodes in the `PRESENT` state. Catches
 the symptom that v1.1.31 fixed (`SwDeviceLifetimeParentPresent`
@@ -34,7 +34,7 @@ custom profile (BEEF:F000) authored via the SDK's `HMProfileBuilder`
 Exit code: `0` if every scenario passed, `1` if any failed.
 
 Total wall time: [D4-PLACEHOLDER: minutes from the v2.0.0 release battery] for the full
-91-scenario battery on a 16-core laptop. Most of it is deliberate cascade-settle waits (Series BT teardown takes about 10s
+95-scenario battery on a 16-core laptop. Most of it is deliberate cascade-settle waits (Series BT teardown takes about 10s
 of xinputhid filter unbinding regardless of code path). Slow machines
 with profile-extraction or PnP-quiesce overhead may push this longer.
 Use `-Filter` to run a single scenario in 1-2 minutes when iterating.
@@ -141,6 +141,10 @@ not run elevated.
 | `S89_Device_Oracle`               | The device code gives the bytes it gave before the conversion | Replays nine recorded cases, the submit and decode paths, the packers, the Switch 2 Pro responder, the USB/IP feature answers, the UMDF2 driver and companion compiled natively, and the physical descriptors of the reference clones, and passes a difference only when `changes.txt` lists it with its lane and reason. Offline |
 | `S90_Arith_Roundtrip`             | Every raw value comes back | Every raw value of every catalog conversion, normalized three ways, returns through the SDK's own code. A NaN writes the rest, an unwritten stick rests at its center, the rounding matches `Math.Round`, and `diff` holds every float in [0, 1] to the design note's table. Offline, about 9 minutes for `diff` |
 | `S91_Vendor_Blob_Golden`          | Vendor-blob reports against golden bytes | Every Sony, Valve and Nintendo vendor-blob report encodes and decodes to its golden SHA-256, and the codec vocabulary refuses the removed `ds3-battery` type, a missing `max` or `invert`, and parameters an output field ignores. Offline |
+| `S92_Profile_Model`               | Profiles and device models as data, no device | The catalog and a user's directory load strictly: every defect a file can carry is refused at its JSON path and listed in `HMContext.ProfileLoadIssues`, a create and a build meet `HMProfileException` for a bad profile, and the catalog files of every earlier v1.x tag load but for the removed spellings. Answer tables, value sources and patches, model resolution by name and by identity (no catalog profile takes a group from an identity default), the SDK's half of the version contract, the 2.0.0 deploy floor and its policy, and `FromProfile`'s whole copy. Offline |
+| `S93_Contract_Live`               | The version contract on the live driver | A fresh-token controller's driver reads its index from the identity entry before its first start, on the ROOT path and the SWD xinputhid path, a device without report IDs answers its message after HID class's leading 0, and each catalog profile with a model, read back by `HMDeviceExtractor`, names the model its identity gives it with the answers the device gave. Live, elevated |
+| `S94_Program_Equivalence`         | Every report program three ways | Each catalog program, decoder and layout set through its generated kernel, the interpreter and a naive evaluator written from the design note, on random states and recorded inputs, a seeded corpus of 1,000 random programs, the negative corpus and planted defects, every validation rule with its JSON path, under the JIT and NativeAOT, where every catalog program must bind its generated kernel. Offline |
+| `S95_Protocol_Engine`             | The protocol engine and the device clock | Conditions, matches, register stores, memory, bitmap and prefix replies, bulk replies in read-sized chunks, the overflow rules, GET_REPORT of the layout that would go out, counters, no allocation per command, reply or report, the Triton's IMU register, the clock's grid under each missed-tick rule, and the idle repeat's period, condition and timestamps. Offline |
 | `S96_Capture_Fidelity`            | Catalog data and driver text against their sources | The INF comments are ASCII, the Xbox 360 profiles carry a real pad's manufacturer string, and xbox-360-flight-stick and ps-move carry their captured descriptors, with the Move's controls, battery and motion where psmoveapi and RPCS3 read them. Offline |
 
 ## What "PASS" means
