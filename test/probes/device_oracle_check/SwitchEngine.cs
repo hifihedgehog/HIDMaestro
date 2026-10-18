@@ -7,7 +7,8 @@
 // SubmitState's 48-byte bodies and the stream's 15 ms periods. The same
 // sequence runs twice. driver_harness_oracle.exe, 9bd6279's driver.c,
 // runs it through hm_script.c on case 5's plan. The engine runs it on the
-// catalog's switch-pro.json or switch-pro-usb.json, with a read taking a
+// catalog's switch-pro.json, the deliberate changes of decision (e) taken
+// back (IdentityForm), or switch-pro-usb.json, with a read taking a
 // queued reply first and a period's frame reaching a read only when one
 // is parked, as the responder delivered them (driver.c:1489-1548 and
 // 1812-1868 at 9bd6279). Every read's bytes must match: each 0x21 and
@@ -59,6 +60,22 @@ internal static class SwitchEngine
             if (JsonNode.Parse(t) is JsonObject o && (string?)o["id"] == id) return t;
         }
         throw new InvalidOperationException($"no catalog profile {id}");
+    }
+
+    /// <summary>switch-pro with the deliberate changes of decision (e) taken
+    /// back: its simple 0x3F report on every tick before the handshake and
+    /// never in mode 0x3F, as 9bd6279 sent it, where the catalog's sends it
+    /// when its bytes change, before the handshake and in mode 0x3F.
+    /// protocol_engine_check's Deliberate section holds those changes. The
+    /// 15 ms grid changes when a frame goes, which this comparison does
+    /// not see.</summary>
+    internal static string IdentityForm(string json)
+    {
+        var o = JsonNode.Parse(json)!.AsObject();
+        var simple = o["inputReports"]!.AsArray().First(l => (string?)l!["name"] == "simple")!.AsObject();
+        simple["send"] = "clock";
+        simple["while"] = "!protocolSeen && inputMode in 30,31";
+        return o.ToJsonString();
     }
 
     /// <summary>The profile validated as a create validates it, its
@@ -451,7 +468,7 @@ internal static class SwitchEngine
         foreach (var need in new[] { planPath, Path.Combine(native, "driver_harness_oracle.exe") })
             if (!File.Exists(need)) { Console.WriteLine($"  [MISSING] {need}"); return 2; }
 
-        string btJson = CatalogJson("switch-pro"), usbJson = CatalogJson("switch-pro-usb");
+        string btJson = IdentityForm(CatalogJson("switch-pro")), usbJson = CatalogJson("switch-pro-usb");
         var (bt, btp, btRefusal) = Load(btJson);
         var (usb, usbp, usbRefusal) = Load(usbJson);
         Check("switch-pro loads and its protocol compiles for UMDF2", btp != null, btRefusal ?? "");

@@ -61,10 +61,24 @@ internal sealed unsafe class ProtocolHost : IDisposable
     private bool _replyPending;
     private int _misses;
 
-    private Thread? _clock;
+    private DeviceClock<HostTick>? _clock;
     private readonly int _index;
-    private readonly ManualResetEvent _stop = new(false);
+    private long _origin;
     private int _started;
+
+    /// <summary>The device clock's tick: one <see cref="Tick"/> of the host
+    /// at each point of the grid its start sets.</summary>
+    private readonly struct HostTick : IClockTick
+    {
+        private readonly ProtocolHost _host;
+        private readonly long _period;
+        public HostTick(ProtocolHost host, long period) { _host = host; _period = period; }
+        public bool Running(out long origin) { origin = _host._origin; return true; }
+        public long Period => _period;
+        public long NotBefore => 0;
+        public void Tick(long due) => _host.Tick(DeliveryTimeoutMs);
+        public void RunEnded() { }
+    }
 
     private sealed class Builder : ILayoutVisitor<int>
     {
@@ -115,14 +129,14 @@ internal sealed unsafe class ProtocolHost : IDisposable
         if (Protocol.Model.LiveFeatures.Length > 0 || Array.Exists(Protocol.Model.Layouts, l => l.Send == SendRule.Submit))
             OnState(Engine.CopyStateBlock());
         if (!NeedsClock()) return;
-        _clock = new Thread(ClockLoop)
-        {
-            IsBackground = true,
-            Name = $"HMProtocolClock_{_index}",
-            // The protocol thread runs above normal priority, as the idle
-            // repeat and the USB/IP input pump do (decision (b)).
-            Priority = ThreadPriority.AboveNormal,
-        };
+        _origin = System.Diagnostics.Stopwatch.GetTimestamp();
+        long period = Math.Max(1, (long)Math.Round(Protocol.ClockPeriodMs * System.Diagnostics.Stopwatch.Frequency / 1000.0));
+        // The device clock of mechanism 2, above normal priority as the
+        // idle repeat and the USB/IP input pump run (decision (b)). Its
+        // ticks hold the grid from the start (decision (e)): a tick that
+        // cannot send, a reply still undelivered, sends nothing, and the
+        // next comes at the next grid point.
+        _clock = new DeviceClock<HostTick>(new HostTick(this, period), MissedTick.NextPoll, $"HMProtocolClock_{_index}");
         _clock.Start();
     }
 
@@ -131,22 +145,6 @@ internal sealed unsafe class ProtocolHost : IDisposable
         foreach (var l in Protocol.Model.Layouts)
             if (l.Send != SendRule.Submit) return true;
         return false;
-    }
-
-    /// <summary>The clock as the driver's stream thread ran it at 9bd6279:
-    /// one tick, then a wait of the period (driver.c:1817-1820).</summary>
-    private void ClockLoop()
-    {
-        int period = Math.Max(1, (int)Math.Round(Protocol.ClockPeriodMs));
-        while (!_stop.WaitOne(period))
-        {
-            try { Tick(waitMs: DeliveryTimeoutMs); }
-            catch
-            {
-                // The input pump's containment contract: a transient failure
-                // must not end the clock.
-            }
-        }
     }
 
     /// <summary>One tick of the device clock: the replies that wait go out
@@ -244,11 +242,8 @@ internal sealed unsafe class ProtocolHost : IDisposable
         }
     }
 
-    public void Dispose()
-    {
-        _stop.Set();
-        if (_clock != null && Thread.CurrentThread != _clock)
-            try { _clock.Join(2000); } catch (ThreadStateException) { }
-        _stop.Dispose();
-    }
+    public void Dispose() => _clock?.Stop(2000);
+
+    /// <summary>The clock's thread, or null before a start that needed one.</summary>
+    internal Thread? ClockThread => _clock?.Thread;
 }

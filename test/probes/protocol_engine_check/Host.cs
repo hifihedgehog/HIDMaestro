@@ -150,7 +150,7 @@ internal static class Host
         dev.C.SubmitState(in s);
         Check("SubmitState on a device whose layouts go out on the clock writes no frame", dev.Frame().Seq == seq);
         var host = typeof(HMController).GetField("_host", Instance)?.GetValue(dev.C);
-        Thread? Clock() => (Thread?)host?.GetType().GetField("_clock", Instance)?.GetValue(host);
+        Thread? Clock() => host?.GetType().GetProperty("ClockThread", Instance)?.GetValue(host) as Thread;
         Check("the constructor starts no clock: a controller on process memory runs none", host != null && Clock() == null, host == null ? "no host" : "");
         typeof(HMController).GetMethod("StartProtocol", Instance)?.Invoke(dev.C, null);
         var clock = Clock();
