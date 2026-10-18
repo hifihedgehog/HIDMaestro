@@ -436,7 +436,7 @@ internal static class Program
               rd != null && Contains(rd, new byte[] { 0x85, 0x80 }));
 
         Check("declares inputReportSize 54, report 0x42's 53 bytes plus its report id",
-              inner.InputReportSize == 54, inner.InputReportSize.ToString());
+              inner.InputReportSize == 54, $"{inner.InputReportSize}");
         Check("has both an IN and an OUT interrupt endpoint",
               set.Endpoints.Count == 2
               && set.Endpoints.Values.Any(e => e.IsIn && e.TransferType == 3)

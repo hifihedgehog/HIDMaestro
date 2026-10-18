@@ -75,8 +75,11 @@ internal static class Program
                 // Still verify Sticks/Triggers lists are consistent with classifier.
                 int stickListCount = p.Sticks.Count;
                 int triggerListCount = p.Triggers.Count;
+                // Reading Count dereferences each list, so a null one throws
+                // here. A null test of the non-nullable properties would leave
+                // the loop's next profile maybe null to the compiler.
                 Check($"{p.Id}: Sticks/Triggers lists are non-null",
-                      p.Sticks != null && p.Triggers != null);
+                      stickListCount >= 0 && triggerListCount >= 0);
                 continue;
             }
 
