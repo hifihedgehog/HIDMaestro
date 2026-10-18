@@ -10,8 +10,8 @@
 //     but uint8-axis, which the decoder would ignore
 //   - every catalog profile's device model compiles under the vocabulary's
 //     checks
-//   - dualshock-3-full's uint8-level-map gives the bytes ds3-battery gave,
-//     full ahead of charging
+//   - uint8-level-map gives the bytes ds3-battery gave, full ahead of
+//     charging, and dualshock-3-full writes a USB pad's 0xEE and 0xEF
 //   - field lists in the vocabulary reproduce SwitchProPacker.BuildBody's
 //     48 bytes on random states, and the Switch 2 Pro composite's stateBlock
 //     is the field list that reproduced Switch2ProPacker.BuildBody's 24
@@ -156,26 +156,43 @@ internal static class Vocabulary
         Check($"all {n} catalog profiles compile their device model", refused.Count == 0, string.Join(" | ", refused.Take(3)));
     }
 
-    /// <summary>The DualShock 3 battery byte: the table ds3-battery held,
-    /// 0xEE charging and 0xEF full, full first.</summary>
+    /// <summary>The DualShock 3 battery byte. uint8-level-map with the table
+    /// ds3-battery held gives that type's bytes, 0xEE charging and 0xEF
+    /// full, full first. The catalog's dualshock-3-full maps every level to
+    /// 0xEE, what a pad on USB sends while it charges (hid-sony.c:973-987 at
+    /// d24e8ac), and keeps 0xEE and 0xEF.</summary>
     static void LevelMap(ControllerProfile ds3)
     {
-        var spec = ds3.ExtendedReport!;
-        int b = spec.Fields.First(f => f.Semantic == "batteryLevel").Byte!.Value;
-        var buf = new byte[spec.Size];
-        byte Encode(byte level, bool charging, bool full)
+        byte[] Bytes(ControllerProfile p, out byte charging, out byte full, out byte both)
         {
-            var s = new HMGamepadState { BatteryLevel = level, BatteryCharging = charging, BatteryFull = full };
-            VendorBlobCodec.EncodeInput(spec, in s, 0.5f, 0.5f, 0.5f, 0.5f, 0, 0, buf, new VendorBlobCodec.EncoderState());
-            return buf[b];
+            var spec = p.ExtendedReport!;
+            int b = spec.Fields.First(f => f.Semantic == "batteryLevel").Byte!.Value;
+            var buf = new byte[spec.Size];
+            byte Encode(byte level, bool c, bool f)
+            {
+                var s = new HMGamepadState { BatteryLevel = level, BatteryCharging = c, BatteryFull = f };
+                VendorBlobCodec.EncodeInput(spec, in s, 0.5f, 0.5f, 0.5f, 0.5f, 0, 0, buf, new VendorBlobCodec.EncoderState());
+                return buf[b];
+            }
+            charging = Encode(5, true, false);
+            full = Encode(5, false, true);
+            both = Encode(5, true, true);
+            return Enumerable.Range(0, 12).Select(l => Encode((byte)l, false, false)).ToArray();
         }
         byte[] table = { 1, 2, 2, 2, 3, 3, 4, 4, 4, 5, 5 };
-        var got = Enumerable.Range(0, 12).Select(l => Encode((byte)l, false, false)).ToArray();
-        bool levels = got.Take(11).SequenceEqual(table) && got[11] == table[10];
-        Check("dualshock-3-full's battery byte for levels 0 to 11 is ds3-battery's table, level 11 as 10", levels, Convert.ToHexString(got));
+        // Edited as JSON: dualshock-3-full with the ds3-battery table.
+        var node = System.Text.Json.Nodes.JsonNode.Parse(JsonSerializer.Serialize(ds3, HMJsonContext.Default.ControllerProfile))!;
+        var field = node["extendedReport"]!["fields"]!.AsArray().First(x => (string?)x!["semantic"] == "batteryLevel")!;
+        field["levels"] = System.Text.Json.Nodes.JsonNode.Parse("[" + string.Join(",", table) + "]");
+        var old = JsonSerializer.Deserialize(node.ToJsonString(), HMJsonContext.Default.ControllerProfile)!;
+        var got = Bytes(old, out byte c, out byte f, out byte cf);
+        Check("uint8-level-map with ds3-battery's table gives its bytes for levels 0 to 11, level 11 as 10",
+            got.Take(11).SequenceEqual(table) && got[11] == table[10], Convert.ToHexString(got));
         Check("charging gives 0xEE, full gives 0xEF, and both give 0xEF, full first as ds3-battery put it",
-            Encode(5, true, false) == 0xEE && Encode(5, false, true) == 0xEF && Encode(5, true, true) == 0xEF,
-            $"{Encode(5, true, false):X2} {Encode(5, false, true):X2} {Encode(5, true, true):X2}");
+            c == 0xEE && f == 0xEF && cf == 0xEF, $"{c:X2} {f:X2} {cf:X2}");
+        var usb = Bytes(ds3, out c, out f, out cf);
+        Check("dualshock-3-full writes 0xEE at every level, 0xEE charging and 0xEF full, as a pad on USB does",
+            usb.All(x => x == 0xEE) && c == 0xEE && f == 0xEF && cf == 0xEF, $"{Convert.ToHexString(usb)} {c:X2} {f:X2} {cf:X2}");
     }
 
     /// <summary>steam-controller-2's IMU register and the hold it drives

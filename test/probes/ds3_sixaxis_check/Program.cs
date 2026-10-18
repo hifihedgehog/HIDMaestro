@@ -97,7 +97,7 @@ internal static class Program
         e[18] = 128; e[19] = 0;                          // L2 R2
         e[20] = 255; e[21] = 0;                          // L1 R1
         e[22] = 200; e[23] = 77; e[24] = 255; e[25] = 0; // triangle circle cross square
-        e[30] = 4;                                       // level 7 -> 75%
+        e[30] = 0xEE;                                    // charging, as a pad on USB reports
         // 512 + 113 * 1 g = 625. 512 - round(113 * 0.25) = 484.
         // 512 + round(113 * 0.5) = 569. 512 - 123 = 389.
         e[41] = 0x02; e[42] = 0x71;
@@ -171,10 +171,12 @@ internal static class Program
         for (int k = 0; k < 10; k++)
             Check($"SDL axis {6 + k} ({names[k]} pressure) reads {want[k]}", r[sdlOffsets[k]] == want[k], $"{r[sdlOffsets[k]]}");
 
-        // hid-sony.c sixaxis_raw_event: battery index into {0,1,25,50,75,100},
-        // 0xEE charging, 0xEF full. Motion is big-endian, X = v - 511,
-        // Y = 511 - (45..46), Z = 511 - (43..44), 113 per g.
-        Check("Linux reads the battery at 75%", r[30] == 4, $"{r[30]}");
+        // hid-sony.c sixaxis_raw_event (973-987 at d24e8ac): 0xEE is
+        // charging and 0xEF full, both at 100%, the only values a pad on USB
+        // sends (DsHidMini DsCommon.h:80-92), so a battery level of 7 is
+        // still 0xEE. Motion is big-endian, X = v - 511, Y = 511 -
+        // (45..46), Z = 511 - (43..44), 113 per g.
+        Check("Linux reads the pad as charging, as a pad on USB is", r[30] == 0xEE, $"{r[30]:X2}");
         Check("Linux reads about +1 g on X", Math.Abs((Be16(r, 41) - 511) / 113.0 - 1.0) < 0.02, $"{Be16(r, 41)}");
         Check("Linux reads about -0.5 g on Y", Math.Abs((511 - Be16(r, 45)) / 113.0 + 0.5) < 0.02, $"{Be16(r, 45)}");
         Check("Linux reads about +0.25 g on Z", Math.Abs((511 - Be16(r, 43)) / 113.0 - 0.25) < 0.02, $"{Be16(r, 43)}");
@@ -195,6 +197,15 @@ internal static class Program
         VendorBlobCodec.EncodeInput(spec, in chg, LX, LY, RX, RY, LT, RT, r2, new VendorBlobCodec.EncoderState());
         VendorBlobCodec.EncodeInput(spec, in full, LX, LY, RX, RY, LT, RT, r3, new VendorBlobCodec.EncoderState());
         Check("charging is 0xEE and charged 0xEF", r2[30] == 0xEE && r3[30] == 0xEF, $"{r2[30]:X2} {r3[30]:X2}");
+        var levels = new List<string>();
+        for (int level = 0; level <= 10; level++)
+        {
+            var at = TestState(); at.BatteryLevel = (byte)level;
+            var rl = new byte[49];
+            VendorBlobCodec.EncodeInput(spec, in at, LX, LY, RX, RY, LT, RT, rl, new VendorBlobCodec.EncoderState());
+            if (rl[30] != 0xEE) levels.Add($"{level}:{rl[30]:X2}");
+        }
+        Check("every battery level not charged is 0xEE, never a level a pad on USB does not send", levels.Count == 0, string.Join(" ", levels));
         // Full scale: 4 g (32767 at 8192 per g) is 512 + 452, inside the
         // 10-bit range. 2048 degrees/second of yaw is far past it either way
         // and clamps.
@@ -438,8 +449,8 @@ internal static class Program
                       && Gate(rep[2] & 0x10, rep[14]) == 255 && Gate(rep[2] & 0x20, rep[15]) == 50);
                 Check("RPCS3 gates the released circle to 0 though its byte is 77",
                       Gate(rep[3] & 0x20, rep[23]) == 0 && rep[23] == 77);
-                Check("RPCS3 reads start and PS, and the battery at 75%",
-                      (rep[2] & 0x08) != 0 && (rep[4] & 0x01) != 0 && rep[30] == 4);
+                Check("RPCS3 reads start and PS, and the battery as charging",
+                      (rep[2] & 0x08) != 0 && (rep[4] & 0x01) != 0 && rep[30] == 0xEE);
                 Check("RPCS3 reads the PS3 sensors its DS4 formula gives (398/569/484/389)",
                       Le16(rep, 41) == 398 && Le16(rep, 45) == 569 && Le16(rep, 43) == 484 && Le16(rep, 47) == 389,
                       $"{Le16(rep, 41)} {Le16(rep, 45)} {Le16(rep, 43)} {Le16(rep, 47)}");
