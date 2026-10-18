@@ -505,7 +505,7 @@ Windows' own parser refused three catalog descriptors. HID class runs it on the 
 - `tinyusb-generic-gamepad`: its reports were not whole bytes. It now serves TinyUSB's `TUD_HID_REPORT_DESC_GAMEPAD` with its report ID 2: a 12-byte input report of six 8-bit axes, an 8-bit hat and 32 buttons, and no output or feature report, where it declared a 14-byte input, a 9-byte output and a 2-byte feature report.
 - `nacon-bigben-ps4`: Linux's fixed descriptor, whose Feature item has no usage. It now serves the descriptor the pad serves (hid-bigbenff.c): a 27-byte input report with X, Y, Z and Rz and with L2 and R2 as buttons 7 and 8, beside 8-byte vendor output and feature reports, where it declared a 35-byte input report. 146B:0902 is BigBen's wired game pad for the PS3, so the profile is now "BigBen Game Pad for PS3", with "Bigben Interactive" and "Bigben Game Pad" as its USB strings. Its id is unchanged.
 
-The GameCube adapter profiles stay refused, as the real adapter's descriptor is.
+`gamecube-adapter` and `gamecube-adapter-hid` stay refused, as the real adapter's descriptor is: each of their ten Application collections carries Usage 0, which hidparse refuses as a top-level collection without a usage (STATUS_COULD_NOT_INTERPRET, HIDP_GETCOLDESC_TOP_COLLECTION_USAGE). `joypad-gc-adapter` parses.
 
 The sixteen profiles whose data report changed, and the two of them that still do not match their devices, are listed in the coexistence design note (The report a data frame fills).
 
