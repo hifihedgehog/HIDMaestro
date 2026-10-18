@@ -65,6 +65,52 @@ internal static class Umdf2
 
     public static void Run()
     {
+        Compiles();
+        FrameCounter();
+    }
+
+    /// <summary>A frame counter numbers the messages that carry it, as the
+    /// Switch Pro's timer byte numbers its replies and its 0x30 reports and
+    /// never its 0x3F reports (driver.c:1631 and 1855 at 9bd6279).</summary>
+    static void FrameCounter()
+    {
+        Console.WriteLine("-- a frame counter advances on the messages that carry it");
+        var json = Profile(o =>
+        {
+            o["inputReports"] = JsonNode.Parse("""
+            [ { "name": "full", "reportId": "0x30", "size": 49, "while": "seen",
+                "program": [ { "const": { "0": "30" } }, { "counter": "timer", "at": 1, "width": 8 }, { "copy": "0-1", "to": 3 } ] },
+              { "name": "simple", "reportId": "0x3F", "size": 12, "while": "!seen", "program": [ { "const": { "0": "3F" } } ] } ]
+            """);
+            var pr = o["protocol"]!.AsObject();
+            pr["counters"] = JsonNode.Parse("""[ { "name": "timer", "bits": 8, "on": "frame" } ]""");
+            pr["commands"]!["replyPrefix"] = JsonNode.Parse("""[ { "hex": "21" }, { "counter": "timer" } ]""");
+            pr["commands"]!["rules"]![0]!["reply"] = JsonNode.Parse("""[ { "echo": "10" } ]""");
+        });
+        var (proto, refusal) = Compile(json);
+        if (proto == null) { Check("the frame counter's test profile compiles", false, refusal ?? ""); return; }
+        var runner = ProgramBinder.BindLayouts(proto.Model)!;
+        var e = new ProtocolEngine(proto, "HM-TEST-0001", 0, runner);
+        var build = new Builder { Engine = e };
+        int timer = Array.IndexOf(proto.Model.CounterNames, "timer");
+        for (int i = 0; i < 3; i++) runner.Visit(build);
+        Check("three 0x3F reports, which do not carry the counter, leave it at 0", build.Buffer[0] == 0x3F && e.GetCounter(timer) == 0, $"timer {e.GetCounter(timer)}");
+        var cmd = new byte[49];
+        cmd[0] = 0x01; cmd[10] = 0x02;
+        e.HandleCommand(cmd, Stopwatch.GetTimestamp());
+        var reply = new byte[64];
+        e.TakeReply(64, reply);
+        Check("the first reply carries 0, and the counter moves on", reply[1] == 0 && e.GetCounter(timer) == 1, $"reply byte 1 {reply[1]}, timer {e.GetCounter(timer)}");
+        runner.Visit(build);
+        runner.Visit(build);
+        Check("two 0x30 reports carry 1 and 2", build.Buffer[0] == 0x30 && build.Buffer[1] == 2 && e.GetCounter(timer) == 3, $"last {build.Buffer[1]}, timer {e.GetCounter(timer)}");
+        e.HandleCommand(cmd, Stopwatch.GetTimestamp());
+        e.TakeReply(64, reply);
+        Check("the next reply carries 3", reply[1] == 3, $"{reply[1]}");
+    }
+
+    static void Compiles()
+    {
         Console.WriteLine("-- a UMDF2 device's protocol");
         var (proto, refusal) = Compile(Profile());
         Check("a UMDF2 profile's protocol compiles, its commands its output reports", proto is { Source: CommandSource.OutputReport }, refusal ?? "");

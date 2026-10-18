@@ -54,6 +54,9 @@ internal sealed unsafe class ProtocolEngine
     // sent since the last attach or port reset.
     private readonly byte[][] _lastSent;
     private readonly bool[] _sentOnce;
+    // Per layout, the frame counters its program writes. A frame counter
+    // advances on a message that carries it.
+    private readonly uint[] _framesWritten;
     private bool _inputOpen;
     private long _inputOpenedAt;
     private long _clockOrigin = Stopwatch.GetTimestamp();
@@ -163,6 +166,9 @@ internal sealed unsafe class ProtocolEngine
         _lastSent = new byte[_m.Layouts.Length][];
         for (int i = 0; i < _lastSent.Length; i++) _lastSent[i] = new byte[_m.Layouts[i].Size];
         _sentOnce = new bool[_m.Layouts.Length];
+        _framesWritten = new uint[_m.Layouts.Length];
+        for (int i = 0; i < _framesWritten.Length; i++)
+            _framesWritten[i] = CountersWritten(_m.Layouts[i].Program.Spec.Ops);
 
         int capacity = Math.Max(protocol.ReportSize,
             Math.Max(SharedMemoryIO.EXTENDED_DATA_CAPACITY, SharedMemoryIO.DATA_CAPACITY + 1));
@@ -807,7 +813,7 @@ internal sealed unsafe class ProtocolEngine
                 _sentOnce[layout] = true;
             }
         }
-        if (commit) CountLocked();
+        if (commit) CountLocked(layout);
         return size;
     }
 
@@ -844,15 +850,31 @@ internal sealed unsafe class ProtocolEngine
         fixed (byte* s = _state)
         fixed (uint* r = _regs, c = _counters)
             _runner!.Run(layout, s, d, r, c);
-        if (count) CountLocked();
+        if (count) CountLocked(layout);
     }
 
-    /// <summary>A layout sent: report and frame counters advance.</summary>
-    private void CountLocked()
+    /// <summary>A layout sent: every report counter advances, and each frame
+    /// counter its program writes.</summary>
+    private void CountLocked(int layout)
     {
+        uint written = _framesWritten[layout];
         for (int i = 0; i < _counterMask.Length; i++)
-            if (_m.CounterOn[i] is CounterEvent.Report or CounterEvent.Frame)
+            if (_m.CounterOn[i] == CounterEvent.Report
+                || (_m.CounterOn[i] == CounterEvent.Frame && (written & (1u << i)) != 0))
                 _counters[i] = (_counters[i] + 1) & _counterMask[i];
+    }
+
+    /// <summary>The counter slots a program's ops write, its conditional
+    /// blocks' included.</summary>
+    private static uint CountersWritten(Op[] ops)
+    {
+        uint mask = 0;
+        foreach (var op in ops)
+        {
+            if (op is CounterOp k) mask |= 1u << k.Slot;
+            else if (op is WhenOp w) mask |= CountersWritten(w.Ops);
+        }
+        return mask;
     }
 
     /// <summary>Clock counters: the time since the clock's origin over their

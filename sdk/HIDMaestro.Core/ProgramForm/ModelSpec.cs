@@ -167,8 +167,10 @@ public sealed class CounterSpec
     [JsonPropertyName("bits")]
     public int? Bits { get; set; }
 
-    /// <summary><c>"report"</c>, each layout sent. <c>"frame"</c>, any
-    /// message sent, replies included. <c>"clock"</c>, the time since the
+    /// <summary><c>"report"</c>, each layout sent. <c>"frame"</c>, each
+    /// message that carries it: a reply that writes it, or a layout whose
+    /// program writes it, so one counter numbers a device's replies and the
+    /// reports that stamp it. <c>"clock"</c>, the time since the
     /// device clock's origin over <see cref="PeriodUs"/>, computed from the
     /// origin on every write. <c>"read"</c>, each time a reply part writes
     /// it.</summary>
