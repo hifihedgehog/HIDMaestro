@@ -116,7 +116,6 @@ internal static class Program
             Check("and does not offer the persona an update", pending != null && mine == null,
                   mine is JsonElement m ? $"offered 0x{Stamp(m, "update_ts"):X8} over 0x{Stamp(m, "current_ts"):X8}" : "");
         }
-        Thread.Sleep(3000);
 
         Console.WriteLine("\n-- Control: the same persona answering with the capture, as v1.9.0 did --");
         if (steamBuild == CapturedBuild)
@@ -146,9 +145,12 @@ internal static class Program
             {
                 try { Directory.Delete(tmp, true); } catch { }
             }
-            Thread.Sleep(3000);
         }
 
+        // Dispose returns once Windows has removed the device
+        // (DeviceOrchestrator.TeardownController waits for its removal), so
+        // the updater is asked at once: a persona it still lists is one the
+        // teardown left.
         Console.WriteLine("\n-- Teardown --");
         var (rcAll, all) = Updater(exe, dir!, "--show-all-devices");
         Check("the updater no longer sees the persona",
@@ -187,16 +189,19 @@ internal static class Program
     }
 
     /// <summary>Re-run a query until it lists the serial, for up to 30 s:
-    /// a new device takes a moment to reach the updater's enumeration.</summary>
+    /// a new device takes a moment to reach the updater's enumeration. Each
+    /// query starts the updater, about half a second, so the next one
+    /// starts 100 ms after the last returns.</summary>
     static JsonElement? WaitForListing(string exe, string dir, string query, string serial)
     {
-        for (int i = 0; i < 15; i++)
+        var sw = Stopwatch.StartNew();
+        while (true)
         {
             var (rc, list) = Updater(exe, dir, query);
             if (rc == 0 && Find(list, serial) is JsonElement hit) return hit;
-            Thread.Sleep(2000);
+            if (sw.ElapsedMilliseconds >= 30_000) return null;
+            Thread.Sleep(100);
         }
-        return null;
     }
 
     /// <summary>The entry for a serial, or null. A plain FirstOrDefault
