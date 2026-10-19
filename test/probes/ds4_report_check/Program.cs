@@ -395,7 +395,6 @@ internal static class Program
         finally
         {
             c?.Dispose();
-            Thread.Sleep(500);
         }
     }
 
@@ -614,13 +613,22 @@ internal static class Program
         return IntPtr.Zero;
     }
 
-    /// <summary>Submit a state for long enough for SDL's reader thread, then
-    /// let SDL fold it into the gamepad state.</summary>
-    static void Drive(HMController c, HMGamepadState st)
+    /// <summary>Submit a state until SDL's gamepad state shows it,
+    /// <paramref name="shows"/> telling the new frame from the one before,
+    /// at most for the time this waited before: eight submits 50 ms apart,
+    /// then 80 ms, about 600 ms at Windows' default 15.6 ms timer. The
+    /// check after it reads SDL's state as it stands, so a value SDL never
+    /// takes still fails, at the old deadline.</summary>
+    static void Drive(HMController c, HMGamepadState st, Func<bool> shows)
     {
-        for (int i = 0; i < 8; i++) { c.SubmitState(st); Thread.Sleep(50); }
-        SDL_UpdateGamepads();
-        Thread.Sleep(80);
+        var sw = Stopwatch.StartNew();
+        while (true)
+        {
+            c.SubmitState(st);
+            SDL_UpdateGamepads();
+            if (shows() || sw.ElapsedMilliseconds >= 600) break;
+            Thread.Sleep(10);
+        }
         SDL_UpdateGamepads();
     }
 
@@ -684,7 +692,7 @@ internal static class Program
             };
 
             // Unarmed: report 0x01 only.
-            Drive(c, Rest(0.0f));
+            Drive(c, Rest(0.0f), () => SDL_GetGamepadAxis(gp, AXIS_LEFTX) <= -30000);
             short lx0 = SDL_GetGamepadAxis(gp, AXIS_LEFTX);
             Check("before arming SDL reads the left stick hard left", lx0 <= -30000, $"LEFTX {lx0}");
 
@@ -707,7 +715,7 @@ internal static class Program
             }
 
             // The regression itself: input keeps arriving once armed.
-            Drive(c, Rest(1.0f));
+            Drive(c, Rest(1.0f), () => SDL_GetGamepadAxis(gp, AXIS_LEFTX) >= 30000);
             short lx1 = SDL_GetGamepadAxis(gp, AXIS_LEFTX);
             Check("after arming SDL still reads input (left stick hard right)", lx1 >= 30000, $"LEFTX {lx1}");
 
@@ -737,7 +745,8 @@ internal static class Program
 
             var yaw = Rest(0.5f);
             yaw.GyroYaw = 1440; // 90 degrees/second at 16 per degree/second
-            Drive(c, yaw);
+            // The frame before had no rotation.
+            Drive(c, yaw, () => SDL_GetGamepadSensorData(gp, SENSOR_GYRO, g, 3) && (g[0] != 0f || g[1] != 0f || g[2] != 0f));
             SDL_GetGamepadSensorData(gp, SENSOR_GYRO, g, 3);
             Check("SDL reads a 90 degree/second yaw as pi/2 rad/s on its own axis",
                   g[0] == 0f && Math.Abs(g[1] - MathF.PI / 2) < 0.002f && g[2] == 0f,
@@ -745,32 +754,36 @@ internal static class Program
 
             var full = Rest(0.5f);
             full.BatteryLevel = 10; full.BatteryCharging = false; full.BatteryFull = true;
-            Drive(c, full);
+            Drive(c, full, () => SDL_GetGamepadPowerInfo(gp, out _) != PowerCharging);
             ps = SDL_GetGamepadPowerInfo(gp, out pct);
             Check("SDL reads a full battery on the cable as charged", ps == PowerCharged && pct == 100, $"state {ps}, {pct}%");
             var off = Rest(0.5f);
             off.BatteryLevel = 4; off.BatteryCharging = false;
-            Drive(c, off);
+            Drive(c, off, () => SDL_GetGamepadPowerInfo(gp, out _) != PowerCharged);
             ps = SDL_GetGamepadPowerInfo(gp, out pct);
             Check("SDL reads level 4 off the cable as on battery at 45%", ps == PowerOnBattery && pct == 45, $"state {ps}, {pct}%");
 
             // A trigger too light to move the analog byte must not set the
             // digital bit, or SDL reads a full pull.
-            Drive(c, Rest(0.5f, 0.001f));
+            // The battery tells this frame from the one before: L2 was
+            // released in that one too.
+            Drive(c, Rest(0.5f, 0.001f), () => SDL_GetGamepadPowerInfo(gp, out _) != PowerOnBattery);
             short lt0 = SDL_GetGamepadAxis(gp, AXIS_LEFT_TRIGGER);
             Check("a near-zero L2 reads as released, not as a full pull", lt0 == 0, $"LEFT_TRIGGER {lt0}");
-            Drive(c, Rest(0.5f, 1.0f));
+            Drive(c, Rest(0.5f, 1.0f), () => SDL_GetGamepadAxis(gp, AXIS_LEFT_TRIGGER) != 0);
             short lt1 = SDL_GetGamepadAxis(gp, AXIS_LEFT_TRIGGER);
             Check("a full L2 reads as a full pull", lt1 >= 32000, $"LEFT_TRIGGER {lt1}");
         }
         catch (Exception ex) { Check("part C ran without throwing", false, ex.Message); }
         finally
         {
+            // SDL lets go of the persona before it goes. Disposed while SDL
+            // still held its HID handle, the persona took 13 s to leave on
+            // the bench: the removal returned after 13 s with no removal
+            // notification within the SDK's bound.
             if (gp != IntPtr.Zero) SDL_CloseGamepad(gp);
-            c?.Dispose();
-            Thread.Sleep(500);
-            SDL_UpdateGamepads();
             SDL_Quit();
+            c?.Dispose();
         }
         return true;
     }
@@ -786,7 +799,7 @@ internal static class Program
             Console.WriteLine($"  control run: {ctx.LoadProfilesFromDirectory(args[1])} profile(s) from {args[1]}");
             ctx.InstallDriver();
             bool ran = PartC(ctx, args[2]);
-            try { HMContext.RemoveAllVirtualControllers(); } catch { }
+            try { HMContext.RemoveAllVirtualControllers(preserveInstall: true); } catch { }
             Console.WriteLine();
             Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");
             return s_failures > 0 ? 1 : ran ? 0 : 2;
@@ -809,7 +822,7 @@ internal static class Program
             ctx.InstallDriver();
             PartB(ctx);
             sdlRan = PartC(ctx);
-            try { HMContext.RemoveAllVirtualControllers(); } catch { }
+            try { HMContext.RemoveAllVirtualControllers(preserveInstall: true); } catch { }
         }
 
         Console.WriteLine();
