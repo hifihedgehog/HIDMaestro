@@ -209,9 +209,17 @@ internal static class Program
                 init != null && init.StartsWith("ok 3004018 ", StringComparison.Ordinal) && init.Contains("829a65d7"), init ?? "no answer");
             var list = Joysticks(h.Ask("wait 054c 09cc 1 10000", 15_000));
             Probe.Check("it lists the DualShock 4 persona, the positive control", list.Any(IsDs4), Describe(list));
-            // SDL notices new devices as it pumps. Two more seconds of it
-            // give an adapter joystick every chance to appear.
-            list = Joysticks(h.Ask("wait 057e 0337 1 2000", 5000));
+            // The adapter was there before SDL started, and every joystick
+            // backend 3.4.18 enables by default lists what is present during
+            // SDL_Init: DirectInput and XInput (SDL_windowsjoystick.c:367-369),
+            // HIDAPI (SDL_hidapijoystick.c:596-598), which without libusb
+            // skips 057E:0337 (SDL_hidapi.c:1152-1155), and GameInput, whose
+            // callback enumerates blocking (SDL_gameinputjoystick.cpp:432-435).
+            // RawInput and WGI are off by default (SDL_rawinputjoystick.c:1025,
+            // SDL_windows_gaming_input.c:589). The libusb build lists all four
+            // ports by its first pump after init. Half a second more of
+            // pumping covers that many times over.
+            list = Joysticks(h.Ask("wait 057e 0337 1 500", 5000));
             Probe.Check("it lists no joystick for the adapter", list.Count > 0 && !list.Any(IsAdapter), Describe(list));
             Probe.Check("it shuts down", h.Ask("quit", 10_000) == "bye");
         }
@@ -504,6 +512,12 @@ internal static class Program
         }
     }
 
+    /// <summary>Each rate count's length. A second holds 125 reports at
+    /// 8 ms and about 833 and 1000 at 1 ms, so a count is off by at most one
+    /// report, 1 Hz, against bounds at least 5 Hz from what the device
+    /// sends.</summary>
+    const int RateWindowMs = 1000;
+
     static readonly (string Label, double Ms, int[] Connected)[] RateCases =
     {
         ("8 ms, four ports", 8, new[] { 1, 2, 3, 4 }),
@@ -511,9 +525,9 @@ internal static class Program
         ("1 ms, exactly ports 1 and 2", 1, new[] { 1, 2 }),
     };
 
-    /// <summary>One two-second count per case: the reports a second the
-    /// device sent and the new states a second SDL's joystick showed. Every
-    /// port is connected again after.</summary>
+    /// <summary>One count of <see cref="RateWindowMs"/> per case: the
+    /// reports a second the device sent and the new states a second SDL's
+    /// joystick showed. Every port is connected again after.</summary>
     static List<(string Label, double Hz, double States)> RateValues(Harness h, HMController controller, uint id)
     {
         var engine = controller.UsbipHandle!.Device.Protocol!;
@@ -539,13 +553,13 @@ internal static class Program
             var feeder = Task.Run(() => Feed(controller, cts.Token));
             uint sent0 = engine.ReportsSent;
             long t0 = Stopwatch.GetTimestamp();
-            string? answer = h.Ask($"count {id} {LEFTX} 2000", 5000);
+            string? answer = h.Ask($"count {id} {LEFTX} {RateWindowMs}", 5000);
             uint sent1 = engine.ReportsSent;
             double seconds = (Stopwatch.GetTimestamp() - t0) / (double)Stopwatch.Frequency;
             cts.Cancel();
             feeder.Wait();
             double hz = (sent1 - sent0) / seconds;
-            double states = answer != null && answer.StartsWith("changes ", StringComparison.Ordinal) ? int.Parse(answer[8..]) / 2.0 : 0;
+            double states = answer != null && answer.StartsWith("changes ", StringComparison.Ordinal) ? int.Parse(answer[8..]) * 1000.0 / RateWindowMs : 0;
             results.Add((label, hz, states));
         }
         SetPorts(controller);
