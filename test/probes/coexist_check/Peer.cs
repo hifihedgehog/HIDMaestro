@@ -4,7 +4,8 @@
 // compiles unchanged against an older HIDMaestro.Core.dll and runs as a
 // program built on that release.
 //
-//   install                     HMContext.InstallDriver
+//   install [bare]              HMContext.InstallDriver. With "bare" the
+//                               context it makes loads no profile catalog
 //   create pad <pid> <key|->    a custom gamepad, VID BEEF and this PID
 //   create gipad <pid> <key|->  a custom gamepad in the shape the SDK writes
 //                               a GameInput table for, VID BEEF
@@ -209,7 +210,9 @@ internal static class Peer
                 {
                     case "install":
                     {
-                        s_ctx ??= NewContext();
+                        // "install bare" makes the context without loading
+                        // the catalog, which InstallDriver does not read.
+                        s_ctx ??= a.Length > 1 && a[1] == "bare" ? new HMContext() : NewContext();
                         var sw = Stopwatch.StartNew();
                         s_ctx.InstallDriver();
                         Reply($"OK install ms={sw.ElapsedMilliseconds} outcome={Get(s_ctx, "LastDriverInstall") ?? "unknown"}");

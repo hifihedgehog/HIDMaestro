@@ -281,32 +281,32 @@ internal static partial class Program
 
         if (args.Length > 1 && args[0] == "removaltimes")
         {
-            Clean();
+            Clean(startNext: false);
             int rc = RemovalTimes(int.Parse(args[1], System.Globalization.CultureInfo.InvariantCulture),
                 args.Length > 2 ? args[2] : "xbox",
                 args.Length > 3 ? int.Parse(args[3], System.Globalization.CultureInfo.InvariantCulture) : 4);
-            Clean();
+            Clean(startNext: false);
             return rc;
         }
         if (args.Length > 2 && args[0] == "firstcall" && args.Contains("phantoms"))
         {
-            Clean();
+            Clean(startNext: false);
             int rc = FirstCallTimes(RunCount(args), makePhantoms: true, args.Contains("inexit"));
-            Clean();
+            Clean(startNext: false);
             return rc;
         }
         if (args.Length > 0 && args[0] == "exitcut")
         {
-            Clean();
+            Clean(startNext: false);
             int rc = ExitCut();
-            Clean();
+            Clean(startNext: false);
             return rc;
         }
         if (args.Length > 1 && args[0] == "phantomtimes")
         {
-            Clean();
+            Clean(startNext: false);
             int rc = PhantomTimes(int.Parse(args[1], System.Globalization.CultureInfo.InvariantCulture));
-            Clean();
+            Clean(startNext: false);
             return rc;
         }
         Clean();
@@ -352,23 +352,60 @@ internal static partial class Program
             Console.WriteLine($"  ({id}: {section.Elapsed.TotalSeconds:F1} s, {s_cleanSeconds - cleaning:F1} s of it in cleanups)");
         }
 
+        EndNextCleanup();
         Console.WriteLine();
         Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed, {s_cleans} cleanups took {s_cleanSeconds:F1} s ===");
         return s_failures == 0 ? 0 : 1;
     }
 
     /// <summary>Remove every controller the sections left, through a peer
-    /// so the probe itself never loads the SDK, and put the driver back.</summary>
-    static void Clean()
+    /// so the probe itself never loads the SDK, and put the driver back.
+    /// Each cleanup's peer is a new process. The next one is started as
+    /// this one ends, so its start overlaps the next section. Until its
+    /// first command it has only loaded the SDK, which takes no claim and
+    /// writes no record (MachineClaims.EnsureOwner runs at the first call
+    /// that needs it), so no section sees it as a running program. The
+    /// timing modes pass <paramref name="startNext"/> false, so no start
+    /// overlaps what they time.</summary>
+    static void Clean(bool startNext = true)
     {
         var sw = Stopwatch.StartNew();
-        using (var p = PeerProcess.Start("cleanup"))
+        var peer = s_nextCleanup ?? PeerProcess.Begin("cleanup");
+        s_nextCleanup = null;
+        using (var p = peer.AwaitReady())
         {
             p.Send("everything");
-            p.Send("install");
+            p.Send("install bare");
         }
+        if (startNext) s_nextCleanup = PeerProcess.Begin("cleanup");
+        ReleaseXInputHandles();
         s_cleans++;
         s_cleanSeconds += sw.Elapsed.TotalSeconds;
+    }
+
+    /// <summary>XInput, loaded in this probe by sections C and M, keeps a
+    /// handle to a slot's device after the device is removed, until the
+    /// next XInputGetState on that slot. The handle keeps the removed XUSB
+    /// companion's driver host running, and the SDK's uninstall waits up to
+    /// 10 s for that host to exit (DeviceOrchestrator.WaitForDriverHostsToExit):
+    /// measured, a host 19 s old before E's first uninstall, gone within
+    /// 300 ms of a read of every slot, and that uninstall down from 10.5 s
+    /// to 0.7 s. A read of every slot after each cleanup closes the
+    /// handles, as a program that polls XInput does.</summary>
+    static void ReleaseXInputHandles()
+    {
+        for (uint s = 0; s < 4; s++) Native.XInputGetState(s, out _);
+    }
+
+    /// <summary>The next cleanup's peer, started and not yet used.</summary>
+    static PeerProcess? s_nextCleanup;
+
+    /// <summary>End the started cleanup peer, which has run nothing, before
+    /// the probe exits.</summary>
+    static void EndNextCleanup()
+    {
+        s_nextCleanup?.Dispose();
+        s_nextCleanup = null;
     }
 
     // How many cleanups ran and how long they took, for the timing lines.

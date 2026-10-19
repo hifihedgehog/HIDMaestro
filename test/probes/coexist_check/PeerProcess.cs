@@ -48,7 +48,13 @@ internal sealed class PeerProcess : IDisposable
     /// HIDMAESTRO_TIMEOUT_SCALE, which otherwise it inherits. A
     /// <paramref name="tempDir"/> is its TMP and TEMP, so a release that
     /// stages under %TEMP% stages there.</summary>
-    public static PeerProcess Start(string name, string? legacyVersion = null, string? timeoutScale = null, string? tempDir = null)
+    public static PeerProcess Start(string name, string? legacyVersion = null, string? timeoutScale = null, string? tempDir = null) =>
+        Begin(name, legacyVersion, timeoutScale, tempDir).AwaitReady();
+
+    /// <summary>Start a peer and return before its ready line, so the
+    /// process starts while the caller does other work. Nothing is sent to
+    /// it before <see cref="AwaitReady"/>.</summary>
+    public static PeerProcess Begin(string name, string? legacyVersion = null, string? timeoutScale = null, string? tempDir = null)
     {
         string self = Environment.ProcessPath!;
         string exe = legacyVersion == null
@@ -67,12 +73,18 @@ internal sealed class PeerProcess : IDisposable
         if (timeoutScale != null) psi.Environment["HIDMAESTRO_TIMEOUT_SCALE"] = timeoutScale;
         if (tempDir != null) psi.Environment["TMP"] = psi.Environment["TEMP"] = tempDir;
         var p = Process.Start(psi) ?? throw new InvalidOperationException($"could not start {exe}");
-        var peer = new PeerProcess(name, p);
-        string ready = peer.Read(30_000);
-        if (!ready.StartsWith("OK ready")) throw new InvalidOperationException($"{name} did not start: {ready}");
-        peer.SdkVersion = Field(ready, "sdk") ?? "";
-        Console.WriteLine($"    {name}: {ready}");
-        return peer;
+        return new PeerProcess(name, p);
+    }
+
+    /// <summary>Wait for the ready line of a peer <see cref="Begin"/>
+    /// started, and print it.</summary>
+    public PeerProcess AwaitReady()
+    {
+        string ready = Read(30_000);
+        if (!ready.StartsWith("OK ready")) throw new InvalidOperationException($"{Name} did not start: {ready}");
+        SdkVersion = Field(ready, "sdk") ?? "";
+        Console.WriteLine($"    {Name}: {ready}");
+        return this;
     }
 
     string Read(int timeoutMs)
