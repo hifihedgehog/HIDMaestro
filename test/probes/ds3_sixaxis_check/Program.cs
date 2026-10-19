@@ -401,7 +401,8 @@ internal static class Program
             Check("the HID class sees input 13, output 49, feature 50 (each with the report id 0)",
                   inLen == 13 && outLen == 49 && featLen == 50, $"{inLen}/{outLen}/{featLen}");
 
-            Drive(c, LiveState(prof));
+            // ReadOneMatching submits the state until its report comes back,
+            // so the feature reads below see it too.
             var raw = ExpectedNative();
 
             // The joystick report DirectInput and RawInput read.
@@ -496,7 +497,6 @@ internal static class Program
         finally
         {
             c?.Dispose();
-            Thread.Sleep(500);
         }
     }
 
@@ -604,11 +604,21 @@ internal static class Program
         return IntPtr.Zero;
     }
 
-    static void DriveSdl(HMController c, HMGamepadState st)
+    /// <summary>Submit a state until SDL's gamepad state shows it, at most
+    /// for the time this waited before: eight submits 50 ms apart, then 80
+    /// ms, about 600 ms at Windows' default 15.6 ms timer. The checks after
+    /// it read SDL's state as it stands, so a value SDL never takes still
+    /// fails, at the old deadline.</summary>
+    static void DriveSdl(HMController c, HMGamepadState st, Func<bool> shows)
     {
-        for (int i = 0; i < 8; i++) { c.SubmitState(st); Thread.Sleep(50); }
-        SDL_UpdateGamepads();
-        Thread.Sleep(80);
+        var sw = Stopwatch.StartNew();
+        while (true)
+        {
+            c.SubmitState(st);
+            SDL_UpdateGamepads();
+            if (shows() || sw.ElapsedMilliseconds >= 600) break;
+            Thread.Sleep(10);
+        }
         SDL_UpdateGamepads();
     }
 
@@ -665,7 +675,9 @@ internal static class Program
             Check("16 axes and 11 buttons, PCSX2's IsControllerSixaxis test", axes == 16 && buttons == 11,
                   $"{axes} axes, {buttons} buttons");
 
-            DriveSdl(c, LiveState(prof));
+            // Cross pressed and its pressure axis at 255, which SDL reads
+            // only through the feature report.
+            DriveSdl(c, LiveState(prof), () => SDL_GetGamepadButton(gp, BTN_SOUTH) && SDL_GetJoystickAxis(js, 6) == 255 * 257 - 32768);
             Check("SDL reads cross, triangle, L1, start and PS pressed",
                   SDL_GetGamepadButton(gp, BTN_SOUTH) && SDL_GetGamepadButton(gp, BTN_NORTH)
                   && SDL_GetGamepadButton(gp, BTN_LEFT_SHOULDER) && SDL_GetGamepadButton(gp, BTN_START)
@@ -705,11 +717,13 @@ internal static class Program
         catch (Exception ex) { Check("part C ran without throwing", false, ex.Message); }
         finally
         {
+            // SDL lets go of the persona before it goes. Disposed while SDL
+            // still held its HID handle, the persona took 13 s to leave on
+            // the bench: the removal returned after 13 s with no removal
+            // notification within the SDK's bound.
             if (gp != IntPtr.Zero) SDL_CloseGamepad(gp);
-            c?.Dispose();
-            Thread.Sleep(500);
-            SDL_UpdateGamepads();
             SDL_Quit();
+            c?.Dispose();
         }
         return true;
     }
@@ -841,7 +855,6 @@ internal static class Program
         finally
         {
             c?.Dispose();
-            Thread.Sleep(500);
         }
     }
 
@@ -877,7 +890,7 @@ internal static class Program
             PartB(ctx);
             sdlRan = PartC(ctx);
             PartD(ctx);
-            try { HMContext.RemoveAllVirtualControllers(); } catch { }
+            try { HMContext.RemoveAllVirtualControllers(preserveInstall: true); } catch { }
         }
 
         Console.WriteLine();
