@@ -88,6 +88,25 @@ static class ValveMultiCheck
         return found;
     }
 
+    /// <summary>Polls SDL's Valve pads every 100 ms until
+    /// <paramref name="done"/> holds or <paramref name="limitMs"/> passes,
+    /// and returns the last list read. SDL learns of a device from Windows'
+    /// interface arrival and removal broadcasts (SDL_hidapi.c
+    /// ControllerWndProc, HIDAPI_UpdateDiscovery), which SDL_UpdateGamepads
+    /// on the joystick thread dispatches, so the list changes as soon as
+    /// Windows announces the device.</summary>
+    static List<(uint Id, ushort Pid, string Serial, int Pads)> PollPads(
+        Func<List<(uint Id, ushort Pid, string Serial, int Pads)>, bool> done, int limitMs)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (true)
+        {
+            var pads = ValvePads();
+            if (done(pads) || sw.ElapsedMilliseconds >= limitMs) return pads;
+            Thread.Sleep(100);
+        }
+    }
+
     static int Main()
     {
         string? dll = FindStockSdl();
@@ -128,15 +147,12 @@ static class ValveMultiCheck
                 if (prof == null) { Check($"{id} in catalog", false); continue; }
                 live.Add(ctx.CreateController(prof));
                 Console.WriteLine($"     created {id}");
-                Thread.Sleep(1500);
+                // Each persona reaches SDL before the next is made, as the
+                // 1.5 s this waited gave it time to.
+                int made = live.Count;
+                PollPads(p => p.Count >= made, 1500);
             }
-            List<(uint Id, ushort Pid, string Serial, int Pads)> pads = new();
-            for (int i = 0; i < 40; i++)
-            {
-                Thread.Sleep(500);
-                pads = ValvePads();
-                if (pads.Count >= 3) break;
-            }
+            var pads = PollPads(p => p.Count >= 3, 20_000);
             foreach (var p in pads)
                 Console.WriteLine($"     SDL: 28DE:{p.Pid:X4} serial='{p.Serial}' touchpads={p.Pads}");
             Check("SDL sees all three at the same time", pads.Count >= 3, $"count={pads.Count}");
@@ -150,8 +166,8 @@ static class ValveMultiCheck
         {
             foreach (var c in live) { try { c.Dispose(); } catch { } }
             live.Clear();
-            Thread.Sleep(3000);
-            SDL_UpdateGamepads();
+            // B counts Decks, so A's must have left SDL's list first.
+            PollPads(p => p.Count == 0, 3000);
         }
 
         // ── B: two of the SAME persona ───────────────────────────────────
@@ -167,15 +183,10 @@ static class ValveMultiCheck
                 {
                     live.Add(ctx.CreateController(prof));
                     Console.WriteLine($"     created deck #{i + 1}");
-                    Thread.Sleep(2000);
+                    int made = live.Count;
+                    PollPads(p => p.Count >= made, 2000);
                 }
-                List<(uint Id, ushort Pid, string Serial, int Pads)> pads = new();
-                for (int i = 0; i < 40; i++)
-                {
-                    Thread.Sleep(500);
-                    pads = ValvePads();
-                    if (pads.Count >= 2) break;
-                }
+                var pads = PollPads(p => p.Count >= 2, 20_000);
                 foreach (var p in pads)
                     Console.WriteLine($"     SDL: 28DE:{p.Pid:X4} serial='{p.Serial}' touchpads={p.Pads}");
                 Check("SDL sees two Decks at once", pads.Count >= 2, $"count={pads.Count}");
@@ -190,7 +201,7 @@ static class ValveMultiCheck
         finally
         {
             foreach (var c in live) { try { c.Dispose(); } catch { } }
-            Thread.Sleep(2000);
+            PollPads(p => p.Count == 0, 2000);
         }
 
         SDL_Quit();
