@@ -1026,29 +1026,61 @@ function Scenario-Single-SameVidPid {
 }
 
 # S17: Force-kill mid-cascade. The trickiest force-kill timing: kill
-# the test process while a Series BT teardown is still in its
-# xinputhid filter-unload cascade (5s into a ~10s window). Phantoms
-# left by a hard kill at this exact moment have the worst chance of
-# surviving the next session's RemoveAllVirtualControllers.
+# the test process while a Series BT teardown is still in flight.
+# Phantoms left by a hard kill at this exact moment have the worst
+# chance of surviving the next session's RemoveAllVirtualControllers.
+#
+# Send-Cmd waits for the app's acknowledgment, which comes once the swap
+# has finished, so the swap goes in without waiting for it, and the kill
+# lands the moment the present devnodes first change: the BT pad's HID
+# child has gone and its teardown is under way. On the bench that change
+# came 43 to 129 ms after the command and the app was dead 13 to 17 ms
+# later, inside the teardown, where the whole swap takes about 700 ms. A
+# tree kill through taskkill took 1.4 to 1.6 s to land and missed the
+# swap, so the app goes first, as a crash takes it, and its tree after.
+# The app reads stdin only once its controller exists, and an xinputhid
+# create returns once XInput reports the pad's slot, so the resume's
+# acknowledgment is the bind the old 6 s sleep waited for. After the kill
+# the present devnodes last changed 31 ms later on the bench, so three
+# reads 50 ms apart that agree replace the 5 s sleep, which stays the
+# limit.
 function Scenario-ForceKill-MidCascade {
+    function Get-PresentKey { ((Get-HMPresentDevnodes) | Sort-Object) -join '|' }
     $proc1 = Start-HMTestProcess -ProfileIds @($Profiles.XboxBT)
     try {
         if (-not (Wait-CreateBound -ProfileId $Profiles.XboxBT)) { throw "initial create timeout" }
-        Sleep-Scaled 6   # let xinputhid bind
+        Wait-Ready -Proc $proc1
 
-        # Kick off swap-back-to-360. BT teardown will run xinputhid
-        # filter-unbind cascade (~10s).
-        Send-Cmd -Proc $proc1 -Cmd ('0 ' + $Profiles.Xbox360)
-        # Sleep long enough that the swap is mid-cascade but not done.
-        Sleep-Scaled 5
+        # Kick off swap-back-to-360 without waiting for it.
+        $before = Get-PresentKey
+        Send-Cmd -Proc $proc1 -Cmd ('0 ' + $Profiles.Xbox360) -NoWaitAck
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($sw.ElapsedMilliseconds -lt (HMScaleMs 5000)) {
+            if ((Get-PresentKey) -ne $before) { break }
+            Start-Sleep -Milliseconds 5
+        }
     } finally {
         # Hard-kill while teardown still in flight.
+        if (-not $proc1.HasExited) { try { $proc1.Kill() } catch {} }
         Stop-HMProcessTree -Proc $proc1
         $proc1.WaitForExit(5000) | Out-Null
     }
 
     # Wait for any in-flight kernel work to complete or stall.
-    Sleep-Scaled 5
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $prev = $null
+    $count = 0
+    while ($sw.ElapsedMilliseconds -lt (HMScaleMs 5000)) {
+        $cur = Get-PresentKey
+        if ($cur -eq $prev) {
+            $count++
+            if ($count -ge 2) { break }
+        } else {
+            $count = 0
+            $prev = $cur
+        }
+        Start-Sleep -Milliseconds (HMScaleMs 50)
+    }
 
     # Fresh session should reliably clean up whatever was left in mid-
     # cascade state.
