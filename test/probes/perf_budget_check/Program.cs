@@ -6,7 +6,7 @@
 // take their baseline from a 9bd6279 tree: -p:HmBaselineTree=<checkout>
 // builds this source against that checkout's SDK (PerfBudgetCheck.csproj).
 //
-//   frame [runs] [kbm]
+//   frame [runs] [kbm] [--settle=<ms>] [--key=<identity>]
 //                  time and bytes allocated per call on each submit path,
 //                  the keyboard, mouse, consumer and pointer paths and
 //                  steam-controller-2 (a keyboard and mouse in lizard
@@ -14,7 +14,10 @@
 //                  the pointer on the desktop,
 //                  and outside the gate SubmitState on dualsense-bt once
 //                  its feature reads have armed it, steam-controller-2, the
-//                  Switch 2 Pro composite and the two Luna profiles
+//                  Switch 2 Pro composite, the two Luna profiles and
+//                  switch-pro, with its protocol host's tick. With
+//                  --settle each measurement waits that long first, past
+//                  what Windows starts on a new device
 //   e2e [runs] [profile[@report...][#command...] ...]
 //                  SubmitState to the driver's acknowledgement that a read
 //                  carried the frame, on a DualShock 4 and an Xbox 360 pad,
@@ -36,6 +39,12 @@
 //                  an output report to OutputReceived, and bytes allocated
 //                  per report anywhere in the process: report 05 on a
 //                  DualShock 4, or the report given for each profile
+//   signal [runs] [--key=<identity>]
+//                  live: on a DualShock 4 and an Xbox 360 pad, SetEvent on
+//                  the input event and the companion's doorbell alone, and a
+//                  frame written to the section without and with its signal,
+//                  and to this process's own memory (SignalLive.cs). It
+//                  builds against b4d29d9 as is
 //   rate [runs] [seconds] [profile ...]
 //                  sustained throughput: SubmitState every millisecond and
 //                  back to back, with a reader in a child process, the
@@ -68,6 +77,18 @@
 //                  InterpreterCost.cs): each variant's median ns per report
 //                  and its compile in microseconds, for a script to take p50
 //                  and p95 over 30 launches
+//   submit [runs] [calls]
+//                  offline: the SDK's own cost per call on the frame mode's
+//                  submit paths and switch-pro's, its protocol host's tick
+//                  included, each variant's median ns per call
+//                  (SubmitCost.cs). It builds against b4d29d9 as is
+//   submit-bytes [states]
+//                  offline: a hash of the input section after each submit,
+//                  per catalog profile, armed and not, for two trees'
+//                  outputs to compare line by line (SubmitCost.cs)
+//   submit-repeat [runs] [calls]
+//                  offline: the same on the two budget profiles that repeat
+//                  their last frame, with the repeat running
 //   encode [runs] [calls]
 //                  offline: the codec's encode of the budget table's
 //                  codec-encoded input reports, each median ns per call
@@ -179,12 +200,19 @@ internal static partial class Program
     // diag log.
     static bool s_trace;
 
+    // --key=<identity>: the identity key the create, rate, idle-live,
+    // frame and signal modes create with. Without it each create takes the
+    // index's default identity.
+    internal static string? s_key;
+
     static int Main(string[] args)
     {
         // Read once by the SDK's first create, so it is set before any.
         Environment.SetEnvironmentVariable("HIDMAESTRO_TIMING", "1");
         s_trace = args.Contains("--trace");
         args = args.Where(a => a != "--trace").ToArray();
+        s_key = KeyArg(args);
+        args = args.Where(a => !a.StartsWith("--key=", StringComparison.Ordinal)).ToArray();
         string mode = args.Length > 0 ? args[0] : "gate";
         int runs = args.Length > 1 && int.TryParse(args[1], out int r) ? r : 30;
         if (mode == "start-child") return StartChild();
@@ -239,6 +267,18 @@ internal static partial class Program
             return 0;
         }
 #endif
+#if !HM_BASE
+        if (mode == "submit-bytes")
+        {
+            SubmitCost.Bytes(args.Length > 1 && int.TryParse(args[1], out int states) ? states : 2000);
+            return 0;
+        }
+#endif
+        if (mode is "submit" or "submit-repeat")
+        {
+            SubmitCost.Run(runs, args.Length > 2 && int.TryParse(args[2], out int calls) ? calls : 100_000, mode == "submit-repeat");
+            return 0;
+        }
         if (mode == "ds3cost")
         {
             Ds3Cost.Run(runs, args.Length > 2 && int.TryParse(args[2], out int calls) ? calls : 100_000);
@@ -265,7 +305,10 @@ internal static partial class Program
         Console.WriteLine($"  SDK {sdk.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).Cast<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion} at {sdk.Location}");
         switch (mode)
         {
-            case "frame": Frame(runs, gate: false, keyboardAndMouse: args.Skip(2).Contains("kbm")); break;
+            case "frame":
+                s_frameSettleMs = SettleMs(args);
+                Frame(runs, gate: false, keyboardAndMouse: args.Skip(2).Contains("kbm"));
+                break;
             case "e2e":
                 int e2e = EndToEnd(runs, args.Skip(2).ToArray());
                 if (e2e != 0) return e2e;
@@ -278,13 +321,17 @@ internal static partial class Program
                 int output = Output(runs, args.Skip(2).ToArray());
                 if (output != 0) return output;
                 break;
+            case "signal":
+                int signal = Signal(runs);
+                if (signal != 0) return signal;
+                break;
             case "rate":
                 int rate = Rate(runs, args.Skip(2).ToArray());
                 if (rate != 0) return rate;
                 break;
             case "create":
-                int create = Create(runs, args.Skip(2).Where(a => !a.StartsWith("--settle=", StringComparison.Ordinal)).ToArray(),
-                    SettleMs(args));
+                int create = Create(runs, args.Skip(2).Where(a => !a.StartsWith("--", StringComparison.Ordinal)).ToArray(),
+                    SettleMs(args), s_key);
                 if (create != 0) return create;
                 break;
 #if !HM_BASE
@@ -343,7 +390,7 @@ internal static partial class Program
         var a = new HMGamepadState { Buttons = HMButton.A, Axes = new Dictionary<HMAxis, float> { [HMAxis.X] = 0.25f, [HMAxis.Y] = 0.75f } };
         var b = new HMGamepadState { Buttons = HMButton.B, Axes = new Dictionary<HMAxis, float> { [HMAxis.X] = 0.75f, [HMAxis.Y] = 0.25f } };
 
-        using (var ds4 = ctx.CreateController(ctx.GetProfile(Ds4)!))
+        using (var ds4 = ctx.CreateController(ctx.GetProfile(Ds4)!, s_key))
         {
             if (!gate && !OnEmbeddedDriver(ds4, Ds4)) return;
             bool flip = false;
@@ -351,7 +398,7 @@ internal static partial class Program
             var raw = new byte[63];
             Measure("SubmitRawReport, dualshock-4-v2", runs, 20_000, () => { raw[0]++; ds4.SubmitRawReport(raw); }, gate);
         }
-        using (var x360 = ctx.CreateController(ctx.GetProfile(Xbox360)!))
+        using (var x360 = ctx.CreateController(ctx.GetProfile(Xbox360)!, s_key))
         {
             bool flip = false;
             Measure("SubmitState, xbox-360-wired", runs, 20_000, () => { x360.SubmitState(flip ? a : b); flip = !flip; }, gate);
@@ -404,7 +451,7 @@ internal static partial class Program
         // using the machine. The frame mode measures them only when its
         // arguments name kbm.
         if (keyboardAndMouse)
-        using (var kb = ctx.CreateController(ctx.GetProfile(Keyboard)!))
+        using (var kb = ctx.CreateController(ctx.GetProfile(Keyboard)!, s_key))
         {
             var down = new[] { HMKey.A };
             bool flip = false;
@@ -415,7 +462,7 @@ internal static partial class Program
             }, gate);
         }
         if (keyboardAndMouse)
-        using (var mouse = ctx.CreateController(ctx.GetProfile(Mouse)!))
+        using (var mouse = ctx.CreateController(ctx.GetProfile(Mouse)!, s_key))
         {
             var move = new HMMouseState { X = 1 };
             Measure("SubmitMouse, " + Mouse, runs, paced, () => mouse.SubmitMouse(in move), gate);
@@ -432,22 +479,23 @@ internal static partial class Program
             }
 #endif
         }
-        using (var ds3 = ctx.CreateController(ctx.GetProfile(Ds3)!))
+        using (var ds3 = ctx.CreateController(ctx.GetProfile(Ds3)!, s_key))
         {
             bool flip = false;
             Measure("SubmitState, " + Ds3 + " (the report codec)", runs, 20_000, () => { ds3.SubmitState(flip ? a : b); flip = !flip; }, gate);
         }
         // The rest of the budget table of the data-driven design
         // (docs/design/data-driven-devices.md, Budgets): the centered Luna
-        // sticks, the armed codec, the USB/IP codec and packer, and a
-        // GameCube port. The armed DualSense is armed as the output reader
-        // arms it when a host reads its feature report. Not in the gate,
-        // which measures the USB/IP send paths in its usbip mode.
+        // sticks, the USB/IP codec and packer, and a GameCube port. The
+        // armed codec is FrameConversionProfiles' dualsense-bt, armed by a
+        // host's feature reads. This loop armed one by setting the flag
+        // through reflection on a device no host had read, so it sent
+        // report 0x31 in a state no host produces, and timed that. Not in
+        // the gate, which measures the USB/IP send paths in its usbip mode.
         if (!gate)
-            foreach (var (id, armed) in new[]
+            foreach (string id in new[]
             {
-                ("amazon-luna-usb", false), ("amazon-luna-ble", false), ("dualsense-bt", true),
-                ("steam-controller-2", false), ("switch2-pro-controller-composite", false), ("gamecube-adapter", false),
+                "amazon-luna-usb", "amazon-luna-ble", "steam-controller-2", "switch2-pro-controller-composite", GameCube,
             })
             {
 #if HM_BASE
@@ -458,13 +506,12 @@ internal static partial class Program
                 // steam-controller-2 declares a keyboard and a mouse (its
                 // lizard mode), so it waits for kbm as the keyboards do.
                 if (!keyboardAndMouse && id == "steam-controller-2") continue;
-                using var c = ctx.CreateController(ctx.GetProfile(id)!);
-                if (armed) typeof(HMController).GetField("_extendedModeArmed", Any)!.SetValue(c, true);
+                using var c = ctx.CreateController(ctx.GetProfile(id)!, s_key);
                 bool flip = false;
-                Measure($"SubmitState, {id}{(armed ? " armed" : "")}", runs, 20_000, () => { c.SubmitState(flip ? a : b); flip = !flip; }, gate);
+                Measure($"SubmitState, {id}", runs, 20_000, () => { c.SubmitState(flip ? a : b); flip = !flip; }, gate);
             }
         if (keyboardAndMouse)
-        using (var mk = ctx.CreateController(ctx.GetProfile(MagicKeyboard)!))
+        using (var mk = ctx.CreateController(ctx.GetProfile(MagicKeyboard)!, s_key))
         {
             var playPause = new ushort[] { 0x00CD };
             bool flip = false;
@@ -498,7 +545,7 @@ internal static partial class Program
             }, gate);
         }
 #if !HM_BASE
-        using (var gc = ctx.CreateController(ctx.GetProfile(GameCube)!))
+        using (var gc = ctx.CreateController(ctx.GetProfile(GameCube)!, s_key))
         {
             bool flip = false;
             var port = gc.Ports[0];
@@ -507,6 +554,45 @@ internal static partial class Program
         }
 #endif
         if (!gate) FrameConversionProfiles(ctx, runs, a, b, keyboardAndMouse);
+        if (!gate) FrameSwitchPro(ctx, runs, a, b);
+    }
+
+    /// <summary>switch-pro, whose 0x30 report goes out on the device's
+    /// 15 ms clock. At b4d29d9 SubmitState packs the body and writes it,
+    /// and the driver's stream thread builds each report from the section.
+    /// Here SubmitState hands the state block to the protocol host, and a
+    /// tick of the host's clock builds the report the device sends and
+    /// writes it, so a frame's cost on this side is a submit and a tick:
+    /// in the simple mode, 0x3F sent on change, and in the full mode, 0x30
+    /// sent on every tick, which the host selects by speaking the
+    /// protocol. The command goes to the host as the output reader hands
+    /// it on. Outside the gate.</summary>
+    static void FrameSwitchPro(HMContext ctx, int runs, HMGamepadState a, HMGamepadState b)
+    {
+        using var sw = ctx.CreateController(ctx.GetProfile("switch-pro")!, s_key);
+        if (!OnEmbeddedDriver(sw, "switch-pro")) return;
+        bool flip = false;
+        Measure("SubmitState, switch-pro", runs, 20_000, () => { sw.SubmitState(flip ? a : b); flip = !flip; }, gate: false);
+#if !HM_BASE
+        var host = (ProtocolHost)typeof(HMController).GetField("_host", Any)!.GetValue(sw)!;
+        Measure("SubmitState and a protocol host tick, switch-pro 0x3F", runs, 20_000, () =>
+        {
+            sw.SubmitState(flip ? a : b);
+            flip = !flip;
+            host.Tick(ProtocolHost.DeliveryTimeoutMs);
+        }, gate: false);
+        // Subcommand 0x03, set input report mode, to 0x30.
+        var command = new byte[49];
+        command[0] = 0x01; command[10] = 0x03; command[11] = 0x30;
+        host.OnOutput(command, command.Length, ProtocolHost.DeliveryTimeoutMs);
+        Measure("SubmitState and a protocol host tick, switch-pro 0x30", runs, 20_000, () =>
+        {
+            sw.SubmitState(flip ? a : b);
+            flip = !flip;
+            host.Tick(ProtocolHost.DeliveryTimeoutMs);
+        }, gate: false);
+        Measure("protocol host tick, switch-pro 0x30", runs, 20_000, () => host.Tick(ProtocolHost.DeliveryTimeoutMs), gate: false);
+#endif
     }
 
     /// <summary>The submit paths the v2.0.0 conversion's budget names that
@@ -517,7 +603,7 @@ internal static partial class Program
     /// (a)). Outside the gate, so S84 is unchanged.</summary>
     static void FrameConversionProfiles(HMContext ctx, int runs, HMGamepadState a, HMGamepadState b, bool keyboardAndMouse)
     {
-        using (var ds = ctx.CreateController(ctx.GetProfile("dualsense-bt")!))
+        using (var ds = ctx.CreateController(ctx.GetProfile("dualsense-bt")!, s_key))
         {
             if (!OnEmbeddedDriver(ds, "dualsense-bt")) return;
             string armed = ArmByFeatureReads(ds, a, b);
@@ -527,7 +613,7 @@ internal static partial class Program
         foreach (string id in new[] { "steam-controller-2", "switch2-pro-controller-composite", "amazon-luna-usb", "amazon-luna-ble" })
         {
             if (!keyboardAndMouse && id == "steam-controller-2") continue;
-            using var c = ctx.CreateController(ctx.GetProfile(id)!);
+            using var c = ctx.CreateController(ctx.GetProfile(id)!, s_key);
             if (!OnEmbeddedDriver(c, id)) return;
             bool flip = false;
             Measure("SubmitState, " + id, runs, 20_000, () => { c.SubmitState(flip ? a : b); flip = !flip; }, gate: false);
@@ -575,8 +661,15 @@ internal static partial class Program
         return ok;
     }
 
+    /// <summary>frame --settle=&lt;ms&gt;: each measurement waits this long
+    /// first, so a controller just created has been opened and read by
+    /// what Windows and its services start on a new device before its calls
+    /// are timed. 0, the default and the gate's, times them at once.</summary>
+    static int s_frameSettleMs;
+
     static void Measure(string name, int runs, int calls, Action call, bool gate)
     {
+        if (s_frameSettleMs > 0) Thread.Sleep(s_frameSettleMs);
         for (int i = 0; i < Math.Min(calls, 2_000); i++) call();
         var perCall = new List<double>(runs);
         long worstBytes = 0;
@@ -914,7 +1007,7 @@ internal static partial class Program
     /// <summary>The catalog profiles named after the run count, in that
     /// order, or all five. Returns 1 when a name is refused, 5 when a
     /// devnode runs another driver.</summary>
-    static int Create(int runs, string[] only, int settleMs)
+    static int Create(int runs, string[] only, int settleMs, string? key)
     {
         var named = ParseProfileArgs(only, "create");
         if (named == null) return 1;
@@ -939,7 +1032,7 @@ internal static partial class Program
             var profile = ctx.GetProfile(id)!;
             // One create and dispose first, so a cold first create (driver
             // binding, the USB/IP server's first start) is not a sample.
-            using (var first = ctx.CreateController(profile))
+            using (var first = ctx.CreateController(profile, key))
                 if (!OnEmbeddedDriver(first, id)) return 5;
             long logStart = new FileInfo(log).Exists ? new FileInfo(log).Length : 0;
             var create = new List<double>(runs);
@@ -947,7 +1040,7 @@ internal static partial class Program
             for (int run = 0; run < runs; run++)
             {
                 long t0 = Stopwatch.GetTimestamp();
-                var c = ctx.CreateController(profile);
+                var c = ctx.CreateController(profile, key);
                 long t1 = Stopwatch.GetTimestamp();
                 if (settleMs > 0) Thread.Sleep(settleMs);
                 long t2 = Stopwatch.GetTimestamp();
@@ -973,6 +1066,14 @@ internal static partial class Program
         foreach (string a in args)
             if (a.StartsWith("--settle=", StringComparison.Ordinal) && int.TryParse(a[9..], out int ms)) return ms;
         return 0;
+    }
+
+    /// <summary>The value of --key=, or null.</summary>
+    static string? KeyArg(string[] args)
+    {
+        foreach (string a in args)
+            if (a.StartsWith("--key=", StringComparison.Ordinal) && a.Length > 6) return a[6..];
+        return null;
     }
 
     // ── Process start to the first controller ───────────────────────────

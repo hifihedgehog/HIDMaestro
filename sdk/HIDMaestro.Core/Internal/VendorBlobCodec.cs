@@ -1115,35 +1115,21 @@ internal static class VendorBlobCodec
 
     // CRC-32/ISO-HDLC, polynomial 0xEDB88320 (matches Sony BT, dualsense-tester,
     // ds4drv, hidapi, OpenRGB SonyDualSenseController, PadForge Ds5RawHidWriter).
-    // Inline table to avoid pulling System.IO.Hashing, so single-file
-    // deployment works without an extra NuGet dep.
-    private static readonly uint[] s_crc32Table = BuildCrc32Table();
-
-    private static uint[] BuildCrc32Table()
-    {
-        var t = new uint[256];
-        for (uint i = 0; i < 256; i++)
-        {
-            uint c = i;
-            for (int k = 0; k < 8; k++)
-                c = ((c & 1) != 0) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
-            t[i] = c;
-        }
-        return t;
-    }
-
+    // The state programs' own (Programs.Crc32), which takes sixteen bytes a
+    // step, and no System.IO.Hashing, so single-file deployment works
+    // without an extra NuGet dep.
     private static uint ComputeCrc32(CrcScope scope, ReadOnlySpan<byte> buffer)
     {
         uint crc = 0xFFFFFFFFu;
         if (scope.Prefix != null)
-        {
-            for (int i = 0; i < scope.Prefix.Count; i++)
-                crc = s_crc32Table[(crc ^ scope.Prefix[i]) & 0xFF] ^ (crc >> 8);
-        }
+            crc = Programs.Crc32.Update(crc, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(scope.Prefix));
         int from = scope.From;
         int to = Math.Min(scope.To, buffer.Length - 1);
-        for (int i = from; i <= to; i++)
-            crc = s_crc32Table[(crc ^ buffer[i]) & 0xFF] ^ (crc >> 8);
+        // VendorBlobProgram holds a scope to start inside its report. A
+        // buffer that ends before the scope starts adds nothing, as the
+        // byte loop added nothing.
+        if (to >= from)
+            crc = Programs.Crc32.Update(crc, buffer.Slice(from, to - from + 1));
         return crc ^ 0xFFFFFFFFu;
     }
 
