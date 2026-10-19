@@ -56,7 +56,9 @@ the battery waits for every such program to exit, printing
 minute. A scenario during which one appeared prints `[RERUN]` instead of
 a verdict and runs again once it has gone. `HMForeign.cs` finds them: a
 process outside the battery's own process tree with `HIDMaestro.Core.dll`
-loaded.
+loaded. A process the battery started stays its own after its parent
+exits, so one a crashed probe leaves running fails the scenario that left
+it and is stopped, instead of holding the battery back.
 
 Every step ends at a deadline: a probe's run, the test app's answer to a
 command, and the test app's exit after quit get 300 s, S71 1500 s and S73
