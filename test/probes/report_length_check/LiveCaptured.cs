@@ -96,7 +96,6 @@ internal static partial class Live
         finally
         {
             c?.Dispose();
-            Thread.Sleep(500);
         }
     }
 

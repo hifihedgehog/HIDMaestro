@@ -110,7 +110,6 @@ internal static partial class Live
                 Console.WriteLine($"  [SKIP] microsoft-designer-keyboard: its keyboard collection in Raw Input, {noRawInput}.");
             if (ds4r == null || nsor == null || (rawInput && keyboard == IntPtr.Zero)) return;
             Console.WriteLine($"  [INFO] driver {ds4.DriverVersion?.ToString() ?? "(not reported)"}");
-            Thread.Sleep(500);
 
             var ds4State = new HMGamepadState { Axes = HMGamepadStateHelpers.StandardAxes(ds4p, 1.0f, 0.5f, 0.5f, 0.5f, 0f, 0f) };
             var nsoState = new HMGamepadState { Buttons = HMButton.A };
@@ -153,12 +152,13 @@ internal static partial class Live
         }
         finally
         {
+            // Dispose returns once Windows has removed each device, so the
+            // next create here starts with nothing of these left.
             ds4r?.Dispose();
             nsor?.Dispose();
             kb?.Dispose();
             nso?.Dispose();
             ds4?.Dispose();
-            Thread.Sleep(500);
         }
     }
 
@@ -208,7 +208,6 @@ internal static partial class Live
         finally
         {
             c?.Dispose();
-            Thread.Sleep(500);
         }
     }
 
