@@ -180,17 +180,20 @@ internal static class Program
     static IReadOnlyList<string> ChildrenOf(string? parentId) =>
         parentId == null ? Array.Empty<string>() : DeviceManager.GetAllHidChildIds(parentId);
 
-    /// <summary>How long each held-open wait keeps its registration: a
-    /// create and a dispose of either timed profile, with room to spare. A
+    /// <summary>The longest each held-open wait keeps its registration: a
+    /// create and a dispose of either timed profile, with room to spare. The
+    /// wait ends sooner, once the dispose has returned, since nothing that
+    /// arrives after that changes a verdict: a child's own REMOVED after the
+    /// PnP lock was let go fails whether the window sees it or not. A
     /// window that closes before the PnP lock was let go fails its timing
     /// as not judged.</summary>
     const int WindowMs = 10_000;
 
     /// <summary>One create and dispose timed through a held-open
     /// all-instances registration, which the wait for a HID child of a
-    /// device that does not exist keeps for <see cref="WindowMs"/>. Sets
-    /// the SDK's taps from its construction to its disposal and opens no
-    /// registration of its own.</summary>
+    /// device that does not exist keeps until <see cref="Close"/>, or for
+    /// <see cref="WindowMs"/>. Sets the SDK's taps from its construction
+    /// to its disposal and opens no registration of its own.</summary>
     internal sealed class ChildTiming : IDisposable
     {
         [ThreadStatic] static ChildTiming? t_holding;
@@ -198,6 +201,7 @@ internal static class Program
         readonly System.Collections.Concurrent.ConcurrentQueue<(double Ms, IntPtr Registration, uint Action, string Id)> _events = new();
         bool _registered;
         IntPtr _handle;
+        readonly ManualResetEventSlim _close = new();
         double _openedAt, _closedAt = double.NaN, _createAt, _disposeAt, _lockReleasedAt = double.NaN;
         string? _parentId;
         IReadOnlyList<string> _children = Array.Empty<string>();
@@ -236,14 +240,19 @@ internal static class Program
 
         /// <summary>Starts the held-open wait, the wait for a HID child of
         /// <see cref="NoSuchDevice"/> unless <paramref name="wait"/> stands
-        /// in for it (S77 offline). Its task ends after the wait's
-        /// registration is closed.</summary>
+        /// in for it (S77 offline). It ends at <see cref="Close"/>, which its
+        /// failure test reads every 25 ms, or after <see cref="WindowMs"/>.
+        /// Its task ends after the wait's registration is closed.</summary>
         internal Task<bool> Hold(Func<bool>? wait = null) => Task.Run(() =>
         {
             t_holding = this;
-            try { return wait != null ? wait() : DeviceManager.WaitForHidChild(NoSuchDevice, WindowMs); }
+            try { return wait != null ? wait() : DeviceManager.WaitForHidChild(NoSuchDevice, WindowMs, () => _close.IsSet); }
             finally { t_holding = null; _closedAt = Now; }
         });
+
+        /// <summary>Ends the held-open wait. Called once the dispose has
+        /// returned.</summary>
+        internal void Close() => _close.Set();
 
         internal void CreateStarting() => _createAt = Now;
 
@@ -264,6 +273,7 @@ internal static class Program
 
         public void Dispose()
         {
+            _close.Set();
             DeviceManager.InstanceEventTap = null;
             DeviceManager.AllInstancesRegistrationTap = null;
             DeviceOrchestrator.DiagTap = null;
@@ -277,24 +287,42 @@ internal static class Program
         // diag log a live run on this machine writes (HIDMAESTRO_DIAG=1),
         // which is read once, when DeviceOrchestrator first loads.
         if (mode is "offline" or "cost") Environment.SetEnvironmentVariable("HIDMAESTRO_DIAG", null);
-        if (mode == "offline") return Offline.Run();
+        // "offline" runs the parts at once, each in a process of its own,
+        // "offline <part>" one part, and "offline 0" every part in turn.
+        if (mode == "offline") return args.Length > 1 ? Offline.Run(int.Parse(args[1])) : Offline.RunInParts();
         if (mode == "cost") return Cost.Run(args.Length > 1 ? int.Parse(args[1]) : 200);
 
         Console.WriteLine(mode is "measure" or "measure4" ? "=== Dispose timing ===" : "=== PnP notifications reach the SDK's waits ===");
-        foreach (var p in Process.GetProcesses())
+        // Each process's module list is read on a thread of its own, since
+        // one read at a time took about 5.5 s elevated.
+        var all = Process.GetProcesses();
+        string? sharing = null;
+        try
         {
-            try
+            Parallel.ForEach(all, (p, loop) =>
             {
-                if (p.Id == Environment.ProcessId) continue;
-                foreach (ProcessModule m in p.Modules)
-                    if (string.Equals(m.ModuleName, "HIDMaestro.Core.dll", StringComparison.OrdinalIgnoreCase))
-                    {
-                        Console.WriteLine($"  [SKIP] {p.ProcessName} is running and shares the SDK's devices.");
-                        return 2;
-                    }
-            }
-            catch { }
-            finally { p.Dispose(); }
+                try
+                {
+                    if (p.Id == Environment.ProcessId) return;
+                    foreach (ProcessModule m in p.Modules)
+                        if (string.Equals(m.ModuleName, "HIDMaestro.Core.dll", StringComparison.OrdinalIgnoreCase))
+                        {
+                            Interlocked.CompareExchange(ref sharing, p.ProcessName, null);
+                            loop.Stop();
+                            return;
+                        }
+                }
+                catch { }
+            });
+        }
+        finally
+        {
+            foreach (var p in all) p.Dispose();
+        }
+        if (sharing != null)
+        {
+            Console.WriteLine($"  [SKIP] {sharing} is running and shares the SDK's devices.");
+            return 2;
         }
 
         if (mode == "measure") return Measure.Run(args.Length > 1 ? int.Parse(args[1]) : 30);
@@ -314,7 +342,8 @@ internal static class Program
         long before = DeviceManager.NotificationsDelivered;
         long interfaceBefore = DeviceManager.InterfaceNotificationsDelivered;
         var window = timing.Hold();
-        var interfaceWindow = Task.Run(() => DeviceManager.WaitForDeviceInterface(NoSuchDevice, HidInterfaceClass, WindowMs));
+        using var closeInterfaceWindow = new ManualResetEventSlim();
+        var interfaceWindow = Task.Run(() => DeviceManager.WaitForDeviceInterface(NoSuchDevice, HidInterfaceClass, WindowMs, () => closeInterfaceWindow.IsSet));
         Thread.Sleep(250);
 
         timing.CreateStarting();
@@ -327,6 +356,8 @@ internal static class Program
         sw.Restart();
         c.Dispose();
         long disposeMs = sw.ElapsedMilliseconds;
+        timing.Close();
+        closeInterfaceWindow.Set();
         bool found = window.Result;
         bool interfaceFound = interfaceWindow.Result;
         var timed = timing.Judge();
@@ -368,6 +399,7 @@ internal static class Program
             var more = ctx.CreateController(ctx.GetProfile(id)!, "pnp-notify-check-" + id);
             timedHere?.DisposeStarting(more.InstanceId, ChildrenOf(more.InstanceId));
             more.Dispose();
+            timedHere?.Close();
             CheckRemovals(id, r0);
             if (timedHere != null)
             {
