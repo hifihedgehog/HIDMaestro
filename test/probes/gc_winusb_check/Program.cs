@@ -101,13 +101,24 @@ internal static class Program
             Probe.Check("the ledger holds it", RegistryLedger.HeldWinUsbDevnodes().Contains(first, StringComparer.OrdinalIgnoreCase));
 
             var ranks = DriverRanks(first);
-            Probe.Check("input.inf matches it and ranks 0x00FF3205, best",
-                ranks.TryGetValue("input.inf", out var input) && input.Rank == 0x00FF3205 && input.Status.Contains("Best Ranked"),
+            // Windows 10 generates no vendor-scoped compatible ID, so there the
+            // package matches no devnode, and input.inf's USB\Class_03 comes
+            // third among the compatible IDs rather than sixth. Measured on
+            // 2026-10-18: 0x00FF3205 on Windows 11 26200, 0x00FF3202 on
+            // Windows 10 19044.
+            bool vendorScoped = Devnodes.CompatibleIds(first).Exists(c => c.StartsWith(@"USB\COMPAT_VID_057E&", StringComparison.OrdinalIgnoreCase));
+            uint inputRank = vendorScoped ? 0x00FF3205u : 0x00FF3202u;
+            Probe.Check($"input.inf matches it and ranks 0x{inputRank:X8}, best",
+                ranks.TryGetValue("input.inf", out var input) && input.Rank == inputRank && input.Status.Contains("Best Ranked"),
                 Describe(ranks));
             var ours = ranks.Values.FirstOrDefault(r => r.Original.StartsWith("hmwinusb_", StringComparison.OrdinalIgnoreCase));
-            Probe.Check("HIDMaestro's package matches through the vendor-scoped compatible ID at rank 0x00FF3F00, outranked",
-                ours.Original == "hmwinusb_gamecube-adapter.inf" && ours.Rank == 0x00FF3F00 && ours.Status.Contains("Outranked"),
-                Describe(ranks));
+            if (vendorScoped)
+                Probe.Check("HIDMaestro's package matches through the vendor-scoped compatible ID at rank 0x00FF3F00, outranked",
+                    ours.Original == "hmwinusb_gamecube-adapter.inf" && ours.Rank == 0x00FF3F00 && ours.Status.Contains("Outranked"),
+                    Describe(ranks));
+            else
+                Probe.Check("HIDMaestro's package matches nothing on a devnode with no vendor-scoped compatible ID, so Windows never chooses it",
+                    ours.Original == null, Describe(ranks));
 
             Probe.Check("a second BindWinUsb finds it already bound", a.BindWinUsb() == HMWinUsbBinding.AlreadyBound);
 
@@ -186,7 +197,7 @@ internal static class Program
                 held.Set();
                 // Long enough for the bind to reach the devnode lock.
                 Thread.Sleep(1500);
-                WinUsbBinding.RestoreLocked(@"USB\VID_057E&PID_0337\S81_NOT_PRESENT");
+                WinUsbBinding.RestoreLocked(@"USB\VID_057E&PID_0337\S81_NOT_PRESENT", priorInf: null);
             }
             finally { devnodes.ReleaseMutex(); devnodes.Dispose(); }
         }) { IsBackground = true };

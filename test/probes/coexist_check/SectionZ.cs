@@ -84,10 +84,18 @@
 //         input.inf with no flag and no entry while the stale handle is
 //         held and after it closes. The run logs the devnode's arrival
 //         before and after the bind and the other adapter's PnP status.
+//      f. The single-INF install Windows 10 needs, which the program takes
+//         here on the probe's word: the bind puts the null driver on, then
+//         the package from a list built from its own INF, and WinUSB
+//         starts. Then the state that install leaves when its second step
+//         fails: the probe puts the null driver on the bound adapter, and
+//         once the program disposes it, the devnode, gone with no driver,
+//         has the reinstall flag and no entry, and the next adapter on it
+//         installs by rank.
 //    "--z-parts=<characters>" after the section letters runs only those
-//    parts. Parts 8, 9, c, d and e bind a real adapter and dispose it, which
+//    parts. Parts 8, 9, c, d, e and f bind a real adapter and dispose it, which
 //    on an SDK below the departing-devnode rule they were written for
-//    (WinUsbBinding.DepartingDevnodeRule 6) can change the driver of a
+//    (WinUsbBinding.DepartingDevnodeRule 7) can change the driver of a
 //    devnode on its way out. Each asks the program for the rule first and
 //    fails its check, running nothing, when the SDK is older.
 using System;
@@ -120,6 +128,7 @@ internal static partial class Program
         if (ZPart('c')) { ZBindWhileDevnodeLeaves(); Clean(); }
         if (ZPart('d')) { ZDisposeDuringBind(); Clean(); }
         if (ZPart('e')) { ZHeldOpenAtTeardown(); Clean(); }
+        if (ZPart('f')) { ZSingleInfInstall(); Clean(); }
     }
 
     /// <summary>Whether "--z-parts=" names this part, or is absent.</summary>
@@ -171,9 +180,10 @@ internal static partial class Program
 
     /// <summary>The departing-devnode rule section Z was written for
     /// (WinUsbBinding.DepartingDevnodeRule): a restore never installs a
-    /// driver on a present devnode, no cleanup removes a devnode, and a
-    /// process exit stops its re-binds first.</summary>
-    internal const int ZDepartingRule = 6;
+    /// driver on a present devnode, no cleanup removes a devnode, a process
+    /// exit stops its re-binds first, and a restore flags a gone devnode its
+    /// claim found on a driver and that has none.</summary>
+    internal const int ZDepartingRule = 7;
 
     /// <summary>Whether the program's SDK has the departing-devnode rule
     /// section Z was written for. Without it a bind, a restore or a cleanup
@@ -762,6 +772,7 @@ internal static partial class Program
             string? devA = null;
             WaitFor(() => (devA = Usb.OnVhciPort(0x057E, 0x0337, x)) != null, 15_000);
             if (devA == null) { Check("Zc: its adapter enumerates", false, $"vhci {x}"); return; }
+            WaitSettled(devA);
             var before = EnumDriver(devA);
 
             var devnodes = Native.AdminMutex("WinUsb");
@@ -966,6 +977,95 @@ internal static partial class Program
             foreach (var (port, busId) in touched) Vhci.Stop("127.0.0.1", port, busId);
         }
     }
+
+    // ── Zf ─────────────────────────────────────────────────────────────
+
+    static void ZSingleInfInstall()
+    {
+        const uint CONFIGFLAG_REINSTALL = 0x20, DN_STARTED = 0x8;
+        var touched = new HashSet<(int Port, string BusId)>();
+        try
+        {
+            using var a = PeerProcess.Start("Zf-bound");
+            if (!ZGuarded(a, "Zf")) return;
+            string ca = a.Send("create gc -");
+            if (!Ok(ca)) { Check("Zf: the program creates a GameCube adapter", false, ca); return; }
+            var (_, _, x) = GcImport(a, ca, touched);
+            string? devA = null;
+            WaitFor(() => (devA = Usb.OnVhciPort(0x057E, 0x0337, x)) != null, 15_000);
+            if (devA == null) { Check("Zf: its adapter enumerates", false, $"vhci {x}"); return; }
+            string single = a.Send("singleinf");
+            Check("Zf: the program takes the single-INF install", single == "OK singleinf", single);
+            if (single != "OK singleinf") return;
+            string bound = a.Send("bindwinusb", 120_000);
+            Check("Zf: its BindWinUsb binds", bound == "OK bindwinusb Bound", bound);
+            string seen = a.Send("singleinfseen");
+            Check("Zf: through the single-INF install, after the null driver", LongField(seen, "n") > 0, seen);
+            Check("Zf: WinUSB is on its adapter, started",
+                  WaitFor(() => string.Equals(Usb.Service(devA), "WinUSB", StringComparison.OrdinalIgnoreCase)
+                                && DevnodeStatus(devA) is { Problem: 0 } s && (s.Status & DN_STARTED) != 0, 10_000),
+                  $"{Usb.Service(devA) ?? "no driver"}, {DevnodeStatus(devA)}");
+            if (bound != "OK bindwinusb Bound") return;
+
+            // The state a failed second step leaves: the null driver on a
+            // devnode whose entry recorded input.inf.
+            Check("Zf: the probe puts the null driver on the bound adapter", InstallNullDriver(devA), devA);
+            Check("Zf: the adapter has no driver and its entry stays",
+                  WaitFor(() => Usb.Service(devA) == null, 10_000) && WinUsbEntryExists(devA),
+                  $"{Usb.Service(devA) ?? "no driver"}, entry {WinUsbEntryExists(devA)}");
+            string d = a.Send("dispose", 120_000);
+            Check("Zf: the program disposes its adapter", Ok(d), d);
+            Check("Zf: once gone, it has the reinstall flag and the entry is gone",
+                  WaitFor(() => HasLeft(devA) && ((ConfigFlags(devA) ?? 0) & CONFIGFLAG_REINSTALL) != 0 && !WinUsbEntryExists(devA), 35_000),
+                  $"left {HasLeft(devA)}, ConfigFlags 0x{ConfigFlags(devA) ?? 0:X}, entry {(WinUsbEntryExists(devA) ? "kept" : "gone")}");
+
+            using var b = PeerProcess.Start("Zf-other");
+            if (!ZGuarded(b, "Zf")) return;
+            string cb = b.Send("create gc -");
+            var (_, _, xb) = Ok(cb) ? GcImport(b, cb, touched) : (0, "", 0);
+            string? devB = null;
+            if (xb > 0) WaitFor(() => (devB = Usb.OnVhciPort(0x057E, 0x0337, xb)) != null, 15_000);
+            // Same serial, so the same instance: the flag reinstalls it by
+            // rank, input.inf, and the install spends the flag.
+            Check("Zf: the next adapter on that instance installs by rank, the flag spent",
+                  string.Equals(devB, devA, StringComparison.OrdinalIgnoreCase)
+                  && WaitFor(() => string.Equals(Usb.Service(devA), "HidUsb", StringComparison.OrdinalIgnoreCase)
+                                   && ((ConfigFlags(devA) ?? 0) & CONFIGFLAG_REINSTALL) == 0, 15_000),
+                  $"{devB ?? "none"}: {Usb.Service(devA) ?? "no driver"}, ConfigFlags 0x{ConfigFlags(devA) ?? 0:X}");
+            if (Ok(cb)) b.Send("dispose");
+        }
+        finally
+        {
+            foreach (var (port, busId) in touched) Vhci.Stop("127.0.0.1", port, busId);
+        }
+    }
+
+    /// <summary>The null driver on a devnode, the single-INF install's first
+    /// step (DiInstallDevice with DIIDFLAG_INSTALLNULLDRIVER, newdev.h).</summary>
+    static bool InstallNullDriver(string instanceId)
+    {
+        IntPtr set = ZSetupDiCreateDeviceInfoList(IntPtr.Zero, IntPtr.Zero);
+        if (set == new IntPtr(-1)) return false;
+        try
+        {
+            var dev = new ZDevInfo { cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<ZDevInfo>() };
+            return ZSetupDiOpenDeviceInfoW(set, instanceId, IntPtr.Zero, 0, ref dev)
+                   && ZDiInstallDevice(IntPtr.Zero, set, ref dev, IntPtr.Zero, 0x4, out _);
+        }
+        finally { ZSetupDiDestroyDeviceInfoList(set); }
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    struct ZDevInfo { public uint cbSize; public Guid ClassGuid; public uint DevInst; public IntPtr Reserved; }
+
+    [System.Runtime.InteropServices.DllImport("setupapi.dll", EntryPoint = "SetupDiCreateDeviceInfoList", SetLastError = true)]
+    static extern IntPtr ZSetupDiCreateDeviceInfoList(IntPtr classGuid, IntPtr hwnd);
+    [System.Runtime.InteropServices.DllImport("setupapi.dll", EntryPoint = "SetupDiDestroyDeviceInfoList", SetLastError = true)]
+    static extern bool ZSetupDiDestroyDeviceInfoList(IntPtr set);
+    [System.Runtime.InteropServices.DllImport("setupapi.dll", EntryPoint = "SetupDiOpenDeviceInfoW", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    static extern bool ZSetupDiOpenDeviceInfoW(IntPtr set, string instanceId, IntPtr hwnd, uint flags, ref ZDevInfo data);
+    [System.Runtime.InteropServices.DllImport("newdev.dll", EntryPoint = "DiInstallDevice", SetLastError = true)]
+    static extern bool ZDiInstallDevice(IntPtr hwnd, IntPtr set, ref ZDevInfo data, IntPtr driver, uint flags, out bool needReboot);
 
     static bool WinUsbEntryExists(string instanceId)
     {

@@ -24,9 +24,12 @@ namespace HIDMaestro.Internal;
 /// fifteen IDs no device carries, so it ranks below the driver Windows gives
 /// the device. A bind is refused when no other driver ranks above the
 /// package, since Windows would then pick the package for a real device on
-/// its own.</item>
+/// its own. Windows 10 generates no vendor-scoped compatible ID, so there
+/// the package matches no device at all.</item>
 /// <item><c>DiInstallDevice</c> puts it on the virtual device's devnode and
-/// nowhere else.</item>
+/// nowhere else. A devnode whose driver list cannot carry the package, as
+/// on Windows 10, takes the null driver first and the package from a list
+/// built from its own INF (<see cref="InstallFromInf"/>).</item>
 /// <item>The registry ledger records the devnode and its driver first, and
 /// puts the devnode back once the last holder lets go and the devnode is
 /// gone: it gets <c>CONFIGFLAG_REINSTALL</c>, so its next arrival, a real
@@ -175,11 +178,20 @@ DeviceName = ""{deviceName}""
     /// class change off a devnode that is leaving or gone: 5 since a
     /// restore never installs a driver on a present devnode, and only marks
     /// one for reinstall once it is gone. 6 since no cleanup removes a
-    /// devnode and a process exit stops its re-binds before it detaches. The
-    /// probes that bind and dispose a real adapter refuse to run on a build
-    /// below the version they were written for, so a run of old code cannot
-    /// change a departing devnode.</summary>
-    internal const int DepartingDevnodeRule = 6;
+    /// devnode and a process exit stops its re-binds before it detaches. 7
+    /// since a restore flags a gone devnode its claim found on a driver and
+    /// that has none, the state a single-INF install leaves when its package
+    /// install fails after the null driver. The probes that bind and dispose
+    /// a real adapter refuse to run on a build below the version they were
+    /// written for, so a run of old code cannot change a departing
+    /// devnode.</summary>
+    internal const int DepartingDevnodeRule = 7;
+
+    /// <summary>Set through reflection by coexist_check's section Z, which
+    /// then takes <see cref="InstallFromInf"/>, the path Windows 10 needs, on
+    /// a machine whose driver list carries the package. False outside the
+    /// probe.</summary>
+    internal static bool SingleInfForProbe;
 
     /// <summary>Take the machine-wide lock over the devnodes a binding
     /// changes, held by the calling thread until it calls
@@ -456,7 +468,7 @@ DeviceName = ""{deviceName}""
                                     // crash between the two leaves a record whose
                                     // restore finds the devnode as it was.
                                     RegistryLedger.ClaimWinUsb(instanceId, service, inf, controller.Index, ClaimTimeoutMs);
-                                    if (!InstallOn(instanceId, published!,
+                                    if (!InstallOn(instanceId, published!, package.CompatibleId,
                                             () => ArrivalOf(instanceId) == arrival
                                                   && IsImportsDevnode(handle, instanceId, d.VendorId, d.ProductId)))
                                     {
@@ -644,7 +656,10 @@ DeviceName = ""{deviceName}""
     /// again, by rank, the next time it is enumerated (Microsoft Learn,
     /// "Determining Whether a Device is Plugged In", steps 4 and 5: the flag
     /// "causes the device to be reinstalled the next time that the device is
-    /// reenumerated").</para>
+    /// reenumerated"). So does a gone devnode with no driver whose claim
+    /// recorded one in <paramref name="priorInf"/>: a single-INF install
+    /// left it on the null driver when its package install failed
+    /// (<see cref="InstallFromInf"/>).</para>
     ///
     /// <para>Nothing is ever installed on a present devnode, whoever's device
     /// it is: the device bound, on its way out, or another that arrived on
@@ -654,7 +669,7 @@ DeviceName = ""{deviceName}""
     /// hold while it runs. A present devnode keeps its driver and its entry
     /// until a sweep finds it gone, and never gets the flag while
     /// present.</para></summary>
-    internal static bool RestoreLocked(string instanceId)
+    internal static bool RestoreLocked(string instanceId, string? priorInf)
     {
         if (CM_Locate_DevNodeW(out _, instanceId, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS)
         {
@@ -668,6 +683,8 @@ DeviceName = ""{deviceName}""
             return current != null && IsInboxOrNone(current);
         }
         var (_, inf) = DriverOf(instanceId, phantom: true);
+        if (string.IsNullOrEmpty(inf) && !string.IsNullOrEmpty(priorInf) && HasRecord(instanceId))
+            return HasLeft(instanceId) && FlagForNextArrival(instanceId);
         switch (IsOurPackage(inf))
         {
             case false:
@@ -1312,12 +1329,15 @@ DeviceName = ""{deviceName}""
     /// devnode's driver list shows another driver ranked above it. A lower
     /// rank is the better match (Microsoft Learn, "How Windows ranks drivers"),
     /// and only that other driver keeps Windows from choosing the package for
-    /// a real device of the same kind. <paramref name="still"/> runs after
-    /// the driver list is built and the package chosen, right before
-    /// <c>DiInstallDevice</c>, and when it returns false nothing is installed
-    /// and this returns false.</summary>
-    private static bool InstallOn(string instanceId, string publishedInf, Func<bool> still)
+    /// a real device of the same kind. A devnode without
+    /// <paramref name="compatibleId"/>, as on Windows 10, has no list that
+    /// can carry the package, which then matches no device, and takes it
+    /// through <see cref="InstallFromInf"/>. <paramref name="still"/> runs
+    /// right before the first change to the devnode, and when it returns
+    /// false nothing is installed and this returns false.</summary>
+    private static bool InstallOn(string instanceId, string publishedInf, string compatibleId, Func<bool> still)
     {
+        bool listed = false;
         IntPtr set = SetupDiCreateDeviceInfoList(IntPtr.Zero, IntPtr.Zero);
         if (set == INVALID_HANDLE_VALUE)
             throw new InvalidOperationException($"SetupDiCreateDeviceInfoList failed ({Marshal.GetLastWin32Error()}).");
@@ -1353,30 +1373,146 @@ DeviceName = ""{deviceName}""
                         bestOtherInf = infFile;
                     }
                 }
-                if (!found)
-                    throw new InvalidOperationException($"{publishedInf} is not among the compatible drivers of {instanceId}.");
-                if (bestOther >= ourRank)
-                    throw new InvalidOperationException(
-                        $"No driver ranks above HIDMaestro's WinUSB package (rank 0x{ourRank:X8}) on {instanceId}, so " +
-                        "Windows would choose the package for every real device of this kind. Nothing was bound.");
-                DeviceOrchestrator.LogDiag(
-                    $"    winusb: {publishedInf} ranks 0x{ourRank:X8} on {instanceId}, below {Path.GetFileName(bestOtherInf ?? "?")} at 0x{bestOther:X8}");
-                // SetupDiOpenDeviceInfo opens a devnode that is not present
-                // too, so the devnode is checked here, last.
-                if (!still())
+                listed = found;
+                if (found)
                 {
-                    DeviceOrchestrator.LogDiag($"    winusb: {instanceId} left before the install, nothing installed");
-                    return false;
+                    if (bestOther >= ourRank)
+                        throw new InvalidOperationException(
+                            $"No driver ranks above HIDMaestro's WinUSB package (rank 0x{ourRank:X8}) on {instanceId}, so " +
+                            "Windows would choose the package for every real device of this kind. Nothing was bound.");
+                    DeviceOrchestrator.LogDiag(
+                        $"    winusb: {publishedInf} ranks 0x{ourRank:X8} on {instanceId}, below {Path.GetFileName(bestOtherInf ?? "?")} at 0x{bestOther:X8}");
+                    if (!SingleInfForProbe)
+                    {
+                        // SetupDiOpenDeviceInfo opens a devnode that is not
+                        // present too, so the devnode is checked here, last.
+                        if (!still())
+                        {
+                            DeviceOrchestrator.LogDiag($"    winusb: {instanceId} left before the install, nothing installed");
+                            return false;
+                        }
+                        if (!DiInstallDevice(IntPtr.Zero, set, ref dev, ref ours, 0, out bool reboot))
+                            throw new InvalidOperationException($"DiInstallDevice on {instanceId} failed ({Marshal.GetLastWin32Error()}).");
+                        if (reboot)
+                            DeviceOrchestrator.LogDiag($"    winusb: DiInstallDevice on {instanceId} asked for a restart");
+                        return true;
+                    }
                 }
-                if (!DiInstallDevice(IntPtr.Zero, set, ref dev, ref ours, 0, out bool reboot))
-                    throw new InvalidOperationException($"DiInstallDevice on {instanceId} failed ({Marshal.GetLastWin32Error()}).");
-                if (reboot)
-                    DeviceOrchestrator.LogDiag($"    winusb: DiInstallDevice on {instanceId} asked for a restart");
-                return true;
             }
             finally { SetupDiDestroyDriverInfoList(set, ref dev, SPDIT_COMPATDRIVER); }
         }
         finally { SetupDiDestroyDeviceInfoList(set); }
+        // A devnode that has the compatible ID lists the package on every
+        // Windows version that generates the ID, so a list without it there
+        // is a fault, not a Windows 10 devnode.
+        if (!listed && HasCompatibleId(instanceId, compatibleId))
+            throw new InvalidOperationException($"{publishedInf} is not among the compatible drivers of {instanceId}.");
+        DeviceOrchestrator.LogDiag(listed
+            ? $"    winusb: the probe puts {publishedInf} on {instanceId} from its INF"
+            : $"    winusb: {instanceId} has no {compatibleId}, so {publishedInf} goes on from its INF after the null driver");
+        return InstallFromInf(instanceId, publishedInf, still);
+    }
+
+    /// <summary>True when the present devnode lists <paramref name="id"/>
+    /// among its compatible IDs.</summary>
+    private static bool HasCompatibleId(string instanceId, string id) =>
+        CM_Locate_DevNodeW(out uint dev, instanceId, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS
+        && ReadMultiSz(dev, CM_DRP_COMPATIBLEIDS).Any(c => c.Equals(id, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Install the package on a devnode from a driver list built from
+    /// its own INF, in the two steps of Nefarius.Utilities.DeviceManagement's
+    /// PnPDevice: InstallNullDriver, then InstallCustomDriver. Windows builds a
+    /// driver list from one INF only of the devnode's own setup class, and the
+    /// package's class is USBDevice, so the null driver goes on first and
+    /// takes the devnode out of its class. Measured on Windows 10 19044 on
+    /// 2026-10-18: a list from winusb.inf for the adapter on input.inf held no
+    /// driver, and one from input.inf held 172.
+    ///
+    /// <para><paramref name="still"/> runs right before the null driver, the
+    /// first change. From there the install runs to the end or throws, with
+    /// the claim kept, and a devnode left on no driver gets the reinstall flag
+    /// once it is gone (<see cref="RestoreLocked"/>).</para></summary>
+    private static bool InstallFromInf(string instanceId, string publishedInf, Func<bool> still)
+    {
+        if (!still())
+        {
+            DeviceOrchestrator.LogDiag($"    winusb: {instanceId} left before the install, nothing installed");
+            return false;
+        }
+        IntPtr set = OpenDevnode(instanceId, out var dev);
+        try
+        {
+            if (!DiInstallNullDriver(IntPtr.Zero, set, ref dev, IntPtr.Zero, DIIDFLAG_INSTALLNULLDRIVER, out bool reboot))
+                throw new InvalidOperationException($"Installing the null driver on {instanceId} failed ({Marshal.GetLastWin32Error()}).");
+            if (reboot)
+                DeviceOrchestrator.LogDiag($"    winusb: the null driver on {instanceId} asked for a restart");
+        }
+        finally { SetupDiDestroyDeviceInfoList(set); }
+
+        set = OpenDevnode(instanceId, out dev);
+        try
+        {
+            // PnPDevice.InstallCustomDriver's own check: a devnode still in a
+            // class gets a list without the package.
+            if (dev.ClassGuid != Guid.Empty)
+                throw new InvalidOperationException(
+                    $"{instanceId} is still in setup class {dev.ClassGuid} after the null driver, so no driver list from {publishedInf} can carry the package.");
+            if (!SetupDiSetSelectedDevice(set, ref dev))
+                throw new InvalidOperationException($"SetupDiSetSelectedDevice({instanceId}) failed ({Marshal.GetLastWin32Error()}).");
+            var prm = new SP_DEVINSTALL_PARAMS_W { cbSize = (uint)Marshal.SizeOf<SP_DEVINSTALL_PARAMS_W>() };
+            if (!SetupDiGetDeviceInstallParamsW(set, ref dev, ref prm))
+                throw new InvalidOperationException($"SetupDiGetDeviceInstallParams({instanceId}) failed ({Marshal.GetLastWin32Error()}).");
+            // DriverPath is the INF's name, which SetupAPI looks for in
+            // %windir%\INF, as InstallCustomDriver passes it.
+            prm.Flags |= DI_ENUMSINGLEINF;
+            prm.FlagsEx |= DI_FLAGSEX_ALLOWEXCLUDEDDRVS;
+            prm.SetDriverPath(publishedInf);
+            if (!SetupDiSetDeviceInstallParamsW(set, ref dev, ref prm))
+                throw new InvalidOperationException($"SetupDiSetDeviceInstallParams({instanceId}) failed ({Marshal.GetLastWin32Error()}).");
+            if (!SetupDiBuildDriverInfoList(set, ref dev, SPDIT_CLASSDRIVER))
+                throw new InvalidOperationException($"SetupDiBuildDriverInfoList from {publishedInf} failed ({Marshal.GetLastWin32Error()}).");
+            try
+            {
+                SP_DRVINFO_DATA_W ours = default;
+                bool found = false;
+                for (uint i = 0; !found; i++)
+                {
+                    var drv = new SP_DRVINFO_DATA_W { cbSize = (uint)Marshal.SizeOf<SP_DRVINFO_DATA_W>() };
+                    if (!SetupDiEnumDriverInfoW(set, ref dev, SPDIT_CLASSDRIVER, i, ref drv)) break;
+                    string? infFile = DriverInfFile(set, ref dev, ref drv);
+                    if (infFile != null && Path.GetFileName(infFile).Equals(publishedInf, StringComparison.OrdinalIgnoreCase))
+                    {
+                        ours = drv;
+                        found = true;
+                    }
+                }
+                if (!found)
+                    throw new InvalidOperationException($"The driver list from {publishedInf} holds no driver for {instanceId}.");
+                if (!SetupDiSetSelectedDriverW(set, ref dev, ref ours))
+                    throw new InvalidOperationException($"SetupDiSetSelectedDriver({instanceId}) failed ({Marshal.GetLastWin32Error()}).");
+                if (!DiInstallDevice(IntPtr.Zero, set, ref dev, ref ours, 0, out bool reboot))
+                    throw new InvalidOperationException($"DiInstallDevice on {instanceId} failed ({Marshal.GetLastWin32Error()}).");
+                if (reboot)
+                    DeviceOrchestrator.LogDiag($"    winusb: DiInstallDevice on {instanceId} asked for a restart");
+            }
+            finally { SetupDiDestroyDriverInfoList(set, ref dev, SPDIT_CLASSDRIVER); }
+        }
+        finally { SetupDiDestroyDeviceInfoList(set); }
+        return true;
+    }
+
+    /// <summary>A device information set holding the devnode, which the
+    /// caller destroys.</summary>
+    private static IntPtr OpenDevnode(string instanceId, out SP_DEVINFO_DATA dev)
+    {
+        IntPtr set = SetupDiCreateDeviceInfoList(IntPtr.Zero, IntPtr.Zero);
+        if (set == INVALID_HANDLE_VALUE)
+            throw new InvalidOperationException($"SetupDiCreateDeviceInfoList failed ({Marshal.GetLastWin32Error()}).");
+        dev = new SP_DEVINFO_DATA { cbSize = (uint)Marshal.SizeOf<SP_DEVINFO_DATA>() };
+        if (SetupDiOpenDeviceInfoW(set, instanceId, IntPtr.Zero, 0, ref dev)) return set;
+        int error = Marshal.GetLastWin32Error();
+        SetupDiDestroyDeviceInfoList(set);
+        throw new InvalidOperationException($"SetupDiOpenDeviceInfo({instanceId}) failed ({error}).");
     }
 
     private static unsafe string? DriverInfFile(IntPtr set, ref SP_DEVINFO_DATA dev, ref SP_DRVINFO_DATA_W drv)
@@ -1505,6 +1641,7 @@ DeviceName = ""{deviceName}""
     private const uint CM_GETIDLIST_FILTER_ENUMERATOR = 0x00000001;
     private const uint CM_GETIDLIST_FILTER_PRESENT = 0x00000100;
     private const uint CM_DRP_HARDWAREID = 0x02;
+    private const uint CM_DRP_COMPATIBLEIDS = 0x03;
     private const uint CM_DRP_SERVICE = 0x05;
     private const uint CM_DRP_CONFIGFLAGS = 0x0B;
     private const uint CM_DRP_ADDRESS = 0x1D;
@@ -1516,7 +1653,11 @@ DeviceName = ""{deviceName}""
     private const uint CM_PROB_DEVICE_NOT_THERE = 0x18;
     private const uint CM_PROB_REINSTALL = 18;
     private const uint CM_PROB_FAILED_INSTALL = 28;
+    private const uint SPDIT_CLASSDRIVER = 1;
     private const uint SPDIT_COMPATDRIVER = 2;
+    private const uint DI_ENUMSINGLEINF = 0x00010000;
+    private const uint DI_FLAGSEX_ALLOWEXCLUDEDDRVS = 0x00000800;
+    private const uint DIIDFLAG_INSTALLNULLDRIVER = 0x00000004;
     private const uint WAIT_OBJECT_0 = 0;
     private static readonly IntPtr INVALID_HANDLE_VALUE = new(-1);
 
@@ -1590,6 +1731,34 @@ DeviceName = ""{deviceName}""
         public uint Reserved;
     }
 
+    // SP_DEVINSTALL_PARAMS_W (setupapi.h, which packs to 8 bytes on 64-bit
+    // Windows): 584 bytes there, DriverPath at offset 60.
+    [StructLayout(LayoutKind.Sequential)]
+    private unsafe struct SP_DEVINSTALL_PARAMS_W
+    {
+        public uint cbSize;
+        public uint Flags;
+        public uint FlagsEx;
+        public IntPtr hwndParent;
+        public IntPtr InstallMsgHandler;
+        public IntPtr InstallMsgHandlerContext;
+        public IntPtr FileQueue;
+        public UIntPtr ClassInstallReserved;
+        public uint Reserved;
+        public fixed char DriverPath[260];
+
+        /// <summary>DriverPath, null-terminated within its 260.</summary>
+        public void SetDriverPath(string path)
+        {
+            if (path.Length >= 260) throw new ArgumentException($"{path} does not fit in DriverPath.", nameof(path));
+            fixed (char* p = DriverPath)
+            {
+                path.AsSpan().CopyTo(new Span<char>(p, 260));
+                p[path.Length] = '\0';
+            }
+        }
+    }
+
     [LibraryImport("cfgmgr32.dll", StringMarshalling = StringMarshalling.Utf16)]
     private static partial int CM_Locate_DevNodeW(out uint dnDevInst, string pDeviceID, uint ulFlags);
 
@@ -1660,4 +1829,30 @@ DeviceName = ""{deviceName}""
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool DiInstallDevice(IntPtr hwndParent, IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData,
         ref SP_DRVINFO_DATA_W DriverInfoData, uint Flags, [MarshalAs(UnmanagedType.Bool)] out bool NeedReboot);
+
+    // DiInstallDevice with DIIDFLAG_INSTALLNULLDRIVER, which takes no driver
+    // (newdev.h), so DriverInfoData is null.
+    [LibraryImport("newdev.dll", EntryPoint = "DiInstallDevice", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool DiInstallNullDriver(IntPtr hwndParent, IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData,
+        IntPtr DriverInfoData, uint Flags, [MarshalAs(UnmanagedType.Bool)] out bool NeedReboot);
+
+    [LibraryImport("setupapi.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiSetSelectedDevice(IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData);
+
+    [LibraryImport("setupapi.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiGetDeviceInstallParamsW(IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData,
+        ref SP_DEVINSTALL_PARAMS_W DeviceInstallParams);
+
+    [LibraryImport("setupapi.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiSetDeviceInstallParamsW(IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData,
+        ref SP_DEVINSTALL_PARAMS_W DeviceInstallParams);
+
+    [LibraryImport("setupapi.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiSetSelectedDriverW(IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData,
+        ref SP_DRVINFO_DATA_W DriverInfoData);
 }

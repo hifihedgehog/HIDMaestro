@@ -1087,6 +1087,24 @@ internal static partial class RegistryLedger
     /// leave.</summary>
     private readonly record struct WinUsbQueued(string Name, string InstanceId, string[] Seen, bool Own);
 
+    /// <summary>The driver INF an entry recorded for its devnode at its claim,
+    /// empty when the devnode had none, and null when the entry cannot be
+    /// read, which restores the devnode as one recorded with none. The caller
+    /// holds the devnode lock, which every claim and every delete of an entry
+    /// with a devnode take, so the entry does not change under the read.</summary>
+    private static string? PriorInfOf(string name)
+    {
+        try
+        {
+            using var e = Registry.LocalMachine.OpenSubKey($@"{Root}\{WinUsbKind}\{name}");
+            return e?.GetValue(V_PriorInf) as string;
+        }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or System.IO.IOException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>Queue a WinUSB entry for <see cref="RestoreWinUsbEntries"/>.
     /// Its devnode work takes seconds, so it runs after the ledger's lock is
     /// released, and the entry stays until it is done: a process that ends
@@ -1141,7 +1159,7 @@ internal static partial class RegistryLedger
                 try
                 {
                     if (!WinUsbEntryUnheld(name, ignoreHolders, seen)) continue;
-                    if (!WinUsbBinding.RestoreLocked(id))
+                    if (!WinUsbBinding.RestoreLocked(id, PriorInfOf(name)))
                     {
                         DeviceOrchestrator.LogDiag($"    ledger: the WinUSB entry of {id} stays for a later sweep");
                         kept.Add(entry);

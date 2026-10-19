@@ -494,6 +494,10 @@ internal static partial class Program
         string? devA = null, devB = null;
         WaitFor(() => (devA = Usb.OnVhciPort(0x057E, 0x0337, vhciA)) != null && (devB = Usb.OnVhciPort(0x057E, 0x0337, vhciB)) != null, 15_000);
         if (devA == null || devB == null) { Check("V7: both adapters enumerate", false, $"vhci {vhciA} {devA}, vhci {vhciB} {devB}"); return; }
+        string idA = devA, idB = devB;
+        Console.WriteLine($"    V7: on arrival {idA} has ConfigFlags 0x{ConfigFlags(idA) ?? 0:X} and {Usb.Service(idA) ?? "no driver"}, " +
+                          $"{idB} has ConfigFlags 0x{ConfigFlags(idB) ?? 0:X} and {Usb.Service(idB) ?? "no driver"}");
+        WaitSettled(idA, idB);
         string? serviceB = Usb.Service(devB);
 
         string st = a.Send($"staleport {vhciB}");
@@ -506,6 +510,16 @@ internal static partial class Program
         Check($"V7: the other program's adapter keeps its driver {serviceB ?? "none"}", Usb.Service(devB) == serviceB,
               Usb.Service(devB) ?? "none");
     }
+
+    /// <summary>Wait, up to 15 s, until no device installation is pending
+    /// and none of the instances carries the reinstall flag. An adapter can
+    /// arrive on an instance a restore flagged after an earlier binding: it
+    /// names its old driver, WinUSB, until Windows reinstalls it by rank
+    /// just after it arrives, so a driver read as a baseline before that
+    /// reads a driver the instance is about to lose.</summary>
+    static void WaitSettled(params string[] instanceIds) =>
+        WaitFor(() => Y.CMP_WaitNoPendingInstallEvents(0) == 0
+                      && instanceIds.All(id => ((ConfigFlags(id) ?? 0) & 0x20) == 0), 15_000);
 
     // ── V8 ─────────────────────────────────────────────────────────────
 

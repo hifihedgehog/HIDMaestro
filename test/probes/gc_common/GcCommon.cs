@@ -85,8 +85,9 @@ internal static class Probe
 
     /// <summary>The departing-devnode rule these probes were written for
     /// (WinUsbBinding.DepartingDevnodeRule): a restore never installs a
-    /// driver on a present devnode.</summary>
-    public const int DepartingRule = 6;
+    /// driver on a present devnode, and flags a gone devnode its claim found
+    /// on a driver and that has none.</summary>
+    public const int DepartingRule = 7;
 
     /// <summary>True, after a failed check, when the SDK this probe runs is
     /// below <see cref="DepartingRule"/>: binding a real adapter and
@@ -174,7 +175,7 @@ internal static class Devnodes
     public const int CR_SUCCESS = 0;
     const uint CM_LOCATE_DEVNODE_NORMAL = 0, CM_LOCATE_DEVNODE_PHANTOM = 1;
     const uint CM_GETIDLIST_FILTER_ENUMERATOR = 1, CM_GETIDLIST_FILTER_PRESENT = 0x100;
-    const uint CM_DRP_HARDWAREID = 0x02, CM_DRP_SERVICE = 0x05, CM_DRP_CONFIGFLAGS = 0x0B, CM_DRP_ADDRESS = 0x1D;
+    const uint CM_DRP_HARDWAREID = 0x02, CM_DRP_COMPATIBLEIDS = 0x03, CM_DRP_SERVICE = 0x05, CM_DRP_CONFIGFLAGS = 0x0B, CM_DRP_ADDRESS = 0x1D;
 
     /// <summary>Every present 057E:0337 devnode.</summary>
     public static List<string> PresentAdapters()
@@ -211,6 +212,12 @@ internal static class Devnodes
     }
 
     public static bool IsPresent(string id) => CM_Locate_DevNodeW(out _, id, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS;
+
+    /// <summary>A present devnode's compatible IDs, none when it cannot be
+    /// read.</summary>
+    public static List<string> CompatibleIds(string id)
+        => CM_Locate_DevNodeW(out uint dev, id, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS
+            ? MultiSz(dev, CM_DRP_COMPATIBLEIDS) : new List<string>();
 
     public static string? Service(string id, bool phantom = false)
         => CM_Locate_DevNodeW(out uint dev, id, phantom ? CM_LOCATE_DEVNODE_PHANTOM : CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS

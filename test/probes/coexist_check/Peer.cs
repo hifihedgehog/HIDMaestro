@@ -178,7 +178,11 @@ internal static class Peer
 
     /// <summary>The departing-devnode rule (WinUsbBinding.DepartingDevnodeRule)
     /// below which bindwinusb refuses to bind.</summary>
-    const int BindRule = 6;
+    const int BindRule = 7;
+
+    /// <summary>The SDK's diag lines that name the single-INF install, counted
+    /// once singleinf has set the tap.</summary>
+    static int s_singleInfLines;
 
     /// <summary>Commands this file does not know, for a section whose own
     /// file only the current SDK's probe compiles (SectionZ.cs). Returns
@@ -595,6 +599,27 @@ internal static class Peer
                         Reply($"OK staleport {a[1]}");
                         break;
                     }
+                    case "singleinf":
+                    {
+                        // WinUsbBinding's single-INF install, the path Windows
+                        // 10 takes, on a machine whose driver list carries the
+                        // package, and a tap on the SDK's diag lines that
+                        // shows the path ran.
+                        var sdk = typeof(HMContext).Assembly;
+                        var single = sdk.GetType("HIDMaestro.Internal.WinUsbBinding")?.GetField("SingleInfForProbe", BindingFlags.NonPublic | BindingFlags.Static);
+                        var tap = sdk.GetType("HIDMaestro.Internal.DeviceOrchestrator")?.GetField("DiagTap", BindingFlags.NonPublic | BindingFlags.Static);
+                        if (single == null || tap == null) { Reply("ERR singleinf no WinUsbBinding.SingleInfForProbe or DeviceOrchestrator.DiagTap"); break; }
+                        tap.SetValue(null, (Action<string>)(line =>
+                        {
+                            if (line.Contains("from its INF", StringComparison.Ordinal)) Interlocked.Increment(ref s_singleInfLines);
+                        }));
+                        single.SetValue(null, true);
+                        Reply("OK singleinf");
+                        break;
+                    }
+                    case "singleinfseen":
+                        Reply($"OK singleinfseen n={Volatile.Read(ref s_singleInfLines)}");
+                        break;
                     case "bindwinusb":
                     {
                         HMController? last;
