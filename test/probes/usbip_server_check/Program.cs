@@ -156,31 +156,31 @@ internal static partial class Program
     static void DisposeTiming(HMContext ctx)
     {
         Console.WriteLine("-- Dispose time with the input pump waiting for a frame (30 devices)");
+        // One index per device, since the 30 run at once.
         const int TimingIndex = 62;
         var profile = ctx.GetProfile("dualsense-composite")!.Inner;
-        var rnd = new Random(43);
-        var ms = new List<double>(30);
-        for (int i = 0; i < 30; i++)
+        var devices = new UsbipEmulatedDevice?[30];
+        double[] ms;
+        try
         {
-            var device = new UsbipEmulatedDevice(profile, TimingIndex);
-            try
+            ms = DisposeTogether(30, new Random(43), 50, 500, i => devices[i] = new UsbipEmulatedDevice(profile, TimingIndex + i));
+        }
+        finally
+        {
+            for (int i = 0; i < devices.Length; i++)
             {
-                Thread.Sleep(50 + rnd.Next(500));
-                var sw = Stopwatch.StartNew();
-                device.Dispose();
-                ms.Add(sw.Elapsed.TotalMilliseconds);
-            }
-            finally
-            {
-                device.Dispose();
-                SharedMemoryIO.DestroyController(TimingIndex);
+                if (devices[i] == null) continue;
+                devices[i]!.Dispose();
+                SharedMemoryIO.DestroyController(TimingIndex + i);
             }
         }
-        ms.Sort();
+        int lost = Array.FindAll(ms, double.IsNaN).Length;
+        Array.Sort(ms);
         // Nearest rank: the 15th and the 29th of 30.
         double p50 = ms[14], p95 = ms[28], max = ms[29];
         Check("a USB/IP device's Dispose does not wait out its input pump's 500 ms wait (p95 under 250 ms over 30)",
-              p95 < 250, $"p50 {p50:F1} ms, p95 {p95:F1} ms, max {max:F1} ms");
+              p95 < 250 && lost == 0,
+              $"p50 {p50:F1} ms, p95 {p95:F1} ms, max {max:F1} ms" + (lost > 0 ? $", {lost} Dispose(s) threw or hung" : ""));
     }
 
     static void RunAll(UsbipServer server, UsbipEmulatedDevice device, ControllerProfile profile,
@@ -1236,10 +1236,10 @@ internal static partial class Program
     static void InputPumpWakeOffline()
     {
         var t = typeof(UsbipEmulatedDevice);
-        var rnd = new Random(43);
-        var ms = new List<double>(30);
-        bool closed = true;
-        for (int i = 0; i < 30; i++)
+        var pumps = new Thread[30];
+        var events = new IntPtr[30];
+        var ended = new bool[30];
+        double[] ms = DisposeTogether(30, new Random(43), 20, 300, i =>
         {
             var dev = (UsbipEmulatedDevice)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(t);
             t.GetField("_lifetimeLock", Private)!.SetValue(dev, new object());
@@ -1249,19 +1249,59 @@ internal static partial class Program
             var loop = (ThreadStart)Delegate.CreateDelegate(typeof(ThreadStart), dev, t.GetMethod("InputPumpLoop", Private)!);
             var pump = new Thread(loop) { IsBackground = true, Name = "S43 offline input pump" };
             t.GetField("_inputThread", Private)!.SetValue(dev, pump);
+            pumps[i] = pump;
+            events[i] = ev;
             pump.Start();
-            Thread.Sleep(20 + rnd.Next(300));
-            var sw = Stopwatch.StartNew();
-            dev.Dispose();
-            ms.Add(sw.Elapsed.TotalMilliseconds);
-            // The pump closes the event as it ends.
-            closed &= !pump.IsAlive && !GetHandleInformation(ev, out _);
-        }
-        ms.Sort();
+            return dev;
+        },
+        // The pump closes the event as it ends.
+        i => ended[i] = !pumps[i].IsAlive && !GetHandleInformation(events[i], out _));
+        bool closed = Array.TrueForAll(ended, e => e);
+        int lost = Array.FindAll(ms, double.IsNaN).Length;
+        Array.Sort(ms);
         // Nearest rank: the 15th and the 29th of 30.
         double p50 = ms[14], p95 = ms[28], max = ms[29];
         Check("Dispose wakes the input pump instead of waiting out its 500 ms wait (p95 under 100 ms over 30)",
-              p95 < 100 && closed, $"p50 {p50:F1} ms, p95 {p95:F1} ms, max {max:F1} ms, pump ended and event closed {closed}");
+              p95 < 100 && closed && lost == 0,
+              $"p50 {p50:F1} ms, p95 {p95:F1} ms, max {max:F1} ms, pump ended and event closed {closed}" + (lost > 0 ? $", {lost} Dispose(s) threw or hung" : ""));
+    }
+
+    /// <summary>Dispose times of <paramref name="count"/> devices that run at
+    /// once. This thread makes each in turn with <paramref name="make"/> and
+    /// starts a thread of its own for it, which sleeps
+    /// <paramref name="fromMs"/> plus a random part of
+    /// <paramref name="spanMs"/> from that moment, times the device's
+    /// Dispose, and then runs <paramref name="after"/>. The devices share no
+    /// lock, event or section, so each Dispose waits for its own input pump
+    /// alone, as when the devices ran one after another, and the whole run
+    /// takes one offset instead of the sum of them. NaN for a Dispose that
+    /// threw or did not return within 10 s.</summary>
+    static double[] DisposeTogether(int count, Random rnd, int fromMs, int spanMs, Func<int, IDisposable> make, Action<int>? after = null)
+    {
+        var ms = new double[count];
+        Array.Fill(ms, double.NaN);
+        var threads = new Thread[count];
+        for (int i = 0; i < count; i++)
+        {
+            int n = i;
+            var dev = make(n);
+            int offset = fromMs + rnd.Next(spanMs);
+            var start = Stopwatch.StartNew();
+            threads[n] = new Thread(() =>
+            {
+                int left = offset - (int)start.ElapsedMilliseconds;
+                if (left > 0) Thread.Sleep(left);
+                var sw = Stopwatch.StartNew();
+                try { dev.Dispose(); ms[n] = sw.Elapsed.TotalMilliseconds; }
+                catch (Exception) { }
+                after?.Invoke(n);
+            }) { IsBackground = true, Name = "S43 dispose " + n };
+            threads[n].Start();
+        }
+        foreach (var th in threads) th.Join(10_000);
+        // A copy, so a Dispose that returns after its 10 s cannot change
+        // what the caller sorts.
+        return (double[])ms.Clone();
     }
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
