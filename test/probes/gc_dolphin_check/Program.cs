@@ -368,6 +368,12 @@ internal static class Program
         }
     }
 
+    /// <summary>Each rate count's length. A second holds 125 reports at
+    /// 8 ms and about 833 and 1000 at 1 ms, so a count is off by at most one
+    /// report, 1 Hz, against bounds at least 5 Hz from what the device
+    /// sends.</summary>
+    const int RateWindowMs = 1000;
+
     static readonly (string Label, double Ms, int[] Connected)[] RateCases =
     {
         ("8 ms, four ports", 8, new[] { 1, 2, 3, 4 }),
@@ -375,9 +381,10 @@ internal static class Program
         ("1 ms, exactly ports 1 and 2", 1, new[] { 1, 2 }),
     };
 
-    /// <summary>One two-second count per case: the reports a second the
-    /// device sent, the new states a second the emulator's Input saw, and
-    /// the emulator's own figure. Every port is connected again after.</summary>
+    /// <summary>One count of <see cref="RateWindowMs"/> per case: the
+    /// reports a second the device sent, the new states a second the
+    /// emulator's Input saw, and the emulator's own figure. Every port is
+    /// connected again after.</summary>
     static List<(string Label, double Hz, double States, string Own)> RateValues(Harness h, HMController controller)
     {
         var engine = controller.UsbipHandle!.Device.Protocol!;
@@ -403,13 +410,13 @@ internal static class Program
             var feeder = Task.Run(() => Feed(controller, cts.Token));
             uint sent0 = engine.ReportsSent;
             long t0 = Stopwatch.GetTimestamp();
-            string? answer = h.Ask("count 0 2000", 5000);
+            string? answer = h.Ask($"count 0 {RateWindowMs}", 5000);
             uint sent1 = engine.ReportsSent;
             double seconds = (Stopwatch.GetTimestamp() - t0) / (double)Stopwatch.Frequency;
             cts.Cancel();
             feeder.Wait();
             double hz = (sent1 - sent0) / seconds;
-            double states = answer != null && answer.StartsWith("changes ", StringComparison.Ordinal) ? int.Parse(answer[8..]) / 2.0 : 0;
+            double states = answer != null && answer.StartsWith("changes ", StringComparison.Ordinal) ? int.Parse(answer[8..]) * 1000.0 / RateWindowMs : 0;
             results.Add((label, hz, states, h.Ask("rate") ?? ""));
         }
         for (int p = 0; p < 4; p++)
