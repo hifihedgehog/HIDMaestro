@@ -8,10 +8,12 @@
 //         The runner they use, given a program that hangs and leaves a
 //         process holding its output open past the kill, returns within
 //         its timeout and its bounded read.
-//      2. Another program's transport work holds its lock for 1.5 s while a
+//      2. Another program's transport work holds its lock for 0.75 s while a
 //         program runs the deploy gate every UMDF2 create passes
 //         (DriverDeploy.EnsureForCreate). The gate's time, p50 and p95 over
-//         30 runs, with and without the work.
+//         30 runs, with and without the work. A gate that waits for the work
+//         takes the rest of the hold, half again the 500 ms the check
+//         allows.
 //      3. The install's progress callback runs with no machine-wide lock
 //         held: while it runs, another thread takes the deploy and the
 //         transport locks, and a callback that blocks past the end of the
@@ -28,7 +30,8 @@
 //         so a build that waits for the lock gives up after 60 s.
 //      6. A usbip-win2 installer another program left running, played by a
 //         copy of this probe named USBip-zprobe.exe that runs 6 s. An install
-//         waits for it to end, and gives up at its own timeout.
+//         gives up at its own timeout while it runs, and the next one waits
+//         for it to end.
 //      7. A sweep that finds a WinUSB entry of another program while another
 //         thread's WinUSB work holds the binding's locks for 3 s. The sweep
 //         takes that lock only when no one holds it, so it does not wait.
@@ -92,6 +95,10 @@
 //         once the program disposes it, the devnode, gone with no driver,
 //         has the reinstall flag and no entry, and the next adapter on it
 //         installs by rank.
+//    Parts 1, 4 and 6 run while part 8 holds the deploy lock, part 2 while
+//    part 9 waits for its re-import, and parts 3 and b while part c waits
+//    for its re-import, each after that part when it ends before the wait
+//    or does not run. None of them takes a lock its host's checks wait on.
 //    "--z-parts=<characters>" after the section letters runs only those
 //    parts. Parts 8, 9, c, d, e and f bind a real adapter and dispose it, which
 //    on an SDK below the departing-devnode rule they were written for
@@ -114,21 +121,46 @@ internal static partial class Program
 {
     static void SectionZ()
     {
-        if (ZPart('1')) ZPnputilPath();
-        if (ZPart('2')) ZGateBesideTransportWork();
-        if (ZPart('3')) ZProgressCallback();
-        if (ZPart('4')) ZRepairOutlivesBudget();
-        if (ZPart('5')) ZLegacyCheckWithoutLock();
-        if (ZPart('6')) ZRunningInstaller();
-        if (ZPart('7')) ZLedgerWinUsbSweep();
-        if (ZPart('8')) { ZWinUsbPackageLock(); Clean(); }
-        if (ZPart('9')) { ZRebindAfterReimport(); Clean(); }
-        if (ZPart('a')) ZClaimDuringSweep();
-        if (ZPart('b')) ZCertificateRace();
-        if (ZPart('c')) { ZBindWhileDevnodeLeaves(); Clean(); }
-        if (ZPart('d')) { ZDisposeDuringBind(); Clean(); }
-        if (ZPart('e')) { ZHeldOpenAtTeardown(); Clean(); }
-        if (ZPart('f')) { ZSingleInfInstall(); Clean(); }
+        var inLock = new ZGuests().Add('1', "Z1", ZPnputilPath).Add('4', "Z4", ZRepairOutlivesBudget).Add('6', "Z6", ZRunningInstaller);
+        var inReimport = new ZGuests().Add('2', "Z2", ZGateBesideTransportWork);
+        var inReimportC = new ZGuests().Add('3', "Z3", ZProgressCallback).Add('b', "Zb", ZCertificateRace);
+        if (ZPart('5')) PartTimed("Z5", ZLegacyCheckWithoutLock);
+        if (ZPart('7')) PartTimed("Z7", ZLedgerWinUsbSweep);
+        if (ZPart('8')) PartTimed("Z8", () => { ZWinUsbPackageLock(inLock.InWait); Clean(); });
+        inLock.Run();
+        if (ZPart('9')) PartTimed("Z9", () => { ZRebindAfterReimport(inReimport.InWait); Clean(); });
+        inReimport.Run();
+        if (ZPart('a')) PartTimed("Za", ZClaimDuringSweep);
+        if (ZPart('c')) PartTimed("Zc", () => { ZBindWhileDevnodeLeaves(inReimportC.InWait); Clean(); });
+        inReimportC.Run();
+        if (ZPart('d')) PartTimed("Zd", () => { ZDisposeDuringBind(); Clean(); });
+        if (ZPart('e')) PartTimed("Ze", () => { ZHeldOpenAtTeardown(); Clean(); });
+        if (ZPart('f')) PartTimed("Zf", () => { ZSingleInfInstall(); Clean(); });
+    }
+
+    /// <summary>Parts that run inside another part's wait. They run once,
+    /// in that wait, or at <see cref="Run"/> after the host when the host
+    /// ended before its wait or did not run.</summary>
+    sealed class ZGuests
+    {
+        readonly List<(string Name, Action Body)> _parts = new();
+        bool _ran;
+
+        public ZGuests Add(char part, string name, Action body)
+        {
+            if (ZPart(part)) _parts.Add((name, body));
+            return this;
+        }
+
+        /// <summary>What the host calls in its wait, or null with no part.</summary>
+        public Action? InWait => _parts.Count == 0 ? null : Run;
+
+        public void Run()
+        {
+            if (_ran) return;
+            _ran = true;
+            foreach (var (name, body) in _parts) PartTimed(name, body);
+        }
     }
 
     /// <summary>Whether "--z-parts=" names this part, or is absent.</summary>
@@ -284,7 +316,7 @@ internal static partial class Program
 
     static void ZGateBesideTransportWork()
     {
-        const int runs = 30, holdMs = 1500;
+        const int runs = 30, holdMs = 750;
         using var work = PeerProcess.Start("Z2-transport");
         using var create = PeerProcess.Start("Z2-create");
 
@@ -327,9 +359,10 @@ internal static partial class Program
         string r2 = p.Send("zrun 0 throw");
         Check("Z3: a callback that throws leaves the work's outcome as it was",
               PeerProcess.Field(r2, "result") == "True" && PeerProcess.Field(r2, "calls") == "1", r2);
-        // The work reports, then holds its lock 3 s more and ends. The
-        // callback blocks 7 s, and 4.5 s in, after the work has ended,
-        // another thread tries both locks.
+        // The work reports, then holds its lock 1.5 s more and ends. The
+        // callback blocks 3.5 s, and 2 s in, after the work has ended,
+        // another thread tries both locks for 1 s each, ending before the
+        // callback does.
         string r3 = p.Send("zrun 0 block", 60_000);
         Check("Z3: a callback that blocks past the end of the work leaves the deploy and the transport locks free",
               PeerProcess.Field(r3, "result") == "True" && PeerProcess.Field(r3, "free") == "True", r3);
@@ -341,7 +374,9 @@ internal static partial class Program
     {
         using var first = PeerProcess.Start("Z4-first");
         using var second = PeerProcess.Start("Z4-second");
-        string r1 = first.Send("zrepair 6000 1000");
+        // The PnP work runs 4.5 s, so a repair that waited for it would
+        // take half again the 3 s the check allows.
+        string r1 = first.Send("zrepair 4500 1000");
         long ms1 = LongField(r1, "ms");
         Check("Z4: the first repair gives up after its 1 s budget while its PnP work runs on",
               PeerProcess.Field(r1, "result") == "False" && ms1 >= 0 && ms1 < 3000, r1);
@@ -396,27 +431,26 @@ internal static partial class Program
         {
             string planted = PlantCopy(dir, "USBip-zprobe.exe");
             using var peer = PeerProcess.Start("Z6");
-            using (var first = Process.Start(new ProcessStartInfo(planted) { UseShellExecute = false, CreateNoWindow = true })!)
+            using (var installer = Process.Start(new ProcessStartInfo(planted) { UseShellExecute = false, CreateNoWindow = true })!)
             {
+                var running = Stopwatch.StartNew();
                 string r1 = peer.Send("zinstallers 1000");
                 Check("Z6: an install gives up at its timeout while another installer runs",
                       PeerProcess.Field(r1, "result") == "False" && LongField(r1, "ms") >= 900, r1);
-                first.WaitForExit(20_000);
-            }
-            using (var second = Process.Start(new ProcessStartInfo(planted) { UseShellExecute = false, CreateNoWindow = true })!)
-            {
+                long began = running.ElapsedMilliseconds;
                 string r2 = peer.Send("zinstallers 30000", 60_000);
                 // Read as the reply comes: an install that went on without
                 // waiting answers while the 6 s installer still runs. The
                 // lower bound is the installer's: one that ended at once, on a
                 // loader failure, leaves nothing to wait for, and the 3 s it
-                // allows against the installer's 6 s is no race.
-                bool endedFirst = second.HasExited;
+                // allows against the more than 4.5 s the installer has left
+                // after the first install's 1 s is no race.
+                bool endedFirst = installer.HasExited;
                 long ms = LongField(r2, "ms");
                 Check("Z6: an install waits for the running installer to end, and goes on",
                       PeerProcess.Field(r2, "result") == "True" && endedFirst && ms >= 3000 && ms < 20_000,
-                      $"{r2}, the installer {(endedFirst ? "had ended" : "still ran")} when the reply came");
-                second.WaitForExit(20_000);
+                      $"{r2}, the installer {(endedFirst ? "had ended" : "still ran")} when the reply came, the install began {began} ms after the installer started");
+                installer.WaitForExit(20_000);
             }
             string r3 = peer.Send("zinstallers 1000");
             Check("Z6: with no installer running an install goes on at once",
@@ -445,7 +479,9 @@ internal static partial class Program
 
     // ── Z8 ─────────────────────────────────────────────────────────────
 
-    static void ZWinUsbPackageLock()
+    /// <summary>Part 8. <paramref name="inLock"/> runs while the probe holds
+    /// the deploy lock, and the window ends no sooner for it.</summary>
+    static void ZWinUsbPackageLock(Action? inLock)
     {
         using (var p = PeerProcess.Start("Z8-held"))
         {
@@ -454,17 +490,23 @@ internal static partial class Program
             if (!Ok(c)) { Check("Z8: the program creates a GameCube adapter", false, c); return; }
             var deploy = Native.AdminMutex("Deploy");
             string early;
+            long releasedAt;
             try
             {
                 try { deploy.WaitOne(); } catch (AbandonedMutexException) { }
+                var held = Stopwatch.StartNew();
                 p.Post("bindwinusb");
+                inLock?.Invoke();
                 // Longer than a first add takes: inf2cat, signtool, pnputil.
-                early = p.Receive("bindwinusb, while the probe holds the deploy lock", 30_000);
+                early = p.Receive("bindwinusb, while the probe holds the deploy lock",
+                                  (int)Math.Max(0, 30_000 - held.ElapsedMilliseconds));
                 Check("Z8: BindWinUsb does not add its package while another program holds the deploy lock",
                       early.StartsWith("ERR timeout", StringComparison.Ordinal), early);
             }
-            finally { deploy.ReleaseMutex(); deploy.Dispose(); }
+            finally { releasedAt = Stopwatch.GetTimestamp(); deploy.ReleaseMutex(); deploy.Dispose(); }
             string bound = early.StartsWith("ERR timeout", StringComparison.Ordinal) ? p.Receive("bindwinusb, once it is free", 120_000) : early;
+            if (p.LastArrival != 0)
+                Console.WriteLine($"    Z8: the bind replied {Stopwatch.GetElapsedTime(releasedAt, p.LastArrival).TotalMilliseconds:F0} ms after the probe let the deploy lock go");
             Check("Z8: it binds once the lock is free", bound == "OK bindwinusb Bound", bound);
         }
         Clean();
@@ -473,9 +515,14 @@ internal static partial class Program
         using var b = PeerProcess.Start("Z8-b");
         string ca = a.Send("create gc -"), cb = b.Send("create gc -");
         if (!Ok(ca) || !Ok(cb)) { Check("Z8: two programs create a GameCube adapter each", false, $"{ca} / {cb}"); return; }
+        long posted = Stopwatch.GetTimestamp();
         a.Post("bindwinusb");
         b.Post("bindwinusb");
-        string ra = a.Receive("bindwinusb", 180_000), rb = b.Receive("bindwinusb", 180_000);
+        string ra = a.Receive("bindwinusb", 180_000);
+        long atA = a.LastArrival;
+        string rb = b.Receive("bindwinusb", 180_000);
+        long atB = b.LastArrival;
+        Console.WriteLine($"    Z8: the two binds replied {Stopwatch.GetElapsedTime(posted, atA).TotalMilliseconds:F0} and {Stopwatch.GetElapsedTime(posted, atB).TotalMilliseconds:F0} ms after the posts");
         Check("Z8: two programs of one build bind at the same moment, and both bind", ra == "OK bindwinusb Bound" && rb == "OK bindwinusb Bound", $"{ra} / {rb}");
     }
 
@@ -515,7 +562,9 @@ internal static partial class Program
         return (port, bus, vhci);
     }
 
-    static void ZRebindAfterReimport()
+    /// <summary>Part 9. <paramref name="inWait"/> runs while it waits for the
+    /// host controller's re-import.</summary>
+    static void ZRebindAfterReimport(Action? inWait)
     {
         var touched = new HashSet<(int Port, string BusId)>();
         try
@@ -551,9 +600,11 @@ internal static partial class Program
 
             // The host controller's attempt goes out 30 s after the drop
             // (persistent.cpp start_attach_attempts, DELAY).
+            inWait?.Invoke();
             int y = 0;
             WaitFor(() => (y = Vhci.Imported().FirstOrDefault(r => r.Port == portA && r.BusId == busA).VhciPort) > 0,
                     (int)Math.Max(0, 45_000 - dropped.ElapsedMilliseconds));
+            Console.WriteLine($"    Z9: the re-import came {dropped.Elapsed.TotalSeconds:F1} s after the drop");
             Check($"Z9: the host controller imports {busA} again, on another vhci port", y > 0 && y != x, $"vhci port {y}");
             if (y <= 0) return;
             string? devA2 = null;
@@ -675,9 +726,10 @@ internal static partial class Program
         Check("Za: the follow-up thread runs", int.TryParse(PeerProcess.Field(t1, "n"), out int n1) && n1 >= 1, t1);
         string c = p.Send("zfollow claim", 30_000);
         Check("Za: the lock holder claims under the holder name the cleanup saw and lets the lock go", Ok(c), c);
-        // The follow-up retries every 250 ms, so in 3 s it has decided more
-        // than once.
-        Thread.Sleep(3000);
+        // The follow-up waits for the WinUSB lock and decides as soon as it
+        // is let go, then again every 250 ms (RegistryLedger.FollowUp), so
+        // in 1 s it has decided more than once.
+        Thread.Sleep(1000);
         string k = p.Send("zfollow check");
         string t2 = p.Send("threads HMWinUsbFollowUp");
         Check("Za: the follow-up keeps the entry and the fresh claim",
@@ -737,10 +789,12 @@ internal static partial class Program
             try
             {
                 try { deploy.WaitOne(); } catch (AbandonedMutexException) { }
+                var posted = Stopwatch.StartNew();
                 a.Post($"zcert {name}");
                 b.Post($"zcert {name}");
+                // Both posted together, so both windows run 4 s from the posts.
                 ea = a.Receive("zcert, while the probe holds the deploy lock", 4000);
-                eb = b.Receive("zcert, while the probe holds the deploy lock", 4000);
+                eb = b.Receive("zcert, while the probe holds the deploy lock", (int)Math.Max(0, 4000 - posted.ElapsedMilliseconds));
                 Check("Zb: neither program adds the certificate while another holds the deploy lock",
                       ea.StartsWith("ERR timeout", StringComparison.Ordinal) && eb.StartsWith("ERR timeout", StringComparison.Ordinal)
                       && CertCount(StoreName.My, name) == 0, $"{ea} / {eb}, {CertCount(StoreName.My, name)} in My");
@@ -759,7 +813,9 @@ internal static partial class Program
 
     // ── Zc ─────────────────────────────────────────────────────────────
 
-    static void ZBindWhileDevnodeLeaves()
+    /// <summary>Part c. <paramref name="inWait"/> runs while it waits for the
+    /// host controller's re-import, after the bind has thrown.</summary>
+    static void ZBindWhileDevnodeLeaves(Action? inWait)
     {
         var touched = new HashSet<(int Port, string BusId)>();
         try
@@ -792,6 +848,7 @@ internal static partial class Program
             }
             finally { devnodes.ReleaseMutex(); devnodes.Dispose(); }
             string r = a.Receive("bindwinusb", 120_000);
+            Console.WriteLine($"    Zc: the bind replied {dropped.Elapsed.TotalSeconds:F1} s after the drop");
             var after = EnumDriver(devA);
             Console.WriteLine($"    Zc: the bind: {r}; {devA} was {before.Service} {before.Class}, is {after.Service} {after.Class}");
             Check("Zc: the bind changes neither the driver nor the setup class of the devnode that left",
@@ -805,9 +862,13 @@ internal static partial class Program
                   string.Join(",", WinUsbHolders(devA)));
 
             // The host controller's attempt goes out 30 s after the drop.
+            // The 15 s on input.inf below count from the settled devnode,
+            // however late the wait ends.
+            inWait?.Invoke();
             int y = 0;
             WaitFor(() => (y = Vhci.Imported().FirstOrDefault(i => i.Port == portA && i.BusId == busA).VhciPort) > 0,
                     (int)Math.Max(0, 45_000 - dropped.ElapsedMilliseconds));
+            Console.WriteLine($"    Zc: the re-import came {dropped.Elapsed.TotalSeconds:F1} s after the drop");
             string? dev2 = null;
             if (y > 0) WaitFor(() => (dev2 = Usb.OnVhciPort(0x057E, 0x0337, y)) != null, 15_000);
             // The bind threw, so the program was told nothing is bound, and a
@@ -1122,9 +1183,9 @@ internal static partial class Program
 ///                         mode none: no callback. check: the callback
 ///                         tries the deploy and the transport locks from
 ///                         another thread. throw: the callback throws.
-///                         block: the work reports, then holds its lock 3 s
-///                         and ends, and the callback blocks 7 s and tries
-///                         both locks 4.5 s in
+///                         block: the work reports, then holds its lock 1.5 s
+///                         and ends, and the callback blocks 3.5 s and tries
+///                         both locks 2 s in
 ///   zgate                 DriverDeploy.EnsureForCreate, timed
 ///   zrepair &lt;pnp&gt; &lt;budget&gt; UsbipDriverInstaller.RepairForProbe with a
 ///                         restart that sleeps &lt;pnp&gt; ms and a transport
@@ -1343,11 +1404,11 @@ internal static class PeerZ
                 calls++;
                 var t = new Thread(() =>
                 {
-                    Thread.Sleep(4500);
+                    Thread.Sleep(2000);
                     free = LocksFreeFromAnotherThread();
                 });
                 t.Start();
-                Thread.Sleep(7000);
+                Thread.Sleep(3500);
                 t.Join();
             },
             _ => throw new ArgumentException(mode),
@@ -1361,7 +1422,7 @@ internal static class PeerZ
                 Thread.Sleep(holdMs);
             }
             report("zrun progress");
-            if (mode == "block") Thread.Sleep(3000);
+            if (mode == "block") Thread.Sleep(1500);
             return true;
         };
         var sw = Stopwatch.StartNew();
@@ -1372,7 +1433,7 @@ internal static class PeerZ
     }
 
     /// <summary>Whether a thread other than the caller takes the deploy and
-    /// the transport locks within 2 s each.</summary>
+    /// the transport locks within 1 s each.</summary>
     static bool LocksFreeFromAnotherThread()
     {
         bool ok = false;
@@ -1387,7 +1448,7 @@ internal static class PeerZ
     static bool TryTake(string obj)
     {
         using var m = new Mutex(false, AdminName(obj));
-        try { if (!m.WaitOne(2000)) return false; }
+        try { if (!m.WaitOne(1000)) return false; }
         catch (AbandonedMutexException) { }
         m.ReleaseMutex();
         return true;
