@@ -3,8 +3,9 @@
 // call that registers a devnode (SetupDiCreateDeviceInfoW, SetupDiCallClassInstaller,
 // SwdDeviceFactory.Create), removes or uninstalls one (SetupDiRemoveDevice,
 // CM_Uninstall_DevNode, DIF_REMOVE, SwdDeviceFactory.Remove, pnputil
-// /remove-device, devcon remove), installs a driver on one (pnputil
-// /install, DiInstallDevice, hmswd.exe force-driver), disables, starts or
+// /remove-device, devcon remove), installs a driver or the null driver on
+// one (pnputil /install, DiInstallDevice, DiInstallNullDriver, hmswd.exe
+// force-driver), disables, starts or
 // re-enumerates one, writes a property on one, or plugs a USB/IP import in or
 // out, must sit in a method that takes the lock before it, or in one of the
 // three helpers that only run under it (DifRemoveDevice, DisableAndUninstall,
@@ -44,7 +45,7 @@ internal static class LockCoverage
         "SetupDiRemoveDevice(", "CM_Uninstall_DevNode(", "DIF_REMOVE,", "SwdDeviceFactory.Remove(",
         "/remove-device", "remove \\\"@",
         "DifRemoveDevice(", "DisableAndUninstall(", "RemoveDeviceLocked(",
-        " /install\"", "DiInstallDevice(", "\"force-driver\"", "RunSilentInstall(exe)",
+        " /install\"", "DiInstallDevice(", "DiInstallNullDriver(", "\"force-driver\"", "RunSilentInstall(exe)",
         "CM_Disable_DevNode(", "CM_Enable_DevNode(", "CM_Setup_DevNode(", "CM_Reenumerate_DevNode(",
         "CM_Query_And_Remove_SubTreeW(", "/uninstall /force",
         "CM_Set_DevNode_PropertyW(", "SetupDiSetDeviceRegistryPropertyW(", "CM_Set_DevNode_Registry_PropertyW(",
@@ -99,8 +100,10 @@ internal static class LockCoverage
         ("PLUGOUT_HARDWARE,", "Detach", "attach and detach"),
         // The transport driver update.
         ("\"force-driver\"", "ReplaceLegacyTransport", "hmswd.exe force-driver"),
-        // A WinUSB bind.
+        // A WinUSB bind, and on Windows 10 its null driver first.
         ("DiInstallDevice(", "InstallOn", "WinUSB bind"),
+        ("DiInstallNullDriver(", "InstallFromInf", "WinUSB bind"),
+        ("DiInstallDevice(", "InstallFromInf", "WinUSB bind"),
         // A registration's driver install, after its hold.
         ("DiInstallDevice(", "InstallBestStoreDriver", "registration's DiInstallDevice"),
     };

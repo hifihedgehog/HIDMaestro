@@ -1365,8 +1365,9 @@ public static partial class DeviceManager
     /// controller, under the deploy lock, which restarts every import's
     /// subtree. Run only on a transport swap.</item>
     /// <item>A WinUSB bind, DiInstallDevice on the device, which takes its
-    /// HID collections away. Only a persona that declares a WinUSB binding
-    /// makes one.</item>
+    /// HID collections away, after the null driver where its driver list
+    /// cannot carry the package (Windows 10). Only a persona that declares a
+    /// WinUSB binding makes one.</item>
     /// <item>A registration's DiInstallDevice, which runs once its hold has
     /// ended, on the controller's own devnode. Its HID child is linked into
     /// the HIDClass list by Plug and Play after the hold, with no lock: the
