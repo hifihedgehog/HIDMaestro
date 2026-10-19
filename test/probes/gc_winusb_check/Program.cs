@@ -51,6 +51,14 @@ internal static class Program
 {
     const uint CONFIGFLAG_REINSTALL = 0x20;
 
+    /// <summary>How long a check looks after a sweep for a driver change on
+    /// a present devnode. A sweep restores its entries before it returns
+    /// (RegistryLedger.Sweep), and a restore that installed a driver would
+    /// do it with DiInstallDevice, which returns once the driver is on the
+    /// devnode. What runs after the sweep is the follow-up it started, which
+    /// looks again every 250 ms (RegistryLedger.FollowUp). Two of its laps.</summary>
+    const int SweepSettleMs = 500;
+
     static int Main(string[] args)
     {
         if (args.Length > 0 && args[0] == "child")
@@ -357,7 +365,7 @@ internal static class Program
                 Probe.Check("and the ledger holds it for this controller",
                     RegistryLedger.HeldWinUsbDevnodes().Contains(id, StringComparer.OrdinalIgnoreCase));
                 RegistryLedger.PruneDead();
-                Thread.Sleep(3000);
+                Thread.Sleep(SweepSettleMs);
                 Probe.Check("a sweep drops the dead holder and leaves it on WinUSB",
                     Devnodes.Service(id) == "WINUSB" && Devnodes.Status(id) is { Problem: 0 }, $"{Devnodes.Service(id)}");
             }
@@ -368,7 +376,7 @@ internal static class Program
                 // A restore never installs a driver on a present devnode: the
                 // stand-in keeps WinUSB, and the entry stays until it leaves.
                 RegistryLedger.PruneDead();
-                Thread.Sleep(3000);
+                Thread.Sleep(SweepSettleMs);
                 Probe.Check("the reclaim leaves the present stand-in on WinUSB, with no reinstall flag",
                     Devnodes.Service(id) == "WINUSB" && ((Devnodes.ConfigFlags(id) ?? 0) & CONFIGFLAG_REINSTALL) == 0,
                     $"{Devnodes.Service(id)}, ConfigFlags 0x{Devnodes.ConfigFlags(id) ?? 0:X}");
