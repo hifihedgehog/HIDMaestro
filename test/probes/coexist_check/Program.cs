@@ -133,8 +133,7 @@
 //      claim during a sweep, the test certificate under the deploy lock, a
 //      bind whose devnode leaves, and a dispose during a bind.
 //      SectionZ.cs has the detail.
-//   S71 runs A to D, F to H, J to M and O to S, with E, N, T, U, W, X
-//   and Y in its coexistence area and V and Z in its usbip area
+//   S71 runs A to H and J to Z, and S72 runs I
 //   (test/regression/README.md).
 //
 // "child-paths" [sandbox] checks the 0xCA invariant, no two HID children
