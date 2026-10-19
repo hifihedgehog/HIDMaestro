@@ -916,7 +916,16 @@ internal static partial class SharedMemoryIO
     /// around the two barriers are the same. A view of zero still throws
     /// before anything is written, as Marshal.WriteInt32 threw. The two
     /// lanes take spans, so a caller writes its frame from where it already
-    /// is, with no copy into a buffer of its own first.</para></summary>
+    /// is, with no copy into a buffer of its own first.</para>
+    ///
+    /// <para>Compiled fully optimized from its first call. Tier-0 code of
+    /// these span and pointer stores calls a helper for every slice, span
+    /// and copy: with the process on one CPU, where tiering waits longest, a
+    /// 63-byte frame took 35 ns, the same code optimized from its first call
+    /// 18, and v1.12.0's Marshal calls, already compiled in CoreLib, 26. A
+    /// program's first frames, and every frame while its tiering waits, ran
+    /// that code.</para></summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static unsafe void WriteInputFrame(IntPtr view, IntPtr eventHandle, ref uint seqNo,
                                        ReadOnlySpan<byte> data, int dataLen, byte[]? gipData,
                                        int dataOffset = 0,

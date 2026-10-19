@@ -158,6 +158,9 @@ internal static unsafe class Crc32
         fixed (byte* p = bytes) return Update(crc, p, bytes.Length);
     }
 
+    // Compiled fully optimized from its first call, as the frame writer is:
+    // tier-0 code calls Le32 four times a step instead of inlining it.
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveOptimization)]
     public static uint Update(uint crc, byte* p, int len)
     {
         fixed (uint* t = s_table)
