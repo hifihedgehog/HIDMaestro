@@ -4,17 +4,23 @@
 // Under the real BLUETOOTH descriptor (extracted from a live Pro's SDP
 // cache), report 0x3F is the only report DirectInput can parse: 16
 // buttons, null-state hat, X/Y/Rx/Ry 16-bit. The full-mode family is
-// vendor-blob, invisible to joy.cpl. Pre-handshake the driver streams
-// genuine 12-byte 0x3F simple-mode frames; the first 0x01 subcommand
-// arms full mode and the stream becomes the 49-byte BT 0x30.
+// vendor-blob, invisible to joy.cpl. Before the handshake the pad sends
+// the 12-byte 0x3F simple-mode report when its bytes change, as a real
+// pad pushes it on a press or release (dekuNukem bluetooth_hid_notes.md,
+// "INPUT 0x3F"). Through v1.12.0 it streamed every 15 ms instead, and
+// v2.0.0 changed that on purpose (docs/design/data-driven-devices.md,
+// decision (e)), and protocol_engine_check's Deliberate.Change holds the
+// engine to it. The first 0x01 subcommand arms full mode and the stream
+// becomes the 49-byte BT 0x30 on the 15 ms clock.
 //
 // Phases:
-//   1. Idle stream is 12-byte 0x3F: buttons 0 stable (no strobe), hat
-//      nibble 8 (null), all four axes 0x8000.
+//   1. Nothing changes, nothing streams: no 0x3F stream at rest, a press
+//      and a release each send one 12-byte 0x3F, and the one at rest has
+//      buttons 0, hat nibble 8 (null) and all four axes 0x8000.
 //   2. Submitted state lands in simple-mode fields: A -> byte1 bit1,
 //      ZR -> byte1 bit7, dpad up -> hat 0, X full right / Y full up.
-//   3. Held pad answers a 0x01 subcommand (0x21 reply, 49 bytes) but
-//      the stream stays 0x3F.
+//   3. Held pad answers a 0x01 subcommand (0x21 reply, 49 bytes), and a
+//      change after it still sends 0x3F, no 0x30.
 //   4. Unheld pad flips to 49-byte 0x30 full-mode on the first
 //      subcommand (timer advancing, battery byte, A at byte3 bit3).
 //
@@ -69,6 +75,10 @@ internal static class Program
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern IntPtr CreateEventW(IntPtr attrs, bool manual, bool initial, IntPtr name);
 
+    [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    static extern bool HidD_FlushQueue(SafeFileHandle h);
+
     const uint GENERIC_READ = 0x80000000, GENERIC_WRITE = 0x40000000;
     const uint FILE_SHARE_RW = 0x3, OPEN_EXISTING = 3, FILE_FLAG_OVERLAPPED = 0x40000000;
 
@@ -84,14 +94,14 @@ internal static class Program
     // length so shape asserts can guard descriptor drift.
     static byte[]? HidRead(int timeoutMs)
     {
-        var buf = new byte[362];
+        var buf = GC.AllocateArray<byte>(362, pinned: true);
         var ov = new NativeOverlapped { EventHandle = s_readEvent };
         if (!ReadFile(s_hid, buf, 362, IntPtr.Zero, ref ov)
             && Marshal.GetLastWin32Error() != 997 /* ERROR_IO_PENDING */)
             return null;
         if (!GetOverlappedResultEx(s_hid, ref ov, out uint read, (uint)timeoutMs, false))
         {
-            CancelIoEx(s_hid, IntPtr.Zero);
+            CancelAndWait(ref ov);
             return null;
         }
         s_lastReadLen = (int)read;
@@ -101,7 +111,7 @@ internal static class Program
     // BT descriptor: OutputReportByteLength is 49 (48 vendor bytes + ID).
     static bool HidWrite(byte[] report)
     {
-        var buf = new byte[49];
+        var buf = GC.AllocateArray<byte>(49, pinned: true);
         Array.Copy(report, buf, Math.Min(report.Length, 49));
         var ov = new NativeOverlapped { EventHandle = s_writeEvent };
         if (!WriteFile(s_hid, buf, 49, IntPtr.Zero, ref ov)
@@ -109,11 +119,39 @@ internal static class Program
             return false;
         if (!GetOverlappedResultEx(s_hid, ref ov, out uint written, 1000, false))
         {
-            CancelIoEx(s_hid, IntPtr.Zero);
+            CancelAndWait(ref ov);
             return false;
         }
         return written == 49;
     }
+
+    // A canceled transfer still completes, and the system writes its status
+    // into the OVERLAPPED and its bytes into the buffer when it does
+    // (CancelIoEx on Microsoft Learn: the OVERLAPPED must not be freed or
+    // reused until the canceled operation has completed). The OVERLAPPED
+    // lives in the caller's frame and the buffers are pinned, so this waits
+    // for the completion before the frame returns, as switch_pro_check does.
+    static void CancelAndWait(ref NativeOverlapped ov)
+    {
+        CancelIoEx(s_hid, IntPtr.Zero);
+        GetOverlappedResultEx(s_hid, ref ov, out _, 0xFFFFFFFF /* INFINITE */, false);
+    }
+
+    /// <summary>Every report that arrives within <paramref name="ms"/>.</summary>
+    static System.Collections.Generic.List<byte[]> Collect(int ms)
+    {
+        var got = new System.Collections.Generic.List<byte[]>();
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < ms)
+        {
+            var r = HidRead((int)Math.Max(1, ms - sw.ElapsedMilliseconds));
+            if (r != null) got.Add(r);
+        }
+        return got;
+    }
+
+    static string Ids(System.Collections.Generic.List<byte[]> frames)
+        => frames.Count == 0 ? "none" : string.Join(",", frames.Select(f => f[0].ToString("X2")));
 
     static byte[]? ReadUntil(byte reportId, int timeoutMs, Func<byte[], bool>? accept = null)
     {
@@ -191,19 +229,20 @@ internal static class Program
         { IsBackground = true };
         pump.Start();
 
-        // VIRTUAL pad only: a real Pro paired to this box shares VID/PID
-        // (2026-07-22). The virtual serves serial HM-CTL-<index>; a real
-        // one serves its MAC.
+        // THIS pad only: a real Pro paired to this box shares VID/PID
+        // (2026-07-22), and another program's virtual Switch Pro shares the
+        // HM-CTL- prefix. This one serves HM-CTL- and its own transport
+        // index (DeviceOrchestrator.DriverSerial). A real one serves its MAC.
+        string serial = DeviceOrchestrator.DriverSerial(ctrl.TransportIndex);
         string? path = null;
         for (int i = 0; i < 50 && path == null; i++)
         {
             path = HidDeviceEnumerator.Enumerate()
                 .FirstOrDefault(d => d.VendorId == 0x057E && d.ProductId == 0x2009
-                    && d.SerialNumberString != null
-                    && d.SerialNumberString.StartsWith("HM-CTL-"))?.DevicePath;
+                    && d.SerialNumberString == serial)?.DevicePath;
             if (path == null) Thread.Sleep(100);
         }
-        Check("virtual HID interface enumerates (VID 057E PID 2009, HM-CTL serial)", path != null, path ?? "");
+        Check($"virtual HID interface enumerates (VID 057E PID 2009, serial {serial})", path != null, path ?? "");
         if (path == null) { Volatile.Write(ref pumpStop, true); return 1; }
 
         s_readEvent = CreateEventW(IntPtr.Zero, true, false, IntPtr.Zero);
@@ -213,34 +252,41 @@ internal static class Program
         Check("HID device opens", !s_hid.IsInvalid);
         if (s_hid.IsInvalid) { Volatile.Write(ref pumpStop, true); return 1; }
 
-        // ── Phase 1: idle stream is descriptor-shaped ───────────────────
-        Console.WriteLine("\n-- Phase 1: idle stream (no protocol traffic yet) --");
+        // ── Phase 1: 0x3F is sent on a change, not streamed ─────────────
+        Console.WriteLine("\n-- Phase 1: 0x3F on change, no stream at rest (no protocol traffic yet) --");
 
-        var frames = new System.Collections.Generic.List<byte[]>();
-        int frameLen = -1;
-        var deadline = Stopwatch.StartNew();
-        while (frames.Count < 6 && deadline.ElapsedMilliseconds < 2000)
-        {
-            var r = HidRead(200);
-            if (r != null && r[0] == 0x3F) { frames.Add(r); frameLen = s_lastReadLen; }
-        }
-        Check("received idle 0x3F frames", frames.Count >= 4, $"{frames.Count}");
-        if (frames.Count >= 4)
+        // The pad sent its state at rest once, at its start, and the pump
+        // has submitted that same state every 8 ms since. Whatever the HID
+        // class queued before this handle opened is dropped, and then 600
+        // ms at rest must bring no report: a 15 ms stream would bring 40.
+        HidD_FlushQueue(s_hid);
+        var atRest = Collect(600);
+        Check("no report streams while nothing changes", atRest.Count == 0, Ids(atRest));
+
+        // A press sends one 0x3F, holding it sends no more, and the release
+        // sends one more: the pad's state at rest, read for its shape.
+        lock (pumpLock) pumpState = new HMGamepadState { Buttons = (HMButton)(1u << 1) };
+        var pressed = ReadUntil(0x3F, 800, r => (r[1] & 0x02) != 0);
+        Check("a press sends a 0x3F", pressed != null);
+        var holding = Collect(300);
+        Check("holding the press sends no more", holding.Count == 0, Ids(holding));
+        lock (pumpLock) pumpState = new HMGamepadState();
+        var released = ReadUntil(0x3F, 800, r => (r[1] & 0x02) == 0);
+        int frameLen = s_lastReadLen;
+        Check("the release sends a 0x3F", released != null);
+        var after = Collect(300);
+        Check("and nothing after it", after.Count == 0, Ids(after));
+        if (released != null)
         {
             // HidClass completes every read at InputReportByteLength
             // (362 under the BT descriptor), zero-padded. Verified
             // identical on a live BT Pro (2026-07-22 capture). Guards
             // descriptor drift.
             Check("reads complete at 362 (InputReportByteLength)", frameLen == 362, $"{frameLen}");
-            // The regression signature: full-mode bytes through the wrong
-            // map strobed byte 1; simple mode has stable button bytes.
-            bool byte1Stable = frames.All(f => f[1] == 0);
-            bool byte2Stable = frames.All(f => f[2] == 0);
-            Check("byte1 stable at 0 across frames (no strobe)", byte1Stable,
-                  string.Join(",", frames.Select(f => f[1].ToString("X2"))));
-            Check("byte2 stable at 0 across frames", byte2Stable);
+            Check("byte1 at 0 at rest", released[1] == 0, released[1].ToString("X2"));
+            Check("byte2 at 0 at rest", released[2] == 0, released[2].ToString("X2"));
 
-            var f0 = frames[^1];
+            var f0 = released;
             int x  = f0[4] | (f0[5] << 8);
             int y  = f0[6] | (f0[7] << 8);
             int rx = f0[8] | (f0[9] << 8);
@@ -307,9 +353,13 @@ internal static class Program
         Check("0x21 subcommand reply (the held copy answers)",
               ack != null && ack[14] == 0x02, ack != null ? $"len={s_lastReadLen}" : "no reply");
         Check("0x21 reply completes at 362 (padded)", ack != null && s_lastReadLen == 362, $"{s_lastReadLen}");
-        var still = ReadUntil(0x3F, 800);
-        Check("stream stays 0x3F on the held copy", still != null,
-              still != null ? $"len={s_lastReadLen}" : "no frame");
+        // The held copy never sets protocolSeen, so a change after the
+        // subcommand still goes out as 0x3F, and no 0x30 starts.
+        lock (pumpLock) pumpState = new HMGamepadState { Buttons = (HMButton)(1u << 1) };
+        var still = Collect(400);
+        lock (pumpLock) pumpState = new HMGamepadState();
+        Check("a change after it still sends 0x3F on the held copy, and no 0x30",
+              still.Any(f => f[0] == 0x3F && (f[1] & 0x02) != 0) && !still.Any(f => f[0] == 0x30), Ids(still));
 
         Volatile.Write(ref pumpStop, true);
         pump.Join(1000);
@@ -333,16 +383,16 @@ internal static class Program
             }) { IsBackground = true };
             pump2.Start();
 
+            string serial2 = DeviceOrchestrator.DriverSerial(ctrl2.TransportIndex);
             string? path2 = null;
             for (int i = 0; i < 50 && path2 == null; i++)
             {
                 path2 = HidDeviceEnumerator.Enumerate()
                     .FirstOrDefault(d => d.VendorId == 0x057E && d.ProductId == 0x2009
-                        && d.SerialNumberString != null
-                        && d.SerialNumberString.StartsWith("HM-CTL-"))?.DevicePath;
+                        && d.SerialNumberString == serial2)?.DevicePath;
                 if (path2 == null) Thread.Sleep(100);
             }
-            Check("second pad enumerates (HM-CTL serial)", path2 != null);
+            Check($"second pad enumerates (serial {serial2})", path2 != null);
             if (path2 != null)
             {
                 s_hid = CreateFileW(path2, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_RW,
@@ -355,7 +405,7 @@ internal static class Program
 
                     var nf = new System.Collections.Generic.List<byte[]>();
                     bool allLen362 = true;
-                    deadline.Restart();
+                    var deadline = Stopwatch.StartNew();
                     while (nf.Count < 4 && deadline.ElapsedMilliseconds < 2000)
                     {
                         var r = HidRead(200);
@@ -394,7 +444,7 @@ internal static class Program
         }
 
         Console.WriteLine(s_failures == 0
-            ? "\n=== PASS: idle stream 0x3F simple-mode; subcommand locks 49-byte 0x30 on unheld pad ==="
+            ? "\n=== PASS: 0x3F simple-mode on change; subcommand locks 49-byte 0x30 on unheld pad ==="
             : $"\n=== FAIL: {s_failures} check(s) failed ===");
         return s_failures == 0 ? 0 : 1;
     }
