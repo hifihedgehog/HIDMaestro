@@ -36,10 +36,12 @@
 //                  DualShock 4 and an Xbox 360 pad or the profiles named
 //                  (RateLive.cs)
 //   create [runs] [profile ...] [--settle=<ms>]
-//                  CreateController and Dispose for five kinds of device, or
+//                  CreateController and Dispose for four kinds of device, or
 //                  the catalog profiles named, with the SDK's own step
 //                  timings (HIDMAESTRO_TIMING), each controller up for <ms>
-//                  first
+//                  first. A keyboard or a mouse types and moves the pointer
+//                  on the desktop of whoever works at the machine, so none
+//                  is among the four: one is measured only when named
 //   report [runs] [calls]
 //                  offline, no elevation: one launch of the hot path's cost
 //                  under the one arithmetic, BuildReportInto, EncodeInput and
@@ -883,7 +885,7 @@ internal static partial class Program
     // ── Create and dispose ──────────────────────────────────────────────
 
     /// <summary>The catalog profiles named after the run count, in that
-    /// order, or all five. Returns 1 when a name is refused, 5 when a
+    /// order, or the default set. Returns 1 when a name is refused, 5 when a
     /// devnode runs another driver.</summary>
     static int Create(int runs, string[] only, int settleMs)
     {
@@ -897,7 +899,9 @@ internal static partial class Program
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
         ctx.InstallDriver();
-        var ids = new List<string> { Ds4, Xbox360, Composite, Keyboard };
+        // No keyboard or mouse unless named: a live one acts on the
+        // desktop of whoever works at the machine.
+        var ids = new List<string> { Ds4, Xbox360, Composite };
 #if !HM_BASE
         ids.Add(GameCube);
 #endif
