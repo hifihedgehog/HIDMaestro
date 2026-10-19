@@ -10,15 +10,18 @@
 //                  and outside the gate SubmitState on dualsense-bt once
 //                  its feature reads have armed it, steam-controller-2, the
 //                  Switch 2 Pro composite and the two Luna profiles
-//   e2e [runs] [profile[@report...] ...]
+//   e2e [runs] [profile[@report...][#command...] ...]
 //                  SubmitState to the driver's acknowledgement that a read
 //                  carried the frame, on a DualShock 4 and an Xbox 360 pad,
 //                  or the profiles named. A profile named is also read as a
 //                  host reads it: each output report given is written
-//                  first, then the time runs from SubmitState to the
-//                  ReadFile that returns a report carrying the new state,
-//                  and on a profile XInput lists, to the XInputGetState
-//                  that shows it
+//                  first, and each command given to the device's WinUSB
+//                  bulk OUT pipe, then the time runs from SubmitState to
+//                  the ReadFile that returns a report carrying the new
+//                  state, and on a profile XInput lists, to the
+//                  XInputGetState that shows it. A USB/IP profile's HID
+//                  interfaces are the ones Windows made under the USB
+//                  device the host controller plugged in
 //   feature [runs] [profile[@report...] ...]
 //                  feature answers as a host asks for them: HidD_GetFeature
 //                  on a UMDF2 profile, GET_REPORT(Feature) on a USB/IP one
@@ -732,7 +735,9 @@ internal static partial class Program
     /// reports, so it measures a 9bd6279 driver and a converted one alike.
     /// The profile's output reports, if any, are written first, as a host
     /// writes them (SDL's input-mode subcommand on a Switch Pro, which
-    /// starts the 0x30 stream). Calibrate learns which bytes tell the two
+    /// starts the 0x30 stream), and then its commands to the WinUSB
+    /// interface (the 03/0D that starts a Switch 2 Pro's reports, as SDL's
+    /// Switch 2 driver sends it). Calibrate learns which bytes tell the two
     /// states apart. Fifty submits per run, each after a random pause of 2
     /// to 19 ms, so a device that sends on a 15 ms clock is caught at every
     /// phase of it. A report not seen within 100 ms counts as missed, and
@@ -753,6 +758,11 @@ internal static partial class Program
                 return;
             }
             Thread.Sleep(100);
+        }
+        if (p.Commands is { Length: > 0 } commands && !WriteCommands(c, commands, out why))
+        {
+            Check($"{p.Text}: the commands written to its WinUSB interface", false, why);
+            return;
         }
         using var reader = new HidReader(dev);
         var a = new HMGamepadState { Buttons = HMButton.A };

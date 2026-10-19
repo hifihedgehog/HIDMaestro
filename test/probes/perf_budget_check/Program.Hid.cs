@@ -17,36 +17,75 @@ internal static partial class Program
 {
     // ── A controller's HID interfaces ────────────────────────────────────
 
-    /// <summary>The device paths of the HID interfaces of every child of a
-    /// devnode: the top-level collections HID class made for it. Waits up
-    /// to <paramref name="waitMs"/> for the first to appear.</summary>
-    static List<string> ChildHidInterfaces(string parentInstanceId, int waitMs = 5000)
+    /// <summary>The device paths of the HID interfaces of every devnode
+    /// below one, at any depth: the top-level collections HID class made
+    /// for a driver-backed controller's devnode, which are its children,
+    /// and for a USB/IP device's USB device, which are its interfaces'
+    /// children. Waits up to <paramref name="waitMs"/> for the first to
+    /// appear.</summary>
+    static List<string> HidInterfacesBelow(string rootInstanceId, int waitMs)
     {
         var sw = Stopwatch.StartNew();
         while (true)
         {
             var paths = new List<string>();
-            if (CM_Locate_DevNodeW(out uint parent, parentInstanceId, 0) == 0
-                && CM_Get_Child(out uint child, parent, 0) == 0)
-            {
-                do
-                {
-                    var id = new char[MaxDeviceIdLen + 1];
-                    if (CM_Get_Device_IDW(child, id, id.Length, 0) != 0) continue;
-                    string childId = new string(id, 0, Array.IndexOf(id, '\0') is int n and >= 0 ? n : id.Length);
-                    paths.AddRange(InterfacesOf(childId));
-                }
-                while (CM_Get_Sibling(out child, child, 0) == 0);
-            }
+            foreach (string id in DescendantIds(rootInstanceId)) paths.AddRange(InterfacesOf(id));
             if (paths.Count > 0 || sw.ElapsedMilliseconds >= waitMs) return paths;
             Thread.Sleep(50);
         }
     }
 
-    static List<string> InterfacesOf(string deviceId)
+    /// <summary>The device instance IDs of every devnode below one, at any
+    /// depth, as test\probes\probe_common\SteamDeviceLog.cs HidPathsUnder
+    /// walks them. Empty when the devnode is not there.</summary>
+    static List<string> DescendantIds(string rootInstanceId)
+    {
+        var ids = new List<string>();
+        if (CM_Locate_DevNodeW(out uint root, rootInstanceId, 0) != 0) return ids;
+        var pending = new Stack<uint>();
+        pending.Push(root);
+        var id = new char[MaxDeviceIdLen + 1];
+        while (pending.Count > 0)
+        {
+            if (CM_Get_Child(out uint child, pending.Pop(), 0) != 0) continue;
+            do
+            {
+                pending.Push(child);
+                if (CM_Get_Device_IDW(child, id, id.Length, 0) != 0) continue;
+                ids.Add(new string(id, 0, Array.IndexOf(id, '\0') is int n and >= 0 ? n : id.Length));
+            }
+            while (CM_Get_Sibling(out child, child, 0) == 0);
+        }
+        return ids;
+    }
+
+    /// <summary>The devnode a controller's HID interfaces are found under:
+    /// its own for a driver-backed one, and for a USB/IP one the USB device
+    /// the host controller plugged in, USB\VID_xxxx&amp;PID_yyyy\ and the
+    /// device's serial string, the instance ID Windows gives a device that
+    /// reports a serial number (switch2_composite_check and
+    /// valve_steam_check name it the same way). Null when it has
+    /// neither.</summary>
+    static string? OwnRoot(HMController c)
+    {
+        if (c.InstanceId is { } id) return id;
+        var d = c.UsbipHandle?.Device.Descriptors;
+        if (d?.SerialString == null) return null;
+        return string.Create(CultureInfo.InvariantCulture, $@"USB\VID_{d.VendorId:X4}&PID_{d.ProductId:X4}\{d.SerialString}");
+    }
+
+    /// <summary>How long Windows takes to show a new device's HID
+    /// interfaces: a driver-backed controller's are there when its create
+    /// returns, and a USB/IP device's come after the host controller plugs
+    /// it in and Windows enumerates its interfaces.</summary>
+    static int InterfaceWaitMs(HMController c) => c.InstanceId != null ? 5000 : 20000;
+
+    static List<string> InterfacesOf(string deviceId) => InterfacesOf(deviceId, GuidDevinterfaceHid);
+
+    static List<string> InterfacesOf(string deviceId, Guid interfaceClass)
     {
         var list = new List<string>();
-        var guid = GuidDevinterfaceHid;
+        var guid = interfaceClass;
         if (CM_Get_Device_Interface_List_SizeW(out uint len, ref guid, deviceId, 0) != 0 || len <= 1) return list;
         var buf = new char[len];
         if (CM_Get_Device_Interface_ListW(ref guid, deviceId, buf, len, 0) != 0) return list;
@@ -59,10 +98,11 @@ internal static partial class Program
     /// reason.</summary>
     static HidDevice? OpenOwnInterface(HMController c, Func<HidDevice, bool> want, out string why)
     {
-        string? parent = c.InstanceId;
-        if (parent == null) { why = "the controller has no devnode"; return null; }
-        var paths = ChildHidInterfaces(parent);
-        if (paths.Count == 0) { why = $"no HID interface under {parent} in 5 s"; return null; }
+        string? parent = OwnRoot(c);
+        if (parent == null) { why = "the controller has no devnode and no USB device"; return null; }
+        int waitMs = InterfaceWaitMs(c);
+        var paths = HidInterfacesBelow(parent, waitMs);
+        if (paths.Count == 0) { why = $"no HID interface under {parent} in {waitMs / 1000} s"; return null; }
         foreach (string path in paths)
         {
             var d = HidDevice.Open(path);
@@ -124,6 +164,62 @@ internal static partial class Program
         bool ok = WriteFile(d.Handle, buf, buf.Length, out _, IntPtr.Zero);
         error = ok ? 0 : Marshal.GetLastWin32Error();
         return ok;
+    }
+
+    // ── Commands to a WinUSB interface ───────────────────────────────────
+
+    /// <summary>Write each command, in order, to the first bulk OUT pipe of
+    /// the controller's WinUSB interface, as libusb writes a vendor command
+    /// (switch2_composite_check's Bulk). The interface is the one a
+    /// devnode below the controller's root registered under the
+    /// DeviceInterfaceGUID its device parameters hold, which a device's
+    /// Microsoft OS descriptors give Windows. False with the reason when no
+    /// such interface appears in 20 s or a write fails.</summary>
+    static bool WriteCommands(HMController c, byte[][] commands, out string why)
+    {
+        string? root = OwnRoot(c);
+        if (root == null) { why = "the controller has no devnode and no USB device"; return false; }
+        string? path = null;
+        var sw = Stopwatch.StartNew();
+        while (path == null && sw.ElapsedMilliseconds < 20000)
+        {
+            foreach (string id in DescendantIds(root))
+            {
+                using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{id}\Device Parameters");
+                var value = key?.GetValue("DeviceInterfaceGUIDs") ?? key?.GetValue("DeviceInterfaceGUID");
+                string? text = value switch { string[] many => many.FirstOrDefault(), string one => one, _ => null };
+                if (text == null || !Guid.TryParse(text, out Guid guid)) continue;
+                path = InterfacesOf(id, guid).FirstOrDefault();
+                if (path != null) break;
+            }
+            if (path == null) Thread.Sleep(100);
+        }
+        if (path == null) { why = $"no WinUSB interface under {root} in 20 s"; return false; }
+        // WinUSB takes a handle opened for overlapped I/O, and runs a call
+        // given no OVERLAPPED synchronously.
+        using var file = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, IntPtr.Zero);
+        if (file.IsInvalid) { why = $"open {path}: error {Marshal.GetLastWin32Error()}"; return false; }
+        if (!WinUsb_Initialize(file, out IntPtr usb)) { why = $"WinUsb_Initialize: error {Marshal.GetLastWin32Error()}"; return false; }
+        try
+        {
+            byte pipe = 0;
+            for (byte i = 0; pipe == 0 && WinUsb_QueryPipe(usb, 0, i, out var info); i++)
+                if (info.PipeType == UsbdPipeTypeBulk && (info.PipeId & 0x80) == 0) pipe = info.PipeId;
+            if (pipe == 0) { why = $"{path} has no bulk OUT pipe"; return false; }
+            uint timeout = 1000;
+            WinUsb_SetPipePolicy(usb, pipe, PIPE_TRANSFER_TIMEOUT, 4, ref timeout);
+            foreach (var command in commands)
+            {
+                if (!WinUsb_WritePipe(usb, pipe, command, (uint)command.Length, out uint written, IntPtr.Zero) || written != command.Length)
+                {
+                    why = $"bulk write to pipe 0x{pipe:X2}: error {Marshal.GetLastWin32Error()}";
+                    return false;
+                }
+            }
+        }
+        finally { WinUsb_Free(usb); }
+        why = "";
+        return true;
     }
 
     // ── A reader that stamps each report ─────────────────────────────────
@@ -222,11 +318,14 @@ internal static partial class Program
 
     /// <summary>What a report looks like in each of two states: each state
     /// is submitted twice, the last report read 150 ms after each submit is
-    /// kept, and the positions that hold the same byte in both reports of a
-    /// state are the ones a pattern compares. A counter or a time stamp
-    /// differs between the two and drops out. Null, with the reason, when a
-    /// submit brought no report or no compared position tells the states
-    /// apart.</summary>
+    /// kept, and a pattern compares the positions that hold one byte in both
+    /// reports of a state and another byte in the other state's, and byte 0
+    /// when all four reports hold the same one there (a report ID). Every
+    /// other byte drops out: a counter or a time stamp, and a counter's
+    /// higher bytes too, which can hold still through the calibration and
+    /// move later (a Steam Deck's report sequence number). Null, with the
+    /// reason, when a submit brought no report or no position tells the
+    /// states apart.</summary>
     static (ReportPattern A, ReportPattern B)? Calibrate(HMController c, HidReader rd, HMGamepadState a, HMGamepadState b, out string why)
     {
         var got = new byte[4][];
@@ -249,10 +348,11 @@ internal static partial class Program
         int telling = 0;
         for (int i = 0; i < care.Length; i++)
         {
-            care[i] = a0[i] == a1[i] && b0[i] == b1[i];
-            if (care[i] && a0[i] != b0[i]) telling++;
+            bool tells = a0[i] == a1[i] && b0[i] == b1[i] && a0[i] != b0[i];
+            if (tells) telling++;
+            care[i] = tells || (i == 0 && a0[0] == a1[0] && a0[0] == b0[0] && a0[0] == b1[0]);
         }
-        if (telling == 0) { why = $"no stable byte of the {a0.Length}-byte report tells the two states apart"; return null; }
+        if (telling == 0) { why = $"no byte of the {a0.Length}-byte report tells the two states apart"; return null; }
         why = $"{care.Count(x => x)} of {care.Length} bytes compared, {telling} tell the states apart";
         return (new ReportPattern(a0, care), new ReportPattern(b0, care));
     }
@@ -407,6 +507,29 @@ internal static partial class Program
 
     [DllImport("cfgmgr32.dll")]
     static extern int CM_Get_DevNode_PropertyW(uint devInst, ref DEVPROPKEY key, out uint type, byte[] buffer, ref uint size, uint flags);
+
+    const uint FILE_FLAG_OVERLAPPED = 0x40000000;
+    const int UsbdPipeTypeBulk = 2;
+    const uint PIPE_TRANSFER_TIMEOUT = 0x03;
+
+    // winusbio.h WINUSB_PIPE_INFORMATION.
+    [StructLayout(LayoutKind.Sequential)]
+    struct WINUSB_PIPE_INFORMATION { public int PipeType; public byte PipeId; public ushort MaximumPacketSize; public byte Interval; }
+
+    [DllImport("winusb.dll", SetLastError = true)]
+    static extern bool WinUsb_Initialize(SafeFileHandle device, out IntPtr handle);
+
+    [DllImport("winusb.dll", SetLastError = true)]
+    static extern bool WinUsb_Free(IntPtr handle);
+
+    [DllImport("winusb.dll", SetLastError = true)]
+    static extern bool WinUsb_QueryPipe(IntPtr handle, byte alternate, byte index, out WINUSB_PIPE_INFORMATION info);
+
+    [DllImport("winusb.dll", SetLastError = true)]
+    static extern bool WinUsb_SetPipePolicy(IntPtr handle, byte pipe, uint policy, uint length, ref uint value);
+
+    [DllImport("winusb.dll", SetLastError = true)]
+    static extern bool WinUsb_WritePipe(IntPtr handle, byte pipe, byte[] buffer, uint length, out uint transferred, IntPtr overlapped);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool ReadFile(SafeFileHandle h, byte[] buffer, int length, out int read, IntPtr overlapped);
