@@ -11,7 +11,8 @@
 //   OF3  T6 at HIDMAESTRO_TIMEOUT_SCALE 1, 1.5 and 2: a peer at each scale
 //        runs a tool whose child holds the output for 15 s scaled, and the
 //        tool runner returns at its 10 s drain bound scaled, with the output
-//        still open and the tool's exit code.
+//        still open and the tool's exit code. The three peers run at once,
+//        beside the checks below.
 //   OF4  The refusal. A directory this process's user owns, with a file
 //        under it held open so it cannot be moved aside, goes through the
 //        repair the shared root takes (ProtectedStaging.EnsureProtected,
@@ -118,25 +119,42 @@ internal static partial class Program
             bool pdAllowed = (bool)allowed.Invoke(null, new object[] { programData })!;
             Check("OF2: %ProgramData%, owned by SYSTEM with the DACL its folders inherit, may", pdAllowed, programData);
         }
-        foreach (string scale in new[] { "1", "1.5", "2" })
+        // OF3's three peers run at once, beside the checks after it. Each
+        // runner's drain bound is a timer in its own process, which nothing
+        // here shares, so the three wait out their bounds together and OF3
+        // takes the longest bound, not the sum of the three.
+        var of3 = new List<(string Scale, PeerProcess Peer)>();
+        try
         {
-            using var p = PeerProcess.Start("OF3-" + scale, timeoutScale: scale);
-            string h = p.Send("runtool beyond", 180_000);
-            Check($"OF3: at timeout scale {scale}, the tool runner returns at its drain bound, not when the child lets go", HeldForDrainBound(h), h);
+            foreach (string scale in new[] { "1", "1.5", "2" })
+            {
+                var p = PeerProcess.Start("OF3-" + scale, timeoutScale: scale);
+                of3.Add((scale, p));
+                p.Post("runtool beyond");
+            }
+            OfflineRefusal();
+            OfflinePinShape();
+            OfflineHeldTools();
+            OfflinePinLevels();
+            OfflineSquat();
+            OfflineSweep();
+            OfflineDiagFiles();
+            OfflineListings();
+            ObjectHolders.SelfCheck(Check);
+            OfflineCensusIndex();
+            OfflineKeyBelowFloor();
+            OfflineLedgerHolders();
+            OfflineExitRecord();
+            foreach (var (scale, p) in of3)
+            {
+                string h = p.Receive("runtool beyond", 180_000);
+                Check($"OF3: at timeout scale {scale}, the tool runner returns at its drain bound, not when the child lets go", HeldForDrainBound(h), h);
+            }
         }
-        OfflineRefusal();
-        OfflinePinShape();
-        OfflineHeldTools();
-        OfflinePinLevels();
-        OfflineSquat();
-        OfflineSweep();
-        OfflineDiagFiles();
-        OfflineListings();
-        ObjectHolders.SelfCheck(Check);
-        OfflineCensusIndex();
-        OfflineKeyBelowFloor();
-        OfflineLedgerHolders();
-        OfflineExitRecord();
+        finally
+        {
+            foreach (var (_, p) in of3) p.Dispose();
+        }
         Console.WriteLine();
         Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
