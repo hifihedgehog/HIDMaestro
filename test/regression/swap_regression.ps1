@@ -124,7 +124,7 @@ public class CMxz {
 }
 "@ -ErrorAction SilentlyContinue
 
-if (-not $KeepLogs) {
+if (-not $KeepLogs -and -not $ListOnly) {
     $diagLog = Join-Path $env:TEMP 'HIDMaestro\teardown_diag.log'
     if (Test-Path $diagLog) { Remove-Item $diagLog -Force }
 }
@@ -483,6 +483,18 @@ function Stop-HMTestProcess {
         return 'GRACEFUL'
     }
     return 'ALREADY_EXITED'
+}
+
+# Hard-kill a test process and everything it started, as a crash or Task
+# Manager's End process tree does. Windows PowerShell 5.1 runs on .NET
+# Framework, whose Process.Kill takes no argument and kills one process,
+# so taskkill /T does it. cmd keeps taskkill's own output and an error for
+# a process already gone out of PowerShell's error stream.
+function Stop-HMProcessTree {
+    param([System.Diagnostics.Process]$Proc)
+    if ($Proc.HasExited) { return }
+    & cmd.exe /c "taskkill /PID $($Proc.Id) /T /F >nul 2>&1"
+    $null = $Proc.WaitForExit(5000)
 }
 
 # Wait until the test process has created its initial controllers and the
@@ -920,7 +932,7 @@ function Scenario-ForceKill-Recovery {
     Wait-Ready -Proc $proc1
     # Hard-kill: no quit, no clean dispose. Simulates user closing
     # PadForge from Task Manager / a crash.
-    try { $proc1.Kill($true) } catch {}
+    Stop-HMProcessTree -Proc $proc1
     $proc1.WaitForExit(5000) | Out-Null
     Wait-CascadeSettle
 
@@ -1040,7 +1052,7 @@ function Scenario-ForceKill-MidCascade {
         Sleep-Scaled 5
     } finally {
         # Hard-kill while teardown still in flight.
-        try { $proc1.Kill($true) } catch {}
+        Stop-HMProcessTree -Proc $proc1
         $proc1.WaitForExit(5000) | Out-Null
     }
 
@@ -2252,12 +2264,15 @@ function Scenario-Switch-Family {
 }
 
 function Scenario-Arith-Roundtrip {
-    # The probe's diff mode, every float in [0, 1] through each conversion
-    # against the design note's table, takes about 9 minutes and runs by
-    # hand when the arithmetic or a descriptor range changes. The round
-    # trip and rounding checks here cover a regression in between.
     Invoke-Probe -Dir 'arith_roundtrip_check' -Exe 'ArithRoundtripCheck.exe' -Arguments 'check' `
                  -Message 'a raw value a consumer reads from a device no longer returns through the SDK as that value (see probe stdout for the conversion)'
+    # Every float in [0, 1] through each catalog conversion, against the
+    # design note's table, about 9 minutes: with the arith area, when the
+    # arithmetic or this probe changed.
+    if ($script:ActiveAreas.Contains('arith')) {
+        Invoke-Probe -Dir 'arith_roundtrip_check' -Exe 'ArithRoundtripCheck.exe' -Arguments 'diff' -Tag 'diff' `
+                     -Message 'a catalog conversion changes in a way the design note''s table does not list (see probe stdout for the conversion)'
+    }
 }
 
 # S92: profiles as data, the SDK side. profile_model_check loads the catalog
@@ -2292,102 +2307,75 @@ function Scenario-Contract-Live {
 #  Areas
 # ====================================================================
 #
-# A scenario with an Area runs when a file of that area changed since the
-# last release, so each check still runs whenever the code it guards
-# changes, and a run whose changes touch no area takes the core alone,
-# about 16 minutes on the development machine against about 45 for every
-# area. A change to a shared file runs every area, and so does a run
-# whose changes cannot be read (no git, or no release tag). The paths
-# are git paths from the repository root, matched with -like.
+# A scenario with an Area runs when a file that area depends on changed
+# since the last release, and a run whose changes reach no area takes the
+# core alone. $AreaMap names the files a change there reaches, with every
+# area those files feed. A changed file it does not name selects every
+# area, unless it is one of $QuietPaths, which no area scenario reads
+# beyond what the core runs anyway. So a file the map leaves out costs
+# time, never a check. A run whose changes cannot be read (no git, or no
+# release tag) runs every area. The paths are git paths from the
+# repository root, matched with -like.
+#
+# 'arith' is S90's diff over every float, about 9 minutes, and runs only
+# when the arithmetic or its probe changes, or with -All.
 
-$AreaPaths = [ordered]@{
-    # The USB/IP transport, its install, the WinUSB binding and the
-    # personas that run on it.
-    usbip = @(
+$EveryArea = @('usbip', 'coexistence', 'kbm', 'identity', 'xinput')
+
+$AreaMap = @(
+    # The USB/IP transport and the composite persona, which S59 and the
+    # coexistence sections create too.
+    @{ Areas = @('usbip', 'coexistence', 'identity'); Paths = @(
         'sdk/HIDMaestro.Core/Internal/Usbip/*',
-        'sdk/HIDMaestro.Core/Internal/WinUsbBinding.cs',
         'sdk/HIDMaestro.Core/Internal/UsbConfigurationSpec.cs',
-        'sdk/HIDMaestro.Core/Internal/PnputilHelper.cs',
-        'sdk/HIDMaestro.Core/Internal/RegistryLedger.cs',
+        'sdk/HIDMaestro.Core/Internal/DeviceClock.cs',
+        'sdk/HIDMaestro.Core/Internal/StreamClock.cs',
         'sdk/HIDMaestro.Core/UsbipPackage.json',
         'sdk/HIDMaestro.Core/HMUsbAudio.cs',
+        'profiles/sony/dualsense-composite.json') },
+    # The WinUSB binding, which sweeps restore, and coexist_check, which
+    # holds S71 and S72 and compiles two of device_oracle_check's files.
+    @{ Areas = @('usbip', 'coexistence'); Paths = @(
+        'sdk/HIDMaestro.Core/Internal/WinUsbBinding.cs',
+        'test/probes/coexist_check/*',
+        'test/probes/device_oracle_check/Golden.cs',
+        'test/probes/device_oracle_check/LeftValues.cs') },
+    # The GameCube ports, the Valve and Nintendo personas and their probes.
+    @{ Areas = @('usbip'); Paths = @(
         'sdk/HIDMaestro.Core/HMPort.cs',
         'profiles/valve/*',
         'profiles/nintendo/*',
         'test/probes/usbip_*',
         'test/probes/gc_*',
         'test/probes/valve_*',
-        'test/probes/switch2_composite_check/*',
-        'test/probes/coexist_check/*'
-    )
-    # Programs side by side: the ledger, the machine-wide claims, owner
-    # records and sweeps, the driver deploy and the staging the SDK runs
-    # elevated.
-    coexistence = @(
-        'sdk/HIDMaestro.Core/Internal/RegistryLedger.cs',
-        'sdk/HIDMaestro.Core/Internal/LedgerLock.cs',
-        'sdk/HIDMaestro.Core/Internal/MachineClaims.cs',
-        'sdk/HIDMaestro.Core/Internal/AdminNamespace.cs',
-        'sdk/HIDMaestro.Core/Internal/ObjectOwner.cs',
-        'sdk/HIDMaestro.Core/Internal/OwnerCensus.cs',
-        'sdk/HIDMaestro.Core/Internal/OwnerSweep.cs',
-        'sdk/HIDMaestro.Core/Internal/ProcessExitSignal.cs',
-        'sdk/HIDMaestro.Core/Internal/ProtectedStaging.cs',
-        'sdk/HIDMaestro.Core/Internal/DriverDeploy.cs',
-        'sdk/HIDMaestro.Core/Internal/DriverBuilder.cs',
-        'sdk/HIDMaestro.Core/Internal/PnputilHelper.cs',
-        'sdk/HIDMaestro.Core/Internal/ControllerLease.cs',
-        'sdk/HIDMaestro.Core/Internal/SharedMemoryIO.cs',
-        'sdk/HIDMaestro.Core/Internal/OemNameOverrideStore.cs',
-        'sdk/HIDMaestro.Core/HMCleanupScope.cs',
-        'sdk/HIDMaestro.Core/HMDriverInstall.cs',
-        'sdk/HIDMaestro.Core/HMOemNameOverride.cs',
-        'legacy_cache/*',
-        'test/probes/coexist_check/*'
-    )
-    # Keyboards and mice. A changed profile of type keyboard or mouse
-    # counts too, wherever its file is.
-    kbm = @(
+        'test/probes/switch2_composite_check/*') },
+    # Keyboards and mice. A profile of type keyboard or mouse selects kbm
+    # wherever its file is.
+    @{ Areas = @('kbm'); Paths = @(
         'sdk/HIDMaestro.Core/HMKeyboardMouse.cs',
         'sdk/HIDMaestro.Core/Internal/KeyboardMousePacker.cs',
-        'test/probes/kbm_*'
-    )
-    # A controller's identity across its lives.
-    identity = @(
-        'sdk/HIDMaestro.Core/Internal/DeviceIdentity.cs',
-        'sdk/HIDMaestro.Core/Internal/DeviceNodeCreator.cs',
-        'sdk/HIDMaestro.Core/Internal/SwdDeviceFactory.cs',
-        'sdk/HIDMaestro.Core/Internal/DeviceProperties.cs',
-        'test/probes/identity_*'
-    )
-    # XInput and WGI on the XUSB and xinputhid paths.
-    xinput = @(
+        'test/probes/kbm_*') },
+    # XInput and WGI. S59's Xbox families and the coexistence sections'
+    # xinputhid creates take these paths too.
+    @{ Areas = @('xinput', 'identity', 'coexistence'); Paths = @(
         'sdk/HIDMaestro.Core/Internal/XInputPresentation.cs',
         'sdk/HIDMaestro.Core/Internal/XInputSpec.cs',
         'sdk/HIDMaestro.Core/Internal/XusbAnswers.cs',
         'sdk/HIDMaestro.Core/Internal/GameInputMapping.cs',
-        'sdk/HIDMaestro.Core/Internal/SwdDeviceFactory.cs',
         'profiles/microsoft/*',
-        'test/probes/xusb_*'
-    )
-}
-
-# Files every area depends on: the driver, the create and teardown path,
-# the build, the test app and this script.
-$SharedPaths = @(
-    'driver/*',
-    'sdk/HIDMaestro.Core/HMContext.cs',
-    'sdk/HIDMaestro.Core/HMController.cs',
-    'sdk/HIDMaestro.Core/HIDMaestro.Core.csproj',
-    'sdk/HIDMaestro.Core/Internal/DeviceOrchestrator.cs',
-    'sdk/HIDMaestro.Core/Internal/DeviceManager.cs',
-    'sdk/HIDMaestro.Core/Resources/*',
-    'build/*',
-    'Directory.Build.*',
-    'test/HIDMaestroTest/*',
-    'test/Program.cs',
-    'test/regression/*'
+        'profiles/models/xusb-companion.json') },
+    @{ Areas = @('xinput'); Paths = @('test/probes/xusb_*') },
+    @{ Areas = @('identity'); Paths = @('profiles/sony/dualsense.json', 'test/probes/identity_*') },
+    # The arithmetic every report is built with: every area, and the diff.
+    @{ Areas = @('every', 'arith'); Paths = @('sdk/HIDMaestro.Core/Internal/WireArith.cs') },
+    @{ Areas = @('arith'); Paths = @('test/probes/arith_roundtrip_check/*') }
 )
+
+# Files whose change selects no area: text, the tools, the sandbox
+# experiments, every probe the map does not name (core scenarios' own),
+# and every profile but the device models, which any device can use.
+$QuietPaths = @('*.md', 'docs/*', 'LICENSE', '.gitignore', '.github/*', 'example/*', 'tools/*',
+                'test/sandbox/*', 'test/probes/*', 'profiles/*')
 
 function Get-ChangedFiles {
     param([string]$RepoRoot, [string]$Base)
@@ -2403,45 +2391,69 @@ function Get-ChangedFiles {
     }
     $files = @(& git -C $RepoRoot diff --name-only $Base -- 2>$null)
     if ($LASTEXITCODE -ne 0) { return $null }
-    return [PSCustomObject]@{ Scope = "since $($Base.Trim())"; Files = $files }
+    # Files git does not track yet change a run too.
+    $untracked = @(& git -C $RepoRoot ls-files --others --exclude-standard 2>$null)
+    if ($LASTEXITCODE -ne 0) { return $null }
+    return [PSCustomObject]@{ Scope = "since $($Base.Trim())"; Files = @($files + $untracked) }
+}
+
+# The areas one changed file selects, as names, with 'every' for all of
+# $EveryArea.
+function Get-FileAreas {
+    param([string]$File, [string]$RepoRoot)
+    $areas = New-Object 'System.Collections.Generic.HashSet[string]'
+    $mapped = $false
+    foreach ($entry in $AreaMap) {
+        if (@($entry.Paths | Where-Object { $File -like $_ }).Count -gt 0) {
+            $mapped = $true
+            foreach ($a in $entry.Areas) { [void]$areas.Add($a) }
+        }
+    }
+    if ($File -like 'profiles/*.json') {
+        $path = Join-Path $RepoRoot $File
+        if ((Test-Path $path) -and ((Get-Content $path -Raw) -match '"type"\s*:\s*"(keyboard|mouse)"')) {
+            $mapped = $true
+            [void]$areas.Add('kbm')
+        }
+    }
+    if (-not $mapped) {
+        $quiet = $File -notlike 'profiles/models/*' -and @($QuietPaths | Where-Object { $File -like $_ }).Count -gt 0
+        if (-not $quiet) { [void]$areas.Add('every') }
+    }
+    return @($areas)
 }
 
 $script:ActiveAreas = New-Object 'System.Collections.Generic.HashSet[string]'
 $script:NotRun = @()
 if ($All) {
-    foreach ($a in $AreaPaths.Keys) { [void]$script:ActiveAreas.Add($a) }
+    foreach ($a in $EveryArea + 'arith') { [void]$script:ActiveAreas.Add($a) }
     $script:AreaNote = 'every area (-All)'
 } elseif ($Core) {
     $script:AreaNote = 'none, the core alone (-Core)'
 } else {
     $repoRoot = (Resolve-Path (Join-Path $scriptDir '..\..')).Path
-    $diff = if ($Changed) { [PSCustomObject]@{ Scope = 'in the -Changed list'; Files = $Changed } }
-               else { Get-ChangedFiles -RepoRoot $repoRoot -Base $Since }
+    # Through powershell.exe -File a list arrives as one string, "a,b".
+    $listed = @($Changed | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
+    $diff = if ($listed.Count -gt 0) { [PSCustomObject]@{ Scope = 'in the -Changed list'; Files = $listed } }
+            else { Get-ChangedFiles -RepoRoot $repoRoot -Base $Since }
     if ($null -eq $diff) {
-        foreach ($a in $AreaPaths.Keys) { [void]$script:ActiveAreas.Add($a) }
+        foreach ($a in $EveryArea) { [void]$script:ActiveAreas.Add($a) }
         $script:AreaNote = 'every area, since the changes since the last release could not be read'
     } else {
-        $shared = @($diff.Files | Where-Object { $f = $_; @($SharedPaths | Where-Object { $f -like $_ }).Count -gt 0 })
-        if ($shared.Count -gt 0) {
-            foreach ($a in $AreaPaths.Keys) { [void]$script:ActiveAreas.Add($a) }
-            $script:AreaNote = "every area, since shared files changed $($diff.Scope) ($($shared[0])$(if ($shared.Count -gt 1) { " and $($shared.Count - 1) more" }))"
-        } else {
-            foreach ($a in $AreaPaths.Keys) {
-                foreach ($f in $diff.Files) {
-                    if (@($AreaPaths[$a] | Where-Object { $f -like $_ }).Count -gt 0) { [void]$script:ActiveAreas.Add($a); break }
+        $wide = @()
+        foreach ($f in $diff.Files) {
+            foreach ($a in (Get-FileAreas -File $f -RepoRoot $repoRoot)) {
+                if ($a -eq 'every') {
+                    $wide += $f
+                    foreach ($e in $EveryArea) { [void]$script:ActiveAreas.Add($e) }
+                } else {
+                    [void]$script:ActiveAreas.Add($a)
                 }
             }
-            foreach ($f in $diff.Files) {
-                if ($f -notlike 'profiles/*.json') { continue }
-                $path = Join-Path $repoRoot $f
-                if ((Test-Path $path) -and ((Get-Content $path -Raw) -match '"type"\s*:\s*"(keyboard|mouse)"')) {
-                    [void]$script:ActiveAreas.Add('kbm')
-                    break
-                }
-            }
-            $names = @($script:ActiveAreas)
-            $script:AreaNote = "$(if ($names.Count -gt 0) { $names -join ', ' } else { 'none' }), from $($diff.Files.Count) file(s) changed $($diff.Scope)"
         }
+        $names = @($script:ActiveAreas)
+        $script:AreaNote = "$(if ($names.Count -gt 0) { $names -join ', ' } else { 'none' }), from $($diff.Files.Count) file(s) changed $($diff.Scope)" +
+            $(if ($wide.Count -gt 0) { ". $($wide[0])$(if ($wide.Count -gt 1) { " and $($wide.Count - 1) more select" } else { ' selects' }) every area" } else { '' })
     }
 }
 Write-Host ('Areas: ' + $script:AreaNote)
@@ -2554,6 +2566,9 @@ if ($ListOnly) {
         if ($s.Name -notlike $Filter) { continue }
         $runs = -not $s.Area -or $script:ActiveAreas.Contains($s.Area)
         Write-Host ('  {0,-7} {1,-40} {2}' -f $(if ($runs) { 'run' } else { 'not run' }), $s.Name, $(if ($s.Area) { $s.Area } else { 'core' }))
+    }
+    if ('S90_Arith_Roundtrip' -like $Filter) {
+        Write-Host ('  {0,-7} {1,-40} {2}' -f $(if ($script:ActiveAreas.Contains('arith')) { 'run' } else { 'not run' }), 'S90_Arith_Roundtrip, its diff', 'arith')
     }
     exit 0
 }
