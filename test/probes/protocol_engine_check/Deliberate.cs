@@ -97,8 +97,15 @@ internal static class Deliberate
         }
     }
 
-    /// <summary>1,000 periods of the running clock after a handshake: the
-    /// 0x30 frames' mean period within 0.1 ms of 15 ms.</summary>
+    /// <summary>400 periods of the running clock after a handshake: the
+    /// 0x30 frames' mean period within 0.1 ms of 15 ms. A clock that waits
+    /// its period after each tick runs long every period, 16.58 ms at
+    /// 9bd6279's identity commit, whatever the count. On the grid only the
+    /// first and last frames' lateness moves the mean, by their difference
+    /// over the count: a last frame 40 ms late fails 400 periods, where
+    /// frames on this machine come at most 10 ms late.</summary>
+    const int Periods = 400;
+
     static void Grid()
     {
         var (host, ch) = Make(7972);
@@ -107,13 +114,13 @@ internal static class Deliberate
             host.OnOutput(Subcommand(0x02), 49, 0);
             host.Start();
             var deadline = Stopwatch.StartNew();
-            while (ch.Count(0x30) < 1001 && deadline.Elapsed < TimeSpan.FromSeconds(30)) Thread.Sleep(50);
+            while (ch.Count(0x30) < Periods + 1 && deadline.Elapsed < TimeSpan.FromSeconds(30)) Thread.Sleep(50);
         }
         finally { host.Dispose(); }
         List<long> at;
         lock (ch.Frames) at = ch.Frames.Where(f => f.Report.Length > 0 && f.Report[0] == 0x30).Select(f => f.At).ToList();
-        if (at.Count < 1001) { Check("the clock sends 1,001 0x30 frames within 30 s", false, $"{at.Count}"); return; }
-        double mean = (at[1000] - at[0]) * 1000.0 / Stopwatch.Frequency / 1000;
-        Check("the 0x30 stream's mean period over 1,000 frames is within 0.1 ms of 15 ms", Math.Abs(mean - 15.0) <= 0.1, $"{mean:F4} ms");
+        if (at.Count < Periods + 1) { Check($"the clock sends {Periods + 1} 0x30 frames within 30 s", false, $"{at.Count}"); return; }
+        double mean = (at[Periods] - at[0]) * 1000.0 / Stopwatch.Frequency / Periods;
+        Check($"the 0x30 stream's mean period over {Periods} frames is within 0.1 ms of 15 ms", Math.Abs(mean - 15.0) <= 0.1, $"{mean:F4} ms");
     }
 }
