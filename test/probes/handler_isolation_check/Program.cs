@@ -61,7 +61,11 @@ internal static class Program
     {
         if (args.Length >= 1 && args[0] == "offline") return Offline();
         Console.WriteLine("=== S85: a throwing event handler stops nothing else ===");
-        if (Probe.OtherSdkRunning()) return 2;
+        if (SdkConsumers.Find() is string other)
+        {
+            Console.WriteLine($"  [SKIP] {other} is running and shares the SDK's devices.");
+            return 2;
+        }
 
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
