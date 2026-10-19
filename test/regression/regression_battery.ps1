@@ -394,8 +394,10 @@ function Send-Cmd {
     # add_OutputDataReceived handler (ThreadPool-driven). Wait(50) gives
     # the runspace a 50 ms heartbeat and yields back to PowerShell so
     # other cmdlets / event pumps can run; never blocks indefinitely on
-    # a single .Wait. No budget; only exits on [ACK] or HasExited.
+    # a single .Wait. It exits on [ACK] or HasExited, and fails the
+    # scenario as a hang at the hang deadline.
     $drain = $Proc.HMDrain
+    $deadline = [Diagnostics.Stopwatch]::StartNew()
     while ($true) {
         $line = $null
         if ($drain.Queue.TryDequeue([ref]$line)) {
@@ -403,6 +405,9 @@ function Send-Cmd {
             continue
         }
         if ($Proc.HasExited) { return }
+        if ($deadline.ElapsedMilliseconds -ge (HMScaleMs ($script:HangSeconds * 1000))) {
+            throw ("HIDMaestroTest did not acknowledge '" + $Cmd + "' in " + [int]((HMScaleMs ($script:HangSeconds * 1000)) / 1000) + " s: a hang")
+        }
         [void]$drain.Signal.Wait(50)
         $drain.Signal.Reset()
     }
@@ -427,16 +432,37 @@ if ($env:HIDMAESTRO_TIMEOUT_SCALE) {
 }
 
 function HMScaleMs { param([int]$Ms) [int][Math]::Min([int]::MaxValue, $Ms * $script:HMScale) }
+
+# How long a step may take before it counts as a hang: a probe's run, the
+# test app's answer to a command, the test app's exit after quit. Every
+# scenario but S71 and S73 finishes in about two minutes, so the deadline
+# ends a hang and nothing else, and those two pass their own. A hang fails
+# its scenario and stops the process tree. Beside the 2026-10-19 gate a
+# probe looped for 14 minutes, and with no deadline the battery would have
+# waited for it forever.
+$script:HangSeconds = 300
+
+# Waits for a process to exit by the hang deadline, scaled. At the
+# deadline it stops the process tree and throws.
+function Wait-Exit {
+    param([Parameter(Mandatory)][System.Diagnostics.Process]$Proc,
+          [Parameter(Mandatory)][string]$What,
+          [int]$Seconds = $script:HangSeconds)
+    $ms = HMScaleMs ($Seconds * 1000)
+    if ($Proc.WaitForExit($ms)) { return }
+    Stop-HMProcessTree -Proc $Proc
+    throw ($What + ' did not finish in ' + [int]($ms / 1000) + ' s and was stopped: a hang')
+}
 function Sleep-Scaled { param([int]$Seconds) Start-Sleep -Milliseconds (HMScaleMs ($Seconds * 1000)) }
 
 function Stop-HMTestProcess {
     param(
         [System.Diagnostics.Process]$Proc,
         # Retained for ABI compatibility with callers that still pass it;
-        # ignored. We wait indefinitely for the test process to exit on
-        # its own: no KILL budget, no scaled timeout. If the test process
-        # genuinely hangs, that's a real bug to surface in the diag log,
-        # not paper over with a deadline.
+        # ignored. The test process gets until the hang deadline to exit
+        # on its own, far above any teardown it does. One still running
+        # then has hung, which is a real bug: the scenario fails with it
+        # and never continues past it.
         [int]$GracefulMs = 0
     )
     $null = $GracefulMs
@@ -455,7 +481,7 @@ function Stop-HMTestProcess {
             # Fallback: send via stdin (works on Atom / older OS).
             try { Send-Cmd -Proc $Proc -Cmd 'quit' -NoWaitAck } catch {}
         }
-        $Proc.WaitForExit()
+        Wait-Exit -Proc $Proc -What 'HIDMaestroTest after quit'
         return 'GRACEFUL'
     }
     return 'ALREADY_EXITED'
@@ -670,7 +696,8 @@ function Invoke-Probe {
         # one probe with different arguments also pass a distinct -Tag, so
         # each keeps its own transcript.
         [string]$Arguments = '',
-        [string]$Tag = ''
+        [string]$Tag = '',
+        [int]$DeadlineSeconds = $script:HangSeconds
     )
     $probe = Resolve-ProbeBinary $Dir $Exe
     $name = [IO.Path]::GetFileNameWithoutExtension($Exe)
@@ -681,7 +708,6 @@ function Invoke-Probe {
         FilePath               = $probe
         PassThru               = $true
         NoNewWindow            = $true
-        Wait                   = $true
         RedirectStandardOutput = $out
         RedirectStandardError  = $err
     }
@@ -689,7 +715,24 @@ function Invoke-Probe {
     # when there is something to pass.
     if ($Arguments) { $start.ArgumentList = $Arguments }
     $p = Start-Process @start
+    # The exit code reads back only through a handle taken while the
+    # process runs.
+    $null = $p.Handle
+    Wait-ProbeExit -Proc $p -Out $out -Exe $Exe -Seconds $DeadlineSeconds
     Resolve-ProbeExit -ExitCode $p.ExitCode -Out $out -Exe $Exe -Message $Message -SkipCodes $SkipCodes
+}
+
+# Wait-Exit for a probe with a transcript: a hang prints the transcript's
+# tail, as a failure does, before the scenario fails.
+function Wait-ProbeExit {
+    param([Parameter(Mandatory)][System.Diagnostics.Process]$Proc, [Parameter(Mandatory)][string]$Out,
+          [Parameter(Mandatory)][string]$Exe, [int]$Seconds = $script:HangSeconds)
+    try { Wait-Exit -Proc $Proc -What $Exe -Seconds $Seconds }
+    catch {
+        $hang = $_.Exception.Message
+        try { Resolve-ProbeExit -ExitCode -1 -Out $Out -Exe $Exe -Message $hang } catch {}
+        throw $hang
+    }
 }
 
 # What Invoke-Probe does once the probe has exited: a skip code prints
@@ -738,9 +781,12 @@ function Start-BackgroundProbe {
 }
 
 function Complete-BackgroundProbe {
-    param([Parameter(Mandatory)][hashtable]$Run, [Parameter(Mandatory)][string]$Message, [int[]]$SkipCodes = @())
+    param([Parameter(Mandatory)][hashtable]$Run, [Parameter(Mandatory)][string]$Message, [int[]]$SkipCodes = @(),
+          [int]$DeadlineSeconds = $script:HangSeconds)
     if ($Run.Error) { throw $Run.Error }
-    $Run.Process.WaitForExit()
+    # The deadline counts from the probe's start, not from this slot.
+    $left = [Math]::Max(1, $DeadlineSeconds - [int]((Get-Date) - $Run.Process.StartTime).TotalSeconds)
+    Wait-ProbeExit -Proc $Run.Process -Out $Run.Out -Exe $Run.Exe -Seconds $left
     Write-Host ('    ran beside the scenarios ahead of it, {0:N1} s' -f ($Run.Process.ExitTime - $Run.Process.StartTime).TotalSeconds)
     Resolve-ProbeExit -ExitCode $Run.Process.ExitCode -Out $Run.Out -Exe $Run.Exe -Message $Message -SkipCodes $SkipCodes
 }
@@ -1278,7 +1324,9 @@ function Scenario-PidFfb-RoundTrip {
     if (-not (Test-Path $probe)) {
         throw "pid_ffb_roundtrip probe not built. Run: dotnet build test/probes/pid_ffb_roundtrip -c Release"
     }
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow
+    $null = $p.Handle
+    Wait-Exit -Proc $p -What (Split-Path $probe -Leaf)
     if ($p.ExitCode -ne 0) {
         throw "PidFfbRoundtrip exited $($p.ExitCode)"
     }
@@ -1307,7 +1355,9 @@ function Scenario-PidFfb-AllocFree {
     if (-not (Test-Path $probe)) {
         throw "pid_ffb_alloc_free probe not built. Run: dotnet build test/probes/pid_ffb_alloc_free -c Release"
     }
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow
+    $null = $p.Handle
+    Wait-Exit -Proc $p -What (Split-Path $probe -Leaf)
     if ($p.ExitCode -ne 0) {
         throw "PidFfbAllocFree exited $($p.ExitCode)"
     }
@@ -1333,7 +1383,9 @@ function Scenario-PidFfb-FfbTest {
     if (-not (Test-Path $probe)) {
         throw "pid_setusages_probe not built. Run: dotnet build test/probes/pid_setusages_probe -c Release"
     }
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow
+    $null = $p.Handle
+    Wait-Exit -Proc $p -What (Split-Path $probe -Leaf)
     if ($p.ExitCode -ne 0) {
         throw ("PidSetUsagesProbe exited " + $p.ExitCode + " - Constant Force CreateEffect did not succeed")
     }
@@ -1351,7 +1403,9 @@ function Scenario-Xbox360-Dpad-XInput {
     if (-not (Test-Path $probe)) {
         throw "xbox_dpad_xinput_check not built. Run: dotnet build test/probes/xbox_dpad_xinput_check -c Release"
     }
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow
+    $null = $p.Handle
+    Wait-Exit -Proc $p -What (Split-Path $probe -Leaf)
     if ($p.ExitCode -ne 0) {
         throw ("XboxDpadXInputCheck exited " + $p.ExitCode + " - one or more d-pad directions did not match expected wButtons.DPAD_* mask")
     }
@@ -1370,7 +1424,9 @@ function Scenario-Hat-Resolution-Check {
     if (-not (Test-Path $probe)) {
         throw "hat_resolution_check not built. Run: dotnet build test/probes/hat_resolution_check -c Release"
     }
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow
+    $null = $p.Handle
+    Wait-Exit -Proc $p -What (Split-Path $probe -Leaf)
     if ($p.ExitCode -ne 0) {
         throw ("HatResolutionCheck exited " + $p.ExitCode + " - one or more hat-input shapes did not encode the expected descriptor bits")
     }
@@ -1795,7 +1851,9 @@ function Scenario-Valve-Raw-Path {
 # no XInput slot reads connected again after Dispose returns.
 function Scenario-Xusb-Wgi-Single {
     $probe = Resolve-ProbeBinary 'xusb_wgi_single_check' 'XusbWgiSingleCheck.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow
+    $null = $p.Handle
+    Wait-Exit -Proc $p -What (Split-Path $probe -Leaf)
     if ($p.ExitCode -ne 0) {
         throw ("XusbWgiSingleCheck exited " + $p.ExitCode + " - a 360-family virtual doubled in WGI again, lost its tripwire, lost XInput, its HID child stopped reporting 10 buttons, or its XInput slot came back after Dispose (see probe stdout)")
     }
@@ -2003,8 +2061,9 @@ function Scenario-Kbm-Raw-Input {
 # program is a peer process the probe drives, and the probe judges what
 # they did from outside both. Its header lists every section.
 function Scenario-Coexistence {
+    # About 10.5 minutes on the devbox, so its hang deadline is 25.
     Invoke-Probe -Dir 'coexist_check' -Exe 'CoexistCheck.exe' -Arguments 'ABCDEFGHJKLMNOPQRSTUVWXYZ' -Tag 'coexistence' `
-                 -Message 'two programs that embed HIDMaestro disturbed each other (see probe stdout)' -SkipCodes 2
+                 -Message 'two programs that embed HIDMaestro disturbed each other (see probe stdout)' -SkipCodes 2 -DeadlineSeconds 1500
 }
 
 # S72: everything the elevated SDK runs or hands to pnputil is staged under
@@ -2036,10 +2095,11 @@ function Scenario-Protected-Staging {
 # battery starts this probe before S01 and the slot collects its result.
 function Scenario-Usbip-Clean-Install {
     $message = 'the bundled usbip-win2 install left a shortcut, Start menu folder, GUI, SDK or PDB file, broke the composite, ran over an existing install, or ran twice for two programs at once (see probe stdout)'
+    # About four and a half minutes, so its hang deadline is 15.
     if ($script:S73Run) {
-        Complete-BackgroundProbe -Run $script:S73Run -Message $message -SkipCodes 2
+        Complete-BackgroundProbe -Run $script:S73Run -Message $message -SkipCodes 2 -DeadlineSeconds 900
     } else {
-        Invoke-Probe -Dir 'usbip_install_check' -Exe 'UsbipInstallCheck.exe' -Message $message -SkipCodes 2
+        Invoke-Probe -Dir 'usbip_install_check' -Exe 'UsbipInstallCheck.exe' -Message $message -SkipCodes 2 -DeadlineSeconds 900
     }
 }
 
