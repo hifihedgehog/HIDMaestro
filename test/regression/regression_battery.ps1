@@ -668,6 +668,19 @@ function Test-Scenario {
         $err = $_
     }
 
+    # A process the scenario started that embeds HIDMaestro and outlived
+    # what started it is a leak. It fails the scenario, and the battery
+    # stops it so the next scenario starts clean.
+    $orphans = @([HMForeign]::Orphans($PID))
+    if ($orphans.Count -gt 0) {
+        $names = @(foreach ($o in $orphans) {
+            $p = Get-Process -Id $o -ErrorAction SilentlyContinue
+            if ($p) { $p.ProcessName + ' (' + $o + ')' }
+            & cmd.exe /c "taskkill /PID $o /T /F >nul 2>&1"
+        })
+        if (-not $err) { $err = 'the scenario left running: ' + ($names -join ', ') }
+    }
+
     # Scenario should have exited the test process by now; settle window
     # for any in-flight resurrection attempts.
     Wait-CascadeSettle

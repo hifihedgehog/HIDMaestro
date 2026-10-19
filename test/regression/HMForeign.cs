@@ -113,6 +113,58 @@ public static class HMForeign
         finally { CloseHandle(h); }
     }
 
+    // Every process the battery has held, by ID with its creation time,
+    // kept after it exits. A probe that crashes leaves its children running
+    // with no live parent, and they stay the battery's: the battery fails
+    // the scenario that left them and stops them (Orphans), and never waits
+    // for its own leftovers as if another program ran them.
+    static readonly Dictionary<uint, long> s_own = new Dictionary<uint, long>();
+
+    /// <summary>The battery's processes: <paramref name="root"/>, every
+    /// process once seen as one of them that still runs with the same
+    /// creation time, and every process created after a parent that is one
+    /// of them, running or exited.</summary>
+    static HashSet<uint> Own(List<Entry> all, uint root)
+    {
+        var created = new Dictionary<uint, long>();
+        var own = new HashSet<uint>();
+        own.Add(root);
+        if (!s_own.ContainsKey(root)) s_own[root] = CreatedOnce(created, root);
+        foreach (var e in all)
+        {
+            long known;
+            if (e.Pid == root || !s_own.TryGetValue(e.Pid, out known)) continue;
+            // An ID another process took since is not the battery's.
+            if (CreatedOnce(created, e.Pid) == known) own.Add(e.Pid);
+            else s_own.Remove(e.Pid);
+        }
+        bool grew = true;
+        while (grew)
+        {
+            grew = false;
+            foreach (var e in all)
+            {
+                if (own.Contains(e.Pid) || e.Pid == e.Parent) continue;
+                long parent;
+                if (own.Contains(e.Parent)) parent = CreatedOnce(created, e.Parent);
+                else if (!s_own.TryGetValue(e.Parent, out parent)) continue;
+                long child = CreatedOnce(created, e.Pid);
+                if (child < 0 || parent < 0 || child < parent) continue;
+                own.Add(e.Pid);
+                s_own[e.Pid] = child;
+                grew = true;
+            }
+        }
+        return own;
+    }
+
+    static long CreatedOnce(Dictionary<uint, long> created, uint pid)
+    {
+        long c;
+        if (!created.TryGetValue(pid, out c)) { c = Created(pid); created[pid] = c; }
+        return c;
+    }
+
     /// <summary>The processes of <paramref name="root"/>'s tree: the root
     /// and every process whose parent is in the tree and that was created
     /// after that parent.</summary>
@@ -230,7 +282,7 @@ public static class HMForeign
         lock (s_lock)
         {
             var all = Snapshot();
-            var tree = Tree(all, (uint)root);
+            var tree = Own(all, (uint)root);
             // FILETIME ticks, as GetProcessTimes gives a creation time.
             long now = DateTime.UtcNow.ToFileTimeUtc();
             var live = new HashSet<uint>();
@@ -256,6 +308,23 @@ public static class HMForeign
             foreach (var pid in s_without.Keys) if (!live.Contains(pid)) gone.Add(pid);
             foreach (var pid in gone) s_without.Remove(pid);
             return found;
+        }
+    }
+
+    /// <summary>The process IDs of the battery's processes that embed
+    /// HIDMaestro and run with no live parent in <paramref name="root"/>'s
+    /// tree: what a probe left behind when it exited.</summary>
+    public static int[] Orphans(int root)
+    {
+        lock (s_lock)
+        {
+            var all = Snapshot();
+            var own = Own(all, (uint)root);
+            var tree = Tree(all, (uint)root);
+            var list = new List<int>();
+            foreach (var e in all)
+                if (own.Contains(e.Pid) && !tree.Contains(e.Pid) && HasModule(e.Pid)) list.Add((int)e.Pid);
+            return list.ToArray();
         }
     }
 
