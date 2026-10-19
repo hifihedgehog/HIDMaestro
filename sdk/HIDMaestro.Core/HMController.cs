@@ -1241,7 +1241,7 @@ public sealed partial class HMController : IDisposable
     public void SubmitRawReport(ReadOnlySpan<byte> report)
     {
         ThrowIfDisposed();
-        if (SubmitRawStateBlock(report)) return;
+        if (_stateBlockSpec != null && SubmitRawStateBlock(report)) return;
         if (report.Length == 0) throw new ArgumentException("Report cannot be empty.", nameof(report));
         if (report.Length > SharedMemoryIO.DATA_CAPACITY)
             throw new ArgumentException(
@@ -1277,6 +1277,19 @@ public sealed partial class HMController : IDisposable
 
     private void SubmitRawReportCore(ReadOnlySpan<byte> report)
     {
+        // A frame with no fixed bytes to overlay and no report id to prepend
+        // goes into the section from the caller's own span, in the one copy
+        // the section takes.
+        var rawDefaults = Profile.Inner.InputDefaults;
+        if (rawDefaults == null && !_rawEmitsVerbatim)
+        {
+            SharedMemoryIO.WriteInputFrame(
+                _inputView, _inputEvent, ref _inputSeqNo, report, report.Length,
+                _packsGipBuffer ? _gipBuf : null,
+                companionEvent: _companionInputEvent);
+            return;
+        }
+
         // v1.3.0: copy into the per-controller reusable buffer instead of
         // report.ToArray()'ing per call. Vendor-protocol consumers (PadForge
         // DualSense path, etc.) hit this path at the same rate as
@@ -1292,7 +1305,6 @@ public sealed partial class HMController : IDisposable
         // status bytes (activeProfile at struct[48]); without overlaying
         // here, SubmitRawReport clobbers whatever SubmitState wrote a few
         // microseconds earlier.
-        var rawDefaults = Profile.Inner.InputDefaults;
         if (rawDefaults != null)
         {
             int len = Math.Min(report.Length, _rawReportBuffer.Length);
@@ -1353,7 +1365,7 @@ public sealed partial class HMController : IDisposable
     public void SubmitRawExtendedReport(ReadOnlySpan<byte> report)
     {
         ThrowIfDisposed();
-        if (SubmitRawStateBlock(report)) return;
+        if (_stateBlockSpec != null && SubmitRawStateBlock(report)) return;
         if (report.Length == 0) throw new ArgumentException("Report cannot be empty.", nameof(report));
         // The extended lane carries the whole frame in an 80-byte field. The
         // writer used to cut a longer one there without a word.
@@ -1588,14 +1600,14 @@ public sealed partial class HMController : IDisposable
 
     private void SubmitRawExtendedReportCore(ReadOnlySpan<byte> report)
     {
-        report.CopyTo(_rawReportBuffer.AsSpan());
+        // Straight from the caller's span: the section's copy is the only one.
         SharedMemoryIO.WriteInputFrame(
             _inputView, _inputEvent, ref _inputSeqNo,
             Array.Empty<byte>(), 0,
             _packsGipBuffer ? _gipBuf : null,
             companionEvent: _companionInputEvent,
             dataOffset: 0,
-            extendedData: _rawReportBuffer, extendedLen: report.Length);
+            extendedData: report, extendedLen: report.Length);
     }
 
     /// <summary>Emit through the extended path, prepending the declared

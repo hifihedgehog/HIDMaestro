@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -907,16 +908,27 @@ internal static partial class SharedMemoryIO
     /// <para><paramref name="eventHandle"/> may be <see cref="IntPtr.Zero"/>
     /// if no signaling event exists (e.g. older driver that still polls
     /// without opening the event). The SetEvent call is skipped in that
-    /// case: the write still completes normally.</para></summary>
-    public static void WriteInputFrame(IntPtr view, IntPtr eventHandle, ref uint seqNo,
-                                       byte[] data, int dataLen, byte[]? gipData,
+    /// case: the write still completes normally.</para>
+    ///
+    /// <para>The stores go through the view's pointer. Each Marshal.WriteInt32
+    /// and Marshal.Copy they replace was a call the JIT does not inline,
+    /// four or five a frame, and the bytes and the order of the stores
+    /// around the two barriers are the same. A view of zero still throws
+    /// before anything is written, as Marshal.WriteInt32 threw. The two
+    /// lanes take spans, so a caller writes its frame from where it already
+    /// is, with no copy into a buffer of its own first.</para></summary>
+    public static unsafe void WriteInputFrame(IntPtr view, IntPtr eventHandle, ref uint seqNo,
+                                       ReadOnlySpan<byte> data, int dataLen, byte[]? gipData,
                                        int dataOffset = 0,
-                                       byte[]? extendedData = null, int extendedLen = 0,
+                                       ReadOnlySpan<byte> extendedData = default, int extendedLen = 0,
                                        IntPtr companionEvent = default)
     {
+        if (view == IntPtr.Zero) throw new AccessViolationException();
+        byte* v = (byte*)view;
+
         // 1. Mark write in progress (odd seqNo)
         uint pending = seqNo + 1;
-        Marshal.WriteInt32(view, 0, (int)pending);
+        Volatile.Write(ref *(uint*)v, pending);
         Thread.MemoryBarrier();
 
         // 2. Write payload (DataSize + Data + GipData + ExtendedReport*).
@@ -931,25 +943,27 @@ internal static partial class SharedMemoryIO
         // can skip the 14-byte copy entirely. Section is zero-initialized
         // at create time, so the GIP slice stays zeros.
         //
-        // v1.3.5: when extendedData != null AND extendedLen > 0, copy
+        // v1.3.5: when extendedData is not empty AND extendedLen > 0, copy
         // the full RID-included extended report into ExtendedReportData
         // and set ExtendedReportSize. Driver branches on
         // ExtendedReportSize > 0 and emits ExtendedReportData verbatim
-        // (no FirstInputReportId prepend). When extendedData is null we
+        // (no FirstInputReportId prepend). When extendedData is empty we
         // explicitly clear ExtendedReportSize so a previously-armed
         // controller's stale extended bytes don't leak through after
         // a legacy-mode frame (e.g. if armOn fires were ever rolled back
-        //: currently they aren't, but cheap insurance).
-        Marshal.WriteInt32(view, 4, dataLen);
+        //: currently they aren't, but cheap insurance). The size words take
+        // unaligned stores: the one at 278 is not on a 4-byte boundary,
+        // which Marshal.WriteInt32 also handled with an unaligned store.
+        Unsafe.WriteUnaligned(v + 4, dataLen);
         if (dataLen > 0)
-            Marshal.Copy(data, dataOffset, view + DATA_OFFSET, dataLen);
+            data.Slice(dataOffset, dataLen).CopyTo(new Span<byte>(v + DATA_OFFSET, dataLen));
         if (gipData != null)
-            Marshal.Copy(gipData, 0, view + GIP_DATA_OFFSET, GIP_DATA_LENGTH);
-        if (extendedData != null && extendedLen > 0)
+            gipData.AsSpan(0, GIP_DATA_LENGTH).CopyTo(new Span<byte>(v + GIP_DATA_OFFSET, GIP_DATA_LENGTH));
+        if (!extendedData.IsEmpty && extendedLen > 0)
         {
             int copyLen = Math.Min(extendedLen, EXTENDED_DATA_CAPACITY);
-            Marshal.Copy(extendedData, 0, view + EXTENDED_DATA_OFFSET, copyLen);
-            Marshal.WriteInt32(view, EXTENDED_SIZE_OFFSET, copyLen);
+            extendedData.Slice(0, copyLen).CopyTo(new Span<byte>(v + EXTENDED_DATA_OFFSET, copyLen));
+            Unsafe.WriteUnaligned(v + EXTENDED_SIZE_OFFSET, copyLen);
         }
         else
         {
@@ -960,15 +974,15 @@ internal static partial class SharedMemoryIO
             // BETWEEN restarts a foreign writer could have left ExtendedReportSize
             // > 0 + ExtendedReportData populated; with the legacy path running
             // (USB Sony, generic profiles) that stale extended buffer would be
-            // emitted by the driver, breaking input. Cost is one P/Invoke per
+            // emitted by the driver, breaking input. Cost is one store per
             // frame.
-            Marshal.WriteInt32(view, EXTENDED_SIZE_OFFSET, 0);
+            Unsafe.WriteUnaligned(v + EXTENDED_SIZE_OFFSET, 0);
         }
 
         // 3. Mark write complete (even seqNo)
         Thread.MemoryBarrier();
         seqNo = pending + 1;
-        Marshal.WriteInt32(view, 0, (int)seqNo);
+        Volatile.Write(ref *(uint*)v, seqNo);
 
         // 4. Wake the driver's worker thread. Auto-reset event: one
         // successful wait consumes the signal. If the driver is still
@@ -1498,7 +1512,9 @@ internal static partial class SharedMemoryIO
     [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
     private static partial IntPtr OpenEventW(uint dwDesiredAccess, [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, string lpName);
 
-    [LibraryImport("kernel32.dll", SetLastError = true)]
+    // The frame writer's doorbell, once or twice a frame. Nothing reads its
+    // error, so the stub neither clears nor saves the last error around it.
+    [LibraryImport("kernel32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool SetEvent(IntPtr hEvent);
 
