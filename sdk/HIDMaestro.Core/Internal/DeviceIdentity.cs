@@ -152,6 +152,22 @@ internal sealed class DeviceIdentity
         return $"1&{(uint)(hash >> 32):x}&0";
     }
 
+    /// <summary>How many prefixes past <see cref="ParentIdPrefix"/> a ROOT
+    /// parent may give its HID child (<see cref="AlternatePrefix"/>).</summary>
+    public const int PrefixAlternates = 3;
+
+    /// <summary>The <paramref name="n"/>th prefix after
+    /// <paramref name="basePrefix"/>: <c>1&amp;hash&amp;n</c>, the counter
+    /// Windows itself raises when it mints a prefix. A ROOT parent takes
+    /// one when its identity's HID child record was left without its
+    /// driver (<see cref="DeviceManager.ChildPrefixFor"/>). Same hash, so
+    /// the prefix still names this identity and no other.</summary>
+    public static string AlternatePrefix(string basePrefix, int n)
+    {
+        int cut = basePrefix.LastIndexOf('&');
+        return cut < 0 ? basePrefix : $"{basePrefix[..(cut + 1)]}{n}";
+    }
+
     public static DeviceIdentity ForIndex(int index)
         => new(DefaultKey(index), true, index, Hash(DefaultKey(index)));
 

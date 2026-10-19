@@ -56,11 +56,12 @@
 //                  DualShock 4 and an Xbox 360 pad or the profiles named
 //                  (RateLive.cs)
 //   create [runs] [profile ...] [--settle=<ms>]
-//                  CreateController and Dispose for four kinds of device (a
-//                  keyboard only when named), or
+//                  CreateController and Dispose for four kinds of device, or
 //                  the catalog profiles named, with the SDK's own step
 //                  timings (HIDMAESTRO_TIMING), each controller up for <ms>
-//                  first
+//                  first. A keyboard or a mouse types and moves the pointer
+//                  on the desktop of whoever works at the machine, so none
+//                  is among the four: one is measured only when named
 //   report [runs] [calls]
 //                  offline, no elevation: one launch of the hot path's cost
 //                  under the one arithmetic, BuildReportInto, EncodeInput and
@@ -100,11 +101,17 @@
 //                  offline: the process's CPU time per second with one
 //                  dualsense-bt's idle repeat at the period and nothing else
 //                  submitting, and the frames it wrote per second
-//   idle-live [runs] [seconds]
-//                  live, elevated: one dualsense-bt at rest with one reader
-//                  in a child process, the CPU cycles per second of the SDK's
-//                  process, the reader and the WUDFHost processes, and the
-//                  reports read per second (IdleLive.cs)
+//   clock [seconds] [periodMs] [frameMs]
+//                  offline: the idle repeat's device clock while a consumer
+//                  sends a frame every [frameMs] and then at rest, its
+//                  passes, ticks and the process's cycles per second
+//                  (ClockCost.cs)
+//   idle-live [runs] [seconds] [profile]
+//                  live, elevated: one dualsense-bt, or the profile named,
+//                  at rest with one reader in a child process, the CPU
+//                  cycles per second of the SDK's process, the reader and
+//                  the WUDFHost processes, and the reports read per second
+//                  (IdleLive.cs)
 //   report-build [runs]
 //                  the Switch 2 Pro composite's device-built report in each
 //                  layout, offline
@@ -289,6 +296,13 @@ internal static partial class Program
             return 0;
         }
 #if !HM_BASE
+        if (mode == "clock")
+        {
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            ClockCost.Run(args.Length > 1 ? double.Parse(args[1], inv) : 3,
+                args.Length > 2 ? double.Parse(args[2], inv) : 4, args.Length > 3 ? double.Parse(args[3], inv) : 1);
+            return 0;
+        }
         if (mode == "idle")
         {
             double period = args.Length > 1 ? double.Parse(args[1], System.Globalization.CultureInfo.InvariantCulture) : 4;
@@ -300,7 +314,8 @@ internal static partial class Program
         if (OtherSdkRunning()) return 2;
         if (mode == "idle-live")
         {
-            IdleLive.Run(runs, args.Length > 2 ? double.Parse(args[2], System.Globalization.CultureInfo.InvariantCulture) : 10);
+            IdleLive.Run(runs, args.Length > 2 ? double.Parse(args[2], System.Globalization.CultureInfo.InvariantCulture) : 10,
+                args.Length > 3 ? args[3] : null);
             return 0;
         }
 
@@ -1111,7 +1126,7 @@ internal static partial class Program
     // ── Create and dispose ──────────────────────────────────────────────
 
     /// <summary>The catalog profiles named after the run count, in that
-    /// order, or all five. Returns 1 when a name is refused, 5 when a
+    /// order, or the default set. Returns 1 when a name is refused, 5 when a
     /// devnode runs another driver.</summary>
     static int Create(int runs, string[] only, int settleMs, string? key)
     {
@@ -1125,8 +1140,8 @@ internal static partial class Program
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
         ctx.InstallDriver();
-        // No keyboard unless named: one this probe creates sits on the
-        // desktop of whoever is using the machine.
+        // No keyboard or mouse unless named: a live one acts on the
+        // desktop of whoever works at the machine.
         var ids = new List<string> { Ds4, Xbox360, Composite };
 #if !HM_BASE
         ids.Add(GameCube);

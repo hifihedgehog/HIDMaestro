@@ -35,6 +35,10 @@
 //      HIDMaestro holds or derives. A parent that cannot be found is never
 //      proof on its own, now that the phase walks every vendor's IG_00
 //      children.
+//   8. A ROOT parent whose identity's child path holds a record an older
+//      build's vetoed removal left without its driver takes the next prefix
+//      of its identity, 1&hash&1 to 1&hash&3, and no such prefix belongs to
+//      two tokens (AlternatePrefixes.cs).
 //
 // Exit 0 PASS / 1 FAIL.
 
@@ -210,6 +214,12 @@ internal static class Program
         //    (OrphanOwnership.cs).
         Console.WriteLine("\n--- orphan ownership ---");
         OrphanOwnership.Run((name, ok, detail) => Check(name, ok, detail));
+
+        // 8. A ROOT parent whose identity's child path holds a record an
+        //    older build's vetoed removal left without its driver takes the
+        //    next prefix of its identity (AlternatePrefixes.cs).
+        Console.WriteLine("\n--- alternate child prefixes ---");
+        AlternatePrefixes.Run((name, ok, detail) => Check(name, ok, detail));
 
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} {(s_failures == 0 ? "PASS" : "FAIL")} ===");
         return s_failures == 0 ? 0 : 1;

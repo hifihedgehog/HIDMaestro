@@ -1369,7 +1369,9 @@ public static partial class DeviceManager
     /// cannot carry the package (Windows 10). Only a persona that declares a
     /// WinUSB binding makes one.</item>
     /// <item>A registration's DiInstallDevice, which runs once its hold has
-    /// ended, on the controller's own devnode. Its HID child is linked into
+    /// ended, on the controller's own devnode: the driver store's search, or
+    /// the driver the search chose before for the same ids
+    /// (DeviceNodeCreator.InstallFromStoreInf). Its HID child is linked into
     /// the HIDClass list by Plug and Play after the hold, with no lock: the
     /// lock covers the parent's registration, not its children's.</item>
     /// <item>Any program built on HIDMaestro before v2.0.0.</item>
@@ -1770,6 +1772,9 @@ public static partial class DeviceManager
     }
 
     // ── SetupAPI P/Invoke for DIF_REMOVE ──
+
+    [LibraryImport("SetupAPI.dll", SetLastError = true)]
+    private static partial IntPtr SetupDiCreateDeviceInfoList(IntPtr ClassGuid, IntPtr hwndParent);
 
     [LibraryImport("SetupAPI.dll", EntryPoint = "SetupDiGetClassDevsW", SetLastError = true)]
     private static partial IntPtr SetupDiGetClassDevsByRef(ref Guid ClassGuid, IntPtr Enumerator, IntPtr hwndParent, uint Flags);
@@ -2848,10 +2853,17 @@ public static partial class DeviceManager
         bool located = CM_Locate_DevNodeW(out devInst, instanceId, 0) == CR_SUCCESS
                     || CM_Locate_DevNodeW(out devInst, instanceId, 1) == CR_SUCCESS;
 
-        // Use Guid.Empty + DIGCF_ALLCLASSES to enumerate ALL devices including phantoms.
-        // This is critical: a device-class-specific DevInfoSet won't find phantoms.
-        Guid nullGuid = Guid.Empty;
-        IntPtr dis = SetupDiGetClassDevsByRef(ref nullGuid, IntPtr.Zero, IntPtr.Zero, DIGCF_ALLCLASSES);
+        // An empty set with no setup class, into which SetupDiOpenDeviceInfo
+        // opens the one device by its instance id, present or not: a set of
+        // one class would refuse a device of another. A set of every device
+        // of every class (SetupDiGetClassDevs with DIGCF_ALLCLASSES), which
+        // this call built before, took 8 to 9 ms on the bench machine on
+        // 2026-10-19, once for each device a removal takes. The same day an
+        // empty set opened five devnodes that were not present, of the
+        // AudioEndpoint, HIDClass and USB classes. Nefarius'
+        // PnPDevice.InstallCustomDriver and nefcon's DeviceRestart open a
+        // device the same way.
+        IntPtr dis = SetupDiCreateDeviceInfoList(IntPtr.Zero, IntPtr.Zero);
         if (dis == new IntPtr(-1))
         {
             if (!located) return false;
@@ -2974,6 +2986,67 @@ public static partial class DeviceManager
             return null;
 
         return new string(buffer, 0, (int)idLen);
+    }
+
+    /// <summary>The ParentIdPrefix a ROOT parent under
+    /// <paramref name="enumerator"/> gives its HID child: the identity's
+    /// own, <paramref name="basePrefix"/>, unless a record of a child on
+    /// that path is out of the tree with no Driver value and names
+    /// HIDMaestro in its hardware ids. A vetoed removal left such records
+    /// before v2.0.0 (SetupDiRemoveDevice deletes the driver before it
+    /// queries the removal, and "Setting needs reboot"). On 2026-10-19
+    /// every later child on that path was configured with a null driver
+    /// and stopped with problem 19, and no user-mode call removed the
+    /// record or installed a driver on it: SetupDiRemoveDevice and
+    /// CM_Uninstall_DevNode failed with CR_NO_SUCH_DEVNODE, DiInstallDevice
+    /// could not read the hardware ids, and CONFIGFLAG_REINSTALL was cleared
+    /// unused. The child is then given the next prefix
+    /// (<see cref="DeviceIdentity.AlternatePrefix"/>) whose path holds no
+    /// such record, a fresh record Windows installs as a new device. All
+    /// broken leaves the identity's own. The child path is
+    /// HID\&lt;enumerator&gt;\&lt;prefix&gt;&amp;&lt;collection&gt;, as
+    /// ClearParentIdPrefixRivals reads it.</summary>
+    internal static string ChildPrefixFor(string enumerator, string basePrefix)
+    {
+        for (int n = 0; n <= DeviceIdentity.PrefixAlternates; n++)
+        {
+            string prefix = n == 0 ? basePrefix : DeviceIdentity.AlternatePrefix(basePrefix, n);
+            if (!(DriverlessChildHook ?? DriverlessChild)(enumerator, prefix))
+            {
+                if (n > 0)
+                    DeviceOrchestrator.LogDiag($"      the HID child record under {basePrefix} has no driver, so this child takes {prefix}");
+                return prefix;
+            }
+        }
+        return basePrefix;
+    }
+
+    /// <summary>Stands in for <see cref="DriverlessChild"/> in the offline
+    /// checks. Null outside them.</summary>
+    internal static Func<string, string, bool>? DriverlessChildHook;
+
+    /// <summary>A record HID\&lt;enumerator&gt;\&lt;prefix&gt;&amp;N that is
+    /// not in the tree, has no Driver value and names HIDMaestro in its
+    /// hardware ids.</summary>
+    static bool DriverlessChild(string enumerator, string prefix)
+    {
+        try
+        {
+            using var segment = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\HID\{enumerator}");
+            if (segment == null) return false;
+            foreach (string name in segment.GetSubKeyNames())
+            {
+                if (!name.StartsWith(prefix + "&", StringComparison.OrdinalIgnoreCase)) continue;
+                using var record = segment.OpenSubKey(name);
+                if (record == null || !string.IsNullOrEmpty(record.GetValue("Driver") as string)) continue;
+                if (record.GetValue("HardwareID") is not string[] ids
+                    || !Array.Exists(ids, id => id.Contains("HIDMaestro", StringComparison.OrdinalIgnoreCase)))
+                    continue;
+                if (Locate($@"HID\{enumerator}\{name}", CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS) return true;
+            }
+        }
+        catch (Exception e) when (e is System.Security.SecurityException or UnauthorizedAccessException or System.IO.IOException) { }
+        return false;
     }
 
     /// <summary>

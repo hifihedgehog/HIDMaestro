@@ -1,8 +1,9 @@
-// idle-live [runs] [seconds]: the idle repeat's whole cost on the machine,
-// live and elevated: one dualsense-bt created through HMContext as a program
-// creates it, one consumer state submitted and then nothing, and one reader,
-// a child process of this probe reading the device's HID input reports as a
-// game does. Over a window of [seconds] it reads the CPU cycles
+// idle-live [runs] [seconds] [profile]: the idle repeat's whole cost on the
+// machine, live and elevated: one controller of the profile (dualsense-bt
+// unless one is named) created through HMContext as a program creates it,
+// one consumer state submitted and then nothing, and one reader, a child
+// process of this probe reading the device's HID input reports as a game
+// does. Over a window of [seconds] it reads the CPU cycles
 // (QueryProcessCycleTime) of the SDK's process, of the reader, and of every
 // WUDFHost process, which host the UMDF2 driver, and the reports the reader
 // read. Each run prints one line:
@@ -23,14 +24,15 @@ using Microsoft.Win32.SafeHandles;
 
 internal static class IdleLive
 {
-    const string Id = "dualsense-bt";
+    const string DefaultId = "dualsense-bt";
 
-    public static void Run(int runs, double seconds)
+    public static void Run(int runs, double seconds, string? profileId = null)
     {
+        string id = profileId ?? DefaultId;
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
         ctx.InstallDriver();
-        var profile = ctx.GetProfile(Id) ?? throw new InvalidOperationException($"no {Id}");
+        var profile = ctx.GetProfile(id) ?? throw new InvalidOperationException($"no {id}");
         for (int run = 1; run <= runs; run++)
         {
             using var c = ctx.CreateController(profile, Program.s_key);
@@ -38,7 +40,7 @@ internal static class IdleLive
             // The controller's own input interface, found under its devnode:
             // a HID path carries no HIDMaestro name to search for.
             string? path = Program.OwnInputInterface(c);
-            if (path == null) { Console.WriteLine($"idle-live,{run},no HID input interface under {Id}'s devnode"); return; }
+            if (path == null) { Console.WriteLine($"idle-live,{run},no HID input interface under {id}'s devnode"); return; }
             using var reader = Process.Start(new ProcessStartInfo(Environment.ProcessPath!)
             {
                 UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true,

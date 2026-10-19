@@ -9,7 +9,7 @@
 //                at index 0 first. Then a fresh-token dualsense at index 1
 //                on the ROOT path and a fresh-token xbox-one-s at index 2
 //                on the SWD xinputhid path. For each, the driver's half of
-//                the chosen index's version section reads protocols 4 to 4,
+//                the chosen index's version section reads protocols 4 to 5,
 //                which it writes only into the section of the index it
 //                chose. The dualsense answers report 0x09 with its MAC's
 //                last byte 1, from the FeatureAnswers of index 1, and the
@@ -342,8 +342,8 @@ internal static class Program
         using (var c0 = Create(ctx, 0, pad, "a generic pad at index 0, whose driver must read its instance ID before its device exists"))
         {
             if (c0 != null)
-                Check("a generic pad at index 0 starts on a driver of protocols 4 to 4",
-                      SharedMemoryIO.DriverHalf(0) is { Protocol: 4, ProtocolMin: 4 }, $"{SharedMemoryIO.DriverHalf(0)} | {Node(c0)}");
+                Check("a generic pad at index 0 starts on a driver of protocols 4 to 5",
+                      SharedMemoryIO.DriverHalf(0) is { Protocol: 5, ProtocolMin: 4 }, $"{SharedMemoryIO.DriverHalf(0)} | {Node(c0)}");
         }
 
         using (var c1 = Create(ctx, 1, ctx.GetProfile("dualsense")!, "a fresh-token dualsense at index 1 on the ROOT path"))
@@ -351,8 +351,8 @@ internal static class Program
             if (c1 != null)
             {
                 var half = SharedMemoryIO.DriverHalf(1);
-                Check("a fresh-token dualsense at index 1 on the ROOT path: its driver wrote protocols 4 to 4 into index 1's section at its first add",
-                      half is { Protocol: 4, ProtocolMin: 4, ConfigError: 0 }, $"{half} | {Node(c1)}");
+                Check("a fresh-token dualsense at index 1 on the ROOT path: its driver wrote protocols 4 to 5 into index 1's section at its first add",
+                      half is { Protocol: 5, ProtocolMin: 4, ConfigError: 0 }, $"{half} | {Node(c1)}");
                 using var h = Open(Find(1));
                 var r = h == null ? null : Get(h, 0x09, 20);
                 Check("its report 0x09 carries index 1 in its MAC, from index 1's FeatureAnswers",
@@ -364,8 +364,8 @@ internal static class Program
         {
             if (c2 == null) return;
             var half = SharedMemoryIO.DriverHalf(2);
-            Check("a fresh-token xbox-one-s at index 2 on the SWD xinputhid path: its driver wrote protocols 4 to 4 into index 2's section at its first add",
-                  half is { Protocol: 4, ProtocolMin: 4, ConfigError: 0 }, $"{half} | {Node(c2)}");
+            Check("a fresh-token xbox-one-s at index 2 on the SWD xinputhid path: its driver wrote protocols 4 to 5 into index 2's section at its first add",
+                  half is { Protocol: 5, ProtocolMin: 4, ConfigError: 0 }, $"{half} | {Node(c2)}");
             var state = new HMGamepadState { Buttons = HMButton.A | HMButton.Y };
             var sw = Stopwatch.StartNew();
             bool seen = false;

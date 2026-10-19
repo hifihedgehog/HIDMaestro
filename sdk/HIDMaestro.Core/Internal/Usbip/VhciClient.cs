@@ -84,6 +84,21 @@ internal static partial class VhciClient
     /// running. Requires no elevation.</summary>
     public static bool IsAvailable() => TryGetInterfacePath() != null;
 
+    /// <summary>Every present host controller's interface path, each
+    /// null-terminated, or null when there is none.</summary>
+    internal static string? InterfaceList()
+    {
+        var guid = VhciInterfaceGuid;
+        uint cr = CM_Get_Device_Interface_List_SizeW(out uint len, ref guid, null,
+            CM_GET_DEVICE_INTERFACE_LIST_PRESENT);
+        if (cr != 0 || len <= 1) return null;
+        var buf = new char[len];
+        cr = CM_Get_Device_Interface_ListW(ref guid, null, buf, len,
+            CM_GET_DEVICE_INTERFACE_LIST_PRESENT);
+        if (cr != 0 || buf[0] == '\0') return null;
+        return new string(buf, 0, (int)len).TrimEnd('\0');
+    }
+
     public static string? TryGetInterfacePath()
     {
         var guid = VhciInterfaceGuid;
@@ -114,14 +129,56 @@ internal static partial class VhciClient
     // them all.
     private const int CensusRows = 16;
 
+    // The host controller as the creating thread holds it open for one
+    // composite create (HoldOpen): the census of the create's lease, the
+    // stale sweep and the attach then share one open. An open of the host
+    // controller took about 700 microseconds on the bench machine on
+    // 2026-10-19 (CreateFileW alone, p50 of 50), and a composite create made
+    // two. The handle is closed when the create's hold ends, so no handle
+    // outlives a create, as none outlives a call outside one.
+    [ThreadStatic] private static IntPtr t_held;
+    [ThreadStatic] private static int t_holds;
+
+    /// <summary>Keep the host controller open on this thread, once the
+    /// first call opens it, until the returned scope is disposed. A
+    /// composite create holds it from its lease to its attach.</summary>
+    internal static IDisposable HoldOpen()
+    {
+        t_holds++;
+        return new Hold();
+    }
+
+    private sealed class Hold : IDisposable
+    {
+        private bool _done;
+
+        public void Dispose()
+        {
+            if (_done) return;
+            _done = true;
+            if (--t_holds > 0) return;
+            if (t_held != IntPtr.Zero) CloseHandle(t_held);
+            t_held = IntPtr.Zero;
+        }
+    }
+
     private static SafeHandleWrapper Open()
+    {
+        if (t_held != IntPtr.Zero) return new SafeHandleWrapper(t_held, owns: false);
+        SafeHandleWrapper opened = OpenNew();
+        if (t_holds == 0) return opened;
+        t_held = opened.Handle;
+        return new SafeHandleWrapper(opened.Handle, owns: false);
+    }
+
+    private static SafeHandleWrapper OpenNew()
     {
         string? kept = Volatile.Read(ref s_path);
         if (kept != null)
         {
             IntPtr k = CreateFileW(kept, 0xC0000000 /* GENERIC_READ|WRITE */, 0, IntPtr.Zero,
                 3 /* OPEN_EXISTING */, 0, IntPtr.Zero);
-            if (k != new IntPtr(-1)) return new SafeHandleWrapper(k);
+            if (k != new IntPtr(-1)) return new SafeHandleWrapper(k, owns: true);
         }
         string path = TryGetInterfacePath()
             ?? throw new InvalidOperationException(
@@ -132,7 +189,7 @@ internal static partial class VhciClient
         if (h == new IntPtr(-1))
             throw new Win32Exception(Marshal.GetLastWin32Error(), $"CreateFile('{path}') failed.");
         Volatile.Write(ref s_path, path);
-        return new SafeHandleWrapper(h);
+        return new SafeHandleWrapper(h, owns: true);
     }
 
     private static void WriteLocation(byte[] buf, int offset, string busid, string service, string host)
@@ -501,9 +558,20 @@ internal static partial class VhciClient
 
     private sealed class SafeHandleWrapper : IDisposable
     {
+        private readonly bool _owns;
         public IntPtr Handle { get; }
-        public SafeHandleWrapper(IntPtr h) => Handle = h;
-        public void Dispose() => CloseHandle(Handle);
+        public SafeHandleWrapper(IntPtr h, bool owns)
+        {
+            Handle = h;
+            _owns = owns;
+        }
+
+        /// <summary>Closes the handle, unless a hold of this thread's owns
+        /// it (<see cref="HoldOpen"/>).</summary>
+        public void Dispose()
+        {
+            if (_owns) CloseHandle(Handle);
+        }
     }
 
     private const uint CM_GET_DEVICE_INTERFACE_LIST_PRESENT = 0;

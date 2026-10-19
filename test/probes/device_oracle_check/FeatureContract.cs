@@ -21,7 +21,7 @@
 //   - protocols 4 to 4 with another token's tag: the start fails with
 //     STATUS_DEVICE_CONFIGURATION_ERROR
 //   - protocols 4 to 5 with the device node's tag: the blob answers
-//   - the driver writes DriverProtocol 4 and DriverProtocolMin 4 at add
+//   - the driver writes DriverProtocol 5 and DriverProtocolMin 4 at add
 //   - the index before the first start: an identity entry naming index 1
 //     and no hardware value gives index 1 and FunctionMode from Controller1
 //   - an entry whose section carries another tag, with no hardware value,
@@ -688,11 +688,11 @@ internal static class FeatureContract
             var g = Of(r["range45"], "getfeature").Single();
             return (Status(g) == 0 && Info(g) == 41 && Body(g)[0] == 0x05, $"{Status(g):X8} {Info(g)}");
         });
-        Add("the driver writes DriverProtocol 4 and DriverProtocolMin 4 at add", () =>
+        Add("the driver writes DriverProtocol 5 and DriverProtocolMin 4 at add", () =>
         {
             var v = Of(r["range45"], "section.version")[0];
             int proto = BinaryPrimitives.ReadInt32LittleEndian(v.AsSpan(20)), min = BinaryPrimitives.ReadInt32LittleEndian(v.AsSpan(36));
-            return (proto == 4 && min == 4, $"{proto} {min}");
+            return (proto == 5 && min == 4, $"{proto} {min}");
         });
         Add("an identity entry naming index 1 and no hardware value: index 1 at the first add, its MAC byte 1, FunctionMode from Controller1", () =>
         {

@@ -32,7 +32,9 @@
 // call. "cost" times them against an id that does not exist (Cost.cs),
 // "measure [cycles]" times Dispose per profile type on live devices, and
 // "measure4 [cycles]" times four controllers of each type disposed together
-// (Measure.cs, elevated, through the bench only).
+// (Measure.cs, elevated, through the bench only). "veto" disposes
+// controllers while another holder keeps their HID children open (Veto.cs,
+// elevated, through the bench only).
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -325,6 +327,7 @@ internal static class Program
             return 2;
         }
 
+        if (mode == "veto") return Veto.Run();
         if (mode == "measure") return Measure.Run(args.Length > 1 ? int.Parse(args[1]) : 30);
         if (mode == "measure4") return Measure.RunBatch(args.Length > 1 ? int.Parse(args[1]) : 30);
 

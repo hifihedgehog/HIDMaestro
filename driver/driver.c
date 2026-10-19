@@ -115,6 +115,18 @@ InitInstancePaths(
         AppendUlongDecimal(ctx->InputAckEventName, index, cap);
     }
     {
+        static const WCHAR prefix[] = L"Global\\HIDMaestroRemoveEvent";
+        SIZE_T cap = sizeof(ctx->RemoveEventName) / sizeof(WCHAR);
+        RtlCopyMemory(ctx->RemoveEventName, prefix, sizeof(prefix));
+        AppendUlongDecimal(ctx->RemoveEventName, index, cap);
+    }
+    {
+        static const WCHAR prefix[] = L"Global\\HIDMaestroRemovedEvent";
+        SIZE_T cap = sizeof(ctx->RemovedEventName) / sizeof(WCHAR);
+        RtlCopyMemory(ctx->RemovedEventName, prefix, sizeof(prefix));
+        AppendUlongDecimal(ctx->RemovedEventName, index, cap);
+    }
+    {
         static const WCHAR prefix[] = L"\\\\.\\pipe\\HIDMaestroOwner";
         SIZE_T cap = sizeof(ctx->OwnerPipeName) / sizeof(WCHAR);
         RtlCopyMemory(ctx->OwnerPipeName, prefix, sizeof(prefix));
@@ -1786,6 +1798,10 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                                    ctx->InputEventName);
             if (ev != NULL) {
                 ctx->InputDataEvent = ev;
+                /* The remove events, which an SDK of this release
+                 * makes with the input event. */
+                ctx->RemoveEvent = OpenEventW(SYNCHRONIZE, FALSE, ctx->RemoveEventName);
+                ctx->RemovedEvent = OpenEventW(EVENT_MODIFY_STATE, FALSE, ctx->RemovedEventName);
                 /* The SDK creates the input section (and the delivery
                  * acknowledgement beside it, issue #67) before the event,
                  * so map both now rather than on the first frame: a writer
@@ -1842,8 +1858,17 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
         for (;;) {
             /* The owner watch (issue #67) joins the wait while it is open.
              * After it fires it is closed and the wait is back to two. */
-            HANDLE waits[3] = { ctx->StopEvent, ctx->InputDataEvent, ctx->OwnerReadEvent };
-            DWORD rc = WaitForMultipleObjects(ctx->OwnerReadEvent ? 3 : 2, waits, FALSE, 500);
+            /* The remove event joins last, after the owner read while
+             * that is open, so the indices below stay as they were. */
+            HANDLE waits[4] = { ctx->StopEvent, ctx->InputDataEvent, ctx->OwnerReadEvent, ctx->RemoveEvent };
+            DWORD count = 2;
+            if (ctx->OwnerReadEvent != NULL) count = 3;
+            DWORD removeAt = MAXDWORD;
+            if (ctx->RemoveEvent != NULL) {
+                waits[count] = ctx->RemoveEvent;
+                removeAt = count++;
+            }
+            DWORD rc = WaitForMultipleObjects(count, waits, FALSE, 500);
 
             /* Issue #38: TearingDown is the authoritative exit
              * condition, checked on EVERY wake including timeouts. The
@@ -1910,6 +1935,31 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                 continue;
             }
 
+            if (removeAt != MAXDWORD && rc == WAIT_OBJECT_0 + removeAt) {
+                /* The SDK's Dispose asks the device to leave as an
+                 * unplugged one does. A driver with an unrecoverable error
+                 * "must call WdfDeviceSetFailed so that the system can
+                 * unload the device's drivers" (Learn, WdfDeviceSetFailed),
+                 * and a function driver that reports its device failed
+                 * starts a surprise removal (Learn, "Handling an
+                 * IRP_MN_SURPRISE_REMOVAL Request"), which no open handle
+                 * vetoes. Measured 2026-10-19: the device and its HID child
+                 * left the tree within 70 ms while another program held
+                 * the child open. A removal Windows queries instead is
+                 * vetoed by that handle, and the vetoed SetupDiRemoveDevice
+                 * left the child's record without its driver until a
+                 * reboot. DsHidMini calls WdfDeviceSetFailed the same way,
+                 * off any PnP callback as this worker is, with
+                 * WdfDeviceFailedAttemptRestart to be enumerated again
+                 * (driver\Device.c, DsDevice_EvtHidModeRestartTimerFunc).
+                 * One request is all it takes, so the event closes here. */
+                CloseHandle(ctx->RemoveEvent);
+                ctx->RemoveEvent = NULL;
+                WdfDeviceSetFailed(ctx->Device, WdfDeviceFailedNoRestart);
+                if (ctx->RemovedEvent != NULL) SetEvent(ctx->RemovedEvent);
+                continue;
+            }
+
             if (rc == WAIT_OBJECT_0 + 2) {
                 /* The consumer's end of the owner pipe closed. */
                 OwnerGone(ctx);
@@ -1945,6 +1995,8 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
              * sequence symmetric with TryOpenSharedMapping. */
             CloseHandle(ctx->InputDataEvent);
             ctx->InputDataEvent = NULL;
+            if (ctx->RemoveEvent)  { CloseHandle(ctx->RemoveEvent);  ctx->RemoveEvent = NULL; }
+            if (ctx->RemovedEvent) { CloseHandle(ctx->RemovedEvent); ctx->RemovedEvent = NULL; }
 
             if (ctx->SharedMemPtr)    { UnmapViewOfFile(ctx->SharedMemPtr);    ctx->SharedMemPtr = NULL; }
             if (ctx->SharedMemHandle) { CloseHandle(ctx->SharedMemHandle);     ctx->SharedMemHandle = NULL; }
@@ -1995,6 +2047,8 @@ static VOID ReleaseIndexObjects(_In_ PDEVICE_CONTEXT ctx)
     }
 
     if (ctx->InputDataEvent) { CloseHandle(ctx->InputDataEvent); ctx->InputDataEvent = NULL; }
+    if (ctx->RemoveEvent)    { CloseHandle(ctx->RemoveEvent);    ctx->RemoveEvent = NULL; }
+    if (ctx->RemovedEvent)   { CloseHandle(ctx->RemovedEvent);   ctx->RemovedEvent = NULL; }
     if (ctx->StopEvent)      { CloseHandle(ctx->StopEvent);      ctx->StopEvent = NULL; }
     if (ctx->OutputSignalEvent) { CloseHandle(ctx->OutputSignalEvent); ctx->OutputSignalEvent = NULL; }
 

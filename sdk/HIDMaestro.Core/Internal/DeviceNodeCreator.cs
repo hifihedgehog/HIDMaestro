@@ -119,6 +119,11 @@ internal static partial class DeviceNodeCreator
         // devnodes. The lock and the gate narrow that window. Neither is
         // shown to close it.
         string instId = $@"ROOT\{enumerator}\{identity.Token}";
+        // The identity's own child path unless an older build's vetoed
+        // removal left a record there with no driver, which no later child
+        // on that path starts from (DeviceManager.ChildPrefixFor). The
+        // rival guard and the prefix written below take the one chosen.
+        string childPrefix = DeviceManager.ChildPrefixFor(enumerator, identity.ParentIdPrefix);
         using var pnp = DeviceManager.EnterRegistrationGate(instId, DeviceManager.RegistrationKind.Root,
             removePriorLife: () =>
             {
@@ -130,7 +135,7 @@ internal static partial class DeviceNodeCreator
                 DeviceOrchestrator.LogDiag($"      {instId} still exists from a prior life; removing before recreate");
                 return DeviceManager.RemovePriorLife(instId, timeoutMs: 120_000);
             },
-            clearRivals: remove => DeviceManager.ClearParentIdPrefixRivals("ROOT", enumerator, identity.Token, identity.ParentIdPrefix, remove),
+            clearRivals: remove => DeviceManager.ClearParentIdPrefixRivals("ROOT", enumerator, identity.Token, childPrefix, remove),
             out _);
         if (pnp == null)
             return new Result(false, null);
@@ -206,7 +211,7 @@ internal static partial class DeviceNodeCreator
                 // every life. Measured on 26200: three lives with the value
                 // pre-written produced one child path; three without it
                 // counted 0, 1, 2.
-                DeviceIdentity.ApplyParentIdPrefix(instId, identity.ParentIdPrefix, createKey: true);
+                DeviceIdentity.ApplyParentIdPrefix(instId, childPrefix, createKey: true);
 
                 // Issue #59. XUSB-companion profiles carry the xinputhid
                 // tripwire on this HID parent so WGI's OnPnpDeviceAdded
@@ -329,7 +334,7 @@ internal static partial class DeviceNodeCreator
             // package beside one the deploy policy had kept. Perf audit
             // 2026-07-21: a binding failure is named in the diag at once rather
             // than left to the two readiness waits below.
-            if (!InstallBestStoreDriver(dis, instId))
+            if (!InstallBestStoreDriver(dis, instId, plan))
             {
                 int err = Marshal.GetLastWin32Error();
                 DeviceOrchestrator.LogDiag(
@@ -420,12 +425,39 @@ internal static partial class DeviceNodeCreator
 
     private const int ERROR_DEVINST_ALREADY_EXISTS = unchecked((int)0xE0000207);
 
-    /// <summary>DiInstallDevice on one element of <paramref name="dis"/>, with
-    /// no driver named, so the best driver-store match is installed on that
-    /// device and no other. The element is opened by instance id because the
-    /// create's SP_DEVINFO_DATA buffer has been released by now.</summary>
-    private static bool InstallBestStoreDriver(IntPtr dis, string instId)
+    /// <summary>DiInstallDevice on one element of <paramref name="dis"/>, so
+    /// the best driver-store match is installed on that device and no other.
+    /// The element is opened by instance id because the create's
+    /// SP_DEVINFO_DATA buffer has been released by now.
+    ///
+    /// <para>With no driver named, DiInstallDevice "searches the drivers
+    /// preinstalled in the driver store for the driver that is the best match
+    /// to the specified device" (Learn, DiInstallDevice). That search is most
+    /// of a create: in setupapi.dev.log of 2026-10-19 its Build Driver List
+    /// took 101 ms and DIF_SELECTBESTCOMPATDRV 52 ms of a 376 ms
+    /// DiInstallDevice. Its answer depends on the device's hardware and
+    /// compatible ids and on the driver store, so it is kept for the ids with
+    /// the state of the driver store it was found in
+    /// (<see cref="StoreDriverChoice"/>). While that state holds, the next
+    /// create of the same ids, in this process or a later one, builds its
+    /// driver list from that one INF (DI_ENUMSINGLEINF) and passes the driver
+    /// to DiInstallDevice, the steps Learn's remarks give for naming one. Any
+    /// other outcome, an INF gone included, takes the search.</para></summary>
+    private static bool InstallBestStoreDriver(IntPtr dis, string instId, PresentationPlan plan)
     {
+        string ids = string.Join("\0", plan.HardwareIds) + "\0\0" + string.Join("\0", plan.CompatibleIds);
+        string? state = StoreDriverChoice.State();
+        if (state != null && StoreDriverChoice.For(ids, state) is { } inf)
+        {
+            if (InstallFromStoreInf(instId, inf, out int failed))
+            {
+                DeviceOrchestrator.LogDiag($"      driver from {inf}, the store's search skipped");
+                return true;
+            }
+            StoreDriverChoice.Forget(ids);
+            DeviceOrchestrator.LogDiag($"      driver from {inf} not installed (Win32={failed}); searching the store");
+        }
+
         byte[] buf = new byte[IntPtr.Size == 8 ? 32 : 28];
         BitConverter.GetBytes(buf.Length).CopyTo(buf, 0);
         var handle = GCHandle.Alloc(buf, GCHandleType.Pinned);
@@ -433,13 +465,291 @@ internal static partial class DeviceNodeCreator
         {
             if (!SetupDiOpenDeviceInfoW(dis, instId, IntPtr.Zero, 0, handle.AddrOfPinnedObject()))
                 return false;
-            return DiInstallDevice(IntPtr.Zero, dis, handle.AddrOfPinnedObject(), IntPtr.Zero,
-                                   DIIDFLAG_NOFINISHINSTALLUI, out _);
+            if (!DiInstallDevice(IntPtr.Zero, dis, handle.AddrOfPinnedObject(), IntPtr.Zero,
+                                 DIIDFLAG_NOFINISHINSTALLUI, out _))
+                return false;
         }
         finally { handle.Free(); }
+
+        // What the search chose: the device's driver INF, a published name
+        // (DEVPKEY_Device_DriverInfPath), and that package's INF in the
+        // driver store, the path the search's driver node carries. The state
+        // is read again: a package added during the search makes the choice
+        // one nothing can match.
+        if (state != null && StoreInfOf(instId) is { } chosen && StoreDriverChoice.State() == state)
+            StoreDriverChoice.Remember(ids, state, chosen);
+        return true;
+    }
+
+    /// <summary>The store INF the driver-store search chose for a device's
+    /// hardware and compatible ids, with the state of the driver store it
+    /// was chosen in. Kept in the process and under
+    /// <c>HKLM\SOFTWARE\HIDMaestro\StoreDriverChoice</c>, one value per
+    /// set of ids, so a program's first create skips the search too. The
+    /// key goes with <c>SOFTWARE\HIDMaestro</c> when the packages are
+    /// removed.</summary>
+    internal static class StoreDriverChoice
+    {
+        private const string KeyPath = @"SOFTWARE\HIDMaestro\StoreDriverChoice";
+        private static readonly object s_lock = new();
+        private static readonly System.Collections.Generic.Dictionary<string, (string State, string Inf)> s_byIds =
+            new(StringComparer.Ordinal);
+
+        /// <summary>The state of the driver store a choice holds for: the
+        /// installed-payload record, which every deploy of the driver
+        /// rewrites (<see cref="DriverDeploy.DeployMachine.ManifestHash"/>),
+        /// and the last write of the driver store's FileRepository
+        /// directory, which moves when any package is added or removed: on
+        /// the bench machine on 2026-10-19 it moved with each deploy and
+        /// stayed through the device installs between them. Null when either
+        /// cannot be read.</summary>
+        internal static string? State()
+        {
+            string? manifest = DriverDeploy.Machine.ManifestHash();
+            if (manifest == null) return null;
+            try
+            {
+                var repo = new System.IO.DirectoryInfo(System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.System), "DriverStore", "FileRepository"));
+                if (!repo.Exists) return null;
+                return manifest + "|" + repo.LastWriteTimeUtc.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+            catch (Exception e) when (e is System.IO.IOException or UnauthorizedAccessException) { return null; }
+        }
+
+        /// <summary>The INF chosen for the ids in this state, from this
+        /// process or the registry, or null.</summary>
+        internal static string? For(string ids, string state)
+        {
+            lock (s_lock)
+                if (s_byIds.TryGetValue(ids, out var c) && c.State == state) return c.Inf;
+            try
+            {
+                using var k = Registry.LocalMachine.OpenSubKey(KeyPath);
+                if (k?.GetValue(ValueName(ids)) is string[] { Length: 2 } v && v[0] == state && v[1].Length > 0)
+                {
+                    lock (s_lock) s_byIds[ids] = (state, v[1]);
+                    return v[1];
+                }
+            }
+            catch (Exception e) when (e is System.Security.SecurityException or UnauthorizedAccessException or System.IO.IOException) { }
+            return null;
+        }
+
+        internal static void Remember(string ids, string state, string inf)
+        {
+            lock (s_lock) s_byIds[ids] = (state, inf);
+            try
+            {
+                using var k = Registry.LocalMachine.CreateSubKey(KeyPath);
+                k.SetValue(ValueName(ids), new[] { state, inf }, RegistryValueKind.MultiString);
+            }
+            catch (Exception e) when (e is System.Security.SecurityException or UnauthorizedAccessException or System.IO.IOException) { }
+        }
+
+        internal static void Forget(string ids)
+        {
+            lock (s_lock) s_byIds.Remove(ids);
+            try
+            {
+                using var k = Registry.LocalMachine.OpenSubKey(KeyPath, writable: true);
+                k?.DeleteValue(ValueName(ids), throwOnMissingValue: false);
+            }
+            catch (Exception e) when (e is System.Security.SecurityException or UnauthorizedAccessException or System.IO.IOException) { }
+        }
+
+        /// <summary>The value's name: the SHA-256 of the ids, which hold
+        /// characters a value name may not.</summary>
+        private static string ValueName(string ids) =>
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(ids)));
+    }
+
+    /// <summary>The driver-store INF of the driver installed on a present
+    /// devnode, or null when it cannot be read.</summary>
+    private static string? StoreInfOf(string instId)
+    {
+        if (CM_Locate_DevNodeW(out uint dev, instId, 0) != 0) return null;
+        var key = DEVPKEY_Device_DriverInfPath;
+        uint len = 0;
+        CM_Get_DevNode_PropertyW(dev, ref key, out _, null, ref len, 0);
+        if (len == 0) return null;
+        var buf = new byte[len];
+        if (CM_Get_DevNode_PropertyW(dev, ref key, out _, buf, ref len, 0) != 0) return null;
+        string published = Encoding.Unicode.GetString(buf, 0, (int)Math.Min(len, (uint)buf.Length)).TrimEnd('\0');
+        if (published.Length == 0) return null;
+        try { return PnputilHelper.DriverStorePathOf(published); }
+        catch (InvalidOperationException) { return null; }
+    }
+
+    /// <summary>DiInstallDevice of the one driver a driver list built from
+    /// <paramref name="inf"/> alone gives the device, in a device information
+    /// set of its own, so the create's set keeps its installation parameters
+    /// for the search. Learn, DiInstallDevice, Remarks: "call
+    /// SetupDiBuildDriverInfoList to build a list of drivers for the device
+    /// and then call SetupDiEnumDriverInfo to enumerate the elements of the
+    /// driver list", with DI_ENUMSINGLEINF, under which "DriverPath contains
+    /// the path of a single INF file instead of a path of a directory"
+    /// (SP_DEVINSTALL_PARAMS). The driver is the list's best rank
+    /// (SP_DRVINSTALL_PARAMS.Rank, the lower the better), as the search
+    /// ranks the drivers of one INF, whose date and version are the same. A
+    /// best rank two drivers share is left to the search. False when no
+    /// driver was installed, with the failed call's error in
+    /// <paramref name="error"/>, 0 for a list with no driver or a
+    /// tie.</summary>
+    private static unsafe bool InstallFromStoreInf(string instId, string inf, out int error)
+    {
+        error = 0;
+        if (inf.Length >= 260) return false;
+        IntPtr set = SetupDiCreateDeviceInfoList(IntPtr.Zero, IntPtr.Zero);
+        if (set == new IntPtr(-1)) { error = Marshal.GetLastWin32Error(); return false; }
+        try
+        {
+            var dev = new SP_DEVINFO_DATA { cbSize = (uint)sizeof(SP_DEVINFO_DATA) };
+            var prm = new SP_DEVINSTALL_PARAMS_W { cbSize = (uint)sizeof(SP_DEVINSTALL_PARAMS_W) };
+            if (!SetupDiOpenDeviceInfoW(set, instId, IntPtr.Zero, 0, (IntPtr)(&dev))
+                || !SetupDiGetDeviceInstallParamsW(set, ref dev, ref prm))
+            {
+                error = Marshal.GetLastWin32Error();
+                return false;
+            }
+            prm.Flags |= DI_ENUMSINGLEINF;
+            inf.AsSpan().CopyTo(new Span<char>(prm.DriverPath, 260));
+            prm.DriverPath[inf.Length] = '\0';
+            if (!SetupDiSetDeviceInstallParamsW(set, ref dev, ref prm)
+                || !SetupDiBuildDriverInfoList(set, ref dev, SPDIT_COMPATDRIVER))
+            {
+                error = Marshal.GetLastWin32Error();
+                return false;
+            }
+            try
+            {
+                SP_DRVINFO_DATA_W best = default;
+                uint bestRank = uint.MaxValue;
+                bool tie = false;
+                for (uint i = 0; ; i++)
+                {
+                    var drv = new SP_DRVINFO_DATA_W { cbSize = (uint)sizeof(SP_DRVINFO_DATA_W) };
+                    if (!SetupDiEnumDriverInfoW(set, ref dev, SPDIT_COMPATDRIVER, i, ref drv)) break;
+                    var dp = new SP_DRVINSTALL_PARAMS { cbSize = (uint)sizeof(SP_DRVINSTALL_PARAMS) };
+                    if (!SetupDiGetDriverInstallParamsW(set, ref dev, ref drv, ref dp))
+                    {
+                        error = Marshal.GetLastWin32Error();
+                        return false;
+                    }
+                    if (dp.Rank < bestRank) { best = drv; bestRank = dp.Rank; tie = false; }
+                    else if (dp.Rank == bestRank) tie = true;
+                }
+                if (bestRank == uint.MaxValue || tie) return false;
+                if (DiInstallDevice(IntPtr.Zero, set, (IntPtr)(&dev), (IntPtr)(&best), DIIDFLAG_NOFINISHINSTALLUI, out _)) return true;
+                error = Marshal.GetLastWin32Error();
+                return false;
+            }
+            finally { SetupDiDestroyDriverInfoList(set, ref dev, SPDIT_COMPATDRIVER); }
+        }
+        finally { SetupDiDestroyDeviceInfoList(set); }
     }
 
     private const uint DIIDFLAG_NOFINISHINSTALLUI = 0x00000002;
+    private const uint DI_ENUMSINGLEINF = 0x00010000;
+    private const uint SPDIT_COMPATDRIVER = 2;
+
+    // devpkey.h: DEVPKEY_Device_DriverInfPath, {a8b865dd-2e3d-4094-ad97-e593a70c75d6}, 5.
+    private static readonly DEVPROPKEY DEVPKEY_Device_DriverInfPath = new()
+    {
+        fmtid = new Guid("a8b865dd-2e3d-4094-ad97-e593a70c75d6"),
+        pid = 5,
+    };
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct DEVPROPKEY { public Guid fmtid; public uint pid; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SP_DEVINFO_DATA
+    {
+        public uint cbSize;
+        public Guid ClassGuid;
+        public uint DevInst;
+        public IntPtr Reserved;
+    }
+
+    // SP_DRVINFO_DATA_V2_W (setupapi.h). FILETIME is two DWORDs.
+    [StructLayout(LayoutKind.Sequential)]
+    private unsafe struct SP_DRVINFO_DATA_W
+    {
+        public uint cbSize;
+        public uint DriverType;
+        public IntPtr Reserved;
+        public fixed char Description[256];
+        public fixed char MfgName[256];
+        public fixed char ProviderName[256];
+        public uint DriverDateLow;
+        public uint DriverDateHigh;
+        public ulong DriverVersion;
+    }
+
+    // SP_DRVINSTALL_PARAMS (setupapi.h): Rank is the driver's rank for this
+    // device, lower being the better match.
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SP_DRVINSTALL_PARAMS
+    {
+        public uint cbSize;
+        public uint Rank;
+        public uint Flags;
+        public UIntPtr PrivateData;
+        public uint Reserved;
+    }
+
+    // SP_DEVINSTALL_PARAMS_W (setupapi.h, which packs to 8 bytes on 64-bit
+    // Windows): 584 bytes there, DriverPath at offset 60.
+    [StructLayout(LayoutKind.Sequential)]
+    private unsafe struct SP_DEVINSTALL_PARAMS_W
+    {
+        public uint cbSize;
+        public uint Flags;
+        public uint FlagsEx;
+        public IntPtr hwndParent;
+        public IntPtr InstallMsgHandler;
+        public IntPtr InstallMsgHandlerContext;
+        public IntPtr FileQueue;
+        public UIntPtr ClassInstallReserved;
+        public uint Reserved;
+        public fixed char DriverPath[260];
+    }
+
+    [LibraryImport("SetupAPI.dll", EntryPoint = "SetupDiCreateDeviceInfoList", SetLastError = true)]
+    private static partial IntPtr SetupDiCreateDeviceInfoList(IntPtr ClassGuid, IntPtr hwndParent);
+
+    [LibraryImport("SetupAPI.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiGetDeviceInstallParamsW(IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData,
+        ref SP_DEVINSTALL_PARAMS_W DeviceInstallParams);
+
+    [LibraryImport("SetupAPI.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiSetDeviceInstallParamsW(IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData,
+        ref SP_DEVINSTALL_PARAMS_W DeviceInstallParams);
+
+    [LibraryImport("SetupAPI.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiBuildDriverInfoList(IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData, uint DriverType);
+
+    [LibraryImport("SetupAPI.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiDestroyDriverInfoList(IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData, uint DriverType);
+
+    [LibraryImport("SetupAPI.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiEnumDriverInfoW(IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData, uint DriverType,
+        uint MemberIndex, ref SP_DRVINFO_DATA_W DriverInfoData);
+
+    [LibraryImport("SetupAPI.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiGetDriverInstallParamsW(IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData,
+        ref SP_DRVINFO_DATA_W DriverInfoData, ref SP_DRVINSTALL_PARAMS DriverInstallParams);
+
+    [LibraryImport("CfgMgr32.dll")]
+    private static partial uint CM_Get_DevNode_PropertyW(uint dnDevInst, ref DEVPROPKEY PropertyKey, out uint PropertyType,
+        byte[]? PropertyBuffer, ref uint PropertyBufferSize, uint ulFlags);
 
     [LibraryImport("newdev.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

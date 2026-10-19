@@ -78,6 +78,14 @@ internal interface IDeviceClock : IDisposable
     /// a fixed order, and leaves the clock unstarted. Returns false when the
     /// clock would not run.</summary>
     bool TickNow();
+
+    /// <summary>The consumer sent a frame at <paramref name="at"/>
+    /// (Stopwatch ticks), which moves the tick's
+    /// <see cref="IClockTick.NotBefore"/> to <paramref name="at"/> plus a
+    /// period. The idle repeat's clock calls it from the submit paths, so a
+    /// consumer that sends faster than the period keeps the timer ahead of
+    /// it and the clock does not wake. Called on any thread.</summary>
+    void FrameSent(long at);
 }
 
 internal sealed class DeviceClock<TTick> : IDeviceClock where TTick : struct, IClockTick
@@ -91,6 +99,11 @@ internal sealed class DeviceClock<TTick> : IDeviceClock where TTick : struct, IC
     private readonly object _lifetime = new();
     private volatile bool _stop;
     private bool _closed;
+    // When the waitable timer is set to fire, in Stopwatch ticks, 0 before
+    // the first setting. The clock and FrameSent each set the timer to a
+    // time at or before the next tick, never after it, so whichever setting
+    // lands last, the clock wakes no later than the tick is due.
+    private long _armedDue;
 
     /// <param name="everyChangeWakes">Every change to what the tick reads
     /// calls <see cref="Wake"/>, so the clock waits for its next tick in one
@@ -122,6 +135,33 @@ internal sealed class DeviceClock<TTick> : IDeviceClock where TTick : struct, IC
         if (!_tick.Running(out _)) return false;
         _tick.Tick(Stopwatch.GetTimestamp());
         return true;
+    }
+
+    /// <summary>A frame of the consumer's at <paramref name="at"/> puts the
+    /// next tick at <paramref name="at"/> plus a period (the idle repeat's
+    /// rule, <see cref="IClockTick.NotBefore"/>). The timer is moved there
+    /// only when it would fire within half a period of the frame: a consumer
+    /// that sends faster than that sends again before the timer fires, and
+    /// moves it then. So the clock wakes once per gap in the consumer's
+    /// frames rather than once a period while frames arrive. The
+    /// SetWaitableTimer call, about 600 cycles on the bench machine on
+    /// 2026-10-19, comes once each half period: on every other frame of a
+    /// consumer sending each millisecond to a 4 ms stream. A timer set
+    /// earlier than the tick, by a setting that lost a race with this one,
+    /// wakes the clock early, and it sets the timer again.</summary>
+    public void FrameSent(long at)
+    {
+        if (_timer == IntPtr.Zero) return;
+        long period = Math.Max(1, _tick.Period);
+        if (Volatile.Read(ref _armedDue) - at > period / 2) return;
+        long due = at + period;
+        lock (_lifetime)
+        {
+            if (_closed) return;
+            long rel = -Math.Max(1, (due - Stopwatch.GetTimestamp()) * 10_000_000L / Stopwatch.Frequency);
+            if (SetWaitableTimer(_timer, ref rel, 0, IntPtr.Zero, IntPtr.Zero, false))
+                Volatile.Write(ref _armedDue, due);
+        }
     }
 
     /// <summary>Something the tick reads changed: look again now.</summary>
@@ -209,8 +249,9 @@ internal sealed class DeviceClock<TTick> : IDeviceClock where TTick : struct, IC
                     if (_timer != IntPtr.Zero)
                     {
                         long rel = -Math.Max(1, wait * 10_000_000L / freq); // relative, 100 ns units
-                        if (SetWaitableTimer(_timer, ref rel, 0, IntPtr.Zero, IntPtr.Zero, false)
-                            && WaitForMultipleObjects(2, waits, false, _waitCapMs) != WAIT_FAILED)
+                        bool set = SetWaitableTimer(_timer, ref rel, 0, IntPtr.Zero, IntPtr.Zero, false);
+                        if (set) Volatile.Write(ref _armedDue, due);
+                        if (set && WaitForMultipleObjects(2, waits, false, _waitCapMs) != WAIT_FAILED)
                             continue;
                     }
                     // No high-resolution timer (Windows 10 before 1803) or a

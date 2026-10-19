@@ -114,7 +114,7 @@ internal static class Contract
             ("HM_FEATURE_FLAG_MESSAGE", table, "FlagMessage"), ("HM_FEATURE_FLAG_PARAM", table, "FlagParam"),
             ("HM_FEATURE_FLAG_ECHO", table, "FlagEcho"), ("HM_FEATURE_FLAG_REPLY_HEAD", table, "FlagReplyHead"),
             ("HM_FEATURE_FLAG_NOTIFY", table, "FlagNotify"),
-            ("HIDMAESTRO_DRIVER_PROTOCOL", typeof(SharedMemoryIO), "SDK_PROTOCOL"),
+            ("HIDMAESTRO_DRIVER_PROTOCOL", typeof(SharedMemoryIO), "DRIVER_PROTOCOL_REMOVE"),
             ("HIDMAESTRO_DRIVER_PROTOCOL_MIN", typeof(SharedMemoryIO), "SDK_PROTOCOL_MIN"),
             ("HIDMAESTRO_CONTRACT_PROTOCOL", typeof(SharedMemoryIO), "SDK_PROTOCOL"),
         };
