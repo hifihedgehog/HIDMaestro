@@ -22,6 +22,7 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("StopEventResilienceCheck")]
 [assembly: InternalsVisibleTo("UsbCompositeSchemaCheck")]
 [assembly: InternalsVisibleTo("ValvePersonaCheck")]
+[assembly: InternalsVisibleTo("ValveSteamCheck")]
 [assembly: InternalsVisibleTo("UsbipServerCheck")]
 [assembly: InternalsVisibleTo("UsbipE2ECheck")]
 [assembly: InternalsVisibleTo("UsbipBundleCheck")]

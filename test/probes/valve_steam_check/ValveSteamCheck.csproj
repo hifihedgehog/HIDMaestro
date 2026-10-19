@@ -13,5 +13,7 @@
     <!-- record-switch-pro writes device_oracle_check's golden format. -->
     <Compile Include="..\device_oracle_check\Golden.cs" Link="Golden.cs" />
     <Compile Include="..\device_oracle_check\LiveRecorder.cs" Link="LiveRecorder.cs" />
+    <!-- Steam's log read per device, and whether Steam holds it open. -->
+    <Compile Include="..\probe_common\SteamDeviceLog.cs" Link="SteamDeviceLog.cs" />
   </ItemGroup>
 </Project>

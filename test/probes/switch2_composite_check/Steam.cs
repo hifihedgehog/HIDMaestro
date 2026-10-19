@@ -35,26 +35,6 @@ internal static partial class Program
     static bool AnySteamRunning()
         => new[] { "steam", "steamwebhelper", "steamservice" }.Any(n => Process.GetProcessesByName(n).Length > 0);
 
-    /// <summary>Read a log from an offset, even while Steam holds it open.</summary>
-    static string ReadLogFrom(string path, long offset)
-    {
-        try
-        {
-            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            if (offset > fs.Length) offset = 0;   // Steam rotated it
-            fs.Seek(offset, SeekOrigin.Begin);
-            using var sr = new StreamReader(fs);
-            return sr.ReadToEnd();
-        }
-        catch { return string.Empty; }
-    }
-
-    static long LogLength(string path)
-    {
-        try { return File.Exists(path) ? new FileInfo(path).Length : 0; }
-        catch { return 0; }
-    }
-
     /// <summary>Start Steam to the tray when it is not running. Returns
     /// false when it would not come up.</summary>
     static bool EnsureSteam(string root, string log, out bool startedHere)
@@ -62,7 +42,7 @@ internal static partial class Program
         startedHere = false;
         if (SteamRunning()) return true;
         Console.WriteLine("  starting Steam (-silent)...");
-        long before = LogLength(log);
+        long before = SteamDeviceLog.Length(log);
         try
         {
             Process.Start(new ProcessStartInfo
@@ -80,13 +60,13 @@ internal static partial class Program
             return false;
         }
         // Far enough up to be writing its controller log.
-        for (int i = 0; i < 120 && LogLength(log) == 0; i++) Thread.Sleep(500);
-        for (int i = 0; i < 60 && !(SteamRunning() && LogLength(log) > 0); i++) Thread.Sleep(500);
+        for (int i = 0; i < 120 && SteamDeviceLog.Length(log) == 0; i++) Thread.Sleep(500);
+        for (int i = 0; i < 60 && !(SteamRunning() && SteamDeviceLog.Length(log) > 0); i++) Thread.Sleep(500);
         // Until the controller log opens this session with the client's
         // version line, for up to the 8 s this waited before.
         var up = Stopwatch.StartNew();
         while (up.ElapsedMilliseconds < 8000
-               && !ReadLogFrom(log, before).Contains("Client version:", StringComparison.Ordinal))
+               && !SteamDeviceLog.Read(log, before).Contains("Client version:", StringComparison.Ordinal))
             Thread.Sleep(100);
         return SteamRunning();
     }
@@ -131,7 +111,7 @@ internal static partial class Program
         Attached? a = null;
         try
         {
-            long controllerBase = LogLength(controllerLog), consoleBase = LogLength(consoleLog);
+            long controllerBase = SteamDeviceLog.Length(controllerLog), consoleBase = SteamDeviceLog.Length(consoleLog);
             var profile = ctx.GetProfile(ProfileId)!;
             a = Attached.Create(ctx, profile, null, out string? skip);
             if (a == null) { Console.WriteLine($"  [SKIP] {skip}"); return; }
@@ -147,12 +127,12 @@ internal static partial class Program
             for (int i = 0; i < 900 && !opened; i++)
             {
                 Thread.Sleep(100);
-                controller = ReadLogFrom(controllerLog, controllerBase);
+                controller = SteamDeviceLog.Read(controllerLog, controllerBase);
                 var log = s2.SnapshotBulkLog();
                 opened = controller.Contains("Steam controller device opened", StringComparison.Ordinal)
                       && log.Count >= 19 && log.Skip(17).Any(p => p.Length >= 9 && p[0] == 0x0C && p[3] == 0x04);
             }
-            console = ReadLogFrom(consoleLog, consoleBase);
+            console = SteamDeviceLog.Read(consoleLog, consoleBase);
 
             string added = console.Split('\n').FirstOrDefault(l => l.Contains("Added HIDAPI device", StringComparison.Ordinal)
                                                                && l.Contains("PID 0x2069", StringComparison.OrdinalIgnoreCase)) ?? "";
@@ -192,17 +172,19 @@ internal static partial class Program
             double rate = sent * 1000.0 / hold.ElapsedMilliseconds;
             Check("Steam keeps reading: it takes the persona's 250 reports a second for eight more seconds",
                   rate > 237 && rate < 252, $"{sent} reports, {rate:F1} a second");
-            string after = ReadLogFrom(controllerLog, controllerBase);
+            string after = SteamDeviceLog.Read(controllerLog, controllerBase);
             // Config sets can land after the open, so this reads the log as
             // it stands after the hold.
             Check("Steam gives it the Switch Pro configuration set",
                   after.Contains("configset_controller_switch_pro.vdf", StringComparison.OrdinalIgnoreCase));
-            int openAt = after.LastIndexOf("Steam controller device opened", StringComparison.Ordinal);
-            string tail = openAt >= 0 ? after[openAt..] : after;
-            Check("Steam does not close it",
-                  !tail.Contains("closed after hid_read failure", StringComparison.Ordinal)
-                  && !tail.Contains("PollState Changed from 1 to 0", StringComparison.Ordinal)
-                  && !tail.Contains("PollState Changed from 2 to 0", StringComparison.Ordinal));
+            // Steam's close line names no device, and another program's
+            // device closing meanwhile writes it too (probe_common/
+            // SteamDeviceLog.cs). So the close is read off Windows: while
+            // Steam's SDL holds the persona's HID interface, an open that
+            // shares nothing fails.
+            bool held = SteamDeviceLog.HeldOpen(a.HidPath!, out int error);
+            Check("Steam does not close it", held,
+                  held ? "Steam holds its HID interface" : $"an open that shares nothing got error {error}");
             Check("Steam never left a bulk read to time out", device.BulkReadsCanceled == 0, $"{device.BulkReadsCanceled} canceled");
             Console.WriteLine("  [NOTE] the gyro moving in Steam's own controller settings is a screen check and was not run here.");
         }
@@ -238,8 +220,8 @@ internal static partial class Program
             .Select(n => Path.Combine(root, "logs", n)).ToArray();
 
         if (!EnsureSteam(root, log, out bool startedHere)) return 2;
-        long baseline = LogLength(log);
-        var otherBase = others.Select(LogLength).ToArray();
+        long baseline = SteamDeviceLog.Length(log);
+        var otherBase = others.Select(SteamDeviceLog.Length).ToArray();
 
         var profile = ctx.GetProfile(ProfileId)!;
         var a = Attached.Create(ctx, profile, null, out string? skip);
@@ -262,10 +244,10 @@ internal static partial class Program
             foreach (var e in s2.SnapshotBulkLogTimed())
                 Console.WriteLine($"  {(e.Ticks - t0) * 1000.0 / Stopwatch.Frequency,9:F1}  {X(e.Payload)}");
             Console.WriteLine("\n-- Steam controller.txt since attach --");
-            Console.WriteLine(ReadLogFrom(log, baseline));
+            Console.WriteLine(SteamDeviceLog.Read(log, baseline));
             for (int i = 0; i < others.Length; i++)
             {
-                string fresh = ReadLogFrom(others[i], otherBase[i]);
+                string fresh = SteamDeviceLog.Read(others[i], otherBase[i]);
                 var lines = fresh.Split('\n').Where(l => l.Contains("057e", StringComparison.OrdinalIgnoreCase) || l.Contains("2069")
                     || l.Contains("Switch", StringComparison.OrdinalIgnoreCase) || l.Contains("Nintendo", StringComparison.OrdinalIgnoreCase)).ToArray();
                 Console.WriteLine($"\n-- {Path.GetFileName(others[i])}: {lines.Length} matching line(s) --");

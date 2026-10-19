@@ -9,4 +9,8 @@
   <ItemGroup>
     <ProjectReference Include="..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Steam's log read per device, and whether Steam holds it open. -->
+    <Compile Include="..\probe_common\SteamDeviceLog.cs" Link="SteamDeviceLog.cs" />
+  </ItemGroup>
 </Project>

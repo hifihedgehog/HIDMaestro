@@ -21,10 +21,13 @@
 //                                             the 2015 unit, triton for
 //                                             the 2026 one
 //
-// And one absence that matters more than any of them: no "Controller device
-// closed after hid_read failure" after the open. That line is what an idle
-// persona produced before idleFrameIntervalMs existed. Steam claimed the
-// device, read nothing, and dropped it seconds later.
+// And one absence that matters more than any of them: Steam does not close
+// the device. A close is what an idle persona got before idleFrameIntervalMs
+// existed. Steam claimed the device, read nothing, logged "Controller
+// device closed after hid_read failure" and dropped it seconds later. That
+// line names no device, so the close is read off Windows instead: Steam
+// found the device once and still holds it open (probe_common/
+// SteamDeviceLog.cs).
 //
 // Nothing is submitted. The personas stream neutral frames on their own, so
 // no axis moves and no button fires, and a Steam desktop layout bound to
@@ -66,27 +69,6 @@ static class ValveSteamCheck
                  })
             if (File.Exists(Path.Combine(p, "steam.exe"))) return p;
         return null;
-    }
-
-    /// <summary>Read the log even while Steam holds it open.</summary>
-    static string ReadLogFrom(string path, long offset)
-    {
-        try
-        {
-            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
-                                          FileShare.ReadWrite | FileShare.Delete);
-            if (offset > fs.Length) offset = 0;   // Steam rotated it
-            fs.Seek(offset, SeekOrigin.Begin);
-            using var sr = new StreamReader(fs);
-            return sr.ReadToEnd();
-        }
-        catch { return string.Empty; }
-    }
-
-    static long LogLength(string path)
-    {
-        try { return File.Exists(path) ? new FileInfo(path).Length : 0; }
-        catch { return 0; }
     }
 
     static bool SteamRunning() => Process.GetProcessesByName("steam").Length > 0;
@@ -141,7 +123,7 @@ static class ValveSteamCheck
             // -silent starts Steam to the tray with no window, so a battery
             // run never takes focus from whoever is using the machine.
             Console.WriteLine("  starting Steam (-silent)...");
-            long before = LogLength(log);
+            long before = SteamDeviceLog.Length(log);
             try
             {
                 Process.Start(new ProcessStartInfo
@@ -160,17 +142,17 @@ static class ValveSteamCheck
             }
             // Steam has to be far enough up to be writing its controller
             // log before any of this means anything.
-            for (int i = 0; i < 120 && LogLength(log) == 0; i++) Thread.Sleep(500);
+            for (int i = 0; i < 120 && SteamDeviceLog.Length(log) == 0; i++) Thread.Sleep(500);
             for (int i = 0; i < 60; i++)
             {
                 Thread.Sleep(500);
-                if (SteamRunning() && LogLength(log) > 0) break;
+                if (SteamRunning() && SteamDeviceLog.Length(log) > 0) break;
             }
             // Until its controller log opens this session with the client's
             // version line, for up to the 5 s this waited before.
             var up = Stopwatch.StartNew();
             while (up.ElapsedMilliseconds < 5000
-                   && !ReadLogFrom(log, before).Contains("Client version:", StringComparison.Ordinal))
+                   && !SteamDeviceLog.Read(log, before).Contains("Client version:", StringComparison.Ordinal))
                 Thread.Sleep(100);
         }
         if (!SteamRunning())
@@ -238,6 +220,11 @@ static class ValveSteamCheck
         public HMController? Pad;
         public long Baseline;
         public long OpenedAt = -1;
+        /// <summary>USB\VID_28DE&amp;PID_&lt;pid&gt;\&lt;serial&gt;, and the HID
+        /// interfaces under it, which is how Steam's log names the
+        /// device.</summary>
+        public string UsbId = "";
+        public List<string> Paths = new();
         public readonly List<(byte Id, int Len)> Written = new();
         public string? Error;
     }
@@ -273,17 +260,21 @@ static class ValveSteamCheck
         try
         {
             // The three are held together. Each is created once Steam has
-            // opened the one before, so each one's lines in the log, from its
-            // "Local Device Found" to the next, are its own.
+            // opened the one before. Each one's lines in the log run from
+            // the "Local Device Found" block that names one of its own
+            // interface paths to the next block, so another program's
+            // device, opened or closed meanwhile, is never read as one of
+            // these.
             foreach (var t in cases)
             {
                 t.Profile = ctx.GetProfile(t.Id);
                 if (t.Profile == null) continue;
-                t.Baseline = LogLength(log);
+                t.Baseline = SteamDeviceLog.Length(log);
                 try
                 {
                     var c = ctx.CreateController(t.Profile);
                     t.Pad = c;
+                    t.UsbId = $@"USB\VID_28DE&PID_{t.Pid}\{c.UsbipHandle?.Device.Descriptors.SerialString}";
                     // Every command Steam writes down to this device, in
                     // arrival order. Valve frames a command-channel write as
                     // [message][length][parameters], so byte 0 of the
@@ -308,7 +299,10 @@ static class ValveSteamCheck
                     var open = Stopwatch.StartNew();
                     while (open.ElapsedMilliseconds < 90_000)
                     {
-                        string own = OwnLines(ReadLogFrom(log, t.Baseline), t.Pid);
+                        // Windows adds the interfaces one at a time, so the
+                        // paths are read again until Steam names one.
+                        t.Paths = SteamDeviceLog.HidPathsUnder(t.UsbId);
+                        string own = SteamDeviceLog.Own(SteamDeviceLog.Read(log, t.Baseline), t.Paths);
                         if (own.Contains("Steam controller device opened", StringComparison.Ordinal)) { t.OpenedAt = clock.ElapsedMilliseconds; break; }
                         Thread.Sleep(100);
                     }
@@ -328,7 +322,7 @@ static class ValveSteamCheck
                 long now = clock.ElapsedMilliseconds;
                 bool done = held.All(t => now - t.OpenedAt >= HoldMs
                                           && (now - t.OpenedAt >= 30_000
-                                              || ReadLogFrom(log, t.Baseline).Contains(t.ConfigSet, StringComparison.OrdinalIgnoreCase)));
+                                              || SteamDeviceLog.Read(log, t.Baseline).Contains(t.ConfigSet, StringComparison.OrdinalIgnoreCase)));
                 if (done) break;
                 Thread.Sleep(200);
             }
@@ -341,8 +335,8 @@ static class ValveSteamCheck
                 if (t.Profile == null) continue;
                 if (t.Error != null) { Check("persona ran without throwing", false, t.Error); continue; }
 
-                string after = ReadLogFrom(log, t.Baseline);
-                string own = OwnLines(after, t.Pid);
+                string after = SteamDeviceLog.Read(log, t.Baseline);
+                string own = SteamDeviceLog.Own(after, t.Paths);
                 string want = $"type: 28de {t.Pid}";
                 Check("Steam finds the device and reads its identity",
                       own.Contains(want, StringComparison.OrdinalIgnoreCase), want);
@@ -362,16 +356,19 @@ static class ValveSteamCheck
                 Check("Steam classifies it as this specific Valve model",
                       after.Contains(t.ConfigSet, StringComparison.OrdinalIgnoreCase), t.ConfigSet);
 
-                // Everything Steam logged from this persona's open on. The
-                // close lines name no device, so one from any persona held
-                // with it counts against it too.
-                int found = Math.Max(0, after.IndexOf(want, StringComparison.OrdinalIgnoreCase));
-                int openAt = after.IndexOf("Steam controller device opened", found, StringComparison.Ordinal);
-                string tail = openAt >= 0 ? after[openAt..] : after;
+                // Steam's close line names no device, and another program's
+                // device closing beside this one writes it too (05:47:51 on
+                // 2026-10-19). So a close of this device is read off Windows:
+                // after a close Steam finds a device that is still there
+                // again, and a device it closed for good is one nobody holds.
+                int finds = SteamDeviceLog.Blocks(after, t.Paths).Count;
                 Check("Steam keeps reading it (no hid_read failure close)",
-                      !tail.Contains("closed after hid_read failure", StringComparison.Ordinal));
-                Check($"the device is still open {HoldMs / 1000} seconds later",
-                      !tail.Contains("PollState Changed from 2 to 0", StringComparison.Ordinal));
+                      finds == 1, $"found {finds} time(s)");
+                string? opened = SteamDeviceLog.PathOf(own);
+                int error = 0;
+                bool kept = opened != null && SteamDeviceLog.HeldOpen(opened, out error);
+                Check($"the device is still open {HoldMs / 1000} seconds later", kept,
+                      kept ? "Steam holds its interface" : $"an open that shares nothing got error {error}");
 
                 // What Steam DOES with the device once it has decided
                 // what it is. Steam configures a Valve controller over
@@ -441,19 +438,6 @@ static class ValveSteamCheck
         return s_fail == 0 ? 0 : 1;
     }
 
-    /// <summary>A device's own lines in Steam's log: from the "Local Device
-    /// Found" whose type is 28de <paramref name="pid"/> to the next "Local
-    /// Device Found", or the end. Empty when Steam has not found it.</summary>
-    static string OwnLines(string log, string pid)
-    {
-        int type = log.IndexOf($"type: 28de {pid}", StringComparison.OrdinalIgnoreCase);
-        if (type < 0) return string.Empty;
-        int start = log.LastIndexOf("Local Device Found", type, StringComparison.Ordinal);
-        if (start < 0) start = type;
-        int next = log.IndexOf("Local Device Found", type, StringComparison.Ordinal);
-        return next < 0 ? log[start..] : log[start..next];
-    }
-
     // record-switch-pro: Steam's claim of the Switch Pro persona.
     //
     // Steam claims a Switch Pro through SDL's HIDAPI Switch driver, which
@@ -473,9 +457,9 @@ static class ValveSteamCheck
     //                                     separated) and closed: each the
     //                                     line's text after the timestamp or
     //                                     its absence as an empty output, and
-    //                                     closed 1 when Steam logged a
-    //                                     hid_read failure close after the
-    //                                     open
+    //                                     closed 1 when Steam no longer held
+    //                                     the persona's HID interface open at
+    //                                     the end of the hold
     //   steam/switch-pro/index<N>/writes  every output report Steam wrote,
     //                                     as runs: write (the source, the
     //                                     report ID and the data, with the
@@ -515,12 +499,16 @@ static class ValveSteamCheck
             ctx.LoadDefaultProfiles();
             ctx.InstallDriver();
             var prof = ctx.GetProfile("switch-pro") ?? throw new InvalidOperationException("switch-pro is not in the catalog");
-            long baseline = LogLength(log);
+            long baseline = SteamDeviceLog.Length(log);
             string fresh = string.Empty;
             int index;
+            bool held = false;
             using (var c = ctx.CreateController(prof))
             {
                 index = c.TransportIndex;
+                // The persona's own interface is the HID one whose serial is
+                // HM-CTL- and its transport index.
+                string serial = $"HM-CTL-{index:D4}";
                 c.OutputReceived += (_, pkt) =>
                 {
                     var w = new byte[pkt.Data.Length + 2];
@@ -535,7 +523,7 @@ static class ValveSteamCheck
                 for (int i = 0; i < 90 && !opened; i++)
                 {
                     Thread.Sleep(1000);
-                    fresh = ReadLogFrom(log, baseline);
+                    fresh = SteamDeviceLog.Read(log, baseline);
                     opened = fresh.Contains("type: 057e 2009", StringComparison.OrdinalIgnoreCase)
                           && fresh.Contains("Steam controller device opened", StringComparison.Ordinal);
                 }
@@ -543,7 +531,19 @@ static class ValveSteamCheck
                 // Hold it while Steam configures it, as the Valve personas
                 // are held above, so its writes and config sets land.
                 Thread.Sleep(15000);
-                fresh = ReadLogFrom(log, baseline);
+                fresh = SteamDeviceLog.Read(log, baseline);
+                // A recording is this persona's alone. Steam reaches a Switch
+                // Pro through SDL and logs it as path: sdl://<n>, which names
+                // no interface, so the window may hold Steam's block for this
+                // device and nothing else: another device found meanwhile
+                // would put its lines in the golden file.
+                var blocks = SteamDeviceLog.All(fresh);
+                if (blocks.Count != 1 || !blocks[0].Contains("type: 057e 2009", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException($"Steam found {blocks.Count} device(s) while switch-pro was held, so the log is not this persona's alone");
+                var paths = SteamDeviceLog.HidPathsWithSerial(serial);
+                if (paths.Count != 1)
+                    throw new InvalidOperationException($"{paths.Count} HID interfaces carry the serial {serial}");
+                held = SteamDeviceLog.HeldOpen(paths[0], out _);
             }
 
             string head = $"steam/switch-pro/index{index}";
@@ -572,8 +572,7 @@ static class ValveSteamCheck
                 if (end > at) sets.Add(l.Substring(at, end + 4 - at));
             }
             Text("configsets", string.Join(",", sets));
-            int openAt = fresh.IndexOf("Steam controller device opened", StringComparison.Ordinal);
-            rec.OutByte("closed", (byte)(openAt >= 0 && fresh.IndexOf("closed after hid_read failure", openAt, StringComparison.Ordinal) >= 0 ? 1 : 0));
+            rec.OutByte("closed", (byte)(held ? 0 : 1));
 
             rec.Stream(head + "/writes");
             List<byte[]> all;
