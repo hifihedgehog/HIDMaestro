@@ -112,7 +112,7 @@ static class Program
             // that polls slower than the pump. Submit the new state long
             // enough for both to drain, drop what this handle queued in the
             // meantime, and read the next frame.
-            Thread.Sleep(200);
+            Thread.Sleep(StateSettleMs);
             HidD_FlushQueue(h);
             var buf = new byte[inLen];
             for (int i = 0; i < 6; i++)
@@ -120,8 +120,29 @@ static class Program
                     return buf;
             return null;
         }
-        finally { stop.Set(); Thread.Sleep(40); CloseHandle(h); }
+        // The pump ends before the next state goes in, so no frame of this
+        // one is submitted after it.
+        finally { stop.Set(); pump.Join(40); CloseHandle(h); }
     }
+
+    /// <summary>How long a new state, and a raw consumer's first frame, take
+    /// to displace what the device queued before them, with half again as
+    /// margin. Measured on the bench over 40 changes on each persona: the
+    /// first frame of a new state came at most 7.0 ms after the pump began,
+    /// with no stale frame before it, and a raw consumer's first own frame at
+    /// most 78.4 ms after its feed began (the 2015 controller, whose queue
+    /// of eight drains at its 8 ms poll).</summary>
+    const int StateSettleMs = 20, RawSettleMs = 120;
+
+    /// <summary>The idle, raw-feed and quiet windows. Each holds enough
+    /// frames to fail on the defect it guards, as 8d896b72 measured it
+    /// before its fix: a stream held to the 15.6 ms system tick sends 62
+    /// frames a second, under the 100 a second the slowest persona's bound
+    /// allows, and SDK frames went out between a raw consumer's in 75 of 237
+    /// frames. A 300 ms raw window holds 37 frames or more, so a feed with
+    /// that defect shows none of its SDK frames in it with a chance below
+    /// one in a million (0.68 to the 37th power).</summary>
+    const int IdleWindowMs = 500, RawWindowMs = 300, QuietWindowMs = 300;
 
     /// <summary>Every report the interface delivers for <paramref name="ms"/>
     /// milliseconds, with its arrival time, read by a blocking reader the way
@@ -364,8 +385,8 @@ static class Program
                 string? path = null; int inLen = 0;
                 for (int i = 0; i < 120 && path == null; i++)
                 {
-                    Thread.Sleep(100);
                     (path, inLen) = FindController(t.Vid, t.Pid, t.Len);
+                    if (path == null) Thread.Sleep(100);
                 }
                 Check($"controller interface enumerated ({t.Len}-byte input report)", path != null);
                 if (path == null) continue;
@@ -506,8 +527,8 @@ static class Program
                 // so a persona held to the 15.6 ms system tick can be passed
                 // over.
                 double want = 1000.0 / t.IdleMs;
-                Thread.Sleep(300);
-                var (idleRate, idleP90) = Cadence(Collect(path, inLen, 1000), 1000);
+                Thread.Sleep(StateSettleMs);
+                var (idleRate, idleP90) = Cadence(Collect(path, inLen, IdleWindowMs), IdleWindowMs);
                 Check($"idle frames keep the declared {t.IdleMs} ms cadence",
                       idleRate >= 0.8 * want && idleP90 <= 2.0 * t.IdleMs,
                       $"{idleRate:F0}/s, p90 gap {idleP90:F1} ms, declared {want:F0}/s");
@@ -543,8 +564,8 @@ static class Program
                         catch (ObjectDisposedException) { }
                     }) { IsBackground = true };
                     feeder.Start();
-                    Thread.Sleep(200);
-                    var fed = Collect(path, inLen, 1000);
+                    Thread.Sleep(RawSettleMs);
+                    var fed = Collect(path, inLen, RawWindowMs);
                     int foreign = fed.FindAll(r => !Ours(r.F)).Count;
                     Check("a raw consumer's frames are the only frames on the wire",
                           fed.Count > 0 && foreign == 0, $"{fed.Count - foreign} ours, {foreign} not");
@@ -554,9 +575,9 @@ static class Program
 
                 // Once the raw consumer goes quiet, its own last frame keeps
                 // the stream up at the declared cadence.
-                Thread.Sleep(100);
-                var quiet = Collect(path, inLen, 500);
-                var (quietRate, _) = Cadence(quiet, 500);
+                Thread.Sleep(StateSettleMs);
+                var quiet = Collect(path, inLen, QuietWindowMs);
+                var (quietRate, _) = Cadence(quiet, QuietWindowMs);
                 int quietForeign = quiet.FindAll(r => !Ours(r.F)).Count;
                 Check("a quiet raw consumer's own frame repeats at the declared cadence",
                       quietRate >= 0.8 * want && quietForeign == 0,
@@ -569,7 +590,7 @@ static class Program
                     Console.WriteLine("  [skip] Steam not running; claim check needs a live client");
             }
             catch (Exception ex) { Check("persona created without throwing", false, ex.Message); }
-            finally { c?.Dispose(); Thread.Sleep(400); }
+            finally { c?.Dispose(); }
         }
 
         Console.WriteLine();
