@@ -29,51 +29,13 @@ custom profile (BEEF:F000) authored via the SDK's `HMProfileBuilder`
 
 # point at a non-default exe (e.g. a published build)
 ./test/regression/swap_regression.ps1 -Exe C:\path\to\HIDMaestroTest.exe
-
-# every scenario, or the core alone
-./test/regression/swap_regression.ps1 -All
-./test/regression/swap_regression.ps1 -Core
-
-# which areas changed since the last release, and what a run would take
-./test/regression/swap_regression.ps1 -ListOnly
-./test/regression/swap_regression.ps1 -ListOnly -Changed 'sdk/HIDMaestro.Core/Internal/Usbip/UsbipServer.cs'
 ```
 
 Exit code: `0` if every scenario passed, `1` if any failed.
 
-Total wall time: [D4-PLACEHOLDER: minutes from the v2.0.0 release battery] for every
-area and S90's diff, and [D4-PLACEHOLDER: minutes for the core] for the core alone, on a
-16-core laptop.
-Use `-Filter` to run a single scenario in 1-2 minutes when iterating.
-
-## Core and area runs
-
-A run takes the core scenarios and every area that a file changed since
-the newest release tag before `HEAD` reaches (`-Since` names another ref,
-and files git does not track yet count). The script's `$AreaMap` names
-the files whose change reaches some areas and not others. A changed file
-it does not name reaches every area, unless it is text, a tool, a profile
-other than the device models, or a probe of a core scenario, which reach
-none. So a file the map leaves out costs a run time, never a check. A run
-whose changes git cannot list takes every area. `-ListOnly` prints the
-selection and runs nothing, and the summary names the scenarios an
-unreached area left out and the files that took every area.
-
-| Area | Scenarios | Files the map gives it |
-|---|---|---|
-| `usbip` | S53, S54, S55, S65, S73, S81, S82, S83, and S71 sections V and Z | The USB/IP transport (`Internal/Usbip`), the device and stream clocks, the WinUSB binding, the GameCube ports, the Valve and Nintendo profiles, `dualsense-composite`, and their probes |
-| `coexistence` | S72, and S71 sections E, N, T, U, W, X and Y | The USB/IP transport, the WinUSB binding, the XInput files below, and `coexist_check` with the two `device_oracle_check` files it compiles |
-| `kbm` | S70 | The keyboard and mouse API and packer, `kbm_*` probes, and any profile of type keyboard or mouse |
-| `identity` | S59 | The USB/IP transport, the XInput files below, `dualsense`, `dualsense-composite` and the `identity_*` probes |
-| `xinput` | S57 | The XInput presentation, the XUSB answers and their model, the GameInput mapping, the Microsoft profiles and the `xusb_*` probes |
-| `arith` | S90's diff, every float through each conversion, about 9 minutes | `WireArith.cs`, which also reaches every other area, and the probe. Not part of every area: `-All` runs it |
-
-Everything else in the SDK, the drivers, the build scripts, the test app
-and this directory reaches every area. S71 always runs its sections A to
-D, F to H, J to M and O to S. The core alone takes
-[D4-PLACEHOLDER: minutes for the core] here. Each area check waits out
-what it observes: S71's sections V and Z wait for usbip-win2's
-re-attach, which comes 30 s after a drop, and S73 boots Windows Sandbox.
+Total wall time: [D4-PLACEHOLDER: minutes from the v2.0.0 release battery] for all 96
+scenarios, every section and check, on a 16-core laptop. Use `-Filter` to
+run one scenario when iterating.
 
 ## Why elevated
 
@@ -157,7 +119,7 @@ not run elevated.
 | `S68_Vr_Driver_Conflict`          | A foreign OpenVR driver under HIDMaestro's driver name | `HMVR.FindDriverNameConflicts` lists another driver folder registered under `hidmaestro` in the user's OpenVR path registry or SteamVR's drivers folder, and never HIDMaestro's own. The probe points `VR_PATHREG_OVERRIDE` at a registry file of its own, so the real one is never read or written. Needs neither SteamVR nor elevation. |
 | `S69_Kbm_Descriptors`             | Keyboard and mouse descriptors and packers, no device (issue #67) | `HidDescriptorBuilder` recipes that worked before v1.12.0 build the same bytes, pinned against what v1.11.0 built. The Mouse, Keyboard, KeyboardNkro, ConsumerControl and VendorButtons starters and the guards on combining them. The packers against bytes worked out by hand from each descriptor, relative movement split across reports, ErrorRollOver, extra buttons in a second collection and LED decoding. Every catalog keyboard and mouse parses, packs, reads back and fits the 80-byte extended lane. |
 | `S70_Kbm_Raw_Input`               | Keyboards and mice through Raw Input (issue #67) | Four mice with one VID and PID are four Raw Input devices with four paths, and each identity key gets its own path back when the four are created again in reverse order. A 600-report burst and four threads at 250 Hz lose no counts. An absolute mouse arrives flagged `MOUSE_MOVE_ABSOLUTE`, and buttons six and eight arrive through the vendor collection. Two keyboards, one without report IDs and one with Report ID 2, each hold the LED state Windows sent on arrival, and a Scroll Lock pressed on one reaches both as the new state, then is restored. A consumer usage arrives as a HID report. An output or feature report written through `HidD_SetFeature`, `HidD_SetOutputReport` and `WriteFile` reaches `OutputReceived` split at its first byte, with and without report IDs. Every catalog keyboard and mouse starts as its kind and acknowledges delivery. `Dispose` with a key held sends it up first, and a consumer killed while holding F24, mouse button 6 and an absolute pointer leaves both released and the pointer where it was. The cleanup after it removes all three of that consumer's devices, the keyboard included, which Windows will not disable. Moves the cursor and puts it back. |
-| `S71_Coexistence`                 | Programs that embed HIDMaestro, side by side (coexist_check sections A to H and J to Z, by area) | Two keyless programs get their own transport indices and identities, and each device carries only its own program's input. A create of an identity key a live program holds throws `HMResourceInUseException` and leaves the holder's devices untouched. A second program's `InstallDriver` and create leave the first program's devnodes, XInput slot, WGI and Raw Input entries and frame gaps as they were. A killed program's devices go at the next sweep while a live program's stay. Peers built on v1.12.0 and v1.11.0 run beside this release through each branch of the install policy. Also: two `InstallDriver` calls at once on a machine without the driver, two programs' USB/IP composites, records a killed program left, sweeps and the exit handler beside running programs and a create in flight, a running v1.12.0 program's later creates, deploys against other programs' creates and the public `DriverBuilder` steps, machine-wide names a program that is not elevated creates first, the driver's StopEvent and OutputEvent, and transport and WinUSB work under their locks. Each program is a peer process, and the older releases are built against their own HIDMaestro.Core.dll. |
+| `S71_Coexistence`                 | Programs that embed HIDMaestro, side by side (coexist_check sections A to H and J to Z) | Two keyless programs get their own transport indices and identities, and each device carries only its own program's input. A create of an identity key a live program holds throws `HMResourceInUseException` and leaves the holder's devices untouched. A second program's `InstallDriver` and create leave the first program's devnodes, XInput slot, WGI and Raw Input entries and frame gaps as they were. A killed program's devices go at the next sweep while a live program's stay. Peers built on v1.12.0 and v1.11.0 run beside this release through each branch of the install policy. Also: two `InstallDriver` calls at once on a machine without the driver, two programs' USB/IP composites, records a killed program left, sweeps and the exit handler beside running programs and a create in flight, a running v1.12.0 program's later creates, deploys against other programs' creates and the public `DriverBuilder` steps, machine-wide names a program that is not elevated creates first, the driver's StopEvent and OutputEvent, and transport and WinUSB work under their locks. Each program is a peer process, and the older releases are built against their own HIDMaestro.Core.dll. |
 | `S72_Protected_Staging`           | Staging of everything the SDK runs elevated (coexist_check section I) | The driver payload and `hmswd.exe` stage under `%ProgramFiles%\HIDMaestro\Staging` in directories only Administrators and SYSTEM can write, and nothing is left in `%TEMP%`. A `%ProgramFiles%\HIDMaestro` with a wrong ACL is reset in place when Administrators or SYSTEM own it, and refused when another program does. A staged tool overwritten with other bytes of the same length is restored from the embedded copy, a directory replaced by a link is moved aside, and a deploy prunes the staging of versions no running program uses and never what another build's program reaches while the prune runs. |
 | `S73_Usbip_Clean_Install`         | The usbip-win2 install on a clean machine, in Windows Sandbox started without a window | One sandbox, booted once. A machine holding usbip-win2's uninstall entry without its driver package gets a refusal instead of the installer, and nothing is installed. Two programs whose first composites arrive together then install once, on the clean machine. The install leaves no Start menu folder, desktop shortcut, GUI, SDK or PDB file, and a composite created over it enumerates and carries input. Skips where Windows Sandbox is not available. |
 | `S74_NativeAot_Smoke`             | HIDMaestro.Core in a NativeAOT app | The whole catalog loads, the driver installs, `dualshock-4-v2` on the UMDF2 driver and `dualsense-composite` on USB/IP each deliver the submitted state to a HID read and raise `OutputReceived` for an output report, and both go away on dispose. Delivery is judged on content, against a neutral window. |
@@ -175,7 +137,7 @@ not run elevated.
 | `S87_Interop_Decl`                | Interop declarations and the method names in the SDK's text | No `DllImport` is left, `SetupDiGetClassDevsW` takes its Enumerator as a pointer, and every method a message or XML doc names exists as written. 33 string-form fixtures check the argument counter. The live run reads the SDK's own XInput slot count on an Xbox 360 persona and runs the phantom sweep. There is no S86. |
 | `S88_Device_Shortcut`             | No device shortcut in the SDK or the drivers | No declared name, file name or string carries a device or vendor word from the catalog outside the probe's allowed names, no vendor or product ID is compared, switched on or assigned in any form, no device name is searched, no profile field set by one catalog profile alone is read, and no region of the 24 device regions and the default device's five is left in a driver source. It failed by design until the last device code became profile data, and passes at 2.0.0. Offline |
 | `S89_Device_Oracle`               | The device code gives the bytes it gave before the conversion | Replays nine recorded cases, the submit and decode paths, the packers, the Switch 2 Pro responder, the USB/IP feature answers, the UMDF2 driver and companion compiled natively, and the physical descriptors of the reference clones, and passes a difference only when `changes.txt` lists it with its lane and reason. Offline |
-| `S90_Arith_Roundtrip`             | Every raw value comes back | Every raw value of every catalog conversion, normalized three ways, returns through the SDK's own code. A NaN writes the rest, an unwritten stick rests at its center, and the rounding matches `Math.Round`. Offline. With the `arith` area, its `diff` mode holds every float in [0, 1] to the design note's table, in about 9 minutes |
+| `S90_Arith_Roundtrip`             | Every raw value comes back | Every raw value of every catalog conversion, normalized three ways, returns through the SDK's own code. A NaN writes the rest, an unwritten stick rests at its center, and the rounding matches `Math.Round`. Offline. Its `diff` mode holds every float in [0, 1] to the design note's table |
 | `S91_Vendor_Blob_Golden`          | Vendor-blob reports against golden bytes | Every Sony, Valve and Nintendo vendor-blob report encodes and decodes to its golden SHA-256, and the codec vocabulary refuses the removed `ds3-battery` type, a missing `max` or `invert`, and parameters an output field ignores. Offline |
 | `S92_Profile_Model`               | Profiles and device models as data, no device | The catalog and a user's directory load strictly: every defect a file can carry is refused at its JSON path and listed in `HMContext.ProfileLoadIssues`, a create and a build meet `HMProfileException` for a bad profile, and the catalog files of every earlier v1.x tag load but for the removed spellings. Answer tables, value sources and patches, model resolution by name and by identity (no catalog profile takes a group from an identity default), the SDK's half of the version contract, the 2.0.0 deploy floor and its policy, the start wait's hold of a failed start while Windows has a device installation pending, and `FromProfile`'s whole copy. Offline |
 | `S93_Contract_Live`               | The version contract on the live driver | A fresh-token controller's driver reads its index from the identity entry before its first start, on the ROOT path and the SWD xinputhid path, a device without report IDs answers its message after HID class's leading 0, and each catalog profile with a model, read back by `HMDeviceExtractor`, names the model its identity gives it, and created on the same index answers each feature report as the device did. ps3-remote, tinyusb-generic-gamepad and nacon-bigben-ps4 start, and a create whose descriptor Windows' parser refuses fails with problem code 10 and removes the device it made. Live, elevated |

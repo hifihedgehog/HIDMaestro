@@ -30,24 +30,6 @@
   If set, do NOT clear teardown_diag.log before the run; append.
   Default: clear before each run for a clean per-run log.
 
-.PARAMETER All
-  Run every scenario, whatever changed.
-
-.PARAMETER Core
-  Run the core scenarios only.
-
-.PARAMETER Since
-  The git ref the areas' changes are read from. Default: the newest
-  release tag (v*) before HEAD.
-
-.PARAMETER Changed
-  Changed files, as git paths from the repository root, to select the
-  areas from in place of git's list. With -ListOnly it shows what a
-  planned change would run.
-
-.PARAMETER ListOnly
-  Print the areas and the scenarios a run would take, and run nothing.
-
 .PARAMETER Verbose
   Print every command sent to the test app and every state snapshot.
 
@@ -59,11 +41,6 @@
   ./swap_regression.ps1 -Filter 'S08*' -Verbose
   Runs only the S08 scenario with verbose output.
 
-.EXAMPLE
-  ./swap_regression.ps1 -ListOnly
-  Prints which areas changed since the last release and which scenarios
-  a run would take.
-
 .NOTES
   Requires elevation. Run from an already-elevated PowerShell so the
   test app does not re-launch (which would orphan the stdin pipe).
@@ -72,12 +49,7 @@
 param(
     [string]$Exe,
     [string]$Filter = '*',
-    [switch]$KeepLogs,
-    [switch]$All,
-    [switch]$Core,
-    [string]$Since,
-    [string[]]$Changed,
-    [switch]$ListOnly
+    [switch]$KeepLogs
 )
 
 $ErrorActionPreference = 'Stop'
@@ -100,7 +72,7 @@ if (-not $Exe) {
 #  Setup
 # ====================================================================
 
-if (-not $ListOnly -and -not (Test-Path $Exe)) {
+if (-not (Test-Path $Exe)) {
     Write-Error "HIDMaestroTest.exe not found at: $Exe"
     exit 2
 }
@@ -108,7 +80,7 @@ if (-not $ListOnly -and -not (Test-Path $Exe)) {
 # Verify elevation. HIDMaestroTest re-launches if not, breaking stdin.
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $ListOnly -and -not $isAdmin) {
+if (-not $isAdmin) {
     Write-Error "This script must run elevated. PadForge-style stdin-driven swaps require an already-admin process so the test app does NOT re-launch (which would orphan the stdin pipe). Re-run via 'sudo --inline pwsh -File ...' or an Administrator console."
     exit 2
 }
@@ -124,7 +96,7 @@ public class CMxz {
 }
 "@ -ErrorAction SilentlyContinue
 
-if (-not $KeepLogs -and -not $ListOnly) {
+if (-not $KeepLogs) {
     $diagLog = Join-Path $env:TEMP 'HIDMaestro\teardown_diag.log'
     if (Test-Path $diagLog) { Remove-Item $diagLog -Force }
 }
@@ -255,7 +227,7 @@ if ($verMatch.Success) {
             }
         }
     }
-    if ($stale.Count -gt 0 -and -not $ListOnly) {
+    if ($stale.Count -gt 0) {
         Write-Host "STALE PROBE BINARIES -- refusing to run with mismatched HIDMaestro.Core:" -ForegroundColor Red
         foreach ($s in $stale) {
             Write-Host ("  " + $s.Path) -ForegroundColor Red
@@ -297,9 +269,9 @@ $Profiles = @{
 # + 2x8-bit triggers + hat + 11 buttons), authored via the SDK's public
 # HidDescriptorBuilder + HMProfileBuilder API surface.
 $customProfileDir = Join-Path $env:TEMP 'HIDMaestro-regression-custom'
-if (-not $ListOnly -and (Test-Path $customProfileDir)) { Remove-Item -Recurse -Force $customProfileDir }
-if (-not $ListOnly) { $null = & $Exe make-custom-profile $customProfileDir 2>&1 }
-if (-not $ListOnly -and ($LASTEXITCODE -ne 0 -or -not (Test-Path (Join-Path $customProfileDir 'padforge-custom.json')))) {
+if (Test-Path $customProfileDir) { Remove-Item -Recurse -Force $customProfileDir }
+$null = & $Exe make-custom-profile $customProfileDir 2>&1
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Join-Path $customProfileDir 'padforge-custom.json'))) {
     Write-Error "make-custom-profile failed; cannot run custom-profile scenarios. Build the test app from this branch first."
     exit 2
 }
@@ -616,14 +588,9 @@ function Wait-CascadeSettle {
 function Test-Scenario {
     param(
         [string]$Name,
-        [scriptblock]$Body,
-        [string]$Area
+        [scriptblock]$Body
     )
     if ($Name -notlike $Filter) { return $null }
-    if ($Area -and -not $script:ActiveAreas.Contains($Area)) {
-        $script:NotRun += $Name
-        return $null
-    }
 
     Write-Host ''
     Write-Host ('=== ' + $Name + ' ===') -ForegroundColor Cyan
@@ -1941,12 +1908,7 @@ function Scenario-Kbm-Raw-Input {
 # program is a peer process the probe drives, and the probe judges what
 # they did from outside both. Its header lists every section.
 function Scenario-Coexistence {
-    # The core sections always. E, N, T, U, W, X and Y with the coexistence
-    # area, V and Z with the usbip area.
-    $sections = 'ABCDFGHJKLMOPQRS'
-    if ($script:ActiveAreas.Contains('coexistence')) { $sections += 'ENTUWXY' }
-    if ($script:ActiveAreas.Contains('usbip')) { $sections += 'VZ' }
-    Invoke-Probe -Dir 'coexist_check' -Exe 'CoexistCheck.exe' -Arguments $sections -Tag 'coexistence' `
+    Invoke-Probe -Dir 'coexist_check' -Exe 'CoexistCheck.exe' -Arguments 'ABCDEFGHJKLMNOPQRSTUVWXYZ' -Tag 'coexistence' `
                  -Message 'two programs that embed HIDMaestro disturbed each other (see probe stdout)' -SkipCodes 2
 }
 
@@ -2267,12 +2229,10 @@ function Scenario-Arith-Roundtrip {
     Invoke-Probe -Dir 'arith_roundtrip_check' -Exe 'ArithRoundtripCheck.exe' -Arguments 'check' `
                  -Message 'a raw value a consumer reads from a device no longer returns through the SDK as that value (see probe stdout for the conversion)'
     # Every float in [0, 1] through each catalog conversion, against the
-    # design note's table, about 9 minutes: with the arith area, when the
-    # arithmetic or this probe changed.
-    if ($script:ActiveAreas.Contains('arith')) {
-        Invoke-Probe -Dir 'arith_roundtrip_check' -Exe 'ArithRoundtripCheck.exe' -Arguments 'diff' -Tag 'diff' `
-                     -Message 'a catalog conversion changes in a way the design note''s table does not list (see probe stdout for the conversion)'
-    }
+    # design note's table: a range a descriptor brings in, or a change of
+    # arithmetic, that the table does not list fails here.
+    Invoke-Probe -Dir 'arith_roundtrip_check' -Exe 'ArithRoundtripCheck.exe' -Arguments 'diff' -Tag 'diff' `
+                 -Message 'a catalog conversion changes in a way the design note''s table does not list (see probe stdout for the conversion)'
 }
 
 # S92: profiles as data, the SDK side. profile_model_check loads the catalog
@@ -2302,161 +2262,6 @@ function Scenario-Contract-Live {
     Invoke-Probe -Dir 'contract_live_check' -Exe 'ContractLiveCheck.exe' -Arguments 'check' `
                  -Message 'the live driver does not hold the version contract or FeatureAnswers as the design states (see probe stdout for the check)'
 }
-
-# ====================================================================
-#  Areas
-# ====================================================================
-#
-# A scenario with an Area runs when a file that area depends on changed
-# since the last release, and a run whose changes reach no area takes the
-# core alone. $AreaMap names the files a change there reaches, with every
-# area those files feed. A changed file it does not name selects every
-# area, unless it is one of $QuietPaths, which no area scenario reads
-# beyond what the core runs anyway. So a file the map leaves out costs
-# time, never a check. A run whose changes cannot be read (no git, or no
-# release tag) runs every area. The paths are git paths from the
-# repository root, matched with -like.
-#
-# 'arith' is S90's diff over every float, about 9 minutes, and runs only
-# when the arithmetic or its probe changes, or with -All.
-
-$EveryArea = @('usbip', 'coexistence', 'kbm', 'identity', 'xinput')
-
-$AreaMap = @(
-    # The USB/IP transport and the composite persona, which S59 and the
-    # coexistence sections create too.
-    @{ Areas = @('usbip', 'coexistence', 'identity'); Paths = @(
-        'sdk/HIDMaestro.Core/Internal/Usbip/*',
-        'sdk/HIDMaestro.Core/Internal/UsbConfigurationSpec.cs',
-        'sdk/HIDMaestro.Core/Internal/DeviceClock.cs',
-        'sdk/HIDMaestro.Core/Internal/StreamClock.cs',
-        'sdk/HIDMaestro.Core/UsbipPackage.json',
-        'sdk/HIDMaestro.Core/HMUsbAudio.cs',
-        'profiles/sony/dualsense-composite.json') },
-    # The WinUSB binding, which sweeps restore, and coexist_check, which
-    # holds S71 and S72 and compiles two of device_oracle_check's files.
-    @{ Areas = @('usbip', 'coexistence'); Paths = @(
-        'sdk/HIDMaestro.Core/Internal/WinUsbBinding.cs',
-        'test/probes/coexist_check/*',
-        'test/probes/device_oracle_check/Golden.cs',
-        'test/probes/device_oracle_check/LeftValues.cs') },
-    # The GameCube ports, the Valve and Nintendo personas and their probes.
-    @{ Areas = @('usbip'); Paths = @(
-        'sdk/HIDMaestro.Core/HMPort.cs',
-        'profiles/valve/*',
-        'profiles/nintendo/*',
-        'test/probes/usbip_*',
-        'test/probes/gc_*',
-        'test/probes/valve_*',
-        'test/probes/switch2_composite_check/*') },
-    # Keyboards and mice. A profile of type keyboard or mouse selects kbm
-    # wherever its file is.
-    @{ Areas = @('kbm'); Paths = @(
-        'sdk/HIDMaestro.Core/HMKeyboardMouse.cs',
-        'sdk/HIDMaestro.Core/Internal/KeyboardMousePacker.cs',
-        'test/probes/kbm_*') },
-    # XInput and WGI. S59's Xbox families and the coexistence sections'
-    # xinputhid creates take these paths too.
-    @{ Areas = @('xinput', 'identity', 'coexistence'); Paths = @(
-        'sdk/HIDMaestro.Core/Internal/XInputPresentation.cs',
-        'sdk/HIDMaestro.Core/Internal/XInputSpec.cs',
-        'sdk/HIDMaestro.Core/Internal/XusbAnswers.cs',
-        'sdk/HIDMaestro.Core/Internal/GameInputMapping.cs',
-        'profiles/microsoft/*',
-        'profiles/models/xusb-companion.json') },
-    @{ Areas = @('xinput'); Paths = @('test/probes/xusb_*') },
-    @{ Areas = @('identity'); Paths = @('profiles/sony/dualsense.json', 'test/probes/identity_*') },
-    # The arithmetic every report is built with: every area, and the diff.
-    @{ Areas = @('every', 'arith'); Paths = @('sdk/HIDMaestro.Core/Internal/WireArith.cs') },
-    @{ Areas = @('arith'); Paths = @('test/probes/arith_roundtrip_check/*') }
-)
-
-# Files whose change selects no area: text, the tools, the sandbox
-# experiments, every probe the map does not name (core scenarios' own),
-# and every profile but the device models, which any device can use.
-$QuietPaths = @('*.md', 'docs/*', 'LICENSE', '.gitignore', '.github/*', 'example/*', 'tools/*',
-                'test/sandbox/*', 'test/probes/*', 'profiles/*')
-
-function Get-ChangedFiles {
-    param([string]$RepoRoot, [string]$Base)
-    # Windows PowerShell turns a native command's stderr into an error
-    # record, which the script's Stop preference would make fatal: git
-    # warns on stderr about line endings. Its exit code is the answer.
-    $ErrorActionPreference = 'Continue'
-    $git = Get-Command git -ErrorAction SilentlyContinue
-    if (-not $git) { return $null }
-    if (-not $Base) {
-        $Base = (& git -C $RepoRoot describe --tags --abbrev=0 --match 'v*' 'HEAD^' 2>$null)
-        if ($LASTEXITCODE -ne 0 -or -not $Base) { return $null }
-    }
-    $files = @(& git -C $RepoRoot diff --name-only $Base -- 2>$null)
-    if ($LASTEXITCODE -ne 0) { return $null }
-    # Files git does not track yet change a run too.
-    $untracked = @(& git -C $RepoRoot ls-files --others --exclude-standard 2>$null)
-    if ($LASTEXITCODE -ne 0) { return $null }
-    return [PSCustomObject]@{ Scope = "since $($Base.Trim())"; Files = @($files + $untracked) }
-}
-
-# The areas one changed file selects, as names, with 'every' for all of
-# $EveryArea.
-function Get-FileAreas {
-    param([string]$File, [string]$RepoRoot)
-    $areas = New-Object 'System.Collections.Generic.HashSet[string]'
-    $mapped = $false
-    foreach ($entry in $AreaMap) {
-        if (@($entry.Paths | Where-Object { $File -like $_ }).Count -gt 0) {
-            $mapped = $true
-            foreach ($a in $entry.Areas) { [void]$areas.Add($a) }
-        }
-    }
-    if ($File -like 'profiles/*.json') {
-        $path = Join-Path $RepoRoot $File
-        if ((Test-Path $path) -and ((Get-Content $path -Raw) -match '"type"\s*:\s*"(keyboard|mouse)"')) {
-            $mapped = $true
-            [void]$areas.Add('kbm')
-        }
-    }
-    if (-not $mapped) {
-        $quiet = $File -notlike 'profiles/models/*' -and @($QuietPaths | Where-Object { $File -like $_ }).Count -gt 0
-        if (-not $quiet) { [void]$areas.Add('every') }
-    }
-    return @($areas)
-}
-
-$script:ActiveAreas = New-Object 'System.Collections.Generic.HashSet[string]'
-$script:NotRun = @()
-if ($All) {
-    foreach ($a in $EveryArea + 'arith') { [void]$script:ActiveAreas.Add($a) }
-    $script:AreaNote = 'every area (-All)'
-} elseif ($Core) {
-    $script:AreaNote = 'none, the core alone (-Core)'
-} else {
-    $repoRoot = (Resolve-Path (Join-Path $scriptDir '..\..')).Path
-    # Through powershell.exe -File a list arrives as one string, "a,b".
-    $listed = @($Changed | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
-    $diff = if ($listed.Count -gt 0) { [PSCustomObject]@{ Scope = 'in the -Changed list'; Files = $listed } }
-            else { Get-ChangedFiles -RepoRoot $repoRoot -Base $Since }
-    if ($null -eq $diff) {
-        foreach ($a in $EveryArea) { [void]$script:ActiveAreas.Add($a) }
-        $script:AreaNote = 'every area, since the changes since the last release could not be read'
-    } else {
-        $wide = @()
-        foreach ($f in $diff.Files) {
-            foreach ($a in (Get-FileAreas -File $f -RepoRoot $repoRoot)) {
-                if ($a -eq 'every') {
-                    $wide += $f
-                    foreach ($e in $EveryArea) { [void]$script:ActiveAreas.Add($e) }
-                } else {
-                    [void]$script:ActiveAreas.Add($a)
-                }
-            }
-        }
-        $names = @($script:ActiveAreas)
-        $script:AreaNote = "$(if ($names.Count -gt 0) { $names -join ', ' } else { 'none' }), from $($diff.Files.Count) file(s) changed $($diff.Scope)" +
-            $(if ($wide.Count -gt 0) { ". $($wide[0])$(if ($wide.Count -gt 1) { " and $($wide.Count - 1) more select" } else { ' selects' }) every area" } else { '' })
-    }
-}
-Write-Host ('Areas: ' + $script:AreaNote)
 
 # ====================================================================
 #  Runner
@@ -2515,27 +2320,27 @@ $scenarios = @(
     @{ Name = 'S50_Vr_Controller_Smoke';          Body = ${function:Scenario-Vr-Controller-Smoke} },
     @{ Name = 'S51_Valve_Personas';               Body = ${function:Scenario-Valve-Personas} },
     @{ Name = 'S52_Valve_Wire';                   Body = ${function:Scenario-Valve-Wire} },
-    @{ Name = 'S53_Valve_Sdl';                    Body = ${function:Scenario-Valve-Sdl} ; Area = 'usbip' },
-    @{ Name = 'S54_Valve_Steam';                  Body = ${function:Scenario-Valve-Steam} ; Area = 'usbip' },
-    @{ Name = 'S55_Valve_Multi';                  Body = ${function:Scenario-Valve-Multi} ; Area = 'usbip' },
+    @{ Name = 'S53_Valve_Sdl';                    Body = ${function:Scenario-Valve-Sdl} },
+    @{ Name = 'S54_Valve_Steam';                  Body = ${function:Scenario-Valve-Steam} },
+    @{ Name = 'S55_Valve_Multi';                  Body = ${function:Scenario-Valve-Multi} },
     @{ Name = 'S56_Valve_Raw_Path';               Body = ${function:Scenario-Valve-Raw-Path} },
-    @{ Name = 'S57_Xusb_Wgi_Single';              Body = ${function:Scenario-Xusb-Wgi-Single} ; Area = 'xinput' },
+    @{ Name = 'S57_Xusb_Wgi_Single';              Body = ${function:Scenario-Xusb-Wgi-Single} },
     @{ Name = 'S58_Identity_Derivation';         Body = ${function:Scenario-Identity-Derivation} },
-    @{ Name = 'S59_Identity_Battery';            Body = ${function:Scenario-Identity-Battery} ; Area = 'identity' },
+    @{ Name = 'S59_Identity_Battery';            Body = ${function:Scenario-Identity-Battery} },
     @{ Name = 'S60_Xusb_Battery';                Body = ${function:Scenario-Xusb-Battery} },
     @{ Name = 'S61_Driver_Catalog';              Body = ${function:Scenario-Driver-Catalog} },
     @{ Name = 'S62_Valve_Firmware';              Body = ${function:Scenario-Valve-Firmware} },
     @{ Name = 'S63_Ds4_Report';                  Body = ${function:Scenario-Ds4-Report} },
     @{ Name = 'S64_Ds3_Sixaxis';                 Body = ${function:Scenario-Ds3-Sixaxis} },
-    @{ Name = 'S65_Switch2_Composite';           Body = ${function:Scenario-Switch2-Composite} ; Area = 'usbip' },
+    @{ Name = 'S65_Switch2_Composite';           Body = ${function:Scenario-Switch2-Composite} },
     @{ Name = 'S66_Registry_Ownership';          Body = ${function:Scenario-Registry-Ownership} },
     @{ Name = 'S67_Wgi_Mapping';                 Body = ${function:Scenario-Wgi-Mapping} },
     @{ Name = 'S68_Vr_Driver_Conflict';          Body = ${function:Scenario-Vr-Driver-Conflict} },
     @{ Name = 'S69_Kbm_Descriptors';             Body = ${function:Scenario-Kbm-Descriptors} },
-    @{ Name = 'S70_Kbm_Raw_Input';               Body = ${function:Scenario-Kbm-Raw-Input} ; Area = 'kbm' },
+    @{ Name = 'S70_Kbm_Raw_Input';               Body = ${function:Scenario-Kbm-Raw-Input} },
     @{ Name = 'S71_Coexistence';                 Body = ${function:Scenario-Coexistence} },
-    @{ Name = 'S72_Protected_Staging';           Body = ${function:Scenario-Protected-Staging} ; Area = 'coexistence' },
-    @{ Name = 'S73_Usbip_Clean_Install';         Body = ${function:Scenario-Usbip-Clean-Install} ; Area = 'usbip' },
+    @{ Name = 'S72_Protected_Staging';           Body = ${function:Scenario-Protected-Staging} },
+    @{ Name = 'S73_Usbip_Clean_Install';         Body = ${function:Scenario-Usbip-Clean-Install} },
     @{ Name = 'S74_NativeAot_Smoke';             Body = ${function:Scenario-NativeAot-Smoke} },
     @{ Name = 'S75_SingleFile_Smoke';            Body = ${function:Scenario-SingleFile-Smoke} },
     @{ Name = 'S76_Json_Parity';                 Body = ${function:Scenario-Json-Parity} },
@@ -2543,9 +2348,9 @@ $scenarios = @(
     @{ Name = 'S78_Build_Info';                  Body = ${function:Scenario-Build-Info} },
     @{ Name = 'S79_GameCube_Descriptors';        Body = ${function:Scenario-GameCube-Descriptors} },
     @{ Name = 'S80_GameCube_Protocol';           Body = ${function:Scenario-GameCube-Protocol} },
-    @{ Name = 'S81_GameCube_WinUsb';             Body = ${function:Scenario-GameCube-WinUsb} ; Area = 'usbip' },
-    @{ Name = 'S82_GameCube_Dolphin';            Body = ${function:Scenario-GameCube-Dolphin} ; Area = 'usbip' },
-    @{ Name = 'S83_GameCube_Sdl';                Body = ${function:Scenario-GameCube-Sdl} ; Area = 'usbip' },
+    @{ Name = 'S81_GameCube_WinUsb';             Body = ${function:Scenario-GameCube-WinUsb} },
+    @{ Name = 'S82_GameCube_Dolphin';            Body = ${function:Scenario-GameCube-Dolphin} },
+    @{ Name = 'S83_GameCube_Sdl';                Body = ${function:Scenario-GameCube-Sdl} },
     @{ Name = 'S84_Perf_Budget';                 Body = ${function:Scenario-Perf-Budget} },
     @{ Name = 'S85_Handler_Isolation';           Body = ${function:Scenario-Handler-Isolation} },
     @{ Name = 'S87_Interop_Decl';                Body = ${function:Scenario-Interop-Decl} },
@@ -2561,22 +2366,10 @@ $scenarios = @(
     @{ Name = 'S93_Contract_Live';               Body = ${function:Scenario-Contract-Live} }
 )
 
-if ($ListOnly) {
-    foreach ($s in $scenarios) {
-        if ($s.Name -notlike $Filter) { continue }
-        $runs = -not $s.Area -or $script:ActiveAreas.Contains($s.Area)
-        Write-Host ('  {0,-7} {1,-40} {2}' -f $(if ($runs) { 'run' } else { 'not run' }), $s.Name, $(if ($s.Area) { $s.Area } else { 'core' }))
-    }
-    if ('S90_Arith_Roundtrip' -like $Filter) {
-        Write-Host ('  {0,-7} {1,-40} {2}' -f $(if ($script:ActiveAreas.Contains('arith')) { 'run' } else { 'not run' }), 'S90_Arith_Roundtrip, its diff', 'arith')
-    }
-    exit 0
-}
-
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
 $results = @()
 foreach ($s in $scenarios) {
-    $r = Test-Scenario -Name $s.Name -Body $s.Body -Area $s.Area
+    $r = Test-Scenario -Name $s.Name -Body $s.Body
     if ($null -ne $r) { $results += $r }
 }
 $totalSw.Stop()
@@ -2605,10 +2398,6 @@ foreach ($r in $results) {
 
 Write-Host ''
 Write-Host ('  {0}/{1} PASSED, {2} FAILED, {3:N1}s total' -f $passed.Count, $results.Count, $failed.Count, ($totalSw.Elapsed.TotalSeconds))
-Write-Host ('  Areas: ' + $script:AreaNote)
-if ($script:NotRun.Count -gt 0) {
-    Write-Host ('  Not run, their areas unchanged: ' + ($script:NotRun -join ', '))
-}
 Write-Host ''
 if ($failed.Count -gt 0) {
     Write-Host '  Diag log: %TEMP%\HIDMaestro\teardown_diag.log' -ForegroundColor Yellow
