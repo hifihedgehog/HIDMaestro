@@ -28,6 +28,13 @@
 //                  an output report to OutputReceived, and bytes allocated
 //                  per report anywhere in the process: report 05 on a
 //                  DualShock 4, or the report given for each profile
+//   rate [runs] [seconds] [profile ...]
+//                  sustained throughput: SubmitState every millisecond and
+//                  back to back, with a reader in a child process, the
+//                  reports read per second and the CPU cycles per report of
+//                  the driver hosts, the reader and this process, on a
+//                  DualShock 4 and an Xbox 360 pad or the profiles named
+//                  (RateLive.cs)
 //   create [runs] [profile ...] [--settle=<ms>]
 //                  CreateController and Dispose for five kinds of device, or
 //                  the catalog profiles named, with the SDK's own step
@@ -171,6 +178,7 @@ internal static partial class Program
         int runs = args.Length > 1 && int.TryParse(args[1], out int r) ? r : 30;
         if (mode == "start-child") return StartChild();
         if (mode == "idle-reader") return IdleLive.Reader(args[1]);
+        if (mode == "rate-reader") return RateReader(args[1]);
 #if !HM_BASE
         // The usbip mode plays the host controller from this process.
         UsbipServer.AdmitImportsFromThisProcess = true;
@@ -259,6 +267,10 @@ internal static partial class Program
             case "output":
                 int output = Output(runs, args.Skip(2).ToArray());
                 if (output != 0) return output;
+                break;
+            case "rate":
+                int rate = Rate(runs, args.Skip(2).ToArray());
+                if (rate != 0) return rate;
                 break;
             case "create":
                 int create = Create(runs, args.Skip(2).Where(a => !a.StartsWith("--settle=", StringComparison.Ordinal)).ToArray(),
