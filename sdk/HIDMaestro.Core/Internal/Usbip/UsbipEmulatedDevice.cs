@@ -164,6 +164,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     // The input pump's report, rebuilt from the section for each frame.
     // Only the pump touches it.
     private readonly byte[] _pumpReport;
+    // The setup packets the diag log has a line for, since this import or
+    // the last port reset. Null while HIDMAESTRO_DIAG is off. Only the
+    // connection's reader touches it.
+    private HashSet<ulong>? _loggedSetups;
 
     private readonly struct QueuedFrame
     {
@@ -337,6 +341,9 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         // Attach is power-on for a declared protocol's state.
         ResetLayoutState();
         ResetProtocolState();
+        // Set before the import's reply goes out, on the reader that then
+        // serves the import's requests.
+        _loggedSetups = DeviceOrchestrator.DiagEnabled ? new HashSet<ulong>() : null;
         return true;
     }
 
@@ -778,7 +785,12 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         byte type = (byte)((bmRequestType >> 5) & 0x03);      // 0 standard, 1 class, 2 vendor
         byte recipient = (byte)(bmRequestType & 0x1F);        // 0 device, 1 interface, 2 endpoint, 3 other
         bool deviceToHost = (bmRequestType & 0x80) != 0;
-        if (DeviceOrchestrator.DiagEnabled)
+        // Each setup packet once per import and port reset: the requests a
+        // host sets the device up with, and every distinct one after. A
+        // request a host repeats while the device runs, a feature report
+        // read again, costs one line rather than a line and a disk write
+        // per transfer on the thread that answers it.
+        if (_loggedSetups != null && _loggedSetups.Add(cmd.Setup))
             DeviceOrchestrator.LogDiag($"usbip control {BusId}: {Convert.ToHexString(setup)} seq {cmd.Seqnum} buffer {cmd.TransferBufferLength}");
 
         // Hub port reset arrives as USB_RT_PORT SET_FEATURE(PORT_RESET)
@@ -787,6 +799,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         if (bmRequestType == 0x23 && bRequest == 0x03)
         {
             ResetDeviceState();
+            _loggedSetups?.Clear();
             SendRetSubmit(cmd.Seqnum, 0, 0, null);
             return;
         }
