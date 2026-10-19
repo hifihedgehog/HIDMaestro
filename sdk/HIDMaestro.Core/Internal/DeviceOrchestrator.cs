@@ -2556,16 +2556,26 @@ internal static partial class DeviceOrchestrator
     {
         var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         void Add(string? prefix) { if (prefix != null) set.Add(prefix); }
+        // An identity's prefix comes with the alternates a ROOT parent may
+        // give its child (DeviceManager.ChildPrefixFor). A record's own
+        // value is the one its child took.
+        void AddIdentity(string? prefix)
+        {
+            if (prefix == null) return;
+            set.Add(prefix);
+            for (int n = 1; n <= DeviceIdentity.PrefixAlternates; n++)
+                set.Add(DeviceIdentity.AlternatePrefix(prefix, n));
+        }
         foreach (string id in src.ParentRecords())
         {
             if (!src.Owned(id)) continue;
             Add(src.ParentIdPrefix(id));
-            Add(DeviceIdentity.ParentIdPrefixOfToken(id.Substring(id.LastIndexOf('\\') + 1)));
+            AddIdentity(DeviceIdentity.ParentIdPrefixOfToken(id.Substring(id.LastIndexOf('\\') + 1)));
         }
         foreach (string token in src.RecordedTokens())
-            Add(DeviceIdentity.ParentIdPrefixOfToken(token));
+            AddIdentity(DeviceIdentity.ParentIdPrefixOfToken(token));
         for (int n = 0; n < ControllerLease.IndexLimit; n++)
-            Add(DeviceIdentity.ForIndex(n).ParentIdPrefix);
+            AddIdentity(DeviceIdentity.ForIndex(n).ParentIdPrefix);
         return set;
     }
 

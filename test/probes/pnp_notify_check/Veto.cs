@@ -22,7 +22,13 @@
 // create at the same identity once the holder let go starts its HID child
 // with no problem code, and at the end no devnode and no record of the
 // child is left without its driver. Three Disposes with no holder are timed
-// first. The persona is amazon-luna-usb, a gamepad (Generic Desktop 01:05).
+// first. Then a record as an older build left it, made in the registry at an
+// identity of the run's own: the next create there must start its child on
+// a path of its own (DeviceManager.ChildPrefixFor) and its Dispose must end
+// within 500 ms. Last, dualshock-4-v2 and dualsense at their index's
+// default identity, HM_0000 on the bench machine, whose record a vetoed
+// removal of an older build broke on 2026-10-19. The persona is
+// amazon-luna-usb, a gamepad (Generic Desktop 01:05).
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -68,6 +74,14 @@ internal static class Veto
 
         Hold(ctx, profile, run + "-still", reads: false);
         Hold(ctx, profile, run + "-reads", reads: true);
+        Broken(ctx, profile, run + "-broken");
+
+        // The default identity of index 0, HM_0000, whose child record a
+        // vetoed removal of an older build left without its driver on the
+        // bench machine on 2026-10-19. Elsewhere these pass as plain
+        // creates.
+        foreach (string id in new[] { "dualshock-4-v2", "dualsense" })
+            Starts(ctx, ctx.GetProfile(id) ?? throw new InvalidOperationException($"no {id}"), null, $"{id} at its index's default identity");
 
         Console.WriteLine();
         Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");
@@ -165,6 +179,55 @@ internal static class Veto
               $"parent {Describe(Status(parent))}, child {(last == null ? "none" : Describe(Status(last)))}");
         Check("no record of the identity's HID child is left without its driver", last == null || !BrokenRecord(last),
               last == null ? "" : Record(last));
+    }
+
+    /// <summary>A record as an older build's vetoed removal left it on
+    /// 2026-10-19: the identity's HID child record, out of the tree, with
+    /// the persona's hardware ids and no Driver, Service or ClassGUID. Made
+    /// here in the registry at an identity of this run's own, since a
+    /// vetoed removal of this build no longer leaves one. The next create at
+    /// that identity must start its child on a path of its own, its Dispose
+    /// must not wait on the record, and the record is deleted after.</summary>
+    static void Broken(HMContext ctx, HMProfile profile, string key)
+    {
+        Console.WriteLine($"  -- a record an older build left without its driver, identity {key}");
+        string prefix = DeviceIdentity.ForKey(key, 0).ParentIdPrefix;
+        string record = $@"HID\HIDCLASS\{prefix}&0000";
+        using (var k = Registry.LocalMachine.CreateSubKey($@"SYSTEM\CurrentControlSet\Enum\{record}"))
+        {
+            k.SetValue("HardwareID", new[] { "HID\\VID_1949&PID_0419", "HID\\HIDMaestro", "HID_DEVICE_SYSTEM_GAME", "HID_DEVICE" },
+                       RegistryValueKind.MultiString);
+            k.SetValue("Capabilities", 0xE0, RegistryValueKind.DWord);
+            k.SetValue("ConfigFlags", 0, RegistryValueKind.DWord);
+        }
+        Check("the identity's child record is out of the tree with no driver", BrokenRecord(record), $"{record}: {Record(record)}");
+        Starts(ctx, profile, key, "the next create at that identity", notOn: record);
+        try { Registry.LocalMachine.DeleteSubKeyTree($@"SYSTEM\CurrentControlSet\Enum\{record}", throwOnMissingSubKey: false); }
+        catch (Exception e) { Console.WriteLine($"     the record was not deleted: {e.GetType().Name}"); }
+        Check("the record made for the check is deleted", Record(record) == "gone", Record(record));
+    }
+
+    /// <summary>A create that must start its HID child with no problem code
+    /// and leave no record without its driver, and a Dispose with no holder
+    /// that ends within 500 ms.</summary>
+    static void Starts(HMContext ctx, HMProfile profile, string? key, string what, string? notOn = null)
+    {
+        var sw = Stopwatch.StartNew();
+        HMController? c = null;
+        try { c = ctx.CreateController(profile, key); }
+        catch (Exception e) { Check($"{what} starts its HID child with no problem code", false, $"{e.GetType().Name}: {e.Message}"); return; }
+        long createMs = sw.ElapsedMilliseconds;
+        string? child = Children(c.InstanceId!).FirstOrDefault();
+        bool started = child != null && WaitStarted(child);
+        var st = child == null ? (false, 0u, 0u) : Status(child);
+        Check($"{what} starts its HID child with no problem code", started && st.Item3 == 0
+              && (notOn == null || !string.Equals(child, notOn, StringComparison.OrdinalIgnoreCase)),
+              $"{child ?? "no child"}: {Describe(st)}, create {createMs} ms");
+        sw.Restart();
+        c.Dispose();
+        long disposeMs = sw.ElapsedMilliseconds;
+        Check($"{what}: its Dispose with no holder ends within 500 ms and leaves no record without its driver",
+              disposeMs < 500 && (child == null || !BrokenRecord(child)), $"{disposeMs} ms, child record {Record(child)}");
     }
 
     /// <summary>A record of a HIDMaestro HID child that is not in the tree

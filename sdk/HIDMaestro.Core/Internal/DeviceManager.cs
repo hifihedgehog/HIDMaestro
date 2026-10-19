@@ -2988,6 +2988,67 @@ public static partial class DeviceManager
         return new string(buffer, 0, (int)idLen);
     }
 
+    /// <summary>The ParentIdPrefix a ROOT parent under
+    /// <paramref name="enumerator"/> gives its HID child: the identity's
+    /// own, <paramref name="basePrefix"/>, unless a record of a child on
+    /// that path is out of the tree with no Driver value and names
+    /// HIDMaestro in its hardware ids. A vetoed removal left such records
+    /// before v2.0.0 (SetupDiRemoveDevice deletes the driver before it
+    /// queries the removal, and "Setting needs reboot"). On 2026-10-19
+    /// every later child on that path was configured with a null driver
+    /// and stopped with problem 19, and no user-mode call removed the
+    /// record or installed a driver on it: SetupDiRemoveDevice and
+    /// CM_Uninstall_DevNode failed with CR_NO_SUCH_DEVNODE, DiInstallDevice
+    /// could not read the hardware ids, and CONFIGFLAG_REINSTALL was cleared
+    /// unused. The child is then given the next prefix
+    /// (<see cref="DeviceIdentity.AlternatePrefix"/>) whose path holds no
+    /// such record, a fresh record Windows installs as a new device. All
+    /// broken leaves the identity's own. The child path is
+    /// HID\&lt;enumerator&gt;\&lt;prefix&gt;&amp;&lt;collection&gt;, as
+    /// ClearParentIdPrefixRivals reads it.</summary>
+    internal static string ChildPrefixFor(string enumerator, string basePrefix)
+    {
+        for (int n = 0; n <= DeviceIdentity.PrefixAlternates; n++)
+        {
+            string prefix = n == 0 ? basePrefix : DeviceIdentity.AlternatePrefix(basePrefix, n);
+            if (!(DriverlessChildHook ?? DriverlessChild)(enumerator, prefix))
+            {
+                if (n > 0)
+                    DeviceOrchestrator.LogDiag($"      the HID child record under {basePrefix} has no driver, so this child takes {prefix}");
+                return prefix;
+            }
+        }
+        return basePrefix;
+    }
+
+    /// <summary>Stands in for <see cref="DriverlessChild"/> in the offline
+    /// checks. Null outside them.</summary>
+    internal static Func<string, string, bool>? DriverlessChildHook;
+
+    /// <summary>A record HID\&lt;enumerator&gt;\&lt;prefix&gt;&amp;N that is
+    /// not in the tree, has no Driver value and names HIDMaestro in its
+    /// hardware ids.</summary>
+    static bool DriverlessChild(string enumerator, string prefix)
+    {
+        try
+        {
+            using var segment = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\HID\{enumerator}");
+            if (segment == null) return false;
+            foreach (string name in segment.GetSubKeyNames())
+            {
+                if (!name.StartsWith(prefix + "&", StringComparison.OrdinalIgnoreCase)) continue;
+                using var record = segment.OpenSubKey(name);
+                if (record == null || !string.IsNullOrEmpty(record.GetValue("Driver") as string)) continue;
+                if (record.GetValue("HardwareID") is not string[] ids
+                    || !Array.Exists(ids, id => id.Contains("HIDMaestro", StringComparison.OrdinalIgnoreCase)))
+                    continue;
+                if (Locate($@"HID\{enumerator}\{name}", CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS) return true;
+            }
+        }
+        catch (Exception e) when (e is System.Security.SecurityException or UnauthorizedAccessException or System.IO.IOException) { }
+        return false;
+    }
+
     /// <summary>
     /// Returns all HID child device instance IDs of the given parent (one per
     /// top-level HID collection the parent advertises). The enumeration must

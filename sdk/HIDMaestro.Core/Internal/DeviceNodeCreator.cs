@@ -119,6 +119,11 @@ internal static partial class DeviceNodeCreator
         // devnodes. The lock and the gate narrow that window. Neither is
         // shown to close it.
         string instId = $@"ROOT\{enumerator}\{identity.Token}";
+        // The identity's own child path unless an older build's vetoed
+        // removal left a record there with no driver, which no later child
+        // on that path starts from (DeviceManager.ChildPrefixFor). The
+        // rival guard and the prefix written below take the one chosen.
+        string childPrefix = DeviceManager.ChildPrefixFor(enumerator, identity.ParentIdPrefix);
         using var pnp = DeviceManager.EnterRegistrationGate(instId, DeviceManager.RegistrationKind.Root,
             removePriorLife: () =>
             {
@@ -130,7 +135,7 @@ internal static partial class DeviceNodeCreator
                 DeviceOrchestrator.LogDiag($"      {instId} still exists from a prior life; removing before recreate");
                 return DeviceManager.RemovePriorLife(instId, timeoutMs: 120_000);
             },
-            clearRivals: remove => DeviceManager.ClearParentIdPrefixRivals("ROOT", enumerator, identity.Token, identity.ParentIdPrefix, remove),
+            clearRivals: remove => DeviceManager.ClearParentIdPrefixRivals("ROOT", enumerator, identity.Token, childPrefix, remove),
             out _);
         if (pnp == null)
             return new Result(false, null);
@@ -206,7 +211,7 @@ internal static partial class DeviceNodeCreator
                 // every life. Measured on 26200: three lives with the value
                 // pre-written produced one child path; three without it
                 // counted 0, 1, 2.
-                DeviceIdentity.ApplyParentIdPrefix(instId, identity.ParentIdPrefix, createKey: true);
+                DeviceIdentity.ApplyParentIdPrefix(instId, childPrefix, createKey: true);
 
                 // Issue #59. XUSB-companion profiles carry the xinputhid
                 // tripwire on this HID parent so WGI's OnPnpDeviceAdded
