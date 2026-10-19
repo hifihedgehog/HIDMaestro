@@ -119,11 +119,12 @@ $versionGen = @"
 "@
 [IO.File]::WriteAllText((Join-Path $genDir 'version_gen.h'), $versionGen.Replace("`r`n", "`n") + "`n", (New-Object System.Text.ASCIIEncoding))
 
-# build.cmd's flags for the drivers (scripts\build.cmd:47-57), the forced
-# include in front. The harness gets the same defines.
+# build.cmd's flags for the drivers (scripts\build.cmd:57-67), the WDK's
+# release optimization (/Ox /Os) among them, the forced include in front.
+# The harness gets the same defines.
 $defines = '/D _AMD64_ /D _WIN64 /D UNICODE /D _UNICODE /D UMDF_VERSION_MAJOR=2 /D UMDF_VERSION_MINOR=15'
 $includes = "`"/I$stubs`" `"/I$harnessDir`" `"/I$genDir`" `"/I$umInc`" `"/I$sharedInc`" `"/I$ucrtInc`" `"/I$kmInc`" `"/I$wdfInc`""
-$driverFlags = "/nologo /W4 /GS /Gz /wd4324 /MT $defines /FIhm_fi.h $includes"
+$driverFlags = "/nologo /W4 /GS /Gz /Ox /Os /wd4324 /MT $defines /FIhm_fi.h $includes"
 $harnessFlags = "/nologo /W4 /GS /O2 /wd4324 /MT $defines $includes"
 
 $harnessFiles = Get-ChildItem -File $harnessDir -Filter *.c | Sort-Object Name

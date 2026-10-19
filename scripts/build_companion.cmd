@@ -22,7 +22,8 @@ echo Compiling HIDMaestroCompanion.dll ...
 :: scripts/build.cmd (C4324 in the kit's wdfrequest.h). A header included
 :: from an external header is external too. No HIDMaestro header is
 :: included that way today, and none may be.
-cl.exe /nologo /W4 /GS /Gz ^
+:: /Ox /Os: the WDK's release setting, as scripts/build.cmd gives it.
+cl.exe /nologo /W4 /GS /Gz /Ox /Os ^
     /D %HM_ARCH_DEFINE% /D _WIN64 /D UNICODE /D _UNICODE ^
     /D UMDF_VERSION_MAJOR=2 /D UMDF_VERSION_MINOR=15 ^
     "/I%HM_SDK_DIR%\Include\%WDK_VER%\um" "/I%HM_SDK_DIR%\Include\%WDK_VER%\shared" ^

@@ -26,11 +26,24 @@
          sources differ from the commit, committed or not. -->
     <HmBaselineCommit Condition="'$(HmBaselineCommit)' == ''">9bd6279</HmBaselineCommit>
     <DefineConstants Condition="'$(HmBaselineTree)' != ''">$(DefineConstants);HM_BASELINE</DefineConstants>
+    <!-- The same for a build against an SDK assembly (HmBaseSdkDll below):
+         Ds3Cost then takes the frame code it carries for an older tree. -->
+    <DefineConstants Condition="'$(HmBaseSdkDll)' != ''">$(DefineConstants);HM_BASELINE</DefineConstants>
     <_HmSdkProject Condition="'$(HmBaselineTree)' == ''">..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj</_HmSdkProject>
     <_HmSdkProject Condition="'$(HmBaselineTree)' != ''">$([MSBuild]::EnsureTrailingSlash('$(HmBaselineTree)'))sdk\HIDMaestro.Core\HIDMaestro.Core.csproj</_HmSdkProject>
   </PropertyGroup>
-  <ItemGroup>
+  <!-- -p:HmBaseSdkDll=<path> with -p:HmBase=true compiles against an SDK
+       assembly a b4d29d9 build already made (its HIDMaestro.Core.dll, which
+       embeds that build's driver) instead of a b4d29d9 tree, so the before
+       probe runs the very SDK and driver of the earlier measurements. -->
+  <ItemGroup Condition="'$(HmBaseSdkDll)' == ''">
     <ProjectReference Include="$(_HmSdkProject)" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(HmBaseSdkDll)' != ''">
+    <Reference Include="HIDMaestro.Core">
+      <HintPath>$(HmBaseSdkDll)</HintPath>
+      <Private>true</Private>
+    </Reference>
   </ItemGroup>
   <!-- The program-file mode measures a profile file's programs on the
        interpreter with the profile check tool's own code, which only a

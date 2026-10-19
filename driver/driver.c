@@ -417,6 +417,85 @@ ExtendedFrameDeclared(_In_ PDEVICE_CONTEXT ctx, _In_reads_(size) const UCHAR *fr
     return declared != 0 && declared == size;
 }
 
+/* The report IDs the PID block can answer or act on. The SDK writes the PID
+ * report IDs into the PID state section, from PidReportIdExtractor over
+ * this same descriptor: the report ID of a main item inside a Logical
+ * Collection whose usage is Set Effect, Create New Effect, Block Free,
+ * Device Control, Pool, Block Load or State (0x21, 0x88, 0x90, 0x96, 0x7F,
+ * 0x89, 0x92), the innermost one that is, or else the canonical ID. Taken
+ * here loosely enough to hold every SDK's reading: any page (b4d29d9's
+ * extractor reads no page, this one's reads page 0x0F only), any enclosing
+ * Logical Collection, and the report ID both with Push and Pop and without
+ * (b4d29d9's ignores them). A descriptor this walk cannot follow to its end
+ * makes every ID a candidate. */
+static VOID
+BuildPidCandidates(_In_ PDEVICE_CONTEXT ctx)
+{
+    struct { UCHAR type; UCHAR usage; } coll[32];
+    UCHAR idStack[8];
+    int depth = 0, idDepth = 0;
+    UCHAR ridScoped = 0, ridFlat = 0;
+    BOOLEAN haveUsage = FALSE, complete = TRUE;
+    UCHAR firstUsage = 0;
+    const UCHAR *d = ctx->ReportDescriptor;
+    ULONG n = ctx->ReportDescriptorSize, i = 0;
+    static const UCHAR canonical[] = {
+        HIDMAESTRO_PID_CREATE_NEW_EFFECT_REPORT_ID, HIDMAESTRO_PID_BLOCK_LOAD_REPORT_ID,
+        HIDMAESTRO_PID_POOL_REPORT_ID, HIDMAESTRO_PID_STATE_REPORT_ID,
+        HIDMAESTRO_PID_BLOCK_FREE_REPORT_ID, HIDMAESTRO_PID_DEVICE_CONTROL_REPORT_ID };
+    RtlZeroMemory(ctx->PidCandidate, sizeof(ctx->PidCandidate));
+    for (ULONG k = 0; k < ARRAYSIZE(canonical); k++) ctx->PidCandidate[canonical[k]] = TRUE;
+    while (i < n) {
+        UCHAR prefix = d[i];
+        if (prefix == 0xFE) {                       /* long item: size, tag, data */
+            if (i + 2 >= n) { complete = FALSE; break; }
+            i += 3 + (ULONG)d[i + 1];
+            continue;
+        }
+        ULONG sz = prefix & 0x03;
+        if (sz == 3) sz = 4;
+        if (i + 1 + sz > n) { complete = FALSE; break; }
+        ULONG val = 0;
+        for (ULONG k = 0; k < sz; k++) val |= (ULONG)d[i + 1 + k] << (8 * k);
+        UCHAR type = (prefix >> 2) & 0x03, tag = prefix >> 4;
+        if (type == 0) {                            /* main */
+            if (tag == 10) {                        /* Collection */
+                if (depth == ARRAYSIZE(coll)) { complete = FALSE; break; }
+                coll[depth].type = (UCHAR)val;
+                coll[depth].usage = haveUsage ? firstUsage : 0;
+                depth++;
+            } else if (tag == 12) {                 /* End Collection */
+                if (depth > 0) depth--;
+            } else if (tag == 8 || tag == 9 || tag == 11) {   /* Input, Output, Feature */
+                for (int k = depth - 1; k >= 0; k--) {
+                    UCHAR u = coll[k].usage;
+                    if (coll[k].type != 0x02) continue;
+                    if (u == 0x21 || u == 0x88 || u == 0x90 || u == 0x96 || u == 0x7F || u == 0x89 || u == 0x92) {
+                        if (ridScoped) ctx->PidCandidate[ridScoped] = TRUE;
+                        if (ridFlat) ctx->PidCandidate[ridFlat] = TRUE;
+                        break;
+                    }
+                }
+            }
+            haveUsage = FALSE;                      /* locals end at every main item */
+        } else if (type == 1) {                     /* global */
+            if (tag == 8) { ridScoped = (UCHAR)val; ridFlat = (UCHAR)val; }
+            else if (tag == 10) {                   /* Push */
+                if (idDepth == ARRAYSIZE(idStack)) { complete = FALSE; break; }
+                idStack[idDepth++] = ridScoped;
+            } else if (tag == 11 && idDepth > 0) {  /* Pop */
+                ridScoped = idStack[--idDepth];
+            }
+        } else if (type == 2 && tag == 0 && !haveUsage) {   /* the first Usage */
+            firstUsage = (UCHAR)val;
+            haveUsage = TRUE;
+        }
+        i += 1 + sz;
+    }
+    if (!complete)
+        for (ULONG k = 0; k < 256; k++) ctx->PidCandidate[k] = TRUE;
+}
+
 static BOOLEAN
 InputIdCached(_In_ PDEVICE_CONTEXT ctx, _In_ UCHAR id)
 {
@@ -1508,11 +1587,13 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
      * the SDK passes the FULL RID-included extended report (e.g. 78-byte
      * Sony BT Report 0x31 with CRC32). Pass through verbatim. */
     UCHAR inputReport[HIDMAESTRO_MAX_REPORT_SIZE];
-    RtlZeroMemory(inputReport, sizeof(inputReport));
 
     ULONG dataLen = shared.DataSize;
     BOOLEAN hasReportId = (ctx->FirstInputReportId != 0);
     ULONG expectedSize = ctx->InputReportByteLength > 0 ? ctx->InputReportByteLength : 17;
+    /* Only the bytes that go out: every path below sends at most
+     * expectedSize bytes of this buffer, or bytes it wrote itself. */
+    RtlZeroMemory(inputReport, expectedSize);
 
     ULONG maxData;
     if (hasReportId) {
@@ -2199,6 +2280,7 @@ EvtDeviceAdd(
     /* v2.0.0: each input report's declared length, for the extended lane's
      * bound. */
     BuildInputLengths(ctx);
+    BuildPidCandidates(ctx);
 
     /* v2.0.0: this driver's half of the version section at add, then the
      * controller's v2.0.0 values under the contract. A value it cannot
@@ -2557,8 +2639,10 @@ EvtIoDeviceControl(
              * first IOCTL the section is unmapped and an unconditional
              * read would fall back to canonical IDs and miss
              * non-canonical RIDs entirely. EnsurePidStateMapping is
-             * idempotent and ~free after the first successful map. */
-            BOOLEAN haveMap = EnsurePidStateMapping(ctx);
+             * idempotent and ~free after the first successful map.
+             * v2.0.0: only an ID a PID report can arrive on opens it
+             * (BuildPidCandidates). Any other matches no ID below. */
+            BOOLEAN haveMap = ctx->PidCandidate[reportId] && EnsurePidStateMapping(ctx);
             UCHAR createNewEffectRid = HIDMAESTRO_PID_CREATE_NEW_EFFECT_REPORT_ID;
             UCHAR blockFreeRid       = HIDMAESTRO_PID_BLOCK_FREE_REPORT_ID;
             UCHAR deviceControlRid   = HIDMAESTRO_PID_DEVICE_CONTROL_REPORT_ID;
@@ -2712,7 +2796,14 @@ EvtIoDeviceControl(
          * the shared section first so a fresh-IOCTL read on a profile
          * with non-canonical IDs picks up the SDK-published overrides
          * instead of falling back to canonical and missing the RID
-         * entirely. EnsurePidStateMapping is idempotent. */
+         * entirely. EnsurePidStateMapping is idempotent.
+         * v2.0.0: an ID no PID report can arrive on (BuildPidCandidates)
+         * matches none of the IDs below, mapped or not, and fails as it
+         * would below, without the section's open. */
+        if (!ctx->PidCandidate[reportId]) {
+            status = STATUS_NOT_SUPPORTED;
+            break;
+        }
         (void)EnsurePidStateMapping(ctx);
         UCHAR createNewEffectRid = HIDMAESTRO_PID_CREATE_NEW_EFFECT_REPORT_ID;
         UCHAR poolRid            = HIDMAESTRO_PID_POOL_REPORT_ID;
@@ -2830,7 +2921,9 @@ EvtIoDeviceControl(
             const UCHAR *payload = (outBufSize > 0) ? p + 1 : p;
             ULONG payloadLen = (ULONG)((outBufSize > 0) ? outBufSize - 1 : 0);
 
-            BOOLEAN haveOutMap = EnsurePidStateMapping(ctx);
+            /* Only an ID a PID report can arrive on opens the PID section
+             * (BuildPidCandidates). Any other matches no ID below. */
+            BOOLEAN haveOutMap = ctx->PidCandidate[reportId] && EnsurePidStateMapping(ctx);
             UCHAR blockFreeRid     = HIDMAESTRO_PID_BLOCK_FREE_REPORT_ID;
             UCHAR deviceControlRid = HIDMAESTRO_PID_DEVICE_CONTROL_REPORT_ID;
             if (haveOutMap) {
@@ -2895,10 +2988,13 @@ EvtIoDeviceControl(
          * v1.3.7: match against SDK-published State RID with canonical
          * fallback so non-canonical PID layouts (SideWinder etc.) resolve.
          * Open shared section first; otherwise the very first IOCTL read
-         * before any other handler ran would miss the override. */
-        (void)EnsurePidStateMapping(ctx);
+         * before any other handler ran would miss the override.
+         * v2.0.0: an ID no PID report can arrive on goes straight to the
+         * input cache below (BuildPidCandidates). */
+        if (ctx->PidCandidate[inReportId])
+            (void)EnsurePidStateMapping(ctx);
         UCHAR stateRid = HIDMAESTRO_PID_STATE_REPORT_ID;
-        if (ctx->PidStateMemPtr != NULL) {
+        if (ctx->PidCandidate[inReportId] && ctx->PidStateMemPtr != NULL) {
             volatile HIDMAESTRO_SHARED_PID_STATE *sec =
                 (volatile HIDMAESTRO_SHARED_PID_STATE *)ctx->PidStateMemPtr;
             if (sec->StateReportId) stateRid = sec->StateReportId;
