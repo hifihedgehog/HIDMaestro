@@ -62,6 +62,7 @@ internal static partial class Program
         startedHere = false;
         if (SteamRunning()) return true;
         Console.WriteLine("  starting Steam (-silent)...");
+        long before = LogLength(log);
         try
         {
             Process.Start(new ProcessStartInfo
@@ -81,7 +82,12 @@ internal static partial class Program
         // Far enough up to be writing its controller log.
         for (int i = 0; i < 120 && LogLength(log) == 0; i++) Thread.Sleep(500);
         for (int i = 0; i < 60 && !(SteamRunning() && LogLength(log) > 0); i++) Thread.Sleep(500);
-        Thread.Sleep(8000);
+        // Until the controller log opens this session with the client's
+        // version line, for up to the 8 s this waited before.
+        var up = Stopwatch.StartNew();
+        while (up.ElapsedMilliseconds < 8000
+               && !ReadLogFrom(log, before).Contains("Client version:", StringComparison.Ordinal))
+            Thread.Sleep(100);
         return SteamRunning();
     }
 
@@ -99,8 +105,10 @@ internal static partial class Program
                 UseShellExecute = false,
                 CreateNoWindow = true,
             });
-            for (int i = 0; i < 120 && AnySteamRunning(); i++) Thread.Sleep(500);
-            Thread.Sleep(3000);
+            // A claim is an open handle, which Windows closes before a
+            // process it held in ends.
+            var down = Stopwatch.StartNew();
+            while (down.ElapsedMilliseconds < 60_000 && AnySteamRunning()) Thread.Sleep(100);
             Console.WriteLine(AnySteamRunning() ? "  WARNING: Steam processes still present after shutdown" : "  Steam is fully down");
         }
         catch { }
@@ -136,9 +144,9 @@ internal static partial class Program
             // command is the proof it read the stream.
             string controller = "", console = "";
             bool opened = false;
-            for (int i = 0; i < 90 && !opened; i++)
+            for (int i = 0; i < 900 && !opened; i++)
             {
-                Thread.Sleep(1000);
+                Thread.Sleep(100);
                 controller = ReadLogFrom(controllerLog, controllerBase);
                 var log = s2.SnapshotBulkLog();
                 opened = controller.Contains("Steam controller device opened", StringComparison.Ordinal)
@@ -160,8 +168,6 @@ internal static partial class Program
             Check("Steam opens it as a controller of its own, on the HIDAPI driver",
                   controller.Contains("Steam controller device opened", StringComparison.Ordinal)
                   && controller.Contains("Controller using HIDAPI driver, vid=0x057e, pid=0x2069", StringComparison.OrdinalIgnoreCase));
-            Check("Steam gives it the Switch Pro configuration set",
-                  controller.Contains("configset_controller_switch_pro.vdf", StringComparison.OrdinalIgnoreCase));
 
             var timed = s2.SnapshotBulkLogTimed();
             string sequence = string.Join(" ", timed.Select(e => LogLine(e.Payload)));
@@ -187,6 +193,10 @@ internal static partial class Program
             Check("Steam keeps reading: it takes the persona's 250 reports a second for eight more seconds",
                   rate > 237 && rate < 252, $"{sent} reports, {rate:F1} a second");
             string after = ReadLogFrom(controllerLog, controllerBase);
+            // Config sets can land after the open, so this reads the log as
+            // it stands after the hold.
+            Check("Steam gives it the Switch Pro configuration set",
+                  after.Contains("configset_controller_switch_pro.vdf", StringComparison.OrdinalIgnoreCase));
             int openAt = after.LastIndexOf("Steam controller device opened", StringComparison.Ordinal);
             string tail = openAt >= 0 ? after[openAt..] : after;
             Check("Steam does not close it",
