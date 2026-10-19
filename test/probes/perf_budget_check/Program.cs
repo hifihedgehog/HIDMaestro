@@ -60,11 +60,12 @@
 //                  offline: the process's CPU time per second with one
 //                  dualsense-bt's idle repeat at the period and nothing else
 //                  submitting, and the frames it wrote per second
-//   idle-live [runs] [seconds]
-//                  live, elevated: one dualsense-bt at rest with one reader
-//                  in a child process, the CPU cycles per second of the SDK's
-//                  process, the reader and the WUDFHost processes, and the
-//                  reports read per second (IdleLive.cs)
+//   idle-live [runs] [seconds] [profile]
+//                  live, elevated: one dualsense-bt, or the profile named,
+//                  at rest with one reader in a child process, the CPU
+//                  cycles per second of the SDK's process, the reader and
+//                  the WUDFHost processes, and the reports read per second
+//                  (IdleLive.cs)
 //   report-build [runs]
 //                  the Switch 2 Pro composite's device-built report in each
 //                  layout, offline
@@ -236,7 +237,8 @@ internal static partial class Program
         if (OtherSdkRunning()) return 2;
         if (mode == "idle-live")
         {
-            IdleLive.Run(runs, args.Length > 2 ? double.Parse(args[2], System.Globalization.CultureInfo.InvariantCulture) : 10);
+            IdleLive.Run(runs, args.Length > 2 ? double.Parse(args[2], System.Globalization.CultureInfo.InvariantCulture) : 10,
+                args.Length > 3 ? args[3] : null);
             return 0;
         }
 
