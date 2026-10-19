@@ -1369,7 +1369,9 @@ public static partial class DeviceManager
     /// cannot carry the package (Windows 10). Only a persona that declares a
     /// WinUSB binding makes one.</item>
     /// <item>A registration's DiInstallDevice, which runs once its hold has
-    /// ended, on the controller's own devnode. Its HID child is linked into
+    /// ended, on the controller's own devnode: the driver store's search, or
+    /// the driver the search chose before for the same ids
+    /// (DeviceNodeCreator.InstallFromStoreInf). Its HID child is linked into
     /// the HIDClass list by Plug and Play after the hold, with no lock: the
     /// lock covers the parent's registration, not its children's.</item>
     /// <item>Any program built on HIDMaestro before v2.0.0.</item>

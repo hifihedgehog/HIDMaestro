@@ -104,8 +104,10 @@ internal static class LockCoverage
         ("DiInstallDevice(", "InstallOn", "WinUSB bind"),
         ("DiInstallNullDriver(", "InstallFromInf", "WinUSB bind"),
         ("DiInstallDevice(", "InstallFromInf", "WinUSB bind"),
-        // A registration's driver install, after its hold.
+        // A registration's driver install, after its hold: the store's
+        // search, or the driver the search chose before.
         ("DiInstallDevice(", "InstallBestStoreDriver", "registration's DiInstallDevice"),
+        ("DiInstallDevice(", "InstallFromStoreInf", "registration's DiInstallDevice"),
     };
 
     /// <summary>The direct registry writes to devnode keys made outside a
