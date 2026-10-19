@@ -200,7 +200,9 @@ internal static partial class Program
         }
         finally
         {
-            HMContext.RemoveAllVirtualControllers();
+            // The killed child's DualSense goes. The driver stays installed,
+            // so the next program's InstallDriver takes its fast path.
+            HMContext.RemoveAllVirtualControllers(preserveInstall: true);
             try { Unplant(plant); } catch { }
         }
     }

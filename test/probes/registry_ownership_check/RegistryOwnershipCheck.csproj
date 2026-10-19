@@ -3,9 +3,12 @@
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
     <Nullable>enable</Nullable>
+    <!-- probe_common\SdkConsumers.cs uses LibraryImport. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyName>RegistryOwnershipCheck</AssemblyName>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
+    <Compile Include="..\probe_common\SdkConsumers.cs" Link="SdkConsumers.cs" />
   </ItemGroup>
 </Project>

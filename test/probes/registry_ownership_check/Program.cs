@@ -179,19 +179,7 @@ internal static partial class Program
 
     static string? FindLiveSdkConsumer()
     {
-        int self = Environment.ProcessId;
-        foreach (var p in Process.GetProcesses())
-        {
-            if (p.Id == self) { p.Dispose(); continue; }
-            try
-            {
-                foreach (ProcessModule m in p.Modules)
-                    if (string.Equals(m.ModuleName, "HIDMaestro.Core.dll", StringComparison.OrdinalIgnoreCase))
-                        return p.ProcessName;
-            }
-            catch { }
-            finally { p.Dispose(); }
-        }
+        if (SdkConsumers.Find() is string loaded) return loaded;
         // The named input sections are what another consumer's controllers
         // write through, so an open one means live virtuals this run's
         // cleanup would remove.
