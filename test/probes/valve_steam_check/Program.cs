@@ -43,6 +43,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using HIDMaestro;
 
@@ -140,6 +141,7 @@ static class ValveSteamCheck
             // -silent starts Steam to the tray with no window, so a battery
             // run never takes focus from whoever is using the machine.
             Console.WriteLine("  starting Steam (-silent)...");
+            long before = LogLength(log);
             try
             {
                 Process.Start(new ProcessStartInfo
@@ -164,7 +166,12 @@ static class ValveSteamCheck
                 Thread.Sleep(500);
                 if (SteamRunning() && LogLength(log) > 0) break;
             }
-            Thread.Sleep(5000);
+            // Until its controller log opens this session with the client's
+            // version line, for up to the 5 s this waited before.
+            var up = Stopwatch.StartNew();
+            while (up.ElapsedMilliseconds < 5000
+                   && !ReadLogFrom(log, before).Contains("Client version:", StringComparison.Ordinal))
+                Thread.Sleep(100);
         }
         if (!SteamRunning())
         {
@@ -192,12 +199,13 @@ static class ValveSteamCheck
                 UseShellExecute = false,
                 CreateNoWindow = true,
             });
-            // Wait for the whole tree, steam.exe and its helpers, then let
-            // the device claims actually drop. The next scenario
-            // creates Valve personas and reads them through stock
-            // SDL, and it cannot see one Steam still owns.
-            for (int i = 0; i < 120 && AnySteamRunning(); i++) Thread.Sleep(500);
-            Thread.Sleep(3000);
+            // Wait for the whole tree, steam.exe and its helpers. The next
+            // scenario creates Valve personas and reads them through stock
+            // SDL, and it cannot see one Steam still owns. A claim is an
+            // open handle, which Windows closes before a process it held
+            // in ends.
+            var down = Stopwatch.StartNew();
+            while (down.ElapsedMilliseconds < 60_000 && AnySteamRunning()) Thread.Sleep(100);
             Console.WriteLine(AnySteamRunning()
                 ? "  WARNING: Steam processes still present after shutdown"
                 : "  Steam is fully down");
@@ -214,6 +222,24 @@ static class ValveSteamCheck
             return 1;
         }
         return Checks();
+    }
+
+    /// <summary>How long every persona is held after Steam opens it while
+    /// the log is watched for Steam dropping it. Before idleFrameIntervalMs
+    /// (068e615b), Steam closed an idle persona after a hid_read failure 1
+    /// to 3 s after opening it: controller.txt on 2026-08-21 at 10:26:12,
+    /// 10:29:31, 10:30:43, 10:32:16 and 10:58:14. Twice the longest.</summary>
+    const int HoldMs = 6000;
+
+    sealed class Persona
+    {
+        public required string Id, Pid, Product, ConfigSet, Model;
+        public HMProfile? Profile;
+        public HMController? Pad;
+        public long Baseline;
+        public long OpenedAt = -1;
+        public readonly List<(byte Id, int Len)> Written = new();
+        public string? Error;
     }
 
     static int Checks()
@@ -236,33 +262,33 @@ static class ValveSteamCheck
         // The config-set name is Steam's own per-model classification, and
         // it is the assertion that separates "some Valve device" from "this
         // Valve device".
-        var cases = new (string Id, string Pid, string Product, string ConfigSet, string Model)[]
+        var cases = new[]
         {
-            ("steam-deck-composite",       "1205", "Steam Controller", "configset_controller_neptune.vdf",                "neptune"),
-            ("steam-controller-composite", "1102", "Wired Controller", "configset_controller_steamcontroller_gordon.vdf", "steamcontroller_gordon"),
-            ("steam-controller-2",         "1302", "Steam Controller", "configset_controller_triton.vdf",                 "triton"),
+            new Persona { Id = "steam-deck-composite",       Pid = "1205", Product = "Steam Controller", ConfigSet = "configset_controller_neptune.vdf",                Model = "neptune" },
+            new Persona { Id = "steam-controller-composite", Pid = "1102", Product = "Wired Controller", ConfigSet = "configset_controller_steamcontroller_gordon.vdf", Model = "steamcontroller_gordon" },
+            new Persona { Id = "steam-controller-2",         Pid = "1302", Product = "Steam Controller", ConfigSet = "configset_controller_triton.vdf",                 Model = "triton" },
         };
 
+        var clock = Stopwatch.StartNew();
         try
         {
+            // The three are held together. Each is created once Steam has
+            // opened the one before, so each one's lines in the log, from its
+            // "Local Device Found" to the next, are its own.
             foreach (var t in cases)
             {
-                Console.WriteLine();
-                Console.WriteLine($"-- {t.Id} --");
-                var prof = ctx.GetProfile(t.Id);
-                Check("profile is in the catalog", prof != null);
-                if (prof == null) continue;
-
-                long baseline = LogLength(log);
-                HMController? c = null;
-                var written = new List<(byte Id, int Len)>();
+                t.Profile = ctx.GetProfile(t.Id);
+                if (t.Profile == null) continue;
+                t.Baseline = LogLength(log);
                 try
                 {
-                    c = ctx.CreateController(prof);
+                    var c = ctx.CreateController(t.Profile);
+                    t.Pad = c;
                     // Every command Steam writes down to this device, in
                     // arrival order. Valve frames a command-channel write as
                     // [message][length][parameters], so byte 0 of the
                     // payload is the message id.
+                    var written = t.Written;
                     c.OutputReceived += (_, pkt) =>
                     {
                         // Where the message id sits depends on whether the
@@ -279,115 +305,132 @@ static class ValveSteamCheck
                         lock (written) written.Add((msg, span.Length));
                     };
 
-                    string want = $"type: 28de {t.Pid}";
-                    string fresh = string.Empty;
-                    bool found = false;
-                    for (int i = 0; i < 90 && !found; i++)
+                    var open = Stopwatch.StartNew();
+                    while (open.ElapsedMilliseconds < 90_000)
                     {
-                        Thread.Sleep(1000);
-                        fresh = ReadLogFrom(log, baseline);
-                        found = fresh.Contains(want, StringComparison.OrdinalIgnoreCase)
-                             && fresh.Contains("Steam controller device opened", StringComparison.Ordinal);
+                        string own = OwnLines(ReadLogFrom(log, t.Baseline), t.Pid);
+                        if (own.Contains("Steam controller device opened", StringComparison.Ordinal)) { t.OpenedAt = clock.ElapsedMilliseconds; break; }
+                        Thread.Sleep(100);
                     }
-
-                    Check("Steam finds the device and reads its identity",
-                          fresh.Contains(want, StringComparison.OrdinalIgnoreCase), want);
-                    Check("Steam reads the manufacturer string off the device",
-                          fresh.Contains("Manufacturer: Valve Software", StringComparison.Ordinal));
-                    Check("Steam reads the product string off the device",
-                          fresh.Contains("Product:      " + t.Product, StringComparison.Ordinal), t.Product);
-                    Check("Steam selects Valve's HID protocol for it",
-                          fresh.Contains("Controller uses V1 HID protocol", StringComparison.Ordinal));
-
-                    // The claim itself. A device Steam files under Generic
-                    // DirectInput never reaches this line.
-                    Check("Steam CLAIMS it as a Steam controller",
-                          fresh.Contains("Steam controller device opened", StringComparison.Ordinal));
-
-                    // Hold the device and watch for Steam dropping it. An
-                    // idle persona used to die here: claimed, read nothing,
-                    // closed within seconds.
-                    int openAt = fresh.LastIndexOf("Steam controller device opened", StringComparison.Ordinal);
-                    string after = fresh;
-                    for (int i = 0; i < 30; i++)
-                    {
-                        Thread.Sleep(1000);
-                        after = ReadLogFrom(log, baseline);
-                        // Config sets land after Steam finishes registering
-                        // the controller against the account, which is a
-                        // round trip and arrives well behind the claim.
-                        if (i >= 11 && after.Contains(t.ConfigSet, StringComparison.OrdinalIgnoreCase)) break;
-                    }
-
-                    // Which Valve device Steam decided this is.
-                    Check("Steam classifies it as this specific Valve model",
-                          after.Contains(t.ConfigSet, StringComparison.OrdinalIgnoreCase), t.ConfigSet);
-
-                    string tail = openAt >= 0 && openAt < after.Length ? after[openAt..] : after;
-                    Check("Steam keeps reading it (no hid_read failure close)",
-                          !tail.Contains("closed after hid_read failure", StringComparison.Ordinal));
-                    Check("the device is still open twelve seconds later",
-                          !tail.Contains("PollState Changed from 2 to 0", StringComparison.Ordinal));
-
-                    // What Steam DOES with the device once it has decided
-                    // what it is. Steam configures a Valve controller over
-                    // Valve's own command channel, which is the same channel
-                    // its haptics ride, so a persona that never receives one
-                    // of these is one Steam claimed and then ignored.
-                    List<(byte Id, int Len)> cmds;
-                    lock (written) cmds = new List<(byte, int)>(written);
-                    var kinds = new SortedSet<string>();
-                    foreach (var w in cmds) kinds.Add(NameMessage(w.Id));
-                    Console.WriteLine($"     Steam wrote {cmds.Count} command(s): "
-                                      + (kinds.Count > 0 ? string.Join(", ", kinds) : "none"));
-
-                    Check("Steam drives the device over Valve's command channel",
-                          cmds.Count > 0, $"{cmds.Count} writes");
-                    Check("Steam configures it rather than only opening it",
-                          cmds.Exists(w => w.Id == ID_SET_SETTINGS_VALUES
-                                        || w.Id == ID_CLEAR_DIGITAL_MAPPINGS
-                                        || w.Id == ID_GET_ATTRIBUTES_VALUES),
-                          "settings, mappings or attributes");
-
-                    // What Steam's interface for this device is built from.
-                    // The classification above is a name; these are the
-                    // files Steam ships under that name, and they are what
-                    // its layout editor and desktop layout render. Read off
-                    // disk, so nothing opens a window on anybody's screen.
-                    string cbase = Path.Combine(root, "controller_base");
-                    string[] shipped;
-                    try { shipped = Directory.GetFiles(cbase, "*" + t.Model + "*.vdf"); }
-                    catch { shipped = Array.Empty<string>(); }
-                    Check("Steam ships an interface definition for that model",
-                          shipped.Length > 0,
-                          shipped.Length > 0
-                              ? string.Join(", ", Array.ConvertAll(shipped, Path.GetFileName))
-                              : cbase);
-
-                    // Trackpad and stick groups in that definition are the
-                    // surfaces its configuration UI exposes. A pad-less
-                    // gamepad template carries neither.
-                    bool surfaces = false;
-                    foreach (var f in shipped)
-                    {
-                        string body;
-                        try { body = File.ReadAllText(f); } catch { continue; }
-                        if (body.Contains("absolute_mouse", StringComparison.Ordinal)
-                            || body.Contains("joystick_move", StringComparison.Ordinal))
-                        {
-                            surfaces = true;
-                            break;
-                        }
-                    }
-                    Check("that definition exposes trackpad and stick surfaces",
-                          surfaces, "absolute_mouse / joystick_move groups");
                 }
-                catch (Exception ex) { Check("persona ran without throwing", false, ex.Message); }
-                finally { c?.Dispose(); Thread.Sleep(3000); }
+                catch (Exception ex) { t.Error = ex.Message; }
+            }
+
+            // Hold them and watch for Steam dropping one. An idle persona
+            // used to die here: claimed, read nothing, closed within
+            // seconds. Config sets land after Steam finishes registering a
+            // controller against the account, which is a round trip and can
+            // arrive well behind the claim, so the wait also runs until each
+            // one is in, for up to 30 seconds after that persona's open.
+            var held = cases.Where(t => t.OpenedAt >= 0).ToList();
+            while (held.Count > 0)
+            {
+                long now = clock.ElapsedMilliseconds;
+                bool done = held.All(t => now - t.OpenedAt >= HoldMs
+                                          && (now - t.OpenedAt >= 30_000
+                                              || ReadLogFrom(log, t.Baseline).Contains(t.ConfigSet, StringComparison.OrdinalIgnoreCase)));
+                if (done) break;
+                Thread.Sleep(200);
+            }
+
+            foreach (var t in cases)
+            {
+                Console.WriteLine();
+                Console.WriteLine($"-- {t.Id} --");
+                Check("profile is in the catalog", t.Profile != null);
+                if (t.Profile == null) continue;
+                if (t.Error != null) { Check("persona ran without throwing", false, t.Error); continue; }
+
+                string after = ReadLogFrom(log, t.Baseline);
+                string own = OwnLines(after, t.Pid);
+                string want = $"type: 28de {t.Pid}";
+                Check("Steam finds the device and reads its identity",
+                      own.Contains(want, StringComparison.OrdinalIgnoreCase), want);
+                Check("Steam reads the manufacturer string off the device",
+                      own.Contains("Manufacturer: Valve Software", StringComparison.Ordinal));
+                Check("Steam reads the product string off the device",
+                      own.Contains("Product:      " + t.Product, StringComparison.Ordinal), t.Product);
+                Check("Steam selects Valve's HID protocol for it",
+                      own.Contains("Controller uses V1 HID protocol", StringComparison.Ordinal));
+
+                // The claim itself. A device Steam files under Generic
+                // DirectInput never reaches this line.
+                Check("Steam CLAIMS it as a Steam controller",
+                      own.Contains("Steam controller device opened", StringComparison.Ordinal));
+
+                // Which Valve device Steam decided this is.
+                Check("Steam classifies it as this specific Valve model",
+                      after.Contains(t.ConfigSet, StringComparison.OrdinalIgnoreCase), t.ConfigSet);
+
+                // Everything Steam logged from this persona's open on. The
+                // close lines name no device, so one from any persona held
+                // with it counts against it too.
+                int found = Math.Max(0, after.IndexOf(want, StringComparison.OrdinalIgnoreCase));
+                int openAt = after.IndexOf("Steam controller device opened", found, StringComparison.Ordinal);
+                string tail = openAt >= 0 ? after[openAt..] : after;
+                Check("Steam keeps reading it (no hid_read failure close)",
+                      !tail.Contains("closed after hid_read failure", StringComparison.Ordinal));
+                Check($"the device is still open {HoldMs / 1000} seconds later",
+                      !tail.Contains("PollState Changed from 2 to 0", StringComparison.Ordinal));
+
+                // What Steam DOES with the device once it has decided
+                // what it is. Steam configures a Valve controller over
+                // Valve's own command channel, which is the same channel
+                // its haptics ride, so a persona that never receives one
+                // of these is one Steam claimed and then ignored.
+                List<(byte Id, int Len)> cmds;
+                lock (t.Written) cmds = new List<(byte, int)>(t.Written);
+                var kinds = new SortedSet<string>();
+                foreach (var w in cmds) kinds.Add(NameMessage(w.Id));
+                Console.WriteLine($"     Steam wrote {cmds.Count} command(s): "
+                                  + (kinds.Count > 0 ? string.Join(", ", kinds) : "none"));
+
+                Check("Steam drives the device over Valve's command channel",
+                      cmds.Count > 0, $"{cmds.Count} writes");
+                Check("Steam configures it rather than only opening it",
+                      cmds.Exists(w => w.Id == ID_SET_SETTINGS_VALUES
+                                    || w.Id == ID_CLEAR_DIGITAL_MAPPINGS
+                                    || w.Id == ID_GET_ATTRIBUTES_VALUES),
+                      "settings, mappings or attributes");
+
+                // What Steam's interface for this device is built from.
+                // The classification above is a name. These are the
+                // files Steam ships under that name, and they are what
+                // its layout editor and desktop layout render. Read off
+                // disk, so nothing opens a window on anybody's screen.
+                string cbase = Path.Combine(root, "controller_base");
+                string[] shipped;
+                try { shipped = Directory.GetFiles(cbase, "*" + t.Model + "*.vdf"); }
+                catch { shipped = Array.Empty<string>(); }
+                Check("Steam ships an interface definition for that model",
+                      shipped.Length > 0,
+                      shipped.Length > 0
+                          ? string.Join(", ", Array.ConvertAll(shipped, Path.GetFileName))
+                          : cbase);
+
+                // Trackpad and stick groups in that definition are the
+                // surfaces its configuration UI exposes. A pad-less
+                // gamepad template carries neither.
+                bool surfaces = false;
+                foreach (var f in shipped)
+                {
+                    string body;
+                    try { body = File.ReadAllText(f); } catch { continue; }
+                    if (body.Contains("absolute_mouse", StringComparison.Ordinal)
+                        || body.Contains("joystick_move", StringComparison.Ordinal))
+                    {
+                        surfaces = true;
+                        break;
+                    }
+                }
+                Check("that definition exposes trackpad and stick surfaces",
+                      surfaces, "absolute_mouse / joystick_move groups");
             }
         }
         finally
         {
+            var pads = cases.Where(t => t.Pad != null).Select(t => t.Pad!).ToList();
+            try { ctx.DisposeControllersInParallel(pads); } catch { }
             if (startedHere) ShutdownSteam(root);
         }
 
@@ -396,6 +439,19 @@ static class ValveSteamCheck
             ? "=== STEAM CLAIMS AND CLASSIFIES ALL THREE VALVE PERSONAS ==="
             : $"=== {s_fail} check(s) FAILED ===");
         return s_fail == 0 ? 0 : 1;
+    }
+
+    /// <summary>A device's own lines in Steam's log: from the "Local Device
+    /// Found" whose type is 28de <paramref name="pid"/> to the next "Local
+    /// Device Found", or the end. Empty when Steam has not found it.</summary>
+    static string OwnLines(string log, string pid)
+    {
+        int type = log.IndexOf($"type: 28de {pid}", StringComparison.OrdinalIgnoreCase);
+        if (type < 0) return string.Empty;
+        int start = log.LastIndexOf("Local Device Found", type, StringComparison.Ordinal);
+        if (start < 0) start = type;
+        int next = log.IndexOf("Local Device Found", type, StringComparison.Ordinal);
+        return next < 0 ? log[start..] : log[start..next];
     }
 
     // record-switch-pro: Steam's claim of the Switch Pro persona.
