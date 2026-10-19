@@ -30,9 +30,39 @@ custom profile (BEEF:F000) authored via the SDK's `HMProfileBuilder`
 
 # point at a non-default exe (e.g. a published build)
 ./test/regression/regression_battery.ps1 -Exe C:\path\to\HIDMaestroTest.exe
+
+# stop at the first failure, as the release gate does
+./test/regression/regression_battery.ps1 -StopOnFailure
 ```
 
 Exit code: `0` if every scenario passed, `1` if any failed.
+
+`scripts\pre-tag-validate.cmd` runs the battery with `-StopOnFailure`: the
+first scenario that fails ends the run, with its transcript, and the
+rest do not run.
+
+## Sharing the machine
+
+The battery runs beside whatever else the machine is doing. Load,
+Steam, browsers and other controllers never stop a scenario, and the
+probes find their own devices by their own identity, never by VID and PID
+alone or by a fixed transport index.
+
+Another program that embeds HIDMaestro is different: it changes the
+machine-wide state the scenarios measure (devnodes, sweeps, XInput slots,
+Windows.Gaming.Input lists, the registry ledger). Before each scenario
+the battery waits for every such program to exit, printing
+`waiting: <program> (<pid>) embeds HIDMaestro and is running` once a
+minute. A scenario during which one appeared prints `[RERUN]` instead of
+a verdict and runs again once it has gone. `HMForeign.cs` finds them: a
+process outside the battery's own process tree with `HIDMaestro.Core.dll`
+loaded.
+
+Every step ends at a deadline: a probe's run, the test app's answer to a
+command, and the test app's exit after quit get 300 s, S71 1500 s and S73
+900 s from its start, all scaled by `HIDMAESTRO_TIMEOUT_SCALE`. A step
+still running then fails its scenario as a hang, with the probe's
+transcript, and its process tree is stopped.
 
 Total wall time: [D4-PLACEHOLDER: minutes from the v2.0.0 release battery] for all 99
 scenarios, every section and check, on a 16-core laptop. Use `-Filter` to

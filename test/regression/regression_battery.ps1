@@ -17,6 +17,11 @@
   area: incorrect handle tracking, missing teardown call sites,
   cross-controller leaks during multi-slot swaps, etc.
 
+  Another program that embeds HIDMaestro holds the battery back: each
+  scenario waits for it to exit, and a scenario during which one
+  appeared prints [RERUN] and runs again once it has gone
+  (HMForeign.cs). Load and other programs never hold a scenario back.
+
   Exit code: 0 if every scenario PASSED, 1 if any scenario FAILED.
 
 .PARAMETER Exe
@@ -26,6 +31,10 @@
 .PARAMETER Filter
   Run only scenarios whose name matches this wildcard. Useful when
   iterating on a specific scenario. Default: '*' (all).
+
+.PARAMETER StopOnFailure
+  Stop at the first scenario that fails, report it, and skip the rest.
+  The release gate (scripts\pre-tag-validate.cmd) runs with it.
 
 .PARAMETER KeepLogs
   If set, do NOT clear teardown_diag.log before the run; append.
@@ -50,6 +59,7 @@
 param(
     [string]$Exe,
     [string]$Filter = '*',
+    [switch]$StopOnFailure,
     [switch]$KeepLogs
 )
 
@@ -96,6 +106,9 @@ public class CMxz {
     public static extern int CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);
 }
 "@ -ErrorAction SilentlyContinue
+
+# Other programs that embed HIDMaestro (HMForeign.cs).
+Add-Type -Path (Join-Path $scriptDir 'HMForeign.cs')
 
 if (-not $KeepLogs) {
     $diagLog = Join-Path $env:TEMP 'HIDMaestro\teardown_diag.log'
@@ -614,6 +627,24 @@ function Wait-CascadeSettle {
     }
 }
 
+# Waits until no program outside the battery's own process tree embeds
+# HIDMaestro, printing who it waits for once a minute.
+function Wait-NoForeignHM {
+    $who = [HMForeign]::Find($PID)
+    if (-not $who) { return }
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $next = 0
+    while ($who) {
+        if ($sw.Elapsed.TotalSeconds -ge $next) {
+            Write-Host ('  waiting: {0} embeds HIDMaestro and is running ({1:N0} s)' -f $who, $sw.Elapsed.TotalSeconds) -ForegroundColor Yellow
+            $next += 60
+        }
+        Start-Sleep -Milliseconds 1000
+        $who = [HMForeign]::Find($PID)
+    }
+    Write-Host ('  it exited after {0:N0} s' -f $sw.Elapsed.TotalSeconds) -ForegroundColor Yellow
+}
+
 # Run a scenario function and capture PASS/FAIL with leftover diagnosis.
 function Test-Scenario {
     param(
@@ -625,6 +656,7 @@ function Test-Scenario {
     Write-Host ''
     Write-Host ('=== ' + $Name + ' ===') -ForegroundColor Cyan
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    [HMForeign]::Watch($PID)
 
     # Snapshot baseline BEFORE scenario runs.
     $baseline = Get-HMPresentDevnodes
@@ -649,8 +681,14 @@ function Test-Scenario {
     $leftovers = Get-HMLeftovers -Baseline $baseline -After $after
 
     $sw.Stop()
+    $beside = [HMForeign]::Stop()
+    if ($beside) {
+        Write-Host ('  [RERUN] ' + $beside + ' embeds HIDMaestro and ran beside it, so this run does not count') -ForegroundColor Yellow
+        return [PSCustomObject]@{ Name = $Name; Rerun = $true }
+    }
     $result = [PSCustomObject]@{
         Name        = $Name
+        Rerun       = $false
         Pass        = ($null -eq $err) -and ($leftovers.Count -eq 0)
         DurationMs  = $sw.ElapsedMilliseconds
         Error       = $err
@@ -2097,7 +2135,9 @@ function Scenario-Usbip-Clean-Install {
     $message = 'the bundled usbip-win2 install left a shortcut, Start menu folder, GUI, SDK or PDB file, broke the composite, ran over an existing install, or ran twice for two programs at once (see probe stdout)'
     # About four and a half minutes, so its hang deadline is 15.
     if ($script:S73Run) {
-        Complete-BackgroundProbe -Run $script:S73Run -Message $message -SkipCodes 2 -DeadlineSeconds 900
+        $run = $script:S73Run
+        $script:S73Run = $null
+        Complete-BackgroundProbe -Run $run -Message $message -SkipCodes 2 -DeadlineSeconds 900
     } else {
         Invoke-Probe -Dir 'usbip_install_check' -Exe 'UsbipInstallCheck.exe' -Message $message -SkipCodes 2 -DeadlineSeconds 900
     }
@@ -2575,11 +2615,25 @@ if ('S73_Usbip_Clean_Install' -like $Filter) {
 }
 
 $results = @()
+$stoppedAt = $null
 foreach ($s in $scenarios) {
-    $r = Test-Scenario -Name $s.Name -Body $s.Body
-    if ($null -ne $r) { $results += $r }
+    if ($s.Name -notlike $Filter) { continue }
+    do {
+        Wait-NoForeignHM
+        $r = Test-Scenario -Name $s.Name -Body $s.Body
+    } while ($r.Rerun)
+    $results += $r
+    if ($StopOnFailure -and -not $r.Pass) { $stoppedAt = $s.Name; break }
 }
 $totalSw.Stop()
+if ($stoppedAt) {
+    # S73's sandbox runs from the start. A stop ends it with the rest.
+    if ($script:S73Run -and -not $script:S73Run.Error -and -not $script:S73Run.Process.HasExited) {
+        Stop-HMProcessTree -Proc $script:S73Run.Process
+    }
+    Write-Host ''
+    Write-Host ('  Stopped at the first failure, ' + $stoppedAt + ' (-StopOnFailure).') -ForegroundColor Red
+}
 
 # ====================================================================
 #  Summary

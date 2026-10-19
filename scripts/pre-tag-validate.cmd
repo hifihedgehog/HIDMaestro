@@ -129,7 +129,7 @@ echo.
 rem 3. Run the full regression battery
 echo [2/3] Running regression battery (99 scenarios)...
 echo.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "test\regression\regression_battery.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "test\regression\regression_battery.ps1" -StopOnFailure
 set BATTERY_EXIT=%ERRORLEVEL%
 echo.
 
