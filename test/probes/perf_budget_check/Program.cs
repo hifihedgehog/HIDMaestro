@@ -6,7 +6,12 @@
 // take their baseline from a 9bd6279 tree: -p:HmBaselineTree=<checkout>
 // builds this source against that checkout's SDK (PerfBudgetCheck.csproj).
 //
-//   frame [runs]   time and bytes allocated per call on each submit path,
+//   frame [runs] [kbm]
+//                  time and bytes allocated per call on each submit path,
+//                  the keyboard, mouse, consumer and pointer paths and
+//                  steam-controller-2 (a keyboard and mouse in lizard
+//                  mode) only with kbm, since those devices type and move
+//                  the pointer on the desktop,
 //                  and outside the gate SubmitState on dualsense-bt once
 //                  its feature reads have armed it, steam-controller-2, the
 //                  Switch 2 Pro composite and the two Luna profiles
@@ -36,7 +41,8 @@
 //                  DualShock 4 and an Xbox 360 pad or the profiles named
 //                  (RateLive.cs)
 //   create [runs] [profile ...] [--settle=<ms>]
-//                  CreateController and Dispose for five kinds of device, or
+//                  CreateController and Dispose for four kinds of device (a
+//                  keyboard only when named), or
 //                  the catalog profiles named, with the SDK's own step
 //                  timings (HIDMAESTRO_TIMING), each controller up for <ms>
 //                  first
@@ -253,7 +259,7 @@ internal static partial class Program
         Console.WriteLine($"  SDK {sdk.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).Cast<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion} at {sdk.Location}");
         switch (mode)
         {
-            case "frame": Frame(runs, gate: false); break;
+            case "frame": Frame(runs, gate: false, keyboardAndMouse: args.Skip(2).Contains("kbm")); break;
             case "e2e":
                 int e2e = EndToEnd(runs, args.Skip(2).ToArray());
                 if (e2e != 0) return e2e;
@@ -322,7 +328,7 @@ internal static partial class Program
     /// every call writes a new frame. The keyboard and mouse paths wait for
     /// the driver to deliver each report and send at most one a
     /// millisecond, so they run fewer calls.</summary>
-    static void Frame(int runs, bool gate)
+    static void Frame(int runs, bool gate, bool keyboardAndMouse = true)
     {
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
@@ -387,6 +393,11 @@ internal static partial class Program
         // 248 a SubmitMouse before eed63d3f, a 32-byte report ID string
         // before d27be387). The frame mode keeps 200 for its time per call.
         int paced = gate ? 50 : 200;
+        // A keyboard, mouse, consumer control or pointer this probe creates
+        // types, clicks and moves the pointer on the desktop of whoever is
+        // using the machine. The frame mode measures them only when its
+        // arguments name kbm.
+        if (keyboardAndMouse)
         using (var kb = ctx.CreateController(ctx.GetProfile(Keyboard)!))
         {
             var down = new[] { HMKey.A };
@@ -397,6 +408,7 @@ internal static partial class Program
                 flip = !flip;
             }, gate);
         }
+        if (keyboardAndMouse)
         using (var mouse = ctx.CreateController(ctx.GetProfile(Mouse)!))
         {
             var move = new HMMouseState { X = 1 };
@@ -437,11 +449,15 @@ internal static partial class Program
                 // cannot deploy, and its persona came after.
                 if (id == GameCube) continue;
 #endif
+                // steam-controller-2 declares a keyboard and a mouse (its
+                // lizard mode), so it waits for kbm as the keyboards do.
+                if (!keyboardAndMouse && id == "steam-controller-2") continue;
                 using var c = ctx.CreateController(ctx.GetProfile(id)!);
                 if (armed) typeof(HMController).GetField("_extendedModeArmed", Any)!.SetValue(c, true);
                 bool flip = false;
                 Measure($"SubmitState, {id}{(armed ? " armed" : "")}", runs, 20_000, () => { c.SubmitState(flip ? a : b); flip = !flip; }, gate);
             }
+        if (keyboardAndMouse)
         using (var mk = ctx.CreateController(ctx.GetProfile(MagicKeyboard)!))
         {
             var playPause = new ushort[] { 0x00CD };
@@ -465,6 +481,7 @@ internal static partial class Program
             .Vid(0xBEEF).Pid(0xF0C0).ProductString("HIDMaestro Perf Absolute Pointer").ManufacturerString("HIDMaestro")
             .Type("mouse").Connection("usb")
             .FromDescriptorBuilder(new HidDescriptorBuilder().Mouse(absolute: true, wheel: false, pan: false)).Build();
+        if (keyboardAndMouse)
         using (var abs = ctx.CreateController(absolute, "perf-absolute-pointer"))
         {
             int x = 0;
@@ -483,7 +500,7 @@ internal static partial class Program
             Measure("SubmitState, gamecube-adapter", runs, 20_000, () => { gc.SubmitState(flip ? a : b); flip = !flip; }, gate);
         }
 #endif
-        if (!gate) FrameConversionProfiles(ctx, runs, a, b);
+        if (!gate) FrameConversionProfiles(ctx, runs, a, b, keyboardAndMouse);
     }
 
     /// <summary>The submit paths the v2.0.0 conversion's budget names that
@@ -492,7 +509,7 @@ internal static partial class Program
     /// through the codec and the device, and the Luna profiles, whose
     /// sticks the conversion centers (data-driven-devices.md, decision
     /// (a)). Outside the gate, so S84 is unchanged.</summary>
-    static void FrameConversionProfiles(HMContext ctx, int runs, HMGamepadState a, HMGamepadState b)
+    static void FrameConversionProfiles(HMContext ctx, int runs, HMGamepadState a, HMGamepadState b, bool keyboardAndMouse)
     {
         using (var ds = ctx.CreateController(ctx.GetProfile("dualsense-bt")!))
         {
@@ -503,6 +520,7 @@ internal static partial class Program
         }
         foreach (string id in new[] { "steam-controller-2", "switch2-pro-controller-composite", "amazon-luna-usb", "amazon-luna-ble" })
         {
+            if (!keyboardAndMouse && id == "steam-controller-2") continue;
             using var c = ctx.CreateController(ctx.GetProfile(id)!);
             if (!OnEmbeddedDriver(c, id)) return;
             bool flip = false;
@@ -895,7 +913,9 @@ internal static partial class Program
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
         ctx.InstallDriver();
-        var ids = new List<string> { Ds4, Xbox360, Composite, Keyboard };
+        // No keyboard unless named: one this probe creates sits on the
+        // desktop of whoever is using the machine.
+        var ids = new List<string> { Ds4, Xbox360, Composite };
 #if !HM_BASE
         ids.Add(GameCube);
 #endif
