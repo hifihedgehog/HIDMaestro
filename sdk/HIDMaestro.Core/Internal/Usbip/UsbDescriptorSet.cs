@@ -511,15 +511,26 @@ internal sealed class UsbDescriptorSet
     public bool IsHidInterface(byte interfaceNumber)
         => interfaceNumber == HidInterfaceNumber || _secondaryHid.ContainsKey(interfaceNumber);
 
+    private static readonly byte[] LangIds = { 0x04, 0x03, 0x09, 0x04 }; // one LANGID: en-US
+
+    // Each string descriptor, built the first time a host asks for it. The
+    // strings never change after construction.
+    private readonly byte[]?[] _strings = new byte[]?[256];
+
     private byte[]? GetStringDescriptor(byte index)
     {
         if (index == 0)
-            return new byte[] { 0x04, 0x03, 0x09, 0x04 }; // one LANGID: en-US
+            return LangIds;
         // The Microsoft OS string, for a persona that declares one (issue
         // #66). Windows asks for it once per VID, PID and revision and
         // remembers a stall, so it is answered from the first enumeration.
         if (index == 0xEE && _msOsString != null)
             return _msOsString;
+        return _strings[index] ??= BuildStringDescriptor(index);
+    }
+
+    private byte[]? BuildStringDescriptor(byte index)
+    {
         // A device that declares a string index has to serve it. Sony's pads
         // declare iSerial 0 and get null below, unchanged; Valve's declare a
         // real serial at index 3 and a configuration name at 4, and Steam

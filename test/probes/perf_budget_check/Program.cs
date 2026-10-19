@@ -91,11 +91,14 @@
 //                  host's reply, on each of its three send paths: bytes the
 //                  process allocated per frame, the time, and lock
 //                  contentions. Then a DualSense composite's output and
-//                  audio transfers: bytes per transfer. Then the protocol
-//                  engine's lock per frame, beside an uncontended lock alone
+//                  audio transfers: bytes per transfer. Then the control
+//                  requests a host sends a DualSense and a Switch 2 Pro
+//                  composite, answered and stalled: bytes per request and
+//                  the time of each. Then the protocol engine's lock per
+//                  frame, beside an uncontended lock alone
 //   gate           S84: no submit path allocates, a USB/IP device's send
-//                  paths and its output and audio transfers included, the
-//                  codec path, consumer
+//                  paths, its output and audio transfers and its control
+//                  requests included, the codec path, consumer
 //                  usages, a keyboard's raw reports and an absolute pointer
 //                  included, a long mouse movement leaves 16 frames kept,
 //                  the census's own walk completes and finds what the
@@ -1335,6 +1338,28 @@ internal static partial class Program
             start: w => w.WaitFor(w.SubmitOut(2, new byte[] { 0x03, 0x91, 0x00, 0x0D, 0x00, 0x08, 0x00, 0x00,
                                                               0x01, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF })), gate);
         UsbipTransfers(server, ctx.GetProfile(Composite)!.Inner, runs, gate);
+        UsbipControl(server, ctx.GetProfile(Composite)!.Inner, runs, gate, new (string, byte, byte, ushort, ushort, ushort)[]
+        {
+            ("GET_DESCRIPTOR(Device)", 0x80, 0x06, 0x0100, 0, 18),
+            ("GET_DESCRIPTOR(Configuration)", 0x80, 0x06, 0x0200, 0, 4096),
+            ("GET_DESCRIPTOR(String 0)", 0x80, 0x06, 0x0300, 0, 255),
+            ("GET_DESCRIPTOR(String 2)", 0x80, 0x06, 0x0302, 0x0409, 255),
+            ("GET_DESCRIPTOR(Report) of interface 3", 0x81, 0x06, 0x2200, 3, 4096),
+            ("GET_STATUS", 0x80, 0x00, 0, 0, 2),
+            ("GET_CONFIGURATION", 0x80, 0x08, 0, 0, 1),
+            ("GET_INTERFACE 1", 0x81, 0x0A, 0, 1, 1),
+            ("GET_IDLE of interface 3", 0xA1, 0x02, 0, 3, 1),
+            ("GET_REPORT(Input 0x01)", 0xA1, 0x01, 0x0101, 3, 64),
+            ("GET_REPORT(Feature 0x05)", 0xA1, 0x01, 0x0305, 3, 41),
+            ("GET_REPORT(Feature 0x08), stalled", 0xA1, 0x01, 0x0308, 3, 48),
+            ("GET_CUR(sampling frequency)", 0xA2, 0x81, 0x0100, 0x01, 3),
+        });
+        UsbipControl(server, ctx.GetProfile("switch2-pro-controller-composite")!.Inner, runs, gate, new (string, byte, byte, ushort, ushort, ushort)[]
+        {
+            ("GET_DESCRIPTOR(String 0xEE)", 0x80, 0x06, 0x03EE, 0, 18),
+            ("the Microsoft OS compatible ID", 0xC0, 0x01, 0, 4, 40),
+            ("GET_REPORT(Input 0x09)", 0xA1, 0x01, 0x0109, 0, 64),
+        });
 #if !HM_BASE
         var gcProfile = ctx.GetProfile(GameCube)!.Inner;
         var gcReport = new byte[37];
@@ -1502,6 +1527,68 @@ internal static partial class Program
                 double median = sorted[sorted.Count / 2];
                 Check($"USB/IP {name}: a transfer allocates nothing", median == 0,
                       $"median run {median * Sets * 3:F0} bytes, worst {worst}, over {runs} runs of {Sets * 3} transfers");
+            }
+        }
+        finally
+        {
+            server.Unregister(device);
+            device.Dispose();
+            SharedMemoryIO.DestroyController(UsbipIndex);
+        }
+    }
+
+    const int ControlRounds = 20;
+
+    /// <summary>Control requests on endpoint 0 as a host sends them, each
+    /// answered or stalled as the device would: the bytes the whole process
+    /// allocated per request, and the time of each request to its reply,
+    /// <see cref="ControlRounds"/> rounds of the list per run after one
+    /// untimed round. The gate fails when the median run allocates, which
+    /// every run does when one request in the list allocates.</summary>
+    static void UsbipControl(UsbipServer server, ControllerProfile profile, int runs, bool gate,
+                             (string Name, byte Type, byte Request, ushort Value, ushort Index, ushort Length)[] requests)
+    {
+        string name = $"control requests, {profile.Id}";
+        var device = new UsbipEmulatedDevice(profile, UsbipIndex);
+        server.Register(device);
+        try
+        {
+            using var w = new UsbipWire(server.Port, device.BusId);
+            var times = new List<double>[requests.Length];
+            for (int r = 0; r < requests.Length; r++) times[r] = new List<double>(runs * ControlRounds);
+            var statuses = new int[requests.Length];
+            void Round(bool record)
+            {
+                for (int r = 0; r < requests.Length; r++)
+                {
+                    var q = requests[r];
+                    long t0 = Stopwatch.GetTimestamp();
+                    statuses[r] = w.WaitFor(w.SubmitControlIn(q.Type, q.Request, q.Value, q.Index, q.Length));
+                    if (record) times[r].Add((Stopwatch.GetTimestamp() - t0) * 1e6 / Stopwatch.Frequency);
+                }
+            }
+            Round(record: false);
+            var perRequest = new List<double>(runs);
+            long worst = 0;
+            for (int run = 0; run < runs; run++)
+            {
+                long bytes0 = GC.GetTotalAllocatedBytes(precise: true);
+                for (int i = 0; i < ControlRounds; i++) Round(record: true);
+                long bytes = GC.GetTotalAllocatedBytes(precise: true) - bytes0;
+                worst = Math.Max(worst, bytes);
+                perRequest.Add((double)bytes / (ControlRounds * requests.Length));
+            }
+            Report($"USB/IP {name}: bytes the process allocated per request", perRequest, runs,
+                $", most in one run of {ControlRounds * requests.Length} requests {worst}");
+            for (int r = 0; r < requests.Length; r++)
+                Report($"USB/IP {name}: {requests[r].Name}, {(statuses[r] == 0 ? "answered" : $"status {statuses[r]}")}, microseconds",
+                    times[r], runs, "");
+            if (gate)
+            {
+                var sorted = perRequest.OrderBy(x => x).ToList();
+                double median = sorted[sorted.Count / 2];
+                Check($"USB/IP {name}: a request allocates nothing", median == 0,
+                      $"median run {median * ControlRounds * requests.Length:F0} bytes, worst {worst}, over {runs} runs of {ControlRounds * requests.Length} requests");
             }
         }
         finally

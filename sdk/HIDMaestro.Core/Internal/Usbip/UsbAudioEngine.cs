@@ -603,33 +603,36 @@ internal sealed partial class UsbAudioEngine : IDisposable
 
     // ── UAC1 class-request handling (called from the reader thread) ──────
 
-    /// <summary>GET_CUR/MIN/MAX/RES on a feature unit. Returns the raw
-    /// little-endian value bytes, or null to stall (unknown unit or
-    /// selector, matching a real pad's refusal).</summary>
-    public byte[]? HandleUacGet(byte bRequest, byte unitId, byte selector, byte channel, int wLength)
+    /// <summary>GET_CUR/MIN/MAX/RES on a feature unit. Writes the raw
+    /// little-endian value bytes to <paramref name="dst"/>, which holds two,
+    /// and returns their count, or -1 to stall (unknown unit or selector,
+    /// matching a real pad's refusal).</summary>
+    public int HandleUacGet(byte bRequest, byte unitId, byte selector, byte channel, int wLength, Span<byte> dst)
     {
-        if (!_knownUnits.Contains(unitId)) return null;
+        if (!_knownUnits.Contains(unitId)) return -1;
         short value;
         lock (_lock)
         {
             switch (bRequest)
             {
                 case 0x81: // GET_CUR
-                    if (!_controlCur.TryGetValue((unitId, selector, channel), out value)) return null;
+                    if (!_controlCur.TryGetValue((unitId, selector, channel), out value)) return -1;
                     break;
                 case 0x82: // GET_MIN
                 case 0x83: // GET_MAX
                 case 0x84: // GET_RES
-                    if (!_controlRange.TryGetValue((unitId, selector, channel), out var range)) return null;
+                    if (!_controlRange.TryGetValue((unitId, selector, channel), out var range)) return -1;
                     value = bRequest == 0x82 ? range.Min : bRequest == 0x83 ? range.Max : range.Res;
                     break;
                 default:
-                    return null;
+                    return -1;
             }
         }
         // Mute is a 1-byte control, volume 2-byte; serve what the host asked.
-        if (wLength <= 1) return new[] { (byte)value };
-        return new[] { (byte)(value & 0xFF), (byte)((value >> 8) & 0xFF) };
+        dst[0] = (byte)(value & 0xFF);
+        if (wLength <= 1) return 1;
+        dst[1] = (byte)((value >> 8) & 0xFF);
+        return 2;
     }
 
     /// <summary>SET_CUR on a feature unit. Returns false to stall.</summary>

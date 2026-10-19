@@ -1002,6 +1002,21 @@ internal sealed unsafe class ProtocolEngine
         lock (_sync) return _report.AsSpan(0, _reportLength).ToArray();
     }
 
+    /// <summary>The same report copied into <paramref name="dst"/>, which
+    /// holds <see cref="ReportCapacity"/> bytes. Returns its length.</summary>
+    public int CopyReport(Span<byte> dst)
+    {
+        lock (_sync)
+        {
+            _report.AsSpan(0, _reportLength).CopyTo(dst);
+            return _reportLength;
+        }
+    }
+
+    /// <summary>The most bytes <see cref="CopyReport(Span{byte})"/>
+    /// copies.</summary>
+    public int ReportCapacity => _report.Length;
+
     public enum PollResult { Nak, Packet, Babble }
 
     /// <summary>One host poll of the input endpoint at
