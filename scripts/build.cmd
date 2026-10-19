@@ -53,7 +53,7 @@ set "WDF_INC=%HM_WDK_DIR%\Include\wdf\umdf\%UMDF_VER%"
 :: /Ox /Os is the WDK's own release setting for a driver
 :: (WindowsDriver.Common.props, UseDebugLibraries false: Optimization
 :: Full, FavorSizeOrSpeed Size). Without it cl.exe compiles /Od, and
-:: every frame, feature answer and XInput reply ran unoptimized code.
+:: every frame, feature answer and output report ran unoptimized code.
 cl.exe /nologo /W4 /GS /Gz /Ox /Os ^
     /D %HM_ARCH_DEFINE% /D _WIN64 /D UNICODE /D _UNICODE ^
     /D UMDF_VERSION_MAJOR=2 /D UMDF_VERSION_MINOR=15 ^
