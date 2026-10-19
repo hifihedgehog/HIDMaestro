@@ -20,6 +20,8 @@
     <None Remove="probes\**\*" />
     <Compile Remove="sandbox\**\*.cs" />
     <None Remove="sandbox\**\*" />
+    <!-- Source the battery compiles with Add-Type, not part of the test app. -->
+    <Compile Remove="regression\**\*.cs" />
   </ItemGroup>
   <!-- The record option of probe-xusb writes device_oracle_check's golden
        format. Listed after the removal above, which drops every file under
