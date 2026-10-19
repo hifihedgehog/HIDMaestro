@@ -2366,6 +2366,45 @@ public static partial class DeviceManager
     /// <summary>Removes a prior life of an id about to be registered again,
     /// as <see cref="RemoveDevice"/> with its fallbacks, and returns the
     /// outcome of the parent's removal test for the registration gate.</summary>
+    /// <summary>Asks Windows to remove a device and the devices below it the
+    /// way Safely Remove Hardware asks, under the PnP lock
+    /// (CM_Query_And_Remove_SubTreeW). Every program that watches the device
+    /// for a removal query closes its handles before the removal: Windows'
+    /// input stack does for a keyboard or mouse, and a vendor's service that
+    /// opens its own devices does too, such as Logitech's lighting service.
+    /// True when the device has left the tree, or was out of it. False, with
+    /// <paramref name="veto"/>, when a program refused, as one that holds a
+    /// HID child open without watching it does (Steam with a PlayStation
+    /// pad). A refusal changes nothing: no record is touched, where a
+    /// refused SetupDiRemoveDevice has had its class installer delete the
+    /// child's driver before it queried.</summary>
+    internal static bool QueryRemoveSubtree(string instanceId, out string veto)
+    {
+        veto = "";
+        using var pnp = HoldPnpLock();
+        if (CM_Locate_DevNodeW(out uint devInst, instanceId, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS)
+            return true;
+        IntPtr name = Marshal.AllocHGlobal(VetoNameChars * sizeof(char));
+        try
+        {
+            Marshal.Copy(new byte[VetoNameChars * sizeof(char)], 0, name, VetoNameChars * sizeof(char));
+            int cr = CM_Query_And_Remove_SubTreeW(devInst, out uint vetoType, name, VetoNameChars,
+                CM_REMOVE_UI_NOT_OK | CM_REMOVE_NO_RESTART);
+            if (cr == 0) return true;
+            veto = $"CR {cr}, veto type {vetoType}, {Marshal.PtrToStringUni(name)}";
+            return false;
+        }
+        finally { Marshal.FreeHGlobal(name); }
+    }
+
+    // cfgmgr32.h: CM_REMOVE_UI_NOT_OK and CM_REMOVE_NO_RESTART, and a veto
+    // name of MAX_PATH characters.
+    private const uint CM_REMOVE_UI_NOT_OK = 0x00000001, CM_REMOVE_NO_RESTART = 0x00000002;
+    private const int VetoNameChars = 260;
+
+    [LibraryImport("cfgmgr32.dll")]
+    private static partial int CM_Query_And_Remove_SubTreeW(uint dnAncestor, out uint pVetoType, IntPtr pszVetoName, uint ulNameLength, uint ulFlags);
+
     internal static RemovalOutcome RemovePriorLife(string instanceId, int timeoutMs)
     {
         if (CM_Locate_DevNodeW(out _, instanceId, 0) != CR_SUCCESS &&

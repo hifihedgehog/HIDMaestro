@@ -2050,18 +2050,34 @@ internal static partial class DeviceOrchestrator
         LogDiag($"    pre-captured HID children: {preCapturedHidChildren.Count}");
         foreach (var c in preCapturedHidChildren) LogDiag($"      child: {c}");
 
-        // A UMDF2 device the SDK registered under ROOT leaves as an
-        // unplugged device does: its driver fails it, and Windows removes it
-        // with its HID children by surprise removal, which no handle another
-        // program keeps open on a child can veto. The removals below then
-        // find the children gone and the device failed, and remove it and
-        // the records. A driver before protocol 5 does not answer, and the
-        // removals query Windows as before.
+        // A UMDF2 device the SDK registered under ROOT is first asked to go
+        // as Safely Remove Hardware asks (DeviceManager.QueryRemoveSubtree):
+        // every program that watches it closes its handles before the
+        // removal, Windows' input stack for a keyboard or mouse among them.
+        // A program that holds a HID child open without watching refuses,
+        // and then the device leaves as an unplugged device does: its driver
+        // fails it, and Windows removes it with its HID children by surprise
+        // removal, which no open handle can refuse. A watcher closes later
+        // after a surprise removal than after a query, and on 2026-10-19 a
+        // create of the same identity in that gap got the old devnode back
+        // and failed (S70: Logitech mice, held by Logitech's lighting
+        // service). The removals below then remove the device and the
+        // records. A driver before protocol 5 does not answer the request,
+        // and the removals query Windows as before.
         if (instanceId != null && instanceId.StartsWith(@"ROOT\", StringComparison.OrdinalIgnoreCase))
         {
-            var failSw = Stopwatch.StartNew();
-            bool failed = SharedMemoryIO.RequestSurpriseRemoval(controllerIndex, TimeoutScale.Apply(2000));
-            LogDiag($"    surprise removal requested of {instanceId}: {(failed ? "the driver failed its device" : "no answer")} in {failSw.ElapsedMilliseconds}ms");
+            var querySw = Stopwatch.StartNew();
+            bool queried = false;
+            string veto = "";
+            try { queried = DeviceManager.QueryRemoveSubtree(instanceId, out veto); }
+            catch (Exception ex) { veto = ex.Message; }
+            LogDiag($"    removal query of {instanceId}: {(queried ? "removed" : "refused, " + veto)} in {querySw.ElapsedMilliseconds}ms");
+            if (!queried)
+            {
+                var failSw = Stopwatch.StartNew();
+                bool failed = SharedMemoryIO.RequestSurpriseRemoval(controllerIndex, TimeoutScale.Apply(2000));
+                LogDiag($"    surprise removal requested of {instanceId}: {(failed ? "the driver failed its device" : "no answer")} in {failSw.ElapsedMilliseconds}ms");
+            }
         }
 
         try { SharedMemoryIO.DestroyController(controllerIndex); } catch { }

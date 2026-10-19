@@ -6,7 +6,9 @@
 // Service: every later create of that identity met problem 19
 // (CM_PROB_REGISTRY), and no user-mode call could remove the record.
 //
-// A driver of protocol 5 fails its device when the Dispose asks, and Windows
+// A Dispose of this release queries the removal first, as Safely Remove
+// Hardware does, which changes nothing when a holder refuses it. Then a
+// driver of protocol 5 fails its device when the Dispose asks, and Windows
 // removes it with its children by surprise removal, which no handle vetoes.
 // Two holders are run, each at an identity of its own made for this run:
 //
@@ -127,7 +129,13 @@ internal static class Veto
             Check("the reading holder's read failed and it closed its handle", closedAt >= 0,
                   closedAt >= 0 ? $"Win32 {readError}, {closedAt - disposeAt} ms after the Dispose began" : "still reading");
         }
-        Check("the Dispose removed the parent within 3 s while the handle was open", !Present(parent) && disposeMs < 3000,
+        // A holder that never lets go has Windows refuse the removal query only
+        // after waiting for it, 5,376 ms on the bench machine on 2026-10-19, and
+        // the surprise removal after it took 2,081 ms. A reading holder lets go
+        // inside that wait. Before v2.0.0 this Dispose took 13 s and broke the
+        // child's record.
+        int disposeBoundMs = reads ? 3000 : 10_000;
+        Check($"the Dispose removed the parent within {disposeBoundMs / 1000} s while the handle was open", !Present(parent) && disposeMs < disposeBoundMs,
               $"{disposeMs} ms, parent {Describe(Status(parent))}, child record {Record(child)}");
 
         if (!reads)
