@@ -125,7 +125,10 @@ internal static class Program
         using var ctrl = ctx.CreateController(profile);
         Console.WriteLine("OK");
 
-        const int kIndex = 0;
+        // The controller's sections and serial carry its transport index,
+        // which is 0 only while no other program holds index 0
+        // (HMController.TransportIndex).
+        int kIndex = ctrl.TransportIndex;
         string sectionName = $@"Global\HIDMaestroPidState{kIndex}";
 
         int failures = 0;
@@ -204,7 +207,7 @@ internal static class Program
         else Console.WriteLine("OK (ebi=0, status=0)");
 
         // Steps 4-6: driver-side allocation via HidD_SetFeature.
-        SafeFileHandle? hid = OpenHmHidByVidPid(ProbeVid, ProbePid);
+        SafeFileHandle? hid = OpenHmHid(ProbeVid, ProbePid, kIndex);
         bool hidOpen = hid != null && !hid.IsInvalid;
         if (!hidOpen)
         {
@@ -221,7 +224,7 @@ internal static class Program
             }
             else
             {
-                ReadSectionBytes(sectionName, out section);
+                if (!ReadSectionBytes(sectionName, out section)) section = Unreadable(sectionName, ref failures);
                 uint bitmap = BitConverter.ToUInt32(section, OFF_EBI_BITMAP);
                 uint count = BitConverter.ToUInt32(section, OFF_EBI_COUNT);
                 var bl = ctrl.GetCurrentPidBlockLoad();
@@ -238,7 +241,7 @@ internal static class Program
                 // Step 5: second SetFeature(0x11): EBI=2.
                 Console.Write("  [SetFeature 0x11 #2] driver allocates EBI=2 ... ");
                 SendSetFeature(hid!, 0x11, new byte[] { 0x01, 0x00, 0x00 });
-                ReadSectionBytes(sectionName, out section);
+                if (!ReadSectionBytes(sectionName, out section)) section = Unreadable(sectionName, ref failures);
                 bitmap = BitConverter.ToUInt32(section, OFF_EBI_BITMAP);
                 count = BitConverter.ToUInt32(section, OFF_EBI_COUNT);
                 bl = ctrl.GetCurrentPidBlockLoad();
@@ -253,7 +256,7 @@ internal static class Program
                 // Step 6: Block Free EBI=1, then realloc reuses EBI=1.
                 Console.Write("  [SetFeature 0x1B EBI=1] driver frees ... ");
                 SendSetFeature(hid!, 0x1B, new byte[] { 0x01 });
-                ReadSectionBytes(sectionName, out section);
+                if (!ReadSectionBytes(sectionName, out section)) section = Unreadable(sectionName, ref failures);
                 bitmap = BitConverter.ToUInt32(section, OFF_EBI_BITMAP);
                 count = BitConverter.ToUInt32(section, OFF_EBI_COUNT);
                 if (bitmap != 0x02 || count != 1)
@@ -265,7 +268,7 @@ internal static class Program
 
                 Console.Write("  [SetFeature 0x11 #3] reuses freed EBI=1 ... ");
                 SendSetFeature(hid!, 0x11, new byte[] { 0x01, 0x00, 0x00 });
-                ReadSectionBytes(sectionName, out section);
+                if (!ReadSectionBytes(sectionName, out section)) section = Unreadable(sectionName, ref failures);
                 bitmap = BitConverter.ToUInt32(section, OFF_EBI_BITMAP);
                 bl = ctrl.GetCurrentPidBlockLoad();
                 if (bl.EffectBlockIndex != 1 || bitmap != 0x03)
@@ -313,6 +316,16 @@ internal static class Program
         Console.WriteLine($"=== FAIL: {failures} check(s) failed ==="); return 1;
     }
 
+    /// <summary>A section that cannot be read fails the step that needed
+    /// it, and that step's own checks then run on zeros instead of
+    /// throwing.</summary>
+    static byte[] Unreadable(string name, ref int failures)
+    {
+        Console.Write($"FAIL: {name} unreadable; ");
+        failures++;
+        return new byte[SECTION_SIZE];
+    }
+
     static bool ReadSectionBytes(string name, out byte[] bytes)
     {
         bytes = Array.Empty<byte>();
@@ -333,10 +346,15 @@ internal static class Program
         finally { CloseHandle(h); }
     }
 
-    static SafeFileHandle? OpenHmHidByVidPid(ushort vid, ushort pid)
+    /// <summary>The controller's own HID interface: this VID and PID, and
+    /// the serial the driver serves, HM-CTL- and the controller's transport
+    /// index. Another program's controller with the same VID and PID
+    /// serves its own index.</summary>
+    static SafeFileHandle? OpenHmHid(ushort vid, ushort pid, int transportIndex)
     {
+        string serial = $"HM-CTL-{transportIndex:D4}";
         var match = HMDeviceExtractor.ListDevices()
-            .FirstOrDefault(d => d.VendorId == vid && d.ProductId == pid);
+            .FirstOrDefault(d => d.VendorId == vid && d.ProductId == pid && d.SerialNumberString == serial);
         if (match == null) return null;
         var h = CreateFile(match.DevicePath, GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);

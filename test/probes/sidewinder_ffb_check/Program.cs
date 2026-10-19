@@ -107,7 +107,10 @@ internal static class Program
 
         // Diagnostic: read the shared section directly and verify the RID
         // bytes landed at the offsets the driver reads.
-        const int kIndex = 0;
+        // The controller's section and serial carry its transport index,
+        // which is 0 only while no other program holds index 0
+        // (HMController.TransportIndex).
+        int kIndex = ctrl.TransportIndex;
         string sectionName = $@"Global\HIDMaestroPidState{kIndex}";
         if (TryReadSection(sectionName, out byte[] section))
         {

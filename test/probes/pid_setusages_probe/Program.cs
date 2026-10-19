@@ -319,7 +319,7 @@ internal static class Program
         // the descriptor's preparsed-data shape but are NOT a regression
         // signal. If the FfbTest above succeeded, the HidP probe results
         // are informational.
-        SafeFileHandle? hid = OpenHmHidByVidPid(ProbeVid, ProbePid);
+        SafeFileHandle? hid = OpenHmHid(ProbeVid, ProbePid, ctrl.TransportIndex);
         if (hid == null || hid.IsInvalid)
         {
             Console.Error.WriteLine("HidP probe: could not open HID handle (skipping)");
@@ -508,7 +508,7 @@ internal static class Program
             // requires more permissions than the section's SDDL grants).
             int driverHead = -1;
             string slotDump = "";
-            IntPtr secH2 = OpenFileMappingW2(0x4 /*FILE_MAP_READ*/, false, @"Global\HIDMaestroOutput0");
+            IntPtr secH2 = OpenFileMappingW2(0x4 /*FILE_MAP_READ*/, false, $@"Global\HIDMaestroOutput{ctrl.TransportIndex}");
             if (secH2 == IntPtr.Zero)
                 Console.WriteLine($"  OpenFileMappingW2 failed Win32={Marshal.GetLastWin32Error()}");
             if (secH2 != IntPtr.Zero)
@@ -773,10 +773,15 @@ internal static class Program
     const uint FILE_SHARE_READ = 1, FILE_SHARE_WRITE = 2;
     const uint OPEN_EXISTING = 3;
 
-    static SafeFileHandle? OpenHmHidByVidPid(ushort vid, ushort pid)
+    /// <summary>The controller's own HID interface: this VID and PID, and
+    /// the serial the driver serves, HM-CTL- and the controller's transport
+    /// index. Another program's controller with the same VID and PID
+    /// serves its own index.</summary>
+    static SafeFileHandle? OpenHmHid(ushort vid, ushort pid, int transportIndex)
     {
+        string serial = $"HM-CTL-{transportIndex:D4}";
         var match = HMDeviceExtractor.ListDevices()
-            .FirstOrDefault(d => d.VendorId == vid && d.ProductId == pid);
+            .FirstOrDefault(d => d.VendorId == vid && d.ProductId == pid && d.SerialNumberString == serial);
         if (match == null) return null;
         var h = CreateFile(match.DevicePath, GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);

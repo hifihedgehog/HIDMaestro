@@ -110,7 +110,10 @@ internal static class Program
         Console.WriteLine("  --- Section 1: legacy PublishPidBlockLoad path ---");
         ctrlA.PublishPidPool(ramPoolSize: 0x4000, simultaneousEffectsMax: 4,
                              deviceManagedPool: true, sharedParameterBlocks: false);
-        string sectionA = $@"Global\HIDMaestroPidState0";
+        // Each controller's section carries its own transport index, which
+        // is its slot only while no other program holds that index
+        // (HMController.TransportIndex).
+        string sectionA = $@"Global\HIDMaestroPidState{ctrlA.TransportIndex}";
 
         // Allocate EBI 1 via override.
         ctrlA.PublishPidBlockLoad(1, PidLoadStatus.Success, 0x3000);
@@ -134,7 +137,7 @@ internal static class Program
 
         // Free EBI 1 (legacy: just publish a different BL, no actual free-list state).
         // This documents that the legacy path doesn't touch the bitmap.
-        ReadSectionBytes(sectionA, out byte[] sec);
+        if (!ReadSectionBytes(sectionA, out byte[] sec)) sec = Unreadable(sectionA, ref failures);
         uint legacyBitmap = BitConverter.ToUInt32(sec, OFF_EBI_BITMAP);
         if (legacyBitmap != 0)
         {
@@ -164,8 +167,8 @@ internal static class Program
         ctrlA.PublishPidBlockLoad(7, PidLoadStatus.Success, 0xAAAA);
         ctrlB.PublishPidBlockLoad(3, PidLoadStatus.Success, 0xBBBB);
 
-        string secAName = @"Global\HIDMaestroPidState0";
-        string secBName = @"Global\HIDMaestroPidState1";
+        string secAName = $@"Global\HIDMaestroPidState{ctrlA.TransportIndex}";
+        string secBName = $@"Global\HIDMaestroPidState{ctrlB.TransportIndex}";
         if (!ReadSectionBytes(secAName, out byte[] secA) || !ReadSectionBytes(secBName, out byte[] secB))
         {
             Console.WriteLine("  [multi-controller sections] FAIL: could not open one or both sections");
@@ -214,13 +217,13 @@ internal static class Program
 
         // ── Section 4: dynamic SetFeature/SetOutputReport (best-effort) ──
         Console.WriteLine("  --- Section 4: dynamic driver-side allocation (best-effort) ---");
-        SafeFileHandle? hidA = OpenHmHidByVidPid(ProbeVid, ProbePidA);
+        SafeFileHandle? hidA = OpenHmHid(ProbeVid, ProbePidA, ctrlA.TransportIndex);
         bool dynamicHit = false;
         if (hidA != null && !hidA.IsInvalid)
         {
             // Reset bitmap-side state by closing/reopening: driver retains
             // bitmap across the session. Note bitmap before, then check after.
-            ReadSectionBytes(secAName, out sec);
+            if (!ReadSectionBytes(secAName, out sec)) sec = Unreadable(secAName, ref failures);
             uint before = BitConverter.ToUInt32(sec, OFF_EBI_BITMAP);
 
             // Try SetFeature first.
@@ -244,7 +247,7 @@ internal static class Program
             if (dynamicHit)
             {
                 Thread.Sleep(20); // let any async settle
-                ReadSectionBytes(secAName, out sec);
+                if (!ReadSectionBytes(secAName, out sec)) sec = Unreadable(secAName, ref failures);
                 uint after = BitConverter.ToUInt32(sec, OFF_EBI_BITMAP);
                 uint count = BitConverter.ToUInt32(sec, OFF_EBI_COUNT);
                 if (after == before)
@@ -279,6 +282,16 @@ internal static class Program
             .Build();
     }
 
+    /// <summary>A section that cannot be read fails the step that needed
+    /// it, and that step's own checks then run on zeros instead of
+    /// throwing.</summary>
+    static byte[] Unreadable(string name, ref int failures)
+    {
+        Console.Write($"FAIL: {name} unreadable; ");
+        failures++;
+        return new byte[SECTION_SIZE];
+    }
+
     static bool ReadSectionBytes(string name, out byte[] bytes)
     {
         bytes = Array.Empty<byte>();
@@ -299,10 +312,15 @@ internal static class Program
         finally { CloseHandle(h); }
     }
 
-    static SafeFileHandle? OpenHmHidByVidPid(ushort vid, ushort pid)
+    /// <summary>The controller's own HID interface: this VID and PID, and
+    /// the serial the driver serves, HM-CTL- and the controller's transport
+    /// index. Another program's controller with the same VID and PID
+    /// serves its own index.</summary>
+    static SafeFileHandle? OpenHmHid(ushort vid, ushort pid, int transportIndex)
     {
+        string serial = $"HM-CTL-{transportIndex:D4}";
         var match = HMDeviceExtractor.ListDevices()
-            .FirstOrDefault(d => d.VendorId == vid && d.ProductId == pid);
+            .FirstOrDefault(d => d.VendorId == vid && d.ProductId == pid && d.SerialNumberString == serial);
         if (match == null) return null;
         var h = CreateFile(match.DevicePath, GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
