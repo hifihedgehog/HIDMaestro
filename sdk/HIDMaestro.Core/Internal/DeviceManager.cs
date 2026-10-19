@@ -1773,6 +1773,9 @@ public static partial class DeviceManager
 
     // ── SetupAPI P/Invoke for DIF_REMOVE ──
 
+    [LibraryImport("SetupAPI.dll", SetLastError = true)]
+    private static partial IntPtr SetupDiCreateDeviceInfoList(IntPtr ClassGuid, IntPtr hwndParent);
+
     [LibraryImport("SetupAPI.dll", EntryPoint = "SetupDiGetClassDevsW", SetLastError = true)]
     private static partial IntPtr SetupDiGetClassDevsByRef(ref Guid ClassGuid, IntPtr Enumerator, IntPtr hwndParent, uint Flags);
 
@@ -2850,10 +2853,17 @@ public static partial class DeviceManager
         bool located = CM_Locate_DevNodeW(out devInst, instanceId, 0) == CR_SUCCESS
                     || CM_Locate_DevNodeW(out devInst, instanceId, 1) == CR_SUCCESS;
 
-        // Use Guid.Empty + DIGCF_ALLCLASSES to enumerate ALL devices including phantoms.
-        // This is critical: a device-class-specific DevInfoSet won't find phantoms.
-        Guid nullGuid = Guid.Empty;
-        IntPtr dis = SetupDiGetClassDevsByRef(ref nullGuid, IntPtr.Zero, IntPtr.Zero, DIGCF_ALLCLASSES);
+        // An empty set with no setup class, into which SetupDiOpenDeviceInfo
+        // opens the one device by its instance id, present or not: a set of
+        // one class would refuse a device of another. A set of every device
+        // of every class (SetupDiGetClassDevs with DIGCF_ALLCLASSES), which
+        // this call built before, took 8 to 9 ms on the bench machine on
+        // 2026-10-19, once for each device a removal takes. The same day an
+        // empty set opened five devnodes that were not present, of the
+        // AudioEndpoint, HIDClass and USB classes. Nefarius'
+        // PnPDevice.InstallCustomDriver and nefcon's DeviceRestart open a
+        // device the same way.
+        IntPtr dis = SetupDiCreateDeviceInfoList(IntPtr.Zero, IntPtr.Zero);
         if (dis == new IntPtr(-1))
         {
             if (!located) return false;
