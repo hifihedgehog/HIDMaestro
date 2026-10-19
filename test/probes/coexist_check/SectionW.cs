@@ -152,6 +152,12 @@ internal static partial class Program
         Check("W2: and the next sweep removes it", WaitFor(() => !Native.IsPresent(inst), 15_000));
     }
 
+    /// <summary>How long W3 and W4 give the started program's create
+    /// before the held sweep goes on, unscaled: the time a create takes on
+    /// a build whose sweep holds no claims, its own sweep's removal of the
+    /// killed program's device included, with half again on top.</summary>
+    const int ReclaimCreateWindowMs = 4000;
+
     /// <summary>W3 with an identity key, W4 without.</summary>
     static void SectionWReclaim(string label, ushort pid, string key)
     {
@@ -171,12 +177,14 @@ internal static partial class Program
 
         using var k2 = PeerProcess.Start($"{label}-again");
         k2.Post($"create pad {pid:X4} {key}");
-        // Past the started program's own sweep and its create, which take
-        // about two seconds when nothing holds them.
-        Thread.Sleep(8000);
+        // The sweep goes on once the started program's create has returned,
+        // or once it has had the time its own sweep and its create take
+        // when nothing holds them (ReclaimCreateWindowMs). A create that
+        // waits for the held claims returns only after the sweep.
+        string early = k2.Receive("create, while the sweep is held", Scaled(ReclaimCreateWindowMs));
         string swept = s.Send("go");
         Check($"{label}: the held sweep goes on and ends", swept == "OK sweep", swept);
-        string c2 = k2.Receive("create", 180_000);
+        string c2 = early.StartsWith("ERR timeout", StringComparison.Ordinal) ? k2.Receive("create", 180_000) : early;
         Check($"{label}: the program started again creates", Ok(c2), c2);
         if (!Ok(c2)) return;
         string inst = PeerProcess.Field(c2, "instance")!, t = PeerProcess.Field(c2, "transport")!;
