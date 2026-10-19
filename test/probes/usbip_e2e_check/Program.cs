@@ -145,7 +145,8 @@ internal static partial class Program
             tsw.Stop();
             Console.WriteLine($"\n-- Teardown --");
             Check("controller disposed (vhci detach)", true, $"{tsw.ElapsedMilliseconds} ms");
-            Thread.Sleep(2500);
+            // Each must be gone within 2.5 s of the dispose.
+            WaitCompositeGone(2500);
             Check("HID devnode gone after dispose", FindHidDevicePath(0x054C, 0x0CE6) == null);
             Check("audio endpoints gone after dispose",
                   FindEndpoint(DataFlow.Render, "Wireless Controller") == null
@@ -206,9 +207,15 @@ internal static partial class Program
 
             Check("process survived a sweep with a live controller", true,
                   "reaching this line at all is the assertion");
-            // 2.5 s of the idle repeat's 4 ms frames on the swept
-            // controller's section.
-            Thread.Sleep(2500);
+            // At least 750 ms on the swept controller's sections: 1.5 times
+            // the longest period of a thread that reads them, the output
+            // reader's 500 ms event wait (HMController.OutputPoll), and
+            // nearly 190 of the idle repeat's 4 ms frames. Then up to 2.5 s
+            // in all for the persona to go.
+            var swept = Stopwatch.StartNew();
+            while (swept.ElapsedMilliseconds < 2500
+                   && (swept.ElapsedMilliseconds < 750 || FindHidDevicePath(0x054C, 0x0CE6) != null))
+                Thread.Sleep(50);
             Check("composite persona evicted by the sweep",
                   FindHidDevicePath(0x054C, 0x0CE6) == null);
             try { var s = new HMGamepadState(); live.SubmitState(in s); Check("SubmitState after the sweep is harmless", true); }
@@ -347,7 +354,7 @@ internal static partial class Program
                     var outRep = new byte[48];
                     outRep[0] = 0x02; outRep[3] = 0xC8; outRep[4] = 0x40;
                     bool wrote = HidD_SetOutputReport(h, outRep, outRep.Length);
-                    Thread.Sleep(300);
+                    for (int i = 0; i < 30 && Volatile.Read(ref outputPackets) == 0; i++) Thread.Sleep(10);
                     Check("HidD_SetOutputReport delivered", wrote);
                     Check("OutputReceived fired with RID 0x02", outputPackets > 0 && lastOutputRid == 0x02,
                           $"{outputPackets} packet(s)");
@@ -369,9 +376,12 @@ internal static partial class Program
                 var tone = new SignalGenerator(48000, 2) { Type = SignalGeneratorType.Sin, Frequency = 440, Gain = 0.5 };
                 wo.Init(tone.Take(TimeSpan.FromMilliseconds(600)));
                 wo.Play();
-                Thread.Sleep(900);
+                // Until the stream has opened and PCM has arrived, at most
+                // 900 ms.
+                var played = Stopwatch.StartNew();
+                while (played.ElapsedMilliseconds < 900 && !(Volatile.Read(ref outStreamed) && Interlocked.Read(ref outBytes) > before))
+                    Thread.Sleep(10);
                 wo.Stop();
-                Thread.Sleep(300);
                 long delivered = Interlocked.Read(ref outBytes) - before;
                 Check("host PCM reached UsbAudio.Output.FramesReceived", delivered > 0, $"{delivered} bytes");
                 Check("stream open observed (alt setting 1)", outStreamed);
@@ -414,10 +424,15 @@ internal static partial class Program
                     Interlocked.Add(ref energy, sum / Math.Max(1, e.BytesRecorded / 2));
                 };
                 wi.StartRecording();
-                Thread.Sleep(1000);
+                // Until the stream has opened and the fed signal has been
+                // recorded, at most 1 s.
+                var recorded = Stopwatch.StartNew();
+                while (recorded.ElapsedMilliseconds < 1000
+                       && !(Volatile.Read(ref micStreamed) && Interlocked.Read(ref captured) > 0 && Interlocked.Read(ref energy) > 0))
+                    Thread.Sleep(10);
                 wi.StopRecording();
                 feeding = false;
-                Thread.Sleep(200);
+                feeder.Join(200);
                 Check("capture endpoint recorded data", Interlocked.Read(ref captured) > 0,
                       $"{Interlocked.Read(ref captured)} bytes");
                 Check("captured audio is the fed signal, not silence", Interlocked.Read(ref energy) > 0,
@@ -534,16 +549,17 @@ internal static partial class Program
 
     /// <summary>Polls until the composite's HID device and its render and
     /// capture endpoints are gone, the condition the teardown section
-    /// checks after its sleep, up to 10 s.</summary>
-    static bool WaitCompositeGone()
+    /// checks, up to <paramref name="limitMs"/>.</summary>
+    static bool WaitCompositeGone(int limitMs = 10_000)
     {
-        for (int i = 0; i < 100; i++)
+        var sw = Stopwatch.StartNew();
+        while (true)
         {
             if (FindHidDevicePath(0x054C, 0x0CE6) == null && !EndpointPresent(DataFlow.Render) && !EndpointPresent(DataFlow.Capture))
                 return true;
+            if (sw.ElapsedMilliseconds >= limitMs) return false;
             Thread.Sleep(100);
         }
-        return false;
 
         // The endpoint FindEndpoint returns is a COM object. Each poll
         // releases it at once rather than at finalization.
@@ -748,22 +764,37 @@ internal static partial class Program
     static string? FindLiveSdkConsumer()
     {
         // Signal 1: a process with the SDK loaded. Misses a consumer that
-        // has not touched the DLL yet, which is why signal 2 exists.
+        // has not touched the DLL yet, which is why signal 2 exists. Each
+        // process's module list is read on a thread of its own, since one
+        // read at a time took about 5.5 s elevated.
         int self = Environment.ProcessId;
-        foreach (var p in System.Diagnostics.Process.GetProcesses())
+        var all = System.Diagnostics.Process.GetProcesses();
+        string? loaded = null;
+        try
         {
-            if (p.Id == self) continue;
-            try
+            System.Threading.Tasks.Parallel.ForEach(all, (p, loop) =>
             {
-                foreach (System.Diagnostics.ProcessModule m in p.Modules)
+                if (p.Id == self) return;
+                try
                 {
-                    if (string.Equals(m.ModuleName, "HIDMaestro.Core.dll", StringComparison.OrdinalIgnoreCase))
-                        return p.ProcessName;
+                    foreach (System.Diagnostics.ProcessModule m in p.Modules)
+                    {
+                        if (string.Equals(m.ModuleName, "HIDMaestro.Core.dll", StringComparison.OrdinalIgnoreCase))
+                        {
+                            Interlocked.CompareExchange(ref loaded, p.ProcessName, null);
+                            loop.Stop();
+                            return;
+                        }
+                    }
                 }
-            }
-            catch { /* protected, wrong bitness, or exited mid-enumeration */ }
-            finally { p.Dispose(); }
+                catch { /* protected, wrong bitness, or exited mid-enumeration */ }
+            });
         }
+        finally
+        {
+            foreach (var p in all) p.Dispose();
+        }
+        if (loaded != null) return loaded;
 
         // Signal 2: the contended resource itself. The named input sections
         // are what a second consumer's controllers write through, so their

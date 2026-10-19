@@ -18,6 +18,31 @@ internal static partial class Program
     // usbip_server_check uses.
     const int SweepIndex = 62, StrayIndex = 63, ReuseIndex = 65;
 
+    /// <summary>How long a Register on the other thread must stay in its
+    /// call for the hook to take it as waiting for the sweep. A Register
+    /// that does not wait takes two locks no sweep holds and stores one
+    /// entry, microseconds, so this is a bound on the thread being
+    /// descheduled, scaled as the SDK's waits are.</summary>
+    static readonly int RegisterWindowMs = TimeoutScale.Apply(250);
+
+    /// <summary>The hook's hold of the sweep while another thread makes a
+    /// device and registers it. Until the device is made, then until
+    /// <see cref="RegisterWindowMs"/> has passed with Register not
+    /// returned, all within the 3 s the hook gave the whole attach. A
+    /// Register that returns inside the sweep holds the sweep on until its
+    /// attach is done, within those 3 s, as before. True when Register
+    /// returned during the sweep.</summary>
+    static bool HoldForRegister(Func<bool> made, Func<bool> registered, ManualResetEventSlim attached)
+    {
+        var held = Stopwatch.StartNew();
+        while (held.ElapsedMilliseconds < 3000 && !made() && !attached.IsSet) Thread.Sleep(10);
+        var waiting = Stopwatch.StartNew();
+        while (held.ElapsedMilliseconds < 3000 && waiting.ElapsedMilliseconds < RegisterWindowMs && !registered() && !attached.IsSet)
+            Thread.Sleep(10);
+        if (registered()) attached.Wait((int)Math.Max(0, 3000 - held.ElapsedMilliseconds));
+        return registered();
+    }
+
     static void AttachDuringStaleSweep(HMContext ctx)
     {
         var profile = ctx.GetProfile("dualsense-composite")!.Inner;
@@ -25,7 +50,8 @@ internal static partial class Program
 
         // A device registered and attached on another thread while the
         // stale sweep of this server's port runs, from its start. The hook
-        // holds the sweep until that attach is done, 3 s at most. Register
+        // holds the sweep until that attach is done, 3 s at most, or until
+        // its Register has stayed in the call (HoldForRegister). Register
         // waits for the sweep, so the attach lands after it, and either way
         // the sweep must leave the new import.
         Console.WriteLine("\n-- An attach during the stale sweep --");
@@ -55,8 +81,7 @@ internal static partial class Program
                 finally { attached.Set(); }
             }) { IsBackground = true, Name = "e2e attach during sweep" };
             other.Start();
-            attached.Wait(3000);
-            registeredInSweep = Volatile.Read(ref registered) == 1;
+            registeredInSweep = HoldForRegister(() => Volatile.Read(ref swept) != null, () => Volatile.Read(ref registered) == 1, attached);
         };
         try { UsbipBackend.SweepStale(server); }
         finally { UsbipBackend.DuringStaleSweep = null; }
@@ -90,7 +115,8 @@ internal static partial class Program
         // after, then a new device on another thread that takes the same
         // transport index, and so the same bus id, after the sweep reads
         // the exports. The old row now names the new device's location.
-        // The hook gives that attach 3 s. Its Register must wait for the
+        // The hook gives that attach 3 s, less once its Register has stayed
+        // in the call (HoldForRegister). Its Register must wait for the
         // sweep, as in AttachDuringStaleSweep, and the sweep must not
         // detach it.
         Console.WriteLine("\n-- A bus id reused during the stale sweep --");
@@ -131,8 +157,7 @@ internal static partial class Program
                         finally { attached.Set(); }
                     }) { IsBackground = true, Name = "e2e attach on a reused bus id" };
                     other.Start();
-                    attached.Wait(3000);
-                    registeredInSweep = Volatile.Read(ref registered) == 1;
+                    registeredInSweep = HoldForRegister(() => Volatile.Read(ref second) != null, () => Volatile.Read(ref registered) == 1, attached);
                 }
             };
             try { UsbipBackend.SweepStale(server); }
