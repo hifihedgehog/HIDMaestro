@@ -33,8 +33,9 @@
 //
 // The host role starts a sandbox with wsb.exe, which opens no window, runs
 // this program inside it as SYSTEM, and reports what it wrote back. A, B
-// and C share one sandbox, since each boot costs about three minutes: B
-// runs first and leaves the machine without usbip-win2, C installs it on
+// and C share one sandbox, since each sandbox starts clean and its
+// usbip-win2 install takes about four minutes (the sandbox itself starts in
+// about 2 s, measured 2026-10-18): B runs first and leaves the machine without usbip-win2, C installs it on
 // that clean machine, and A's checks then read C's install and a
 // composite created over it. Any other selection, N included, starts a
 // sandbox per scenario. Inside, the program runs as a self-contained copy
@@ -79,8 +80,8 @@ internal static class Program
         }
         if (args.Length >= 3 && args[0] == "--in-sandbox")
             return InSandbox(args[1], args[2]);
-        if (args.Length >= 3 && args[0] == "--create-composite")
-            return CreateComposite(args[1], args[2]);
+        if (args.Length >= 4 && args[0] == "--create-composite")
+            return CreateComposite(args[1], args[2], args[3]);
         if (args.Length >= 2 && args[0] == "--record-create")
             return RecordCreate(args[1]);
         if (args.Length > 0 && args[0] == "--offline")
@@ -140,6 +141,8 @@ internal static class Program
         string results = Path.Combine(Path.GetTempPath(), $"HIDMaestro_sandbox_{scenario}_{Guid.NewGuid():N}");
         Directory.CreateDirectory(results);
         string? id = null;
+        double startS = double.NaN, readyS = double.NaN, runS = double.NaN;
+        int tries = 0;
         try
         {
             string config =
@@ -147,24 +150,32 @@ internal static class Program
                 $"<MappedFolder><HostFolder>{Xml(publish)}</HostFolder><SandboxFolder>C:\\probe</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder>" +
                 $"<MappedFolder><HostFolder>{Xml(results)}</HostFolder><SandboxFolder>C:\\results</SandboxFolder><ReadOnly>false</ReadOnly></MappedFolder>" +
                 "</MappedFolders></Configuration>";
+            var step = Stopwatch.StartNew();
             var started = Run(wsb, 120_000, "start", "--config", config, "--raw");
             id = JsonString(started.Output, "Id");
             if (id == null) { Check($"{scenario}: a sandbox starts", false, started.Output.Trim()); return; }
+            startS = step.Elapsed.TotalSeconds;
 
             // The first command can arrive before the sandbox has finished
-            // starting, so wait for a trivial one to succeed.
+            // starting, so wait for a trivial one to succeed. Each refused
+            // try is a process of its own, and the next follows 250 ms on.
+            step.Restart();
             var sw = Stopwatch.StartNew();
             bool ready = false;
             while (!ready && sw.ElapsedMilliseconds < 180_000)
             {
+                tries++;
                 var probe = Run(wsb, 60_000, "exec", "--id", id, "-c", "cmd.exe /c exit 0", "-r", "System", "--raw");
                 ready = JsonInt(probe.Output, "ExitCode") == 0;
-                if (!ready) Thread.Sleep(2000);
+                if (!ready) Thread.Sleep(250);
             }
+            readyS = step.Elapsed.TotalSeconds;
             if (!ready) { Check($"{scenario}: the sandbox accepts a command", false); return; }
 
+            step.Restart();
             var ran = Run(wsb, 1_200_000, "exec", "--id", id, "-c",
                 $"C:\\probe\\UsbipInstallCheck.exe --in-sandbox {scenario} C:\\results", "-r", "System", "--raw");
+            runS = step.Elapsed.TotalSeconds;
             string file = Path.Combine(results, "results.txt");
             if (!File.Exists(file)) { Check($"{scenario}: the run inside the sandbox reports back", false, ran.Output.Trim()); return; }
             foreach (string line in File.ReadAllLines(file))
@@ -182,7 +193,12 @@ internal static class Program
         }
         finally
         {
+            var stop = Stopwatch.StartNew();
             if (id != null) Run(wsb, 120_000, "stop", "--id", id);
+            // What Windows Sandbox itself takes, apart from the probe's run
+            // inside it.
+            Console.WriteLine(FormattableString.Invariant(
+                $"  [NOTE] {scenario}: the sandbox started in {startS:F1} s, took its first command {readyS:F1} s later after {tries} tries, ran the probe in {runS:F1} s and stopped in {stop.Elapsed.TotalSeconds:F1} s"));
             try { Directory.Delete(results, true); } catch { }
         }
     }
@@ -350,7 +366,10 @@ internal static class Program
         Note($"{scenario}: the early window opened at {Pnp.Stamp(early.StartUtc)}, {(early.StartUtc - appeared).TotalMilliseconds:F0} ms after the interface was seen" +
              (early.ErrorMs >= 0 ? $", and its read failed at {Pnp.Stamp(early.StartUtc.AddMilliseconds(early.ErrorMs))}" : ""));
         NoteChain(scenario, "after the early window", chain, null);
-        Thread.Sleep(3000);
+        // Settled: no device installation pending, the state the early
+        // window already waited for, read again for up to the 3 s a fixed
+        // wait gave it before.
+        Note($"{scenario}: before the settled window, device installation {Pnp.InstallState(3000)}");
         var steady = Hid.CountReports(paths[0], 2000, Submit);
         Record($"{p} input keeps arriving once the device has settled",
                steady.ReadError == 0 && steady.Reports * 2 >= steady.Ticks, steady.ToString());
@@ -494,30 +513,40 @@ internal static class Program
 
     const string GoEvent = @"Global\HIDMaestroS73Go";
     const string DoneEvent = @"Global\HIDMaestroS73Done";
+    const string ReadyEvent = @"Global\HIDMaestroS73Ready";
 
     /// <summary>Two programs, each this binary with --create-composite, wait
     /// on one event and create their first composite when it fires.</summary>
     static void Together(string results)
     {
+        var driver = Stopwatch.StartNew();
         using (var setup = new HMContext())
         {
             setup.LoadDefaultProfiles();
             setup.InstallDriver();
         }
+        Note(FormattableString.Invariant($"together: the driver install before the two programs took {driver.Elapsed.TotalSeconds:F1} s"));
         using var go = new EventWaitHandle(false, EventResetMode.ManualReset, GoEvent);
         using var done = new EventWaitHandle(false, EventResetMode.ManualReset, DoneEvent);
         var children = new List<Process>();
+        var ready = new List<EventWaitHandle>();
         for (int i = 0; i < 2; i++)
         {
+            ready.Add(new EventWaitHandle(false, EventResetMode.ManualReset, ReadyEvent + i));
             var psi = new ProcessStartInfo(Environment.ProcessPath!)
             { UseShellExecute = false, CreateNoWindow = true };
             psi.ArgumentList.Add("--create-composite");
             psi.ArgumentList.Add($"together-{i}");
             psi.ArgumentList.Add(Path.Combine(results, $"child{i}.txt"));
+            psi.ArgumentList.Add(i.ToString(System.Globalization.CultureInfo.InvariantCulture));
             children.Add(Process.Start(psi)!);
         }
-        // Both start the SDK and wait. The event releases them together.
-        Thread.Sleep(5000);
+        // Both start the SDK and wait on the go event, and each says so
+        // just before it waits. The event releases them together once both
+        // wait, or after the 5 s a fixed wait gave them before.
+        bool bothWaiting = WaitHandle.WaitAll(ready.ToArray(), 5000);
+        foreach (var r in ready) r.Dispose();
+        Note($"together: both programs waited on the go event before it was set: {bothWaiting}");
         go.Set();
 
         var sw = Stopwatch.StartNew();
@@ -554,7 +583,7 @@ internal static class Program
 
     /// <summary>One of the two programs: create a composite when the go
     /// event fires, report, and keep it until the done event.</summary>
-    static int CreateComposite(string key, string answer)
+    static int CreateComposite(string key, string answer, string slot)
     {
         try
         {
@@ -562,7 +591,9 @@ internal static class Program
             ctx.LoadDefaultProfiles();
             using var go = EventWaitHandle.OpenExisting(GoEvent);
             using var done = EventWaitHandle.OpenExisting(DoneEvent);
+            using (var ready = EventWaitHandle.OpenExisting(ReadyEvent + slot)) ready.Set();
             go.WaitOne(120_000);
+            var create = Stopwatch.StartNew();
             HMController c;
             try { c = ctx.CreateController(ctx.GetProfile("dualsense-composite")!, key); }
             catch (Exception ex)
@@ -570,7 +601,7 @@ internal static class Program
                 File.WriteAllText(answer, $"failed {ex.GetType().Name}: {ex.Message}");
                 return 1;
             }
-            File.WriteAllText(answer, $"created {key} on transport index {c.TransportIndex}");
+            File.WriteAllText(answer, FormattableString.Invariant($"created {key} on transport index {c.TransportIndex} in {create.Elapsed.TotalSeconds:F1} s"));
             done.WaitOne(300_000);
             c.Dispose();
             return 0;
@@ -593,6 +624,7 @@ internal static class Program
     /// this process creates over it.</summary>
     static void All(string results)
     {
+        var part = Stopwatch.StartNew();
         using (var k = Registry.LocalMachine.CreateSubKey(UninstallKey))
         {
             k.SetValue("DisplayName", "USBip");
@@ -613,7 +645,9 @@ internal static class Program
         Registry.LocalMachine.DeleteSubKeyTree(UninstallKey, throwOnMissingSubKey: false);
         Record("record: the machine is without usbip-win2 again once the planted entry is gone",
                UninstallerPath() == null && !DriverPackagePresent() && !Directory.Exists(InstallDir));
+        Note(FormattableString.Invariant($"record: took {part.Elapsed.TotalSeconds:F1} s"));
 
+        part.Restart();
         Together(results);
 
         // C's programs dispose their composites as they exit, and A's
@@ -623,7 +657,9 @@ internal static class Program
         while (Hid.Paths(0x054C, 0x0CE6).Count > 0 && gone.ElapsedMilliseconds < 30_000) Thread.Sleep(250);
         int left = Hid.Paths(0x054C, 0x0CE6).Count;
         Record("together: both composites are gone once their programs dispose them", left == 0, $"{left} interface(s) left");
+        Note(FormattableString.Invariant($"together: took {part.Elapsed.TotalSeconds:F1} s"));
 
+        part.Restart();
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
         ctx.InstallDriver();
@@ -634,6 +670,7 @@ internal static class Program
         catch (Exception ex) { error = ex; }
         CleanChecks("clean", c, error, createdFrom);
         c?.Dispose();
+        Note(FormattableString.Invariant($"clean: took {part.Elapsed.TotalSeconds:F1} s"));
     }
 
     /// <summary>B's create, in a child process: refused or created, written
