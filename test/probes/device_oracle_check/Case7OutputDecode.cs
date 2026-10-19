@@ -43,6 +43,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using HIDMaestro;
 using HIDMaestro.Internal;
 
@@ -66,143 +67,181 @@ internal sealed class Case7OutputDecode : IOracleCase
         // battery sets for the test app it runs, not for this probe.
         if (testHook != null) Environment.SetEnvironmentVariable("HIDMAESTRO_QUIET", null);
         var console = Console.Out;
-        var hookLines = new HookWriter(console);
         var profiles = all.Where(p => p.ExtendedOutputReport != null
                                       || p.Id is "switch-pro" or "xbox-360-wired" or "xbox-360-wireless")
                           .OrderBy(p => p.Id, StringComparer.Ordinal).ToList();
-        IntPtr view = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_INPUT_SIZE);
-        IntPtr ring = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_OUTPUT_SIZE);
-        if (testHook != null) Console.SetOut(hookLines);
+        if (testHook != null) Console.SetOut(new HookWriter(console));
         try
         {
-            int n = 0;
-            foreach (var p in profiles)
+            // Each profile's stream is its own: its controller, index, ring
+            // and output thread, and most of a stream's time is the output
+            // thread's 8 ms poll. With no dump and no --explain, which take
+            // the outputs in the order they come, the profiles record at
+            // once, each into a recording of its own, and their streams
+            // join the case in the profiles' order. Case1Submit.Create
+            // builds one controller at a time. The profile first in order
+            // that fails throws, as in a run of one profile after another.
+            if (GoldenCase.DumpDir == null && GoldenCase.ExplainDir == null)
             {
-                Marshal.Copy(new byte[SharedMemoryIO.SHARED_INPUT_SIZE], 0, view, SharedMemoryIO.SHARED_INPUT_SIZE);
-                Marshal.Copy(new byte[SharedMemoryIO.SHARED_OUTPUT_SIZE], 0, ring, SharedMemoryIO.SHARED_OUTPUT_SIZE);
-                int index = FirstIndex + n++;
-                var c = Case1Submit.Create(p, index, view, ring);
-                var hp = new HMProfile(p);
-                var events = new ConcurrentQueue<(string Tag, byte[] Data)>();
-                var sentinel = new SemaphoreSlim(0);
-                c.OutputReceived += (_, pkt) =>
+                var parts = new GoldenCase[profiles.Count];
+                var failed = new Exception?[profiles.Count];
+                Parallel.For(0, profiles.Count, new ParallelOptions { MaxDegreeOfParallelism = profiles.Count }, i =>
                 {
-                    if ((byte)pkt.Source == SentinelSource && pkt.ReportId == SentinelId) { sentinel.Release(); return; }
-                    var o = new byte[2 + pkt.Data.Length];
-                    o[0] = (byte)pkt.Source; o[1] = pkt.ReportId;
-                    pkt.Data.Span.CopyTo(o.AsSpan(2));
-                    events.Enqueue(("rx", o));
-                    events.Enqueue(("testapp", Encoding.UTF8.GetBytes(testDecode(hp, pkt))));
-                };
-                c.OutputDecoded += (_, e) => events.Enqueue(("decoded", Decoded(e)));
-                // The test client's own subscriptions, after the case's, so
-                // its line for an event follows the event's record.
-                if (testHook != null)
+                    parts[i] = new GoldenCase(golden.Name, golden.Seed);
+                    try { RecordProfile(parts[i], profiles[i], FirstIndex + i, options, testDecode, testHook); }
+                    catch (Exception e) { failed[i] = e; }
+                });
+                for (int i = 0; i < profiles.Count; i++)
                 {
-                    hookLines.Events = events;
-                    testHook(c, index);
+                    if (failed[i] is { } e) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(e);
+                    golden.Adopt(parts[i]);
                 }
-                foreach (var port in c.Ports)
-                {
-                    var pt = port;
-                    pt.OutputChanged += (_, e) => events.Enqueue(("port", Encoding.ASCII.GetBytes($"{pt.Number}:{e.Name}={e.Value}")));
-                }
-
-                golden.Stream($"output/{p.Id}");
-                uint head = 0;
-                var pending = new List<(byte Source, byte Id, byte[] Data)>();
-                void Flush()
-                {
-                    if (pending.Count == 0) return;
-                    foreach (var (s, id, d) in pending) Write(ring, ref head, s, id, d);
-                    Write(ring, ref head, SentinelSource, SentinelId, Array.Empty<byte>());
-                    if (!sentinel.Wait(10_000))
-                        throw new TimeoutException($"{p.Id}: the output thread did not reach the batch's end in 10 s.");
-                    foreach (var (s, id, d) in pending)
-                    {
-                        var input = new byte[2 + d.Length];
-                        input[0] = s; input[1] = id; d.CopyTo(input, 2);
-                        golden.Out("in", input);
-                    }
-                    while (events.TryDequeue(out var ev)) golden.Out(ev.Tag, ev.Data);
-                    pending.Clear();
-                }
-                void Send(byte source, byte id, byte[] data)
-                {
-                    pending.Add((source, id, data));
-                    if (pending.Count == Batch) Flush();
-                }
-
-                var rng = new Rng(options.Seed, CaseConstant ^ Case1Submit.Fnv(p.Id));
-                const byte Out = (byte)HMOutputSource.HidOutput;
-                var ids = new List<(byte Id, int Size)>();
-                if (p.ExtendedOutputReport is { } eo) ids.Add((eo.ReportIdByte, eo.Size));
-                // The two reports the Switch Pro decode reads, 0x01 rumble
-                // with a subcommand and 0x10 rumble alone, at the 49 bytes a
-                // Bluetooth host writes (SDL_hidapi_switch.c, the report the
-                // driver sees with its ID stripped).
-                if (p.Id == "switch-pro") { ids.Add((0x01, 49)); ids.Add((0x10, 49)); }
-                foreach (var (id, size) in ids)
-                {
-                    int dataSize = Math.Max(0, size - 1);
-                    for (int len = 0; len <= dataSize + 2; len++) Send(Out, id, new byte[len]);
-                    Send(Out, id, Enumerable.Repeat((byte)0xFF, dataSize).ToArray());
-                    for (int b = 0; b < dataSize; b++)
-                        foreach (byte v in new byte[] { 0x80, 0xFF })
-                        {
-                            var d = new byte[dataSize];
-                            d[b] = v;
-                            Send(Out, id, d);
-                        }
-                    for (int i = 0; i < RandomReports; i++)
-                    {
-                        var d = new byte[rng.Next(8) == 0 ? rng.Next(dataSize + 3) : dataSize];
-                        rng.Fill(d);
-                        Send(Out, id, d);
-                    }
-                    // The same ID from the other sources a ring slot carries.
-                    foreach (byte src in new byte[] { (byte)HMOutputSource.HidFeature, 2, (byte)HMOutputSource.HidFeatureRead })
-                    {
-                        var d = new byte[dataSize];
-                        rng.Fill(d);
-                        Send(src, id, d);
-                    }
-                }
-                // XInput rumble as the companion publishes it (source 2,
-                // companion.c:976-979): every length to 8, then random
-                // five-byte packets.
-                if (p.VendorId == 0x045E)
-                {
-                    for (int len = 0; len <= 8; len++)
-                    {
-                        Send((byte)HMOutputSource.XInput, 0, new byte[len]);
-                        Send((byte)HMOutputSource.XInput, 0, Enumerable.Repeat((byte)0xFF, len).ToArray());
-                    }
-                    for (int i = 0; i < 200; i++)
-                    {
-                        var d = new byte[5];
-                        rng.Fill(d);
-                        Send((byte)HMOutputSource.XInput, 0, d);
-                    }
-                }
-                // Other report IDs, which no decode of this profile reads.
-                for (int i = 0; i < 64; i++)
-                {
-                    byte id = rng.Byte();
-                    if (id == SentinelId) continue;
-                    var d = new byte[rng.Next(65)];
-                    rng.Fill(d);
-                    Send(Out, id, d);
-                }
-                Flush();
-
-                Stop(c);
-                Case1Submit.Forget(index);
+            }
+            else
+            {
+                for (int i = 0; i < profiles.Count; i++)
+                    RecordProfile(golden, profiles[i], FirstIndex + i, options, testDecode, testHook);
             }
         }
         finally
         {
             Console.SetOut(console);
+        }
+    }
+
+    /// <summary>One profile's stream: its controller on a section and an
+    /// output ring of its own, every output report of the list written
+    /// into the ring in batches, and what the program receives for
+    /// each.</summary>
+    static void RecordProfile(GoldenCase g, ControllerProfile p, int index, Options options,
+                              Func<HMProfile, HMOutputPacket, string> testDecode, Action<HMController, int>? testHook)
+    {
+        IntPtr view = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_INPUT_SIZE);
+        IntPtr ring = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_OUTPUT_SIZE);
+        HMController? c = null;
+        try
+        {
+            Marshal.Copy(new byte[SharedMemoryIO.SHARED_INPUT_SIZE], 0, view, SharedMemoryIO.SHARED_INPUT_SIZE);
+            Marshal.Copy(new byte[SharedMemoryIO.SHARED_OUTPUT_SIZE], 0, ring, SharedMemoryIO.SHARED_OUTPUT_SIZE);
+            c = Case1Submit.Create(p, index, view, ring);
+            var hp = new HMProfile(p);
+            var events = new ConcurrentQueue<(string Tag, byte[] Data)>();
+            var sentinel = new SemaphoreSlim(0);
+            c.OutputReceived += (_, pkt) =>
+            {
+                // The client's handlers run after this one, on this
+                // thread: its lines go to this controller's events.
+                HookWriter.Events = events;
+                if ((byte)pkt.Source == SentinelSource && pkt.ReportId == SentinelId) { sentinel.Release(); return; }
+                var o = new byte[2 + pkt.Data.Length];
+                o[0] = (byte)pkt.Source; o[1] = pkt.ReportId;
+                pkt.Data.Span.CopyTo(o.AsSpan(2));
+                events.Enqueue(("rx", o));
+                events.Enqueue(("testapp", Encoding.UTF8.GetBytes(testDecode(hp, pkt))));
+            };
+            c.OutputDecoded += (_, e) => events.Enqueue(("decoded", Decoded(e)));
+            // The test client's own subscriptions, after the case's, so
+            // its line for an event follows the event's record.
+            if (testHook != null) testHook(c, index);
+            foreach (var port in c.Ports)
+            {
+                var pt = port;
+                pt.OutputChanged += (_, e) => events.Enqueue(("port", Encoding.ASCII.GetBytes($"{pt.Number}:{e.Name}={e.Value}")));
+            }
+
+            g.Stream($"output/{p.Id}");
+            uint head = 0;
+            var pending = new List<(byte Source, byte Id, byte[] Data)>();
+            void Flush()
+            {
+                if (pending.Count == 0) return;
+                foreach (var (s, id, d) in pending) Write(ring, ref head, s, id, d);
+                Write(ring, ref head, SentinelSource, SentinelId, Array.Empty<byte>());
+                if (!sentinel.Wait(10_000))
+                    throw new TimeoutException($"{p.Id}: the output thread did not reach the batch's end in 10 s.");
+                foreach (var (s, id, d) in pending)
+                {
+                    var input = new byte[2 + d.Length];
+                    input[0] = s; input[1] = id; d.CopyTo(input, 2);
+                    g.Out("in", input);
+                }
+                while (events.TryDequeue(out var ev)) g.Out(ev.Tag, ev.Data);
+                pending.Clear();
+            }
+            void Send(byte source, byte id, byte[] data)
+            {
+                pending.Add((source, id, data));
+                if (pending.Count == Batch) Flush();
+            }
+
+            var rng = new Rng(options.Seed, CaseConstant ^ Case1Submit.Fnv(p.Id));
+            const byte Out = (byte)HMOutputSource.HidOutput;
+            var ids = new List<(byte Id, int Size)>();
+            if (p.ExtendedOutputReport is { } eo) ids.Add((eo.ReportIdByte, eo.Size));
+            // The two reports the Switch Pro decode reads, 0x01 rumble
+            // with a subcommand and 0x10 rumble alone, at the 49 bytes a
+            // Bluetooth host writes (SDL_hidapi_switch.c, the report the
+            // driver sees with its ID stripped).
+            if (p.Id == "switch-pro") { ids.Add((0x01, 49)); ids.Add((0x10, 49)); }
+            foreach (var (id, size) in ids)
+            {
+                int dataSize = Math.Max(0, size - 1);
+                for (int len = 0; len <= dataSize + 2; len++) Send(Out, id, new byte[len]);
+                Send(Out, id, Enumerable.Repeat((byte)0xFF, dataSize).ToArray());
+                for (int b = 0; b < dataSize; b++)
+                    foreach (byte v in new byte[] { 0x80, 0xFF })
+                    {
+                        var d = new byte[dataSize];
+                        d[b] = v;
+                        Send(Out, id, d);
+                    }
+                for (int i = 0; i < RandomReports; i++)
+                {
+                    var d = new byte[rng.Next(8) == 0 ? rng.Next(dataSize + 3) : dataSize];
+                    rng.Fill(d);
+                    Send(Out, id, d);
+                }
+                // The same ID from the other sources a ring slot carries.
+                foreach (byte src in new byte[] { (byte)HMOutputSource.HidFeature, 2, (byte)HMOutputSource.HidFeatureRead })
+                {
+                    var d = new byte[dataSize];
+                    rng.Fill(d);
+                    Send(src, id, d);
+                }
+            }
+            // XInput rumble as the companion publishes it (source 2,
+            // companion.c:976-979): every length to 8, then random
+            // five-byte packets.
+            if (p.VendorId == 0x045E)
+            {
+                for (int len = 0; len <= 8; len++)
+                {
+                    Send((byte)HMOutputSource.XInput, 0, new byte[len]);
+                    Send((byte)HMOutputSource.XInput, 0, Enumerable.Repeat((byte)0xFF, len).ToArray());
+                }
+                for (int i = 0; i < 200; i++)
+                {
+                    var d = new byte[5];
+                    rng.Fill(d);
+                    Send((byte)HMOutputSource.XInput, 0, d);
+                }
+            }
+            // Other report IDs, which no decode of this profile reads.
+            for (int i = 0; i < 64; i++)
+            {
+                byte id = rng.Byte();
+                if (id == SentinelId) continue;
+                var d = new byte[rng.Next(65)];
+                rng.Fill(d);
+                Send(Out, id, d);
+            }
+            Flush();
+        }
+        finally
+        {
+            // The output thread reads the ring until it stops.
+            if (c != null) Stop(c);
+            Case1Submit.Forget(index);
             Marshal.FreeHGlobal(view);
             Marshal.FreeHGlobal(ring);
         }
@@ -270,7 +309,9 @@ internal sealed class Case7OutputDecode : IOracleCase
     sealed class HookWriter : TextWriter
     {
         readonly TextWriter _console;
-        public ConcurrentQueue<(string Tag, byte[] Data)>? Events;
+        // The events of the controller whose output thread is writing, set
+        // by the case's own OutputReceived handler on that thread.
+        [ThreadStatic] public static ConcurrentQueue<(string Tag, byte[] Data)>? Events;
         public HookWriter(TextWriter console) { _console = console; }
         public override Encoding Encoding => _console.Encoding;
         public override void Write(char value) => _console.Write(value);

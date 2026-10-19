@@ -70,6 +70,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
+using System.Threading.Tasks;
 using HIDMaestro;
 using HIDMaestro.Internal;
 
@@ -107,7 +108,7 @@ internal sealed class Case9PhysicalCorpus : IOracleCase
         var repos = listed.Select(x => x.Repo).Distinct(StringComparer.Ordinal).OrderBy(r => r, StringComparer.Ordinal).ToList();
         string root = FindRoot(repos, out string tried)
             ?? throw new CaseSkippedException($"the reference clones ({string.Join(", ", repos)}) are not under {tried}. Pass --corpus-root <dir> or set HIDMAESTRO_CORPUS_ROOT");
-        var bytes = listed.ToDictionary(x => x.Id, x => Fetch(root, x), StringComparer.Ordinal);
+        var bytes = FetchAll(root, listed);
         var entries = Load(corpusPath, bytes);
         var redaction = new Redaction(bytes.Values);
         golden.Redact = redaction.Apply;
@@ -280,6 +281,28 @@ internal sealed class Case9PhysicalCorpus : IOracleCase
         return candidates.FirstOrDefault(c => repos.All(r => Directory.Exists(Path.Combine(c, r))));
     }
 
+    /// <summary>Every entry's descriptor (Fetch), the entries at once: each
+    /// entry's git reads run on a thread of their own, and the processes
+    /// they start are most of the time. The entry first in corpus order
+    /// that fails throws, as a fetch of one entry after another would.</summary>
+    static Dictionary<string, byte[]> FetchAll(string root, List<Listed> listed)
+    {
+        var got = new byte[listed.Count][];
+        var failed = new Exception?[listed.Count];
+        Parallel.For(0, listed.Count, i =>
+        {
+            try { got[i] = Fetch(root, listed[i]); }
+            catch (Exception e) { failed[i] = e; }
+        });
+        var bytes = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        for (int i = 0; i < listed.Count; i++)
+        {
+            if (failed[i] is { } e) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(e);
+            bytes.Add(listed[i].Id, got[i]);
+        }
+        return bytes;
+    }
+
     /// <summary>The entry's descriptor at its commit: a binary file whole,
     /// or the bytes written from the cited line on. Fails unless the length
     /// and the SHA-256 are the corpus's.</summary>
@@ -315,11 +338,15 @@ internal sealed class Case9PhysicalCorpus : IOracleCase
     static string Resolve(string repo, Listed e, string path)
     {
         string key = $"{repo}|{e.Commit}";
-        if (!s_trees.TryGetValue(key, out var names))
+        string[]? names;
+        // FetchAll's threads share the cache.
+        lock (s_trees) s_trees.TryGetValue(key, out names);
+        if (names == null)
         {
             var (code, output, error) = Git(repo, "ls-tree", "-r", "--name-only", e.Commit);
             if (code != 0) throw new InvalidDataException($"{e.Id}: git ls-tree {e.Commit} in {repo} failed: {error.Trim()}");
-            s_trees[key] = names = Encoding.UTF8.GetString(output).Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            names = Encoding.UTF8.GetString(output).Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            lock (s_trees) s_trees[key] = names;
         }
         var found = names.Where(n => string.Equals(n, path, StringComparison.OrdinalIgnoreCase)).ToList();
         return found.Count == 1 ? found[0]

@@ -22,8 +22,9 @@
 //            the same stream: it rebuilds the lane's bytes from the base and
 //            holds them to the lane's own pin. Without --earlier the stream
 //            is read from the tree, and fails.
-// Exit 0 when every check passes, 1 otherwise. Every replay runs them first,
-// so the battery's replay (S89) fails on a failing check.
+// Exit 0 when every check passes, 1 otherwise. Every replay runs them, in a
+// process of its own beside the cases, so the battery's replay (S89) fails
+// on a failing check.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -42,21 +43,61 @@ internal static class SelfTest
         if (!ok) s_failures++;
     }
 
-    /// <summary>The checks as every replay runs them first: only a failing
-    /// check and one line are printed.</summary>
-    public static int RunQuiet()
+    /// <summary>The checks as every replay runs them: in a process of their
+    /// own, this probe's selftest mode, started before the cases and read
+    /// once they are done, since most of the checks' time is git's (the
+    /// history checks commit twice, and each commit runs the machine's
+    /// hooks). Only a failing check and one line are printed.</summary>
+    internal sealed class Quiet : IDisposable
     {
-        var saved = Console.Out;
-        var log = new StringWriter();
-        Console.SetOut(log);
-        int code;
-        try { code = Run(); }
-        finally { Console.SetOut(saved); }
-        foreach (var line in log.ToString().Split('\n'))
-            if (line.StartsWith("  [FAIL]", StringComparison.Ordinal)) Console.WriteLine(line.TrimEnd());
-        Console.WriteLine($"  [{(code == 0 ? "PASS" : "FAIL")}] selftest: {s_checks - s_failures} of {s_checks} checks of the change list's own rules");
-        return code;
+        readonly System.Diagnostics.Process _process;
+        readonly System.Threading.Tasks.Task<string> _out, _err;
+
+        public Quiet()
+        {
+            // A fault or a loader failure in the child ends in an exit code,
+            // not a dialog. The child inherits the mode.
+            SetErrorMode(SetErrorMode(0) | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+            var psi = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!)
+            {
+                UseShellExecute = false, CreateNoWindow = true,
+                RedirectStandardOutput = true, RedirectStandardError = true,
+            };
+            psi.ArgumentList.Add("selftest");
+            _process = System.Diagnostics.Process.Start(psi) ?? throw new InvalidOperationException("could not start the selftest");
+            // Read as it writes, so a full pipe never holds it up.
+            _out = _process.StandardOutput.ReadToEndAsync();
+            _err = _process.StandardError.ReadToEndAsync();
+        }
+
+        /// <summary>Waits for the checks and prints them as one line, and
+        /// each failing check. 0 when every check passed.</summary>
+        public int Report()
+        {
+            _process.WaitForExit();
+            var lines = _out.Result.Split('\n').Select(l => l.TrimEnd()).ToList();
+            int passed = lines.Count(l => l.StartsWith("  [PASS]", StringComparison.Ordinal));
+            var failed = lines.Where(l => l.StartsWith("  [FAIL]", StringComparison.Ordinal)).ToList();
+            foreach (var line in failed) Console.WriteLine(line);
+            int code = _process.ExitCode;
+            if (code != 0 && failed.Count == 0)
+                Console.WriteLine($"  [FAIL] selftest exited {code}: {_err.Result.Trim()}");
+            Console.WriteLine($"  [{(code == 0 ? "PASS" : "FAIL")}] selftest: {passed} of {passed + failed.Count} checks of the change list's own rules");
+            return code;
+        }
+
+        /// <summary>A run that ends before it reports leaves nothing
+        /// running: the checks finish, or end within a minute.</summary>
+        public void Dispose()
+        {
+            if (!_process.WaitForExit(60_000)) _process.Kill(entireProcessTree: true);
+            _process.Dispose();
+        }
     }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    static extern uint SetErrorMode(uint mode);
+    const uint SEM_FAILCRITICALERRORS = 0x0001, SEM_NOGPFAULTERRORBOX = 0x0002, SEM_NOOPENFILEERRORBOX = 0x8000;
 
     const string A = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     const string B = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";

@@ -1,6 +1,6 @@
-// GoldenCase's --explain (Explain.cs), in the probe only: the test app
-// links Golden.cs, and the explainers read the SDK's internals, which only
-// this probe sees.
+// GoldenCase's --explain (Explain.cs), and Adopt, in the probe only: the
+// test app links Golden.cs, and the explainers read the SDK's internals,
+// which only this probe sees.
 using HIDMaestro;
 
 internal sealed partial class GoldenCase
@@ -62,4 +62,21 @@ internal sealed partial class GoldenCase
     partial void ExplainNote(string tag, System.ReadOnlySpan<byte> data) => _explain?.Note(tag, data, Explainer);
 
     partial void ExplainEnd() => _explain?.End();
+
+    /// <summary>Appends another recording's streams, in its order, as
+    /// though they were recorded here: case 1 records its subjects on
+    /// threads of their own and adopts them in order. In the probe only,
+    /// beside --explain, since a recording that explains or dumps takes
+    /// each output as it comes, and neither saw the adopted ones.</summary>
+    public void Adopt(GoldenCase part)
+    {
+        if (_explain != null || _dump != null)
+            throw new System.InvalidOperationException($"Case {Name} explains or dumps its outputs, so it records them itself.");
+        foreach (var s in part.Streams)
+        {
+            if (!_names.Add(s.Name)) throw new System.ArgumentException($"Case {Name} has stream {s.Name} twice.");
+            Streams.Add(s);
+        }
+        _current = null;
+    }
 }

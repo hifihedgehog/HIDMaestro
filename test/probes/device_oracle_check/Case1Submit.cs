@@ -42,6 +42,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Threading.Tasks;
 using HIDMaestro;
 using HIDMaestro.Internal;
 using HIDMaestro.Internal.Usbip;
@@ -73,66 +74,97 @@ internal sealed class Case1Submit : IOracleCase
 
         Predicates(golden, db, made);
 
+        // Each subject's streams are its own: its controller, its index and
+        // its random states. With no dump and no --explain, which take the
+        // outputs in the order they come, the subjects record at once, each
+        // into a recording of its own, and their streams join the case in
+        // the subjects' order. Create builds one controller at a time. The
+        // subject first in order that fails throws, as in a run of one
+        // subject after another.
+        if (GoldenCase.DumpDir == null && GoldenCase.ExplainDir == null)
+        {
+            var parts = new GoldenCase[subjects.Count];
+            var failed = new Exception?[subjects.Count];
+            Parallel.For(0, subjects.Count, i =>
+            {
+                parts[i] = new GoldenCase(golden.Name, golden.Seed);
+                try { RecordSubject(parts[i], subjects[i].Stream, subjects[i].Profile, FirstIndex + i, options); }
+                catch (Exception e) { failed[i] = e; }
+            });
+            for (int i = 0; i < subjects.Count; i++)
+            {
+                if (failed[i] is { } e) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(e);
+                golden.Adopt(parts[i]);
+            }
+            return;
+        }
+        for (int i = 0; i < subjects.Count; i++)
+            RecordSubject(golden, subjects[i].Stream, subjects[i].Profile, FirstIndex + i, options);
+    }
+
+    /// <summary>One subject's streams: the submit as its controller takes it
+    /// from creation and, for a profile a host's request arms, once armed,
+    /// each on the case's own section at the subject's index.</summary>
+    static void RecordSubject(GoldenCase golden, string id, ControllerProfile p, int index, Options options)
+    {
         IntPtr view = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_INPUT_SIZE);
         try
         {
             var section = new byte[SharedMemoryIO.SHARED_INPUT_SIZE];
             var frame = new byte[2 + SharedMemoryIO.DATA_CAPACITY + 2 + SharedMemoryIO.EXTENDED_DATA_CAPACITY + SharedMemoryIO.GIP_DATA_LENGTH];
             var scratch = new Dictionary<HMAxis, float>();
-            int n = 0;
-            foreach (var (id, p) in subjects)
+            // AxesOf builds the profile's report builder on first use, as
+            // Create does: one at a time.
+            IReadOnlyList<HMAxis> axes;
+            lock (s_create) axes = AxesOf(p);
+            foreach (var (suffix, armed) in PathsOf(p))
             {
-                int index = FirstIndex + n++;
-                var axes = AxesOf(p);
-                foreach (var (suffix, armed) in PathsOf(p))
+                Marshal.Copy(new byte[SharedMemoryIO.SHARED_INPUT_SIZE], 0, view, SharedMemoryIO.SHARED_INPUT_SIZE);
+                var c = Create(p, index, view);
+                if (armed) typeof(HMController).GetField("_extendedModeArmed", Instance)!.SetValue(c, true);
+                golden.Stream($"submit/{id}{suffix}");
+                golden.Explainer = new FrameExplainer(c);
+                // The inputs this stream's states move, first, so a
+                // replay whose profile reads other axes differs at
+                // output 0 rather than somewhere in the frames.
+                golden.Out("axes", AxesBytes(axes));
+                // Seeded by the catalog id, also for a profile made from one
+                // ("extracted/xbox-one-s" is seeded as "xbox-one-s").
+                var rng = new Rng(options.Seed, Fnv(id[(id.LastIndexOf('/') + 1)..]));
+                uint stamp = 0;
+                void Submit(in HMGamepadState state)
                 {
-                    Marshal.Copy(new byte[SharedMemoryIO.SHARED_INPUT_SIZE], 0, view, SharedMemoryIO.SHARED_INPUT_SIZE);
-                    var c = Create(p, index, view);
-                    if (armed) typeof(HMController).GetField("_extendedModeArmed", Instance)!.SetValue(c, true);
-                    golden.Stream($"submit/{id}{suffix}");
-                    golden.Explainer = new FrameExplainer(c);
-                    // The inputs this stream's states move, first, so a
-                    // replay whose profile reads other axes differs at
-                    // output 0 rather than somewhere in the frames.
-                    golden.Out("axes", AxesBytes(axes));
-                    // Seeded by the catalog id, also for a profile made from one
-                    // ("extracted/xbox-one-s" is seeded as "xbox-one-s").
-                    var rng = new Rng(options.Seed, Fnv(id[(id.LastIndexOf('/') + 1)..]));
-                    uint stamp = 0;
-                    void Submit(in HMGamepadState state)
+                    // A zero sensor timestamp makes the codec stamp the
+                    // report from the controller's Stopwatch
+                    // (VendorBlobCodec.EncoderState.SensorTicks), which
+                    // is time, not an oracle. Such a state carries the
+                    // stamp a consumer's clock would give it, 4 ms of
+                    // 1/3 microsecond ticks per state, never 0. DD-1's
+                    // own timestamp test covers the clock (plan, DD-1).
+                    var s = state;
+                    stamp += 12000;
+                    if (stamp == 0) stamp = 12000;
+                    if (s.SensorTimestamp == 0) s.SensorTimestamp = stamp;
+                    golden.SetInput(in s);
+                    for (int k = 0; k < States.Repeats; k++)
                     {
-                        // A zero sensor timestamp makes the codec stamp the
-                        // report from the controller's Stopwatch
-                        // (VendorBlobCodec.EncoderState.SensorTicks), which
-                        // is time, not an oracle. Such a state carries the
-                        // stamp a consumer's clock would give it, 4 ms of
-                        // 1/3 microsecond ticks per state, never 0. DD-1's
-                        // own timestamp test covers the clock (plan, DD-1).
-                        var s = state;
-                        stamp += 12000;
-                        if (stamp == 0) stamp = 12000;
-                        if (s.SensorTimestamp == 0) s.SensorTimestamp = stamp;
-                        golden.SetInput(in s);
-                        for (int k = 0; k < States.Repeats; k++)
+                        try { c.SubmitState(in s); }
+                        catch (Exception e)
                         {
-                            try { c.SubmitState(in s); }
-                            catch (Exception e)
-                            {
-                                golden.Out("throw", System.Text.Encoding.ASCII.GetBytes(e.GetType().FullName ?? "?"));
-                                continue;
-                            }
-                            Marshal.Copy(view, section, 0, section.Length);
-                            golden.Out("frame", Frame(section, frame));
+                            golden.Out("throw", System.Text.Encoding.ASCII.GetBytes(e.GetType().FullName ?? "?"));
+                            continue;
                         }
+                        Marshal.Copy(view, section, 0, section.Length);
+                        golden.Out("frame", Frame(section, frame));
                     }
-                    foreach (var s in States.Scripted(axes, scratch)) Submit(in s);
-                    for (int i = 0; i < States.RandomCount; i++)
-                    {
-                        var s = States.Random(rng, axes, scratch);
-                        Submit(in s);
-                    }
-                    Forget(index);
                 }
+                foreach (var s in States.Scripted(axes, scratch)) Submit(in s);
+                for (int i = 0; i < States.RandomCount; i++)
+                {
+                    var s = States.Random(rng, axes, scratch);
+                    Submit(in s);
+                }
+                Forget(index);
             }
         }
         finally
@@ -313,10 +345,24 @@ internal sealed class Case1Submit : IOracleCase
     /// context, which the constructor only stores.</summary>
     internal static HMController Create(ControllerProfile p, int index, IntPtr view, IntPtr outputRing = default, UsbipBackendHandle? usbip = null)
     {
-        Cache("s_inputViews")[index] = view;
+        // One controller at a time, also when case 1's subjects record at
+        // once.
+        lock (s_create) return CreateOne(p, index, view, outputRing, usbip);
+    }
+
+    /// <summary>Held while a controller is built (Create) and while a
+    /// profile builds what its controller reads (AxesOf).</summary>
+    static readonly object s_create = new();
+
+    static HMController CreateOne(ControllerProfile p, int index, IntPtr view, IntPtr outputRing, UsbipBackendHandle? usbip)
+    {
+        // The SDK takes these caches' own locks to read them.
+        var inputs = Cache("s_inputViews");
+        lock (inputs) inputs[index] = view;
         // No output section, so no output thread runs, unless a case hands
         // in a ring of its own to feed the output thread with.
-        Cache("s_outputViews")[index] = outputRing;
+        var outputs = Cache("s_outputViews");
+        lock (outputs) outputs[index] = outputRing;
         if (outputRing != IntPtr.Zero) SharedMemoryIO.MarkOutputStart(index);
         var ctor = typeof(HMController).GetConstructor(Instance, new[]
         {
@@ -389,8 +435,10 @@ internal sealed class Case1Submit : IOracleCase
 
     internal static void Forget(int index)
     {
-        Cache("s_inputViews").Remove(index);
-        Cache("s_outputViews").Remove(index);
+        var inputs = Cache("s_inputViews");
+        lock (inputs) inputs.Remove(index);
+        var outputs = Cache("s_outputViews");
+        lock (outputs) outputs.Remove(index);
     }
 
     static Dictionary<int, IntPtr> Cache(string field) =>

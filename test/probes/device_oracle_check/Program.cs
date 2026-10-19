@@ -188,8 +188,6 @@ internal static class Program
             return HostContract.Run(hcNative, hcGolden) == 0 ? 0 : 1;
         }
         if (mode != "record" && mode != "replay") return Usage();
-        // The change list's own rules first, as selftest runs them.
-        bool selfTestFailed = mode == "replay" && SelfTest.RunQuiet() != 0;
 
         ulong seed = DefaultSeed;
         string golden = Path.Combine(ProbeDir(), "golden");
@@ -282,13 +280,16 @@ internal static class Program
             return 2;
         }
 
+        // The change list's own rules, as selftest runs them, beside the
+        // cases (SelfTest.Quiet), reported after them.
+        using var selfTest = mode == "replay" ? new SelfTest.Quiet() : null;
         Console.WriteLine($"=== device_oracle_check {mode}, seed {seed}, golden {golden} ===");
         if (profilePatch != null) ProfilePatch.Apply(profilePatch);
         // Every case reads the catalog through LoadEmbedded's process-wide
         // cache, so a case that changed a profile would change what every
         // case after it records. None may: checked after the last case.
         var catalog = CatalogText();
-        int failures = selfTestFailed ? 1 : 0, skipped = 0;
+        int failures = 0, skipped = 0;
         // No lane changes another lane's line (ChangeHistory.cs).
         if (mode == "replay" && File.Exists(defaultChanges))
         {
@@ -418,6 +419,7 @@ internal static class Program
             ChangeWriter.Write(writeChanges, changes, ran, moved, pins, explainedStreams, lane, Case5Driver.ConfigUnlisted);
             Console.WriteLine($"  wrote {writeChanges}: the change list this replay passes with, \"?\" where a lane or reason is to be filled in");
         }
+        if (selfTest != null && selfTest.Report() != 0) failures++;
         if (mode == "record" && failures == 0)
         {
             GoldenStore.Save(golden, recorded);
