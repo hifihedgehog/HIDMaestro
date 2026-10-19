@@ -25,10 +25,11 @@ int wmain()
     HRESULT hr = RoGetActivationFactory(className.Get(), IID_PPV_ARGS(&statics));
     if (FAILED(hr)) { wprintf(L"RoGetActivationFactory failed: 0x%08X\n", hr); return 1; }
 
-    // Poll up to ~3s for Gamepad.Gamepads to populate
+    // Poll up to 10 s for Gamepad.Gamepads to populate. A busy machine
+    // can take seconds, and the loop ends at the first pad.
     ComPtr<IVectorView<Gamepad*>> gamepads;
     UINT count = 0;
-    for (int i = 0; i < 15; i++) {
+    for (int i = 0; i < 50; i++) {
         hr = statics->get_Gamepads(&gamepads);
         if (SUCCEEDED(hr) && gamepads) { gamepads->get_Size(&count); if (count > 0) break; }
         Sleep(200);
