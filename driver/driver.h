@@ -169,6 +169,13 @@ typedef struct _DEVICE_CONTEXT {
     BOOLEAN UsesReportIds;
     USHORT  InputLengths[256];
 
+    /* The report IDs a PID report can arrive on, by ID: the canonical six
+     * and each report of a Logical Collection whose usage an SDK's
+     * PidReportIdExtractor reads as a PID report. Built at add
+     * (BuildPidCandidates). A request on any other ID takes no part of the
+     * PID block, so it never needs the PID state section. */
+    BOOLEAN PidCandidate[256];
+
     /* v2.0.0: the version contract held at add (decision (c)): the version
      * section of the index the identity entry names speaks protocol 4 and
      * carries this devnode's identity tag. Only then does the driver read
