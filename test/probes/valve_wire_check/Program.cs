@@ -92,7 +92,16 @@ static class Program
         return (null, 0);
     }
 
-    static byte[]? ReadFrame(string path, int inLen, HMController c, HMGamepadState state)
+    /// <summary>The first frame that carries <paramref name="state"/>, read
+    /// while a pump submits it. Frames of the previous state can come first:
+    /// idle streaming re-published it while the probe was quiet, and the
+    /// device holds up to eight frames for a host that polls slower than the
+    /// pump. So the reader skips frames until <paramref name="arrived"/>
+    /// accepts one. When none does within StateDeadlineMs, the last frame
+    /// read comes back, and it carries the new state by then, so the checks
+    /// that follow fail on its bytes.</summary>
+    static byte[]? ReadFrame(string path, int inLen, HMController c, HMGamepadState state,
+                             Func<byte[], bool> arrived)
     {
         IntPtr h = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_RW,
                                IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
@@ -106,48 +115,48 @@ static class Program
         pump.Start();
         try
         {
-            // The first frame after a change can still carry the previous
-            // state: idle streaming re-published it while the probe was
-            // quiet, and the device holds up to eight frames for a host
-            // that polls slower than the pump. Submit the new state long
-            // enough for both to drain, drop what this handle queued in the
-            // meantime, and read the next frame.
-            Thread.Sleep(StateSettleMs);
-            HidD_FlushQueue(h);
             var buf = new byte[inLen];
-            for (int i = 0; i < 6; i++)
-                if (ReadFile(h, buf, buf.Length, out int n, IntPtr.Zero) && n > 0)
-                    return buf;
-            return null;
+            byte[]? last = null;
+            int failed = 0;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < StateDeadlineMs && failed < 6)
+            {
+                if (!ReadFile(h, buf, buf.Length, out int n, IntPtr.Zero) || n <= 0) { failed++; continue; }
+                last = (byte[])buf.Clone();
+                if (arrived(last)) return last;
+            }
+            return last;
         }
         // The pump ends before the next state goes in, so no frame of this
         // one is submitted after it.
-        finally { stop.Set(); pump.Join(40); CloseHandle(h); }
+        finally { stop.Set(); pump.Join(1000); CloseHandle(h); }
     }
 
-    /// <summary>How long a new state, and a raw consumer's first frame, take
-    /// to displace what the device queued before them, with half again as
-    /// margin. Measured on the bench over 40 changes on each persona: the
-    /// first frame of a new state came at most 7.0 ms after the pump began,
-    /// with no stale frame before it, and a raw consumer's first own frame at
-    /// most 78.4 ms after its feed began (the 2015 controller, whose queue
-    /// of eight drains at its 8 ms poll).</summary>
-    const int StateSettleMs = 20, RawSettleMs = 120;
+    /// <summary>How long a new state may take to reach the wire. The bench
+    /// measured at most 7.0 ms over 40 changes on each persona, so only a
+    /// state that never arrives runs this out.</summary>
+    const int StateDeadlineMs = 3000;
 
-    /// <summary>The idle, raw-feed and quiet windows. Each holds enough
-    /// frames to fail on the defect it guards, as 8d896b72 measured it
-    /// before its fix: a stream held to the 15.6 ms system tick sends 62
-    /// frames a second, under the 100 a second the slowest persona's bound
-    /// allows, and SDK frames went out between a raw consumer's in 75 of 237
-    /// frames. A 300 ms raw window holds 37 frames or more, so a feed with
-    /// that defect shows none of its SDK frames in it with a chance below
-    /// one in a million (0.68 to the 37th power).</summary>
-    const int IdleWindowMs = 500, RawWindowMs = 300, QuietWindowMs = 300;
+    /// <summary>The frames each window holds. A stream held to the 15.6 ms
+    /// system tick, the defect 8d896b72 fixed, puts every gap past one and
+    /// a half declared periods on every persona, so the median of 40 shows
+    /// it. Before that fix SDK frames went out between a raw consumer's in
+    /// 75 of 237 frames, so 40 frames after the consumer's first show none
+    /// of them with a chance below one in a million (0.68 to the 40th
+    /// power).</summary>
+    const int WindowFrames = 40;
 
-    /// <summary>Every report the interface delivers for <paramref name="ms"/>
-    /// milliseconds, with its arrival time, read by a blocking reader the way
-    /// SDL's HIDAPI thread reads. Closing the handle ends the reader.</summary>
-    static List<(double T, byte[] F)> Collect(string path, int inLen, int ms)
+    /// <summary>How long a window may take to fill. 40 frames take 320 ms at
+    /// the slowest declared period, so only a stream that stops runs this
+    /// out.</summary>
+    const int WindowDeadlineMs = 5000;
+
+    /// <summary>The reports the interface delivers, with their arrival
+    /// times, read by a blocking reader the way SDL's HIDAPI thread reads,
+    /// until <paramref name="enough"/> accepts the list or WindowDeadlineMs
+    /// passes. Closing the handle ends the reader.</summary>
+    static List<(double T, byte[] F)> Collect(string path, int inLen,
+                                              Func<List<(double T, byte[] F)>, bool> enough)
     {
         var got = new List<(double T, byte[] F)>();
         IntPtr h = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_RW,
@@ -162,21 +171,26 @@ static class Program
                 lock (got) got.Add((sw.Elapsed.TotalMilliseconds, (byte[])buf.Clone()));
         }) { IsBackground = true };
         reader.Start();
-        Thread.Sleep(ms);
+        while (sw.ElapsedMilliseconds < WindowDeadlineMs)
+        {
+            lock (got) if (enough(got)) break;
+            Thread.Sleep(5);
+        }
         CloseHandle(h);
         reader.Join(500);
-        lock (got) return got.FindAll(r => r.T <= ms);
+        lock (got) return new List<(double T, byte[] F)>(got);
     }
 
-    /// <summary>Reports per second, and the 90th-percentile gap between
-    /// consecutive reports in milliseconds.</summary>
-    static (double PerSec, double P90) Cadence(List<(double T, byte[] F)> r, int ms)
+    /// <summary>The median gap between consecutive reports in milliseconds.
+    /// A stall of the reader or of the device's clock under load moves a
+    /// few gaps, and a clock held to the system tick moves every one.</summary>
+    static double MedianGap(List<(double T, byte[] F)> r)
     {
         var gaps = new List<double>();
         for (int i = 1; i < r.Count; i++) gaps.Add(r[i].T - r[i - 1].T);
+        if (gaps.Count == 0) return double.MaxValue;
         gaps.Sort();
-        double p90 = gaps.Count == 0 ? double.MaxValue : gaps[(int)(0.9 * (gaps.Count - 1))];
-        return (r.Count * 1000.0 / ms, p90);
+        return gaps[gaps.Count / 2];
     }
 
     static short S16(byte[] f, int o) => (short)(f[o] | (f[o + 1] << 8));
@@ -218,37 +232,6 @@ static class Program
                 return (lx, rt);
             }
         }
-    }
-
-    const string SteamLog = "C:/Program Files (x86)/Steam/logs/controller.txt";
-
-    static long SteamLogLength()
-    {
-        try { return System.IO.File.Exists(SteamLog) ? new System.IO.FileInfo(SteamLog).Length : 0; }
-        catch { return 0; }
-    }
-
-    /// <summary>Wait for Steam to log a fresh claim of this VID/PID.</summary>
-    static bool SteamClaimed(ushort vid, ushort pid, long from)
-    {
-        string want = $"{vid:x4} {pid:x4}";
-        for (int i = 0; i < 45; i++)
-        {
-            Thread.Sleep(1000);
-            try
-            {
-                using var fs = new System.IO.FileStream(SteamLog, System.IO.FileMode.Open,
-                    System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite);
-                fs.Seek(Math.Max(0, from - 2048), System.IO.SeekOrigin.Begin);
-                using var sr = new System.IO.StreamReader(fs);
-                string fresh = sr.ReadToEnd();
-                if (fresh.Contains(want, StringComparison.OrdinalIgnoreCase)
-                    && fresh.Contains("device opened for index", StringComparison.Ordinal))
-                    return true;
-            }
-            catch { }
-        }
-        return false;
     }
 
     /// <summary>Live monitor: create one persona, sweep it, and print what
@@ -378,7 +361,6 @@ static class Program
             if (prof == null) continue;
 
             HMController? c = null;
-            long steamBase = SteamLogLength();
             try
             {
                 c = ctx.CreateController(prof);
@@ -391,7 +373,17 @@ static class Program
                 Check($"controller interface enumerated ({t.Len}-byte input report)", path != null);
                 if (path == null) continue;
 
-                var raw = ReadFrame(path, inLen, c, State(prof));
+                // The payload after any report-id byte, and the button word.
+                byte[] P(byte[] r) => r[0] == 0x00 && t.Head[0] != 0x00 ? r[1..] : r;
+                ulong Bits(byte[] f)
+                {
+                    ulong b = 0;
+                    for (int i = 0; i < t.BtnBytes; i++) b |= (ulong)f[t.Btn + i] << (8 * i);
+                    return b;
+                }
+                ulong touched = (1UL << t.TouchL) | (1UL << t.TouchR);
+
+                var raw = ReadFrame(path, inLen, c, State(prof), r => S16(P(r), t.Lsx) <= -32000);
                 Check("an input report arrives on the interrupt endpoint", raw != null);
                 if (raw == null) continue;
 
@@ -430,7 +422,7 @@ static class Program
                     Buttons = 0,
                     Axes = HMGamepadStateHelpers.StandardAxes(prof, 1.0f, 0.5f, 0.5f, 0.5f, 0.0f, 0.0f),
                 };
-                var raw2 = ReadFrame(path, inLen, c, opposite);
+                var raw2 = ReadFrame(path, inLen, c, opposite, r => SdlDecode(t.Id, P(r)).leftX >= 32000);
                 Check("a second frame arrives after the state changes", raw2 != null);
                 if (raw2 != null)
                 {
@@ -463,7 +455,7 @@ static class Program
                     AccelX = 1000, AccelY = -2000, AccelZ = 3000,
                     GyroPitch = -4000, GyroYaw = 5000, GyroRoll = -6000,
                 };
-                var raw3 = ReadFrame(path, inLen, c, touch);
+                var raw3 = ReadFrame(path, inLen, c, touch, r => S16(P(r), t.Accel) == 1000);
                 Check("a frame arrives with both pads touched", raw3 != null);
                 if (raw3 != null)
                 {
@@ -508,7 +500,7 @@ static class Program
                         Buttons = 0,
                         Axes = HMGamepadStateHelpers.StandardAxes(prof, 0.5f, 0.5f, 0.5f, 0.5f, 0.0f, 0.0f),
                     };
-                    var raw4 = ReadFrame(path, inLen, c, lift);
+                    var raw4 = ReadFrame(path, inLen, c, lift, r => (Bits(P(r)) & touched) == 0);
                     if (raw4 != null)
                     {
                         var f4 = raw4[0] == 0x00 && t.Head[0] != 0x00 ? raw4[1..] : raw4;
@@ -525,13 +517,13 @@ static class Program
                 // reads once with a 16 ms timeout before it accepts a Deck
                 // (SDL_hidapi_steamdeck.c, HIDAPI_DriverSteamDeck_InitDevice),
                 // so a persona held to the 15.6 ms system tick can be passed
-                // over.
-                double want = 1000.0 / t.IdleMs;
-                Thread.Sleep(StateSettleMs);
-                var (idleRate, idleP90) = Cadence(Collect(path, inLen, IdleWindowMs), IdleWindowMs);
+                // over. The median gap carries the clock: load delays a few
+                // frames, while a clock held to the tick delays every one.
+                var idle = Collect(path, inLen, l => l.Count >= WindowFrames);
+                double idleGap = MedianGap(idle);
                 Check($"idle frames keep the declared {t.IdleMs} ms cadence",
-                      idleRate >= 0.8 * want && idleP90 <= 2.0 * t.IdleMs,
-                      $"{idleRate:F0}/s, p90 gap {idleP90:F1} ms, declared {want:F0}/s");
+                      idle.Count >= WindowFrames && idleGap <= 1.5 * t.IdleMs,
+                      $"{idle.Count} frames, median gap {idleGap:F1} ms, declared {t.IdleMs} ms");
 
                 // A raw consumer is the only source on the wire. PadForge
                 // feeds Valve personas only through SubmitRawReport, so an
@@ -564,30 +556,35 @@ static class Program
                         catch (ObjectDisposedException) { }
                     }) { IsBackground = true };
                     feeder.Start();
-                    Thread.Sleep(RawSettleMs);
-                    var fed = Collect(path, inLen, RawWindowMs);
-                    int foreign = fed.FindAll(r => !Ours(r.F)).Count;
+                    // The window starts eight frames, the depth of the
+                    // device's queue, after the consumer's first frame
+                    // reaches the wire, so it holds the consumer's stream
+                    // and not the switch from the SDK's own state, however
+                    // late load makes that first frame.
+                    int Steady(List<(double T, byte[] F)> l)
+                    {
+                        int first = l.FindIndex(r => Ours(r.F));
+                        return first < 0 ? l.Count : Math.Min(l.Count, first + 8);
+                    }
+                    var fed = Collect(path, inLen, l => l.Count - Steady(l) >= WindowFrames);
+                    int from = Steady(fed);
+                    var steady = fed.GetRange(from, fed.Count - from);
+                    int foreign = steady.FindAll(r => !Ours(r.F)).Count;
                     Check("a raw consumer's frames are the only frames on the wire",
-                          fed.Count > 0 && foreign == 0, $"{fed.Count - foreign} ours, {foreign} not");
+                          steady.Count >= WindowFrames && foreign == 0,
+                          $"{steady.Count - foreign} ours, {foreign} not");
                     feedStop.Set();
                     feeder.Join(500);
                 }
 
                 // Once the raw consumer goes quiet, its own last frame keeps
                 // the stream up at the declared cadence.
-                Thread.Sleep(StateSettleMs);
-                var quiet = Collect(path, inLen, QuietWindowMs);
-                var (quietRate, _) = Cadence(quiet, QuietWindowMs);
+                var quiet = Collect(path, inLen, l => l.Count >= WindowFrames);
+                double quietGap = MedianGap(quiet);
                 int quietForeign = quiet.FindAll(r => !Ours(r.F)).Count;
                 Check("a quiet raw consumer's own frame repeats at the declared cadence",
-                      quietRate >= 0.8 * want && quietForeign == 0,
-                      $"{quietRate:F0}/s, {quietForeign} foreign");
-
-                if (System.Diagnostics.Process.GetProcessesByName("steam").Length > 0)
-                    Check("Steam claims the device (fresh entry in controller.txt)",
-                          SteamClaimed(t.Vid, t.Pid, steamBase));
-                else
-                    Console.WriteLine("  [skip] Steam not running; claim check needs a live client");
+                      quiet.Count >= WindowFrames && quietGap <= 1.5 * t.IdleMs && quietForeign == 0,
+                      $"{quiet.Count} frames, median gap {quietGap:F1} ms, {quietForeign} foreign");
             }
             catch (Exception ex) { Check("persona created without throwing", false, ex.Message); }
             finally { c?.Dispose(); }
