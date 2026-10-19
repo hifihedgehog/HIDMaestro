@@ -1089,7 +1089,8 @@ internal static partial class RegistryLedger
 
     /// <summary>The driver INF an entry recorded for its devnode at its claim,
     /// empty when the devnode had none, and null when the entry cannot be
-    /// read, which restores the devnode as one recorded with none. The caller
+    /// read, which keeps the entry of a gone devnode with no driver for a
+    /// later sweep (<see cref="WinUsbBinding.RestoreLocked"/>). The caller
     /// holds the devnode lock, which every claim and every delete of an entry
     /// with a devnode take, so the entry does not change under the read.</summary>
     private static string? PriorInfOf(string name)

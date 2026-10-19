@@ -1,7 +1,9 @@
 // The usbip-win2 install on a clean machine, in Windows Sandbox.
 //
 //   A. clean    A composite create on a machine without usbip-win2 runs the
-//               bundled installer. Afterward there is no Start menu folder,
+//               bundled installer, when A runs alone. In the sandbox it
+//               shares with B and C, C's creates run it and A's checks read
+//               that install. Afterward there is no Start menu folder,
 //               no desktop shortcut, and no GUI, SDK or PDB file. The VC++
 //               runtime the host controller's own installer step needs is
 //               there, and the composite enumerates and carries input.
@@ -613,6 +615,14 @@ internal static class Program
                UninstallerPath() == null && !DriverPackagePresent() && !Directory.Exists(InstallDir));
 
         Together(results);
+
+        // C's programs dispose their composites as they exit, and A's
+        // checks read the HID interface of the composite created next, so
+        // C's go first.
+        var gone = Stopwatch.StartNew();
+        while (Hid.Paths(0x054C, 0x0CE6).Count > 0 && gone.ElapsedMilliseconds < 30_000) Thread.Sleep(250);
+        int left = Hid.Paths(0x054C, 0x0CE6).Count;
+        Record("together: both composites are gone once their programs dispose them", left == 0, $"{left} interface(s) left");
 
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();

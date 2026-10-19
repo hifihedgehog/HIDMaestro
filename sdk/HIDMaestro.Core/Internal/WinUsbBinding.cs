@@ -469,8 +469,7 @@ DeviceName = ""{deviceName}""
                                     // restore finds the devnode as it was.
                                     RegistryLedger.ClaimWinUsb(instanceId, service, inf, controller.Index, ClaimTimeoutMs);
                                     if (!InstallOn(instanceId, published!, package.CompatibleId,
-                                            () => ArrivalOf(instanceId) == arrival
-                                                  && IsImportsDevnode(handle, instanceId, d.VendorId, d.ProductId)))
+                                            settled => StillImports(handle, instanceId, arrival, settled)))
                                     {
                                         // It left between the claim and the
                                         // install, and nothing changed on it.
@@ -539,16 +538,37 @@ DeviceName = ""{deviceName}""
 
     /// <summary>True when <paramref name="instanceId"/> is the devnode of
     /// the controller's import now: present and not being removed, settled
-    /// on its driver, the one devnode at the address of the vhci port the
-    /// import's location is on, and that location still on the port.</summary>
-    private static bool IsImportsDevnode(Usbip.UsbipBackendHandle handle, string instanceId, ushort vendorId, ushort productId)
+    /// on its driver unless <paramref name="settled"/> is false, the one
+    /// devnode at the address of the vhci port the import's location is on,
+    /// and that location still on the port.</summary>
+    private static bool IsImportsDevnode(Usbip.UsbipBackendHandle handle, string instanceId, ushort vendorId, ushort productId,
+                                         bool settled = true)
     {
         int port = Usbip.VhciClient.FindLocation("127.0.0.1", handle.ServerPort, handle.Device.BusId);
         return port > 0
             && PresenceOf(instanceId) == Presence.Present
-            && IsSettled(instanceId)
+            && (!settled || IsSettled(instanceId))
             && string.Equals(FindDevnode(port, vendorId, productId), instanceId, StringComparison.OrdinalIgnoreCase)
             && Usbip.VhciClient.FindLocation("127.0.0.1", handle.ServerPort, handle.Device.BusId) == port;
+    }
+
+    /// <summary>True when <paramref name="instanceId"/> is still the import's
+    /// devnode (<see cref="IsImportsDevnode"/>), on the arrival
+    /// <paramref name="arrival"/> while <paramref name="settled"/>. The null
+    /// driver restarts the devnode, which moves its arrival on (0.47 s later
+    /// on Windows 11 26200), so after it the import's location on the
+    /// devnode's port tells this device from another. A devnode that fails
+    /// is logged with each part of the test.</summary>
+    private static bool StillImports(Usbip.UsbipBackendHandle handle, string instanceId, long? arrival, bool settled)
+    {
+        var d = handle.Device.Descriptors;
+        long? now = ArrivalOf(instanceId);
+        if ((!settled || now == arrival) && IsImportsDevnode(handle, instanceId, d.VendorId, d.ProductId, settled)) return true;
+        int port = Usbip.VhciClient.FindLocation("127.0.0.1", handle.ServerPort, handle.Device.BusId);
+        DeviceOrchestrator.LogDiag(
+            $"    winusb: {instanceId} is not the import's devnode: arrival {arrival} then {now}, {PresenceOf(instanceId)}, " +
+            $"settled {IsSettled(instanceId)} (asked {settled}), port {port}, on it {FindDevnode(port, d.VendorId, d.ProductId) ?? "none"}");
+        return false;
     }
 
     /// <summary>True when the controller's import is on
@@ -658,8 +678,11 @@ DeviceName = ""{deviceName}""
     /// "causes the device to be reinstalled the next time that the device is
     /// reenumerated"). So does a gone devnode with no driver whose claim
     /// recorded one in <paramref name="priorInf"/>: a single-INF install
-    /// left it on the null driver when its package install failed
-    /// (<see cref="InstallFromInf"/>).</para>
+    /// left it on the null driver when its package install failed or the
+    /// devnode left first (<see cref="InstallFromInf"/>). Null
+    /// <paramref name="priorInf"/> is an entry that could not be read, and a
+    /// gone devnode with no driver then keeps its entry for a later
+    /// sweep.</para>
     ///
     /// <para>Nothing is ever installed on a present devnode, whoever's device
     /// it is: the device bound, on its way out, or another that arrived on
@@ -683,8 +706,11 @@ DeviceName = ""{deviceName}""
             return current != null && IsInboxOrNone(current);
         }
         var (_, inf) = DriverOf(instanceId, phantom: true);
-        if (string.IsNullOrEmpty(inf) && !string.IsNullOrEmpty(priorInf) && HasRecord(instanceId))
-            return HasLeft(instanceId) && FlagForNextArrival(instanceId);
+        if (string.IsNullOrEmpty(inf) && HasRecord(instanceId))
+        {
+            if (priorInf == null) return false;
+            if (priorInf.Length > 0) return HasLeft(instanceId) && FlagForNextArrival(instanceId);
+        }
         switch (IsOurPackage(inf))
         {
             case false:
@@ -1334,8 +1360,10 @@ DeviceName = ""{deviceName}""
     /// can carry the package, which then matches no device, and takes it
     /// through <see cref="InstallFromInf"/>. <paramref name="still"/> runs
     /// right before the first change to the devnode, and when it returns
-    /// false nothing is installed and this returns false.</summary>
-    private static bool InstallOn(string instanceId, string publishedInf, string compatibleId, Func<bool> still)
+    /// false nothing is installed and this returns false. Its argument is
+    /// whether the devnode must be settled on a driver, false only once the
+    /// null driver has stopped it.</summary>
+    private static bool InstallOn(string instanceId, string publishedInf, string compatibleId, Func<bool, bool> still)
     {
         bool listed = false;
         IntPtr set = SetupDiCreateDeviceInfoList(IntPtr.Zero, IntPtr.Zero);
@@ -1386,7 +1414,7 @@ DeviceName = ""{deviceName}""
                     {
                         // SetupDiOpenDeviceInfo opens a devnode that is not
                         // present too, so the devnode is checked here, last.
-                        if (!still())
+                        if (!still(true))
                         {
                             DeviceOrchestrator.LogDiag($"    winusb: {instanceId} left before the install, nothing installed");
                             return false;
@@ -1429,12 +1457,18 @@ DeviceName = ""{deviceName}""
     /// driver, and one from input.inf held 172.
     ///
     /// <para><paramref name="still"/> runs right before the null driver, the
-    /// first change. From there the install runs to the end or throws, with
-    /// the claim kept, and a devnode left on no driver gets the reinstall flag
-    /// once it is gone (<see cref="RestoreLocked"/>).</para></summary>
-    private static bool InstallFromInf(string instanceId, string publishedInf, Func<bool> still)
+    /// first change, and again right before the package's install, there
+    /// without asking that the devnode be settled on a driver or on its
+    /// first arrival: the null driver leaves it present and not started,
+    /// with no problem code (status 0x01806000 on Windows 11 26200), and its
+    /// restart moves the arrival on. A devnode that fails the
+    /// second check keeps the null driver: this throws, with the claim kept,
+    /// as it does when the install fails, and a devnode left on no driver
+    /// gets the reinstall flag once it is gone
+    /// (<see cref="RestoreLocked"/>).</para></summary>
+    private static bool InstallFromInf(string instanceId, string publishedInf, Func<bool, bool> still)
     {
-        if (!still())
+        if (!still(true))
         {
             DeviceOrchestrator.LogDiag($"    winusb: {instanceId} left before the install, nothing installed");
             return false;
@@ -1490,6 +1524,11 @@ DeviceName = ""{deviceName}""
                     throw new InvalidOperationException($"The driver list from {publishedInf} holds no driver for {instanceId}.");
                 if (!SetupDiSetSelectedDriverW(set, ref dev, ref ours))
                     throw new InvalidOperationException($"SetupDiSetSelectedDriver({instanceId}) failed ({Marshal.GetLastWin32Error()}).");
+                // The devnode left, or another device took the instance,
+                // while the null driver went on.
+                if (!still(false))
+                    throw new InvalidOperationException(
+                        $"The device left {instanceId} after its null driver went on, so WinUSB was not installed on it.");
                 if (!DiInstallDevice(IntPtr.Zero, set, ref dev, ref ours, 0, out bool reboot))
                     throw new InvalidOperationException($"DiInstallDevice on {instanceId} failed ({Marshal.GetLastWin32Error()}).");
                 if (reboot)
