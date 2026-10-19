@@ -95,7 +95,14 @@ internal static partial class Program
     static extern uint XInputGetState(uint index, out XInputState state);
 
     static bool s_showXInput;
-    static int s_settleMs = 600;
+    // How long a new pad is left before WGI's reading of it at rest and
+    // whether it is a Gamepad are taken. Measured on the bench over 30
+    // creates of the three Gamepads here: Gamepad.FromGameController answered
+    // at most 0.9 ms after the RawGameController appeared, and the reading
+    // showed rest at most 2.6 ms after. The DualSense and the code-built
+    // joystick, 10 creates each, never became a Gamepad within 2 s. 50 ms
+    // covers both with room to spare.
+    static int s_settleMs = 50;
 
     /// <summary>Every connected XInput slot, as the same-window control for
     /// what WGI reads: the feed reached the pad when XInput moved.</summary>
@@ -247,17 +254,35 @@ internal static partial class Program
             }
 
             int judged = 0;
+            bool Moved(Snapshot now)
+            {
+                for (int i = 0; i < now.Axes.Length; i++) if (Math.Abs(now.Axes[i] - rest.Axes[i]) > 0.2) return true;
+                for (int i = 0; i < now.Buttons.Length; i++) if (now.Buttons[i] != rest.Buttons[i]) return true;
+                for (int i = 0; i < now.Switches.Length; i++) if (now.Switches[i] != rest.Switches[i]) return true;
+                return false;
+            }
+            // The reading is polled every 10 ms instead of read once after
+            // fixed waits, with those waits as the limits: up to 220 ms for
+            // the stimulus to show, raw and Gamepad, and up to 120 ms for the
+            // reading to fall back to rest before the next one. A control
+            // that lands on the wrong field never shows as expected, and is
+            // judged on the reading at 220 ms, as before.
             void Stim(string label, HMGamepadState s, Func<GamepadReading, GamepadReading, bool> expected, string expectText)
             {
                 lock (gate) state = s;
-                Thread.Sleep(220);
-                var now = Read(raw, gp);
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                Snapshot now;
+                while (true)
+                {
+                    now = Read(raw, gp);
+                    if (Moved(now) && now.Pad is { } p0 && rest.Pad is { } r1 && expected(p0, r1)) break;
+                    if (sw.ElapsedMilliseconds >= 220) break;
+                    Thread.Sleep(10);
+                }
                 lock (gate) state = neutral;
-                Thread.Sleep(120);
-                bool rawMoved = false;
-                for (int i = 0; i < now.Axes.Length; i++) if (Math.Abs(now.Axes[i] - rest.Axes[i]) > 0.2) rawMoved = true;
-                for (int i = 0; i < now.Buttons.Length; i++) if (now.Buttons[i] != rest.Buttons[i]) rawMoved = true;
-                for (int i = 0; i < now.Switches.Length; i++) if (now.Switches[i] != rest.Switches[i]) rawMoved = true;
+                sw.Restart();
+                while (Moved(Read(raw, gp)) && sw.ElapsedMilliseconds < 120) Thread.Sleep(10);
+                bool rawMoved = Moved(now);
                 if (!rawMoved || now.Pad is not { } a || rest.Pad is not { } b) return;   // the profile lacks this control
                 judged++;
                 if (!expected(a, b))
@@ -354,23 +379,7 @@ internal static partial class Program
         }
     }
 
-    static string? FindLiveSdkConsumer()
-    {
-        int self = Environment.ProcessId;
-        foreach (var p in System.Diagnostics.Process.GetProcesses())
-        {
-            if (p.Id == self || !ConsumerElevation.IsElevated(p.Id)) { p.Dispose(); continue; }
-            try
-            {
-                foreach (System.Diagnostics.ProcessModule m in p.Modules)
-                    if (string.Equals(m.ModuleName, "HIDMaestro.Core.dll", StringComparison.OrdinalIgnoreCase))
-                        return p.ProcessName;
-            }
-            catch { }
-            finally { p.Dispose(); }
-        }
-        return null;
-    }
+    static string? FindLiveSdkConsumer() => SdkConsumers.Find(ConsumerElevation.IsElevated);
 
     /// <summary>The battery's check (foundation-sunshine #1056): what WGI
     /// reads from a pad at rest and under each control, with the GameInput
