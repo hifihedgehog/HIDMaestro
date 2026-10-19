@@ -29,9 +29,13 @@
 // was pending, and the Kernel-PnP configuration events that name them.
 // Notes print as [NOTE] and are not checks.
 //
-// The host role starts a fresh sandbox for each scenario with wsb.exe,
-// which opens no window, runs this program inside it as SYSTEM, and reports
-// what it wrote back. Inside, the program runs as a self-contained copy
+// The host role starts a sandbox with wsb.exe, which opens no window, runs
+// this program inside it as SYSTEM, and reports what it wrote back. A, B
+// and C share one sandbox, since each boot costs about three minutes: B
+// runs first and leaves the machine without usbip-win2, C installs it on
+// that clean machine, and A's checks then read C's install and a
+// composite created over it. Any other selection, N included, starts a
+// sandbox per scenario. Inside, the program runs as a self-contained copy
 // published to sandbox\ beside this one, since the sandbox has no .NET
 // runtime. Run with /VERYSILENT as its first argument, it is the planted
 // uninstaller of scenario B and only leaves a marker.
@@ -75,6 +79,8 @@ internal static class Program
             return InSandbox(args[1], args[2]);
         if (args.Length >= 3 && args[0] == "--create-composite")
             return CreateComposite(args[1], args[2]);
+        if (args.Length >= 2 && args[0] == "--record-create")
+            return RecordCreate(args[1]);
         if (args.Length > 0 && args[0] == "--offline")
             return Offline();
         return Host(args.Length > 0 ? args[0].ToUpperInvariant() : "ABC");
@@ -105,6 +111,14 @@ internal static class Program
             ('C', "together", "two programs' first composites at the same moment"),
             ('N', "nostream", "a clean machine, the composite without its idle stream"),
         };
+        if (only.Contains('A') && only.Contains('B') && only.Contains('C'))
+        {
+            Console.WriteLine();
+            Console.WriteLine("B, C, A. an uninstall entry without the driver package, two programs' first composites at the same moment, then a clean install's checks");
+            try { RunInSandbox(wsb, publish, "all"); }
+            catch (Exception ex) { Check("B, C, A ran to the end", false, $"{ex.GetType().Name}: {ex.Message}"); }
+            only = only.Replace("A", "").Replace("B", "").Replace("C", "");
+        }
         foreach (var (id, name, title) in scenarios)
         {
             if (!only.Contains(id)) continue;
@@ -190,6 +204,14 @@ internal static class Program
             Record($"{scenario}: the machine starts without usbip-win2",
                    UninstallerPath() == null && !DriverPackagePresent() && !Directory.Exists(InstallDir));
 
+            if (scenario == "all")
+            {
+                All(results);
+                s_lines.Add("DONE");
+                File.WriteAllLines(Path.Combine(results, "results.txt"), s_lines);
+                return s_lines.Any(l => l.StartsWith("FAIL", StringComparison.Ordinal)) ? 1 : 0;
+            }
+
             if (scenario == "record")
             {
                 using var k = Registry.LocalMachine.CreateSubKey(UninstallKey);
@@ -217,7 +239,7 @@ internal static class Program
             try { c = ctx.CreateController(profile, "sandbox-composite"); }
             catch (Exception ex) { error = ex; }
 
-            if (scenario == "record") RecordChecks(error);
+            if (scenario == "record") RecordChecks(error != null, error == null ? "" : $"{error.GetType().Name}: {error.Message}");
             else CleanChecks(scenario, c, error, createdFrom);
 
             c?.Dispose();
@@ -562,12 +584,77 @@ internal static class Program
     /// devnodes with the hardware ID of its emulated host controller.</summary>
     static int HostControllers() => Pnp.WithHardwareId(@"ROOT\USBIP_WIN2\UDE");
 
-    static void RecordChecks(Exception? error)
+    /// <summary>B, C and A in one sandbox. B's create runs in a child
+    /// process, so nothing it leaves in a process reaches A's, and the
+    /// planted entry goes once it has run. C then installs usbip-win2 on
+    /// the clean machine, and A's checks read that install and a composite
+    /// this process creates over it.</summary>
+    static void All(string results)
     {
-        Record("record: the composite create is refused", error != null);
+        using (var k = Registry.LocalMachine.CreateSubKey(UninstallKey))
+        {
+            k.SetValue("DisplayName", "USBip");
+            k.SetValue("UninstallString", "\"C:\\probe\\UsbipInstallCheck.exe\"");
+        }
+        Record("record: the planted uninstall entry reads as an existing install",
+               UninstallerPath() != null, UninstallerPath() ?? "");
+        string answer = Path.Combine(results, "record.txt");
+        var psi = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, CreateNoWindow = true };
+        psi.ArgumentList.Add("--record-create");
+        psi.ArgumentList.Add(answer);
+        using (var child = Process.Start(psi)!)
+        {
+            if (!child.WaitForExit(300_000)) try { child.Kill(); } catch { }
+        }
+        string said = File.Exists(answer) ? File.ReadAllText(answer).Trim() : "no answer";
+        RecordChecks(said.StartsWith("refused ", StringComparison.Ordinal), said);
+        Registry.LocalMachine.DeleteSubKeyTree(UninstallKey, throwOnMissingSubKey: false);
+        Record("record: the machine is without usbip-win2 again once the planted entry is gone",
+               UninstallerPath() == null && !DriverPackagePresent() && !Directory.Exists(InstallDir));
+
+        Together(results);
+
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        ctx.InstallDriver();
+        HMController? c = null;
+        Exception? error = null;
+        DateTime createdFrom = DateTime.UtcNow;
+        try { c = ctx.CreateController(ctx.GetProfile("dualsense-composite")!, "sandbox-composite"); }
+        catch (Exception ex) { error = ex; }
+        CleanChecks("clean", c, error, createdFrom);
+        c?.Dispose();
+    }
+
+    /// <summary>B's create, in a child process: refused or created, written
+    /// to <paramref name="answer"/>.</summary>
+    static int RecordCreate(string answer)
+    {
+        try
+        {
+            using var ctx = new HMContext();
+            ctx.LoadDefaultProfiles();
+            ctx.InstallDriver();
+            try
+            {
+                using var c = ctx.CreateController(ctx.GetProfile("dualsense-composite")!, "sandbox-composite");
+                File.WriteAllText(answer, "created");
+            }
+            catch (Exception ex) { File.WriteAllText(answer, $"refused {ex.GetType().Name}: {ex.Message}"); }
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            File.WriteAllText(answer, $"failed {ex.GetType().Name}: {ex.Message}");
+            return 1;
+        }
+    }
+
+    static void RecordChecks(bool refused, string refusal)
+    {
+        Record("record: the composite create is refused", refused);
         Record("record: the refusal names the existing usbip-win2 install",
-               error != null && error.Message.Contains("uninstall entry", StringComparison.OrdinalIgnoreCase),
-               error == null ? "" : $"{error.GetType().Name}: {error.Message}");
+               refused && refusal.Contains("uninstall entry", StringComparison.OrdinalIgnoreCase), refusal);
         Record("record: the planted uninstaller never ran", !File.Exists(Marker));
         Record("record: usbip-win2 was not installed", !DriverPackagePresent() && !Directory.Exists(InstallDir));
     }

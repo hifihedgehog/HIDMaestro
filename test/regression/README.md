@@ -29,15 +29,46 @@ custom profile (BEEF:F000) authored via the SDK's `HMProfileBuilder`
 
 # point at a non-default exe (e.g. a published build)
 ./test/regression/swap_regression.ps1 -Exe C:\path\to\HIDMaestroTest.exe
+
+# every scenario, or the core alone
+./test/regression/swap_regression.ps1 -All
+./test/regression/swap_regression.ps1 -Core
+
+# which areas changed since the last release, and what a run would take
+./test/regression/swap_regression.ps1 -ListOnly
+./test/regression/swap_regression.ps1 -ListOnly -Changed 'sdk/HIDMaestro.Core/Internal/Usbip/UsbipServer.cs'
 ```
 
 Exit code: `0` if every scenario passed, `1` if any failed.
 
-Total wall time: [D4-PLACEHOLDER: minutes from the v2.0.0 release battery] for the full
-96-scenario battery on a 16-core laptop. Most of it is deliberate cascade-settle waits (Series BT teardown takes about 10s
-of xinputhid filter unbinding regardless of code path). Slow machines
-with profile-extraction or PnP-quiesce overhead may push this longer.
+Total wall time: [D4-PLACEHOLDER: minutes from the v2.0.0 release battery] for every
+area, and [D4-PLACEHOLDER: minutes for the core] for the core alone, on a 16-core laptop.
 Use `-Filter` to run a single scenario in 1-2 minutes when iterating.
+
+## Core and area runs
+
+A run takes the core scenarios and every area whose files changed since
+the newest release tag before `HEAD` (`-Since` names another ref). A
+change to a shared file runs every area: the driver, `HMContext`,
+`HMController`, `DeviceOrchestrator`, `DeviceManager`, the SDK's
+resources and project, the build, the test app and this directory. So
+does a run whose changes git cannot list. `-ListOnly` prints the
+selection and runs nothing, and the summary names each scenario its
+unchanged area left out.
+
+| Area | Scenarios | Files that select it |
+|---|---|---|
+| `usbip` | S53, S54, S55, S65, S73, S81, S82, S83, and S71 sections V and Z | The USB/IP transport (`Internal/Usbip`), the WinUSB binding, the driver store listing, the registry ledger, the Valve and Nintendo profiles, and their probes |
+| `coexistence` | S72, and S71 sections E, N, T, U, W, X and Y | The registry ledger, the machine-wide claims and locks, owner records and sweeps, the driver deploy and build, protected staging, `legacy_cache`, and `coexist_check` |
+| `kbm` | S70 | The keyboard and mouse packer and API, `kbm_*` probes, and any profile of type keyboard or mouse |
+| `identity` | S59 | Device identity, devnode creation, software devices and device properties |
+| `xinput` | S57 | The XInput presentation and XUSB answers, the GameInput mapping, software devices and the Microsoft profiles |
+
+S71 always runs its sections A to D, F to H, J to M and O to S. The
+core alone takes [D4-PLACEHOLDER: minutes for the core] here. Each area check
+waits out what it observes: S71's sections V and Z wait for usbip-win2's
+re-attach, which comes 30 s after a drop, and S73 boots Windows
+Sandbox.
 
 ## Why elevated
 
@@ -139,7 +170,7 @@ not run elevated.
 | `S87_Interop_Decl`                | Interop declarations and the method names in the SDK's text | No `DllImport` is left, `SetupDiGetClassDevsW` takes its Enumerator as a pointer, and every method a message or XML doc names exists as written. 33 string-form fixtures check the argument counter. The live run reads the SDK's own XInput slot count on an Xbox 360 persona and runs the phantom sweep. There is no S86. |
 | `S88_Device_Shortcut`             | No device shortcut in the SDK or the drivers | No declared name, file name or string carries a device or vendor word from the catalog outside the probe's allowed names, no vendor or product ID is compared, switched on or assigned in any form, no device name is searched, no profile field set by one catalog profile alone is read, and no region of the 24 device regions and the default device's five is left in a driver source. It failed by design until the last device code became profile data, and passes at 2.0.0. Offline |
 | `S89_Device_Oracle`               | The device code gives the bytes it gave before the conversion | Replays nine recorded cases, the submit and decode paths, the packers, the Switch 2 Pro responder, the USB/IP feature answers, the UMDF2 driver and companion compiled natively, and the physical descriptors of the reference clones, and passes a difference only when `changes.txt` lists it with its lane and reason. Offline |
-| `S90_Arith_Roundtrip`             | Every raw value comes back | Every raw value of every catalog conversion, normalized three ways, returns through the SDK's own code. A NaN writes the rest, an unwritten stick rests at its center, the rounding matches `Math.Round`, and `diff` holds every float in [0, 1] to the design note's table. Offline, about 9 minutes for `diff` |
+| `S90_Arith_Roundtrip`             | Every raw value comes back | Every raw value of every catalog conversion, normalized three ways, returns through the SDK's own code. A NaN writes the rest, an unwritten stick rests at its center, and the rounding matches `Math.Round`. Offline. The probe's `diff` mode holds every float in [0, 1] to the design note's table in about 9 minutes, and runs by hand when the arithmetic or a descriptor range changes |
 | `S91_Vendor_Blob_Golden`          | Vendor-blob reports against golden bytes | Every Sony, Valve and Nintendo vendor-blob report encodes and decodes to its golden SHA-256, and the codec vocabulary refuses the removed `ds3-battery` type, a missing `max` or `invert`, and parameters an output field ignores. Offline |
 | `S92_Profile_Model`               | Profiles and device models as data, no device | The catalog and a user's directory load strictly: every defect a file can carry is refused at its JSON path and listed in `HMContext.ProfileLoadIssues`, a create and a build meet `HMProfileException` for a bad profile, and the catalog files of every earlier v1.x tag load but for the removed spellings. Answer tables, value sources and patches, model resolution by name and by identity (no catalog profile takes a group from an identity default), the SDK's half of the version contract, the 2.0.0 deploy floor and its policy, the start wait's hold of a failed start while Windows has a device installation pending, and `FromProfile`'s whole copy. Offline |
 | `S93_Contract_Live`               | The version contract on the live driver | A fresh-token controller's driver reads its index from the identity entry before its first start, on the ROOT path and the SWD xinputhid path, a device without report IDs answers its message after HID class's leading 0, and each catalog profile with a model, read back by `HMDeviceExtractor`, names the model its identity gives it, and created on the same index answers each feature report as the device did. ps3-remote, tinyusb-generic-gamepad and nacon-bigben-ps4 start, and a create whose descriptor Windows' parser refuses fails with problem code 10 and removes the device it made. Live, elevated |

@@ -181,8 +181,9 @@ if errorlevel 1 (
 )
 echo.
 
-rem 4. Run the full regression battery
-echo [3/4] Running live-swap regression battery (96 scenarios)...
+rem 4. Run the regression battery: the core, and every area whose files
+rem changed since the last release (test\regression\README.md)
+echo [3/4] Running live-swap regression battery (core and changed areas)...
 echo.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "test\regression\swap_regression.ps1"
 set BATTERY_EXIT=%ERRORLEVEL%

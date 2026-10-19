@@ -30,6 +30,24 @@
   If set, do NOT clear teardown_diag.log before the run; append.
   Default: clear before each run for a clean per-run log.
 
+.PARAMETER All
+  Run every scenario, whatever changed.
+
+.PARAMETER Core
+  Run the core scenarios only.
+
+.PARAMETER Since
+  The git ref the areas' changes are read from. Default: the newest
+  release tag (v*) before HEAD.
+
+.PARAMETER Changed
+  Changed files, as git paths from the repository root, to select the
+  areas from in place of git's list. With -ListOnly it shows what a
+  planned change would run.
+
+.PARAMETER ListOnly
+  Print the areas and the scenarios a run would take, and run nothing.
+
 .PARAMETER Verbose
   Print every command sent to the test app and every state snapshot.
 
@@ -41,6 +59,11 @@
   ./swap_regression.ps1 -Filter 'S08*' -Verbose
   Runs only the S08 scenario with verbose output.
 
+.EXAMPLE
+  ./swap_regression.ps1 -ListOnly
+  Prints which areas changed since the last release and which scenarios
+  a run would take.
+
 .NOTES
   Requires elevation. Run from an already-elevated PowerShell so the
   test app does not re-launch (which would orphan the stdin pipe).
@@ -49,7 +72,12 @@
 param(
     [string]$Exe,
     [string]$Filter = '*',
-    [switch]$KeepLogs
+    [switch]$KeepLogs,
+    [switch]$All,
+    [switch]$Core,
+    [string]$Since,
+    [string[]]$Changed,
+    [switch]$ListOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -72,7 +100,7 @@ if (-not $Exe) {
 #  Setup
 # ====================================================================
 
-if (-not (Test-Path $Exe)) {
+if (-not $ListOnly -and -not (Test-Path $Exe)) {
     Write-Error "HIDMaestroTest.exe not found at: $Exe"
     exit 2
 }
@@ -80,7 +108,7 @@ if (-not (Test-Path $Exe)) {
 # Verify elevation. HIDMaestroTest re-launches if not, breaking stdin.
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
+if (-not $ListOnly -and -not $isAdmin) {
     Write-Error "This script must run elevated. PadForge-style stdin-driven swaps require an already-admin process so the test app does NOT re-launch (which would orphan the stdin pipe). Re-run via 'sudo --inline pwsh -File ...' or an Administrator console."
     exit 2
 }
@@ -227,7 +255,7 @@ if ($verMatch.Success) {
             }
         }
     }
-    if ($stale.Count -gt 0) {
+    if ($stale.Count -gt 0 -and -not $ListOnly) {
         Write-Host "STALE PROBE BINARIES -- refusing to run with mismatched HIDMaestro.Core:" -ForegroundColor Red
         foreach ($s in $stale) {
             Write-Host ("  " + $s.Path) -ForegroundColor Red
@@ -269,9 +297,9 @@ $Profiles = @{
 # + 2x8-bit triggers + hat + 11 buttons), authored via the SDK's public
 # HidDescriptorBuilder + HMProfileBuilder API surface.
 $customProfileDir = Join-Path $env:TEMP 'HIDMaestro-regression-custom'
-if (Test-Path $customProfileDir) { Remove-Item -Recurse -Force $customProfileDir }
-$null = & $Exe make-custom-profile $customProfileDir 2>&1
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Join-Path $customProfileDir 'padforge-custom.json'))) {
+if (-not $ListOnly -and (Test-Path $customProfileDir)) { Remove-Item -Recurse -Force $customProfileDir }
+if (-not $ListOnly) { $null = & $Exe make-custom-profile $customProfileDir 2>&1 }
+if (-not $ListOnly -and ($LASTEXITCODE -ne 0 -or -not (Test-Path (Join-Path $customProfileDir 'padforge-custom.json')))) {
     Write-Error "make-custom-profile failed; cannot run custom-profile scenarios. Build the test app from this branch first."
     exit 2
 }
@@ -457,6 +485,17 @@ function Stop-HMTestProcess {
     return 'ALREADY_EXITED'
 }
 
+# Wait until the test process has created its initial controllers and the
+# devnodes hold still. The test app reads stdin only once every initial
+# controller exists, and it acknowledges a command after running it, so
+# the acknowledgment of a resume marks the batch as created. Resume
+# changes nothing while no slot is paused, and no scenario pauses one.
+function Wait-Ready {
+    param([System.Diagnostics.Process]$Proc)
+    Send-Cmd -Proc $Proc -Cmd 'resume'
+    Wait-CascadeSettle
+}
+
 # Wait for a controller-creation event to fully bind. Polls for the
 # expected enumerator-pattern devnode being PRESENT. Adaptive: returns
 # as soon as the device appears (short on fast machines, longer on slow).
@@ -565,9 +604,14 @@ function Wait-CascadeSettle {
 function Test-Scenario {
     param(
         [string]$Name,
-        [scriptblock]$Body
+        [scriptblock]$Body,
+        [string]$Area
     )
     if ($Name -notlike $Filter) { return $null }
+    if ($Area -and -not $script:ActiveAreas.Contains($Area)) {
+        $script:NotRun += $Name
+        return $null
+    }
 
     Write-Host ''
     Write-Host ('=== ' + $Name + ' ===') -ForegroundColor Cyan
@@ -687,7 +731,7 @@ function Scenario-Single-360-BT-360 {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
         if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
-        Sleep-Scaled 4
+        Wait-Ready -Proc $proc
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT)
         Wait-CascadeSettle
@@ -705,7 +749,7 @@ function Scenario-Single-360-BT-360-BT {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
         if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
-        Sleep-Scaled 4
+        Wait-Ready -Proc $proc
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT);    Wait-CascadeSettle
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.Xbox360);   Wait-CascadeSettle
@@ -727,7 +771,7 @@ function Scenario-Single-LongCycle {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
         if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
-        Sleep-Scaled 4
+        Wait-Ready -Proc $proc
         foreach ($p in $sequence) {
             Send-Cmd -Proc $proc -Cmd ('0 ' + $p)
             Wait-CascadeSettle
@@ -742,7 +786,7 @@ function Scenario-Single-BT-360-BT {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.XboxBT)
     try {
         if (-not (Wait-CreateBound -ProfileId $Profiles.XboxBT)) { throw "initial create timeout" }
-        Sleep-Scaled 4
+        Wait-Ready -Proc $proc
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.Xbox360);   Wait-CascadeSettle
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT);    Wait-CascadeSettle
@@ -757,7 +801,7 @@ function Scenario-Single-Mixed-Families {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
         if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
-        Sleep-Scaled 4
+        Wait-Ready -Proc $proc
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.DualSense);   Wait-CascadeSettle
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.SwitchPro);   Wait-CascadeSettle
@@ -775,7 +819,7 @@ function Scenario-Single-SameProfileSwap {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.XboxBT)
     try {
         if (-not (Wait-CreateBound -ProfileId $Profiles.XboxBT)) { throw "initial create timeout" }
-        Sleep-Scaled 4
+        Wait-Ready -Proc $proc
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT);   Wait-CascadeSettle
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT);   Wait-CascadeSettle
@@ -792,8 +836,7 @@ function Scenario-Multi-CreateAll-Idle {
         $Profiles.DualSense, $Profiles.SwitchPro
     )
     try {
-        # Multi-create takes longer; give it 15s for all slots to bind.
-        Sleep-Scaled 15
+        Wait-Ready -Proc $proc
     } finally {
         Stop-HMTestProcess -Proc $proc | Out-Null
     }
@@ -807,7 +850,7 @@ function Scenario-Multi-SwapOneSlot {
         $Profiles.Xbox360, $Profiles.Xbox360
     )
     try {
-        Sleep-Scaled 15
+        Wait-Ready -Proc $proc
         # Swap slot 1 through a full cycle; slots 0,2,3 should be untouched.
         Send-Cmd -Proc $proc -Cmd ('1 ' + $Profiles.XboxBT);    Wait-CascadeSettle
         Send-Cmd -Proc $proc -Cmd ('1 ' + $Profiles.Xbox360);   Wait-CascadeSettle
@@ -825,7 +868,7 @@ function Scenario-Multi-SwapAllSlots {
         $Profiles.Xbox360, $Profiles.Xbox360
     )
     try {
-        Sleep-Scaled 15
+        Wait-Ready -Proc $proc
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT);       Wait-CascadeSettle
         Send-Cmd -Proc $proc -Cmd ('1 ' + $Profiles.DualSense);    Wait-CascadeSettle
         Send-Cmd -Proc $proc -Cmd ('2 ' + $Profiles.SwitchPro);    Wait-CascadeSettle
@@ -843,7 +886,7 @@ function Scenario-Multi-RemoveOne {
         $Profiles.DualSense
     )
     try {
-        Sleep-Scaled 15
+        Wait-Ready -Proc $proc
         Send-Cmd -Proc $proc -Cmd 'remove 1';   Wait-CascadeSettle
     } finally {
         Stop-HMTestProcess -Proc $proc | Out-Null
@@ -859,7 +902,7 @@ function Scenario-Multi-MultipleXinputhid {
         $Profiles.XboxBT, $Profiles.XboxOneBT, $Profiles.XboxEliteBT
     )
     try {
-        Sleep-Scaled 18
+        Wait-Ready -Proc $proc
         # Swap slot 1 to non-xinputhid family, then back.
         Send-Cmd -Proc $proc -Cmd ('1 ' + $Profiles.Xbox360);   Wait-CascadeSettle
         Send-Cmd -Proc $proc -Cmd ('1 ' + $Profiles.XboxOneBT); Wait-CascadeSettle
@@ -874,18 +917,18 @@ function Scenario-Multi-MultipleXinputhid {
 # session's RemoveAllVirtualControllers can not drain.
 function Scenario-ForceKill-Recovery {
     $proc1 = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360, $Profiles.XboxBT)
-    Sleep-Scaled 15
+    Wait-Ready -Proc $proc1
     # Hard-kill: no quit, no clean dispose. Simulates user closing
     # PadForge from Task Manager / a crash.
     try { $proc1.Kill($true) } catch {}
     $proc1.WaitForExit(5000) | Out-Null
-    Sleep-Scaled 3
+    Wait-CascadeSettle
 
     # Now run a clean session that should clean up the orphans on
     # startup and leave a clean post-state on quit.
     $proc2 = Start-HMTestProcess -ProfileIds @($Profiles.DualSense)
     try {
-        Sleep-Scaled 12
+        Wait-Ready -Proc $proc2
     } finally {
         Stop-HMTestProcess -Proc $proc2 | Out-Null
     }
@@ -898,7 +941,7 @@ function Scenario-ForceKill-Recovery {
 # fixes it. This regression-catches if that prefix ever stops varying.
 function Scenario-AcrossProcess-Recreation {
     $proc1 = Start-HMTestProcess -ProfileIds @($Profiles.XboxBT, $Profiles.Xbox360)
-    Sleep-Scaled 15
+    Wait-Ready -Proc $proc1
     Stop-HMTestProcess -Proc $proc1 | Out-Null
     Wait-CascadeSettle  # wait for the prior proc's teardowns to fully drain
 
@@ -906,7 +949,7 @@ function Scenario-AcrossProcess-Recreation {
     # subsequent runs.
     $proc2 = Start-HMTestProcess -ProfileIds @($Profiles.XboxBT, $Profiles.Xbox360)
     try {
-        Sleep-Scaled 15
+        Wait-Ready -Proc $proc2
         # Also exercise a swap on this second run to confirm the
         # recreated devnodes are functional, not empty shells.
         Send-Cmd -Proc $proc2 -Cmd ('0 ' + $Profiles.Xbox360);   Wait-CascadeSettle
@@ -924,7 +967,7 @@ function Scenario-RapidSwaps-NoSettle {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
         if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
-        Sleep-Scaled 4
+        Wait-Ready -Proc $proc
 
         # Queue 4 swap commands with no inter-command sleep. Each one
         # processes after the prior LiveSwap returns synchronously; no
@@ -933,9 +976,9 @@ function Scenario-RapidSwaps-NoSettle {
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.Xbox360)
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT)
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.Xbox360)
-        # Now wait long enough for ALL queued swaps to drain. Each is
-        # ~5-15s depending on family; budget 60s for the full chain.
-        Sleep-Scaled 60
+        # Send-Cmd returns once the app has run each swap, so all four
+        # are done here.
+        Wait-CascadeSettle
     } finally {
         Stop-HMTestProcess -Proc $proc | Out-Null
     }
@@ -951,9 +994,7 @@ function Scenario-Multi-SixControllers {
         $Profiles.XboxOneBT, $Profiles.DualSenseBT
     )
     try {
-        # 6-controller create takes longer due to per-instance PnP
-        # work; give it 25s.
-        Sleep-Scaled 25
+        Wait-Ready -Proc $proc
         # Swap a slot beyond XInput's 4 to verify high-index ContainerID
         # encoding and teardown behave correctly.
         Send-Cmd -Proc $proc -Cmd ('5 ' + $Profiles.Xbox360);   Wait-CascadeSettle
@@ -971,7 +1012,7 @@ function Scenario-Single-SameVidPid {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
         if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
-        Sleep-Scaled 4
+        Wait-Ready -Proc $proc
 
         # xbox-360-arcade-stick: same 045E:028E as xbox-360-wired.
         Send-Cmd -Proc $proc -Cmd '0 xbox-360-arcade-stick';     Wait-CascadeSettle
@@ -1010,7 +1051,7 @@ function Scenario-ForceKill-MidCascade {
     # cascade state.
     $proc2 = Start-HMTestProcess -ProfileIds @($Profiles.SwitchPro)
     try {
-        Sleep-Scaled 12
+        Wait-Ready -Proc $proc2
     } finally {
         Stop-HMTestProcess -Proc $proc2 | Out-Null
     }
@@ -1024,7 +1065,7 @@ function Scenario-Single-AlternatingPattern {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
         if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
-        Sleep-Scaled 4
+        Wait-Ready -Proc $proc
 
         # A=Xbox360, B=XboxBT, C=DualSense.
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT);    Wait-CascadeSettle  # A->B
@@ -1051,15 +1092,16 @@ function Scenario-Multi-RapidMultiSlotSwap {
         $Profiles.Xbox360, $Profiles.Xbox360
     )
     try {
-        Sleep-Scaled 18  # 4-controller initial bind
+        Wait-Ready -Proc $proc
 
         # Queue 4 swaps for 4 different slots with no inter-command sleep.
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT)
         Send-Cmd -Proc $proc -Cmd ('1 ' + $Profiles.DualSense)
         Send-Cmd -Proc $proc -Cmd ('2 ' + $Profiles.SwitchPro)
         Send-Cmd -Proc $proc -Cmd ('3 ' + $Profiles.XboxOneBT)
-        # Each swap takes 5-15s depending on family; budget generously.
-        Sleep-Scaled 80
+        # Send-Cmd returns once the app has run each swap, so all four
+        # are done here.
+        Wait-CascadeSettle
     } finally {
         Stop-HMTestProcess -Proc $proc -GracefulMs 60000 | Out-Null
     }
@@ -1080,7 +1122,7 @@ function Scenario-Multi-HeterogeneousCascade {
         $Profiles.DualSense   # plain HID, no companions
     )
     try {
-        Sleep-Scaled 18
+        Wait-Ready -Proc $proc
         # No swaps; we want to test the simultaneous-dispose path that
         # only fires on `quit` / context-Dispose.
     } finally {
@@ -1097,7 +1139,7 @@ function Scenario-Multi-HeterogeneousCascade {
 function Scenario-Custom-CreateIdle {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Custom)
     try {
-        Sleep-Scaled 10
+        Wait-Ready -Proc $proc
     } finally {
         Stop-HMTestProcess -Proc $proc | Out-Null
     }
@@ -1110,7 +1152,7 @@ function Scenario-Custom-CreateIdle {
 function Scenario-Custom-SwapCycle {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Custom)
     try {
-        Sleep-Scaled 8
+        Wait-Ready -Proc $proc
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.Xbox360);   Wait-CascadeSettle
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.Custom);    Wait-CascadeSettle
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT);    Wait-CascadeSettle
@@ -1136,7 +1178,7 @@ function Scenario-Multi-CustomInMix {
         $Profiles.Custom
     )
     try {
-        Sleep-Scaled 22  # 5-controller initial bind
+        Wait-Ready -Proc $proc
         # Swap the custom slot through a couple of family transitions.
         Send-Cmd -Proc $proc -Cmd ('4 ' + $Profiles.Xbox360);   Wait-CascadeSettle
         Send-Cmd -Proc $proc -Cmd ('4 ' + $Profiles.Custom);    Wait-CascadeSettle
@@ -1430,7 +1472,9 @@ function Scenario-Axis-Addressing-Check {
 # (Raw Input), beside dualshock-4-v2's unchanged 0x01. Then the 5-byte
 # wingman report. Then ps-move and xbox-360-flight-stick: each
 # collection's HidP_GetCaps against the captured descriptor, and the
-# input report with the trigger where the capture puts it.
+# input report with the trigger where the capture puts it. In session 0,
+# as over SSH, Raw Input lists no device, and the keyboard's two Raw Input
+# checks print [SKIP] while the rest run.
 function Scenario-Layout-Audit-Check {
     Invoke-Probe -Dir 'layout_audit_check' -Exe 'LayoutAuditCheck.exe' `
                  -Message 'layout schema/descriptor mismatch (see probe stdout)'
@@ -1873,16 +1917,24 @@ function Scenario-Kbm-Descriptors {
 # killed consumer's keys come up and its devices, keyboard included, go in
 # the cleanup. Moves the cursor and puts it back, and presses Scroll Lock
 # twice.
+#
+# Exit 3, a skip: the probe runs in session 0, as over SSH, where Raw Input
+# lists no device. Exit 2, a running SDK consumer, stays a failure.
 function Scenario-Kbm-Raw-Input {
     Invoke-Probe -Dir 'kbm_live_check' -Exe 'KbmLiveCheck.exe' `
-                 -Message 'a virtual keyboard or mouse reached Raw Input wrong, lost input, or did not start (see probe stdout)'
+                 -Message 'a virtual keyboard or mouse reached Raw Input wrong, lost input, or did not start (see probe stdout)' -SkipCodes 3
 }
 
 # S71: programs that embed HIDMaestro, side by side on one machine. Each
 # program is a peer process the probe drives, and the probe judges what
 # they did from outside both. Its header lists every section.
 function Scenario-Coexistence {
-    Invoke-Probe -Dir 'coexist_check' -Exe 'CoexistCheck.exe' -Arguments 'ABCDEFGHJKLMNOPQRSTUVWXYZ' -Tag 'coexistence' `
+    # The core sections always. E, N, T, U, W, X and Y with the coexistence
+    # area, V and Z with the usbip area.
+    $sections = 'ABCDFGHJKLMOPQRS'
+    if ($script:ActiveAreas.Contains('coexistence')) { $sections += 'ENTUWXY' }
+    if ($script:ActiveAreas.Contains('usbip')) { $sections += 'VZ' }
+    Invoke-Probe -Dir 'coexist_check' -Exe 'CoexistCheck.exe' -Arguments $sections -Tag 'coexistence' `
                  -Message 'two programs that embed HIDMaestro disturbed each other (see probe stdout)' -SkipCodes 2
 }
 
@@ -2200,13 +2252,12 @@ function Scenario-Switch-Family {
 }
 
 function Scenario-Arith-Roundtrip {
+    # The probe's diff mode, every float in [0, 1] through each conversion
+    # against the design note's table, takes about 9 minutes and runs by
+    # hand when the arithmetic or a descriptor range changes. The round
+    # trip and rounding checks here cover a regression in between.
     Invoke-Probe -Dir 'arith_roundtrip_check' -Exe 'ArithRoundtripCheck.exe' -Arguments 'check' `
                  -Message 'a raw value a consumer reads from a device no longer returns through the SDK as that value (see probe stdout for the conversion)'
-    # Every float in [0, 1] through each catalog conversion, against the
-    # design note's table: a range a descriptor brings in, or a change of
-    # arithmetic, that the table does not list fails here. About 9 minutes.
-    Invoke-Probe -Dir 'arith_roundtrip_check' -Exe 'ArithRoundtripCheck.exe' -Arguments 'diff' -Tag 'diff' `
-                 -Message 'a catalog conversion changes in a way the design note''s table does not list (see probe stdout for the conversion)'
 }
 
 # S92: profiles as data, the SDK side. profile_model_check loads the catalog
@@ -2236,6 +2287,164 @@ function Scenario-Contract-Live {
     Invoke-Probe -Dir 'contract_live_check' -Exe 'ContractLiveCheck.exe' -Arguments 'check' `
                  -Message 'the live driver does not hold the version contract or FeatureAnswers as the design states (see probe stdout for the check)'
 }
+
+# ====================================================================
+#  Areas
+# ====================================================================
+#
+# A scenario with an Area runs when a file of that area changed since the
+# last release, so each check still runs whenever the code it guards
+# changes, and a run whose changes touch no area takes the core alone,
+# about 16 minutes on the development machine against about 45 for every
+# area. A change to a shared file runs every area, and so does a run
+# whose changes cannot be read (no git, or no release tag). The paths
+# are git paths from the repository root, matched with -like.
+
+$AreaPaths = [ordered]@{
+    # The USB/IP transport, its install, the WinUSB binding and the
+    # personas that run on it.
+    usbip = @(
+        'sdk/HIDMaestro.Core/Internal/Usbip/*',
+        'sdk/HIDMaestro.Core/Internal/WinUsbBinding.cs',
+        'sdk/HIDMaestro.Core/Internal/UsbConfigurationSpec.cs',
+        'sdk/HIDMaestro.Core/Internal/PnputilHelper.cs',
+        'sdk/HIDMaestro.Core/Internal/RegistryLedger.cs',
+        'sdk/HIDMaestro.Core/UsbipPackage.json',
+        'sdk/HIDMaestro.Core/HMUsbAudio.cs',
+        'sdk/HIDMaestro.Core/HMPort.cs',
+        'profiles/valve/*',
+        'profiles/nintendo/*',
+        'test/probes/usbip_*',
+        'test/probes/gc_*',
+        'test/probes/valve_*',
+        'test/probes/switch2_composite_check/*',
+        'test/probes/coexist_check/*'
+    )
+    # Programs side by side: the ledger, the machine-wide claims, owner
+    # records and sweeps, the driver deploy and the staging the SDK runs
+    # elevated.
+    coexistence = @(
+        'sdk/HIDMaestro.Core/Internal/RegistryLedger.cs',
+        'sdk/HIDMaestro.Core/Internal/LedgerLock.cs',
+        'sdk/HIDMaestro.Core/Internal/MachineClaims.cs',
+        'sdk/HIDMaestro.Core/Internal/AdminNamespace.cs',
+        'sdk/HIDMaestro.Core/Internal/ObjectOwner.cs',
+        'sdk/HIDMaestro.Core/Internal/OwnerCensus.cs',
+        'sdk/HIDMaestro.Core/Internal/OwnerSweep.cs',
+        'sdk/HIDMaestro.Core/Internal/ProcessExitSignal.cs',
+        'sdk/HIDMaestro.Core/Internal/ProtectedStaging.cs',
+        'sdk/HIDMaestro.Core/Internal/DriverDeploy.cs',
+        'sdk/HIDMaestro.Core/Internal/DriverBuilder.cs',
+        'sdk/HIDMaestro.Core/Internal/PnputilHelper.cs',
+        'sdk/HIDMaestro.Core/Internal/ControllerLease.cs',
+        'sdk/HIDMaestro.Core/Internal/SharedMemoryIO.cs',
+        'sdk/HIDMaestro.Core/Internal/OemNameOverrideStore.cs',
+        'sdk/HIDMaestro.Core/HMCleanupScope.cs',
+        'sdk/HIDMaestro.Core/HMDriverInstall.cs',
+        'sdk/HIDMaestro.Core/HMOemNameOverride.cs',
+        'legacy_cache/*',
+        'test/probes/coexist_check/*'
+    )
+    # Keyboards and mice. A changed profile of type keyboard or mouse
+    # counts too, wherever its file is.
+    kbm = @(
+        'sdk/HIDMaestro.Core/HMKeyboardMouse.cs',
+        'sdk/HIDMaestro.Core/Internal/KeyboardMousePacker.cs',
+        'test/probes/kbm_*'
+    )
+    # A controller's identity across its lives.
+    identity = @(
+        'sdk/HIDMaestro.Core/Internal/DeviceIdentity.cs',
+        'sdk/HIDMaestro.Core/Internal/DeviceNodeCreator.cs',
+        'sdk/HIDMaestro.Core/Internal/SwdDeviceFactory.cs',
+        'sdk/HIDMaestro.Core/Internal/DeviceProperties.cs',
+        'test/probes/identity_*'
+    )
+    # XInput and WGI on the XUSB and xinputhid paths.
+    xinput = @(
+        'sdk/HIDMaestro.Core/Internal/XInputPresentation.cs',
+        'sdk/HIDMaestro.Core/Internal/XInputSpec.cs',
+        'sdk/HIDMaestro.Core/Internal/XusbAnswers.cs',
+        'sdk/HIDMaestro.Core/Internal/GameInputMapping.cs',
+        'sdk/HIDMaestro.Core/Internal/SwdDeviceFactory.cs',
+        'profiles/microsoft/*',
+        'test/probes/xusb_*'
+    )
+}
+
+# Files every area depends on: the driver, the create and teardown path,
+# the build, the test app and this script.
+$SharedPaths = @(
+    'driver/*',
+    'sdk/HIDMaestro.Core/HMContext.cs',
+    'sdk/HIDMaestro.Core/HMController.cs',
+    'sdk/HIDMaestro.Core/HIDMaestro.Core.csproj',
+    'sdk/HIDMaestro.Core/Internal/DeviceOrchestrator.cs',
+    'sdk/HIDMaestro.Core/Internal/DeviceManager.cs',
+    'sdk/HIDMaestro.Core/Resources/*',
+    'build/*',
+    'Directory.Build.*',
+    'test/HIDMaestroTest/*',
+    'test/Program.cs',
+    'test/regression/*'
+)
+
+function Get-ChangedFiles {
+    param([string]$RepoRoot, [string]$Base)
+    # Windows PowerShell turns a native command's stderr into an error
+    # record, which the script's Stop preference would make fatal: git
+    # warns on stderr about line endings. Its exit code is the answer.
+    $ErrorActionPreference = 'Continue'
+    $git = Get-Command git -ErrorAction SilentlyContinue
+    if (-not $git) { return $null }
+    if (-not $Base) {
+        $Base = (& git -C $RepoRoot describe --tags --abbrev=0 --match 'v*' 'HEAD^' 2>$null)
+        if ($LASTEXITCODE -ne 0 -or -not $Base) { return $null }
+    }
+    $files = @(& git -C $RepoRoot diff --name-only $Base -- 2>$null)
+    if ($LASTEXITCODE -ne 0) { return $null }
+    return [PSCustomObject]@{ Scope = "since $($Base.Trim())"; Files = $files }
+}
+
+$script:ActiveAreas = New-Object 'System.Collections.Generic.HashSet[string]'
+$script:NotRun = @()
+if ($All) {
+    foreach ($a in $AreaPaths.Keys) { [void]$script:ActiveAreas.Add($a) }
+    $script:AreaNote = 'every area (-All)'
+} elseif ($Core) {
+    $script:AreaNote = 'none, the core alone (-Core)'
+} else {
+    $repoRoot = (Resolve-Path (Join-Path $scriptDir '..\..')).Path
+    $diff = if ($Changed) { [PSCustomObject]@{ Scope = 'in the -Changed list'; Files = $Changed } }
+               else { Get-ChangedFiles -RepoRoot $repoRoot -Base $Since }
+    if ($null -eq $diff) {
+        foreach ($a in $AreaPaths.Keys) { [void]$script:ActiveAreas.Add($a) }
+        $script:AreaNote = 'every area, since the changes since the last release could not be read'
+    } else {
+        $shared = @($diff.Files | Where-Object { $f = $_; @($SharedPaths | Where-Object { $f -like $_ }).Count -gt 0 })
+        if ($shared.Count -gt 0) {
+            foreach ($a in $AreaPaths.Keys) { [void]$script:ActiveAreas.Add($a) }
+            $script:AreaNote = "every area, since shared files changed $($diff.Scope) ($($shared[0])$(if ($shared.Count -gt 1) { " and $($shared.Count - 1) more" }))"
+        } else {
+            foreach ($a in $AreaPaths.Keys) {
+                foreach ($f in $diff.Files) {
+                    if (@($AreaPaths[$a] | Where-Object { $f -like $_ }).Count -gt 0) { [void]$script:ActiveAreas.Add($a); break }
+                }
+            }
+            foreach ($f in $diff.Files) {
+                if ($f -notlike 'profiles/*.json') { continue }
+                $path = Join-Path $repoRoot $f
+                if ((Test-Path $path) -and ((Get-Content $path -Raw) -match '"type"\s*:\s*"(keyboard|mouse)"')) {
+                    [void]$script:ActiveAreas.Add('kbm')
+                    break
+                }
+            }
+            $names = @($script:ActiveAreas)
+            $script:AreaNote = "$(if ($names.Count -gt 0) { $names -join ', ' } else { 'none' }), from $($diff.Files.Count) file(s) changed $($diff.Scope)"
+        }
+    }
+}
+Write-Host ('Areas: ' + $script:AreaNote)
 
 # ====================================================================
 #  Runner
@@ -2294,27 +2503,27 @@ $scenarios = @(
     @{ Name = 'S50_Vr_Controller_Smoke';          Body = ${function:Scenario-Vr-Controller-Smoke} },
     @{ Name = 'S51_Valve_Personas';               Body = ${function:Scenario-Valve-Personas} },
     @{ Name = 'S52_Valve_Wire';                   Body = ${function:Scenario-Valve-Wire} },
-    @{ Name = 'S53_Valve_Sdl';                    Body = ${function:Scenario-Valve-Sdl} },
-    @{ Name = 'S54_Valve_Steam';                  Body = ${function:Scenario-Valve-Steam} },
-    @{ Name = 'S55_Valve_Multi';                  Body = ${function:Scenario-Valve-Multi} },
+    @{ Name = 'S53_Valve_Sdl';                    Body = ${function:Scenario-Valve-Sdl} ; Area = 'usbip' },
+    @{ Name = 'S54_Valve_Steam';                  Body = ${function:Scenario-Valve-Steam} ; Area = 'usbip' },
+    @{ Name = 'S55_Valve_Multi';                  Body = ${function:Scenario-Valve-Multi} ; Area = 'usbip' },
     @{ Name = 'S56_Valve_Raw_Path';               Body = ${function:Scenario-Valve-Raw-Path} },
-    @{ Name = 'S57_Xusb_Wgi_Single';              Body = ${function:Scenario-Xusb-Wgi-Single} },
+    @{ Name = 'S57_Xusb_Wgi_Single';              Body = ${function:Scenario-Xusb-Wgi-Single} ; Area = 'xinput' },
     @{ Name = 'S58_Identity_Derivation';         Body = ${function:Scenario-Identity-Derivation} },
-    @{ Name = 'S59_Identity_Battery';            Body = ${function:Scenario-Identity-Battery} },
+    @{ Name = 'S59_Identity_Battery';            Body = ${function:Scenario-Identity-Battery} ; Area = 'identity' },
     @{ Name = 'S60_Xusb_Battery';                Body = ${function:Scenario-Xusb-Battery} },
     @{ Name = 'S61_Driver_Catalog';              Body = ${function:Scenario-Driver-Catalog} },
     @{ Name = 'S62_Valve_Firmware';              Body = ${function:Scenario-Valve-Firmware} },
     @{ Name = 'S63_Ds4_Report';                  Body = ${function:Scenario-Ds4-Report} },
     @{ Name = 'S64_Ds3_Sixaxis';                 Body = ${function:Scenario-Ds3-Sixaxis} },
-    @{ Name = 'S65_Switch2_Composite';           Body = ${function:Scenario-Switch2-Composite} },
+    @{ Name = 'S65_Switch2_Composite';           Body = ${function:Scenario-Switch2-Composite} ; Area = 'usbip' },
     @{ Name = 'S66_Registry_Ownership';          Body = ${function:Scenario-Registry-Ownership} },
     @{ Name = 'S67_Wgi_Mapping';                 Body = ${function:Scenario-Wgi-Mapping} },
     @{ Name = 'S68_Vr_Driver_Conflict';          Body = ${function:Scenario-Vr-Driver-Conflict} },
     @{ Name = 'S69_Kbm_Descriptors';             Body = ${function:Scenario-Kbm-Descriptors} },
-    @{ Name = 'S70_Kbm_Raw_Input';               Body = ${function:Scenario-Kbm-Raw-Input} },
+    @{ Name = 'S70_Kbm_Raw_Input';               Body = ${function:Scenario-Kbm-Raw-Input} ; Area = 'kbm' },
     @{ Name = 'S71_Coexistence';                 Body = ${function:Scenario-Coexistence} },
-    @{ Name = 'S72_Protected_Staging';           Body = ${function:Scenario-Protected-Staging} },
-    @{ Name = 'S73_Usbip_Clean_Install';         Body = ${function:Scenario-Usbip-Clean-Install} },
+    @{ Name = 'S72_Protected_Staging';           Body = ${function:Scenario-Protected-Staging} ; Area = 'coexistence' },
+    @{ Name = 'S73_Usbip_Clean_Install';         Body = ${function:Scenario-Usbip-Clean-Install} ; Area = 'usbip' },
     @{ Name = 'S74_NativeAot_Smoke';             Body = ${function:Scenario-NativeAot-Smoke} },
     @{ Name = 'S75_SingleFile_Smoke';            Body = ${function:Scenario-SingleFile-Smoke} },
     @{ Name = 'S76_Json_Parity';                 Body = ${function:Scenario-Json-Parity} },
@@ -2322,9 +2531,9 @@ $scenarios = @(
     @{ Name = 'S78_Build_Info';                  Body = ${function:Scenario-Build-Info} },
     @{ Name = 'S79_GameCube_Descriptors';        Body = ${function:Scenario-GameCube-Descriptors} },
     @{ Name = 'S80_GameCube_Protocol';           Body = ${function:Scenario-GameCube-Protocol} },
-    @{ Name = 'S81_GameCube_WinUsb';             Body = ${function:Scenario-GameCube-WinUsb} },
-    @{ Name = 'S82_GameCube_Dolphin';            Body = ${function:Scenario-GameCube-Dolphin} },
-    @{ Name = 'S83_GameCube_Sdl';                Body = ${function:Scenario-GameCube-Sdl} },
+    @{ Name = 'S81_GameCube_WinUsb';             Body = ${function:Scenario-GameCube-WinUsb} ; Area = 'usbip' },
+    @{ Name = 'S82_GameCube_Dolphin';            Body = ${function:Scenario-GameCube-Dolphin} ; Area = 'usbip' },
+    @{ Name = 'S83_GameCube_Sdl';                Body = ${function:Scenario-GameCube-Sdl} ; Area = 'usbip' },
     @{ Name = 'S84_Perf_Budget';                 Body = ${function:Scenario-Perf-Budget} },
     @{ Name = 'S85_Handler_Isolation';           Body = ${function:Scenario-Handler-Isolation} },
     @{ Name = 'S87_Interop_Decl';                Body = ${function:Scenario-Interop-Decl} },
@@ -2340,10 +2549,19 @@ $scenarios = @(
     @{ Name = 'S93_Contract_Live';               Body = ${function:Scenario-Contract-Live} }
 )
 
+if ($ListOnly) {
+    foreach ($s in $scenarios) {
+        if ($s.Name -notlike $Filter) { continue }
+        $runs = -not $s.Area -or $script:ActiveAreas.Contains($s.Area)
+        Write-Host ('  {0,-7} {1,-40} {2}' -f $(if ($runs) { 'run' } else { 'not run' }), $s.Name, $(if ($s.Area) { $s.Area } else { 'core' }))
+    }
+    exit 0
+}
+
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
 $results = @()
 foreach ($s in $scenarios) {
-    $r = Test-Scenario -Name $s.Name -Body $s.Body
+    $r = Test-Scenario -Name $s.Name -Body $s.Body -Area $s.Area
     if ($null -ne $r) { $results += $r }
 }
 $totalSw.Stop()
@@ -2372,6 +2590,10 @@ foreach ($r in $results) {
 
 Write-Host ''
 Write-Host ('  {0}/{1} PASSED, {2} FAILED, {3:N1}s total' -f $passed.Count, $results.Count, $failed.Count, ($totalSw.Elapsed.TotalSeconds))
+Write-Host ('  Areas: ' + $script:AreaNote)
+if ($script:NotRun.Count -gt 0) {
+    Write-Host ('  Not run, their areas unchanged: ' + ($script:NotRun -join ', '))
+}
 Write-Host ''
 if ($failed.Count -gt 0) {
     Write-Host '  Diag log: %TEMP%\HIDMaestro\teardown_diag.log' -ForegroundColor Yellow
