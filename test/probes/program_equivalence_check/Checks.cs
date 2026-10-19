@@ -87,18 +87,49 @@ internal static unsafe class Checks
         first = null;
         if (kernel == null) kernel = gen == PathMutation.None ? Kernel(v) : Mutant(v, gen);
         if (kernel == null) throw new InvalidOperationException($"{v.Spec.Name}: no generated kernel for hash {v.Hash[..16]} ({gen})");
-        var interp = new ReportProgram(v, interpMutation);
-        var s = new byte[v.Spec.StateSize + StatePad];
-        var a = new byte[ProgramForm.MaxReport]; var b = new byte[ProgramForm.MaxReport]; var c = new byte[ProgramForm.MaxReport];
-        var regs = new uint[Registers]; var ctr = new uint[Counters];
-        int diff = 0;
+        // Every input is drawn first, in order, from data, as a loop of one
+        // input after another draws it. Each input's state and registers are
+        // drawn whole, so no input reads what another left, and the inputs
+        // run in chunks across the processors, each chunk with its own
+        // interpreter and buffers. first is the first differing input's. A
+        // naive evaluator over a profile's JSON reads nodes that build
+        // themselves on first read, so its inputs run in one chunk.
+        int stateLength = v.Spec.StateSize + StatePad;
+        var states = new byte[inputs * stateLength];
+        var regsAll = new uint[inputs * Registers];
+        var ctrAll = new uint[inputs * Counters];
+        var s0 = new byte[stateLength];
+        var regs0 = new uint[Registers]; var ctr0 = new uint[Counters];
         for (int n = 0; n < inputs; n++)
         {
-            data.NextBytes(s);
-            DrawRegisters(data, regs, ctr, n);
-            if (!Agree(v, kernel, interp, s, a, b, c, regs, ctr, fills, ref first, naive)) diff++;
+            data.NextBytes(s0);
+            DrawRegisters(data, regs0, ctr0, n);
+            s0.CopyTo(states, n * stateLength);
+            regs0.CopyTo(regsAll, n * Registers);
+            ctr0.CopyTo(ctrAll, n * Counters);
         }
-        return diff;
+        int chunk = naive == null ? 250 : Math.Max(1, inputs);
+        int chunks = (inputs + chunk - 1) / chunk;
+        var diffs = new int[chunks];
+        var firsts = new string?[chunks];
+        nint kernelAddress = (nint)kernel;
+        System.Threading.Tasks.Parallel.For(0, chunks, k =>
+        {
+            var chunkKernel = (delegate*<byte*, byte*, uint*, uint*, void>)kernelAddress;
+            var interp = new ReportProgram(v, interpMutation);
+            var s = new byte[stateLength];
+            var a = new byte[ProgramForm.MaxReport]; var b = new byte[ProgramForm.MaxReport]; var c = new byte[ProgramForm.MaxReport];
+            var regs = new uint[Registers]; var ctr = new uint[Counters];
+            for (int n = k * chunk; n < Math.Min(inputs, (k + 1) * chunk); n++)
+            {
+                Array.Copy(states, n * stateLength, s, 0, stateLength);
+                Array.Copy(regsAll, n * Registers, regs, 0, Registers);
+                Array.Copy(ctrAll, n * Counters, ctr, 0, Counters);
+                if (!Agree(v, chunkKernel, interp, s, a, b, c, regs, ctr, fills, ref firsts[k], naive)) diffs[k]++;
+            }
+        });
+        first = firsts.FirstOrDefault(f => f != null);
+        return diffs.Sum();
     }
 
     static void Refusals(string title, IEnumerable<(string rule, ProgramSpec program, string path)> cases)
