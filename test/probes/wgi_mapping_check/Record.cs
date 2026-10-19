@@ -108,7 +108,7 @@ internal static partial class Program
     {
         ushort vid = profile.VendorId, pid = profile.ProductId;
         string keyName = $"{vid:X4}{pid:X4}00010005";
-        var before = new HashSet<string>(RawGameController.RawGameControllers.Select(r => r.NonRoamableId), StringComparer.Ordinal);
+        var before = new HashSet<string>(WgiPins.Raws().Select(r => r.NonRoamableId), StringComparer.Ordinal);
         var seen = new List<string>();
         int rawCount = 0;
 
@@ -141,7 +141,7 @@ internal static partial class Program
                 List<RawGameController> mine = new();
                 while (sw.ElapsedMilliseconds < 10000)
                 {
-                    mine = RawGameController.RawGameControllers
+                    mine = WgiPins.Raws()
                         .Where(r => r.HardwareVendorId == vid && r.HardwareProductId == pid && !before.Contains(r.NonRoamableId))
                         .ToList();
                     if (mine.Count > 0) break;
@@ -150,14 +150,14 @@ internal static partial class Program
                 if (mine.Count > 0)
                 {
                     Thread.Sleep(s_settleMs);
-                    mine = RawGameController.RawGameControllers
+                    mine = WgiPins.Raws()
                         .Where(r => r.HardwareVendorId == vid && r.HardwareProductId == pid && !before.Contains(r.NonRoamableId))
                         .ToList();
                 }
                 seen.AddRange(mine.Select(r => r.NonRoamableId));
                 rawCount = mine.Count;
                 rec.OutU32("rawCount", (uint)mine.Count);
-                rec.OutU32("gamepads", (uint)mine.Count(r => Gamepad.FromGameController(r) != null));
+                rec.OutU32("gamepads", (uint)mine.Count(r => WgiPins.PadOf(r) != null));
                 if (mine.Count == 0)
                     Console.WriteLine($"  {profile.Id}: WGI lists no new RawGameController within 10 s");
                 else
@@ -171,7 +171,7 @@ internal static partial class Program
 
             void ReadAll(RawGameController raw)
             {
-                var gp = Gamepad.FromGameController(raw);
+                var gp = WgiPins.PadOf(raw);
                 rec.Out("raw", Encoding.UTF8.GetBytes(
                     $"{raw.DisplayName}|axes={raw.AxisCount}|buttons={raw.ButtonCount}|switches={raw.SwitchCount}|gamepad={(gp != null ? 1 : 0)}"));
 
@@ -224,7 +224,7 @@ internal static partial class Program
         // Profiles of one VID and PID share an interface path at one
         // index, so the next create must not meet this one on its way out.
         var gone = Stopwatch.StartNew();
-        while (RawGameController.RawGameControllers.Any(r => seen.Contains(r.NonRoamableId)))
+        while (WgiPins.Raws().Any(r => seen.Contains(r.NonRoamableId)))
         {
             if (gone.ElapsedMilliseconds > 15000)
                 throw new InvalidOperationException($"{profile.Id}: WGI still lists it 15 s after the dispose");

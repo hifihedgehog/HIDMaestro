@@ -181,8 +181,7 @@ internal static class Program
         }
 
         // WGI's broker only tracks controllers for processes that listen.
-        Gamepad.GamepadAdded += (_, _) => { };
-        RawGameController.RawGameControllerAdded += (_, _) => { };
+        WgiPins.Listen();
         Thread.Sleep(500);
         Sdl.TryLoad();
 
@@ -787,12 +786,12 @@ internal static class Program
     static (int, int) WgiCounts(ushort vid, ushort pid)
     {
         int gp = 0;
-        foreach (var g in Gamepad.Gamepads)
+        foreach (var g in WgiPins.Pads())
         {
-            var r = RawGameController.FromGameController(g);
+            var r = WgiPins.RawOf(g);
             if (r != null && r.HardwareVendorId == vid && r.HardwareProductId == pid) gp++;
         }
-        int raw = RawGameController.RawGameControllers.Count(r => r.HardwareVendorId == vid && r.HardwareProductId == pid);
+        int raw = WgiPins.Raws().Count(r => r.HardwareVendorId == vid && r.HardwareProductId == pid);
         return (gp, raw);
     }
 

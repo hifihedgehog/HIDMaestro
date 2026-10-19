@@ -45,7 +45,7 @@ internal static partial class Program
         var sw = System.Diagnostics.Stopwatch.StartNew();
         while (sw.ElapsedMilliseconds < timeoutMs)
         {
-            foreach (var r in RawGameController.RawGameControllers)
+            foreach (var r in WgiPins.Raws())
                 if (r.HardwareVendorId == vid && r.HardwareProductId == pid) return r;
             Thread.Sleep(100);
         }
@@ -172,7 +172,7 @@ internal static partial class Program
         var sw = System.Diagnostics.Stopwatch.StartNew();
         while (sw.ElapsedMilliseconds < timeoutMs)
         {
-            if (!RawGameController.RawGameControllers.Any(r => r.HardwareVendorId == vid && r.HardwareProductId == pid))
+            if (!WgiPins.Raws().Any(r => r.HardwareVendorId == vid && r.HardwareProductId == pid))
                 return true;
             Thread.Sleep(100);
         }
@@ -237,7 +237,7 @@ internal static partial class Program
             v.Listed = true;
             using (var k = Registry.LocalMachine.OpenSubKey(keyPath)) v.KeyWhileLive = k != null;
             Thread.Sleep(s_settleMs);
-            var gp = Gamepad.FromGameController(raw);
+            var gp = WgiPins.PadOf(raw);
             string head = $"'{raw.DisplayName}' {raw.AxisCount}a/{raw.ButtonCount}b/{raw.SwitchCount}s";
             if (gp == null) { v.Text = $"not a Gamepad  {head}"; return v; }
             v.IsGamepad = true;
@@ -517,12 +517,12 @@ internal static partial class Program
             return;
         }
         Thread.Sleep(s_settleMs);
-        var gp = Gamepad.FromGameController(raw);
-        var sameIdentity = RawGameController.RawGameControllers
+        var gp = WgiPins.PadOf(raw);
+        var sameIdentity = WgiPins.Raws()
             .Where(r => r.HardwareVendorId == vid && r.HardwareProductId == pid).ToList();
-        Console.WriteLine($"  WGI lists {sameIdentity.Count} RawGameController(s) for {vid:X4}:{pid:X4} and {Gamepad.Gamepads.Count} Gamepad(s) in all");
+        Console.WriteLine($"  WGI lists {sameIdentity.Count} RawGameController(s) for {vid:X4}:{pid:X4} and {WgiPins.Pads().Count} Gamepad(s) in all");
         foreach (var r in sameIdentity)
-            Console.WriteLine($"    '{r.DisplayName}' axes {r.AxisCount} buttons {r.ButtonCount} switches {r.SwitchCount} gamepad {(Gamepad.FromGameController(r) != null ? "yes" : "no")}");
+            Console.WriteLine($"    '{r.DisplayName}' axes {r.AxisCount} buttons {r.ButtonCount} switches {r.SwitchCount} gamepad {(WgiPins.PadOf(r) != null ? "yes" : "no")}");
         Console.WriteLine($"  RawGameController '{raw.DisplayName}': {raw.AxisCount} axes, {raw.ButtonCount} buttons, {raw.SwitchCount} switches. Gamepad: {(gp != null ? "yes" : "no")}");
         Console.WriteLine($"  id {raw.NonRoamableId}");
 
@@ -581,8 +581,7 @@ internal static partial class Program
 
     static int Main(string[] args)
     {
-        Gamepad.GamepadAdded += (_, _) => { };
-        RawGameController.RawGameControllerAdded += (_, _) => { };
+        WgiPins.Listen();
 
         if (args.Length >= 2 && args[0] == "--record")
             return Record(args[1], args.Skip(2).ToList());
@@ -591,11 +590,11 @@ internal static partial class Program
         {
             // Read-only: no SDK call, nothing created or removed.
             Thread.Sleep(1500);
-            var all = RawGameController.RawGameControllers;
-            Console.WriteLine($"WGI lists {all.Count} RawGameController(s), {Gamepad.Gamepads.Count} Gamepad(s)");
+            var all = WgiPins.Raws();
+            Console.WriteLine($"WGI lists {all.Count} RawGameController(s), {WgiPins.Pads().Count} Gamepad(s)");
             foreach (var r in all)
             {
-                var g = Gamepad.FromGameController(r);
+                var g = WgiPins.PadOf(r);
                 var snap = Read(r, g);
                 Console.WriteLine($"- {r.HardwareVendorId:X4}:{r.HardwareProductId:X4} '{r.DisplayName}' axes {r.AxisCount} buttons {r.ButtonCount} switches {r.SwitchCount} gamepad {(g != null ? "yes" : "no")}");
                 Console.WriteLine($"    id {r.NonRoamableId}");
@@ -632,7 +631,7 @@ internal static partial class Program
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
         ctx.InstallDriver();
-        Console.WriteLine($"physical or leftover WGI devices before any create: {RawGameController.RawGameControllers.Count}");
+        Console.WriteLine($"physical or leftover WGI devices before any create: {WgiPins.Raws().Count}");
         foreach (var id in ids) Explore(ctx, id, absent);
         return 0;
     }

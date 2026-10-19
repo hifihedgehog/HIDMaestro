@@ -535,7 +535,7 @@ internal static partial class Program
 
     static void SectionC()
     {
-        var wgiBefore = RawGameController.RawGameControllers.Select(r => r.NonRoamableId).ToHashSet();
+        var wgiBefore = WgiPins.Raws().Select(r => r.NonRoamableId).ToHashSet();
         using var p1 = PeerProcess.Start("C1");
         p1.Send("install");
         string cx = p1.Send("create xbox - coexist-c-xbox");
@@ -554,7 +554,7 @@ internal static partial class Program
         string? wgiId = null;
         WaitFor(() =>
         {
-            wgiId = RawGameController.RawGameControllers
+            wgiId = WgiPins.Raws()
                 .Where(r => r.HardwareVendorId == 0x045E && r.HardwareProductId == 0x028E && !wgiBefore.Contains(r.NonRoamableId))
                 .Select(r => r.NonRoamableId).FirstOrDefault();
             return wgiId != null;
@@ -573,7 +573,7 @@ internal static partial class Program
         // Watch the XInput slot and WGI for the whole run.
         int xinputMisses = 0;
         var wgiRemoved = new List<string>();
-        void OnRemoved(object? s, RawGameController r) { lock (wgiRemoved) wgiRemoved.Add(r.NonRoamableId); }
+        void OnRemoved(object? s, RawGameController r) { WgiPins.Pin(r); lock (wgiRemoved) wgiRemoved.Add(r.NonRoamableId); }
         RawGameController.RawGameControllerRemoved += OnRemoved;
         bool watching = true;
         var watch = new Thread(() =>
@@ -624,7 +624,7 @@ internal static partial class Program
                   && treeX.Concat(treeP).All(Native.IsStarted));
             Check("C: the first program's HID handle never failed", !cap.Broken, cap.Broken ? $"read error {cap.ReadError}" : "");
             Check("C: the first program's XInput slot never dropped", Volatile.Read(ref xinputMisses) == 0, $"{xinputMisses} misses at slot {slot}");
-            bool wgiStill = RawGameController.RawGameControllers.Any(r => r.NonRoamableId == wgiId);
+            bool wgiStill = WgiPins.Raws().Any(r => r.NonRoamableId == wgiId);
             lock (wgiRemoved)
                 Check("C: the first program's WGI entry stayed", wgiStill && !wgiRemoved.Contains(wgiId!), wgiRemoved.Count > 0 ? $"removed: {string.Join(", ", wgiRemoved)}" : "");
             var raw2 = Native.RawInputDevices().Where(d => string.Equals(d.Name, padPath[0], StringComparison.OrdinalIgnoreCase)).ToList();

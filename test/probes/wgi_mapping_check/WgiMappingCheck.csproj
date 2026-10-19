@@ -9,6 +9,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
+    <Compile Include="..\probe_common\WgiPins.cs" Link="WgiPins.cs" />
     <Compile Include="..\probe_common\SdkConsumers.cs" Link="SdkConsumers.cs" />
   </ItemGroup>
   <ItemGroup>
