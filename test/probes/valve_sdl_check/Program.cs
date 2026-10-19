@@ -78,6 +78,25 @@ static class ValveSdlCheck
 
     static string Err() => Marshal.PtrToStringUTF8(SDL_GetError()) ?? "";
 
+    static bool Sleep10() { Thread.Sleep(10); return true; }
+
+    /// <summary>Whether SDL lists a gamepad with this VID/PID.</summary>
+    static bool Listed(ushort vid, ushort pid)
+    {
+        IntPtr arr = SDL_GetGamepads(out int n);
+        if (arr == IntPtr.Zero) return false;
+        try
+        {
+            for (int j = 0; j < n; j++)
+            {
+                uint id = (uint)Marshal.ReadInt32(arr, j * 4);
+                if (SDL_GetJoystickVendorForID(id) == vid && SDL_GetJoystickProductForID(id) == pid) return true;
+            }
+            return false;
+        }
+        finally { SDL_free(arr); }
+    }
+
     /// <summary>Pump SDL until a gamepad with this VID/PID shows up.</summary>
     static IntPtr WaitForGamepad(ushort vid, ushort pid, int seconds)
     {
@@ -106,12 +125,26 @@ static class ValveSdlCheck
         return IntPtr.Zero;
     }
 
-    /// <summary>Submit a state and let SDL's reader thread pick it up.</summary>
-    static void Drive(HMController c, HMGamepadState st)
+    /// <summary>Submit a state until SDL's gamepad view shows what the
+    /// check after it asks for, on two reads in a row, or for 480 ms, the
+    /// fixed wait this replaced. The persona repeats its last frame every
+    /// 4 or 8 ms (idleFrameIntervalMs), so the second read follows newer
+    /// frames than the first, and a state that does not hold fails as it
+    /// did. A view that never shows it leaves the check to fail on the
+    /// same read the fixed wait ended with.</summary>
+    static void Drive(HMController c, HMGamepadState st, Func<bool> shown)
     {
-        for (int i = 0; i < 8; i++) { c.SubmitState(st); Thread.Sleep(50); }
-        SDL_UpdateGamepads();
-        Thread.Sleep(80);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        long nextSubmit = 0;
+        int inRow = 0;
+        while (sw.ElapsedMilliseconds < 480)
+        {
+            if (sw.ElapsedMilliseconds >= nextSubmit && nextSubmit < 400) { c.SubmitState(st); nextSubmit += 50; }
+            Thread.Sleep(10);
+            SDL_UpdateGamepads();
+            inRow = shown() ? inRow + 1 : 0;
+            if (inRow == 2) return;
+        }
         SDL_UpdateGamepads();
     }
 
@@ -230,7 +263,7 @@ static class ValveSdlCheck
                 Drive(c, new HMGamepadState
                 {
                     Axes = HMGamepadStateHelpers.StandardAxes(prof, 0.0f, 0.5f, 0.5f, 0.5f, 0.0f, 1.0f),
-                });
+                }, () => SDL_GetGamepadAxis(gp, AXIS_LEFTX) <= -30000 && SDL_GetGamepadAxis(gp, AXIS_RIGHT_TRIGGER) >= 30000);
                 short lx1 = SDL_GetGamepadAxis(gp, AXIS_LEFTX);
                 short rt1 = SDL_GetGamepadAxis(gp, AXIS_RIGHT_TRIGGER);
                 Check("SDL reads the left stick hard left", lx1 <= -30000, $"LEFTX={lx1}");
@@ -239,7 +272,7 @@ static class ValveSdlCheck
                 Drive(c, new HMGamepadState
                 {
                     Axes = HMGamepadStateHelpers.StandardAxes(prof, 1.0f, 0.5f, 0.5f, 0.5f, 0.0f, 0.0f),
-                });
+                }, () => SDL_GetGamepadAxis(gp, AXIS_LEFTX) >= 30000 && SDL_GetGamepadAxis(gp, AXIS_RIGHT_TRIGGER) <= 1000);
                 short lx2 = SDL_GetGamepadAxis(gp, AXIS_LEFTX);
                 short rt2 = SDL_GetGamepadAxis(gp, AXIS_RIGHT_TRIGGER);
                 Check("SDL reads the left stick hard right", lx2 >= 30000, $"LEFTX={lx2}");
@@ -251,6 +284,12 @@ static class ValveSdlCheck
                     Axes = HMGamepadStateHelpers.StandardAxes(prof, 0.5f, 0.5f, 0.5f, 0.5f, 0.0f, 0.0f),
                     TouchpadFinger0Active = true, TouchpadFinger0X = 1919, TouchpadFinger0Y = 0,
                     TouchpadFinger1Active = true, TouchpadFinger1X = 0, TouchpadFinger1Y = 1079,
+                }, () =>
+                {
+                    if (pads < 2) return true;
+                    SDL_GetGamepadTouchpadFinger(gp, 0, 0, out bool a0, out float ax, out float ay, out _);
+                    SDL_GetGamepadTouchpadFinger(gp, 1, 0, out bool a1, out float bx, out float by, out _);
+                    return a0 && a1 && ax > 1.0f - t.Tol && ay < t.Tol && bx < t.Tol && by > 1.0f - t.Tol;
                 });
                 if (pads >= 2)
                 {
@@ -294,9 +333,9 @@ static class ValveSdlCheck
                 var neutral = HMGamepadStateHelpers.StandardAxes(prof, 0.5f, 0.5f, 0.5f, 0.5f, 0.0f, 0.0f);
                 foreach (var (label, button, gpButton) in buttonCases)
                 {
-                    Drive(c, new HMGamepadState { Axes = neutral, Buttons = button });
+                    Drive(c, new HMGamepadState { Axes = neutral, Buttons = button }, () => SDL_GetGamepadButton(gp, gpButton));
                     bool down = SDL_GetGamepadButton(gp, gpButton);
-                    Drive(c, new HMGamepadState { Axes = neutral });
+                    Drive(c, new HMGamepadState { Axes = neutral }, () => !SDL_GetGamepadButton(gp, gpButton));
                     bool up = !SDL_GetGamepadButton(gp, gpButton);
                     Check($"SDL reads {label} ({button}) on its own button and lets go", down && up,
                           $"down={down} released={up}");
@@ -316,9 +355,9 @@ static class ValveSdlCheck
                     foreach (var (label, button, sense) in touchCases)
                     {
                         bool has = SDL_GamepadHasCapSense(gp, sense);
-                        Drive(c, new HMGamepadState { Axes = neutral, Buttons = button });
+                        Drive(c, new HMGamepadState { Axes = neutral, Buttons = button }, () => SDL_GetGamepadCapSense(gp, sense));
                         bool on = SDL_GetGamepadCapSense(gp, sense);
-                        Drive(c, new HMGamepadState { Axes = neutral });
+                        Drive(c, new HMGamepadState { Axes = neutral }, () => !SDL_GetGamepadCapSense(gp, sense));
                         bool off = !SDL_GetGamepadCapSense(gp, sense);
                         Check($"SDL reads the {label} sensor ({button})", has && on && off,
                               $"has={has} on={on} off={off}");
@@ -341,6 +380,13 @@ static class ValveSdlCheck
                         Axes = HMGamepadStateHelpers.StandardAxes(prof, 0.5f, 0.5f, 0.5f, 0.5f, 0.0f, 0.0f),
                         AccelX = 8000, AccelY = -12000, AccelZ = 16000,
                         GyroPitch = -20000, GyroYaw = 24000, GyroRoll = -28000,
+                    }, () =>
+                    {
+                        var gs = new float[3];
+                        var acs = new float[3];
+                        SDL_GetGamepadSensorData(gp, SENSOR_GYRO, gs, 3);
+                        SDL_GetGamepadSensorData(gp, SENSOR_ACCEL, acs, 3);
+                        return gs[0] != 0f && gs[1] != 0f && gs[2] != 0f && acs[0] != 0f && acs[1] != 0f && acs[2] != 0f;
                     });
                     var g = new float[3];
                     var a = new float[3];
@@ -359,8 +405,11 @@ static class ValveSdlCheck
             {
                 if (gp != IntPtr.Zero) SDL_CloseGamepad(gp);
                 c?.Dispose();
-                Thread.Sleep(500);
-                SDL_UpdateGamepads();
+                // Until SDL lists the persona no more, for up to the 500 ms
+                // this waited before.
+                var gone = System.Diagnostics.Stopwatch.StartNew();
+                do { SDL_UpdateGamepads(); }
+                while (Listed(t.Vid, t.Pid) && gone.ElapsedMilliseconds < 500 && Sleep10());
             }
         }
 
