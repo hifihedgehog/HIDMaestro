@@ -459,7 +459,7 @@ partial class Program
         }) { IsBackground = true, Name = "stdin-pump" };
         stdinPump.Start();
         // Emit a stdout marker after every command finishes processing so
-        // a stdin-driven harness (e.g. swap_regression.ps1) can block on
+        // a stdin-driven harness (e.g. regression_battery.ps1) can block on
         // command completion without resorting to time-based heuristics.
         // The marker is the LAST line printed for each iteration, and is
         // emitted via try/finally so it covers continue branches AND the

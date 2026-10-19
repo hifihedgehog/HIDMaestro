@@ -1,5 +1,5 @@
 # Which devnodes are HIDMaestro's, for the battery's leftover check
-# (swap_regression.ps1, Test-Scenario) and its own offline check
+# (regression_battery.ps1, Test-Scenario) and its own offline check
 # (devnode_owner_check.ps1). Dot-sourced by both.
 #
 # Ownership is proved by hardware ID, read from the instance key, as

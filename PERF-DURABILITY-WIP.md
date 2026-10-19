@@ -5,7 +5,7 @@
 > and the file/line citations in Tables 2 and 3 no longer resolve against
 > current source. Cite `File.Method` from the tree, not these line numbers.
 
-**Scope:** address audit-pass timing fragility (Tier 1) and add multi-layer caching for fresh-launch + create/teardown speed (Tiers 2–5). Use the swap_regression battery as the gate.
+**Scope:** address audit-pass timing fragility (Tier 1) and add multi-layer caching for fresh-launch + create/teardown speed (Tiers 2–5). Use the regression battery as the gate.
 
 **Version target:** v1.3.0. Major-minor bump because the new `HIDMAESTRO_TIMEOUT_SCALE` env var is a public-surface addition and the cache behavior changes are user-observable.
 
@@ -28,8 +28,8 @@ To be filled before any Tier 1 changes land. All times are wall-clock; battery s
 |   ↳ Xbox Series BT | 166 ms | 198 ms | **122 ms** (-27%) | **119 ms** (-28%) | _p25 = 143 ms_ | _p25 = 152 ms_ | _p25 = 154 ms_ | _p25 = 149 ms_ | ~1.2 s |
 |   ↳ DualSense BT | 427 ms | 432 ms | **390 ms** (-9%) | **373 ms** (-13%) | _median_ | _median_ | _median_ | _median_ | ~3.7 s |
 | Finalize device names | 2 ms | 1 ms | 1 ms | 1 ms | 1 ms | 1 ms | 1 ms | 1 ms | 2 ms | 2 ms | 1 ms | 1 ms | ~10 ms |
-| swap_regression battery wall | 2 016 s | **1 934 s** (-4%) | **1 895 s** (-6%) | **2 021 s** | **1 949 s** (-3.3%) | **1 971 s** (-2.2%) | **1 965 s** (-2.5%) | **1 970 s** (-2.3%) | n/a | n/a | **1 952 s** (-3.2%) | **1 973 s** (-2.1%) | ~5–6 h |
-| swap_regression battery PASS count | 26/26 | **26/26** | **26/26** | **26/26** | **26/26** | **26/26** | **26/26** | **26/26** | n/a | n/a | **26/26** | **26/26** | _pending_ |
+| regression battery wall | 2 016 s | **1 934 s** (-4%) | **1 895 s** (-6%) | **2 021 s** | **1 949 s** (-3.3%) | **1 971 s** (-2.2%) | **1 965 s** (-2.5%) | **1 970 s** (-2.3%) | n/a | n/a | **1 952 s** (-3.2%) | **1 973 s** (-2.1%) | ~5–6 h |
+| regression battery PASS count | 26/26 | **26/26** | **26/26** | **26/26** | **26/26** | **26/26** | **26/26** | **26/26** | n/a | n/a | **26/26** | **26/26** | _pending_ |
 
 **Battery wall progression context:** C5/C8 (1895/1918 s) were faster than baseline because the v1.3.0-wip-broken `WaitForHidChild` was returning False immediately for SWD-rooted parents: skipping a real PnP wait that downstream slot-claim was effectively absorbing. C9 (2021 s) is post-fix: the wait happens properly in step 4, slot-claim in step 7 is then fast. Net: battery wall is ~baseline (within 5s of 2016 s noise), per-controller Phase 1 is **16% faster**, and the SDK is now functionally correct for SWD-rooted parents. The user-visible metric (Phase 1) is the right scorecard.
 
@@ -213,10 +213,10 @@ Every wall-clock budget that could trip on slow hardware. Categories from the au
 | T1-19 | `DeviceOrchestrator.WaitForDeviceStarted` (line 1377) | 5 000 ms | b | Wrap with TimeoutScale.Apply | done |  |
 | T1-20 | `DeviceOrchestrator.WaitForDeviceInterface` (line 957) | 2 000 ms | b | **Floor-bump base to 5 000**, then wrap with TimeoutScale.Apply | done | 2s is too tight even on fast hw |
 | T1-21 | `DeviceOrchestrator.WaitForHidChild` (line 862) | 5 000 ms | b | Wrap with TimeoutScale.Apply | done | gamepad-companion HID child |
-| T1-22 | `swap_regression.ps1` Wait-CascadeSettle | fixed 12 s | a | Read `$env:HIDMAESTRO_TIMEOUT_SCALE`, multiply | done | battery script |
-| T1-23 | `swap_regression.ps1` Wait-CreateBound TimeoutMs | 60 000 ms | a | Read env scale, multiply | done |  |
-| T1-24 | `swap_regression.ps1` Start-Sleep -Seconds 4 (post-create) | 4 s × N | a | Read env scale, multiply | done |  |
-| T1-25 | `swap_regression.ps1` Stop-Process WaitForExit GracefulMs | 5 000 ms | a | Read env scale, multiply | done |  |
+| T1-22 | `regression_battery.ps1` Wait-CascadeSettle | fixed 12 s | a | Read `$env:HIDMAESTRO_TIMEOUT_SCALE`, multiply | done | battery script |
+| T1-23 | `regression_battery.ps1` Wait-CreateBound TimeoutMs | 60 000 ms | a | Read env scale, multiply | done |  |
+| T1-24 | `regression_battery.ps1` Start-Sleep -Seconds 4 (post-create) | 4 s × N | a | Read env scale, multiply | done |  |
+| T1-25 | `regression_battery.ps1` Stop-Process WaitForExit GracefulMs | 5 000 ms | a | Read env scale, multiply | done |  |
 | T1-26 | NEW: `TimeoutScale` class | n/a | n/a | Add at `sdk/HIDMaestro.Core/Internal/TimeoutScale.cs` | done | reads HIDMAESTRO_TIMEOUT_SCALE once at class init |
 | T1-27 | `HMController.OutputPollLoop` Thread.Sleep(8) | 8 ms | c | Leave as-is | n/a | pacing |
 | T1-28 | `DeviceOrchestrator` WaitFor* poll Thread.Sleep(100) | 100 ms | c | Leave as-is | n/a | pacing |

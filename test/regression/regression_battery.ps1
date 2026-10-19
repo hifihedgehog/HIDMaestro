@@ -1,10 +1,11 @@
 ﻿<#
 .SYNOPSIS
-  Regression battery for HIDMaestro live-swap teardown.
+  Regression battery for HIDMaestro.
 
 .DESCRIPTION
-  Drives HIDMaestroTest.exe through a series of single-controller and
-  multi-controller create/swap/remove sequences. After every scenario,
+  Drives HIDMaestroTest.exe through single-controller and
+  multi-controller create/swap/remove sequences (S01 to S23) and runs the
+  probe programs under test\probes (S24 and up). After every scenario,
   verifies that no HIDMaestro PnP devnodes are left in the PRESENT
   state. PHANTOM is fine: it's registry residue with no live devnode.
   A single PRESENT leftover means a real consumer (XInput, WGI,
@@ -34,11 +35,11 @@
   Print every command sent to the test app and every state snapshot.
 
 .EXAMPLE
-  ./swap_regression.ps1
+  ./regression_battery.ps1
   Runs all scenarios.
 
 .EXAMPLE
-  ./swap_regression.ps1 -Filter 'S08*' -Verbose
+  ./regression_battery.ps1 -Filter 'S08*' -Verbose
   Runs only the S08 scenario with verbose output.
 
 .NOTES

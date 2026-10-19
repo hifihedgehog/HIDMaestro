@@ -96,7 +96,7 @@ $banner = @"
     .\PidSetUsagesProbe.exe
 
   Subset of regression battery (full battery is 33+ min on fast hw):
-    powershell -File C:\HIDMaestro\regression\swap_regression.ps1 -Filter 'S0[1-3]*'
+    powershell -File C:\HIDMaestro\regression\regression_battery.ps1 -Filter 'S0[1-3]*'
 
   When done: close the Sandbox window. State is discarded automatically.
 

@@ -4,14 +4,14 @@ rem  pre-tag-validate.cmd
 rem
 rem  Mandatory pre-release validation. Run before `git tag vX.Y.Z`.
 rem  - Builds the SDK + test app
-rem  - Runs the full live-swap regression battery (99 scenarios, [D4-PLACEHOLDER: minutes] min
+rem  - Runs the full regression battery (99 scenarios, [D4-PLACEHOLDER: minutes] min
 rem    on the Ryzen devbox)
 rem  - Exits non-zero if any scenario FAILed; do NOT tag/push/release in
 rem    that case
 rem
-rem  Per memory:feedback-always-run-swap-regression-before-release.md
-rem  this script encodes the discipline rule. The release recipe should
-rem  invoke this between "build_all.cmd succeeds" and "git tag".
+rem  This script encodes the release rule: the full battery passes before
+rem  any tag. The release recipe should invoke this between
+rem  "build_all.cmd succeeds" and "git tag".
 rem
 rem  Requires:
 rem    - Elevated cmd/PowerShell (HIDMaestroTest needs admin; if invoked
@@ -95,7 +95,7 @@ if errorlevel 1 (
 rem Rebuild every managed probe so the battery's probe scenarios (S24+)
 rem run the SDK built THIS run, not whatever a prior iteration left in
 rem bin\. RID-agnostic (plain dotnet build): the harness consumes that
-rem flavor and its freshness gate (swap_regression.ps1) hash-compares
+rem flavor and its freshness gate (regression_battery.ps1) hash-compares
 rem each probe's HIDMaestro.Core.dll against the SDK project's own
 rem RID-agnostic output, refusing to run stale. This loop is what makes
 rem the gate pass automatically. 2026-07-21 audit: a battery ran a
@@ -127,9 +127,9 @@ echo       BUILD OK
 echo.
 
 rem 3. Run the full regression battery
-echo [2/3] Running live-swap regression battery (99 scenarios)...
+echo [2/3] Running regression battery (99 scenarios)...
 echo.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "test\regression\swap_regression.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "test\regression\regression_battery.ps1"
 set BATTERY_EXIT=%ERRORLEVEL%
 echo.
 
@@ -145,7 +145,7 @@ if %BATTERY_EXIT% neq 0 (
 echo [3/3] Validation complete.
 echo.
 echo ====================================================================
-echo  [PASS] Switch Pro check + 96/96 swap scenarios passed. Safe to:
+echo  [PASS] 99/99 scenarios passed. Safe to:
 echo         git tag vX.Y.Z
 echo         git push origin master vX.Y.Z
 echo         gh release create vX.Y.Z ...

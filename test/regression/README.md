@@ -1,11 +1,12 @@
-﻿# swap_regression.ps1: live-swap teardown regression battery
+# regression_battery.ps1: the regression battery
 
-Drives `HIDMaestroTest.exe` through 99 single- and multi-controller
-create/swap/remove/force-kill sequences and verifies every scenario
-leaves zero HIDMaestro PnP devnodes in the `PRESENT` state. Catches
-the symptom that v1.1.31 fixed (`SwDeviceLifetimeParentPresent`
-resurrection after `DIF_REMOVE`) and any future regression in the
-same area.
+Runs 99 scenarios and verifies every one leaves zero HIDMaestro PnP
+devnodes in the `PRESENT` state. S01 to S23 drive `HIDMaestroTest.exe`
+through single- and multi-controller create/swap/remove/force-kill
+sequences, and S24 and up run the probe programs under `test/probes`.
+The sequences catch the symptom that v1.1.31 fixed
+(`SwDeviceLifetimeParentPresent` resurrection after `DIF_REMOVE`) and
+any future regression in the same area.
 
 Covers all five controller archetypes a real consumer (PadForge etc.)
 deploys: Xbox 360 Wired (non-xinputhid + XUSB SwDevice companion),
@@ -19,16 +20,16 @@ custom profile (BEEF:F000) authored via the SDK's `HMProfileBuilder`
 
 ```powershell
 # from an ELEVATED PowerShell, repo root or anywhere
-./test/regression/swap_regression.ps1
+./test/regression/regression_battery.ps1
 
 # specific scenario only (wildcard match on scenario name)
-./test/regression/swap_regression.ps1 -Filter 'S08*'
+./test/regression/regression_battery.ps1 -Filter 'S08*'
 
 # verbose: prints every stdin command sent to the test app
-./test/regression/swap_regression.ps1 -Verbose
+./test/regression/regression_battery.ps1 -Verbose
 
 # point at a non-default exe (e.g. a published build)
-./test/regression/swap_regression.ps1 -Exe C:\path\to\HIDMaestroTest.exe
+./test/regression/regression_battery.ps1 -Exe C:\path\to\HIDMaestroTest.exe
 ```
 
 Exit code: `0` if every scenario passed, `1` if any failed.
