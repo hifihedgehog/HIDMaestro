@@ -72,6 +72,10 @@ internal static class Program
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool CloseHandle(IntPtr h);
 
+    [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    static extern bool HidD_FlushQueue(SafeFileHandle h);
+
     const uint GENERIC_READ = 0x80000000, GENERIC_WRITE = 0x40000000;
     const uint FILE_SHARE_RW = 0x3, OPEN_EXISTING = 3, FILE_FLAG_OVERLAPPED = 0x40000000;
 
@@ -237,22 +241,24 @@ internal static class Program
         { IsBackground = true };
         pump.Start();
 
-        // Locate the VIRTUAL pad's HID interface (poll: enumeration
-        // follows device creation by a few hundred ms). VID/PID alone is
-        // ambiguous when a real Pro Controller is paired to the same box
-        // (2026-07-22: the probe opened the live pad and asserted against
-        // its real firmware/calibration). The virtual serves serial
-        // HM-CTL-<index>; a real one serves its MAC.
+        // Locate THIS pad's HID interface (poll: enumeration follows
+        // device creation by a few hundred ms). VID/PID alone is ambiguous
+        // when a real Pro Controller is paired to the same box (2026-07-22:
+        // the probe opened the live pad and asserted against its real
+        // firmware/calibration), and so is any HM-CTL- serial while another
+        // program runs a virtual Switch Pro. This one serves HM-CTL- and its
+        // own transport index (DeviceOrchestrator.DriverSerial). A real one
+        // serves its MAC.
+        string serial = DeviceOrchestrator.DriverSerial(ctrl.TransportIndex);
         string? path = null;
         for (int i = 0; i < 50 && path == null; i++)
         {
             path = HidDeviceEnumerator.Enumerate()
                 .FirstOrDefault(d => d.VendorId == 0x057E && d.ProductId == 0x2009
-                    && d.SerialNumberString != null
-                    && d.SerialNumberString.StartsWith("HM-CTL-"))?.DevicePath;
+                    && d.SerialNumberString == serial)?.DevicePath;
             if (path == null) Thread.Sleep(100);
         }
-        Check("virtual HID interface enumerates (VID 057E PID 2009, HM-CTL serial)", path != null, path ?? "");
+        Check($"virtual HID interface enumerates (VID 057E PID 2009, serial {serial})", path != null, path ?? "");
         if (path == null) return Fail(ref pumpStop, pump);
 
         s_readEvent = CreateEventW(IntPtr.Zero, true, false, IntPtr.Zero);
@@ -349,8 +355,13 @@ internal static class Program
         // ── Phase 3: 0x30 streaming ─────────────────────────────────────
         Console.WriteLine("\n-- Phase 3: 0x30 streaming at ~60 Hz --");
 
-        // Drain whatever is queued, then time 30 fresh frames.
-        while (HidRead(30) != null) { }
+        // Drop whatever is queued, then time 30 fresh frames. Reading until
+        // a read times out never ends while frames keep coming faster than
+        // the timeout, and the pad streams every 15 ms (driver.c's stream
+        // clock): beside the 2026-10-19 gate this loop ran for 14 minutes.
+        // HidD_FlushQueue empties the HID class's queue in one call, as
+        // DS4Windows does before reading (HidLibrary/HidDevice.cs:162).
+        Check("input queue flushed", HidD_FlushQueue(s_hid), $"error {Marshal.GetLastWin32Error()}");
         int frames = 0; byte firstTimer = 0, lastTimer = 0;
         bool allLen362 = true;
         var cadence = Stopwatch.StartNew();
