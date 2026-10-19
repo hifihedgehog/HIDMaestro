@@ -827,8 +827,24 @@ public sealed partial class HMController : IDisposable
     {
         long startTicks = timed ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
 
-        ResolveSimpleSlots(in state, out double mlx, out double mly, out double mrx,
-                           out double mry, out double mlt, out double mrt);
+        // The arm flag is read once a frame, here: the output reader sets it
+        // from another thread, and the slots below and the branch further
+        // down must agree on it. The buffer, allocated only for a profile
+        // that arms, is tested first, so any other profile's frame stops
+        // at one field.
+        bool useExtended = _extendedReportBuffer != null
+                        && _extEncoderState != null
+                        && Profile.ExtendedReport != null
+                        && _extendedModeArmed;
+
+        // The six simple slots feed the ports, the state block, the codec
+        // and the XUSB slice. The descriptor path reads the axes itself
+        // (BuildReportInto), so a frame that takes it alone, every plain HID
+        // profile's, skips their dictionary lookups. Resolving them has no
+        // side effect.
+        double mlx = 0, mly = 0, mrx = 0, mry = 0, mlt = 0, mrt = 0;
+        if (useExtended || _packsGipBuffer || _stateBlockSpec != null || Ports.Count > 0)
+            ResolveSimpleSlots(in state, out mlx, out mly, out mrx, out mry, out mlt, out mrt);
 
         // A device with controller ports: SubmitState is port 1.
         if (Ports.Count > 0)
@@ -896,12 +912,7 @@ public sealed partial class HMController : IDisposable
         // (its descriptor already declares structured X/Y/Rx/Ry usages
         // that joy.cpl, dinput, and the test app's parsers all decode
         // correctly). Restoring the v1.3.4 path for USB removes the
-        // regression.
-        bool useExtended = Profile.ExtendedReport != null
-                        && _extendedReportBuffer != null
-                        && _extEncoderState != null
-                        && _extendedModeArmed;
-
+        // regression. useExtended is read at the top of this method.
         if (useExtended)
         {
             // Profile.ExtendedReport's field list drives byte placement.
