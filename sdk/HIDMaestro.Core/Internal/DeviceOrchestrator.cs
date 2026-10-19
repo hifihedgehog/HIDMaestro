@@ -283,6 +283,7 @@ internal static partial class DeviceOrchestrator
     private const uint CM_LOCATE_DEVNODE_PHANTOM = 0x00000001;
     private const uint DN_HAS_PROBLEM = 0x00000400;
     private const uint DN_STARTED = 0x00000008;
+    private const uint DN_WILL_BE_REMOVED = 0x00040000;
 
     // ════════════════════════════════════════════════════════════════════
     //  Well-known GUIDs
@@ -1734,6 +1735,17 @@ internal static partial class DeviceOrchestrator
     /// (<see cref="SharedMemoryIO.DriverHalf"/>).</summary>
     internal static Func<int, (int Protocol, int ProtocolMin, Version? Version, int ConfigError)> DriverHalf = SharedMemoryIO.DriverHalf;
 
+    /// <summary>True when the devnode is one Windows will remove
+    /// (DN_WILL_BE_REMOVED), as a life surprise removed while a program
+    /// keeps its HID child open leaves it. A normal locate need not find
+    /// such a devnode, so it is located as a phantom too, and the status
+    /// call answers only for a devnode in the tree. A check replaces
+    /// it.</summary>
+    internal static Func<string, bool> RemovalPending = instanceId =>
+        CM_Locate_DevNodeW(out uint devInst, instanceId, 1 /*CM_LOCATE_DEVNODE_PHANTOM*/) == 0
+        && CM_Get_DevNode_Status(out uint status, out _, devInst, 0) == 0
+        && (status & DN_WILL_BE_REMOVED) != 0;
+
     private static (bool Present, uint Status, uint Problem) ReadDevnodeStatus(string instanceId)
     {
         if (CM_Locate_DevNodeW(out uint devInst, instanceId, 0) != 0) return (false, 0, 0);
@@ -1765,6 +1777,14 @@ internal static partial class DeviceOrchestrator
     {
         if (DriverHalf(controllerIndex).ConfigError != 0) return true;
         var (present, status, problem) = DevnodeStatus(instanceId);
+        // The devnode of a life that ended by surprise removal while a
+        // program kept its HID child open: Windows "will send the remove
+        // IRP for the child device" only "when all handles to the child
+        // device are closed" ("Removing a Device in a Function Driver"), and
+        // until then a create at the same instance id gets that devnode,
+        // which never starts again. Measured 2026-10-19: DN_WILL_BE_REMOVED,
+        // not started, no child, until the holder closed its handle.
+        if (RemovalPending(instanceId)) return true;
         if (!present || (status & DN_HAS_PROBLEM) == 0) return false;
         if (final) return true;
         return problem is CM_PROB_FAILED_START or CM_PROB_FAILED_ADD or CM_PROB_FAILED_DRIVER_ENTRY
@@ -1859,6 +1879,11 @@ internal static partial class DeviceOrchestrator
                 $"(problem code {problem}) and the create removed it.{advice}",
                 half.Version ?? new Version(0, 0, 0), DriverDeploy.MinimumDriverVersion, new[] { instanceId });
         }
+        if (RemovalPending(instanceId))
+            return new InvalidOperationException(
+                $"The device {instanceId} is still its previous life's, which Windows removes once no program holds its " +
+                "HID child open. A program still holds it, so this create cannot start it. Create again once that " +
+                "program lets go, as it does when its reads of the child fail.");
         return new InvalidOperationException($"The device {instanceId} failed its start, problem code {problem}.");
     }
 
@@ -2009,9 +2034,8 @@ internal static partial class DeviceOrchestrator
         try
         {
 
-        try { SharedMemoryIO.DestroyController(controllerIndex); } catch { }
-
-        // Capture the HID children of the parent BEFORE any removal step.
+        // Capture the HID children of the parent BEFORE any removal step,
+        // the surprise removal below included.
         // Once the parent goes, CM_Get_Child / CM_Get_Sibling on it stops
         // working: so any explicit per-child cleanup needs the list in
         // hand first. Covers issue #11 (xbox-360-wired orphan that
@@ -2025,6 +2049,22 @@ internal static partial class DeviceOrchestrator
         }
         LogDiag($"    pre-captured HID children: {preCapturedHidChildren.Count}");
         foreach (var c in preCapturedHidChildren) LogDiag($"      child: {c}");
+
+        // A UMDF2 device the SDK registered under ROOT leaves as an
+        // unplugged device does: its driver fails it, and Windows removes it
+        // with its HID children by surprise removal, which no handle another
+        // program keeps open on a child can veto. The removals below then
+        // find the children gone and the device failed, and remove it and
+        // the records. A driver before protocol 5 does not answer, and the
+        // removals query Windows as before.
+        if (instanceId != null && instanceId.StartsWith(@"ROOT\", StringComparison.OrdinalIgnoreCase))
+        {
+            var failSw = Stopwatch.StartNew();
+            bool failed = SharedMemoryIO.RequestSurpriseRemoval(controllerIndex, TimeoutScale.Apply(2000));
+            LogDiag($"    surprise removal requested of {instanceId}: {(failed ? "the driver failed its device" : "no answer")} in {failSw.ElapsedMilliseconds}ms");
+        }
+
+        try { SharedMemoryIO.DestroyController(controllerIndex); } catch { }
 
         // Close all SwDeviceCreate-owned handles for this controller FIRST.
         // SwDeviceCreate-managed devices (xinputhid-path gamepad companion

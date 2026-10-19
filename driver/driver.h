@@ -298,6 +298,16 @@ typedef struct _DEVICE_CONTEXT {
     HANDLE  InputAckEvent;
     WCHAR   InputAckMappingName[64];  /* e.g. L"Global\\HIDMaestroInputAck0" */
     WCHAR   InputAckEventName[64];    /* e.g. L"Global\\HIDMaestroInputAckEvent0" */
+    WCHAR   RemoveEventName[64];      /* e.g. L"Global\\HIDMaestroRemoveEvent0" */
+    WCHAR   RemovedEventName[64];     /* e.g. L"Global\\HIDMaestroRemovedEvent0" */
+
+    /* The SDK's request that the device leave as an unplugged one does
+     * (OpenEvent on RemoveEventName, SYNCHRONIZE), and the driver's answer
+     * that it has failed itself (OpenEvent on RemovedEventName,
+     * EVENT_MODIFY_STATE). Both NULL against an SDK that makes neither.
+     * Opened and closed with InputDataEvent, on the worker thread. */
+    HANDLE  RemoveEvent;
+    HANDLE  RemovedEvent;
 
     /* Owner watch (issue #67). The SDK holds the server end of
      * \\.\pipe\HIDMaestroOwner<N> for as long as the controller lives. The

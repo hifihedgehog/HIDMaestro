@@ -32,10 +32,15 @@
  * Protocol 4: the version contract, v2.0.0 (the design note's decision
  *             (c)): the identity tag and the identity entry, under which
  *             a driver reads a controller's v2.0.0 values.
+ * Protocol 5: the remove events, v2.0.0: on Global\HIDMaestroRemoveEvent<N>
+ *             the driver fails its device (WdfDeviceSetFailed,
+ *             WdfDeviceFailedNoRestart), which removes it and its HID
+ *             children as an unplug does, and then signals
+ *             Global\HIDMaestroRemovedEvent<N>.
  * A driver keeps every older layout. The SDK runs on a driver whose range
  * from DriverProtocolMin to DriverProtocol holds its protocol. */
 #define HIDMAESTRO_VERSION_LAYOUT       1
-#define HIDMAESTRO_DRIVER_PROTOCOL      4
+#define HIDMAESTRO_DRIVER_PROTOCOL      5
 #define HIDMAESTRO_DRIVER_PROTOCOL_MIN  4
 /* The protocol whose SDK's values this driver reads. */
 #define HIDMAESTRO_CONTRACT_PROTOCOL    4

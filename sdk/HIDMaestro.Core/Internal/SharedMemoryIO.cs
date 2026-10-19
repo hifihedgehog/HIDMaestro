@@ -159,6 +159,10 @@ internal static partial class SharedMemoryIO
     private static readonly Dictionary<int, IntPtr> s_inputAckHandles = new();
     private static readonly Dictionary<int, IntPtr> s_inputAckViews   = new();
     private static readonly Dictionary<int, IntPtr> s_inputAckEvents  = new();
+    // The remove request and the driver's answer (driver.c, protocol 5):
+    // made with the input mapping, released with it.
+    private static readonly Dictionary<int, IntPtr> s_removeEvents    = new();
+    private static readonly Dictionary<int, IntPtr> s_removedEvents   = new();
     // Issue #67: the server ends of each controller's owner pipe, guarded by
     // the s_inputViews lock.
     private static readonly Dictionary<int, List<IntPtr>> s_ownerPipes = new();
@@ -207,6 +211,32 @@ internal static partial class SharedMemoryIO
                 (ushort)Marshal.ReadInt16(v, VERSION_OFFSET_DRIVER_VERSION + 4));
             return (version, protocol);
         }
+    }
+
+    /// <summary>The driver protocol that fails its device on request
+    /// (driver.c, Global\HIDMaestroRemoveEvent&lt;N&gt;).</summary>
+    internal const int DRIVER_PROTOCOL_REMOVE = 5;
+
+    /// <summary>Asks the index's driver to fail its device, which Windows
+    /// then removes with its HID children as an unplug removes them, by
+    /// surprise removal, and waits up to <paramref name="timeoutMs"/> for
+    /// the driver's answer. False when the driver does not serve protocol
+    /// <see cref="DRIVER_PROTOCOL_REMOVE"/>, the index has no events, or no
+    /// answer came.</summary>
+    internal static bool RequestSurpriseRemoval(int controllerIndex, int timeoutMs)
+    {
+        IntPtr request, answer;
+        lock (s_inputViews)
+        {
+            if (!s_removeEvents.TryGetValue(controllerIndex, out request) || request == IntPtr.Zero
+                || !s_removedEvents.TryGetValue(controllerIndex, out answer) || answer == IntPtr.Zero)
+                return false;
+        }
+        if (DriverHalf(controllerIndex).Protocol < DRIVER_PROTOCOL_REMOVE) return false;
+        // A stale answer from a request no Dispose waited for is not this one.
+        ResetEvent(answer);
+        if (!SetEvent(request)) return false;
+        return WaitForSingleObject(answer, (uint)Math.Max(0, timeoutMs)) == 0;
     }
 
     /// <summary>v2.0.0: the driver's half of the version section: the
@@ -385,6 +415,8 @@ internal static partial class SharedMemoryIO
         $@"Global\HIDMaestroCompanionInputEvent{controllerIndex}",
         $@"Global\HIDMaestroInputAck{controllerIndex}",
         $@"Global\HIDMaestroInputAckEvent{controllerIndex}",
+        $@"Global\HIDMaestroRemoveEvent{controllerIndex}",
+        $@"Global\HIDMaestroRemovedEvent{controllerIndex}",
         $@"Global\HIDMaestroOutput{controllerIndex}",
         $@"Global\HIDMaestroOutputEvent{controllerIndex}",
         $@"Global\HIDMaestroPidState{controllerIndex}",
@@ -472,6 +504,9 @@ internal static partial class SharedMemoryIO
                 s_inputAckHandles[controllerIndex] = ah;
                 s_inputAckViews[controllerIndex] = av;
                 s_inputAckEvents[controllerIndex] = CreateNamedEvent($@"Global\HIDMaestroInputAckEvent{controllerIndex}");
+                // Before the input event, which the worker opens them with.
+                s_removeEvents[controllerIndex] = CreateNamedEvent($@"Global\HIDMaestroRemoveEvent{controllerIndex}");
+                s_removedEvents[controllerIndex] = CreateNamedEvent($@"Global\HIDMaestroRemovedEvent{controllerIndex}");
 
                 // v2.0.0: the version handshake (HIDMAESTRO_VERSION_INFO in
                 // driver.h). This SDK's half goes in now. The driver writes its
@@ -1074,6 +1109,10 @@ internal static partial class SharedMemoryIO
             CloseHandle(ah);
         if (s_inputAckEvents.Remove(controllerIndex, out IntPtr aev) && aev != IntPtr.Zero)
             CloseHandle(aev);
+        if (s_removeEvents.Remove(controllerIndex, out IntPtr rev) && rev != IntPtr.Zero)
+            CloseHandle(rev);
+        if (s_removedEvents.Remove(controllerIndex, out IntPtr rdev) && rdev != IntPtr.Zero)
+            CloseHandle(rdev);
         if (s_ownerPipes.Remove(controllerIndex, out var pipes))
             foreach (var ph in pipes) CloseHandle(ph);
         if (s_versionViews.Remove(controllerIndex, out IntPtr vv) && vv != IntPtr.Zero)
@@ -1158,7 +1197,8 @@ internal static partial class SharedMemoryIO
         {
             foreach (int i in Indexes(s_inputViews.Keys, s_inputHandles.Keys, s_inputEvents.Keys,
                                       s_companionInputEvents.Keys, s_inputAckViews.Keys, s_inputAckHandles.Keys,
-                                      s_inputAckEvents.Keys, s_ownerPipes.Keys, s_versionViews.Keys, s_versionHandles.Keys))
+                                      s_inputAckEvents.Keys, s_removeEvents.Keys, s_removedEvents.Keys,
+                                      s_ownerPipes.Keys, s_versionViews.Keys, s_versionHandles.Keys))
                 if (!IsHeld(i)) ReleaseInputLocked(i);
                 else ForgetDriverLocked(i);
         }
@@ -1501,6 +1541,10 @@ internal static partial class SharedMemoryIO
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool SetEvent(IntPtr hEvent);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool ResetEvent(IntPtr hEvent);
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     private static partial uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
