@@ -21,7 +21,9 @@ int wmain() {
     if (FAILED(RoGetActivationFactory(cn.Get(), IID_PPV_ARGS(&s)))) return 1;
     ComPtr<IVectorView<Gamepad*>> pads;
     UINT n = 0;
-    for (int i = 0; i < 15; i++) {
+    // Poll up to 10 s for Gamepad.Gamepads to populate. A busy machine
+    // can take seconds, and the loop ends at the first pad.
+    for (int i = 0; i < 50; i++) {
         s->get_Gamepads(&pads);
         if (pads) { pads->get_Size(&n); if (n > 0) break; }
         Sleep(200);
