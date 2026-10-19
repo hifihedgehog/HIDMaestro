@@ -63,6 +63,13 @@ internal sealed class HidCapture : IDisposable
 
     public int Count { get { lock (_reports) return _reports.Count; } }
 
+    /// <summary>Whether a report arrived at or after <paramref name="mark"/>.
+    /// Reports are kept in arrival order, so the last one decides.</summary>
+    public bool AnySince(long mark)
+    {
+        lock (_reports) return _reports.Count > 0 && _reports[^1].Ticks >= mark;
+    }
+
     /// <summary>Pressed buttons and the X value of one report, read
     /// through the device's own report descriptor.</summary>
     public (string Buttons, uint X) Decode(byte[] report)

@@ -63,7 +63,7 @@ internal static partial class Program
                 Console.WriteLine($"  E6: the WUDF service's ImagePath after it: {WudfImagePath()}");
                 Check("E6: the v1.12.0 program's controller is untouched, driver and all",
                       !capOld.Broken && Native.Subtree(instOld).SequenceEqual(treeOld, StringComparer.OrdinalIgnoreCase)
-                      && Native.DriverVersionOf(instOld) == verOld && Flows(capOld),
+                      && Native.DriverVersionOf(instOld) == verOld && Arrives(capOld),
                       capOld.Broken ? $"read error {capOld.ReadError}" : $"driver {Native.DriverVersionOf(instOld)}");
                 nu.Send("sweep");
             }
@@ -114,7 +114,7 @@ internal static partial class Program
             nu.Send($"stream 6 0.8 125 0");
             var path = WaitPaths(0xBEEF, padPid, 1, 10_000);
             using var cap = path.Count == 1 ? HidCapture.Open(path[0]) : null;
-            Check($"{tag}: the pad's input arrives", cap != null && Flows(cap));
+            Check($"{tag}: the pad's input arrives", cap != null && Arrives(cap));
         }
 
         var hidBefore = new HashSet<string>(Native.InterfaceList(Native.HidGuid, null), StringComparer.OrdinalIgnoreCase);

@@ -435,6 +435,23 @@ internal static partial class Program
         return cap.Since(mark).Count > 0;
     }
 
+    /// <summary><see cref="Flows"/>'s answer without its fixed wait: whether
+    /// a report arrives within <paramref name="ms"/> of now, polled every
+    /// 10 ms and returned at the first one. Flows waits the whole window
+    /// and then asks the same question of it, so the two agree on every
+    /// capture, a report in the window's last poll interval aside.</summary>
+    static bool Arrives(HidCapture cap, int ms = 600)
+    {
+        long mark = cap.Mark();
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < ms)
+        {
+            if (cap.AnySince(mark)) return true;
+            Thread.Sleep(10);
+        }
+        return cap.AnySince(mark);
+    }
+
     static string Show(List<(string Buttons, uint X)> p) =>
         p.Count == 0 ? "(no reports)" : string.Join(", ", p.Take(4).Select(t => $"buttons {t.Buttons} X {t.X}")) + (p.Count > 4 ? $" (+{p.Count - 4})" : "");
 
@@ -467,8 +484,11 @@ internal static partial class Program
         using var cap2 = HidCapture.Open(path2[0]);
         if (cap1 == null || cap2 == null) { Check("A: both devices open", false); return; }
         Thread.Sleep(300);
+        // Each program submits every 8 ms (stream at 125 Hz), so a device
+        // that carried the other program's input would show its pattern
+        // within 8 ms. The window spans about 30 of those periods.
         long from = cap1.Mark();
-        Thread.Sleep(1000);
+        Thread.Sleep(250);
         long to = cap1.Mark();
         var pat1 = Patterns(cap1, from, to);
         var pat2 = Patterns(cap2, from, to);
@@ -508,7 +528,7 @@ internal static partial class Program
               tree2.SequenceEqual(tree, StringComparer.OrdinalIgnoreCase) && tree.All(Native.IsStarted),
               $"before {tree.Count} nodes, after {tree2.Count}");
         Check("B: the first program's open handle never failed", !cap.Broken, cap.Broken ? $"read error {cap.ReadError}" : "");
-        Check("B: the first program's input still arrives", Flows(cap));
+        Check("B: the first program's input still arrives", Arrives(cap));
     }
 
     // ── C ──────────────────────────────────────────────────────────────
@@ -567,9 +587,14 @@ internal static partial class Program
         watch.Start();
         try
         {
+            // Each window is 1 s, 250 frames at 250 Hz, the length of the
+            // window around the second program's start. Over 90 such
+            // windows of one program alone on this machine the p99 was
+            // 4.06 to 4.55 ms, and 4.07 to 4.08 ms over 5 s windows, so the
+            // 0.5 ms allowance covers either length.
             Thread.Sleep(500);
             long a1 = cap.Mark();
-            Thread.Sleep(5000);
+            Thread.Sleep(1000);
             long a1End = cap.Mark();
 
             using var p2 = PeerProcess.Start("C2");
@@ -581,7 +606,7 @@ internal static partial class Program
             Check("C: the second program installs and creates", Ok(i2) && Ok(c2), $"{i2} / {c2}");
 
             long a2 = cap.Mark();
-            Thread.Sleep(5000);
+            Thread.Sleep(1000);
             long a2End = cap.Mark();
 
             double p99a1 = HidCapture.Percentile(HidCapture.Gaps(cap.Since(a1, a1End)), 0.99);
@@ -665,7 +690,7 @@ internal static partial class Program
         WaitFor(() => tree3.All(Native.IsGone), 5000);
         Check("D: a new program's start removes a killed program's devices", Ok(i4) && tree3.All(Native.IsGone),
               string.Join(", ", tree3.Where(t => !Native.IsGone(t))));
-        Check("D: a new program's start leaves the live program's controller", Native.IsStarted(inst2) && !cap2.Broken && Flows(cap2));
+        Check("D: a new program's start leaves the live program's controller", Native.IsStarted(inst2) && !cap2.Broken && Arrives(cap2));
     }
 
     // ── E ──────────────────────────────────────────────────────────────
@@ -716,12 +741,12 @@ internal static partial class Program
                 nu.Send("stream 6 0.8 125 0");
                 var pathNew = WaitPaths(0xBEEF, 0xF0E1, 1, 10_000);
                 using var capNew = pathNew.Count == 1 ? HidCapture.Open(pathNew[0]) : null;
-                Check("E1: the new program's input arrives", capNew != null && Flows(capNew));
+                Check("E1: the new program's input arrives", capNew != null && Arrives(capNew));
             }
             nu.Send("sweep");
             Check("E1: the v1.12.0 program's controller is untouched, driver and all",
                   !capOld.Broken && Native.Subtree(instOld).SequenceEqual(treeOld, StringComparer.OrdinalIgnoreCase)
-                  && Native.DriverVersionOf(instOld) == verOld && Flows(capOld),
+                  && Native.DriverVersionOf(instOld) == verOld && Arrives(capOld),
                   capOld.Broken ? $"read error {capOld.ReadError}" : $"driver {Native.DriverVersionOf(instOld)}");
         }
 
@@ -763,7 +788,7 @@ internal static partial class Program
             var path = WaitPaths(0xBEEF, 0xF0E3, 1, 10_000);
             using var cap = path.Count == 1 ? HidCapture.Open(path[0]) : null;
             Check("E3: a v1.12.0 program runs on a machine where a newer driver was installed",
-                  Ok(ri) && Ok(co) && cap != null && Flows(cap), $"{ri} / {co}");
+                  Ok(ri) && Ok(co) && cap != null && Arrives(cap), $"{ri} / {co}");
         }
 
         // E4. A live v1.11.0 program on its own driver, which predates the
@@ -786,7 +811,7 @@ internal static partial class Program
                   PeerProcess.Field(ri, "outcome") == "Upgraded", ri);
             string cn = nu.Send("create pad F0E6 coexist-e-over-v11");
             Check("E4: the new program creates beside the v1.11.0 program", Ok(cn), cn);
-            Check("E4: the v1.11.0 program's controller is untouched", !cap.Broken && Native.IsStarted(instV) && Flows(cap));
+            Check("E4: the v1.11.0 program's controller is untouched", !cap.Broken && Native.IsStarted(instV) && Arrives(cap));
         }
         using (var nu = PeerProcess.Start("E4-new-after"))
         {
@@ -810,7 +835,7 @@ internal static partial class Program
             nu.Send("stream 6 0.8 125 0");
             var path = WaitPaths(0xBEEF, 0xF0E5, 1, 10_000);
             using var cap = path.Count == 1 ? HidCapture.Open(path[0]) : null;
-            Check("E5: its input arrives", cap != null && Flows(cap));
+            Check("E5: its input arrives", cap != null && Arrives(cap));
         }
         Uninstall();
     }
@@ -966,7 +991,7 @@ internal static partial class Program
                 p2.Send("stream 0 0.5 125 0");
                 var path = WaitPaths(0xBEEF, 0xF0D8, 1, 10_000);
                 using var cap = path.Count == 1 ? HidCapture.Open(path[0]) : null;
-                Check("H: its input arrives", cap != null && Flows(cap));
+                Check("H: its input arrives", cap != null && Arrives(cap));
             }
         }
         finally
@@ -1232,7 +1257,7 @@ internal static partial class Program
             p1.Send("stream 3 0.7 125 0");
             var path = WaitPaths(0xBEEF, 0xF0F4, 1, 10_000);
             using var cap = path.Count == 1 ? HidCapture.Open(path[0]) : null;
-            Check("P: its input arrives", cap != null && Flows(cap));
+            Check("P: its input arrives", cap != null && Arrives(cap));
         }
     }
 
@@ -1253,8 +1278,11 @@ internal static partial class Program
         holder.Start();
         held.Wait(10_000);
         p.Post("create pad F0F5 -");
-        Thread.Sleep(3000);
-        // The lock is held for 3 s from just before the create was sent.
+        // A create that did not wait for the lock answers after its own
+        // run, 1163 ms at the 95th percentile over 751 pad creates logged
+        // on this machine. 2 s is that and half again.
+        Thread.Sleep(2000);
+        // The lock is held for 2 s from just before the create was sent.
         // Stamped before the holder lets go, so a create that waited for
         // the lock always answers after the stamp, and one that did not
         // answered before it.
