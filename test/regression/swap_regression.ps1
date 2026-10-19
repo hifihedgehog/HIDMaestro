@@ -739,7 +739,14 @@ function Scenario-Single-360-BT-360-BT {
 }
 
 # S3: Long cycle, 8 swaps. Stress-tests the per-call unique suffix
-# scheme (v1.1.30) and the SwDevice teardown path repeatedly.
+# scheme (v1.1.30) and the SwDevice teardown path repeatedly. Each swap
+# starts on a settled device tree: after the app's acknowledgment the
+# present devnodes read the same three times 50 ms apart (scaled), where
+# Wait-CascadeSettle reads them 200 ms apart. Polled every 10 ms for 1.5 s
+# after each of 40 acknowledgments on the bench (the resume and four
+# runs of the eight swaps), the set never changed once the app had
+# acknowledged, since the SDK's swap returns after Windows has removed
+# the old device and created the new one.
 function Scenario-Single-LongCycle {
     $sequence = @(
         $Profiles.XboxBT, $Profiles.Xbox360,
@@ -747,13 +754,30 @@ function Scenario-Single-LongCycle {
         $Profiles.XboxBT, $Profiles.Xbox360,
         $Profiles.XboxBT, $Profiles.Xbox360
     )
+    function Wait-Settled {
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $prev = $null
+        $count = 0
+        while ($sw.ElapsedMilliseconds -lt (HMScaleMs 60000)) {
+            $cur = ((Get-HMPresentDevnodes) | Sort-Object) -join '|'
+            if ($cur -eq $prev) {
+                $count++
+                if ($count -ge 2) { return }
+            } else {
+                $count = 0
+                $prev = $cur
+            }
+            Start-Sleep -Milliseconds (HMScaleMs 50)
+        }
+    }
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
         if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
-        Wait-Ready -Proc $proc
+        Send-Cmd -Proc $proc -Cmd 'resume'
+        Wait-Settled
         foreach ($p in $sequence) {
             Send-Cmd -Proc $proc -Cmd ('0 ' + $p)
-            Wait-CascadeSettle
+            Wait-Settled
         }
     } finally {
         Stop-HMTestProcess -Proc $proc | Out-Null
