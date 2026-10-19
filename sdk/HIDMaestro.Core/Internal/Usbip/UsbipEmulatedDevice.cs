@@ -164,6 +164,15 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     // The input pump's report, rebuilt from the section for each frame.
     // Only the pump touches it.
     private readonly byte[] _pumpReport;
+    // The data stage of a control reply the device builds for one request,
+    // an input report copied from its slot or a layout built now. Only the
+    // connection's reader touches it, and it serves one control transfer at
+    // a time (FeatureStubTable's answer buffer relies on the same).
+    private readonly byte[] _controlReply;
+    // The setup packets the diag log has a line for, since this import or
+    // the last port reset. Null while HIDMAESTRO_DIAG is off. Only the
+    // connection's reader touches it.
+    private HashSet<ulong>? _loggedSetups;
 
     private readonly struct QueuedFrame
     {
@@ -281,6 +290,8 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             // The device clock owns a timer and an event, which the catch
             // releases if anything after this throws.
             if (runner != null) CreateLayoutClock(runner);
+            _controlReply = new byte[Math.Max(Math.Max(_reportCapacity, _layoutReport.Length),
+                                              _engine?.ReportCapacity ?? 0)];
 
             // Sections and events first, so both this device and the
             // HMController constructed after it see the same objects.
@@ -337,6 +348,9 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         // Attach is power-on for a declared protocol's state.
         ResetLayoutState();
         ResetProtocolState();
+        // Set before the import's reply goes out, on the reader that then
+        // serves the import's requests.
+        _loggedSetups = DeviceOrchestrator.DiagEnabled ? new HashSet<ulong>() : null;
         return true;
     }
 
@@ -778,7 +792,12 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         byte type = (byte)((bmRequestType >> 5) & 0x03);      // 0 standard, 1 class, 2 vendor
         byte recipient = (byte)(bmRequestType & 0x1F);        // 0 device, 1 interface, 2 endpoint, 3 other
         bool deviceToHost = (bmRequestType & 0x80) != 0;
-        if (DeviceOrchestrator.DiagEnabled)
+        // Each setup packet once per import and port reset: the requests a
+        // host sets the device up with, and every distinct one after. A
+        // request a host repeats while the device runs, a feature report
+        // read again, costs one line rather than a line and a disk write
+        // per transfer on the thread that answers it.
+        if (_loggedSetups != null && _loggedSetups.Add(cmd.Setup))
             DeviceOrchestrator.LogDiag($"usbip control {BusId}: {Convert.ToHexString(setup)} seq {cmd.Seqnum} buffer {cmd.TransferBufferLength}");
 
         // Hub port reset arrives as USB_RT_PORT SET_FEATURE(PORT_RESET)
@@ -787,6 +806,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         if (bmRequestType == 0x23 && bRequest == 0x03)
         {
             ResetDeviceState();
+            _loggedSetups?.Clear();
             SendRetSubmit(cmd.Seqnum, 0, 0, null);
             return;
         }
@@ -807,7 +827,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                         : Descriptors.GetDescriptor(descType, descIndex, wIndex);
                     if (d == null) { SendError(cmd.Seqnum, -UsbipProtocol.EPipe); return; }
                     int n = Math.Min(d.Length, wLength);
-                    SendRetSubmit(cmd.Seqnum, 0, n, d.AsSpan(0, n).ToArray());
+                    SendRetSubmitSpan(cmd.Seqnum, 0, n, d.AsSpan(0, n));
                     return;
                 }
                 case 0x00: // GET_STATUS
@@ -815,9 +835,11 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     if (!deviceToHost) break;
                     // Device: self-powered bit from bmAttributes 0xC0. Interface/endpoint: zero.
                     ushort status = recipient == 0 ? (ushort)0x0001 : (ushort)0x0000;
-                    var d = new[] { (byte)(status & 0xFF), (byte)(status >> 8) };
+                    Span<byte> d = stackalloc byte[2];
+                    d[0] = (byte)(status & 0xFF);
+                    d[1] = (byte)(status >> 8);
                     int n = Math.Min(d.Length, wLength);
-                    SendRetSubmit(cmd.Seqnum, 0, n, d.AsSpan(0, n).ToArray());
+                    SendRetSubmitSpan(cmd.Seqnum, 0, n, d[..n]);
                     return;
                 }
                 case 0x09: // SET_CONFIGURATION
@@ -827,9 +849,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     return;
                 case 0x08: // GET_CONFIGURATION
                 {
-                    var d = new[] { _configurationValue };
+                    Span<byte> d = stackalloc byte[1];
+                    d[0] = _configurationValue;
                     int n = Math.Min(1, (int)wLength);
-                    SendRetSubmit(cmd.Seqnum, 0, n, n > 0 ? d : null);
+                    SendRetSubmitSpan(cmd.Seqnum, 0, n, d[..n]);
                     return;
                 }
                 case 0x0B: // SET_INTERFACE
@@ -838,9 +861,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     return;
                 case 0x0A: // GET_INTERFACE
                 {
-                    var d = new[] { Audio.GetAltSetting((byte)(wIndex & 0xFF)) };
-                    SendRetSubmit(cmd.Seqnum, 0, Math.Min(1, (int)wLength),
-                        wLength > 0 ? d : null);
+                    Span<byte> d = stackalloc byte[1];
+                    d[0] = Audio.GetAltSetting((byte)(wIndex & 0xFF));
+                    int n = Math.Min(1, (int)wLength);
+                    SendRetSubmitSpan(cmd.Seqnum, 0, n, d[..n]);
                     return;
                 }
                 case 0x01: // CLEAR_FEATURE (ENDPOINT_HALT arrives via ude clear_endpoint_stall)
@@ -871,10 +895,11 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             byte channel = (byte)(wValue & 0xFF);
             if (deviceToHost)
             {
-                var d = Audio.HandleUacGet(bRequest, unitId, selector, channel, wLength);
-                if (d == null) { SendError(cmd.Seqnum, -UsbipProtocol.EPipe); return; }
-                int n = Math.Min(d.Length, wLength);
-                SendRetSubmit(cmd.Seqnum, 0, n, d.AsSpan(0, n).ToArray());
+                Span<byte> d = stackalloc byte[2];
+                int size = Audio.HandleUacGet(bRequest, unitId, selector, channel, wLength, d);
+                if (size < 0) { SendError(cmd.Seqnum, -UsbipProtocol.EPipe); return; }
+                int n = Math.Min(size, wLength);
+                SendRetSubmitSpan(cmd.Seqnum, 0, n, d[..n]);
             }
             else
             {
@@ -899,9 +924,9 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             {
                 if (deviceToHost)
                 {
-                    var freq = new byte[] { 0x80, 0xBB, 0x00 }; // 48000, 3-byte UAC1 rate
+                    ReadOnlySpan<byte> freq = [0x80, 0xBB, 0x00]; // 48000, 3-byte UAC1 rate
                     int n = Math.Min(freq.Length, wLength);
-                    SendRetSubmit(cmd.Seqnum, 0, n, freq.AsSpan(0, n).ToArray());
+                    SendRetSubmitSpan(cmd.Seqnum, 0, n, freq[..n]);
                 }
                 else
                 {
@@ -927,7 +952,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             if (feature != null)
             {
                 int n = Math.Min(feature.Length, wLength);
-                SendRetSubmit(cmd.Seqnum, 0, n, feature.AsSpan(0, n).ToArray());
+                SendRetSubmitSpan(cmd.Seqnum, 0, n, feature.AsSpan(0, n));
                 return;
             }
         }
@@ -956,8 +981,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     SendRetSubmit(cmd.Seqnum, 0, 0, null);
                     return;
                 case 0x02 when deviceToHost: // GET_IDLE
-                    SendRetSubmit(cmd.Seqnum, 0, Math.Min(1, (int)wLength),
-                        wLength > 0 ? new byte[] { 0 } : null);
+                    SendIdleRate(cmd.Seqnum, wLength);
                     return;
                 default:
                     SendError(cmd.Seqnum, -UsbipProtocol.EPipe);
@@ -973,7 +997,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     return;
                 if (reportType == 0x01)
                 {
-                    byte[] snapshot;
+                    int length;
                     // A report ID the descriptor does not declare is a
                     // value the request cannot take, which USB 2.0 9.2.7
                     // answers with a STALL. A firmware stack stalls the
@@ -996,17 +1020,21 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     if (deviceReport)
                     {
                         // The layout asked for, built now and not counted.
-                        var built = new byte[_layoutReport.Length];
-                        int len = _engine!.Peek(reportId, built);
-                        snapshot = built.AsSpan(0, len).ToArray();
+                        length = _engine!.Peek(reportId, _controlReply);
                     }
                     else
                     {
+                        // Copied under the lock the input pump writes the
+                        // slot under, and sent after it.
                         int slot = _inputSlot[reportId];
-                        lock (_hidLock) snapshot = _inputReports[slot].AsSpan(0, _inputReportLength[slot]).ToArray();
+                        lock (_hidLock)
+                        {
+                            length = _inputReportLength[slot];
+                            _inputReports[slot].AsSpan(0, length).CopyTo(_controlReply);
+                        }
                     }
-                    int n = Math.Min(snapshot.Length, wLength);
-                    SendRetSubmit(cmd.Seqnum, 0, n, snapshot.AsSpan(0, n).ToArray());
+                    int n = Math.Min(length, wLength);
+                    SendRetSubmitSpan(cmd.Seqnum, 0, n, _controlReply.AsSpan(0, n));
                     return;
                 }
                 if (reportType == 0x03 && _engine != null)
@@ -1019,7 +1047,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     {
                         PublishOutput(SourceHidFeatureRead, reportId, ReadOnlySpan<byte>.Empty);
                         int n = Math.Min(size, wLength);
-                        SendRetSubmit(cmd.Seqnum, 0, n, live[..n].ToArray());
+                        SendRetSubmitSpan(cmd.Seqnum, 0, n, live[..n]);
                         return;
                     }
                 }
@@ -1084,13 +1112,22 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 SendRetSubmit(cmd.Seqnum, 0, 0, null);
                 return;
             case 0x02 when deviceToHost: // GET_IDLE
-                SendRetSubmit(cmd.Seqnum, 0, Math.Min(1, (int)wLength),
-                    wLength > 0 ? new byte[] { 0 } : null);
+                SendIdleRate(cmd.Seqnum, wLength);
                 return;
         }
         // GET/SET_PROTOCOL and anything else: the pad is not a boot device;
         // a real one stalls these.
         SendError(cmd.Seqnum, -UsbipProtocol.EPipe);
+    }
+
+    /// <summary>GET_IDLE: an idle rate of 0, cut to the request's
+    /// length.</summary>
+    private void SendIdleRate(uint seqnum, ushort wLength)
+    {
+        Span<byte> rate = stackalloc byte[1];
+        rate[0] = 0;
+        int n = Math.Min(1, (int)wLength);
+        SendRetSubmitSpan(seqnum, 0, n, rate[..n]);
     }
 
     private void ResetDeviceState()

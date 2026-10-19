@@ -355,9 +355,8 @@ internal sealed partial class UsbipEmulatedDevice
         // does not declare stalls.
         if (reportId != engine.Protocol.ReportId)
             return false;
-        var report = engine.CopyReport();
-        int n = Math.Min(report.Length, wLength);
-        SendRetSubmitSpan(cmd.Seqnum, 0, n, report.AsSpan(0, n));
+        int n = Math.Min(engine.CopyReport(_controlReply), wLength);
+        SendRetSubmitSpan(cmd.Seqnum, 0, n, _controlReply.AsSpan(0, n));
         return true;
     }
 

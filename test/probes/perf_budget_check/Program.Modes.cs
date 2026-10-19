@@ -8,7 +8,9 @@
 // "switch-pro@010000014040000140400330". What the reports are for depends
 // on the mode: output reports written before e2e measures, the feature
 // report SET before each timed GET in feature, the output report output
-// sends.
+// sends. After the reports, each command after a # is written, in e2e,
+// to the first bulk OUT pipe of the device's WinUSB interface, as libusb
+// writes a vendor command: "switch2-pro-controller-composite#0391000D...".
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -22,7 +24,7 @@ using HIDMaestro.Internal.Usbip;
 
 internal static partial class Program
 {
-    sealed record ProfileArg(string Text, string Id, byte[][] Reports);
+    sealed record ProfileArg(string Text, string Id, byte[][] Reports, byte[][]? Commands = null);
 
     /// <summary>Parse the profile arguments, or print why not and return
     /// null. Every id must be in the embedded catalog, so nothing is
@@ -33,17 +35,22 @@ internal static partial class Program
         var catalog = ProfileDatabase.LoadEmbedded();
         foreach (string text in args)
         {
-            var parts = text.Split('@');
-            byte[][] reports;
-            try { reports = parts.Skip(1).Select(Convert.FromHexString).ToArray(); }
+            var sections = text.Split('#');
+            var parts = sections[0].Split('@');
+            byte[][] reports, commands;
+            try
+            {
+                reports = parts.Skip(1).Select(Convert.FromHexString).ToArray();
+                commands = sections.Skip(1).Select(Convert.FromHexString).ToArray();
+            }
             catch (FormatException)
             {
-                Console.WriteLine($"{mode}: {text}: a report after @ is not hex");
+                Console.WriteLine($"{mode}: {text}: a report after @ or a command after # is not hex");
                 return null;
             }
-            if (reports.Any(r => r.Length == 0))
+            if (reports.Any(r => r.Length == 0) || commands.Any(r => r.Length == 0))
             {
-                Console.WriteLine($"{mode}: {text}: an empty report after @");
+                Console.WriteLine($"{mode}: {text}: an empty report after @ or command after #");
                 return null;
             }
             if (!catalog.All.Any(p => p.Id == parts[0]))
@@ -51,7 +58,7 @@ internal static partial class Program
                 Console.WriteLine($"{mode}: no profile {parts[0]} in the catalog");
                 return null;
             }
-            list.Add(new ProfileArg(text, parts[0], reports));
+            list.Add(new ProfileArg(text, parts[0], reports, commands));
         }
         return list;
     }
@@ -518,7 +525,12 @@ internal static partial class Program
         Check("a profile argument with a report", args != null && args[0].Id == "switch-pro" && args[0].Reports.Length == 1
             && args[0].Reports[0].Length == 12 && args[0].Reports[0][10] == 0x03 && args[0].Reports[0][11] == 0x30 && args[1].Reports.Length == 0, "");
         Check("an unknown profile and odd hex are refused before anything runs",
-            ParseProfileArgs(new[] { "no-such-profile" }, "selftest") == null && ParseProfileArgs(new[] { "switch-pro@010" }, "selftest") == null, "");
+            ParseProfileArgs(new[] { "no-such-profile" }, "selftest") == null && ParseProfileArgs(new[] { "switch-pro@010" }, "selftest") == null
+            && ParseProfileArgs(new[] { "switch-pro#0" }, "selftest") == null && ParseProfileArgs(new[] { "switch-pro#" }, "selftest") == null, "");
+        var cmd = ParseProfileArgs(new[] { "switch2-pro-controller-composite@02#0391000D#0C91000400" }, "selftest");
+        Check("a profile argument with a report and two commands", cmd != null && cmd[0].Id == "switch2-pro-controller-composite"
+            && cmd[0].Reports.Length == 1 && cmd[0].Reports[0][0] == 0x02 && cmd[0].Commands is { Length: 2 } c
+            && c[0].Length == 4 && c[0][3] == 0x0D && c[1].Length == 5 && c[1][4] == 0x00, "");
 
         // A pattern: byte 1 counts and is not compared, byte 3 tells A from
         // B, and the length must match.
