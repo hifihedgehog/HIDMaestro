@@ -12,12 +12,13 @@
 //      write code that cannot build.
 //
 // live (needs elevation, run through the bench): creates an Xbox 360 wired
-// controller with HIDMAESTRO_DIAG=1 and reads the SDK's own XInput slot wait
-// line, which is the only caller of the XInputGetState declaration.
+// controller with HIDMAESTRO_DIAG=1, prints the SDK's own XInput slot wait
+// line, and reads each XInput slot through the SDK's XInputGetState
+// declaration and through xinput.h's, which must agree with a slot connected.
 // Then it disposes the controller and requires the devnode gone within 5 s
 // (SetupDiGetClassDevsW through DifRemoveDevice), and runs the phantom sweep
-// (the other SetupDiGetClassDevsW caller), which must remove the one record
-// the dispose leaves.
+// (the other SetupDiGetClassDevsW caller), which must remove at least the one
+// record the dispose leaves.
 //
 // Exit 0 PASS, 1 FAIL, 2 when another program that embeds HIDMaestro runs or,
 // for static, when the SDK source tree is not beside the exe.
@@ -27,7 +28,9 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
+using System.Threading;
 using HIDMaestro;
 using HIDMaestro.Internal;
 
@@ -491,22 +494,57 @@ internal static class Program
                 if (line.Contains("XInput slot wait:")) wait = line;
         }
         catch (Exception e) { wait = "unreadable: " + e.Message; }
-        Console.WriteLine("  " + wait);
-        var m2 = Regex.Match(wait, @"before=(\d+) after=(\d+)");
-        Check("the SDK's XInputGetState count sees the new slot",
-              m2.Success && int.Parse(m2.Groups[2].Value) > int.Parse(m2.Groups[1].Value), wait);
+        // The SDK's wait counts slots machine-wide within its 500 ms budget,
+        // so load or another program's pad moves its numbers. Information only.
+        Console.WriteLine("  info: " + wait);
+        // Each slot through the SDK's XInputGetState and through xinput.h's,
+        // back to back. A pad another program adds or removes between the two
+        // reads disagrees once and agrees on the next pass. This controller
+        // holds a slot, or other pads hold all four. 10 s detects a hang: a
+        // slot claim takes about 100 ms.
+        var sdkGetState = typeof(DeviceOrchestrator).GetMethod("XInputGetState", BindingFlags.NonPublic | BindingFlags.Static);
+        string slots = sdkGetState == null ? "DeviceOrchestrator.XInputGetState not found" : "";
+        bool agree = false;
+        var hang = Stopwatch.StartNew();
+        while (sdkGetState != null && !agree && hang.ElapsedMilliseconds < 10_000)
+        {
+            agree = true;
+            int connected = 0;
+            var states = new List<string>();
+            for (uint slot = 0; slot < 4; slot++)
+            {
+                object?[] a = { slot, null };
+                uint sdkRc = (uint)sdkGetState.Invoke(null, a)!;
+                uint refRc = XInputGetState(slot, out _);
+                if (refRc == 0) connected++;
+                agree &= (sdkRc == 0) == (refRc == 0);
+                states.Add($"{slot}:{sdkRc}/{refRc}");
+            }
+            agree &= connected > 0;
+            slots = $"slot:sdk/xinput.h {string.Join(" ", states)} after {hang.ElapsedMilliseconds} ms";
+            if (!agree) Thread.Sleep(50);
+        }
+        Check("the SDK's XInputGetState reads every slot as xinput.h's does, with a slot connected", agree, slots);
 
         string instanceId = ctrl.InstanceId ?? "";
         ctrl.Dispose();
         // DifRemoveDevice (SetupDiGetClassDevsW) removes the parent devnode.
         Check("the devnode is gone within 5 s of Dispose",
               instanceId.Length > 0 && DeviceManager.WaitForDeviceRemoval(instanceId, 5000), instanceId);
-        // Exactly the one record this run's dispose leaves behind, after a sweep that clears older ones.
+        // At least the one record this run's dispose leaves, after a sweep that
+        // cleared older ones. Another program's dispose in between adds its own.
         int removed = DeviceManager.RemoveAccumulatedHmPhantoms();
-        Check("the phantom sweep (SetupDiGetClassDevsW enumeration) removes the one record this run left",
-              removed == 1, $"removed {removed}");
+        Check("the phantom sweep (SetupDiGetClassDevsW enumeration) removes the record this run left",
+              removed >= 1, $"removed {removed}");
 
         Console.WriteLine(s_failures == 0 ? $"=== ALL PASS ({s_total}) ===" : $"=== FAIL: {s_failures}/{s_total} ===");
         return s_failures == 0 ? 0 : 1;
     }
+
+    // XInputGetState as xinput.h declares it, the reference for the SDK's.
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct XINPUT_GAMEPAD { public ushort wButtons; public byte bLeftTrigger, bRightTrigger; public short sThumbLX, sThumbLY, sThumbRX, sThumbRY; }
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct XINPUT_STATE { public uint dwPacketNumber; public XINPUT_GAMEPAD Gamepad; }
+    [DllImport("xinput1_4.dll")] static extern uint XInputGetState(uint dwUserIndex, out XINPUT_STATE pState);
 }
