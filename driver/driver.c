@@ -1587,11 +1587,13 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
      * the SDK passes the FULL RID-included extended report (e.g. 78-byte
      * Sony BT Report 0x31 with CRC32). Pass through verbatim. */
     UCHAR inputReport[HIDMAESTRO_MAX_REPORT_SIZE];
-    RtlZeroMemory(inputReport, sizeof(inputReport));
 
     ULONG dataLen = shared.DataSize;
     BOOLEAN hasReportId = (ctx->FirstInputReportId != 0);
     ULONG expectedSize = ctx->InputReportByteLength > 0 ? ctx->InputReportByteLength : 17;
+    /* Only the bytes that go out: every path below sends at most
+     * expectedSize bytes of this buffer, or bytes it wrote itself. */
+    RtlZeroMemory(inputReport, expectedSize);
 
     ULONG maxData;
     if (hasReportId) {
