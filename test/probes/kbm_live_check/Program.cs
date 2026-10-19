@@ -130,6 +130,20 @@ internal static class Program
         return found;
     }
 
+    /// <summary>Windows reads a collection by the time Raw Input lists it.
+    /// With --ready-timing, the first event submitted after the listing
+    /// arrived in each of 30 lives of a keyboard, a mouse, a vendor
+    /// collection and a consumer control, at most 27 ms after the listing
+    /// (p95 26 ms), and every keyboard already held the LED state Windows
+    /// sends one it has opened. So a keyboard waits for that state, up to
+    /// the 1000 ms this waited before, and anything else 50 ms.</summary>
+    static void Readable(params HMController[] keyboards)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < 1000 && keyboards.Any(k => k.KeyboardLeds == null)) Thread.Sleep(10);
+        if (keyboards.Length == 0) Thread.Sleep(50);
+    }
+
     static HashSet<string> Names() => RawInputSink.Devices().Select(d => d.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Which Raw Input mouse a controller drives: move it one count
@@ -139,7 +153,8 @@ internal static class Program
         var set = candidates.ToHashSet();
         for (int attempt = 0; attempt < 3; attempt++)
         {
-            Thread.Sleep(150);
+            // A retry follows a move Windows did not report within 1500 ms.
+            if (attempt > 0) Thread.Sleep(150);
             sink.Clear();
             c.SubmitMouse(new HMMouseState { X = 7 });
             IntPtr hit = IntPtr.Zero;
@@ -172,20 +187,31 @@ internal static class Program
     }
 
     /// <summary>Wait for a device's X deltas to stop arriving, and return
-    /// how many came, their sum and the highest running total.</summary>
-    static (int Count, long Sum, long Peak) Settle(RawInputSink sink, IntPtr device, int expectCount, int timeoutMs)
+    /// how many came, their sum and the highest running total. Windows
+    /// merges consecutive moves, so fewer than <paramref name="expectCount"/>
+    /// messages carry every count: the wait also ends 300 ms after the
+    /// counts are complete, back to 0 from <paramref name="peak"/>. A lost
+    /// count keeps them incomplete, and the wait then runs to 1500 ms of
+    /// quiet as before.</summary>
+    static (int Count, long Sum, long Peak) Settle(RawInputSink sink, IntPtr device, int expectCount, long peak, int timeoutMs)
     {
         var sw = Stopwatch.StartNew();
         int lastCount = -1;
         long quietSince = sw.ElapsedMilliseconds;
         while (sw.ElapsedMilliseconds < timeoutMs)
         {
-            int n = sink.Mice.Count(m => m.Device == device);
+            var (n, s, pk) = Totals(sink, device);
             if (n != lastCount) { lastCount = n; quietSince = sw.ElapsedMilliseconds; }
-            if (n >= expectCount && sw.ElapsedMilliseconds - quietSince > 300) break;
+            bool complete = n >= expectCount || (s == 0 && pk == peak);
+            if (complete && sw.ElapsedMilliseconds - quietSince > 300) break;
             if (sw.ElapsedMilliseconds - quietSince > 1500) break;
             Thread.Sleep(20);
         }
+        return Totals(sink, device);
+    }
+
+    static (int Count, long Sum, long Peak) Totals(RawInputSink sink, IntPtr device)
+    {
         long sum = 0, peak = 0; int count = 0;
         foreach (var m in sink.Mice.Where(m => m.Device == device))
         {
@@ -293,7 +319,8 @@ internal static class Program
             WaitNew(b0, d => d.Type == RawInputSink.RIM_TYPEKEYBOARD && Is(d.Name, Tag(0xBEEF, 0xF0B6)), 1, 15000);
             WaitNew(b0, d => d.Type == RawInputSink.RIM_TYPEHID && Is(d.Name, Tag(0xBEEF, 0xF0B8)), 1, 15000);
             WaitNew(b0, d => d.Type == RawInputSink.RIM_TYPEMOUSE && Is(d.Name, Tag(0xBEEF, 0xF0B9)), 1, 15000);
-            Thread.Sleep(1000);
+            Readable(k);
+            Readable();
             k.SubmitKeyboard(HMKeyModifiers.None, new[] { HMKey.F24 });
             m.SubmitMouse(new HMMouseState { Buttons = HMMouseButtons.Button6 });
             a.SubmitMouse(new HMMouseState { X = 16384, Y = 16384 });
@@ -325,6 +352,9 @@ internal static class Program
             }
             return 0;
         }
+
+        if (Environment.GetCommandLineArgs().Contains("--ready-timing"))
+            return ReadyTiming(ctx);
 
         int kd = Array.IndexOf(Environment.GetCommandLineArgs(), "--key-diag");
         if (kd > 0 && kd + 1 < Environment.GetCommandLineArgs().Length)
@@ -444,7 +474,7 @@ internal static class Program
         for (int i = 0; i < 300; i++) first.SubmitMouse(new HMMouseState { X = 1 });
         for (int i = 0; i < 300; i++) first.SubmitMouse(new HMMouseState { X = -1 });
         sw.Stop();
-        var (count, sum, peak) = Settle(sink, dev, 600, 8000);
+        var (count, sum, peak) = Settle(sink, dev, 600, 300, 8000);
         Console.WriteLine($"  sent in {sw.ElapsedMilliseconds} ms ({600_000.0 / Math.Max(1, sw.ElapsedMilliseconds):F0} reports/s), DeliversEveryReport={first.DeliversEveryReport}");
         Console.WriteLine($"  Raw Input delivered {count} messages; Windows merges consecutive moves (RAWMOUSE has MOUSE_MOVE_NOCOALESCE for that reason)");
         Check("the controller delivers every report", first.DeliversEveryReport);
@@ -470,7 +500,7 @@ internal static class Program
         threads.ForEach(t => t.Join());
         for (int i = 0; i < 4; i++)
         {
-            var (c, s, pk) = Settle(sink, devs[i], 500, 6000);
+            var (c, s, pk) = Settle(sink, devs[i], 500, 500, 6000);
             Check($"mouse {i + 1}: every count arrived, 500 out and back", pk == 500 && s == 0, $"{c} messages, peak {pk}, sum {s}");
             if (pk != 500 || s != 0)
             {
@@ -522,7 +552,7 @@ internal static class Program
         Check("Raw Input lists it as a mouse", dev.Count == 1);
         if (dev.Count == 1)
         {
-            Thread.Sleep(200);
+            Readable();
             sink.Clear();
             pad.SubmitMouse(new HMMouseState { X = 16384, Y = 16384 });
             var sw = Stopwatch.StartNew();
@@ -557,7 +587,7 @@ internal static class Program
         Check("the vendor collection is a Raw Input HID device of its own", vendor.Count == 1);
         if (vendor.Count == 1)
         {
-            Thread.Sleep(1000);
+            Readable();
             sink.Clear();
             pad.SubmitMouse(new HMMouseState { Buttons = HMMouseButtons.Button6 | HMMouseButtons.Button8 });
             pad.SubmitMouse(new HMMouseState());
@@ -640,7 +670,7 @@ internal static class Program
         Check("Raw Input lists both as keyboards", dev1.Count == 1 && dev2.Count == 1, $"{dev1.Count}, {dev2.Count}");
         if (dev1.Count == 1 && dev2.Count == 1)
         {
-            Thread.Sleep(1000);
+            Readable(k1, k2);
             sink.Clear();
             k1.SubmitKeyboard(HMKeyModifiers.None, new[] { HMKey.F24 });
             k1.SubmitKeyboard(HMKeyModifiers.None, ReadOnlySpan<HMKey>.Empty);
@@ -701,7 +731,7 @@ internal static class Program
         Check("Raw Input lists the consumer collection", dev.Count == 1);
         if (dev.Count == 1)
         {
-            Thread.Sleep(1000);
+            Readable();
             sink.Clear();
             // 0x0069 Red Menu Button: a usage Windows binds to nothing.
             pad.SubmitConsumer(new ushort[] { 0x0069 });
@@ -808,7 +838,7 @@ internal static class Program
         var kd = WaitNew(before, d => d.Type == RawInputSink.RIM_TYPEKEYBOARD && Is(d.Name, ktag), 1, 15000);
         if (kd.Count == 1)
         {
-            Thread.Sleep(1000);
+            Readable(kb);
             kb.SubmitKeyboard(HMKeyModifiers.None, new[] { HMKey.F24 });
             Thread.Sleep(100);
             sink.Clear();
@@ -845,16 +875,34 @@ internal static class Program
         IntPtr Find(uint type, ushort pid) => devs.FirstOrDefault(d => d.Type == type && Is(d.Name, Tag(0xBEEF, pid))).Handle;
         IntPtr hk = Find(RawInputSink.RIM_TYPEKEYBOARD, 0xF0B6), hv = Find(RawInputSink.RIM_TYPEHID, 0xF0B8),
                hp = Find(RawInputSink.RIM_TYPEMOUSE, 0xF0B9);
-        Thread.Sleep(1500);   // F24 is repeating by now
-        int repeats = sink.Keys.Count(k => k.Device == hk && k.VKey == 0x87 && (k.Flags & 1) == 0);
+        // Until F24 repeats: Windows repeats a held key after the keyboard
+        // delay, 250 to 1000 ms.
+        int Repeats() => sink.Keys.Count(k => k.Device == hk && k.VKey == 0x87 && (k.Flags & 1) == 0);
+        var heldFor = Stopwatch.StartNew();
+        while (heldFor.ElapsedMilliseconds < 1500 && Repeats() < 3) Thread.Sleep(20);
+        int repeats = Repeats();
+        long heldMs = heldFor.ElapsedMilliseconds;
         sink.Clear();
         var clock = Stopwatch.StartNew();
         child.Kill();
         child.WaitForExit();
-        while (clock.ElapsedMilliseconds < 3000) Thread.Sleep(50);
+        // The driver's release frames: F24 up, button 6 up and the pointer
+        // where it was. Then 500 ms, ten of Windows' key repeats, for a key
+        // that goes down again or a pointer that moves after them.
+        long released = -1;
+        while (clock.ElapsedMilliseconds < 3000)
+        {
+            if (released < 0
+                && sink.Keys.Any(k => k.Device == hk && k.VKey == 0x87 && (k.Flags & 1) == 1)
+                && sink.Reports.Any(r => r.Device == hv && Convert.ToHexString(r.Report) == "0200")
+                && sink.Mice.Any(x => x.Device == hp))
+                released = clock.ElapsedMilliseconds;
+            if (released >= 0 && clock.ElapsedMilliseconds - released >= 500) break;
+            Thread.Sleep(20);
+        }
         var keys = sink.Keys.Where(k => k.Device == hk && k.VKey == 0x87).ToList();
         int up = keys.FindIndex(k => (k.Flags & 1) == 1);
-        Console.WriteLine($"  held: {repeats} F24 repeats in 1.5 s; after the kill: {string.Join(" ", keys.Select(k => (k.Flags & 1) == 1 ? "up" : "down"))}");
+        Console.WriteLine($"  held: {repeats} F24 repeats in {heldMs} ms; after the kill: {string.Join(" ", keys.Select(k => (k.Flags & 1) == 1 ? "up" : "down"))}");
         Check("F24 goes up when the consumer is killed, and stops repeating",
               up >= 0 && keys.Skip(up + 1).All(k => (k.Flags & 1) == 1), $"{keys.Count} F24 messages");
         var vendor = sink.Reports.Where(r => r.Device == hv).Select(r => Convert.ToHexString(r.Report)).ToList();
@@ -880,6 +928,73 @@ internal static class Program
               held.Count == 3 && left.Count == 0,
               left.Count > 0 ? "left: " + string.Join(", ", left) : $"{held.Count} devices, {cleanupMs} ms");
         WaitGone(Tag(0xBEEF, 0xF0B6), 10000);
+    }
+
+    // ── --ready-timing ───────────────────────────────────────────────────
+
+    /// <summary>Thirty lives of a keyboard, a mouse, a mouse with a vendor
+    /// collection and a consumer control, held together. Each life prints,
+    /// per device, how long after Raw Input lists it the first of a
+    /// repeated event arrives, and whether the keyboard already holds the
+    /// LED state Windows sends it.</summary>
+    static int ReadyTiming(HMContext ctx)
+    {
+        using var sink = new RawInputSink((0x01, 0x02), (0x01, 0x06), (0xFF00, 0x01), (0x0C, 0x01));
+        var kp = Custom(0xF0D0, "HIDMaestro Ready Keyboard", "keyboard", new HidDescriptorBuilder().Keyboard());
+        var mp = Custom(0xF0D1, "HIDMaestro Ready Mouse", "mouse", new HidDescriptorBuilder().Mouse());
+        var vp = Custom(0xF0D2, "HIDMaestro Ready Buttons", "mouse", new HidDescriptorBuilder().Mouse(reportId: 1).VendorButtons(3, 2));
+        var cp = Custom(0xF0D3, "HIDMaestro Ready Consumer", "keyboard", new HidDescriptorBuilder().ConsumerControl());
+        var all = new List<long>[4] { new(), new(), new(), new() };
+        int ledsAtList = 0;
+        for (int life = 1; life <= 30; life++)
+        {
+            var before = Names();
+            var k = ctx.CreateController(kp, "kbm-ready-k");
+            var m = ctx.CreateController(mp, "kbm-ready-m");
+            var v = ctx.CreateController(vp, "kbm-ready-v");
+            var c = ctx.CreateController(cp, "kbm-ready-c");
+            try
+            {
+                var lk = WaitNew(before, d => d.Type == RawInputSink.RIM_TYPEKEYBOARD && Is(d.Name, Tag(0xBEEF, 0xF0D0)), 1, 15000);
+                var lm = WaitNew(before, d => d.Type == RawInputSink.RIM_TYPEMOUSE && Is(d.Name, Tag(0xBEEF, 0xF0D1)), 1, 15000);
+                var lv = WaitNew(before, d => d.Type == RawInputSink.RIM_TYPEHID && Is(d.Name, Tag(0xBEEF, 0xF0D2)), 1, 15000);
+                var lc = WaitNew(before, d => d.Type == RawInputSink.RIM_TYPEHID && Is(d.Name, Tag(0xBEEF, 0xF0D3)), 1, 15000);
+                if (lk.Count + lm.Count + lv.Count + lc.Count != 4) { Console.WriteLine($"life {life}: not all listed"); continue; }
+                if (k.KeyboardLeds != null) ledsAtList++;
+                sink.Clear();
+                var t = new long[4] { -1, -1, -1, -1 };
+                var clock = Stopwatch.StartNew();
+                while (clock.ElapsedMilliseconds < 3000 && t.Any(x => x < 0))
+                {
+                    if (t[0] < 0) { k.SubmitKeyboard(HMKeyModifiers.None, new[] { HMKey.F24 }); k.SubmitKeyboard(HMKeyModifiers.None, ReadOnlySpan<HMKey>.Empty); }
+                    if (t[1] < 0) { m.SubmitMouse(new HMMouseState { X = 1 }); m.SubmitMouse(new HMMouseState { X = -1 }); }
+                    if (t[2] < 0) { v.SubmitMouse(new HMMouseState { Buttons = HMMouseButtons.Button6 }); v.SubmitMouse(new HMMouseState()); }
+                    if (t[3] < 0) { c.SubmitConsumer(new ushort[] { 0x0069 }); c.SubmitConsumer(ReadOnlySpan<ushort>.Empty); }
+                    Thread.Sleep(5);
+                    long now = clock.ElapsedMilliseconds;
+                    if (t[0] < 0 && sink.Keys.Any(x => x.Device == lk[0].Handle)) t[0] = now;
+                    if (t[1] < 0 && sink.Mice.Any(x => x.Device == lm[0].Handle)) t[1] = now;
+                    if (t[2] < 0 && sink.Reports.Any(x => x.Device == lv[0].Handle)) t[2] = now;
+                    if (t[3] < 0 && sink.Reports.Any(x => x.Device == lc[0].Handle)) t[3] = now;
+                }
+                for (int i = 0; i < 4; i++) all[i].Add(t[i]);
+                Console.WriteLine($"life {life}: keyboard {t[0]} ms, mouse {t[1]} ms, vendor {t[2]} ms, consumer {t[3]} ms after listing");
+            }
+            finally
+            {
+                ctx.DisposeControllersInParallel(new[] { k, m, v, c });
+                foreach (ushort pid in new ushort[] { 0xF0D0, 0xF0D1, 0xF0D2, 0xF0D3 }) WaitGone(Tag(0xBEEF, pid), 10000);
+            }
+        }
+        string[] names = { "keyboard", "mouse", "vendor", "consumer" };
+        for (int i = 0; i < 4; i++)
+        {
+            var s = all[i].OrderBy(x => x).ToList();
+            if (s.Count == 0) continue;
+            Console.WriteLine($"{names[i]}: p50 {s[s.Count / 2]} ms, p95 {s[(int)Math.Ceiling(s.Count * 0.95) - 1]} ms, max {s[^1]} ms over {s.Count}");
+        }
+        Console.WriteLine($"keyboard LED state present when listed: {ledsAtList} of 30");
+        return 0;
     }
 
     // ── H ────────────────────────────────────────────────────────────────
