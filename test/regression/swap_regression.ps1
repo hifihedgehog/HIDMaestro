@@ -685,13 +685,21 @@ function Invoke-Probe {
     # when there is something to pass.
     if ($Arguments) { $start.ArgumentList = $Arguments }
     $p = Start-Process @start
-    if ($SkipCodes -contains $p.ExitCode) {
-        Write-Host ('    [SKIP] probe reported exit ' + $p.ExitCode) -ForegroundColor Yellow
+    Resolve-ProbeExit -ExitCode $p.ExitCode -Out $out -Exe $Exe -Message $Message -SkipCodes $SkipCodes
+}
+
+# What Invoke-Probe does once the probe has exited: a skip code prints
+# [SKIP], and any other exit but 0 prints the probe's [FAIL] lines, or its
+# tail, and throws.
+function Resolve-ProbeExit {
+    param([int]$ExitCode, [string]$Out, [string]$Exe, [string]$Message, [int[]]$SkipCodes = @())
+    if ($SkipCodes -contains $ExitCode) {
+        Write-Host ('    [SKIP] probe reported exit ' + $ExitCode) -ForegroundColor Yellow
         return
     }
-    if ($p.ExitCode -ne 0) {
-        if (Test-Path $out) {
-            $lines = @(Get-Content $out -ErrorAction SilentlyContinue)
+    if ($ExitCode -ne 0) {
+        if (Test-Path $Out) {
+            $lines = @(Get-Content $Out -ErrorAction SilentlyContinue)
             $failed = @($lines | Where-Object { $_ -match '\[FAIL\]' })
             if ($failed.Count -gt 0) {
                 Write-Host '    probe failures:' -ForegroundColor Red
@@ -700,10 +708,37 @@ function Invoke-Probe {
                 Write-Host '    probe tail:' -ForegroundColor Red
                 foreach ($l in ($lines | Select-Object -Last 15)) { Write-Host ('      ' + $l.Trim()) -ForegroundColor Red }
             }
-            Write-Host ('    full transcript: ' + $out) -ForegroundColor Yellow
+            Write-Host ('    full transcript: ' + $Out) -ForegroundColor Yellow
         }
-        throw ($Exe + ' exited ' + $p.ExitCode + ' - ' + $Message)
+        throw ($Exe + ' exited ' + $ExitCode + ' - ' + $Message)
     }
+}
+
+# Starts a probe whose work runs on a machine of its own, so it can run
+# beside the scenarios ahead of its slot: S73's Windows Sandbox. The slot
+# waits for it with Complete-BackgroundProbe and judges it as Invoke-Probe
+# would. A probe that cannot start fails at its slot, not here.
+function Start-BackgroundProbe {
+    param([Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)][string]$Exe)
+    try {
+        $probe = Resolve-ProbeBinary $Dir $Exe
+        $out = Join-Path $env:TEMP ('HIDMaestro_probe_' + [IO.Path]::GetFileNameWithoutExtension($Exe) + '.log')
+        $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError "$out.err"
+        # The exit code reads back only through a handle taken while the
+        # process runs.
+        $null = $p.Handle
+        return @{ Process = $p; Out = $out; Exe = $Exe; Error = $null }
+    } catch {
+        return @{ Error = $_ }
+    }
+}
+
+function Complete-BackgroundProbe {
+    param([Parameter(Mandatory)][hashtable]$Run, [Parameter(Mandatory)][string]$Message, [int[]]$SkipCodes = @())
+    if ($Run.Error) { throw $Run.Error }
+    $Run.Process.WaitForExit()
+    Write-Host ('    ran beside the scenarios ahead of it, {0:N1} s' -f ($Run.Process.ExitTime - $Run.Process.StartTime).TotalSeconds)
+    Resolve-ProbeExit -ExitCode $Run.Process.ExitCode -Out $Run.Out -Exe $Run.Exe -Message $Message -SkipCodes $SkipCodes
 }
 
 function Scenario-Single-360-BT-360 {
@@ -1993,10 +2028,15 @@ function Scenario-Protected-Staging {
 # gets a refusal instead of the installer, which would run that entry's
 # uninstaller first. Two programs whose first composites arrive together
 # install once: one host controller, both composites up. Exit 2 when Windows
-# Sandbox is not available.
+# Sandbox is not available. The sandbox is a machine of its own, so the
+# battery starts this probe before S01 and the slot collects its result.
 function Scenario-Usbip-Clean-Install {
-    Invoke-Probe -Dir 'usbip_install_check' -Exe 'UsbipInstallCheck.exe' `
-                 -Message 'the bundled usbip-win2 install left a shortcut, Start menu folder, GUI, SDK or PDB file, broke the composite, ran over an existing install, or ran twice for two programs at once (see probe stdout)' -SkipCodes 2
+    $message = 'the bundled usbip-win2 install left a shortcut, Start menu folder, GUI, SDK or PDB file, broke the composite, ran over an existing install, or ran twice for two programs at once (see probe stdout)'
+    if ($script:S73Run) {
+        Complete-BackgroundProbe -Run $script:S73Run -Message $message -SkipCodes 2
+    } else {
+        Invoke-Probe -Dir 'usbip_install_check' -Exe 'UsbipInstallCheck.exe' -Message $message -SkipCodes 2
+    }
 }
 
 # The smoke apps the aot_smoke probe publishes for this machine's
@@ -2423,6 +2463,18 @@ $scenarios = @(
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
+
+# S73 runs in Windows Sandbox and spends about four minutes there, nearly
+# all of it idle while Windows Installer's signature check of each of the
+# VC++ runtime's two packages times out at 120 s in the fresh image. The
+# sandbox adds no devnode to this machine and its probe loads no
+# HIDMaestro.Core.dll here, so it starts now, beside S01 to S72, and its
+# slot collects the result.
+$script:S73Run = $null
+if ('S73_Usbip_Clean_Install' -like $Filter) {
+    $script:S73Run = Start-BackgroundProbe -Dir 'usbip_install_check' -Exe 'UsbipInstallCheck.exe'
+}
+
 $results = @()
 foreach ($s in $scenarios) {
     $r = Test-Scenario -Name $s.Name -Body $s.Body
