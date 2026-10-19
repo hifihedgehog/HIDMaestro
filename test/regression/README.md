@@ -1,6 +1,6 @@
 ﻿# swap_regression.ps1: live-swap teardown regression battery
 
-Drives `HIDMaestroTest.exe` through 96 single- and multi-controller
+Drives `HIDMaestroTest.exe` through 99 single- and multi-controller
 create/swap/remove/force-kill sequences and verifies every scenario
 leaves zero HIDMaestro PnP devnodes in the `PRESENT` state. Catches
 the symptom that v1.1.31 fixed (`SwDeviceLifetimeParentPresent`
@@ -33,7 +33,7 @@ custom profile (BEEF:F000) authored via the SDK's `HMProfileBuilder`
 
 Exit code: `0` if every scenario passed, `1` if any failed.
 
-Total wall time: [D4-PLACEHOLDER: minutes from the v2.0.0 release battery] for all 96
+Total wall time: [D4-PLACEHOLDER: minutes from the v2.0.0 release battery] for all 99
 scenarios, every section and check, on a 16-core laptop. Use `-Filter` to
 run one scenario when iterating.
 
@@ -145,6 +145,9 @@ not run elevated.
 | `S95_Protocol_Engine`             | The protocol engine and the device clock | Conditions, matches, register stores, memory, bitmap and prefix replies, bulk replies in read-sized chunks, the overflow rules, GET_REPORT of the layout that would go out, counters, no allocation per command, reply or report, the Triton's IMU register, the clock's grid under each missed-tick rule, and the idle repeat's period, condition and timestamps. Offline |
 | `S96_Capture_Fidelity`            | Catalog data and driver text against their sources | The INF comments are ASCII, the Xbox 360 profiles carry a real pad's manufacturer string, and xbox-360-flight-stick and ps-move carry their captured descriptors, with the Move's controls, battery and motion where psmoveapi and RPCS3 read them. Offline |
 | `S97_Switch_Family`               | A second device on the Switch Pro's mechanisms | `joycon-l-proof`, a Joy-Con (L) built from `switch-pro`'s protocol, state block and report programs, loads, answers SDL's Joy-Con open with nxbt's device info, and its 0x3F stick hat follows dekuNukem's grid in all eight directions and reads centered inside its dead zone. Offline |
+| `S98_Switch_Pro_Protocol`         | The Switch Pro's protocol, as SDL3 drives it over Bluetooth | Over raw HID under the real Bluetooth descriptor, the init SDL3's `HIDAPI_DriverSwitch` runs (device info, stick and IMU calibration, vibration, input mode) gets a real pad's answers, the 0x30 stream runs, input and IMU arrive as submitted, rumble decodes, and the USB-only 0x80 family answers nothing, as on a real Bluetooth pad. Live, elevated |
+| `S99_Switch_Descriptor_Idle`      | The Switch Pro before its handshake | The idle stream is the real pad's 12-byte 0x3F simple-mode report, the one report DirectInput can parse through the Bluetooth descriptor, and the first 0x01 subcommand switches the stream to the 49-byte 0x30. Live, elevated |
+| `S100_Switch_Pro_Sdl3`            | The Switch Pro through real SDL3 | SDL3's `HIDAPI_DriverSwitch`, from the unfiltered SDL3 build beside the repository, opens the virtual pad, completes init, reads calibrated sticks and buttons, and reports gyro and accel through `SDL_GetGamepadSensorData`. Prints `[SKIP]` where no SDL3 build is beside the repository. Live, elevated |
 
 ## What "PASS" means
 

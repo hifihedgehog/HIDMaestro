@@ -4,7 +4,7 @@ rem  pre-tag-validate.cmd
 rem
 rem  Mandatory pre-release validation. Run before `git tag vX.Y.Z`.
 rem  - Builds the SDK + test app
-rem  - Runs the full live-swap regression battery (96 scenarios, [D4-PLACEHOLDER: minutes] min
+rem  - Runs the full live-swap regression battery (99 scenarios, [D4-PLACEHOLDER: minutes] min
 rem    on the Ryzen devbox)
 rem  - Exits non-zero if any scenario FAILed; do NOT tag/push/release in
 rem    that case
@@ -20,7 +20,7 @@ rem      and orphan the regression script's stdin pipe).
 rem    - sudo/gsudo NOT used here (caller is responsible for elevation).
 rem
 rem  Exit codes:
-rem    0  All 96 scenarios PASSED. Safe to tag/push/release.
+rem    0  All 99 scenarios PASSED. Safe to tag/push/release.
 rem    1  At least one scenario FAILED. Do NOT release.
 rem    2  Build failed. Fix before re-running.
 rem ====================================================================
@@ -55,7 +55,7 @@ set "HMSkipUsbip="
 rem    A release is stamped with the time its build starts, never a
 rem    stamp time left in the environment (stamp_inf.ps1).
 set "HM_STAMP_TIME="
-echo [1/4] Building SDK + driver + test apps...
+echo [1/3] Building SDK + driver + test apps...
 call scripts\build_all.cmd >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] build_all.cmd failed. Run it directly to see the error.
@@ -123,66 +123,11 @@ if errorlevel 1 (
     popd
     exit /b 2
 )
-dotnet build test\probes\switch_pro_check\SwitchProCheck.csproj -c Release --nologo -v:minimal >nul 2>&1
-if errorlevel 1 (
-    echo [ERROR] SwitchProCheck build failed.
-    popd
-    exit /b 2
-)
-dotnet build test\probes\switch_descriptor_idle_check\switch_descriptor_idle_check.csproj -c Release --nologo -v:minimal >nul 2>&1
-if errorlevel 1 (
-    echo [ERROR] SwitchDescriptorIdleCheck build failed.
-    popd
-    exit /b 2
-)
-dotnet build test\probes\switch_pro_sdl3_check\SwitchProSdl3Check.csproj -c Release --nologo -v:minimal >nul 2>&1
-if errorlevel 1 (
-    echo [ERROR] SwitchProSdl3Check build failed.
-    popd
-    exit /b 2
-)
 echo       BUILD OK
 echo.
 
-rem 3. Switch Pro protocol responder check (issue #33). Headless and
-rem    self-contained: creates the virtual pad, runs SDL's exact USB init
-rem    + subcommand sequence over raw HID, validates 0x30 streaming,
-rem    input/IMU round-trip, and rumble decode. 43 asserts, ~15 s.
-echo [2/4] Running Switch Pro protocol check...
-test\probes\switch_pro_check\bin\Release\net10.0-windows10.0.26100.0\SwitchProCheck.exe
-if errorlevel 1 (
-    echo ====================================================================
-    echo  [FAIL] Switch Pro protocol check failed. DO NOT TAG OR RELEASE.
-    echo ====================================================================
-    popd
-    exit /b 1
-)
-rem     Pre-handshake descriptor conformance (issue #35): the idle 0x30
-rem     stream must parse correctly through the HID descriptor
-rem     (DirectInput/joy.cpl) and flip to the Nintendo layout on the
-rem     first protocol write. 21 asserts, ~10 s.
-test\probes\switch_descriptor_idle_check\bin\Release\net10.0-windows10.0.26100.0\SwitchDescriptorIdleCheck.exe
-if errorlevel 1 (
-    echo ====================================================================
-    echo  [FAIL] Switch descriptor idle check failed. DO NOT TAG OR RELEASE.
-    echo ====================================================================
-    popd
-    exit /b 1
-)
-rem     Real-SDL3 acceptance (issue #33 acceptance line): SKIPs cleanly
-rem     when the sibling SDL3-build checkout is absent; a FAIL is real.
-test\probes\switch_pro_sdl3_check\bin\Release\net10.0-windows10.0.26100.0\SwitchProSdl3Check.exe
-if errorlevel 1 (
-    echo ====================================================================
-    echo  [FAIL] Switch Pro SDL3 acceptance failed. DO NOT TAG OR RELEASE.
-    echo ====================================================================
-    popd
-    exit /b 1
-)
-echo.
-
-rem 4. Run the full regression battery
-echo [3/4] Running live-swap regression battery (96 scenarios)...
+rem 3. Run the full regression battery
+echo [2/3] Running live-swap regression battery (99 scenarios)...
 echo.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "test\regression\swap_regression.ps1"
 set BATTERY_EXIT=%ERRORLEVEL%
@@ -197,7 +142,7 @@ if %BATTERY_EXIT% neq 0 (
     exit /b 1
 )
 
-echo [4/4] Validation complete.
+echo [3/3] Validation complete.
 echo.
 echo ====================================================================
 echo  [PASS] Switch Pro check + 96/96 swap scenarios passed. Safe to:

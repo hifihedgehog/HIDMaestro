@@ -194,6 +194,9 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\pnp_notify_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         # The copy in variant\ is a different build of the SDK on purpose.
         Join-Path $scriptDir '..\probes\build_info_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\switch_pro_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\switch_descriptor_idle_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\switch_pro_sdl3_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
     )
     # Canonical SDK output for the content-hash check. Source tree only:
     # a release bundle carries no sdk/ build output, and the version
@@ -2359,6 +2362,38 @@ function Scenario-Contract-Live {
                  -Message 'the live driver does not hold the version contract or FeatureAnswers as the design states (see probe stdout for the check)'
 }
 
+# S98: the Switch Pro protocol responder (issues #33, #36 and #37). The
+# probe opens the virtual pad over raw HID under the real Bluetooth
+# descriptor and runs the init SDL3's HIDAPI_DriverSwitch runs over
+# Bluetooth: device info, stick and IMU calibration, vibration and input
+# mode. It then checks the 0x30 stream, the input and IMU round trip and
+# the rumble decode, and that the USB-only 0x80 family answers nothing, as
+# on a real Bluetooth pad.
+function Scenario-Switch-Pro-Protocol {
+    Invoke-Probe -Dir 'switch_pro_check' -Exe 'SwitchProCheck.exe' `
+                 -Message 'the Switch Pro no longer answers SDL''s Bluetooth init, streams 0x30, carries input and IMU, or decodes rumble as a real pad does (see probe stdout)'
+}
+
+# S99: the Switch Pro before its handshake (issues #35 and #37). Under the
+# real Bluetooth descriptor the idle stream is the 12-byte 0x3F simple-mode
+# report, the one report DirectInput can parse, and the first 0x01
+# subcommand switches the stream to the 49-byte 0x30.
+function Scenario-Switch-Descriptor-Idle {
+    Invoke-Probe -Dir 'switch_descriptor_idle_check' -Exe 'SwitchDescriptorIdleCheck.exe' `
+                 -Message 'the Switch Pro''s idle 0x3F stream, or its switch to 0x30 on the first 0x01 subcommand, no longer matches a real pad (see probe stdout)'
+}
+
+# S100: the Switch Pro through real SDL3 (issue #33's acceptance line).
+# HIDAPI_DriverSwitch opens the virtual pad, completes init, reads
+# calibrated sticks and buttons, and reports gyro and accel through
+# SDL_GetGamepadSensorData. The probe loads the unfiltered SDL3 build
+# beside the repository, as the fork's head hides HIDMaestro pads by
+# design, and prints [SKIP] where no SDL3 build is there.
+function Scenario-Switch-Pro-Sdl3 {
+    Invoke-Probe -Dir 'switch_pro_sdl3_check' -Exe 'SwitchProSdl3Check.exe' `
+                 -Message 'SDL3''s HIDAPI_DriverSwitch no longer opens the virtual Switch Pro, completes its init, or reads its sticks, buttons and motion (see probe stdout)'
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -2459,7 +2494,10 @@ $scenarios = @(
     @{ Name = 'S96_Capture_Fidelity';            Body = ${function:Scenario-Capture-Fidelity} },
     @{ Name = 'S97_Switch_Family';               Body = ${function:Scenario-Switch-Family} },
     @{ Name = 'S92_Profile_Model';               Body = ${function:Scenario-Profile-Model} },
-    @{ Name = 'S93_Contract_Live';               Body = ${function:Scenario-Contract-Live} }
+    @{ Name = 'S93_Contract_Live';               Body = ${function:Scenario-Contract-Live} },
+    @{ Name = 'S98_Switch_Pro_Protocol';         Body = ${function:Scenario-Switch-Pro-Protocol} },
+    @{ Name = 'S99_Switch_Descriptor_Idle';      Body = ${function:Scenario-Switch-Descriptor-Idle} },
+    @{ Name = 'S100_Switch_Pro_Sdl3';            Body = ${function:Scenario-Switch-Pro-Sdl3} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
