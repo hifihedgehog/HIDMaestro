@@ -663,6 +663,10 @@ public sealed class HMContext : IDisposable
 
     private HMController CreateUnderLease(int slot, HMProfile profile, string? identityKey)
     {
+        // A composite create opens the USB/IP host controller for its
+        // lease's census and again for its attach: one open serves both
+        // (VhciClient.HoldOpen), closed as this create returns.
+        using var vhci = profile.RequiresUsbipBackend ? Internal.Usbip.VhciClient.HoldOpen() : null;
         var lease = AcquireLease(slot, identityKey,
             profile.RequiresUsbipBackend ? "usbip" : "umdf", profile.Id);
         bool keepLease = false;

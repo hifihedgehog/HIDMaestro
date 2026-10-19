@@ -95,7 +95,7 @@ internal static partial class UsbipDriverInstaller
         if (IsInstalled)
         {
             ReplaceLegacyTransportOnce(progress);
-            StampOwnerHardwareId();
+            StampOwnerHardwareIdOnChange();
             return true;
         }
 
@@ -1026,7 +1026,34 @@ internal static partial class UsbipDriverInstaller
     /// and a write only on the first call per machine), and best-effort:
     /// a machine where this cannot be written still creates controllers,
     /// it just cannot be filtered by the token.</summary>
-    internal static bool StampOwnerHardwareId()
+    internal static bool StampOwnerHardwareId() => StampAll() > 0;
+
+    /// <summary>The host controllers' interface list that the last stamp
+    /// pass on a create found every controller of stamped, or null.</summary>
+    private static string? s_stampedFor;
+
+    /// <summary><see cref="StampOwnerHardwareId"/> for a composite create,
+    /// passed over while the host controllers' interface list is the one
+    /// a pass found each of them stamped for. A host controller added,
+    /// reinstalled under a new instance number or removed changes the
+    /// list, and the pass runs again. The pass reads sixteen instance
+    /// numbers, about 90 microseconds of each composite create on the bench
+    /// machine on 2026-10-19. The count compared is one interface per host
+    /// controller: a list that holds more interfaces than the pass stamped
+    /// controllers is not kept, and the next create runs the pass
+    /// again.</summary>
+    private static void StampOwnerHardwareIdOnChange()
+    {
+        string? list = VhciClient.InterfaceList();
+        if (list != null && string.Equals(list, Volatile.Read(ref s_stampedFor), StringComparison.Ordinal)) return;
+        int stamped = StampAll();
+        if (list != null && stamped == list.Split('\0', StringSplitOptions.RemoveEmptyEntries).Length)
+            Volatile.Write(ref s_stampedFor, list);
+    }
+
+    /// <summary>Stamp every present host controller of the transport, and
+    /// count those that carry the stamp after it.</summary>
+    private static int StampAll()
     {
         // The vhci host controller is ROOT-enumerated, and its instance
         // NUMBER is not stable: deleting and reinstalling the transport
@@ -1038,14 +1065,14 @@ internal static partial class UsbipDriverInstaller
         // So: enumerate the instance-number space and stamp EVERY present
         // controller whose hardware IDs mark it as the usbip UDE root,
         // rather than assuming instance 0000.
-        bool any = false;
+        int stamped = 0;
         for (int n = 0; n < 16; n++)
         {
             string instanceId = $"ROOT\\USB\\{n:D4}";
             if (StampOne(instanceId))
-                any = true;
+                stamped++;
         }
-        return any;
+        return stamped;
     }
 
     private static bool StampOne(string instanceId)
