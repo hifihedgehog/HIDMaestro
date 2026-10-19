@@ -9,13 +9,15 @@
 //   joystick path (when the SDL3-build checkout is beside the repo), and
 //   the USB serial for the USB/IP family.
 //
-// Lives per family: five same-process create/destroy cycles, three process
+// Lives per family: two same-process create/destroy cycles, two process
 // restarts (a child process creates, records and exits), and one driver
 // uninstall plus reinstall (the full sweep deletes the packages; the next
-// create redeploys). A reboot cannot be run from inside a battery: the
-// default run writes %TEMP%\HIDMaestro\identity_baseline.json, and
-// `--compare` after a reboot creates one life per family and checks it
-// against that file.
+// create redeploys). Issue #60's paths changed on every life, so the first
+// recreate shows it. The second restart follows a process that ended, as
+// the first follows this one, which is still running. A reboot cannot be
+// run from inside a battery: the default run writes
+// %TEMP%\HIDMaestro\identity_baseline.json, and `--compare` after a reboot
+// creates one life per family and checks it against that file.
 //
 // After every create the empty-shell check runs: Service bound, interface
 // published, input flowing (a submitted state is read back through the
@@ -161,6 +163,9 @@ internal static class Program
 
     // ── entry ──────────────────────────────────────────────────────────
 
+    const int SameProcessLives = 2, ProcessRestarts = 2;
+    const int LivesPerFamily = SameProcessLives + ProcessRestarts + 1;
+
     static readonly string BaselinePath = Path.Combine(Path.GetTempPath(), "HIDMaestro", "identity_baseline.json");
 
     static int Main(string[] args)
@@ -210,19 +215,20 @@ internal static class Program
             var profile = ResolveProfile(ctx, fam.Id);
             var lives = new List<IdentityRecord>();
 
-            // L1..L5: same process.
-            for (int n = 1; n <= 5; n++)
+            // Same process.
+            for (int n = 1; n <= SameProcessLives; n++)
             {
                 var r = RunLife(ctx, fam, profile, key, $"same-process #{n}");
                 if (r != null) lives.Add(r);
             }
-            // L6..L8: process restarts.
-            for (int n = 1; n <= 3; n++)
+            // Process restarts.
+            var bench = fam.Xbox ? (Wgi: WgiCounts(VidPid(profile).Vid, VidPid(profile).Pid), Slots: XInputSlots().Count) : default;
+            for (int n = 1; n <= ProcessRestarts; n++)
             {
-                var r = SpawnLife(fam, key, $"process-restart #{n}");
+                var r = SpawnLife(fam, key, $"process-restart #{n}", VidPid(profile), bench.Wgi, bench.Slots);
                 if (r != null) lives.Add(r);
             }
-            // L9: driver uninstall + reinstall. The full sweep evicts every
+            // Driver uninstall + reinstall. The full sweep evicts every
             // device and deletes the driver packages; the next create sees
             // no package and redeploys.
             HMContext.RemoveAllVirtualControllers();
@@ -230,7 +236,7 @@ internal static class Program
             var r9 = RunLife(ctx, fam, profile, key, "driver reinstall");
             if (r9 != null) lives.Add(r9);
 
-            Check($"{fam.Id}: 9 lives recorded", lives.Count == 9, $"{lives.Count}");
+            Check($"{fam.Id}: {LivesPerFamily} lives recorded", lives.Count == LivesPerFamily, $"{lives.Count}");
             if (lives.Count > 0)
             {
                 Console.WriteLine($"  life 1: {lives[0].Summary()}");
@@ -354,7 +360,8 @@ internal static class Program
         }
     }
 
-    static IdentityRecord? SpawnLife(Family fam, string key, string life)
+    static IdentityRecord? SpawnLife(Family fam, string key, string life, (ushort Vid, ushort Pid) ids,
+                                     (int Gamepads, int Raw) wgiBench, int slotsBench)
     {
         string outFile = Path.Combine(Path.GetTempPath(), "HIDMaestro", $"identity_{fam.Id}_{Guid.NewGuid():N}.json");
         try
@@ -384,8 +391,19 @@ internal static class Program
         {
             try { File.Delete(outFile); File.Delete(outFile + ".err"); } catch { }
             // The child disposed its controller before exiting; its XUSB or
-            // xinputhid cascade may still be finishing.
-            if (fam.Xbox) Thread.Sleep(1500);
+            // xinputhid cascade may still be finishing. Until WGI and XInput
+            // are back to the bench this family started from, for up to the
+            // 1500 ms this waited before.
+            if (fam.Xbox)
+            {
+                var settle = Stopwatch.StartNew();
+                while (settle.ElapsedMilliseconds < 1500)
+                {
+                    var now = WgiCounts(ids.Vid, ids.Pid);
+                    if (now.Item1 <= wgiBench.Gamepads && now.Item2 <= wgiBench.Raw && XInputSlots().Count <= slotsBench) break;
+                    Thread.Sleep(50);
+                }
+            }
         }
     }
 
@@ -476,8 +494,21 @@ internal static class Program
                 vib = default; XInputSetState((uint)slot, ref vib);
             }
             var counts = (0, 0);
-            for (int i = 0; i < 40; i++) { Thread.Sleep(250); counts = WgiCounts(vid, pid); if (counts.Item1 > wgiBefore.Gamepads) break; }
-            Thread.Sleep(1500);
+            var seen = Stopwatch.StartNew();
+            while (seen.ElapsedMilliseconds < 10000) { Thread.Sleep(50); counts = WgiCounts(vid, pid); if (counts.Item1 > wgiBefore.Gamepads) break; }
+            // Then a hold for a second registration. For the XUSB family,
+            // whose doubling S57 measured (WGI listed the second
+            // RawGameController 50 to 65 ms after the first, 30 of 30
+            // creates without the create's restart), 250 ms. The xinputhid
+            // family keeps 1500 ms: nothing measured its doubling.
+            int holdMs = fam.Id == "xbox-360-wired" ? 250 : 1500;
+            var hold = Stopwatch.StartNew();
+            while (hold.ElapsedMilliseconds < holdMs)
+            {
+                Thread.Sleep(50);
+                var c2 = WgiCounts(vid, pid);
+                if (c2.Item1 > wgiBefore.Gamepads + 1 || c2.Item2 > wgiBefore.Raw + 1) break;
+            }
             counts = WgiCounts(vid, pid);
             Check($"{tag}: exactly one WGI Gamepad more than the bench had",
                   counts.Item1 == wgiBefore.Gamepads + 1 && counts.Item2 == wgiBefore.Raw + 1,

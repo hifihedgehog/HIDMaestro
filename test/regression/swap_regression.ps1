@@ -1798,8 +1798,8 @@ function Scenario-Identity-Derivation {
 }
 
 # S59: identity battery (issue #60). One controller per family across
-# nine lives (five same-process cycles, three process restarts, one
-# driver uninstall and reinstall) must keep its parent instance id,
+# five lives (two same-process cycles, two process restarts, one driver
+# uninstall and reinstall) must keep its parent instance id,
 # ParentIdPrefix, ContainerId, HID children, interface paths, DirectInput
 # GUID, SDL3 path and USB serial. Every life also passes the empty-shell
 # check (Service, interface, input, output, one WGI Gamepad and one XInput
