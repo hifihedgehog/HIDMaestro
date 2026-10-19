@@ -705,7 +705,13 @@ internal static partial class Program
         holder.Start();
         held.Wait(10_000);
         p.Post("sweep");
-        Thread.Sleep(3000);
+        // Five times the lock's short bound (LedgerLock.LegacyMarkedWaitMs,
+        // scaled), the shortest wait it gives an owner it does not read as
+        // SYSTEM or Administrators. A sweep takes the lock two or three
+        // times, so a sweep that gave this holder that bound each time (1.0
+        // to 1.5 s, as the second sweep above shows), or no wait at all,
+        // answers before the holder lets go.
+        Thread.Sleep(5 * Scaled(SdkConst("LedgerLock", "LegacyMarkedWaitMs")));
         // Stamped before the holder lets go, so a sweep that waited for the
         // release always answers after the stamp.
         long released = Stopwatch.GetTimestamp();
@@ -723,16 +729,17 @@ internal static partial class Program
         // same way and wait out a hold instead of writing beside it.
         // The peer sweeps twice before the squatter comes, so its sweeps
         // are warm, and the second one's time is the baseline. The writer
-        // holds the mutex 1 s, and the held sweep's reply must arrive after
-        // the writer lets go and none before, while the baseline must stay
-        // under half of the hold, so the check tells a wait from a sweep
-        // that is merely slow. The reply is ordered against the release,
-        // not timed against the hold: the wait for the reply can end a
-        // timer period short of its bound (3 of 9 sandbox runs answered
-        // 993 to 998 ms after the post), which says nothing about the
+        // holds the mutex 250 ms, and the held sweep's reply must arrive
+        // after the writer lets go and none before, while the baseline must
+        // stay under half of the hold, so the check tells a wait from a
+        // sweep that is merely slow. A sweep that does not wait answers in
+        // its baseline. The reply is ordered against the release, not timed
+        // against the hold: the wait for the reply can end a timer period
+        // short of its bound (3 of 9 sandbox runs answered 993 to 998 ms
+        // after the post of a 1 s hold), which says nothing about the
         // sweep.
         const string noReadControl = "D:(A;;0x100001;;;WD)(A;;0x0;;;OW)";
-        const int holdMs = 1000;
+        const int holdMs = 250;
         using var p2 = PeerProcess.Start("X2-noread");
         p2.Send("sweep", 60_000);
         var warm = Stopwatch.StartNew();
@@ -868,12 +875,16 @@ internal static partial class Program
             if (Ok(c))
             {
                 p.Send("stream 0 0.5 125 0");
+                // 250 ms at 125 Hz is 31 frames. A controller on the
+                // squatter's event signaled it each frame, and the squatter
+                // took about half of them (63 in 1 s before the fix).
+                const int windowMs = 250;
                 int taken = 0;
                 var sw = Stopwatch.StartNew();
-                while (sw.ElapsedMilliseconds < 1000)
+                while (sw.ElapsedMilliseconds < windowMs)
                     if (Native.WaitForSingleObject(sq.Handle(inputEvent), 50) == 0) taken++;
                 p.Send("stopstream");
-                Check("X4: the squatter's event carries none of the controller's input signals", taken == 0, $"it took {taken} in 1 s");
+                Check("X4: the squatter's event carries none of the controller's input signals", taken == 0, $"it took {taken} in {windowMs} ms");
             }
         }
         finally { sq.Dispose(); }
