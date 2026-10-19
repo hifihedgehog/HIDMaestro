@@ -10,7 +10,7 @@
 //                  and outside the gate SubmitState on dualsense-bt once
 //                  its feature reads have armed it, steam-controller-2, the
 //                  Switch 2 Pro composite and the two Luna profiles
-//   e2e [runs] [profile[@report...] ...]
+//   e2e [runs] [profile[@report...] ...] [--key=<identity>]
 //                  SubmitState to the driver's acknowledgement that a read
 //                  carried the frame, on a DualShock 4 and an Xbox 360 pad,
 //                  or the profiles named. A profile named is also read as a
@@ -19,16 +19,19 @@
 //                  ReadFile that returns a report carrying the new state,
 //                  and on a profile XInput lists, to the XInputGetState
 //                  that shows it
-//   feature [runs] [profile[@report...] ...]
+//   feature [runs] [profile[@report...] ...] [--key=<identity>]
 //                  feature answers as a host asks for them: HidD_GetFeature
 //                  on a UMDF2 profile, GET_REPORT(Feature) on a USB/IP one
 //                  in this process. dualsense-bt, dualshock-3-full and
 //                  dualsense-composite unless profiles are named
-//   output [runs] [profile@report ...]
+//   output [runs] [profile[@report] | profile@xinput ...] [--key=<identity>]
 //                  an output report to OutputReceived, and bytes allocated
 //                  per report anywhere in the process: report 05 on a
-//                  DualShock 4, or the report given for each profile
-//   rate [runs] [seconds] [profile ...]
+//                  DualShock 4, XInputSetState on an Xbox 360 pad and on an
+//                  Xbox Series pad (through xinputhid), or the report
+//                  given for each profile (its first declared one when
+//                  none is given, XInputSetState with @xinput)
+//   rate [runs] [seconds] [profile ...] [--key=<identity>]
 //                  sustained throughput: SubmitState every millisecond and
 //                  back to back, with a reader in a child process, the
 //                  reports read per second and the CPU cycles per report of
@@ -140,6 +143,7 @@ internal static partial class Program
 
     const string Ds4 = "dualshock-4-v2";
     const string Xbox360 = "xbox-360-wired";
+    const string XboxSeries = "xbox-series-xs-bt";
     const string Composite = "dualsense-composite";
     const string Keyboard = "microsoft-wired-keyboard-600";
     const string Mouse = "microsoft-notebook-optical-mouse";
@@ -167,12 +171,19 @@ internal static partial class Program
     // diag log.
     static bool s_trace;
 
+    // --key=<identity>: the identity key the e2e, output, feature and rate
+    // modes create with. Without it each create takes the index's default
+    // identity.
+    internal static string? s_key;
+
     static int Main(string[] args)
     {
         // Read once by the SDK's first create, so it is set before any.
         Environment.SetEnvironmentVariable("HIDMAESTRO_TIMING", "1");
         s_trace = args.Contains("--trace");
         args = args.Where(a => a != "--trace").ToArray();
+        s_key = KeyArg(args);
+        args = args.Where(a => !a.StartsWith("--key=", StringComparison.Ordinal)).ToArray();
         string mode = args.Length > 0 ? args[0] : "gate";
         int runs = args.Length > 1 && int.TryParse(args[1], out int r) ? r : 30;
         if (mode == "start-child") return StartChild();
@@ -593,7 +604,7 @@ internal static partial class Program
         foreach (var p in list)
         {
             var xinputBefore = XInputConnected();
-            using var c = ctx.CreateController(ctx.GetProfile(p.Id)!);
+            using var c = ctx.CreateController(ctx.GetProfile(p.Id)!, s_key);
             if (named.Count > 0 && !OnEmbeddedDriver(c, p.Text)) return 5;
             AckPass(c, p.Text, runs);
             if (named.Count > 0)
@@ -766,10 +777,22 @@ internal static partial class Program
             }
             Thread.Sleep(100);
         }
-        using var reader = new HidReader(dev);
         var a = new HMGamepadState { Buttons = HMButton.A };
         var b = new HMGamepadState { Buttons = HMButton.B };
+        ReportReader reader = new HidReader(dev);
+        string via = "ReadFile";
         var patterns = Calibrate(c, reader, a, b, out string learned);
+        if (patterns == null && reader.Count == 0)
+        {
+            // No report at all through ReadFile: xinputhid's collection.
+            // Raw Input reads the same reports for every program.
+            reader.Dispose();
+            reader = new RawHidReader(dev.Path, dev.InputLength, dev.UsagePage, dev.Usage);
+            via = "Raw Input WM_INPUT";
+            Console.WriteLine($"  {p.Text}: ReadFile returned no report ({learned}), so Raw Input reads it");
+            patterns = Calibrate(c, reader, a, b, out learned);
+        }
+        using var readerScope = reader;
         if (patterns == null) { Check($"{p.Text}: the two states tell apart in its reports", false, learned); return; }
         Console.WriteLine($"  {p.Text}: report 0x{patterns.Value.A.Expect[0]:X2} of {patterns.Value.A.Expect.Length} bytes, {learned}");
         var rng = new Random(84);
@@ -795,7 +818,7 @@ internal static partial class Program
             }
         }
         if (reader.ReadError != 0) Check($"{p.Text}: the reader read to the end", false, $"ReadFile error {reader.ReadError}");
-        Report($"{p.Text}: SubmitState to a host's ReadFile of the report that carries it, microseconds", samples, runs,
+        Report($"{p.Text}: SubmitState to a host's {via} of the report that carries it, microseconds", samples, runs,
             $", {missed} not seen within 100 ms");
     }
 
@@ -804,36 +827,122 @@ internal static partial class Program
     /// <summary>Output reports sent through HID, each timed to
     /// OutputReceived, and the bytes the whole process allocated per report
     /// while the SDK's reader handled them: report 05 of 32 bytes on a
-    /// DualShock 4, or for each profile named the report given, padded to
-    /// its interface's output report length. Byte 4 changes with every
-    /// report, so no two in a row are the same. Returns 1 when an argument
-    /// is refused, 3 without elevation, 5 on another driver.</summary>
+    /// DualShock 4, and XInputSetState on an Xbox 360 pad (the XUSB
+    /// companion's path) and on an Xbox Series pad (xinputhid's, whose HID
+    /// interface declares no output report a program can write), or for
+    /// each profile named
+    /// the report given, padded to its interface's output report length.
+    /// A profile named alone sends the first output report its interface
+    /// declares, zero-filled, and <c>profile@xinput</c> sends XInputSetState
+    /// to the slot the profile's create connected. Byte 4 of a report, or
+    /// the motor speeds of a vibration, change with every send, so no two
+    /// in a row are the same. Returns 1 when an argument is refused, 3
+    /// without elevation, 5 on another driver.</summary>
     static int Output(int runs, string[] args)
     {
-        var named = ParseProfileArgs(args, "output");
+        var xinput = args.Where(a => a.EndsWith("@xinput", StringComparison.Ordinal)).Select(a => a[..^7]).ToList();
+        var named = ParseProfileArgs(args.Where(a => !a.EndsWith("@xinput", StringComparison.Ordinal)).Concat(xinput), "output");
         if (named == null) return 1;
-        if (named.Any(p => p.Reports.Length != 1))
+        if (named.Any(p => p.Reports.Length > 1))
         {
-            Console.WriteLine("output: each profile named needs one report, as <profile>@<report hex>");
+            Console.WriteLine("output: each profile named takes one report at most, as <profile>@<report hex>");
             return 1;
         }
         if (!Elevated("output")) return 3;
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
         ctx.InstallDriver();
+        // The XInput targets came last, one per @xinput argument.
+        var viaXInput = new HashSet<ProfileArg>(named.Skip(named.Count - xinput.Count));
         if (named.Count == 0)
         {
             var report = new byte[32];
             report[0] = 0x05;
             named.Add(new ProfileArg(Ds4, Ds4, new[] { report }));
+            var x360 = new ProfileArg(Xbox360 + "@xinput", Xbox360, Array.Empty<byte[]>());
+            named.Add(x360);
+            viaXInput.Add(x360);
+            var series = new ProfileArg(XboxSeries + "@xinput", XboxSeries, Array.Empty<byte[]>());
+            named.Add(series);
+            viaXInput.Add(series);
         }
         foreach (var p in named)
         {
-            using var c = ctx.CreateController(ctx.GetProfile(p.Id)!);
+            var xinputBefore = XInputConnected();
+            using var c = ctx.CreateController(ctx.GetProfile(p.Id)!, s_key);
             if (!OnEmbeddedDriver(c, p.Text)) return 5;
-            OutputOne(c, p, runs);
+            if (viaXInput.Contains(p)) XInputOutputOne(c, p.Text, runs, xinputBefore);
+            else OutputOne(c, p, runs);
         }
         return 0;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct XInputVibration
+    {
+        public ushort Left, Right;
+    }
+
+    [DllImport("xinput1_4.dll", EntryPoint = "XInputSetState")]
+    static extern int XInputSetState(int userIndex, ref XInputVibration vibration);
+
+    /// <summary>XInputSetState on the slot the controller's create
+    /// connected, each timed to the OutputReceived that carries it, what a
+    /// game's rumble waits on its way to a program that drives a physical
+    /// pad: the companion's XInput packet, or the output report xinputhid
+    /// writes. The left motor turns on and off by turns, with a new speed
+    /// each time it turns on, so every send changes the motors. Each send
+    /// follows a random pause of 2 to 19 ms, a game's frame or less, as the
+    /// e2e passes pause. With 1 ms between sends xinputhid's write reached
+    /// the driver about 9.4 ms after the call.</summary>
+    static void XInputOutputOne(HMController c, string id, int runs, HashSet<int> before)
+    {
+        int slot = -1;
+        var wait = Stopwatch.StartNew();
+        while (slot < 0 && wait.ElapsedMilliseconds < 5000)
+        {
+            foreach (int s in XInputConnected())
+                if (!before.Contains(s)) { slot = s; break; }
+            if (slot < 0) Thread.Sleep(50);
+        }
+        if (slot < 0) { Check($"{id}: an XInput slot the create connected", false, "none in 5 s"); return; }
+        long sent = 0;
+        using var got = new AutoResetEvent(false);
+        var rtts = new List<double>(runs * 100);
+        c.OutputReceived += (_, pkt) =>
+        {
+            if (pkt.Source != HMOutputSource.XInput && pkt.Source != HMOutputSource.HidOutput) return;
+            long t = Stopwatch.GetTimestamp();
+            long s = Interlocked.Exchange(ref sent, 0);
+            if (s != 0)
+            {
+                rtts.Add((t - s) * 1e6 / Stopwatch.Frequency);
+                got.Set();
+            }
+        };
+        var perReport = new List<double>(runs);
+        var rng = new Random(84);
+        int lost = 0;
+        for (int run = 0; run < runs; run++)
+        {
+            int delivered = 0;
+            long bytes0 = GC.GetTotalAllocatedBytes(precise: true);
+            for (int i = 0; i < 100; i++)
+            {
+                Spin(rng.Next(2_000, 19_000));
+                var v = new XInputVibration { Left = (ushort)(i % 2 == 0 ? 0x100 * (1 + ((run * 100 + i) % 254)) : 0), Right = 0 };
+                Interlocked.Exchange(ref sent, Stopwatch.GetTimestamp());
+                if (XInputSetState(slot, ref v) != 0) { Interlocked.Exchange(ref sent, 0); lost++; continue; }
+                if (got.WaitOne(500)) delivered++;
+                else { Interlocked.Exchange(ref sent, 0); lost++; }
+            }
+            long bytes = GC.GetTotalAllocatedBytes(precise: true) - bytes0;
+            if (delivered > 0) perReport.Add((double)bytes / delivered);
+        }
+        var stop = new XInputVibration();
+        XInputSetState(slot, ref stop);
+        Report($"{id}: XInputSetState to OutputReceived, slot {slot}, microseconds", rtts, runs, $", {lost} lost");
+        Report($"{id}: bytes the process allocated per XInputSetState", perReport, runs, "");
     }
 
     static void OutputOne(HMController c, ProfileArg p, int runs)
@@ -841,8 +950,9 @@ internal static partial class Program
         long sent = 0;
         using var got = new AutoResetEvent(false);
         var rtts = new List<double>(runs * 100);
-        c.OutputReceived += (_, _) =>
+        c.OutputReceived += (_, pkt) =>
         {
+            if (pkt.Source != HMOutputSource.HidOutput) return;
             long t = Stopwatch.GetTimestamp();
             long s = Interlocked.Exchange(ref sent, 0);
             if (s != 0)
@@ -853,8 +963,9 @@ internal static partial class Program
         };
         using var dev = OpenOwnInterface(c, d => d.OutputLength > 0, out string why);
         if (dev == null) { Check($"{p.Text}: a HID interface with output reports", false, why); return; }
-        var report = new byte[Math.Max(dev.OutputLength, p.Reports[0].Length)];
-        p.Reports[0].CopyTo(report, 0);
+        byte[] given = p.Reports.Length > 0 ? p.Reports[0] : new[] { FirstOutputReportId(dev) };
+        var report = new byte[Math.Max(dev.OutputLength, given.Length)];
+        given.CopyTo(report, 0);
         int vary = Math.Min(4, report.Length - 1);
         var perReport = new List<double>(runs);
         int lost = 0;
@@ -940,6 +1051,14 @@ internal static partial class Program
         foreach (string a in args)
             if (a.StartsWith("--settle=", StringComparison.Ordinal) && int.TryParse(a[9..], out int ms)) return ms;
         return 0;
+    }
+
+    /// <summary>The value of --key=, or null.</summary>
+    static string? KeyArg(string[] args)
+    {
+        foreach (string a in args)
+            if (a.StartsWith("--key=", StringComparison.Ordinal) && a.Length > 6) return a[6..];
+        return null;
     }
 
     // ── Process start to the first controller ───────────────────────────

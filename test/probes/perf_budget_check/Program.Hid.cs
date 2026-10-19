@@ -89,10 +89,12 @@ internal static partial class Program
         public readonly string Path;
         public readonly SafeFileHandle Handle;
         public readonly int InputLength, OutputLength, FeatureLength;
+        public readonly ushort Usage, UsagePage;
 
-        HidDevice(string path, SafeFileHandle h, int input, int output, int feature)
+        HidDevice(string path, SafeFileHandle h, int input, int output, int feature, ushort usage, ushort usagePage)
         {
             Path = path; Handle = h; InputLength = input; OutputLength = output; FeatureLength = feature;
+            Usage = usage; UsagePage = usagePage;
         }
 
         public static HidDevice? Open(string path)
@@ -106,13 +108,41 @@ internal static partial class Program
                 if (HidP_GetCaps(pp, caps) != HIDP_STATUS_SUCCESS) { h.Dispose(); return null; }
                 // HIDP_CAPS: Usage, UsagePage, then the input, output and
                 // feature report byte lengths.
-                return new HidDevice(path, h, BitConverter.ToUInt16(caps, 4), BitConverter.ToUInt16(caps, 6), BitConverter.ToUInt16(caps, 8));
+                return new HidDevice(path, h, BitConverter.ToUInt16(caps, 4), BitConverter.ToUInt16(caps, 6), BitConverter.ToUInt16(caps, 8),
+                                     BitConverter.ToUInt16(caps, 0), BitConverter.ToUInt16(caps, 2));
             }
             finally { HidD_FreePreparsedData(pp); }
         }
 
         public void Dispose() => Handle.Dispose();
     }
+
+    /// <summary>The report ID of the first output value or button the
+    /// interface's preparsed data lists (HIDP_VALUE_CAPS and
+    /// HIDP_BUTTON_CAPS carry ReportID at offset 2 of 72 bytes), or 0 for
+    /// an interface that declares no IDs.</summary>
+    static byte FirstOutputReportId(HidDevice d)
+    {
+        if (!HidD_GetPreparsedData(d.Handle, out IntPtr pp)) return 0;
+        try
+        {
+            var caps = new byte[72 * 64];
+            ushort n = 64;
+            if (HidP_GetValueCaps(HidP_Output, caps, ref n, pp) == HIDP_STATUS_SUCCESS && n > 0) return caps[2];
+            n = 64;
+            if (HidP_GetButtonCaps(HidP_Output, caps, ref n, pp) == HIDP_STATUS_SUCCESS && n > 0) return caps[2];
+            return 0;
+        }
+        finally { HidD_FreePreparsedData(pp); }
+    }
+
+    const int HidP_Output = 1;
+
+    [DllImport("hid.dll")]
+    static extern int HidP_GetValueCaps(int reportType, byte[] caps, ref ushort length, IntPtr preparsed);
+
+    [DllImport("hid.dll")]
+    static extern int HidP_GetButtonCaps(int reportType, byte[] caps, ref ushort length, IntPtr preparsed);
 
     /// <summary>Write one output report as hidapi does on Windows, through
     /// WriteFile, padded with zeros to the device's output report length,
@@ -141,52 +171,33 @@ internal static partial class Program
         }
     }
 
-    /// <summary>Reads one HID interface on its own thread, as
-    /// coexist_check's HidCapture does, and stamps each input report with
-    /// the time ReadFile returned it. While a pattern is armed, the first
-    /// report that matches it sets Hit. Nothing is allocated per report.
-    /// Dispose cancels the read, so the thread ends.</summary>
-    sealed class HidReader : IDisposable
+    /// <summary>What a host-side reader shares: each input report stamped
+    /// with the time the host got it, the last report and the count, and
+    /// while a pattern is armed, the time of the first report that matches
+    /// it. Nothing is allocated per report.</summary>
+    abstract class ReportReader : IDisposable
     {
-        readonly HidDevice _dev;
-        readonly Thread _thread;
-        readonly byte[] _buf, _last;
+        readonly byte[] _last;
         readonly object _lastLock = new();
         int _lastLength;
         long _count, _hit;
         ReportPattern? _armed;
-        volatile bool _stop;
-        public int ReadError { get; private set; }
+        public int ReadError { get; protected set; }
 
-        public HidReader(HidDevice dev)
-        {
-            _dev = dev;
-            _buf = new byte[dev.InputLength];
-            _last = new byte[dev.InputLength];
-            _thread = new Thread(Loop) { IsBackground = true, Priority = ThreadPriority.Highest, Name = "e2e reader" };
-            _thread.Start();
-        }
+        protected ReportReader(int length) => _last = new byte[length];
 
-        void Loop()
+        /// <summary>One report, got at Stopwatch time t.</summary>
+        protected void Deliver(byte[] report, int length, long t)
         {
-            while (!_stop)
+            var armed = Volatile.Read(ref _armed);
+            if (armed != null && Interlocked.Read(ref _hit) == 0 && armed.Matches(report, length))
+                Interlocked.CompareExchange(ref _hit, t, 0);
+            lock (_lastLock)
             {
-                if (!ReadFile(_dev.Handle, _buf, _buf.Length, out int read, IntPtr.Zero))
-                {
-                    if (!_stop) ReadError = Marshal.GetLastWin32Error();
-                    return;
-                }
-                long t = Stopwatch.GetTimestamp();
-                if (read <= 0) continue;
-                var armed = Volatile.Read(ref _armed);
-                if (armed != null && Interlocked.Read(ref _hit) == 0 && armed.Matches(_buf, read))
-                    Interlocked.CompareExchange(ref _hit, t, 0);
-                lock (_lastLock)
-                {
-                    Buffer.BlockCopy(_buf, 0, _last, 0, read);
-                    _lastLength = read;
-                    _count++;
-                }
+                int n = Math.Min(length, _last.Length);
+                Buffer.BlockCopy(report, 0, _last, 0, n);
+                _lastLength = n;
+                _count++;
             }
         }
 
@@ -212,7 +223,43 @@ internal static partial class Program
         /// armed pattern, or 0.</summary>
         public long Hit => Interlocked.Read(ref _hit);
 
-        public void Dispose()
+        public abstract void Dispose();
+    }
+
+    /// <summary>Reads one HID interface on its own thread, as
+    /// coexist_check's HidCapture does, and stamps each input report with
+    /// the time ReadFile returned it. Dispose cancels the read, so the
+    /// thread ends.</summary>
+    sealed class HidReader : ReportReader
+    {
+        readonly HidDevice _dev;
+        readonly Thread _thread;
+        readonly byte[] _buf;
+        volatile bool _stop;
+
+        public HidReader(HidDevice dev) : base(dev.InputLength)
+        {
+            _dev = dev;
+            _buf = new byte[dev.InputLength];
+            _thread = new Thread(Loop) { IsBackground = true, Priority = ThreadPriority.Highest, Name = "e2e reader" };
+            _thread.Start();
+        }
+
+        void Loop()
+        {
+            while (!_stop)
+            {
+                if (!ReadFile(_dev.Handle, _buf, _buf.Length, out int read, IntPtr.Zero))
+                {
+                    if (!_stop) ReadError = Marshal.GetLastWin32Error();
+                    return;
+                }
+                long t = Stopwatch.GetTimestamp();
+                if (read > 0) Deliver(_buf, read, t);
+            }
+        }
+
+        public override void Dispose()
         {
             _stop = true;
             CancelIoEx(_dev.Handle, IntPtr.Zero);
@@ -220,15 +267,20 @@ internal static partial class Program
         }
     }
 
-    /// <summary>What a report looks like in each of two states: each state
-    /// is submitted twice, the last report read 150 ms after each submit is
+    /// <summary>What a report looks like in each of two states: after the
+    /// state at rest, each state is submitted twice, the last report read
+    /// 150 ms after each submit is
     /// kept, and the positions that hold the same byte in both reports of a
     /// state are the ones a pattern compares. A counter or a time stamp
     /// differs between the two and drops out. Null, with the reason, when a
     /// submit brought no report or no compared position tells the states
     /// apart.</summary>
-    static (ReportPattern A, ReportPattern B)? Calibrate(HMController c, HidReader rd, HMGamepadState a, HMGamepadState b, out string why)
+    static (ReportPattern A, ReportPattern B)? Calibrate(HMController c, ReportReader rd, HMGamepadState a, HMGamepadState b, out string why)
     {
+        // The state at rest first, so every submit below changes the state
+        // whatever the pass before left: the acknowledgement pass ends on a.
+        c.SubmitState(new HMGamepadState());
+        Thread.Sleep(150);
         var got = new byte[4][];
         for (int k = 0; k < 4; k++)
         {
