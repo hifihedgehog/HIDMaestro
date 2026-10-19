@@ -6,7 +6,7 @@
 // take their baseline from a 9bd6279 tree: -p:HmBaselineTree=<checkout>
 // builds this source against that checkout's SDK (PerfBudgetCheck.csproj).
 //
-//   frame [runs] [kbm] [--settle=<ms>]
+//   frame [runs] [kbm] [--settle=<ms>] [--key=<identity>]
 //                  time and bytes allocated per call on each submit path,
 //                  the keyboard, mouse, consumer and pointer paths and
 //                  steam-controller-2 (a keyboard and mouse in lizard
@@ -36,10 +36,12 @@
 //                  an output report to OutputReceived, and bytes allocated
 //                  per report anywhere in the process: report 05 on a
 //                  DualShock 4, or the report given for each profile
-//   signal [runs]  live: on a DualShock 4 and an Xbox 360 pad, SetEvent on
+//   signal [runs] [--key=<identity>]
+//                  live: on a DualShock 4 and an Xbox 360 pad, SetEvent on
 //                  the input event and the companion's doorbell alone, and a
-//                  frame written to the section without and with its signal
-//                  (SignalLive.cs). It builds against b4d29d9 as is
+//                  frame written to the section without and with its signal,
+//                  and to this process's own memory (SignalLive.cs). It
+//                  builds against b4d29d9 as is
 //   rate [runs] [seconds] [profile ...]
 //                  sustained throughput: SubmitState every millisecond and
 //                  back to back, with a reader in a child process, the
@@ -192,9 +194,9 @@ internal static partial class Program
     // diag log.
     static bool s_trace;
 
-    // --key=<identity>: the identity key the create, rate and idle-live
-    // modes create with. Without it each create takes the index's default
-    // identity.
+    // --key=<identity>: the identity key the create, rate, idle-live,
+    // frame and signal modes create with. Without it each create takes the
+    // index's default identity.
     internal static string? s_key;
 
     static int Main(string[] args)
@@ -382,7 +384,7 @@ internal static partial class Program
         var a = new HMGamepadState { Buttons = HMButton.A, Axes = new Dictionary<HMAxis, float> { [HMAxis.X] = 0.25f, [HMAxis.Y] = 0.75f } };
         var b = new HMGamepadState { Buttons = HMButton.B, Axes = new Dictionary<HMAxis, float> { [HMAxis.X] = 0.75f, [HMAxis.Y] = 0.25f } };
 
-        using (var ds4 = ctx.CreateController(ctx.GetProfile(Ds4)!))
+        using (var ds4 = ctx.CreateController(ctx.GetProfile(Ds4)!, s_key))
         {
             if (!gate && !OnEmbeddedDriver(ds4, Ds4)) return;
             bool flip = false;
@@ -390,7 +392,7 @@ internal static partial class Program
             var raw = new byte[63];
             Measure("SubmitRawReport, dualshock-4-v2", runs, 20_000, () => { raw[0]++; ds4.SubmitRawReport(raw); }, gate);
         }
-        using (var x360 = ctx.CreateController(ctx.GetProfile(Xbox360)!))
+        using (var x360 = ctx.CreateController(ctx.GetProfile(Xbox360)!, s_key))
         {
             bool flip = false;
             Measure("SubmitState, xbox-360-wired", runs, 20_000, () => { x360.SubmitState(flip ? a : b); flip = !flip; }, gate);
@@ -443,7 +445,7 @@ internal static partial class Program
         // using the machine. The frame mode measures them only when its
         // arguments name kbm.
         if (keyboardAndMouse)
-        using (var kb = ctx.CreateController(ctx.GetProfile(Keyboard)!))
+        using (var kb = ctx.CreateController(ctx.GetProfile(Keyboard)!, s_key))
         {
             var down = new[] { HMKey.A };
             bool flip = false;
@@ -454,7 +456,7 @@ internal static partial class Program
             }, gate);
         }
         if (keyboardAndMouse)
-        using (var mouse = ctx.CreateController(ctx.GetProfile(Mouse)!))
+        using (var mouse = ctx.CreateController(ctx.GetProfile(Mouse)!, s_key))
         {
             var move = new HMMouseState { X = 1 };
             Measure("SubmitMouse, " + Mouse, runs, paced, () => mouse.SubmitMouse(in move), gate);
@@ -471,7 +473,7 @@ internal static partial class Program
             }
 #endif
         }
-        using (var ds3 = ctx.CreateController(ctx.GetProfile(Ds3)!))
+        using (var ds3 = ctx.CreateController(ctx.GetProfile(Ds3)!, s_key))
         {
             bool flip = false;
             Measure("SubmitState, " + Ds3 + " (the report codec)", runs, 20_000, () => { ds3.SubmitState(flip ? a : b); flip = !flip; }, gate);
@@ -498,12 +500,12 @@ internal static partial class Program
                 // steam-controller-2 declares a keyboard and a mouse (its
                 // lizard mode), so it waits for kbm as the keyboards do.
                 if (!keyboardAndMouse && id == "steam-controller-2") continue;
-                using var c = ctx.CreateController(ctx.GetProfile(id)!);
+                using var c = ctx.CreateController(ctx.GetProfile(id)!, s_key);
                 bool flip = false;
                 Measure($"SubmitState, {id}", runs, 20_000, () => { c.SubmitState(flip ? a : b); flip = !flip; }, gate);
             }
         if (keyboardAndMouse)
-        using (var mk = ctx.CreateController(ctx.GetProfile(MagicKeyboard)!))
+        using (var mk = ctx.CreateController(ctx.GetProfile(MagicKeyboard)!, s_key))
         {
             var playPause = new ushort[] { 0x00CD };
             bool flip = false;
@@ -537,7 +539,7 @@ internal static partial class Program
             }, gate);
         }
 #if !HM_BASE
-        using (var gc = ctx.CreateController(ctx.GetProfile(GameCube)!))
+        using (var gc = ctx.CreateController(ctx.GetProfile(GameCube)!, s_key))
         {
             bool flip = false;
             var port = gc.Ports[0];
@@ -561,7 +563,7 @@ internal static partial class Program
     /// it on. Outside the gate.</summary>
     static void FrameSwitchPro(HMContext ctx, int runs, HMGamepadState a, HMGamepadState b)
     {
-        using var sw = ctx.CreateController(ctx.GetProfile("switch-pro")!);
+        using var sw = ctx.CreateController(ctx.GetProfile("switch-pro")!, s_key);
         if (!OnEmbeddedDriver(sw, "switch-pro")) return;
         bool flip = false;
         Measure("SubmitState, switch-pro", runs, 20_000, () => { sw.SubmitState(flip ? a : b); flip = !flip; }, gate: false);
@@ -595,7 +597,7 @@ internal static partial class Program
     /// (a)). Outside the gate, so S84 is unchanged.</summary>
     static void FrameConversionProfiles(HMContext ctx, int runs, HMGamepadState a, HMGamepadState b, bool keyboardAndMouse)
     {
-        using (var ds = ctx.CreateController(ctx.GetProfile("dualsense-bt")!))
+        using (var ds = ctx.CreateController(ctx.GetProfile("dualsense-bt")!, s_key))
         {
             if (!OnEmbeddedDriver(ds, "dualsense-bt")) return;
             string armed = ArmByFeatureReads(ds, a, b);
@@ -605,7 +607,7 @@ internal static partial class Program
         foreach (string id in new[] { "steam-controller-2", "switch2-pro-controller-composite", "amazon-luna-usb", "amazon-luna-ble" })
         {
             if (!keyboardAndMouse && id == "steam-controller-2") continue;
-            using var c = ctx.CreateController(ctx.GetProfile(id)!);
+            using var c = ctx.CreateController(ctx.GetProfile(id)!, s_key);
             if (!OnEmbeddedDriver(c, id)) return;
             bool flip = false;
             Measure("SubmitState, " + id, runs, 20_000, () => { c.SubmitState(flip ? a : b); flip = !flip; }, gate: false);
