@@ -71,7 +71,9 @@ internal static partial class Live
     /// its first input report is the vendor 0x27. Keyboard collections are
     /// Windows' own, so the keyboard is
     /// read through Raw Input: F24 (usage 0x73) arrives as VK_F24 only if
-    /// the frame went out as report 0x01.</summary>
+    /// the frame went out as report 0x01. In session 0, where Raw Input
+    /// lists no device, the keyboard is created and its two Raw Input
+    /// checks are skipped. The rest run.</summary>
     static void SameWindow(HMContext ctx, RawInputSink sink)
     {
         var ds4p = ctx.GetProfile("dualshock-4-v2")!;
@@ -79,6 +81,7 @@ internal static partial class Live
         var kbp = ctx.GetProfile("microsoft-designer-keyboard")!;
         HMController? ds4 = null, nso = null, kb = null;
         HidReader? ds4r = null, nsor = null;
+        bool rawInput = !RawInputSink.NoRawInputHere(out string noRawInput);
         try
         {
             ds4 = Open(ctx, ds4p, out ds4r);
@@ -87,20 +90,25 @@ internal static partial class Live
                 .Where(d => d.Type == RawInputSink.RIM_TYPEKEYBOARD).Select(d => d.Handle));
             kb = ctx.CreateController(kbp);
             IntPtr keyboard = IntPtr.Zero;
-            var wait = Stopwatch.StartNew();
-            while (keyboard == IntPtr.Zero && wait.ElapsedMilliseconds < 15000)
+            if (rawInput)
             {
-                // By the collection's HID attributes, as kbm_live_check finds
-                // its keyboards: a device on ROOT\HIDClass has no VID or PID
-                // in its path.
-                keyboard = RawInputSink.Devices()
-                    .Where(d => d.Type == RawInputSink.RIM_TYPEKEYBOARD && !keyboardsBefore.Contains(d.Handle)
-                                && RawInputSink.Attributes(d.Name) is { } a && a.Vid == kbp.VendorId && a.Pid == kbp.ProductId)
-                    .Select(d => d.Handle).FirstOrDefault();
-                if (keyboard == IntPtr.Zero) Thread.Sleep(100);
+                var wait = Stopwatch.StartNew();
+                while (keyboard == IntPtr.Zero && wait.ElapsedMilliseconds < 15000)
+                {
+                    // By the collection's HID attributes, as kbm_live_check finds
+                    // its keyboards: a device on ROOT\HIDClass has no VID or PID
+                    // in its path.
+                    keyboard = RawInputSink.Devices()
+                        .Where(d => d.Type == RawInputSink.RIM_TYPEKEYBOARD && !keyboardsBefore.Contains(d.Handle)
+                                    && RawInputSink.Attributes(d.Name) is { } a && a.Vid == kbp.VendorId && a.Pid == kbp.ProductId)
+                        .Select(d => d.Handle).FirstOrDefault();
+                    if (keyboard == IntPtr.Zero) Thread.Sleep(100);
+                }
+                Check("microsoft-designer-keyboard: its keyboard collection reaches Raw Input", keyboard != IntPtr.Zero);
             }
-            Check("microsoft-designer-keyboard: its keyboard collection reaches Raw Input", keyboard != IntPtr.Zero);
-            if (ds4r == null || nsor == null || keyboard == IntPtr.Zero) return;
+            else
+                Console.WriteLine($"  [SKIP] microsoft-designer-keyboard: its keyboard collection in Raw Input, {noRawInput}.");
+            if (ds4r == null || nsor == null || (rawInput && keyboard == IntPtr.Zero)) return;
             Console.WriteLine($"  [INFO] driver {ds4.DriverVersion?.ToString() ?? "(not reported)"}");
             Thread.Sleep(500);
 
@@ -115,11 +123,11 @@ internal static partial class Live
             int seen21 = 0;
             long nextKey = 0;
             var sw = Stopwatch.StartNew();
-            while (sw.ElapsedMilliseconds < 4000 && !(ds4Ok && nsoOk && keyOk))
+            while (sw.ElapsedMilliseconds < 4000 && !(ds4Ok && nsoOk && (keyOk || !rawInput)))
             {
                 ds4.SubmitState(ds4State);
                 nso.SubmitState(nsoState);
-                if (!keyOk && sw.ElapsedMilliseconds >= nextKey)
+                if (rawInput && !keyOk && sw.ElapsedMilliseconds >= nextKey)
                 {
                     kb.SubmitRawReport(f24);
                     kb.SubmitRawReport(none);
@@ -133,12 +141,15 @@ internal static partial class Live
                     if (r != null && r.Length > 0 && r[0] == 0x21) seen21++;
                     if (r != null && r.Length >= 3 && r[0] == 0x3F && (r[1] | r[2]) != 0) nsoOk = true;
                 }
-                keyOk |= sink.Keys.Any(k => k.Device == keyboard && k.VKey == 0x87 && (k.Flags & 1) == 0);
+                if (rawInput) keyOk |= sink.Keys.Any(k => k.Device == keyboard && k.VKey == 0x87 && (k.Flags & 1) == 0);
             }
             Check("dualshock-4-v2, the control, in the same window: report 0x01 with left stick X 0xFF", ds4Ok);
             Check("genesis-nso: report 0x3F with the button pressed", nsoOk);
             Check("genesis-nso: no report 0x21 arrived, which the driver sent before InputReportId", seen21 == 0, $"{seen21} seen");
-            Check("microsoft-designer-keyboard: a data-only frame arrives as its keyboard report 0x01 (F24 pressed)", keyOk);
+            if (rawInput)
+                Check("microsoft-designer-keyboard: a data-only frame arrives as its keyboard report 0x01 (F24 pressed)", keyOk);
+            else
+                Console.WriteLine($"  [SKIP] microsoft-designer-keyboard: the data-only frame as keyboard report 0x01, {noRawInput}.");
         }
         finally
         {

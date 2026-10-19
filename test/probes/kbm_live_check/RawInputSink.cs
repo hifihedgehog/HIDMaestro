@@ -132,6 +132,25 @@ internal sealed class RawInputSink : IDisposable
         return list;
     }
 
+    /// <summary>True when this program runs in session 0 and Raw Input
+    /// lists no device to it. Services run in session 0, which has no
+    /// interactive desktop, and Windows routes keyboard and mouse input to
+    /// the console's session instead. A battery run over SSH runs there, as
+    /// on a test machine where no user signs in. <paramref name="why"/>
+    /// says so for the probe's output.</summary>
+    public static bool NoRawInputHere(out string why)
+    {
+        why = "";
+        if (!ProcessIdToSessionId(GetCurrentProcessId(), out uint session) || session != 0 || Devices().Count > 0)
+            return false;
+        why = $"not run here: this program runs in session 0, where Raw Input lists no device. The console is session {WTSGetActiveConsoleSessionId()}";
+        return true;
+    }
+
+    [DllImport("kernel32.dll")] private static extern bool ProcessIdToSessionId(uint processId, out uint sessionId);
+    [DllImport("kernel32.dll")] private static extern uint GetCurrentProcessId();
+    [DllImport("kernel32.dll")] private static extern uint WTSGetActiveConsoleSessionId();
+
     /// <summary>The HID attributes behind a Raw Input device path. Mouse
     /// and keyboard collections are opened exclusively by Windows, but a
     /// handle with no access rights still answers HidD_GetAttributes.</summary>

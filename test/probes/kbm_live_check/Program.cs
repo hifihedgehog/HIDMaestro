@@ -206,6 +206,13 @@ internal static class Program
             Console.WriteLine($"  [SKIP] {consumer} is running and shares the SDK's devices.");
             return 2;
         }
+        // Every check here reads Raw Input. Exit 3, which the battery reads as
+        // a skip, unlike the running consumer's 2.
+        if (RawInputSink.NoRawInputHere(out string why))
+        {
+            Console.WriteLine($"  [SKIP] {why}.");
+            return 3;
+        }
 
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();

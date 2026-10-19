@@ -247,6 +247,24 @@ internal static class Native
     static extern uint GetRawInputDeviceInfoW(IntPtr device, uint command, char[]? data, ref uint size);
     const uint RIDI_DEVICENAME = 0x20000007;
 
+    [DllImport("kernel32.dll")] static extern bool ProcessIdToSessionId(uint processId, out uint sessionId);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentProcessId();
+    [DllImport("kernel32.dll")] static extern uint WTSGetActiveConsoleSessionId();
+
+    /// <summary>True when this program runs in session 0 and Raw Input
+    /// lists no device to it. Services run in session 0, which has no
+    /// interactive desktop, and Windows routes keyboard and mouse input to
+    /// the console's session instead. A battery run over SSH runs there.
+    /// <paramref name="why"/> says so for the probe's output.</summary>
+    internal static bool NoRawInputHere(out string why)
+    {
+        why = "";
+        if (!ProcessIdToSessionId(GetCurrentProcessId(), out uint session) || session != 0 || RawInputDevices().Count > 0)
+            return false;
+        why = $"not run here: this program runs in session 0, where Raw Input lists no device. The console is session {WTSGetActiveConsoleSessionId()}";
+        return true;
+    }
+
     /// <summary>Raw Input's device handles with their names.</summary>
     internal static List<(IntPtr Handle, string Name)> RawInputDevices()
     {

@@ -342,13 +342,16 @@ internal static partial class Program
             if (!only.Contains(id)) continue;
             Console.WriteLine();
             Console.WriteLine($"{id}. {title}");
+            var section = Stopwatch.StartNew();
+            double cleaning = s_cleanSeconds;
             try { body(); }
             catch (Exception ex) { Check($"{id} ran to the end", false, $"{ex.GetType().Name}: {ex.Message}"); }
             Clean();
+            Console.WriteLine($"  ({id}: {section.Elapsed.TotalSeconds:F1} s, {s_cleanSeconds - cleaning:F1} s of it in cleanups)");
         }
 
         Console.WriteLine();
-        Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");
+        Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed, {s_cleans} cleanups took {s_cleanSeconds:F1} s ===");
         return s_failures == 0 ? 0 : 1;
     }
 
@@ -356,10 +359,19 @@ internal static partial class Program
     /// so the probe itself never loads the SDK, and put the driver back.</summary>
     static void Clean()
     {
-        using var p = PeerProcess.Start("cleanup");
-        p.Send("everything");
-        p.Send("install");
+        var sw = Stopwatch.StartNew();
+        using (var p = PeerProcess.Start("cleanup"))
+        {
+            p.Send("everything");
+            p.Send("install");
+        }
+        s_cleans++;
+        s_cleanSeconds += sw.Elapsed.TotalSeconds;
     }
+
+    // How many cleanups ran and how long they took, for the timing lines.
+    static int s_cleans;
+    static double s_cleanSeconds;
 
     static List<string> WaitPaths(ushort vid, ushort pid, int count, int ms, ICollection<string>? exclude = null)
     {
@@ -552,9 +564,12 @@ internal static partial class Program
             lock (wgiRemoved)
                 Check("C: the first program's WGI entry stayed", wgiStill && !wgiRemoved.Contains(wgiId!), wgiRemoved.Count > 0 ? $"removed: {string.Join(", ", wgiRemoved)}" : "");
             var raw2 = Native.RawInputDevices().Where(d => string.Equals(d.Name, padPath[0], StringComparison.OrdinalIgnoreCase)).ToList();
-            Check("C: the first program's Raw Input entry kept its handle",
-                  raw.Count == 1 && raw2.Count == 1 && raw[0].Handle == raw2[0].Handle,
-                  $"before {raw.Count}, after {raw2.Count}");
+            if (Native.NoRawInputHere(out string noRawInput))
+                Console.WriteLine($"  [SKIP] C: the first program's Raw Input entry kept its handle, {noRawInput}.");
+            else
+                Check("C: the first program's Raw Input entry kept its handle",
+                      raw.Count == 1 && raw2.Count == 1 && raw[0].Handle == raw2[0].Handle,
+                      $"before {raw.Count}, after {raw2.Count}");
         }
         finally
         {
