@@ -147,7 +147,7 @@ internal static class Program
                 var (held, heldError) = ReadWhileSubmitting(c, path, neutralOnly ? neutral : pressed);
                 int readError = idleError != 0 ? idleError : heldError;
                 Check($"{d.Id}: input arrives", idle != null && held != null && idle.Count > 0 && held.Count > 0 && readError == 0,
-                      $"{idle?.Count ?? -1} and {held?.Count ?? -1} report(s) in 600 ms each{(readError != 0 ? $", a read failed with Win32 error {readError}" : "")}");
+                      $"{idle?.Count ?? -1} and {held?.Count ?? -1} report(s) in {WindowMs} ms each{(readError != 0 ? $", a read failed with Win32 error {readError}" : "")}");
                 var (idleAgain, againError) = ReadWhileSubmitting(c, path, neutral);
                 var changed = idle != null && held != null ? SteadyDifferences(idle, held) : new List<int>();
                 Check($"{d.Id}: the submitted state is what the host reads", changed.Count > 0,
@@ -176,15 +176,25 @@ internal static class Program
     }
 
     /// <summary>Submits <paramref name="state"/> for a short settle, then
-    /// reads the interface for 600 ms with the state still submitted every
-    /// 8 ms. The handle is opened after the settle, so its queue holds only
-    /// reports of this state.</summary>
+    /// reads the interface for <see cref="WindowMs"/> with the state still
+    /// submitted every 8 ms. The handle is opened after the settle, so its
+    /// queue holds only reports of this state.</summary>
     static (List<byte[]>? Reports, int ReadError) ReadWhileSubmitting(HMController c, string path, HMGamepadState state)
     {
         void Submit() { try { c.SubmitState(in state); } catch { } }
-        for (int i = 0; i < 40; i++) { Submit(); Thread.Sleep(8); }
-        return Native.CaptureReports(path, 600, Submit);
+        var settle = Stopwatch.StartNew();
+        while (settle.ElapsedMilliseconds < SettleMs) { Submit(); Thread.Sleep(8); }
+        return Native.CaptureReports(path, WindowMs, Submit);
     }
+
+    /// <summary>The settle: a new state reached the wire at most 54.2 ms
+    /// after it was first submitted, over 40 changes on each of the two
+    /// devices on the bench, so 100 ms covers it with half again to spare.
+    /// The window: about 50 reports at the 4 ms either device reports at,
+    /// where a counter or timestamp byte changes, so only a byte the state
+    /// sets holds one value through it. --neutral-only shows the read-back
+    /// check failing with these.</summary>
+    const int SettleMs = 100, WindowMs = 200;
 
     /// <summary>The byte positions that hold one value in every report of
     /// <paramref name="a"/>, one value in every report of <paramref name="b"/>,
@@ -216,24 +226,13 @@ internal static class Program
     }
 
     /// <summary>Another running program that embeds HIDMaestro: one with
-    /// HIDMaestro.Core.dll loaded, or one a v2.0.0 owner record names. The
-    /// record catches NativeAOT and single-file programs, which load no such
-    /// DLL.</summary>
+    /// HIDMaestro.Core.dll loaded (SdkConsumers.Find), or one a v2.0.0 owner
+    /// record names. The record catches NativeAOT and single-file programs,
+    /// which load no such DLL.</summary>
     static string? OtherSdkConsumer()
     {
         int self = Environment.ProcessId;
-        foreach (var p in Process.GetProcesses())
-        {
-            try
-            {
-                if (p.Id == self) continue;
-                foreach (ProcessModule m in p.Modules)
-                    if (string.Equals(m.ModuleName, "HIDMaestro.Core.dll", StringComparison.OrdinalIgnoreCase))
-                        return p.ProcessName;
-            }
-            catch { }
-            finally { p.Dispose(); }
-        }
+        if (SdkConsumers.Find() is string loaded) return loaded;
         using var owners = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestroOwners");
         foreach (string id in owners?.GetSubKeyNames() ?? Array.Empty<string>())
         {
