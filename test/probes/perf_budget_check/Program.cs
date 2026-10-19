@@ -354,11 +354,22 @@ internal static partial class Program
             }
 #endif
         }
+        // A keyboard or mouse call waits about a millisecond for the driver
+        // to deliver the report before it. Measure counts the calling
+        // thread's bytes and fails on the worst of the runs, so 3 runs of 50
+        // calls after the warm-up catch an allocation that comes once in
+        // any 150 calls. These paths allocate only at a frame's, release
+        // frame's or key count's first size, which the warm-up meets, and
+        // run no timer on the calling thread. The defects the gate was
+        // written for came on every call (539 bytes a SubmitKeyboard and
+        // 248 a SubmitMouse before eed63d3f, a 32-byte report ID string
+        // before d27be387). The frame mode keeps 200 for its time per call.
+        int paced = gate ? 50 : 200;
         using (var kb = ctx.CreateController(ctx.GetProfile(Keyboard)!))
         {
             var down = new[] { HMKey.A };
             bool flip = false;
-            Measure("SubmitKeyboard, " + Keyboard, runs, 200, () =>
+            Measure("SubmitKeyboard, " + Keyboard, runs, paced, () =>
             {
                 kb.SubmitKeyboard(HMKeyModifiers.None, flip ? new ReadOnlySpan<HMKey>(down) : ReadOnlySpan<HMKey>.Empty);
                 flip = !flip;
@@ -367,7 +378,7 @@ internal static partial class Program
         using (var mouse = ctx.CreateController(ctx.GetProfile(Mouse)!))
         {
             var move = new HMMouseState { X = 1 };
-            Measure("SubmitMouse, " + Mouse, runs, 200, () => mouse.SubmitMouse(in move), gate);
+            Measure("SubmitMouse, " + Mouse, runs, paced, () => mouse.SubmitMouse(in move), gate);
 #if !HM_BASE
             if (gate)
             {
@@ -408,7 +419,7 @@ internal static partial class Program
         {
             var playPause = new ushort[] { 0x00CD };
             bool flip = false;
-            Measure("SubmitConsumer, " + MagicKeyboard, runs, 200, () =>
+            Measure("SubmitConsumer, " + MagicKeyboard, runs, paced, () =>
             {
                 mk.SubmitConsumer(flip ? playPause : ReadOnlySpan<ushort>.Empty);
                 flip = !flip;
@@ -417,7 +428,7 @@ internal static partial class Program
             // modifiers, reserved, six keys and the extras byte.
             var down = new byte[] { 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
             var up = new byte[9];
-            Measure("SubmitRawReport, " + MagicKeyboard + " report 1", runs, 200, () =>
+            Measure("SubmitRawReport, " + MagicKeyboard + " report 1", runs, paced, () =>
             {
                 mk.SubmitRawReport(flip ? down : up);
                 flip = !flip;
@@ -430,7 +441,7 @@ internal static partial class Program
         using (var abs = ctx.CreateController(absolute, "perf-absolute-pointer"))
         {
             int x = 0;
-            Measure("SubmitMouse, an absolute pointer", runs, 200, () =>
+            Measure("SubmitMouse, an absolute pointer", runs, paced, () =>
             {
                 x = (x + 997) % 32768;
                 abs.SubmitMouse(new HMMouseState { X = x, Y = 32767 - x });
@@ -1201,6 +1212,13 @@ internal static partial class Program
         ctx.LoadDefaultProfiles();
         var server = UsbipServer.GetOrStart();
 
+        // The check counts every thread's bytes and fails when the median
+        // of the runs allocates, so a run must hold any allocation the
+        // device makes on a period. The periodic wakes on its threads come
+        // at most every 500 ms (DeviceClock's idle wait, the input pump's
+        // wait timeout, the audio engine's 250 ms park). The clocks send a
+        // frame each 4 and 8 ms, so 150 and 75 frames span 600 ms a run.
+        // The input pump keeps 2,000 frames.
         var ds = new byte[63];
         UsbipPath(server, ctx.GetProfile(Composite)!.Inner, "input pump, " + Composite, runs, gate ? 2_000 : 1_000,
             inEp: 4, readLength: 64, frame: ds, extended: false, queueEveryOther: true, start: null, gate);
@@ -1208,7 +1226,7 @@ internal static partial class Program
         // The state block the Switch 2 composite builds its reports from.
         var body = new byte[24];
         UsbipPath(server, ctx.GetProfile("switch2-pro-controller-composite")!.Inner,
-            "report clock, switch2-pro-controller-composite", runs, gate ? 250 : 50,
+            "report clock, switch2-pro-controller-composite", runs, gate ? 150 : 50,
             inEp: 1, readLength: 64, frame: body, extended: true, queueEveryOther: false,
             start: w => w.WaitFor(w.SubmitOut(2, new byte[] { 0x03, 0x91, 0x00, 0x0D, 0x00, 0x08, 0x00, 0x00,
                                                               0x01, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF })), gate);
@@ -1217,7 +1235,7 @@ internal static partial class Program
         var gcProfile = ctx.GetProfile(GameCube)!.Inner;
         var gcReport = new byte[37];
         gcReport[0] = 0x21;
-        UsbipPath(server, gcProfile, "protocol clock, " + GameCube, runs, gate ? 125 : 25,
+        UsbipPath(server, gcProfile, "protocol clock, " + GameCube, runs, gate ? 75 : 25,
             inEp: 1, readLength: 37, frame: gcReport, extended: true, queueEveryOther: false,
             start: w => w.WaitFor(w.SubmitOut(2, new byte[] { 0x13 })), gate);
         if (!gate) EngineLock(gcProfile, runs);
