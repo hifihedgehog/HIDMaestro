@@ -16,7 +16,9 @@
 //                  or the profiles named. A profile named is also read as a
 //                  host reads it: each output report given is written
 //                  first, then the time runs from SubmitState to the
-//                  ReadFile that returns a report carrying the new state
+//                  ReadFile that returns a report carrying the new state,
+//                  and on a profile XInput lists, to the XInputGetState
+//                  that shows it
 //   feature [runs] [profile[@report...] ...]
 //                  feature answers as a host asks for them: HidD_GetFeature
 //                  on a UMDF2 profile, GET_REPORT(Feature) on a USB/IP one
@@ -180,7 +182,7 @@ internal static partial class Program
             if (args.Length != 3) { Console.WriteLine("usage: PerfBudgetCheck compare <before file or dir> <after file or dir>"); return 1; }
             return BudgetCompare.Run(args[1], args[2]);
         }
-#if HM_BASELINE
+#if HM_BASELINE && !HM_BASE
         if (mode == "report-build")
         {
             Console.WriteLine($"=== budgets, {Build}, mode {mode} ===");
@@ -188,16 +190,20 @@ internal static partial class Program
             return s_failures == 0 ? 0 : 1;
         }
 #endif
+#if !HM_BASE
         if (mode == "report")
         {
             ReportCost.Run(runs, args.Length > 2 && int.TryParse(args[2], out int calls) ? calls : 100_000);
             return 0;
         }
+#endif
+#if !HM_BASE
         if (mode == "encode")
         {
             EncodeCost.Run(runs, args.Length > 2 && int.TryParse(args[2], out int calls) ? calls : 100_000);
             return 0;
         }
+#endif
 #if HM_PROGRAM_FILE
         if (mode == "program-file")
         {
@@ -206,16 +212,19 @@ internal static partial class Program
                                args.Length > 3 && int.TryParse(args[3], out int fn) ? fn : 100_000);
         }
 #endif
+#if !HM_BASE
         if (mode == "program")
         {
             ProgramCost.Run(runs, args.Length > 2 && int.TryParse(args[2], out int calls) ? calls : 100_000);
             return 0;
         }
+#endif
         if (mode == "ds3cost")
         {
             Ds3Cost.Run(runs, args.Length > 2 && int.TryParse(args[2], out int calls) ? calls : 100_000);
             return 0;
         }
+#if !HM_BASE
         if (mode == "idle")
         {
             double period = args.Length > 1 ? double.Parse(args[1], System.Globalization.CultureInfo.InvariantCulture) : 4;
@@ -223,6 +232,7 @@ internal static partial class Program
             ProgramCost.Idle(period, seconds);
             return 0;
         }
+#endif
         if (OtherSdkRunning()) return 2;
         if (mode == "idle-live")
         {
@@ -410,6 +420,11 @@ internal static partial class Program
                 ("steam-controller-2", false), ("switch2-pro-controller-composite", false), ("gamecube-adapter", false),
             })
             {
+#if HM_BASE
+                // b4d29d9's gamecube-adapter is a HID-only placeholder it
+                // cannot deploy, and its persona came after.
+                if (id == GameCube) continue;
+#endif
                 using var c = ctx.CreateController(ctx.GetProfile(id)!);
                 if (armed) typeof(HMController).GetField("_extendedModeArmed", Any)!.SetValue(c, true);
                 bool flip = false;
@@ -565,12 +580,91 @@ internal static partial class Program
         ctx.InstallDriver();
         foreach (var p in list)
         {
+            var xinputBefore = XInputConnected();
             using var c = ctx.CreateController(ctx.GetProfile(p.Id)!);
             if (named.Count > 0 && !OnEmbeddedDriver(c, p.Text)) return 5;
             AckPass(c, p.Text, runs);
-            if (named.Count > 0) HostReadPass(c, p, runs);
+            if (named.Count > 0)
+            {
+                HostReadPass(c, p, runs);
+                XInputPass(c, p.Text, runs, xinputBefore);
+            }
         }
         return 0;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct XInputState
+    {
+        public uint PacketNumber;
+        public ushort Buttons;
+        public byte LeftTrigger, RightTrigger;
+        public short ThumbLX, ThumbLY, ThumbRX, ThumbRY;
+    }
+
+    [DllImport("xinput1_4.dll", EntryPoint = "XInputGetState")]
+    static extern int XInputGetState(int userIndex, out XInputState state);
+
+    const ushort XInputA = 0x1000, XInputB = 0x2000;
+
+    /// <summary>The XInput slots that read connected.</summary>
+    static HashSet<int> XInputConnected()
+    {
+        var set = new HashSet<int>();
+        for (int i = 0; i < 4; i++)
+            if (XInputGetState(i, out _) == 0) set.Add(i);
+        return set;
+    }
+
+    /// <summary>SubmitState to the first XInputGetState that shows it, what a
+    /// game that reads an Xbox persona through XInput waits. The slot is the
+    /// one the controller's create connected, so a profile XInput does not
+    /// list is skipped, and a pad another program or a real controller holds
+    /// is never read.</summary>
+    static void XInputPass(HMController c, string id, int runs, HashSet<int> before)
+    {
+        int slot = -1;
+        var wait = Stopwatch.StartNew();
+        while (slot < 0 && wait.ElapsedMilliseconds < 5000)
+        {
+            foreach (int s in XInputConnected())
+                if (!before.Contains(s)) { slot = s; break; }
+            if (slot < 0) Thread.Sleep(50);
+        }
+        if (slot < 0) return;
+        var a = new HMGamepadState { Buttons = HMButton.A };
+        var b = new HMGamepadState { Buttons = HMButton.B };
+        c.SubmitState(b);
+        Thread.Sleep(200);
+        var rng = new Random(84);
+        var samples = new List<double>(runs * 50);
+        int missed = 0;
+        bool flip = true;
+        for (int run = 0; run < runs; run++)
+        {
+            for (int i = 0; i < 50; i++)
+            {
+                Spin(rng.Next(2_000, 19_000));
+                flip = !flip;
+                ushort want = flip ? XInputB : XInputA;
+                long t0 = Stopwatch.GetTimestamp();
+                c.SubmitState(flip ? b : a);
+                long deadline = t0 + Stopwatch.Frequency / 10;
+                long hit = 0;
+                while (Stopwatch.GetTimestamp() < deadline)
+                {
+                    if (XInputGetState(slot, out var st) == 0 && (st.Buttons & (XInputA | XInputB)) == want)
+                    {
+                        hit = Stopwatch.GetTimestamp();
+                        break;
+                    }
+                }
+                if (hit != 0) samples.Add((hit - t0) * 1e6 / Stopwatch.Frequency);
+                else { missed++; Thread.Sleep(200); }
+            }
+        }
+        Report($"{id}: SubmitState to an XInputGetState that shows it, slot {slot}, microseconds", samples, runs,
+            $", {missed} not seen within 100 ms");
     }
 
     static void AckPass(HMController c, string id, int runs)

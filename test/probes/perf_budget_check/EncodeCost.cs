@@ -6,6 +6,9 @@
 // 9bd6279, b22324e and this tree alike, and program_equivalence_check's
 // state-cost mode times the state programs these reports lower into on the
 // same states (EncodeStates, linked into both).
+// The codec vocabulary this measures (ports, PortLayout) is not in
+// b4d29d9, so the HmBase build leaves the file out.
+#if !HM_BASE
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -98,3 +101,4 @@ internal static class EncodeStates
         return (states, slots);
     }
 }
+#endif

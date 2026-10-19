@@ -74,6 +74,14 @@ internal static partial class Program
         return null;
     }
 
+    /// <summary>The device path of the controller's first HID interface
+    /// with input reports, or null when none appears in 5 s.</summary>
+    internal static string? OwnInputInterface(HMController c)
+    {
+        using var d = OpenOwnInterface(c, d => d.InputLength > 0, out _);
+        return d?.Path;
+    }
+
     /// <summary>One opened HID interface and the report lengths HID class
     /// gives it (HIDP_CAPS).</summary>
     sealed class HidDevice : IDisposable

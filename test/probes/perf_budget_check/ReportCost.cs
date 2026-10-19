@@ -15,6 +15,9 @@
 // allocated per call. A script launches it 30 times or more against this
 // tree and against the tree before the change, and takes p50 and p95 over
 // the launches (scripts in the lane's report).
+// The idle repeat and arithmetic this measures (ControllerProfile.Stream)
+// are not in b4d29d9, so the HmBase build leaves the file out.
+#if !HM_BASE
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -197,3 +200,4 @@ internal static class ReportCost
     static Dictionary<int, IntPtr> Cache(string field) =>
         (Dictionary<int, IntPtr>)typeof(SharedMemoryIO).GetField(field, Static)!.GetValue(null)!;
 }
+#endif

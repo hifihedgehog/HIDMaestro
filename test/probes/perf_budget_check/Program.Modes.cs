@@ -305,7 +305,7 @@ internal static partial class Program
         if (allocations) Report($"{name}: bytes the process allocated per call", perCall, runs, "");
     }
 
-#if HM_BASELINE
+#if HM_BASELINE && !HM_BASE
     // ── A report the device builds ───────────────────────────────────────
     // The baseline's Switch2ProDevice. The converted tree builds the same
     // reports in the protocol engine from the profile's layouts, which the

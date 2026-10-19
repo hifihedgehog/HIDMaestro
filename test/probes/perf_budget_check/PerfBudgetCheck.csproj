@@ -8,6 +8,10 @@
     <!-- -p:HmBase=true builds against a b4d29d9 tree for the "before"
          measurements, leaving out what b4d29d9 lacks. -->
     <DefineConstants Condition="'$(HmBase)' == 'true'">$(DefineConstants);HM_BASE</DefineConstants>
+    <!-- b4d29d9 grants its internals to a fixed list of probe names
+         (Internal\AssemblyInfo.cs there), PerfBudgetCheck not among them,
+         so the build against it takes one of the names it lists. -->
+    <AssemblyName Condition="'$(HmBase)' == 'true'">OutputPerfBench</AssemblyName>
     <!-- -p:HmDd4Base=true builds against the tree before lane DD-4 for
          ProgramCost's "before" measurements. A property of this project
          only, where -p:DefineConstants would reach the SDK's build too. -->

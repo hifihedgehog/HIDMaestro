@@ -17,6 +17,9 @@
 // none), with the frames the repeat wrote per second. This tree runs the repeat on the device clock
 // from the profile's stream, the tree before on IdleFrameLoop from
 // extendedReport.idleFrameIntervalMs, whole milliseconds only.
+// The protocol engine and report programs this measures are not in
+// b4d29d9, so the HmBase build leaves the file out.
+#if !HM_BASE
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -280,3 +283,4 @@ internal static unsafe class ProgramCost
     static Dictionary<int, IntPtr> Cache(string field) =>
         (Dictionary<int, IntPtr>)typeof(SharedMemoryIO).GetField(field, Static)!.GetValue(null)!;
 }
+#endif

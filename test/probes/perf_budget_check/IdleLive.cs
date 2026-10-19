@@ -35,13 +35,10 @@ internal static class IdleLive
         {
             using var c = ctx.CreateController(profile);
             c.SubmitState(new HMGamepadState { Buttons = HMButton.A });
-            string? path = null;
-            for (int i = 0; i < 100 && path == null; i++)
-            {
-                path = Paths(profile.VendorId, profile.ProductId).FirstOrDefault(p => p.Contains("hidmaestro", StringComparison.OrdinalIgnoreCase));
-                if (path == null) Thread.Sleep(100);
-            }
-            if (path == null) { Console.WriteLine($"idle-live,{run},no HIDMaestro HID path for {Id}"); return; }
+            // The controller's own input interface, found under its devnode:
+            // a HID path carries no HIDMaestro name to search for.
+            string? path = Program.OwnInputInterface(c);
+            if (path == null) { Console.WriteLine($"idle-live,{run},no HID input interface under {Id}'s devnode"); return; }
             using var reader = Process.Start(new ProcessStartInfo(Environment.ProcessPath!)
             {
                 UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true,
@@ -121,20 +118,6 @@ internal static class IdleLive
     }
 
     static ulong Sum(Process[] ps) => ps.Aggregate(0UL, (s, p) => s + Cycles(p));
-
-    static System.Collections.Generic.IEnumerable<string> Paths(ushort vid, ushort pid)
-    {
-        var t = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.HidDeviceEnumerator")!;
-        const System.Reflection.BindingFlags Any = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Instance;
-        var list = (System.Collections.IEnumerable)t.GetMethod("Enumerate", Any)!.Invoke(null, null)!;
-        foreach (var d in list)
-        {
-            var dt = d.GetType();
-            if (Convert.ToUInt16(dt.GetField("VendorId")!.GetValue(d)) != vid) continue;
-            if (Convert.ToUInt16(dt.GetField("ProductId")!.GetValue(d)) != pid) continue;
-            if (dt.GetField("DevicePath")!.GetValue(d) is string p) yield return p;
-        }
-    }
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
