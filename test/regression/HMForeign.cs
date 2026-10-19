@@ -9,17 +9,26 @@
 // Test-Scenario). Load, Steam, browsers and other devices never hold a
 // scenario back.
 //
-// A program embeds HIDMaestro when HIDMaestro.Core.dll is among its
-// modules, found as test\probes\probe_common\SdkConsumers.cs finds it
-// (OpenProcess with PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
-// EnumProcessModulesEx with LIST_MODULES_ALL, GetModuleBaseNameW). The
-// battery's own process tree (its probes, the test app and the peers they
-// start) is left out: a process belongs to it when its parent does and it
-// was created after that parent, so a reused process ID never joins it.
-// So are the programs Windows ships in its own directory, which never load
-// HIDMaestro, except the PowerShell hosts, whose scripts can: reading every
-// process's modules takes about a second on the devbox with 362 processes,
-// and the image path a few microseconds.
+// Such a program is one that holds machine-wide HIDMaestro state. A
+// program built on 2.0.0 or later writes an owner record, under
+// HKLM\SOFTWARE\HIDMaestroOwners, with its process ID and start time, at
+// its first machine-wide write and until it exits
+// (sdk\HIDMaestro.Core\Internal\MachineClaims.cs), so a running process
+// whose record names it holds state. One that loaded the SDK and changed
+// nothing, an offline probe of another work tree on 2026-10-19 for one,
+// has no record and changes nothing a scenario measures. A program built
+// on 1.x writes no record, so one with a 1.x HIDMaestro.Core.dll among its
+// modules counts whenever it runs. The module is found as
+// test\probes\probe_common\SdkConsumers.cs finds it (OpenProcess with
+// PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, EnumProcessModulesEx with
+// LIST_MODULES_ALL, GetModuleBaseNameW). The battery's own process tree
+// (its probes, the test app and the peers they start) is left out: a
+// process belongs to it when its parent does and it was created after that
+// parent, so a reused process ID never joins it. So are the programs
+// Windows ships in its own directory, which never load HIDMaestro, except
+// the PowerShell hosts, whose scripts can: reading every process's modules
+// takes about a second on the devbox with 362 processes, and the image
+// path a few microseconds.
 //
 // Windows PowerShell 5.1 compiles this with Add-Type, so it is C# 5.
 
@@ -63,6 +72,8 @@ public static class HMForeign
     static extern bool EnumProcessModulesEx(IntPtr process, [Out] IntPtr[] modules, int size, out int needed, uint filter);
     [DllImport("psapi.dll", CharSet = CharSet.Unicode)]
     static extern int GetModuleBaseNameW(IntPtr process, IntPtr module, StringBuilder name, int size);
+    [DllImport("psapi.dll", CharSet = CharSet.Unicode)]
+    static extern int GetModuleFileNameExW(IntPtr process, IntPtr module, StringBuilder name, int size);
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, StringBuilder name, ref int size);
 
@@ -216,8 +227,15 @@ public static class HMForeign
 
     static bool HasModule(uint pid)
     {
+        return ModulePath(pid) != null;
+    }
+
+    /// <summary>The full path of the process's HIDMaestro.Core.dll, or null
+    /// when it has none or cannot be read.</summary>
+    static string ModulePath(uint pid)
+    {
         IntPtr h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid);
-        if (h == IntPtr.Zero) return false;
+        if (h == IntPtr.Zero) return null;
         try
         {
             var modules = new IntPtr[256];
@@ -235,7 +253,7 @@ public static class HMForeign
                     ok = false;
                 }
             }
-            if (!ok) return false;
+            if (!ok) return null;
             int count = Math.Min(modules.Length, needed / IntPtr.Size);
             var name = new StringBuilder(260);
             for (int i = 0; i < count; i++)
@@ -243,11 +261,44 @@ public static class HMForeign
                 name.Length = 0;
                 if (GetModuleBaseNameW(h, modules[i], name, name.Capacity) > 0
                     && string.Equals(name.ToString(), Module, StringComparison.OrdinalIgnoreCase))
-                    return true;
+                {
+                    var path = new StringBuilder(1024);
+                    return GetModuleFileNameExW(h, modules[i], path, path.Capacity) > 0 ? path.ToString() : "";
+                }
             }
-            return false;
+            return null;
         }
         finally { CloseHandle(h); }
+    }
+
+    /// <summary>Whether a HIDMaestro.Core.dll at <paramref name="path"/> is
+    /// a 1.x build, which writes no owner record. A path that cannot be
+    /// read counts as 1.x, so its program is waited for.</summary>
+    static bool OneX(string path)
+    {
+        try { return System.Diagnostics.FileVersionInfo.GetVersionInfo(path).FileMajorPart < 2; }
+        catch (Exception) { return true; }
+    }
+
+    /// <summary>Each live owner record's process ID and start time
+    /// (FILETIME, UTC), from HKLM\SOFTWARE\HIDMaestroOwners.</summary>
+    static Dictionary<uint, long> Records()
+    {
+        var map = new Dictionary<uint, long>();
+        using (var root = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestroOwners"))
+        {
+            if (root == null) return map;
+            foreach (var id in root.GetSubKeyNames())
+            {
+                using (var k = root.OpenSubKey(id))
+                {
+                    if (k == null) continue;
+                    object pid = k.GetValue("Pid"), start = k.GetValue("StartTime");
+                    if (pid is int && start is long) map[(uint)(int)pid] = (long)start;
+                }
+            }
+        }
+        return map;
     }
 
     sealed class Read
@@ -275,14 +326,16 @@ public static class HMForeign
     static readonly long Young = TimeSpan.FromSeconds(60).Ticks;
 
     /// <summary>"name (pid)" of a process outside <paramref name="root"/>'s
-    /// tree with HIDMaestro.Core.dll loaded, or null when there is
-    /// none.</summary>
+    /// tree that holds machine-wide HIDMaestro state: one named by a live
+    /// owner record, or one with a 1.x HIDMaestro.Core.dll loaded. Null
+    /// when there is none.</summary>
     public static string Find(int root)
     {
         lock (s_lock)
         {
             var all = Snapshot();
             var tree = Own(all, (uint)root);
+            var records = Records();
             // FILETIME ticks, as GetProcessTimes gives a creation time.
             long now = DateTime.UtcNow.ToFileTimeUtc();
             var live = new HashSet<uint>();
@@ -292,6 +345,16 @@ public static class HMForeign
                 live.Add(e.Pid);
                 // The system idle process and System hold no user modules.
                 if (found != null || e.Pid == 0 || e.Pid == 4 || tree.Contains(e.Pid)) continue;
+                // A record appears at a program's first machine-wide write,
+                // so it is read on every look. Its start time must be this
+                // process's, within the second the two clocks may round to,
+                // or the ID is another process's now.
+                long start;
+                if (records.TryGetValue(e.Pid, out start))
+                {
+                    long c = Created(e.Pid);
+                    if (c > 0 && Math.Abs(c - start) < TimeSpan.TicksPerSecond) { found = e.Name + " (" + e.Pid + ")"; continue; }
+                }
                 Read r;
                 bool known = s_without.TryGetValue(e.Pid, out r) && r.Name == e.Name && r.Parent == e.Parent;
                 if (known && (r.Windows || (now - r.Created >= Young && now - r.At < Reread))) continue;
@@ -301,7 +364,8 @@ public static class HMForeign
                     s_without[e.Pid] = new Read { Name = e.Name, Parent = e.Parent, Created = created, At = now, Windows = true };
                     continue;
                 }
-                if (HasModule(e.Pid)) { found = e.Name + " (" + e.Pid + ")"; continue; }
+                string module = ModulePath(e.Pid);
+                if (module != null && OneX(module)) { found = e.Name + " (" + e.Pid + ")"; continue; }
                 s_without[e.Pid] = new Read { Name = e.Name, Parent = e.Parent, Created = created, At = now };
             }
             var gone = new List<uint>();
