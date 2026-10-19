@@ -11,6 +11,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Threading.Tasks;
 using HIDMaestro;
 
 internal static class Rounding
@@ -64,90 +65,117 @@ internal static class Rounding
             Console.WriteLine("  [FAIL] WireArith.Linear, Unit or CenteredUnit is absent on this tree");
             return 1;
         }
-        int fail = 0;
-        void Report(string what, long n, long bad, string first)
-        {
-            if (bad != 0) fail++;
-            Console.WriteLine($"  [{(bad == 0 ? "PASS" : "FAIL")}] {what}: {n} inputs, {bad} differ{(bad == 0 ? "" : $", first {first}")}");
-        }
-
+        // Each case is independent of the others, so the cases run at once
+        // and report in the order they are listed.
+        var cases = new List<(string What, Func<(long N, long Bad, string First)> Run)>();
         foreach (var (min, max) in new[] { (0, 255), (0, 1023), (0, 4095), (0x200, 0xE00), (-32768, 32767), (-32767, 32767),
                                            (0, 65535), (0, 32767), (-127, 127), (int.MinValue, int.MaxValue) })
             foreach (bool invert in new[] { false, true })
+                cases.Add(($"Linear {min}..{max}{(invert ? " invert" : "")}", () =>
+                {
+                    long n = 0, bad = 0;
+                    string first = "";
+                    var extra = new[] { -1.0, -0.0, 2.0, double.NegativeInfinity, double.PositiveInfinity, double.NaN, double.Epsilon, 1 - 1e-17 };
+                    foreach (var v in Concat(Inputs((long)max - min), extra))
+                    {
+                        n++;
+                        // A NaN takes the rest it is given: a stick's and a trigger's.
+                        foreach (double rest in double.IsNaN(v) ? new[] { 0.5, 0.0 } : new[] { 0.5 })
+                        {
+                            int got = s_linear(v, min, max, invert, rest), want = RefLinear(v, min, max, invert, rest);
+                            if (got != want && bad++ == 0) first = $"v {v:R} rest {rest}: {got}, Math.Round {want}";
+                        }
+                    }
+                    return (n, bad, first);
+                }));
+
+        foreach (long span in new long[] { 255, 1023, 65535 })
+            cases.Add(($"Unit span {span}", () =>
             {
                 long n = 0, bad = 0;
                 string first = "";
-                var extra = new[] { -1.0, -0.0, 2.0, double.NegativeInfinity, double.PositiveInfinity, double.NaN, double.Epsilon, 1 - 1e-17 };
-                foreach (var v in Concat(Inputs((long)max - min), extra))
+                // Unit's callers hand it no NaN: each replaced it by its rest.
+                foreach (var v in Inputs(span))
                 {
                     n++;
-                    // A NaN takes the rest it is given: a stick's and a trigger's.
-                    foreach (double rest in double.IsNaN(v) ? new[] { 0.5, 0.0 } : new[] { 0.5 })
-                    {
-                        int got = s_linear(v, min, max, invert, rest), want = RefLinear(v, min, max, invert, rest);
-                        if (got != want && bad++ == 0) first = $"v {v:R} rest {rest}: {got}, Math.Round {want}";
-                    }
+                    int got = s_unit(v, span), want = (int)Math.Round(v * span);
+                    if (got != want && bad++ == 0) first = $"v {v:R}: {got}, Math.Round {want}";
                 }
-                Report($"Linear {min}..{max}{(invert ? " invert" : "")}", n, bad, first);
-            }
-
-        foreach (long span in new long[] { 255, 1023, 65535 })
-        {
-            long n = 0, bad = 0;
-            string first = "";
-            // Unit's callers hand it no NaN: each replaced it by its rest.
-            foreach (var v in Inputs(span))
-            {
-                n++;
-                int got = s_unit(v, span), want = (int)Math.Round(v * span);
-                if (got != want && bad++ == 0) first = $"v {v:R}: {got}, Math.Round {want}";
-            }
-            Report($"Unit span {span}", n, bad, first);
-        }
+                return (n, bad, first);
+            }));
 
         // Luna's two centered fields and two lopsided ones, where t x sL is
         // negative below the center.
         foreach (var (min, center, max) in new[] { (0, 127, 255), (0, 32767, 65535), (-100, 0, 27), (0, 3, 4095) })
-        {
-            double low = 2.0 * ((long)center - min), step = 2.0 * ((long)max - center) - low;
-            long n = 0, bad = 0;
-            string first = "";
-            foreach (var v in Inputs((long)max - min))
+            cases.Add(($"CenteredUnit {min}..{max} center {center}", () =>
             {
-                n++;
-                double t = v - 0.5;
-                int got = s_centeredUnit(v, center, low, step);
-                int want = center + (int)Math.Round(t * low + Math.Max(t, 0.0) * step);
-                if (got != want && bad++ == 0) first = $"v {v:R}: {got}, Math.Round {want}";
-            }
-            Report($"CenteredUnit {min}..{max} center {center}", n, bad, first);
-        }
+                double low = 2.0 * ((long)center - min), step = 2.0 * ((long)max - center) - low;
+                long n = 0, bad = 0;
+                string first = "";
+                foreach (var v in Inputs((long)max - min))
+                {
+                    n++;
+                    double t = v - 0.5;
+                    int got = s_centeredUnit(v, center, low, step);
+                    int want = center + (int)Math.Round(t * low + Math.Max(t, 0.0) * step);
+                    if (got != want && bad++ == 0) first = $"v {v:R}: {got}, Math.Round {want}";
+                }
+                return (n, bad, first);
+            }));
+
         // The codec's LT and RT digital bits: one compare, c x 255 > 0.5,
         // against Linear's byte above zero, on every float from 0 to 2 / 255
-        // and the specials.
+        // and the specials. The floats run in chunks across the processors,
+        // and the first input that differs is the smallest of the chunks'.
+        if (s_triggerOn != null)
+            cases.Add(("TriggerOn against Linear(v, 0, 255) > 0", () =>
+            {
+                uint top = BitConverter.SingleToUInt32Bits(2f / 255);
+                long n = 0, bad = 0;
+                uint firstBits = uint.MaxValue;
+                const int chunks = 1024;
+                uint per = (top + chunks) / chunks;
+                object gate = new();
+                Parallel.For(0, chunks, c =>
+                {
+                    uint lo = (uint)c * per;
+                    if (lo > top) return;
+                    uint hi = Math.Min(top, lo + per - 1);
+                    long cn = 0, cbad = 0;
+                    uint cfirst = uint.MaxValue;
+                    for (uint bits = lo; ; bits++)
+                    {
+                        float v = BitConverter.UInt32BitsToSingle(bits);
+                        cn++;
+                        if (s_triggerOn(v) != (s_linear(v, 0, 255, false, 0.0) > 0) && cbad++ == 0) cfirst = bits;
+                        if (bits == hi) break;
+                    }
+                    lock (gate) { n += cn; bad += cbad; firstBits = Math.Min(firstBits, cfirst); }
+                });
+                string first = bad == 0 ? "" : $"v {BitConverter.UInt32BitsToSingle(firstBits):R}";
+                var specials = new[] { float.NaN, float.PositiveInfinity, float.NegativeInfinity, -1f, -0f, 0f, 1f, 2f, float.Epsilon };
+                foreach (float v in specials)
+                {
+                    n++;
+                    if (s_triggerOn(v) != (s_linear(v, 0, 255, false, 0.0) > 0) && bad++ == 0) first = $"v {v:R}";
+                }
+                return (n, bad, first);
+            }));
+
+        var results = new (long N, long Bad, string First)[cases.Count];
+        Parallel.For(0, cases.Count, i => results[i] = cases[i].Run());
+
+        int fail = 0;
+        for (int i = 0; i < cases.Count; i++)
+        {
+            var (n, bad, first) = results[i];
+            if (bad != 0) fail++;
+            Console.WriteLine($"  [{(bad == 0 ? "PASS" : "FAIL")}] {cases[i].What}: {n} inputs, {bad} differ{(bad == 0 ? "" : $", first {first}")}");
+        }
         if (s_triggerOn == null)
         {
             Console.WriteLine("  [FAIL] VendorBlobCodec.TriggerOn is absent on this tree");
             fail++;
-        }
-        else
-        {
-            long n = 0, bad = 0;
-            string first = "";
-            var specials = new[] { float.NaN, float.PositiveInfinity, float.NegativeInfinity, -1f, -0f, 0f, 1f, 2f, float.Epsilon };
-            for (uint bits = 0; ; bits++)
-            {
-                float v = BitConverter.UInt32BitsToSingle(bits);
-                if (v > 2f / 255) break;
-                n++;
-                if (s_triggerOn(v) != (s_linear(v, 0, 255, false, 0.0) > 0) && bad++ == 0) first = $"v {v:R}";
-            }
-            foreach (float v in specials)
-            {
-                n++;
-                if (s_triggerOn(v) != (s_linear(v, 0, 255, false, 0.0) > 0) && bad++ == 0) first = $"v {v:R}";
-            }
-            Report("TriggerOn against Linear(v, 0, 255) > 0", n, bad, first);
         }
         return fail;
     }

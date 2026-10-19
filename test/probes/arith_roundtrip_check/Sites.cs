@@ -4,18 +4,20 @@
 //
 // "Old" is each site as 9bd6279 computes it, transliterated line for line
 // from the code it names. "New" is the SDK's WireArith, the function every
-// one of these sites calls now, bound by name (NewArith) so the probe also
-// builds and runs its round trip on a tree from before it. "Tree" runs the
+// one of these sites calls now, called directly so the diff's loop inlines
+// it. NewArith binds the round trip's centered form by name and tells the
+// diff whether the tree has the arithmetic at all. "Tree" runs the
 // SDK's own code path for the site end to end, so the round trip proves the
 // site calls the arithmetic the way the formula says.
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
 using HIDMaestro;
 using HIDMaestro.Internal;
 
-/// <summary>The SDK's WireArith and the XUSB slice's trigger, bound by
-/// name. Absent on a tree from before the one arithmetic, where only the
-/// round trip runs.</summary>
+/// <summary>The SDK's WireArith and the XUSB slice's trigger, looked up by
+/// name: Present is false on a tree from before the one arithmetic.</summary>
 internal static class NewArith
 {
     const System.Reflection.BindingFlags Any = System.Reflection.BindingFlags.Static
@@ -47,11 +49,6 @@ internal static class NewArith
         var (low, step) = s_slopes!(min, center, max);
         return s_centered!(v, min, center, max, low, step, false);
     }
-
-    // The round trip sends no NaN, so the rest value never applies.
-    public static int Linear(double v, int min, int max, bool invert) => s_linear!(v, min, max, invert, 0.5);
-    public static int XusbTrigger(double v) => s_xusbTrigger!(v);
-    public static short Scaled(float v, double n, double d) => s_scaled!(v, n, d);
 }
 
 internal static class Old
@@ -128,7 +125,7 @@ internal static class Companion
 
 /// <summary>One conversion: its old and new arithmetic over a float input,
 /// the raw integer domain a consumer can pass back, how a raw value is
-/// normalized, and how a wire value reads back.</summary>
+/// normalized, and the diff's count over every float in [0, 1].</summary>
 internal sealed record Site(
     string Key,
     Func<float, int> Old,
@@ -137,7 +134,7 @@ internal sealed record Site(
     // raw value -> the count k it sits at above its own zero, and the span.
     // A consumer normalizes it as k / span.
     Func<int, (int K, int Range)> Normal,
-    Func<int, int> ReadBack)
+    Counter Counter)
 {
     /// <summary>The SDK's own code path for this site, from a float input
     /// to the value a consumer reads back. Null for a site the round trip
@@ -145,88 +142,233 @@ internal sealed record Site(
     public Func<float, int>? Tree { get; init; }
 }
 
+/// <summary>A conversion's old and new arithmetic as a struct. Old and New
+/// of its Site are these two methods, and the diff's count runs them in a
+/// loop the JIT compiles for the struct, both bodies inlined, so a billion
+/// inputs make no delegate call.</summary>
+internal interface IConv
+{
+    int Old(float v);
+    int New(float v);
+}
+
+/// <summary>The diff's count for one conversion: of the floats whose bits
+/// run from 0 to <c>top</c>, how many give a different value old and new,
+/// the largest difference, and the three smallest such inputs.</summary>
+internal abstract class Counter
+{
+    public abstract (long Changed, int MaxDelta, List<uint> Firsts) Count(uint top);
+}
+
+internal sealed class Counter<T> : Counter where T : struct, IConv
+{
+    readonly T _conv;
+    public Counter(T conv) => _conv = conv;
+
+    public override (long Changed, int MaxDelta, List<uint> Firsts) Count(uint top)
+    {
+        long changed = 0;
+        int maxDelta = 0;
+        // Each chunk runs its inputs in ascending order and keeps its first
+        // three changed ones, so the three smallest of all the chunks' are
+        // the three smallest changed inputs.
+        var firsts = new List<uint>();
+        const int chunks = 1024;
+        uint per = (uint)(((ulong)top + 1 + chunks - 1) / chunks);
+        T conv = _conv;
+        Parallel.For(0, chunks, () => (0L, 0, new List<uint>(3)), (c, _, acc) =>
+        {
+            uint lo = (uint)c * per;
+            if (lo > top) return acc;
+            uint hi = Math.Min(top, lo + per - 1);
+            long n = 0;
+            int max = 0;
+            for (uint b = lo; ; b++)
+            {
+                float v = BitConverter.UInt32BitsToSingle(b);
+                int o = conv.Old(v), w = conv.New(v);
+                if (o != w)
+                {
+                    n++;
+                    int d = Math.Abs(o - w);
+                    if (d > max) max = d;
+                    if (acc.Item3.Count < 3) acc.Item3.Add(b);
+                }
+                if (b == hi) break;
+            }
+            acc.Item1 += n;
+            if (max > acc.Item2) acc.Item2 = max;
+            return acc;
+        }, acc =>
+        {
+            lock (firsts)
+            {
+                changed += acc.Item1;
+                if (acc.Item2 > maxDelta) maxDelta = acc.Item2;
+                firsts.AddRange(acc.Item3);
+            }
+        });
+        firsts.Sort();
+        return (changed, maxDelta, firsts.Take(3).ToList());
+    }
+}
+
 internal static class Sites
 {
-    static int Id(int x) => x;
+    static Site Make<T>(string key, T conv, int lo, int hi, Func<int, (int K, int Range)> normal) where T : struct, IConv
+        => new(key, conv.Old, conv.New, lo, hi, normal, new Counter<T>(conv));
 
-    public static Site Descriptor(int min, int max) => new(
-        $"hid-descriptor[{min}..{max}]",
-        v => Old.Descriptor(v, min, max),
-        v => NewArith.Linear(v, min, max, false),
-        min, max, r => (r - min, max - min), Id);
+    // The diff sends no NaN, so the rest value never applies.
+    static int Linear(float v, int min, int max, bool invert) => WireArith.Linear(v, min, max, invert, 0.5);
+
+    readonly struct DescriptorConv(int min, int max) : IConv
+    {
+        public int Old(float v) => global::Old.Descriptor(v, min, max);
+        public int New(float v) => Linear(v, min, max, false);
+    }
+
+    readonly struct DescriptorCenteredConv : IConv
+    {
+        readonly int _min, _center, _max;
+        readonly double _low, _step;
+        public DescriptorCenteredConv(int min, int center, int max)
+        {
+            (_min, _center, _max) = (min, center, max);
+            (_low, _step) = WireArith.Slopes(min, center, max);
+        }
+        public int Old(float v) => global::Old.Descriptor(v, _min, _max);
+        // WireArith.Centered with the field's own slopes, as NewArith.Centered.
+        public int New(float v) => WireArith.Centered(v, _min, _center, _max, _low, _step, false);
+    }
+
+    readonly struct U8AxisConv(int center, bool invert) : IConv
+    {
+        public int Old(float v) => global::Old.U8Axis(v, center, invert);
+        public int New(float v) => center == 128 ? Linear(v, 0, 255, invert) : Math.Clamp(Linear(v, center - 127, center + 127, invert), 0, 255);
+    }
+
+    readonly struct U8TriggerConv : IConv
+    {
+        public int Old(float v) => global::Old.U8Trigger(v);
+        public int New(float v) => Linear(v, 0, 255, false);
+    }
+
+    readonly struct Stick12Conv : IConv
+    {
+        public int Old(float v) => global::Old.Stick12(v);
+        public int New(float v) => Linear(v, 0, 4095, false);
+    }
+
+    readonly struct I16AxisConv(bool negate) : IConv
+    {
+        public int Old(float v) => global::Old.I16Axis(v, negate);
+        public int New(float v) => Linear(v, -32767, 32767, negate);
+    }
+
+    readonly struct U16TriggerConv : IConv
+    {
+        public int Old(float v) => global::Old.U16Trigger(v);
+        public int New(float v) => Linear(v, 0, 32767, false);
+    }
+
+    readonly struct DigitalConv : IConv
+    {
+        public int Old(float v) => global::Old.Digital(v) ? 1 : 0;
+        public int New(float v) => Linear(v, 0, 255, false) > 0 ? 1 : 0;
+    }
+
+    // The slice carries g, and the consumer reads companion.c's decode of it.
+    readonly struct GipStickXConv : IConv
+    {
+        public int Old(float v) => Companion.StickX(global::Old.GipStick(v));
+        public int New(float v) => Companion.StickX(Linear(v, 0, 65535, false));
+    }
+
+    // XInput's sThumbY grows upward, so the rule treats it as an inverted
+    // field: sThumbY = Linear(v, -32768, 32767, invert).
+    readonly struct GipStickYConv : IConv
+    {
+        public int Old(float v) => Companion.StickY(global::Old.GipStick(v));
+        public int New(float v) => Linear(v, -32768, 32767, true);
+    }
+
+    readonly struct GipTriggerConv : IConv
+    {
+        public int Old(float v) => Companion.Trigger(global::Old.GipTrigger(v));
+        public int New(float v) => Companion.Trigger(HMController.XusbTrigger(v));
+    }
+
+    readonly struct SwitchStickConv(bool invert) : IConv
+    {
+        public int Old(float v) => global::Old.SwitchStick(v, invert);
+        public int New(float v) => Linear(v, 0x200, 0xE00, invert);
+    }
+
+    readonly struct Switch2StickConv(bool invert) : IConv
+    {
+        public int Old(float v) => global::Old.Switch2Stick(v, invert);
+        public int New(float v) => Linear(v, 0, 4095, invert);
+    }
+
+    readonly struct Switch2DigitalConv : IConv
+    {
+        public int Old(float v) => global::Old.Switch2Digital(v) ? 1 : 0;
+        public int New(float v) => Linear(v, 0, 255, false) > 0 ? 1 : 0;
+    }
+
+    public static Site Descriptor(int min, int max) => Make(
+        $"hid-descriptor[{min}..{max}]", new DescriptorConv(min, max),
+        min, max, r => (r - min, max - min));
 
     /// <summary>A descriptor field its profile centers (axisCenters).</summary>
-    public static Site DescriptorCentered(int min, int center, int max) => new(
-        $"hid-descriptor[{min}..{max}] centered {center}",
-        v => Old.Descriptor(v, min, max),
-        v => NewArith.Centered(v, min, center, max),
-        min, max, r => (r - min, max - min), Id);
+    public static Site DescriptorCentered(int min, int center, int max) => Make(
+        $"hid-descriptor[{min}..{max}] centered {center}", new DescriptorCenteredConv(min, center, max),
+        min, max, r => (r - min, max - min));
 
-    public static Site U8Axis(int center, bool invert) => new(
-        $"codec uint8-axis center {center}{(invert ? " invert" : "")}",
-        v => Old.U8Axis(v, center, invert),
-        v => center == 128 ? NewArith.Linear(v, 0, 255, invert) : Math.Clamp(NewArith.Linear(v, center - 127, center + 127, invert), 0, 255),
+    public static Site U8Axis(int center, bool invert) => Make(
+        $"codec uint8-axis center {center}{(invert ? " invert" : "")}", new U8AxisConv(center, invert),
         center == 128 ? 0 : Math.Max(0, center - 127), center == 128 ? 255 : Math.Min(255, center + 127),
         r =>
         {
             int lo = center == 128 ? 0 : center - 127, hi = center == 128 ? 255 : center + 127;
             return (invert ? hi - r : r - lo, hi - lo);
-        }, Id);
+        });
 
-    public static Site U8Trigger() => new(
-        "codec uint8-trigger", Old.U8Trigger, v => NewArith.Linear(v, 0, 255, false),
-        0, 255, r => (r, 255), Id);
+    public static Site U8Trigger() => Make(
+        "codec uint8-trigger", new U8TriggerConv(), 0, 255, r => (r, 255));
 
-    public static Site Stick12() => new(
-        "codec stick12-pair", Old.Stick12, v => NewArith.Linear(v, 0, 4095, false),
-        0, 4095, r => (r, 4095), Id);
+    public static Site Stick12() => Make(
+        "codec stick12-pair", new Stick12Conv(), 0, 4095, r => (r, 4095));
 
-    public static Site I16Axis(bool negate) => new(
-        $"codec int16-axis{(negate ? " Y (negated)" : "")}",
-        v => Old.I16Axis(v, negate), v => NewArith.Linear(v, -32767, 32767, negate),
-        -32767, 32767, r => (negate ? 32767 - r : r + 32767, 65534), Id);
+    public static Site I16Axis(bool negate) => Make(
+        $"codec int16-axis{(negate ? " Y (negated)" : "")}", new I16AxisConv(negate),
+        -32767, 32767, r => (negate ? 32767 - r : r + 32767, 65534));
 
-    public static Site U16Trigger() => new(
-        "codec uint16-trigger", Old.U16Trigger, v => NewArith.Linear(v, 0, 32767, false),
-        0, 32767, r => (r, 32767), Id);
+    public static Site U16Trigger() => Make(
+        "codec uint16-trigger", new U16TriggerConv(), 0, 32767, r => (r, 32767));
 
-    public static Site Digital() => new(
-        "codec LT_DIGITAL / RT_DIGITAL",
-        v => Old.Digital(v) ? 1 : 0, v => NewArith.Linear(v, 0, 255, false) > 0 ? 1 : 0,
-        0, 1, r => (r == 0 ? 0 : 255, 255), Id);
+    public static Site Digital() => Make(
+        "codec LT_DIGITAL / RT_DIGITAL", new DigitalConv(), 0, 1, r => (r == 0 ? 0 : 255, 255));
 
-    // The slice carries g, and the consumer reads companion.c's decode of it.
-    public static Site GipStickX() => new(
-        "xusb slice stick X",
-        v => Companion.StickX(Old.GipStick(v)), v => Companion.StickX(NewArith.Linear(v, 0, 65535, false)),
-        -32768, 32767, r => (r + 32768, 65535), Id);
+    public static Site GipStickX() => Make(
+        "xusb slice stick X", new GipStickXConv(), -32768, 32767, r => (r + 32768, 65535));
 
-    // XInput's sThumbY grows upward, so the rule treats it as an inverted
-    // field: sThumbY = Linear(v, -32768, 32767, invert).
-    public static Site GipStickY() => new(
-        "xusb slice stick Y",
-        v => Companion.StickY(Old.GipStick(v)), v => NewArith.Linear(v, -32768, 32767, true),
-        -32768, 32767, r => (32767 - r, 65535), Id);
+    public static Site GipStickY() => Make(
+        "xusb slice stick Y", new GipStickYConv(), -32768, 32767, r => (32767 - r, 65535));
 
-    public static Site GipTrigger() => new(
-        "xusb slice trigger",
-        v => Companion.Trigger(Old.GipTrigger(v)), v => Companion.Trigger(NewArith.XusbTrigger(v)),
-        0, 255, r => (r, 255), Id);
+    public static Site GipTrigger() => Make(
+        "xusb slice trigger", new GipTriggerConv(), 0, 255, r => (r, 255));
 
-    public static Site SwitchStick(bool invert) => new(
-        $"switch-pro stick {(invert ? "Y" : "X")}",
-        v => Old.SwitchStick(v, invert), v => NewArith.Linear(v, 0x200, 0xE00, invert),
-        0x200, 0xE00, r => (invert ? 0xE00 - r : r - 0x200, 0xC00), Id);
+    public static Site SwitchStick(bool invert) => Make(
+        $"switch-pro stick {(invert ? "Y" : "X")}", new SwitchStickConv(invert),
+        0x200, 0xE00, r => (invert ? 0xE00 - r : r - 0x200, 0xC00));
 
-    public static Site Switch2Stick(bool invert) => new(
-        $"switch2 composite stick {(invert ? "Y" : "X")}",
-        v => Old.Switch2Stick(v, invert), v => NewArith.Linear(v, 0, 4095, invert),
-        0, 4095, r => (invert ? 4095 - r : r, 4095), Id);
+    public static Site Switch2Stick(bool invert) => Make(
+        $"switch2 composite stick {(invert ? "Y" : "X")}", new Switch2StickConv(invert),
+        0, 4095, r => (invert ? 4095 - r : r, 4095));
 
-    public static Site Switch2Digital() => new(
-        "switch2 composite ZL/ZR",
-        v => Old.Switch2Digital(v) ? 1 : 0, v => NewArith.Linear(v, 0, 255, false) > 0 ? 1 : 0,
-        0, 1, r => (r == 0 ? 0 : 255, 255), Id);
+    public static Site Switch2Digital() => Make(
+        "switch2 composite ZL/ZR", new Switch2DigitalConv(), 0, 1, r => (r == 0 ? 0 : 255, 255));
 }
 
 /// <summary>The motion scales: counts per g or per degree per second, the

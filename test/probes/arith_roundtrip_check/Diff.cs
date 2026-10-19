@@ -6,12 +6,12 @@
 // carries. Fails when a conversion changes in a way the design note's table
 // (docs/design/data-driven-devices.md, decision (a)) does not list.
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using HIDMaestro.Internal;
 
 internal static class Diff
 {
@@ -96,7 +96,7 @@ internal static class Diff
         {
             if (only != null && !s.Key.Contains(only, StringComparison.Ordinal)) continue;
             var sw = Stopwatch.StartNew();
-            var (changed, maxDelta, firsts) = Count(s);
+            var (changed, maxDelta, firsts) = s.Counter.Count(OneBits);
             var row = (changed, s.Old(0f), s.New(0f), s.Old(0.5f), s.New(0.5f), s.Old(1f), s.New(1f));
             changedOf[s.Key] = row;
             bool ok = Table.TryGetValue(s.Key, out var want)
@@ -140,42 +140,6 @@ internal static class Diff
         return fail;
     }
 
-    static (long Changed, int MaxDelta, List<uint> Firsts) Count(Site s)
-    {
-        long changed = 0;
-        int maxDelta = 0;
-        var firsts = new ConcurrentBag<uint>();
-        const int chunks = 1024;
-        uint per = (OneBits + 1 + chunks - 1) / chunks;
-        Parallel.For(0, chunks, () => (0L, 0), (c, _, acc) =>
-        {
-            uint lo = (uint)c * per;
-            if (lo > OneBits) return acc;
-            uint hi = Math.Min(OneBits, lo + per - 1);
-            for (uint b = lo; ; b++)
-            {
-                float v = BitConverter.UInt32BitsToSingle(b);
-                int o = s.ReadBack(s.Old(v)), n = s.ReadBack(s.New(v));
-                if (o != n)
-                {
-                    acc.Item1++;
-                    int d = Math.Abs(o - n);
-                    if (d > acc.Item2) acc.Item2 = d;
-                    if (firsts.Count < 64) firsts.Add(b);
-                }
-                if (b == hi) break;
-            }
-            return acc;
-        }, acc =>
-        {
-            Interlocked.Add(ref changed, acc.Item1);
-            int cur;
-            while ((cur = Volatile.Read(ref maxDelta)) < acc.Item2
-                   && Interlocked.CompareExchange(ref maxDelta, acc.Item2, cur) != cur) { }
-        });
-        return (changed, maxDelta, firsts.OrderBy(x => x).Take(3).ToList());
-    }
-
     static (long Changed, long Inputs) CountImu(ImuScale s)
     {
         float limit = (float)(32768.5 / s.Scale);
@@ -192,8 +156,8 @@ internal static class Diff
             {
                 float v = BitConverter.UInt32BitsToSingle(b);
                 acc.Item2 += b == 0 ? 1 : 2;
-                if (Old.Imu(v, s.OldScale) != NewArith.Scaled(v, s.Numerator, s.Denominator)) acc.Item1++;
-                if (b != 0 && Old.Imu(-v, s.OldScale) != NewArith.Scaled(-v, s.Numerator, s.Denominator)) acc.Item1++;
+                if (Old.Imu(v, s.OldScale) != WireArith.Scaled(v, s.Numerator, s.Denominator)) acc.Item1++;
+                if (b != 0 && Old.Imu(-v, s.OldScale) != WireArith.Scaled(-v, s.Numerator, s.Denominator)) acc.Item1++;
                 if (b == hi) break;
             }
             return acc;
