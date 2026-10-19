@@ -175,12 +175,19 @@ internal static partial class Program
     // diag log.
     static bool s_trace;
 
+    // --key=<identity>: the identity key the create, rate and idle-live
+    // modes create with. Without it each create takes the index's default
+    // identity.
+    internal static string? s_key;
+
     static int Main(string[] args)
     {
         // Read once by the SDK's first create, so it is set before any.
         Environment.SetEnvironmentVariable("HIDMAESTRO_TIMING", "1");
         s_trace = args.Contains("--trace");
         args = args.Where(a => a != "--trace").ToArray();
+        s_key = KeyArg(args);
+        args = args.Where(a => !a.StartsWith("--key=", StringComparison.Ordinal)).ToArray();
         string mode = args.Length > 0 ? args[0] : "gate";
         int runs = args.Length > 1 && int.TryParse(args[1], out int r) ? r : 30;
         if (mode == "start-child") return StartChild();
@@ -287,8 +294,8 @@ internal static partial class Program
                 if (rate != 0) return rate;
                 break;
             case "create":
-                int create = Create(runs, args.Skip(2).Where(a => !a.StartsWith("--settle=", StringComparison.Ordinal)).ToArray(),
-                    SettleMs(args));
+                int create = Create(runs, args.Skip(2).Where(a => !a.StartsWith("--", StringComparison.Ordinal)).ToArray(),
+                    SettleMs(args), s_key);
                 if (create != 0) return create;
                 break;
 #if !HM_BASE
@@ -899,7 +906,7 @@ internal static partial class Program
     /// <summary>The catalog profiles named after the run count, in that
     /// order, or the default set. Returns 1 when a name is refused, 5 when a
     /// devnode runs another driver.</summary>
-    static int Create(int runs, string[] only, int settleMs)
+    static int Create(int runs, string[] only, int settleMs, string? key)
     {
         var named = ParseProfileArgs(only, "create");
         if (named == null) return 1;
@@ -924,7 +931,7 @@ internal static partial class Program
             var profile = ctx.GetProfile(id)!;
             // One create and dispose first, so a cold first create (driver
             // binding, the USB/IP server's first start) is not a sample.
-            using (var first = ctx.CreateController(profile))
+            using (var first = ctx.CreateController(profile, key))
                 if (!OnEmbeddedDriver(first, id)) return 5;
             long logStart = new FileInfo(log).Exists ? new FileInfo(log).Length : 0;
             var create = new List<double>(runs);
@@ -932,7 +939,7 @@ internal static partial class Program
             for (int run = 0; run < runs; run++)
             {
                 long t0 = Stopwatch.GetTimestamp();
-                var c = ctx.CreateController(profile);
+                var c = ctx.CreateController(profile, key);
                 long t1 = Stopwatch.GetTimestamp();
                 if (settleMs > 0) Thread.Sleep(settleMs);
                 long t2 = Stopwatch.GetTimestamp();
@@ -958,6 +965,14 @@ internal static partial class Program
         foreach (string a in args)
             if (a.StartsWith("--settle=", StringComparison.Ordinal) && int.TryParse(a[9..], out int ms)) return ms;
         return 0;
+    }
+
+    /// <summary>The value of --key=, or null.</summary>
+    static string? KeyArg(string[] args)
+    {
+        foreach (string a in args)
+            if (a.StartsWith("--key=", StringComparison.Ordinal) && a.Length > 6) return a[6..];
+        return null;
     }
 
     // ── Process start to the first controller ───────────────────────────

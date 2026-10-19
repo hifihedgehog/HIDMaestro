@@ -43,7 +43,7 @@ internal static partial class Program
         {
             var profile = ctx.GetProfile(id);
             if (profile == null) { Check($"{id}: a catalog profile", false, "no such id"); continue; }
-            using var c = ctx.CreateController(profile);
+            using var c = ctx.CreateController(profile, s_key);
             if (!OnEmbeddedDriver(c, id)) return 5;
             string? path = OwnInputInterface(c);
             if (path == null) { Check($"{id}: a HID input interface under its devnode", false, "none in 5 s"); continue; }

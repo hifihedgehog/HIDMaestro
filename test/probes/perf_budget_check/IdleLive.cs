@@ -35,7 +35,7 @@ internal static class IdleLive
         var profile = ctx.GetProfile(id) ?? throw new InvalidOperationException($"no {id}");
         for (int run = 1; run <= runs; run++)
         {
-            using var c = ctx.CreateController(profile);
+            using var c = ctx.CreateController(profile, Program.s_key);
             c.SubmitState(new HMGamepadState { Buttons = HMButton.A });
             // The controller's own input interface, found under its devnode:
             // a HID path carries no HIDMaestro name to search for.
