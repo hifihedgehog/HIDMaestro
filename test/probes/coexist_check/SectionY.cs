@@ -182,6 +182,27 @@ internal static partial class Program
     static int SectionSeqNo(string section) =>
         Native.SectionBytes(section, 4) is { } b ? BitConverter.ToInt32(b, 0) : -1;
 
+    /// <summary><see cref="Flows"/>, the same test answered as soon as a
+    /// report arrives: whether the device carries a report within
+    /// <paramref name="ms"/>.</summary>
+    static bool FlowsSoon(HidCapture cap, int ms = 600)
+    {
+        long mark = cap.Mark();
+        return WaitFor(() => cap.Since(mark).Count > 0, ms);
+    }
+
+    /// <summary>Whether an acknowledgement section's capabilities carry the
+    /// release bit, which the driver sets while its owner watch is
+    /// connected (driver.c TryOpenOwnerWatch).</summary>
+    static bool ReleaseBit(string ackName) => Y.AckCapabilities(ackName) is int c && (c & 2) != 0;
+
+    /// <summary>How long a negative check in this section waits once the
+    /// driver's worker has reached the step it judges: one and a half of the
+    /// worker's 200 ms bootstrap tick (driver.c SharedInputWorkerProc,
+    /// Phase 1), within which the worker finishes the pass that step is
+    /// part of.</summary>
+    const int WorkerPassMs = 300;
+
     static void SectionY()
     {
         foreach (var v in new[] { "v1.12.0", "v1.11.0" })
@@ -259,7 +280,7 @@ internal static partial class Program
         try
         {
             string tok, inputName, ackName;
-            using (var old = PeerProcess.Start("Y21-v1.12.0", "v1.12.0", tempDir: temp))
+            using (var old = PeerProcess.Start("Y21-v1.12.0", "v1.12.0", timeoutScale: NoDriverScale(), tempDir: temp))
             {
                 string? staging = StagingPath(old.Send("stagingdir"));
                 Check("Y21: the v1.12.0 program's staging has no catalog",
@@ -323,7 +344,8 @@ internal static partial class Program
                       Ok(beside) && int.TryParse(PeerProcess.Field(beside, "transport"), out int tb) && tb >= 64, beside);
                 nu.Send("dispose");
                 nu.Send("sweep");
-                Thread.Sleep(2000);
+                // The sweep removes before it replies (OwnerSweep.RemoveGroup waits
+                // for each removal), so the reply follows any removal it made.
                 Check("Y21: a sweep leaves it", Native.IsPresent(inst), Native.StatusOf(inst));
                 old.Kill();
             }
@@ -340,7 +362,8 @@ internal static partial class Program
             Check("Y21: the census then reads the device as Unknown, as a program's older than v1.12.0",
                   after?.Split('|')[2] == "Unknown", $"{after ?? "no entry"}, {ControllerIndexState(inst)}");
             sweeper.Send("sweep");
-            Thread.Sleep(2000);
+            // The sweep removes before it replies (OwnerSweep.RemoveGroup waits
+            // for each removal), so the reply follows any removal it made.
             Check("Y21: and a sweep leaves it, as it leaves such a program's", Native.IsPresent(inst), Native.StatusOf(inst));
 
             // The state that lasts: the program is gone and its device
@@ -419,7 +442,7 @@ internal static partial class Program
         Directory.CreateDirectory(temp);
         try
         {
-            using var old = PeerProcess.Start("Y22-v1.12.0", "v1.12.0", tempDir: temp);
+            using var old = PeerProcess.Start("Y22-v1.12.0", "v1.12.0", timeoutScale: NoDriverScale(), tempDir: temp);
             string? staging = StagingPath(old.Send("stagingdir"));
             Check("Y22: the v1.12.0 program's staging has no catalog",
                   staging != null && staging.StartsWith(temp, StringComparison.OrdinalIgnoreCase) && !StagingCataloged(staging), staging ?? "no staging");
@@ -469,6 +492,17 @@ internal static partial class Program
             catch (Exception ex) { Console.WriteLine($"    Y22: {temp} not removed: {ex.Message}"); }
         }
     }
+
+    /// <summary>The timeout scale of Y21's and Y22's v1.12.0 programs, a
+    /// tenth of this probe's and no less than v1.12.0 accepts. Each create
+    /// of theirs waits for a HID interface and then a HID child that no
+    /// driver brings, 5 s and 10 s at scale 1, and goes on when the waits
+    /// run out (v1.12.0 DeviceNodeCreator.CreateDeviceNode, after its
+    /// UpdateDriverForPlugAndPlayDevicesW fails, and
+    /// DeviceOrchestrator.WaitForHidChild). What it leaves is the same
+    /// at any scale.</summary>
+    static string NoDriverScale() =>
+        Math.Max(0.1, Scaled(1000) / 10_000.0).ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     /// <summary>Whether the driver store holds a package of each INF and
     /// none of v1.12.0: the state in which a v1.12.0 create skips its
@@ -552,10 +586,11 @@ internal static partial class Program
         Check("Y9: the census holds the device as a running v1.12.0 program's",
               entry?.Split('|')[2] == "LiveLegacy", entry ?? "no entry");
         nu.Send("sweep");
-        Thread.Sleep(2000);
+        // The sweep removes before it replies (OwnerSweep.RemoveGroup waits
+        // for each removal), so the reply follows any removal it made.
         Check("Y9: a sweep leaves the running program's devices", tree.Count > 0 && tree.All(Native.IsPresent),
               string.Join(", ", tree.Where(d => !Native.IsPresent(d))));
-        Observe("Y9: and its input keeps flowing", cap != null && !cap.Broken && Flows(cap));
+        Observe("Y9: and its input keeps flowing", cap != null && !cap.Broken && FlowsSoon(cap));
     }
 
     /// <summary>Y11. Output latency and removal time of a v1.12.0 program's
@@ -620,7 +655,7 @@ internal static partial class Program
                     bool consumed = Y.WaitForSingleObject(heldStop, 0) != Y.WAIT_OBJECT_0;
                     Check("Y12: the new worker does not consume a signal on the held StopEvent",
                           !consumed && Native.IsStarted(inst), consumed ? "the worker reset the held event" : "");
-                    Observe("Y12: and the v1.12.0 program's input flows", !capIn.Broken && Flows(capIn),
+                    Observe("Y12: and the v1.12.0 program's input flows", !capIn.Broken && FlowsSoon(capIn),
                             capIn.Broken ? $"read error {capIn.ReadError}" : "");
                 }
                 old.Send("stopstream");
@@ -653,7 +688,9 @@ internal static partial class Program
             old.Kill();
         }
         var tree = Native.Subtree(inst);
-        Thread.Sleep(1000);
+        // The driver records the killed program gone before the sweep's
+        // census reads it, or a second passes.
+        WaitFor(() => Y.WatchValues(inst) is { Connected: 0 }, 1000);
         using var nu = PeerProcess.Start("Y-ds4-sweeper");
         var sw = Stopwatch.StartNew();
         string s = nu.Send("sweep");
@@ -748,8 +785,17 @@ internal static partial class Program
         try
         {
             // Past the worker's eight idle 500 ms waits, so a pre-fix driver
-            // has recycled and reconnected the watch.
-            Thread.Sleep(7000);
+            // has recycled and reconnected the watch. The recycle maps the
+            // held section again at once, which rewrites the acknowledgement
+            // section's capabilities without the release bit of the watch
+            // the kill ended (driver.c TryOpenInputAck), and the pass that
+            // does it is the one that reconnected the watch on the pre-fix
+            // driver (TryOpenSharedMapping). Seven seconds when the bit was
+            // never seen set, or stays set.
+            string ackName = $@"Global\HIDMaestroInputAck{t}";
+            var idle = Stopwatch.StartNew();
+            if (ReleaseBit(ackName) && WaitFor(() => !ReleaseBit(ackName), 7000)) Thread.Sleep(WorkerPassMs);
+            else Thread.Sleep((int)Math.Max(0, 7000 - idle.ElapsedMilliseconds));
             using var nu = PeerProcess.Start("Y-held-sweeper");
             string? entry = Y.CensusEntry(nu.Send("census"), tok);
             Check("Y13: the census does not count the held pipe as a running program's",
@@ -1014,7 +1060,8 @@ internal static partial class Program
             string? entry = census.Split(' ').FirstOrDefault(e => e.Split('|') is { Length: > 2 } f && f[1] == t.ToString());
             Check($"{y}: the census reads the controller as a running v1.12.0 program's", entry?.Split('|')[2] == "LiveLegacy", entry ?? census);
             nu.Send("sweep");
-            Thread.Sleep(2000);
+            // The sweep removes before it replies (OwnerSweep.RemoveGroup waits
+            // for each removal), so the reply follows any removal it made.
             Check($"{y}: a sweep leaves it", tree.Count > 0 && tree.All(d => !Native.IsGone(d)),
                   string.Join(", ", tree.Where(Native.IsGone)));
         }
@@ -1068,9 +1115,14 @@ internal static partial class Program
             else
                 Check($"{y}: the acknowledgement section is gone", !Native.SectionExists(ackName));
             // The new worker maps the held section within its first 200 ms
-            // tick. Past that, it has refused the user's pipe.
-            Thread.Sleep(3000);
-            Check($"{y}: the new context does not connect to the user's pipe", Y.WatchValues(inst) == null, Y.ShowWatch(inst));
+            // tick. Past that, it has refused the user's pipe: it takes the
+            // pipe or refuses it in the pass that maps the section (driver.c
+            // TryOpenSharedMapping), whose open is a second handle to it
+            // beside the user's. Three seconds when none shows.
+            int handles = 0;
+            if (WaitFor(() => (handles = Y.HandleCount(sec)) >= 2, 3000)) Thread.Sleep(WorkerPassMs);
+            Check($"{y}: the new context does not connect to the user's pipe", Y.WatchValues(inst) == null,
+                  $"{Y.ShowWatch(inst)}, {handles} handles to the section");
             using var nu = PeerProcess.Start("Y-readded-sweeper");
             string? entry = Y.CensusEntry(nu.Send("census"), tok);
             Check($"{y}: the census does not count the held pipe as a running program's",
@@ -1146,9 +1198,13 @@ internal static partial class Program
             old.Kill();
         }
         var tree = Native.Subtree(inst);
-        // Eight idle 500 ms waits reset the driver's handles. Seven seconds
-        // covers it and the reopen attempts after it.
-        Thread.Sleep(7000);
+        // Eight idle 500 ms waits reset the driver's handles. Only the driver
+        // held the killed program's input section, so the reset closes it,
+        // in the same pass that would close the acknowledgement section
+        // with it (driver.c SharedInputWorkerProc, the recycle). Seven
+        // seconds when the input section stays.
+        WaitFor(() => !Native.SectionExists($@"Global\HIDMaestroInput{t}"), 7000);
+        Thread.Sleep(WorkerPassMs);
         string section = $@"Global\HIDMaestroInputAck{t}";
         Check($"Y7: past the driver's idle reset, {section} still exists", Native.SectionExists(section));
         using var nu = PeerProcess.Start("Y-sweeper");
@@ -1171,17 +1227,21 @@ internal static partial class Program
         Check("Y8: before any reset the driver announces release on exit, and the SDK reads it",
               before is int b && (b & 2) != 0 && PeerProcess.Field(sdkBefore, "on") == "1",
               $"capabilities {before?.ToString("X") ?? "none"}, {sdkBefore}");
-        IntPtr stop = Y.OpenEventW(Y.EVENT_MODIFY_STATE, false, $@"Global\HIDMaestroStopEvent{t}");
+        IntPtr stop = Y.OpenEventW(Y.EVENT_MODIFY_STATE | Y.SYNCHRONIZE, false, $@"Global\HIDMaestroStopEvent{t}");
         bool signaled = stop != IntPtr.Zero && Y.SetEvent(stop);
-        if (stop != IntPtr.Zero) Y.CloseHandle(stop);
         Check("Y8: a signal on the StopEvent, as a sweep sends it", signaled);
-        Thread.Sleep(1500);
+        // The worker resets the event it absorbs and resets its handles in
+        // the same pass, mapping the acknowledgement section again (driver.c
+        // SharedInputWorkerProc, the foreign signal). 1.5 s when the reset
+        // does not show.
+        if (signaled && WaitFor(() => Y.WaitForSingleObject(stop, 0) != Y.WAIT_OBJECT_0, 1500)) Thread.Sleep(WorkerPassMs);
+        if (stop != IntPtr.Zero) Y.CloseHandle(stop);
         int? after = Y.AckCapabilities(section);
         string sdkAfter = live.Send($"releases {t}");
         Check("Y8: after the reset the bit is still set", after is int a && (a & 2) != 0,
               $"capabilities {after?.ToString("X") ?? "none"}");
         Check("Y8: and the SDK still reads release-on-exit support", PeerProcess.Field(sdkAfter, "on") == "1", sdkAfter);
-        Check("Y8: the controller's input keeps flowing", !cap.Broken && Flows(cap));
+        Check("Y8: the controller's input keeps flowing", !cap.Broken && FlowsSoon(cap));
     }
 
     /// <summary>Y6. A previous device's values on the instance.</summary>
@@ -1208,7 +1268,7 @@ internal static partial class Program
         Check("Y6: the v1.11.0 program's controller moves to the installed driver", moved,
               $"{Native.DriverVersionOf(inst)}, installed {installed}, {how}, {Native.StatusOf(inst)}");
         if (!moved) return;
-        Thread.Sleep(1500);   // past the worker's first 200 ms bootstrap waits
+        Thread.Sleep(WorkerPassMs);   // past the worker's first 200 ms bootstrap wait
         Check("Y6: the values the earlier device left are gone, and none are written", Y.WatchValues(inst) == null, Y.ShowWatch(inst));
     }
 
@@ -1303,8 +1363,8 @@ internal static partial class Program
             Observe("Y1: the v1.12.0 program still opens and waits on its OutputEvent and signals its StopEvent",
                   PeerProcess.Field(oldOwn, "output") == "1" && PeerProcess.Field(oldOwn, "wait") is "0" or "258"
                   && PeerProcess.Field(oldOwn, "stop") == "1", oldOwn);
-            Observe("Y1: the v1.12.0 program's input keeps flowing", !capOld.Broken && Flows(capOld), capOld.Broken ? $"read error {capOld.ReadError}" : "");
-            Check("Y1: this SDK's program's input keeps flowing", !capLive.Broken && Flows(capLive), capLive.Broken ? $"read error {capLive.ReadError}" : "");
+            Observe("Y1: the v1.12.0 program's input keeps flowing", !capOld.Broken && FlowsSoon(capOld), capOld.Broken ? $"read error {capOld.ReadError}" : "");
+            Check("Y1: this SDK's program's input keeps flowing", !capLive.Broken && FlowsSoon(capLive), capLive.Broken ? $"read error {capLive.ReadError}" : "");
         }
 
         SectionYSquat(user);
@@ -1319,8 +1379,8 @@ internal static partial class Program
               entry != null && Regex.IsMatch(entry, $@"\|watch=connected,pid={old.Pid},owner=[^,]+,alive=1,elevated=1,trusted=1$"),
               entry ?? census);
         Check("Y5: every sweep left the v1.12.0 program's controller in the device tree, started", Native.IsStarted(instOld), Native.StatusOf(instOld));
-        Observe("Y5: and its input still flows", !capOld.Broken && Flows(capOld), capOld.Broken ? $"read error {capOld.ReadError}" : "");
-        Check("Y5: and the running program's own", Native.IsStarted(instLive) && !capLive.Broken && Flows(capLive));
+        Observe("Y5: and its input still flows", !capOld.Broken && FlowsSoon(capOld), capOld.Broken ? $"read error {capOld.ReadError}" : "");
+        Check("Y5: and the running program's own", Native.IsStarted(instLive) && !capLive.Broken && FlowsSoon(capLive));
         return installed;
     }
 
@@ -1417,8 +1477,14 @@ internal static partial class Program
             Check($"Y2: while input streams, the driver makes its own {output}", own, Y.EventSddl(output) ?? "none");
             // The XUSB companion, which publishes the rumble, retries its own
             // handle within 256 input frames (about 2 s at 125 Hz), and the
-            // reader opens the event within 64 polls.
-            Thread.Sleep(3000);
+            // reader opens the event within 64 polls. Once both hold it,
+            // four handles do: the driver's, the companion's, the reader's
+            // and this probe's (driver.c and companion.c TryCreateDoorbell,
+            // SharedMemoryIO.TryOpenOutputEvent). Three seconds when they
+            // do not show.
+            IntPtr doorbell = Y.OpenEventW(Y.SYNCHRONIZE, false, output);
+            try { WaitFor(() => doorbell != IntPtr.Zero && Y.HandleCount(doorbell) >= 4, 3000); }
+            finally { if (doorbell != IntPtr.Zero) Y.CloseHandle(doorbell); }
             OutputTiming after = TimeOutputs(p, rumble, 30, 60);
             Console.WriteLine($"    Y2 output latency on the driver's event: {after.Shown}");
             Check("Y2: and the program's reader waits on it: p95 under 2 ms",
@@ -1491,7 +1557,8 @@ internal static partial class Program
                   Y.CensusEntry(census, tok) is { } e && e.Split('|')[2] == "LiveLegacy" && e.EndsWith("|watch=none", StringComparison.Ordinal),
                   Y.CensusEntry(census, tok) ?? census);
             live.Send("sweep");
-            Thread.Sleep(2000);
+            // The sweep removes before it replies (OwnerSweep.RemoveGroup waits
+            // for each removal), so the reply follows any removal it made.
             Check("Y4: and the sweep keeps the killed program's devices", tree.Count > 0 && tree.All(Native.IsPresent),
                   string.Join(", ", tree.Where(d => !Native.IsPresent(d))));
         }
@@ -1517,15 +1584,23 @@ internal static partial class Program
             send(i);
             Thread.Sleep(spacingMs);
         }
-        Thread.Sleep(600);
-        string reply = peer.Send("outputs");
-        var got = (PeerProcess.Field(reply, "t") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries).Select(long.Parse).OrderBy(x => x).ToList();
+        // The program's notes are read once every output has one, or 600 ms
+        // after the last send.
         var ms = new List<double>();
-        for (int i = 0; i < sent.Count; i++)
+        var late = Stopwatch.StartNew();
+        while (true)
         {
-            long end = i + 1 < sent.Count ? sent[i + 1] : long.MaxValue;
-            long hit = got.FirstOrDefault(x => x >= sent[i] && x < end);
-            ms.Add(hit == 0 ? double.NaN : (hit - sent[i]) * 1000.0 / Stopwatch.Frequency);
+            string reply = peer.Send("outputs");
+            var got = (PeerProcess.Field(reply, "t") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries).Select(long.Parse).OrderBy(x => x).ToList();
+            ms.Clear();
+            for (int i = 0; i < sent.Count; i++)
+            {
+                long end = i + 1 < sent.Count ? sent[i + 1] : long.MaxValue;
+                long hit = got.FirstOrDefault(x => x >= sent[i] && x < end);
+                ms.Add(hit == 0 ? double.NaN : (hit - sent[i]) * 1000.0 / Stopwatch.Frequency);
+            }
+            if (!ms.Any(double.IsNaN) || late.ElapsedMilliseconds >= 600) break;
+            Thread.Sleep(50);
         }
         var arrived = ms.Where(x => !double.IsNaN(x)).OrderBy(x => x).ToList();
         double P(double q) => arrived.Count == 0 ? double.NaN : arrived[Math.Min(arrived.Count - 1, (int)(arrived.Count * q))];
@@ -1607,6 +1682,18 @@ internal static partial class Program
                 Thread.Sleep(250);
             }
         }
+
+        /// <summary>How many handles the object behind <paramref name="h"/>
+        /// has, this one included (NtQueryObject, ObjectBasicInformation,
+        /// PUBLIC_OBJECT_BASIC_INFORMATION.HandleCount), or -1.</summary>
+        internal static int HandleCount(IntPtr h)
+        {
+            var info = new byte[56];
+            return NtQueryObject(h, 0, info, info.Length, out _) == 0 ? BitConverter.ToInt32(info, 8) : -1;
+        }
+
+        [DllImport("ntdll.dll")]
+        static extern int NtQueryObject(IntPtr handle, int infoClass, byte[] info, int length, out int returned);
 
         /// <summary>One device group of a "census" reply: token|index|owner|watch.</summary>
         internal static string? CensusEntry(string reply, string token) =>
