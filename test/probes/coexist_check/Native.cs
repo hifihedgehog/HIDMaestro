@@ -121,6 +121,12 @@ internal static class Native
 
     internal static bool IsPresent(string instanceId) => CM_Locate_DevNodeW(out _, instanceId, 0) == 0;
 
+    /// <summary>Wait until Plug and Play has no device install in progress
+    /// or queued, up to <paramref name="timeoutMs"/>. WAIT_OBJECT_0 (0)
+    /// when it has none, WAIT_TIMEOUT (258) when it still had one.</summary>
+    [DllImport("cfgmgr32.dll")]
+    internal static extern uint CMP_WaitNoPendingInstallEvents(uint timeoutMs);
+
     [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
     static extern uint CM_Get_Device_ID_List_SizeW(out uint length, string filter, uint flags);
     [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]

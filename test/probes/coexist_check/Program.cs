@@ -1714,18 +1714,38 @@ internal static partial class Program
     /// keeps the output open longer holds the runner for a bounded time.</summary>
     static void SectionT5()
     {
-        using var p = PeerProcess.Start("T5");
-        string r = p.Send("runtool");
-        Check("T5: the tool runner returns a tool's output to its last line", PeerProcess.Field(r, "last") == "yes", r);
-        // T6. The same child holding the output for 15 s against the
-        // runner's 10 s drain bound, both as the peer scales them
+        // T6. A child holding the output for 15 s against the runner's 10 s
+        // drain bound, both as the peer scales them
         // (HIDMAESTRO_TIMEOUT_SCALE): the runner gives up on the output at
         // the bound, says so, and keeps the tool's exit code, so the deploy
-        // lock is not held until the child ends. The offline mode runs the
-        // same check at scales 1, 1.5 and 2 (OF3).
-        string h = p.Send("runtool beyond", 180_000);
+        // lock is not held until the child ends. The peer runs at half this
+        // probe's scale, never below 0.5: the hold and the bound keep their
+        // ratio at any scale, and a runner that waits for the child returns
+        // at the hold, past the check's limit of the hold less 1 s. The
+        // offline mode runs the same check at scales 1, 1.5 and 2 (OF3).
+        // T6 runs in its own peer while T5 runs in another, since neither
+        // runner's timers depend on the other's.
+        using var t6 = PeerProcess.Start("T6", timeoutScale: HalfTimeoutScale());
+        t6.Post("runtool beyond");
+        using (var p = PeerProcess.Start("T5"))
+        {
+            string r = p.Send("runtool");
+            Check("T5: the tool runner returns a tool's output to its last line", PeerProcess.Field(r, "last") == "yes", r);
+        }
+        string h = t6.Receive("runtool beyond", 180_000);
         Check("T6: a child that keeps the tool's output open holds the runner for the drain bound, not until it ends",
               HeldForDrainBound(h), h);
+    }
+
+    /// <summary>Half the timeout scale this probe runs at, as the SDK reads
+    /// it (TimeoutScale.ResolveFactor: 1 when unset, not a number or outside
+    /// 0.1 to 100), and at least 0.5.</summary>
+    static string HalfTimeoutScale()
+    {
+        string? raw = Environment.GetEnvironmentVariable("HIDMAESTRO_TIMEOUT_SCALE");
+        double f = double.TryParse(raw, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double v)
+                   && v >= 0.1 && v <= 100.0 ? v : 1.0;
+        return Math.Max(0.5, f / 2).ToString(System.Globalization.CultureInfo.InvariantCulture);
     }
 
     /// <summary>A "runtool beyond" reply in which the runner returned at its
@@ -1828,10 +1848,14 @@ internal static partial class Program
             string a = p.Send("addpackages hidmaestro_xusb.inf");
             Check("T4: this build's XUSB package is added beside it", Ok(a) && XusbPackages() == 2, $"{a}, {XusbPackages()} XUSB");
         }
-        Thread.Sleep(2000);
+        // An add with /install moves matching devices onto the package
+        // (PnPUtil Command Syntax: "install/update drivers on any matching
+        // devices"). Any device install still queued after the add is
+        // waited for here, up to the 2 s this check used to wait in full.
+        uint settled = Native.CMP_WaitNoPendingInstallEvents(2000);
         string? after = Native.DriverVersionOf(before[0].Id);
         Check("T4: the running program's companion stays on its own package", after == before[0].Version,
-              $"{before[0].Id}: {before[0].Version} before, {after ?? "absent"} after");
+              $"{before[0].Id}: {before[0].Version} before, {after ?? "absent"} after{(settled == 0 ? "" : ", installs still pending after 2 s")}");
     }
 
     static byte[]? ReadEmbedded(string logicalName)

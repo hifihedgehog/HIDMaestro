@@ -226,8 +226,10 @@ internal static partial class Program
             a.Send("dispose");
             WaitFor(() => Native.HidPaths(0x054C, 0x0CE6).Except(before, StringComparer.OrdinalIgnoreCase).Count() == 0, 15_000);
             // The retry can map its sections where the failed one did, and
-            // its dispose unmaps them again.
-            Thread.Sleep(1500);
+            // its dispose unmaps them again. A pump left running wakes from
+            // its wait for a frame within 500 ms (UsbipEmulatedDevice.InputPump)
+            // and reads the unmapped section. One wait and half again.
+            Thread.Sleep(750);
             string alive2 = a.Send("alive");
             Check("U: and still runs after the retry's dispose", Ok(alive2), alive2);
         }
