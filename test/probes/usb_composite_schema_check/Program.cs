@@ -246,7 +246,9 @@ internal static class Program
               && hid.AltSettings[0].Endpoints.First(e => (e.Address & 0x80) == 0).Interval == hidOutEpInterval);
 
         // The verbatim wire blobs, cross-validated by UsbDescriptorSet's
-        // constructor exactly as the backend will at create time.
+        // constructor exactly as the backend will at create time. It refuses
+        // a HID class descriptor whose declared length is not the report
+        // descriptor's, so that mismatch fails this check.
         UsbDescriptorSet? set = null;
         string setError = "";
         try { set = new UsbDescriptorSet(composite.Inner); }
@@ -258,8 +260,6 @@ internal static class Program
               set.ConfigurationDescriptor.Length == configBytes);
         Check("device blob VID/PID match the profile",
               set.VendorId == composite.VendorId && set.ProductId == composite.ProductId);
-        Check("HID class descriptor length equals the report descriptor's",
-              true, $"{set.ReportDescriptor.Length} bytes"); // ctor throws on mismatch
         bool highSpeed = expectHighSpeed;
         Check(highSpeed ? "high speed: qualifier served (dump-confirmed)"
                         : "full-speed only: qualifier stalls (dump-confirmed)",
