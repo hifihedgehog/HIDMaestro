@@ -69,6 +69,11 @@
 //                  offline: the process's CPU time per second with one
 //                  dualsense-bt's idle repeat at the period and nothing else
 //                  submitting, and the frames it wrote per second
+//   clock [seconds] [periodMs] [frameMs]
+//                  offline: the idle repeat's device clock while a consumer
+//                  sends a frame every [frameMs] and then at rest, its
+//                  passes, ticks and the process's cycles per second
+//                  (ClockCost.cs)
 //   idle-live [runs] [seconds] [profile]
 //                  live, elevated: one dualsense-bt, or the profile named,
 //                  at rest with one reader in a child process, the CPU
@@ -236,6 +241,13 @@ internal static partial class Program
             return 0;
         }
 #if !HM_BASE
+        if (mode == "clock")
+        {
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            ClockCost.Run(args.Length > 1 ? double.Parse(args[1], inv) : 3,
+                args.Length > 2 ? double.Parse(args[2], inv) : 4, args.Length > 3 ? double.Parse(args[3], inv) : 1);
+            return 0;
+        }
         if (mode == "idle")
         {
             double period = args.Length > 1 ? double.Parse(args[1], System.Globalization.CultureInfo.InvariantCulture) : 4;

@@ -808,10 +808,14 @@ public sealed partial class HMController : IDisposable
             if (_idleThread != null)
             {
                 // Remembered for the idle pump, and the timestamp is what
-                // keeps the pump from competing with a live consumer.
+                // keeps the pump from competing with a live consumer. The
+                // pump's clock moves its timer past this frame, so it does
+                // not wake while frames keep coming.
                 _lastSubmitted = state;
                 _lastSubmitWasRaw = false;
-                Volatile.Write(ref _lastSubmitTimestamp, System.Diagnostics.Stopwatch.GetTimestamp());
+                long at = System.Diagnostics.Stopwatch.GetTimestamp();
+                Volatile.Write(ref _lastSubmitTimestamp, at);
+                _idleClock?.FrameSent(at);
             }
         }
         // Consumer code runs with no SDK lock held: a handler that disposes
@@ -1583,7 +1587,9 @@ public sealed partial class HMController : IDisposable
         _lastRawLength = report.Length;
         _lastRawWasExtended = extended;
         _lastSubmitWasRaw = true;
-        Volatile.Write(ref _lastSubmitTimestamp, System.Diagnostics.Stopwatch.GetTimestamp());
+        long at = System.Diagnostics.Stopwatch.GetTimestamp();
+        Volatile.Write(ref _lastSubmitTimestamp, at);
+        _idleClock?.FrameSent(at);
     }
 
     private void SubmitRawExtendedReportCore(ReadOnlySpan<byte> report)
@@ -1679,12 +1685,21 @@ public sealed partial class HMController : IDisposable
     }
 
     /// <summary>One idle repeat of the consumer's last frame, under the same
-    /// lock every submit path takes.</summary>
+    /// lock every submit path takes. The clock read the last frame's time
+    /// before this lock, so a frame the consumer sent since then is found
+    /// here, and the repeat goes a period after that frame instead
+    /// (<see cref="Internal.StreamTick.NotBefore"/>).</summary>
     private void RepeatLastFrame()
     {
         lock (_submitLock)
         {
             if (_disposed) return;
+            if (_stream != null)
+            {
+                long last = Volatile.Read(ref _lastSubmitTimestamp);
+                if (last != 0 && System.Diagnostics.Stopwatch.GetTimestamp() - last < _stream.Period(_protocolEngine?.RegisterWords))
+                    return;
+            }
             if (_lastSubmitWasRaw && _lastRawFrame != null)
             {
                 var frame = new ReadOnlySpan<byte>(_lastRawFrame, 0, _lastRawLength);
