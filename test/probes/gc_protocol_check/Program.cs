@@ -49,7 +49,11 @@ internal static class Program
     static int Main(string[] args)
     {
         Console.WriteLine("=== S80: the GameCube adapter persona's protocol ===");
-        if (Probe.OtherSdkRunning()) return 2;
+        if (SdkConsumers.Find() is string other)
+        {
+            Console.WriteLine($"  [SKIP] {other} is running and shares the SDK's devices.");
+            return 2;
+        }
         // S80 binds a real adapter and disposes it.
         if (Probe.RefuseWithoutDepartingRule("S80")) return Probe.Finish("S80");
 

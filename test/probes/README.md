@@ -61,6 +61,7 @@ The probes in the table below target HIDMaestro virtuals by default and work aga
 - **C# probes:** .NET SDK 10+ with `net10.0-windows10.0.26100.0` target framework. `dotnet build -c Release` in each probe directory.
 - **C++ probes:** Visual Studio 2022+ with C++ workload and Windows SDK 10.0.26100.0. Each `build_*.cmd` invokes `vcvarsall.bat amd64` and calls `cl.exe` with the WDK include/lib paths hardcoded. Edit the VS path in the .cmd if your VS install differs.
 - **PowerShell probe:** `pwsh` or `powershell` 5.1+.
+- **[probe_common](probe_common/)** holds `SdkConsumers.cs`, which aot_smoke, gc_protocol_check, handler_isolation_check, registry_ownership_check and wgi_mapping_check compile to refuse to run beside another program with HIDMaestro.Core.dll loaded. It reads each process's module base names as `Process.Modules` reads them, over all processes in parallel: about 0.85 s on the bench against 6.3 to 7.2 s for `Process.Modules`. A project that compiles it sets `AllowUnsafeBlocks`.
 
 ## Running probes safely
 
