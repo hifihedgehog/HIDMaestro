@@ -27,6 +27,10 @@
 //   - packed-uint output fields reproduce SwitchProPacker's rumble decode
 //     on every input it reads, and the Switch 2 Pro composite's
 //     protocol.decoders.rumble on a million random reports, boxed as byte
+//   - the CRC-32 the crc32-le field and the state programs compute, sixteen
+//     bytes a step, gives the register a bit-at-a-time CRC-32/ISO-HDLC gives
+//     on every length from 0 to 300 at every start offset modulo 16, from
+//     random registers, and 0xCBF43926 on "123456789"
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -65,8 +69,53 @@ internal static class Vocabulary
         Run("the Triton timestamp", () => TritonTimestamp(db["steam-controller-2"]));
         Run("the int16 center", Int16Center);
         Run("the Triton timestamp while its IMU is off", () => TritonImuHold(db["steam-controller-2"]));
+        Run("the sliced CRC-32", SlicedCrc);
         Console.WriteLine($"=== vocabulary: {(s_fail == 0 ? "PASS" : $"{s_fail} FAIL")} ===");
         return s_fail;
+    }
+
+    /// <summary>Programs.Crc32 takes sixteen bytes a step through sliced
+    /// tables. Each register it reaches must be the one the definition
+    /// gives: a bit at a time, reflected, polynomial 0xEDB88320, here with no
+    /// table at all. Every length from 0 to 300 at each start offset modulo
+    /// 16, so every split between the sixteen-byte steps and the byte tail
+    /// and every alignment of the step's reads is met, from a random
+    /// register each time.</summary>
+    static unsafe void SlicedCrc()
+    {
+        static uint Bitwise(uint crc, ReadOnlySpan<byte> bytes)
+        {
+            foreach (byte b in bytes)
+            {
+                crc ^= b;
+                for (int k = 0; k < 8; k++) crc = (crc & 1) != 0 ? (crc >> 1) ^ 0xEDB88320u : crc >> 1;
+            }
+            return crc;
+        }
+        var rng = new Random(20261019);
+        var data = new byte[16 + 300];
+        int cases = 0, wrong = 0;
+        string first = "";
+        for (int offset = 0; offset < 16; offset++)
+            for (int len = 0; len <= 300; len++)
+            {
+                rng.NextBytes(data);
+                uint start = (uint)rng.Next() ^ ((uint)rng.Next() << 16);
+                var span = new ReadOnlySpan<byte>(data, offset, len);
+                uint want = Bitwise(start, span);
+                uint got = HIDMaestro.Internal.Programs.Crc32.Update(start, span);
+                uint gotPointer;
+                fixed (byte* p = data) gotPointer = HIDMaestro.Internal.Programs.Crc32.Update(start, p + offset, len);
+                cases++;
+                if (got != want || gotPointer != want)
+                {
+                    if (wrong++ == 0) first = $"offset {offset}, length {len}: {got:X8} and {gotPointer:X8}, want {want:X8}";
+                }
+            }
+        Check($"the sliced CRC-32 gives the bit-at-a-time register on {cases} spans, every length 0 to 300 at every offset modulo 16",
+            wrong == 0, wrong == 0 ? "" : $"{wrong} differ, first {first}");
+        uint check = HIDMaestro.Internal.Programs.Crc32.Update(0xFFFFFFFFu, "123456789"u8) ^ 0xFFFFFFFFu;
+        Check("the sliced CRC-32 of \"123456789\" is 0xCBF43926, CRC-32/ISO-HDLC's check value", check == 0xCBF43926u, $"{check:X8}");
     }
 
     /// <summary>A profile that still writes ds3-battery is refused where a

@@ -116,20 +116,38 @@ internal enum StateFeedKind : byte { Rolling8, Rolling32, AccumulateOver, TicksO
 
 internal readonly record struct StateFeed(StateFeedKind Kind, uint Initial, int Stride, uint Divisor);
 
-/// <summary>The CRC-32 the codec's crc32-le field computes.</summary>
+/// <summary>The CRC-32 the codec's crc32-le field computes: CRC-32/ISO-HDLC,
+/// reflected, polynomial 0xEDB88320, the CRC a Sony Bluetooth report
+/// carries.
+///
+/// <para>Sixteen bytes a step, by slicing: table k gives the register's
+/// contribution of a byte that k more bytes follow, so the sixteen lookups
+/// of a step are independent of each other, where a byte at a time chains
+/// each lookup on the one before. DS4Windows computes the same CRC this way
+/// for every Bluetooth DS4 and DualSense report (DS4Library/Crc32.cs,
+/// InitializeTable and CalculateBasicHash). The register after each step is
+/// the one the byte-at-a-time loop reaches, and the bytes left over take
+/// that loop.</para></summary>
 internal static unsafe class Crc32
 {
+    // Sixteen tables of 256, table k at k * 256.
     static readonly uint[] s_table = Build();
 
     static uint[] Build()
     {
-        var t = new uint[256];
+        var t = new uint[16 * 256];
         for (uint i = 0; i < 256; i++)
         {
             uint c = i;
             for (int k = 0; k < 8; k++) c = (c & 1) != 0 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
             t[i] = c;
         }
+        for (int k = 1; k < 16; k++)
+            for (int i = 0; i < 256; i++)
+            {
+                uint prev = t[(k - 1) * 256 + i];
+                t[k * 256 + i] = (prev >> 8) ^ t[prev & 0xFF];
+            }
         return t;
     }
 
@@ -137,15 +155,37 @@ internal static unsafe class Crc32
     /// <paramref name="crc"/>, without the final inversion.</summary>
     public static uint Update(uint crc, ReadOnlySpan<byte> bytes)
     {
-        foreach (byte b in bytes) crc = s_table[(crc ^ b) & 0xFF] ^ (crc >> 8);
-        return crc;
+        fixed (byte* p = bytes) return Update(crc, p, bytes.Length);
     }
 
     public static uint Update(uint crc, byte* p, int len)
     {
-        var t = s_table;
-        for (int i = 0; i < len; i++) crc = t[(crc ^ p[i]) & 0xFF] ^ (crc >> 8);
+        fixed (uint* t = s_table)
+        {
+            for (; len >= 16; len -= 16, p += 16)
+            {
+                uint one = Le32(p) ^ crc, two = Le32(p + 4), three = Le32(p + 8), four = Le32(p + 12);
+                crc = t[15 * 256 + (one & 0xFF)] ^ t[14 * 256 + ((one >> 8) & 0xFF)]
+                    ^ t[13 * 256 + ((one >> 16) & 0xFF)] ^ t[12 * 256 + (one >> 24)]
+                    ^ t[11 * 256 + (two & 0xFF)] ^ t[10 * 256 + ((two >> 8) & 0xFF)]
+                    ^ t[9 * 256 + ((two >> 16) & 0xFF)] ^ t[8 * 256 + (two >> 24)]
+                    ^ t[7 * 256 + (three & 0xFF)] ^ t[6 * 256 + ((three >> 8) & 0xFF)]
+                    ^ t[5 * 256 + ((three >> 16) & 0xFF)] ^ t[4 * 256 + (three >> 24)]
+                    ^ t[3 * 256 + (four & 0xFF)] ^ t[2 * 256 + ((four >> 8) & 0xFF)]
+                    ^ t[256 + ((four >> 16) & 0xFF)] ^ t[four >> 24];
+            }
+            for (; len > 0; len--, p++) crc = t[(crc ^ *p) & 0xFF] ^ (crc >> 8);
+        }
         return crc;
+    }
+
+    /// <summary>Four bytes as a little-endian word, the order the reflected
+    /// register takes them in.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    static uint Le32(byte* p)
+    {
+        uint v = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<uint>(p);
+        return BitConverter.IsLittleEndian ? v : System.Buffers.Binary.BinaryPrimitives.ReverseEndianness(v);
     }
 }
 
