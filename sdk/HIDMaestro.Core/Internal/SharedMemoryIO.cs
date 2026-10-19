@@ -951,7 +951,16 @@ internal static partial class SharedMemoryIO
     /// around the two barriers are the same. A view of zero still throws
     /// before anything is written, as Marshal.WriteInt32 threw. The two
     /// lanes take spans, so a caller writes its frame from where it already
-    /// is, with no copy into a buffer of its own first.</para></summary>
+    /// is, with no copy into a buffer of its own first.</para>
+    ///
+    /// <para>Compiled fully optimized from its first call. Tier-0 code of
+    /// these span and pointer stores calls a helper for every slice, span
+    /// and copy: with the process on one CPU, where tiering waits longest, a
+    /// 63-byte frame took 35 ns, the same code optimized from its first call
+    /// 18, and v1.12.0's Marshal calls, already compiled in CoreLib, 26. A
+    /// program's first frames, and every frame while its tiering waits, ran
+    /// that code.</para></summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static unsafe void WriteInputFrame(IntPtr view, IntPtr eventHandle, ref uint seqNo,
                                        ReadOnlySpan<byte> data, int dataLen, byte[]? gipData,
                                        int dataOffset = 0,
@@ -966,29 +975,22 @@ internal static partial class SharedMemoryIO
         Volatile.Write(ref *(uint*)v, pending);
         Thread.MemoryBarrier();
 
-        // 2. Write payload (DataSize + Data + GipData + ExtendedReport*).
-        // v1.3.0: bulk Marshal.Copy replaces the prior per-byte
-        // Marshal.WriteByte loops, which were 256 + 14 = 270 P/Invoke
-        // calls per frame. At 250 Hz × 6 controllers that was ~400 000
-        // P/Invokes/sec; a single bulk copy per region is two
-        // P/Invokes/frame total. We don't zero the unused data tail past
-        // dataLen: driver/consumer reads DataSize and uses only
-        // data[0..DataSize-1]; the tail is irrelevant. T26-2: gipData
-        // is null for non-Xbox profiles (no XUSB companion bound), so we
-        // can skip the 14-byte copy entirely. Section is zero-initialized
-        // at create time, so the GIP slice stays zeros.
+        // 2. The payload: DataSize, the data lane, the GIP slice and the
+        // extended lane, each copied from the caller's span straight into
+        // the view. The size words take unaligned stores, since the one at
+        // 278 is not on a 4-byte boundary. The data lane's tail past
+        // dataLen is not zeroed: the driver reads DataSize and uses only
+        // that many bytes. gipData is null for a profile with no XUSB
+        // companion, which only Xbox profiles have, so every other frame
+        // skips the 14-byte slice, which stays as create's zeroing left it.
         //
-        // v1.3.5: when extendedData is not empty AND extendedLen > 0, copy
-        // the full RID-included extended report into ExtendedReportData
-        // and set ExtendedReportSize. Driver branches on
-        // ExtendedReportSize > 0 and emits ExtendedReportData verbatim
-        // (no FirstInputReportId prepend). When extendedData is empty we
-        // explicitly clear ExtendedReportSize so a previously-armed
-        // controller's stale extended bytes don't leak through after
-        // a legacy-mode frame (e.g. if armOn fires were ever rolled back
-        //: currently they aren't, but cheap insurance). The size words take
-        // unaligned stores: the one at 278 is not on a 4-byte boundary,
-        // which Marshal.WriteInt32 also handled with an unaligned store.
+        // An extended frame (extendedData not empty and extendedLen above
+        // 0) goes into ExtendedReportData, report ID included, with its
+        // length in ExtendedReportSize. The driver sends that lane
+        // verbatim whenever ExtendedReportSize is above 0, with no
+        // FirstInputReportId prepended. Any other frame clears
+        // ExtendedReportSize, so extended bytes an earlier frame left
+        // never go out after a frame on the data lane.
         Unsafe.WriteUnaligned(v + 4, dataLen);
         if (dataLen > 0)
             data.Slice(dataOffset, dataLen).CopyTo(new Span<byte>(v + DATA_OFFSET, dataLen));
