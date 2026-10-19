@@ -746,9 +746,22 @@ internal static class Strict
         catch (Exception e) { Console.WriteLine($"  [SKIP] strict: earlier tags not read ({e.Message})"); return; }
         if (tags.Count == 0) { Console.WriteLine("  [SKIP] strict: no v1.x tags in this clone"); return; }
 
+        // Each tag's tree, read at once, since the git processes are most
+        // of the time, then taken in tag order, so a blob keeps the first
+        // tag that has it. The tag first in order whose read fails throws.
+        var trees = new string[tags.Count];
+        var failed = new Exception?[tags.Count];
+        System.Threading.Tasks.Parallel.For(0, tags.Count, i =>
+        {
+            try { trees[i] = Git(repo, $"ls-tree -r {tags[i]} profiles"); }
+            catch (Exception e) { failed[i] = e; }
+        });
         var blobs = new Dictionary<string, (string Tag, string Path)>(StringComparer.Ordinal);
-        foreach (string tag in tags)
-            foreach (string line in Git(repo, $"ls-tree -r {tag} profiles").Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        for (int i = 0; i < tags.Count; i++)
+        {
+            if (failed[i] is { } error) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(error);
+            string tag = tags[i];
+            foreach (string line in trees[i].Split('\n', StringSplitOptions.RemoveEmptyEntries))
             {
                 // <mode> blob <id>\t<path>
                 int tab = line.IndexOf('\t');
@@ -759,12 +772,15 @@ internal static class Strict
                     continue;
                 blobs.TryAdd(head[2], (tag, path));
             }
+        }
         int loaded = 0, notProfiles = 0;
         var removed = new List<string>();
         var refused = new List<string>();
-        foreach (var (blob, (tag, path)) in blobs.OrderBy(b => b.Value.Tag, StringComparer.Ordinal).ThenBy(b => b.Value.Path, StringComparer.Ordinal))
+        var ordered = blobs.OrderBy(b => b.Value.Tag, StringComparer.Ordinal).ThenBy(b => b.Value.Path, StringComparer.Ordinal).ToList();
+        var texts = CatFile(repo, ordered.Select(b => b.Key).ToList());
+        foreach (var (blob, (tag, path)) in ordered)
         {
-            string text = Git(repo, $"cat-file blob {blob}");
+            string text = texts[blob];
             var issue = ParseOne($"{tag}:{path}", text);
             if (issue == null) { loaded++; continue; }
             if (issue.Kind == "NotAProfile") { notProfiles++; continue; }
@@ -790,6 +806,61 @@ internal static class Strict
         return issue == null ? null
             : new Api.Issue(Api.Prop(issue, "Kind")!.ToString()!, file, (string?)Api.Prop(issue, "ProfileId"),
                             (string)Api.Prop(issue, "JsonPath")!, (string)Api.Prop(issue, "Reason")!);
+    }
+
+    /// <summary>Each blob's text, as git cat-file blob gives it, from one
+    /// git cat-file --batch: its bytes decoded as the redirected output of a
+    /// git process is (UTF-8, a byte order mark read and dropped).</summary>
+    static Dictionary<string, string> CatFile(string repo, List<string> ids)
+    {
+        var psi = new ProcessStartInfo("git", $"-C \"{repo}\" cat-file --batch")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardInputEncoding = new UTF8Encoding(false),
+        };
+        using var p = Process.Start(psi) ?? throw new InvalidOperationException("git did not start");
+        var err = p.StandardError.ReadToEndAsync();
+        // The ids go in from another thread, so neither pipe fills while
+        // the other waits.
+        var input = System.Threading.Tasks.Task.Run(() =>
+        {
+            foreach (string id in ids) p.StandardInput.Write(id + "\n");
+            p.StandardInput.Close();
+        });
+        var output = p.StandardOutput.BaseStream;
+        var texts = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (string id in ids)
+        {
+            // <id> blob <size>, the bytes, then a line feed.
+            string header = ReadLine(output);
+            string[] parts = header.Split(' ');
+            if (parts.Length != 3 || parts[0] != id || parts[1] != "blob")
+                throw new InvalidOperationException($"git cat-file blob {id}: {header}");
+            var bytes = new byte[int.Parse(parts[2])];
+            output.ReadExactly(bytes);
+            if (output.ReadByte() != '\n') throw new InvalidOperationException($"git cat-file blob {id}: no line feed after the blob");
+            using var reader = new StreamReader(new MemoryStream(bytes), new UTF8Encoding(false), detectEncodingFromByteOrderMarks: true);
+            texts[id] = reader.ReadToEnd();
+        }
+        input.Wait();
+        p.WaitForExit();
+        if (p.ExitCode != 0) throw new InvalidOperationException($"git cat-file --batch: {err.Result.Trim()}");
+        return texts;
+    }
+
+    static string ReadLine(Stream s)
+    {
+        var line = new List<byte>();
+        for (int b; (b = s.ReadByte()) != '\n';)
+        {
+            if (b < 0) throw new InvalidOperationException("git cat-file --batch ended early");
+            line.Add((byte)b);
+        }
+        return Encoding.ASCII.GetString(line.ToArray());
     }
 
     static string Git(string repo, string args)
