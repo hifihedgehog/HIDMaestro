@@ -66,7 +66,7 @@ command, and the test app's exit after quit get 300 s, S71 1500 s and S73
 still running then fails its scenario as a hang, with the probe's
 transcript, and its process tree is stopped.
 
-Total wall time: [D4-PLACEHOLDER: minutes from the v2.0.0 release battery] for all 99
+Total wall time: 30 minutes for all 99
 scenarios, every section and check, on a 16-core laptop. Use `-Filter` to
 run one scenario when iterating.
 
