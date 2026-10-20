@@ -187,9 +187,12 @@ internal static class Program
         // beside the virtual one is never opened. The path cannot tell them
         // apart: the virtual SideWinder is not an XInput device, so its path
         // has no &IG_, the same as the real joystick's.
+        // The interface can arrive late on a loaded machine. The deadline
+        // only catches a device that never comes up.
         string serial = $"HM-CTL-{index:D4}";
         HMHidDeviceInfo? match = null;
-        for (int i = 0; i < 50 && match == null; i++)
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        while (match == null && watch.ElapsedMilliseconds < 30000)
         {
             match = HMDeviceExtractor.ListDevices()
                 .FirstOrDefault(d => d.VendorId == vid && d.ProductId == pid && d.SerialNumberString == serial);
