@@ -40,13 +40,16 @@ internal static partial class Program
 
     static string F(double v) => v.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture);
 
-    static RawGameController? FindRaw(ushort vid, ushort pid, int timeoutMs)
+    /// <summary>The first RawGameController of this VID and PID whose id is
+    /// not in <paramref name="skip"/>.</summary>
+    static RawGameController? FindRaw(ushort vid, ushort pid, int timeoutMs, ISet<string>? skip = null)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
         while (sw.ElapsedMilliseconds < timeoutMs)
         {
             foreach (var r in WgiPins.Raws())
-                if (r.HardwareVendorId == vid && r.HardwareProductId == pid) return r;
+                if (r.HardwareVendorId == vid && r.HardwareProductId == pid && (skip == null || !skip.Contains(r.NonRoamableId)))
+                    return r;
             Thread.Sleep(100);
         }
         return null;
@@ -167,17 +170,29 @@ internal static partial class Program
         DPad("DPadUp", "Up"); DPad("DPadDown", "Down"); DPad("DPadLeft", "Left"); DPad("DPadRight", "Right");
     }
 
-    static bool WaitGone(ushort vid, ushort pid, int timeoutMs)
+    /// <summary>Waits up to <paramref name="timeoutMs"/> for WGI to drop
+    /// every RawGameController of this VID and PID, and returns the ids of
+    /// every one that outlasted a wait. A pad this probe disposed leaves
+    /// within it. One that stays is a real pad or another program's device,
+    /// which is never waited on again and never read in place of the
+    /// probe's own.</summary>
+    static HashSet<string> WaitGone(ushort vid, ushort pid, int timeoutMs)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        while (sw.ElapsedMilliseconds < timeoutMs)
+        List<string> left;
+        while (true)
         {
-            if (!WgiPins.Raws().Any(r => r.HardwareVendorId == vid && r.HardwareProductId == pid))
-                return true;
+            left = WgiPins.Raws()
+                .Where(r => r.HardwareVendorId == vid && r.HardwareProductId == pid && !s_others.Contains(r.NonRoamableId))
+                .Select(r => r.NonRoamableId).ToList();
+            if (left.Count == 0 || sw.ElapsedMilliseconds >= timeoutMs) break;
             Thread.Sleep(100);
         }
-        return false;
+        s_others.UnionWith(left);
+        return s_others;
     }
+
+    static readonly HashSet<string> s_others = new(StringComparer.Ordinal);
 
     sealed class Verdict
     {
@@ -206,11 +221,9 @@ internal static partial class Program
         {
             WriteLegacyOverride(vid, pid, string.Equals(profile.TriggerMode, "combined", StringComparison.OrdinalIgnoreCase));
         }
-        if (!WaitGone(vid, pid, 6000))
-        {
-            v.Text = "SKIP: a device with this VID:PID is still listed by WGI";
-            return v;
-        }
+        // A real pad of this VID and PID, or another program's, outlasts the
+        // wait and is left alone instead of failing the profile.
+        var others = WaitGone(vid, pid, 6000);
 
         HMController pad;
         try { pad = ctx.CreateController(profile); }
@@ -232,7 +245,7 @@ internal static partial class Program
         feeder.Start();
         try
         {
-            var raw = FindRaw(vid, pid, 10000);
+            var raw = FindRaw(vid, pid, 10000, others);
             if (raw == null) { v.Text = "WGI lists no RawGameController within 10 s"; return v; }
             v.Listed = true;
             using (var k = Registry.LocalMachine.OpenSubKey(keyPath)) v.KeyWhileLive = k != null;
@@ -261,12 +274,15 @@ internal static partial class Program
                 for (int i = 0; i < now.Switches.Length; i++) if (now.Switches[i] != rest.Switches[i]) return true;
                 return false;
             }
-            // The reading is polled every 10 ms instead of read once after
-            // fixed waits, with those waits as the limits: up to 220 ms for
-            // the stimulus to show, raw and Gamepad, and up to 120 ms for the
-            // reading to fall back to rest before the next one. A control
+            // The reading is polled every 10 ms until the stimulus shows, raw
+            // and Gamepad, and then until it falls back to rest before the
+            // next one. The reading follows the feed within a few 8 ms
+            // frames, so the limits, 2 s to show and 1 s to fall back, are
+            // hang bounds a busy machine cannot reach, where the 220 and
+            // 120 ms they replace could leave a control unjudged. A control
             // that lands on the wrong field never shows as expected, and is
-            // judged on the reading at 220 ms, as before.
+            // judged on the reading at 2 s. A control the profile lacks
+            // never moves the raw reading and takes the full 2 s.
             void Stim(string label, HMGamepadState s, Func<GamepadReading, GamepadReading, bool> expected, string expectText)
             {
                 lock (gate) state = s;
@@ -276,12 +292,12 @@ internal static partial class Program
                 {
                     now = Read(raw, gp);
                     if (Moved(now) && now.Pad is { } p0 && rest.Pad is { } r1 && expected(p0, r1)) break;
-                    if (sw.ElapsedMilliseconds >= 220) break;
+                    if (sw.ElapsedMilliseconds >= 2000) break;
                     Thread.Sleep(10);
                 }
                 lock (gate) state = neutral;
                 sw.Restart();
-                while (Moved(Read(raw, gp)) && sw.ElapsedMilliseconds < 120) Thread.Sleep(10);
+                while (Moved(Read(raw, gp)) && sw.ElapsedMilliseconds < 1000) Thread.Sleep(10);
                 bool rawMoved = Moved(now);
                 if (!rawMoved || now.Pad is not { } a || rest.Pad is not { } b) return;   // the profile lacks this control
                 judged++;
