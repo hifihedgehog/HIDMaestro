@@ -55,7 +55,11 @@ internal static partial class Program
             // A connection that sends nothing, MaxHandshakes of them at once,
             // and one more.
             int deadline = UsbipServer.HandshakeDeadlineMs;
-            Thread.Sleep(300);
+            // The connections above leave their handshake once answered. Wait
+            // for that, and for any other program's connection to leave by
+            // its own deadline, so no slot below is already taken.
+            var inHandshake = typeof(UsbipServer).GetField("_handshakes", BindingFlags.NonPublic | BindingFlags.Instance)!;
+            WaitUntil(() => (int)inHandshake.GetValue(server)! == 0, deadline + 5000);
             var idle = new List<Socket>();
             var opened = Stopwatch.StartNew();
             try
@@ -67,25 +71,31 @@ internal static partial class Program
                       $"{closedEarly} closed early");
                 using (var extra = Connect(server.Port))
                 {
-                    long at = WaitClosed(extra, 1000);
-                    Check("one more is closed at once", at >= 0, at >= 0 ? $"{at} ms" : "still open after 1 s");
+                    // Half the deadline: room for load, and well short of the
+                    // deadline that would close one wrongly admitted.
+                    long at = WaitClosed(extra, deadline / 2);
+                    Check("one more is closed at once", at >= 0, at >= 0 ? $"{at} ms" : $"still open after {deadline / 2} ms");
                 }
+                // Not closed before the deadline is the check. Twice the
+                // deadline only bounds a connection that is never closed.
                 var closedAt = new List<long>();
                 foreach (var s in idle)
                 {
-                    long left = deadline + 1500 - opened.ElapsedMilliseconds;
+                    long left = 2 * deadline - opened.ElapsedMilliseconds;
                     closedAt.Add(WaitClosed(s, (int)Math.Max(0, left)) >= 0 ? opened.ElapsedMilliseconds : -1);
                 }
                 long first = closedAt.Count > 0 ? closedAt.Min() : -1;
                 Check($"an idle connection is closed at its {deadline} ms handshake deadline",
                       !closedAt.Contains(-1) && first >= deadline - 500,
-                      closedAt.Contains(-1) ? $"{closedAt.FindAll(t => t < 0).Count} still open at {deadline + 1500} ms"
+                      closedAt.Contains(-1) ? $"{closedAt.FindAll(t => t < 0).Count} still open at {2 * deadline} ms"
                                             : $"closed from {first} to {closedAt.Max()} ms");
             }
             finally { foreach (var s in idle) s.Dispose(); }
 
-            // A request sent one byte a second: the deadline is the
-            // handshake's, not each read's.
+            // A request sent one byte every 2 s: the deadline is the
+            // handshake's, not each read's. A deadline per read would let the
+            // request finish at 14 s and be answered, far past the 10 s bound,
+            // which leaves the deadline 5 s of room for load.
             using (var s = Connect(server.Port))
             {
                 var req = new byte[8];
@@ -96,12 +106,12 @@ internal static partial class Program
                 for (int i = 0; i < req.Length && closed < 0; i++)
                 {
                     try { s.Send(req.AsSpan(i, 1)); } catch (SocketException) { closed = clock.ElapsedMilliseconds; break; }
-                    long at = WaitClosed(s, 1000);
+                    long at = WaitClosed(s, 2000);
                     if (at >= 0) closed = clock.ElapsedMilliseconds;
                 }
                 if (closed < 0) closed = WaitClosed(s, 1500) >= 0 ? clock.ElapsedMilliseconds : -1;
-                Check("a request sent a byte a second is closed at the deadline",
-                      closed >= 0 && closed < deadline + 1500,
+                Check("a request sent a byte every 2 s is closed at the deadline",
+                      closed >= 0 && closed < 2 * deadline,
                       closed >= 0 ? $"{closed} ms" : "answered or still open");
             }
         }

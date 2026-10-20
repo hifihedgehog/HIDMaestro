@@ -104,7 +104,9 @@ internal static partial class Program
         // that is closing is no one's to import over.
         client.Shutdown(SocketShutdown.Both);
         client.Close();
-        Thread.Sleep(200);
+        // Polled: the end leaves ESTABLISHED once the stack has taken the
+        // close in. A lookup that still matches it fails at the bound.
+        WaitUntil(() => TcpConnectionOwner.OfPeer(accepted) == -1, 5000);
         int after = TcpConnectionOwner.OfPeer(accepted);
         Check("once the peer has closed, its end matches no owner", after == -1, $"pid {after}");
     }
