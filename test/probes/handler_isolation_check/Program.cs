@@ -52,6 +52,24 @@ internal static class Program
     const BindingFlags Any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
     const int Reports = 20;
 
+    /// <summary>How soon a handler's dispose must pass the join of its own
+    /// reader. A Dispose that waits for that reader passes it no sooner than
+    /// the join gives up, 500 ms. On the bench it passed it within 0 to 33 ms,
+    /// one 20 ms poll of the probe.</summary>
+    const int OwnThreadBoundMs = 400;
+
+    /// <summary>Whether <paramref name="data"/>, a report 0x05 after its ID,
+    /// is one OutputAndDecoded sent: zero but for its sequence number, 1 to
+    /// <see cref="Reports"/>, at report byte 4. Another program on the
+    /// machine may write the DualShock 4 too.</summary>
+    static bool OwnReport(ReadOnlySpan<byte> data)
+    {
+        if (data.Length < 4 || data[3] < 1 || data[3] > Reports) return false;
+        for (int i = 0; i < data.Length; i++)
+            if (i != 3 && data[i] != 0) return false;
+        return true;
+    }
+
     static readonly Action<HMController, HMOutputPacket> ThrowOnOutput =
         (_, _) => throw new InvalidOperationException("S85: a throwing OutputReceived handler");
     static readonly EventHandler<HMOutputDecodedEventArgs> ThrowOnDecoded =
@@ -93,9 +111,9 @@ internal static class Program
         using var c = ctx.CreateController(profile);
         int received = 0, decoded = 0;
         c.OutputReceived += ThrowOnOutput;
-        c.OutputReceived += (_, p) => { if (p.ReportId == 0x05) Interlocked.Increment(ref received); };
+        c.OutputReceived += (_, p) => { if (p.ReportId == 0x05 && OwnReport(p.Data.Span)) Interlocked.Increment(ref received); };
         c.OutputDecoded += ThrowOnDecoded;
-        c.OutputDecoded += (_, e) => { if (e.ReportId == 0x05) Interlocked.Increment(ref decoded); };
+        c.OutputDecoded += (_, e) => { if (e.ReportId == 0x05 && e.RawBytes.Length > 1 && OwnReport(e.RawBytes.Span[1..])) Interlocked.Increment(ref decoded); };
 
         using var h = OpenNew(profile, before);
         if (h == null) return;
@@ -131,7 +149,9 @@ internal static class Program
         {
             if (p.ReportId != 0x05 || entered.IsSet) return;
             entered.Set();
-            release.Wait(5000);
+            // Far past the Dispose it outlasts, 566 ms on the bench: the probe
+            // releases it once Dispose returns.
+            release.Wait(30_000);
         };
         // Every exception the output thread meets from here on, caught or
         // not.
@@ -201,7 +221,7 @@ internal static class Program
         double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - started) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
         bool ended = Probe.WaitFor(() => !output.IsAlive, 10_000);
         Probe.Check("an OutputReceived handler disposing its own controller does not wait for its own thread",
-            ran && handedOver && ms < 250 && ended,
+            ran && handedOver && ms < OwnThreadBoundMs && ended,
             ran ? $"teardown reached after {ms:F0} ms, reader ended {ended}" : "the handler never ran");
     }
 
@@ -252,7 +272,7 @@ internal static class Program
         bool ended = Probe.WaitFor(() => !output.IsAlive, 10_000);
         if (!ran) ctx.Dispose();
         Probe.Check("an OutputReceived handler disposing the context does not wait for its own thread",
-            registered && ran && released && ms < 250 && done && ended,
+            registered && ran && released && ms < OwnThreadBoundMs && done && ended,
             ran ? $"own reader released after {ms:F0} ms, Dispose returned {done}, reader ended {ended}"
                 : $"the handler never ran (registered {registered})");
     }
@@ -425,7 +445,7 @@ internal static class Program
         bool allGone = set.All(x => !ctx.ActiveControllers.Contains(x));
         if (!ran) ctx.DisposeControllersInParallel(set);
         Probe.Check("an OutputReceived handler disposing its own controller with two others does not wait for its own thread",
-            ran && handedOver && ms < 250 && done && ended && allGone,
+            ran && handedOver && ms < OwnThreadBoundMs && done && ended && allGone,
             ran ? $"teardown reached after {ms:F0} ms, the call returned {done}, reader ended {ended}, all three gone {allGone}"
                 : "the handler never ran");
     }
@@ -454,9 +474,11 @@ internal static class Program
         bool stateToggled = k.KeyboardLeds?.HasFlag(HMKeyboardLeds.ScrollLock) == !initial;
         PressScrollLock(k);
         bool restored = Probe.WaitFor(() => seen.Count >= 2 && seen.Last().HasFlag(HMKeyboardLeds.ScrollLock) == initial, 3000);
-        // Leave Scroll Lock as it was found, whatever the handlers saw.
-        if (!Probe.WaitFor(() => ScrollLockOn() == initial, 1000)) PressScrollLock(k);
-        Probe.WaitFor(() => ScrollLockOn() == initial, 1000);
+        // Leave Scroll Lock as it was found, whatever the handlers saw. A
+        // second press only when the state has not come back by itself, so a
+        // slow update is not pressed the wrong way.
+        if (!Probe.WaitFor(() => ScrollLockOn() == initial, 10_000)) PressScrollLock(k);
+        Probe.WaitFor(() => ScrollLockOn() == initial, 10_000);
 
         Probe.Check("behind a throwing OutputReceived handler and a throwing KeyboardLedsChanged handler, " +
                     "the handler after them sees Scroll Lock go on and off, and KeyboardLeds follows",
@@ -484,10 +506,13 @@ internal static class Program
         int reads = 0;
         c.OutputReceived += ThrowOnOutput;
         c.OutputReceived += (_, p) => { if (p.Source == HMOutputSource.HidFeatureRead && p.ReportId == 0x05) Interlocked.Increment(ref reads); };
+        // Read before the device is looked for: another program that opens a
+        // new DualSense reads these features too, and arms it.
+        bool startedArmed = Armed();
 
         using var h = OpenNew(profile, before);
         if (h == null) return;
-        Probe.Check("the DualSense starts on report 0x01", !Armed());
+        Probe.Check("the DualSense starts on report 0x01", !startedArmed);
         int length = Caps(h).FeatureReportByteLength;
         var buffer = new byte[Math.Max(length, 2)];
         buffer[0] = 0x05;
@@ -495,7 +520,8 @@ internal static class Program
         bool armed = Probe.WaitFor(Armed, 2000);
         Probe.Check("behind a throwing OutputReceived handler, a host's read of feature report 0x05 " +
                     "still switches it to report 0x31, and the handler after it sees the read",
-            armed && Volatile.Read(ref reads) == 1,
+            // At least the probe's read: another program's reads count too.
+            armed && Volatile.Read(ref reads) >= 1,
             $"HidD_GetFeature {(read ? "succeeded" : "failed")}, {reads} read seen, armed {armed}");
     }
 
