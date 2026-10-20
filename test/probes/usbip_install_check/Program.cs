@@ -79,17 +79,39 @@ internal static class Program
             return 0;
         }
         if (args.Length >= 3 && args[0] == "--in-sandbox")
-            return InSandbox(args[1], args[2]);
+        {
+            if (args.Length < 4 || args[3] != "diag") return InSandbox(args[1], args[2]);
+            DiagLog.Start(Path.Combine(args[2], "main-diag.log"));
+            using (DiagLog.SampleInstallers(Path.Combine(args[2], "processes.log")))
+            {
+                int code = InSandbox(args[1], args[2]);
+                DiagLog.Collect(args[2]);
+                return code;
+            }
+        }
         if (args.Length >= 4 && args[0] == "--create-composite")
+        {
+            if (args.Length >= 5 && args[4] == "diag")
+                DiagLog.Start(Path.Combine(Path.GetDirectoryName(args[2])!, $"child{args[3]}-diag.log"));
             return CreateComposite(args[1], args[2], args[3]);
+        }
         if (args.Length >= 2 && args[0] == "--record-create")
             return RecordCreate(args[1]);
         if (args.Length > 0 && args[0] == "--offline")
             return Offline();
-        return Host(args.Length > 0 ? args[0].ToUpperInvariant() : "ABC");
+        int at = Array.IndexOf(args, "--diag");
+        if (at >= 0 && at + 1 < args.Length) s_diagDir = Path.GetFullPath(args[at + 1]);
+        return Host(args.Length > 0 && !args[0].StartsWith("--", StringComparison.Ordinal) ? args[0].ToUpperInvariant() : "ABC");
     }
 
     // ── Host ───────────────────────────────────────────────────────────
+
+    // --diag <dir>: each program inside the sandbox runs with HIDMAESTRO_DIAG=1
+    // and writes the SDK's diagnostic lines to a log of its own. Those logs, a
+    // once-a-second list of the installer processes, the VC++ runtime's
+    // bundle and package logs, the Windows Installer events and Windows'
+    // setupapi logs are copied to <dir> (DiagLog).
+    static string? s_diagDir;
 
     static int Host(string only)
     {
@@ -174,7 +196,7 @@ internal static class Program
 
             step.Restart();
             var ran = Run(wsb, 1_200_000, "exec", "--id", id, "-c",
-                $"C:\\probe\\UsbipInstallCheck.exe --in-sandbox {scenario} C:\\results", "-r", "System", "--raw");
+                $"C:\\probe\\UsbipInstallCheck.exe --in-sandbox {scenario} C:\\results{(s_diagDir != null ? " diag" : "")}", "-r", "System", "--raw");
             runS = step.Elapsed.TotalSeconds;
             string file = Path.Combine(results, "results.txt");
             if (!File.Exists(file)) { Check($"{scenario}: the run inside the sandbox reports back", false, ran.Output.Trim()); return; }
@@ -199,6 +221,21 @@ internal static class Program
             // inside it.
             Console.WriteLine(FormattableString.Invariant(
                 $"  [NOTE] {scenario}: the sandbox started in {startS:F1} s, took its first command {readyS:F1} s later after {tries} tries, ran the probe in {runS:F1} s and stopped in {stop.Elapsed.TotalSeconds:F1} s"));
+            if (s_diagDir != null)
+            {
+                string kept = Path.Combine(s_diagDir, $"{scenario}-{DateTime.Now:yyyyMMdd-HHmmss}");
+                try
+                {
+                    foreach (string f in Directory.GetFiles(results, "*", SearchOption.AllDirectories))
+                    {
+                        string to = Path.Combine(kept, Path.GetRelativePath(results, f));
+                        Directory.CreateDirectory(Path.GetDirectoryName(to)!);
+                        File.Copy(f, to, true);
+                    }
+                    Console.WriteLine($"  [NOTE] {scenario}: diagnostic logs in {kept}");
+                }
+                catch (Exception ex) { Console.WriteLine($"  [NOTE] {scenario}: diagnostic logs not copied: {ex.GetType().Name}: {ex.Message}"); }
+            }
             try { Directory.Delete(results, true); } catch { }
         }
     }
@@ -254,8 +291,12 @@ internal static class Program
             HMController? c = null;
             Exception? error = null;
             DateTime createdFrom = DateTime.UtcNow;
+            var made = Stopwatch.StartNew();
+            DiagLog.Note($"probe: {scenario} create starts");
             try { c = ctx.CreateController(profile, "sandbox-composite"); }
             catch (Exception ex) { error = ex; }
+            DiagLog.Note($"probe: {scenario} create returned after {made.ElapsedMilliseconds} ms{(error == null ? "" : ": " + error)}");
+            Note(FormattableString.Invariant($"{scenario}: the create took {made.Elapsed.TotalSeconds:F1} s"));
 
             if (scenario == "record") RecordChecks(error != null, error == null ? "" : $"{error.GetType().Name}: {error.Message}");
             else CleanChecks(scenario, c, error, createdFrom);
@@ -539,6 +580,11 @@ internal static class Program
             psi.ArgumentList.Add($"together-{i}");
             psi.ArgumentList.Add(Path.Combine(results, $"child{i}.txt"));
             psi.ArgumentList.Add(i.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            if (DiagLog.On)
+            {
+                psi.ArgumentList.Add("diag");
+                psi.Environment["HIDMAESTRO_DIAG"] = "1";
+            }
             children.Add(Process.Start(psi)!);
         }
         // Both start the SDK and wait on the go event, and each says so
@@ -593,14 +639,17 @@ internal static class Program
             using var done = EventWaitHandle.OpenExisting(DoneEvent);
             using (var ready = EventWaitHandle.OpenExisting(ReadyEvent + slot)) ready.Set();
             go.WaitOne(120_000);
+            DiagLog.Note($"probe: {key} (pid {Environment.ProcessId}) released by the go event, creating");
             var create = Stopwatch.StartNew();
             HMController c;
             try { c = ctx.CreateController(ctx.GetProfile("dualsense-composite")!, key); }
             catch (Exception ex)
             {
+                DiagLog.Note($"probe: {key} create failed after {create.ElapsedMilliseconds} ms: {ex}");
                 File.WriteAllText(answer, $"failed {ex.GetType().Name}: {ex.Message}");
                 return 1;
             }
+            DiagLog.Note($"probe: {key} created on transport index {c.TransportIndex} after {create.ElapsedMilliseconds} ms");
             File.WriteAllText(answer, FormattableString.Invariant($"created {key} on transport index {c.TransportIndex} in {create.Elapsed.TotalSeconds:F1} s"));
             done.WaitOne(300_000);
             c.Dispose();
@@ -666,8 +715,10 @@ internal static class Program
         HMController? c = null;
         Exception? error = null;
         DateTime createdFrom = DateTime.UtcNow;
+        var made = Stopwatch.StartNew();
         try { c = ctx.CreateController(ctx.GetProfile("dualsense-composite")!, "sandbox-composite"); }
         catch (Exception ex) { error = ex; }
+        Note(FormattableString.Invariant($"clean: the create took {made.Elapsed.TotalSeconds:F1} s"));
         CleanChecks("clean", c, error, createdFrom);
         c?.Dispose();
         Note(FormattableString.Invariant($"clean: took {part.Elapsed.TotalSeconds:F1} s"));
