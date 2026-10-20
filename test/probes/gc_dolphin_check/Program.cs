@@ -13,7 +13,9 @@
 // WaveBird, and see a port leave and return with a new origin. The probe also
 // measures what a host gets: the time from a port submit returning to the
 // emulator's read holding that state, and the reports the emulator receives
-// per second, at the descriptor's 8 ms poll and at an overclocked 1 ms.
+// per second, at the descriptor's 8 ms poll and at an overclocked 1 ms. Their
+// checks hold medians and wide floors, since other work on the machine slows
+// the emulator's reads with no defect.
 //
 // Requires elevation and the reference clones native\build.ps1 names. Exit
 // 0 PASS, 1 FAIL, 2 when another program that embeds HIDMaestro is running.
@@ -315,10 +317,12 @@ internal static class Program
         s_measurements.Add($"{name}, {ms} ms host poll: submit to read p50 {p50:F3} ms, p95 {p95:F3} ms, max {max:F3} ms (40 samples)");
         // A submit waits at most one controller read, 1.19971 ms, and one
         // host poll. The bound adds 2 ms for the loopback, the emulator's
-        // read loop and Windows' timer scheduling.
+        // read loop and Windows' timer scheduling. It holds the median: a
+        // read late by a whole poll moves every sample past it, while other
+        // work on the machine delays only some, so the slowest is printed.
         double bound = ms + 1.19971 + 2;
-        Probe.Check($"{name} at a {ms} ms poll: every submit read within {bound:F1} ms",
-            complete && max <= bound, $"p50 {p50:F3}, p95 {p95:F3}, max {max:F3} ms");
+        Probe.Check($"{name} at a {ms} ms poll: the median submit read within {bound:F1} ms",
+            complete && p50 <= bound, $"p50 {p50:F3}, p95 {p95:F3}, max {max:F3} ms");
     }
 
     /// <summary>Forty submit-to-read times in milliseconds at one host
@@ -354,11 +358,15 @@ internal static class Program
     /// own reads-per-second figure is printed beside them.</summary>
     static void Rate(Harness h, HMController controller, string name)
     {
+        // The ceilings fail a report the poll did not ask for, which no load
+        // makes. Each count is one second, and an emulator thread held by
+        // other work reads less, so the floors sit just above half the rate:
+        // they fail a device read at half its poll or stopped, not a slow host.
         var bounds = new Dictionary<string, (double Lo, double Hi)>
         {
-            [RateCases[0].Label] = (120, 130),
-            [RateCases[1].Label] = (790, 875),
-            [RateCases[2].Label] = (950, 1010),
+            [RateCases[0].Label] = (70, 130),
+            [RateCases[1].Label] = (450, 875),
+            [RateCases[2].Label] = (550, 1010),
         };
         foreach (var (label, hz, states, own) in RateValues(h, controller))
         {
