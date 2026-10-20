@@ -832,6 +832,12 @@ internal sealed class Case8UsbipPaths : IOracleCase
             Set("_spareReads", Activator.CreateInstance(t.GetField("_spareReads", Instance)!.FieldType));
             if (runner != null)
                 t.GetMethod("CreateLayoutClock", Instance)!.Invoke(dev, new object[] { runner });
+            // The buffer every control request answers into, sized as the
+            // constructor sizes it: the report capacity, the largest layout
+            // and the engine's report.
+            var layoutReport = (byte[]?)t.GetField("_layoutReport", Instance)!.GetValue(dev);
+            var replyEngine = (ProtocolEngine?)t.GetField("_engine", Instance)!.GetValue(dev);
+            Set("_controlReply", new byte[Math.Max(Math.Max(capacity, layoutReport?.Length ?? 0), replyEngine?.ReportCapacity ?? 0)]);
             return dev;
         }
 
