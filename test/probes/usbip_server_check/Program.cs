@@ -179,10 +179,13 @@ internal static partial class Program
         }
         int lost = Array.FindAll(ms, double.IsNaN).Length;
         Array.Sort(ms);
-        // Nearest rank: the 15th and the 29th of 30.
+        // Nearest rank: the 15th and the 29th of 30. A pump that waits out
+        // its wait costs 0 to 450 ms at random, a median near 225 ms, and a
+        // woken one under a millisecond. The median tells them apart, and
+        // load that slows a few Disposes does not move it.
         double p50 = ms[14], p95 = ms[28], max = ms[29];
-        Check("a USB/IP device's Dispose does not wait out its input pump's 500 ms wait (p95 under 250 ms over 30)",
-              p95 < 250 && lost == 0,
+        Check("a USB/IP device's Dispose does not wait out its input pump's 500 ms wait (median under 100 ms over 30)",
+              p50 < 100 && lost == 0,
               $"p50 {p50:F1} ms, p95 {p95:F1} ms, max {max:F1} ms" + (lost > 0 ? $", {lost} Dispose(s) threw or hung" : ""));
     }
 
@@ -1285,10 +1288,12 @@ internal static partial class Program
         Array.Sort(ms);
         // Nearest rank: the 15th and the 29th of 30. A woken pump ends in
         // about a millisecond, and one that waits out its 500 ms wait from
-        // 20 to 320 ms in takes 180 ms or more.
+        // 20 to 320 ms in takes 180 ms or more at every sample. The median
+        // tells them apart, and load that slows a few Disposes does not
+        // move it.
         double p50 = ms[14], p95 = ms[28], max = ms[29];
-        Check("Dispose wakes the input pump instead of waiting out its 500 ms wait (p95 under 250 ms over 30)",
-              p95 < 250 && closed && lost == 0,
+        Check("Dispose wakes the input pump instead of waiting out its 500 ms wait (median under 100 ms over 30)",
+              p50 < 100 && closed && lost == 0,
               $"p50 {p50:F1} ms, p95 {p95:F1} ms, max {max:F1} ms, pump ended and event closed {closed}" + (lost > 0 ? $", {lost} Dispose(s) threw or hung" : ""));
     }
 
