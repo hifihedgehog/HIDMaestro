@@ -80,47 +80,38 @@ internal sealed class PeerProcess : IDisposable
     /// started, and print it.</summary>
     public PeerProcess AwaitReady()
     {
-        string ready = Read(30_000);
+        string ready = Read(System.Threading.Timeout.Infinite);
         if (!ready.StartsWith("OK ready")) throw new InvalidOperationException($"{Name} did not start: {ready}");
         SdkVersion = Field(ready, "sdk") ?? "";
         Console.WriteLine($"    {Name}: {ready}");
         return this;
     }
 
+    /// <summary>The peer's next line. With no timeout the wait ends on one of
+    /// the two events that can end it: the line, or the end of the peer's
+    /// output when it exits. A peer that hangs is the battery's scenario
+    /// deadline to catch. A timeout is for a check that a command blocks,
+    /// where no event comes.</summary>
     string Read(int timeoutMs)
     {
         LastArrival = 0;
         try
         {
-            if (!_lines.TryTake(out var line, timeoutMs)) return $"ERR timeout after {timeoutMs} ms";
+            if (!_lines.TryTake(out var line, timeoutMs))
+                return timeoutMs < 0 ? "ERR peer exited" : $"ERR timeout after {timeoutMs} ms";
             LastArrival = line.At;
             return line.Line;
         }
         catch (InvalidOperationException) { return "ERR peer exited"; }
     }
 
-    /// <summary>How long a reply is waited for by default: past the longest
-    /// bound the SDK itself waits in a create or a sweep, the transport and
-    /// deploy locks' 10 minutes, at the machine's HIDMAESTRO_TIMEOUT_SCALE.
-    /// A slow machine whose device installs queue behind Windows' online
-    /// driver searches finishes the command, and a peer that hangs still
-    /// fails, later.</summary>
-    internal static readonly int ReplyMs = (int)(660_000 * Scale());
-
-    static double Scale()
-    {
-        string? raw = Environment.GetEnvironmentVariable("HIDMAESTRO_TIMEOUT_SCALE");
-        return double.TryParse(raw, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double v)
-               && v >= 0.1 && v <= 100.0 ? v : 1.0;
-    }
-
     /// <summary>Send one command and wait for its reply line.</summary>
-    public string Send(string command, int timeoutMs = -1)
+    public string Send(string command, int timeoutMs = System.Threading.Timeout.Infinite)
     {
         if (_p.HasExited) return "ERR peer exited";
         _p.StandardInput.WriteLine(command);
         _p.StandardInput.Flush();
-        string reply = Read(timeoutMs < 0 ? ReplyMs : timeoutMs);
+        string reply = Read(timeoutMs);
         Console.WriteLine($"    {Name} <- {command}: {reply}");
         return reply;
     }
@@ -133,9 +124,9 @@ internal sealed class PeerProcess : IDisposable
         _p.StandardInput.Flush();
     }
 
-    public string Receive(string label, int timeoutMs = -1)
+    public string Receive(string label, int timeoutMs = System.Threading.Timeout.Infinite)
     {
-        string reply = Read(timeoutMs < 0 ? ReplyMs : timeoutMs);
+        string reply = Read(timeoutMs);
         Console.WriteLine($"    {Name} <- {label}: {reply}");
         return reply;
     }
