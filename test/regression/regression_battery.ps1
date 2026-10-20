@@ -524,31 +524,6 @@ function Wait-Ready {
     Wait-CascadeSettle
 }
 
-# Wait for a controller-creation event to fully bind. Polls for the
-# expected enumerator-pattern devnode being PRESENT. Adaptive: returns
-# as soon as the device appears (short on fast machines, longer on slow).
-function Wait-CreateBound {
-    param(
-        [string]$ProfileId,
-        # Generous timeout: the FIRST scenario in a battery run can take
-        # significantly longer than steady-state because the test process's
-        # HMContext init does a full RemoveAllVirtualControllers + driver
-        # install check + (post-v1.1.32) phantom-sweep over any
-        # accumulated state from prior sessions. 30s is enough for
-        # subsequent runs but can clip the first run on a heavy machine.
-        # Scaled by HIDMAESTRO_TIMEOUT_SCALE.
-        [int]$TimeoutMs = 60000
-    )
-    $budget = HMScaleMs $TimeoutMs
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($sw.ElapsedMilliseconds -lt $budget) {
-        $present = Get-HMPresentDevnodes
-        if ($present.Count -gt 0) { return $true }
-        Start-Sleep -Milliseconds 250
-    }
-    return $false
-}
-
 # Wait until the SDK-driven create/teardown has actually propagated to
 # PnP and then settled. Two phases:
 #
@@ -846,7 +821,6 @@ function Complete-BackgroundProbe {
 function Scenario-Single-360-BT-360 {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
         Wait-Ready -Proc $proc
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT)
@@ -864,7 +838,6 @@ function Scenario-Single-360-BT-360 {
 function Scenario-Single-360-BT-360-BT {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
         Wait-Ready -Proc $proc
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT);    Wait-CascadeSettle
@@ -909,7 +882,6 @@ function Scenario-Single-LongCycle {
     }
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
         Send-Cmd -Proc $proc -Cmd 'resume'
         Wait-Settled
         foreach ($p in $sequence) {
@@ -925,7 +897,6 @@ function Scenario-Single-LongCycle {
 function Scenario-Single-BT-360-BT {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.XboxBT)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.XboxBT)) { throw "initial create timeout" }
         Wait-Ready -Proc $proc
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.Xbox360);   Wait-CascadeSettle
@@ -940,7 +911,6 @@ function Scenario-Single-BT-360-BT {
 function Scenario-Single-Mixed-Families {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
         Wait-Ready -Proc $proc
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.DualSense);   Wait-CascadeSettle
@@ -958,7 +928,6 @@ function Scenario-Single-Mixed-Families {
 function Scenario-Single-SameProfileSwap {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.XboxBT)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.XboxBT)) { throw "initial create timeout" }
         Wait-Ready -Proc $proc
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT);   Wait-CascadeSettle
@@ -1106,7 +1075,6 @@ function Scenario-AcrossProcess-Recreation {
 function Scenario-RapidSwaps-NoSettle {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
         Wait-Ready -Proc $proc
 
         # Queue 4 swap commands with no inter-command sleep. Each one
@@ -1151,7 +1119,6 @@ function Scenario-Multi-SixControllers {
 function Scenario-Single-SameVidPid {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
         Wait-Ready -Proc $proc
 
         # xbox-360-arcade-stick: same 045E:028E as xbox-360-wired.
@@ -1185,7 +1152,6 @@ function Scenario-ForceKill-MidCascade {
     function Get-PresentKey { ((Get-HMPresentDevnodes) | Sort-Object) -join '|' }
     $proc1 = Start-HMTestProcess -ProfileIds @($Profiles.XboxBT)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.XboxBT)) { throw "initial create timeout" }
         Wait-Ready -Proc $proc1
 
         # Kick off swap-back-to-360 without waiting for it.
@@ -1236,7 +1202,6 @@ function Scenario-ForceKill-MidCascade {
 function Scenario-Single-AlternatingPattern {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
         Wait-Ready -Proc $proc
 
         # A=Xbox360, B=XboxBT, C=DualSense.
