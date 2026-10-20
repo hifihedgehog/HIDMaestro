@@ -2061,10 +2061,14 @@ function Scenario-Registry-Ownership {
 # DualShock 4 v1 must read correctly at rest and on every control through
 # the mapping Windows ships for it. A game pad built in code must hold the
 # table while it lives, read correctly through it and drop it on dispose.
-# A joystick built in code gets neither.
+# A joystick built in code gets neither. The probe exits 2, a skip, before
+# it creates anything while another elevated program that embeds
+# HIDMaestro runs, PadForge for one, since that program shares the SDK's
+# devices.
 function Scenario-Wgi-Mapping {
     Invoke-Probe -Dir 'wgi_mapping_check' -Exe 'WgiMappingCheck.exe' `
-                 -Message 'WGI reads a virtual pad differently from the real device, or a GameInput key outlived its virtual (see probe stdout)'
+                 -Message 'WGI reads a virtual pad differently from the real device, or a GameInput key outlived its virtual (see probe stdout)' `
+                 -SkipCodes 2
 }
 
 # S68: another OpenVR driver registered under HIDMaestro's driver name,
