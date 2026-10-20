@@ -24,6 +24,8 @@ internal static partial class Program
 
     [DllImport(SDL)] static extern bool SDL_SetHint(string name, string value);
     [DllImport(SDL)] static extern bool SDL_Init(uint flags);
+    [DllImport(SDL)] static extern bool SDL_InitSubSystem(uint flags);
+    [DllImport(SDL)] static extern void SDL_QuitSubSystem(uint flags);
     [DllImport(SDL)] static extern void SDL_Quit();
     [DllImport(SDL)] static extern void SDL_PumpEvents();
     [DllImport(SDL)] static extern bool SDL_PollEvent(IntPtr sdlEvent);
@@ -261,6 +263,37 @@ internal static partial class Program
             Check("SDL reports an accelerometer and a gyro", SDL_GamepadHasSensor(gp, SENSOR_ACCEL) && SDL_GamepadHasSensor(gp, SENSOR_GYRO));
             Check("both enable", SDL_SetGamepadSensorEnabled(gp, SENSOR_ACCEL, true) && SDL_SetGamepadSensorEnabled(gp, SENSOR_GYRO, true), Str(SDL_GetError()));
             Console.WriteLine($"  SDL's stated rate: {SDL_GetGamepadSensorDataRate(gp, SENSOR_GYRO)} Hz");
+
+            // SDL calibrates the pad's motion clock once, on its first 100
+            // reports after it finds the pad. When their timestamps advance
+            // within 10 percent of 100 report periods, it reads them as
+            // microseconds and the gyro at 34.8 rad/s full scale, otherwise
+            // at 40 (SDL_hidapi_switch2.c, the sample_count == 100 branch).
+            // A host too busy to read every report in that window, as the
+            // Atom can be, leaves SDL on the second path, and SDL keeps it
+            // until it finds the pad again. So SDL's gamepad subsystem starts
+            // again, up to twice, before the checks below judge the clock. A
+            // persona that sends the wrong units fails all three times.
+            for (int attempt = 1; attempt < 3; attempt++)
+            {
+                // SDL sends motion only after its 105-report calibration,
+                // about 420 ms of reports.
+                var first = SensorTimestamps(SDL_GetGamepadID(gp), SENSOR_GYRO, 1500);
+                var gaps = new List<long>();
+                for (int i = 1; i < first.Count; i++) gaps.Add((long)(first[i] - first[i - 1]));
+                if (gaps.Count < 10 || gaps.All(s => s == 4_000_000)) break;
+                Console.WriteLine($"  SDL calibrated its motion clock off the pad's 4 ms ({gaps.GroupBy(s => s).OrderByDescending(g => g.Count()).First().Key} ns a step): starting SDL's gamepad subsystem again");
+                SDL_CloseGamepad(gp);
+                gp = IntPtr.Zero;
+                SDL_QuitSubSystem(SDL_INIT_JOYSTICK | SDL_INIT_GAMEPAD);
+                if (!SDL_InitSubSystem(SDL_INIT_JOYSTICK | SDL_INIT_GAMEPAD)) { Check("SDL's gamepad subsystem starts again", false, Str(SDL_GetError())); return; }
+                var again = WaitForSwitch2(1, 20000);
+                if (again.Count != 1 || !again[0].IsGamepad) { Check("SDL finds the pad again", false, $"{again.Count} listed"); return; }
+                gp = SDL_OpenGamepad(again[0].Id);
+                if (gp == IntPtr.Zero) { Check("SDL opens the pad again", false, Str(SDL_GetError())); return; }
+                SDL_SetGamepadSensorEnabled(gp, SENSOR_ACCEL, true);
+                SDL_SetGamepadSensorEnabled(gp, SENSOR_GYRO, true);
+            }
 
             var v = new float[3];
             bool Near(float got, float want) => Math.Abs(got - want) <= Math.Max(0.01f * Math.Abs(want), 0.02f);
