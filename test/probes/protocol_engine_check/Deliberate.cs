@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using HIDMaestro.Internal;
 using HIDMaestro.Internal.Usbip;
@@ -97,32 +98,39 @@ internal static class Deliberate
         }
     }
 
-    /// <summary>400 intervals of the running clock after a handshake: the
-    /// median of the 0x30 frames' intervals within 0.1 ms of 15 ms. A clock
-    /// that waits its period after each tick runs long every period, 16.58
-    /// ms at 9bd6279's identity commit, so its median runs long too. On the
-    /// grid a frame the machine holds up makes one interval long and the
-    /// next short, and a grid point it skips makes one interval 30 ms, so
-    /// the median stays at 15 ms. 401 frames take 6 s, and 60 s is the hang
-    /// bound.</summary>
+    /// <summary>The running clock after a handshake. Its missed-tick rule
+    /// decides the grid: NextPoll keeps every tick on the origin plus whole
+    /// periods and skips the points a late tick passed, where a clock that
+    /// waits its period after each tick runs long every period, 16.58 ms at
+    /// 9bd6279's identity commit. The rule is read from the host's clock, and
+    /// the grid math it runs is checked above without a running clock. The
+    /// median of 400 intervals is printed, not judged: a loaded machine
+    /// moves it with no defect, 15.14 ms on the Atom fixture. 401 frames
+    /// take 6 s, and 60 s is the hang bound.</summary>
     const int Periods = 400;
+    const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;
 
     static void Grid()
     {
         var (host, ch) = Make(7972);
+        MissedTick? rule = null;
         try
         {
             host.OnOutput(Subcommand(0x02), 49, 0);
             host.Start();
+            var clock = typeof(ProtocolHost).GetField("_clock", Instance)?.GetValue(host);
+            rule = clock?.GetType().GetField("_missed", Instance)?.GetValue(clock) as MissedTick?;
             var deadline = Stopwatch.StartNew();
             while (ch.Count(0x30) < Periods + 1 && deadline.Elapsed < TimeSpan.FromSeconds(60)) Thread.Sleep(50);
         }
         finally { host.Dispose(); }
+        Check("the 0x30 stream's clock keeps its grid: a late tick skips the points it passed and never restarts the period",
+              rule == MissedTick.NextPoll, rule?.ToString() ?? "no clock");
         List<long> at;
         lock (ch.Frames) at = ch.Frames.Where(f => f.Report.Length > 0 && f.Report[0] == 0x30).Select(f => f.At).ToList();
         if (at.Count < Periods + 1) { Check($"the clock sends {Periods + 1} 0x30 frames within 60 s", false, $"{at.Count}"); return; }
         var intervals = Enumerable.Range(0, Periods).Select(i => (at[i + 1] - at[i]) * 1000.0 / Stopwatch.Frequency).OrderBy(ms => ms).ToList();
         double median = (intervals[Periods / 2 - 1] + intervals[Periods / 2]) / 2;
-        Check($"the 0x30 stream's median period over {Periods} intervals is within 0.1 ms of 15 ms", Math.Abs(median - 15.0) <= 0.1, $"{median:F4} ms");
+        Console.WriteLine($"  info: the 0x30 stream's median period over {Periods} intervals is {median:F4} ms");
     }
 }
