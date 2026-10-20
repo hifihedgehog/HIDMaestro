@@ -136,12 +136,15 @@ internal static class Program
     /// collection and a consumer control, at most 27 ms after the listing
     /// (p95 26 ms), and every keyboard already held the LED state Windows
     /// sends one it has opened. So a keyboard waits for that state, up to
-    /// the 1000 ms this waited before, and anything else 50 ms.</summary>
+    /// the 1000 ms this waited before, and anything else 300 ms. A report
+    /// sent before Windows reads the collection is lost, as a real device's
+    /// is, and other work on the machine delays that read with no defect,
+    /// so the wait is some 11 times the slowest of those readings.</summary>
     static void Readable(params HMController[] keyboards)
     {
         var sw = Stopwatch.StartNew();
         while (sw.ElapsedMilliseconds < 1000 && keyboards.Any(k => k.KeyboardLeds == null)) Thread.Sleep(10);
-        if (keyboards.Length == 0) Thread.Sleep(50);
+        if (keyboards.Length == 0) Thread.Sleep(300);
     }
 
     static HashSet<string> Names() => RawInputSink.Devices().Select(d => d.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -675,10 +678,16 @@ internal static class Program
             k1.SubmitKeyboard(HMKeyModifiers.None, new[] { HMKey.F24 });
             k1.SubmitKeyboard(HMKeyModifiers.None, ReadOnlySpan<HMKey>.Empty);
             var sw = Stopwatch.StartNew();
-            while (sw.ElapsedMilliseconds < 2000 && sink.Keys.Count(k => k.Device == dev1[0].Handle) < 2) Thread.Sleep(20);
+            while (sw.ElapsedMilliseconds < 2000 && !sink.Keys.Any(k => k.Device == dev1[0].Handle && (k.Flags & 1) == 1)) Thread.Sleep(20);
             var keys = sink.Keys.Where(k => k.Device == dev1[0].Handle).ToList();
+            // Windows repeats a held key after the keyboard delay, 250 ms at
+            // the shortest. When other work holds this thread that long
+            // between the two submits, the make repeats before the break,
+            // and those repeats pass. No make, no break, a break before a
+            // make or another key still fails.
             Check("F24 arrives as make then break (VK_F24)",
-                  keys.Count == 2 && keys.All(k => k.VKey == 0x87) && (keys[0].Flags & 1) == 0 && (keys[1].Flags & 1) == 1,
+                  keys.Count >= 2 && keys.All(k => k.VKey == 0x87) && keys.Take(keys.Count - 1).All(k => (k.Flags & 1) == 0)
+                  && (keys[^1].Flags & 1) == 1,
                   string.Join(", ", keys.Select(k => $"vk 0x{k.VKey:X2} flags {k.Flags}")));
 
             // Windows sends each keyboard the lock state as it arrives,

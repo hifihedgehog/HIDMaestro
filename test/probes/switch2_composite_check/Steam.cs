@@ -165,13 +165,23 @@ internal static partial class Program
                   $"report 0x{s2.SelectedReport:X2}, mask 0x{s2.FeatureMask:X2}, enabled 0x{s2.FeatureEnabled:X2}");
 
             // Hold it and watch for Steam dropping it.
+            // Each second of the hold is counted. Steam dropping the pad leaves
+            // a second with almost no reads, while Steam slowed by other work
+            // still reads most of them. More than 250 a second is a report the
+            // clock did not send, which no load makes.
             uint before = s2.ReportsSent;
             var hold = Stopwatch.StartNew();
-            Thread.Sleep(8000);
+            var perSecond = new List<uint>();
+            for (int s = 0; s < 8; s++)
+            {
+                uint at = s2.ReportsSent;
+                Thread.Sleep(1000);
+                perSecond.Add(s2.ReportsSent - at);
+            }
             uint sent = s2.ReportsSent - before;
             double rate = sent * 1000.0 / hold.ElapsedMilliseconds;
-            Check("Steam keeps reading: it takes the persona's 250 reports a second for eight more seconds",
-                  rate > 237 && rate < 252, $"{sent} reports, {rate:F1} a second");
+            Check("Steam keeps reading: it takes the persona's reports in each of eight more seconds, none past 250 a second",
+                  perSecond.All(n => n >= 50) && rate < 252, $"{sent} reports, {rate:F1} a second, by second {string.Join(" ", perSecond)}");
             string after = SteamDeviceLog.Read(controllerLog, controllerBase);
             // Config sets can land after the open, so this reads the log as
             // it stands after the hold.

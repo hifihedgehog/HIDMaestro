@@ -160,7 +160,11 @@ internal static class Program
         Check("so is one whose manifest says HIDMaestro in another case", found.Any(f => f.Equals(upper, StringComparison.OrdinalIgnoreCase)));
         Check("a driver with another name is not", !found.Any(f => f.Equals(other, StringComparison.OrdinalIgnoreCase)));
         Check("HIDMaestro's own folder is not", !found.Any(f => f.Equals(ours, StringComparison.OrdinalIgnoreCase)));
-        Check("a registered folder that no longer exists is skipped", found.Count == 2, $"{found.Count} reported");
+        // The scan also reads SteamVR's own drivers folder, where another
+        // program may have installed a driver under this name. Only the
+        // probe's own folders are counted, so that one cannot fail the check.
+        int mine = found.Count(f => f.StartsWith(root, StringComparison.OrdinalIgnoreCase));
+        Check("a registered folder that no longer exists is skipped", mine == 2, $"{mine} of the probe's folders reported");
 
         File.WriteAllText(registry, "{\n\t\"external_drivers\" : [],\n\t\"version\" : 1\n}\n");
         Check("an empty registry reports nothing beyond SteamVR's own drivers folder",

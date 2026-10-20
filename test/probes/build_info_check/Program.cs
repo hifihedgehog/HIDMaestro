@@ -198,9 +198,18 @@ internal static class Program
             ExpectMissing("the driver for ARM64", HMPayload.Driver, Architecture.Arm64,
                           () => HMBuildInfo.ThrowIfMissing(HMPayload.Driver, Architecture.Arm64));
             var after = ClaimSnapshot();
+            // The pipes are machine-wide. A program that embeds HIDMaestro
+            // and starts, creates or exits during the refusals adds or drops
+            // claims of its own, named in its own record, so only new claims
+            // no other program's record names are this process's.
+            var others = OtherProgramsClaims();
+            var added = after.Except(before).ToList();
+            var foreign = added.Where(others.Contains).ToList();
+            var taken = added.Where(e => !others.Contains(e)).ToList();
+            if (foreign.Count > 0)
+                Console.WriteLine($"  info: claims another program took meanwhile: {string.Join(", ", foreign)}");
             Check("the refusals took no machine-wide claim and wrote nothing to the owner record",
-                  after.SetEquals(before),
-                  after.SetEquals(before) ? "" : "new: " + string.Join(", ", after.Except(before)));
+                  taken.Count == 0, taken.Count == 0 ? "" : "new: " + string.Join(", ", taken));
 
             if (os == Architecture.Arm64)
             {
@@ -261,6 +270,30 @@ internal static class Program
                 using var cs = k.OpenSubKey("Controllers");
                 foreach (string token in cs?.GetSubKeyNames() ?? Array.Empty<string>())
                     set.Add("controller " + token);
+            }
+        }
+        return set;
+    }
+
+    /// <summary>The claim pipes other programs' owner records name, in
+    /// <see cref="ClaimSnapshot"/>'s form: each record's owner claim, and
+    /// the transport index and identity of each of its controllers.</summary>
+    static HashSet<string> OtherProgramsClaims()
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using var root = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestroOwners");
+        if (root == null) return set;
+        foreach (string id in root.GetSubKeyNames())
+        {
+            using var k = root.OpenSubKey(id);
+            if (k == null || (k.GetValue("Pid") is int pid && pid == Environment.ProcessId)) continue;
+            set.Add("pipe HIDMaestro.Owner." + id);
+            using var cs = k.OpenSubKey("Controllers");
+            foreach (string token in cs?.GetSubKeyNames() ?? Array.Empty<string>())
+            {
+                set.Add("pipe HIDMaestro.Identity." + token);
+                using var c = cs!.OpenSubKey(token);
+                if (c?.GetValue("TransportIndex") is int index) set.Add("pipe HIDMaestro.Index." + index);
             }
         }
         return set;

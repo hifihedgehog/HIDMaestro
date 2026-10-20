@@ -59,6 +59,12 @@ internal static class Program
     /// looks again every 250 ms (RegistryLedger.FollowUp). Two of its laps.</summary>
     const int SweepSettleMs = 500;
 
+    /// <summary>How long a devnode may take to get input.inf by rank. That is
+    /// a device install, which Windows runs one at a time for the whole
+    /// machine, so another program's install delays it with no defect. A
+    /// hang bound, some 10 times the seconds an install takes.</summary>
+    const int InstallBoundMs = 60_000;
+
     static int Main(string[] args)
     {
         if (args.Length > 0 && args[0] == "child")
@@ -68,6 +74,9 @@ internal static class Program
         if (Probe.OtherSdkRunning()) return 2;
         if (Probe.RefuseWithoutDepartingRule("S81")) return Probe.Finish("S81");
 
+        // A real adapter plugged into the machine is no adapter of this run's,
+        // so the last check leaves out what was present before the first create.
+        var present = Devnodes.PresentAdapters();
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
         var gc = ctx.GetProfile("gamecube-adapter")!;
@@ -83,8 +92,9 @@ internal static class Program
         Console.WriteLine("-- afterward");
         Probe.Check("no WinUSB hold left in the ledger", RegistryLedger.HeldWinUsbDevnodes().Count == 0,
             string.Join(", ", RegistryLedger.HeldWinUsbDevnodes()));
-        Probe.Check("no adapter left present", Probe.WaitFor(() => Devnodes.PresentAdapters().Count == 0, 10_000),
-            string.Join(", ", Devnodes.PresentAdapters()));
+        List<string> Left() => Devnodes.PresentAdapters().Except(present, StringComparer.OrdinalIgnoreCase).ToList();
+        Probe.Check("no adapter of this run's left present", Probe.WaitFor(() => Left().Count == 0, 10_000),
+            string.Join(", ", Left()));
         return Probe.Finish("S81");
     }
 
@@ -137,7 +147,7 @@ internal static class Program
                     second ?? "");
                 if (second != null)
                 {
-                    Probe.WaitFor(() => Devnodes.Status(second) is { Problem: 10 }, 10_000);
+                    Probe.WaitFor(() => Devnodes.Status(second) is { Problem: 10 }, InstallBoundMs);
                     Probe.Check("it gets input.inf, as a real adapter would, while the first stays on WinUSB",
                         Devnodes.Service(second) == "HidUsb" && Devnodes.Service(first) == "WINUSB",
                         $"{Devnodes.Service(second)} / {Devnodes.Service(first)}");
@@ -245,6 +255,10 @@ internal static class Program
         Console.WriteLine("-- a staging and a deploy while another thread holds the deploy and staging locks");
         DriverBuilder.EnsureExtracted();
         using var held = new ManualResetEventSlim();
+        // Set by the holder before it lets go. A staging or deploy that
+        // finishes with it unset did not wait for the lock. Timing the wait
+        // instead failed when other work delayed the waiting threads' start.
+        int letGo = 0;
         var holder = new Thread(() =>
         {
             var deploy = DriverDeploy.Acquire();
@@ -255,6 +269,7 @@ internal static class Program
                 {
                     held.Set();
                     Thread.Sleep(1500);
+                    Volatile.Write(ref letGo, 1);
                 }
                 finally { staging.ReleaseMutex(); staging.Dispose(); }
             }
@@ -264,11 +279,17 @@ internal static class Program
         held.Wait(10_000);
 
         long stagedMs = -1, deployedMs = -1;
+        bool stagedAfter = false, deployedAfter = false;
         string stageError = "", deployError = "";
         var stager = new Thread(() =>
         {
             var sw = Stopwatch.StartNew();
-            try { DriverBuilder.EnsureExtracted(); stagedMs = sw.ElapsedMilliseconds; }
+            try
+            {
+                DriverBuilder.EnsureExtracted();
+                stagedAfter = Volatile.Read(ref letGo) == 1;
+                stagedMs = sw.ElapsedMilliseconds;
+            }
             catch (Exception ex) { stageError = ex.Message; }
         }) { IsBackground = true };
         var deployer = new Thread(() =>
@@ -279,6 +300,7 @@ internal static class Program
                 var deploy = DriverDeploy.Acquire();
                 try { ProtectedStaging.DirFor(ProtectedStaging.OperationPackage); }
                 finally { deploy.ReleaseMutex(); deploy.Dispose(); }
+                deployedAfter = Volatile.Read(ref letGo) == 1;
                 deployedMs = sw.ElapsedMilliseconds;
             }
             catch (Exception ex) { deployError = ex.Message; }
@@ -286,8 +308,10 @@ internal static class Program
         stager.Start();
         deployer.Start();
         bool done = holder.Join(20_000) & stager.Join(20_000) & deployer.Join(20_000);
-        Probe.Check("a staging waits for the staging lock's holder, then finishes", stagedMs >= 1000, $"{stagedMs} ms {stageError}");
-        Probe.Check("a deploy that stages waits for the deploy lock's holder, then finishes", deployedMs >= 1000, $"{deployedMs} ms {deployError}");
+        Probe.Check("a staging waits for the staging lock's holder, then finishes", stagedMs >= 0 && stagedAfter,
+            $"{stagedMs} ms, {(stagedAfter ? "after" : "before")} the holder let go {stageError}");
+        Probe.Check("a deploy that stages waits for the deploy lock's holder, then finishes", deployedMs >= 0 && deployedAfter,
+            $"{deployedMs} ms, {(deployedAfter ? "after" : "before")} the holder let go {deployError}");
         if (!done)
         {
             // The threads hold machine-wide locks between them. Ending the
@@ -352,7 +376,7 @@ internal static class Program
             if (reclaimFirst)
             {
                 Probe.Check("it gets input.inf: the flag reinstalled it by rank",
-                    Probe.WaitFor(() => Devnodes.Service(id) == "HidUsb" && Devnodes.Status(id) is { Problem: 10 }, 10_000),
+                    Probe.WaitFor(() => Devnodes.Service(id) == "HidUsb" && Devnodes.Status(id) is { Problem: 10 }, InstallBoundMs),
                     $"{Devnodes.Service(id)}");
                 Probe.Check("and the flag is spent", ((Devnodes.ConfigFlags(id) ?? 0) & CONFIGFLAG_REINSTALL) == 0);
             }

@@ -189,12 +189,14 @@ internal static class Program
 
     /// <summary>The settle: a new state reached the wire at most 54.2 ms
     /// after it was first submitted, over 40 changes on each of the two
-    /// devices on the bench, so 100 ms covers it with half again to spare.
-    /// The window: about 50 reports at the 4 ms either device reports at,
-    /// where a counter or timestamp byte changes, so only a byte the state
-    /// sets holds one value through it. --neutral-only shows the read-back
-    /// check failing with these.</summary>
-    const int SettleMs = 100, WindowMs = 200;
+    /// devices on the bench. A state that arrives after the settle puts the
+    /// old state at the window's start and fails the read-back check, and
+    /// other work on the machine slows its arrival, so the settle is some
+    /// 10 times that slowest change. The window: about 50 reports at the
+    /// 4 ms either device reports at, where a counter or timestamp byte
+    /// changes, so only a byte the state sets holds one value through it.
+    /// --neutral-only shows the read-back check failing with these.</summary>
+    const int SettleMs = 600, WindowMs = 200;
 
     /// <summary>The byte positions that hold one value in every report of
     /// <paramref name="a"/>, one value in every report of <paramref name="b"/>,

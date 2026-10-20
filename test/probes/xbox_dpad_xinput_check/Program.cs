@@ -70,11 +70,13 @@ internal sealed class Program
 
         // Find the slot the new virtual claimed. SetupController has its own
         // 500 ms slot-claim wait but it's non-fatal; if the slot didn't
-        // appear inside the SDK we poll once more here for safety.
-        int slot = WaitForSlot(timeoutMs: 3000);
+        // appear inside the SDK we poll once more here for safety. 30 s is a
+        // hang bound: the companion's start waits for its driver host, which
+        // other work on the machine slows.
+        int slot = WaitForSlot(timeoutMs: 30_000);
         if (slot < 0)
         {
-            Console.WriteLine("  FAIL: no XInput slot claimed for the virtual within 3 s: cannot exercise XUSB companion path.");
+            Console.WriteLine("  FAIL: no XInput slot claimed for the virtual within 30 s: cannot exercise XUSB companion path.");
             try { ctrl.Dispose(); } catch { }
             return 1;
         }

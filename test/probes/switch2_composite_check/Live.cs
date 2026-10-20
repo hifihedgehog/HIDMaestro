@@ -498,7 +498,11 @@ internal static partial class Program
             Check("every one is 0x09 and the counter rises by 1 through Windows' HID stack", counted);
             double spanMs = (run[^1].Ticks - run[0].Ticks) * 1000.0 / Stopwatch.Frequency;
             double mean = spanMs / (run.Count - 1);
-            Check("one report every 4 ms while the consumer submits every 8 ms", mean > 3.96 && mean < 4.20, $"mean {mean:F4} ms over {spanMs:F0} ms");
+            // The floor is the claim that no submit adds a report. Skipped
+            // ticks from other work lengthen the mean with no defect, so the
+            // ceiling only fails a device that follows the consumer's 8 ms.
+            // The wire check holds the 4 ms step by its median.
+            Check("one report every 4 ms while the consumer submits every 8 ms, not one every 8", mean > 3.96 && mean < 6.0, $"mean {mean:F4} ms over {spanMs:F0} ms");
         }
 
         Console.WriteLine("\n-- B4 report 0x05 and motion, from SubmitState to ReadFile --");

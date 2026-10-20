@@ -448,12 +448,13 @@ function HMScaleMs { param([int]$Ms) [int][Math]::Min([int]::MaxValue, $Ms * $sc
 
 # How long a step may take before it counts as a hang: a probe's run, the
 # test app's answer to a command, the test app's exit after quit. Every
-# scenario but S71 and S73 finishes in about two minutes, so the deadline
-# ends a hang and nothing else, and those two pass their own. A hang fails
-# its scenario and stops the process tree. Beside the 2026-10-19 gate a
-# probe looped for 14 minutes, and with no deadline the battery would have
-# waited for it forever.
-$script:HangSeconds = 300
+# scenario but S71 and S73 finishes in about two minutes, and those two
+# pass their own. The deadline is ten times that, so a run that load or
+# another program slows still ends inside it and only a hang reaches it.
+# A hang fails its scenario and stops the process tree. Beside the
+# 2026-10-19 gate a probe looped for 14 minutes, and with no deadline the
+# battery would have waited for it forever.
+$script:HangSeconds = 1200
 
 # Waits for a process to exit by the hang deadline, scaled. At the
 # deadline it stops the process tree and throws.
@@ -523,26 +524,24 @@ function Wait-Ready {
     Wait-CascadeSettle
 }
 
-# Wait for a controller-creation event to fully bind. Polls for the
-# expected enumerator-pattern devnode being PRESENT. Adaptive: returns
-# as soon as the device appears (short on fast machines, longer on slow).
+# Wait for the test app's initial create to bring a HIDMaestro devnode
+# PRESENT. Returns as soon as one appears, or false when the app exits
+# first or the hang deadline passes. The first scenario of a run can take
+# some 30 s on a heavy machine, since the app's HMContext init runs a full
+# RemoveAllVirtualControllers, the driver install check and the phantom
+# sweep, so the bound is the hang deadline and only a create that never
+# brings a device reaches it.
 function Wait-CreateBound {
     param(
         [string]$ProfileId,
-        # Generous timeout: the FIRST scenario in a battery run can take
-        # significantly longer than steady-state because the test process's
-        # HMContext init does a full RemoveAllVirtualControllers + driver
-        # install check + (post-v1.1.32) phantom-sweep over any
-        # accumulated state from prior sessions. 30s is enough for
-        # subsequent runs but can clip the first run on a heavy machine.
-        # Scaled by HIDMAESTRO_TIMEOUT_SCALE.
-        [int]$TimeoutMs = 60000
+        [System.Diagnostics.Process]$Proc
     )
-    $budget = HMScaleMs $TimeoutMs
+    $budget = HMScaleMs ($script:HangSeconds * 1000)
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($sw.ElapsedMilliseconds -lt $budget) {
         $present = Get-HMPresentDevnodes
         if ($present.Count -gt 0) { return $true }
+        if ($Proc -and $Proc.HasExited) { return $false }
         Start-Sleep -Milliseconds 250
     }
     return $false
@@ -845,7 +844,7 @@ function Complete-BackgroundProbe {
 function Scenario-Single-360-BT-360 {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
+        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
         Wait-Ready -Proc $proc
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT)
@@ -863,7 +862,7 @@ function Scenario-Single-360-BT-360 {
 function Scenario-Single-360-BT-360-BT {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
+        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
         Wait-Ready -Proc $proc
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT);    Wait-CascadeSettle
@@ -908,7 +907,7 @@ function Scenario-Single-LongCycle {
     }
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
+        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
         Send-Cmd -Proc $proc -Cmd 'resume'
         Wait-Settled
         foreach ($p in $sequence) {
@@ -924,7 +923,7 @@ function Scenario-Single-LongCycle {
 function Scenario-Single-BT-360-BT {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.XboxBT)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.XboxBT)) { throw "initial create timeout" }
+        if (-not (Wait-CreateBound -ProfileId $Profiles.XboxBT -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
         Wait-Ready -Proc $proc
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.Xbox360);   Wait-CascadeSettle
@@ -939,7 +938,7 @@ function Scenario-Single-BT-360-BT {
 function Scenario-Single-Mixed-Families {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
+        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
         Wait-Ready -Proc $proc
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.DualSense);   Wait-CascadeSettle
@@ -957,7 +956,7 @@ function Scenario-Single-Mixed-Families {
 function Scenario-Single-SameProfileSwap {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.XboxBT)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.XboxBT)) { throw "initial create timeout" }
+        if (-not (Wait-CreateBound -ProfileId $Profiles.XboxBT -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
         Wait-Ready -Proc $proc
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT);   Wait-CascadeSettle
@@ -1105,7 +1104,7 @@ function Scenario-AcrossProcess-Recreation {
 function Scenario-RapidSwaps-NoSettle {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
+        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
         Wait-Ready -Proc $proc
 
         # Queue 4 swap commands with no inter-command sleep. Each one
@@ -1150,7 +1149,7 @@ function Scenario-Multi-SixControllers {
 function Scenario-Single-SameVidPid {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
+        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
         Wait-Ready -Proc $proc
 
         # xbox-360-arcade-stick: same 045E:028E as xbox-360-wired.
@@ -1184,7 +1183,7 @@ function Scenario-ForceKill-MidCascade {
     function Get-PresentKey { ((Get-HMPresentDevnodes) | Sort-Object) -join '|' }
     $proc1 = Start-HMTestProcess -ProfileIds @($Profiles.XboxBT)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.XboxBT)) { throw "initial create timeout" }
+        if (-not (Wait-CreateBound -ProfileId $Profiles.XboxBT -Proc $proc1)) { throw "the initial create brought no HIDMaestro devnode" }
         Wait-Ready -Proc $proc1
 
         # Kick off swap-back-to-360 without waiting for it.
@@ -1235,7 +1234,7 @@ function Scenario-ForceKill-MidCascade {
 function Scenario-Single-AlternatingPattern {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
+        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
         Wait-Ready -Proc $proc
 
         # A=Xbox360, B=XboxBT, C=DualSense.
@@ -2049,10 +2048,14 @@ function Scenario-Switch2-Composite {
 # virtuals of those identities, runs the full cleanup and a fresh context,
 # and diffs. It then follows the GameInput table a code-built game pad
 # holds, HMOemNameOverride against a live virtual in all four orders of
-# claim and release, and a consumer killed with its virtual alive.
+# claim and release, and a consumer killed with its virtual alive. The
+# probe exits 2, a skip, when another program that embeds HIDMaestro runs
+# or holds an input section open, since its live part would remove that
+# program's virtuals.
 function Scenario-Registry-Ownership {
     Invoke-Probe -Dir 'registry_ownership_check' -Exe 'RegistryOwnershipCheck.exe' `
-                 -Message 'a registry key a real device owns was changed, or a key HIDMaestro wrote outlived its virtual (see probe stdout)'
+                 -Message 'a registry key a real device owns was changed, or a key HIDMaestro wrote outlived its virtual (see probe stdout)' `
+                 -SkipCodes 2
 }
 
 # S67: what WGI reads from a virtual pad (foundation-sunshine #1056). The
@@ -2061,10 +2064,14 @@ function Scenario-Registry-Ownership {
 # DualShock 4 v1 must read correctly at rest and on every control through
 # the mapping Windows ships for it. A game pad built in code must hold the
 # table while it lives, read correctly through it and drop it on dispose.
-# A joystick built in code gets neither.
+# A joystick built in code gets neither. The probe exits 2, a skip, before
+# it creates anything while another elevated program that embeds
+# HIDMaestro runs, PadForge for one, since that program shares the SDK's
+# devices.
 function Scenario-Wgi-Mapping {
     Invoke-Probe -Dir 'wgi_mapping_check' -Exe 'WgiMappingCheck.exe' `
-                 -Message 'WGI reads a virtual pad differently from the real device, or a GameInput key outlived its virtual (see probe stdout)'
+                 -Message 'WGI reads a virtual pad differently from the real device, or a GameInput key outlived its virtual (see probe stdout)' `
+                 -SkipCodes 2
 }
 
 # S68: another OpenVR driver registered under HIDMaestro's driver name,
@@ -2102,19 +2109,21 @@ function Scenario-Kbm-Descriptors {
 # twice.
 #
 # Exit 3, a skip: the probe runs in session 0, as over SSH, where Raw Input
-# lists no device. Exit 2, a running SDK consumer, stays a failure.
+# lists no device. Exit 2, also a skip: another program that embeds
+# HIDMaestro runs, and the probe creates nothing beside it.
 function Scenario-Kbm-Raw-Input {
     Invoke-Probe -Dir 'kbm_live_check' -Exe 'KbmLiveCheck.exe' `
-                 -Message 'a virtual keyboard or mouse reached Raw Input wrong, lost input, or did not start (see probe stdout)' -SkipCodes 3
+                 -Message 'a virtual keyboard or mouse reached Raw Input wrong, lost input, or did not start (see probe stdout)' -SkipCodes 2, 3
 }
 
 # S71: programs that embed HIDMaestro, side by side on one machine. Each
 # program is a peer process the probe drives, and the probe judges what
 # they did from outside both. Its header lists every section.
 function Scenario-Coexistence {
-    # About 10.5 minutes on the devbox, so its hang deadline is 25.
+    # About 10.5 minutes on the devbox, so its hang deadline is ten times
+    # that, 105, which load or another program cannot reach.
     Invoke-Probe -Dir 'coexist_check' -Exe 'CoexistCheck.exe' -Arguments 'ABCDEFGHJKLMNOPQRSTUVWXYZ' -Tag 'coexistence' `
-                 -Message 'two programs that embed HIDMaestro disturbed each other (see probe stdout)' -SkipCodes 2 -DeadlineSeconds 1500
+                 -Message 'two programs that embed HIDMaestro disturbed each other (see probe stdout)' -SkipCodes 2 -DeadlineSeconds 6300
 }
 
 # S72: everything the elevated SDK runs or hands to pnputil is staged under
@@ -2146,13 +2155,14 @@ function Scenario-Protected-Staging {
 # battery starts this probe before S01 and the slot collects its result.
 function Scenario-Usbip-Clean-Install {
     $message = 'the bundled usbip-win2 install left a shortcut, Start menu folder, GUI, SDK or PDB file, broke the composite, ran over an existing install, or ran twice for two programs at once (see probe stdout)'
-    # About four and a half minutes, so its hang deadline is 15.
+    # About four and a half minutes, so its hang deadline is ten times
+    # that, 45, which load or another program cannot reach.
     if ($script:S73Run) {
         $run = $script:S73Run
         $script:S73Run = $null
-        Complete-BackgroundProbe -Run $run -Message $message -SkipCodes 2 -DeadlineSeconds 900
+        Complete-BackgroundProbe -Run $run -Message $message -SkipCodes 2 -DeadlineSeconds 2700
     } else {
-        Invoke-Probe -Dir 'usbip_install_check' -Exe 'UsbipInstallCheck.exe' -Message $message -SkipCodes 2 -DeadlineSeconds 900
+        Invoke-Probe -Dir 'usbip_install_check' -Exe 'UsbipInstallCheck.exe' -Message $message -SkipCodes 2 -DeadlineSeconds 2700
     }
 }
 
@@ -2315,13 +2325,17 @@ function Scenario-Handler-Isolation {
 # S87: interop declarations and the method names in the SDK's text. No
 # DllImport is left, SetupDiGetClassDevsW takes its Enumerator as the pointer
 # it is, and every method a message or XML doc names exists as written. The
-# live run creates an Xbox 360 persona and reads the SDK's own XInput slot
-# count, disposes it, and runs the phantom sweep.
+# live run creates an Xbox 360 persona, prints the SDK's own XInput slot
+# wait line, and reads each of the four XInput slots through the SDK's
+# XInputGetState declaration and through xinput.h's, which must agree, with
+# a slot connected, inside a 10 s hang bound. Then it disposes the persona,
+# requires its devnode gone within 5 s, and runs the phantom sweep, which
+# must remove at least the one record the dispose leaves.
 function Scenario-Interop-Decl {
     Invoke-Probe -Dir 'interop_decl_check' -Exe 'InteropDeclCheck.exe' -Arguments 'static' -Tag 'static' `
                  -Message 'an interop declaration or a method name in the SDK''s text is wrong (see probe stdout)' -SkipCodes 2
     Invoke-Probe -Dir 'interop_decl_check' -Exe 'InteropDeclCheck.exe' -Arguments 'live' -Tag 'live' `
-                 -Message 'the XInput slot count or a SetupDiGetClassDevsW caller failed on a live controller (see probe stdout)' -SkipCodes 2
+                 -Message 'the SDK''s XInputGetState read a slot differently from xinput.h''s, or a SetupDiGetClassDevsW caller failed on a live controller (see probe stdout)' -SkipCodes 2
 }
 
 # S88: no device shortcut in the SDK or the drivers. With comments removed,

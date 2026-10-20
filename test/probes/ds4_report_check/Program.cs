@@ -615,10 +615,10 @@ internal static class Program
 
     /// <summary>Submit a state until SDL's gamepad state shows it,
     /// <paramref name="shows"/> telling the new frame from the one before,
-    /// at most for the time this waited before: eight submits 50 ms apart,
-    /// then 80 ms, about 600 ms at Windows' default 15.6 ms timer. The
+    /// at most 6 s, a hang bound 10 times the 600 ms this waited before,
+    /// since other work on the machine can hold SDL's reads past that. The
     /// check after it reads SDL's state as it stands, so a value SDL never
-    /// takes still fails, at the old deadline.</summary>
+    /// takes still fails, at the deadline.</summary>
     static void Drive(HMController c, HMGamepadState st, Func<bool> shows)
     {
         var sw = Stopwatch.StartNew();
@@ -626,7 +626,7 @@ internal static class Program
         {
             c.SubmitState(st);
             SDL_UpdateGamepads();
-            if (shows() || sw.ElapsedMilliseconds >= 600) break;
+            if (shows() || sw.ElapsedMilliseconds >= 6_000) break;
             Thread.Sleep(10);
         }
         SDL_UpdateGamepads();

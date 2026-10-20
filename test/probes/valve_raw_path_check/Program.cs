@@ -250,13 +250,18 @@ static class ValveRawPathCheck
         Listener? listener = null;
         try
         {
+            // A real controller with this VID and PID on the machine would
+            // be read in place of the virtual, so only a collection that
+            // arrives with the create counts.
+            var before = Collections(prof.VendorId, prof.ProductId).Select(x => x.Path)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
             c = ctx.CreateController(prof);
 
             List<(string Path, int InLen)> cols = new();
             for (int i = 0; i < 60 && cols.Count == 0; i++)
             {
                 Thread.Sleep(500);
-                cols = Collections(prof.VendorId, prof.ProductId);
+                cols = Collections(prof.VendorId, prof.ProductId).Where(x => !before.Contains(x.Path)).ToList();
             }
             Console.WriteLine($"     collections: {string.Join(", ", cols.Select(x => x.InLen + "B"))}");
             var col = cols.FirstOrDefault(x => x.InLen == FrameSize);
