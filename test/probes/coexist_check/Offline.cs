@@ -114,7 +114,7 @@ internal static partial class Program
                 bool ownAllowed = (bool)allowed.Invoke(null, new object[] { own })!;
                 Check("OF1: a directory this process's user owns may not be reset where it is", !ownAllowed, own);
             }
-            finally { Directory.Delete(own, true); }
+            finally { RemoveScratch(own, "OF1"); }
             string programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
             bool pdAllowed = (bool)allowed.Invoke(null, new object[] { programData })!;
             Check("OF2: %ProgramData%, owned by SYSTEM with the DACL its folders inherit, may", pdAllowed, programData);
@@ -179,6 +179,26 @@ internal static partial class Program
     {
         try { a(); return "done"; }
         catch (Exception e) { return e.GetType().Name; }
+    }
+
+    /// <summary>Removes a scratch folder under TEMP. A program that ran from
+    /// it a moment ago can stay open in another process for a while, such as
+    /// an antivirus scan of a new executable, so the delete is tried again for
+    /// up to 10 s, and a folder still held then is left with a note. Cleanup
+    /// never fails a check.</summary>
+    static void RemoveScratch(string dir, string part)
+    {
+        long until = Environment.TickCount64 + 10_000;
+        while (true)
+        {
+            try { if (Directory.Exists(dir)) Directory.Delete(dir, true); return; }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                if (Environment.TickCount64 < until) { System.Threading.Thread.Sleep(200); continue; }
+                Console.WriteLine($"    {part}: {dir} not removed: {e.Message}");
+                return;
+            }
+        }
     }
 
     static void OfflinePinShape()
@@ -291,7 +311,7 @@ internal static partial class Program
         Check("OF5: control: released, the root renames", released == "done", released);
         string writable = Attempt(() => new FileStream(exe, FileMode.Open, FileAccess.Write, FileShare.ReadWrite).Dispose());
         Check("OF5: control: released, the file opens for writing", writable == "done", writable);
-        Directory.Delete(scratch, true);
+        RemoveScratch(scratch, "OF5");
     }
 
     static void OfflinePinLevels()
@@ -430,7 +450,7 @@ internal static partial class Program
         finally
         {
             foreach (var h in handles) h.Dispose();
-            Directory.Delete(dir, true);
+            RemoveScratch(dir, "OF6");
         }
     }
 
@@ -501,7 +521,7 @@ internal static partial class Program
                       && m2.Contains("try again", StringComparison.Ordinal) && !m2.Contains("SteamVR", StringComparison.Ordinal), m2);
             }
         }
-        finally { Directory.Delete(dir, true); }
+        finally { RemoveScratch(dir, "OF4"); }
     }
 
     static void OfflineDiagFiles()
