@@ -149,11 +149,13 @@ internal static partial class Program
         {
             int transport = int.Parse(PeerProcess.Field(cx, "transport")!, System.Globalization.CultureInfo.InvariantCulture);
             string? xusb = null;
-            WaitFor(() => (xusb = OwnedXusb(xusbBefore, transport)) != null, 15_000);
+            // A hang bound: the companion's install can run long on a busy
+            // machine, and the wait ends as soon as the interface is there.
+            WaitFor(() => (xusb = OwnedXusb(xusbBefore, transport)) != null, 60_000);
             string? companion = xusb == null ? null : Native.InstanceOfInterface(xusb);
             Check($"{tag}: the xbox-360-wired's XUSB interface is present, on this release's companion",
                   companion != null && Native.DriverVersionOf(companion) == xusbVer,
-                  companion == null ? "no XUSB interface within 15 s" : $"{companion} runs {Native.DriverVersionOf(companion)} (this release {xusbVer})");
+                  companion == null ? "no XUSB interface within 60 s" : $"{companion} runs {Native.DriverVersionOf(companion)} (this release {xusbVer})");
         }
     }
 

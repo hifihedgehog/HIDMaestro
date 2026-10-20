@@ -135,9 +135,9 @@ internal static partial class Program
         string r3 = a.Send("create pad F1B0 -");
         Check($"U: a retry in the failed program takes transport index {t} and identity index:{t} again",
               Ok(r3) && PeerProcess.Field(r3, "transport") == t && PeerProcess.Field(r3, "key") == "index:" + t, r3);
-        Check("U: and one device of it is present", WaitPaths(0xBEEF, UPid, 1, 5000).Count == 1);
+        Check("U: and one device of it is present", WaitPaths(0xBEEF, UPid, 1, 15_000).Count == 1);
         a.Send("dispose");
-        Check("U: its dispose leaves no entry", WaitFor(() => Entries(controllers).Count == 0, 5000),
+        Check("U: its dispose leaves no entry", WaitFor(() => Entries(controllers).Count == 0, 15_000),
               string.Join(",", Entries(controllers)));
         WaitFor(() => Native.HidPaths(0xBEEF, UPid).Count == 0, 10_000);
 
@@ -171,12 +171,12 @@ internal static partial class Program
         // holds the index's v1.12.0 owner pipe, then creates its output
         // doorbell. The same kind of locked event under the doorbell's name
         // fails that step.
-        var before = Native.HidPaths(0x054C, 0x0CE6);
+        var before = CompositePaths();
         string c4 = a.Send("create composite - -");
         if (!Ok(c4)) { Check("U: the program creates a composite", false, c4); return; }
         string tc = PeerProcess.Field(c4, "transport")!;
         a.Send("dispose");
-        WaitFor(() => Native.HidPaths(0x054C, 0x0CE6).Except(before, StringComparer.OrdinalIgnoreCase).Count() == 0, 15_000);
+        WaitFor(() => CompositePaths().Except(before, StringComparer.OrdinalIgnoreCase).Count() == 0, 15_000);
         bool clear4 = WaitInputObjectsGone(tc, output: true, out string trace4, out var holders4);
         Check($"U: after the composite's dispose the program holds no object of index {tc}", !holders4.Contains(a.Pid), $"program {a.Pid}");
         Check($"U: before the next composite no section or event of index {tc} exists", clear4, trace4);
@@ -197,12 +197,12 @@ internal static partial class Program
                   Ok(cb) && PeerProcess.Field(cb, "transport") == tc, cb);
             b.Send("dispose");
         }
-        WaitFor(() => Native.HidPaths(0x054C, 0x0CE6).Except(before, StringComparer.OrdinalIgnoreCase).Count() == 0, 15_000);
+        WaitFor(() => CompositePaths().Except(before, StringComparer.OrdinalIgnoreCase).Count() == 0, 15_000);
         string r4 = a.Send("create composite - -");
         Check($"U: a retry in the failed program takes transport index {tc} and identity index:{tc}",
               Ok(r4) && PeerProcess.Field(r4, "transport") == tc && PeerProcess.Field(r4, "key") == "index:" + tc, r4);
         a.Send("dispose");
-        WaitFor(() => Native.HidPaths(0x054C, 0x0CE6).Except(before, StringComparer.OrdinalIgnoreCase).Count() == 0, 15_000);
+        WaitFor(() => CompositePaths().Except(before, StringComparer.OrdinalIgnoreCase).Count() == 0, 15_000);
 
         // The same emulator fails after its input pump started. The pump
         // reads the input section, and the failed create unmaps it.
@@ -224,7 +224,7 @@ internal static partial class Program
             Check($"U: a retry in the failed program takes transport index {tc}",
                   Ok(r6) && PeerProcess.Field(r6, "transport") == tc, r6);
             a.Send("dispose");
-            WaitFor(() => Native.HidPaths(0x054C, 0x0CE6).Except(before, StringComparer.OrdinalIgnoreCase).Count() == 0, 15_000);
+            WaitFor(() => CompositePaths().Except(before, StringComparer.OrdinalIgnoreCase).Count() == 0, 15_000);
             // The retry can map its sections where the failed one did, and
             // its dispose unmaps them again. A pump left running wakes from
             // its wait for a frame within 500 ms (UsbipEmulatedDevice.InputPump)

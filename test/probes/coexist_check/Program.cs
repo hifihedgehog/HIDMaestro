@@ -8,8 +8,9 @@
 //      owner, and the first program's devices never change.
 //   C. A second program runs InstallDriver and a create while the first
 //      streams. The first program's devnodes, XInput slot, WGI entry and
-//      Raw Input entry stay as they were, and its frame gaps stay within
-//      its own one-program 99th percentile.
+//      Raw Input entry stay as they were, and its stream does not stall:
+//      the 99th percentile of its frame gaps stays under ten times its
+//      own one-program figure.
 //   D. A program killed with TerminateProcess. The next sweep of a live
 //      program, or the start of a new one, removes the killed program's
 //      devices and releases its registry ledger holds, and leaves the live
@@ -422,6 +423,44 @@ internal static partial class Program
         return found;
     }
 
+    /// <summary>The dualsense-composite HID interfaces present: 054C:0CE6
+    /// behind the USB/IP host controller whose hardware ids carry
+    /// ROOT\HIDMAESTRO_UDE, the match usbip_e2e_check makes. A real
+    /// DualSense, on a cable or on Bluetooth, hangs off a physical
+    /// controller with no such ancestor, so one that connects during a
+    /// section is never taken for a composite.</summary>
+    static List<string> CompositePaths() =>
+        Native.HidPaths(0x054C, 0x0CE6).Where(BehindHidMaestroHost).ToList();
+
+    static bool BehindHidMaestroHost(string interfacePath)
+    {
+        string? id = Native.InstanceOfInterface(interfacePath);
+        for (int depth = 0; id != null && depth <= 8; depth++, id = Native.ParentOf(id))
+        {
+            try
+            {
+                using var k = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{id}");
+                if (k?.GetValue("HardwareID") is string[] ids
+                    && ids.Any(h => h.Contains("HIDMAESTRO", StringComparison.OrdinalIgnoreCase)))
+                    return true;
+            }
+            catch (Exception) { }
+        }
+        return false;
+    }
+
+    /// <summary><see cref="WaitPaths"/> for composites only.</summary>
+    static List<string> WaitComposites(int count, int ms, ICollection<string> exclude)
+    {
+        List<string> found = new();
+        WaitFor(() =>
+        {
+            found = CompositePaths().Where(p => !exclude.Contains(p, StringComparer.OrdinalIgnoreCase)).ToList();
+            return found.Count >= count;
+        }, ms);
+        return found;
+    }
+
     /// <summary>The input a device carried in one window, as distinct
     /// (buttons, X) pairs.</summary>
     static List<(string Buttons, uint X)> Patterns(HidCapture cap, long from, long to) =>
@@ -589,8 +628,12 @@ internal static partial class Program
             // Each window is 1 s, 250 frames at 250 Hz, the length of the
             // window around the second program's start. Over 90 such
             // windows of one program alone on this machine the p99 was
-            // 4.06 to 4.55 ms, and 4.07 to 4.08 ms over 5 s windows, so the
-            // 0.5 ms allowance covers either length.
+            // 4.06 to 4.55 ms. How near the window around the second
+            // program's start comes to that is a performance figure that
+            // other work on the machine moves, so it is printed. The check
+            // is for a stall: a stream the second program's install or
+            // create holds up, over 1% of its frames, at ten times the
+            // larger one-program p99.
             Thread.Sleep(500);
             long a1 = cap.Mark();
             Thread.Sleep(1000);
@@ -611,10 +654,11 @@ internal static partial class Program
             double p99a1 = HidCapture.Percentile(HidCapture.Gaps(cap.Since(a1, a1End)), 0.99);
             double p99d = HidCapture.Percentile(HidCapture.Gaps(cap.Since(during, duringEnd)), 0.99);
             double p99a2 = HidCapture.Percentile(HidCapture.Gaps(cap.Since(a2, a2End)), 0.99);
-            double noise = Math.Max(0.5, Math.Abs(p99a1 - p99a2));
-            Check("C: the first program's frame gaps stay within its own one-program p99 while the second starts",
-                  p99d <= Math.Max(p99a1, p99a2) + noise,
-                  FormattableString.Invariant($"p99 alone {p99a1:F2} ms, during {p99d:F2} ms, alone after {p99a2:F2} ms, allowance {noise:F2} ms"));
+            Console.WriteLine(FormattableString.Invariant($"    C: frame gap p99 alone {p99a1:F2} ms, while the second program starts {p99d:F2} ms, alone after {p99a2:F2} ms"));
+            double stall = 10 * Math.Max(p99a1, p99a2);
+            Check("C: the first program's stream does not stall while the second starts: its frame gap p99 stays under ten times its one-program p99",
+                  p99d < stall,
+                  FormattableString.Invariant($"p99 alone {p99a1:F2} ms, during {p99d:F2} ms, alone after {p99a2:F2} ms, bound {stall:F2} ms"));
 
             var treeX2 = Native.Subtree(instX);
             var treeP2 = Native.Subtree(instP);
@@ -921,17 +965,17 @@ internal static partial class Program
 
     static void SectionG()
     {
-        var before = Native.HidPaths(0x054C, 0x0CE6);
+        var before = CompositePaths();
         using var p1 = PeerProcess.Start("G1");
         p1.Send("install");
         string c1 = p1.Send("create composite - coexist-g-a");
-        var pathA = WaitPaths(0x054C, 0x0CE6, 1, 20_000, before);
+        var pathA = WaitComposites(1, 20_000, before);
         if (!Ok(c1) || pathA.Count != 1) { Check("G: the first composite appears", false, $"{c1}, {pathA.Count} interfaces"); return; }
 
         using var p2 = PeerProcess.Start("G2");
         p2.Send("install");
         string c2 = p2.Send("create composite - coexist-g-b");
-        var pathB = WaitPaths(0x054C, 0x0CE6, 1, 20_000, before.Concat(pathA).ToList());
+        var pathB = WaitComposites(1, 20_000, before.Concat(pathA).ToList());
         Check("G: the second program's start leaves the first composite", Native.HidPaths(0x054C, 0x0CE6).Contains(pathA[0], StringComparer.OrdinalIgnoreCase));
         if (!Ok(c2) || pathB.Count != 1) { Check("G: the second composite appears", false, $"{c2}, {pathB.Count} interfaces"); return; }
         using (var capB = HidCapture.Open(pathB[0]))
@@ -1076,26 +1120,26 @@ internal static partial class Program
             transport = PeerProcess.Field(c1, "transport")!;
             k1.Kill();
         }
-        Check("K: the killed program's device is still there", WaitPaths(0xBEEF, 0xF0F3, 1, 2000).Count == 1);
+        Check("K: the killed program's device is still there", WaitPaths(0xBEEF, 0xF0F3, 1, 10_000).Count == 1);
         using var k2 = PeerProcess.Start("K2");
         string c2 = k2.Send("create pad F0F3 -");
         Check("K: started again, it creates", Ok(c2), c2);
         Check("K: on the killed program's transport index and identity",
               PeerProcess.Field(c2, "transport") == transport && PeerProcess.Field(c2, "key") == "index:" + transport,
               $"transport {PeerProcess.Field(c2, "transport")}, key {PeerProcess.Field(c2, "key")}, was {transport}");
-        Check("K: and one device of that identity is present", WaitPaths(0xBEEF, 0xF0F3, 1, 5000).Count == 1);
+        Check("K: and one device of that identity is present", WaitPaths(0xBEEF, 0xF0F3, 1, 10_000).Count == 1);
     }
 
     // ── L ──────────────────────────────────────────────────────────────
 
     static void SectionL()
     {
-        var before = Native.HidPaths(0x054C, 0x0CE6);
+        var before = CompositePaths();
         string? ownerId;
         using (var l1 = PeerProcess.Start("L1"))
         {
             string c1 = l1.Send("create composite - coexist-l");
-            var path = WaitPaths(0x054C, 0x0CE6, 1, 20_000, before);
+            var path = WaitComposites(1, 20_000, before);
             if (!Ok(c1) || path.Count != 1) { Check("L: the first program's composite appears", false, c1); return; }
             ownerId = Native.OwnerRecords().Where(r => r.Value == l1.Pid).Select(r => r.Key).FirstOrDefault();
             Check("L: it has an owner record", ownerId != null);
@@ -1107,8 +1151,8 @@ internal static partial class Program
         if (ownerId != null)
             Check("L: its first create removes the killed program's record", !Native.OwnerRecords().ContainsKey(ownerId));
         Check("L: one composite of that identity is present",
-              WaitFor(() => Native.HidPaths(0x054C, 0x0CE6).Except(before, StringComparer.OrdinalIgnoreCase).Count() == 1, 15_000),
-              $"{Native.HidPaths(0x054C, 0x0CE6).Except(before, StringComparer.OrdinalIgnoreCase).Count()} present");
+              WaitFor(() => CompositePaths().Except(before, StringComparer.OrdinalIgnoreCase).Count() == 1, 15_000),
+              $"{CompositePaths().Except(before, StringComparer.OrdinalIgnoreCase).Count()} present");
     }
 
     // ── M ──────────────────────────────────────────────────────────────

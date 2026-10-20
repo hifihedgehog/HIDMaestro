@@ -318,13 +318,13 @@ internal static partial class Program
     /// <summary>W10.</summary>
     static void SectionWExitThenDispose()
     {
-        var before = Native.HidPaths(0x054C, 0x0CE6);
+        var before = CompositePaths();
         using var p = PeerProcess.Start("W10");
         string cp = p.Send("create pad F20F coexist-w10");
         string cc = p.Send("create composite - coexist-w10c");
         if (!Ok(cp) || !Ok(cc)) { Check("W10: the program creates a pad and a composite", false, $"{cp} / {cc}"); return; }
         string pad = PeerProcess.Field(cp, "instance")!;
-        WaitPaths(0x054C, 0x0CE6, 1, 20_000, before);
+        WaitComposites(1, 20_000, before);
         var sw = System.Diagnostics.Stopwatch.StartNew();
         string r = p.Send("quitdispose");
         bool ended = Ok(r) && p.WaitExit(120_000);
@@ -333,7 +333,7 @@ internal static partial class Program
         Check("W10: with exit code 0", p.ExitCode == 0, $"exit code {p.ExitCode}");
         Check("W10: its pad is gone", WaitFor(() => !Native.IsPresent(pad), 15_000), pad);
         Check("W10: its composite is gone",
-              WaitFor(() => !Native.HidPaths(0x054C, 0x0CE6).Except(before, StringComparer.OrdinalIgnoreCase).Any(), 15_000));
+              WaitFor(() => !CompositePaths().Except(before, StringComparer.OrdinalIgnoreCase).Any(), 15_000));
         Check("W10: and its record", !Native.OwnerRecords().ContainsValue(p.Pid));
     }
 
@@ -417,12 +417,12 @@ internal static partial class Program
     /// <summary>W13.</summary>
     static void SectionWLegacyTableImport()
     {
-        var before = Native.HidPaths(0x054C, 0x0CE6);
+        var before = CompositePaths();
         using var old = PeerProcess.Start("W13-v1.11.0", "v1.11.0");
         string? table = LeaveLegacyTable(old, 0xF213, "W13");
         if (table == null) return;
         string cc = old.Send("create composite - -");
-        bool up = Ok(cc) && WaitFor(() => Native.HidPaths(0x054C, 0x0CE6).Except(before, StringComparer.OrdinalIgnoreCase).Any(), 20_000);
+        bool up = Ok(cc) && WaitFor(() => CompositePaths().Except(before, StringComparer.OrdinalIgnoreCase).Any(), 20_000);
         Check("W13: the v1.11.0 program runs a composite, whose input section has no configuration and no record", up, cc);
         if (!up) return;
         string t = PeerProcess.Field(cc, "transport") ?? "?";
