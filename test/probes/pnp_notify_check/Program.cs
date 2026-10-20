@@ -289,6 +289,12 @@ internal static class Program
         // diag log a live run on this machine writes (HIDMAESTRO_DIAG=1),
         // which is read once, when DeviceOrchestrator first loads.
         if (mode is "offline" or "cost") Environment.SetEnvironmentVariable("HIDMAESTRO_DIAG", null);
+        // The offline sequences step in unscaled milliseconds against the
+        // SDK's own waits, which TimeoutScale also reads once, at type init.
+        // A machine's HIDMAESTRO_TIMEOUT_SCALE would stretch those waits and
+        // not the sequences, so the offline parts run at scale 1. The live
+        // run keeps the machine's scale.
+        if (mode == "offline") Environment.SetEnvironmentVariable("HIDMAESTRO_TIMEOUT_SCALE", null);
         // "offline" runs the parts at once, each in a process of its own,
         // "offline <part>" one part, and "offline 0" every part in turn.
         if (mode == "offline") return args.Length > 1 ? Offline.Run(int.Parse(args[1])) : Offline.RunInParts();
