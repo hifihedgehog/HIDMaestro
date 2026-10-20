@@ -359,20 +359,21 @@ internal static class Program
     static void Rate(Harness h, HMController controller, string name)
     {
         // The ceilings fail a report the poll did not ask for, which no load
-        // makes. Each count is one second, and an emulator thread held by
-        // other work reads less, so the floors sit just above half the rate:
-        // they fail a device read at half its poll or stopped, not a slow host.
-        var bounds = new Dictionary<string, (double Lo, double Hi)>
+        // makes. The rate an emulator thread reads is the host's: on the Atom
+        // it read 278 reports a second at a 1 ms poll on four ports. So the
+        // only floor is that reports arrive at all, and the counts per poll
+        // are checked on the engine's own clock in gc_protocol_check.
+        var ceilings = new Dictionary<string, double>
         {
-            [RateCases[0].Label] = (70, 130),
-            [RateCases[1].Label] = (450, 875),
-            [RateCases[2].Label] = (550, 1010),
+            [RateCases[0].Label] = 130,
+            [RateCases[1].Label] = 875,
+            [RateCases[2].Label] = 1010,
         };
         foreach (var (label, hz, states, own) in RateValues(h, controller))
         {
-            var (lo, hi) = bounds[label];
+            double hi = ceilings[label];
             s_measurements.Add($"{name}, {label}: {hz:F1} reports a second, {states:F1} new states a second seen by Input ({own})");
-            Probe.Check($"{name} at {label}: {lo}-{hi} reports a second", hz >= lo && hz <= hi, $"{hz:F1}");
+            Probe.Check($"{name} at {label}: reports arrive, no more than {hi} a second", hz > 0 && hz <= hi, $"{hz:F1}");
         }
     }
 

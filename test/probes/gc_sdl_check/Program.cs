@@ -508,13 +508,13 @@ internal static class Program
         };
         foreach (var (label, hz, states) in RateValues(h, controller, id))
         {
-            var (lo, hi) = bounds[label];
+            var (_, hi) = bounds[label];
             s_measurements.Add($"SDL, {label}: {hz:F1} reports a second, {states:F1} new states a second seen by SDL");
             // The ceiling catches a device that sends without the host's
             // polls, which no load can cause. A busy machine slows SDL's
             // libusb thread, which queues fewer reads and so takes fewer
-            // reports, so the floor only catches a stream that stopped.
-            Probe.Check($"SDL at {label}: streams, at most {hi} reports a second", hz >= lo / 10 && hz <= hi, $"{hz:F1}");
+            // reports, so the only floor is that reports arrive at all.
+            Probe.Check($"SDL at {label}: streams, at most {hi} reports a second", hz > 0 && hz <= hi, $"{hz:F1}");
         }
     }
 
