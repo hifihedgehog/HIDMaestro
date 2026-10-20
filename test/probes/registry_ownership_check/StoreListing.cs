@@ -61,12 +61,27 @@ internal static partial class Program
     /// machines.</summary>
     static void StoreListingAgainstPnputil()
     {
-        var mine = PnputilHelper.TryEnumerateDrivers(_ => true);
+        // Another program can add or remove a package while pnputil reads
+        // the store, and no listing taken before matches that. The listing
+        // is taken again after pnputil's read, and a store that changed
+        // between the two is read again, up to three times. A listing that
+        // disagrees with pnputil over a store that held still fails.
+        List<PnputilHelper.DriverRecord>? mine = null;
+        string form = "";
+        var theirs = new List<(string Published, string Original, string Provider, string Version)>();
+        for (int read = 1; read <= 3; read++)
+        {
+            mine = PnputilHelper.TryEnumerateDrivers(_ => true);
+            if (mine == null) break;
+            (form, theirs) = PnputilListing();
+            var after = PnputilHelper.TryEnumerateDrivers(_ => true);
+            if (after != null && after.ToHashSet().SetEquals(mine)) break;
+            Console.WriteLine($"  info: the driver store changed while pnputil read it, read {read} of 3");
+        }
         Check("the driver store's packages can be listed on this Windows version", mine is { Count: > 0 },
               mine == null ? "the listing failed" : $"{mine.Count} package(s)");
         if (mine == null) return;
 
-        var (form, theirs) = PnputilListing();
         Check($"pnputil /enum-drivers lists this driver store ({form})", theirs.Count > 0, $"{theirs.Count} record(s)");
         if (theirs.Count == 0) return;
 

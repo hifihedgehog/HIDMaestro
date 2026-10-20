@@ -557,7 +557,10 @@ internal static partial class Program
     /// <paramref name="published"/>, read from the registry with none of
     /// WinUsbBinding's code: each instance key under Enum\USB, its Driver
     /// value, and that class key's InfPath, the INF the device was installed
-    /// from. Null when a key cannot be read. Read without elevation.</summary>
+    /// from. Null when a key cannot be read. A key that is gone when opened
+    /// was deleted after its listing, by whatever removed that devnode, and
+    /// uses no package, so it is passed over rather than failing the read.
+    /// Read without elevation.</summary>
     static System.Collections.Generic.Dictionary<string, System.Collections.Generic.List<string>>? DriversFromEnum(System.Collections.Generic.IEnumerable<string> published)
     {
         var names = new System.Collections.Generic.HashSet<string>(published, StringComparer.OrdinalIgnoreCase);
@@ -569,11 +572,11 @@ internal static partial class Program
             foreach (string device in usb.GetSubKeyNames())
             {
                 using var dk = usb.OpenSubKey(device);
-                if (dk == null) return null;
+                if (dk == null) continue;
                 foreach (string instance in dk.GetSubKeyNames())
                 {
                     using var ik = dk.OpenSubKey(instance);
-                    if (ik == null) return null;
+                    if (ik == null) continue;
                     if (ik.GetValue("Driver") is not string driver) continue;
                     using var ck = Microsoft.Win32.Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Control\Class\{driver}");
                     if (ck?.GetValue("InfPath") is not string inf || !names.Contains(inf)) continue;
@@ -713,22 +716,45 @@ internal static partial class Program
         // A wait can return up to one timer tick (15.6 ms) early, so every
         // lower bound leaves that much room at any scale.
         const int TickMs = 16;
+
+        // Each ceiling sits seconds past the wait it bounds and short of the
+        // wrong wait it catches. Other work on the machine can only lengthen
+        // a wait, so a take past its ceiling is taken again, up to three
+        // times, and the shortest is judged: a lock that waits a wrong bound
+        // is past the ceiling every time. The mark is set back as the first
+        // take found it before each take again.
+        (bool Threw, long Ms, bool Held) Shortest(Func<(bool Threw, long Ms, bool Held)> once, long ceiling, bool markBefore)
+        {
+            var best = once();
+            for (int i = 1; i < 3 && best.Ms >= ceiling; i++)
+            {
+                Console.WriteLine($"  info: a take of {best.Ms} ms is past its {ceiling} ms ceiling, taken again");
+                mark.SetValue(null, markBefore);
+                var again = once();
+                if (again.Ms < best.Ms) best = again;
+            }
+            return best;
+        }
+
         try
         {
             mark.SetValue(null, false);
-            var cut = Take(Environment.TickCount64 + cutMs);
+            long cutCeiling = cutMs + fullMs / 2;
+            var cut = Shortest(() => Take(Environment.TickCount64 + cutMs), cutCeiling, markBefore: false);
             Check($"the caller's {cutMs} ms bound cuts the lock's own {fullMs} ms: it waits its bound and throws, holding nothing",
-                  cut.Threw && !cut.Held && cut.Ms >= cutMs * 9 / 10 - TickMs && cut.Ms < cutMs + fullMs / 2, $"threw {cut.Threw}, held {cut.Held}, {cut.Ms} ms");
+                  cut.Threw && !cut.Held && cut.Ms >= cutMs * 9 / 10 - TickMs && cut.Ms < cutCeiling, $"threw {cut.Threw}, held {cut.Held}, {cut.Ms} ms");
             Check("a cut wait does not mark the name", mark.GetValue(null) is false);
 
-            var full = Take(long.MaxValue);
+            long fullCeiling = fullMs * 8 / 5;
+            var full = Shortest(() => Take(long.MaxValue), fullCeiling, markBefore: false);
             Check($"an unbounded caller waits the lock's own {fullMs} ms and goes on without the mutex, as with a squatter",
-                  !full.Threw && !full.Held && full.Ms >= fullMs * 9 / 10 - TickMs && full.Ms < fullMs * 8 / 5, $"threw {full.Threw}, held {full.Held}, {full.Ms} ms");
+                  !full.Threw && !full.Held && full.Ms >= fullMs * 9 / 10 - TickMs && full.Ms < fullCeiling, $"threw {full.Threw}, held {full.Held}, {full.Ms} ms");
             Check("a full wait marks the name", mark.GetValue(null) is true);
 
-            var marked = Take(Environment.TickCount64 + markedBound);
+            long markedCeiling = shortMs * 4;
+            var marked = Shortest(() => Take(Environment.TickCount64 + markedBound), markedCeiling, markBefore: true);
             Check($"once marked, a caller's {markedBound} ms bound is longer than the lock's own {shortMs} ms: it waits the {shortMs} ms and goes on",
-                  !marked.Threw && !marked.Held && marked.Ms >= shortMs * 4 / 5 - TickMs && marked.Ms < shortMs * 4, $"threw {marked.Threw}, held {marked.Held}, {marked.Ms} ms");
+                  !marked.Threw && !marked.Held && marked.Ms >= shortMs * 4 / 5 - TickMs && marked.Ms < markedCeiling, $"threw {marked.Threw}, held {marked.Held}, {marked.Ms} ms");
         }
         finally
         {
