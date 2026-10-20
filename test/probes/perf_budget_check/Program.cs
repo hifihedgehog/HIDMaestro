@@ -1020,6 +1020,15 @@ internal static partial class Program
     [DllImport("xinput1_4.dll", EntryPoint = "XInputSetState")]
     static extern int XInputSetState(int userIndex, ref XInputVibration vibration);
 
+    // The wait for the XInput slot an @xinput target's create connected, a
+    // hang bound. The slot comes once the XUSB companion or xinputhid has
+    // started, which waits for a driver host that other work on the machine
+    // slows, so the bound sits far above that start. A working build ends
+    // the wait as soon as the slot appears. The e2e mode keeps its own
+    // shorter wait, which only skips the XInput pass on a profile XInput
+    // does not list and fails nothing.
+    const int XInputSlotWaitMs = 30_000;
+
     /// <summary>XInputSetState on the slot the controller's create
     /// connected, each timed to the OutputReceived that carries it, what a
     /// game's rumble waits on its way to a program that drives a physical
@@ -1033,13 +1042,13 @@ internal static partial class Program
     {
         int slot = -1;
         var wait = Stopwatch.StartNew();
-        while (slot < 0 && wait.ElapsedMilliseconds < 5000)
+        while (slot < 0 && wait.ElapsedMilliseconds < XInputSlotWaitMs)
         {
             foreach (int s in XInputConnected())
                 if (!before.Contains(s)) { slot = s; break; }
             if (slot < 0) Thread.Sleep(50);
         }
-        if (slot < 0) { Check($"{id}: an XInput slot the create connected", false, "none in 5 s"); return; }
+        if (slot < 0) { Check($"{id}: an XInput slot the create connected", false, $"none in {XInputSlotWaitMs / 1000} s"); return; }
         long sent = 0;
         using var got = new AutoResetEvent(false);
         var rtts = new List<double>(runs * 100);
