@@ -171,6 +171,36 @@ internal sealed class Program
         return (int)value;
     }
 
+    /// <summary>How long a submitted state may take to show on the wire. It
+    /// normally shows within one read, so only a state that never arrives
+    /// runs this out.</summary>
+    const int StateDeadlineMs = 3000;
+
+    /// <summary>The field's value once a read shows one <paramref name="ok"/>
+    /// accepts, or the last value read when none does within
+    /// StateDeadlineMs. A state that reaches the wire late on a loaded
+    /// machine passes, and a wrong value still fails. Read is false when
+    /// no GetInputReport succeeded.</summary>
+    static (bool Read, int Got) ReadUntil(string path, int reportLen, HidReportBuilder.InputField field,
+                                          byte reportId, Func<int, bool> ok)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        bool read = false;
+        int got = 0;
+        do
+        {
+            byte[]? wire = GetCurrentInputReport(path, reportLen, reportId);
+            if (wire != null)
+            {
+                read = true;
+                got = ReadField(wire, field, reportId);
+                if (ok(got)) break;
+            }
+            Thread.Sleep(20);
+        } while (sw.ElapsedMilliseconds < StateDeadlineMs);
+        return (read, got);
+    }
+
     static void TestLayout(HMContext ctx, int sticks, int triggers, int povs, int buttons, bool ffb)
     {
         string label = $"({sticks}s,{triggers}t,{(povs > 0 ? "hat" : "nohat")},{buttons}btn,{(ffb ? "ffb" : "noffb")})";
@@ -202,10 +232,12 @@ internal sealed class Program
 
         using var ctrl = ctx.CreateController(profile);
 
-        // Settle. Driver needs a moment to finalize the HID interface.
-        Thread.Sleep(800);
-
-        string? path = FindHidDevicePath(vid, pid);
+        // The HID interface can come up after the create returns. A hang
+        // bound: the poll ends as soon as the interface shows.
+        string? path = null;
+        var found = System.Diagnostics.Stopwatch.StartNew();
+        while ((path = FindHidDevicePath(vid, pid)) == null && found.ElapsedMilliseconds < 15000)
+            Thread.Sleep(100);
         Check($"{label} HID device path resolved", path != null);
         if (path == null) return;
 
@@ -227,10 +259,9 @@ internal sealed class Program
                 {
                     Axes = HMGamepadStateHelpers.StandardAxes(ctrl.Profile, leftTrigger: (float)input)
                 });
-                Thread.Sleep(40);
-                byte[]? wire = GetCurrentInputReport(path, reportLen, rb.InputReportId);
-                if (wire == null) { Check($"{label} LT={input}: GetInputReport", false); continue; }
-                int got = ReadField(wire, rb.LeftTrigger, rb.InputReportId);
+                var (read, got) = ReadUntil(path, reportLen, rb.LeftTrigger, rb.InputReportId,
+                                            v => Math.Abs(v - expected) <= 2);
+                if (!read) { Check($"{label} LT={input}: GetInputReport", false); continue; }
                 Check($"{label} LT={input:F1} → wire {got} ~= {expected}",
                       Math.Abs(got - expected) <= 2,
                       $"got {got}, expected ~{expected}");
@@ -250,10 +281,9 @@ internal sealed class Program
                 {
                     Axes = HMGamepadStateHelpers.StandardAxes(ctrl.Profile, rightTrigger: (float)input)
                 });
-                Thread.Sleep(40);
-                byte[]? wire = GetCurrentInputReport(path, reportLen, rb.InputReportId);
-                if (wire == null) { Check($"{label} RT={input}: GetInputReport", false); continue; }
-                int got = ReadField(wire, rb.RightTrigger, rb.InputReportId);
+                var (read, got) = ReadUntil(path, reportLen, rb.RightTrigger, rb.InputReportId,
+                                            v => Math.Abs(v - expected) <= 2);
+                if (!read) { Check($"{label} RT={input}: GetInputReport", false); continue; }
                 Check($"{label} RT={input:F1} → wire {got} ~= {expected}",
                       Math.Abs(got - expected) <= 2,
                       $"got {got}, expected ~{expected}");
@@ -267,11 +297,10 @@ internal sealed class Program
             {
                 Axes = HMGamepadStateHelpers.StandardAxes(ctrl.Profile, leftStickX: 1.0f)
             });
-            Thread.Sleep(40);
-            byte[]? wire = GetCurrentInputReport(path, reportLen, rb.InputReportId);
-            if (wire != null)
+            var (read, got) = ReadUntil(path, reportLen, rb.LeftStickX, rb.InputReportId,
+                                        v => v == rb.LeftStickX.LogicalMax);
+            if (read)
             {
-                int got = ReadField(wire, rb.LeftStickX, rb.InputReportId);
                 Check($"{label} LSX=1.0 → wire {got} = {rb.LeftStickX.LogicalMax}",
                       got == rb.LeftStickX.LogicalMax,
                       $"got {got}, expected {rb.LeftStickX.LogicalMax}");
