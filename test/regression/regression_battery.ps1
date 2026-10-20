@@ -524,6 +524,29 @@ function Wait-Ready {
     Wait-CascadeSettle
 }
 
+# Wait for the test app's initial create to bring a HIDMaestro devnode
+# PRESENT. Returns as soon as one appears, or false when the app exits
+# first or the hang deadline passes. The first scenario of a run can take
+# some 30 s on a heavy machine, since the app's HMContext init runs a full
+# RemoveAllVirtualControllers, the driver install check and the phantom
+# sweep, so the bound is the hang deadline and only a create that never
+# brings a device reaches it.
+function Wait-CreateBound {
+    param(
+        [string]$ProfileId,
+        [System.Diagnostics.Process]$Proc
+    )
+    $budget = HMScaleMs ($script:HangSeconds * 1000)
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.ElapsedMilliseconds -lt $budget) {
+        $present = Get-HMPresentDevnodes
+        if ($present.Count -gt 0) { return $true }
+        if ($Proc -and $Proc.HasExited) { return $false }
+        Start-Sleep -Milliseconds 250
+    }
+    return $false
+}
+
 # Wait until the SDK-driven create/teardown has actually propagated to
 # PnP and then settled. Two phases:
 #
@@ -821,6 +844,7 @@ function Complete-BackgroundProbe {
 function Scenario-Single-360-BT-360 {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
+        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
         Wait-Ready -Proc $proc
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT)
@@ -838,6 +862,7 @@ function Scenario-Single-360-BT-360 {
 function Scenario-Single-360-BT-360-BT {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
+        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
         Wait-Ready -Proc $proc
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT);    Wait-CascadeSettle
@@ -882,6 +907,7 @@ function Scenario-Single-LongCycle {
     }
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
+        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
         Send-Cmd -Proc $proc -Cmd 'resume'
         Wait-Settled
         foreach ($p in $sequence) {
@@ -897,6 +923,7 @@ function Scenario-Single-LongCycle {
 function Scenario-Single-BT-360-BT {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.XboxBT)
     try {
+        if (-not (Wait-CreateBound -ProfileId $Profiles.XboxBT -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
         Wait-Ready -Proc $proc
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.Xbox360);   Wait-CascadeSettle
@@ -911,6 +938,7 @@ function Scenario-Single-BT-360-BT {
 function Scenario-Single-Mixed-Families {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
+        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
         Wait-Ready -Proc $proc
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.DualSense);   Wait-CascadeSettle
@@ -928,6 +956,7 @@ function Scenario-Single-Mixed-Families {
 function Scenario-Single-SameProfileSwap {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.XboxBT)
     try {
+        if (-not (Wait-CreateBound -ProfileId $Profiles.XboxBT -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
         Wait-Ready -Proc $proc
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT);   Wait-CascadeSettle
@@ -1075,6 +1104,7 @@ function Scenario-AcrossProcess-Recreation {
 function Scenario-RapidSwaps-NoSettle {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
+        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
         Wait-Ready -Proc $proc
 
         # Queue 4 swap commands with no inter-command sleep. Each one
@@ -1119,6 +1149,7 @@ function Scenario-Multi-SixControllers {
 function Scenario-Single-SameVidPid {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
+        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
         Wait-Ready -Proc $proc
 
         # xbox-360-arcade-stick: same 045E:028E as xbox-360-wired.
@@ -1152,6 +1183,7 @@ function Scenario-ForceKill-MidCascade {
     function Get-PresentKey { ((Get-HMPresentDevnodes) | Sort-Object) -join '|' }
     $proc1 = Start-HMTestProcess -ProfileIds @($Profiles.XboxBT)
     try {
+        if (-not (Wait-CreateBound -ProfileId $Profiles.XboxBT -Proc $proc1)) { throw "the initial create brought no HIDMaestro devnode" }
         Wait-Ready -Proc $proc1
 
         # Kick off swap-back-to-360 without waiting for it.
@@ -1202,6 +1234,7 @@ function Scenario-ForceKill-MidCascade {
 function Scenario-Single-AlternatingPattern {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
+        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
         Wait-Ready -Proc $proc
 
         # A=Xbox360, B=XboxBT, C=DualSense.
