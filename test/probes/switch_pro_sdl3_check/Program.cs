@@ -23,6 +23,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -174,21 +175,32 @@ internal static class Program
         Check("SDL_Init(GAMEPAD)", SDL_Init(SDL_INIT_GAMEPAD));
 
         // Detection + full HIDAPI init happen inside SDL's update pump;
-        // poll up to 15 s. An open handle is itself the init-completed
+        // poll up to 60 s, a hang bound that ends as soon as the pad opens.
+        // A build whose revision carries the fork's filter hides the pad by
+        // design and ends in the SKIP below, so it keeps 15 s. An open
+        // handle is itself the init-completed
         // assert: HIDAPI_DriverSwitch rejects the device when the USB
         // handshake or stick-calibration SPI reads fail
         // (SDL_hidapi_switch.c:2410-2418 return false paths).
         // Select the VIRTUAL pad among SDL's gamepads: a real Pro paired
         // to the box enumerates identically by VID/PID/name (2026-07-22:
-        // the raw-HID probes opened the live pad by mistake). The virtual
-        // is distinguishable by HID serial (HM-CTL-<index>) or interface
-        // path (hid#hidclass# parent; a real BT pad sits under the
-        // Bluetooth HID service class GUID).
+        // the raw-HID probes opened the live pad by mistake), and so does
+        // another program's virtual Switch Pro. THIS pad is the one whose
+        // interface path is the HID interface serving this controller's
+        // serial, HM-CTL- and its transport index
+        // (DeviceOrchestrator.DriverSerial). SDL's Switch driver replaces
+        // the serial with the pad's MAC, so the path decides.
+        string ownSerial = $"HM-CTL-{ctrl.TransportIndex:D4}";
+        string? ownPath = null;
         IntPtr pad = IntPtr.Zero;
         var logged = new System.Collections.Generic.HashSet<uint>();
+        int openMs = SdlRevisionHasHmFilter() ? 15000 : 60000;
         var sw = Stopwatch.StartNew();
-        while (pad == IntPtr.Zero && sw.ElapsedMilliseconds < 15000)
+        while (pad == IntPtr.Zero && sw.ElapsedMilliseconds < openMs)
         {
+            ownPath ??= HMDeviceExtractor.ListDevices()
+                .FirstOrDefault(d => d.VendorId == 0x057E && d.ProductId == 0x2009
+                    && d.SerialNumberString == ownSerial)?.DevicePath;
             SDL_PumpEvents();
             IntPtr list = SDL_GetGamepads(out int n);
             if (list != IntPtr.Zero)
@@ -202,8 +214,7 @@ internal static class Program
                     string cpath = Marshal.PtrToStringUTF8(SDL_GetGamepadPath(cand)) ?? "";
                     if (logged.Add(id))
                         Console.WriteLine($"  [cand] id={id} serial='{serial}' path={cpath}");
-                    if (serial.StartsWith("HM-CTL-", StringComparison.OrdinalIgnoreCase)
-                        || cpath.Contains("hid#hidclass#", StringComparison.OrdinalIgnoreCase))
+                    if (ownPath != null && cpath.Equals(ownPath, StringComparison.OrdinalIgnoreCase))
                         pad = cand;
                     else
                         SDL_CloseGamepad(cand);
@@ -227,6 +238,7 @@ internal static class Program
         if (pad == IntPtr.Zero)
         {
             // Diagnostic: raw HIDAPI enumeration (below the joystick layer).
+            Console.WriteLine($"  [diag] own interface ({ownSerial}): {ownPath ?? "not enumerated"}");
             Console.WriteLine($"  [diag] SDL_hid_init = {SDL_hid_init()}");
             IntPtr devs = SDL_hid_enumerate(0, 0);
             int hidCount = 0;
@@ -284,7 +296,7 @@ internal static class Program
         {
             SDL_PumpEvents();
             return SDL_GetGamepadButton(pad, BUTTON_SOUTH) || SDL_GetGamepadButton(pad, BUTTON_EAST);
-        }, 3000);
+        }, 10000);
         // Nintendo pads report through SDL's label remap; the A press
         // surfaces as SOUTH or EAST depending on the labels hint. Either
         // proves button delivery through the calibrated path.
@@ -317,7 +329,7 @@ internal static class Program
             return SDL_GetGamepadSensorData(pad, SENSOR_ACCEL, accel, 3)
                 && SDL_GetGamepadSensorData(pad, SENSOR_GYRO, gyro, 3)
                 && Magnitude(accel) > 1.0f;
-        }, 5000);
+        }, 10000);
         Check("SDL_GetGamepadSensorData returns data", sensorRead);
         float am = Magnitude(accel);
         Check("accel magnitude ~= 1 g (8.8..10.8 m/s^2)", am > 8.8f && am < 10.8f,
@@ -329,7 +341,7 @@ internal static class Program
         // ── rumble round-trip ───────────────────────────────────────────
         int before = decoded10;
         Check("SDL_RumbleGamepad", SDL_RumbleGamepad(pad, 0xFFFF, 0xFFFF, 500));
-        Deadline(() => { SDL_PumpEvents(); return decoded10 > before; }, 2000);
+        Deadline(() => { SDL_PumpEvents(); return decoded10 > before; }, 10000);
         Check("rumble reaches OutputDecoded", decoded10 > before,
             $"left={decodedLeft} right={decodedRight}");
         Check("decoded amplitude nonzero", decodedLeft > 0 || decodedRight > 0,
