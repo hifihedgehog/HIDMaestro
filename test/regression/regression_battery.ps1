@@ -2110,10 +2110,11 @@ function Scenario-Kbm-Descriptors {
 # twice.
 #
 # Exit 3, a skip: the probe runs in session 0, as over SSH, where Raw Input
-# lists no device. Exit 2, a running SDK consumer, stays a failure.
+# lists no device. Exit 2, also a skip: another program that embeds
+# HIDMaestro runs, and the probe creates nothing beside it.
 function Scenario-Kbm-Raw-Input {
     Invoke-Probe -Dir 'kbm_live_check' -Exe 'KbmLiveCheck.exe' `
-                 -Message 'a virtual keyboard or mouse reached Raw Input wrong, lost input, or did not start (see probe stdout)' -SkipCodes 3
+                 -Message 'a virtual keyboard or mouse reached Raw Input wrong, lost input, or did not start (see probe stdout)' -SkipCodes 2, 3
 }
 
 # S71: programs that embed HIDMaestro, side by side on one machine. Each
