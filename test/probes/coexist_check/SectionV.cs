@@ -276,6 +276,13 @@ internal static partial class Program
             inWindow?.Invoke();
             while (dropped.Elapsed < TimeSpan.FromSeconds(78)) Thread.Sleep(250);
         }
+        // The probe's own attempt ends with its window. Left to run, it
+        // comes back every 30 s, and when V8 holds this port with a
+        // listener that never answers, the host controller waits on that
+        // import and holds every attach behind it: measured on the Atom,
+        // V8's peer waited 22 minutes and attached the moment the listener
+        // closed.
+        Vhci.Stop("127.0.0.1", port, "1-99");
         List<string> heard;
         lock (seen) heard = seen.ToList();
         Check("V3: the probe's own attempt reaches the probe's listener again", heard.Count(b => b == "1-99") >= 2,
