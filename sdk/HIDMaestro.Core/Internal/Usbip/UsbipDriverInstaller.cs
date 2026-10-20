@@ -296,8 +296,37 @@ internal static partial class UsbipDriverInstaller
 
         work.Report($"Installing USB audio transport (usbip-win2 {Version})...");
 
-        string exe = ExtractInstaller();
-        RunSilentInstall(exe);
+        int? failedWith = null;
+        for (int run = 1; ; run++)
+        {
+            string exe = ExtractInstaller();
+            int exitCode = RunSilentInstall(exe);
+            // Inno Setup: 0 success, 3010 success-with-reboot-pending. The
+            // driver still works before that reboot, so the availability
+            // poll below is the verdict.
+            if (exitCode == 0 || exitCode == 3010) break;
+
+            // A failing exit code does not say what the installer left. On
+            // this command line Inno Setup itself ends with 0 to 8 (issrc
+            // 7.1.0 Setup.MainFunc.pas, ecInitializationError to
+            // ecPrepareToInstallFailedRestartNeeded, and a restart code only
+            // when /RESTARTEXITCODE names one), so any other code comes from
+            // outside its code, such as a process that crashed or was ended.
+            // The setup its loader started can still be running, or can have
+            // installed everything first. So wait for every usbip-win2
+            // installer to end, then read the machine: a driver package in
+            // the store means the install reached its drivers, and its host
+            // controller gets the poll below. A machine with neither the
+            // package nor the uninstall entry is the clean machine this
+            // install started from, and the installer runs once more.
+            // Anything between is left as it is, and the create fails.
+            DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: the installer exited {exitCode}; reading the machine again.");
+            failedWith = exitCode;
+            if (!WaitForRunningInstallers(TimeoutScale.Apply(300_000)) || IsProductInstalled()) break;
+            if (run == 2 || InstalledUninstaller() != null) throw InstallerFailed(exitCode);
+            DeviceOrchestrator.LogDiag("UsbipDriverInstaller: nothing of usbip-win2 is on the machine; running the installer again.");
+            failedWith = null;
+        }
 
         // PnP settles the new host controller asynchronously. The
         // driver's own device arrives quickly. The root-hub
@@ -308,6 +337,8 @@ internal static partial class UsbipDriverInstaller
         {
             if (VhciClient.IsAvailable())
             {
+                if (failedWith is int code)
+                    DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: the host controller answers after the installer exited {code}.");
                 StampOwnerHardwareId();
                 work.Report("USB audio transport ready.");
                 return true;
@@ -315,6 +346,7 @@ internal static partial class UsbipDriverInstaller
             Thread.Sleep(250);
         }
 
+        if (failedWith is int failed) throw InstallerFailed(failed);
         throw new InvalidOperationException(
             $"usbip-win2 {Version} installer completed but its virtual host controller did not " +
             "appear within the timeout. Check Device Manager for 'USBip 3.X Emulated Host " +
@@ -1287,8 +1319,8 @@ internal static partial class UsbipDriverInstaller
     }
 
     /// <summary>Run the Inno Setup installer silently with
-    /// <see cref="InstallerArguments"/>.</summary>
-    private static void RunSilentInstall(string exePath)
+    /// <see cref="InstallerArguments"/> and return its exit code.</summary>
+    private static int RunSilentInstall(string exePath)
     {
         // Point-of-use check under a pin held until the installer exits: the
         // staged installer still matches the pinned hash, and its directory
@@ -1305,13 +1337,10 @@ internal static partial class UsbipDriverInstaller
             throw new InvalidOperationException(
                 "The usbip-win2 installer did not finish within the timeout.");
         }
-
-        // Inno Setup: 0 success, 3010 success-with-reboot-pending. The
-        // driver still works before that reboot, so treat it as success
-        // and let the availability poll be the real verdict.
-        if (p.ExitCode != 0 && p.ExitCode != 3010)
-            throw new InvalidOperationException(
-                $"The usbip-win2 installer failed with exit code {p.ExitCode}. " +
-                "Installing a driver requires elevation, the same as HMContext.InstallDriver.");
+        return p.ExitCode;
     }
+
+    private static InvalidOperationException InstallerFailed(int exitCode) =>
+        new($"The usbip-win2 installer failed with exit code {exitCode}. " +
+            "Installing a driver requires elevation, the same as HMContext.InstallDriver.");
 }

@@ -18,6 +18,13 @@
 //   N. nostream A, with the composite's profile loaded from a file without
 //               its idle stream ("stream"), the one change in what the
 //               device sends between v1.12.0 and 2.0.0. Runs only when named.
+//   K. killed-loader
+//               One program's first composite while the installer's loader
+//               is ended mid-install: a watcher ends the loader with exit
+//               code 255 once its setup child runs. The setup finishes the
+//               install alone, and the create still succeeds, reading the
+//               machine again after the failing exit code. The SDK's
+//               diagnostic log must name both steps. Runs only when named.
 //
 // --offline checks, on this machine with no sandbox, no device and no
 // elevation, the parts of A and N that can be: N's profile differs from the
@@ -79,17 +86,41 @@ internal static class Program
             return 0;
         }
         if (args.Length >= 3 && args[0] == "--in-sandbox")
-            return InSandbox(args[1], args[2]);
+        {
+            bool diag = args.Length >= 4 && args[3] == "diag";
+            // K reads the SDK's diagnostic lines, so it always runs with them.
+            if (diag || args[1] == "killed-loader") DiagLog.Start(Path.Combine(args[2], "main-diag.log"));
+            if (!diag) return InSandbox(args[1], args[2]);
+            using (DiagLog.SampleInstallers(Path.Combine(args[2], "processes.log")))
+            {
+                int code = InSandbox(args[1], args[2]);
+                DiagLog.Collect(args[2]);
+                return code;
+            }
+        }
         if (args.Length >= 4 && args[0] == "--create-composite")
+        {
+            if (args.Length >= 5 && args[4] == "diag")
+                DiagLog.Start(Path.Combine(Path.GetDirectoryName(args[2])!, $"child{args[3]}-diag.log"));
             return CreateComposite(args[1], args[2], args[3]);
+        }
         if (args.Length >= 2 && args[0] == "--record-create")
             return RecordCreate(args[1]);
         if (args.Length > 0 && args[0] == "--offline")
             return Offline();
-        return Host(args.Length > 0 ? args[0].ToUpperInvariant() : "ABC");
+        int at = Array.IndexOf(args, "--diag");
+        if (at >= 0 && at + 1 < args.Length) s_diagDir = Path.GetFullPath(args[at + 1]);
+        return Host(args.Length > 0 && !args[0].StartsWith("--", StringComparison.Ordinal) ? args[0].ToUpperInvariant() : "ABC");
     }
 
     // ── Host ───────────────────────────────────────────────────────────
+
+    // --diag <dir>: each program inside the sandbox runs with HIDMAESTRO_DIAG=1
+    // and writes the SDK's diagnostic lines to a log of its own. Those logs, a
+    // once-a-second list of the installer processes, the VC++ runtime's
+    // bundle and package logs, the Windows Installer events and Windows'
+    // setupapi logs are copied to <dir> (DiagLog).
+    static string? s_diagDir;
 
     static int Host(string only)
     {
@@ -113,6 +144,7 @@ internal static class Program
             ('B', "record", "an uninstall entry without the driver package"),
             ('C', "together", "two programs' first composites at the same moment"),
             ('N', "nostream", "a clean machine, the composite without its idle stream"),
+            ('K', "killed-loader", "one program's first composite while the installer's loader is ended mid-install"),
         };
         if (only.Contains('A') && only.Contains('B') && only.Contains('C'))
         {
@@ -174,7 +206,7 @@ internal static class Program
 
             step.Restart();
             var ran = Run(wsb, 1_200_000, "exec", "--id", id, "-c",
-                $"C:\\probe\\UsbipInstallCheck.exe --in-sandbox {scenario} C:\\results", "-r", "System", "--raw");
+                $"C:\\probe\\UsbipInstallCheck.exe --in-sandbox {scenario} C:\\results{(s_diagDir != null ? " diag" : "")}", "-r", "System", "--raw");
             runS = step.Elapsed.TotalSeconds;
             string file = Path.Combine(results, "results.txt");
             if (!File.Exists(file)) { Check($"{scenario}: the run inside the sandbox reports back", false, ran.Output.Trim()); return; }
@@ -199,6 +231,21 @@ internal static class Program
             // inside it.
             Console.WriteLine(FormattableString.Invariant(
                 $"  [NOTE] {scenario}: the sandbox started in {startS:F1} s, took its first command {readyS:F1} s later after {tries} tries, ran the probe in {runS:F1} s and stopped in {stop.Elapsed.TotalSeconds:F1} s"));
+            if (s_diagDir != null)
+            {
+                string kept = Path.Combine(s_diagDir, $"{scenario}-{DateTime.Now:yyyyMMdd-HHmmss}");
+                try
+                {
+                    foreach (string f in Directory.GetFiles(results, "*", SearchOption.AllDirectories))
+                    {
+                        string to = Path.Combine(kept, Path.GetRelativePath(results, f));
+                        Directory.CreateDirectory(Path.GetDirectoryName(to)!);
+                        File.Copy(f, to, true);
+                    }
+                    Console.WriteLine($"  [NOTE] {scenario}: diagnostic logs in {kept}");
+                }
+                catch (Exception ex) { Console.WriteLine($"  [NOTE] {scenario}: diagnostic logs not copied: {ex.GetType().Name}: {ex.Message}"); }
+            }
             try { Directory.Delete(results, true); } catch { }
         }
     }
@@ -247,6 +294,14 @@ internal static class Program
                 return s_lines.Any(l => l.StartsWith("FAIL", StringComparison.Ordinal)) ? 1 : 0;
             }
 
+            if (scenario == "killed-loader")
+            {
+                KilledLoader(results);
+                s_lines.Add("DONE");
+                File.WriteAllLines(Path.Combine(results, "results.txt"), s_lines);
+                return s_lines.Any(l => l.StartsWith("FAIL", StringComparison.Ordinal)) ? 1 : 0;
+            }
+
             using var ctx = new HMContext();
             ctx.LoadDefaultProfiles();
             ctx.InstallDriver();
@@ -254,8 +309,12 @@ internal static class Program
             HMController? c = null;
             Exception? error = null;
             DateTime createdFrom = DateTime.UtcNow;
+            var made = Stopwatch.StartNew();
+            DiagLog.Note($"probe: {scenario} create starts");
             try { c = ctx.CreateController(profile, "sandbox-composite"); }
             catch (Exception ex) { error = ex; }
+            DiagLog.Note($"probe: {scenario} create returned after {made.ElapsedMilliseconds} ms{(error == null ? "" : ": " + error)}");
+            Note(FormattableString.Invariant($"{scenario}: the create took {made.Elapsed.TotalSeconds:F1} s"));
 
             if (scenario == "record") RecordChecks(error != null, error == null ? "" : $"{error.GetType().Name}: {error.Message}");
             else CleanChecks(scenario, c, error, createdFrom);
@@ -541,6 +600,11 @@ internal static class Program
             psi.ArgumentList.Add($"together-{i}");
             psi.ArgumentList.Add(Path.Combine(results, $"child{i}.txt"));
             psi.ArgumentList.Add(i.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            if (DiagLog.On)
+            {
+                psi.ArgumentList.Add("diag");
+                psi.Environment["HIDMAESTRO_DIAG"] = "1";
+            }
             children.Add(Process.Start(psi)!);
         }
         // Both start the SDK and wait on the go event, and each says so
@@ -595,14 +659,17 @@ internal static class Program
             using var done = EventWaitHandle.OpenExisting(DoneEvent);
             using (var ready = EventWaitHandle.OpenExisting(ReadyEvent + slot)) ready.Set();
             go.WaitOne(120_000);
+            DiagLog.Note($"probe: {key} (pid {Environment.ProcessId}) released by the go event, creating");
             var create = Stopwatch.StartNew();
             HMController c;
             try { c = ctx.CreateController(ctx.GetProfile("dualsense-composite")!, key); }
             catch (Exception ex)
             {
+                DiagLog.Note($"probe: {key} create failed after {create.ElapsedMilliseconds} ms: {ex}");
                 File.WriteAllText(answer, $"failed {ex.GetType().Name}: {ex.Message}");
                 return 1;
             }
+            DiagLog.Note($"probe: {key} created on transport index {c.TransportIndex} after {create.ElapsedMilliseconds} ms");
             File.WriteAllText(answer, FormattableString.Invariant($"created {key} on transport index {c.TransportIndex} in {create.Elapsed.TotalSeconds:F1} s"));
             done.WaitOne(300_000);
             c.Dispose();
@@ -613,6 +680,129 @@ internal static class Program
             try { File.WriteAllText(answer, $"failed {ex.GetType().Name}: {ex.Message}"); } catch { }
             return 1;
         }
+    }
+
+    // ── The loader ended mid-install ───────────────────────────────────
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool TerminateProcess(Microsoft.Win32.SafeHandles.SafeProcessHandle process, uint exitCode);
+
+    /// <summary>The exit code the watcher ends the loader with: the code
+    /// the failed S73 run reported.</summary>
+    const uint KilledLoaderExitCode = 255;
+
+    /// <summary>One program's first composite. A watcher polls the process
+    /// list every 100 ms for the setup Inno Setup's loader runs
+    /// (USBip-*.tmp), and once it runs, ends the loader (the other USBip-*
+    /// process) with exit code 255, then follows the setup to its exit. The
+    /// SDK's diagnostic lines are read from the log the probe's tap
+    /// writes.</summary>
+    static void KilledLoader(string results)
+    {
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        ctx.InstallDriver();
+
+        var run = Stopwatch.StartNew();
+        int loaderPid = -1, setupPid = -1, loaderExit = int.MinValue, setupExit = int.MinValue;
+        long killedAt = -1, setupEndedAt = -1;
+        bool setupRanAfterKill = false;
+        string watchError = "";
+        var stop = new ManualResetEventSlim();
+        var watcher = new Thread(() =>
+        {
+            try
+            {
+                Process? setup = null, loader = null;
+                while (setup == null && !stop.Wait(100))
+                {
+                    foreach (var p in Process.GetProcesses())
+                    {
+                        string n;
+                        try { n = p.ProcessName; } catch { p.Dispose(); continue; }
+                        if (!n.StartsWith("USBip-", StringComparison.OrdinalIgnoreCase)) { p.Dispose(); continue; }
+                        if (n.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)) setup ??= p;
+                        else loader ??= p;
+                    }
+                    if (setup == null) { loader?.Dispose(); loader = null; }
+                }
+                if (setup == null) return;
+                if (loader == null) { watchError = $"the setup child (pid {setup.Id}) ran with no loader beside it"; return; }
+                loaderPid = loader.Id;
+                setupPid = setup.Id;
+                // A handle held from here keeps the setup's exit code
+                // readable after it ends.
+                _ = setup.SafeHandle;
+                if (!TerminateProcess(loader.SafeHandle, KilledLoaderExitCode))
+                {
+                    watchError = $"TerminateProcess failed with Win32 error {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}";
+                    return;
+                }
+                killedAt = run.ElapsedMilliseconds;
+                loader.WaitForExit(10_000);
+                loaderExit = loader.ExitCode;
+                setupRanAfterKill = !setup.HasExited;
+                if (setup.WaitForExit(600_000))
+                {
+                    setupEndedAt = run.ElapsedMilliseconds;
+                    setupExit = setup.ExitCode;
+                }
+            }
+            catch (Exception ex) { watchError = $"{ex.GetType().Name}: {ex.Message}"; }
+        }) { IsBackground = true, Name = "killed-loader watcher" };
+        watcher.Start();
+
+        HMController? c = null;
+        Exception? error = null;
+        DiagLog.Note("probe: killed-loader create starts");
+        try { c = ctx.CreateController(ctx.GetProfile("dualsense-composite")!, "sandbox-composite"); }
+        catch (Exception ex) { error = ex; }
+        long created = run.ElapsedMilliseconds;
+        DiagLog.Note($"probe: killed-loader create returned after {created} ms{(error == null ? "" : ": " + error)}");
+        Note(FormattableString.Invariant($"killed-loader: the create took {created / 1000.0:F1} s"));
+        // The setup has ended by the time the create returns, unless the
+        // create gave up first.
+        if (!watcher.Join(15_000)) { stop.Set(); watcher.Join(5_000); }
+        stop.Set();
+
+        Record("killed-loader: the watcher ended the loader while its setup child ran (positive control)",
+               killedAt >= 0 && setupRanAfterKill,
+               killedAt < 0
+                   ? (watchError.Length > 0 ? watchError : "the watcher never saw the setup child, so no fault was injected")
+                   : FormattableString.Invariant($"loader pid {loaderPid} ended with exit code {loaderExit} at {killedAt} ms into the create, setup pid {setupPid} {(setupRanAfterKill ? "still running" : "already gone")}") +
+                     (setupEndedAt >= 0 ? FormattableString.Invariant($", the setup exited {setupExit} at {setupEndedAt} ms") : ", the setup's exit not seen") +
+                     (watchError.Length > 0 ? $", {watchError}" : ""));
+        Record("killed-loader: the composite creates", c != null, error == null ? "" : $"{error.GetType().Name}: {error.Message}");
+
+        var paths = new List<string>();
+        var sw = Stopwatch.StartNew();
+        while (c != null && paths.Count == 0 && sw.ElapsedMilliseconds < 30_000)
+        {
+            paths = Hid.Paths(0x054C, 0x0CE6);
+            if (paths.Count == 0) Thread.Sleep(250);
+        }
+        Record("killed-loader: the composite's HID interface appears", paths.Count > 0, $"{paths.Count} interface(s)");
+
+        string diag = "";
+        try
+        {
+            using var fs = new FileStream(Path.Combine(results, "main-diag.log"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(fs);
+            diag = reader.ReadToEnd();
+        }
+        catch (Exception ex) { diag = ""; Note($"killed-loader: the diag log could not be read: {ex.GetType().Name}: {ex.Message}"); }
+        string exited = $"the installer exited {loaderExit}; reading the machine again";
+        string answers = $"the host controller answers after the installer exited {loaderExit}";
+        bool sawExit = loaderExit != int.MinValue && diag.Contains(exited, StringComparison.Ordinal);
+        bool sawAnswer = loaderExit != int.MinValue && diag.Contains(answers, StringComparison.Ordinal);
+        Record("killed-loader: the diag log names the loader's exit code, then the host controller answering after it",
+               sawExit && sawAnswer,
+               $"\"{exited}\" {(sawExit ? "found" : "missing")}, \"{answers}\" {(sawAnswer ? "found" : "missing")}");
+        foreach (string line in diag.Split('\n'))
+            if (line.Contains("UsbipDriverInstaller:", StringComparison.Ordinal))
+                Note($"killed-loader: diag {line.Trim()}");
+
+        c?.Dispose();
     }
 
     /// <summary>Host controller devnodes usbip-win2's devnode.exe made: the
@@ -668,8 +858,10 @@ internal static class Program
         HMController? c = null;
         Exception? error = null;
         DateTime createdFrom = DateTime.UtcNow;
+        var made = Stopwatch.StartNew();
         try { c = ctx.CreateController(ctx.GetProfile("dualsense-composite")!, "sandbox-composite"); }
         catch (Exception ex) { error = ex; }
+        Note(FormattableString.Invariant($"clean: the create took {made.Elapsed.TotalSeconds:F1} s"));
         CleanChecks("clean", c, error, createdFrom);
         c?.Dispose();
         Note(FormattableString.Invariant($"clean: took {part.Elapsed.TotalSeconds:F1} s"));
