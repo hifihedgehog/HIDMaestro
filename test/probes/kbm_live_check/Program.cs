@@ -583,9 +583,10 @@ internal static class Program
         string tag = Tag(0xBEEF, 0xF0B2);
         var before = Names();
         using var pad = ctx.CreateController(profile, "kbm-live-buttons");
+        // Windows enumerates the two collections on their own, so each one
+        // is waited for: the vendor one can arrive before the mouse.
         var vendor = WaitNew(before, d => d.Type == RawInputSink.RIM_TYPEHID && Is(d.Name, tag), 1, 15000);
-        var mouse = RawInputSink.Devices().Where(d => !before.Contains(d.Name) && d.Type == RawInputSink.RIM_TYPEMOUSE
-                                                    && Is(d.Name, tag)).ToList();
+        var mouse = WaitNew(before, d => d.Type == RawInputSink.RIM_TYPEMOUSE && Is(d.Name, tag), 1, 15000);
         Check("the mouse collection is a Raw Input mouse", mouse.Count == 1);
         Check("the vendor collection is a Raw Input HID device of its own", vendor.Count == 1);
         if (vendor.Count == 1)
