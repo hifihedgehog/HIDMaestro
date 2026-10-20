@@ -17,15 +17,21 @@
 //              ~half the poll interval; post-#34 the driver signals the
 //              event and the RTT drops to dispatch cost.
 //
-//   dual       (mode arg "dual") One xbox-360-wheel-v1 controller, BOTH
-//              ring producers driven concurrently: XInputSetState rumble
-//              through the XUSB companion and HidD_SetFeature (PID
+//   dual       (mode arg "dual") One custom Xbox wheel with a PID block,
+//              BOTH ring producers driven concurrently: XInputSetState
+//              rumble through the XUSB companion and HidD_SetFeature (PID
 //              Create New Effect 0x11) through the main HID driver, 300
 //              sends each at ~1 ms pacing. Asserts full delivery per
 //              source. Locks the multi-producer reservation protocol
 //              (audit of #34): the pre-fix local-counter scheme could
 //              mint colliding sequence numbers and silently drop one
-//              producer's packet.
+//              producer's packet. A source never has more than
+//              InFlightLimit packets undelivered, so a reader the
+//              machine's load delays cannot be lapped by the 64-slot
+//              ring. The XInput slot is the one the wheel's create
+//              connected and the HID interface is the one serving the
+//              wheel's serial, so a real pad or another program's pad is
+//              never driven.
 //
 // Usage: OutputPerfBench.exe [controllers=4] [idleSeconds=30] [rttSends=200]
 //        OutputPerfBench.exe dual
@@ -33,6 +39,7 @@
 // gate); the timing modes exit 0 always (they are benches).
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -74,6 +81,56 @@ internal static class Program
         IntPtr sec, uint disp, uint flags, IntPtr tmpl);
 
     const uint GENERIC_RW = 0xC0000000, FILE_SHARE_RW = 0x3, OPEN_EXISTING = 3;
+
+    // Bound for a wait the machine's load can stretch. The ring delivers a
+    // packet in under a millisecond (docs/testing/latency.md, RTT max
+    // 0.630 ms), and this gate used to wait 1.5 s for the tail and 5 s for
+    // the slot and HID interface, so only a hang or a lost packet reaches it.
+    const int HangMs = 15000;
+
+    // Undelivered packets one source may have before it waits. Two sources
+    // at this depth fill half of the 64-slot output ring
+    // (SharedMemoryIO.OUTPUT_RING_SLOTS), so a reader the machine's load
+    // delays is never lapped and never skips a packet that was delivered
+    // correctly. A lost packet stays undelivered and still fails the count.
+    const int InFlightLimit = 16;
+
+    static bool WaitUntil(Func<bool> cond, int ms)
+    {
+        var sw = Stopwatch.StartNew();
+        while (!cond())
+        {
+            if (sw.ElapsedMilliseconds >= ms) return false;
+            Thread.Sleep(1);
+        }
+        return true;
+    }
+
+    static HashSet<uint> ConnectedXInputSlots()
+    {
+        var slots = new HashSet<uint>();
+        for (uint s = 0; s < 4; s++)
+            if (XInputGetState(s, out _) == 0) slots.Add(s);
+        return slots;
+    }
+
+    /// <summary>The controller's own HID interface: its VID and PID, and the
+    /// serial the driver serves for its transport index. A real pad or
+    /// another program's controller with the same VID and PID serves a
+    /// different serial. Null when none arrives within the hang bound.</summary>
+    static string? OwnHidPath(HMController ctrl, HMProfile profile)
+    {
+        string serial = DeviceOrchestrator.DriverSerial(ctrl.TransportIndex);
+        var wait = Stopwatch.StartNew();
+        while (true)
+        {
+            string? path = HidDeviceEnumerator.Enumerate()
+                .FirstOrDefault(d => d.VendorId == profile.VendorId && d.ProductId == profile.ProductId
+                                  && d.SerialNumberString == serial)?.DevicePath;
+            if (path != null || wait.ElapsedMilliseconds >= HangMs) return path;
+            Thread.Sleep(100);
+        }
+    }
 
     static int Main(string[] args)
     {
@@ -142,13 +199,7 @@ internal static class Program
             }
         };
 
-        string? path = null;
-        for (int i = 0; i < 50 && path == null; i++)
-        {
-            path = HidDeviceEnumerator.Enumerate()
-                .FirstOrDefault(d => d.VendorId == profile.VendorId && d.ProductId == profile.ProductId)?.DevicePath;
-            if (path == null) Thread.Sleep(100);
-        }
+        string? path = OwnHidPath(ctrl, profile);
         if (path == null) { Console.WriteLine("out-rtt: HID open FAILED"); ctrl.Dispose(); return 0; }
         using var h = CreateFileW(path, GENERIC_RW, FILE_SHARE_RW, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
         if (h.IsInvalid) { Console.WriteLine("out-rtt: CreateFile FAILED"); ctrl.Dispose(); return 0; }
@@ -234,6 +285,9 @@ internal static class Program
             .Connection("usb")
             .FromDescriptorBuilder(descBuilder)
             .Build();
+        // A real pad or another program's pad can hold any slot. The
+        // wheel's slot is one its create connects.
+        var slotsBefore = ConnectedXInputSlots();
         using var ctrl = ctx.CreateController(profile);
 
         int gotXInput = 0, gotFeature = 0;
@@ -248,19 +302,14 @@ internal static class Program
         ctrl.PublishPidPool(0xFFFF, 16, true, false);
 
         uint slot = 0xFFFFFFFF;
-        for (int i = 0; i < 50 && slot == 0xFFFFFFFF; i++)
+        var slotWait = Stopwatch.StartNew();
+        while (slot == 0xFFFFFFFF && slotWait.ElapsedMilliseconds < HangMs)
         {
-            for (uint s = 0; s < 4; s++)
-                if (XInputGetState(s, out _) == 0) { slot = s; break; }
+            foreach (uint s in ConnectedXInputSlots())
+                if (!slotsBefore.Contains(s) && s < slot) slot = s;
             if (slot == 0xFFFFFFFF) Thread.Sleep(100);
         }
-        string? path = null;
-        for (int i = 0; i < 50 && path == null; i++)
-        {
-            path = HidDeviceEnumerator.Enumerate()
-                .FirstOrDefault(d => d.VendorId == profile.VendorId && d.ProductId == profile.ProductId)?.DevicePath;
-            if (path == null) Thread.Sleep(100);
-        }
+        string? path = OwnHidPath(ctrl, profile);
         if (slot == 0xFFFFFFFF || path == null)
         {
             Console.WriteLine($"[FAIL] setup: xinput slot={slot} hidPath={(path == null ? "absent" : "ok")}");
@@ -272,8 +321,14 @@ internal static class Program
         var tA = new Thread(() =>
         {
             var vib = new XINPUT_VIBRATION();
+            int xBase = Volatile.Read(ref gotXInput);
             for (int i = 0; i < SendsPerSource; i++)
             {
+                if (!WaitUntil(() => i - (Volatile.Read(ref gotXInput) - xBase) < InFlightLimit, HangMs))
+                {
+                    Console.WriteLine($"  [lane-a] {InFlightLimit} packets undelivered for {HangMs} ms, lane stopped at {i}");
+                    break;
+                }
                 vib.LeftMotor = (ushort)(1 + (i % 65000));
                 vib.RightMotor = (ushort)(65000 - (i % 65000));
                 XInputSetState(slot, ref vib);
@@ -326,6 +381,11 @@ internal static class Program
             buf[0] = workingRid;
             for (int i = 1; i < SendsPerSource; i++)
             {
+                if (!WaitUntil(() => sentFeature - Volatile.Read(ref gotFeature) < InFlightLimit, HangMs))
+                {
+                    Console.WriteLine($"  [lane-b] {InFlightLimit} packets undelivered for {HangMs} ms, lane stopped at {i}");
+                    break;
+                }
                 if (buf.Length > 1) buf[1] = (byte)(1 + (i % 254));
                 bool ok = useOutput ? HidD_SetOutputReport(h, buf, buf.Length)
                                     : HidD_SetFeature(h, buf, buf.Length);
@@ -335,7 +395,11 @@ internal static class Program
         });
         tA.Start(); tB.Start();
         tA.Join(); tB.Join();
-        Thread.Sleep(1500);                    // let the reader drain the tail
+        // Let the reader drain the tail. A reader the machine's load delays
+        // gets up to the hang bound, and a lost packet never arrives.
+        Thread.Sleep(1500);
+        WaitUntil(() => Volatile.Read(ref gotXInput) >= SendsPerSource
+                     && Volatile.Read(ref gotFeature) >= sentFeature, HangMs);
 
         Console.WriteLine($"dual: XInput {gotXInput}/{SendsPerSource} (>= asserted; slot-claim can add one), " +
                           $"HidFeature {gotFeature}/{sentFeature} sent-and-delivered of {SendsPerSource} attempts");
@@ -362,11 +426,17 @@ internal static class Program
         buf2[0] = 0x11;
         for (int i = 0; i < 100; i++)
         {
+            if (!WaitUntil(() => sentStagger - (Volatile.Read(ref gotFeature) - featBase) < InFlightLimit, HangMs))
+            {
+                Console.WriteLine($"  [stagger] {InFlightLimit} packets undelivered for {HangMs} ms, burst stopped at {i}");
+                break;
+            }
             buf2[1] = (byte)(1 + i);
             if (HidD_SetFeature(h, buf2, buf2.Length)) sentStagger++;
             Thread.Sleep(1);
         }
         Thread.Sleep(1500);
+        WaitUntil(() => Volatile.Read(ref gotFeature) - featBase >= sentStagger, HangMs);
         int gotStagger = gotFeature - featBase;
 
         // Ground truth: raw ring header + slot SeqNos straight from the
