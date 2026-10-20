@@ -2049,10 +2049,14 @@ function Scenario-Switch2-Composite {
 # virtuals of those identities, runs the full cleanup and a fresh context,
 # and diffs. It then follows the GameInput table a code-built game pad
 # holds, HMOemNameOverride against a live virtual in all four orders of
-# claim and release, and a consumer killed with its virtual alive.
+# claim and release, and a consumer killed with its virtual alive. The
+# probe exits 2, a skip, when another program that embeds HIDMaestro runs
+# or holds an input section open, since its live part would remove that
+# program's virtuals.
 function Scenario-Registry-Ownership {
     Invoke-Probe -Dir 'registry_ownership_check' -Exe 'RegistryOwnershipCheck.exe' `
-                 -Message 'a registry key a real device owns was changed, or a key HIDMaestro wrote outlived its virtual (see probe stdout)'
+                 -Message 'a registry key a real device owns was changed, or a key HIDMaestro wrote outlived its virtual (see probe stdout)' `
+                 -SkipCodes 2
 }
 
 # S67: what WGI reads from a virtual pad (foundation-sunshine #1056). The
