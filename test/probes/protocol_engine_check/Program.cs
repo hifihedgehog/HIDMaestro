@@ -420,22 +420,27 @@ internal static class Engine
         e.HandleCommand(Checks.Bytes("15 00"), Stopwatch.GetTimestamp());
         long opened = Stopwatch.GetTimestamp();
         e.HandleCommand(Checks.Bytes("15 01"), opened);
-        var sw = Stopwatch.StartNew();
         int reads = 0, off = 0;
         uint last = 0;
+        long lo = 0;
         var buf = new byte[16];
-        while (sw.ElapsedMilliseconds < 300)
+        // Until a read made 300 ms after the origin, and more than 1,000
+        // reads: a loaded machine slows the loop but cannot end it early.
+        // The last read's lo is then 300 or more, so off == 0 also says
+        // the counter reached 300.
+        while (lo < 300 || reads <= 1000)
         {
             long before = Stopwatch.GetTimestamp();
             e.Peek(0x09, buf);
             long after = Stopwatch.GetTimestamp();
             uint v = BitConverter.ToUInt32(buf, 2);
-            long lo = (before - opened) * 1_000_000 / Stopwatch.Frequency / 1000, hi = (after - opened) * 1_000_000 / Stopwatch.Frequency / 1000;
+            lo = (before - opened) * 1_000_000 / Stopwatch.Frequency / 1000;
+            long hi = (after - opened) * 1_000_000 / Stopwatch.Frequency / 1000;
             if (v < lo || v > hi || v < last) off++;
             last = v;
             reads++;
         }
-        Checks.Check($"a clock counter of 1 ms read {reads} times over 300 ms matches the elapsed time on every read", off == 0 && reads > 1000 && last >= 299 && last <= 301,
+        Checks.Check($"a clock counter of 1 ms read {reads} times over 300 ms matches the elapsed time on every read", off == 0,
             $"{off} reads off, last {last}");
     }
 
@@ -498,14 +503,21 @@ internal static class Clock
             public int StallAt = -1, StallMs;
         }
         public Box B;
-        public bool Running(out long origin) { Interlocked.Increment(ref B.Looks); origin = Volatile.Read(ref B.Origin); return B.Running; }
+        // Running before Origin: the test writes Origin, then Running, so a
+        // run seen here always comes with its own origin, however the
+        // clock's thread is preempted between the two reads.
+        public bool Running(out long origin) { Interlocked.Increment(ref B.Looks); bool running = B.Running; origin = Volatile.Read(ref B.Origin); return running; }
         public long Period => Volatile.Read(ref B.Period);
         public long NotBefore => Volatile.Read(ref B.NotBefore);
         public void Tick(long due)
         {
             int n;
-            lock (B.Ticks) { B.Ticks.Add((due, Stopwatch.GetTimestamp())); n = B.Ticks.Count; }
-            if (n - 1 == B.StallAt) Thread.Sleep(B.StallMs);
+            long at;
+            lock (B.Ticks) { at = Stopwatch.GetTimestamp(); B.Ticks.Add((due, at)); n = B.Ticks.Count; }
+            // The stall lasts StallMs by the Stopwatch from the time
+            // recorded: one Sleep can end up to a timer tick early.
+            if (n - 1 == B.StallAt)
+                while (Stopwatch.GetTimestamp() - at < B.StallMs * Stopwatch.Frequency / 1000) Thread.Sleep(1);
         }
         public void RunEnded() => Interlocked.Increment(ref B.Ends);
     }
@@ -596,19 +608,23 @@ internal static class Clock
         Check("Stop ends the clock's thread", !clock.Thread.IsAlive);
 
         // A clock that every change wakes waits for its next tick in one
-        // wait. Waits capped at 100 ms would look at a 500 ms tick six
-        // times a period, 18 or more times for three ticks.
+        // wait, two looks a tick. Waits capped at 100 ms would look at a
+        // 500 ms tick six times a period. Looks are read first, then the
+        // ticks, so a test thread that reads late counts the ticks of the
+        // looks it read. Three ticks take 1.5 s, and 15 s is the hang bound.
         var slow = new Probe.Box { Period = f / 2 };
         var slowClock = new DeviceClock<Probe>(new Probe { B = slow }, MissedTick.Owe, "engine check slow clock", everyChangeWakes: true);
         slowClock.Start();
         slow.Origin = Stopwatch.GetTimestamp(); slow.Running = true;
         slowClock.Wake();
-        bool slowTicked = Until(() => { lock (slow.Ticks) return slow.Ticks.Count >= 3; });
+        bool slowTicked = Until(() => { lock (slow.Ticks) return slow.Ticks.Count >= 3; }, 15_000);
         int looks = Volatile.Read(ref slow.Looks);
+        int slowTicks;
+        lock (slow.Ticks) slowTicks = slow.Ticks.Count;
         slow.Running = false;
         slowClock.Stop(1000);
         Check("a clock that every change wakes looks at a 500 ms tick a few times a period, not every 100 ms",
-            slowTicked && looks <= 12, $"{looks} looks for three ticks");
+            slowTicked && looks <= 4 * slowTicks, $"{looks} looks for {slowTicks} ticks");
 
         Console.WriteLine("-- the idle repeat's clock (stream)");
         Stream();

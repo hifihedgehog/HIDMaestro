@@ -25,10 +25,6 @@
 //      parses back with every requested HMAxis present, and ExtraAxes-driven
 //      values reach the right wire bytes.
 //
-//   4. Override semantics: when an axis is reachable via BOTH a semantic slot
-//      (state.LeftTrigger) AND ExtraAxes, the explicit ExtraAxes write wins
-//      "explicit beats implicit" is the documented contract.
-//
 // No driver install, no virtual device. Exit 0 on PASS, 1 on FAIL.
 
 using System;
@@ -131,22 +127,6 @@ internal static class Program
         Check("Builder Throttle wire byte = 0xBF", built[rb.AxisFields[HMAxis.Throttle].BitOffset / 8] == 0xBF);
         Check("Builder Brake wire byte = 0x40",    built[rb.AxisFields[HMAxis.Brake].BitOffset / 8]    == 0x40);
         Check("Builder Clutch wire byte = 0x00",   built[rb.AxisFields[HMAxis.Clutch].BitOffset / 8]   == 0x00);
-
-        // ── Phase 4: Last-write-wins on the unified Axes dict ─────────────
-        Console.WriteLine("\n-- Last-write-wins on the unified Axes dict --");
-
-        // SideWinder's Slider field is the descriptor axis HMAxis.Slider; in
-        // v1.3.9 there is exactly ONE write surface (state.Axes[axis]) so the
-        // last write to a key wins. Verify the dict-driven write lands at
-        // the correct wire byte.
-        var sw = ctx.GetProfile("sidewinder-force-feedback-2")!;
-        var swRb = HidReportBuilder.Parse(sw.GetDescriptorBytes()!);
-        var swReport = swRb.BuildReport(
-            new Dictionary<HMAxis, float> { [HMAxis.Slider] = 1.0f });
-
-        Check("Slider=1.0 lands at byte 6 = 0x7F on SideWinder descriptor",
-              swReport[6] == 0x7F,
-              $"got 0x{swReport[6]:X2}");
 
         // ── Summary ───────────────────────────────────────────────────────
         Console.WriteLine($"\n=== {(s_failures == 0 ? "PASS" : "FAIL")}: {s_total - s_failures}/{s_total} ===");

@@ -46,8 +46,8 @@ internal static class SelfTest
     /// <summary>The checks as every replay runs them: in a process of their
     /// own, this probe's selftest mode, started before the cases and read
     /// once they are done, since most of the checks' time is git's (the
-    /// history checks commit twice, and each commit runs the machine's
-    /// hooks). Only a failing check and one line are printed.</summary>
+    /// history checks commit twice). Only a failing check and one line are
+    /// printed.</summary>
     internal sealed class Quiet : IDisposable
     {
         readonly System.Diagnostics.Process _process;
@@ -351,7 +351,10 @@ internal static class SelfTest
         bool Git(params string[] args)
         {
             var psi = new System.Diagnostics.ProcessStartInfo("git") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
-            foreach (var a in new[] { "-C", repo, "-c", "user.name=selftest", "-c", "user.email=selftest@invalid", "-c", "commit.gpgsign=false" }.Concat(args))
+            // No hook of the machine's runs here: the hooks path names a
+            // folder that does not exist.
+            foreach (var a in new[] { "-C", repo, "-c", "user.name=selftest", "-c", "user.email=selftest@invalid", "-c", "commit.gpgsign=false",
+                                      "-c", "core.hooksPath=" + Path.Combine(dir, "no-hooks") }.Concat(args))
                 psi.ArgumentList.Add(a);
             using var proc = System.Diagnostics.Process.Start(psi)!;
             proc.StandardOutput.ReadToEnd();

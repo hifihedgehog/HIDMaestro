@@ -223,8 +223,9 @@ internal static class Ds3Engine
         }
         finally
         {
-            foreach (var f in Directory.EnumerateFiles(work)) File.Delete(f);
-            Directory.Delete(work);
+            // Another program can hold a file here a moment, which
+            // DeleteDirectory waits out.
+            Case5Driver.DeleteDirectory(work);
         }
     }
 

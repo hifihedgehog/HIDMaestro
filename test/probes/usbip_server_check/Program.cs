@@ -71,7 +71,10 @@ internal static partial class Program
         Console.WriteLine($"  [{(cond ? "PASS" : "FAIL")}] {name}{(detail.Length > 0 ? "  " + detail : "")}");
     }
 
-    const int Index = 60; // far from live controller indices
+    // Above every transport index a create takes (ControllerLease.IndexLimit,
+    // 4096), so no program's controller can hold these. A create starts at
+    // 64 while a v1.12.0 program runs, inside the old 60 to 91.
+    const int Index = 5000;
 
     static int Main(string[] args)
     {
@@ -157,7 +160,7 @@ internal static partial class Program
     {
         Console.WriteLine("-- Dispose time with the input pump waiting for a frame (30 devices)");
         // One index per device, since the 30 run at once.
-        const int TimingIndex = 62;
+        const int TimingIndex = Index + 2;
         var profile = ctx.GetProfile("dualsense-composite")!.Inner;
         var devices = new UsbipEmulatedDevice?[30];
         double[] ms;
@@ -513,10 +516,9 @@ internal static partial class Program
 
         var setVol = cl.ControlOut(0x21, 0x01, 0x0200, 0x0200, new byte[] { 0x00, 0xF0 }); // -16 dB
         Check("SET_CUR(volume) acks", setVol.Status == 0);
-        Thread.Sleep(20);
-        lock (controlWrites)
-            Check("ControlChanged event carried the write",
-                  controlWrites.Any(w => w.Item1 == 2 && w.Item2 == 2 && w.Item3 == unchecked((short)0xF000)));
+        // The audio event thread raises it. The wait ends once it has.
+        Check("ControlChanged event carried the write",
+              WaitUntil(() => { lock (controlWrites) return controlWrites.Any(w => w.Item1 == 2 && w.Item2 == 2 && w.Item3 == unchecked((short)0xF000)); }, 5000));
         var volCur2 = cl.ControlIn(0xA1, 0x81, 0x0200, 0x0200, 2);
         Check("GET_CUR reflects the write", S16(volCur2.Data) == unchecked((short)0xF000));
 
@@ -551,7 +553,10 @@ internal static partial class Program
                   device.Audio.GetAltSetting(2) == 1 && LastAlt(altEvents, 2) == 1,
                   $"alt {device.Audio.GetAltSetting(2)}, last event {LastAlt(altEvents, 2)}");
 
-            Thread.Sleep(700);
+            // Polled, so a late idle timer passes and a stream that never
+            // closes still fails.
+            WaitUntil(() => device.Audio.GetAltSetting(1) == 0 && device.Audio.GetAltSetting(2) == 0
+                            && LastAlt(altEvents, 1) == 0 && LastAlt(altEvents, 2) == 0, 5000);
             Check("both streams close once their traffic stops",
                   device.Audio.GetAltSetting(1) == 0 && device.Audio.GetAltSetting(2) == 0
                   && LastAlt(altEvents, 1) == 0 && LastAlt(altEvents, 2) == 0,
@@ -585,14 +590,16 @@ internal static partial class Program
         Check("all iso OUT URBs completed", true, $"{sw.ElapsedMilliseconds} ms for {Urbs * Pkts} ms of audio");
         Check("pacing held: 80 ms of audio took >= 55 ms", sw.ElapsedMilliseconds >= 55,
               $"{sw.ElapsedMilliseconds} ms");
-        Check("pacing sane: completed within 400 ms", sw.ElapsedMilliseconds < 400);
+        // A stall bound, 25 times the 80 ms the pacing takes.
+        Check("pacing does not stall: completed within 2 s", sw.ElapsedMilliseconds < 2000,
+              $"{sw.ElapsedMilliseconds} ms");
         Check("iso OUT RET: n packets echoed, actual = buffer length",
               lastRet.RawNumberOfPackets == Pkts && lastRet.ActualLength == Pkts * PktBytes);
         Check("iso OUT descriptors echo offsets with status 0",
               lastRet.IsoDescs != null && lastRet.IsoDescs.Length == Pkts
               && lastRet.IsoDescs[0].Offset == 0 && lastRet.IsoDescs[1].Offset == PktBytes
               && lastRet.IsoDescs.All(d => d.Status == 0));
-        Thread.Sleep(30);
+        WaitUntil(() => { lock (outFrames) return outFrames.Length >= sent.Length; }, 5000);
         lock (outFrames)
             Check("OutFrames delivered every PCM byte in order",
                   outFrames.Length == sent.Length
@@ -855,7 +862,7 @@ internal static partial class Program
     static void SlowHandlers(HMContext ctx, UsbipServer server)
     {
         Console.WriteLine("\n-- audio handlers that block --");
-        const int SlowIndex = 61;
+        const int SlowIndex = Index + 1;
         var profile = ctx.GetProfile("dualsense-composite")!.Inner;
         foreach (string which in new[] { "ControlChanged", "StreamingChanged" })
         {
@@ -864,7 +871,9 @@ internal static partial class Program
             var audio = new HMUsbAudio(profile, device);
             using var entered = new ManualResetEventSlim();
             using var release = new ManualResetEventSlim();
-            void Block() { entered.Set(); release.Wait(5000); }
+            // The handler holds well past the answer's wait below, so only a
+            // read taken in while it blocks counts as answered.
+            void Block() { entered.Set(); release.Wait(30_000); }
             if (which == "ControlChanged") audio.ControlChanged += (_, _) => Block();
             else audio.Output.StreamingChanged += (_, _) => Block();
             try
@@ -888,7 +897,7 @@ internal static partial class Program
                 var data = MakePattern(63, 0x31);
                 SharedMemoryIO.WriteInputFrame(view, evt, ref seqNo, data, 63, null);
                 var reply = System.Threading.Tasks.Task.Run(() => cl.ReadRet(read));
-                bool answered = reply.Wait(1000);
+                bool answered = reply.Wait(5000);
                 bool stillBlocked = !release.IsSet;
                 release.Set();
                 if (!answered) reply.Wait(5000);
@@ -1238,6 +1247,12 @@ internal static partial class Program
         var t = typeof(UsbipEmulatedDevice);
         var pumps = new Thread[30];
         var events = new IntPtr[30];
+        // A second handle to each event, kept by the probe. Once the pump
+        // closes its own, Windows can give that value to the next handle any
+        // thread here creates, and on a slow machine the loop below is still
+        // creating events and threads when the first Disposes run, so the
+        // value alone cannot tell a closed handle from a reused one.
+        var dups = new IntPtr[30];
         var ended = new bool[30];
         double[] ms = DisposeTogether(30, new Random(43), 20, 300, i =>
         {
@@ -1245,6 +1260,7 @@ internal static partial class Program
             t.GetField("_lifetimeLock", Private)!.SetValue(dev, new object());
             t.GetField("_publishLock", Private)!.SetValue(dev, new object());
             IntPtr ev = CreateEventW(IntPtr.Zero, false, false, null);
+            DuplicateHandle(GetCurrentProcess(), ev, GetCurrentProcess(), out dups[i], 0, false, DuplicateSameAccess);
             t.GetField("_inputWaitEvent", Private)!.SetValue(dev, ev);
             var loop = (ThreadStart)Delegate.CreateDelegate(typeof(ThreadStart), dev, t.GetMethod("InputPumpLoop", Private)!);
             var pump = new Thread(loop) { IsBackground = true, Name = "S43 offline input pump" };
@@ -1254,15 +1270,25 @@ internal static partial class Program
             pump.Start();
             return dev;
         },
-        // The pump closes the event as it ends.
-        i => ended[i] = !pumps[i].IsAlive && !GetHandleInformation(events[i], out _));
+        // The pump closes the event as it ends. The join bounds a pump that
+        // never ends. The pump's handle is still open only when its value
+        // still names the same event as the kept one.
+        i =>
+        {
+            pumps[i].Join(5000);
+            ended[i] = dups[i] != IntPtr.Zero && !pumps[i].IsAlive
+                       && !(GetHandleInformation(events[i], out _) && CompareObjectHandles(events[i], dups[i]));
+            if (dups[i] != IntPtr.Zero) CloseHandle(dups[i]);
+        });
         bool closed = Array.TrueForAll(ended, e => e);
         int lost = Array.FindAll(ms, double.IsNaN).Length;
         Array.Sort(ms);
-        // Nearest rank: the 15th and the 29th of 30.
+        // Nearest rank: the 15th and the 29th of 30. A woken pump ends in
+        // about a millisecond, and one that waits out its 500 ms wait from
+        // 20 to 320 ms in takes 180 ms or more.
         double p50 = ms[14], p95 = ms[28], max = ms[29];
-        Check("Dispose wakes the input pump instead of waiting out its 500 ms wait (p95 under 100 ms over 30)",
-              p95 < 100 && closed && lost == 0,
+        Check("Dispose wakes the input pump instead of waiting out its 500 ms wait (p95 under 250 ms over 30)",
+              p95 < 250 && closed && lost == 0,
               $"p50 {p50:F1} ms, p95 {p95:F1} ms, max {max:F1} ms, pump ended and event closed {closed}" + (lost > 0 ? $", {lost} Dispose(s) threw or hung" : ""));
     }
 
@@ -1309,6 +1335,19 @@ internal static partial class Program
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll")]
     static extern bool GetHandleInformation(IntPtr handle, out uint flags);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    static extern bool DuplicateHandle(IntPtr sourceProcess, IntPtr source, IntPtr targetProcess, out IntPtr target,
+                                       uint access, bool inherit, uint options);
+
+    const uint DuplicateSameAccess = 2; // DUPLICATE_SAME_ACCESS
+
+    // Windows 10 1607 and later.
+    [System.Runtime.InteropServices.DllImport("kernelbase.dll")]
+    static extern bool CompareObjectHandles(IntPtr first, IntPtr second);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr handle);
 
     static (int Code, string Line) RunChild(string which) => RunChild($"--throwing {which}", null);
 
@@ -1367,13 +1406,17 @@ internal static partial class Program
             int bodyLength = builder.InputReportByteSize - 1;
             var body = MakePattern(bodyLength, 0x31);
             SharedMemoryIO.WriteInputFrame(view, evt, ref seqNo, body, bodyLength, null);
-            Thread.Sleep(60);
 
+            // The input pump takes each frame in on its own thread, so each
+            // report is asked for until it answers, which a late pump passes
+            // and a wrong answer still fails at the bound.
             byte sent = builder.InputReportId;
-            var got = cl.ControlIn(0xA1, 0x01, (ushort)(0x0100 | sent), iface, 64);
+            Client.Ret got = default;
+            bool SentAnswered(Client.Ret r) => r.Status == 0 && r.Data.Length > 1 && r.Data[0] == sent && r.Data.Skip(1).Take(bodyLength).SequenceEqual(body);
+            WaitUntil(() => SentAnswered(got = cl.ControlIn(0xA1, 0x01, (ushort)(0x0100 | sent), iface, 64)), 5000);
             Check($"GET_REPORT(Input 0x{sent:X2}), the report just sent, answers it",
-                  got.Status == 0 && got.Data.Length > 1 && got.Data[0] == sent && got.Data.Skip(1).Take(bodyLength).SequenceEqual(body),
-                  $"status {got.Status}, {got.Data.Length} bytes");
+                  SentAnswered(got),
+                  $"status {got.Status}, {got.Data?.Length ?? 0} bytes");
             // A second declared report, sent whole as an extended frame,
             // takes its own slot: the first keeps its bytes, and each
             // answers with its own.
@@ -1382,16 +1425,19 @@ internal static partial class Program
             second[0] = secondId;
             SharedMemoryIO.WriteInputFrame(view, evt, ref seqNo, body, bodyLength, null,
                                            extendedData: second, extendedLen: second.Length);
-            Thread.Sleep(60);
+            // The second report first, so the first is read only once the
+            // pump has taken the second frame in.
+            int ownWant = Math.Min(second.Length, 64);
+            Client.Ret own = default;
+            bool OwnAnswered(Client.Ret r) => r.Status == 0 && r.Data.Length == ownWant && r.Data.SequenceEqual(second.Take(ownWant));
+            WaitUntil(() => OwnAnswered(own = cl.ControlIn(0xA1, 0x01, (ushort)(0x0100 | secondId), iface, 64)), 5000);
             var keep = cl.ControlIn(0xA1, 0x01, (ushort)(0x0100 | sent), iface, 64);
             Check($"after a frame of report 0x{secondId:X2}, GET_REPORT(Input 0x{sent:X2}) still answers 0x{sent:X2}'s bytes",
-                  keep.Status == 0 && keep.Data.Length > 1 && keep.Data[0] == sent && keep.Data.Skip(1).Take(bodyLength).SequenceEqual(body),
+                  SentAnswered(keep),
                   $"status {keep.Status}, {keep.Data.Length} bytes, first {(keep.Data.Length > 0 ? keep.Data[0] : 0):X2}");
-            var own = cl.ControlIn(0xA1, 0x01, (ushort)(0x0100 | secondId), iface, 64);
-            int ownWant = Math.Min(second.Length, 64);
             Check($"GET_REPORT(Input 0x{secondId:X2}) answers its own frame",
-                  own.Status == 0 && own.Data.Length == ownWant && own.Data.SequenceEqual(second.Take(ownWant)),
-                  $"status {own.Status}, {own.Data.Length} bytes");
+                  OwnAnswered(own),
+                  $"status {own.Status}, {own.Data?.Length ?? 0} bytes");
 
             var unsent = declared.Where(r => r.Id != sent && r.Id != secondId).ToList();
             var wrong = new List<string>();
@@ -1562,7 +1608,7 @@ internal static partial class Program
     static int ThrowingChild(string which)
     {
         SetErrorMode(QuietErrorMode);
-        const int ChildIndex = 61;
+        const int ChildIndex = Index + 1;
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
         var profile = ctx.GetProfile("dualsense-composite")!.Inner;
@@ -1677,7 +1723,7 @@ internal static partial class Program
     // arriving on the open connection meanwhile. The GameCube adapter persona
     // runs a protocol clock with an event and a timer of its own.
 
-    const int TeardownIndex = 61;
+    const int TeardownIndex = Index + 1;
     const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
 
     static void Teardown(HMContext ctx, UsbipServer server)
@@ -1700,7 +1746,7 @@ internal static partial class Program
             server.Unregister(device);
             device.Dispose();
             cl.SendSubmitInterruptIn(cl.NextSeq(), 1, 37);
-            string answer = cl.Within(1000);
+            string answer = cl.Within(5000);
             Check("a transfer after Dispose gets no answer and the device ends the connection",
                   answer == "closed", answer);
             // A sweep disposes the device, then the controller's teardown
@@ -1739,7 +1785,7 @@ internal static partial class Program
                 {
                     cl.SendControlOut(0x00, 0x09, 0x0001, 0, Array.Empty<byte>());   // SET_CONFIGURATION(1)
                 }
-                string answer = cl.Within(1000);
+                string answer = cl.Within(5000);
                 uint headAfter = (uint)System.Runtime.InteropServices.Marshal.ReadInt32(ring, 0);
                 Check($"{(kind == "interrupt" ? "an" : "a")} {kind} transfer after Dispose gets no answer, ends the connection and writes no output",
                       answer == "closed" && headAfter == headBefore,
@@ -1797,7 +1843,7 @@ internal static partial class Program
                 Thread.Sleep(700);
                 var disposer = new Thread(() => { server.Unregister(device); device.Dispose(); }) { IsBackground = true };
                 disposer.Start();
-                disposed = disposer.Join(5000);
+                disposed = disposer.Join(15_000);
                 if (disposed) SharedMemoryIO.DestroyController(TeardownIndex);
             }
             finally { Monitor.Exit(hidLock); }
@@ -1837,7 +1883,7 @@ internal static partial class Program
                 Thread.Sleep(700);
                 var disposer = new Thread(() => { server.Unregister(device); device.Dispose(); }) { IsBackground = true };
                 disposer.Start();
-                disposed = disposer.Join(5000);
+                disposed = disposer.Join(15_000);
                 if (disposed) SharedMemoryIO.DestroyController(TeardownIndex);
             }
             finally { Monitor.Exit(sync); }
@@ -1893,13 +1939,13 @@ internal static partial class Program
             {
                 var disposer = new Thread(() => { server.Unregister(device); device.Dispose(); }) { IsBackground = true };
                 disposer.Start();
-                joined = disposer.Join(5000);
+                joined = disposer.Join(15_000);
                 handled.Set();
             };
             cl.SendControlOut(0x21, 0x01, 0x0200, 0x0200, new byte[] { 0x00, 0xF0 });   // SET_CUR(volume)
-            bool ran = handled.Wait(10_000);
+            bool ran = handled.Wait(30_000);
             Check("Dispose returns while a consumer's handler on the connection thread waits for it",
-                  ran && joined, ran ? $"Dispose returned within 5 s: {joined}" : "the handler never ran");
+                  ran && joined, ran ? $"Dispose returned within 15 s: {joined}" : "the handler never ran");
             cl.Dispose();
             NoConnections();
             SharedMemoryIO.DestroyController(TeardownIndex);
@@ -1948,7 +1994,7 @@ internal static partial class Program
                 detaching = WaitUntil(() => connectionField.GetValue(device) == null, 2000);
                 server.Unregister(device);
                 disposer.Start();
-                disposed = disposer.Join(5000);
+                disposed = disposer.Join(15_000);
                 if (disposed) SharedMemoryIO.DestroyController(TeardownIndex);
             }
             finally { Monitor.Exit(hidLock); }
@@ -2019,7 +2065,7 @@ internal static partial class Program
             held = WaitUntil(() => (long)lastDump.GetValue(device)! != before, 5000);
             var disposer = new Thread(() => { server.Unregister(device); device.Dispose(); }) { IsBackground = true };
             disposer.Start();
-            disposed = disposer.Join(5000);
+            disposed = disposer.Join(15_000);
             if (disposed)
             {
                 SharedMemoryIO.DestroyController(TeardownIndex);

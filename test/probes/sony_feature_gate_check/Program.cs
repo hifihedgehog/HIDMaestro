@@ -128,7 +128,9 @@ internal static class Program
     static SafeFileHandle? Open(ushort vid, ushort pid)
     {
         string? path = null;
-        for (int i = 0; i < 50 && path == null; i++)
+        // Poll up to 10 s for the HID interface. A busy machine can take
+        // seconds, and the loop ends at the first match.
+        for (int i = 0; i < 100 && path == null; i++)
         {
             path = HidDeviceEnumerator.Enumerate()
                 .FirstOrDefault(d => d.VendorId == vid && d.ProductId == pid
