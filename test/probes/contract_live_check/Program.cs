@@ -367,9 +367,12 @@ internal static class Program
             Check("a fresh-token xbox-one-s at index 2 on the SWD xinputhid path: its driver wrote protocols 4 to 5 into index 2's section at its first add",
                   half is { Protocol: 5, ProtocolMin: 4, ConfigError: 0 }, $"{half} | {Node(c2)}");
             var state = new HMGamepadState { Buttons = HMButton.A | HMButton.Y };
+            // A hang bound: xinputhid claims a slot in about 100 ms, and the
+            // poll ends as soon as the press shows, so only input that never
+            // reaches XInput runs it out.
             var sw = Stopwatch.StartNew();
             bool seen = false;
-            while (!seen && sw.ElapsedMilliseconds < 3000)
+            while (!seen && sw.ElapsedMilliseconds < 15000)
             {
                 c2.SubmitState(state);
                 for (uint s = 0; s < 4 && !seen; s++)
