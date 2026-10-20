@@ -232,6 +232,16 @@ internal static class Program
             // no package and redeploys.
             HMContext.RemoveAllVirtualControllers();
             Check($"{fam.Id}: driver packages gone after the full sweep", !DriverBuilder.IsDriverInstalled());
+            // The reinstall life reads its bench from WGI and XInput, and the
+            // last process restart's pad can still be listed there: the
+            // child's settle stops at 1500 ms. Measured on the dev box, WGI
+            // still listed it while XInput did not, and the life counted it
+            // in its bench. So the family's bench comes back first.
+            if (fam.Xbox)
+            {
+                SettleWgi(VidPid(profile).Vid, VidPid(profile).Pid, bench.Wgi);
+                SettleXInput(bench.Slots);
+            }
             var r9 = RunLife(ctx, fam, profile, key, "driver reinstall");
             if (r9 != null) lives.Add(r9);
 
@@ -630,13 +640,21 @@ internal static class Program
         return cond();
     }
 
+    /// <summary>How long a settle waits for WGI or XInput to let go of a
+    /// removed pad: a minute at the run's timeout scale. A pad goes in about
+    /// a second, so each settle ends when the pad does, and the bound only
+    /// stops a hang.</summary>
+    static readonly int SettleMs = 60_000 * Math.Max(1,
+        int.TryParse(Environment.GetEnvironmentVariable("HIDMAESTRO_TIMEOUT_SCALE"), out int scale) ? scale : 1);
+
     static void SettleWgi(ushort vid, ushort pid, (int Gamepads, int Raw) before)
     {
-        for (int i = 0; i < 30; i++)
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < SettleMs)
         {
             var now = WgiCounts(vid, pid);
             if (now.Item1 <= before.Gamepads && now.Item2 <= before.Raw) break;
-            Thread.Sleep(500);
+            Thread.Sleep(100);
         }
     }
 
@@ -645,10 +663,11 @@ internal static class Program
     /// go too, or that bench counts the previous life's pad.</summary>
     static void SettleXInput(int before)
     {
-        for (int i = 0; i < 30; i++)
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < SettleMs)
         {
             if (XInputSlots().Count <= before) break;
-            Thread.Sleep(500);
+            Thread.Sleep(100);
         }
     }
 
