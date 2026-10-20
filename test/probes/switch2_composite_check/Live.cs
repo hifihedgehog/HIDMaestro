@@ -203,6 +203,12 @@ internal static partial class Program
             _path = path;
             _handle = CreateFileW(path, 0xC0000000, 3, IntPtr.Zero, 3, 0x40000000, IntPtr.Zero);
             if (_handle.IsInvalid) throw new IOException($"open {path}: error {Marshal.GetLastWin32Error()}");
+            // HID class keeps 32 reports for a handle by default and drops the
+            // oldest past that, so a reader thread the machine's load holds up
+            // for over 128 ms of 4 ms reports loses input the device sent. 512,
+            // the most it allows, holds 2 s, more than the 500 reports the
+            // longest check here reads.
+            HidD_SetNumInputBuffers(_handle, 512);
             _stream = new FileStream(_handle, FileAccess.ReadWrite, 0, isAsync: true);
             _thread = new Thread(Loop) { IsBackground = true, Name = "ProbeHidRead" };
             _thread.Start();
@@ -522,9 +528,17 @@ internal static partial class Program
         if (moving.Count == 120)
         {
             bool step = true;
-            for (int i = 1; i < moving.Count; i++)
-                if (BinaryPrimitives.ReadUInt32LittleEndian(moving[i].Data.AsSpan(0x2B)) - BinaryPrimitives.ReadUInt32LittleEndian(moving[i - 1].Data.AsSpan(0x2B)) != 4000) step = false;
-            Check("the timestamp at 0x2B rises by 4000 a report", step);
+            string firstBad = "";
+            for (int i = 1; i < moving.Count && step; i++)
+            {
+                uint was = BinaryPrimitives.ReadUInt32LittleEndian(moving[i - 1].Data.AsSpan(0x2B)), now = BinaryPrimitives.ReadUInt32LittleEndian(moving[i].Data.AsSpan(0x2B));
+                if (now - was == 4000) continue;
+                step = false;
+                // Bytes 1 to 4 count the device's milliseconds, 4 a report, so
+                // they tell a report Windows dropped from a wrong step.
+                firstBad = $"report {i}: {was} then {now}, at {BinaryPrimitives.ReadUInt32LittleEndian(moving[i - 1].Data.AsSpan(1))} then {BinaryPrimitives.ReadUInt32LittleEndian(moving[i].Data.AsSpan(1))} ms";
+            }
+            Check("the timestamp at 0x2B rises by 4000 a report", step, firstBad);
             var d = moving[^1].Data;
             short ay = (short)(d[0x35] | (d[0x36] << 8)), gx = (short)(d[0x37] | (d[0x38] << 8));
             Check("a submitted AccelGY of 1.0 and 100 deg/s on X arrive as 4096 and 1643", ay == 4096 && gx == 1643, $"{ay}/{gx}");
@@ -704,6 +718,7 @@ internal static partial class Program
 
     [DllImport("hid.dll")] static extern void HidD_GetHidGuid(out Guid guid);
     [DllImport("hid.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_GetSerialNumberString(SafeFileHandle h, byte[] buffer, int length);
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_SetNumInputBuffers(SafeFileHandle h, uint count);
 
     [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)] static extern int CM_Locate_DevNodeW(out uint node, string id, uint flags);
     [DllImport("cfgmgr32.dll")] static extern int CM_Get_Child(out uint child, uint node, uint flags);
