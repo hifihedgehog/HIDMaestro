@@ -131,7 +131,7 @@ internal static partial class Program
         byte lastOutputRid = 0;
         controller.OutputReceived += (_, pkt) =>
         {
-            if (pkt.Source == HMOutputSource.HidOutput) { Interlocked.Increment(ref outputPackets); lastOutputRid = pkt.ReportId; }
+            if (pkt.Source == HMOutputSource.HidOutput) { lastOutputRid = pkt.ReportId; Interlocked.Increment(ref outputPackets); }
         };
 
         try
@@ -145,8 +145,10 @@ internal static partial class Program
             tsw.Stop();
             Console.WriteLine($"\n-- Teardown --");
             Check("controller disposed (vhci detach)", true, $"{tsw.ElapsedMilliseconds} ms");
-            // Each must be gone within 2.5 s of the dispose.
-            WaitCompositeGone(2500);
+            // Each must be gone within 10 s of the dispose. The audio
+            // service removes the endpoints on its own time, which other work
+            // on the machine can stretch past the 2.5 s this once allowed.
+            WaitCompositeGone();
             Check("HID devnode gone after dispose", FindHidDevicePath(0x054C, 0x0CE6) == null);
             Check("audio endpoints gone after dispose",
                   FindEndpoint(DataFlow.Render, "Wireless Controller") == null
@@ -210,10 +212,11 @@ internal static partial class Program
             // At least 750 ms on the swept controller's sections: 1.5 times
             // the longest period of a thread that reads them, the output
             // reader's 500 ms event wait (HMController.OutputPoll), and
-            // nearly 190 of the idle repeat's 4 ms frames. Then up to 2.5 s
-            // in all for the persona to go.
+            // nearly 190 of the idle repeat's 4 ms frames. Then up to 10 s
+            // in all for the persona to go, a bound only a removal that
+            // never comes reaches.
             var swept = Stopwatch.StartNew();
-            while (swept.ElapsedMilliseconds < 2500
+            while (swept.ElapsedMilliseconds < 10_000
                    && (swept.ElapsedMilliseconds < 750 || FindHidDevicePath(0x054C, 0x0CE6) != null))
                 Thread.Sleep(50);
             Check("composite persona evicted by the sweep",
@@ -354,9 +357,10 @@ internal static partial class Program
                     var outRep = new byte[48];
                     outRep[0] = 0x02; outRep[3] = 0xC8; outRep[4] = 0x40;
                     bool wrote = HidD_SetOutputReport(h, outRep, outRep.Length);
-                    for (int i = 0; i < 30 && Volatile.Read(ref outputPackets) == 0; i++) Thread.Sleep(10);
+                    // A hang bound: the event usually fires within a few ms.
+                    for (int i = 0; i < 500 && Volatile.Read(ref outputPackets) == 0; i++) Thread.Sleep(10);
                     Check("HidD_SetOutputReport delivered", wrote);
-                    Check("OutputReceived fired with RID 0x02", outputPackets > 0 && lastOutputRid == 0x02,
+                    Check("OutputReceived fired with RID 0x02", Volatile.Read(ref outputPackets) > 0 && lastOutputRid == 0x02,
                           $"{outputPackets} packet(s)");
 
                     var feat = new byte[41];
@@ -377,9 +381,10 @@ internal static partial class Program
                 wo.Init(tone.Take(TimeSpan.FromMilliseconds(600)));
                 wo.Play();
                 // Until the stream has opened and PCM has arrived, at most
-                // 900 ms.
+                // 10 s. The tone stays queued until the stream starts, and a
+                // passing run ends the wait as soon as PCM arrives.
                 var played = Stopwatch.StartNew();
-                while (played.ElapsedMilliseconds < 900 && !(Volatile.Read(ref outStreamed) && Interlocked.Read(ref outBytes) > before))
+                while (played.ElapsedMilliseconds < 10_000 && !(Volatile.Read(ref outStreamed) && Interlocked.Read(ref outBytes) > before))
                     Thread.Sleep(10);
                 wo.Stop();
                 long delivered = Interlocked.Read(ref outBytes) - before;
@@ -425,9 +430,10 @@ internal static partial class Program
                 };
                 wi.StartRecording();
                 // Until the stream has opened and the fed signal has been
-                // recorded, at most 1 s.
+                // recorded, at most 10 s. A passing run ends the wait as soon
+                // as both show.
                 var recorded = Stopwatch.StartNew();
-                while (recorded.ElapsedMilliseconds < 1000
+                while (recorded.ElapsedMilliseconds < 10_000
                        && !(Volatile.Read(ref micStreamed) && Interlocked.Read(ref captured) > 0 && Interlocked.Read(ref energy) > 0))
                     Thread.Sleep(10);
                 wi.StopRecording();

@@ -394,7 +394,7 @@ internal static partial class Program
                 dropped5.Start();
                 int recorded = -1;
                 Check("V5: its record's vhci port goes to 0 with the drop",
-                      WaitFor(() => (recorded = RecordVhciPort(p.Pid)) == 0, 3000), $"record {recorded}");
+                      WaitFor(() => (recorded = RecordVhciPort(p.Pid)) == 0, 10_000), $"record {recorded}");
                 string s = p.Send("sweep");
                 Check("V5: the program's own sweep runs", Ok(s), s);
                 return true;
@@ -466,7 +466,7 @@ internal static partial class Program
                 Check($"V4: the host controller imports {busA} again, on another vhci port", y > 0 && y != x, $"vhci port {y}");
                 int recorded = 0;
                 Check("V4: the first program's record names the new vhci port",
-                      y > 0 && WaitFor(() => (recorded = RecordVhciPort(a.Pid)) == y, 5000), $"record {recorded}, vhci {y}");
+                      y > 0 && WaitFor(() => (recorded = RecordVhciPort(a.Pid)) == y, 15_000), $"record {recorded}, vhci {y}");
 
                 string d = a.Send("dispose");
                 Check("V4: the first program disposes its controller", Ok(d), d);
@@ -499,19 +499,25 @@ internal static partial class Program
         // A free port outside the SDK's range keeps these listeners away
         // from every server's port.
         const int probePort = UsbipBasePort - 2;
+        // The query's deadline is one second all told. The trickle keeps a
+        // query that times each read alone alive for its whole 8 s (20 bytes
+        // 400 ms apart), and a query with no deadline waits on the silent
+        // listener until it closes. Four seconds is four deadlines, room
+        // for a loaded machine, and half the trickle.
+        const int deadlineBoundMs = 4000;
         using (var q = PeerProcess.Start("V6-query"))
         {
             using (new FakeServer(probePort, FakeServer.Kind.Silent))
             {
                 string r = q.Send($"exports {probePort}");
                 Check("V6: a listener that never answers gets no list, within the deadline",
-                      PeerProcess.Field(r, "n") == "null" && int.TryParse(PeerProcess.Field(r, "ms"), out int ms) && ms < 2000, r);
+                      PeerProcess.Field(r, "n") == "null" && int.TryParse(PeerProcess.Field(r, "ms"), out int ms) && ms < deadlineBoundMs, r);
             }
             using (new FakeServer(probePort, FakeServer.Kind.Trickle))
             {
                 string r = q.Send($"exports {probePort}");
                 Check("V6: a listener that answers one byte at a time gets no list, within the deadline",
-                      PeerProcess.Field(r, "n") == "null" && int.TryParse(PeerProcess.Field(r, "ms"), out int ms) && ms < 2000, r);
+                      PeerProcess.Field(r, "n") == "null" && int.TryParse(PeerProcess.Field(r, "ms"), out int ms) && ms < deadlineBoundMs, r);
             }
             using (new FakeServer(probePort, FakeServer.Kind.Oversized))
             {
@@ -551,13 +557,20 @@ internal static partial class Program
         WaitFor(() => !Vhci.Imported().Any(r => r.Port == port), 10_000);
 
         using var s = PeerProcess.Start("V6-sweeper");
-        using (new FakeServer(port, FakeServer.Kind.Silent))
+        using (var silent = new FakeServer(port, FakeServer.Kind.Silent))
         {
             var sw = Stopwatch.StartNew();
             string r = s.Send("sweep");
             long ms = sw.ElapsedMilliseconds;
+            // Counted at the listener, not timed: a sweep that asked once per
+            // composite connects once per composite. Another program's sweep
+            // that reads the same record may connect too, so the bound is
+            // fewer connections than composites. The time is printed.
+            WaitFor(() => !silent.Waiting, 5_000);
+            int asked = silent.Accepted;
+            Console.WriteLine($"    info: V6: the sweep took {ms} ms for {buses.Count} composites");
             Check("V6: a sweep asks the silent listener on the killed program's port once, not once per composite",
-                  Ok(r) && ms < 2500, $"{r}, {ms} ms for {buses.Count} composites");
+                  Ok(r) && asked < buses.Count, $"{r}, {asked} connections for {buses.Count} composites, {ms} ms");
             int kept = Vhci.Stop("127.0.0.1", port, buses[0]);
             Check($"V6: the sweep leaves the attempt for {buses[0]}, since the listener did not say what it exports",
                   kept == 1, $"{kept} canceled by the probe");
@@ -746,6 +759,13 @@ internal static partial class Program
         readonly Thread _thread;
         readonly List<System.Net.Sockets.Socket> _held = new();
         volatile bool _stop;
+        int _accepted;
+
+        /// <summary>Connections accepted so far.</summary>
+        public int Accepted => Volatile.Read(ref _accepted);
+
+        /// <summary>Whether a connection waits to be accepted.</summary>
+        public bool Waiting => _listener.Pending();
 
         public FakeServer(int port, Kind kind)
         {
@@ -762,6 +782,7 @@ internal static partial class Program
             {
                 if (!_listener.Pending()) { Thread.Sleep(10); continue; }
                 var s = _listener.AcceptSocket();
+                Interlocked.Increment(ref _accepted);
                 lock (_held) _held.Add(s);
                 if (_kind == Kind.Silent) continue;
                 try

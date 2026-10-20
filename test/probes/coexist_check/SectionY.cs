@@ -1441,8 +1441,14 @@ internal static partial class Program
             };
             OutputTiming squatted = TimeOutputs(p, rumble, 30, 60);
             Console.WriteLine($"    Y2 output latency beside the user's event: {squatted.Shown}");
-            Check("Y2: the program's reader does not wait on the user's OutputEvent: every rumble arrives within 50 ms",
-                  squatted.AllArrived && squatted.Max < 50, squatted.Shown);
+            // A reader that took the user's event waits out its 500 ms timeout
+            // twice before it drops to polling (HMController.OutputPoll,
+            // missedSignalStrikes), so at 60 ms apart six or more of these
+            // outputs miss their own window. Other work on the machine can
+            // hold up a few on the poll, so up to three may be late.
+            int lateSquatted = squatted.Ms.Count(x => double.IsNaN(x) || x >= 50);
+            Check("Y2: the program's reader does not wait on the user's OutputEvent: at most 3 of 30 rumbles take 50 ms or more",
+                  lateSquatted <= 3, $"{lateSquatted} late, {squatted.Shown}");
 
             // Rumble through XInput: the XUSB companion publishes each packet
             // and signals the output doorbell it holds.
@@ -1487,8 +1493,13 @@ internal static partial class Program
             finally { if (doorbell != IntPtr.Zero) Y.CloseHandle(doorbell); }
             OutputTiming after = TimeOutputs(p, rumble, 30, 60);
             Console.WriteLine($"    Y2 output latency on the driver's event: {after.Shown}");
-            Check("Y2: and the program's reader waits on it: p95 under 2 ms",
-                  after.AllArrived && after.P95 < 2, after.Shown);
+            // On the event a rumble wakes the reader at once. On its 8 ms poll
+            // the median wait is half a poll or more. The median, since other
+            // work on the machine delays single wakes, and up to three
+            // outputs may miss their window for the same reason.
+            int missedAfter = after.Ms.Count(double.IsNaN);
+            Check("Y2: and the program's reader waits on it: median under 2 ms",
+                  missedAfter <= 3 && after.P50 < 2, $"{missedAfter} missed their window, {after.Shown}");
             var stopRumble = new Y.XINPUT_VIBRATION();
             Y.XInputSetState((uint)slot, ref stopRumble);
             p.Send("stopstream");

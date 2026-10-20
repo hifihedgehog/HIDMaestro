@@ -219,7 +219,7 @@ internal static partial class Program
             int rcJoin = RunGateChild("cleanup", joined, childBound, out long msJoin, out _);
             int rcCtl = RunGateChild("thread", abandoned, childBound, out long msCtl, out _);
             int rcLong = RunGateChild("long", cut, childBound, out long msLong, out string logLong);
-            int rcMany = RunGateChild("many", many, childBound, out long msMany, out _);
+            int rcMany = RunGateChild("many", many, childBound, out long msMany, out string logMany);
             int rcKnown = RunGateChild("known", known, childBound, out long msKnown, out string logKnown);
             int rcQueued = RunGateChild("queued", queued, childBound, out long msQueued, out string logQueued);
             string inExit = Path.Combine(dir, "inexit.done"), inExitLate = Path.Combine(dir, "inexitlate.done");
@@ -238,12 +238,21 @@ internal static partial class Program
                   logLong.Contains("phantom cleanup still holds the gate", StringComparison.Ordinal)
                   && !logLong.Contains("a create is still in flight", StringComparison.Ordinal),
                   LastExitLine(logLong));
+            // An exit whose join outlasts the cleanup logs that it reached the
+            // end of the exit's budget. That line, not the child's wall
+            // time, which counts its start and teardown on a machine that
+            // may be busy, says whether the cleanup ended inside the budget.
+            // The cleanup's own summary line, written as its run ends, shows
+            // the child's log was written.
+            const string budgetSpent = "at the end of the exit's budget", cleanupEnded = "phantom cleanup:";
             string count = File.Exists(many) ? File.ReadAllText(many) : "0";
             Check("once the exit starts, the cleanup begins no further uninstall",
-                  rcMany == 0 && count == "1" && msMany < exitBudget,
-                  $"exit {rcMany} after {msMany} ms, {count} of 5 uninstalls ran");
+                  rcMany == 0 && count == "1" && logMany.Contains(cleanupEnded, StringComparison.Ordinal)
+                  && !logMany.Contains(budgetSpent, StringComparison.Ordinal),
+                  $"exit {rcMany} after {msMany} ms, {count} of 5 uninstalls ran. {LastExitLine(logMany)}");
             Check("a phantom that stays known costs the exit the cleanup's budget, which ends inside the exit's",
-                  rcKnown == 0 && msKnown >= budget && msKnown < exitBudget && File.Exists(known),
+                  rcKnown == 0 && msKnown >= budget && logKnown.Contains(cleanupEnded, StringComparison.Ordinal)
+                  && !logKnown.Contains(budgetSpent, StringComparison.Ordinal) && File.Exists(known),
                   $"exit {rcKnown} after {msKnown} ms, cleanup budget {budget} ms, exit budget {exitBudget} ms, " +
                   $"handler {(File.Exists(known) ? "ran" : "did not run")} past the join. {LastExitLine(logKnown)}");
             Check("a cleanup queued behind a create in flight ends the exit's wait at the budget",

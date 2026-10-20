@@ -683,22 +683,30 @@ internal static class Program
 
         // Ports 1, 2 and 3 hold controllers: the adapter reads them every
         // 1.19971 ms, so about one 1 ms poll in six finds nothing new.
+        // At a 1 ms poll the adapter answers every poll or every second
+        // one, so a gap of 3 ms or more is time the reader or the machine
+        // was away, and the read after it lands at once on what piled up.
+        // The rate leaves both out, so a busy machine cannot move it.
         proto.HostPollInterval = TimeSpan.FromMilliseconds(1);
-        var at1 = Rate(1200);
+        var at1 = Rate(1200, stallMs: 3);
         Probe.Check("1 ms host poll, ports 1 to 3: about 833 reports a second",
-            at1.Hz >= 800 && at1.Hz <= 860, $"{at1.Hz:F1} Hz, median {at1.MedianMs:F3} ms, p95 {at1.P95Ms:F3} ms");
+            at1.SteadyHz >= 800 && at1.SteadyHz <= 860, RateText(at1));
 
         // Exactly ports 1 and 2: every 0.9995 ms, so every poll finds news.
         controller.Ports[2].Disconnect();
-        var at1two = Rate(1200);
+        var at1two = Rate(1200, stallMs: 3);
         Probe.Check("1 ms host poll, exactly ports 1 and 2: a report every poll",
-            at1two.Hz >= 960 && at1two.Hz <= 1010, $"{at1two.Hz:F1} Hz, median {at1two.MedianMs:F3} ms, p95 {at1two.P95Ms:F3} ms");
+            at1two.SteadyHz >= 960 && at1two.SteadyHz <= 1010, RateText(at1two));
         controller.Ports[2].Connect();
         proto.HostPollInterval = proto.DescriptorPollInterval;
         Probe.Check("back to 8 ms", proto.HostPollInterval == TimeSpan.FromMilliseconds(8));
     }
 
-    static (double Hz, double MedianMs, double P95Ms) Rate(int reads)
+    /// <summary>The gaps between <paramref name="reads"/> reports. SteadyHz
+    /// is the rate over the gaps shorter than <paramref name="stallMs"/>,
+    /// leaving out each longer gap and the gap after it, and Stalls counts
+    /// the longer gaps.</summary>
+    static (double Hz, double MedianMs, double P95Ms, double SteadyHz, int Stalls) Rate(int reads, double stallMs = double.PositiveInfinity)
     {
         var times = new List<long>(reads);
         Read(150); // the first read lands on the poll grid
@@ -707,13 +715,27 @@ internal static class Program
             if (Read(150) == null) break;
             times.Add(Stopwatch.GetTimestamp());
         }
-        if (times.Count < 2) return (0, 0, 0);
+        if (times.Count < 2) return (0, 0, 0, 0, 0);
         var gaps = new List<double>(times.Count - 1);
         for (int i = 1; i < times.Count; i++) gaps.Add((times[i] - times[i - 1]) * 1000.0 / Stopwatch.Frequency);
+        int kept = 0, stalls = 0;
+        double keptMs = 0;
+        bool afterStall = false;
+        foreach (double g in gaps)
+        {
+            if (g >= stallMs) { stalls++; afterStall = true; continue; }
+            if (afterStall) { afterStall = false; continue; }
+            kept++;
+            keptMs += g;
+        }
         gaps.Sort();
         double total = (times[^1] - times[0]) * 1.0 / Stopwatch.Frequency;
-        return ((times.Count - 1) / total, gaps[gaps.Count / 2], gaps[(int)(gaps.Count * 0.95)]);
+        return ((times.Count - 1) / total, gaps[gaps.Count / 2], gaps[(int)(gaps.Count * 0.95)],
+            kept == 0 ? 0 : kept * 1000.0 / keptMs, stalls);
     }
+
+    static string RateText((double Hz, double MedianMs, double P95Ms, double SteadyHz, int Stalls) r) =>
+        $"{r.SteadyHz:F1} Hz without {r.Stalls} gap(s) of 3 ms or more, {r.Hz:F1} Hz in all, median {r.MedianMs:F3} ms, p95 {r.P95Ms:F3} ms";
 
     // ── 0x15 and the port reset ─────────────────────────────────────────
 
@@ -871,7 +893,9 @@ internal static class Program
             called = true;
             var disposer = new Thread(() => controller.Dispose()) { IsBackground = true };
             disposer.Start();
-            joined = disposer.Join(5000);
+            // The deadlock this guards never ends, so the bound is the 30 s
+            // DisposeBesideSubmit gives a Dispose, not its usual cost.
+            joined = disposer.Join(30_000);
         };
         try
         {

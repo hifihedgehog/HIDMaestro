@@ -315,13 +315,16 @@ static class ValveSteamCheck
             // seconds. Config sets land after Steam finishes registering a
             // controller against the account, which is a round trip and can
             // arrive well behind the claim, so the wait also runs until each
-            // one is in, for up to 30 seconds after that persona's open.
+            // one is in, for up to 90 seconds after that persona's open, the
+            // bound the open itself gets. A slow network or a busy Steam
+            // delays the round trip without any defect, and a pass ends the
+            // wait as soon as every config set is in.
             var held = cases.Where(t => t.OpenedAt >= 0).ToList();
             while (held.Count > 0)
             {
                 long now = clock.ElapsedMilliseconds;
                 bool done = held.All(t => now - t.OpenedAt >= HoldMs
-                                          && (now - t.OpenedAt >= 30_000
+                                          && (now - t.OpenedAt >= 90_000
                                               || SteamDeviceLog.Read(log, t.Baseline).Contains(t.ConfigSet, StringComparison.OrdinalIgnoreCase)));
                 if (done) break;
                 Thread.Sleep(200);

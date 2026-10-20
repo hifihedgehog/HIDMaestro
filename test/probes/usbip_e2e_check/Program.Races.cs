@@ -202,7 +202,7 @@ internal static partial class Program
         {
             Check("the create whose device was imported first fails", threw && strayPort > 0, $"stray import on port {strayPort}");
             var clock = Stopwatch.StartNew();
-            while (VhciClient.FindLocation("127.0.0.1", server.Port, busId) > 0 && clock.ElapsedMilliseconds < 3000)
+            while (VhciClient.FindLocation("127.0.0.1", server.Port, busId) > 0 && clock.ElapsedMilliseconds < 10_000)
                 Thread.Sleep(50);
             Check("and the import that took its device is gone",
                   VhciClient.FindLocation("127.0.0.1", server.Port, busId) == 0);

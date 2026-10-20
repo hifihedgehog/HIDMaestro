@@ -17,7 +17,7 @@
 // Checked through stock upstream SDL3 rather than our own decode, for the
 // same reason S53 is: the fork beside this repo skips HIDMaestro devices.
 //
-// Exit 0 PASS, 1 FAIL, 2 SKIP (no stock SDL3 build).
+// Exit 0 PASS, 1 FAIL, 2 SKIP (no stock SDL3 build, or Steam is running).
 
 using System;
 using System.Collections.Generic;
@@ -114,24 +114,24 @@ static class ValveMultiCheck
         NativeLibrary.SetDllImportResolver(typeof(ValveMultiCheck).Assembly,
             (name, asm, path) => name == SDL ? NativeLibrary.Load(dll) : IntPtr.Zero);
 
+        // The Steam client claims Valve devices exclusively, so beside it a
+        // persona SDL cannot see is Steam's doing, not the SDK's. S54 shuts
+        // down a Steam it started, so this skips only beside a Steam the
+        // machine was already running. Its web helper and service open no
+        // controller, so neither one alone skips the scenario.
+        if (System.Diagnostics.Process.GetProcessesByName("steam").Length > 0)
+        {
+            Console.WriteLine("  [SKIP] steam.exe is running. Steam claims Valve devices "
+                              + "exclusively, so SDL cannot open a persona Steam holds.");
+            return 2;
+        }
+
         SDL_SetHint("SDL_JOYSTICK_HIDAPI", "1");
         SDL_SetHint("SDL_JOYSTICK_HIDAPI_STEAM", "1");
         SDL_SetHint("SDL_JOYSTICK_HIDAPI_STEAMDECK", "1");
         SDL_SetHint("SDL_JOYSTICK_RAWINPUT", "0");
         SDL_SetHint("SDL_JOYSTICK_THREAD", "1");
         if (!SDL_Init(0x00002000u)) { Console.WriteLine("SDL_Init failed"); return 1; }
-
-        // Steam claims Valve devices exclusively, so a Steam left running
-        // by an earlier scenario takes a persona away from this one and the
-        // failure reads as a device that never enumerated. Name it instead
-        // of leaving it to be diagnosed. S54 shuts Steam fully down before
-        // handing over; this is the check that says so.
-        foreach (var n in new[] { "steam", "steamwebhelper", "steamservice" })
-        {
-            if (System.Diagnostics.Process.GetProcessesByName(n).Length == 0) continue;
-            Console.WriteLine($"  [WARN] {n}.exe is running. Steam claims Valve devices "
-                              + "exclusively, so a persona may be invisible to SDL here.");
-        }
 
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();

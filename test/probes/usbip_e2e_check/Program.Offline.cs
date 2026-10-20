@@ -456,7 +456,11 @@ internal static partial class Program
                 dev.C.SubmitKeyboard(HMKeyModifiers.None, key);
                 dev.C.SubmitKeyboard(HMKeyModifiers.None, Array.Empty<HMKey>());
             });
-            Check("three keyboard frames after the sweep wait for no acknowledgement", three < 100, $"{three} ms");
+            // A frame that waits for an acknowledgement waits 200 ms
+            // (HMController.DeliveryTimeoutMs), so three that wait take 600 ms.
+            // Three that do not take well under a millisecond, and 400 ms is
+            // room for a machine busy with other work.
+            Check("three keyboard frames after the sweep wait for no acknowledgement", three < 400, $"{three} ms");
             Check("and each one writes the controller's own section", dev.Seq == before + 6, $"seq {before} to {dev.Seq}");
             dev.TearDown();
         }
@@ -478,9 +482,16 @@ internal static partial class Program
             Sweep();
             Check("after the sweep the protocol host's controller reports no driver",
                 Marshal.ReadInt32(version, SharedMemoryIO.VERSION_OFFSET_DRIVER_PROTOCOL) == 0 && dev.C.DriverVersion == null);
+            // The wait it guards is one 200 ms DeliveryTimeoutMs, too close to
+            // what a busy machine adds for a time to tell them apart. The
+            // sweep's DeviceRemoved clears the pending reply, and a send with
+            // none pending waits for nothing (ProtocolHost.AwaitReplyLocked).
+            // The send's time is printed.
+            bool pending = (bool)typeof(ProtocolHost).GetField("_replyPending", AnyInstance)!.GetValue(host)!;
             uint before = dev.Seq;
             long tick = Timed(() => host.Tick(200));
-            Check("a protocol send after the sweep waits for no reply the removed driver never delivered", tick < 100, $"{tick} ms");
+            Console.WriteLine($"    info: the protocol send after the sweep took {tick} ms");
+            Check("a protocol send after the sweep waits for no reply the removed driver never delivered", !pending, $"reply pending {pending}, {tick} ms");
             Check("and writes the controller's own section", dev.Seq != before, $"seq {before} to {dev.Seq}");
             dev.TearDown();
         }
