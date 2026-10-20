@@ -266,15 +266,22 @@ internal static class Deploy
     {
         var (s0, c0, h0) = (DeviceOrchestrator.DevnodeStatus, DeviceOrchestrator.HidChildOf, DeviceOrchestrator.DriverHalf);
         var q0 = DeviceManager.InstallQueueHook;
+        // The removal test locates the real devnode, and a real controller
+        // another program holds can have Node's id. The check's machine has
+        // no devnode pending removal. By reflection, for an SDK without it.
+        var removal = typeof(DeviceOrchestrator).GetField("RemovalPending", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+        object? r0 = removal?.GetValue(null);
         DeviceOrchestrator.DevnodeStatus = id => status(id);
         DeviceOrchestrator.HidChildOf = child;
         DeviceOrchestrator.DriverHalf = i => half(i);
         DeviceManager.InstallQueueHook = installs ?? (_ => NonePending);
+        removal?.SetValue(null, (Func<string, bool>)(_ => false));
         try { return body(); }
         finally
         {
             (DeviceOrchestrator.DevnodeStatus, DeviceOrchestrator.HidChildOf, DeviceOrchestrator.DriverHalf) = (s0, c0, h0);
             DeviceManager.InstallQueueHook = q0;
+            removal?.SetValue(null, r0);
         }
     }
 
@@ -321,15 +328,19 @@ internal static class Deploy
 
     static void Start(Checks c)
     {
+        // "Within one poll" counts the polls, each one HID child lookup, so
+        // a slow machine cannot fail it: a wait that misses the failure
+        // polls until its budget runs out. The time is information.
         c.Run("a devnode whose driver failed its start and set its error word: the wait ends within one 25 ms poll and the create throws HMDriverVersionException naming FeatureAnswers", () =>
         {
+            int polls = 0;
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var (wait, error) = With(_ => (true, HasProblem, 10u), _ => null, _ => (4, 4, new Version(2, 0, 0), 1), () =>
+            var (wait, error) = With(_ => (true, HasProblem, 10u), _ => { polls++; return null; }, _ => (4, 4, new Version(2, 0, 0), 1), () =>
                 (DeviceOrchestrator.WaitForHidChild(Node, 3, 10_000), DeviceOrchestrator.StartError(Node, 3)));
             long ms = sw.ElapsedMilliseconds;
-            return (wait == DeviceOrchestrator.StartWait.Failed && ms < 1000 && error is HMDriverVersionException v
+            return (wait == DeviceOrchestrator.StartWait.Failed && polls <= 1 && error is HMDriverVersionException v
                     && v.Message.Contains("FeatureAnswers", StringComparison.Ordinal) && v.Blockers.SequenceEqual(new[] { Node }),
-                    $"{wait} in {ms} ms: {error.GetType().Name}: {error.Message}");
+                    $"{wait} after {polls} poll(s), {ms} ms: {error.GetType().Name}: {error.Message}");
         });
         c.Run("a failed add with no error word ends the wait as well, and names the problem", () =>
         {
@@ -346,12 +357,13 @@ internal static class Deploy
         foreach (uint code in new uint[] { 10, 31, 37, 39, 43 })
             c.Run($"problem {code} ends the wait within one poll, and the error names it", () =>
             {
+                int polls = 0;
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                var (wait, error) = With(_ => (true, HasProblem, code), _ => null, _ => (0, 0, null, 0), () =>
+                var (wait, error) = With(_ => (true, HasProblem, code), _ => { polls++; return null; }, _ => (0, 0, null, 0), () =>
                     (DeviceOrchestrator.WaitForHidChild(Node, 3, 2_000), DeviceOrchestrator.StartError(Node, 3)));
                 long ms = sw.ElapsedMilliseconds;
-                return (wait == DeviceOrchestrator.StartWait.Failed && ms < 1000 && error.Message.Contains($"problem code {code}", StringComparison.Ordinal),
-                        $"{wait} in {ms} ms: {error.Message}");
+                return (wait == DeviceOrchestrator.StartWait.Failed && polls <= 1 && error.Message.Contains($"problem code {code}", StringComparison.Ordinal),
+                        $"{wait} after {polls} poll(s), {ms} ms: {error.Message}");
             });
         // A record Windows flagged for reinstall comes back with
         // CM_PROB_REINSTALL, then a failed start, until the install it queues
@@ -391,23 +403,29 @@ internal static class Deploy
         });
         c.Run("the error word ends the wait at once even while an installation is pending", () =>
         {
+            int polls = 0;
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var wait = With(_ => (true, HasProblem, 10u), _ => null, _ => (4, 4, new Version(2, 0, 0), 1),
+            var wait = With(_ => (true, HasProblem, 10u), _ => { polls++; return null; }, _ => (4, 4, new Version(2, 0, 0), 1),
                 () => DeviceOrchestrator.WaitForHidChild(Node, 3, 10_000), _ => Pending);
             long ms = sw.ElapsedMilliseconds;
-            return (wait == DeviceOrchestrator.StartWait.Failed && ms < 1000, $"{wait} in {ms} ms");
+            return (wait == DeviceOrchestrator.StartWait.Failed && polls <= 1, $"{wait} after {polls} poll(s), {ms} ms");
         });
         // The queue is the hold's reason. A failure held for longer than any
         // fixed grace, then a start, ends the wait on the child, and the poll
         // at which the queue empties under a failure still showing ends it
         // as failed.
+        // The queue empties at the status read that sees the start, so a
+        // poll that reads the failure before 1200 ms and the queue after it
+        // still finds the queue pending. The 15 s budget only bounds a hang:
+        // the wait ends at the child, 1250 ms in.
         c.Run("a failed start held 1.2 s while an installation stays pending, then the child: the wait follows the queue", () =>
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var wait = With(_ => sw.ElapsedMilliseconds < 1200 ? (true, HasProblem, 10u) : (true, Started, 0u),
+            bool failing = true;
+            var wait = With(_ => (failing = sw.ElapsedMilliseconds < 1200) ? (true, HasProblem, 10u) : (true, Started, 0u),
                             _ => sw.ElapsedMilliseconds >= 1250 ? @"HID\HM_0003\1" : null, _ => (0, 0, null, 0),
-                            () => DeviceOrchestrator.WaitForHidChild(Node, 3, 5_000),
-                            _ => sw.ElapsedMilliseconds < 1200 ? Pending : NonePending);
+                            () => DeviceOrchestrator.WaitForHidChild(Node, 3, 15_000),
+                            _ => failing ? Pending : NonePending);
             long ms = sw.ElapsedMilliseconds;
             return (wait == DeviceOrchestrator.StartWait.Done && ms >= 1250, $"{wait} in {ms} ms");
         });
@@ -426,16 +444,19 @@ internal static class Deploy
         // neither device starts on its own, so the wait's end is the verdict.
         // At f977bb39 both ended as a timeout, and the create went on with a
         // device that never started.
+        // The hold is the first poll's read, so the wait's own last read
+        // sees the queued install's problem however few polls a slow
+        // machine fits in 500 ms.
         foreach (uint after in new uint[] { 28, 18 })
             c.Run($"a held failed start whose queued install ends in problem {after} fails the create when the wait runs out", () =>
             {
                 int reads = 0;
-                var wait = With(_ => ++reads <= 3 ? (true, HasProblem, 10u) : (true, HasProblem, after), _ => null, _ => (0, 0, null, 0),
+                var wait = With(_ => ++reads <= 1 ? (true, HasProblem, 10u) : (true, HasProblem, after), _ => null, _ => (0, 0, null, 0),
                                 () => DeviceOrchestrator.WaitForHidChild(Node, 3, 500),
-                                _ => reads <= 3 ? Pending : NonePending);
+                                _ => reads <= 1 ? Pending : NonePending);
                 var started = With(_ => (true, HasProblem, after), _ => @"HID\HM_0003\1", _ => (0, 0, null, 0),
                                    () => DeviceOrchestrator.WaitForDeviceStarted(@"HID\HM_0003\1", Node, 3, 300));
-                return (wait == DeviceOrchestrator.StartWait.Failed && reads > 3 && started == DeviceOrchestrator.StartWait.Failed,
+                return (wait == DeviceOrchestrator.StartWait.Failed && reads > 1 && started == DeviceOrchestrator.StartWait.Failed,
                         $"{wait} after {reads} status reads, the start wait {started}");
             });
         // The XUSB companion's three waits for its interface
@@ -516,10 +537,14 @@ internal static class Deploy
             var wait = typeof(DeviceOrchestrator).GetField("RootChildWait", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public)
                 ?? throw new MissingMemberException("DeviceOrchestrator", "RootChildWait");
             var f = (Func<string, int, bool>)wait.GetValue(null)!;
+            // One status read: the failure test ran and its first answer
+            // ended the wait. None is a wait with no failure test, and more
+            // are re-checks after the failure showed.
+            int reads = 0;
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            bool child = With(_ => (true, HasProblem, 31u), _ => null, _ => (0, 0, null, 0), () => f(@"ROOT\HIDCLASS\HM_7777", 3));
+            bool child = With(_ => { reads++; return (true, HasProblem, 31u); }, _ => null, _ => (0, 0, null, 0), () => f(@"ROOT\HIDCLASS\HM_7777", 3));
             long ms = sw.ElapsedMilliseconds;
-            return (!child && ms < 1000, $"{child} in {ms} ms");
+            return (!child && reads == 1, $"{child} after {reads} status read(s), {ms} ms");
         });
         // The XUSB companion's wait for its interface ends on a failed start
         // too. At e0c4d951 it waited 5 s three times, restarting the
@@ -529,10 +554,11 @@ internal static class Deploy
             var wait = typeof(DeviceOrchestrator).GetField("CompanionInterfaceWait", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public)
                 ?? throw new MissingMemberException("DeviceOrchestrator", "CompanionInterfaceWait");
             var f = (Func<string, int, bool>)wait.GetValue(null)!;
+            int reads = 0;
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            bool present = With(_ => (true, HasProblem, 43u), _ => null, _ => (0, 0, null, 0), () => f(@"SWD\HIDMAESTRO\HM_XUSB_7777", 3));
+            bool present = With(_ => { reads++; return (true, HasProblem, 43u); }, _ => null, _ => (0, 0, null, 0), () => f(@"SWD\HIDMAESTRO\HM_XUSB_7777", 3));
             long ms = sw.ElapsedMilliseconds;
-            return (!present && ms < 1000, $"{present} in {ms} ms");
+            return (!present && reads == 1, $"{present} after {reads} status read(s), {ms} ms");
         });
         // The protocol check runs when the HID child is slow too. At
         // 6cf274b6 a create whose child did not appear within its 10 s wait
