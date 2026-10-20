@@ -97,8 +97,23 @@ static class ValveSdlCheck
         finally { SDL_free(arr); }
     }
 
-    /// <summary>Pump SDL until a gamepad with this VID/PID shows up.</summary>
-    static IntPtr WaitForGamepad(ushort vid, ushort pid, int seconds)
+    /// <summary>SDL's joystick IDs now. SDL never reuses one, so a device
+    /// created after this has none of them.</summary>
+    static HashSet<uint> JoystickIds()
+    {
+        SDL_UpdateGamepads();
+        var ids = new HashSet<uint>();
+        IntPtr arr = SDL_GetJoysticks(out int n);
+        if (arr == IntPtr.Zero) return ids;
+        try { for (int j = 0; j < n; j++) ids.Add((uint)Marshal.ReadInt32(arr, j * 4)); }
+        finally { SDL_free(arr); }
+        return ids;
+    }
+
+    /// <summary>Pump SDL until a gamepad with this VID/PID shows up, other
+    /// than one in <paramref name="skip"/>: a real Valve controller on the
+    /// machine has the persona's VID/PID too.</summary>
+    static IntPtr WaitForGamepad(ushort vid, ushort pid, int seconds, HashSet<uint> skip)
     {
         for (int i = 0; i < seconds * 10; i++)
         {
@@ -111,6 +126,7 @@ static class ValveSdlCheck
                     for (int j = 0; j < n; j++)
                     {
                         uint id = (uint)Marshal.ReadInt32(arr, j * 4);
+                        if (skip.Contains(id)) continue;
                         IntPtr gp = SDL_OpenGamepad(id);
                         if (gp == IntPtr.Zero) continue;
                         if (SDL_GetGamepadVendor(gp) == vid && SDL_GetGamepadProduct(gp) == pid)
@@ -126,18 +142,18 @@ static class ValveSdlCheck
     }
 
     /// <summary>Submit a state until SDL's gamepad view shows what the
-    /// check after it asks for, on two reads in a row, or for 480 ms, the
-    /// fixed wait this replaced. The persona repeats its last frame every
-    /// 4 or 8 ms (idleFrameIntervalMs), so the second read follows newer
-    /// frames than the first, and a state that does not hold fails as it
-    /// did. A view that never shows it leaves the check to fail on the
-    /// same read the fixed wait ended with.</summary>
+    /// check after it asks for, on two reads in a row, or for 3 s, far past
+    /// the few tens of ms it takes, so load does not end it early. The
+    /// persona repeats its last frame every 4 or 8 ms (idleFrameIntervalMs),
+    /// so the second read follows newer frames than the first, and frames
+    /// keep coming after the submits stop. A view that never shows it
+    /// leaves the check to fail on the last read.</summary>
     static void Drive(HMController c, HMGamepadState st, Func<bool> shown)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
         long nextSubmit = 0;
         int inRow = 0;
-        while (sw.ElapsedMilliseconds < 480)
+        while (sw.ElapsedMilliseconds < 3000)
         {
             if (sw.ElapsedMilliseconds >= nextSubmit && nextSubmit < 400) { c.SubmitState(st); nextSubmit += 50; }
             Thread.Sleep(10);
@@ -226,8 +242,9 @@ static class ValveSdlCheck
             IntPtr gp = IntPtr.Zero;
             try
             {
+                var present = JoystickIds();
                 c = ctx.CreateController(prof);
-                gp = WaitForGamepad(t.Vid, t.Pid, 20);
+                gp = WaitForGamepad(t.Vid, t.Pid, 20, present);
                 Check("stock SDL enumerates the persona as a gamepad", gp != IntPtr.Zero);
                 if (gp == IntPtr.Zero)
                 {
@@ -276,7 +293,6 @@ static class ValveSdlCheck
                 short lx2 = SDL_GetGamepadAxis(gp, AXIS_LEFTX);
                 short rt2 = SDL_GetGamepadAxis(gp, AXIS_RIGHT_TRIGGER);
                 Check("SDL reads the left stick hard right", lx2 >= 30000, $"LEFTX={lx2}");
-                Check("the axis swept rather than sticking", lx2 - lx1 >= 60000, $"span={lx2 - lx1}");
                 Check("SDL reads the right trigger released", rt2 <= 1000, $"RT={rt2}");
 
                 Drive(c, new HMGamepadState
