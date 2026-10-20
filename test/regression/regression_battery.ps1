@@ -2157,13 +2157,14 @@ function Scenario-Protected-Staging {
 # battery starts this probe before S01 and the slot collects its result.
 function Scenario-Usbip-Clean-Install {
     $message = 'the bundled usbip-win2 install left a shortcut, Start menu folder, GUI, SDK or PDB file, broke the composite, ran over an existing install, or ran twice for two programs at once (see probe stdout)'
-    # About four and a half minutes, so its hang deadline is 15.
+    # About four and a half minutes, so its hang deadline is ten times
+    # that, 45, which load or another program cannot reach.
     if ($script:S73Run) {
         $run = $script:S73Run
         $script:S73Run = $null
-        Complete-BackgroundProbe -Run $run -Message $message -SkipCodes 2 -DeadlineSeconds 900
+        Complete-BackgroundProbe -Run $run -Message $message -SkipCodes 2 -DeadlineSeconds 2700
     } else {
-        Invoke-Probe -Dir 'usbip_install_check' -Exe 'UsbipInstallCheck.exe' -Message $message -SkipCodes 2 -DeadlineSeconds 900
+        Invoke-Probe -Dir 'usbip_install_check' -Exe 'UsbipInstallCheck.exe' -Message $message -SkipCodes 2 -DeadlineSeconds 2700
     }
 }
 
