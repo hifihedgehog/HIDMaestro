@@ -2122,9 +2122,10 @@ function Scenario-Kbm-Raw-Input {
 # program is a peer process the probe drives, and the probe judges what
 # they did from outside both. Its header lists every section.
 function Scenario-Coexistence {
-    # About 10.5 minutes on the devbox, so its hang deadline is 25.
+    # About 10.5 minutes on the devbox, so its hang deadline is ten times
+    # that, 105, which load or another program cannot reach.
     Invoke-Probe -Dir 'coexist_check' -Exe 'CoexistCheck.exe' -Arguments 'ABCDEFGHJKLMNOPQRSTUVWXYZ' -Tag 'coexistence' `
-                 -Message 'two programs that embed HIDMaestro disturbed each other (see probe stdout)' -SkipCodes 2 -DeadlineSeconds 1500
+                 -Message 'two programs that embed HIDMaestro disturbed each other (see probe stdout)' -SkipCodes 2 -DeadlineSeconds 6300
 }
 
 # S72: everything the elevated SDK runs or hands to pnputil is staged under
