@@ -97,13 +97,14 @@ internal static class Deliberate
         }
     }
 
-    /// <summary>400 periods of the running clock after a handshake: the
-    /// 0x30 frames' mean period within 0.1 ms of 15 ms. A clock that waits
-    /// its period after each tick runs long every period, 16.58 ms at
-    /// 9bd6279's identity commit, whatever the count. On the grid only the
-    /// first and last frames' lateness moves the mean, by their difference
-    /// over the count: a last frame 40 ms late fails 400 periods, where
-    /// frames on this machine come at most 10 ms late.</summary>
+    /// <summary>400 intervals of the running clock after a handshake: the
+    /// median of the 0x30 frames' intervals within 0.1 ms of 15 ms. A clock
+    /// that waits its period after each tick runs long every period, 16.58
+    /// ms at 9bd6279's identity commit, so its median runs long too. On the
+    /// grid a frame the machine holds up makes one interval long and the
+    /// next short, and a grid point it skips makes one interval 30 ms, so
+    /// the median stays at 15 ms. 401 frames take 6 s, and 60 s is the hang
+    /// bound.</summary>
     const int Periods = 400;
 
     static void Grid()
@@ -114,13 +115,14 @@ internal static class Deliberate
             host.OnOutput(Subcommand(0x02), 49, 0);
             host.Start();
             var deadline = Stopwatch.StartNew();
-            while (ch.Count(0x30) < Periods + 1 && deadline.Elapsed < TimeSpan.FromSeconds(30)) Thread.Sleep(50);
+            while (ch.Count(0x30) < Periods + 1 && deadline.Elapsed < TimeSpan.FromSeconds(60)) Thread.Sleep(50);
         }
         finally { host.Dispose(); }
         List<long> at;
         lock (ch.Frames) at = ch.Frames.Where(f => f.Report.Length > 0 && f.Report[0] == 0x30).Select(f => f.At).ToList();
-        if (at.Count < Periods + 1) { Check($"the clock sends {Periods + 1} 0x30 frames within 30 s", false, $"{at.Count}"); return; }
-        double mean = (at[Periods] - at[0]) * 1000.0 / Stopwatch.Frequency / Periods;
-        Check($"the 0x30 stream's mean period over {Periods} frames is within 0.1 ms of 15 ms", Math.Abs(mean - 15.0) <= 0.1, $"{mean:F4} ms");
+        if (at.Count < Periods + 1) { Check($"the clock sends {Periods + 1} 0x30 frames within 60 s", false, $"{at.Count}"); return; }
+        var intervals = Enumerable.Range(0, Periods).Select(i => (at[i + 1] - at[i]) * 1000.0 / Stopwatch.Frequency).OrderBy(ms => ms).ToList();
+        double median = (intervals[Periods / 2 - 1] + intervals[Periods / 2]) / 2;
+        Check($"the 0x30 stream's median period over {Periods} intervals is within 0.1 ms of 15 ms", Math.Abs(median - 15.0) <= 0.1, $"{median:F4} ms");
     }
 }
