@@ -122,6 +122,13 @@ internal static class Program
         return saw00 && sawFF;
     }
 
+    /// <summary>The HID interface of the virtual DualSense serving
+    /// <paramref name="serial"/>, or null.</summary>
+    static string? OurInterface(string serial) =>
+        HidDeviceEnumerator.Enumerate()
+            .FirstOrDefault(d => d.VendorId == 0x054C && d.ProductId == 0x0CE6
+                && string.Equals(d.SerialNumberString, serial, StringComparison.Ordinal))?.DevicePath;
+
     static int Main()
     {
         Console.WriteLine("=== Stop-event resilience check (issue #38) ===");
@@ -145,18 +152,19 @@ internal static class Program
         Console.WriteLine("  Creating dualsense virtual controller...");
         var ctrl = ctx.CreateController(profile);
 
-        // VIRTUAL pad only: a real DualSense on the box shares VID/PID.
-        // Virtuals serve serial HM-CTL-<index>; real pads serve their MAC.
+        // This run's pad only. A real DualSense on the box shares VID/PID and
+        // serves its MAC, and another program's virtual serves the serial of
+        // its own index, so the match is the exact serial of this
+        // controller's index.
+        int index = ctrl.TransportIndex;
+        string serial = DeviceOrchestrator.DriverSerial(index);
         string? path = null;
         for (int i = 0; i < 50 && path == null; i++)
         {
-            path = HidDeviceEnumerator.Enumerate()
-                .FirstOrDefault(d => d.VendorId == 0x054C && d.ProductId == 0x0CE6
-                    && d.SerialNumberString != null
-                    && d.SerialNumberString.StartsWith("HM-CTL-"))?.DevicePath;
+            path = OurInterface(serial);
             if (path == null) Thread.Sleep(100);
         }
-        Check("virtual HID interface enumerates (VID 054C PID 0CE6, HM-CTL serial)", path != null, path ?? "");
+        Check($"virtual HID interface enumerates (VID 054C PID 0CE6, serial {serial})", path != null, path ?? "");
         if (path == null) { ctrl.Dispose(); return 1; }
 
         s_readEvent = CreateEventW(IntPtr.Zero, true, false, IntPtr.Zero);
@@ -171,12 +179,15 @@ internal static class Program
 
         // ── Phase 2: foreign stop-event signals must not kill the pad ───
         Console.WriteLine("\n-- Phase 2: foreign StopEvent signals (the #38 kill vector) --");
+        // The stop event of this controller's index. Index 0 is another
+        // program's pad when one was running first.
+        string stopEvent = $@"Global\HIDMaestroStopEvent{index}";
         for (int round = 1; round <= 3; round++)
         {
-            IntPtr ev = OpenEventW(EVENT_MODIFY_STATE, false, @"Global\HIDMaestroStopEvent0");
+            IntPtr ev = OpenEventW(EVENT_MODIFY_STATE, false, stopEvent);
             bool signaled = ev != IntPtr.Zero && SetEvent(ev);
             if (ev != IntPtr.Zero) CloseHandle(ev);
-            Check($"round {round}: foreign SetEvent on Global\\HIDMaestroStopEvent0", signaled);
+            Check($"round {round}: foreign SetEvent on {stopEvent}", signaled);
 
             // Give the worker its wake; pre-#38 it returns here and the
             // wire freezes at the last report forever.
@@ -198,10 +209,7 @@ internal static class Program
         bool gone = false;
         for (int i = 0; i < 50 && !gone; i++)
         {
-            gone = !HidDeviceEnumerator.Enumerate()
-                .Any(d => d.VendorId == 0x054C && d.ProductId == 0x0CE6
-                    && d.SerialNumberString != null
-                    && d.SerialNumberString.StartsWith("HM-CTL-"));
+            gone = OurInterface(serial) == null;
             if (!gone) Thread.Sleep(100);
         }
         Check("HID interface disappears after dispose", gone);
