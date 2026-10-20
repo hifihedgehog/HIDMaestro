@@ -313,7 +313,7 @@ internal static partial class Program
               ackBefore != null && delivered != 0,
               ackBefore == null ? "absent" : $"DeliveredSeqNo {delivered}, Capabilities 0x{caps:X8}");
 
-        string f7 = a.Send("go", 120_000);
+        string f7 = a.Send("go");
         Check("U: the waiting create is refused as in use",
               !Ok(f7) && f7.Contains("HMResourceInUseException", StringComparison.Ordinal), f7);
         Thread.Sleep(2000);

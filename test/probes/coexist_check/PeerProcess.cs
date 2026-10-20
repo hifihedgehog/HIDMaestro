@@ -99,13 +99,28 @@ internal sealed class PeerProcess : IDisposable
         catch (InvalidOperationException) { return "ERR peer exited"; }
     }
 
+    /// <summary>How long a reply is waited for by default: past the longest
+    /// bound the SDK itself waits in a create or a sweep, the transport and
+    /// deploy locks' 10 minutes, at the machine's HIDMAESTRO_TIMEOUT_SCALE.
+    /// A slow machine whose device installs queue behind Windows' online
+    /// driver searches finishes the command, and a peer that hangs still
+    /// fails, later.</summary>
+    internal static readonly int ReplyMs = (int)(660_000 * Scale());
+
+    static double Scale()
+    {
+        string? raw = Environment.GetEnvironmentVariable("HIDMAESTRO_TIMEOUT_SCALE");
+        return double.TryParse(raw, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double v)
+               && v >= 0.1 && v <= 100.0 ? v : 1.0;
+    }
+
     /// <summary>Send one command and wait for its reply line.</summary>
-    public string Send(string command, int timeoutMs = 120_000)
+    public string Send(string command, int timeoutMs = -1)
     {
         if (_p.HasExited) return "ERR peer exited";
         _p.StandardInput.WriteLine(command);
         _p.StandardInput.Flush();
-        string reply = Read(timeoutMs);
+        string reply = Read(timeoutMs < 0 ? ReplyMs : timeoutMs);
         Console.WriteLine($"    {Name} <- {command}: {reply}");
         return reply;
     }
@@ -118,9 +133,9 @@ internal sealed class PeerProcess : IDisposable
         _p.StandardInput.Flush();
     }
 
-    public string Receive(string label, int timeoutMs = 120_000)
+    public string Receive(string label, int timeoutMs = -1)
     {
-        string reply = Read(timeoutMs);
+        string reply = Read(timeoutMs < 0 ? ReplyMs : timeoutMs);
         Console.WriteLine($"    {Name} <- {label}: {reply}");
         return reply;
     }

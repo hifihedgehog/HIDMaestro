@@ -273,11 +273,11 @@ internal static partial class Program
             using var peer = PeerProcess.Start("Z1");
             string c = peer.Send($"zcwd {dir}");
             if (!Ok(c)) { Check("Z1: the program's current directory is the planted one's", false, c); return; }
-            string r1 = peer.Send("zproduct", 120_000);
+            string r1 = peer.Send("zproduct");
             long ms1 = LongField(r1, "ms");
             Check("Z1: IsProductInstalled reads the driver store, with no pnputil, planted or not, and answers within 30 s",
                   PeerProcess.Field(r1, "installed") == "True" && ms1 >= 0 && ms1 < 30_000, r1);
-            string r2 = peer.Send("zpnputil /enum-drivers", 120_000);
+            string r2 = peer.Send("zpnputil /enum-drivers");
             long ms2 = LongField(r2, "ms");
             Check("Z1: the legacy move's pnputil runs System32's and returns within its 60 s timeout",
                   PeerProcess.Field(r2, "rc") == "0" && ms2 >= 0 && ms2 < 60_000, r2);
@@ -289,7 +289,7 @@ internal static partial class Program
             // waits for that process, 40 s.
             string orphan = Path.Combine(dir, OrphanName + ".exe");
             File.Copy(planted, orphan);
-            string r3 = peer.Send($"zruntool 3000 {orphan}", 120_000);
+            string r3 = peer.Send($"zruntool 3000 {orphan}");
             long ms3 = LongField(r3, "ms");
             var left = Process.GetProcessesByName(OrphanName);
             bool held = left.Length > 0;
@@ -413,7 +413,7 @@ internal static partial class Program
                 try { m.WaitOne(); } catch (AbandonedMutexException) { }
                 held.Add(m);
             }
-            string r = p.Send("zlegacy", 120_000);
+            string r = p.Send("zlegacy");
             long ms = LongField(r, "ms");
             // A build that waits for the lock gives up at 60 s. Half that is
             // the bound, so a slow listing of the driver store on a busy
@@ -513,7 +513,7 @@ internal static partial class Program
                       early.StartsWith("ERR timeout", StringComparison.Ordinal), early);
             }
             finally { releasedAt = Stopwatch.GetTimestamp(); deploy.ReleaseMutex(); deploy.Dispose(); }
-            string bound = early.StartsWith("ERR timeout", StringComparison.Ordinal) ? p.Receive("bindwinusb, once it is free", 120_000) : early;
+            string bound = early.StartsWith("ERR timeout", StringComparison.Ordinal) ? p.Receive("bindwinusb, once it is free") : early;
             if (p.LastArrival != 0)
                 Console.WriteLine($"    Z8: the bind replied {Stopwatch.GetElapsedTime(releasedAt, p.LastArrival).TotalMilliseconds:F0} ms after the probe let the deploy lock go");
             Check("Z8: it binds once the lock is free", bound == "OK bindwinusb Bound", bound);
@@ -586,7 +586,7 @@ internal static partial class Program
             string? devA = null;
             WaitFor(() => (devA = Usb.OnVhciPort(0x057E, 0x0337, x)) != null, 15_000);
             if (devA == null) { Check("Z9: its adapter enumerates", false, $"vhci {x}"); return; }
-            string bound = a.Send("bindwinusb", 120_000);
+            string bound = a.Send("bindwinusb");
             Check("Z9: its BindWinUsb binds", bound == "OK bindwinusb Bound", bound);
             if (bound != "OK bindwinusb Bound") return;
 
@@ -859,7 +859,7 @@ internal static partial class Program
                 WaitFor(() => Native.CM_Locate_DevNodeW(out _, devA, 0) != 0, 5000);
             }
             finally { devnodes.ReleaseMutex(); devnodes.Dispose(); }
-            string r = a.Receive("bindwinusb", 120_000);
+            string r = a.Receive("bindwinusb");
             Console.WriteLine($"    Zc: the bind replied {dropped.Elapsed.TotalSeconds:F1} s after the drop");
             var after = EnumDriver(devA);
             Console.WriteLine($"    Zc: the bind: {r}; {devA} was {before.Service} {before.Class}, is {after.Service} {after.Class}");
@@ -903,7 +903,7 @@ internal static partial class Program
                   stayed, dev2 == null ? $"vhci {y}, no devnode" : $"{Usb.Service(dev2) ?? "no driver"}, holders {string.Join(",", WinUsbHolders(dev2))}");
             // The positive control: the re-import takes a binding, so the
             // input.inf above is the rule's, not a device that cannot bind.
-            string again = dev2 == null ? "no devnode" : a.Send("bindwinusb", 120_000);
+            string again = dev2 == null ? "no devnode" : a.Send("bindwinusb");
             Check("Zc: the program's next BindWinUsb binds the import that came back",
                   again == "OK bindwinusb Bound"
                   && WaitFor(() => string.Equals(Usb.Service(dev2!), "WinUSB", StringComparison.OrdinalIgnoreCase), 10_000),
@@ -962,7 +962,7 @@ internal static partial class Program
             WaitFor(() => (devA = Usb.OnVhciPort(0x057E, 0x0337, x)) != null, 15_000);
             if (devA == null) { Check("Ze: its adapter enumerates", false, $"vhci {x}"); return; }
             string before = a.Send($"zarrival {devA}");
-            string bound = a.Send("bindwinusb", 120_000);
+            string bound = a.Send("bindwinusb");
             Check("Ze: its BindWinUsb binds", bound == "OK bindwinusb Bound", bound);
             if (bound != "OK bindwinusb Bound") return;
             string after = a.Send($"zarrival {devA}");
@@ -978,7 +978,7 @@ internal static partial class Program
 
             var driver = EnumDriver(devA);
             uint flags = ConfigFlags(devA) ?? 0;
-            string d = a.Send("dispose", 120_000);
+            string d = a.Send("dispose");
             Check("Ze: the program disposes its adapter while the probe holds it open", Ok(d), d);
 
             // An open handle does not keep the devnode in the device tree:
@@ -1070,7 +1070,7 @@ internal static partial class Program
             string single = a.Send("singleinf");
             Check("Zf: the program takes the single-INF install", single == "OK singleinf", single);
             if (single != "OK singleinf") return;
-            string bound = a.Send("bindwinusb", 120_000);
+            string bound = a.Send("bindwinusb");
             Check("Zf: its BindWinUsb binds", bound == "OK bindwinusb Bound", bound);
             string seen = a.Send("singleinfseen");
             Check("Zf: through the single-INF install, after the null driver", LongField(seen, "n") > 0, seen);
@@ -1086,7 +1086,7 @@ internal static partial class Program
             Check("Zf: the adapter has no driver and its entry stays",
                   WaitFor(() => Usb.Service(devA) == null, 10_000) && WinUsbEntryExists(devA),
                   $"{Usb.Service(devA) ?? "no driver"}, entry {WinUsbEntryExists(devA)}");
-            string d = a.Send("dispose", 120_000);
+            string d = a.Send("dispose");
             Check("Zf: the program disposes its adapter", Ok(d), d);
             Check("Zf: once gone, it has the reinstall flag and the entry is gone",
                   WaitFor(() => HasLeft(devA) && ((ConfigFlags(devA) ?? 0) & CONFIGFLAG_REINSTALL) != 0 && !WinUsbEntryExists(devA), 35_000),
@@ -1181,7 +1181,7 @@ internal static partial class Program
         // bind cannot answer while the lock is held, so an answer inside the
         // hold is the test, however long the teardown takes.
         bool whileHeld = !disposed.StartsWith("ERR timeout", StringComparison.Ordinal);
-        if (!whileHeld) disposed = a.Receive("dispose", 120_000);
+        if (!whileHeld) disposed = a.Receive("dispose");
         Check("Zd: the dispose does not wait for the bind", Ok(disposed) && whileHeld,
               $"{disposed} in {ms} ms{(whileHeld ? "" : ", only after the probe let the WinUSB lock go")}");
         string r = a.Send("zbindwait 60000", 90_000);

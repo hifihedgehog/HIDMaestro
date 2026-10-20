@@ -563,7 +563,7 @@ internal static partial class Program
             if (!Ok(c))
             {
                 sq.Dispose();
-                p.Receive("create, once the name is let go", 120_000);
+                p.Receive("create, once the name is let go");
             }
         }
         finally { sq.Dispose(); }
@@ -621,7 +621,7 @@ internal static partial class Program
             if (!Ok(r))
             {
                 sq.Dispose();
-                p.Receive("sweep, once the name is let go", 120_000);
+                p.Receive("sweep, once the name is let go");
             }
             else
             {
