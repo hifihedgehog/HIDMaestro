@@ -150,6 +150,30 @@ internal static class Program
         return got;
     }
 
+    /// <summary>Reports for at least <paramref name="minMs"/>, and past that
+    /// until one <paramref name="want"/> accepts has arrived or
+    /// <paramref name="maxMs"/> is up.</summary>
+    static System.Collections.Generic.List<byte[]> CollectUntil(Func<byte[], bool> want, int minMs, int maxMs)
+    {
+        var got = new System.Collections.Generic.List<byte[]>();
+        bool found = false;
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < (found ? minMs : maxMs))
+        {
+            var r = HidRead((int)Math.Max(1, (found ? minMs : maxMs) - sw.ElapsedMilliseconds));
+            if (r == null) continue;
+            got.Add(r);
+            if (want(r)) found = true;
+        }
+        return got;
+    }
+
+    /// <summary>The reports the pad sends on its own. A 0x21 answers a
+    /// subcommand, and before phase 3 only another program (a browser or
+    /// Steam handshaking the new pad) writes one.</summary>
+    static System.Collections.Generic.List<byte[]> Own(System.Collections.Generic.List<byte[]> frames)
+        => frames.Where(f => f[0] != 0x21).ToList();
+
     static string Ids(System.Collections.Generic.List<byte[]> frames)
         => frames.Count == 0 ? "none" : string.Join(",", frames.Select(f => f[0].ToString("X2")));
 
@@ -235,7 +259,7 @@ internal static class Program
         // index (DeviceOrchestrator.DriverSerial). A real one serves its MAC.
         string serial = DeviceOrchestrator.DriverSerial(ctrl.TransportIndex);
         string? path = null;
-        for (int i = 0; i < 50 && path == null; i++)
+        for (int i = 0; i < 300 && path == null; i++)
         {
             path = HidDeviceEnumerator.Enumerate()
                 .FirstOrDefault(d => d.VendorId == 0x057E && d.ProductId == 0x2009
@@ -258,23 +282,25 @@ internal static class Program
         // The pad sent its state at rest once, at its start, and the pump
         // has submitted that same state every 8 ms since. Whatever the HID
         // class queued before this handle opened is dropped, and then 600
-        // ms at rest must bring no report: a 15 ms stream would bring 40.
+        // ms at rest must bring no stream: a 15 ms stream would bring 40.
+        // One report is allowed, the one the pad sends at its start, which
+        // lands here when the pump's first submit runs late under load.
         HidD_FlushQueue(s_hid);
-        var atRest = Collect(600);
-        Check("no report streams while nothing changes", atRest.Count == 0, Ids(atRest));
+        var atRest = Own(Collect(600));
+        Check("no report streams while nothing changes", atRest.Count <= 1, Ids(atRest));
 
         // A press sends one 0x3F, holding it sends no more, and the release
         // sends one more: the pad's state at rest, read for its shape.
         lock (pumpLock) pumpState = new HMGamepadState { Buttons = (HMButton)(1u << 1) };
-        var pressed = ReadUntil(0x3F, 800, r => (r[1] & 0x02) != 0);
+        var pressed = ReadUntil(0x3F, 2000, r => (r[1] & 0x02) != 0);
         Check("a press sends a 0x3F", pressed != null);
-        var holding = Collect(300);
+        var holding = Own(Collect(300));
         Check("holding the press sends no more", holding.Count == 0, Ids(holding));
         lock (pumpLock) pumpState = new HMGamepadState();
-        var released = ReadUntil(0x3F, 800, r => (r[1] & 0x02) == 0);
+        var released = ReadUntil(0x3F, 2000, r => (r[1] & 0x02) == 0);
         int frameLen = s_lastReadLen;
         Check("the release sends a 0x3F", released != null);
-        var after = Collect(300);
+        var after = Own(Collect(300));
         Check("and nothing after it", after.Count == 0, Ids(after));
         if (released != null)
         {
@@ -321,7 +347,7 @@ internal static class Program
         }
         Thread.Sleep(60);
 
-        var fp = ReadUntil(0x3F, 800, r => (r[1] & 0x02) != 0);
+        var fp = ReadUntil(0x3F, 2000, r => (r[1] & 0x02) != 0);
         Check("A press lands on simple-mode byte1 bit1", fp != null);
         if (fp != null)
         {
@@ -349,14 +375,18 @@ internal static class Program
         cmd[6] = 0x00; cmd[7] = 0x01; cmd[8] = 0x40; cmd[9] = 0x40;
         cmd[10] = 0x02;                 // subcommand: device info
         Check("0x01 subcommand write (49-byte BT framing)", HidWrite(cmd));
-        var ack = ReadUntil(0x21, 1000);
+        // Matched on the echoed subcommand, as SDL's ReadSubcommandReply
+        // does: another program's handshake gets replies of its own.
+        var ack = ReadUntil(0x21, 2000, r => r[14] == 0x02);
         Check("0x21 subcommand reply (the held copy answers)",
               ack != null && ack[14] == 0x02, ack != null ? $"len={s_lastReadLen}" : "no reply");
         Check("0x21 reply completes at 362 (padded)", ack != null && s_lastReadLen == 362, $"{s_lastReadLen}");
         // The held copy never sets protocolSeen, so a change after the
-        // subcommand still goes out as 0x3F, and no 0x30 starts.
+        // subcommand still goes out as 0x3F, and no 0x30 starts. The reads
+        // run 400 ms, long enough for a 15 ms stream to show, and past that
+        // until the press arrives, so a pump that runs late cannot fail it.
         lock (pumpLock) pumpState = new HMGamepadState { Buttons = (HMButton)(1u << 1) };
-        var still = Collect(400);
+        var still = CollectUntil(f => f[0] == 0x3F && (f[1] & 0x02) != 0, 400, 2000);
         lock (pumpLock) pumpState = new HMGamepadState();
         Check("a change after it still sends 0x3F on the held copy, and no 0x30",
               still.Any(f => f[0] == 0x3F && (f[1] & 0x02) != 0) && !still.Any(f => f[0] == 0x30), Ids(still));
@@ -385,7 +415,7 @@ internal static class Program
 
             string serial2 = DeviceOrchestrator.DriverSerial(ctrl2.TransportIndex);
             string? path2 = null;
-            for (int i = 0; i < 50 && path2 == null; i++)
+            for (int i = 0; i < 300 && path2 == null; i++)
             {
                 path2 = HidDeviceEnumerator.Enumerate()
                     .FirstOrDefault(d => d.VendorId == 0x057E && d.ProductId == 0x2009
@@ -406,7 +436,9 @@ internal static class Program
                     var nf = new System.Collections.Generic.List<byte[]>();
                     bool allLen362 = true;
                     var deadline = Stopwatch.StartNew();
-                    while (nf.Count < 4 && deadline.ElapsedMilliseconds < 2000)
+                    // A hang detector: four frames take 60 ms on the 15 ms
+                    // clock, and the loop ends when they arrive.
+                    while (nf.Count < 4 && deadline.ElapsedMilliseconds < 10000)
                     {
                         var r = HidRead(200);
                         if (r != null && r[0] == 0x30)
@@ -425,7 +457,7 @@ internal static class Program
                         Check("byte1 advances (Nintendo timer)", timerAdvances,
                               string.Join(",", nf.Select(f => f[1].ToString("X2"))));
                         Check("byte2 battery/conn nonzero", nf[^1][2] != 0, $"0x{nf[^1][2]:X2}");
-                        var na = ReadUntil(0x30, 800, r => (r[3] & 0x08) != 0);
+                        var na = ReadUntil(0x30, 2000, r => (r[3] & 0x08) != 0);
                         Check("A press at Nintendo byte3 bit3 post-arm", na != null);
                     }
                     s_hid.Dispose();

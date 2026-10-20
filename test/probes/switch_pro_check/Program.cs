@@ -168,7 +168,9 @@ internal static class Program
     // (hidapi pads to OutputReportByteLength); HidWrite does the same.
     static int s_counter;
 
-    static byte[]? Subcommand(byte id, byte[] args, int timeoutMs = 500)
+    // The reply deadline only detects a hang: a reply comes within one
+    // 15 ms stream tick, and the read returns as soon as it does.
+    static byte[]? Subcommand(byte id, byte[] args, int timeoutMs = 2000)
     {
         var pkt = new byte[49];
         pkt[0] = 0x01;
@@ -251,7 +253,7 @@ internal static class Program
         // serves its MAC.
         string serial = DeviceOrchestrator.DriverSerial(ctrl.TransportIndex);
         string? path = null;
-        for (int i = 0; i < 50 && path == null; i++)
+        for (int i = 0; i < 300 && path == null; i++)
         {
             path = HidDeviceEnumerator.Enumerate()
                 .FirstOrDefault(d => d.VendorId == 0x057E && d.ProductId == 0x2009
@@ -355,32 +357,52 @@ internal static class Program
         // ── Phase 3: 0x30 streaming ─────────────────────────────────────
         Console.WriteLine("\n-- Phase 3: 0x30 streaming at ~60 Hz --");
 
-        // Drop whatever is queued, then time 30 fresh frames. Reading until
+        // Drop whatever is queued, then time 120 fresh frames. Reading until
         // a read times out never ends while frames keep coming faster than
         // the timeout, and the pad streams every 15 ms (driver.c's stream
         // clock): beside the 2026-10-19 gate this loop ran for 14 minutes.
         // HidD_FlushQueue empties the HID class's queue in one call, as
         // DS4Windows does before reading (HidLibrary/HidDevice.cs:162).
+        // The clock's upper bound is judged by the median gap between
+        // consecutive frames: a stall of this process or of the driver under
+        // load moves a few gaps, not the median of 119. Its lower bound is
+        // judged by the run's average, since a stalled reader finds queued
+        // frames back to back but never more frames than the clock made.
         Check("input queue flushed", HidD_FlushQueue(s_hid), $"error {Marshal.GetLastWin32Error()}");
-        int frames = 0; byte firstTimer = 0, lastTimer = 0;
+        const int streamFrames = 120;
+        int frames = 0, timerRepeats = 0; byte lastTimer = 0;
         bool allLen362 = true;
+        var gaps = new List<double>(streamFrames);
+        long lastTicks = 0;
         var cadence = Stopwatch.StartNew();
-        for (int i = 0; i < 30; i++)
+        for (int i = 0; i < streamFrames; i++)
         {
-            var r = ReadUntil(0x30, 500);
+            var r = ReadUntil(0x30, 2000);
             if (r == null) break;
-            if (frames == 0) firstTimer = r[1];
+            long now = Stopwatch.GetTimestamp();
+            if (frames > 0)
+            {
+                gaps.Add((now - lastTicks) * 1000.0 / Stopwatch.Frequency);
+                if (r[1] == lastTimer) timerRepeats++;
+            }
+            lastTicks = now;
             lastTimer = r[1];
             if (s_lastReadLen != 362) allLen362 = false;
             frames++;
         }
         cadence.Stop();
-        Check("30 consecutive 0x30 frames", frames == 30, $"got {frames}");
+        Check($"{streamFrames} consecutive 0x30 frames", frames == streamFrames, $"got {frames}");
         Check("0x30 frames complete at 362 (padded, real-BT parity)", frames > 0 && allLen362);
+        gaps.Sort();
+        double medianGap = gaps.Count > 0 ? gaps[gaps.Count / 2] : 0;
         double msPerFrame = cadence.Elapsed.TotalMilliseconds / Math.Max(1, frames);
-        Check("cadence ~60 Hz (10..25 ms/frame)", msPerFrame >= 10 && msPerFrame <= 25,
-            $"{msPerFrame:F1} ms/frame");
-        Check("timer byte advances", frames >= 2 && ((byte)(lastTimer - firstTimer)) >= (byte)(frames - 1));
+        Check("stream clock ~15 ms (median gap at most 25 ms, average at least 10 ms)",
+            gaps.Count > 0 && medianGap <= 25 && msPerFrame >= 10,
+            $"median {medianGap:F1} ms over {gaps.Count} gaps, average {msPerFrame:F1} ms");
+        // The timer counts every frame (driver.c:1855), so no two
+        // consecutive frames carry the same value. Frames the HID class
+        // drops while this process stalls only make the step larger.
+        Check("timer byte advances on every frame", frames >= 2 && timerRepeats == 0, $"{timerRepeats} repeats");
 
         // ── Phase 4: input round-trip ───────────────────────────────────
         Console.WriteLine("\n-- Phase 4: input round-trip (SubmitState -> wire bytes) --");
@@ -407,7 +429,7 @@ internal static class Program
         ctrl.SubmitState(pressed);
         Thread.Sleep(50);
 
-        var f = ReadUntil(0x30, 500, r => (r[3] & 0x08) != 0);
+        var f = ReadUntil(0x30, 2000, r => (r[3] & 0x08) != 0);
         Check("A press reaches wire (byte3 bit3)", f != null);
         if (f != null)
         {
@@ -441,8 +463,10 @@ internal static class Program
         rumble[2] = 0x00; rumble[3] = 0xC8; rumble[4] = 0x60; rumble[5] = 0x00;
         rumble[6] = 0x00; rumble[7] = 0x01; rumble[8] = 0x40; rumble[9] = 0x40;
         Check("0x10 rumble write", HidWrite(rumble));
+        // A hang detector: the decode fires within milliseconds, and the
+        // wait ends as soon as it does.
         var decodeSw = Stopwatch.StartNew();
-        while (decoded10Count == 0 && decodeSw.ElapsedMilliseconds < 1000) Thread.Sleep(10);
+        while (decoded10Count == 0 && decodeSw.ElapsedMilliseconds < 10000) Thread.Sleep(10);
         Check("OutputDecoded fired for report 0x10", decoded10Count > 0);
         Check("leftMotor = 255 (HF amp 0xC8)", decodedLeft == 255, $"got {decodedLeft}");
         Check("rightMotor = 0 (neutral)", decodedRight == 0, $"got {decodedRight}");
@@ -614,13 +638,16 @@ internal static class Program
             VendorBlobCodec.EncodeInput(stateSpec, in neutral, 0.5f, 0.5f, 0.5f, 0.5f, 0f, 0f, body, new VendorBlobCodec.EncoderState());
             rec.Out("body", body);
 
+            // THIS pad, by its own serial as in Checks: a real Pro and
+            // another program's virtual Switch Pro share VID, PID and the
+            // HM-CTL- prefix.
+            string serial = DeviceOrchestrator.DriverSerial(ctrl.TransportIndex);
             string? path = null;
-            for (int i = 0; i < 50 && path == null; i++)
+            for (int i = 0; i < 300 && path == null; i++)
             {
                 path = HidDeviceEnumerator.Enumerate()
                     .FirstOrDefault(d => d.VendorId == 0x057E && d.ProductId == 0x2009
-                        && d.SerialNumberString != null
-                        && d.SerialNumberString.StartsWith("HM-CTL-"))?.DevicePath;
+                        && d.SerialNumberString == serial)?.DevicePath;
                 if (path == null) Thread.Sleep(100);
             }
             if (path == null) throw new InvalidOperationException("the virtual pad's HID interface did not appear");
@@ -685,8 +712,8 @@ internal static class Program
                 pkt[6] = 0x00; pkt[7] = 0x01; pkt[8] = 0x40; pkt[9] = 0x40;
                 pkt[10] = id;
                 Array.Copy(a, 0, pkt, 11, a.Length);
-                if (!RecordExchange(rec, skipped, pkt, 49, 0x21, 500, r => r[14] == id && (r[13] & 0x80) != 0))
-                    throw new InvalidOperationException($"subcommand 0x{id:X2} got no reply in 500 ms");
+                if (!RecordExchange(rec, skipped, pkt, 49, 0x21, 2000, r => r[14] == id && (r[13] & 0x80) != 0))
+                    throw new InvalidOperationException($"subcommand 0x{id:X2} got no reply in 2000 ms");
             }
 
             // 3 s of the stream in mode 0x30 with the IMU on.

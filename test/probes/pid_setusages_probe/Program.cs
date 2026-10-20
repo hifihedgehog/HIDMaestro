@@ -279,7 +279,19 @@ internal static class Program
         // captures every payload. After FfbTest exits, give the SDK poll
         // loop one more drain cycle, then assert the round-trip.
         int failuresFromFfbTest = RunFfbTest();
-        System.Threading.Thread.Sleep(80);
+        // The burst reaches OutputReceived through the SDK's output loop,
+        // which a loaded machine can delay. Wait for the round trip to show
+        // instead of reading it once after a fixed pause. A dropped packet
+        // never arrives, so the assertion below still fails on it.
+        if (failuresFromFfbTest == 0)
+        {
+            var roundTripWatch = System.Diagnostics.Stopwatch.StartNew();
+            while (roundTripWatch.ElapsedMilliseconds < 10000
+                   && ((System.Threading.Volatile.Read(ref constForceMaxMag) == 0
+                        && System.Threading.Volatile.Read(ref periodicMaxMag) == 0)
+                       || System.Threading.Volatile.Read(ref effectOpStartPackets) == 0))
+                System.Threading.Thread.Sleep(20);
+        }
         pumpCts.Cancel();
         pumpThread?.Join(2000);
 
@@ -495,11 +507,15 @@ internal static class Program
                         writeFailures++;
                 }
             }
-            // Drain window. SDK polls every 8 ms; 5 cycles (40 ms) gives
-            // comfortable headroom even on a busy machine.
-            System.Threading.Thread.Sleep(80);
-            int total = totalOutputPackets;
+            // Drain window. A loaded machine can delay the SDK's output
+            // loop, so poll for the count instead of reading it once after
+            // a fixed pause. A lost packet never arrives and still fails below.
             int expected = kBursts * 3;
+            var drainWatch = System.Diagnostics.Stopwatch.StartNew();
+            while (System.Threading.Volatile.Read(ref totalOutputPackets) < expected
+                   && drainWatch.ElapsedMilliseconds < 10000)
+                System.Threading.Thread.Sleep(10);
+            int total = totalOutputPackets;
             int got11 = outputCounts.TryGetValue((byte)0x11, out int n11) ? n11 : 0;
             int got15 = outputCounts.TryGetValue((byte)0x15, out int n15) ? n15 : 0;
             int got1A = outputCounts.TryGetValue((byte)0x1A, out int n1A) ? n1A : 0;
@@ -599,10 +615,12 @@ internal static class Program
         proc.ErrorDataReceived  += (_, e) => { if (e.Data != null) lock (sb) sb.AppendLine("[err] " + e.Data); };
         proc.BeginOutputReadLine();
         proc.BeginErrorReadLine();
-        bool exited = proc.WaitForExit(20000);
+        // Hang detector. A normal run takes a few seconds, most of it
+        // DirectInput enumeration, which slows with load and device count.
+        bool exited = proc.WaitForExit(60000);
         if (!exited)
         {
-            Console.WriteLine("  FfbTest hung past 20s, killing");
+            Console.WriteLine("  FfbTest hung past 60s, killing");
             try { proc.Kill(entireProcessTree: true); } catch { }
             proc.WaitForExit(2000);
         }

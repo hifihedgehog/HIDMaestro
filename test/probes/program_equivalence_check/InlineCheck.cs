@@ -83,6 +83,9 @@ internal static class InlineCheck
             return 0;
         }
         string listing = Path.Combine(Path.GetTempPath(), $"HIDMaestro_inline_{Environment.ProcessId}.txt");
+        // The JIT appends to this file, and a run that ended before its
+        // cleanup leaves one behind for a later process with the same id.
+        File.Delete(listing);
         var start = new ProcessStartInfo(Environment.ProcessPath!)
         {
             UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true,

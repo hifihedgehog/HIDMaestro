@@ -542,6 +542,7 @@ internal static class Program
     [DllImport(SDL)] static extern void SDL_CloseGamepad(IntPtr gp);
     [DllImport(SDL)] static extern void SDL_UpdateGamepads();
     [DllImport(SDL)] static extern int SDL_GetGamepadType(IntPtr gp);
+    [DllImport(SDL)] static extern int SDL_GetGamepadPlayerIndex(IntPtr gp);
     [DllImport(SDL)] static extern IntPtr SDL_GetGamepadName(IntPtr gp);
     [DllImport(SDL)] static extern IntPtr SDL_GetGamepadJoystick(IntPtr gp);
     [DllImport(SDL)] static extern int SDL_GetNumJoystickAxes(IntPtr js);
@@ -604,11 +605,11 @@ internal static class Program
         return IntPtr.Zero;
     }
 
-    /// <summary>Submit a state until SDL's gamepad state shows it, at most
-    /// for the time this waited before: eight submits 50 ms apart, then 80
-    /// ms, about 600 ms at Windows' default 15.6 ms timer. The checks after
-    /// it read SDL's state as it stands, so a value SDL never takes still
-    /// fails, at the old deadline.</summary>
+    /// <summary>Submit a state until SDL's gamepad state shows it. SDL
+    /// reads the feature report on each update, so it shows on the first
+    /// pass or two. The 5 s limit is a hang bound that a loaded machine
+    /// does not reach. The checks after it read SDL's state as it stands,
+    /// so a value SDL never takes still fails.</summary>
     static void DriveSdl(HMController c, HMGamepadState st, Func<bool> shows)
     {
         var sw = Stopwatch.StartNew();
@@ -616,7 +617,7 @@ internal static class Program
         {
             c.SubmitState(st);
             SDL_UpdateGamepads();
-            if (shows() || sw.ElapsedMilliseconds >= 600) break;
+            if (shows() || sw.ElapsedMilliseconds >= 5000) break;
             Thread.Sleep(10);
         }
         SDL_UpdateGamepads();
@@ -705,8 +706,16 @@ internal static class Program
             }
             Check("SDL reads all ten pressure axes as PCSX2 binds them", all, string.Join(", ", seen));
 
-            var leds = log.WaitFor(f => F(f, "ledBitmap") == 0x02, 2000);
-            Check("SDL's player LED command reaches the SDK as LED 1", leds != null);
+            // SDL lights LED n + 1 for player index n below 4 and none past
+            // it (UpdateLEDsSonySixaxis), and gives a new gamepad the lowest
+            // index no other gamepad holds (SDL_FindFreePlayerIndex), so
+            // another pad on the machine moves this one off LED 1. The
+            // protocol folds LED n into bit n of ledBitmap.
+            int player = SDL_GetGamepadPlayerIndex(gp);
+            int ledWant = player >= 0 && player < 4 ? 0x02 << player : 0;
+            var leds = log.WaitFor(f => F(f, "ledBitmap") == ledWant, 2000);
+            Check("SDL's player LED command reaches the SDK as its player's LED", leds != null,
+                  $"player index {player}, ledBitmap 0x{ledWant:X2}");
             log.Clear();
             Check("SDL accepts a rumble request", SDL_RumbleGamepad(gp, 0xC800, 0xFFFF, 1000), Err());
             var m = log.WaitFor(f => F(f, "leftMotorForce") == 200, 2000);
@@ -1168,7 +1177,10 @@ internal static class Program
                     var ov = new NativeOverlapped { EventHandle = readEvent };
                     if (!ReadFileOverlapped(hr, buf, (uint)inLen, IntPtr.Zero, ref ov) && Marshal.GetLastWin32Error() != 997)
                         throw new InvalidOperationException($"ReadFile failed, error {Marshal.GetLastWin32Error()}");
-                    if (!GetOverlappedResultEx(hr, ref ov, out uint n, 300, false))
+                    // 300 ms with no report ends the runs. The first report
+                    // gets a 5 s hang bound instead, so a loaded machine that
+                    // delivers it late does not end the state with nothing.
+                    if (!GetOverlappedResultEx(hr, ref ov, out uint n, last == null ? 5000u : 300u, false))
                     {
                         CancelIoEx(hr, IntPtr.Zero);
                         GetOverlappedResultEx(hr, ref ov, out _, 0xFFFFFFFF /* INFINITE */, false);

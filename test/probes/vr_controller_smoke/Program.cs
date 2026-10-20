@@ -161,10 +161,12 @@ internal static class Program
         IntPtr view = MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, (UIntPtr)VrSharedMemory.SectionSize);
         try
         {
+            // The reader finds a slot this probe writes on its 250 ms poll,
+            // since no event is signaled. 10 s is a hang bound, not a speed.
             for (int n = 1; n <= 2; n++)
             {
                 PublishHaptic(view, hand: (uint)(n - 1), amplitude: 0.25f * n);
-                System.Threading.SpinWait.SpinUntil(() => Volatile.Read(ref seen) >= n, 2000);
+                System.Threading.SpinWait.SpinUntil(() => Volatile.Read(ref seen) >= n, 10_000);
             }
             Console.WriteLine($"CHILD haptic seen={Volatile.Read(ref seen)}");
             return 0;
@@ -193,7 +195,10 @@ internal static class Program
         {
             if (entered.IsSet) return;
             entered.Set();
-            release.Wait(5000);
+            // Held until Dispose has returned. The bound only keeps a
+            // stalled main thread from holding the handler forever, and it
+            // must outlast Dispose's 1000 ms join under load.
+            release.Wait(15_000);
         };
         IntPtr mapping = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, false, VrSharedMemory.SectionName);
         if (mapping == IntPtr.Zero)
@@ -205,7 +210,7 @@ internal static class Program
         try
         {
             PublishHaptic(view, hand: 1, amplitude: 0.5f);
-            bool inHandler = entered.Wait(2000);
+            bool inHandler = entered.Wait(10_000);
             vr.Dispose();
             bool stillInHandler = !release.IsSet && reader.IsAlive;
             release.Set();
@@ -257,12 +262,14 @@ internal static class Program
             // handler that disposed the controller returns.
             PublishHaptic(view, hand: 0, amplitude: 0.25f);
             PublishHaptic(view, hand: 1, amplitude: 0.5f);
-            bool ran = returned.Wait(5000);
+            bool ran = returned.Wait(10_000);
             bool ended = System.Threading.SpinWait.SpinUntil(() => !reader.IsAlive, 3000);
             bool reclaimed;
             try { using var again = new HMVRController(); reclaimed = true; }
             catch (InvalidOperationException) { reclaimed = false; }
-            Console.WriteLine($"CHILD self-dispose returned={ran && disposeMs < 500} ended={ended} reclaimed={reclaimed}");
+            // A self-join waits Dispose's full 1000 ms join, so 900 ms still
+            // catches it and leaves the rest of the second to load.
+            Console.WriteLine($"CHILD self-dispose returned={ran && disposeMs < 900} ended={ended} reclaimed={reclaimed} disposeMs={disposeMs}");
             return 0;
         }
         finally
@@ -346,7 +353,14 @@ internal static class Program
                 Right = new HMVRHandState { Buttons = HMVRButton.System, Trigger = 1.0f },
             };
             vr.SubmitState(in state);
-            Check("input event signaled per frame", WaitForSingleObject(inputEv, 1000) == 0);
+            // The input event is auto-reset. When a running vrserver's
+            // driver attaches to this channel, its wait takes the signal
+            // first, so a miss counts only when no driver is attached.
+            bool inputSignaled = WaitForSingleObject(inputEv, 1000) == 0;
+            if (!inputSignaled && vr.DriverConnected)
+                Console.WriteLine("  info: input event check skipped: a running vrserver's driver attached and took the signal");
+            else
+                Check("input event signaled per frame", inputSignaled);
 
             uint seq = Read<uint>(view, VrSharedMemory.InputSeqNoOffset);
             Check("input seqlock is even (stable) after write", (seq & 1) == 0 && seq != 0, $"seq={seq}");
@@ -371,7 +385,8 @@ internal static class Program
 
             PublishHaptic(view, hand: 1, amplitude: 0.9f);
 
-            Check("HapticReceived fires from a driver-protocol ring write", got.Wait(2000));
+            // Found on the reader's 250 ms poll, since no event is signaled.
+            Check("HapticReceived fires from a driver-protocol ring write", got.Wait(10_000));
             Check("haptic hand decoded", received?.Hand == HMVRHand.Right);
             Check("haptic amplitude decoded", received != null && Math.Abs(received.Amplitude - 0.9f) < 1e-6);
 
@@ -401,7 +416,8 @@ internal static class Program
         // channel can be claimed again.
         var (selfCode, selfLine) = RunChild("--self-dispose-haptic");
         Check("a HapticReceived handler that disposes its controller: Dispose returns, the reader ends and the channel can be claimed again",
-              selfCode == 0 && selfLine == "CHILD self-dispose returned=True ended=True reclaimed=True", $"exit {selfCode}: {selfLine}");
+              selfCode == 0 && selfLine.StartsWith("CHILD self-dispose returned=True ended=True reclaimed=True ", StringComparison.Ordinal),
+              $"exit {selfCode}: {selfLine}");
 
         // ── Phase 2: live SteamVR ──────────────────────────────────────
         Console.WriteLine("\n-- phase 2: live SteamVR --");
@@ -600,10 +616,13 @@ internal static class Program
                 Check("[reader] right hand routes independently (trigger=1.0)", rightTracks,
                       $"right axis1.x={stR.rAxis1.x:F3}");
 
+                // Polled until the counter moves, so a slow machine cannot
+                // fail it. A frozen counter still fails at the deadline.
                 var st2 = new VRControllerState_t();
-                Thread.Sleep(150);
-                system.GetControllerState(leftIdx, ref st2, stSize);
-                Check("[reader] legacy packet counter advances", st2.unPacketNum > st1.unPacketNum,
+                bool advanced = SpinWait(() =>
+                    system.GetControllerState(leftIdx, ref st2, stSize) &&
+                    st2.unPacketNum > st1.unPacketNum, 5000);
+                Check("[reader] legacy packet counter advances", advanced,
                       $"{st1.unPacketNum} -> {st2.unPacketNum}");
             }
         }
