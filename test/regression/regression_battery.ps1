@@ -2319,13 +2319,17 @@ function Scenario-Handler-Isolation {
 # S87: interop declarations and the method names in the SDK's text. No
 # DllImport is left, SetupDiGetClassDevsW takes its Enumerator as the pointer
 # it is, and every method a message or XML doc names exists as written. The
-# live run creates an Xbox 360 persona and reads the SDK's own XInput slot
-# count, disposes it, and runs the phantom sweep.
+# live run creates an Xbox 360 persona, prints the SDK's own XInput slot
+# wait line, and reads each of the four XInput slots through the SDK's
+# XInputGetState declaration and through xinput.h's, which must agree, with
+# a slot connected, inside a 10 s hang bound. Then it disposes the persona,
+# requires its devnode gone within 5 s, and runs the phantom sweep, which
+# must remove at least the one record the dispose leaves.
 function Scenario-Interop-Decl {
     Invoke-Probe -Dir 'interop_decl_check' -Exe 'InteropDeclCheck.exe' -Arguments 'static' -Tag 'static' `
                  -Message 'an interop declaration or a method name in the SDK''s text is wrong (see probe stdout)' -SkipCodes 2
     Invoke-Probe -Dir 'interop_decl_check' -Exe 'InteropDeclCheck.exe' -Arguments 'live' -Tag 'live' `
-                 -Message 'the XInput slot count or a SetupDiGetClassDevsW caller failed on a live controller (see probe stdout)' -SkipCodes 2
+                 -Message 'the SDK''s XInputGetState read a slot differently from xinput.h''s, or a SetupDiGetClassDevsW caller failed on a live controller (see probe stdout)' -SkipCodes 2
 }
 
 # S88: no device shortcut in the SDK or the drivers. With comments removed,
