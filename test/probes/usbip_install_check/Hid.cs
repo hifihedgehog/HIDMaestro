@@ -19,6 +19,7 @@ internal static class Hid
     [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_GetAttributes(IntPtr h, ref HIDD_ATTRIBUTES a);
     [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_GetPreparsedData(IntPtr h, out IntPtr pp);
     [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_FreePreparsedData(IntPtr pp);
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_SetNumInputBuffers(IntPtr h, uint count);
     [DllImport("hid.dll")] static extern int HidP_GetCaps(IntPtr pp, byte[] caps);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern IntPtr CreateFileW(string p, uint a, uint s, IntPtr sa, uint d, uint f, IntPtr t);
@@ -89,6 +90,11 @@ internal static class Hid
             HidD_FreePreparsedData(pp);
         }
         if (len == 0) { CloseHandle(h); return new Reading(-1, 0, 0, 0, 0); }
+        // HID class keeps 32 reports for a handle by default and drops the
+        // oldest past that, so a reader thread the machine's load holds up
+        // for over 128 ms of 4 ms reports loses input the device sent. 512,
+        // the most it allows, covers 2 s, longer than any window here.
+        HidD_SetNumInputBuffers(h, 512);
 
         int count = 0, readError = 0;
         long first = -1, last = -1, errorAt = -1;

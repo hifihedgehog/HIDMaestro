@@ -491,7 +491,9 @@ internal static class Program
             Check("its devnode reads as present with a last arrival", first.Present && first.Arrived != null, first.ToString());
             Check("the install state reads", !Pnp.InstallState(0).StartsWith("unknown", StringComparison.Ordinal), Pnp.InstallState(0));
         }
-        var events = Pnp.Events(DateTime.UtcNow.AddDays(-7), new[] { "HID", "USB" }, Run);
+        // Every HID or USB configuration event the log holds: whether one
+        // came in the last week depends on the machine's own devices.
+        var events = Pnp.Events(new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc), new[] { "HID", "USB" }, Run);
         Check("Kernel-PnP configuration events read and parse",
               events.Count > 0 && events.All(e => e.Length > 0 && char.IsDigit(e[0])) && !events[0].StartsWith("wevtutil", StringComparison.Ordinal),
               events.Count > 0 ? $"{events.Count} event(s), the first: {events[0]}" : "none");
