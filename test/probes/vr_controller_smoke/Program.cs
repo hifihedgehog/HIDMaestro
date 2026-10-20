@@ -773,8 +773,12 @@ internal static class Program
         // session starts after roles exist streams within ~150 ms. So the
         // legacy lane is verified the way real legacy apps meet it: a
         // separate reader process launched against hands that are already
-        // up, this same exe in --legacy-reader mode.
-        if (handsVerified)
+        // up, this same exe in --legacy-reader mode. The reader is a scene
+        // app, and SteamVR's compositor has no display in session 0, where a
+        // battery run over SSH runs. The checks above run there.
+        if (handsVerified && Process.GetCurrentProcess().SessionId == 0)
+            Console.WriteLine("  [SKIP] legacy reader app: not run here: this program runs in session 0, which has no display for SteamVR's compositor.");
+        else if (handsVerified)
         {
             var known = new HMVRState();
             known.Left.StickX = -0.5f;

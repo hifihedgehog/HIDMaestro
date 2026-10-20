@@ -212,6 +212,13 @@ internal static partial class Program
                 return;
             }
         IntPtr user = Y.UserToken(out string why);
+        // Session 0, where a battery run over SSH runs, has no explorer.exe
+        // and so no user token to run the peers with.
+        if (user == IntPtr.Zero && Process.GetCurrentProcess().SessionId == 0)
+        {
+            Console.WriteLine("  [SKIP] Y: not run here: this program runs in session 0, which has no explorer.exe to take the user's token from.");
+            return;
+        }
         Check("Y: the user's medium-integrity token is at hand", user != IntPtr.Zero, why);
         if (user == IntPtr.Zero) return;
         try
