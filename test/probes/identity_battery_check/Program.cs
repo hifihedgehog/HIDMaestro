@@ -260,10 +260,17 @@ internal static class Program
             var profile = ResolveProfile(ctx, "dualsense");
             var a = RunLife(ctx, Families[2], profile, null, "default key #1");
             var b = RunLife(ctx, Families[2], profile, null, "default key #2");
+            // The default key is the index. Another program's controllers
+            // can hold index 0, so the first life takes the lowest free
+            // index, and the second, after the first is gone, takes it
+            // again. Each life is held to its own index's token.
+            static bool OwnToken(IdentityRecord r) =>
+                r.Key.StartsWith("index:", StringComparison.Ordinal) && int.TryParse(r.Key.AsSpan(6), out int n)
+                && r.Parent.EndsWith($@"\HM_{n:D4}", StringComparison.OrdinalIgnoreCase);
             Check("default key: index identity is stable across two lives",
-                  a != null && b != null && IdentityRecord.Differences(a, b).Length == 0
-                  && a.Parent.EndsWith(@"\HM_0000", StringComparison.OrdinalIgnoreCase),
-                  a?.Parent ?? "(none)");
+                  a != null && b != null && OwnToken(a) && a.Key == b.Key
+                  && IdentityRecord.Differences(a, b).Length == 0,
+                  $"{a?.Key} {a?.Parent ?? "(none)"}, {b?.Key} {b?.Parent ?? "(none)"}");
         }
 
         Console.WriteLine();
@@ -431,8 +438,9 @@ internal static class Program
         rec.Container = ContainerIdOf(rec.Parent);
         rec.Children = Descendants(rec.Parent).Where(d => d.StartsWith(@"HID\", StringComparison.OrdinalIgnoreCase)).ToArray();
 
-        // The HID interface takes a moment after the devnode.
-        for (int i = 0; i < 50; i++)
+        // The HID interface takes a moment after the devnode. 30 s is the
+        // hang bound: the loop ends as soon as it is published.
+        for (int i = 0; i < 300; i++)
         {
             rec.Interfaces = rec.Children.SelectMany(ch => InterfaceList(HidGuid, ch)).ToArray();
             if (rec.Interfaces.Length > 0) break;
@@ -494,7 +502,7 @@ internal static class Program
             }
             var counts = (0, 0);
             var seen = Stopwatch.StartNew();
-            while (seen.ElapsedMilliseconds < 10000) { Thread.Sleep(50); counts = WgiCounts(vid, pid); if (counts.Item1 > wgiBefore.Gamepads) break; }
+            while (seen.ElapsedMilliseconds < 30000) { Thread.Sleep(50); counts = WgiCounts(vid, pid); if (counts.Item1 > wgiBefore.Gamepads) break; }
             // Then a hold for a second registration. For the XUSB family,
             // whose doubling S57 measured (WGI listed the second
             // RawGameController 50 to 65 ms after the first, 30 of 30
@@ -512,8 +520,11 @@ internal static class Program
             Check($"{tag}: exactly one WGI Gamepad more than the bench had",
                   counts.Item1 == wgiBefore.Gamepads + 1 && counts.Item2 == wgiBefore.Raw + 1,
                   $"gamepads {wgiBefore.Gamepads}->{counts.Item1} raw {wgiBefore.Raw}->{counts.Item2}");
-            Check($"{tag}: exactly one XInput slot more than the bench had", XInputSlots().Count == slotsBefore + 1,
-                  $"{slotsBefore}->{XInputSlots().Count}");
+            // Only the slots that follow this controller's stick count: a
+            // real pad or another program's in any other slot does not.
+            int own = OwnXInputSlots(c);
+            Check($"{tag}: exactly one XInput slot follows this controller", own == 1,
+                  $"{own} slot(s), {slotsBefore}->{XInputSlots().Count} on the machine");
         }
         else
         {
@@ -578,7 +589,8 @@ internal static class Program
     static int FindXInputSlot(HMController c)
     {
         var state = new HMGamepadState { Axes = new Dictionary<HMAxis, float> { [HMAxis.X] = 1.0f, [HMAxis.Y] = 0.5f } };
-        for (int i = 0; i < 100; i++)
+        // Up to about 10 s, the hang bound: the loop ends at the slot.
+        for (int i = 0; i < 500; i++)
         {
             c.SubmitState(state);
             Thread.Sleep(20);
@@ -586,6 +598,29 @@ internal static class Program
                 if (XInputGetState(s, out var st) == 0 && st.Gamepad.sThumbLX > 30000) return (int)s;
         }
         return -1;
+    }
+
+    /// <summary>The XInput slots that follow this controller's stick full
+    /// right and then full left, ten times each.</summary>
+    static int OwnXInputSlots(HMController c)
+    {
+        var right = new HMGamepadState { Axes = new Dictionary<HMAxis, float> { [HMAxis.X] = 1.0f, [HMAxis.Y] = 0.5f } };
+        var left = new HMGamepadState { Axes = new Dictionary<HMAxis, float> { [HMAxis.X] = 0.0f, [HMAxis.Y] = 0.5f } };
+        var seenRight = new HashSet<uint>();
+        var seenLeft = new HashSet<uint>();
+        for (int i = 0; i < 10; i++)
+        {
+            c.SubmitState(right);
+            Thread.Sleep(20);
+            for (uint s = 0; s < 4; s++)
+                if (XInputGetState(s, out var st) == 0 && st.Gamepad.sThumbLX > 30000) seenRight.Add(s);
+            c.SubmitState(left);
+            Thread.Sleep(20);
+            for (uint s = 0; s < 4; s++)
+                if (XInputGetState(s, out var st) == 0 && st.Gamepad.sThumbLX < -30000) seenLeft.Add(s);
+        }
+        seenRight.IntersectWith(seenLeft);
+        return seenRight.Count;
     }
 
     static bool WaitFor(Func<bool> cond, int ms)
