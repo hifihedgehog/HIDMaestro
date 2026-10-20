@@ -944,7 +944,9 @@ internal sealed class Case4UsbipFeatures : IOracleCase
         {
             if (cuKey != IntPtr.Zero) RegCloseKey(cuKey);
             if (lmKey != IntPtr.Zero) RegCloseKey(lmKey);
-            Directory.Delete(root, recursive: true);
+            // A hive can stay locked a moment after its key closes, which
+            // DeleteDirectory waits out, as case 5 does for its hive.
+            Case5Driver.DeleteDirectory(root);
         }
     }
 

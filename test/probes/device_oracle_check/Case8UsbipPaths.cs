@@ -864,12 +864,15 @@ internal sealed class Case8UsbipPaths : IOracleCase
                 Marshal.Copy(_view + SharedMemoryIO.EXTENDED_DATA_OFFSET, body, 0, body.Length);
                 Wait(() => (uint)_lastSeq.GetValue(_dev)! == seq, "read the frame");
                 // The pump sets the body right after its read. One that does
-                // not within a second is recorded with the body it holds,
-                // and the rig stops waiting for bodies from then on.
+                // not within 5 s, the bound of the read above, is recorded
+                // with the body it holds, and the rig stops waiting for
+                // bodies from then on. The body is read again at the
+                // deadline, so time this thread spent descheduled is not
+                // taken for a body never set.
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 while (!_bodyStuck && !BodyIs(body))
                 {
-                    if (sw.ElapsedMilliseconds > 1000) _bodyStuck = true;
+                    if (sw.ElapsedMilliseconds > 5000) _bodyStuck = !BodyIs(body);
                     Thread.Yield();
                 }
                 if (_bodyStuck)
