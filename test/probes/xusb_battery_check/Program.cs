@@ -85,11 +85,16 @@ internal static class Program
 
                 // The companion's XUSB interface, isolated from anything on the
                 // bench by taking the one that was not there before the create.
+                // It arrives when the companion's driver host starts the device,
+                // which other work on the machine slows, so the wait is a 30 s
+                // hang bound on the clock.
                 string? iface = null;
-                for (int i = 0; i < 100 && iface == null; i++)
+                var arrival = System.Diagnostics.Stopwatch.StartNew();
+                while (true)
                 {
                     iface = XusbInterfaces().FirstOrDefault(p => !xusbBefore.Contains(p, StringComparer.OrdinalIgnoreCase));
-                    if (iface == null) Thread.Sleep(100);
+                    if (iface != null || arrival.ElapsedMilliseconds > 30_000) break;
+                    Thread.Sleep(100);
                 }
                 Check("the companion published an XUSB interface", iface != null);
                 if (iface == null) continue;
@@ -272,11 +277,14 @@ internal static class Program
 
     /// <summary>The slot carrying our deflected stick. Submitting a value no
     /// resting pad reports keeps a physical controller on the bench from
-    /// being read as ours.</summary>
+    /// being read as ours. XInput takes the pad once it sees the interface
+    /// arrive, which other work on the machine delays, so the wait is a 30 s
+    /// hang bound on the clock, not 150 tries of 20 ms.</summary>
     static int FindSlot(HMController c, List<uint> before)
     {
         var state = new HMGamepadState { Axes = new Dictionary<HMAxis, float> { [HMAxis.X] = 1.0f, [HMAxis.Y] = 0.5f } };
-        for (int i = 0; i < 150; i++)
+        var wait = System.Diagnostics.Stopwatch.StartNew();
+        while (wait.ElapsedMilliseconds < 30_000)
         {
             c.SubmitState(state);
             Thread.Sleep(20);
