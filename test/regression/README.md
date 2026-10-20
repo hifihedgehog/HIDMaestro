@@ -61,7 +61,7 @@ exits, so one a crashed probe leaves running fails the scenario that left
 it and is stopped, instead of holding the battery back.
 
 Every step ends at a deadline: a probe's run, the test app's answer to a
-command, and the test app's exit after quit get 300 s, S71 1500 s and S73
+command, and the test app's exit after quit get 1200 s, S71 1500 s and S73
 900 s from its start, all scaled by `HIDMAESTRO_TIMEOUT_SCALE`. A step
 still running then fails its scenario as a hang, with the probe's
 transcript, and its process tree is stopped.

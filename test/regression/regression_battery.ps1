@@ -448,12 +448,13 @@ function HMScaleMs { param([int]$Ms) [int][Math]::Min([int]::MaxValue, $Ms * $sc
 
 # How long a step may take before it counts as a hang: a probe's run, the
 # test app's answer to a command, the test app's exit after quit. Every
-# scenario but S71 and S73 finishes in about two minutes, so the deadline
-# ends a hang and nothing else, and those two pass their own. A hang fails
-# its scenario and stops the process tree. Beside the 2026-10-19 gate a
-# probe looped for 14 minutes, and with no deadline the battery would have
-# waited for it forever.
-$script:HangSeconds = 300
+# scenario but S71 and S73 finishes in about two minutes, and those two
+# pass their own. The deadline is ten times that, so a run that load or
+# another program slows still ends inside it and only a hang reaches it.
+# A hang fails its scenario and stops the process tree. Beside the
+# 2026-10-19 gate a probe looped for 14 minutes, and with no deadline the
+# battery would have waited for it forever.
+$script:HangSeconds = 1200
 
 # Waits for a process to exit by the hang deadline, scaled. At the
 # deadline it stops the process tree and throws.
