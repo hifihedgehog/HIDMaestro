@@ -18,6 +18,13 @@
 //   N. nostream A, with the composite's profile loaded from a file without
 //               its idle stream ("stream"), the one change in what the
 //               device sends between v1.12.0 and 2.0.0. Runs only when named.
+//   K. killed-loader
+//               One program's first composite while the installer's loader
+//               is ended mid-install: a watcher ends the loader with exit
+//               code 255 once its setup child runs. The setup finishes the
+//               install alone, and the create still succeeds, reading the
+//               machine again after the failing exit code. The SDK's
+//               diagnostic log must name both steps. Runs only when named.
 //
 // --offline checks, on this machine with no sandbox, no device and no
 // elevation, the parts of A and N that can be: N's profile differs from the
@@ -80,8 +87,10 @@ internal static class Program
         }
         if (args.Length >= 3 && args[0] == "--in-sandbox")
         {
-            if (args.Length < 4 || args[3] != "diag") return InSandbox(args[1], args[2]);
-            DiagLog.Start(Path.Combine(args[2], "main-diag.log"));
+            bool diag = args.Length >= 4 && args[3] == "diag";
+            // K reads the SDK's diagnostic lines, so it always runs with them.
+            if (diag || args[1] == "killed-loader") DiagLog.Start(Path.Combine(args[2], "main-diag.log"));
+            if (!diag) return InSandbox(args[1], args[2]);
             using (DiagLog.SampleInstallers(Path.Combine(args[2], "processes.log")))
             {
                 int code = InSandbox(args[1], args[2]);
@@ -135,6 +144,7 @@ internal static class Program
             ('B', "record", "an uninstall entry without the driver package"),
             ('C', "together", "two programs' first composites at the same moment"),
             ('N', "nostream", "a clean machine, the composite without its idle stream"),
+            ('K', "killed-loader", "one program's first composite while the installer's loader is ended mid-install"),
         };
         if (only.Contains('A') && only.Contains('B') && only.Contains('C'))
         {
@@ -279,6 +289,14 @@ internal static class Program
             if (scenario == "together")
             {
                 Together(results);
+                s_lines.Add("DONE");
+                File.WriteAllLines(Path.Combine(results, "results.txt"), s_lines);
+                return s_lines.Any(l => l.StartsWith("FAIL", StringComparison.Ordinal)) ? 1 : 0;
+            }
+
+            if (scenario == "killed-loader")
+            {
+                KilledLoader(results);
                 s_lines.Add("DONE");
                 File.WriteAllLines(Path.Combine(results, "results.txt"), s_lines);
                 return s_lines.Any(l => l.StartsWith("FAIL", StringComparison.Ordinal)) ? 1 : 0;
@@ -660,6 +678,129 @@ internal static class Program
             try { File.WriteAllText(answer, $"failed {ex.GetType().Name}: {ex.Message}"); } catch { }
             return 1;
         }
+    }
+
+    // ── The loader ended mid-install ───────────────────────────────────
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool TerminateProcess(Microsoft.Win32.SafeHandles.SafeProcessHandle process, uint exitCode);
+
+    /// <summary>The exit code the watcher ends the loader with: the code
+    /// the failed S73 run reported.</summary>
+    const uint KilledLoaderExitCode = 255;
+
+    /// <summary>One program's first composite. A watcher polls the process
+    /// list every 100 ms for the setup Inno Setup's loader runs
+    /// (USBip-*.tmp), and once it runs, ends the loader (the other USBip-*
+    /// process) with exit code 255, then follows the setup to its exit. The
+    /// SDK's diagnostic lines are read from the log the probe's tap
+    /// writes.</summary>
+    static void KilledLoader(string results)
+    {
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        ctx.InstallDriver();
+
+        var run = Stopwatch.StartNew();
+        int loaderPid = -1, setupPid = -1, loaderExit = int.MinValue, setupExit = int.MinValue;
+        long killedAt = -1, setupEndedAt = -1;
+        bool setupRanAfterKill = false;
+        string watchError = "";
+        var stop = new ManualResetEventSlim();
+        var watcher = new Thread(() =>
+        {
+            try
+            {
+                Process? setup = null, loader = null;
+                while (setup == null && !stop.Wait(100))
+                {
+                    foreach (var p in Process.GetProcesses())
+                    {
+                        string n;
+                        try { n = p.ProcessName; } catch { p.Dispose(); continue; }
+                        if (!n.StartsWith("USBip-", StringComparison.OrdinalIgnoreCase)) { p.Dispose(); continue; }
+                        if (n.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)) setup ??= p;
+                        else loader ??= p;
+                    }
+                    if (setup == null) { loader?.Dispose(); loader = null; }
+                }
+                if (setup == null) return;
+                if (loader == null) { watchError = $"the setup child (pid {setup.Id}) ran with no loader beside it"; return; }
+                loaderPid = loader.Id;
+                setupPid = setup.Id;
+                // A handle held from here keeps the setup's exit code
+                // readable after it ends.
+                _ = setup.SafeHandle;
+                if (!TerminateProcess(loader.SafeHandle, KilledLoaderExitCode))
+                {
+                    watchError = $"TerminateProcess failed with Win32 error {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}";
+                    return;
+                }
+                killedAt = run.ElapsedMilliseconds;
+                loader.WaitForExit(10_000);
+                loaderExit = loader.ExitCode;
+                setupRanAfterKill = !setup.HasExited;
+                if (setup.WaitForExit(600_000))
+                {
+                    setupEndedAt = run.ElapsedMilliseconds;
+                    setupExit = setup.ExitCode;
+                }
+            }
+            catch (Exception ex) { watchError = $"{ex.GetType().Name}: {ex.Message}"; }
+        }) { IsBackground = true, Name = "killed-loader watcher" };
+        watcher.Start();
+
+        HMController? c = null;
+        Exception? error = null;
+        DiagLog.Note("probe: killed-loader create starts");
+        try { c = ctx.CreateController(ctx.GetProfile("dualsense-composite")!, "sandbox-composite"); }
+        catch (Exception ex) { error = ex; }
+        long created = run.ElapsedMilliseconds;
+        DiagLog.Note($"probe: killed-loader create returned after {created} ms{(error == null ? "" : ": " + error)}");
+        Note(FormattableString.Invariant($"killed-loader: the create took {created / 1000.0:F1} s"));
+        // The setup has ended by the time the create returns, unless the
+        // create gave up first.
+        if (!watcher.Join(15_000)) { stop.Set(); watcher.Join(5_000); }
+        stop.Set();
+
+        Record("killed-loader: the watcher ended the loader while its setup child ran (positive control)",
+               killedAt >= 0 && setupRanAfterKill,
+               killedAt < 0
+                   ? (watchError.Length > 0 ? watchError : "the watcher never saw the setup child, so no fault was injected")
+                   : FormattableString.Invariant($"loader pid {loaderPid} ended with exit code {loaderExit} at {killedAt} ms into the create, setup pid {setupPid} {(setupRanAfterKill ? "still running" : "already gone")}") +
+                     (setupEndedAt >= 0 ? FormattableString.Invariant($", the setup exited {setupExit} at {setupEndedAt} ms") : ", the setup's exit not seen") +
+                     (watchError.Length > 0 ? $", {watchError}" : ""));
+        Record("killed-loader: the composite creates", c != null, error == null ? "" : $"{error.GetType().Name}: {error.Message}");
+
+        var paths = new List<string>();
+        var sw = Stopwatch.StartNew();
+        while (c != null && paths.Count == 0 && sw.ElapsedMilliseconds < 30_000)
+        {
+            paths = Hid.Paths(0x054C, 0x0CE6);
+            if (paths.Count == 0) Thread.Sleep(250);
+        }
+        Record("killed-loader: the composite's HID interface appears", paths.Count > 0, $"{paths.Count} interface(s)");
+
+        string diag = "";
+        try
+        {
+            using var fs = new FileStream(Path.Combine(results, "main-diag.log"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(fs);
+            diag = reader.ReadToEnd();
+        }
+        catch (Exception ex) { diag = ""; Note($"killed-loader: the diag log could not be read: {ex.GetType().Name}: {ex.Message}"); }
+        string exited = $"the installer exited {loaderExit}; reading the machine again";
+        string answers = $"the host controller answers after the installer exited {loaderExit}";
+        bool sawExit = loaderExit != int.MinValue && diag.Contains(exited, StringComparison.Ordinal);
+        bool sawAnswer = loaderExit != int.MinValue && diag.Contains(answers, StringComparison.Ordinal);
+        Record("killed-loader: the diag log names the loader's exit code, then the host controller answering after it",
+               sawExit && sawAnswer,
+               $"\"{exited}\" {(sawExit ? "found" : "missing")}, \"{answers}\" {(sawAnswer ? "found" : "missing")}");
+        foreach (string line in diag.Split('\n'))
+            if (line.Contains("UsbipDriverInstaller:", StringComparison.Ordinal))
+                Note($"killed-loader: diag {line.Trim()}");
+
+        c?.Dispose();
     }
 
     /// <summary>Host controller devnodes usbip-win2's devnode.exe made: the
