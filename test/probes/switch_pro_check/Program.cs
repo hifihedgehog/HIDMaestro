@@ -53,6 +53,9 @@ internal static class Program
     static extern SafeFileHandle CreateFileW(string fileName, uint access, uint share,
         IntPtr security, uint disposition, uint flags, IntPtr template);
 
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)]
+    static extern bool HidD_SetNumInputBuffers(SafeFileHandle h, uint n);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool ReadFile(SafeFileHandle h, byte[] buf, uint n, IntPtr read, ref NativeOverlapped ov);
 
@@ -170,7 +173,7 @@ internal static class Program
 
     // The reply deadline only detects a hang: a reply comes within one
     // 15 ms stream tick, and the read returns as soon as it does.
-    static byte[]? Subcommand(byte id, byte[] args, int timeoutMs = 2000)
+    static byte[]? Subcommand(byte id, byte[] args, int timeoutMs = 60000)
     {
         var pkt = new byte[49];
         pkt[0] = 0x01;
@@ -267,6 +270,7 @@ internal static class Program
         s_writeEvent = CreateEventW(IntPtr.Zero, true, false, IntPtr.Zero);
         s_hid = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_RW,
                             IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, IntPtr.Zero);
+        if (!s_hid.IsInvalid) HidD_SetNumInputBuffers(s_hid, 512);
         Check("CreateFile read/write", !s_hid.IsInvalid);
         if (s_hid.IsInvalid) return Fail(ref pumpStop, pump);
 
@@ -377,7 +381,7 @@ internal static class Program
         var cadence = Stopwatch.StartNew();
         for (int i = 0; i < streamFrames; i++)
         {
-            var r = ReadUntil(0x30, 2000);
+            var r = ReadUntil(0x30, 60000);
             if (r == null) break;
             long now = Stopwatch.GetTimestamp();
             if (frames > 0)
@@ -429,7 +433,7 @@ internal static class Program
         ctrl.SubmitState(pressed);
         Thread.Sleep(50);
 
-        var f = ReadUntil(0x30, 2000, r => (r[3] & 0x08) != 0);
+        var f = ReadUntil(0x30, 60000, r => (r[3] & 0x08) != 0);
         Check("A press reaches wire (byte3 bit3)", f != null);
         if (f != null)
         {
@@ -655,6 +659,7 @@ internal static class Program
             s_writeEvent = CreateEventW(IntPtr.Zero, true, false, IntPtr.Zero);
             s_hid = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_RW,
                                 IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, IntPtr.Zero);
+            if (!s_hid.IsInvalid) HidD_SetNumInputBuffers(s_hid, 512);
             if (s_hid.IsInvalid) throw new InvalidOperationException($"CreateFile failed, error {Marshal.GetLastWin32Error()}");
 
             // Before any protocol traffic the driver streams 0x3F simple

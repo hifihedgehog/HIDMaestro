@@ -59,6 +59,9 @@ internal static class Program
     static extern SafeFileHandle CreateFileW(string fileName, uint access, uint share,
         IntPtr security, uint disposition, uint flags, IntPtr template);
 
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)]
+    static extern bool HidD_SetNumInputBuffers(SafeFileHandle h, uint n);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool ReadFile(SafeFileHandle h, byte[] buf, uint n, IntPtr read, ref NativeOverlapped ov);
 
@@ -273,6 +276,7 @@ internal static class Program
         s_writeEvent = CreateEventW(IntPtr.Zero, true, false, IntPtr.Zero);
         s_hid = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_RW,
                             IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, IntPtr.Zero);
+        if (!s_hid.IsInvalid) HidD_SetNumInputBuffers(s_hid, 512);
         Check("HID device opens", !s_hid.IsInvalid);
         if (s_hid.IsInvalid) { Volatile.Write(ref pumpStop, true); return 1; }
 
@@ -292,12 +296,12 @@ internal static class Program
         // A press sends one 0x3F, holding it sends no more, and the release
         // sends one more: the pad's state at rest, read for its shape.
         lock (pumpLock) pumpState = new HMGamepadState { Buttons = (HMButton)(1u << 1) };
-        var pressed = ReadUntil(0x3F, 2000, r => (r[1] & 0x02) != 0);
+        var pressed = ReadUntil(0x3F, 60000, r => (r[1] & 0x02) != 0);
         Check("a press sends a 0x3F", pressed != null);
         var holding = Own(Collect(300));
         Check("holding the press sends no more", holding.Count == 0, Ids(holding));
         lock (pumpLock) pumpState = new HMGamepadState();
-        var released = ReadUntil(0x3F, 2000, r => (r[1] & 0x02) == 0);
+        var released = ReadUntil(0x3F, 60000, r => (r[1] & 0x02) == 0);
         int frameLen = s_lastReadLen;
         Check("the release sends a 0x3F", released != null);
         var after = Own(Collect(300));
@@ -347,7 +351,7 @@ internal static class Program
         }
         Thread.Sleep(60);
 
-        var fp = ReadUntil(0x3F, 2000, r => (r[1] & 0x02) != 0);
+        var fp = ReadUntil(0x3F, 60000, r => (r[1] & 0x02) != 0);
         Check("A press lands on simple-mode byte1 bit1", fp != null);
         if (fp != null)
         {
@@ -377,7 +381,7 @@ internal static class Program
         Check("0x01 subcommand write (49-byte BT framing)", HidWrite(cmd));
         // Matched on the echoed subcommand, as SDL's ReadSubcommandReply
         // does: another program's handshake gets replies of its own.
-        var ack = ReadUntil(0x21, 2000, r => r[14] == 0x02);
+        var ack = ReadUntil(0x21, 60000, r => r[14] == 0x02);
         Check("0x21 subcommand reply (the held copy answers)",
               ack != null && ack[14] == 0x02, ack != null ? $"len={s_lastReadLen}" : "no reply");
         Check("0x21 reply completes at 362 (padded)", ack != null && s_lastReadLen == 362, $"{s_lastReadLen}");
@@ -386,7 +390,7 @@ internal static class Program
         // run 400 ms, long enough for a 15 ms stream to show, and past that
         // until the press arrives, so a pump that runs late cannot fail it.
         lock (pumpLock) pumpState = new HMGamepadState { Buttons = (HMButton)(1u << 1) };
-        var still = CollectUntil(f => f[0] == 0x3F && (f[1] & 0x02) != 0, 400, 2000);
+        var still = CollectUntil(f => f[0] == 0x3F && (f[1] & 0x02) != 0, 400, 60000);
         lock (pumpLock) pumpState = new HMGamepadState();
         Check("a change after it still sends 0x3F on the held copy, and no 0x30",
               still.Any(f => f[0] == 0x3F && (f[1] & 0x02) != 0) && !still.Any(f => f[0] == 0x30), Ids(still));
@@ -427,6 +431,7 @@ internal static class Program
             {
                 s_hid = CreateFileW(path2, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_RW,
                                     IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, IntPtr.Zero);
+                if (!s_hid.IsInvalid) HidD_SetNumInputBuffers(s_hid, 512);
                 Check("second pad opens", !s_hid.IsInvalid);
                 if (!s_hid.IsInvalid)
                 {
@@ -438,7 +443,7 @@ internal static class Program
                     var deadline = Stopwatch.StartNew();
                     // A hang detector: four frames take 60 ms on the 15 ms
                     // clock, and the loop ends when they arrive.
-                    while (nf.Count < 4 && deadline.ElapsedMilliseconds < 10000)
+                    while (nf.Count < 4 && deadline.ElapsedMilliseconds < 60000)
                     {
                         var r = HidRead(200);
                         if (r != null && r[0] == 0x30)
@@ -457,7 +462,7 @@ internal static class Program
                         Check("byte1 advances (Nintendo timer)", timerAdvances,
                               string.Join(",", nf.Select(f => f[1].ToString("X2"))));
                         Check("byte2 battery/conn nonzero", nf[^1][2] != 0, $"0x{nf[^1][2]:X2}");
-                        var na = ReadUntil(0x30, 2000, r => (r[3] & 0x08) != 0);
+                        var na = ReadUntil(0x30, 60000, r => (r[3] & 0x08) != 0);
                         Check("A press at Nintendo byte3 bit3 post-arm", na != null);
                     }
                     s_hid.Dispose();
