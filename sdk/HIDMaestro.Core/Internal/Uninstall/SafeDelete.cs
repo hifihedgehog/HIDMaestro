@@ -26,14 +26,15 @@ namespace HIDMaestro.Internal.Uninstall;
 /// <para>An entry another program holds open is handed to Windows to delete
 /// at its next start (MoveFileEx, MOVEFILE_DELAY_UNTIL_REBOOT) only when the
 /// caller allows it, which a full removal does for %ProgramFiles%\HIDMaestro
-/// alone, and only when the folder that holds the entry and every folder from
-/// the target down to it, each checked through its own held handle, carry the
-/// staging DACL that lets only Administrators and SYSTEM change them: Windows
+/// alone, and only when every folder below the anchor, down to the one that
+/// holds the entry, each checked through its own held handle, carries the
+/// staging DACL that lets only Administrators and SYSTEM change it: Windows
 /// resolves that path again by name at the next start, as SYSTEM. A folder
-/// that cannot be opened for delete is emptied through a handle opened
-/// without DELETE before it is queued, since Windows deletes only an empty
-/// folder then. Anywhere else such an entry stays, and the removal reports it
-/// Failed.</para>
+/// that cannot be opened for delete, the target included, is emptied through
+/// a handle opened without DELETE before it is queued, since Windows deletes
+/// only an empty folder then. A folder that keeps a child that could not go
+/// is not queued. Anywhere else such an entry stays, and the removal reports
+/// it Failed.</para>
 ///
 /// <para>.NET's recursive Directory.Delete also removes a name-surrogate
 /// link without recursing into it (FileSystem.Windows.cs,
@@ -49,6 +50,17 @@ internal static partial class SafeDelete
     {
         private readonly List<SafeFileHandle> _handles = new();
         internal SafeFileHandle Last => _handles[^1];
+        /// <summary>How many folders below the anchor the chain holds.</summary>
+        internal int Depth => _handles.Count - 1;
+        /// <summary>Whether every folder below the anchor carries the staging
+        /// DACL, each read through its own handle. The chain must have been
+        /// opened with READ_CONTROL. True for a chain of the anchor alone.</summary>
+        internal bool BelowAnchorProtected()
+        {
+            for (int i = 1; i < _handles.Count; i++)
+                if (!ProtectedStaging.IsProtectedFolder(_handles[i])) return false;
+            return true;
+        }
         internal string Path { get; }
         internal Chain(string path) => Path = path;
         internal void Add(SafeFileHandle h) => _handles.Add(h);
@@ -64,8 +76,10 @@ internal static partial class SafeDelete
     /// confirm the deepest one's final path. Null with
     /// <paramref name="refusal"/> null when a folder on the way does not
     /// exist, and null with the reason when one is a link, cannot be opened,
-    /// or resolves elsewhere.</summary>
-    internal static Chain? OpenChain(string anchor, string relative, out string? refusal)
+    /// or resolves elsewhere. With <paramref name="readControl"/> each folder
+    /// below the anchor is also opened for its security descriptor
+    /// (<see cref="Chain.BelowAnchorProtected"/>).</summary>
+    internal static Chain? OpenChain(string anchor, string relative, out string? refusal, bool readControl = false)
     {
         refusal = null;
         string full = System.IO.Path.GetFullPath(anchor).TrimEnd('\\');
@@ -90,7 +104,7 @@ internal static partial class SafeDelete
             foreach (string part in relative.Split('\\', StringSplitOptions.RemoveEmptyEntries))
             {
                 at = System.IO.Path.Combine(at, part);
-                var h = OpenRelative(chain.Last, part, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                var h = OpenRelative(chain.Last, part, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE | (readControl ? READ_CONTROL : 0),
                     FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_DIRECTORY_FILE, out int err);
                 if (h == null)
                 {
@@ -159,7 +173,7 @@ internal static partial class SafeDelete
     /// path that does not exist is Removed. Names are used exactly as given,
     /// a trailing dot or space included. With
     /// <paramref name="deferInProtected"/>, an entry in use may wait for the
-    /// next start when every folder from the target down to it, each checked
+    /// next start when every folder below the anchor down to it, each checked
     /// through its own handle, carries the staging DACL
     /// (ProtectedStaging.IsProtectedFolder).</summary>
     internal static (UninstallOutcome Outcome, string? Reason) Tree(string anchor, string relative, bool deferInProtected = false)
@@ -179,9 +193,17 @@ internal static partial class SafeDelete
         int cut = relative.LastIndexOf('\\');
         string parentRel = cut < 0 ? "" : relative[..cut];
         string leaf = cut < 0 ? relative : relative[(cut + 1)..];
-        using var parent = OpenChain(anchor, parentRel, out string? refusal);
+        using var parent = OpenChain(anchor, parentRel, out string? refusal, readControl: deferInProtected);
         if (parent == null)
             return refusal == null ? (UninstallOutcome.Removed, null) : (UninstallOutcome.Failed, refusal);
+
+        // Windows resolves a deferred delete by name at the next start, from
+        // the drive down. Every folder between the anchor and the target
+        // must then be one only administrators can change.
+        bool chainProtected = deferInProtected && parent.BelowAnchorProtected();
+        // A file or link waits for the next start only inside such a folder
+        // below the anchor.
+        bool leafMayDefer = chainProtected && parent.Depth > 0;
 
         var state = new State();
         var target = OpenRelative(parent.Last, leaf, DELETE | READ_CONTROL | FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
@@ -189,7 +211,14 @@ internal static partial class SafeDelete
         if (target == null)
         {
             if (err is ERROR_FILE_NOT_FOUND or ERROR_PATH_NOT_FOUND) return (UninstallOutcome.Removed, null);
-            return (UninstallOutcome.Failed, $"{full} could not be opened (Win32 error {err})");
+            if (err is not (ERROR_SHARING_VIOLATION or ERROR_ACCESS_DENIED))
+                return (UninstallOutcome.Failed, $"{full} could not be opened (Win32 error {err})");
+            // Held open by another program, or refusing DELETE: a folder is
+            // emptied and queued as one below it would be, and a file or
+            // link is queued where that is allowed.
+            if (IsRealFolder(parent.Last, leaf)) EmptyHeldElsewhere(parent.Last, leaf, full, state, chainProtected, err);
+            else Defer(full, state, leafMayDefer, $"in use (Win32 error {err})");
+            return Outcome(state);
         }
         using (target)
         {
@@ -197,20 +226,36 @@ internal static partial class SafeDelete
             if ((attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0 || (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0)
             {
                 // A file, or a link planted under HIDMaestro's name: it goes
-                // as itself. Neither waits for the next start, since no
-                // folder of HIDMaestro's below the anchor holds it.
-                Dispose(target, full, state, mayDefer: false);
+                // as itself.
+                Dispose(target, full, state, leafMayDefer);
             }
             else
             {
                 string? final = FinalPath(target);
                 if (final == null || !string.Equals(final.TrimEnd('\\'), full.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
                     return (UninstallOutcome.Failed, $"{full} resolves to {final ?? "a path that could not be read"}");
-                bool mayDefer = deferInProtected && ProtectedStaging.IsProtectedFolder(target);
+                bool mayDefer = chainProtected && ProtectedStaging.IsProtectedFolder(target);
                 Empty(target, full, state, mayDefer);
-                Dispose(target, full, state, mayDefer);
+                if (state.Errors == 0) Dispose(target, full, state, mayDefer);
             }
         }
+        return Outcome(state);
+    }
+
+    /// <summary>Whether <paramref name="name"/> in the held folder is a
+    /// folder and not a link, read through a handle that asks for no access
+    /// another program's open can refuse.</summary>
+    private static bool IsRealFolder(SafeFileHandle dir, string name)
+    {
+        using var h = OpenRelative(dir, name, FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, out _);
+        if (h == null) return false;
+        uint attrs = Attributes(h);
+        return (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 && (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+    }
+
+    private static (UninstallOutcome Outcome, string? Reason) Outcome(State state)
+    {
         if (state.FirstError != null) return (UninstallOutcome.Failed, state.FirstError);
         if (state.Pending > 0)
             return (UninstallOutcome.RemovedAtRestart,
@@ -258,7 +303,7 @@ internal static partial class SafeDelete
     /// folders.</summary>
     internal static (UninstallOutcome Outcome, string? Reason) TreeUnder(string full, IEnumerable<string> profiles)
     {
-        string path = (System.IO.Path.IsPathFullyQualified(full) ? full : System.IO.Path.GetFullPath(full)).TrimEnd('\\');
+        string path = Normalize(System.IO.Path.IsPathFullyQualified(full) ? full : System.IO.Path.GetFullPath(full));
         string ownProgramFiles = System.IO.Path.Combine(
             System.IO.Path.GetFullPath(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles)).TrimEnd('\\'), "HIDMaestro");
         bool inOwnProgramFiles = path.StartsWith(ownProgramFiles + "\\", StringComparison.OrdinalIgnoreCase);
@@ -273,6 +318,24 @@ internal static partial class SafeDelete
         }
         if (best == null) return (UninstallOutcome.Failed, $"{path} is not under a folder the removal starts from");
         return Tree(best, path[(best.Length + 1)..], deferInProtected: inOwnProgramFiles);
+    }
+
+    /// <summary>A fully qualified path with '/' read as '\', empty and "."
+    /// segments dropped and ".." taking the segment before it, and every
+    /// other name kept exactly, a trailing dot or space included, which
+    /// Path.GetFullPath would trim.</summary>
+    internal static string Normalize(string path)
+    {
+        path = path.Replace('/', '\\');
+        string prefix = path.StartsWith(@"\\", StringComparison.Ordinal) ? @"\\" : "";
+        var parts = new List<string>();
+        foreach (string part in path[prefix.Length..].Split('\\'))
+        {
+            if (part.Length == 0 || part == ".") continue;
+            if (part == "..") { if (parts.Count > 1) parts.RemoveAt(parts.Count - 1); continue; }
+            parts.Add(part);
+        }
+        return prefix + string.Join('\\', parts);
     }
 
     /// <summary>Whether <paramref name="relative"/> below
@@ -292,8 +355,13 @@ internal static partial class SafeDelete
     private sealed class State
     {
         public int Pending;
+        public int Errors;
         public string? FirstError;
-        public void Fail(string path, string what) => FirstError ??= $"{path}: {what}";
+        public void Fail(string path, string what)
+        {
+            Errors++;
+            FirstError ??= $"{path}: {what}";
+        }
     }
 
     /// <summary>Every entry of the held folder, each opened relative to it,
@@ -331,7 +399,11 @@ internal static partial class SafeDelete
                 // the open did not follow it, and it goes as a link.
                 bool realFolder = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 && (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
                 bool below = realFolder && mayDefer && ProtectedStaging.IsProtectedFolder(h);
+                int before = state.Errors;
                 if (realFolder) Empty(h, path, state, below);
+                // A folder that keeps a child that could not go stays: it
+                // is not queued behind it.
+                if (state.Errors != before) continue;
                 Dispose(h, path, state, realFolder ? below : mayDefer);
             }
         }
@@ -356,9 +428,11 @@ internal static partial class SafeDelete
             return;
         }
         bool below = mayDefer && ProtectedStaging.IsProtectedFolder(h);
-        string? before = state.FirstError;
+        // A child that could not go keeps the folder from being queued,
+        // whatever failed before it.
+        int before = state.Errors;
         Empty(h, path, state, below);
-        if (state.FirstError != before) return;
+        if (state.Errors != before) return;
         Defer(path, state, below, $"in use (Win32 error {openError})");
     }
 
