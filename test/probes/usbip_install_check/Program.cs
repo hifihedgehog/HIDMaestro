@@ -321,22 +321,27 @@ internal static partial class Program
         }
     }
 
-    /// <summary>R01's other release: usbip-win2 0.9.8.0's own host controller
-    /// package, which the build unpacked into build\downloads when an earlier
-    /// SDK pinned it, copied for the sandbox. Only its usbip2_ude files, never
-    /// the filter's. Nothing is copied when the build has none, and R01 says
-    /// so.</summary>
+    /// <summary>R01's other release: a usbip-win2 host controller package
+    /// other than the pinned one, from what the build unpacked into
+    /// build\downloads for this and earlier pins (0.9.8.0 first, then
+    /// 0.9.7.5), copied for the sandbox with a note of where it came from.
+    /// Only its usbip2_ude files, never the filter's. Nothing is copied when
+    /// the build has none, and R01 fails.</summary>
     static void CopyForeignPackage(string to)
     {
         string arch = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture == System.Runtime.InteropServices.Architecture.Arm64 ? "arm64" : "x64";
         for (string? d = AppContext.BaseDirectory; d != null; d = Path.GetDirectoryName(d))
         {
-            string from = Path.Combine(d, "build", "downloads", $"usbip-0.9.8.0-{arch}", "{tmp}");
-            if (!File.Exists(Path.Combine(from, "usbip2_ude.inf"))) continue;
-            Directory.CreateDirectory(to);
-            foreach (string f in new[] { "usbip2_ude.inf", "usbip2_ude.sys", "usbip2_ude.cat" })
-                File.Copy(Path.Combine(from, f), Path.Combine(to, f), true);
-            return;
+            foreach (string release in new[] { "0.9.8.0", "0.9.7.5" })
+            {
+                string from = Path.Combine(d, "build", "downloads", $"usbip-{release}-{arch}", "{tmp}");
+                if (!new[] { "usbip2_ude.inf", "usbip2_ude.sys", "usbip2_ude.cat" }.All(f => File.Exists(Path.Combine(from, f)))) continue;
+                Directory.CreateDirectory(to);
+                foreach (string f in new[] { "usbip2_ude.inf", "usbip2_ude.sys", "usbip2_ude.cat" })
+                    File.Copy(Path.Combine(from, f), Path.Combine(to, f), true);
+                File.WriteAllText(Path.Combine(to, "source.txt"), $"usbip-win2 {release} {arch}, from {from}");
+                return;
+            }
         }
     }
 
@@ -452,6 +457,9 @@ internal static partial class Program
                    && k.GetValue("PackageAdded") is int added && added == 1 && k.GetValue("Version") as string == "0.9.8.1"
                    && k.GetValue("InstalledUtc") is string when && DateTime.TryParse(when, out _),
                    k == null ? "no record" : string.Join(", ", k.GetValueNames().Select(n => $"{n}={k.GetValue(n)}")));
+            string wantVer = inf == null ? "" : InfDriverVerWholeOf(ReadInf(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "INF", inf)));
+            Record($"{p} the install record keeps that package's whole DriverVer, date and version",
+                   wantVer != "" && k?.GetValue("DriverVer") as string == wantVer, $"record {k?.GetValue("DriverVer") ?? "none"}, package {wantVer}");
         }
 
         // The filter: neither its package nor its service, so no root hub,
