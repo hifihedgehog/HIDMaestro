@@ -1898,6 +1898,47 @@ public static partial class DeviceManager
         return removed;
     }
 
+    /// <summary>Whether the devnode is in the device tree.</summary>
+    internal static bool IsPresent(string instanceId) => CM_Locate_DevNodeW(out _, instanceId, 0) == CR_SUCCESS;
+
+    /// <summary>Every devnode of any class, present or not, that the phantom
+    /// pass counts as HIDMaestro's (<see cref="IsHmInstance"/>), with whether
+    /// it is in the device tree. The same SetupDi walk as
+    /// <see cref="RemoveAccumulatedHmPhantoms"/>, reading only. A full
+    /// removal lists these before and after it acts.</summary>
+    internal static List<(string Id, bool Present)> ListHmInstances()
+    {
+        var list = new List<(string, bool)>();
+        Guid nullGuid = Guid.Empty;
+        IntPtr dis = SetupDiGetClassDevsByRef(ref nullGuid, IntPtr.Zero, IntPtr.Zero, DIGCF_ALLCLASSES);
+        if (dis == new IntPtr(-1)) return list;
+        try
+        {
+            int devInfoSize = IntPtr.Size == 8 ? 32 : 28;
+            byte[] devInfoBuf = new byte[devInfoSize];
+            var devInfoHandle = System.Runtime.InteropServices.GCHandle.Alloc(
+                devInfoBuf, System.Runtime.InteropServices.GCHandleType.Pinned);
+            try
+            {
+                char[] idBuf = new char[512];
+                for (uint index = 0; ; index++)
+                {
+                    BitConverter.GetBytes(devInfoSize).CopyTo(devInfoBuf, 0);
+                    if (!SetupDiEnumDeviceInfo(dis, index, devInfoHandle.AddrOfPinnedObject())) break;
+                    if (!SetupDiGetDeviceInstanceIdW(dis, devInfoHandle.AddrOfPinnedObject(),
+                            idBuf, (uint)idBuf.Length, out uint idLen))
+                        continue;
+                    string instanceId = new string(idBuf, 0, (int)idLen - 1);
+                    if (!IsHmInstance(instanceId)) continue;
+                    list.Add((instanceId, CM_Locate_DevNodeW(out _, instanceId, 0) == CR_SUCCESS));
+                }
+            }
+            finally { devInfoHandle.Free(); }
+        }
+        finally { SetupDiDestroyDeviceInfoList(dis); }
+        return list;
+    }
+
     /// <summary>Phantoms with no device behind them, each id with the call
     /// that stands for its SetupDiRemoveDevice. Coexistence probe
     /// `phantomgate` sets it through reflection to run the phantom cleanup's

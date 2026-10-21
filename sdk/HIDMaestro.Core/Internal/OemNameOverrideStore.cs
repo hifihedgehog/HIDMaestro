@@ -82,6 +82,8 @@ internal static class OemNameOverrideStore
     private const string JU_OriginalName    = "OriginalJoystickOemName_HKCU";
     private const string JU_OriginalExisted = "OriginalJoystickKeyExisted_HKCU";
     private const string V_ClaimedAt        = "ClaimedAtFileTime";
+    // The label the last Claim wrote to all three targets (2.0.1).
+    private const string V_WrittenLabel     = "WrittenLabel";
 
     // ────────────────────────────────────────────────────────────────
     //  Public entry points
@@ -106,6 +108,12 @@ internal static class OemNameOverrideStore
             }
             if (!recordExists)
                 CaptureAllOriginalsToPendingStore(vidPid);
+
+            // The label goes in the record before the targets, so a full
+            // removal restores a target only while it still holds what
+            // HIDMaestro wrote (RestoreForUninstall).
+            using (var pending = Registry.LocalMachine.CreateSubKey(PendingEntryPath(vidPid), writable: true)!)
+                pending.SetValue(V_WrittenLabel, label, RegistryValueKind.String);
 
             WriteAllTargets(vidPid, label);
         }
@@ -151,6 +159,94 @@ internal static class OemNameOverrideStore
                 restored++;
             }
             return restored;
+        }
+        finally { mutex.ReleaseMutex(); }
+    }
+
+    /// <summary>The identities with a pending override record, for a full
+    /// removal's list. Reads only.</summary>
+    internal static List<string> PendingIdentities()
+    {
+        var list = new List<string>();
+        try
+        {
+            using var root = Registry.LocalMachine.OpenSubKey(PendingRoot, writable: false);
+            if (root != null) list.AddRange(root.GetSubKeyNames());
+        }
+        catch (Exception e) when (e is System.Security.SecurityException or UnauthorizedAccessException or System.IO.IOException) { }
+        return list;
+    }
+
+    /// <summary>The registry path of an identity's pending record, under
+    /// HKLM.</summary>
+    internal static string PendingRecordPath(string vidPid) => PendingEntryPath(vidPid);
+
+    /// <summary>A full removal's restore of one identity's override. Each of
+    /// the three targets gets its captured original back only while it
+    /// still holds the label HIDMaestro wrote: the record's WrittenLabel, or
+    /// for a record older than 2.0.1, which did not keep it, the DirectInput
+    /// value, which Claim writes first. A target someone changed since is
+    /// left as it is and named in the returned list. The record goes either
+    /// way. The HKCU target is the calling account's, the hive Claim wrote.
+    /// The caller has established that no other HIDMaestro program runs.
+    /// Needs elevation.</summary>
+    internal static List<string> RestoreForUninstall(string vidPid)
+    {
+        var left = new List<string>();
+        using var mutex = AcquireMutex();
+        try
+        {
+            string? written, diOrig, jmOrig, juOrig;
+            bool? diExisted, jmExisted, juExisted;
+            using (var pending = Registry.LocalMachine.OpenSubKey(PendingEntryPath(vidPid), writable: false))
+            {
+                if (pending is null) return left;
+                written   = pending.GetValue(V_WrittenLabel) as string;
+                diOrig    = pending.GetValue(DI_OriginalName) as string;
+                diExisted = ReadExistedFlag(pending, DI_OriginalExisted);
+                jmOrig    = pending.GetValue(JM_OriginalName) as string;
+                jmExisted = ReadExistedFlag(pending, JM_OriginalExisted);
+                juOrig    = pending.GetValue(JU_OriginalName) as string;
+                juExisted = ReadExistedFlag(pending, JU_OriginalExisted);
+            }
+            string diPath = $@"{DirectInputRoot}\{vidPid}\{DirectInputOemSubkey}";
+            string joyPath = $@"{JoystickRoot}\{vidPid}";
+            written ??= ReadOriginal(Registry.LocalMachine, diPath, DirectInputOemNameValue).val;
+
+            bool Ours(RegistryKey hive, string path, string value) =>
+                written != null && ReadOriginal(hive, path, value).val == written;
+
+            if (diExisted != null)
+            {
+                if (!Ours(Registry.LocalMachine, diPath, DirectInputOemNameValue)) left.Add($@"HKLM\{diPath}\{DirectInputOemNameValue}");
+                else if (diExisted == true) RestoreValue(Registry.LocalMachine, diPath, DirectInputOemNameValue, diOrig);
+                else
+                {
+                    DeleteSubkey(Registry.LocalMachine, $@"{DirectInputRoot}\{vidPid}", DirectInputOemSubkey);
+                    // Claim's CreateSubKey made the identity's key too when
+                    // it was missing. Empty now, it goes.
+                    DeleteIfEmpty(Registry.LocalMachine, DirectInputRoot, vidPid);
+                }
+            }
+            if (jmExisted != null)
+            {
+                if (!Ours(Registry.LocalMachine, joyPath, JoystickOemNameValue)) left.Add($@"HKLM\{joyPath}\{JoystickOemNameValue}");
+                else if (jmExisted == true) RestoreValue(Registry.LocalMachine, joyPath, JoystickOemNameValue, jmOrig);
+                else DeleteSubkeyFromParent(Registry.LocalMachine, JoystickRoot, vidPid);
+            }
+            if (juExisted != null)
+            {
+                if (!Ours(Registry.CurrentUser, joyPath, JoystickOemNameValue)) left.Add($@"HKCU\{joyPath}\{JoystickOemNameValue}");
+                else if (juExisted == true) RestoreValue(Registry.CurrentUser, joyPath, JoystickOemNameValue, juOrig);
+                else DeleteSubkeyFromParent(Registry.CurrentUser, JoystickRoot, vidPid);
+            }
+
+            using var pendingRoot = Registry.LocalMachine.OpenSubKey(PendingRoot, writable: true);
+            pendingRoot?.DeleteSubKeyTree(vidPid, throwOnMissingSubKey: false);
+            bool empty = pendingRoot != null && pendingRoot.SubKeyCount == 0 && pendingRoot.ValueCount == 0;
+            pendingRoot?.Close();
+            if (empty) Registry.LocalMachine.DeleteSubKey(PendingRoot, throwOnMissingSubKey: false);
+            return left;
         }
         finally { mutex.ReleaseMutex(); }
     }
@@ -324,6 +420,15 @@ internal static class OemNameOverrideStore
 
     private static void DeleteSubkeyFromParent(RegistryKey baseKey, string parentPath, string subkey) =>
         DeleteSubkey(baseKey, parentPath, subkey);
+
+    private static void DeleteIfEmpty(RegistryKey baseKey, string parentPath, string subkey)
+    {
+        using var parent = baseKey.OpenSubKey(parentPath, writable: true);
+        if (parent == null) return;
+        bool empty;
+        using (var k = parent.OpenSubKey(subkey)) empty = k != null && k.SubKeyCount == 0 && k.ValueCount == 0;
+        if (empty) parent.DeleteSubKey(subkey, throwOnMissingSubKey: false);
+    }
 
     // ────────────────────────────────────────────────────────────────
     //  Registry ledger coordination. Callers hold the shared mutex.

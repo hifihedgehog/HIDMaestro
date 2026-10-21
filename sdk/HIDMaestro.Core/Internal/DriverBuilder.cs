@@ -25,7 +25,7 @@ namespace HIDMaestro.Internal;
 /// </summary>
 public static class DriverBuilder
 {
-    const string CertFriendlyName = "HIDMaestroTestCert";
+    internal const string CertFriendlyName = "HIDMaestroTestCert";
 
     /// <summary>The directory the most recent extraction landed in. Other
     /// internal helpers (e.g. DeviceOrchestrator) read the staged INF from
@@ -368,6 +368,12 @@ public static class DriverBuilder
     // package directory, by SHA-256. Written and read only under the deploy
     // lock, which serializes threads as well as programs.
     private static Dictionary<string, string>? s_signedPackage;
+
+    /// <summary>Forget the package the last signing in this process left,
+    /// after a full removal of HIDMaestro deleted the certificate it was
+    /// signed with, so the next deploy signs again. The caller holds the
+    /// deploy lock.</summary>
+    internal static void ForgetSignedPackage() => s_signedPackage = null;
 
     /// <summary>This build's package: the one the last signing in this
     /// process left, when its binaries still carry the bytes that signing

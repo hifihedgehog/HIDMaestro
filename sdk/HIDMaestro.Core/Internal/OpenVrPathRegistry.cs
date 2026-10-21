@@ -165,7 +165,56 @@ internal static partial class OpenVrPathRegistry
         }
     }
 
-    private static bool MutateFile(string file, Func<Lists, bool> edit) => RunAsUser(() =>
+    private static bool MutateFile(string file, Func<Lists, bool> edit) => RunAsUser(() => MutateFileAs(file, edit));
+
+    /// <summary>The external_drivers entries of the path registry at
+    /// <paramref name="file"/>, another account's, read as
+    /// <see cref="ExternalDrivers"/> reads the caller's. Empty when the file
+    /// is missing or unreadable. Reads only.</summary>
+    internal static List<string> ExternalDriversIn(string file)
+    {
+        var list = new List<string>();
+        foreach (var e in Load(ReadFile(file)).ExternalDrivers)
+            list.Add(Encoding.UTF8.GetString(e));
+        return list;
+    }
+
+    /// <summary>A full removal's edit of another account's path registry:
+    /// every external_drivers entry equal to <paramref name="driverPath"/>
+    /// goes, as <see cref="RemoveDriver"/> removes the caller's. The elevated
+    /// process writes in a folder of that account's profile, which that
+    /// account can change, so the folder is held open without delete sharing
+    /// for the whole edit, which no rename or replacement of it can get past,
+    /// and a folder or file that is a link is refused, never followed. Writes
+    /// only when the list changes. Returns true when it wrote.</summary>
+    /// <exception cref="InvalidOperationException">The file could not be
+    /// read or written, or is a link, or its folder is.</exception>
+    internal static bool RemoveDriverIn(string file, string driverPath)
+    {
+        string full = Path.GetFullPath(file);
+        string dir = Path.GetDirectoryName(full)!;
+        using var hold = ProtectedStaging.OpenLevel(dir, hold: true);
+        if ((File.GetAttributes(hold) & FileAttributes.ReparsePoint) != 0
+            || (File.Exists(full) && (File.GetAttributes(full) & FileAttributes.ReparsePoint) != 0))
+            throw new InvalidOperationException($"{full} or its folder is a link, which HIDMaestro does not follow.");
+        byte[] path = Encoding.UTF8.GetBytes(driverPath);
+        try
+        {
+            return MutateFileAs(full, l =>
+            {
+                bool any = false;
+                while (Edit(l, RemoveDriverVerb, path)) any = true;
+                return any;
+            });
+        }
+        catch (InvalidOperationException) { throw; }
+        catch (Exception e)
+        {
+            throw new InvalidOperationException($"Could not update the OpenVR path registry {full}: {e.Message}", e);
+        }
+    }
+
+    private static bool MutateFileAs(string file, Func<Lists, bool> edit)
     {
         var l = Load(ReadFile(file, missingOnly: true));
         if (!edit(l)) return false;
@@ -190,7 +239,7 @@ internal static partial class OpenVrPathRegistry
             throw;
         }
         return true;
-    });
+    }
 
     /// <summary>Path_ReadBinaryFile: null when the file is missing, cannot
     /// be opened, or is empty. Before a write, only a missing file reads as
