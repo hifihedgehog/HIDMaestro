@@ -653,7 +653,7 @@ internal sealed class Case4UsbipFeatures : IOracleCase
                 (t.GetField(field, Instance) ?? throw new MissingFieldException(t.Name, field)).SetValue(dev, value);
             Set("<Descriptors>k__BackingField", descriptors);
             Set("_index", index);
-            Set("_stubs", FeatureStubTable.From(profile, index, descriptors.SerialString, stamp));
+            Set("_stubs", FeatureStubTable.From(profile, index, descriptors.SerialString, stamp, descriptors.SerialVariant));
             var slots = new int[256];
             Array.Fill(slots, -1);
             Set("_inputSlot", slots);

@@ -860,9 +860,13 @@ internal static partial class DeviceOrchestrator
     internal static string DriverSerial(int controllerIndex) => $"HM-CTL-{controllerIndex:D4}";
 
     /// <summary>The FeatureAnswers value of a controller: the blob of the
-    /// table its resolved model compiles to, or the empty blob.</summary>
+    /// table its resolved model compiles to, or the empty blob. An
+    /// instanceSerial patch is served here as on USB/IP: the SDK writes
+    /// every patch but a file's into the blob, so the driver needs nothing
+    /// new. Its variant is the index, the rule the serial the driver serves
+    /// follows (<see cref="DriverSerial"/>).</summary>
     internal static byte[] FeatureAnswersBlob(ControllerProfile profile, int controllerIndex) =>
-        Usbip.FeatureStubTable.From(profile, controllerIndex, DriverSerial(controllerIndex))?.ToBlob()
+        Usbip.FeatureStubTable.From(profile, controllerIndex, DriverSerial(controllerIndex), controllerIndex)?.ToBlob()
         ?? Usbip.FeatureStubTable.EmptyBlob();
 
     // ════════════════════════════════════════════════════════════════════

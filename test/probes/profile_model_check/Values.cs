@@ -110,6 +110,26 @@ internal static class Values
             o["valueSources"]!["index"] = o["valueSources"]!["steamUpdater"]!.DeepClone();
             return o;
         }, "$.valueSources.index", "built-in");
+        // instanceSerial varies the answer's own captured text. Report 2 is
+        // Triton's 0xAE index 1, the unit serial FXA9960200001 at bytes 4 to
+        // 16 of 01 AE 14 01 <serial>.
+        JsonObject Unit(JsonObject o) => o["featureStubs"]!["reports"]![2]!.AsObject();
+        Add("an instance serial as a number", () => { var o = Triton(); Unit(o)["patch"] = Patch(4, 1, "uint8", "instanceSerial"); return o; },
+            "$.featureStubs.reports[2].patch[0].encoding", "answer's own text");
+        Add("an instance serial with an add", () => { var o = Triton(); Unit(o)["patch"] = Patch(4, 13, "ascii", "instanceSerial", add: 1); return o; },
+            "$.featureStubs.reports[2].patch[0].add", "takes no add");
+        Add("an instance serial with a key", () => { var o = Triton(); Unit(o)["patch"] = Patch(4, 13, "ascii", "instanceSerial", "TRITON_FW_TS"); return o; },
+            "$.featureStubs.reports[2].patch[0].key", "only a keyedHexFile");
+        Add("an instance serial over bytes that are not printable", () => { var o = Triton(); Unit(o)["patch"] = Patch(2, 5, "ascii", "instanceSerial"); return o; },
+            "$.featureStubs.reports[2].patch[0].at", "printable ASCII");
+        Add("an instance serial whose text ends in no digit", () => { var o = Triton(); Unit(o)["patch"] = Patch(4, 3, "ascii", "instanceSerial"); return o; },
+            "$.featureStubs.reports[2].patch[0].length", "digit");
+        Add("a source named like the instanceSerial built-in", () =>
+        {
+            var o = Triton();
+            o["valueSources"]!["instanceSerial"] = o["valueSources"]!["steamUpdater"]!.DeepClone();
+            return o;
+        }, "$.valueSources.instanceSerial", "built-in");
         Add("a keyedHexFile with no root", () =>
         {
             var o = Triton();
@@ -276,6 +296,54 @@ internal static class Values
                     && a.AsSpan(8, 6).IndexOfAnyExcept((byte)0) < 0 && Encoding.ASCII.GetString(a, 14, 4) == "1234"
                     && BinaryPrimitives.ReadUInt32LittleEndian(a.AsSpan(18)) == 0,
                     a == null ? "no answer" : Convert.ToHexString(a.AsSpan(0, 24)));
+        });
+
+        // instanceSerial (issue #72): the captured text, varied by the
+        // serial variant the table is given, not by the index.
+        string? UnitSerial(FeatureStubTable? t, byte channel)
+        {
+            if (t == null) return null;
+            int at = channel == 0 ? 0 : 1;
+            var set = new byte[at + 3];
+            set[0] = channel;
+            set[at] = 0xAE;
+            set[at + 2] = 1;
+            t.OnSetFeature(channel, set);
+            int n = t.Lookup(channel, 64, out _);
+            if (n < at + 3) return null;
+            var a = t.Answer(n);
+            int end = at + 3;
+            while (end < a.Length && a[end] != 0) end++;
+            return Encoding.ASCII.GetString(a[(at + 3)..end]);
+        }
+        c.Run("instanceSerial follows the variant it is given, not the index", () =>
+        {
+            string? a = UnitSerial(FeatureStubTable.From(baseTriton, 0, null, _ => null, 41), 1);
+            string? b = UnitSerial(FeatureStubTable.From(baseTriton, 41, null, _ => null, 0), 1);
+            string? d = UnitSerial(FeatureStubTable.From(baseTriton, 7, null, _ => null), 1);
+            return (a == "FXA9960200042" && b == "FXA9960200001" && d == "FXA9960200008", $"{a} {b} {d}");
+        });
+        c.Run("instanceSerial carries across the digit run and keeps the text's length", () =>
+        {
+            string? a = UnitSerial(FeatureStubTable.From(baseTriton, 0, null, _ => null, 999_999), 1);
+            return (a == "FXA9961200000", a ?? "stalled");
+        });
+        var deck = ProfileDatabase.LoadEmbedded().All.First(x => x.Id == "steam-deck-composite");
+        c.Run("a keyed identity's Deck answers the unit serial its USB serial carries", () =>
+        {
+            var identity = DeviceIdentity.ForKey("profile-model-check-values", 0);
+            var set = new UsbDescriptorSet(deck, 0, identity);
+            string? unit = UnitSerial(FeatureStubTable.From(deck, 0, set.SerialString, _ => null, set.SerialVariant), 0);
+            return (set.SerialVariant == identity.SerialVariant && identity.SerialVariant > 0
+                    && unit == set.SerialString && unit != "FX1A00000001",
+                    $"variant {identity.SerialVariant}, USB {set.SerialString}, 0xAE {unit}");
+        });
+        c.Run("the UMDF2 blob writes instanceSerial with the index as its variant, the rule HM-CTL-<index> follows", () =>
+        {
+            string b0 = Encoding.ASCII.GetString(DeviceOrchestrator.FeatureAnswersBlob(deck, 0));
+            string b3 = Encoding.ASCII.GetString(DeviceOrchestrator.FeatureAnswersBlob(deck, 3));
+            return (b0.Contains("FX1A00000001") && b0.Contains("MHDA00000001")
+                    && b3.Contains("FX1A00000004") && b3.Contains("MHDA00000004") && !b3.Contains("FX1A00000001"), "");
         });
     }
 

@@ -257,6 +257,9 @@ internal static class Program
         CheckSteamController(ctx);
         CheckTriton(ctx);
 
+        // 7a. Each unit answers its own serials (issue #72).
+        CheckUnitSerials(ctx);
+
         // 8. The input path: a submitted state has to reach the wire.
         CheckDeckInputFrame(ctx);
 
@@ -535,6 +538,60 @@ internal static class Program
 
     /// <summary>Read a (tag, u32-LE) attribute record out of a reply's
     /// record block.</summary>
+    /// <summary>Issue #72: Steam keys a Valve controller's config set by the
+    /// unit serial it reads with ID_GET_STRING_ATTRIBUTE (0xAE) index 1, and
+    /// the kernel reads the same index into the device's uniq (hid-steam.c
+    /// steam_get_serial). Each unit answers its own board and unit serial,
+    /// varied by the rule the USB serial follows: instance 0 keeps the
+    /// captured text, a later one adds its variant into the trailing digit
+    /// run. Triton's index 3, the Valve constant every real unit shares,
+    /// stays the same on every unit. A table built for an index takes the
+    /// index's own variant, the default identity's.</summary>
+    static void CheckUnitSerials(HMContext ctx)
+    {
+        Console.WriteLine();
+        Console.WriteLine("-- unit serials per instance (issue #72) --");
+        var cases = new (string Id, byte Channel, int Index, string Captured, string Variant1)[]
+        {
+            ("steam-deck-composite",       0, 0, "MHDA00000001",  "MHDA00000002"),
+            ("steam-deck-composite",       0, 1, "FX1A00000001",  "FX1A00000002"),
+            ("steam-controller-2",         1, 0, "MXA9960200001", "MXA9960200002"),
+            ("steam-controller-2",         1, 1, "FXA9960200001", "FXA9960200002"),
+            ("steam-controller-composite", 0, 0, "HMBOARD000001", "HMBOARD000002"),
+            ("steam-controller-composite", 0, 1, "HMUNIT0000001", "HMUNIT0000002"),
+        };
+        foreach (var (id, channel, index, captured, variant1) in cases)
+        {
+            var p = ctx.GetProfile(id);
+            if (p == null) { Check($"{id} is in the catalog", false); continue; }
+            string? first = UnitString(FeatureStubTable.From(p.Inner, 0, null, _ => null), channel, index);
+            string? second = UnitString(FeatureStubTable.From(p.Inner, 1, null, _ => null), channel, index);
+            Check($"{id} 0xAE index {index}: instance 0 answers the captured {captured}", first == captured, first ?? "stalled");
+            Check($"{id} 0xAE index {index}: instance 1 answers {variant1}", second == variant1, second ?? "stalled");
+        }
+        var triton = ctx.GetProfile("steam-controller-2");
+        if (triton != null)
+        {
+            string? a = UnitString(FeatureStubTable.From(triton.Inner, 0, null, _ => null), 1, 3);
+            string? b = UnitString(FeatureStubTable.From(triton.Inner, 5, null, _ => null), 1, 3);
+            Check("steam-controller-2 0xAE index 3 is the Valve constant on every instance",
+                  a == "7054257d2da7" && b == a, $"{a} / {b}");
+        }
+    }
+
+    /// <summary>The string a 0xAE answer carries for one index: the bytes
+    /// after [0xAE][length][index], after the report ID on a channel that
+    /// has one, up to the first zero. Null when the device stalls or the
+    /// answer echoes another index.</summary>
+    static string? UnitString(FeatureStubTable? t, byte channel, int index)
+    {
+        if (t == null) return null;
+        var a = Ask(t, channel, 0xAE, index, 64);
+        int at = channel == 0 ? 0 : 1;
+        if (a == null || a.Length < at + 3 || a[at] != 0xAE || a[at + 2] != index) return null;
+        return Ascii(a, at + 3);
+    }
+
     static uint Attr(byte[] reply, int start, int len, byte tag)
     {
         for (int off = start; off + 5 <= start + len && off + 5 <= reply.Length; off += 5)
