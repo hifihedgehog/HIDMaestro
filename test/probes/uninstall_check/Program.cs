@@ -1094,7 +1094,8 @@ internal static class Program
         Record("late: each install and create returned with the removal's lock free",
                lockLines.Length == 4 && lockLines.All(s => s.StartsWith("lock free ", StringComparison.Ordinal)), string.Join(" / ", lockLines));
         Record("late: a call back into the gate from the gate's own wait, on the same thread, waits with it and returns",
-               aSaid.Contains("reentry returned True"), string.Join(" / ", aSaid.Where(s => s.StartsWith("reentr", StringComparison.Ordinal))));
+               aSaid.Contains("reentry returned True") && !Has(aSaid, GateBehindThread),
+               string.Join(" / ", aSaid.Where(s => s.StartsWith("reentr", StringComparison.Ordinal) || s.StartsWith(GateBehindThread, StringComparison.Ordinal))));
         Record("late: after the removal they pass the gate, install again and keep their controllers",
                Has(aSaid, GateWaited) && Has(bSaid, GateWaited) && aSaid.Contains("created dualshock-4-v2")
                && bSaid.Contains("created 1") && bSaid.Contains("created 2") && !a.HasExited && !b.HasExited
