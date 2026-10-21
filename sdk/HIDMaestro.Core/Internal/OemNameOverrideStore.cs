@@ -142,6 +142,11 @@ internal static class OemNameOverrideStore
         using var mutex = AcquireMutex();
         try
         {
+            // A removal this process started since the caller's claim takes
+            // this lock for its own restore: nothing is written beside it.
+            if (Uninstall.RemovalGate.RemovingHere)
+                throw new InvalidOperationException(MachineClaims.RemovingHereMessage);
+
             // Capture a target's prior value only when the record does not
             // hold it yet: on the first Set for this VID:PID, and for a
             // target a full removal run from another account already put
@@ -208,7 +213,7 @@ internal static class OemNameOverrideStore
         // the record itself.
         if (!MachineClaims.ClaimBeforeWrite()) return;
         using var mutex = AcquireMutex();
-        try { RestoreFromPendingStore(vidPid); }
+        try { if (!Uninstall.RemovalGate.RemovingHere) RestoreFromPendingStore(vidPid); }
         finally { mutex.ReleaseMutex(); }
     }
 
@@ -224,6 +229,7 @@ internal static class OemNameOverrideStore
         using var mutex = AcquireMutex();
         try
         {
+            if (Uninstall.RemovalGate.RemovingHere) return 0;
             using var pendingRoot = Registry.LocalMachine.OpenSubKey(PendingRoot, writable: false);
             if (pendingRoot is null) return 0;
 
