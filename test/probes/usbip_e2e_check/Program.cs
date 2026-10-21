@@ -471,10 +471,12 @@ internal static partial class Program
                 // included (measured 2026-10-21), so with --sandbox a silent
                 // loopback beside a silent tone is a skip too. Anything else
                 // fails.
-                var control = Interlocked.Read(ref energy) > 0 || render == null ? (Loopback: double.NaN, Tone: -1L) : LoopbackControl(render, c);
-                bool skip = control.Loopback == 0 && (control.Tone > 0 || (s_sandbox && control.Tone == 0));
+                var control = Interlocked.Read(ref energy) > 0 || render == null ? (Loopback: double.NaN, Tone: -1L, Samples: -1L) : LoopbackControl(render, c);
+                // The sandbox case needs samples to have arrived: silence the device
+                // received, not a tone that never reached it.
+                bool skip = control.Loopback == 0 && (control.Tone > 0 || (s_sandbox && control.Tone == 0 && control.Samples > 0));
                 string controls = double.IsNaN(control.Loopback) ? ""
-                    : FormattableString.Invariant($", loopback control energy {control.Loopback:F1}, nonzero tone samples at the device {control.Tone}");
+                    : FormattableString.Invariant($", loopback control energy {control.Loopback:F1}, nonzero tone samples at the device {control.Tone} of {control.Samples}");
                 if (skip)
                     Console.WriteLine("  [SKIP] captured audio is the fed signal, not silence: this machine's capture path is silent, " +
                                       $"a loopback of the composite's speaker during a tone is silent too{controls}");
@@ -489,18 +491,20 @@ internal static partial class Program
     /// <summary>A 440 Hz tone played to <paramref name="render"/> for about
     /// 2 s: the summed magnitude of a 1.5 s loopback capture of it, 32-bit
     /// float as the shared-mode engine delivers it, and the nonzero 16-bit
-    /// samples <paramref name="c"/>'s speaker stream received meanwhile.
+    /// samples <paramref name="c"/>'s speaker stream received meanwhile,
+    /// and all the samples it received.
     /// Loopback 0 when every sample is silent, NaN when the capture could not
     /// run.</summary>
-    static (double Loopback, long Tone) LoopbackControl(MMDevice render, HMController c)
+    static (double Loopback, long Tone, long Samples) LoopbackControl(MMDevice render, HMController c)
     {
-        long tone = 0;
+        long tone = 0, samples = 0;
         void Count(HMAudioOutput _, ReadOnlyMemory<byte> pcm)
         {
             var span = pcm.Span;
             long n = 0;
             for (int i = 0; i + 1 < span.Length; i += 2) if ((short)(span[i] | (span[i + 1] << 8)) != 0) n++;
             Interlocked.Add(ref tone, n);
+            Interlocked.Add(ref samples, span.Length / 2);
         }
         c.UsbAudio!.Output.FramesReceived += Count;
         try
@@ -522,9 +526,9 @@ internal static partial class Program
             loop.StopRecording();
             output.Stop();
             Thread.Sleep(100);
-            lock (loop) return (energy, Interlocked.Read(ref tone));
+            lock (loop) return (energy, Interlocked.Read(ref tone), Interlocked.Read(ref samples));
         }
-        catch { return (double.NaN, Interlocked.Read(ref tone)); }
+        catch { return (double.NaN, Interlocked.Read(ref tone), Interlocked.Read(ref samples)); }
         finally { c.UsbAudio!.Output.FramesReceived -= Count; }
     }
 
