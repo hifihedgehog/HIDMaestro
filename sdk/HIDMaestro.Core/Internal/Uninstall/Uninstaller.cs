@@ -116,6 +116,7 @@ internal static partial class Uninstaller
         }
         entries.AddRange(Scan());
         entries.AddRange(Safely("usbip-win2", () => UsbipRemoval.Remove(preview: true, includeUnproven: options.IncludeUsbip)));
+        KeepWhatWinUsbRecordsKeep(entries);
         // A preview that could not read part of the machine is not one a
         // removal can be judged by.
         var status = programs.Count > 0 ? HMUninstallStatus.Blocked
@@ -907,6 +908,48 @@ internal static partial class Uninstaller
     private const string CertificateKeptReason =
         "a driver package whose provider is HIDMaestro stays in the driver store, signed with it";
 
+    /// <summary>The preview's view of the WinUSB packages, made the run's.
+    /// The run keeps a WinUSB package while any USB device record names it,
+    /// present or not (WinUsbBinding.RemovePackage, through
+    /// WinUsbBinding.DevnodesByPackage), and every record left after its
+    /// device steps counts: a composite persona's record whose serial is a
+    /// real adapter's stays, since every real adapter of the model shares it.
+    /// So the preview reads the same records, less the ones its own device
+    /// entries would remove, and keeps that package, the certificate it is
+    /// signed with and HIDMaestroPackagesLeft, which names it, as the run
+    /// does. A walk that cannot be read keeps them all, as the run then
+    /// deletes nothing.</summary>
+    private static void KeepWhatWinUsbRecordsKeep(List<UninstallEntry> entries)
+    {
+        var winUsb = HidMaestroPackages().Where(p => p.Known && p.WinUsb).ToList();
+        if (winUsb.Count == 0) return;
+        var on = WinUsbBinding.DevnodesByPackage(
+            winUsb.Select(p => new PnputilHelper.DriverRecord(p.Published, p.InfName, "HIDMaestro", "")).ToList());
+        var removed = new HashSet<string>(
+            entries.Where(e => e.Kind == KindDevnode && e.Outcome == UninstallOutcome.WouldRemove)
+                   .Select(e => e.Location.Split(" (")[0]),
+            StringComparer.OrdinalIgnoreCase);
+        var kept = winUsb.Where(p => on == null
+            || (on.TryGetValue(p.Published, out var ids) && ids.Any(id => !removed.Contains(id))))
+            .Select(p => p.Location).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (kept.Count == 0) return;
+        string reason = WinUsbDevicePresent() ? WinUsbPresentReason : WinUsbRecordReason;
+        for (int i = 0; i < entries.Count; i++)
+        {
+            var e = entries[i];
+            if (e.Outcome != UninstallOutcome.WouldRemove) continue;
+            if (e.Kind == KindPackage && kept.Contains(e.Location))
+                entries[i] = Keep(KindPackage, e.Location, reason);
+            else if (e.Kind == KindRegistryKey && e.Location.Equals($@"HKLM\{PackagesLeftKey}", StringComparison.OrdinalIgnoreCase))
+                entries[i] = Keep(KindRegistryKey, e.Location, PackagesLeftKeptReason);
+            else if (e.Kind == KindCertificate)
+                entries[i] = Keep(KindCertificate, e.Location, CertificateKeptReason);
+        }
+    }
+
+    private const string PackagesLeftKeptReason =
+        "it names the WinUSB package that stays, so a later HIDMaestro program can remove it once nothing uses it";
+
     /// <summary>The HIDMaestro packages a run leaves as they are: one under
     /// a name no HIDMaestro release used, and a WinUSB package while its
     /// device is plugged in. One a device still uses at the run's time is
@@ -1298,8 +1341,7 @@ internal static partial class Uninstaller
         else if (Registry.LocalMachine.OpenSubKey(PackagesLeftKey) is { } note)
         {
             note.Dispose();
-            told.Add(new UninstallEntry(KindRegistryKey, $@"HKLM\{PackagesLeftKey}", UninstallOutcome.Kept,
-                "it names the WinUSB package that stays, so a later HIDMaestro program can remove it once nothing uses it"));
+            told.Add(new UninstallEntry(KindRegistryKey, $@"HKLM\{PackagesLeftKey}", UninstallOutcome.Kept, PackagesLeftKeptReason));
         }
         if (winUsbLeft && sharedLeft == 0)
             told.Add(new UninstallEntry(KindRegistryKey, $@"HKLM\{RegistryLedger.Root}", UninstallOutcome.Kept,
