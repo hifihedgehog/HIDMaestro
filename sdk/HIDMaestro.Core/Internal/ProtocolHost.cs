@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using HIDMaestro.Internal.Programs;
 using HIDMaestro.Internal.Usbip;
@@ -247,6 +248,19 @@ internal sealed unsafe class ProtocolHost : IDisposable
             Engine.SetStateBlock(block);
             return;
         }
+        SendState(block);
+    }
+
+    /// <summary>OnState for a device that sends on a submit. Never inlined:
+    /// the section write it ends in makes a P/Invoke, and a method that
+    /// inlines one sets up a native-call frame each time it is entered. With
+    /// this inlined into OnState, and OnState into
+    /// HMController.SubmitRawStateBlock, a Switch Pro, which sends only on
+    /// its clock, paid that setup on every submit: 26.3 ns to 30.1 for a raw
+    /// one.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void SendState(ReadOnlySpan<byte> block)
+    {
         lock (_sendLock)
         {
             int n, f;
