@@ -1181,6 +1181,51 @@ public class HidReportBuilder
             return;
         }
 
+        // Any other field of 1 to 32 bits: one masked read-modify-write of
+        // the smallest 1-, 2-, 4- or 8-byte window from its first byte that
+        // holds it, where the loop below took one pass per bit: a button's
+        // bit, a hat's nibble, a 10-bit trigger. The field takes the low
+        // bitSize bits of value, as the loop sets them, and every bit
+        // outside it goes back as it was. A window past the buffer's end
+        // leaves the field to the loop. The window reads little-endian, as
+        // the report's bits count.
+        int first = bitOffset >> 3;
+        if (BitConverter.IsLittleEndian && (uint)(bitSize - 1) < 32u && first >= 0)
+        {
+            int shift = bitOffset & 7;
+            int span = shift + bitSize;
+            ulong mask = (ulong.MaxValue >> (64 - bitSize)) << shift;
+            ulong bits = ((ulong)(uint)value << shift) & mask;
+            ref byte at = ref System.Runtime.InteropServices.MemoryMarshal.GetArrayDataReference(buffer);
+            if (span <= 8 && first < buffer.Length)
+            {
+                ref byte b = ref System.Runtime.CompilerServices.Unsafe.Add(ref at, first);
+                b = (byte)((b & ~(uint)mask) | (uint)bits);
+                return;
+            }
+            if (span <= 16 && first <= buffer.Length - 2)
+            {
+                ref byte b = ref System.Runtime.CompilerServices.Unsafe.Add(ref at, first);
+                uint w = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<ushort>(ref b);
+                System.Runtime.CompilerServices.Unsafe.WriteUnaligned(ref b, (ushort)((w & ~(uint)mask) | (uint)bits));
+                return;
+            }
+            if (span <= 32 && first <= buffer.Length - 4)
+            {
+                ref byte b = ref System.Runtime.CompilerServices.Unsafe.Add(ref at, first);
+                uint w = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<uint>(ref b);
+                System.Runtime.CompilerServices.Unsafe.WriteUnaligned(ref b, (w & ~(uint)mask) | (uint)bits);
+                return;
+            }
+            if (first <= buffer.Length - 8)
+            {
+                ref byte b = ref System.Runtime.CompilerServices.Unsafe.Add(ref at, first);
+                ulong w = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<ulong>(ref b);
+                System.Runtime.CompilerServices.Unsafe.WriteUnaligned(ref b, (w & ~mask) | bits);
+                return;
+            }
+        }
+
         // Fall-through: arbitrary alignment / non-byte-multiple size. Used
         // for HID button bitmaps that pack 1 bit per button starting at
         // mid-byte offsets and similar oddly-aligned fields.

@@ -358,6 +358,13 @@ public sealed partial class HMController : IDisposable
     private readonly System.Collections.Generic.IReadOnlyList<HMSimpleStick> _cachedSticks;
     private readonly System.Collections.Generic.IReadOnlyList<HMSimpleTrigger> _cachedTriggers;
 
+    // The simple slots' keys, read from the cached layout once: the left
+    // stick's (X and Y without a declared stick), the right stick's when the
+    // layout declares a second one, and each declared trigger field's.
+    // ResolveSimpleSlots reads the dictionary at these and touches no list.
+    private readonly HMAxis _slotLx, _slotLy, _slotRx, _slotRy, _slotLtField, _slotRtField;
+    private readonly bool _slotRightDeclared, _slotLtDeclared, _slotRtDeclared;
+
     // Companion input doorbell (perf audit 2026-07-21): signaled per
     // GIP-carrying frame so the XUSB companion can complete a parked
     // WAIT_FOR_INPUT at frame arrival instead of its 8 ms timer tick.
@@ -591,6 +598,15 @@ public sealed partial class HMController : IDisposable
         // declarations. Profile.Sticks/Triggers allocate per access.
         _cachedSticks = profile.Sticks;
         _cachedTriggers = profile.Triggers;
+        _slotLx = _cachedSticks.Count > 0 ? _cachedSticks[0].XAxis : HMAxis.X;
+        _slotLy = _cachedSticks.Count > 0 ? _cachedSticks[0].YAxis : HMAxis.Y;
+        _slotRightDeclared = _cachedSticks.Count > 1;
+        _slotRx = _slotRightDeclared ? _cachedSticks[1].XAxis : HMAxis.None;
+        _slotRy = _slotRightDeclared ? _cachedSticks[1].YAxis : HMAxis.None;
+        _slotLtDeclared = _cachedTriggers.Count > 0;
+        _slotRtDeclared = _cachedTriggers.Count > 1;
+        _slotLtField = _slotLtDeclared ? _cachedTriggers[0].Axis : HMAxis.None;
+        _slotRtField = _slotRtDeclared ? _cachedTriggers[1].Axis : HMAxis.None;
 
         // Resolve the canonical trigger axes once (issue #34): axisMap-
         // declared override wins, else the Z/Rz defaults PadForge writes.
@@ -818,19 +834,24 @@ public sealed partial class HMController : IDisposable
         int slot,
         HMAxis canonical)
     {
-        if (axes != null)
-        {
-            if (axes.TryGetValue(canonical, out var vCanon))
-                return WireArith.Normalized(vCanon, 0.0);
-            if (slot < triggers.Count && axes.TryGetValue(triggers[slot].Axis, out var vField))
-                return WireArith.Normalized(vField, 0.0);
-            // A descriptor with no declared triggers (every Valve state
-            // packet, both Switch 2 Pro profiles) has no field to fall back
-            // to. The canonical axis above is the whole answer, and it is
-            // what StandardAxes writes. Reading Z and Rz here regardless of
-            // the axisMap took the Switch 2 Pro's right stick Y, which is
-            // Rz, for its right trigger (issue #66).
-        }
+        if (axes == null) return 0.0;
+        bool declared = slot < triggers.Count;
+        return SlotTrigger(axes, canonical, declared, declared ? triggers[slot].Axis : HMAxis.None);
+    }
+
+    /// <summary><see cref="ResolveTrigger"/> with the trigger field's key
+    /// already read from the layout, as ResolveSimpleSlots passes the keys
+    /// its constructor read.</summary>
+    private static double SlotTrigger(Dictionary<HMAxis, float> axes, HMAxis canonical, bool declared, HMAxis field)
+    {
+        if (axes.TryGetValue(canonical, out var v)) return WireArith.Normalized(v, 0.0);
+        if (declared && axes.TryGetValue(field, out v)) return WireArith.Normalized(v, 0.0);
+        // A descriptor with no declared triggers (every Valve state
+        // packet, both Switch 2 Pro profiles) has no field to fall back
+        // to. The canonical axis above is the whole answer, and it is
+        // what StandardAxes writes. Reading Z and Rz here regardless of
+        // the axisMap took the Switch 2 Pro's right stick Y, which is
+        // Rz, for its right trigger (issue #66).
         return 0.0;
     }
 
@@ -1204,43 +1225,49 @@ public sealed partial class HMController : IDisposable
                                     out double mrx, out double mry, out double mlt, out double mrt)
     {
         var axes = state.Axes;
-        double GetAxis(HMAxis ax, double def) =>
-            axes != null && axes.TryGetValue(ax, out var v) ? WireArith.Normalized(v, def) : def;
+        if (axes == null)
+        {
+            mlx = mly = mrx = mry = 0.5;
+            mlt = mrt = 0.0;
+            return;
+        }
 
-        // Cached at construction: Profile.Sticks / Profile.Triggers are
-        // uncached computed properties that each allocate a List plus
-        // record elements on every access. Reading them per SubmitState
-        // frame (~250 Hz × N controllers) is ~6 heap objects/frame of
-        // avoidable GC pressure on the hot path (audit 1n). The layout is
-        // immutable for the controller's lifetime, so resolve once.
-        var sticks = _cachedSticks;
-        var triggers = _cachedTriggers;
-        // Sticks resolve canonical-first when the descriptor declares none,
-        // mirroring ResolveTrigger below (issue #56). Profile.Sticks derives
-        // from the descriptor-built report builder, so a profile whose
-        // descriptor is an opaque vendor blob - every Valve state packet -
-        // has no declared sticks at all. Hard-defaulting those to 0.5 put a
-        // live device on the wire whose sticks never left center, while its
-        // triggers worked, because only triggers had a fallback. The right
-        // stick accepts either convention: Rx/Ry, or Sony's Z/Rz.
-        mlx = sticks.Count > 0 ? GetAxis(sticks[0].XAxis, 0.5) : GetAxis(HMAxis.X, 0.5);
-        mly = sticks.Count > 0 ? GetAxis(sticks[0].YAxis, 0.5) : GetAxis(HMAxis.Y, 0.5);
-        mrx = sticks.Count > 1 ? GetAxis(sticks[1].XAxis, 0.5)
-                   : axes != null && axes.ContainsKey(HMAxis.Rx) ? GetAxis(HMAxis.Rx, 0.5)
-                                                                 : GetAxis(HMAxis.Z, 0.5);
-        mry = sticks.Count > 1 ? GetAxis(sticks[1].YAxis, 0.5)
-                   : axes != null && axes.ContainsKey(HMAxis.Ry) ? GetAxis(HMAxis.Ry, 0.5)
-                                                                 : GetAxis(HMAxis.Rz, 0.5);
+        // The keys come from the layout the constructor cached (audit 1n),
+        // resolved there once, so a frame reads the dictionary and nothing
+        // else. Sticks resolve canonical-first when the descriptor declares
+        // none, mirroring the triggers below (issue #56). Profile.Sticks
+        // derives from the descriptor-built report builder, so a profile
+        // whose descriptor is an opaque vendor blob - every Valve state
+        // packet - has no declared sticks at all. Hard-defaulting those to
+        // 0.5 put a live device on the wire whose sticks never left center,
+        // while its triggers worked, because only triggers had a fallback.
+        // The right stick accepts either convention: Rx/Ry, or Sony's Z/Rz.
+        mlx = SlotAxis(axes, _slotLx, 0.5);
+        mly = SlotAxis(axes, _slotLy, 0.5);
+        if (_slotRightDeclared)
+        {
+            mrx = SlotAxis(axes, _slotRx, 0.5);
+            mry = SlotAxis(axes, _slotRy, 0.5);
+        }
+        else
+        {
+            mrx = axes.TryGetValue(HMAxis.Rx, out var rx) ? WireArith.Normalized(rx, 0.5) : SlotAxis(axes, HMAxis.Z, 0.5);
+            mry = axes.TryGetValue(HMAxis.Ry, out var ry) ? WireArith.Normalized(ry, 0.5) : SlotAxis(axes, HMAxis.Rz, 0.5);
+        }
         // Triggers resolve canonical-first, then fall back to the descriptor's
-        // declared trigger field. PadForge writes axes[Z]/axes[Rz] via
-        // ResolveAxisByRole (canonical defaults when no axisMap). HIDMaestroTest
-        // and StandardAxes write axes[triggers[N].Axis] directly. Both must feed
-        // the GIP buffer that drives XInput, WGI and Raw Input. Otherwise the
-        // unified xbox-360-* descriptors (layout.triggers = Vx/Vy) silently
-        // drop PadForge's writes and triggers freeze in non-DirectInput APIs.
-        mlt = ResolveTrigger(axes, triggers, 0, _canonicalLt);
-        mrt = ResolveTrigger(axes, triggers, 1, _canonicalRt);
+        // declared trigger field, as ResolveTrigger does. PadForge writes
+        // axes[Z]/axes[Rz] via ResolveAxisByRole (canonical defaults when no
+        // axisMap). HIDMaestroTest and StandardAxes write
+        // axes[triggers[N].Axis] directly. Both must feed the GIP buffer that
+        // drives XInput, WGI and Raw Input. Otherwise the unified xbox-360-*
+        // descriptors (layout.triggers = Vx/Vy) silently drop PadForge's
+        // writes and triggers freeze in non-DirectInput APIs.
+        mlt = SlotTrigger(axes, _canonicalLt, _slotLtDeclared, _slotLtField);
+        mrt = SlotTrigger(axes, _canonicalRt, _slotRtDeclared, _slotRtField);
     }
+
+    private static double SlotAxis(Dictionary<HMAxis, float> axes, HMAxis key, double rest) =>
+        axes.TryGetValue(key, out var v) ? WireArith.Normalized(v, rest) : rest;
 
     /// <summary>The six simple-slot values as the port encoders take them.</summary>
     internal void ResolveSlots(in HMGamepadState state, out float lx, out float ly, out float rx,
