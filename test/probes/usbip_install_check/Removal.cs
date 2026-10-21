@@ -322,6 +322,26 @@ internal static partial class Program
         InstallChecks("remove: reinstall:");
         if (hc == null) return;
 
+        // The owner stamp a create puts back on a host controller whose
+        // stamp is off: not while this process's own removal runs, which
+        // takes stamps off, and once it ends, at the next create.
+        var stampedFor = Installer.GetField("s_stampedFor", BindingFlags.NonPublic | BindingFlags.Static)!;
+        bool unstamped = (bool)Installer.GetMethod("Unstamp", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, new object[] { hc })!;
+        stampedFor.SetValue(null, null);
+        Exception? stampRefusal = null;
+        removingHere.SetValue(null, true);
+        try { Installer.GetMethod("EnsureInstalled", BindingFlags.Public | BindingFlags.Static)!.Invoke(null, new object?[] { null }); }
+        catch (TargetInvocationException tie) { stampRefusal = tie.InnerException; }
+        finally { removingHere.SetValue(null, false); }
+        Record("remove: a create while this process's own removal runs leaves an unstamped host controller unstamped",
+               unstamped && stampRefusal == null && Pnp.HardwareIds(hc).SequenceEqual(new[] { UdeHardwareId }, StringComparer.OrdinalIgnoreCase)
+               && stampedFor.GetValue(null) == null,
+               $"unstamp {unstamped}, {stampRefusal?.GetType().Name ?? "no exception"}, ids {string.Join(";", Pnp.HardwareIds(hc))}");
+        Installer.GetMethod("EnsureInstalled", BindingFlags.Public | BindingFlags.Static)!.Invoke(null, new object?[] { null });
+        Record("remove: and the next create after it stamps it again (the positive control)",
+               Pnp.HardwareIds(hc).SequenceEqual(new[] { UdeHardwareId, StampHardwareId }, StringComparer.OrdinalIgnoreCase),
+               string.Join(";", Pnp.HardwareIds(hc)));
+
         // ── R3: an install no record proves ───────────────────────────────
         // A devnode another installer registered on the same instance id
         // carries no HIDMaestro token, and one whose Apps entry usbip-win2's
