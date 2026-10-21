@@ -59,6 +59,9 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("GcWinUsbCheck")]
 [assembly: InternalsVisibleTo("GcDolphinCheck")]
 [assembly: InternalsVisibleTo("GcSdlCheck")]
+// handler_isolation_check compiles gc_common\GcCommon.cs too, which reads
+// TimeoutScale.
+[assembly: InternalsVisibleTo("HandlerIsolationCheck")]
 [assembly: InternalsVisibleTo("PerfBudgetCheck")]
 [assembly: InternalsVisibleTo("DeviceOracleCheck")]
 [assembly: InternalsVisibleTo("ArithRoundtripCheck")]

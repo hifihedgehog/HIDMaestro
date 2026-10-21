@@ -148,73 +148,16 @@ $verRegex   = [regex]'<Version>([0-9.]+)</Version>'
 $verMatch   = $verRegex.Match($buildProps)
 if ($verMatch.Success) {
     $expectedVer = [Version]($verMatch.Groups[1].Value + '.0')
-    $probePaths = @(
-        Join-Path $scriptDir '..\probes\pid_ffb_roundtrip\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\pid_ffb_alloc_free\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\pid_setusages_probe\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\xbox_dpad_xinput_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\hat_resolution_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\sony_bt_report31_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\sony_bt_output_decode_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\sony_data_driven_coverage\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\v135_features_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\trigger_classifier_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\trigger_live_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\sidewinder_ffb_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\axis_addressing_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\layout_audit_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\report_length_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\sony_bt_axis_role_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\foreign_devnode_survival_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\xbox_combined_trigger_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\xbox_gip_trigger_resolver_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\usb_composite_schema_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\usbip_server_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\usbip_bundle_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\usbip_e2e_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\sony_feature_gate_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\switch2_pro_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\switch2_pro_sdl3_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\sony_extra_buttons_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\vr_controller_smoke\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\valve_persona_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\valve_wire_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\valve_sdl_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\valve_raw_path_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\xusb_wgi_single_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\valve_steam_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\valve_multi_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\identity_derivation_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\identity_battery_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\xusb_battery_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\driver_catalog_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\valve_firmware_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\ds4_report_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\ds3_sixaxis_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\switch2_composite_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\registry_ownership_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\wgi_mapping_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\vr_driver_conflict_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\kbm_offline_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\kbm_live_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\coexist_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        # The copy that runs inside Windows Sandbox is published from the same
-        # build into sandbox\, so this one's freshness is that one's too.
-        Join-Path $scriptDir '..\probes\usbip_install_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        # The NativeAOT and single-file copies carry no separate DLL. They
-        # are published from the same build as this one.
-        Join-Path $scriptDir '..\probes\aot_smoke\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\json_parity_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\pnp_notify_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        # The copy in variant\ is a different build of the SDK on purpose.
-        Join-Path $scriptDir '..\probes\build_info_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\switch_pro_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\switch_descriptor_idle_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\switch_pro_sdl3_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-        # The sandbox copy is published from this build, and the tool in
-        # tool\ is built from the same SDK source as part of it.
-        Join-Path $scriptDir '..\probes\uninstall_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
-    )
+    # Every probe's own build output, found rather than listed. The list
+    # this replaced missed 31 of the 89 probes, and one of those left
+    # stale would run whatever SDK it was last built with. Copies a probe
+    # keeps in a folder of its own (sandbox\, tool\, variant\) sit below
+    # this path and are not read here. The sandbox and tool copies, and the
+    # NativeAOT and single-file publishes, come from the same build as the
+    # probe's own copy, and build_info_check's variant\ is a different build
+    # of the SDK on purpose.
+    $probePaths = @(Get-ChildItem -LiteralPath (Join-Path $scriptDir '..\probes') -Directory -ErrorAction SilentlyContinue |
+        ForEach-Object { Join-Path $_.FullName 'bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll' })
     # Canonical SDK output for the content-hash check. Source tree only:
     # a release bundle carries no sdk/ build output, and the version
     # check above still guards that case.
