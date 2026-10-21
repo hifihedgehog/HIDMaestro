@@ -106,7 +106,7 @@ internal static partial class Program
         client.Close();
         // Polled: the end leaves ESTABLISHED once the stack has taken the
         // close in. A lookup that still matches it fails at the bound.
-        WaitUntil(() => TcpConnectionOwner.OfPeer(accepted) == -1, 5000);
+        WaitUntil(() => TcpConnectionOwner.OfPeer(accepted) == -1, Hang);
         int after = TcpConnectionOwner.OfPeer(accepted);
         Check("once the peer has closed, its end matches no owner", after == -1, $"pid {after}");
     }

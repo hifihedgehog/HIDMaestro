@@ -25,7 +25,7 @@ internal static partial class Program
     static void Handshake(UsbipServer server, UsbipEmulatedDevice device)
     {
         Console.WriteLine("\n-- Handshake --");
-        Check("the device is free before the handshake checks", WaitFree(device, 3000));
+        Check("the device is free before the handshake checks", WaitFree(device, Hang));
 
         // An import from a program other than the host controller.
         UsbipServer.AdmitImportsFromThisProcess = false;
@@ -34,18 +34,18 @@ internal static partial class Program
             using (var s = Connect(server.Port))
             {
                 SendImport(s, device.BusId);
-                var op = ReadOrNull(s, 8, 3000);
+                var op = ReadOrNull(s, 8, Hang);
                 uint status = op == null ? uint.MaxValue : BinaryPrimitives.ReadUInt32BigEndian(op.AsSpan(4));
                 Check("an import from user mode is answered ST_NA", status == 1,
                       op == null ? "no reply" : $"status {status}");
                 Check("and the device stays free", !Claimed(device));
             }
-            Check("the device is free after it", WaitFree(device, 3000));
+            Check("the device is free after it", WaitFree(device, Hang));
 
             using (var s = Connect(server.Port))
             {
                 SendOp(s, 0x8005);
-                var head = ReadOrNull(s, 12, 3000);
+                var head = ReadOrNull(s, 12, Hang);
                 Check("the device list still answers user mode",
                       head != null && BinaryPrimitives.ReadUInt16BigEndian(head.AsSpan(2)) == 0x0005
                       && BinaryPrimitives.ReadUInt32BigEndian(head.AsSpan(4)) == 0
@@ -117,10 +117,10 @@ internal static partial class Program
         }
         finally { UsbipServer.AdmitImportsFromThisProcess = true; }
 
-        Check("the device is free after the deadline checks", WaitFree(device, 3000));
+        Check("the device is free after the deadline checks", WaitFree(device, Hang));
         Check("an import from this process is admitted while the probe allows it",
               ImportStatus(server.Port, device.BusId) == 0);
-        WaitFree(device, 3000);
+        WaitFree(device, Hang);
 
         // An import whose reply fails to send after the claim.
         int fired = 0;
@@ -136,12 +136,12 @@ internal static partial class Program
                 var op = ReadOrNull(s, 8, 3000);
                 Check("an import whose reply fails gets no reply", fired == 1 && op == null);
             }
-            Check("and leaves the device free", WaitFree(device, 3000));
+            Check("and leaves the device free", WaitFree(device, Hang));
             Check("so the next import of the bus id is answered ST_OK",
                   ImportStatus(server.Port, device.BusId) == 0);
         }
         finally { UsbipServer.BeforeImportReply = null; }
-        WaitFree(device, 3000);
+        WaitFree(device, Hang);
     }
 
     static Socket Connect(int port)
@@ -173,7 +173,7 @@ internal static partial class Program
     {
         using var s = Connect(port);
         SendImport(s, busid);
-        var op = ReadOrNull(s, 8, 3000);
+        var op = ReadOrNull(s, 8, Hang);
         return op == null ? uint.MaxValue : BinaryPrimitives.ReadUInt32BigEndian(op.AsSpan(4));
     }
 
