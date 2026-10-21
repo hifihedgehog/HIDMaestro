@@ -1,0 +1,666 @@
+// HIDMaestro's removal: HIDMaestroUninstall.exe and HMUninstall.
+//
+//   preview  On this machine: a snapshot of what HIDMaestro leaves (devices,
+//            driver packages, the certificate, registry keys, files), the
+//            tool's --preview --json and HMUninstall.Preview in this
+//            process, then the snapshot again. Nothing may change. The
+//            preview must list every HIDMaestro package the snapshot finds.
+//   sandbox  In Windows Sandbox started without a window, as SYSTEM: the
+//            driver installs, a program creates a plain HID controller, an
+//            Xbox 360 controller with its XUSB companion and an xinputhid
+//            controller, sets an OEM name override and registers the
+//            OpenVR driver with a stand-in SteamVR. While it runs the tool
+//            refuses (exit 2) and changes nothing. Once it is killed the
+//            tool removes everything, and the machine is read again: no
+//            HIDMaestro device record, package, certificate, registry key or
+//            folder is left, the OEM targets hold what they held before, the
+//            OpenVR registration is gone, and no USB root hub arrived again.
+//            Then a program in this process installs, creates, and calls
+//            HMUninstall.Run itself, as a program's uninstaller would, and
+//            installs and creates again in the same process afterward.
+//   fixture  The real removal on this machine, then a reinstall and one
+//            controller created and disposed, so the machine stays a working
+//            test fixture. Only with HIDMAESTRO_UNINSTALL_FIXTURE=1 and only
+//            where Windows Sandbox is absent: on a machine with Windows
+//            Sandbox the real removal runs only inside it.
+//
+// No argument runs preview, then sandbox where Windows Sandbox exists, else
+// fixture where it is allowed. The battery's S101 runs preview and fixture
+// in its slot and sandbox beside the scenarios before it.
+//
+// A composite is created in the sandbox once the SDK installs usbip-win2
+// without its vendor installer (CompositeInSandbox), since the vendor
+// installer installs usbip-win2's root-hub filter.
+//
+// Requires elevation. Exit 0 PASS, 1 FAIL, 2 when the part asked for cannot
+// run on this machine.
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Text.Json;
+using System.Threading;
+using HIDMaestro;
+using Microsoft.Win32;
+
+internal static class Program
+{
+    /// <summary>Whether the sandbox run creates a USB/IP composite. False
+    /// while the SDK's first transport install runs usbip-win2's vendor
+    /// installer, which installs the root-hub filter.</summary>
+    static readonly bool CompositeInSandbox = false;
+
+    // dualshock-4-v2's identity, so the override and the controller's own
+    // joy.cpl key meet, as they do in a program that names its controller.
+    const ushort OemVid = 0x054C, OemPid = 0x09CC;
+    const string OemLabel = "HIDMaestro removal check";
+
+    static int s_total, s_failures;
+
+    delegate void CheckFn(string name, bool ok, string detail = "");
+
+    static void Check(string name, bool ok, string detail = "")
+    {
+        s_total++;
+        if (!ok) s_failures++;
+        Console.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] {name}{(detail.Length > 0 ? "  " + detail : "")}");
+    }
+
+    static int Main(string[] args)
+    {
+        if (args.Length >= 2 && args[0] == "--in-sandbox") return InSandbox(args[1]);
+        if (args.Length >= 2 && args[0] == "--hold") return Hold(args[1]);
+        string part = args.Length > 0 ? args[0].ToLowerInvariant() : "all";
+        int code;
+        switch (part)
+        {
+            case "preview": code = PreviewPart(); break;
+            case "sandbox": code = SandboxPart(); break;
+            case "fixture": code = FixturePart(); break;
+            case "all":
+                code = PreviewPart();
+                int real = FindOnPath("wsb.exe") != null ? SandboxPart() : FixturePart();
+                if (real == 1) code = 1;
+                break;
+            default:
+                Console.WriteLine("Usage: UninstallCheck.exe [preview|sandbox|fixture]");
+                return 1;
+        }
+        Console.WriteLine();
+        Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");
+        return code == 2 && s_total == 0 ? 2 : s_failures == 0 ? 0 : 1;
+    }
+
+    static string ToolPath => Path.Combine(AppContext.BaseDirectory, "tool", "HIDMaestroUninstall.exe");
+
+    // ── preview ────────────────────────────────────────────────────────
+
+    static int PreviewPart()
+    {
+        Console.WriteLine("=== A preview changes nothing ===");
+        if (!File.Exists(ToolPath)) { Check("the tool was built beside the probe", false, ToolPath); return 1; }
+        // The positive control: a folder of a shape the SDK through v1.12.0
+        // left in %TEMP%, made by this probe. The previews must list it, and
+        // the snapshot must see it go once the probe deletes it.
+        string control = Path.Combine(Path.GetTempPath(), "HIDMaestro_00000000c0ffee00");
+        Directory.CreateDirectory(control);
+        File.WriteAllText(Path.Combine(control, "control.txt"), "uninstall_check");
+        var before = Inventory.Take();
+
+        var (exit, output) = Run(ToolPath, 600_000, "--preview", "--json");
+        var tool = Report.Parse(output);
+        Check("the tool's --preview --json writes a report", tool != null, tool == null ? Tail(output) : "");
+        if (tool != null)
+        {
+            Check("the report says it is a preview", tool.Preview);
+            Check("its exit code matches its status", exit == tool.ExitCode && exit == (tool.Status == "Blocked" ? 2 : 0),
+                  $"exit {exit}, status {tool.Status}, exitCode {tool.ExitCode}");
+            Check("a preview has no Removed, RemovedAtRestart or Failed entry",
+                  tool.Entries.All(e => e.Outcome is "WouldRemove" or "Kept"),
+                  string.Join("; ", tool.Entries.Where(e => e.Outcome is not ("WouldRemove" or "Kept")).Take(5)));
+            // The positive control: each HIDMaestro package the snapshot finds
+            // through the driver database is in the preview.
+            var published = before.Packages.Select(p => p[(p.IndexOf('|') + 1)..]).ToList();
+            var listed = published.Where(oem => tool.Entries.Any(e => e.Kind == "driver package"
+                && e.Location.StartsWith(oem + " (", StringComparison.OrdinalIgnoreCase))).ToList();
+            Check("the preview lists every HIDMaestro driver package the driver database holds",
+                  listed.Count == published.Count, $"{listed.Count} of {published.Count}: {string.Join(", ", published)}");
+            Check("the preview lists the probe's control folder in %TEMP% (positive control)",
+                  tool.Entries.Any(e => e.Kind == "folder" && e.Outcome == "WouldRemove" && e.Location.Equals(control, StringComparison.OrdinalIgnoreCase)), control);
+            if (Directory.Exists(Inventory.ProgramFilesFolder))
+                Check("the preview lists %ProgramFiles%\\HIDMaestro",
+                      tool.Entries.Any(e => e.Kind == "folder" && e.Location.StartsWith(Inventory.ProgramFilesFolder, StringComparison.OrdinalIgnoreCase)));
+            Console.WriteLine($"  [NOTE] the tool lists {tool.Entries.Count(e => e.Outcome == "WouldRemove")} item(s) to remove and keeps {tool.Entries.Count(e => e.Outcome == "Kept")}");
+        }
+
+        HMUninstallReport? api = null;
+        try { api = HMUninstall.Preview(); }
+        catch (Exception ex) { Check("HMUninstall.Preview runs in this process", false, $"{ex.GetType().Name}: {ex.Message}"); }
+        if (api != null && tool != null)
+        {
+            Check("HMUninstall.Preview says it is a preview", api.IsPreview && api.Status is HMUninstallStatus.Previewed or HMUninstallStatus.Blocked,
+                  api.Status.ToString());
+            var a = api.Entries.Select(e => $"{e.Kind}|{e.Location}|{e.Outcome}").ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var t = tool.Entries.Select(e => $"{e.Kind}|{e.Location}|{e.Outcome}").ToHashSet(StringComparer.OrdinalIgnoreCase);
+            Check("HMUninstall.Preview and the tool list the same items", a.SetEquals(t),
+                  $"{a.Except(t).Count()} only in the API's, {t.Except(a).Count()} only in the tool's");
+        }
+
+        var after = Inventory.Take();
+        var diff = before.Diff(after).ToList();
+        Check("nothing changed: devices, packages, certificates, registry keys and files read the same after both previews",
+              diff.Count == 0, string.Join("; ", diff.Take(8)));
+        try { Directory.Delete(control, recursive: true); } catch { }
+        var gone = after.Diff(Inventory.Take()).ToList();
+        Check("the snapshot sees a change: the control folder's deletion shows (positive control)",
+              gone.Any(d => d.Contains(control, StringComparison.OrdinalIgnoreCase)), $"{gone.Count} difference(s)");
+        return s_failures == 0 ? 0 : 1;
+    }
+
+    // ── fixture ────────────────────────────────────────────────────────
+
+    static int FixturePart()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== The real removal on this machine, then a reinstall ===");
+        if (FindOnPath("wsb.exe") != null)
+        {
+            Console.WriteLine("  [SKIP] Windows Sandbox is available here, so the real removal runs only inside it.");
+            return 2;
+        }
+        if (Environment.GetEnvironmentVariable("HIDMAESTRO_UNINSTALL_FIXTURE") != "1")
+        {
+            Console.WriteLine("  [SKIP] HIDMAESTRO_UNINSTALL_FIXTURE is not 1 on this machine.");
+            return 2;
+        }
+        if (!File.Exists(ToolPath)) { Check("the tool was built beside the probe", false, ToolPath); return 1; }
+
+        var before = Inventory.Take();
+        Check("the machine holds HIDMaestro's driver before the removal (positive control)", before.Packages.Count > 0,
+              $"{before.Packages.Count} package(s)");
+        var hubs = Inventory.RootHubs();
+        var (exit, output) = Run(ToolPath, 1_800_000, "--yes", "--json");
+        var report = Report.Parse(output);
+        RemovalChecks("fixture", exit, report, output, hubs, clean: false, Console.WriteLine, Check);
+
+        // Leave the fixture working: the driver installs again and a
+        // controller comes and goes.
+        try
+        {
+            using var ctx = new HMContext();
+            ctx.LoadDefaultProfiles();
+            ctx.InstallDriver();
+            using (var c = ctx.CreateController(ctx.GetProfile("dualshock-4-v2")!, "uninstall-fixture"))
+                Check("after the removal the driver installs again and a controller creates", c != null);
+            Check("the driver packages are back", Inventory.Take().Packages.Count > 0);
+        }
+        catch (Exception ex) { Check("after the removal the driver installs again and a controller creates", false, $"{ex.GetType().Name}: {ex.Message}"); }
+        return s_failures == 0 ? 0 : 1;
+    }
+
+    /// <summary>The checks after a real removal, from the tool's report and
+    /// from the machine read again directly.</summary>
+    static void RemovalChecks(string p, int exit, Report? report, string output, SortedDictionary<string, long> hubsBefore,
+                              bool clean, Action<string> note, CheckFn check)
+    {
+        check($"{p}: the tool writes a report", report != null, report == null ? Tail(output) : "");
+        if (report == null) return;
+        check($"{p}: the tool removed HIDMaestro (exit 0, or 3 with items left to the next start)",
+              exit is 0 or 3 && report.Status is "Removed" or "RemovedRestartPending", $"exit {exit}, status {report.Status}");
+        var failed = report.Entries.Where(e => e.Outcome == "Failed").ToList();
+        check($"{p}: no item failed", failed.Count == 0, string.Join("; ", failed.Take(6)));
+        foreach (var g in report.Entries.GroupBy(e => e.Outcome))
+            note($"{p}: {g.Count()} {g.Key}");
+        foreach (var e in report.Entries.Where(e => clean || e.Outcome is "Kept" or "RemovedAtRestart"))
+            note($"{p}: {e}");
+
+        var after = Inventory.Take();
+        var devnodes = after.HidMaestroDevnodes();
+        check($"{p}: no HIDMaestro device record is left, present or not", devnodes.Count == 0, string.Join(", ", devnodes.Take(8)));
+        if (clean)
+        {
+            var hid = after.HidMaestroShapedHidRecords();
+            check($"{p}: no HID record of HIDMaestro's shapes is left", hid.Count == 0, string.Join(", ", hid.Take(8)));
+        }
+        check($"{p}: no HIDMaestro driver package is left", after.Packages.Count == 0 || KeptPackages(report, after),
+              string.Join(", ", after.Packages));
+        check($"{p}: the certificate is gone from My, Root and TrustedPublisher", after.Certificates.Count == 0,
+              string.Join(", ", after.Certificates));
+        foreach (string key in Inventory.WatchedKeys.Take(5).Concat(Inventory.WatchedKeys.Skip(6).Take(2)))
+        {
+            bool kept = report.Entries.Any(e => e.Outcome == "Kept" && e.Location.Equals(key, StringComparison.OrdinalIgnoreCase));
+            check($"{p}: {key} is gone", !Inventory.KeyExists(key) || kept, kept ? "kept, with the reason in the report" : "");
+        }
+        if (clean)
+        {
+            string overrides = Inventory.Dump(@"HKLM\SYSTEM\CurrentControlSet\Control\DeviceOverrides");
+            check($"{p}: no root#VID_ DeviceOverrides key is left", !overrides.Contains(@"\root#VID_", StringComparison.OrdinalIgnoreCase));
+        }
+        else
+        {
+            var left = report.Entries.Where(e => e.Kind == "DeviceOverrides key" && e.Outcome == "Removed" && Inventory.KeyExists(e.Location)).ToList();
+            check($"{p}: every DeviceOverrides key the report removed is gone", left.Count == 0, string.Join(", ", left.Take(5)));
+        }
+        var pending = Inventory.PendingDeletes();
+        foreach (string folder in new[] { Inventory.ProgramFilesFolder, Inventory.ProgramDataFolder })
+        {
+            bool kept = report.Entries.Any(e => e.Outcome == "Kept" && e.Location.Equals(folder, StringComparison.OrdinalIgnoreCase));
+            var under = Directory.Exists(folder)
+                ? Directory.EnumerateFileSystemEntries(folder, "*", SearchOption.AllDirectories).Prepend(folder)
+                    .Where(x => !pending.Contains(x, StringComparer.OrdinalIgnoreCase)).ToList()
+                : new List<string>();
+            check($"{p}: {folder} is gone or left only to the next start", under.Count == 0 || kept, string.Join(", ", under.Take(5)));
+        }
+        var temps = Inventory.TempRoots().SelectMany(t =>
+        {
+            try { return Directory.EnumerateDirectories(t, "HIDMaestro*").Where(d => IsLegacyTemp(Path.GetFileName(d))).ToList(); }
+            catch { return new List<string>(); }
+        }).ToList();
+        check($"{p}: no legacy HIDMaestro folder is left in any %TEMP%", temps.Count == 0, string.Join(", ", temps.Take(5)));
+        foreach (string f in Inventory.OpenVrFiles())
+            if (File.Exists(f))
+                check($"{p}: {f} no longer names HIDMaestro's OpenVR driver",
+                      !File.ReadAllText(f).Contains(@"HIDMaestro\\openvr\\hidmaestro", StringComparison.OrdinalIgnoreCase));
+        var hubsAfter = Inventory.RootHubs();
+        var restarted = hubsBefore.Where(h => hubsAfter.TryGetValue(h.Key, out long t) && t != h.Value).Select(h => h.Key).ToList();
+        var gone = hubsBefore.Keys.Where(h => !hubsAfter.ContainsKey(h)).ToList();
+        note($"{p}: {hubsBefore.Count} USB root hub(s) present before the removal");
+        check($"{p}: no USB root hub arrived again", restarted.Count == 0, string.Join(", ", restarted));
+        // usbip-win2's own virtual hub goes with its host controller when
+        // usbip-win2 is removed, so a hub that is gone is noted, not judged.
+        foreach (string h in gone) note($"{p}: root hub {h} is no longer present");
+
+        HMUninstallReport? again = null;
+        try { again = HMUninstall.Preview(); } catch (Exception ex) { note($"{p}: the preview after the removal threw {ex.Message}"); }
+        var still = again?.Entries.Where(e => e.Outcome != HMUninstallOutcome.Kept).ToList() ?? new List<HMUninstallEntry>();
+        check($"{p}: a preview after the removal finds nothing but kept items", again != null && still.Count == 0,
+              string.Join("; ", still.Take(6)));
+    }
+
+    /// <summary>A package left after the removal is accepted only when the
+    /// report kept it with a reason: a WinUSB package a device record still
+    /// names.</summary>
+    static bool KeptPackages(Report report, Inventory after) =>
+        after.Packages.All(pkg => report.Entries.Any(e => e.Kind == "driver package" && e.Outcome == "Kept"
+            && e.Location.StartsWith(pkg[(pkg.IndexOf('|') + 1)..] + " (", StringComparison.OrdinalIgnoreCase)));
+
+    static bool IsLegacyTemp(string name) =>
+        name.Equals("HIDMaestro", StringComparison.OrdinalIgnoreCase)
+        || System.Text.RegularExpressions.Regex.IsMatch(name, @"^HIDMaestro_([0-9A-Fa-f-]{8,}|usbip_[0-9.]+)$")
+        || System.Text.RegularExpressions.Regex.IsMatch(name, @"^HIDMaestroEmulate-[0-9A-Fa-f-]{8,}$");
+
+    // ── sandbox: host ──────────────────────────────────────────────────
+
+    static readonly string SandboxIdFile = Path.Combine(Path.GetTempPath(), "HIDMaestro_uninstall_check.sandbox");
+
+    static int SandboxPart()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== The removal in Windows Sandbox ===");
+        string? wsb = FindOnPath("wsb.exe");
+        if (wsb == null)
+        {
+            Console.WriteLine("  [SKIP] Windows Sandbox (wsb.exe) is not available on this machine.");
+            return 2;
+        }
+        string publish = Path.Combine(AppContext.BaseDirectory, "sandbox");
+        string toolDir = Path.Combine(AppContext.BaseDirectory, "tool");
+        if (!File.Exists(Path.Combine(publish, "UninstallCheck.exe")) || !File.Exists(Path.Combine(toolDir, "HIDMaestroUninstall.exe")))
+        {
+            Check("the sandbox copy and the tool were built beside the probe", false, $"{publish}, {toolDir}");
+            return 1;
+        }
+        string results = Path.Combine(Path.GetTempPath(), $"HIDMaestro_uninstall_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(results);
+        string? id = null;
+        var clock = Stopwatch.StartNew();
+        try
+        {
+            string config =
+                "<Configuration><Networking>Disable</Networking><MappedFolders>" +
+                $"<MappedFolder><HostFolder>{Xml(publish)}</HostFolder><SandboxFolder>C:\\probe</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder>" +
+                $"<MappedFolder><HostFolder>{Xml(toolDir)}</HostFolder><SandboxFolder>C:\\tool</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder>" +
+                $"<MappedFolder><HostFolder>{Xml(results)}</HostFolder><SandboxFolder>C:\\results</SandboxFolder><ReadOnly>false</ReadOnly></MappedFolder>" +
+                "</MappedFolders></Configuration>";
+            // One sandbox at a time: a run killed before its finally leaves
+            // its sandbox running, and the next start fails. Each run stops
+            // the one an earlier run of this probe left, and no other.
+            if (File.Exists(SandboxIdFile))
+            {
+                string left = File.ReadAllText(SandboxIdFile).Trim();
+                if (left.Length > 0) Run(wsb, 120_000, "stop", "--id", left);
+                File.Delete(SandboxIdFile);
+            }
+            var started = Run(wsb, 120_000, "start", "--config", config, "--raw");
+            id = JsonString(started.Output, "Id");
+            if (id == null) { Check("a sandbox starts", false, started.Output.Trim()); return 1; }
+            File.WriteAllText(SandboxIdFile, id);
+            var sw = Stopwatch.StartNew();
+            bool ready = false;
+            while (!ready && sw.ElapsedMilliseconds < 180_000)
+            {
+                var probe = Run(wsb, 60_000, "exec", "--id", id, "-c", "cmd.exe /c exit 0", "-r", "System", "--raw");
+                ready = JsonInt(probe.Output, "ExitCode") == 0;
+                if (!ready) Thread.Sleep(250);
+            }
+            if (!ready) { Check("the sandbox accepts a command", false); return 1; }
+            var ran = Run(wsb, 2_400_000, "exec", "--id", id, "-c", @"C:\probe\UninstallCheck.exe --in-sandbox C:\results", "-r", "System", "--raw");
+            string file = Path.Combine(results, "results.txt");
+            if (!File.Exists(file)) { Check("the run inside the sandbox reports back", false, ran.Output.Trim()); return 1; }
+            var lines = File.ReadAllLines(file);
+            foreach (string line in lines)
+            {
+                if (line == "DONE") continue;
+                int sp = line.IndexOf(' ');
+                if (sp < 0) continue;
+                string verdict = line[..sp], rest = line[(sp + 1)..];
+                if (verdict == "NOTE") { Console.WriteLine($"  [NOTE] {rest}"); continue; }
+                int bar = rest.IndexOf(" | ", StringComparison.Ordinal);
+                Check(bar < 0 ? rest : rest[..bar], verdict == "PASS", bar < 0 ? "" : rest[(bar + 3)..]);
+            }
+            if (!lines.Contains("DONE")) Check("the run inside the sandbox finished", false, ran.Output.Trim());
+        }
+        finally
+        {
+            if (id != null) Run(wsb, 120_000, "stop", "--id", id);
+            try { File.Delete(SandboxIdFile); } catch { }
+            Console.WriteLine(FormattableString.Invariant($"  [NOTE] the sandbox part took {clock.Elapsed.TotalSeconds:F1} s"));
+            try { Directory.Delete(results, true); } catch { }
+        }
+        return s_failures == 0 ? 0 : 1;
+    }
+
+    // ── sandbox: inside ────────────────────────────────────────────────
+
+    static readonly List<string> s_lines = new();
+
+    static void Note(string text) => s_lines.Add("NOTE " + text.Replace('\r', ' ').Replace('\n', ' '));
+
+    static void Record(string name, bool ok, string detail = "")
+    {
+        detail = detail.Replace('\r', ' ').Replace('\n', ' ');
+        s_lines.Add($"{(ok ? "PASS" : "FAIL")} {name}{(detail.Length > 0 ? " | " + detail : "")}");
+    }
+
+    static string SandboxTool => @"C:\tool\HIDMaestroUninstall.exe";
+
+    static int InSandbox(string results)
+    {
+        // Windows Sandbox signs in as WDAGUtilityAccount. A machine without
+        // that profile is not the sandbox, and nothing here may run on it.
+        if (!Directory.Exists(@"C:\Users\WDAGUtilityAccount"))
+        {
+            Console.WriteLine("Refused: --in-sandbox runs only inside Windows Sandbox.");
+            return 1;
+        }
+        try { RemovalInSandbox(results); }
+        catch (Exception ex) { Record("the run ran to the end", false, $"{ex.GetType().Name}: {ex.Message}"); }
+        try { InProcess(); }
+        catch (Exception ex) { Record("inproc: the run ran to the end", false, $"{ex.GetType().Name}: {ex.Message}"); }
+        s_lines.Add("DONE");
+        File.WriteAllLines(Path.Combine(results, "results.txt"), s_lines);
+        return s_lines.Any(l => l.StartsWith("FAIL", StringComparison.Ordinal)) ? 1 : 0;
+    }
+
+    static string OemTargets() => string.Join("\n",
+        Inventory.Dump($@"HKLM\SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\DirectInput\VID_{OemVid:X4}&PID_{OemPid:X4}"),
+        Inventory.Dump($@"HKLM\SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_{OemVid:X4}&PID_{OemPid:X4}"),
+        Inventory.Dump($@"HKCU\SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_{OemVid:X4}&PID_{OemPid:X4}"));
+
+    static void RemovalInSandbox(string results)
+    {
+        var clock = Stopwatch.StartNew();
+        string oemBefore = OemTargets();
+        var clean = Inventory.Take();
+        Record("the sandbox starts without HIDMaestro", clean.Packages.Count == 0 && clean.HidMaestroDevnodes().Count == 0 && clean.Certificates.Count == 0);
+
+        // A stand-in SteamVR: discovery finds C:\SteamVR by its
+        // bin\win64\vrpathreg.exe, which HIDMaestro never runs.
+        Directory.CreateDirectory(@"C:\SteamVR\bin\win64");
+        File.WriteAllBytes(@"C:\SteamVR\bin\win64\vrpathreg.exe", Array.Empty<byte>());
+
+        string answer = Path.Combine(results, "hold.txt");
+        var psi = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, CreateNoWindow = true };
+        psi.ArgumentList.Add("--hold");
+        psi.ArgumentList.Add(answer);
+        using var holder = Process.Start(psi)!;
+        var wait = Stopwatch.StartNew();
+        string[] said = Array.Empty<string>();
+        while (wait.ElapsedMilliseconds < 900_000 && !holder.HasExited)
+        {
+            try { if (File.Exists(answer)) said = File.ReadAllLines(answer); } catch { }
+            if (said.Contains("ready")) break;
+            Thread.Sleep(500);
+        }
+        foreach (string s in said.Where(s => s != "ready")) Note($"holder: {s}");
+        Record("a program installs the driver", said.Contains("installed"), string.Join(" / ", said));
+        Record("it creates a plain HID controller (positive control)", said.Contains("created dualshock-4-v2"));
+        Record("it sets an OEM name override", said.Contains("oem set"));
+        Note(FormattableString.Invariant($"setup took {clock.Elapsed.TotalSeconds:F1} s"));
+
+        var before = Inventory.Take();
+        Record("the machine holds HIDMaestro: devices, packages and the certificate (positive control)",
+               before.HidMaestroDevnodes().Count > 0 && before.Packages.Count > 0 && before.Certificates.Count > 0,
+               $"{before.HidMaestroDevnodes().Count} device record(s), {before.Packages.Count} package(s), {before.Certificates.Count} certificate(s)");
+
+        // While the program runs, the removal refuses and changes nothing.
+        var (bexit, bout) = Run(SandboxTool, 600_000, "--yes", "--json");
+        var blocked = Report.Parse(bout);
+        Record("while the program runs the tool exits 2, blocked", bexit == 2 && blocked?.Status == "Blocked", $"exit {bexit}, status {blocked?.Status}");
+        Record("and names the program's process", blocked?.Programs.Contains(holder.Id) == true,
+               $"holder {holder.Id}, listed {string.Join(", ", blocked?.Programs ?? new List<int>())}");
+        var diff = before.Diff(Inventory.Take()).ToList();
+        Record("and changes nothing", diff.Count == 0, string.Join("; ", diff.Take(6)));
+
+        // Killed, the program leaves its devices and its record behind, as a
+        // crash does.
+        try { holder.Kill(); holder.WaitForExit(30_000); } catch { }
+        var hubs = Inventory.RootHubs();
+        var step = Stopwatch.StartNew();
+        var (exit, output) = Run(SandboxTool, 1_800_000, "--yes", "--json");
+        Note(FormattableString.Invariant($"the removal took {step.Elapsed.TotalSeconds:F1} s"));
+        RemovalChecks("removal", exit, Report.Parse(output), output, hubs, clean: true, Note, (n, ok, d) => Record(n, ok, d));
+        string oemAfter = OemTargets();
+        Record("removal: the OEM name targets hold what they held before HIDMaestro", oemAfter == oemBefore,
+               oemAfter == oemBefore ? "" : $"before [{oemBefore}] after [{oemAfter}]");
+        foreach (string key in Inventory.WatchedKeys.Skip(6).Take(2))
+            if (Inventory.KeyExists(key)) Note($"after the removal {key} holds {Inventory.Dump(key)}");
+    }
+
+    /// <summary>A program's own uninstaller: it installs, creates, and
+    /// calls HMUninstall.Run in its own process with its controller still
+    /// open, then installs and creates again.</summary>
+    static void InProcess()
+    {
+        var clock = Stopwatch.StartNew();
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        ctx.InstallDriver();
+        var profile = ctx.GetProfile("dualshock-4-v2")!;
+        var c = ctx.CreateController(profile, "uninstall-inproc");
+        Record("inproc: the program's controller creates (positive control)", Inventory.Take().HidMaestroDevnodes().Count > 0);
+        Record("inproc: the program has its owner record (positive control)", Inventory.KeyExists(@"HKLM\SOFTWARE\HIDMaestroOwners"));
+
+        var r = HMUninstall.Run();
+        var failed = r.Entries.Where(e => e.Outcome == HMUninstallOutcome.Failed).ToList();
+        Record("inproc: HMUninstall.Run in the program removes HIDMaestro",
+               r.Status is HMUninstallStatus.Removed or HMUninstallStatus.RemovedRestartPending && failed.Count == 0,
+               $"{r.Status}: {string.Join("; ", failed.Take(5))}");
+        Record("inproc: the program is not its own blocker", r.RunningPrograms.Count == 0);
+        var after = Inventory.Take();
+        Record("inproc: its controller's devices are gone", after.HidMaestroDevnodes().Count == 0, string.Join(", ", after.HidMaestroDevnodes().Take(5)));
+        Record("inproc: its owner record is gone", !Inventory.KeyExists(@"HKLM\SOFTWARE\HIDMaestroOwners"));
+        Record("inproc: the packages and the certificate are gone", after.Packages.Count == 0 && after.Certificates.Count == 0);
+        Exception? disposeError = null;
+        try { c.Dispose(); } catch (Exception ex) { disposeError = ex; }
+        Record("inproc: the program's controller still disposes", disposeError == null, disposeError?.Message ?? "");
+
+        // The same process installs and creates again, which needs the
+        // caches the removal reset: the child temp folder, the signed
+        // package, the DeviceOverrides key.
+        try
+        {
+            ctx.InstallDriver();
+            using (var again = ctx.CreateController(profile, "uninstall-inproc-again"))
+            {
+                Record("inproc: the same process installs the driver and creates again", Inventory.Take().HidMaestroDevnodes().Count > 0);
+                Record("inproc: and writes its DeviceOverrides key again",
+                       Inventory.KeyExists($@"HKLM\SYSTEM\CurrentControlSet\Control\DeviceOverrides\root#VID_{OemVid:X4}&PID_{OemPid:X4}"));
+            }
+        }
+        catch (Exception ex) { Record("inproc: the same process installs the driver and creates again", false, $"{ex.GetType().Name}: {ex.Message}"); }
+        var last = HMUninstall.Run();
+        Record("inproc: a second removal ends clean", last.Status is HMUninstallStatus.Removed or HMUninstallStatus.RemovedRestartPending
+               && Inventory.Take().Packages.Count == 0, last.Status.ToString());
+        Note(FormattableString.Invariant($"inproc: took {clock.Elapsed.TotalSeconds:F1} s"));
+    }
+
+    /// <summary>The program the sandbox run kills: it installs, creates one
+    /// controller of each kind the sandbox supports, sets an OEM name
+    /// override, registers the OpenVR driver, says so, and waits.</summary>
+    static int Hold(string answer)
+    {
+        var lines = new List<string>();
+        void Say()
+        {
+            string tmp = answer + ".tmp";
+            File.WriteAllLines(tmp, lines);
+            File.Move(tmp, answer, overwrite: true);
+        }
+        var held = new List<HMController>();
+        try
+        {
+            var ctx = new HMContext();
+            ctx.LoadDefaultProfiles();
+            ctx.InstallDriver();
+            lines.Add("installed");
+            var profiles = new List<string> { "dualshock-4-v2", "xbox-360-wired", "xbox-elite-v2" };
+            if (CompositeInSandbox) profiles.Add("dualsense-composite");
+            foreach (string id in profiles)
+            {
+                try
+                {
+                    held.Add(ctx.CreateController(ctx.GetProfile(id)!, "uninstall-" + id));
+                    lines.Add($"created {id}");
+                }
+                catch (Exception ex) { lines.Add($"failed {id} {ex.GetType().Name}: {ex.Message}"); }
+            }
+            try { HMOemNameOverride.Set(OemVid, OemPid, OemLabel); lines.Add("oem set"); }
+            catch (Exception ex) { lines.Add($"oem failed {ex.Message}"); }
+            try { lines.Add($"openvr registered {HMVR.EnsureDriverRegistered()}"); }
+            catch (Exception ex) { lines.Add($"openvr failed {ex.Message}"); }
+        }
+        catch (Exception ex) { lines.Add($"failed {ex.GetType().Name}: {ex.Message}"); }
+        lines.Add("ready");
+        Say();
+        Thread.Sleep(Timeout.Infinite);
+        GC.KeepAlive(held);
+        return 0;
+    }
+
+    // ── The tool's JSON report ─────────────────────────────────────────
+
+    sealed record Entry(string Kind, string Location, string Outcome, string? Reason)
+    {
+        public override string ToString() => $"{Outcome} {Kind} {Location}{(Reason != null ? ": " + Reason : "")}";
+    }
+
+    sealed class Report
+    {
+        public bool Preview;
+        public string Status = "";
+        public int ExitCode;
+        public List<int> Programs = new();
+        public List<Entry> Entries = new();
+
+        public static Report? Parse(string output)
+        {
+            int at = output.IndexOf('{');
+            if (at < 0) return null;
+            try
+            {
+                using var d = JsonDocument.Parse(output[at..]);
+                var root = d.RootElement;
+                if (root.GetProperty("schemaVersion").GetInt32() != 1) return null;
+                var r = new Report
+                {
+                    Preview = root.GetProperty("preview").GetBoolean(),
+                    Status = root.GetProperty("status").GetString() ?? "",
+                    ExitCode = root.GetProperty("exitCode").GetInt32(),
+                };
+                foreach (var p in root.GetProperty("runningPrograms").EnumerateArray())
+                    r.Programs.Add(p.GetProperty("processId").GetInt32());
+                foreach (var e in root.GetProperty("entries").EnumerateArray())
+                    r.Entries.Add(new Entry(e.GetProperty("kind").GetString()!, e.GetProperty("location").GetString()!,
+                        e.GetProperty("outcome").GetString()!, e.GetProperty("reason").ValueKind == JsonValueKind.Null ? null : e.GetProperty("reason").GetString()));
+                return r;
+            }
+            catch { return null; }
+        }
+    }
+
+    // ── Helpers ────────────────────────────────────────────────────────
+
+    static string Tail(string s) => s.Length <= 400 ? s.Trim() : s[^400..].Trim();
+
+    static (int Exit, string Output) Run(string exe, int timeoutMs, params string[] args)
+    {
+        var psi = new ProcessStartInfo(exe)
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            RedirectStandardInput = true,
+            CreateNoWindow = true,
+        };
+        foreach (string a in args) psi.ArgumentList.Add(a);
+        using var p = Process.Start(psi)!;
+        p.StandardInput.Close();
+        var stdout = p.StandardOutput.ReadToEndAsync();
+        var stderr = p.StandardError.ReadToEndAsync();
+        if (!p.WaitForExit(timeoutMs))
+        {
+            try { p.Kill(entireProcessTree: true); } catch { }
+            return (-1, "timed out");
+        }
+        return (p.ExitCode, stdout.Result + stderr.Result);
+    }
+
+    static string? JsonString(string json, string name)
+    {
+        try
+        {
+            using var d = JsonDocument.Parse(json[json.IndexOf('{')..]);
+            return d.RootElement.TryGetProperty(name, out var v) ? v.GetString() : null;
+        }
+        catch { return null; }
+    }
+
+    static int? JsonInt(string json, string name)
+    {
+        try
+        {
+            using var d = JsonDocument.Parse(json[json.IndexOf('{')..]);
+            return d.RootElement.TryGetProperty(name, out var v) && v.TryGetInt32(out int i) ? i : null;
+        }
+        catch { return null; }
+    }
+
+    static string Xml(string s) => System.Security.SecurityElement.Escape(s);
+
+    static string? FindOnPath(string exe)
+    {
+        foreach (string dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';', StringSplitOptions.RemoveEmptyEntries))
+        {
+            try
+            {
+                string p = Path.Combine(dir.Trim(), exe);
+                if (File.Exists(p)) return p;
+            }
+            catch { }
+        }
+        string apps = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Microsoft", "WindowsApps", exe);
+        return File.Exists(apps) ? apps : null;
+    }
+}
