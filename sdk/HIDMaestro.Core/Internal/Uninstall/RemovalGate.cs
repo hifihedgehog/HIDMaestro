@@ -60,6 +60,10 @@ internal static class RemovalGate
     /// one without elevation, whose claim is refused.</summary>
     internal static bool Claim(Action claim)
     {
+        // First, before the fast path: a process that holds its claim and
+        // runs a removal on one thread runs no sweep or write beside it on
+        // another.
+        if (RemovingHere) return false;
         if (MachineClaims.HoldsOwnerClaim || !Environment.IsPrivilegedProcess) { claim(); return true; }
         int me = Environment.CurrentManagedThreadId;
         var clock = Stopwatch.StartNew();
