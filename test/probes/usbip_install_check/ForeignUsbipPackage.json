@@ -1,0 +1,27 @@
+{
+  "version": "0.9.8.0",
+  "tag": "v.0.9.8.0",
+  "purpose": "S73 R01's other release, a test input only. The SDK never embeds or installs it. Only the host controller files are unpacked, never the filter.",
+  "architectures": {
+    "x64": {
+      "installer": "USBip-0.9.8.0-x64.exe",
+      "url": "https://github.com/vadimgrn/usbip-win2/releases/download/v.0.9.8.0/USBip-0.9.8.0-x64.exe",
+      "sha256": "81f426741f7ee2ed991febe24a22daca8400b6ae2f171054e3fb404897e15d39",
+      "files": {
+        "usbip2_ude.inf": "d975ac1ae14246611824518ceb05fa45227176d8e366366220f58a7ab977c379",
+        "usbip2_ude.sys": "d4d98db62d78a5b6d32eec3f8f1f9f6b0d2eda925a56c96367c5b7985ab52cd8",
+        "usbip2_ude.cat": "99c6807a2d05fd01a689389be81d5088bb4777831adb3c7e119b14a1f5b088c7"
+      }
+    },
+    "arm64": {
+      "installer": "USBip-0.9.8.0-arm64.exe",
+      "url": "https://github.com/vadimgrn/usbip-win2/releases/download/v.0.9.8.0/USBip-0.9.8.0-arm64.exe",
+      "sha256": "fa5dab657380ed99d7ed953010aae79ad9be478eddfeb2d72c22309fb48bc35e",
+      "files": {
+        "usbip2_ude.inf": "9f7260d38560f5674311e2e8bf1ef7c2988cab91958c09671c6178300b3cde7f",
+        "usbip2_ude.sys": "19e5165e1a2a051069be19b37bc0ef75a797ee0364d3626316110ac51535d6e0",
+        "usbip2_ude.cat": "e79ae2a5d2b7cebe0f5afc2b0a4b216f92160eadde343fc56b958880abe1714e"
+      }
+    }
+  }
+}

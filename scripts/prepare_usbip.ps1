@@ -6,6 +6,12 @@
 #
 # Every input and output is hash-checked against UsbipPackage.json. The
 # unpacker is fetched from a pinned commit and hash-checked too.
+#
+# -ManifestPath names another manifest of the same shape, such as S73's
+# other release (test\probes\usbip_install_check\ForeignUsbipPackage.json),
+# and -FetchInstallers fetches each installer from its manifest URL when it
+# is not already in -InstallerDirectory. Only the files a manifest lists
+# are unpacked.
 
 param(
     [Parameter(Mandatory=$true)][string]$InstallerDirectory,
@@ -13,17 +19,19 @@ param(
     [string]$CacheDirectory = '',
     # x64 only for a build made with HMSkipArm64. A -File invocation passes
     # "x64,arm64" as one string, so the list is split here.
-    [string[]]$Architectures = @('x64', 'arm64')
+    [string[]]$Architectures = @('x64', 'arm64'),
+    [string]$ManifestPath = '',
+    [switch]$FetchInstallers
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 # $PSScriptRoot is empty inside a param default under Windows PowerShell 5.1.
 if (!$CacheDirectory) { $CacheDirectory = Join-Path $PSScriptRoot '..\build\downloads' }
-$manifestPath = Join-Path $PSScriptRoot '..\sdk\HIDMaestro.Core\UsbipPackage.json'
-$manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+if (!$ManifestPath) { $ManifestPath = Join-Path $PSScriptRoot '..\sdk\HIDMaestro.Core\UsbipPackage.json' }
+$manifest = Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $Architectures = @($Architectures | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 foreach ($arch in $Architectures) {
-    if (!$manifest.architectures.$arch) { throw "UsbipPackage.json has no architecture '$arch'." }
+    if (!$manifest.architectures.$arch) { throw "$(Split-Path -Leaf $ManifestPath) has no architecture '$arch'." }
 }
 
 function Test-FileHash([string]$Path, [string]$Expected) {
@@ -61,6 +69,10 @@ if (!(Test-Path -LiteralPath $extractor)) { throw 'The pinned unpacker archive h
 foreach ($arch in $pending) {
     $package = $manifest.architectures.$arch
     $installer = Join-Path $InstallerDirectory $package.installer
+    if ($FetchInstallers) {
+        New-Item -ItemType Directory -Path $InstallerDirectory -Force | Out-Null
+        Get-VerifiedFile $package.url $installer $package.sha256
+    }
     if (!(Test-FileHash $installer $package.sha256)) { throw "Installer missing or failed SHA256 verification: $installer" }
 
     $destination = Join-Path $DestinationDirectory $arch

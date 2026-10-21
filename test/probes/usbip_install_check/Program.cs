@@ -31,8 +31,14 @@
 //   R. remove   The usbip-win2 part of a full removal (UsbipRemoval.Remove):
 //               a driver install that timed out and bound afterward (a
 //               removal proves it, and the next create records its package),
+//               but not when the record names another release or usbip-win2's
+//               Apps entry changed since, and with the package already in
+//               the store a removal takes the devnode and keeps the package),
 //               another release's package forced onto that devnode instead
-//               (neither the next create nor a default removal takes it),
+//               (neither the next create, the record update after a move,
+//               nor a default removal takes it. The release is 0.9.8.0,
+//               fetched by the build and checked against
+//               ForeignUsbipPackage.json),
 //               a record rebuilt beside a user's identical package and Apps
 //               entry (a default removal keeps that package),
 //               an install cut short before its driver (a default removal
@@ -45,8 +51,11 @@
 //               another program that uses usbip-win2 is installed), and a
 //               host controller that carried a composite since Windows
 //               started (kept until a restart with its persona's records and
-//               the Apps entry and folder of usbip-win2's installer, and kept
-//               again by a second removal before the restart).
+//               the Apps entry, folder and desktop link of usbip-win2's
+//               installer, and kept again by a second removal before the
+//               restart). Held entries under usbip-win2's folders fail the
+//               removal with nothing queued for the next start, and the next
+//               removal takes them.
 //   N. nostream A, with the composite's profile loaded from a file without
 //               its idle stream ("stream"), the one change in what the
 //               device sends between v1.12.0 and 2.0.0. Runs only when named.
@@ -321,28 +330,33 @@ internal static partial class Program
         }
     }
 
-    /// <summary>R01's other release: a usbip-win2 host controller package
-    /// other than the pinned one, from what the build unpacked into
-    /// build\downloads for this and earlier pins (0.9.8.0 first, then
-    /// 0.9.7.5), copied for the sandbox with a note of where it came from.
-    /// Only its usbip2_ude files, never the filter's. Nothing is copied when
-    /// the build has none, and R01 fails.</summary>
+    /// <summary>R01's other release: the host controller files the probe's
+    /// build unpacked into foreign-usbip\&lt;arch&gt; from the release
+    /// ForeignUsbipPackage.json pins, checked again against its hashes and
+    /// copied for the sandbox with a note of the release. Only its usbip2_ude
+    /// files, never the filter's. Nothing is copied when a file is missing or
+    /// its hash differs, and R01 fails.</summary>
     static void CopyForeignPackage(string to)
     {
         string arch = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture == System.Runtime.InteropServices.Architecture.Arm64 ? "arm64" : "x64";
-        for (string? d = AppContext.BaseDirectory; d != null; d = Path.GetDirectoryName(d))
+        string manifestPath = Path.Combine(AppContext.BaseDirectory, "ForeignUsbipPackage.json");
+        if (!File.Exists(manifestPath)) return;
+        using var manifest = JsonDocument.Parse(File.ReadAllText(manifestPath));
+        string version = manifest.RootElement.GetProperty("version").GetString()!;
+        if (!manifest.RootElement.GetProperty("architectures").TryGetProperty(arch, out var package)) return;
+        string from = Path.Combine(AppContext.BaseDirectory, "foreign-usbip", arch);
+        var files = package.GetProperty("files").EnumerateObject().ToList();
+        foreach (var f in files)
         {
-            foreach (string release in new[] { "0.9.8.0", "0.9.7.5" })
-            {
-                string from = Path.Combine(d, "build", "downloads", $"usbip-{release}-{arch}", "{tmp}");
-                if (!new[] { "usbip2_ude.inf", "usbip2_ude.sys", "usbip2_ude.cat" }.All(f => File.Exists(Path.Combine(from, f)))) continue;
-                Directory.CreateDirectory(to);
-                foreach (string f in new[] { "usbip2_ude.inf", "usbip2_ude.sys", "usbip2_ude.cat" })
-                    File.Copy(Path.Combine(from, f), Path.Combine(to, f), true);
-                File.WriteAllText(Path.Combine(to, "source.txt"), $"usbip-win2 {release} {arch}, from {from}");
-                return;
-            }
+            string path = Path.Combine(from, f.Name);
+            if (!File.Exists(path)) return;
+            using var stream = File.OpenRead(path);
+            if (!Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream)).Equals(f.Value.GetString(), StringComparison.OrdinalIgnoreCase)) return;
         }
+        Directory.CreateDirectory(to);
+        foreach (var f in files)
+            File.Copy(Path.Combine(from, f.Name), Path.Combine(to, f.Name), true);
+        File.WriteAllText(Path.Combine(to, "source.txt"), $"usbip-win2 {version} {arch}, hash-checked against ForeignUsbipPackage.json");
     }
 
     // ── Inside the sandbox ─────────────────────────────────────────────

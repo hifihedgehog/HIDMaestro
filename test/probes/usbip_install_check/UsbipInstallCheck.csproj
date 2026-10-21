@@ -7,7 +7,17 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
+    <None Include="ForeignUsbipPackage.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+
+  <!-- R01's other release: usbip-win2 0.9.8.0's host controller files,
+       fetched, unpacked and checked against ForeignUsbipPackage.json the way
+       the SDK's build handles the pinned release, into foreign-usbip\<arch>
+       beside the probe. The installer is cached in build\downloads. Only
+       the probe uses them. The SDK never embeds them. -->
+  <Target Name="PrepareForeignUsbip" AfterTargets="Build" Condition="'$(HMSandboxPublish)' != 'true'">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\..\..\..\scripts\prepare_usbip.ps1&quot; -ManifestPath &quot;$(MSBuildProjectDirectory)\ForeignUsbipPackage.json&quot; -FetchInstallers -InstallerDirectory &quot;$(MSBuildProjectDirectory)\..\..\..\build\downloads&quot; -CacheDirectory &quot;$(MSBuildProjectDirectory)\$(BaseIntermediateOutputPath)foreign-usbip&quot; -DestinationDirectory &quot;$(OutDir)foreign-usbip&quot; -Architectures x64,arm64" />
+  </Target>
 
   <!-- Windows Sandbox has no .NET runtime, so the copy that runs inside it
        is published self-contained into sandbox\ beside the probe, and so
