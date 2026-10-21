@@ -34,15 +34,23 @@ public static class HMUninstall
 
     /// <summary>Remove HIDMaestro from the machine, or, while another
     /// program that embeds HIDMaestro runs, change nothing and return
-    /// <see cref="HMUninstallStatus.Blocked"/> with the programs listed. A
-    /// program that starts during the removal stops it before the next step
-    /// that would touch what that program uses, and the status is then
-    /// Blocked too. Runs on the calling thread to its end, which takes
-    /// seconds to minutes. Requires administrator rights.
+    /// <see cref="HMUninstallStatus.Blocked"/> with the programs listed. Runs
+    /// on the calling thread to its end, which takes seconds to minutes.
+    /// Requires administrator rights.
+    ///
+    /// <para>A program on HIDMaestro 2.0.1 or later that starts during the
+    /// removal waits for its end before its first owner claim,
+    /// <see cref="HMContext.InstallDriver"/>, cleanup, OEM name override,
+    /// VR driver registration or transport install, and then installs the
+    /// driver again. An older program does not wait. The removal checks for
+    /// running programs before it removes devices, before it puts back the
+    /// OEM names and while it holds the driver deploy lock, and one it finds
+    /// stops it before that step with the status Blocked.</para>
     ///
     /// <para>A file another program holds open inside
-    /// %ProgramFiles%\HIDMaestro is deleted when Windows next starts, and the
-    /// status is then <see cref="HMUninstallStatus.RemovedRestartPending"/>.
+    /// %ProgramFiles%\HIDMaestro, in a folder only administrators can change,
+    /// is deleted when Windows next starts, and the status is then
+    /// <see cref="HMUninstallStatus.RemovedRestartPending"/>.
     /// One anywhere else, such as the OpenVR driver while SteamVR runs,
     /// stays, and is reported failed: close the program and run the removal
     /// again. The machine is never restarted.</para></summary>

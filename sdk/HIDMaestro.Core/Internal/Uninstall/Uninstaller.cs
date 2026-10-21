@@ -31,19 +31,26 @@ namespace HIDMaestro.Internal.Uninstall;
 /// <item>DeviceOverrides keys, under the inventory's conditions.</item>
 /// <item>The OpenVR registration, in every profile's path registry.</item>
 /// <item><see cref="UsbipRemoval.Remove"/>.</item>
-/// <item>The driver packages, with a plain <c>pnputil /delete-driver</c>.</item>
+/// <item>The driver packages, with SetupUninstallOEMInf and no
+/// SUOI_FORCEDELETE.</item>
 /// <item>The WUDF service keys whose driver folder is gone.</item>
 /// <item>HIDMaestro's registry roots.</item>
-/// <item>The signing certificate, once no HIDMaestro package is left.</item>
-/// <item>Files and folders, deleted without following links.</item>
+/// <item>The signing certificate, once no package whose provider is
+/// HIDMaestro is left.</item>
+/// <item>Files and folders, from a trusted folder down without following a
+/// link (SafeDelete).</item>
 /// </list>
 ///
 /// <para>The run takes no owner claim (<see cref="MachineClaims.NoNewClaim"/>),
 /// constructs no HMContext and installs nothing. It holds
 /// <see cref="OwnerSweep.CreateGate"/> for writing from its first look to its
 /// last step, so no create of the calling process and no phantom cleanup of
-/// it runs alongside, and a machine-wide lock of its own, so two removals
-/// never run at once.</para>
+/// it runs alongside, and a machine-wide mutex of its own, so two removals
+/// never run at once. Another program's first claim, cleanup, override, VR
+/// registration or transport install waits for that mutex
+/// (<see cref="RemovalGate"/>), so a program that starts during the run waits
+/// for its end. The censuses of running programs before the devices, before
+/// the overrides and under the deploy lock are the backstop.</para>
 /// </summary>
 internal static partial class Uninstaller
 {
@@ -63,7 +70,7 @@ internal static partial class Uninstaller
     internal const string KindServiceSetting = "service setting";
     internal const string KindStep = "removal step";
 
-    private const string UninstallMutexObject = "Uninstall";
+    internal const string UninstallMutexObject = "Uninstall";
     private const string DeviceOverridesRoot = @"SYSTEM\CurrentControlSet\Control\DeviceOverrides";
     private const string WudfServicesRoot = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\WUDF\Services";
     private const string DriverPackagesRoot = @"SYSTEM\DriverDatabase\DriverPackages";
@@ -124,7 +131,14 @@ internal static partial class Uninstaller
         // No lock of this process is held across this wait, so a preview in
         // the same process never waits behind another removal. The mutex is
         // owned by a thread, so it orders two removals in one process too.
+        // The mutex is also the gate a program's first claim, deploy or
+        // create waits at (RemovalGate), so a program that starts during the
+        // removal waits for its end. A thread of this process waiting there
+        // stops waiting once RemovingHere is set, so this process's own
+        // create in flight, which holds CreateGate's read side, finishes and
+        // lets the write side below in.
         using var machine = AcquireUninstallLock();
+        RemovalGate.RemovingHere = true;
         try
         {
             OwnerSweep.CreateGate.EnterWriteLock();
@@ -136,7 +150,11 @@ internal static partial class Uninstaller
                 OwnerSweep.CreateGate.ExitWriteLock();
             }
         }
-        finally { machine.ReleaseMutex(); }
+        finally
+        {
+            RemovalGate.RemovingHere = false;
+            machine.ReleaseMutex();
+        }
     }
 
     private static HMUninstallReport RunGated(HMUninstallOptions options)
@@ -267,8 +285,10 @@ internal static partial class Uninstaller
     }
 
     /// <summary>The machine-wide lock two removals share, in the admin-only
-    /// namespace (<see cref="AdminNamespace"/>). Nothing else takes it, so it
-    /// comes first and orders against nothing.</summary>
+    /// namespace (<see cref="AdminNamespace"/>). It comes first and orders
+    /// against nothing: the only other taker, <see cref="RemovalGate"/>,
+    /// takes it holding no lock of the SDK's and lets it go after one owner
+    /// claim.</summary>
     private static Mutex AcquireUninstallLock()
     {
         var m = new Mutex(false, AdminNamespace.Name(UninstallMutexObject));
@@ -790,14 +810,15 @@ internal static partial class Uninstaller
     /// <summary>A WUDF service key goes once the driver store folder its
     /// ImagePath names is gone, and only when that folder is one of
     /// HIDMaestro's packages' (hidmaestro*.inf_*). Windows makes these keys
-    /// from the INFs' UmdfService lines, and a plain <c>pnputil
-    /// /delete-driver</c> of the package takes their values and leaves the
-    /// key with its empty Parameters and State subkeys (measured in Windows
-    /// Sandbox, 2026-10-20). Such a key, under one of HIDMaestro's UMDF
-    /// service names and holding no value anywhere, goes too. Windows' own
+    /// from the INFs' UmdfService lines, and deleting the package takes
+    /// their values and leaves the key with its empty Parameters and State
+    /// subkeys (measured in Windows Sandbox, 2026-10-20). Such a key, under
+    /// one of HIDMaestro's UMDF service names and holding no value anywhere,
+    /// goes too. Windows' own
     /// mshidumdf and WUDFRd keys are never touched.</summary>
     private static void ScanWudf(List<UninstallEntry> list)
     {
+        bool packageKept = PackagesTheRunKeeps().Any(p => !p.WinUsb);
         foreach (string name in WudfServiceNames)
         {
             using var k = Registry.LocalMachine.OpenSubKey($@"{WudfServicesRoot}\{name}");
@@ -805,9 +826,12 @@ internal static partial class Uninstaller
             string location = $@"HKLM\{WudfServicesRoot}\{name}";
             list.Add(WudfFolder(k) == null && !EmptySkeleton(k)
                 ? Keep(KindWudf, location, $"its ImagePath, {k.GetValue("ImagePath") ?? "none"}, is not in a HIDMaestro driver package's folder")
+                : packageKept ? Keep(KindWudf, location, WudfKeptReason)
                 : Would(KindWudf, location));
         }
     }
+
+    private const string WudfKeptReason = "a HIDMaestro driver package is still in the driver store, and its service needs the key";
 
     /// <summary>A key that holds no value, itself or in any subkey.</summary>
     private static bool EmptySkeleton(RegistryKey k)
@@ -859,6 +883,9 @@ internal static partial class Uninstaller
 
     private static void ScanCertificate(List<UninstallEntry> list)
     {
+        // A package the run will keep keeps the certificate too
+        // (ActCertificate), and the preview says so.
+        bool kept = PackagesTheRunKeeps().Count > 0;
         foreach (var name in CertificateStores)
         {
             using var store = new X509Store(name, StoreLocation.LocalMachine);
@@ -867,8 +894,24 @@ internal static partial class Uninstaller
             foreach (var cert in store.Certificates)
                 using (cert)
                     if (string.Equals(cert.Subject, CertificateSubject, StringComparison.Ordinal))
-                        list.Add(Would(KindCertificate, $@"LocalMachine\{name}\{cert.Thumbprint}"));
+                    {
+                        string location = $@"LocalMachine\{name}\{cert.Thumbprint}";
+                        list.Add(kept ? Keep(KindCertificate, location, CertificateKeptReason) : Would(KindCertificate, location));
+                    }
         }
+    }
+
+    private const string CertificateKeptReason =
+        "a driver package whose provider is HIDMaestro stays in the driver store, signed with it";
+
+    /// <summary>The HIDMaestro packages a run leaves as they are: one under
+    /// a name no HIDMaestro release used, and a WinUSB package while its
+    /// device is plugged in. One a device still uses at the run's time is
+    /// found only by the run.</summary>
+    private static List<Package> PackagesTheRunKeeps()
+    {
+        bool winUsbPresent = WinUsbDevicePresent();
+        return HidMaestroPackages().Where(p => !p.Known || (p.WinUsb && winUsbPresent)).ToList();
     }
 
     /// <summary>The folders a removal deletes: %ProgramFiles%\HIDMaestro,
@@ -948,7 +991,12 @@ internal static partial class Uninstaller
         var children = ListThrough(anchor, relative, out string? refusal);
         if (children == null)
         {
-            if (refusal != null)
+            // A link under HIDMaestro's own name, which a program without
+            // elevation can plant at %ProgramData%\HIDMaestro: it is not
+            // walked, and it goes as a link (SafeDelete.Tree).
+            if (refusal != null && SafeDelete.LeafIsLink(anchor, relative))
+                list.Add(new FileTarget(Would(KindFolder, root), anchor, relative, inProtected));
+            else if (refusal != null)
                 list.Add(new FileTarget(new UninstallEntry(KindFolder, root, UninstallOutcome.Failed, refusal), anchor, relative, inProtected));
             return;
         }
@@ -1180,8 +1228,7 @@ internal static partial class Uninstaller
             if (folder == null && !skeleton) continue;
             if (packageLeft || (folder != null && Directory.Exists(folder)))
             {
-                told.Add(new UninstallEntry(KindWudf, $@"HKLM\{path}", UninstallOutcome.Kept,
-                    "a HIDMaestro driver package is still in the driver store, and its service needs the key"));
+                told.Add(new UninstallEntry(KindWudf, $@"HKLM\{path}", UninstallOutcome.Kept, WudfKeptReason));
                 continue;
             }
             try { Registry.LocalMachine.DeleteSubKeyTree(path, throwOnMissingSubKey: false); }
@@ -1268,8 +1315,7 @@ internal static partial class Uninstaller
     {
         if (HidMaestroPackages().Count > 0)
         {
-            ScanCertificateInto(told, UninstallOutcome.Kept,
-                "a driver package whose provider is HIDMaestro is still in the driver store, signed with it");
+            ScanCertificateInto(told, UninstallOutcome.Kept, CertificateKeptReason);
             return;
         }
         var keys = new List<RSA>();

@@ -88,6 +88,9 @@ public static class HMOemNameOverride
     /// elevated.</exception>
     public static void Set(ushort vid, ushort pid, string label)
     {
+        // Waits, once per process, for a removal of HIDMaestro another
+        // process runs (Uninstall.RemovalGate).
+        Internal.Uninstall.RemovalGate.Pass();
         OemNameOverrideStore.Claim(vid, pid, label);
     }
 

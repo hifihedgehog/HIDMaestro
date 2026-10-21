@@ -178,7 +178,10 @@ internal static partial class MachineClaims
     /// nothing to do in a process that is not elevated: false there.</summary>
     internal static bool TryEnsureOwner()
     {
-        try { EnsureOwner(); return true; }
+        // The first claim waits for a removal of HIDMaestro another process
+        // runs, and is taken under that removal's mutex
+        // (Uninstall.RemovalGate). Its callers hold no lock of the SDK's.
+        try { Uninstall.RemovalGate.Pass(EnsureOwner); return true; }
         catch (UnauthorizedAccessException) { return false; }
     }
 
