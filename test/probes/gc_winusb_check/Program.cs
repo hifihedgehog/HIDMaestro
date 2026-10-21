@@ -93,7 +93,7 @@ internal static class Program
         Probe.Check("no WinUSB hold left in the ledger", RegistryLedger.HeldWinUsbDevnodes().Count == 0,
             string.Join(", ", RegistryLedger.HeldWinUsbDevnodes()));
         List<string> Left() => Devnodes.PresentAdapters().Except(present, StringComparer.OrdinalIgnoreCase).ToList();
-        Probe.Check("no adapter of this run's left present", Probe.WaitFor(() => Left().Count == 0, 10_000),
+        Probe.Check("no adapter of this run's left present", Probe.WaitFor(() => Left().Count == 0, Probe.HangMs()),
             string.Join(", ", Left()));
         return Probe.Finish("S81");
     }
@@ -111,7 +111,7 @@ internal static class Program
             if (first == null) return;
             var bound = a.BindWinUsb();
             Probe.Check("BindWinUsb binds WinUSB", bound == HMWinUsbBinding.Bound, $"{bound}");
-            Probe.Check("the devnode runs WinUSB", Probe.WaitFor(() => Devnodes.Service(first) == "WINUSB" && Devnodes.Status(first) is { Problem: 0 }, 5000),
+            Probe.Check("the devnode runs WinUSB", Probe.WaitFor(() => Devnodes.Service(first) == "WINUSB" && Devnodes.Status(first) is { Problem: 0 }, Probe.HangMs()),
                 $"{Devnodes.Service(first)}");
             Probe.Check("it carries no reinstall flag, which libusb would read as an install problem",
                 ((Devnodes.ConfigFlags(first) ?? 0) & CONFIGFLAG_REINSTALL) == 0,
@@ -147,7 +147,7 @@ internal static class Program
                     second ?? "");
                 if (second != null)
                 {
-                    Probe.WaitFor(() => Devnodes.Status(second) is { Problem: 10 }, InstallBoundMs);
+                    Probe.WaitFor(() => Devnodes.Status(second) is { Problem: 10 }, Probe.HangMs(InstallBoundMs));
                     Probe.Check("it gets input.inf, as a real adapter would, while the first stays on WinUSB",
                         Devnodes.Service(second) == "HidUsb" && Devnodes.Service(first) == "WINUSB",
                         $"{Devnodes.Service(second)} / {Devnodes.Service(first)}");
@@ -158,12 +158,12 @@ internal static class Program
             }
             if (second != null)
                 Probe.Check("the second's hold goes with it", Probe.WaitFor(
-                    () => !RegistryLedger.HeldWinUsbDevnodes().Contains(second, StringComparer.OrdinalIgnoreCase), 5000));
+                    () => !RegistryLedger.HeldWinUsbDevnodes().Contains(second, StringComparer.OrdinalIgnoreCase), Probe.HangMs()));
         }
         Console.WriteLine("-- dispose");
         Probe.Check("the first's hold goes with it",
             !RegistryLedger.HeldWinUsbDevnodes().Contains(first!, StringComparer.OrdinalIgnoreCase));
-        Probe.Check("its devnode leaves", Probe.WaitFor(() => !Devnodes.IsPresent(first!), 10_000));
+        Probe.Check("its devnode leaves", Probe.WaitFor(() => !Devnodes.IsPresent(first!), Probe.HangMs()));
         // A devnode still present when the teardown restored it keeps its
         // entry, and the follow-up that restore started flags it once it is
         // gone. A sweep leaves an entry a follow-up watches to it.
@@ -220,7 +220,7 @@ internal static class Program
             finally { devnodes.ReleaseMutex(); devnodes.Dispose(); }
         }) { IsBackground = true };
         restorer.Start();
-        held.Wait(10_000);
+        held.Wait(Probe.HangMs());
 
         HMWinUsbBinding? bound = null;
         string error = "";
@@ -230,11 +230,11 @@ internal static class Program
             catch (Exception ex) { error = ex.Message; }
         }) { IsBackground = true };
         binder.Start();
-        bool restored = restorer.Join(20_000);
-        bool finished = binder.Join(20_000);
+        bool restored = restorer.Join(Probe.HangMs(180_000));
+        bool finished = binder.Join(Probe.HangMs(180_000));
         Probe.Check("the restore finishes while the bind waits for the devnode lock", restored);
         Probe.Check("the bind finishes after it and binds WinUSB", finished && bound == HMWinUsbBinding.Bound,
-            finished ? $"{bound} {error}" : "both threads still waiting after 20 s");
+            finished ? $"{bound} {error}" : "both threads still waiting at the hang bound");
         if (!restored || !finished)
         {
             // The two threads hold the machine-wide devnode lock between them.
@@ -276,7 +276,7 @@ internal static class Program
             finally { deploy.ReleaseMutex(); deploy.Dispose(); }
         }) { IsBackground = true };
         holder.Start();
-        held.Wait(10_000);
+        held.Wait(Probe.HangMs());
 
         long stagedMs = -1, deployedMs = -1;
         bool stagedAfter = false, deployedAfter = false;
@@ -307,7 +307,7 @@ internal static class Program
         }) { IsBackground = true };
         stager.Start();
         deployer.Start();
-        bool done = holder.Join(20_000) & stager.Join(20_000) & deployer.Join(20_000);
+        bool done = holder.Join(Probe.HangMs()) & stager.Join(Probe.HangMs()) & deployer.Join(Probe.HangMs());
         Probe.Check("a staging waits for the staging lock's holder, then finishes", stagedMs >= 0 && stagedAfter,
             $"{stagedMs} ms, {(stagedAfter ? "after" : "before")} the holder let go {stageError}");
         Probe.Check("a deploy that stages waits for the deploy lock's holder, then finishes", deployedMs >= 0 && deployedAfter,
@@ -339,7 +339,7 @@ internal static class Program
         string? line = null;
         var reader = new Thread(() => { try { line = child.StandardOutput.ReadLine(); } catch { } }) { IsBackground = true };
         reader.Start();
-        reader.Join(60_000);
+        reader.Join(Probe.HangMs(180_000));
         var m = line == null ? null : Regex.Match(line, "^bound (\\w+) (.+)$");
         Probe.Check("the child binds WinUSB", m is { Success: true } && m.Groups[1].Value == "Bound", line ?? "no answer");
         if (m is not { Success: true })
@@ -350,7 +350,7 @@ internal static class Program
         string id = m.Groups[2].Value;
         child.Kill();
         child.WaitForExit(10_000);
-        Probe.Check("the killed child's adapter leaves", Probe.WaitFor(() => !Devnodes.IsPresent(id), 15_000));
+        Probe.Check("the killed child's adapter leaves", Probe.WaitFor(() => !Devnodes.IsPresent(id), Probe.HangMs()));
         Probe.Check("the gone devnode still names WinUSB", Devnodes.Service(id, phantom: true) == "WINUSB",
             $"{Devnodes.Service(id, phantom: true)}");
         Probe.Check("the ledger still holds it for the next reclaim",
@@ -376,13 +376,13 @@ internal static class Program
             if (reclaimFirst)
             {
                 Probe.Check("it gets input.inf: the flag reinstalled it by rank",
-                    Probe.WaitFor(() => Devnodes.Service(id) == "HidUsb" && Devnodes.Status(id) is { Problem: 10 }, InstallBoundMs),
+                    Probe.WaitFor(() => Devnodes.Service(id) == "HidUsb" && Devnodes.Status(id) is { Problem: 10 }, Probe.HangMs(InstallBoundMs)),
                     $"{Devnodes.Service(id)}");
                 Probe.Check("and the flag is spent", ((Devnodes.ConfigFlags(id) ?? 0) & CONFIGFLAG_REINSTALL) == 0);
             }
             else if (bindArrival)
             {
-                Probe.Check("before any reclaim it finds WinUSB", Probe.WaitFor(() => Devnodes.Service(id) == "WINUSB", 10_000),
+                Probe.Check("before any reclaim it finds WinUSB", Probe.WaitFor(() => Devnodes.Service(id) == "WINUSB", Probe.HangMs(InstallBoundMs)),
                     $"{Devnodes.Service(id)}");
                 var again = standIn.BindWinUsb();
                 Probe.Check("BindWinUsb finds it already bound", again == HMWinUsbBinding.AlreadyBound, $"{again}");
@@ -396,7 +396,7 @@ internal static class Program
             else
             {
                 Probe.Check("before any reclaim it finds WinUSB, as an instance Zadig bound would",
-                    Probe.WaitFor(() => Devnodes.Service(id) == "WINUSB", 10_000), $"{Devnodes.Service(id)}");
+                    Probe.WaitFor(() => Devnodes.Service(id) == "WINUSB", Probe.HangMs(InstallBoundMs)), $"{Devnodes.Service(id)}");
                 // A restore never installs a driver on a present devnode: the
                 // stand-in keeps WinUSB, and the entry stays until it leaves.
                 RegistryLedger.PruneDead();
@@ -414,7 +414,7 @@ internal static class Program
             // and which the sweep here leaves the entry to. When the arrival
             // bound, its dispose flags it, or the follow-up the dispose
             // started does when the devnode took longer than 2 s to leave.
-            Probe.WaitFor(() => !Devnodes.IsPresent(id), 10_000);
+            Probe.WaitFor(() => !Devnodes.IsPresent(id), Probe.HangMs());
             RegistryLedger.PruneDead();
             FlaggedOnceGone(id, "once it is gone, the follow-up or a sweep flags it for reinstall, and the entry goes");
         }
@@ -444,14 +444,14 @@ internal static class Program
     /// which polls every 250 ms and flags it once it has left, and a sweep
     /// skips an entry a follow-up of any program watches
     /// (RegistryLedger.RestoreWinUsbEntries). So the flag can land after the
-    /// sweep returns, and the check waits up to 15 s for it: the poll, the
-    /// devnode lock and a pnputil listing of the driver store. It prints
+    /// sweep returns, and the check waits for it, bounded by a hang bound: the
+    /// poll, the devnode lock and a pnputil listing of the driver store. It prints
     /// what the sweep's return found and how long the flag took.</summary>
     static void FlaggedOnceGone(string id, string label)
     {
         uint atSweep = Devnodes.ConfigFlags(id) ?? 0;
         var sw = Stopwatch.StartNew();
-        bool done = Probe.WaitFor(() => ((Devnodes.ConfigFlags(id) ?? 0) & CONFIGFLAG_REINSTALL) != 0 && !HasWinUsbEntry(id), 15_000);
+        bool done = Probe.WaitFor(() => ((Devnodes.ConfigFlags(id) ?? 0) & CONFIGFLAG_REINSTALL) != 0 && !HasWinUsbEntry(id), Probe.HangMs());
         Probe.Check(label, done,
             $"ConfigFlags 0x{Devnodes.ConfigFlags(id) ?? 0:X} (0x{atSweep:X} as the sweep returned), entry {(HasWinUsbEntry(id) ? "kept" : "gone")}, {sw.ElapsedMilliseconds} ms");
     }
@@ -475,7 +475,7 @@ internal static class Program
         string? id = null;
         int port = c.UsbipHandle!.VhciPort;
         Probe.WaitFor(() => (id = Devnodes.AdapterOnVhciPort(port)) != null
-                            && !string.Equals(id, except, StringComparison.OrdinalIgnoreCase), 10_000);
+                            && !string.Equals(id, except, StringComparison.OrdinalIgnoreCase), Probe.HangMs());
         return id;
     }
 

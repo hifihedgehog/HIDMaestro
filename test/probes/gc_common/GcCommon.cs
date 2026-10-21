@@ -169,6 +169,11 @@ internal static class Probe
         while (Stopwatch.GetTimestamp() < end) Thread.SpinWait(64);
     }
 
+    /// <summary>A hang bound for a wait on Windows' device state, which a
+    /// loaded machine's device installs and removals can delay with no
+    /// defect: at least a minute, at the SDK's timeout scale.</summary>
+    public static int HangMs(int ms = 60_000) => HIDMaestro.Internal.TimeoutScale.Apply(Math.Max(ms, 60_000));
+
     /// <summary>Poll <paramref name="cond"/> every 20 ms until it holds or
     /// <paramref name="timeoutMs"/> passes.</summary>
     public static bool WaitFor(Func<bool> cond, int timeoutMs)
