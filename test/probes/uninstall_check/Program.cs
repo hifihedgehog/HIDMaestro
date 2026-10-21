@@ -872,24 +872,36 @@ internal static class Program
                 catch { }
             }));
         string lockName = AdminName("Uninstall");
-        // Whether the removal's lock is free now, read without waiting. The
-        // read takes the lock for a moment, so the late programs' reads go
-        // one at a time under a probe-only mutex: a read never sees another
-        // read's hold, and "held" means the removal holds it.
+        // Whether the removal holds its lock now. Each read takes the lock
+        // for a moment, so the late programs' reads go one at a time under a
+        // probe-only mutex, and a read never sees another read's hold. A
+        // gate pass of another program holds the lock for one owner claim,
+        // so "held" needs six reads 200 ms apart that all find it held, a
+        // span no gate pass reaches and a running removal, which holds it
+        // for seconds, always does. Any free read is free.
+        bool HeldNow()
+        {
+            if (!Mutex.TryOpenExisting(lockName, out var mx)) return false;
+            using (mx)
+            {
+                bool free;
+                try { free = mx.WaitOne(0); } catch (AbandonedMutexException) { free = true; }
+                if (free) mx.ReleaseMutex();
+                return !free;
+            }
+        }
         string LockState()
         {
             using var reads = new Mutex(false, "HIDMaestroUninstallCheck.LockRead");
             try { reads.WaitOne(); } catch (AbandonedMutexException) { }
             try
             {
-                if (!Mutex.TryOpenExisting(lockName, out var mx)) return "free";
-                using (mx)
+                for (int i = 0; i < 6; i++)
                 {
-                    bool free;
-                    try { free = mx.WaitOne(0); } catch (AbandonedMutexException) { free = true; }
-                    if (free) mx.ReleaseMutex();
-                    return free ? "free" : "held";
+                    if (i > 0) Thread.Sleep(200);
+                    if (!HeldNow()) return "free";
                 }
+                return "held";
             }
             finally { reads.ReleaseMutex(); }
         }
