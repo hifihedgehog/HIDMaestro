@@ -20,8 +20,10 @@
 // Each artifact is SHA-256 hashed. `--dump` prints the golden table to
 // paste below, `--bytes` each artifact whole, and the default mode compares
 // against the embedded goldens, then runs the codec vocabulary's checks
-// (Vocabulary.cs), and exits 1 on any mismatch. S91 runs it. Runs
-// UNELEVATED (pure byte manipulation, no driver, no devices).
+// (Vocabulary.cs), and exits 1 on any mismatch. S91 runs it. `--exhaustive`
+// adds sweeps of all 2^32 floats to the vocabulary's float proofs, a one-off
+// run the battery leaves out. Runs UNELEVATED (pure byte manipulation, no
+// driver, no devices).
 
 using System;
 using System.Collections.Generic;
@@ -174,6 +176,9 @@ internal static class Program
     static int Main(string[] args)
     {
         bool dump = args.Contains("--dump");
+        // --exhaustive adds the vocabulary's sweeps of all 2^32 floats, a
+        // one-off proof the battery's default run leaves out.
+        Vocabulary.Exhaustive = args.Contains("--exhaustive");
         // --bytes prints each artifact whole beside its hash, so a deliberate
         // regeneration can be checked byte by byte against the tree before.
         bool bytes = args.Contains("--bytes");
