@@ -818,12 +818,16 @@ internal static partial class UsbipDriverInstaller
     {
         // Same instance-number caveat as StampOwnerHardwareId: the vhci root
         // is not always 0000. Repair the first present controller that
-        // carries the usbip UDE id.
+        // carries the usbip UDE id and has a driver: one with no driver, an
+        // install of HIDMaestro's cut short, has nothing a restart starts,
+        // and InstallLocked finishes it or leaves it.
         uint devInst = 0;
         bool located = false;
         for (int n = 0; n < 16 && !located; n++)
         {
             if (CM_Locate_DevNodeW(out devInst, $"ROOT\\USB\\{n:D4}", CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS)
+                continue;
+            if (GetStringProperty(devInst, DEVPKEY_Device_DriverInfPath) == null)
                 continue;
             foreach (var hwid in GetMultiSz(devInst, CM_DRP_HARDWAREID))
                 if (hwid.IndexOf("USBIP_WIN2", StringComparison.OrdinalIgnoreCase) >= 0) { located = true; break; }

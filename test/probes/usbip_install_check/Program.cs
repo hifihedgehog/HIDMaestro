@@ -31,6 +31,10 @@
 //   R. remove   The usbip-win2 part of a full removal (UsbipRemoval.Remove):
 //               a driver install that timed out and bound afterward (a
 //               removal proves it, and the next create records its package),
+//               another release's package forced onto that devnode instead
+//               (neither the next create nor a default removal takes it),
+//               a record rebuilt beside a user's identical package and Apps
+//               entry (a default removal keeps that package),
 //               an install cut short before its driver (a default removal
 //               takes it, or the next install finishes the same devnode), a
 //               preview that changes nothing, a removal of an install the
@@ -214,6 +218,7 @@ internal static partial class Program
     {
         string results = Path.Combine(Path.GetTempPath(), $"HIDMaestro_sandbox_{scenario}_{Guid.NewGuid():N}");
         Directory.CreateDirectory(results);
+        if (scenario == "remove") CopyForeignPackage(Path.Combine(results, "foreign"));
         string? id = null;
         double startS = double.NaN, readyS = double.NaN, runS = double.NaN;
         int tries = 0;
@@ -313,6 +318,25 @@ internal static partial class Program
                 catch (Exception ex) { Console.WriteLine($"  [NOTE] {scenario}: diagnostic logs not copied: {ex.GetType().Name}: {ex.Message}"); }
             }
             try { Directory.Delete(results, true); } catch { }
+        }
+    }
+
+    /// <summary>R01's other release: usbip-win2 0.9.8.0's own host controller
+    /// package, which the build unpacked into build\downloads when an earlier
+    /// SDK pinned it, copied for the sandbox. Only its usbip2_ude files, never
+    /// the filter's. Nothing is copied when the build has none, and R01 says
+    /// so.</summary>
+    static void CopyForeignPackage(string to)
+    {
+        string arch = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture == System.Runtime.InteropServices.Architecture.Arm64 ? "arm64" : "x64";
+        for (string? d = AppContext.BaseDirectory; d != null; d = Path.GetDirectoryName(d))
+        {
+            string from = Path.Combine(d, "build", "downloads", $"usbip-0.9.8.0-{arch}", "{tmp}");
+            if (!File.Exists(Path.Combine(from, "usbip2_ude.inf"))) continue;
+            Directory.CreateDirectory(to);
+            foreach (string f in new[] { "usbip2_ude.inf", "usbip2_ude.sys", "usbip2_ude.cat" })
+                File.Copy(Path.Combine(from, f), Path.Combine(to, f), true);
+            return;
         }
     }
 

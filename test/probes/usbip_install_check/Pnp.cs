@@ -171,6 +171,15 @@ internal static class Pnp
         finally { SetupDiDestroyDeviceInfoList(set); }
     }
 
+    [DllImport("newdev.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool UpdateDriverForPlugAndPlayDevicesW(IntPtr hwnd, string hardwareId, string infPath, uint flags, out bool reboot);
+
+    /// <summary>Put <paramref name="inf"/> on every present devnode with
+    /// <paramref name="hardwareId"/>, forced, as devnode.exe and hmswd
+    /// force-driver do. Returns 0 or the Win32 error.</summary>
+    internal static int ForceDriver(string inf, string hardwareId) =>
+        UpdateDriverForPlugAndPlayDevicesW(IntPtr.Zero, hardwareId, inf, 1 /* INSTALLFLAG_FORCE */, out _) ? 0 : Marshal.GetLastWin32Error();
+
     /// <summary>The published INF a devnode's driver came from, or null.</summary>
     internal static string? DriverInf(string id) => StringProperty(id, DriverInfPathKey);
 
