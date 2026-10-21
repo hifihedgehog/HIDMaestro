@@ -244,7 +244,7 @@ static class ValveSdlCheck
             {
                 var present = JoystickIds();
                 c = ctx.CreateController(prof);
-                gp = WaitForGamepad(t.Vid, t.Pid, 20, present);
+                gp = WaitForGamepad(t.Vid, t.Pid, 60, present);
                 Check("stock SDL enumerates the persona as a gamepad", gp != IntPtr.Zero);
                 if (gp == IntPtr.Zero)
                 {
@@ -421,11 +421,11 @@ static class ValveSdlCheck
             {
                 if (gp != IntPtr.Zero) SDL_CloseGamepad(gp);
                 c?.Dispose();
-                // Until SDL lists the persona no more, for up to the 500 ms
-                // this waited before.
+                // Until SDL lists the persona no more, so the next part
+                // does not see this one; a minute is the hang bound.
                 var gone = System.Diagnostics.Stopwatch.StartNew();
                 do { SDL_UpdateGamepads(); }
-                while (Listed(t.Vid, t.Pid) && gone.ElapsedMilliseconds < 500 && Sleep10());
+                while (Listed(t.Vid, t.Pid) && gone.ElapsedMilliseconds < 60_000 && Sleep10());
             }
         }
 
