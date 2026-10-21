@@ -201,7 +201,9 @@ internal static class Pnp
         if (size == 0) return null;
         var buf = new byte[size];
         if (CM_Get_DevNode_PropertyW(dev, ref key, out uint type, buf, ref size, 0) != CR_SUCCESS || type != DEVPROP_TYPE_STRING) return null;
-        return Encoding.Unicode.GetString(buf, 0, (int)size).TrimEnd('\0');
+        // An empty value is no value, as the SDK reads DriverInfPath.
+        string value = Encoding.Unicode.GetString(buf, 0, (int)size).TrimEnd('\0');
+        return value.Length == 0 ? null : value;
     }
 
     /// <summary>The devnode of a device interface, then each parent up to the

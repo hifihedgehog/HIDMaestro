@@ -109,7 +109,38 @@ internal static partial class Program
         Record("remove: a removal proves it, and would take the host controller and its package",
                Has(latePreview, "devnode", l => l.StartsWith(late + " "), "WouldRemove")
                && Has(latePreview, "driver package", l => l.StartsWith(Pnp.DriverInf(late) + " "), "WouldRemove"));
-        CreateOnWorkingTransport("remove: bound late: the next create's record check ran (the positive control)");
+
+        // The same devnode under records that differ in one value each. The
+        // record goes back to the plain one after each.
+        string? lateOemNow = Pnp.DriverInf(late);
+        // The store held that package before the install, as a user's
+        // identical one: the record still proves the devnode, and the
+        // package is not the record's to take.
+        WriteRecordWithNoDriver(late, lateToken, PinnedWholeVer, lateOemNow == null ? null : new[] { lateOemNow });
+        var heldBefore = Remove("remove: bound late, package held before", preview: true, includeUnproven: false);
+        Record("remove: with the package in the store before the install, a removal takes the devnode and keeps the package",
+               lateOemNow != null && Has(heldBefore, "devnode", l => l.StartsWith(late + " "), "WouldRemove")
+               && Has(heldBefore, "driver package", l => l.StartsWith(lateOemNow + " "), "Kept"),
+               string.Join("; ", heldBefore.Where(e => e.Kind is "devnode" or "driver package")));
+        // A record that names another release than the one bound: an older
+        // program's pin.
+        WriteRecordWithNoDriver(late, lateToken, "01/01/2000,0.0.0.0");
+        CreateOnWorkingTransport("remove: bound late, another release recorded: the next create's record check ran and recorded nothing", expect: 0);
+        var otherRelease = Remove("remove: bound late, another release recorded", preview: true, includeUnproven: false);
+        Record("remove: with another release recorded, the package is not recorded and a removal keeps the devnode",
+               RecordValue("OemInf") == null && Has(otherRelease, "devnode", l => l.StartsWith(late + " "), "Kept"),
+               $"OemInf {RecordValue("OemInf") ?? "none"}; " + string.Join("; ", otherRelease.Where(e => e.Kind == "devnode")));
+        // usbip-win2's Apps entry written after the install: its installer
+        // ran, and the package bound may be its own.
+        WriteRecordWithNoDriver(late, lateToken, PinnedWholeVer);
+        PlantAppsEntry();
+        CreateOnWorkingTransport("remove: bound late, Apps entry written since: the next create's record check ran and recorded nothing", expect: 0);
+        Record("remove: with usbip-win2's Apps entry written since the install, the next create does not record the package",
+               RecordValue("OemInf") == null, $"OemInf {RecordValue("OemInf") ?? "none"}");
+        Registry.LocalMachine.DeleteSubKeyTree(UninstallKey, throwOnMissingSubKey: false);
+        WriteRecordWithNoDriver(late, lateToken, PinnedWholeVer);
+
+        CreateOnWorkingTransport("remove: bound late: the next create's record check ran and recorded the package (the positive control)", expect: 1);
         Record("remove: the next create on the working transport records the package",
                RecordValue("OemInf") is string lateOem && lateOem.Equals(Pnp.DriverInf(late), StringComparison.OrdinalIgnoreCase),
                $"OemInf {RecordValue("OemInf") ?? "none"}");
@@ -121,12 +152,13 @@ internal static partial class Program
         // The same record with no package, but another usbip-win2 release's
         // own package forced onto the devnode, as another program's installer
         // forces its own. Neither the next create nor a removal takes it for
-        // HIDMaestro's. The host copies the package from the build's
-        // downloads (CopyForeignPackage), and a tree without one fails here.
+        // HIDMaestro's. The probe's build fetches that release, hash-pinned in
+        // ForeignUsbipPackage.json, and the host copies it in
+        // (CopyForeignPackage). A build without it fails here.
         string foreignInf = Path.Combine(ForeignDir, "usbip2_ude.inf");
         string foreignFrom = File.Exists(Path.Combine(ForeignDir, "source.txt")) ? File.ReadAllText(Path.Combine(ForeignDir, "source.txt")).Trim() : "";
         Record("remove: the tree holds another usbip-win2 release's host controller package for the foreign bind",
-               File.Exists(foreignInf), File.Exists(foreignInf) ? foreignFrom : @"none under build\downloads\usbip-<release>-<arch>\{tmp}");
+               File.Exists(foreignInf), File.Exists(foreignInf) ? foreignFrom : @"foreign-usbip\<arch> beside the probe is missing or fails ForeignUsbipPackage.json's hashes");
         if (File.Exists(foreignInf))
         {
             var (other, otherToken) = RegisterOnly();
@@ -136,8 +168,13 @@ internal static partial class Program
             Record($"remove: another release's package ({foreignFrom}) binds to HIDMaestro's devnode",
                    forced == 0 && foreignOem != null && !InfDriverVer(foreignOem).Equals(PinnedVer, StringComparison.OrdinalIgnoreCase),
                    $"force {forced}, {other} runs {foreignOem} at {(foreignOem == null ? "" : InfDriverVer(foreignOem))}");
-            CreateOnWorkingTransport("remove: foreign bind: the next create's record check ran (the positive control)");
+            CreateOnWorkingTransport("remove: foreign bind: the next create's record check ran and recorded nothing (the positive control)", expect: 0);
             Record("remove: the next create does not record it", RecordValue("OemInf") == null, $"OemInf {RecordValue("OemInf") ?? "none"}");
+            // The record update after a move (RefreshDriver), run on this
+            // devnode as a move would leave it if it had put this package on.
+            RecordType.GetMethod("RefreshDriver", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, null);
+            Record("remove: nor does the record update after a move, for a package not of the pinned release",
+                   RecordValue("OemInf") == null, $"OemInf {RecordValue("OemInf") ?? "none"}");
             var foreignPreview = Remove("remove: foreign bind", preview: true, includeUnproven: false);
             Record("remove: and a default removal keeps the host controller and that package",
                    Has(foreignPreview, "devnode", l => l.StartsWith(other + " "), "Kept")
@@ -487,19 +524,30 @@ internal static partial class Program
 
     /// <summary>Let the next create in this process check the record again,
     /// as the next process's first create does.</summary>
-    static void ResetRecordCheck() =>
+    static void ResetRecordCheck()
+    {
         Installer.GetField("s_recordChecked", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, false);
+        Installer.GetField("s_lateBindResult", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, -1);
+    }
 
     static bool RecordChecked() =>
         (bool)Installer.GetField("s_recordChecked", BindingFlags.NonPublic | BindingFlags.Static)!.GetValue(null)!;
+
+    /// <summary>What the record check's CompleteLateBind did: -1 not run, 0
+    /// recorded nothing, 1 recorded a package.</summary>
+    static int LateBindResult() =>
+        (int)Installer.GetField("s_lateBindResult", BindingFlags.NonPublic | BindingFlags.Static)!.GetValue(null)!;
+
+    static Type RecordType => typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.Usbip.UsbipInstallRecord", throwOnError: true)!;
 
     /// <summary>A create's transport step on a transport that answers, as
     /// the next process's first create runs it, until its record check has
     /// run: the check runs only on that path (EnsureInstalled), and only when
     /// it takes the transport lock with no wait, which a transport step that
-    /// just ended may still hold for a moment. Passes once it ran, within
-    /// 15 s, recorded as <paramref name="label"/>.</summary>
-    static void CreateOnWorkingTransport(string label)
+    /// just ended may still hold for a moment. Passes once it ran within
+    /// 15 s and CompleteLateBind gave <paramref name="expect"/> (1 recorded,
+    /// 0 recorded nothing), recorded as <paramref name="label"/>.</summary>
+    static void CreateOnWorkingTransport(string label, int expect)
     {
         if (!Answers()) { Record(label, false, "the transport did not answer within 30 s"); return; }
         ResetRecordCheck();
@@ -509,7 +557,14 @@ internal static partial class Program
         {
             HMContext.InstallUsbipBackend();
             creates++;
-            if (RecordChecked()) { Record(label, true, $"after {creates} create(s)"); return; }
+            if (RecordChecked())
+            {
+                int result = LateBindResult();
+                Record(label, result == expect, result == -1
+                    ? $"the record check ended before CompleteLateBind ran, after {creates} create(s)"
+                    : $"CompleteLateBind gave {result} after {creates} create(s)");
+                return;
+            }
             Thread.Sleep(250);
         }
         Record(label, false, $"the record check never ran in {creates} create(s): the transport lock stayed held");
@@ -557,14 +612,16 @@ internal static partial class Program
 
     /// <summary>The record an install writes before its driver install, on a
     /// machine with no usbip-win2 Apps entry. With no DriverVer it is a record
-    /// from before the record kept one.</summary>
-    static void WriteRecordWithNoDriver(string instance, string token, string? driverVer = null)
+    /// from before the record kept one. <paramref name="before"/> is the
+    /// packages the store held before, none by default.</summary>
+    static void WriteRecordWithNoDriver(string instance, string token, string? driverVer = null, string[]? before = null)
     {
         using var k = Registry.LocalMachine.CreateSubKey(RecordKey);
         k.SetValue("Instance", instance);
         k.SetValue("Token", token);
         k.SetValue("PackageAdded", 0, RegistryValueKind.DWord);
-        k.SetValue("PackagesBefore", Array.Empty<string>(), RegistryValueKind.MultiString);
+        k.SetValue("PackagesBefore", before ?? Array.Empty<string>(), RegistryValueKind.MultiString);
+        k.DeleteValue("OemInf", throwOnMissingValue: false);
         k.SetValue("AppsEntry", "");
         if (driverVer != null) k.SetValue("DriverVer", driverVer);
         else k.DeleteValue("DriverVer", throwOnMissingValue: false);
