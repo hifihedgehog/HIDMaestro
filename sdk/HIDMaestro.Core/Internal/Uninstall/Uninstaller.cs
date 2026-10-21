@@ -158,7 +158,17 @@ internal static class Uninstaller
         var before = Scan();
         var told = new Told();
 
-        Step(told, "devices", ActDevices);
+        // Each part of the device step is a step of its own, so one that
+        // throws, such as a phantom pass that waited out the PnP lock's
+        // bound, does not keep the others from running.
+        Step(told, "phantom records", () => PhantomPass("first"));
+        Step(told, "devices", DeviceOrchestrator.RemoveEverythingForUninstall);
+        Step(told, "phantom records again", () => PhantomPass("second"));
+        Step(told, "interface registrations", () =>
+        {
+            DeviceOrchestrator.RemoveGhostXusbInterfaces();
+            DeviceOrchestrator.RemoveOwnedInterfaceEntries(phantomOnly: false);
+        });
         Step(told, "OEM name overrides", () => ActOemOverrides(told));
         Step(told, "DeviceOverrides keys", () => ActDeviceOverrides(told));
         Step(told, "OpenVR registrations", () => ActOpenVr(told));
@@ -906,20 +916,16 @@ internal static class Uninstaller
 
     // ── The steps ────────────────────────────────────────────────────────
 
-    /// <summary>The phantom pass, every HIDMaestro device on the machine
-    /// with its USB/IP imports, interface registrations and the ledger's
-    /// restores, then the phantom pass again for the records SwDeviceClose
-    /// keeps, the ghost XUSB entries, and every interface entry. Each phantom
-    /// pass is the background cleanup's walk run here to its end, with no
-    /// budget, on this thread.</summary>
-    private static void ActDevices()
+    /// <summary>The phantom pass: the background cleanup's walk over every
+    /// device class (DeviceManager.RemoveAccumulatedHmPhantoms), run here on
+    /// this thread to its end, with no budget, each uninstall waiting for the
+    /// PnP lock as any removal waits. It runs before the devices go, and
+    /// again after, for the records SwDeviceClose keeps of the software
+    /// devices the Everything removal closes.</summary>
+    private static void PhantomPass(string which)
     {
-        int first = DeviceManager.RemoveAccumulatedHmPhantoms();
-        DeviceOrchestrator.RemoveEverythingForUninstall();
-        int second = DeviceManager.RemoveAccumulatedHmPhantoms();
-        DeviceOrchestrator.RemoveGhostXusbInterfaces();
-        DeviceOrchestrator.RemoveOwnedInterfaceEntries(phantomOnly: false);
-        DeviceOrchestrator.LogDiag($"uninstall: phantom passes removed {first} and {second}");
+        int removed = DeviceManager.RemoveAccumulatedHmPhantoms();
+        DeviceOrchestrator.LogDiag($"uninstall: the {which} phantom pass removed {removed}");
     }
 
     private static void ActOemOverrides(Told told)
@@ -1079,29 +1085,44 @@ internal static class Uninstaller
             try { Registry.LocalMachine.DeleteSubKeyTree(overrides, throwOnMissingSubKey: false); }
             catch (Exception ex) { Fail(overrides, ex.Message); }
 
-        bool winUsbLeft = false;
-        using (var winUsb = Registry.LocalMachine.OpenSubKey($@"{RegistryLedger.Root}\WinUsb"))
-            winUsbLeft = winUsb != null && winUsb.SubKeyCount > 0;
-        if (!winUsbLeft)
+        // A program that started during the removal keeps the earlier state
+        // of the shared keys it changes in the ledger, which its teardown
+        // reads back, so the ledger and the note stay with it.
+        if (lateStart != null) return;
+
+        // The ledger goes once the Everything removal has put back every
+        // shared key it records (RegistryLedger.ReleaseAll deletes it then).
+        // An entry left is the only record of a key's earlier value, so a
+        // ledger still holding a GameInput or joy.cpl entry stays.
+        int EntriesOf(string kind)
+        {
+            using var k = Registry.LocalMachine.OpenSubKey($@"{RegistryLedger.Root}\{kind}");
+            return k?.SubKeyCount ?? 0;
+        }
+        bool winUsbLeft = EntriesOf("WinUsb") > 0;
+        int sharedLeft = EntriesOf("GameInput") + EntriesOf("JoystickOem");
+        if (sharedLeft > 0)
+            Fail(RegistryLedger.Root, $"{sharedLeft} shared key(s) it records were not put back, and it is their only record of what they held before");
+        else if (!winUsbLeft)
         {
             try { Registry.LocalMachine.DeleteSubKeyTree(RegistryLedger.Root, throwOnMissingSubKey: false); }
             catch (Exception ex) { Fail(RegistryLedger.Root, ex.Message); }
         }
 
-        if (lateStart == null && !HidMaestroPackages().Any(p => p.WinUsb))
+        if (!HidMaestroPackages().Any(p => p.WinUsb))
         {
             using var deploy = DriverDeploy.Acquire();
             try { RegistryLedger.WriteNote(Registry.LocalMachine, null); }
             catch (Exception ex) { Fail(PackagesLeftKey, ex.Message); }
             finally { deploy.ReleaseMutex(); }
         }
-        else if (lateStart == null && Registry.LocalMachine.OpenSubKey(PackagesLeftKey) is { } note)
+        else if (Registry.LocalMachine.OpenSubKey(PackagesLeftKey) is { } note)
         {
             note.Dispose();
             told.Add(new UninstallEntry(KindRegistryKey, $@"HKLM\{PackagesLeftKey}", UninstallOutcome.Kept,
                 "it names the WinUSB package that stays, so a later HIDMaestro program can remove it once nothing uses it"));
         }
-        if (winUsbLeft)
+        if (winUsbLeft && sharedLeft == 0)
             told.Add(new UninstallEntry(KindRegistryKey, $@"HKLM\{RegistryLedger.Root}", UninstallOutcome.Kept,
                 "it records the driver to give back to a device on HIDMaestro's WinUSB driver"));
     }
