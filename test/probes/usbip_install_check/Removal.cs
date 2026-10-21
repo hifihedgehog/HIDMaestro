@@ -120,16 +120,22 @@ internal static partial class Program
         var heldBefore = Remove("remove: bound late, package held before", preview: true, includeUnproven: false);
         Record("remove: with the package in the store before the install, a removal takes the devnode and keeps the package",
                lateOemNow != null && Has(heldBefore, "devnode", l => l.StartsWith(late + " "), "WouldRemove")
-               && Has(heldBefore, "driver package", l => l.StartsWith(lateOemNow + " "), "Kept"),
+               && Has(heldBefore, "driver package", l => l.StartsWith(lateOemNow + " "), "Kept", "before HIDMaestro's install"),
                string.Join("; ", heldBefore.Where(e => e.Kind is "devnode" or "driver package")));
         // A record that names another release than the one bound: an older
-        // program's pin.
-        WriteRecordWithNoDriver(late, lateToken, "01/01/2000,0.0.0.0");
-        CreateOnWorkingTransport("remove: bound late, another release recorded: the next create's record check ran and recorded nothing", expect: 0);
-        var otherRelease = Remove("remove: bound late, another release recorded", preview: true, includeUnproven: false);
-        Record("remove: with another release recorded, the package is not recorded and a removal keeps the devnode",
-               RecordValue("OemInf") == null && Has(otherRelease, "devnode", l => l.StartsWith(late + " "), "Kept"),
-               $"OemInf {RecordValue("OemInf") ?? "none"}; " + string.Join("; ", otherRelease.Where(e => e.Kind == "devnode")));
+        // program's pin. Each differs from the bound package's DriverVer in
+        // one part only, the date or the version, since the whole value is
+        // what names a release.
+        string pinnedDate = PinnedWholeVer.Split(',')[0];
+        foreach (var (what, other) in new[] { ("another date", "01/01/2000," + PinnedVer), ("another version", pinnedDate + ",0.0.0.0") })
+        {
+            WriteRecordWithNoDriver(late, lateToken, other);
+            CreateOnWorkingTransport($"remove: bound late, {what} recorded ({other}): the next create's record check ran and recorded nothing", expect: 0);
+            var otherRelease = Remove($"remove: bound late, {what} recorded", preview: true, includeUnproven: false);
+            Record($"remove: with {what} recorded, the package is not recorded and a removal keeps the devnode",
+                   RecordValue("OemInf") == null && Has(otherRelease, "devnode", l => l.StartsWith(late + " "), "Kept"),
+                   $"OemInf {RecordValue("OemInf") ?? "none"}; " + string.Join("; ", otherRelease.Where(e => e.Kind == "devnode")));
+        }
         // usbip-win2's Apps entry written after the install: its installer
         // ran, and the package bound may be its own.
         WriteRecordWithNoDriver(late, lateToken, PinnedWholeVer);
@@ -144,6 +150,16 @@ internal static partial class Program
         Record("remove: the next create on the working transport records the package",
                RecordValue("OemInf") is string lateOem && lateOem.Equals(Pnp.DriverInf(late), StringComparison.OrdinalIgnoreCase),
                $"OemInf {RecordValue("OemInf") ?? "none"}");
+        // The record update after a move (RefreshDriver) on the same devnode
+        // and package: it records the pinned package, with this SDK's
+        // versions. R01 runs it on another release's package.
+        WriteRecordWithNoDriver(late, lateToken, PinnedWholeVer);
+        RefreshDriver();
+        Record("remove: the record update after a move records a package of the pinned release, with this SDK's versions (the positive control)",
+               RecordValue("OemInf") is string refreshed && refreshed.Equals(Pnp.DriverInf(late), StringComparison.OrdinalIgnoreCase)
+               && RecordValue("DriverVer") == PinnedWholeVer && RecordValue("Version") is string usbipVer && usbipVer != "probe"
+               && RecordValue("SdkVersion") is string sdk && sdk != "probe",
+               $"OemInf {RecordValue("OemInf") ?? "none"}, DriverVer {RecordValue("DriverVer")}, Version {RecordValue("Version")}, SdkVersion {RecordValue("SdkVersion")}");
         var lateRemoved = Remove("remove: bound late, removed", preview: false, includeUnproven: false);
         Record("remove: and a default removal takes it all",
                !Pnp.Known(late) && UdePackages().Count == 0 && !KeyExists(RecordKey) && lateRemoved.All(e => e.Outcome != "Failed"), Snapshot());
@@ -172,7 +188,7 @@ internal static partial class Program
             Record("remove: the next create does not record it", RecordValue("OemInf") == null, $"OemInf {RecordValue("OemInf") ?? "none"}");
             // The record update after a move (RefreshDriver), run on this
             // devnode as a move would leave it if it had put this package on.
-            RecordType.GetMethod("RefreshDriver", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, null);
+            RefreshDriver();
             Record("remove: nor does the record update after a move, for a package not of the pinned release",
                    RecordValue("OemInf") == null, $"OemInf {RecordValue("OemInf") ?? "none"}");
             var foreignPreview = Remove("remove: foreign bind", preview: true, includeUnproven: false);
@@ -198,6 +214,23 @@ internal static partial class Program
         Record("remove: a default removal takes it, with its record",
                Has(finished, "devnode", l => l.StartsWith(cut + " "), "Removed") && !Pnp.Known(cut) && !KeyExists(RecordKey)
                && finished.All(e => e.Outcome != "Failed"));
+
+        // The same, cut short by a program on another pin, whose record
+        // names its own release, then finished by this SDK, which forces
+        // its own package: the record names this SDK's release and versions,
+        // on the same devnode and token.
+        (cut, cutToken) = RegisterOnly();
+        WriteRecordWithNoDriver(cut, cutToken, "01/01/2000," + PinnedVer);
+        HMContext.InstallUsbipBackend();
+        Record("remove: an install another pin cut short, finished by this SDK, records this SDK's release, versions and package on the same devnode",
+               RecordValue("DriverVer") == PinnedWholeVer && RecordValue("OemInf") is string finishedOem && finishedOem.Equals(Pnp.DriverInf(cut), StringComparison.OrdinalIgnoreCase)
+               && RecordValue("Instance") is string inst && inst.Equals(cut, StringComparison.OrdinalIgnoreCase) && RecordValue("Token") == cutToken
+               && RecordValue("Version") is string ver && ver != "probe" && RecordValue("SdkVersion") is string sdkVer && sdkVer != "probe",
+               $"{cut} runs {Pnp.DriverInf(cut)}; record DriverVer {RecordValue("DriverVer")}, OemInf {RecordValue("OemInf")}, Instance {RecordValue("Instance")}, " +
+               $"token {(RecordValue("Token") == cutToken ? "kept" : "changed")}, Version {RecordValue("Version")}, SdkVersion {RecordValue("SdkVersion")}");
+        var finishedOther = Remove("remove: finished from another pin's record", preview: false, includeUnproven: false);
+        Record("remove: finished from another pin's record: a default removal takes it all",
+               !Pnp.Known(cut) && UdePackages().Count == 0 && !KeyExists(RecordKey) && finishedOther.All(e => e.Outcome != "Failed"), Snapshot());
 
         // ── R02: a rebuilt record beside a user's own install ─────────────
         // A user's usbip-win2 0.9.8.1 install left its package, identical to
@@ -540,6 +573,11 @@ internal static partial class Program
 
     static Type RecordType => typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.Usbip.UsbipInstallRecord", throwOnError: true)!;
 
+    /// <summary>The record update the SDK runs after it moved a devnode to
+    /// the pinned driver (UsbipInstallRecord.RefreshDriver).</summary>
+    static void RefreshDriver() =>
+        RecordType.GetMethod("RefreshDriver", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, null);
+
     /// <summary>A create's transport step on a transport that answers, as
     /// the next process's first create runs it, until its record check has
     /// run: the check runs only on that path (EnsureInstalled), and only when
@@ -625,7 +663,7 @@ internal static partial class Program
         k.SetValue("AppsEntry", "");
         if (driverVer != null) k.SetValue("DriverVer", driverVer);
         else k.DeleteValue("DriverVer", throwOnMissingValue: false);
-        k.SetValue("Version", "0.9.8.1");
+        k.SetValue("Version", "probe");
         k.SetValue("InstalledUtc", DateTime.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture));
         k.SetValue("SdkVersion", "probe");
     }
