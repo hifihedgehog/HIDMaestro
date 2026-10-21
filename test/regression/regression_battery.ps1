@@ -672,6 +672,15 @@ function Test-Scenario {
     # what started it is a leak. It fails the scenario, and the battery
     # stops it so the next scenario starts clean.
     $orphans = @([HMForeign]::Orphans($PID))
+    # A child the scenario ended can still be exiting here. Wait for it
+    # to go: only one still running at the hang bound is a leak.
+    if ($orphans.Count -gt 0) {
+        $orphanSw = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($orphans.Count -gt 0 -and $orphanSw.ElapsedMilliseconds -lt (HMScaleMs 60000)) {
+            Start-Sleep -Milliseconds 250
+            $orphans = @([HMForeign]::Orphans($PID))
+        }
+    }
     if ($orphans.Count -gt 0) {
         $names = @(foreach ($o in $orphans) {
             $p = Get-Process -Id $o -ErrorAction SilentlyContinue
