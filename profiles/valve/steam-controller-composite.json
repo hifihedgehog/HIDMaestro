@@ -40,7 +40,15 @@
         "size": 64,
         "data": "ae1400484d424f415244303030303031",
         "notify": true,
-        "comment": "ATTRIB_STR_BOARD_SERIAL. Same command channel as the Deck's, so the same per-index rule applies. No capture of a 2015 unit's serial format exists, so the framing is the Deck's verified one and the string itself is this project's, not a real unit's."
+        "patch": [
+          {
+            "at": 3,
+            "length": 13,
+            "encoding": "ascii",
+            "source": "instanceSerial"
+          }
+        ],
+        "comment": "ATTRIB_STR_BOARD_SERIAL. Same command channel as the Deck's, so the same per-index rule applies. No capture of a 2015 unit's serial format exists, so the framing is the Deck's verified one and the string itself is this project's, not a real unit's. Each controller answers its own (issue #72): serial variant 0, a keyless controller at index 0, keeps HMBOARD000001, and another variant is added into the trailing digits."
       },
       {
         "id": "0x00",
@@ -56,7 +64,15 @@
         "size": 64,
         "data": "ae1401484d554e495430303030303031",
         "notify": true,
-        "comment": "ATTRIB_STR_UNIT_SERIAL, and distinct from index 0 as on real hardware."
+        "patch": [
+          {
+            "at": 3,
+            "length": 13,
+            "encoding": "ascii",
+            "source": "instanceSerial"
+          }
+        ],
+        "comment": "ATTRIB_STR_UNIT_SERIAL, and distinct from index 0 as on real hardware. Steam refuses this string (\"Invalid or missing unit serial number\") and names the 2015 controller's config set after its USB ids instead, but the kernel reads it into the device's uniq (hid-steam.c steam_get_serial), so each controller answers its own (issue #72): serial variant 0, a keyless controller at index 0, keeps HMUNIT0000001, and another variant is added into the trailing digits."
       },
       {
         "id": "0x00",

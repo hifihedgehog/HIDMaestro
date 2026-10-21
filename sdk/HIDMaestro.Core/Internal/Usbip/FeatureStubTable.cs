@@ -22,9 +22,10 @@ namespace HIDMaestro.Internal.Usbip;
 /// implement.</para>
 ///
 /// <para>The table compiles once per controller: every patch from the
-/// index and the serial and every CRC is written into final bytes then. On
-/// USB/IP it serves the answers from those arrays into one buffer, with
-/// only a file-backed patch written as the answer is asked for. On UMDF2
+/// index, the serial and the instance serial and every CRC is written into
+/// final bytes then. On USB/IP it serves the answers from those arrays into
+/// one buffer, with only a file-backed patch written as the answer is asked
+/// for. On UMDF2
 /// the SDK writes it as the <c>FeatureAnswers</c> blob
 /// (<see cref="ToBlob"/>), which the driver parses once at its add into
 /// arrays of the same shape and serves the same way.</para></summary>
@@ -118,14 +119,18 @@ internal sealed class FeatureStubTable
     /// <summary>The table for one controller of a profile, from the model
     /// the profile resolved to, or null when it has no answers.
     /// <paramref name="serial"/> is the serial the device serves, which a
-    /// <c>serial</c> patch writes.</summary>
-    public static FeatureStubTable? From(ControllerProfile profile, int index, string? serial) =>
-        From(profile, index, serial, ValueSources.ReadFile);
+    /// <c>serial</c> patch writes. <paramref name="serialVariant"/> is the
+    /// number an <c>instanceSerial</c> patch folds into its captured text,
+    /// the controller identity's <see cref="DeviceIdentity.SerialVariant"/>.
+    /// Without it the index's default identity's, which is the index.</summary>
+    public static FeatureStubTable? From(ControllerProfile profile, int index, string? serial, int? serialVariant = null) =>
+        From(profile, index, serial, ValueSources.ReadFile, serialVariant);
 
     /// <summary>The same with a given reader for the files value sources
     /// read, so a check can exercise an answer with Steam present and
     /// absent on any machine.</summary>
-    internal static FeatureStubTable? From(ControllerProfile profile, int index, string? serial, ValueSources.FileReader files)
+    internal static FeatureStubTable? From(ControllerProfile profile, int index, string? serial, ValueSources.FileReader files,
+                                           int? serialVariant = null)
     {
         var model = profile.Resolved.Model;
         var spec = model.FeatureStubs;
@@ -141,7 +146,8 @@ internal sealed class FeatureStubTable
         {
             throw new InvalidOperationException($"Profile '{profile.Id}': {e.JsonPath}: {e.Reason}", e);
         }
-        var values = new ValueSources.Values(index, serial, model.ValueSources, files);
+        // The default identity's variant is its index (DeviceIdentity).
+        var values = new ValueSources.Values(index, serial, serialVariant ?? index, model.ValueSources, files);
         var onReports = new List<byte>();
         var compiled = new Entry[entries.Count];
         for (int i = 0; i < entries.Count; i++)

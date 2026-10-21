@@ -197,6 +197,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     /// table keeps itself. Null for a profile with none.</summary>
     private readonly FeatureStubTable? _stubs;
 
+    /// <summary>The feature answers this device serves, compiled at its
+    /// create. A check reads the served bytes off them.</summary>
+    internal FeatureStubTable? FeatureAnswers => _stubs;
+
     // Buffer lengths of parked bulk IN reads, by seqnum, for a protocol
     // whose replies go out on a bulk IN endpoint. The seqnums park in
     // _pendingInterruptIn beside the interrupt reads, which is where
@@ -251,7 +255,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             // A device that builds its reports starts from a pad at rest.
             if (protocol.BuildsReports) _engine.SetStateBlock(profile.StateBlockAtRest());
         }
-        _stubs = FeatureStubTable.From(profile, index, Descriptors.SerialString);
+        _stubs = FeatureStubTable.From(profile, index, Descriptors.SerialString, Descriptors.SerialVariant);
         _primaryInEndpoint = 0;
         foreach (var kv in Descriptors.Endpoints)
         {

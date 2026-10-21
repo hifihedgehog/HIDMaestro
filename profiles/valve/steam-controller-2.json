@@ -69,9 +69,17 @@
         },
         "size": 64,
         "data": "01ae14004d584139393630323030303031",
+        "patch": [
+          {
+            "at": 4,
+            "length": 13,
+            "encoding": "ascii",
+            "source": "instanceSerial"
+          }
+        ],
         "replyHead": "requestReportId",
         "notify": true,
-        "comment": "ID_GET_STRING_ATTRIBUTE index 0, the board serial, in Valve's own format."
+        "comment": "ID_GET_STRING_ATTRIBUTE index 0, the board serial, in Valve's own format. Each controller answers its own (issue #72): serial variant 0, a keyless controller at index 0, keeps MXA9960200001, and another variant is added into the trailing digits, as a captured USB serial's is."
       },
       {
         "id": "0x01",
@@ -86,9 +94,17 @@
         },
         "size": 64,
         "data": "01ae140146584139393630323030303031",
+        "patch": [
+          {
+            "at": 4,
+            "length": 13,
+            "encoding": "ascii",
+            "source": "instanceSerial"
+          }
+        ],
         "replyHead": "requestReportId",
         "notify": true,
-        "comment": "Index 1, the unit serial. Constant, as every serial this catalog ships is."
+        "comment": "Index 1, the unit serial. Steam names the controller's config set after it (configset_<unit serial>.vdf), so two controllers answering one serial shared one configuration. Each controller answers its own (issue #72): serial variant 0, a keyless controller at index 0, keeps FXA9960200001, and variant 1 answers FXA9960200002."
       },
       {
         "id": "0x01",
