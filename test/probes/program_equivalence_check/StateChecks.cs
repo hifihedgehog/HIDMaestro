@@ -246,8 +246,10 @@ internal static unsafe class StateChecks
         int k = r.Next(8);
         if (k == 0) return Specials[r.Next(Specials.Length)];
         // Values on and beside the steps of a 12-bit and an 8-bit field,
-        // where ties fall.
+        // where ties fall, and of a 32767-count trigger near the Valve
+        // personas' digital threshold of 29490.
         if (k == 1) { int span = r.Next(2) == 0 ? 4095 : 255; return (float)((r.Next(span + 1) + 0.5 * r.Next(2)) / span) + (r.Next(3) - 1) * 1e-7f; }
+        if (k == 2) return (float)((r.Next(29470, 29510) + 0.5 * r.Next(2)) / 32767.0) + (r.Next(3) - 1) * 1e-7f;
         return (float)r.NextDouble();
     }
 
@@ -260,6 +262,18 @@ internal static unsafe class StateChecks
         return (float)((r.NextDouble() * 2 - 1) * (r.Next(2) == 0 ? 8 : 4000));
     }
 
+    /// <summary>A pad pressure: 0 a third of the time, the value a
+    /// touch-only consumer sends, then the specials, values on and beside a
+    /// half count of a 32767 scale, and anything in [0, 1].</summary>
+    static float PadPressure(Random r)
+    {
+        int k = r.Next(6);
+        if (k <= 1) return 0f;
+        if (k == 2) return Specials[r.Next(Specials.Length)];
+        if (k == 3) return (float)((r.Next(32768) + 0.5 * r.Next(2)) / 32767.0) + (r.Next(3) - 1) * 1e-7f;
+        return (float)r.NextDouble();
+    }
+
     static HMGamepadState RandomState(Random r) => new()
     {
         Buttons = (HMButton)(uint)r.NextInt64(0, 1L << 32),
@@ -268,6 +282,7 @@ internal static unsafe class StateChecks
         GyroDpsX = Motion(r), GyroDpsY = Motion(r), GyroDpsZ = Motion(r),
         TouchpadFinger0Active = r.Next(2) == 0, TouchpadFinger1Active = r.Next(2) == 0,
         BatteryCharging = r.Next(2) == 0, BatteryFull = r.Next(2) == 0, MicMuted = r.Next(2) == 0, HeadphonesConnected = r.Next(2) == 0,
+        TouchpadFinger0Pressure = PadPressure(r), TouchpadFinger1Pressure = PadPressure(r),
     };
 
     static void Compare(string name, ValidProgram v, ExtendedReportSpec codec, StateRunner runner, Random data, int inputs)
@@ -320,6 +335,17 @@ internal static unsafe class StateChecks
               {"byte":8,"type":"button-mask","bits":"2-5","buttons":["DPAD_RIGHT","Square","Triangle","#0","Guide","Start"]},
               {"byte":9,"type":"button-mask","buttons":["A","B","X","Y","LeftBumper","RightBumper","Back","Start","Guide","Share"]} ]
             """, 10);
+        yield return ("trigger bits at thresholds, pad pressures", """
+            [ {"byte":0,"type":"button-mask","bits":"0-15","triggerThreshold":{"max":32767,"at":29490},"buttons":["RT_DIGITAL","LT_DIGITAL","A","B","_","_","_","_","DPAD_UP","LEFTPAD_TOUCH"]},
+              {"byte":2,"type":"button-mask","triggerThreshold":{"max":255,"at":255},"buttons":["LT_DIGITAL","RT_DIGITAL","X"]},
+              {"byte":3,"type":"button-mask","triggerThreshold":{"max":1,"at":1},"buttons":["LT_DIGITAL","_","RT_DIGITAL"]},
+              {"byte":4,"type":"button-mask","triggerThreshold":{"max":65535,"at":1},"buttons":["RT_DIGITAL","LT_DIGITAL"]},
+              {"byte":5,"type":"button-mask","buttons":["LT_DIGITAL","RT_DIGITAL"]},
+              {"byte":6,"type":"uint16-pressure","semantic":"leftPadPressure","max":32767},
+              {"byte":8,"type":"uint16-pressure","semantic":"rightPadPressure","max":32767},
+              {"byte":10,"type":"uint16-pressure","semantic":"leftPadPressure","min":100,"max":65535},
+              {"byte":12,"type":"uint16-pressure","semantic":"rightPadPressure","min":40000,"max":3} ]
+            """, 14);
         yield return ("scaled motion with repeats and ratios", """
             [ {"byte":0,"type":"int16-le","semantic":"accelGX","scale":[13371,936]},
               {"byte":2,"type":"int16-le","semantic":"accelGY","scale":4096,"negate":true,"repeat":[3,12]},
@@ -351,7 +377,8 @@ internal static unsafe class StateChecks
         yield return ("gptable", P(new GpTableOp(GpByte.Hat, new byte[256], 3, 4, 0, 4, 7, false)));
         yield return ("gpfinger", P(new GpFingerOp(1, 2)));
         yield return ("gppad", P(new GpPadOp(1, true, true, -100, 100, true, 0)));
-        yield return ("gpselect", P(new GpSelectOp(GpFlag.Finger1Active, 32767, 0, 6)));
+        yield return ("gppadpressure", P(new GpPadPressureOp(1, 0, 32767, 6)));
+        yield return ("gptriggerbit", P(new GpTriggerBitOp(GpFloat.RightTrigger, 32767, 29490, 13)));
         yield return ("gpten", P(new GpTenBitOp(GpRaw.AccelZ, 113, 8192, 512, true, 6)));
         yield return ("gpcrc", P(new GpCrc32Op(new byte[] { 0xA1 }, 0, 3, 4)));
     }
@@ -389,7 +416,16 @@ internal static unsafe class StateChecks
         yield return ("a 12-bit pair of a stick and a trigger", P(new GpStick12Op(GpFloat.RightStickY, GpFloat.LeftTrigger, 0, 4095, false, 0)), "$.ops[0].src");
         yield return ("a 12-bit pair past 4095", P(new GpStick12Op(GpFloat.LeftStickX, GpFloat.LeftStickY, 0, 4096, false, 0)), "$.ops[0].max");
         yield return ("a third pad", P(new GpPadOp(2, false, false, 0, 0, false, 0)), "$.ops[0].pad");
-        yield return ("a selection by a flag the form does not define", P(new GpSelectOp((GpFlag)99, 1, 0, 0)), "$.ops[0].flag");
+        yield return ("a third finger's pressure", P(new GpPadPressureOp(2, 0, 32767, 0)), "$.ops[0].finger");
+        yield return ("a pad pressure past 16 bits", P(new GpPadPressureOp(0, 0, 65536, 0)), "$.ops[0].max");
+        yield return ("a pad pressure below 0", P(new GpPadPressureOp(1, -1, 32767, 0)), "$.ops[0].max");
+        yield return ("a trigger bit of a stick", P(new GpTriggerBitOp(GpFloat.LeftStickX, 255, 1, 0)), "$.ops[0].src");
+        yield return ("a trigger bit of 0 counts", P(new GpTriggerBitOp(GpFloat.LeftTrigger, 0, 0, 0)), "$.ops[0].max");
+        yield return ("a trigger bit past 65535 counts", P(new GpTriggerBitOp(GpFloat.LeftTrigger, 65536, 1, 0)), "$.ops[0].max");
+        yield return ("a trigger bit at 0", P(new GpTriggerBitOp(GpFloat.LeftTrigger, 255, 0, 0)), "$.ops[0].at");
+        yield return ("a trigger bit past its max", P(new GpTriggerBitOp(GpFloat.RightTrigger, 255, 256, 0)), "$.ops[0].at");
+        yield return ("a trigger bit past the block", P(new GpTriggerBitOp(GpFloat.RightTrigger, 255, 1, 64)), "$.ops[0].bit");
+        yield return ("a trigger bit on a button's bit", P(new GpButtonsOp(new[] { 0, 3 }), new GpTriggerBitOp(GpFloat.RightTrigger, 255, 1, 3)), "$.ops[1].bit");
         yield return ("a ten-bit value of the stamp", P(new GpTenBitOp(GpRaw.SensorTimestamp, 1, 1, 512, false, 0)), "$.ops[0].src");
         yield return ("a ten-bit value of resolution 0", P(new GpTenBitOp(GpRaw.AccelX, 0, 1, 512, false, 0)), "$.ops[0].resolution");
         yield return ("a CRC before another op", P(new GpCrc32Op(Array.Empty<byte>(), 0, 1, 4), new GpRawOp(GpRaw.AccelX, 2, 2)), "$.ops[0]");
@@ -407,6 +443,14 @@ internal static unsafe class StateChecks
         yield return ("two fields on one byte", """[ {"byte":0,"type":"uint8","initial":1}, {"byte":0,"type":"button-mask","buttons":["A"]} ]""", 4);
         yield return ("a raw motion value in repeats", """[ {"byte":0,"type":"int16-le","semantic":"gyroPitch","repeat":[2,2]} ]""", 4);
         yield return ("a button name the codec reads as a number", """[ {"byte":0,"type":"button-mask","buttons":["3"]} ]""", 4);
+        // A trigger threshold the codec's check refuses stays with the codec,
+        // which refuses it at create with its path.
+        yield return ("a trigger threshold past its max", """[ {"byte":0,"type":"button-mask","triggerThreshold":{"max":255,"at":256},"buttons":["LT_DIGITAL"]} ]""", 4);
+        yield return ("a trigger threshold with no at", """[ {"byte":0,"type":"button-mask","triggerThreshold":{"max":255},"buttons":["LT_DIGITAL"]} ]""", 4);
+        yield return ("a trigger threshold of 0 counts", """[ {"byte":0,"type":"button-mask","triggerThreshold":{"max":0,"at":0},"buttons":["LT_DIGITAL"]} ]""", 4);
+        yield return ("a trigger threshold past 16 bits", """[ {"byte":0,"type":"button-mask","triggerThreshold":{"max":65536,"at":1},"buttons":["LT_DIGITAL"]} ]""", 4);
+        yield return ("a trigger threshold that is a number", """[ {"byte":0,"type":"button-mask","triggerThreshold":255,"buttons":["LT_DIGITAL"]} ]""", 4);
+        yield return ("a trigger threshold with a key it does not read", """[ {"byte":0,"type":"button-mask","triggerThreshold":{"max":255,"at":1,"release":1},"buttons":["LT_DIGITAL"]} ]""", 4);
         // An int16-le field with a center writes offset binary, clamped to
         // 0 to 65535 (VendorBlobCodec.WriteCalibratedI16), which the form
         // does not say: the codec keeps it, raw or scaled.
@@ -573,10 +617,29 @@ internal static unsafe class NaiveState
                     d[g.Dst] = (byte)(v & 0xFF); d[g.Dst + 1] = (byte)((v >> 8) & 0xFF);
                     break;
                 }
-                case GpSelectOp g:
+                case GpPadPressureOp g:
                 {
-                    long v = Flag(g.Flag, in st, sl) ? g.WhenSet : g.WhenClear;
+                    // The pressure, NaN read as 0 and clamped to [0, 1]. A 0
+                    // on a finger that is down is 1. Then min + the product
+                    // rounded to nearest with ties to even.
+                    double pr = g.Finger == 1 ? st.TouchpadFinger1Pressure : st.TouchpadFinger0Pressure;
+                    bool down = g.Finger == 1 ? st.TouchpadFinger1Active : st.TouchpadFinger0Active;
+                    if (double.IsNaN(pr)) pr = 0;
+                    pr = Math.Min(Math.Max(pr, 0), 1);
+                    if (pr == 0 && down) pr = 1;
+                    long v = g.Min + (long)Math.Round(pr * ((long)g.Max - g.Min), MidpointRounding.ToEven);
                     d[g.Dst] = (byte)(v & 0xFF); d[g.Dst + 1] = (byte)((v >> 8) & 0xFF);
+                    break;
+                }
+                case GpTriggerBitOp g:
+                {
+                    // The trigger, NaN read as 0 and clamped to [0, 1], on a
+                    // scale of max counts rounded to nearest with ties to
+                    // even, against at.
+                    double t = sl[(int)g.Src];
+                    if (double.IsNaN(t)) t = 0;
+                    t = Math.Min(Math.Max(t, 0), 1);
+                    if ((long)Math.Round(t * g.Max, MidpointRounding.ToEven) >= g.At) d[g.Bit / 8] |= (byte)(1 << (g.Bit % 8));
                     break;
                 }
                 case GpTenBitOp g:
