@@ -179,33 +179,75 @@ internal static partial class OpenVrPathRegistry
         return list;
     }
 
-    /// <summary>A full removal's edit of another account's path registry:
-    /// every external_drivers entry equal to <paramref name="driverPath"/>
-    /// goes, as <see cref="RemoveDriver"/> removes the caller's. The elevated
-    /// process writes in a folder of that account's profile, which that
-    /// account can change, so the folder is held open without delete sharing
-    /// for the whole edit, which no rename or replacement of it can get past,
-    /// and a folder or file that is a link is refused, never followed. Writes
-    /// only when the list changes. Returns true when it wrote.</summary>
+    /// <summary>A full removal's edit of another account's path registry,
+    /// <paramref name="fileName"/> in <paramref name="relativeDir"/> below
+    /// that account's profile folder <paramref name="anchor"/>: every
+    /// external_drivers entry equal to <paramref name="driverPath"/> goes, as
+    /// <see cref="RemoveDriver"/> removes the caller's. The elevated process
+    /// works in folders that account can change, so each folder from the
+    /// profile down is opened as itself and held without delete sharing,
+    /// which no rename or replacement can get past, a link among them is
+    /// refused, and the deepest one's final path is checked
+    /// (Uninstall.SafeDelete.OpenChain). The file is read through a handle
+    /// opened relative to the held folder without following a link, and a
+    /// file that is a link is refused. The new contents go to a new file
+    /// beside it, which replaces it. Writes only when the list changes.
+    /// Returns true when it wrote.</summary>
     /// <exception cref="InvalidOperationException">The file could not be
-    /// read or written, or is a link, or its folder is.</exception>
-    internal static bool RemoveDriverIn(string file, string driverPath)
+    /// read or written, or a folder on its path or the file is a
+    /// link.</exception>
+    internal static bool RemoveDriverIn(string anchor, string relativeDir, string fileName, string driverPath)
     {
-        string full = Path.GetFullPath(file);
-        string dir = Path.GetDirectoryName(full)!;
-        using var hold = ProtectedStaging.OpenLevel(dir, hold: true);
-        if ((File.GetAttributes(hold) & FileAttributes.ReparsePoint) != 0
-            || (File.Exists(full) && (File.GetAttributes(full) & FileAttributes.ReparsePoint) != 0))
-            throw new InvalidOperationException($"{full} or its folder is a link, which HIDMaestro does not follow.");
-        byte[] path = Encoding.UTF8.GetBytes(driverPath);
+        using var chain = Uninstall.SafeDelete.OpenChain(anchor, relativeDir, out string? refusal);
+        if (chain == null)
+        {
+            if (refusal == null) return false;
+            throw new InvalidOperationException($"Could not update the OpenVR path registry: {refusal}.");
+        }
+        string full = Path.Combine(chain.Path, fileName);
         try
         {
-            return MutateFileAs(full, l =>
+            byte[]? raw;
+            using (var h = Uninstall.SafeDelete.OpenRelative(chain.Last, fileName,
+                       Uninstall.SafeDelete.FILE_READ_DATA | Uninstall.SafeDelete.FILE_READ_ATTRIBUTES,
+                       Uninstall.SafeDelete.FILE_SHARE_READ | Uninstall.SafeDelete.FILE_SHARE_WRITE,
+                       Uninstall.SafeDelete.FILE_NON_DIRECTORY_FILE, out int err))
             {
-                bool any = false;
-                while (Edit(l, RemoveDriverVerb, path)) any = true;
-                return any;
-            });
+                if (h == null)
+                {
+                    if (err is 2 or 3) return false;
+                    throw new IOException($"it could not be opened (Win32 error {err})");
+                }
+                if (Uninstall.SafeDelete.IsLink(h))
+                    throw new InvalidOperationException($"{full} is a link, which HIDMaestro does not follow.");
+                using var fs = new FileStream(h, FileAccess.Read);
+                var ms = new MemoryStream();
+                fs.CopyTo(ms);
+                raw = ms.Length > 0 ? ms.ToArray() : null;
+            }
+            var l = Load(raw);
+            byte[] path = Encoding.UTF8.GetBytes(driverPath);
+            bool any = false;
+            while (Edit(l, RemoveDriverVerb, path)) any = true;
+            if (!any) return false;
+            byte[] bytes = Save(l);
+            // The folder is held and checked, so these names resolve in it.
+            string tmp = Path.Combine(chain.Path, fileName + "." + Guid.NewGuid().ToString("N") + ".tmp");
+            try
+            {
+                using (var fs = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    fs.Write(bytes, 0, bytes.Length);
+                    fs.Flush(flushToDisk: true);
+                }
+                File.Move(tmp, full, overwrite: true);
+            }
+            catch
+            {
+                try { File.Delete(tmp); } catch { }
+                throw;
+            }
+            return true;
         }
         catch (InvalidOperationException) { throw; }
         catch (Exception e)

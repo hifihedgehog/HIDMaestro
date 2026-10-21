@@ -34,14 +34,18 @@ public static class HMUninstall
 
     /// <summary>Remove HIDMaestro from the machine, or, while another
     /// program that embeds HIDMaestro runs, change nothing and return
-    /// <see cref="HMUninstallStatus.Blocked"/> with the programs listed.
-    /// Runs on the calling thread to its end, which takes seconds to
-    /// minutes. Requires administrator rights.
+    /// <see cref="HMUninstallStatus.Blocked"/> with the programs listed. A
+    /// program that starts during the removal stops it before the next step
+    /// that would touch what that program uses, and the status is then
+    /// Blocked too. Runs on the calling thread to its end, which takes
+    /// seconds to minutes. Requires administrator rights.
     ///
-    /// <para>A file another program holds open, such as the OpenVR driver
-    /// while SteamVR runs, is deleted when Windows next starts, and the
+    /// <para>A file another program holds open inside
+    /// %ProgramFiles%\HIDMaestro is deleted when Windows next starts, and the
     /// status is then <see cref="HMUninstallStatus.RemovedRestartPending"/>.
-    /// The machine is never restarted.</para></summary>
+    /// One anywhere else, such as the OpenVR driver while SteamVR runs,
+    /// stays, and is reported failed: close the program and run the removal
+    /// again. The machine is never restarted.</para></summary>
     /// <exception cref="UnauthorizedAccessException">The process is not
     /// elevated.</exception>
     public static HMUninstallReport Run(HMUninstallOptions? options = null) =>
@@ -69,13 +73,17 @@ public enum HMUninstallStatus
     /// Windows deletes when it next starts.</summary>
     RemovedRestartPending,
 
-    /// <summary>Another program that embeds HIDMaestro runs. Nothing was
-    /// changed. <see cref="HMUninstallReport.RunningPrograms"/> lists
-    /// them.</summary>
+    /// <summary>Another program that embeds HIDMaestro runs, and
+    /// <see cref="HMUninstallReport.RunningPrograms"/> lists it. A removal
+    /// that finds one before it starts changes nothing. One that finds a
+    /// program started while it ran stops before the next step, which would
+    /// take that program's controllers, overrides or driver, and its entries
+    /// say what it had done and what it left. Run it again once the program
+    /// has exited.</summary>
     Blocked,
 
-    /// <summary>At least one item could not be removed. Its entry says
-    /// why.</summary>
+    /// <summary>At least one item could not be removed, or for a preview,
+    /// part of the machine could not be read. Its entry says why.</summary>
     Failed,
 
     /// <summary>A preview: nothing was changed, and no program blocks a
@@ -122,8 +130,12 @@ public sealed class HMUninstallEntry
     /// <c>WinUSB binding</c>, <c>OEM name override</c>,
     /// <c>DeviceOverrides key</c>, <c>OpenVR registration</c>,
     /// <c>driver package</c>, <c>WUDF service key</c>, <c>registry key</c>,
-    /// <c>certificate</c>, <c>folder</c>, <c>service setting</c>, or one of
-    /// the usbip-win2 kinds docs/UNINSTALL.md lists.</summary>
+    /// <c>certificate</c>, <c>folder</c>, <c>service setting</c>,
+    /// <c>removal step</c>, or, from the usbip-win2 part, <c>devnode</c>,
+    /// <c>driver package</c>, <c>service</c>, <c>registry key</c>,
+    /// <c>registry value</c>, <c>scheduled task</c>, <c>folder</c>,
+    /// <c>file</c>, <c>Apps entry</c>, <c>hardware id</c> or <c>USB/IP
+    /// import</c>.</summary>
     public string Kind { get; }
 
     /// <summary>Where it is: a device instance ID, a registry path under

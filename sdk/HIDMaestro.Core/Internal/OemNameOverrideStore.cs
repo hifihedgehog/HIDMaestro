@@ -84,6 +84,18 @@ internal static class OemNameOverrideStore
     private const string V_ClaimedAt        = "ClaimedAtFileTime";
     // The label the last Claim wrote to all three targets (2.0.1).
     private const string V_WrittenLabel     = "WrittenLabel";
+    // The SID of the account whose HKCU target the last Claim wrote (2.0.1).
+    private const string V_UserSid          = "UserSid";
+
+    private static string? CurrentUserSid()
+    {
+        try
+        {
+            using var id = System.Security.Principal.WindowsIdentity.GetCurrent();
+            return id.User?.Value;
+        }
+        catch { return null; }
+    }
 
     // ────────────────────────────────────────────────────────────────
     //  Public entry points
@@ -109,11 +121,15 @@ internal static class OemNameOverrideStore
             if (!recordExists)
                 CaptureAllOriginalsToPendingStore(vidPid);
 
-            // The label goes in the record before the targets, so a full
-            // removal restores a target only while it still holds what
-            // HIDMaestro wrote (RestoreForUninstall).
+            // The label and the account whose HKCU target this writes go in
+            // the record before the targets, so a full removal restores a
+            // target only while it still holds what HIDMaestro wrote, and the
+            // per-user target only from that account (RestoreForUninstall).
             using (var pending = Registry.LocalMachine.CreateSubKey(PendingEntryPath(vidPid), writable: true)!)
+            {
                 pending.SetValue(V_WrittenLabel, label, RegistryValueKind.String);
+                if (CurrentUserSid() is { } sid) pending.SetValue(V_UserSid, sid, RegistryValueKind.String);
+            }
 
             WriteAllTargets(vidPid, label);
         }
@@ -181,27 +197,35 @@ internal static class OemNameOverrideStore
     /// HKLM.</summary>
     internal static string PendingRecordPath(string vidPid) => PendingEntryPath(vidPid);
 
-    /// <summary>A full removal's restore of one identity's override. Each of
-    /// the three targets gets its captured original back only while it
-    /// still holds the label HIDMaestro wrote: the record's WrittenLabel, or
-    /// for a record older than 2.0.1, which did not keep it, the DirectInput
-    /// value, which Claim writes first. A target someone changed since is
-    /// left as it is and named in the returned list. The record goes either
-    /// way. The HKCU target is the calling account's, the hive Claim wrote.
-    /// The caller has established that no other HIDMaestro program runs.
-    /// Needs elevation.</summary>
-    internal static List<string> RestoreForUninstall(string vidPid)
+    /// <summary>What a full removal did with one override record: whether
+    /// the record stays for a later run, and why, or which targets it left
+    /// because another program changed them.</summary>
+    internal readonly record struct UninstallRestore(bool RecordKept, string? Reason);
+
+    /// <summary>A full removal's restore of one identity's override. Each
+    /// target gets its captured original back only while it still holds the
+    /// label the record says HIDMaestro wrote (WrittenLabel, 2.0.1). A target
+    /// someone changed since is left as it is. A record older than 2.0.1
+    /// holds no label, so no target can be shown to hold HIDMaestro's, and
+    /// the record stays with every target as it is. The HKCU target is
+    /// restored only from the account the record names (UserSid), whose hive
+    /// Claim wrote. From any other account the HKLM targets are restored,
+    /// and the record stays with the HKCU target alone, for a removal run
+    /// from that account. The caller has established that no other
+    /// HIDMaestro program runs. Needs elevation.</summary>
+    internal static UninstallRestore RestoreForUninstall(string vidPid)
     {
         var left = new List<string>();
         using var mutex = AcquireMutex();
         try
         {
-            string? written, diOrig, jmOrig, juOrig;
+            string? written, sid, diOrig, jmOrig, juOrig;
             bool? diExisted, jmExisted, juExisted;
             using (var pending = Registry.LocalMachine.OpenSubKey(PendingEntryPath(vidPid), writable: false))
             {
-                if (pending is null) return left;
+                if (pending is null) return new UninstallRestore(false, null);
                 written   = pending.GetValue(V_WrittenLabel) as string;
+                sid       = pending.GetValue(V_UserSid) as string;
                 diOrig    = pending.GetValue(DI_OriginalName) as string;
                 diExisted = ReadExistedFlag(pending, DI_OriginalExisted);
                 jmOrig    = pending.GetValue(JM_OriginalName) as string;
@@ -209,12 +233,13 @@ internal static class OemNameOverrideStore
                 juOrig    = pending.GetValue(JU_OriginalName) as string;
                 juExisted = ReadExistedFlag(pending, JU_OriginalExisted);
             }
+            if (written == null)
+                return new UninstallRestore(true,
+                    "it was made before 2.0.1, which did not record the label it wrote, so whether each label is still HIDMaestro's cannot be told. The labels stay as they are, and HMOemNameOverride.Clear puts them back");
+
             string diPath = $@"{DirectInputRoot}\{vidPid}\{DirectInputOemSubkey}";
             string joyPath = $@"{JoystickRoot}\{vidPid}";
-            written ??= ReadOriginal(Registry.LocalMachine, diPath, DirectInputOemNameValue).val;
-
-            bool Ours(RegistryKey hive, string path, string value) =>
-                written != null && ReadOriginal(hive, path, value).val == written;
+            bool Ours(RegistryKey hive, string path, string value) => ReadOriginal(hive, path, value).val == written;
 
             if (diExisted != null)
             {
@@ -236,6 +261,16 @@ internal static class OemNameOverrideStore
             }
             if (juExisted != null)
             {
+                if (sid == null || !string.Equals(sid, CurrentUserSid(), StringComparison.OrdinalIgnoreCase))
+                {
+                    // Another account's hive: the HKLM parts are done, and
+                    // the record keeps the HKCU part alone.
+                    using (var pending = Registry.LocalMachine.OpenSubKey(PendingEntryPath(vidPid), writable: true))
+                        foreach (string v in new[] { DI_OriginalName, DI_OriginalExisted, JM_OriginalName, JM_OriginalExisted })
+                            pending?.DeleteValue(v, throwOnMissingValue: false);
+                    return new UninstallRestore(true,
+                        $"the DirectInput and joy.cpl labels were put back. The per-user joy.cpl label belongs to {AccountName(sid)}, whose program set it, so the record stays for a removal run from that account");
+                }
                 if (!Ours(Registry.CurrentUser, joyPath, JoystickOemNameValue)) left.Add($@"HKCU\{joyPath}\{JoystickOemNameValue}");
                 else if (juExisted == true) RestoreValue(Registry.CurrentUser, joyPath, JoystickOemNameValue, juOrig);
                 else DeleteSubkeyFromParent(Registry.CurrentUser, JoystickRoot, vidPid);
@@ -246,9 +281,21 @@ internal static class OemNameOverrideStore
             bool empty = pendingRoot != null && pendingRoot.SubKeyCount == 0 && pendingRoot.ValueCount == 0;
             pendingRoot?.Close();
             if (empty) Registry.LocalMachine.DeleteSubKey(PendingRoot, throwOnMissingSubKey: false);
-            return left;
+            return new UninstallRestore(false, left.Count == 0 ? null
+                : $"restored, except {string.Join(" and ", left)}, which another program changed since HIDMaestro wrote it, and which stays as it is");
         }
         finally { mutex.ReleaseMutex(); }
+    }
+
+    private static string AccountName(string? sid)
+    {
+        if (sid == null) return "an account the record does not name";
+        try
+        {
+            return new System.Security.Principal.SecurityIdentifier(sid)
+                .Translate(typeof(System.Security.Principal.NTAccount)).Value;
+        }
+        catch { return "account " + sid; }
     }
 
     public static IReadOnlyList<(string VidPid, string? OriginalOemName, bool OriginalExisted)> ListActive()
