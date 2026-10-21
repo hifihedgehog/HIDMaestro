@@ -52,10 +52,14 @@ internal static partial class UsbipDriverInstaller
         var before = UdePackageNames();
 
         string inf = StageUdePackage();
+        // The staged INF is the embedded one, checked against its hash, so
+        // its DriverVer is read from the resource, with no file read between
+        // the registration and the record.
+        string? driverVer = PinnedDriverVer();
         var (instance, token) = RegisterHostController();
         // Written before the driver install, so an install that is cut short
         // leaves a record a later create finishes from and a removal takes.
-        var record = new UsbipInstallRecord(instance, token, null, false, before.ToArray(), AppsEntryStamp(), DriverVerOf(ReadInfText(inf)), Version, DateTime.UtcNow, MachineClaims.SdkVersion);
+        var record = new UsbipInstallRecord(instance, token, null, false, before.ToArray(), AppsEntryStamp(), driverVer, Version, DateTime.UtcNow, MachineClaims.SdkVersion);
         UsbipInstallRecord.Write(record);
         DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: registered {instance}; installing the host controller driver.");
         return FinishHostController(work, inf, record, rollBack: true);
@@ -125,10 +129,12 @@ internal static partial class UsbipDriverInstaller
         // Every usbip2_ude package in the store now counts as one it held
         // before: a pinned package that install may have added outlives a
         // default removal, which is safe, where taking one a user's own
-        // usbip-win2 install added would not be.
+        // usbip-win2 install added would not be. Either way the record names
+        // this assembly's release, the package forced on below: the process
+        // that registered the devnode may have carried another pin.
         var record = known != null && string.Equals(known.Instance, instance, StringComparison.OrdinalIgnoreCase) && known.Token == token
-            ? known
-            : new UsbipInstallRecord(instance, token, null, false, UdePackageNames().ToArray(), AppsEntryStamp(), DriverVerOf(ReadInfText(inf)), Version, DateTime.UtcNow, MachineClaims.SdkVersion);
+            ? known with { DriverVer = PinnedDriverVer() }
+            : new UsbipInstallRecord(instance, token, null, false, UdePackageNames().ToArray(), AppsEntryStamp(), PinnedDriverVer(), Version, DateTime.UtcNow, MachineClaims.SdkVersion);
         UsbipInstallRecord.Write(record);
         return FinishHostController(work, inf, record, rollBack: false);
     }
@@ -196,6 +202,11 @@ internal static partial class UsbipDriverInstaller
 
     private static volatile bool s_recordChecked;
 
+    /// <summary>What this process's record check did: -1 when
+    /// <see cref="UsbipInstallRecord.CompleteLateBind"/> has not run, 0 when
+    /// it ran and recorded nothing, 1 when it recorded a package.</summary>
+    private static volatile int s_lateBindResult = -1;
+
     /// <summary>Once per process, on a machine whose transport answers:
     /// record the package of an install whose driver install timed out and
     /// then bound on its own (<see cref="UsbipInstallRecord.CompleteLateBind"/>).
@@ -215,7 +226,7 @@ internal static partial class UsbipDriverInstaller
             try
             {
                 s_recordChecked = true;
-                UsbipInstallRecord.CompleteLateBind();
+                s_lateBindResult = UsbipInstallRecord.CompleteLateBind() ? 1 : 0;
             }
             finally { m.ReleaseMutex(); }
         }
