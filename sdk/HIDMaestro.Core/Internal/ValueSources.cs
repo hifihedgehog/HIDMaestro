@@ -11,11 +11,13 @@ namespace HIDMaestro.Internal;
 /// note, mechanism 5). A patch writes a value from a named source over
 /// bytes of an answer's data: <c>index</c>, the transport index,
 /// <c>serial</c>, the serial the device serves, <c>instanceSerial</c>, the
-/// answer's own captured text varied per controller as a captured USB
-/// serial is, or a source the profile's <c>valueSources</c> declares. The
-/// one declared kind is <c>keyedHexFile</c>, which reads a <c>KEY:HEX</c> line of a file, the
-/// form of Steam's updater config. This replaces SteamHardwareUpdater, which
-/// held Steam's install and file format in code (issue #62).</summary>
+/// answer's own captured text varied per controller by the serial variant
+/// that varies a captured USB serial, or a source the profile's
+/// <c>valueSources</c> declares. The one declared kind is
+/// <c>keyedHexFile</c>, which reads a <c>KEY:HEX</c> line of a file, the
+/// form of Steam's updater config. This replaces SteamHardwareUpdater,
+/// which held Steam's install and file format in code (issue
+/// #62).</summary>
 internal static class ValueSources
 {
     public const string Index = "index";
@@ -198,7 +200,9 @@ internal static class ValueSources
             // the variant is added into the trailing digit run, a carry past
             // the run is dropped, and the length stays. Variant 0 keeps the
             // text byte for byte, and each later variant answers another
-            // serial. The load checked that it is printable ASCII ending in a
+            // serial. A profile with sharedSerial keeps its USB serial
+            // unvaried, and its instanceSerial text is varied all the same:
+            // the flag names the USB string only. The load checked that it is printable ASCII ending in a
             // digit. It runs once, when the table compiles.
             int carry = v.SerialVariant;
             for (int i = dst.Length - 1; i >= 0 && carry > 0 && dst[i] is >= (byte)'0' and <= (byte)'9'; i--)

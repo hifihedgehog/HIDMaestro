@@ -536,8 +536,6 @@ internal static class Program
               Ask(stubs, 1, 0x7F, -1, 64) == null);
     }
 
-    /// <summary>Read a (tag, u32-LE) attribute record out of a reply's
-    /// record block.</summary>
     /// <summary>Issue #72: Steam keys a Valve controller's config set by the
     /// unit serial it reads with ID_GET_STRING_ATTRIBUTE (0xAE) index 1, and
     /// the kernel reads the same index into the device's uniq (hid-steam.c
@@ -592,6 +590,8 @@ internal static class Program
         return Ascii(a, at + 3);
     }
 
+    /// <summary>Read a (tag, u32-LE) attribute record out of a reply's
+    /// record block.</summary>
     static uint Attr(byte[] reply, int start, int len, byte tag)
     {
         for (int off = start; off + 5 <= start + len && off + 5 <= reply.Length; off += 5)
@@ -601,7 +601,6 @@ internal static class Program
         return 0;
     }
 
-    /// <summary>The NUL-terminated ASCII run at an offset.</summary>
     /// <summary>The answer to a message, asked as a host asks it: a SET of
     /// the message on the channel report, framed as Valve frames its command
     /// channel ([message][length][parameters...], after the report ID when
@@ -619,6 +618,7 @@ internal static class Program
         return n < 0 ? null : t.Answer(n).ToArray();
     }
 
+    /// <summary>The NUL-terminated ASCII run at an offset.</summary>
     static string Ascii(byte[] b, int off)
     {
         int end = off;

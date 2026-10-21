@@ -383,12 +383,16 @@ static class ValveSteamCheck
                     // The next unit is created once Steam has named this
                     // one's config set, so each set lands in its own
                     // device's block: for a model Steam keys by unit serial,
-                    // the set named after the serial this unit serves.
+                    // the set named after the serial this unit serves. The
+                    // wait has the open's 90 s bound, since the set lands
+                    // after Steam's account round trip.
                     string naming = t.KeysByUnitSerial && t.UnitSerial != null ? $"configset_{t.UnitSerial}.vdf" : "configset_";
                     var named = Stopwatch.StartNew();
-                    while (t.OpenedAt >= 0 && named.ElapsedMilliseconds < 30_000
+                    while (t.OpenedAt >= 0 && named.ElapsedMilliseconds < 90_000
                            && !SteamDeviceLog.Own(SteamDeviceLog.Read(log, t.Baseline), t.Paths).Contains(naming, StringComparison.Ordinal))
                         Thread.Sleep(200);
+                    if (t.OpenedAt >= 0 && !SteamDeviceLog.Own(SteamDeviceLog.Read(log, t.Baseline), t.Paths).Contains(naming, StringComparison.Ordinal))
+                        t.Error = $"Steam named no config set ({naming}) for this unit within 90 s of its open";
                 }
                 catch (Exception ex) { t.Error = ex.Message; }
             }
@@ -422,7 +426,7 @@ static class ValveSteamCheck
                 Console.WriteLine($"-- {t.Id} --");
                 Check("profile is in the catalog", t.Profile != null);
                 if (t.Profile == null) continue;
-                if (t.Error != null) { Check("persona ran without throwing", false, t.Error); continue; }
+                if (t.Error != null) { Check("persona was created and Steam named its config set", false, t.Error); continue; }
 
                 string after = SteamDeviceLog.Read(log, t.Baseline);
                 string own = SteamDeviceLog.Own(after, t.Paths);

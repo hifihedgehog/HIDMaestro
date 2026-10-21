@@ -72,7 +72,7 @@
             "source": "instanceSerial"
           }
         ],
-        "comment": "ATTRIB_STR_UNIT_SERIAL, and distinct from index 0 as on real hardware. Steam refuses this string (\"Invalid or missing unit serial number\") and names the 2015 controller's config set after its USB ids instead, but the kernel reads it into the device's uniq (hid-steam.c steam_get_serial), so each controller answers its own (issue #72): serial variant 0, a keyless controller at index 0, keeps HMUNIT0000001, and another variant is added into the trailing digits."
+        "comment": "ATTRIB_STR_UNIT_SERIAL, and distinct from index 0 as on real hardware. Steam refuses this string (\"Invalid or missing unit serial number\") and names the 2015 controller's config set after its USB ids instead, but the kernel reads it into the device's uniq (hid-steam.c steam_get_serial), so each controller answers its own (issue #72): serial variant 0, a keyless controller at index 0, keeps HMUNIT0000001, and another variant is added into the trailing digits. A controller created with an identity key, as PadForge creates them, answers its identity's own unit serial."
       },
       {
         "id": "0x00",
