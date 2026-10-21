@@ -55,8 +55,13 @@ public static class HMVR
     /// <para>A failure to update the registry throws
     /// <see cref="InvalidOperationException"/> with the cause as its inner
     /// exception.</para></summary>
-    public static bool EnsureDriverRegistered() =>
-        VrDriverBuilder.EnsureDriverRegistered();
+    public static bool EnsureDriverRegistered()
+    {
+        // Waits, once per process, for a removal of HIDMaestro another
+        // process runs (Uninstall.RemovalGate).
+        Internal.Uninstall.RemovalGate.Pass();
+        return VrDriverBuilder.EnsureDriverRegistered();
+    }
 
     /// <summary>Unregister the driver from the same OpenVR path registry
     /// <see cref="EnsureDriverRegistered"/> writes, and clear the idempotence

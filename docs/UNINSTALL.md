@@ -2,7 +2,7 @@
 
 HIDMaestro 2.0.1 removes itself. `HIDMaestroUninstall.exe` does it from a prompt or an installer, and `HMUninstall` does it from inside a program that embeds HIDMaestro. Both run the same code and report the same items.
 
-The driver, its certificate and its staging belong to every program on the machine that embeds HIDMaestro. A removal takes them from all of them. It refuses while another such program runs, and a program that runs later installs the driver again at its next `InstallDriver` or create.
+The driver, its certificate and its staging belong to every program on the machine that embeds HIDMaestro. A removal takes them from all of them. It refuses while another such program runs, and a program that runs later installs the driver again at its next `InstallDriver` or create. A program on 2.0.1 or later that starts while a removal runs waits for it to end first, as the section on what a removal does describes.
 
 ## The tool
 
@@ -26,6 +26,8 @@ HIDMaestroUninstall [--preview] [--yes] [--include-usbip] [--json]
 | 3 | Removed, with items Windows deletes when it next starts |
 | 2 | Blocked by another program that embeds HIDMaestro, which the report lists. Found before the removal started, nothing was changed. Found after a program started during the removal, the removal stopped before the step that would take what that program uses, and the report says what it had done |
 | 1 | Failed, or did not run: an item could not be removed, part of the machine could not be read (a preview says so too), an unknown option, the question answered no, or no administrator rights |
+
+The tool checks for administrator rights before anything else, `--preview` included, and without them says so and exits with 1. With no option it shows the preview and asks. A preview that could not read part of the machine does not stop the removal, which reads the machine again and reports those items, exactly as `--yes` does.
 
 ### JSON
 
@@ -81,15 +83,19 @@ A run reads every item first, acts in the order below, reads the machine again, 
 5. A DeviceOverrides key, `HKLM\SYSTEM\CurrentControlSet\Control\DeviceOverrides\root#VID_xxxx&PID_yyyy[&IG_00]`, goes when its hardware ID is one the catalog's profiles create, it holds only the `Removable` value HIDMaestro writes, and no root-enumerated device of another driver carries that hardware ID.
 6. HIDMaestro's OpenVR driver folder leaves the `external_drivers` list of the `openvrpaths.vrpath` of the account running the removal, and of every other account's at its default place, `AppData\Local\openvr` in its profile, SYSTEM's included. Another account's `VR_PATHREG_OVERRIDE` is not read. The file stays, since SteamVR owns it.
 7. usbip-win2, as the next section describes.
-8. The driver packages `hidmaestro.inf`, `hidmaestro_xusb.inf`, the XUSB shim `hidmaestro_xusbshim_class.inf` that v1.1.19 to v1.1.21 installed, and the `hmwinusb_*.inf` packages, read from the driver database, which also lists a package whose `oemNN.inf` file is gone. Each goes with `SetupUninstallOEMInf` without `SUOI_FORCEDELETE`, the delete `pnputil /delete-driver` makes without `/uninstall` or `/force`, after the devices are gone and their driver hosts have exited. A package a device still uses is reported `Failed`. A package whose provider is HIDMaestro under a name no HIDMaestro release used is listed and kept.
+8. The driver packages `hidmaestro.inf`, `hidmaestro_xusb.inf`, the XUSB shim `hidmaestro_xusbshim_class.inf` that v1.1.19 to v1.1.21 installed and `hidmaestro_xusbshim.inf`, the shim's name in builds before v1.1.19, and the `hmwinusb_*.inf` packages, read from the driver database, which also lists a package whose `oemNN.inf` file is gone. Each goes with `SetupUninstallOEMInf` without `SUOI_FORCEDELETE`, the delete `pnputil /delete-driver` makes without `/uninstall` or `/force`, after the devices are gone and their driver hosts have exited. A package a device still uses is reported `Failed`. A package whose provider is HIDMaestro under a name no HIDMaestro release used is listed and kept.
 9. The WUDF service keys `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\WUDF\Services\HIDMaestro`, `HMXInput` and the shim's `HMXusbShim`, once no HIDMaestro driver package but a WinUSB one is left and the driver store folder their `ImagePath` names is gone, or when the package's removal left them holding no value. Windows' own `mshidumdf` and `WUDFRd` keys are never touched.
 10. HIDMaestro's registry keys: `HKLM\SOFTWARE\HIDMaestro`, `HIDMaestroOwners`, `HIDMaestroRegistryLedger`, `HIDMaestroPackagesLeft` and `HIDMaestroOemOverrides`. The usbip-win2 part owns `HKLM\SOFTWARE\HIDMaestroUsbip`.
 11. The signing certificate, `CN=HIDMaestroTestCert`, leaves LocalMachine `My`, `Root` and `TrustedPublisher`, once no driver package whose provider is HIDMaestro is left in the driver store, whatever its name. The copies go first, and its private key last, once the copy in `My` is gone.
 12. `%ProgramFiles%\HIDMaestro` (staging, the per-process temporary folders, and folders a repair moved aside), `%ProgramData%\HIDMaestro` (the OpenVR driver, and the usbip-win2 package v1.12.0 staged) and the folders a repair moved aside beside it, and, in every account's `%TEMP%` and in `C:\Windows\Temp`, the folders HIDMaestro wrote there through v1.12.0, by their exact names: `HIDMaestro`, `HIDMaestro_<hash>`, `HIDMaestro_usbip_<version>` and the test program's `HIDMaestroEmulate-<guid>`.
 
-Steps 8 to 12 run under the driver deploy lock, which every program's deploy and create takes, so no program installs the driver between the last look for running programs and the last file deleted.
+Steps 8 to 12 run under the driver deploy lock. A program's driver install takes that lock when it copies or installs a package, so none installs the driver between the last look for running programs and the last file deleted. An install that finds the driver already in place takes no lock.
 
-Files and folders are deleted from a fixed starting folder down: the profile folder, `%ProgramData%`, `%SystemRoot%` or `%ProgramFiles%`. Each folder below it is opened as itself, never through a link, held so it cannot be renamed or replaced, and checked to resolve where it should. A folder on the way that is a link stops the walk, and the report keeps that `%TEMP%` with the reason. A link found under one of HIDMaestro's names is removed as a link, and what it points to stays. A file another program has open inside `%ProgramFiles%\HIDMaestro`, which only administrators can change, is deleted when Windows next starts. One anywhere else, such as the OpenVR driver while SteamVR runs, stays and is reported `Failed`: close that program and run the removal again.
+A program on 2.0.1 or later waits for a running removal to end before the first thing it does that would put HIDMaestro back or take its share of it: its first owner claim, which `InstallDriver`, a create, a cleanup and the prewarm make, an `HMOemNameOverride.Set`, `HMVR.EnsureDriverRegistered` and `InstallUsbipBackend`. It waits once per process, on the removal's own machine-wide lock, which costs one acquire and release when no removal runs, and it never waits on a removal it runs itself. It then installs the driver again. A program on v1.12.0 or 2.0.0 does not wait, and the looks for running programs above find it instead.
+
+Files and folders are deleted from a fixed starting folder down: the profile folder, `C:\Users\Public`, `%ProgramData%`, `%SystemRoot%` or `%ProgramFiles%`. Each folder below it is opened as itself, never through a link, held so it cannot be renamed or replaced, and checked to resolve where it should. A folder on the way that is a link stops the walk, and the report keeps that `%TEMP%` with the reason. A link found under one of HIDMaestro's names, `%ProgramData%\HIDMaestro` among them, is removed as a link, and what it points to stays.
+
+A file or folder another program has open inside `%ProgramFiles%\HIDMaestro` is deleted when Windows next starts, when the folder holding it is one only administrators can change. Each folder is checked through its own handle. A folder that cannot be opened for delete is emptied through a handle that does not delete, and then waits for the next start too. Anything held open anywhere else, such as the OpenVR driver while SteamVR runs, stays and is reported `Failed`: close that program and run the removal again.
 
 A run never restarts the computer or a USB root hub, and never creates a virtual keyboard or mouse. A driver host that runs only HIDMaestro's driver and outlives its devices is ended, as the `Everything` cleanup ends it, and a host that runs any other driver is never touched.
 
@@ -108,11 +114,12 @@ The root-hub filter, `usbip2_filter`, always stays: its package, its service and
 - A shared value, an OEM label or a DeviceOverrides key that another program changed since HIDMaestro wrote it. A folder of HIDMaestro's that also holds files HIDMaestro did not write keeps those files and itself, and the report names them.
 - An OEM override record made before 2.0.1, and the per-user label of an override another account's program set, until the removal runs from that account.
 - Another account's OpenVR registration in a path registry its `VR_PATHREG_OVERRIDE` names.
+- The `%TEMP%` folders of a profile reached through a junction or other link. The removal does not walk a link, and the report lists that `%TEMP%` as `Kept` with the reason.
 - The audio endpoint records Windows keeps under `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices` for a composite's speaker and microphone. Windows' audio service owns them.
 - usbip-win2's root-hub filter, and the VC++ runtime its installer added, which other programs share.
 - What Windows records about drivers and devices: `C:\Windows\INF\setupapi.dev.log`, the Kernel-PnP and DriverFrameworks-UserMode event logs, Prefetch and Amcache. HIDMaestro never edits Windows' own logs.
 
-A program built on HIDMaestro older than v1.12.0 leaves no sign that it runs, so a removal cannot see it and does not wait for it.
+A program built on HIDMaestro older than v1.12.0 leaves no sign that it runs, so a removal cannot see it, and the program does not wait for the removal.
 
 ## Report kinds
 

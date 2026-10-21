@@ -95,7 +95,15 @@ public sealed class HMContext : IDisposable
             {
                 if (HMBuildInfo.Carries(HMPayload.Driver, System.Runtime.InteropServices.RuntimeInformation.OSArchitecture) &&
                     !Internal.DriverBuilder.WillTakeFastPath())
-                    Internal.DriverBuilder.EnsureExtracted();
+                {
+                    // Staging claims this process's owner: it waits first for
+                    // a removal another process runs (Uninstall.RemovalGate),
+                    // holding no lock, as staging takes the staging lock. A
+                    // removal this process runs stages nothing in its wake.
+                    Internal.Uninstall.RemovalGate.Pass();
+                    if (!Internal.Uninstall.RemovalGate.RemovingHere)
+                        Internal.DriverBuilder.EnsureExtracted();
+                }
             }
             catch { }
             try { Internal.DriverBuilder.IsDriverInstalled(); } catch { }
@@ -176,7 +184,10 @@ public sealed class HMContext : IDisposable
     /// <exception cref="HMPayloadMissingException">This build carries no
     /// USB/IP transport for this machine's architecture.</exception>
     public static void InstallUsbipBackend(Action<string>? progress = null)
-        => Internal.Usbip.UsbipDriverInstaller.EnsureInstalled(progress);
+    {
+        Internal.Uninstall.RemovalGate.Pass();
+        Internal.Usbip.UsbipDriverInstaller.EnsureInstalled(progress);
+    }
 
     /// <summary>Stage the embedded driver files under
     /// <c>%ProgramFiles%\HIDMaestro\Staging</c>, verifying each against its
@@ -300,6 +311,9 @@ public sealed class HMContext : IDisposable
     /// transport index and its sections.</para></summary>
     public static void RemoveAllVirtualControllers(HMCleanupScope scope, bool preserveInstall)
     {
+        // Waits, once per process, for a removal of HIDMaestro another
+        // process runs (Uninstall.RemovalGate).
+        Internal.Uninstall.RemovalGate.Pass();
         if (scope == HMCleanupScope.Everything)
             Internal.DeviceOrchestrator.RemoveEverything(preserveInstall);
         else

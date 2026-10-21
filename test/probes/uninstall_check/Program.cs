@@ -15,6 +15,11 @@
 //            HIDMaestro device record, package, certificate, registry key or
 //            folder is left, the OEM targets hold what they held before, the
 //            OpenVR registration is gone, and no USB root hub arrived again.
+//            A program that starts while the tool removes HIDMaestro waits
+//            for the removal to end, does not block it, and then installs
+//            again and keeps its controller. A junction at
+//            %ProgramData%\HIDMaestro goes as a link with its target intact,
+//            and usbip-win2's link on the all-users desktop is removed.
 //            Then a program in this process installs, creates, and calls
 //            HMUninstall.Run itself, as a program's uninstaller would, and
 //            installs and creates again in the same process afterward.
@@ -66,6 +71,8 @@ internal static class Program
     {
         if (args.Length >= 2 && args[0] == "--in-sandbox") return InSandbox(args[1]);
         if (args.Length >= 2 && args[0] == "--hold") return Hold(args[1]);
+        if (args.Length >= 2 && args[0] == "--hold-one") return Hold(args[1], one: true);
+        if (args.Length >= 3 && args[0] == "--late") return Late(args[1], args[2]);
         string part = args.Length > 0 ? args[0].ToLowerInvariant() : "all";
         int code;
         switch (part)
@@ -399,8 +406,17 @@ internal static class Program
             Console.WriteLine("Refused: --in-sandbox runs only inside Windows Sandbox.");
             return 1;
         }
+        // First, while usbip-win2 is absent: once a composite has used the
+        // host controller it stays until a restart, and what its installer
+        // left stays with it.
+        try { PublicLink(); }
+        catch (Exception ex) { Record("public: the run ran to the end", false, $"{ex.GetType().Name}: {ex.Message}"); }
         try { RemovalInSandbox(results); }
         catch (Exception ex) { Record("the run ran to the end", false, $"{ex.GetType().Name}: {ex.Message}"); }
+        try { LateStart(results); }
+        catch (Exception ex) { Record("late: the run ran to the end", false, $"{ex.GetType().Name}: {ex.Message}"); }
+        try { ProgramDataJunction(); }
+        catch (Exception ex) { Record("links: the run ran to the end", false, $"{ex.GetType().Name}: {ex.Message}"); }
         try { InProcess(); }
         catch (Exception ex) { Record("inproc: the run ran to the end", false, $"{ex.GetType().Name}: {ex.Message}"); }
         s_lines.Add("DONE");
@@ -672,16 +688,13 @@ internal static class Program
 
     /// <summary>The program the sandbox run kills: it installs, creates one
     /// controller of each kind the sandbox supports, sets an OEM name
-    /// override, registers the OpenVR driver, says so, and waits.</summary>
-    static int Hold(string answer)
+    /// override, registers the OpenVR driver, says so, and waits. With
+    /// <paramref name="one"/> it creates one plain HID controller and
+    /// nothing else.</summary>
+    static int Hold(string answer, bool one = false)
     {
         var lines = new List<string>();
-        void Say()
-        {
-            string tmp = answer + ".tmp";
-            File.WriteAllLines(tmp, lines);
-            File.Move(tmp, answer, overwrite: true);
-        }
+        void Say() => SayTo(answer, lines);
         var held = new List<HMController>();
         try
         {
@@ -689,6 +702,14 @@ internal static class Program
             ctx.LoadDefaultProfiles();
             ctx.InstallDriver();
             lines.Add("installed");
+            if (one)
+            {
+                held.Add(ctx.CreateController(ctx.GetProfile("dualshock-4-v2")!, "uninstall-one"));
+                lines.Add("created dualshock-4-v2");
+                lines.Add("ready");
+                Say();
+                Thread.Sleep(Timeout.Infinite);
+            }
             var profiles = new List<string> { "dualshock-4-v2", "xbox-360-wired", "xbox-elite-v2", "dualsense-composite" };
             foreach (string id in profiles)
             {
@@ -710,6 +731,202 @@ internal static class Program
         Thread.Sleep(Timeout.Infinite);
         GC.KeepAlive(held);
         return 0;
+    }
+
+    static void SayTo(string answer, List<string> lines)
+    {
+        string tmp = answer + ".tmp";
+        File.WriteAllLines(tmp, lines);
+        File.Move(tmp, answer, overwrite: true);
+    }
+
+    /// <summary>A program that starts while a removal runs. It is started
+    /// before the removal and waits on <paramref name="eventName"/> without
+    /// touching HIDMaestro. Once set, it notes the time, constructs its
+    /// context, installs the driver, notes the time again, creates one
+    /// controller and waits.</summary>
+    static int Late(string answer, string eventName)
+    {
+        var lines = new List<string>();
+        var held = new List<HMController>();
+        using (var go = new EventWaitHandle(false, EventResetMode.ManualReset, eventName))
+        {
+            lines.Add("waiting");
+            SayTo(answer, lines);
+            if (!go.WaitOne(600_000)) { lines.Add("never signaled"); SayTo(answer, lines); return 1; }
+        }
+        lines.Add(FormattableString.Invariant($"signaled {DateTime.UtcNow.Ticks}"));
+        // The SDK's diagnostic hook, set by reflection: the removal gate
+        // says there when it waits, from whichever thread passes it first.
+        var gate = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.DeviceOrchestrator")!
+            .GetField("DiagTap", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
+            .SetValue(null, (Action<string>)(m => { if (m.StartsWith("removal gate:", StringComparison.Ordinal)) gate.Enqueue(m); }));
+        try
+        {
+            var ctx = new HMContext();
+            ctx.LoadDefaultProfiles();
+            ctx.InstallDriver();
+            lines.Add(FormattableString.Invariant($"installed {DateTime.UtcNow.Ticks}"));
+            held.Add(ctx.CreateController(ctx.GetProfile("dualshock-4-v2")!, "uninstall-late"));
+            lines.Add("created dualshock-4-v2");
+        }
+        catch (Exception ex) { lines.Add($"failed {ex.GetType().Name}: {ex.Message}"); }
+        lines.AddRange(gate.Select(m => "gate " + m));
+        lines.Add("ready");
+        SayTo(answer, lines);
+        Thread.Sleep(Timeout.Infinite);
+        GC.KeepAlive(held);
+        return 0;
+    }
+
+    static string[] WaitFor(string answer, Process p, string word, int timeoutMs)
+    {
+        var wait = Stopwatch.StartNew();
+        string[] said = Array.Empty<string>();
+        while (wait.ElapsedMilliseconds < timeoutMs && !p.HasExited)
+        {
+            try { if (File.Exists(answer)) said = File.ReadAllLines(answer); } catch { }
+            if (said.Contains(word)) break;
+            Thread.Sleep(100);
+        }
+        return said;
+    }
+
+    static long TicksAfter(string[] said, string word) =>
+        said.FirstOrDefault(s => s.StartsWith(word + " ", StringComparison.Ordinal)) is { } line
+        && long.TryParse(line[(word.Length + 1)..], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out long t) ? t : 0;
+
+    /// <summary>A program that starts while the tool removes HIDMaestro
+    /// waits for the removal to end, then installs the driver again and
+    /// keeps its controller, and the removal is not blocked by it. A killed
+    /// program's controller gives the removal devices to remove, and the
+    /// late program is let go once the tool holds the removal's lock.</summary>
+    static void LateStart(string results)
+    {
+        string oneAnswer = Path.Combine(results, "hold-one.txt");
+        var psi = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, CreateNoWindow = true };
+        psi.ArgumentList.Add("--hold-one");
+        psi.ArgumentList.Add(oneAnswer);
+        using (var one = Process.Start(psi)!)
+        {
+            var said = WaitFor(oneAnswer, one, "ready", 600_000);
+            Record("late: a program installs and creates a controller (positive control)", said.Contains("created dualshock-4-v2"), string.Join(" / ", said));
+            try { one.Kill(); one.WaitForExit(30_000); } catch { }
+        }
+        Note($"late: before the removal, device installation {(CMP_WaitNoPendingInstallEvents(120_000) == 0 ? "settled" : "still pending after 120 s")}");
+        var devices = Inventory.Take().HidMaestroDevnodes();
+        Record("late: the killed program's devices are there (positive control)", devices.Count > 0, $"{devices.Count} device record(s)");
+
+        string lateAnswer = Path.Combine(results, "late.txt");
+        string eventName = "HIDMaestroUninstallCheckLate_" + Guid.NewGuid().ToString("N");
+        using var go = new EventWaitHandle(false, EventResetMode.ManualReset, eventName);
+        var lpsi = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, CreateNoWindow = true };
+        lpsi.ArgumentList.Add("--late");
+        lpsi.ArgumentList.Add(lateAnswer);
+        lpsi.ArgumentList.Add(eventName);
+        using var late = Process.Start(lpsi)!;
+        WaitFor(lateAnswer, late, "waiting", 60_000);
+
+        var tpsi = new ProcessStartInfo(SandboxTool)
+        {
+            UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true,
+        };
+        tpsi.ArgumentList.Add("--yes");
+        tpsi.ArgumentList.Add("--json");
+        using var tool = Process.Start(tpsi)!;
+        var stdout = tool.StandardOutput.ReadToEndAsync();
+        var stderr = tool.StandardError.ReadToEndAsync();
+        // The late program is let go once the tool holds the removal's
+        // mutex, which the probe finds by its name in the SDK's admin
+        // namespace and tries without waiting. The tool takes it before its
+        // first look for running programs.
+        string mutexName = (string)typeof(HMUninstall).Assembly.GetType("HIDMaestro.Internal.AdminNamespace")!
+            .GetMethod("Name", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
+            .Invoke(null, new object[] { "Uninstall" })!;
+        var sw = Stopwatch.StartNew();
+        bool sawRemoval = false;
+        while (!tool.HasExited && sw.ElapsedMilliseconds < 600_000)
+        {
+            if (Mutex.TryOpenExisting(mutexName, out var mx))
+                using (mx)
+                {
+                    bool free;
+                    try { free = mx.WaitOne(0); } catch (AbandonedMutexException) { free = true; }
+                    if (free) mx.ReleaseMutex();
+                    else { sawRemoval = true; break; }
+                }
+            Thread.Sleep(5);
+        }
+        go.Set();
+        bool exited = tool.WaitForExit(1_800_000);
+        if (!exited) { try { tool.Kill(entireProcessTree: true); } catch { } }
+        long toolEnd = exited ? tool.ExitTime.ToUniversalTime().Ticks : 0;
+        string output = stdout.Result + stderr.Result;
+        var report = Report.Parse(output);
+        Record("late: the program is let go while the tool holds the removal's lock (positive control)", sawRemoval && exited,
+               sawRemoval ? "" : "the tool ended before it was seen holding the lock");
+
+        var lateSaid = WaitFor(lateAnswer, late, "ready", 900_000);
+        foreach (string s in lateSaid.Where(s => s.StartsWith("failed", StringComparison.Ordinal))) Note($"late: {s}");
+        long signaled = TicksAfter(lateSaid, "signaled"), installed = TicksAfter(lateSaid, "installed");
+        Record("late: the removal is not blocked by it and removes HIDMaestro",
+               exited && tool.ExitCode is 0 or 3 && report?.Status is "Removed" or "RemovedRestartPending",
+               $"exit {(exited ? tool.ExitCode : -1)}, status {report?.Status}: {string.Join("; ", report?.Entries.Where(e => e.Outcome is "Failed" or "Blocked").Take(4) ?? Enumerable.Empty<Entry>())}");
+        Record("late: the program started before the removal ended (positive control)", signaled > 0 && toolEnd > 0 && signaled < toolEnd,
+               FormattableString.Invariant($"started {(toolEnd - signaled) / 10_000} ms before the removal ended"));
+        Record("late: it waited at the removal gate",
+               lateSaid.Any(s => s.StartsWith("gate removal gate: waited", StringComparison.Ordinal)),
+               string.Join(" / ", lateSaid.Where(s => s.StartsWith("gate ", StringComparison.Ordinal))));
+        Record("late: its InstallDriver returned only after the removal ended", installed > 0 && toolEnd > 0 && installed > toolEnd,
+               FormattableString.Invariant($"returned {(installed - toolEnd) / 10_000} ms after the removal ended"));
+        var after = Inventory.Take();
+        Record("late: it installs the driver again and keeps its controller",
+               lateSaid.Contains("created dualshock-4-v2") && !late.HasExited && after.Packages.Count > 0 && after.HidMaestroDevnodes().Count > 0,
+               $"{string.Join(" / ", lateSaid)}; {after.Packages.Count} package(s), {after.HidMaestroDevnodes().Count} device record(s)");
+
+        try { late.Kill(); late.WaitForExit(30_000); } catch { }
+        var (cexit, cout) = Run(SandboxTool, 1_800_000, "--yes", "--json");
+        var clean = Inventory.Take();
+        Record("late: a removal afterward leaves the machine clean", cexit is 0 or 3 && clean.Packages.Count == 0 && clean.HidMaestroDevnodes().Count == 0,
+               $"exit {cexit}, status {Report.Parse(cout)?.Status}");
+    }
+
+    /// <summary>A junction planted at %ProgramData%\HIDMaestro goes as a
+    /// link, and the folder it points to keeps its file.</summary>
+    static void ProgramDataJunction()
+    {
+        string pd = Inventory.ProgramDataFolder;
+        const string bait = @"C:\uninstall_bait_programdata";
+        Directory.CreateDirectory(bait);
+        File.WriteAllText(Path.Combine(bait, "keep.txt"), "uninstall_check");
+        if (!Directory.Exists(pd)) Run("cmd.exe", 30_000, "/c", "mklink", "/J", pd, bait);
+        Record("links: %ProgramData%\\HIDMaestro is a junction (positive control)", IsLinkPath(pd), pd);
+
+        var r = HMUninstall.Run();
+        var pdEntries = r.Entries.Where(e => e.Location.Equals(pd, StringComparison.OrdinalIgnoreCase)).ToList();
+        Record("links: the junction at %ProgramData%\\HIDMaestro goes as a link, and its target keeps its file",
+               !Directory.Exists(pd) && !File.Exists(pd) && File.Exists(Path.Combine(bait, "keep.txt"))
+               && pdEntries.Count > 0 && pdEntries.All(e => e.Outcome == HMUninstallOutcome.Removed),
+               string.Join("; ", pdEntries));
+        try { Directory.Delete(bait, recursive: true); } catch { }
+    }
+
+    /// <summary>usbip-win2's installer's desktop link lives on the all-users
+    /// desktop, under the Public profile. A removal that includes usbip-win2
+    /// deletes it from there rather than refusing a path under no anchor.
+    /// Runs on the clean sandbox, before anything is installed.</summary>
+    static void PublicLink()
+    {
+        string link = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), "USBip.lnk");
+        File.WriteAllBytes(link, new byte[] { 0x4C, 0, 0, 0 });
+        Record("public: the all-users desktop link is planted (positive control)", File.Exists(link), link);
+        var r = HMUninstall.Run(new HMUninstallOptions { IncludeUsbip = true });
+        var linkEntry = r.Entries.FirstOrDefault(e => e.Location.Equals(link, StringComparison.OrdinalIgnoreCase));
+        Record("public: the all-users desktop link is removed from the Public profile, not refused",
+               !File.Exists(link) && linkEntry?.Outcome == HMUninstallOutcome.Removed,
+               $"{r.Status}: {linkEntry?.ToString() ?? "no entry for it"}");
+        try { if (File.Exists(link)) File.Delete(link); } catch { }
     }
 
     // ── The tool's JSON report ─────────────────────────────────────────
