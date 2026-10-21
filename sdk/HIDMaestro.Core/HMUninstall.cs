@@ -27,8 +27,16 @@ public static class HMUninstall
 {
     /// <summary>List what <see cref="Run"/> would remove and keep, and the
     /// running HIDMaestro programs that would block it. Changes nothing.
-    /// Reads more with administrator rights: without them, a folder or key
-    /// it cannot read is left out of the list.</summary>
+    /// Reads more with administrator rights. Without them, a HIDMaestro
+    /// folder it cannot open (Uninstaller.OwnFolder), a step that throws
+    /// (Uninstaller.Safely) and a census of running programs it cannot take
+    /// (Uninstaller.Preview) each come back as a failed entry, and the
+    /// status is then <see cref="HMUninstallStatus.Failed"/>. An account's
+    /// %TEMP% it cannot open comes back as a kept entry with the reason
+    /// (Uninstaller.FileTargets). A few reads leave out what they cannot
+    /// open, with no entry: a package record in the driver database, an
+    /// account's OpenVR path registry, an account in ProfileList, and the
+    /// moved-aside folders at the top of %ProgramData%.</summary>
     public static HMUninstallReport Preview(HMUninstallOptions? options = null) =>
         Uninstaller.Preview(options ?? new HMUninstallOptions());
 
