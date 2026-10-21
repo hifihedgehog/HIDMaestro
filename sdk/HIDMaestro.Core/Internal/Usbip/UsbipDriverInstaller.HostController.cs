@@ -574,30 +574,60 @@ internal static partial class UsbipDriverInstaller
 
     /// <summary>Once per process, on a machine whose transport answers:
     /// clear the stale values when no present host controller's INF writes
-    /// them. The values take effect at the driver's next load.</summary>
+    /// them. The values take effect at the driver's next load. The clear
+    /// runs under the transport lock taken with no wait
+    /// (<see cref="WithTransportLockNow"/>). When another program holds it,
+    /// or this process's own removal runs, nothing is written and a later
+    /// create checks again.</summary>
     private static void ClearStaleVerifierOnce()
     {
         if (s_verifierChecked) return;
-        s_verifierChecked = true;
-        if (Environment.GetEnvironmentVariable("HIDMAESTRO_KEEP_TRANSPORT") == "1") return;
+        if (Environment.GetEnvironmentVariable("HIDMAESTRO_KEEP_TRANSPORT") == "1") { s_verifierChecked = true; return; }
         try
         {
-            if (StaleVerifierValues().Count == 0) return;
-            var texts = new List<string>();
-            foreach (var (id, present) in HostControllers())
+            if (StaleVerifierValues().Count == 0) { s_verifierChecked = true; return; }
+            bool ran = WithTransportLockNow(() =>
             {
-                if (!present) continue;
-                // A controller whose INF cannot be read could be one that
-                // writes them: leave them.
-                if (DriverInfPathOf(id) is not string oem) return;
-                texts.Add(ReadInfText(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "INF", oem)));
-            }
-            if (texts.Count > 0) ClearStaleVerifier(texts, "for the installed driver");
+                var texts = new List<string>();
+                foreach (var (id, present) in HostControllers())
+                {
+                    if (!present) continue;
+                    // A controller whose INF cannot be read could be one that
+                    // writes them: leave them.
+                    if (DriverInfPathOf(id) is not string oem) return;
+                    texts.Add(ReadInfText(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "INF", oem)));
+                }
+                if (texts.Count > 0) ClearStaleVerifier(texts, "for the installed driver");
+            });
+            if (ran) s_verifierChecked = true;
         }
         catch (Exception ex)
         {
+            s_verifierChecked = true;
             DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: KMDF debug values not checked: {ex.GetType().Name}: {ex.Message}");
         }
+    }
+
+    /// <summary>Run <paramref name="write"/>, a write of the fast path, under
+    /// the transport lock taken with no wait, as CompleteRecordOnce does, and
+    /// read RemovingHere again under it. False, with nothing run, when
+    /// another program holds the lock or this process's own removal runs:
+    /// the caller leaves the work to a later call. A removal that starts
+    /// after the caller's claim waits for the lock or finds this done.</summary>
+    internal static bool WithTransportLockNow(Action write)
+    {
+        using var m = new Mutex(false, AdminNamespace.Name(TransportMutexObject));
+        bool held;
+        try { held = m.WaitOne(0); }
+        catch (AbandonedMutexException) { held = true; }
+        if (!held) return false;
+        try
+        {
+            if (Uninstall.RemovalGate.RemovingHere) return false;
+            write();
+            return true;
+        }
+        finally { m.ReleaseMutex(); }
     }
 
     /// <summary>The KMDF debug values the service key holds now, only the
