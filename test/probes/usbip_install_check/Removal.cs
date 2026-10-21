@@ -93,6 +93,28 @@ internal static partial class Program
 
     static void Removal()
     {
+        // ── R00: a driver install that timed out and then bound ───────────
+        // The state the timeout leaves: the record written before the driver
+        // install, with no package, and the SDK's own driver install, which
+        // binds after the create gave up. A removal proves it, and the next
+        // create on the working transport records the package.
+        var (late, lateToken) = RegisterOnly();
+        WriteRecordWithNoDriver(late, lateToken);
+        ForceDriverAsTheSdkDoes();
+        Record("remove: a driver install that bound after its timeout leaves a working host controller and a record with no package",
+               Answers() && Pnp.DriverInf(late) != null && RecordValue("OemInf") == null, $"{late} runs {Pnp.DriverInf(late)}");
+        var latePreview = Remove("remove: bound late", preview: true, includeUnproven: false);
+        Record("remove: a removal proves it, and would take the host controller and its package",
+               Has(latePreview, "devnode", l => l.StartsWith(late + " "), "WouldRemove")
+               && Has(latePreview, "driver package", l => l.StartsWith(Pnp.DriverInf(late) + " "), "WouldRemove"));
+        HMContext.InstallUsbipBackend();
+        Record("remove: the next create on the working transport records the package",
+               RecordValue("OemInf") is string lateOem && lateOem.Equals(Pnp.DriverInf(late), StringComparison.OrdinalIgnoreCase),
+               $"OemInf {RecordValue("OemInf") ?? "none"}");
+        var lateRemoved = Remove("remove: bound late, removed", preview: false, includeUnproven: false);
+        Record("remove: and a default removal takes it all",
+               !Pnp.Known(late) && UdePackages().Count == 0 && !KeyExists(RecordKey) && lateRemoved.All(e => e.Outcome != "Failed"), Snapshot());
+
         // ── R0: an install cut short between its devnode and its driver ────
         // The SDK's own registration, called as an install calls it, then
         // nothing more: a timeout or a killed process. With the record the
@@ -173,8 +195,8 @@ internal static partial class Program
             k.SetValue("UninstallString", "\"C:\\Program Files\\USBip\\unins000.exe\"");
         }
         var vendor = Remove("remove: vendor install after", preview: true, includeUnproven: false);
-        Record("remove: nor one whose Apps entry usbip-win2's installer wrote after HIDMaestro's install",
-               Has(vendor, "devnode", l => l.StartsWith(hc + " "), "Kept", "after HIDMaestro's install"));
+        Record("remove: nor one whose usbip-win2 Apps entry was written since HIDMaestro's install",
+               Has(vendor, "devnode", l => l.StartsWith(hc + " "), "Kept", "Apps entry was written or removed since HIDMaestro's install"));
 
         Registry.LocalMachine.DeleteSubKeyTree(RecordKey, throwOnMissingSubKey: false);
         using (var k = Registry.LocalMachine.CreateSubKey(UninstallKey))
@@ -308,7 +330,23 @@ internal static partial class Program
         return ((string)t.GetField("Item1")!.GetValue(result)!, (string)t.GetField("Item2")!.GetValue(result)!);
     }
 
-    /// <summary>The record an install writes before its driver install.</summary>
+    /// <summary>The SDK's own driver install on every present host
+    /// controller, from its staged package, as an install runs it.</summary>
+    static void ForceDriverAsTheSdkDoes()
+    {
+        var installer = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.Usbip.UsbipDriverInstaller", throwOnError: true)!;
+        string inf = (string)installer.GetMethod("StageUdePackage", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, null)!;
+        installer.GetMethod("RunForceDriver", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, new object[] { inf });
+    }
+
+    static string? RecordValue(string name)
+    {
+        using var k = Registry.LocalMachine.OpenSubKey(RecordKey);
+        return k?.GetValue(name) as string;
+    }
+
+    /// <summary>The record an install writes before its driver install, on a
+    /// machine with no usbip-win2 Apps entry.</summary>
     static void WriteRecordWithNoDriver(string instance, string token)
     {
         using var k = Registry.LocalMachine.CreateSubKey(RecordKey);
@@ -316,6 +354,7 @@ internal static partial class Program
         k.SetValue("Token", token);
         k.SetValue("PackageAdded", 0, RegistryValueKind.DWord);
         k.SetValue("PackagesBefore", Array.Empty<string>(), RegistryValueKind.MultiString);
+        k.SetValue("AppsEntry", "");
         k.SetValue("Version", "0.9.8.1");
         k.SetValue("InstalledUtc", DateTime.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture));
         k.SetValue("SdkVersion", "probe");

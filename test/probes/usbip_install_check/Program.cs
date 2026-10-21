@@ -29,6 +29,8 @@
 //               S45's microphone energy check is a skip, and its render check
 //               counts bytes.
 //   R. remove   The usbip-win2 part of a full removal (UsbipRemoval.Remove):
+//               a driver install that timed out and bound afterward (a
+//               removal proves it, and the next create records its package),
 //               an install cut short before its driver (a default removal
 //               takes it, or the next install finishes the same devnode), a
 //               preview that changes nothing, a removal of an install the
