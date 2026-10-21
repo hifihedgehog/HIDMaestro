@@ -526,9 +526,12 @@ internal static partial class UsbipRemoval
 
     private static void VendorPieces(List<UninstallEntry> entries, bool preview, bool remove, string keptReason)
     {
-        // The detach task.
-        var (q, _) = RunSystemTool("schtasks.exe", $"/query /tn \"{DetachTaskName}\"");
-        if (q == 0)
+        // The detach task, found by the definition file Task Scheduler keeps
+        // for each task in its root folder, where the installer registers
+        // it. Reading the file starts no process, so a preview changes
+        // nothing: a tool started through PnputilHelper makes a child
+        // temporary folder under %ProgramFiles%\HIDMaestro.
+        if (File.Exists(Path.Combine(Environment.SystemDirectory, "Tasks", DetachTaskName)))
         {
             if (!remove) entries.Add(new("scheduled task", DetachTaskName, UninstallOutcome.Kept, keptReason));
             else if (preview) entries.Add(new("scheduled task", DetachTaskName, UninstallOutcome.WouldRemove));

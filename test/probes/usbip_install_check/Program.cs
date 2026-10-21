@@ -197,6 +197,7 @@ internal static partial class Program
     }
 
     static readonly string SandboxIdFile = Path.Combine(Path.GetTempPath(), "HIDMaestro", "usbip_install_check.sandbox");
+    static readonly string UninstallCheckIdFile = Path.Combine(Path.GetTempPath(), "HIDMaestro_uninstall_check.sandbox");
 
     static void RunInSandbox(string wsb, string publish, string scenario)
     {
@@ -221,12 +222,16 @@ internal static partial class Program
             // Windows Sandbox runs one instance at a time, and a run killed
             // before its finally leaves its sandbox running, so the next
             // start fails CO_E_APPSINGLEUSE. Each run records the sandbox it
-            // started and stops the one an earlier run left, and no other.
-            if (File.Exists(SandboxIdFile))
+            // started and stops the one an earlier run left: this probe's,
+            // or uninstall_check's (S101), whose sandbox the battery starts
+            // only after this one's is collected, so a recorded one is left
+            // over. No other sandbox is touched.
+            foreach (string idFile in new[] { SandboxIdFile, UninstallCheckIdFile })
             {
-                string left = File.ReadAllText(SandboxIdFile).Trim();
+                if (!File.Exists(idFile)) continue;
+                string left = File.ReadAllText(idFile).Trim();
                 if (left.Length > 0) Run(wsb, 120_000, "stop", "--id", left);
-                File.Delete(SandboxIdFile);
+                File.Delete(idFile);
             }
             var step = Stopwatch.StartNew();
             var started = Run(wsb, 120_000, "start", "--config", config, "--raw");

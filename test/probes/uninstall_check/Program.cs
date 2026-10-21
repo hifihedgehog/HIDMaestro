@@ -28,9 +28,9 @@
 // fixture where it is allowed. The battery's S101 runs preview and fixture
 // in its slot and sandbox beside the scenarios before it.
 //
-// A composite is created in the sandbox once the SDK installs usbip-win2
-// without its vendor installer (CompositeInSandbox), since the vendor
-// installer installs usbip-win2's root-hub filter.
+// The sandbox run creates a USB/IP composite too. The SDK installs
+// usbip-win2's host controller from its own package, with no root-hub
+// filter, so the sandbox has no filter before or after.
 //
 // Requires elevation. Exit 0 PASS, 1 FAIL, 2 when the part asked for cannot
 // run on this machine.
@@ -46,11 +46,6 @@ using Microsoft.Win32;
 
 internal static class Program
 {
-    /// <summary>Whether the sandbox run creates a USB/IP composite. False
-    /// while the SDK's first transport install runs usbip-win2's vendor
-    /// installer, which installs the root-hub filter.</summary>
-    static readonly bool CompositeInSandbox = false;
-
     // dualshock-4-v2's identity, so the override and the controller's own
     // joy.cpl key meet, as they do in a program that names its controller.
     const ushort OemVid = 0x054C, OemPid = 0x09CC;
@@ -298,6 +293,7 @@ internal static class Program
     // ── sandbox: host ──────────────────────────────────────────────────
 
     static readonly string SandboxIdFile = Path.Combine(Path.GetTempPath(), "HIDMaestro_uninstall_check.sandbox");
+    static readonly string UsbipInstallCheckIdFile = Path.Combine(Path.GetTempPath(), "HIDMaestro", "usbip_install_check.sandbox");
 
     static int SandboxPart()
     {
@@ -330,12 +326,16 @@ internal static class Program
                 "</MappedFolders></Configuration>";
             // One sandbox at a time: a run killed before its finally leaves
             // its sandbox running, and the next start fails. Each run stops
-            // the one an earlier run of this probe left, and no other.
-            if (File.Exists(SandboxIdFile))
+            // the one an earlier run left: this probe's, or
+            // usbip_install_check's (S73), which the battery collects before
+            // this one starts, so a recorded one is left over. No other
+            // sandbox is touched.
+            foreach (string idFile in new[] { SandboxIdFile, UsbipInstallCheckIdFile })
             {
-                string left = File.ReadAllText(SandboxIdFile).Trim();
+                if (!File.Exists(idFile)) continue;
+                string left = File.ReadAllText(idFile).Trim();
                 if (left.Length > 0) Run(wsb, 120_000, "stop", "--id", left);
-                File.Delete(SandboxIdFile);
+                File.Delete(idFile);
             }
             var started = Run(wsb, 120_000, "start", "--config", config, "--raw");
             id = JsonString(started.Output, "Id");
@@ -566,8 +566,7 @@ internal static class Program
             ctx.LoadDefaultProfiles();
             ctx.InstallDriver();
             lines.Add("installed");
-            var profiles = new List<string> { "dualshock-4-v2", "xbox-360-wired", "xbox-elite-v2" };
-            if (CompositeInSandbox) profiles.Add("dualsense-composite");
+            var profiles = new List<string> { "dualshock-4-v2", "xbox-360-wired", "xbox-elite-v2", "dualsense-composite" };
             foreach (string id in profiles)
             {
                 try
