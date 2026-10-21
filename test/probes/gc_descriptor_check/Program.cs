@@ -122,7 +122,7 @@ internal static class Program
             CheckServed(controller);
 
             string? id = null;
-            Probe.WaitFor(() => (id = Devnodes.PresentAdapters().Except(before, StringComparer.OrdinalIgnoreCase).FirstOrDefault()) != null, 10_000);
+            Probe.WaitFor(() => (id = Devnodes.PresentAdapters().Except(before, StringComparer.OrdinalIgnoreCase).FirstOrDefault()) != null, Probe.HangMs());
             Probe.Check("the adapter arrives as a USB device", id != null, id ?? "");
             if (id == null) return Probe.Finish("S79");
 
@@ -135,7 +135,7 @@ internal static class Program
 
             // Windows binds input.inf's HID driver, which cannot parse the
             // report descriptor: Code 10, as on a real adapter.
-            Probe.WaitFor(() => Devnodes.Status(id) is { Problem: 10 }, 10_000);
+            Probe.WaitFor(() => Devnodes.Status(id) is { Problem: 10 }, Probe.HangMs());
             string? inf = Devnodes.InfPath(id);
             var status = Devnodes.Status(id);
             Probe.Check("Windows gives it input.inf's HID driver",
@@ -150,7 +150,7 @@ internal static class Program
         }
 
         Probe.Check("the device leaves with the controller",
-            Probe.WaitFor(() => Devnodes.PresentAdapters().Except(before, StringComparer.OrdinalIgnoreCase).Count() == 0, 10_000));
+            Probe.WaitFor(() => Devnodes.PresentAdapters().Except(before, StringComparer.OrdinalIgnoreCase).Count() == 0, Probe.HangMs()));
         return Probe.Finish("S79");
     }
 
@@ -684,7 +684,7 @@ internal static class Program
             // asynchronously, so give it the time the device part gives a
             // real create.
             if (created != null)
-                Probe.WaitFor(() => Devnodes.PresentAdapters().Except(devnodes, StringComparer.OrdinalIgnoreCase).Any(), 10_000);
+                Probe.WaitFor(() => Devnodes.PresentAdapters().Except(devnodes, StringComparer.OrdinalIgnoreCase).Any(), Probe.HangMs());
             var pipesAfter = ClaimPipes();
             Probe.Check("no claim pipe appeared", pipesAfter.SetEquals(pipes),
                 string.Join(" ", pipesAfter.Except(pipes)));
@@ -700,7 +700,7 @@ internal static class Program
             if (created != null)
             {
                 created.Dispose();
-                Probe.WaitFor(() => !Devnodes.PresentAdapters().Except(devnodes, StringComparer.OrdinalIgnoreCase).Any(), 10_000);
+                Probe.WaitFor(() => !Devnodes.PresentAdapters().Except(devnodes, StringComparer.OrdinalIgnoreCase).Any(), Probe.HangMs());
             }
         }
     }
@@ -937,7 +937,7 @@ internal static class Program
         }
         Probe.Check("BindWinUsb binds WinUSB", result?.ToString() == "Bound", $"{result}");
         WinUsbDevice? usb = null;
-        Probe.WaitFor(() => (usb = WinUsbDevice.Open(id)) != null, 10_000);
+        Probe.WaitFor(() => (usb = WinUsbDevice.Open(id)) != null, Probe.HangMs());
         Probe.Check("WinUSB opens the device by the profile's interface GUID", usb != null);
         if (usb == null) return;
         using (usb)
