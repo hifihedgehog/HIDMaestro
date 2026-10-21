@@ -67,7 +67,12 @@ namespace HIDMaestro;
 ///         record holds that account's per-user original, and
 ///         <see cref="Clear"/> and <see cref="RecoverOrphans"/> put back the
 ///         HKLM targets and leave the per-user part of the record for that
-///         account.</item>
+///         account. A record written by 2.0.0 names no account: it is taken
+///         as this account's while this account's per-user target holds the
+///         label HIDMaestro wrote. When two accounts both set the same
+///         VID:PID under 2.0.0, both hold it, and the first to set, clear or
+///         remove from 2.0.1 on is taken as the owner. The second account's
+///         original was never recorded, so it cannot be put back.</item>
 ///   <item><see cref="Set"/> takes the program's HIDMaestro owner claim, so
 ///         a full removal (<see cref="HMUninstall"/>) refuses while the
 ///         program runs, and a Set made while another program removes
