@@ -458,6 +458,11 @@ internal static class Program
         var diff = before.Diff(Inventory.Take()).ToList();
         Record("and changes nothing", diff.Count == 0, string.Join("; ", diff.Take(6)));
 
+        // The certificate's private key, by its CNG name, before and after.
+        var key = CertificateKey();
+        Record("the certificate's private key is in the machine key store (positive control)", key is { } k0 && KeyExists(k0),
+               key?.ToString() ?? "no RSA CNG key on the certificate in My");
+
         // Killed, the program leaves its devices and its record behind, as a
         // crash does.
         try { holder.Kill(); holder.WaitForExit(30_000); } catch { }
@@ -466,12 +471,33 @@ internal static class Program
         var (exit, output) = Run(SandboxTool, 1_800_000, "--yes", "--json");
         Note(FormattableString.Invariant($"the removal took {step.Elapsed.TotalSeconds:F1} s"));
         RemovalChecks("removal", exit, Report.Parse(output), output, hubs, clean: true, Note, (n, ok, d) => Record(n, ok, d));
+        if (key is { } k1) Record("removal: the certificate's private key is gone from the machine key store", !KeyExists(k1), k1.ToString());
         string oemAfter = OemTargets();
         Record("removal: the OEM name targets hold what they held before HIDMaestro", oemAfter == oemBefore,
                oemAfter == oemBefore ? "" : $"before [{oemBefore}] after [{oemAfter}]");
-        foreach (string key in Inventory.WatchedKeys.Skip(6).Take(2))
-            if (Inventory.KeyExists(key)) Note($"after the removal {key} holds {Inventory.Dump(key)}");
     }
+
+    /// <summary>The CNG key name and provider of the HIDMaestro certificate
+    /// in LocalMachine My, or null.</summary>
+    static (string Name, string Provider)? CertificateKey()
+    {
+        using var store = new System.Security.Cryptography.X509Certificates.X509Store(
+            System.Security.Cryptography.X509Certificates.StoreName.My, System.Security.Cryptography.X509Certificates.StoreLocation.LocalMachine);
+        store.Open(System.Security.Cryptography.X509Certificates.OpenFlags.ReadOnly);
+        foreach (var c in store.Certificates)
+            using (c)
+            {
+                if (c.Subject != "CN=HIDMaestroTestCert") continue;
+                using var rsa = System.Security.Cryptography.X509Certificates.RSACertificateExtensions.GetRSAPrivateKey(c);
+                if (rsa is System.Security.Cryptography.RSACng cng && cng.Key.KeyName is { } name)
+                    return (name, cng.Key.Provider?.Provider ?? "");
+            }
+        return null;
+    }
+
+    static bool KeyExists((string Name, string Provider) key) =>
+        System.Security.Cryptography.CngKey.Exists(key.Name, new System.Security.Cryptography.CngProvider(key.Provider),
+            System.Security.Cryptography.CngKeyOpenOptions.MachineKey);
 
     /// <summary>A program's own uninstaller: it installs, creates, and
     /// calls HMUninstall.Run in its own process with its controller still
