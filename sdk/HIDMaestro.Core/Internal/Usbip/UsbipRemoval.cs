@@ -707,18 +707,20 @@ internal static partial class UsbipRemoval
     }
 
     /// <summary>Delete a folder through the full removal's own delete
-    /// (<see cref="SafeDelete.Tree"/>), which follows no link, changes no
-    /// attribute, and leaves an entry in use for the next start.</summary>
+    /// (<see cref="SafeDelete.TreeUnder"/>), which opens every folder from a
+    /// trusted anchor down without following a link, changes no attribute,
+    /// and leaves an entry in use for the next start only inside
+    /// HIDMaestro's protected staging.</summary>
     private static void DeleteFolder(List<UninstallEntry> entries, string dir, bool preview)
     {
         if (preview) { entries.Add(new("folder", dir, UninstallOutcome.WouldRemove)); return; }
-        var (outcome, reason) = SafeDelete.Tree(dir);
+        var (outcome, reason) = SafeDelete.TreeUnder(dir, ProfileFolders());
         entries.Add(new("folder", dir, outcome, reason));
     }
 
     private static UninstallEntry DeleteFile(string path)
     {
-        var (outcome, reason) = SafeDelete.Tree(path);
+        var (outcome, reason) = SafeDelete.TreeUnder(path, ProfileFolders());
         return new("file", path, outcome, reason);
     }
 

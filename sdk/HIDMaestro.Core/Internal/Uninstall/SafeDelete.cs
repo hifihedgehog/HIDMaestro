@@ -199,6 +199,33 @@ internal static partial class SafeDelete
         return (UninstallOutcome.Removed, null);
     }
 
+    /// <summary><see cref="Tree"/> for a full path, from the deepest trusted
+    /// anchor that holds it: %ProgramFiles%, %ProgramData%, %SystemRoot%, or
+    /// one of <paramref name="profiles"/>. A path under none of them is
+    /// refused.</summary>
+    internal static (UninstallOutcome Outcome, string? Reason) TreeUnder(string full, IEnumerable<string> profiles)
+    {
+        string path = System.IO.Path.GetFullPath(full).TrimEnd('\\');
+        string? best = null;
+        var anchors = new List<string>
+        {
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+        };
+        anchors.AddRange(profiles);
+        foreach (string a in anchors)
+        {
+            if (string.IsNullOrEmpty(a)) continue;
+            string root = System.IO.Path.GetFullPath(a).TrimEnd('\\');
+            if (path.Length > root.Length + 1 && path.StartsWith(root + "\\", StringComparison.OrdinalIgnoreCase)
+                && (best == null || root.Length > best.Length))
+                best = root;
+        }
+        if (best == null) return (UninstallOutcome.Failed, $"{path} is not under a folder the removal starts from");
+        return Tree(best, path[(best.Length + 1)..], deferInProtected: true);
+    }
+
     private sealed class State
     {
         public int Pending;
