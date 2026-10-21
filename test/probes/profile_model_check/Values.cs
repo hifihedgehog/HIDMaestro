@@ -328,6 +328,27 @@ internal static class Values
             string? a = UnitSerial(FeatureStubTable.From(baseTriton, 0, null, _ => null, 999_999), 1);
             return (a == "FXA9961200000", a ?? "stalled");
         });
+        c.Run("instanceSerial varies text exactly as UsbDescriptorSet.InstanceSerial varies a USB serial", () =>
+        {
+            var rng = new Random(72);
+            const string alphabet = "0123456789ABCXZ-";
+            int compared = 0;
+            for (int n = 0; n < 20_000; n++)
+            {
+                var chars = new char[rng.Next(1, 20)];
+                for (int i = 0; i < chars.Length; i++) chars[i] = alphabet[rng.Next(alphabet.Length)];
+                chars[^1] = (char)('0' + rng.Next(10));
+                string text = new(chars);
+                int variant = n % 4 == 0 ? rng.Next(0, 12) : rng.Next(0, 1_000_000);
+                var bytes = Encoding.ASCII.GetBytes(text);
+                var patch = new AnswerPatchSpec { At = 0, Length = bytes.Length, Encoding = "ascii", Source = ValueSources.InstanceSerial };
+                ValueSources.Apply(bytes, patch, new ValueSources.Values(0, null, variant, null, _ => null));
+                string want = UsbDescriptorSet.InstanceSerial(text, variant)!;
+                if (Encoding.ASCII.GetString(bytes) != want) return (false, $"{text} + {variant}: {Encoding.ASCII.GetString(bytes)}, want {want}");
+                compared++;
+            }
+            return (true, $"{compared} texts");
+        });
         var deck = ProfileDatabase.LoadEmbedded().All.First(x => x.Id == "steam-deck-composite");
         c.Run("a keyed identity's Deck answers the unit serial its USB serial carries", () =>
         {

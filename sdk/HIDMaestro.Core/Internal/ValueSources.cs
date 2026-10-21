@@ -139,12 +139,29 @@ internal static class ValueSources
             throw new ProfileDefectException(at + ".encoding", "an instance serial is the answer's own text, so its encoding is ascii.");
         if (p.Add != 0) throw new ProfileDefectException(at + ".add", "an instance serial is text and takes no add.");
         if (p.Key != null) throw new ProfileDefectException(at + ".key", "only a keyedHexFile source takes a key.");
-        byte[] bytes;
-        try { bytes = Convert.FromHexString((data ?? "").Replace(" ", "")); }
-        catch (FormatException) { throw new ProfileDefectException(at, "the answer's data is not whole hex bytes."); }
-        if (p.At + p.Length > bytes.Length)
-            throw new ProfileDefectException(at + ".at", $"bytes {p.At} to {p.At + p.Length - 1} are not inside the answer's {bytes.Length} bytes of data.");
-        var text = bytes.AsSpan(p.At, p.Length);
+        // The patched bytes alone, decoded without an allocation when the
+        // data has no spaces, which is every catalog profile's form. A
+        // create compiles this check with its table.
+        string hex = data ?? "";
+        Span<byte> text = stackalloc byte[Math.Clamp(p.Length, 0, 64)];
+        bool decoded;
+        if (hex.Contains(' '))
+        {
+            byte[] bytes;
+            try { bytes = Convert.FromHexString(hex.Replace(" ", "")); }
+            catch (FormatException) { throw new ProfileDefectException(at, "the answer's data is not whole hex bytes."); }
+            decoded = p.At + p.Length <= bytes.Length && p.Length <= text.Length;
+            if (decoded) bytes.AsSpan(p.At, p.Length).CopyTo(text);
+        }
+        else
+        {
+            decoded = 2 * (p.At + p.Length) <= hex.Length && p.Length <= text.Length
+                && Convert.FromHexString(hex.AsSpan(2 * p.At, 2 * p.Length), text, out _, out int written) == System.Buffers.OperationStatus.Done
+                && written == p.Length;
+        }
+        if (!decoded)
+            throw new ProfileDefectException(at + ".at", $"bytes {p.At} to {p.At + p.Length - 1} are not whole hex bytes inside the answer's data.");
+        text = text[..p.Length];
         foreach (byte b in text)
             if (b is < 0x20 or > 0x7E)
                 throw new ProfileDefectException(at + ".at",
@@ -176,15 +193,21 @@ internal static class ValueSources
         }
         if (p.Source == InstanceSerial)
         {
-            // Issue #72. The captured text, varied by the rule a captured
-            // USB serial follows, so instance 0 keeps it byte for byte and
-            // two units never answer one serial. The load checked that it is
-            // printable ASCII ending in a digit, and the varied text keeps
-            // its length. It runs once, when the table compiles.
-            if (v.SerialVariant <= 0) return;
-            string captured = System.Text.Encoding.ASCII.GetString(dst);
-            string varied = Usbip.UsbDescriptorSet.InstanceSerial(captured, v.SerialVariant)!;
-            for (int i = 0; i < dst.Length; i++) dst[i] = (byte)varied[i];
+            // Issue #72. The captured text, varied in place by the rule a
+            // captured USB serial follows (UsbDescriptorSet.InstanceSerial):
+            // the variant is added into the trailing digit run, a carry past
+            // the run is dropped, and the length stays. Instance 0 keeps it
+            // byte for byte, so two units never answer one serial. The load
+            // checked that it is printable ASCII ending in a digit. It runs
+            // once, when the table compiles.
+            int carry = v.SerialVariant;
+            for (int i = dst.Length - 1; i >= 0 && carry > 0 && dst[i] is >= (byte)'0' and <= (byte)'9'; i--)
+            {
+                int d = dst[i] - '0' + carry % 10;
+                carry /= 10;
+                if (d > 9) { d -= 10; carry++; }
+                dst[i] = (byte)('0' + d);
+            }
             return;
         }
         long value;
