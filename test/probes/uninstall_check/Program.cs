@@ -444,6 +444,10 @@ internal static class Program
         Record("it sets an OEM name override", said.Contains("oem set"));
         Note(FormattableString.Invariant($"setup took {clock.Elapsed.TotalSeconds:F1} s"));
 
+        // The composite's HID functions arrive after its create returns, so
+        // the snapshot waits for Windows to finish installing devices, or the
+        // blocked run's comparison would see them arrive.
+        Note($"before the snapshot, device installation {(CMP_WaitNoPendingInstallEvents(120_000) == 0 ? "settled" : "still pending after 120 s")}");
         var before = Inventory.Take();
         Record("the machine holds HIDMaestro: devices, packages and the certificate (positive control)",
                before.HidMaestroDevnodes().Count > 0 && before.Packages.Count > 0 && before.Certificates.Count > 0,
@@ -455,7 +459,13 @@ internal static class Program
         Record("while the program runs the tool exits 2, blocked", bexit == 2 && blocked?.Status == "Blocked", $"exit {bexit}, status {blocked?.Status}");
         Record("and names the program's process", blocked?.Programs.Contains(holder.Id) == true,
                $"holder {holder.Id}, listed {string.Join(", ", blocked?.Programs ?? new List<int>())}");
+        // A device record that appears is the composite's own late
+        // enumeration: one HID record of it arrived after device installation
+        // had settled (2026-10-21), and no removal adds a record. Everything
+        // else counts.
         var diff = before.Diff(Inventory.Take()).ToList();
+        foreach (string d in diff.Where(d => d.StartsWith("devnode new:", StringComparison.Ordinal))) Note($"while blocked: {d}");
+        diff = diff.Where(d => !d.StartsWith("devnode new:", StringComparison.Ordinal)).ToList();
         Record("and changes nothing", diff.Count == 0, string.Join("; ", diff.Take(6)));
 
         // The certificate's private key, by its CNG name, before and after.
@@ -466,11 +476,46 @@ internal static class Program
         // Killed, the program leaves its devices and its record behind, as a
         // crash does.
         try { holder.Kill(); holder.WaitForExit(30_000); } catch { }
+        // Links where a non-administrator could plant them. One account's
+        // %TEMP% becomes a junction to a folder holding a HIDMaestro-named
+        // folder, and C:\Windows\Temp gets a junction under a HIDMaestro
+        // name. Neither target may lose its file.
+        const string baitTemp = @"C:\uninstall_bait_temp", baitName = @"C:\uninstall_bait_name";
+        string wdagTemp = @"C:\Users\WDAGUtilityAccount\AppData\Local\Temp";
+        string plantedName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Temp", "HIDMaestro_00000000deadbeef");
+        Directory.CreateDirectory(Path.Combine(baitTemp, "HIDMaestro"));
+        File.WriteAllText(Path.Combine(baitTemp, "HIDMaestro", "keep.txt"), "uninstall_check");
+        Directory.CreateDirectory(baitName);
+        File.WriteAllText(Path.Combine(baitName, "keep.txt"), "uninstall_check");
+        bool tempMoved = false;
+        try
+        {
+            if (Directory.Exists(wdagTemp)) { Directory.Move(wdagTemp, wdagTemp + ".real"); tempMoved = true; }
+            Run("cmd.exe", 30_000, "/c", "mklink", "/J", wdagTemp, baitTemp);
+            Run("cmd.exe", 30_000, "/c", "mklink", "/J", plantedName, baitName);
+        }
+        catch (Exception ex) { Note($"the junctions could not be planted: {ex.Message}"); }
+        Record("two junctions are planted (positive control)",
+               IsLinkPath(wdagTemp) && IsLinkPath(plantedName));
+
         var hubs = Inventory.RootHubs();
         var step = Stopwatch.StartNew();
         var (exit, output) = Run(SandboxTool, 1_800_000, "--yes", "--json");
         Note(FormattableString.Invariant($"the removal took {step.Elapsed.TotalSeconds:F1} s"));
-        RemovalChecks("removal", exit, Report.Parse(output), output, hubs, clean: true, Note, (n, ok, d) => Record(n, ok, d));
+        var parsed = Report.Parse(output);
+        Record("removal: a %TEMP% that is a junction is not walked, and the HIDMaestro folder behind it stays",
+               File.Exists(Path.Combine(baitTemp, "HIDMaestro", "keep.txt"))
+               && parsed?.Entries.Any(e => e.Outcome == "Kept" && e.Location.Equals(wdagTemp, StringComparison.OrdinalIgnoreCase)) == true,
+               parsed?.Entries.FirstOrDefault(e => e.Location.Equals(wdagTemp, StringComparison.OrdinalIgnoreCase))?.ToString() ?? "no entry for it");
+        Record("removal: a junction under a HIDMaestro name goes as a junction, and its target stays",
+               !Directory.Exists(plantedName) && !File.Exists(plantedName) && File.Exists(Path.Combine(baitName, "keep.txt")));
+        try
+        {
+            if (IsLinkPath(wdagTemp)) Directory.Delete(wdagTemp, recursive: false);
+            if (tempMoved) Directory.Move(wdagTemp + ".real", wdagTemp);
+        }
+        catch (Exception ex) { Note($"the junction could not be taken back: {ex.Message}"); }
+        RemovalChecks("removal", exit, parsed, output, hubs, clean: true, Note, (n, ok, d) => Record(n, ok, d));
         if (key is { } k1) Record("removal: the certificate's private key is gone from the machine key store", !KeyExists(k1), k1.ToString());
         string oemAfter = OemTargets();
         Record("removal: the OEM name targets hold what they held before HIDMaestro", oemAfter == oemBefore,
@@ -545,6 +590,84 @@ internal static class Program
         Record("inproc: a second removal ends clean", last.Status is HMUninstallStatus.Removed or HMUninstallStatus.RemovedRestartPending
                && Inventory.Take().Packages.Count == 0, last.Status.ToString());
         Note(FormattableString.Invariant($"inproc: took {clock.Elapsed.TotalSeconds:F1} s"));
+
+        try { InUseAndRecords(ctx); }
+        catch (Exception ex) { Record("held: the run ran to the end", false, $"{ex.GetType().Name}: {ex.Message}"); }
+    }
+
+    /// <summary>Files in use, and override records a removal cannot prove.
+    /// A file another program holds open inside %ProgramFiles%\HIDMaestro
+    /// waits for the next start, and one in %ProgramData%\HIDMaestro stays
+    /// and fails the run, with nothing queued for it. A record older than
+    /// 2.0.1 stays with its label, and a 2.0.1 record of another account
+    /// has its machine-wide labels put back and keeps its per-user one.</summary>
+    static void InUseAndRecords(HMContext ctx)
+    {
+        ctx.InstallDriver();
+        string pf = Inventory.ProgramFilesFolder, pd = Inventory.ProgramDataFolder;
+        string pfHeld = Path.Combine(pf, "childtemp", "held.bin");
+        string pdHeld = Path.Combine(pd, "openvr", "hidmaestro", "held.bin");
+        Directory.CreateDirectory(Path.GetDirectoryName(pfHeld)!);
+        Directory.CreateDirectory(Path.GetDirectoryName(pdHeld)!);
+
+        const string di = @"SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\DirectInput";
+        const string joy = @"SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM";
+        const string pending = @"SOFTWARE\HIDMaestroOemOverrides";
+        // A record as 2.0.0 wrote it, with no label: the target keeps a value
+        // the removal cannot show is HIDMaestro's.
+        using (var k = Registry.LocalMachine.CreateSubKey($@"{di}\VID_BEEF&PID_0A01\OEM")) k.SetValue("OEM Name", "legacy label");
+        using (var r = Registry.LocalMachine.CreateSubKey($@"{pending}\VID_BEEF&PID_0A01"))
+        {
+            r.SetValue("OriginalKeyExisted", 0, RegistryValueKind.DWord);
+        }
+        // A 2.0.1 record another account's program wrote.
+        using (var k = Registry.LocalMachine.CreateSubKey($@"{di}\VID_BEEF&PID_0A02\OEM")) k.SetValue("OEM Name", "other label");
+        using (var k = Registry.LocalMachine.CreateSubKey($@"{joy}\VID_BEEF&PID_0A02")) k.SetValue("OEMName", "other label");
+        using (var r = Registry.LocalMachine.CreateSubKey($@"{pending}\VID_BEEF&PID_0A02"))
+        {
+            r.SetValue("OriginalKeyExisted", 0, RegistryValueKind.DWord);
+            r.SetValue("OriginalJoystickKeyExisted_HKLM", 0, RegistryValueKind.DWord);
+            r.SetValue("OriginalJoystickKeyExisted_HKCU", 0, RegistryValueKind.DWord);
+            r.SetValue("WrittenLabel", "other label");
+            r.SetValue("UserSid", "S-1-5-21-1000000000-1000000000-1000000000-1001");
+        }
+
+        HMUninstallReport report;
+        using (new FileStream(pfHeld, FileMode.Create, FileAccess.ReadWrite, FileShare.None))
+        using (new FileStream(pdHeld, FileMode.Create, FileAccess.ReadWrite, FileShare.None))
+            report = HMUninstall.Run();
+        var pendingDeletes = Inventory.PendingDeletes();
+        Record("held: a file in use under %ProgramFiles%\\HIDMaestro waits for the next start",
+               pendingDeletes.Contains(pfHeld, StringComparer.OrdinalIgnoreCase)
+               && report.Entries.Any(e => e.Location.Equals(pf, StringComparison.OrdinalIgnoreCase) && e.Outcome == HMUninstallOutcome.RemovedAtRestart),
+               string.Join("; ", report.Entries.Where(e => e.Location.StartsWith(pf, StringComparison.OrdinalIgnoreCase)))
+               + $" | queued: {string.Join(", ", pendingDeletes.Take(6))}");
+        Record("held: a file in use under %ProgramData%\\HIDMaestro stays, reported failed, with nothing queued for the next start",
+               File.Exists(pdHeld) && !pendingDeletes.Any(p => p.StartsWith(pd, StringComparison.OrdinalIgnoreCase))
+               && report.Entries.Any(e => e.Location.Equals(pd, StringComparison.OrdinalIgnoreCase) && e.Outcome == HMUninstallOutcome.Failed),
+               string.Join("; ", report.Entries.Where(e => e.Location.StartsWith(pd, StringComparison.OrdinalIgnoreCase))));
+        string ReadDi(string id) { using var k = Registry.LocalMachine.OpenSubKey($@"{di}\{id}\OEM"); return k?.GetValue("OEM Name") as string ?? "absent"; }
+        Record("records: a record older than 2.0.1 stays, and so does its label",
+               Inventory.KeyExists($@"HKLM\{pending}\VID_BEEF&PID_0A01") && ReadDi("VID_BEEF&PID_0A01") == "legacy label"
+               && report.Entries.Any(e => e.Location.EndsWith("VID_BEEF&PID_0A01", StringComparison.OrdinalIgnoreCase) && e.Outcome == HMUninstallOutcome.Kept));
+        bool otherKept;
+        using (var r = Registry.LocalMachine.OpenSubKey($@"{pending}\VID_BEEF&PID_0A02"))
+            otherKept = r != null && r.GetValue("OriginalJoystickKeyExisted_HKCU") is 0 && r.GetValue("OriginalKeyExisted") == null;
+        Record("records: another account's record has its machine-wide labels put back and keeps its per-user one",
+               otherKept && ReadDi("VID_BEEF&PID_0A02") == "absent" && !Inventory.KeyExists($@"HKLM\{joy}\VID_BEEF&PID_0A02"));
+
+        Registry.LocalMachine.DeleteSubKeyTree(pending, throwOnMissingSubKey: false);
+        Registry.LocalMachine.DeleteSubKeyTree($@"{di}\VID_BEEF&PID_0A01", throwOnMissingSubKey: false);
+        var again = HMUninstall.Run();
+        Record("held: once nothing holds them, a removal ends with nothing failed",
+               again.Entries.All(e => e.Outcome != HMUninstallOutcome.Failed),
+               string.Join("; ", again.Entries.Where(e => e.Outcome == HMUninstallOutcome.Failed).Take(4)));
+    }
+
+    static bool IsLinkPath(string p)
+    {
+        try { return (File.GetAttributes(p) & FileAttributes.ReparsePoint) != 0; }
+        catch { return false; }
     }
 
     /// <summary>The program the sandbox run kills: it installs, creates one
@@ -631,6 +754,11 @@ internal static class Program
     }
 
     // ── Helpers ────────────────────────────────────────────────────────
+
+    // cfgmgr32.h: CM_WaitNoPendingInstallEvents is this export. 0 when no
+    // device installation is pending, WAIT_TIMEOUT when one still was.
+    [System.Runtime.InteropServices.DllImport("cfgmgr32.dll")]
+    static extern uint CMP_WaitNoPendingInstallEvents(uint timeoutMs);
 
     static string Tail(string s) => s.Length <= 400 ? s.Trim() : s[^400..].Trim();
 
