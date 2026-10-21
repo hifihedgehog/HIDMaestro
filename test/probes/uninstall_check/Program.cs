@@ -376,6 +376,11 @@ internal static class Program
                 Check(bar < 0 ? rest : rest[..bar], verdict == "PASS", bar < 0 ? "" : rest[(bar + 3)..]);
             }
             if (!lines.Contains("DONE")) Check("the run inside the sandbox finished", false, ran.Output.Trim());
+            // The battery runs this part beside the scenarios after S73, whose
+            // probes skip while another program has HIDMaestro.Core.dll loaded,
+            // so the host side never loads it.
+            Check("the host part ran without loading HIDMaestro.Core.dll",
+                  !AppDomain.CurrentDomain.GetAssemblies().Any(a => a.GetName().Name == "HIDMaestro.Core"));
         }
         finally
         {
