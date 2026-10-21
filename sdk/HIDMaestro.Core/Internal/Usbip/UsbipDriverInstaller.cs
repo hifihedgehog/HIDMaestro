@@ -14,47 +14,35 @@ namespace HIDMaestro.Internal.Usbip;
 ///
 /// <para>Composite USB personas need a driver-backed USB device for their
 /// audio endpoints, which no user-mode API can create. HIDMaestro ships
-/// the transport inside HIDMaestro.Core.dll and installs it itself, the
-/// same way it ships and installs its own UMDF2 driver: the consumer
-/// calls <see cref="HIDMaestro.HMContext.CreateController"/> with a
-/// composite profile and it works. There is no separate download, no
-/// second package, and nothing for a user to go find.</para>
+/// usbip-win2's host controller package inside HIDMaestro.Core.dll and
+/// installs it itself, the same way it ships and installs its own UMDF2
+/// driver: the consumer calls
+/// <see cref="HIDMaestro.HMContext.CreateController"/> with a composite
+/// profile and it works. There is no separate download, no second package,
+/// and nothing for a user to go find.</para>
 ///
-/// <para>The embedded installer is usbip-win2's own signed build,
-/// unmodified: the x64 one from the 0.9.8.1 release, the ARM64 one of the
-/// same tag from the project's signer. Its SHA-256 is checked after
-/// extraction against the pinned value, and a mismatch throws rather than
-/// running an unverified installer. The BSD-2-Clause notice ships beside
-/// it and is written next to the binary at deploy time.</para>
+/// <para>The package is usbip-win2's own signed host controller driver,
+/// unmodified: usbip2_ude.inf, .sys and .cat of the x64 0.9.8.1 release, and
+/// the ARM64 build of the same tag from the project's signer. The build
+/// unpacks them from the pinned installers and checks each against
+/// UsbipPackage.json, and the SDK checks each staged file against the same
+/// hash before it uses it. The BSD-2-Clause notice is written beside the
+/// staged package.</para>
 ///
 /// <para>Install is silent, needs the same elevation
-/// <see cref="HIDMaestro.HMContext.InstallDriver"/> already needs, and
-/// is idempotent: present-and-working short-circuits to a no-op. Because
-/// usbip-win2's extension INF matches the generic USB 3.0 root-hub
-/// hardware ID, PnP re-enumerates the root hubs once during install,
-/// which momentarily interrupts USB devices. That happens once per
-/// machine, on the first composite controller ever created.</para>
-///
-/// <para>The install takes the drivers, the VC++ runtime their installer
-/// step needs, and the uninstaller with its Apps entry. It adds no GUI,
-/// SDK, symbol files, Start menu folder or desktop shortcut
-/// (<see cref="InstallerArguments"/>).</para></summary>
+/// <see cref="HIDMaestro.HMContext.InstallDriver"/> already needs, and is
+/// idempotent: a host controller that answers short-circuits to a no-op.
+/// The SDK registers the host controller devnode and puts the package on
+/// it, the two steps usbip-win2's devnode.exe takes
+/// (<see cref="InstallHostController"/>), and nothing else. It never runs
+/// usbip-win2's installer and never installs the root-hub filter, whose
+/// install restarts every USB root hub. It adds no Apps entry, program
+/// folder, scheduled task, Start menu folder or shortcut, and it records
+/// what it installed (<see cref="UsbipInstallRecord"/>) so a removal can
+/// tell its install from another program's.</para></summary>
 internal static partial class UsbipDriverInstaller
 {
     public const string Version = "0.9.8.1";
-    /// <summary>The installer matching this OS. One AnyCPU assembly carries
-    /// both architectures and picks here.</summary>
-    internal static string InstallerFile => InstallerFileFor(RuntimeInformation.OSArchitecture);
-
-    /// <summary>The installer for an architecture.</summary>
-    internal static string InstallerFileFor(Architecture arch) =>
-        arch == Architecture.Arm64
-            ? "USBip-" + Version + "-arm64-release-attestation.exe"
-            : "USBip-" + Version + "-x64.exe";
-
-    /// <summary>The installer's embedded resource name for an architecture.</summary>
-    internal static string InstallerResourceFor(Architecture arch) =>
-        "HIDMaestro.Resources." + InstallerFileFor(arch);
 
     /// <summary>The host controller files' embedded resource names for an
     /// architecture.</summary>
@@ -66,15 +54,6 @@ internal static partial class UsbipDriverInstaller
 
     private const string NoticeFile = "THIRD-PARTY-NOTICES.txt";
 
-    /// <summary>Pinned SHA-256 of the bundled installer. The MSBuild
-    /// PackResources target checks the same value at build time, so a
-    /// corrupted or substituted binary fails the build. This is the
-    /// runtime half of that check, covering the extracted copy.</summary>
-    internal static string InstallerSha256 =>
-        RuntimeInformation.OSArchitecture == Architecture.Arm64
-            ? "cab7ff97f79275eeb5c5b8bb2eb3111ff6b6c4eead07d9bec9be5bd1e3a35800"
-            : "38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a";
-
     private static readonly object s_lock = new();
 
     /// <summary>True when the vhci host controller is present and started,
@@ -82,19 +61,19 @@ internal static partial class UsbipDriverInstaller
     /// install step.</summary>
     public static bool IsInstalled => VhciClient.IsAvailable();
 
-    /// <summary>Ensure the transport is installed, deploying the bundled
-    /// installer if it is not. Idempotent and safe to call on every
-    /// composite create. Returns true when the driver is usable.</summary>
+    /// <summary>Install the bundled host controller when no host controller
+    /// answers. Idempotent and safe to call on every composite create.
+    /// Returns true when the driver is usable.</summary>
     /// <param name="progress">Optional status callback: consumers with a
     /// UI can surface "installing controller audio support" during the
-    /// one-time install, which takes a few seconds and briefly
-    /// re-enumerates USB.</param>
+    /// one-time install, which takes a few seconds.</param>
     public static bool EnsureInstalled(Action<string>? progress = null)
     {
         HMBuildInfo.ThrowIfMissing(HMPayload.UsbipTransport);
         if (IsInstalled)
         {
             ReplaceLegacyTransportOnce(progress);
+            ClearStaleVerifierOnce();
             StampOwnerHardwareIdOnChange();
             return true;
         }
@@ -246,111 +225,36 @@ internal static partial class UsbipDriverInstaller
     /// has found no host controller answering.</summary>
     private static bool InstallLocked(TransportWork work)
     {
-        // A usbip-win2 installer still running would install beside this
-        // one, as one left by a program killed mid-install does: the
-        // transport lock went with that program, and usbip-win2's script
-        // declares no SetupMutex (setup.iss at v.0.9.8.1). Wait for it to
-        // end, then read the machine again.
+        // Another program's usbip-win2 installer still running (VIIPER,
+        // Handheld Companion, or an SDK before 2.0.1) is about to make a host
+        // controller of its own: its devnode.exe registers one without
+        // looking for another (userspace/devnode/main.cpp:232-295), and
+        // usbip-win2's script declares no SetupMutex (setup.iss at
+        // v.0.9.8.1). Wait for it to end, then read the machine again.
         if (!WaitForRunningInstallers(TimeoutScale.Apply(300_000)))
             throw new InvalidOperationException(
                 "A usbip-win2 installer another program started is still running after five minutes. " +
                 "Try again once it has finished.");
         if (IsInstalled) return true;
 
-        // A machine can have usbip-win2 already (VIIPER and DS4Windows
-        // install the same transport) with its host controller merely
-        // not started, or left interface-less by an interrupted PnP
-        // operation. Running the installer over an existing install is
-        // the wrong repair for that: Inno uninstalls the old version
-        // first, and its driver-package removal touches the extension
-        // INF bound to every USB root hub, which re-enumerates the whole
-        // USB tree and can take many minutes. Restarting the devnode
-        // republishes the interface in seconds. Try that first, and only
-        // install when the product is genuinely absent.
-        if (IsProductInstalled())
+        // A present host controller that does not answer is usbip-win2
+        // installed with its device merely not started, or left
+        // interface-less by an interrupted PnP operation. Restarting the
+        // devnode republishes the interface in seconds. A second host
+        // controller beside it is never the repair.
+        foreach (var (id, present) in HostControllers())
         {
+            if (!present) continue;
             work.Report("Repairing the existing USB audio transport...");
             if (TryRestartHostController(work)) return true;
 
             throw new InvalidOperationException(
-                $"usbip-win2 {Version} is installed on this machine but its virtual host " +
-                "controller is not available, and restarting the device did not recover it. " +
-                "Reinstalling it from HIDMaestro would first uninstall the existing copy, " +
-                "which detaches a filter driver from every USB root hub and can take several " +
-                "minutes, so that is not done automatically. Repair or reinstall usbip-win2, " +
-                "or reboot, and try again.");
+                $"usbip-win2's virtual host controller ({id}) is installed on this machine but not " +
+                "available, and restarting the device did not recover it. HIDMaestro does not install " +
+                "a second one beside it. Repair or reinstall usbip-win2, or restart Windows, and try again.");
         }
 
-        // The installer's own PrepareToInstall (setup.iss 504-535) runs
-        // the uninstaller of any copy whose uninstall entry it finds,
-        // before it installs anything. An entry left without its driver
-        // package would get that uninstaller run, which is the root-hub
-        // filter removal the check above exists to avoid.
-        if (InstalledUninstaller() is string uninstaller)
-            throw new InvalidOperationException(
-                $"usbip-win2 has an uninstall entry on this machine (its uninstaller is {uninstaller}), " +
-                "but its driver package is not in the driver store. The bundled installer would run " +
-                "that uninstaller first, which detaches a filter driver from every USB root hub, so " +
-                "HIDMaestro does not run it. Repair or uninstall usbip-win2 from Settings > Apps, " +
-                "and try again.");
-
-        work.Report($"Installing USB audio transport (usbip-win2 {Version})...");
-
-        int? failedWith = null;
-        for (int run = 1; ; run++)
-        {
-            string exe = ExtractInstaller();
-            int exitCode = RunSilentInstall(exe);
-            // Inno Setup: 0 success, 3010 success-with-reboot-pending. The
-            // driver still works before that reboot, so the availability
-            // poll below is the verdict.
-            if (exitCode == 0 || exitCode == 3010) break;
-
-            // A failing exit code does not say what the installer left. On
-            // this command line Inno Setup itself ends with 0 to 8 (issrc
-            // 7.1.0 Setup.MainFunc.pas, ecInitializationError to
-            // ecPrepareToInstallFailedRestartNeeded, and a restart code only
-            // when /RESTARTEXITCODE names one), so any other code comes from
-            // outside its code, such as a process that crashed or was ended.
-            // The setup its loader started can still be running, or can have
-            // installed everything first. So wait for every usbip-win2
-            // installer to end, then read the machine: a driver package in
-            // the store means the install reached its drivers, and its host
-            // controller gets the poll below. A machine with neither the
-            // package nor the uninstall entry is the clean machine this
-            // install started from, and the installer runs once more.
-            // Anything between is left as it is, and the create fails.
-            DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: the installer exited {exitCode}; reading the machine again.");
-            failedWith = exitCode;
-            if (!WaitForRunningInstallers(TimeoutScale.Apply(300_000)) || IsProductInstalled()) break;
-            if (run == 2 || InstalledUninstaller() != null) throw InstallerFailed(exitCode);
-            DeviceOrchestrator.LogDiag("UsbipDriverInstaller: nothing of usbip-win2 is on the machine; running the installer again.");
-            failedWith = null;
-        }
-
-        // PnP settles the new host controller asynchronously. The
-        // driver's own device arrives quickly. The root-hub
-        // re-enumeration its filter INF triggers takes longer and does
-        // not gate us.
-        var sw = Stopwatch.StartNew();
-        while (sw.ElapsedMilliseconds < TimeoutScale.Apply(60_000))
-        {
-            if (VhciClient.IsAvailable())
-            {
-                if (failedWith is int code)
-                    DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: the host controller answers after the installer exited {code}.");
-                StampOwnerHardwareId();
-                work.Report("USB audio transport ready.");
-                return true;
-            }
-            Thread.Sleep(250);
-        }
-
-        if (failedWith is int failed) throw InstallerFailed(failed);
-        throw new InvalidOperationException(
-            $"usbip-win2 {Version} installer completed but its virtual host controller did not " +
-            "appear within the timeout. Check Device Manager for 'USBip 3.X Emulated Host " +
-            "Controller' and any pending-reboot state.");
+        return InstallHostController(work);
     }
 
     // ── Moving a machine off the transport earlier releases installed ────
@@ -522,52 +426,16 @@ internal static partial class UsbipDriverInstaller
 
         string inf = StageUdePackage();
 
-        // hmswd force-driver calls UpdateDriverForPlugAndPlayDevices with
-        // INSTALLFLAG_FORCE, which puts this INF on every device carrying
-        // the hardware id whatever the installed package's DriverVer.
-        // It is the call usbip-win2's own devnode.exe makes. It runs in the
-        // helper and not here because that call has no timeout: a host
-        // controller that will not let go of its driver would hold the
-        // calling thread forever, and that thread belongs to the consumer.
-        // Out of process it can be given up on, and the transport that was
-        // answering is still there to use.
-        // The helper and the package are held, and checked under the hold,
-        // until the helper has exited: the update reads the package's files
-        // while it runs.
-        var sw = new Stopwatch();
-        using (SwdDeviceFactory.PinHelper(out string helper))
-        using (PinUdePackage(inf))
-        {
-            sw.Start();
-            var psi = new ProcessStartInfo
-            {
-                FileName = helper,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardError = true,
-                WorkingDirectory = Path.GetDirectoryName(helper)!,
-            };
-            ProtectedStaging.ConfineChildTemp(psi, Path.GetDirectoryName(helper)!);
-            psi.ArgumentList.Add("force-driver");
-            psi.ArgumentList.Add(inf);
-            psi.ArgumentList.Add(UdeHardwareId);
-            using (var p = Process.Start(psi) ?? throw new InvalidOperationException("Could not start hmswd.exe."))
-            {
-                // Drained as it comes, so hmswd never blocks on a full pipe
-                // while this waits for it to exit.
-                var stderr = p.StandardError.ReadToEndAsync();
-                if (!p.WaitForExit(TimeoutScale.Apply(90_000)))
-                {
-                    try { p.Kill(entireProcessTree: true); } catch { }
-                    throw new TimeoutException(
-                        $"The driver update for {UdeHardwareId} did not return in time; keeping the existing transport.");
-                }
-                if (p.ExitCode != 0 && p.ExitCode != 3010)
-                    throw new InvalidOperationException(
-                        $"hmswd force-driver returned {p.ExitCode}: {(stderr.Wait(TimeoutScale.Apply(5_000)) ? stderr.Result.Trim() : "")}");
-                DeviceOrchestrator.LogDiag($"UsbipDriverInstaller:   driver update returned {p.ExitCode} in {sw.ElapsedMilliseconds} ms.");
-            }
-        }
+        // The 0.9.7.5 INF wrote KMDF's debug values, and the pinned INF
+        // does not: clear them before the new driver loads.
+        ClearStaleVerifier(new[] { ReadInfText(inf) }, "before the move");
+
+        // hmswd force-driver puts this INF on every device carrying the
+        // hardware id whatever the installed package's DriverVer
+        // (RunForceDriver). A timeout there leaves the transport that was
+        // answering in place, still there to use.
+        var sw = Stopwatch.StartNew();
+        RunForceDriver(inf);
 
         while (sw.ElapsedMilliseconds < TimeoutScale.Apply(60_000))
         {
@@ -689,8 +557,9 @@ internal static partial class UsbipDriverInstaller
 
     /// <summary>Write the pinned host controller files to an
     /// administrators-only directory, verify each against its pinned hash,
-    /// and return the INF's path.</summary>
-    private static string StageUdePackage()
+    /// write the BSD-2-Clause notice beside them, and return the INF's
+    /// path.</summary>
+    internal static string StageUdePackage()
     {
         string arch = RuntimeInformation.OSArchitecture == Architecture.Arm64 ? "arm64" : "x64";
         string dir = ProtectedStaging.DirFor(ProtectedStaging.OperationUsbipUde);
@@ -704,6 +573,20 @@ internal static partial class UsbipDriverInstaller
             // Verified against the pinned per-file hash from UsbipPackage.json.
             ProtectedStaging.StageStream(dir, file, src, PinnedUdeHash(file));
         }
+
+        // The license's "documentation and/or other materials provided with
+        // the distribution", met where the driver is deployed from. The
+        // notice is embedded in the assembly as well.
+        try
+        {
+            using var notice = asm.GetManifestResourceStream("HIDMaestro.Resources." + NoticeFile);
+            if (notice != null)
+            {
+                using var nf = File.Create(Path.Combine(dir, NoticeFile));
+                notice.CopyTo(nf);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         return Path.Combine(dir, "usbip2_ude.inf");
     }
 
@@ -789,55 +672,16 @@ internal static partial class UsbipDriverInstaller
     /// holds when pnputil hangs.</summary>
     private static int RunPnputil(string arguments) => PnputilHelper.Run(arguments, timeoutMs: 60_000).exitCode;
 
-    /// <summary>True when usbip-win2's driver package is already in the
-    /// driver store, whether or not its host controller is currently
-    /// usable. Distinguishes "never installed here" from "installed but
-    /// not working", which need different remedies.
-    ///
-    /// <para>False only on a whole listing of the driver store
-    /// (<see cref="PnputilHelper.ListPackages"/>) that names no
-    /// usbip2_ude.inf. Any other result is unknown, and unknown is never
-    /// "absent": absent leads to the vendor installer, which must not run
-    /// over an existing install. A listing that fails throws with the
-    /// reason, and nothing is installed.</para>
-    ///
-    /// <para>A usbip2_ude.inf entry the driver store keeps after its INF
-    /// file and FileRepository folder are gone is not listed, so it reads
-    /// as absent. Nothing of it is left to repair. The installer then runs
-    /// only when usbip-win2's uninstall entry is gone as well
-    /// (<see cref="InstallLocked"/>), and the installer's uninstall of an
-    /// earlier copy, which detaches the root-hub filter, runs only from
-    /// that entry.</para></summary>
-    /// <exception cref="InvalidOperationException">The driver store could not
-    /// be read.</exception>
-    private static bool IsProductInstalled() =>
-        IsProductInstalled(() => PnputilHelper.ListPackages(n => string.Equals(n, ProductInf, StringComparison.OrdinalIgnoreCase)));
-
-    /// <summary>The same, with <paramref name="list"/> for the listing.
-    /// Coexistence probe OF11 calls it through reflection with listings
-    /// that fail.</summary>
-    internal static bool IsProductInstalled(Func<List<PnputilHelper.DriverRecord>> list)
-    {
-        List<PnputilHelper.DriverRecord> listing;
-        try { listing = list(); }
-        catch (InvalidOperationException ex)
-        {
-            throw new InvalidOperationException(
-                $"HIDMaestro could not read the driver store to tell whether usbip-win2 is installed ({ex.Message.TrimEnd('.')}), so it does not install it.", ex);
-        }
-        return listing.Exists(r => string.Equals(r.OriginalName, ProductInf, StringComparison.OrdinalIgnoreCase));
-    }
-
     /// <summary>The INF of usbip-win2's host controller package.</summary>
-    private const string ProductInf = "usbip2_ude.inf";
+    internal const string ProductInf = "usbip2_ude.inf";
 
     /// <summary>Wait up to <paramref name="timeoutMs"/> for every running
-    /// usbip-win2 installer to end. Returns false when one still runs. An
-    /// installer is a process whose name starts with <c>USBip-</c>: the
-    /// release installers' own name, and the setup Inno Setup's loader
-    /// extracts and runs under the same name with <c>.tmp</c>
-    /// (issrc Projects/SetupLdr.dpr, the temporary directory and
-    /// <c>PathChangeExt(PathExtractName(SelfFilename), '.tmp')</c>).
+    /// usbip-win2 installer, another program's, to end. Returns false when
+    /// one still runs. An installer is a process whose name starts with
+    /// <c>USBip-</c>: the release installers' own name, and the setup Inno
+    /// Setup's loader extracts and runs under the same name with
+    /// <c>.tmp</c> (issrc Projects/SetupLdr.dpr, the temporary directory
+    /// and <c>PathChangeExt(PathExtractName(SelfFilename), '.tmp')</c>).
     /// Coexistence probe section Z calls this through reflection.</summary>
     internal static bool WaitForRunningInstallers(int timeoutMs)
     {
@@ -872,72 +716,8 @@ internal static partial class UsbipDriverInstaller
     }
 
     /// <summary>usbip-win2's uninstall entry, from its <c>AppId</c>.</summary>
-    private const string UninstallEntryKey =
+    internal const string UninstallEntryKey =
         @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{199505b0-b93d-4521-a8c7-897818e0205a}_is1";
-
-    /// <summary>The uninstaller usbip-win2's setup would run before it
-    /// installs, or null when it would run none. A port of the script's
-    /// <c>GetInstalledUninstallString</c> (setup.iss 433-502): the first
-    /// <c>UninstallString</c> found in the 64-bit view of HKLM, then the
-    /// 32-bit view, then HKCU, read unexpanded as Inno Setup's
-    /// <c>RegQueryStringValue</c> reads it (REG_SZ or REG_EXPAND_SZ,
-    /// Shared.CommonFunc.pas 912-924), the executable's path taken out of it
-    /// quoted or not, and kept only if that file exists.</summary>
-    internal static string? InstalledUninstaller()
-    {
-        string? value = null;
-        foreach (var (hive, view) in new[]
-                 {
-                     (Microsoft.Win32.RegistryHive.LocalMachine, Microsoft.Win32.RegistryView.Registry64),
-                     (Microsoft.Win32.RegistryHive.LocalMachine, Microsoft.Win32.RegistryView.Registry32),
-                     (Microsoft.Win32.RegistryHive.CurrentUser, Microsoft.Win32.RegistryView.Default),
-                 })
-        {
-            try
-            {
-                using var root = Microsoft.Win32.RegistryKey.OpenBaseKey(hive, view);
-                using var key = root.OpenSubKey(UninstallEntryKey);
-                if (key?.GetValue("UninstallString", null, Microsoft.Win32.RegistryValueOptions.DoNotExpandEnvironmentNames) is string s)
-                {
-                    value = s;
-                    break;
-                }
-            }
-            catch { }
-        }
-        if (value == null) return null;
-        string path = UninstallerPathOf(value);
-        return path.Length > 0 && File.Exists(path) ? path : null;
-    }
-
-    /// <summary>The executable's path in an UninstallString, taken out the
-    /// way the script does it (setup.iss 446-499).</summary>
-    internal static string UninstallerPathOf(string uninstallString)
-    {
-        string u = uninstallString.Trim();
-        if (u.Length == 0) return "";
-        if (u[0] == '"')
-        {
-            u = u[1..];
-            int q = u.IndexOf('"');
-            return q >= 0 ? u[..q] : u;
-        }
-        if (File.Exists(u)) return u;
-
-        // Unquoted with arguments: the rightmost ".exe" whose prefix names an
-        // existing file, else the rightmost ".exe", else the first word.
-        string lower = u.ToLowerInvariant();
-        int at = -1;
-        for (int i = lower.Length - 4; i >= 0; i--)
-        {
-            if (string.CompareOrdinal(lower, i, ".exe", 0, 4) != 0) continue;
-            if (File.Exists(u[..(i + 4)].Trim())) { at = i; break; }
-            if (at < 0) at = i;
-        }
-        if (at >= 0) return u[..(at + 4)].Trim();
-        int space = u.IndexOf(' ');
-        return space >= 0 ? u[..space] : u;
-    }
 
     /// <summary>Restart the vhci devnode so it republishes its device
     /// interface. This is the cheap repair for an installed-but-unusable
@@ -1231,116 +1011,4 @@ internal static partial class UsbipDriverInstaller
 
     [LibraryImport("cfgmgr32.dll")]
     private static partial int CM_Reenumerate_DevNode(uint dnDevInst, uint ulFlags);
-
-    /// <summary>Stage the bundled installer and its license notice into the
-    /// protected per-version "usbip" directory (Administrators/SYSTEM-write
-    /// only), verifying the binary against the pinned SHA-256. Through
-    /// v1.12.0 this lived in <c>%TEMP%\HIDMaestro_usbip_&lt;ver&gt;</c>, which
-    /// any process of the user could write between the check and the run.</summary>
-    private static string ExtractInstaller()
-    {
-        string dir = ProtectedStaging.DirFor(ProtectedStaging.OperationUsbip);
-        string exePath = Path.Combine(dir, InstallerFile);
-
-        var asm = typeof(UsbipDriverInstaller).Assembly;
-        string logical = InstallerResourceFor(RuntimeInformation.OSArchitecture);
-        using (var stream = asm.GetManifestResourceStream(logical)
-            ?? throw new InvalidOperationException(
-                $"The bundled usbip-win2 installer ('{logical}') is missing from " +
-                "HIDMaestro.Core.dll. The PackResources MSBuild target fetches and embeds it; " +
-                "rebuild the SDK."))
-        {
-            // Verified against the pinned release hash, not merely the
-            // embedded bytes' own hash, so a substituted embedded resource is
-            // also caught.
-            ProtectedStaging.StageStream(dir, InstallerFile, stream, InstallerSha256);
-        }
-
-        // Ship the BSD-2-Clause notice next to the binary, which is the
-        // license's "documentation and/or other materials provided with
-        // the distribution" requirement met at the point of deployment.
-        try
-        {
-            using var notice = asm.GetManifestResourceStream("HIDMaestro.Resources." + NoticeFile);
-            if (notice != null)
-            {
-                using var nf = File.Create(Path.Combine(dir, NoticeFile));
-                notice.CopyTo(nf);
-            }
-        }
-        catch { /* the notice is also embedded in the assembly itself */ }
-
-        return exePath;
-    }
-
-    /// <summary>The installer's command line: no UI, no message boxes, no
-    /// reboot, and the smallest set it allows. Checked against the compiled
-    /// script inside both pinned installers (innounp 2.71.1) and the source
-    /// at tag v.0.9.8.1 (userspace/innosetup/setup.iss):
-    /// <list type="bullet">
-    /// <item><c>/COMPONENTS=main,client</c> deselects <c>gui</c>, <c>sdk</c>
-    /// and <c>pdb</c>, which the default type, <c>full</c>, installs (lines
-    /// 126-131). <c>client</c> is the drivers themselves: the filter and the
-    /// host controller (lines 176-177).</item>
-    /// <item><c>/TASKS=vcredist</c> keeps only the VC++ runtime, which
-    /// <c>devnode.exe</c>, the program that installs the host controller,
-    /// imports (MSVCP140.dll, VCRUNTIME140.dll). <c>desktopicon</c> goes,
-    /// along with <c>gui</c> (line 166).</item>
-    /// <item><c>/NOICONS</c> checks "Don't create a Start Menu folder", the
-    /// only switch that drops the uninstall shortcut <c>main</c> creates
-    /// (line 135). It applies because the script sets
-    /// <c>AllowNoIcons=yes</c>.</item>
-    /// <item><c>/NORESTART</c> because the script sets
-    /// <c>AlwaysRestart=yes</c> (line 112), and a very silent setup without
-    /// it "will reboot without asking".</item>
-    /// </list></summary>
-    internal const string InstallerArguments =
-        "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /COMPONENTS=main,client /TASKS=vcredist /NOICONS";
-
-    /// <summary>The installer's <see cref="ProcessStartInfo"/>: its arguments,
-    /// no window, its working directory and TEMP and TMP confined to its own
-    /// protected staging folder. Its loader extracts and runs its setup
-    /// program inside TEMP (issrc SetupLdr.dpr, GetTempDir reads TMP first),
-    /// so confining TEMP keeps that in a folder only an administrator can
-    /// reach. A seam <see cref="RunSilentInstall"/> and the coexistence probe
-    /// both use, so dropping the confinement shows in the test.</summary>
-    internal static ProcessStartInfo BuildInstallerStartInfo(string exePath)
-    {
-        var psi = new ProcessStartInfo
-        {
-            FileName = exePath,
-            Arguments = InstallerArguments,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            WorkingDirectory = Path.GetDirectoryName(exePath)!,
-        };
-        ProtectedStaging.ConfineChildTemp(psi, Path.GetDirectoryName(exePath)!);
-        return psi;
-    }
-
-    /// <summary>Run the Inno Setup installer silently with
-    /// <see cref="InstallerArguments"/> and return its exit code.</summary>
-    private static int RunSilentInstall(string exePath)
-    {
-        // Point-of-use check under a pin held until the installer exits: the
-        // staged installer still matches the pinned hash, and its directory
-        // cannot be renamed or replaced while it runs elevated.
-        using var pin = ProtectedStaging.PinFile(exePath, InstallerSha256);
-        var psi = BuildInstallerStartInfo(exePath);
-
-        using var p = Process.Start(psi)
-            ?? throw new InvalidOperationException("Failed to start the usbip-win2 installer.");
-
-        if (!p.WaitForExit(TimeoutScale.Apply(300_000)))
-        {
-            try { p.Kill(entireProcessTree: true); } catch { }
-            throw new InvalidOperationException(
-                "The usbip-win2 installer did not finish within the timeout.");
-        }
-        return p.ExitCode;
-    }
-
-    private static InvalidOperationException InstallerFailed(int exitCode) =>
-        new($"The usbip-win2 installer failed with exit code {exitCode}. " +
-            "Installing a driver requires elevation, the same as HMContext.InstallDriver.");
 }

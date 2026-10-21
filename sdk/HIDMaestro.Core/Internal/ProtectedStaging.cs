@@ -10,7 +10,7 @@ namespace HIDMaestro.Internal;
 
 /// <summary>
 /// The one place every file the elevated SDK runs, or hands to pnputil,
-/// signtool, inf2cat or the usbip-win2 installer, is written and read.
+/// signtool, inf2cat or hmswd, is written and read.
 ///
 /// <para>Through v1.12.0 these went into <c>%TEMP%</c>: the driver payload
 /// into <c>%TEMP%\HIDMaestro_&lt;hash&gt;</c>, <c>hmswd.exe</c> into a shared
@@ -90,8 +90,8 @@ namespace HIDMaestro.Internal;
 /// driver binary cannot be held while signtool rewrites it: it is checked
 /// right before, and held once signed. A catalog is held once signed. The
 /// pin lasts until the use is over. The signing tools, the driver package, the SWD helper
-/// (<c>SwdDeviceFactory.PinHelper</c>), the usbip-win2 installer, its host
-/// controller package and each WinUSB package take one. The OpenVR
+/// (<c>SwdDeviceFactory.PinHelper</c>), usbip-win2's host controller package
+/// and each WinUSB package take one. The OpenVR
 /// extraction, which writes files for SteamVR and runs none, takes a pin
 /// over folders Users can all read, so it checks them and holds none. A
 /// change made between two uses is found at the next one. Every staged
@@ -102,9 +102,9 @@ namespace HIDMaestro.Internal;
 /// <para>Lock order. The staging lock (<see cref="StagingMutexObject"/>) is
 /// a leaf. It is taken under the deploy lock (a deploy's prune, every
 /// staging a deploy does, and a WinUSB package's), under the transport lock
-/// (<c>UsbipDriverInstaller.TransportMutexObject</c>: the usbip-win2
-/// installer's staging, the host controller package's, and the SWD
-/// helper's when the host controller update stages it), under the PnP lock
+/// (<c>UsbipDriverInstaller.TransportMutexObject</c>: the host controller
+/// package's, and the SWD helper's when the host controller's install or
+/// update stages it), under the PnP lock
 /// (the SWD helper's staging for a create or a remove, inside its
 /// registration's or its removal's hold), or with no lock held (a
 /// constructor's prewarm), and nothing takes another machine-wide lock
@@ -126,10 +126,10 @@ internal static partial class ProtectedStaging
     internal const string OperationDriver = "driver";
     /// <summary>Operation name for the SWD helper, <c>hmswd.exe</c>.</summary>
     internal const string OperationSwd = "swd";
-    /// <summary>Operation name for the usbip-win2 installer.</summary>
-    internal const string OperationUsbip = "usbip";
     /// <summary>Operation name for the usbip-win2 host-controller package the
-    /// SDK forces onto an older transport.</summary>
+    /// SDK installs, or forces onto an older transport. Through v2.0.0 a
+    /// folder named <c>usbip</c> beside it held usbip-win2's
+    /// installer.</summary>
     internal const string OperationUsbipUde = "usbip-ude";
     /// <summary>Operation name for one deploy's driver package: the two
     /// binaries and two INFs, staged fresh from the embedded bytes, then
@@ -248,7 +248,7 @@ internal static partial class ProtectedStaging
     /// sc.exe, which DeviceOrchestrator.RunProcess starts with the
     /// process's own environment. With
     /// <paramref name="protectedDir"/> it uses that folder, the child's own
-    /// staging directory (hmswd, the usbip-win2 installer, signtool and
+    /// staging directory (hmswd, signtool and
     /// Inf2Cat run from one). Without it the folder is
     /// <see cref="ChildTempDir"/>, for a child that has none of its own
     /// (pnputil, devcon). A process that is not elevated starts no elevated

@@ -113,26 +113,23 @@ internal static class Program
         // with the license notice redistribution requires.
         Console.WriteLine("\n-- Bundled transport --");
         var asm = typeof(HMProfile).Assembly;
-        // The name and the digest come from the code under test, so the
+        // The names and the digests come from the code under test, so the
         // probe tracks the pin instead of going stale behind it.
-        string installerRes =
-            "HIDMaestro.Resources." + UsbipDriverInstaller.InstallerFile;
         const string noticeRes = "HIDMaestro.Resources.THIRD-PARTY-NOTICES.txt";
         var resNames = asm.GetManifestResourceNames();
 
-        Check("usbip-win2 installer is embedded in HIDMaestro.Core.dll",
-              resNames.Contains(installerRes));
-        using (var s = asm.GetManifestResourceStream(installerRes))
+        var arch = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture;
+        foreach (string res in UsbipDriverInstaller.UdeResourcesFor(arch))
         {
-            if (s == null) Check("embedded installer opens", false);
-            else
-            {
-                string hex = Convert.ToHexString(
-                    System.Security.Cryptography.SHA256.HashData(s)).ToLowerInvariant();
-                Check("embedded installer matches the pinned SHA-256",
-                      hex == UsbipDriverInstaller.InstallerSha256, hex);
-            }
+            string file = res[(res.LastIndexOf(".usbip2_ude", StringComparison.Ordinal) + 1)..];
+            using var s = asm.GetManifestResourceStream(res);
+            if (s == null) { Check($"usbip-win2's {file} is embedded in HIDMaestro.Core.dll", false, res); continue; }
+            string hex = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(s)).ToLowerInvariant();
+            Check($"usbip-win2's {file} is embedded at the pinned SHA-256", hex == UsbipDriverInstaller.PinnedUdeHash(file), hex);
         }
+        Check("usbip-win2's installer is not embedded: the SDK never runs it",
+              !resNames.Any(n => n.StartsWith("HIDMaestro.Resources.USBip-", StringComparison.OrdinalIgnoreCase)),
+              string.Join(", ", resNames.Where(n => n.StartsWith("HIDMaestro.Resources.USBip-", StringComparison.OrdinalIgnoreCase))));
         Check("BSD-2-Clause notice ships with it (license requirement)", resNames.Contains(noticeRes));
         using (var s = asm.GetManifestResourceStream(noticeRes))
         {

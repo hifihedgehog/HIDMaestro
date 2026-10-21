@@ -17,18 +17,26 @@ user-mode API can create, so HIDMaestro speaks the USB/IP protocol to
 usbip-win2's virtual host controller. Every device behavior remains in
 HIDMaestro's own user-mode code.
 
-The redistributed binaries are usbip-win2's own signed installers,
-unmodified. The x64 installer is the v.0.9.8.1 release asset. The ARM64
-installer is the same tag's build that the project's signing service
-(ossign.org) published in usbip-win2 issue #13, with drivers
-attestation-signed by Microsoft. HIDMaestro deploys the one matching the
-machine's architecture.
+The redistributed binaries are usbip-win2's own signed host controller
+driver, unmodified: usbip2_ude.inf, usbip2_ude.sys and usbip2_ude.cat,
+unpacked at build time from usbip-win2's signed installers. The x64 files
+come from the v.0.9.8.1 release asset. The ARM64 files come from the same
+tag's build that the project's signing service (ossign.org) published in
+usbip-win2 issue #13, with drivers attestation-signed by Microsoft.
+HIDMaestro installs the one matching the machine's architecture. It does
+not redistribute the installers or the root-hub filter driver.
 
-USBip-0.9.8.1-x64.exe, SHA256:
+Unpacked from USBip-0.9.8.1-x64.exe, SHA256:
 38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a
+  usbip2_ude.inf 1ae9e8dc497929de1a6be1291ae1dca6a19e7fd6c0351e8c266f65dd91f15073
+  usbip2_ude.sys abd4fc43dce40e027e4acc884cbfe92433e026206f6565c5ee5284a39441169a
+  usbip2_ude.cat 84dd6cc5985857adf1514a9ee202210ff3ee1384c9be40fd49d6810e23e25f3a
 
-USBip-0.9.8.1-arm64-release-attestation.exe, SHA256:
+Unpacked from USBip-0.9.8.1-arm64-release-attestation.exe, SHA256:
 cab7ff97f79275eeb5c5b8bb2eb3111ff6b6c4eead07d9bec9be5bd1e3a35800
+  usbip2_ude.inf 04b6ac34874198fc73b6bb11c003fc89f87df9d504f78109eb2b500d05ef09c1
+  usbip2_ude.sys 38c64546938ea99b6c3ec69f3e5169ad79afc47a59faceb51cfb35d038e249a2
+  usbip2_ude.cat 14c2aa313740e362256d4da721e18751f0ecf0dc19b5c5f3887f084145a6af78
 
 BSD 2-Clause License
 

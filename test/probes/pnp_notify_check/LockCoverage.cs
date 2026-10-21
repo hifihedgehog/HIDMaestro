@@ -45,7 +45,7 @@ internal static class LockCoverage
         "SetupDiRemoveDevice(", "CM_Uninstall_DevNode(", "DIF_REMOVE,", "SwdDeviceFactory.Remove(",
         "/remove-device", "remove \\\"@",
         "DifRemoveDevice(", "DisableAndUninstall(", "RemoveDeviceLocked(",
-        " /install\"", "DiInstallDevice(", "DiInstallNullDriver(", "\"force-driver\"", "RunSilentInstall(exe)",
+        " /install\"", "DiInstallDevice(", "DiInstallNullDriver(", "\"force-driver\"",
         "CM_Disable_DevNode(", "CM_Enable_DevNode(", "CM_Setup_DevNode(", "CM_Reenumerate_DevNode(",
         "CM_Query_And_Remove_SubTreeW(", "/uninstall /force",
         "CM_Set_DevNode_PropertyW(", "SetupDiSetDeviceRegistryPropertyW(", "CM_Set_DevNode_Registry_PropertyW(",
@@ -90,16 +90,15 @@ internal static class LockCoverage
         ("CM_Query_And_Remove_SubTreeW(", "RestartHostControllerDevnode", "CM_Query_And_Remove_SubTreeW"),
         ("CM_Setup_DevNode(", "RestartHostControllerDevnode", "CM_Setup_DevNode"),
         ("CM_Reenumerate_DevNode(", "RestartHostControllerDevnode", "CM_Reenumerate_DevNode"),
-        // The usbip-win2 installer, the host controller's hardware id stamp
-        // and a WinUSB restore's reinstall flag.
-        ("RunSilentInstall(exe)", "InstallLocked", "usbip-win2 installer's own ROOT\\USB devnode"),
+        // The host controller's hardware id stamp and a WinUSB restore's
+        // reinstall flag.
         ("SetupDiSetDeviceRegistryPropertyW(", "StampOne", "hardware id stamp"),
         ("CM_Set_DevNode_Registry_PropertyW(", "WriteConfigFlags", "CONFIGFLAG_REINSTALL"),
         // A USB/IP import's attach and detach.
         ("PLUGIN_HARDWARE_ONCE,", "Attach", "attach and detach"),
         ("PLUGOUT_HARDWARE,", "Detach", "attach and detach"),
-        // The transport driver update.
-        ("\"force-driver\"", "ReplaceLegacyTransport", "hmswd.exe force-driver"),
+        // The transport driver install and update.
+        ("\"force-driver\"", "BuildForceDriverStartInfo", "hmswd.exe force-driver"),
         // A WinUSB bind, and on Windows 10 its null driver first.
         ("DiInstallDevice(", "InstallOn", "WinUSB bind"),
         ("DiInstallNullDriver(", "InstallFromInf", "WinUSB bind"),

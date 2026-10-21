@@ -41,9 +41,9 @@
        or as -p: on this project. docs/design/coexistence.md ("Building from
        source") has the table. Official releases set none of them.
          HMSkipArm64=true  the x64 payload only, and no ARM64 usbip-win2
-                           installer.
-         HMSkipUsbip=true  no USB/IP transport: neither installer, no host
-                           controller files, nothing downloaded for them.
+                           host controller files.
+         HMSkipUsbip=true  no USB/IP transport: no host controller files,
+                           and no installer downloaded to unpack them.
          HM_SDK_ROOT       the Windows SDK. Default WindowsSdkDir, which a
                            Visual Studio or EWDK prompt sets, else the
                            installed kit.
@@ -75,17 +75,18 @@
     <_HMUsbipArchs Condition="'$(_HMWithArm64)' == 'true'">x64,arm64</_HMUsbipArchs>
     <_HMResources>$(MSBuildThisFileDirectory)Resources\</_HMResources>
 
-    <!-- usbip-win2 0.9.8.1 installer, bundled (issue #39). Composite USB
-         personas need a driver-backed USB device for their audio
-         endpoints, so the SDK ships the transport rather than asking a
-         user to go install one: HIDMaestro deploys it on demand, the
+    <!-- usbip-win2 0.9.8.1's host controller driver, bundled (issue #39).
+         Composite USB personas need a driver-backed USB device for their
+         audio endpoints, so the SDK ships the transport rather than asking
+         a user to go install one: HIDMaestro deploys it on demand, the
          same way it deploys its own UMDF2 driver. BSD-2-Clause permits
          binary redistribution, and the required notice ships beside it as
          THIRD-PARTY-NOTICES.txt and is written to disk at install time.
 
-         The binaries are NOT committed. Each is fetched once and cached
-         in Resources/ (gitignored), then checked against its pinned
-         SHA-256. A hash mismatch FAILS the build rather than embedding an
+         The installers are the source of the driver files and are NOT
+         committed or embedded. Each is fetched once and cached in
+         Resources/ (gitignored), then checked against its pinned SHA-256.
+         A hash mismatch FAILS the build rather than unpacking an
          unverified binary.
 
          The ARM64 installer: the 0.9.8.1 release page carries the x64
@@ -201,18 +202,13 @@
       <LogicalName>HIDMaestro.VR.%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
     </_HMVr>
 
-    <!-- usbip-win2: each installer, and the host controller files
-         prepare_usbip.ps1 unpacks from it. PackResources fetches and
-         checks them where they sit in Resources\. -->
-    <_HMUsbipPayload Include="$(HMUsbipFile)" Condition="'$(_HMWithUsbip)' == 'true'">
-      <LogicalName>HIDMaestro.Resources.$(HMUsbipAsset)</LogicalName>
-    </_HMUsbipPayload>
+    <!-- usbip-win2: the host controller files prepare_usbip.ps1 unpacks
+         from each installer. PackResources fetches and checks the
+         installers where they sit in Resources\, and embeds only the
+         files unpacked from them. The SDK never runs an installer. -->
     <_HMUsbipPayload Include="$(_HMResources)usbip\x64\usbip2_ude.inf;$(_HMResources)usbip\x64\usbip2_ude.sys;$(_HMResources)usbip\x64\usbip2_ude.cat"
                      Condition="'$(_HMWithUsbip)' == 'true'">
       <LogicalName>HIDMaestro.Usbip.x64.%(Filename)%(Extension)</LogicalName>
-    </_HMUsbipPayload>
-    <_HMUsbipPayload Include="$(HMUsbipArmFile)" Condition="'$(_HMWithUsbip)' == 'true' and '$(_HMWithArm64)' == 'true'">
-      <LogicalName>HIDMaestro.Resources.$(HMUsbipArmAsset)</LogicalName>
     </_HMUsbipPayload>
     <_HMUsbipPayload Include="$(_HMResources)usbip\arm64\usbip2_ude.inf;$(_HMResources)usbip\arm64\usbip2_ude.sys;$(_HMResources)usbip\arm64\usbip2_ude.cat"
                      Condition="'$(_HMWithUsbip)' == 'true' and '$(_HMWithArm64)' == 'true'">
@@ -271,10 +267,11 @@
 
     <!-- The host controller's own INF/SYS/CAT, unpacked from the verified
          installers above and checked file by file against
-         UsbipPackage.json. The SDK uses them to move a machine off the
-         transport an earlier release installed through PnP, which the
-         installer cannot do without launching the old version's
-         uninstaller. -->
+         UsbipPackage.json. The SDK installs the transport from them, and
+         moves a machine off the transport an earlier release installed,
+         through PnP, never through the installer, which installs the
+         root-hub filter and, run over an install, launches the old
+         version's uninstaller. -->
     <Exec Condition="'$(_HMWithUsbip)' == 'true'"
           Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(HMRepoRoot)scripts\prepare_usbip.ps1&quot; -InstallerDirectory &quot;$(_HMResources.TrimEnd('\'))&quot; -DestinationDirectory &quot;$(_HMResources)usbip&quot; -Architectures $(_HMUsbipArchs)" />
 
