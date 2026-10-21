@@ -518,7 +518,7 @@ internal static partial class UsbipDriverInstaller
                 if (!isUde) continue;
                 // A host controller with no driver, an install cut short
                 // before it, has loaded nothing and carried nothing.
-                if (GetStringProperty(devInst, DEVPKEY_Device_DriverInfPath) == null) continue;
+                if (string.IsNullOrEmpty(GetStringProperty(devInst, DEVPKEY_Device_DriverInfPath))) continue;
                 driven++;
                 if (CM_Get_Child(out uint hub, devInst, 0) != CR_SUCCESS) { why = $"ROOT\\USB\\{n:D4} has no root hub to inspect"; return true; }
                 var buf = new char[512];
@@ -827,7 +827,7 @@ internal static partial class UsbipDriverInstaller
         {
             if (CM_Locate_DevNodeW(out devInst, $"ROOT\\USB\\{n:D4}", CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS)
                 continue;
-            if (GetStringProperty(devInst, DEVPKEY_Device_DriverInfPath) == null)
+            if (string.IsNullOrEmpty(GetStringProperty(devInst, DEVPKEY_Device_DriverInfPath)))
                 continue;
             foreach (var hwid in GetMultiSz(devInst, CM_DRP_HARDWAREID))
                 if (hwid.IndexOf("USBIP_WIN2", StringComparison.OrdinalIgnoreCase) >= 0) { located = true; break; }
