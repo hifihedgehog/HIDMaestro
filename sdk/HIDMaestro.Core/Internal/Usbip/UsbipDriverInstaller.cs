@@ -920,12 +920,27 @@ internal static partial class UsbipDriverInstaller
     /// machine on 2026-10-19. The count compared is one interface per host
     /// controller: a list that holds more interfaces than the pass stamped
     /// controllers is not kept, and the next create runs the pass
-    /// again.</summary>
+    /// again.
+    ///
+    /// <para>The pass writes under the transport lock taken with no wait
+    /// (<see cref="WithTransportLockNow"/>). When another program holds it,
+    /// or this process's own removal runs, which takes the stamp off,
+    /// nothing is written and the list is not kept, so a later create runs
+    /// the pass. A lock that cannot be opened is the same.</para></summary>
     private static void StampOwnerHardwareIdOnChange()
     {
         string? list = VhciClient.InterfaceList();
         if (list != null && string.Equals(list, Volatile.Read(ref s_stampedFor), StringComparison.Ordinal)) return;
-        int stamped = StampAll();
+        int stamped = 0;
+        try
+        {
+            if (!WithTransportLockNow(() => stamped = StampAll())) return;
+        }
+        catch (Exception ex)
+        {
+            DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: owner stamp not checked: {ex.GetType().Name}: {ex.Message}");
+            return;
+        }
         if (list != null && stamped == list.Split('\0', StringSplitOptions.RemoveEmptyEntries).Length)
             Volatile.Write(ref s_stampedFor, list);
     }
