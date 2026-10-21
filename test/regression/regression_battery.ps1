@@ -211,6 +211,9 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\switch_pro_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\switch_descriptor_idle_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\switch_pro_sdl3_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        # The sandbox copy is published from this build, and the tool in
+        # tool\ is built from the same SDK source as part of it.
+        Join-Path $scriptDir '..\probes\uninstall_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
     )
     # Canonical SDK output for the content-hash check. Source tree only:
     # a release bundle carries no sdk/ build output, and the version
@@ -837,11 +840,22 @@ function Resolve-ProbeExit {
 # waits for it with Complete-BackgroundProbe and judges it as Invoke-Probe
 # would. A probe that cannot start fails at its slot, not here.
 function Start-BackgroundProbe {
-    param([Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)][string]$Exe)
+    param([Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)][string]$Exe,
+          [string]$Arguments = '', [string]$Tag = '')
     try {
         $probe = Resolve-ProbeBinary $Dir $Exe
-        $out = Join-Path $env:TEMP ('HIDMaestro_probe_' + [IO.Path]::GetFileNameWithoutExtension($Exe) + '.log')
-        $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError "$out.err"
+        $name = [IO.Path]::GetFileNameWithoutExtension($Exe)
+        if ($Tag) { $name += '_' + $Tag }
+        $out = Join-Path $env:TEMP ('HIDMaestro_probe_' + $name + '.log')
+        $start = @{
+            FilePath               = $probe
+            PassThru               = $true
+            NoNewWindow            = $true
+            RedirectStandardOutput = $out
+            RedirectStandardError  = "$out.err"
+        }
+        if ($Arguments) { $start.ArgumentList = $Arguments }
+        $p = Start-Process @start
         # The exit code reads back only through a handle taken while the
         # process runs.
         $null = $p.Handle
@@ -2543,6 +2557,29 @@ function Scenario-Switch-Pro-Sdl3 {
                  -Message 'SDL3''s HIDAPI_DriverSwitch no longer opens the virtual Switch Pro, completes its init, or reads its sticks, buttons and motion (see probe stdout)'
 }
 
+# S101: removing HIDMaestro, HIDMaestroUninstall.exe and HMUninstall. On
+# every machine the tool's preview and the API's change nothing, read
+# against a snapshot the probe takes without the SDK. On a machine without
+# Windows Sandbox and with HIDMAESTRO_UNINSTALL_FIXTURE=1 (the Celeron), the
+# real removal runs here, the machine must read clean, and the driver
+# installs again with one controller created and disposed. Where Windows
+# Sandbox exists, the real removal runs inside it, beside the scenarios after
+# S73, since one sandbox runs at a time, and this slot collects it.
+function Scenario-Uninstall {
+    Invoke-Probe -Dir 'uninstall_check' -Exe 'UninstallCheck.exe' -Arguments 'preview' -Tag 'preview' `
+                 -Message 'a preview of the removal changed the machine, or missed what HIDMaestro left (see probe stdout)'
+    Invoke-Probe -Dir 'uninstall_check' -Exe 'UninstallCheck.exe' -Arguments 'fixture' -Tag 'fixture' -SkipCodes 2 -DeadlineSeconds 1800 `
+                 -Message 'the removal on this machine left HIDMaestro behind, restarted a USB root hub, or the driver did not install again (see probe stdout)'
+    $message = 'the removal in Windows Sandbox did not refuse beside a running program, left HIDMaestro behind, or broke a program that removed it in its own process (see probe stdout)'
+    if ($script:S101Run) {
+        $run = $script:S101Run
+        $script:S101Run = $null
+        Complete-BackgroundProbe -Run $run -Message $message -SkipCodes 2 -DeadlineSeconds 1800
+    } else {
+        Invoke-Probe -Dir 'uninstall_check' -Exe 'UninstallCheck.exe' -Arguments 'sandbox' -Tag 'sandbox' -Message $message -SkipCodes 2 -DeadlineSeconds 1800
+    }
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -2646,7 +2683,8 @@ $scenarios = @(
     @{ Name = 'S93_Contract_Live';               Body = ${function:Scenario-Contract-Live} },
     @{ Name = 'S98_Switch_Pro_Protocol';         Body = ${function:Scenario-Switch-Pro-Protocol} },
     @{ Name = 'S99_Switch_Descriptor_Idle';      Body = ${function:Scenario-Switch-Descriptor-Idle} },
-    @{ Name = 'S100_Switch_Pro_Sdl3';            Body = ${function:Scenario-Switch-Pro-Sdl3} }
+    @{ Name = 'S100_Switch_Pro_Sdl3';            Body = ${function:Scenario-Switch-Pro-Sdl3} },
+    @{ Name = 'S101_Uninstall';                  Body = ${function:Scenario-Uninstall} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -2661,6 +2699,14 @@ $script:S73Run = $null
 if ('S73_Usbip_Clean_Install' -like $Filter) {
     $script:S73Run = Start-BackgroundProbe -Dir 'usbip_install_check' -Exe 'UsbipInstallCheck.exe'
 }
+# S101's removal in Windows Sandbox, about 20 s inside the sandbox, starts
+# once no other sandbox runs: here when S73 is not in the run, otherwise once
+# S73's slot has collected its sandbox.
+$script:S101Run = $null
+$s101 = 'S101_Uninstall' -like $Filter
+if ($s101 -and -not $script:S73Run) {
+    $script:S101Run = Start-BackgroundProbe -Dir 'uninstall_check' -Exe 'UninstallCheck.exe' -Arguments 'sandbox' -Tag 'sandbox'
+}
 
 $results = @()
 $stoppedAt = $null
@@ -2672,12 +2718,16 @@ foreach ($s in $scenarios) {
     } while ($r.Rerun)
     $results += $r
     if ($StopOnFailure -and -not $r.Pass) { $stoppedAt = $s.Name; break }
+    if ($s101 -and $s.Name -eq 'S73_Usbip_Clean_Install' -and -not $script:S101Run) {
+        $script:S101Run = Start-BackgroundProbe -Dir 'uninstall_check' -Exe 'UninstallCheck.exe' -Arguments 'sandbox' -Tag 'sandbox'
+    }
 }
 $totalSw.Stop()
 if ($stoppedAt) {
-    # S73's sandbox runs from the start. A stop ends it with the rest.
-    if ($script:S73Run -and -not $script:S73Run.Error -and -not $script:S73Run.Process.HasExited) {
-        Stop-HMProcessTree -Proc $script:S73Run.Process
+    # S73's and S101's sandboxes run beside the scenarios. A stop ends them
+    # with the rest.
+    foreach ($bg in @($script:S73Run, $script:S101Run)) {
+        if ($bg -and -not $bg.Error -and -not $bg.Process.HasExited) { Stop-HMProcessTree -Proc $bg.Process }
     }
     Write-Host ''
     Write-Host ('  Stopped at the first failure, ' + $stoppedAt + ' (-StopOnFailure).') -ForegroundColor Red

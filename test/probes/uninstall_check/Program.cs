@@ -100,6 +100,11 @@ internal static class Program
     {
         Console.WriteLine("=== A preview changes nothing ===");
         if (!File.Exists(ToolPath)) { Check("the tool was built beside the probe", false, ToolPath); return 1; }
+        // The battery sets HIDMAESTRO_DIAG=1, and with it any SDK call may
+        // append to %TEMP%\HIDMaestro\teardown_diag.log, the log a user asks
+        // for. The previews run without it, in this process and the tool's.
+        Environment.SetEnvironmentVariable("HIDMAESTRO_DIAG", null);
+        Environment.SetEnvironmentVariable("HIDMAESTRO_TIMING", null);
         // The positive control: a folder of a shape the SDK through v1.12.0
         // left in %TEMP%, made by this probe. The previews must list it, and
         // the snapshot must see it go once the probe deletes it.
