@@ -93,6 +93,30 @@ internal static partial class Program
 
     static void Removal()
     {
+        // ── R0: an install cut short between its devnode and its driver ────
+        // The SDK's own registration, called as an install calls it, then
+        // nothing more: a timeout or a killed process. With the record the
+        // install writes before its driver, a default removal takes the
+        // driverless devnode. Without it, the next install finishes it.
+        var (cut, cutToken) = RegisterOnly();
+        WriteRecordWithNoDriver(cut, cutToken);
+        Record("remove: an install cut short leaves a driverless host controller with HIDMaestro's token",
+               Pnp.Present(cut) && Pnp.DriverInf(cut) == null && Pnp.OwnerToken(cut) == cutToken, $"{cut}, token {Pnp.OwnerToken(cut)}");
+        var finished = Remove("remove: cut short", preview: false, includeUnproven: false);
+        Record("remove: a default removal takes it, with its record",
+               Has(finished, "devnode", l => l.StartsWith(cut + " "), "Removed") && !Pnp.Known(cut) && !KeyExists(RecordKey)
+               && finished.All(e => e.Outcome != "Failed"));
+
+        (cut, cutToken) = RegisterOnly();
+        var resumed = Stopwatch.StartNew();
+        HMContext.InstallUsbipBackend();
+        Note(FormattableString.Invariant($"remove: the install that finished a cut-short one took {resumed.Elapsed.TotalSeconds:F1} s"));
+        using (var k = Registry.LocalMachine.OpenSubKey(RecordKey))
+            Record("remove: with no record, the next install finishes the same devnode, answers, and records it with its token",
+                   Pnp.RootDevnodes(UdeHardwareId).Count == 1 && Pnp.Present(cut) && Pnp.DriverInf(cut) != null && Answers()
+                   && (k?.GetValue("Instance") as string)?.Equals(cut, StringComparison.OrdinalIgnoreCase) == true && k?.GetValue("Token") as string == cutToken,
+                   $"{cut} runs {Pnp.DriverInf(cut)}");
+
         // ── R1: an install the record proves, unused since Windows started ──
         var install = Stopwatch.StartNew();
         HMContext.InstallUsbipBackend();
@@ -133,6 +157,25 @@ internal static partial class Program
         if (hc == null) return;
 
         // ── R3: an install no record proves ───────────────────────────────
+        // A devnode another installer registered on the same instance id
+        // carries no HIDMaestro token, and one whose Apps entry usbip-win2's
+        // installer wrote after HIDMaestro's install is no longer
+        // HIDMaestro's alone. Previews, so nothing changes.
+        string? token = Pnp.OwnerToken(hc);
+        bool swapped = Pnp.SetOwnerToken(hc, "another-installers-devnode");
+        var foreign = Remove("remove: another devnode", preview: true, includeUnproven: false);
+        Record("remove: a devnode without the record's token is not taken",
+               swapped && Has(foreign, "devnode", l => l.StartsWith(hc + " "), "Kept", "not the devnode HIDMaestro registered"));
+        Pnp.SetOwnerToken(hc, token ?? "");
+        using (var k = Registry.LocalMachine.CreateSubKey(UninstallKey))
+        {
+            k.SetValue("DisplayName", "USBip version 0.9.8.1");
+            k.SetValue("UninstallString", "\"C:\\Program Files\\USBip\\unins000.exe\"");
+        }
+        var vendor = Remove("remove: vendor install after", preview: true, includeUnproven: false);
+        Record("remove: nor one whose Apps entry usbip-win2's installer wrote after HIDMaestro's install",
+               Has(vendor, "devnode", l => l.StartsWith(hc + " "), "Kept", "after HIDMaestro's install"));
+
         Registry.LocalMachine.DeleteSubKeyTree(RecordKey, throwOnMissingSubKey: false);
         using (var k = Registry.LocalMachine.CreateSubKey(UninstallKey))
         {
@@ -253,6 +296,29 @@ internal static partial class Program
         Console.WriteLine();
         Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
+    }
+
+    /// <summary>The SDK's own host controller registration, with nothing
+    /// after it: its devnode and the owner token it wrote.</summary>
+    static (string Instance, string Token) RegisterOnly()
+    {
+        var installer = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.Usbip.UsbipDriverInstaller", throwOnError: true)!;
+        var result = installer.GetMethod("RegisterHostController", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, null)!;
+        var t = result.GetType();
+        return ((string)t.GetField("Item1")!.GetValue(result)!, (string)t.GetField("Item2")!.GetValue(result)!);
+    }
+
+    /// <summary>The record an install writes before its driver install.</summary>
+    static void WriteRecordWithNoDriver(string instance, string token)
+    {
+        using var k = Registry.LocalMachine.CreateSubKey(RecordKey);
+        k.SetValue("Instance", instance);
+        k.SetValue("Token", token);
+        k.SetValue("PackageAdded", 0, RegistryValueKind.DWord);
+        k.SetValue("PackagesBefore", Array.Empty<string>(), RegistryValueKind.MultiString);
+        k.SetValue("Version", "0.9.8.1");
+        k.SetValue("InstalledUtc", DateTime.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture));
+        k.SetValue("SdkVersion", "probe");
     }
 
     /// <summary>A devnode's record and every record below it, by each

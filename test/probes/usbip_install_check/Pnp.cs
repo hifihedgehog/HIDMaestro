@@ -135,6 +135,42 @@ internal static class Pnp
     static readonly DEVPROPKEY DriverInfPathKey = new() { fmtid = new Guid("a8b865dd-2e3d-4094-ad97-e593a70c75d6"), pid = 5 };
     static readonly DEVPROPKEY ParentKey = new() { fmtid = new Guid("4340a6c5-93fa-4706-972c-7b648008a5a7"), pid = 8 };
 
+    // The SDK's owner token on the host controller it registers
+    // (UsbipDriverInstaller.OwnerTokenKey): a string property of its own.
+    static readonly DEVPROPKEY OwnerTokenKey = new() { fmtid = new Guid("48494430-4d41-4553-5553-4249504f574e"), pid = 2 };
+
+    /// <summary>The SDK's owner token on a devnode, or null.</summary>
+    internal static string? OwnerToken(string id) => StringProperty(id, OwnerTokenKey);
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct SP_DEVINFO_DATA { public int cbSize; public Guid ClassGuid; public uint DevInst; public IntPtr Reserved; }
+    [DllImport("setupapi.dll", SetLastError = true)]
+    static extern IntPtr SetupDiCreateDeviceInfoList(IntPtr classGuid, IntPtr hwnd);
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool SetupDiOpenDeviceInfoW(IntPtr set, string id, IntPtr hwnd, uint flags, ref SP_DEVINFO_DATA data);
+    [DllImport("setupapi.dll", SetLastError = true)]
+    static extern bool SetupDiSetDevicePropertyW(IntPtr set, ref SP_DEVINFO_DATA data, ref DEVPROPKEY key, uint type, byte[] buffer, uint size, uint flags);
+    [DllImport("setupapi.dll")]
+    static extern bool SetupDiDestroyDeviceInfoList(IntPtr set);
+
+    /// <summary>Write <paramref name="value"/> as a devnode's owner token, as
+    /// another installer's devnode on the same instance id would read: not
+    /// the token the SDK's record keeps.</summary>
+    internal static bool SetOwnerToken(string id, string value)
+    {
+        IntPtr set = SetupDiCreateDeviceInfoList(IntPtr.Zero, IntPtr.Zero);
+        if (set == new IntPtr(-1)) return false;
+        try
+        {
+            var data = new SP_DEVINFO_DATA { cbSize = Marshal.SizeOf<SP_DEVINFO_DATA>() };
+            if (!SetupDiOpenDeviceInfoW(set, id, IntPtr.Zero, 0, ref data)) return false;
+            var key = OwnerTokenKey;
+            byte[] buf = Encoding.Unicode.GetBytes(value + "\0");
+            return SetupDiSetDevicePropertyW(set, ref data, ref key, DEVPROP_TYPE_STRING, buf, (uint)buf.Length, 0);
+        }
+        finally { SetupDiDestroyDeviceInfoList(set); }
+    }
+
     /// <summary>The published INF a devnode's driver came from, or null.</summary>
     internal static string? DriverInf(string id) => StringProperty(id, DriverInfPathKey);
 

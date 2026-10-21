@@ -2186,8 +2186,9 @@ function Scenario-Protected-Staging {
 # enumerates and carries input. A planted uninstall entry does not stop the
 # install and its uninstaller never runs. Two programs whose first composites
 # arrive together install once. S45's and S65's probes then run in the same
-# sandbox with no filter on the machine, and a second sandbox runs the
-# usbip-win2 part of a full removal. Exit 2 when Windows Sandbox is not
+# sandbox with no filter on the machine, all but audio content, which the
+# sandbox's audio engine silences, and a second sandbox runs the usbip-win2
+# part of a full removal, an install cut short among its cases. Exit 2 when Windows Sandbox is not
 # available. The sandboxes are machines of their own, so the battery starts
 # this probe before S01 and the slot collects its result.
 function Scenario-Usbip-Clean-Install {

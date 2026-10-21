@@ -21,17 +21,26 @@
 //               it under the transport lock: one host controller, and both
 //               composites appear.
 //   E. e2e      With A's install, S45's probe (usbip_e2e_check: HID input,
-//               output, feature, audio out and the microphone) and S65's
-//               (switch2_composite_check: a HID and WinUSB composite, its bulk
-//               commands and rumble) run inside the sandbox, so every check
-//               they make runs with no filter on the root hub.
+//               output, feature, audio render and the microphone stream) and
+//               S65's (switch2_composite_check: a HID and WinUSB composite, its
+//               bulk commands and rumble) run inside the sandbox with no filter
+//               on the root hub. The sandbox's audio engine silences every
+//               stream, so the audio PCM's content is not checked there:
+//               S45's microphone energy check is a skip, and its render check
+//               counts bytes.
 //   R. remove   The usbip-win2 part of a full removal (UsbipRemoval.Remove):
-//               a preview that changes nothing, a removal of an install the
-//               record proves, a reinstall after it, an install with no
-//               record (kept, then taken when usbip-win2 is included, refused
-//               while another program that uses usbip-win2 is installed), and
-//               a host controller that carried a composite since Windows
-//               started (kept until a restart, its persona's records gone).
+//               an install cut short before its driver (a default removal
+//               takes it, or the next install finishes the same devnode), a
+//               preview that changes nothing, a removal of an install the
+//               record proves, a reinstall after it, an install the record no
+//               longer proves (another devnode's token, or usbip-win2's Apps
+//               entry written after it, both previewed), one with no record
+//               (kept, then taken when usbip-win2 is included, refused while
+//               another program that uses usbip-win2 is installed), and a
+//               host controller that carried a composite since Windows
+//               started (kept until a restart with its persona's records and
+//               the Apps entry and folder of usbip-win2's installer, and kept
+//               again by a second removal before the restart).
 //   N. nostream A, with the composite's profile loaded from a file without
 //               its idle stream ("stream"), the one change in what the
 //               device sends between v1.12.0 and 2.0.0. Runs only when named.
@@ -804,7 +813,7 @@ internal static partial class Program
     {
         foreach (var (name, exe) in new[]
                  {
-                     ("S45", @"C:\probe-e2e\UsbipE2ECheck.exe"),
+                     ("S45", @"C:\probe-e2e\UsbipE2ECheck.exe --sandbox"),
                      ("S65", @"C:\probe-switch2\Switch2CompositeCheck.exe"),
                  })
         {
