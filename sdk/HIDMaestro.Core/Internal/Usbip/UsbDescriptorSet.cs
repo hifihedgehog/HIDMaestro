@@ -57,6 +57,12 @@ internal sealed class UsbDescriptorSet
     /// #66).</summary>
     public string? SerialString => _serial;
 
+    /// <summary>The identity's <see cref="DeviceIdentity.SerialVariant"/>,
+    /// which varies a captured serial here and the captured text of an
+    /// instanceSerial patch in the device's feature answers (issue
+    /// #72).</summary>
+    public int SerialVariant { get; }
+
     // Issue #66. Microsoft OS 1.0 descriptors, null unless the profile
     // declares them. A device without them stalls string 0xEE and every
     // vendor request, as the Sony and Valve pads do.
@@ -148,6 +154,7 @@ internal sealed class UsbDescriptorSet
     public UsbDescriptorSet(ControllerProfile profile, int index = 0, DeviceIdentity? identity = null)
     {
         identity ??= DeviceIdentity.ForIndex(index);
+        SerialVariant = identity.SerialVariant;
         var cfg = profile.UsbConfiguration
             ?? throw new ProfileDefectException("$.usbConfiguration", "is required for the usbip backend.");
         CheckStructure(cfg);

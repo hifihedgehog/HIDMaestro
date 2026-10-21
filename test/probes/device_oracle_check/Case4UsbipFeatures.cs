@@ -653,7 +653,7 @@ internal sealed class Case4UsbipFeatures : IOracleCase
                 (t.GetField(field, Instance) ?? throw new MissingFieldException(t.Name, field)).SetValue(dev, value);
             Set("<Descriptors>k__BackingField", descriptors);
             Set("_index", index);
-            Set("_stubs", FeatureStubTable.From(profile, index, descriptors.SerialString, stamp));
+            Set("_stubs", FeatureStubTable.From(profile, index, descriptors.SerialString, stamp, descriptors.SerialVariant));
             var slots = new int[256];
             Array.Fill(slots, -1);
             Set("_inputSlot", slots);
@@ -912,7 +912,7 @@ internal sealed class Case4UsbipFeatures : IOracleCase
                             o.AddRange(e);
                         }
                         g.Out($"state.{name}", o.ToArray());
-                        g.Out($"answer-83.{name}", Answer83(FeatureStubTable.From(triton, 0, null)));
+                        g.Out($"answer-83.{name}", Answer83(FeatureStubTable.From(triton, 0, null, 0)));
                     }
 
                     // Steam writes SteamPath with forward slashes in lower case

@@ -20,6 +20,13 @@
 //                                             steamcontroller_gordon for
 //                                             the 2015 unit, triton for
 //                                             the 2026 one
+//   configset_<unit serial>.vdf               the unit's own configuration,
+//                                             named after the serial it
+//                                             read over 0xAE index 1
+//
+// A second Deck and a second 2026 controller follow the three (issue #72):
+// each serves a unit serial of its own and gets its own config set, never
+// the first unit's. The Deck also gets TRIGGER_HAPTIC_PULSE writes.
 //
 // And one absence that matters more than any of them: Steam does not close
 // the device. A close is what an idle persona got before idleFrameIntervalMs
@@ -98,6 +105,7 @@ static class ValveSteamCheck
     const byte ID_GET_ATTRIBUTES_VALUES  = 0x83;
     const byte ID_SET_SETTINGS_VALUES    = 0x87;
     const byte ID_TRIGGER_HAPTIC_PULSE   = 0x8F;
+    const byte ID_GET_STRING_ATTRIBUTE   = 0xAE;
     const byte ID_TRIGGER_HAPTIC_CMD     = 0xEA;
     const byte ID_TRIGGER_RUMBLE_CMD     = 0xEB;
 
@@ -198,10 +206,9 @@ static class ValveSteamCheck
     static int Main(string[] args)
     {
         if (args.Length == 2 && args[0] == "record-switch-pro") return RecordSwitchPro(args[1]);
-        if (args.Length == 1 && args[0] == "pairs") return Checks(pairs: true);
         if (args.Length != 0)
         {
-            Console.WriteLine("usage: ValveSteamCheck [pairs | record-switch-pro <out dir>]");
+            Console.WriteLine("usage: ValveSteamCheck [record-switch-pro <out dir>]");
             return 1;
         }
         return Checks();
@@ -217,6 +224,19 @@ static class ValveSteamCheck
     sealed class Persona
     {
         public required string Id, Pid, Product, ConfigSet, Model;
+        /// <summary>Steam names this model's per-unit config set after the
+        /// unit serial it reads with 0xAE index 1. It refuses the 2015
+        /// persona's and names that one after its USB ids.</summary>
+        public bool KeysByUnitSerial;
+        /// <summary>Steam sends this model TRIGGER_HAPTIC_PULSE while it
+        /// configures it (issue #72).</summary>
+        public bool Haptics;
+        /// <summary>The earlier unit of the same model in this run, for a
+        /// second one.</summary>
+        public Persona? First;
+        /// <summary>The unit serial the device serves at 0xAE index 1, read
+        /// off its compiled answers.</summary>
+        public string? UnitSerial;
         public HMProfile? Profile;
         public HMController? Pad;
         public long Baseline;
@@ -248,7 +268,28 @@ static class ValveSteamCheck
         return list;
     }
 
-    static int Checks(bool pairs = false)
+    /// <summary>The string a device's compiled answers serve for 0xAE
+    /// index 1: the bytes after [0xAE][length][index], from the message's
+    /// own offset, up to the first zero. Null when it has no such
+    /// answer.</summary>
+    static string? ServedUnitSerial(HMController c)
+    {
+        var table = c.UsbipHandle?.Device.FeatureAnswers;
+        if (table == null) return null;
+        foreach (var e in table.Entries)
+        {
+            if (!e.IsMessage || !e.HasParam || e.ParamValue != 1 || e.Value.Length != 1 || e.Value[0] != ID_GET_STRING_ATTRIBUTE
+                || e.Pages.Length == 0)
+                continue;
+            var page = e.Pages[0];
+            int at = e.At + 3, end = at;
+            while (end < page.Length && page[end] != 0) end++;
+            return System.Text.Encoding.ASCII.GetString(page, at, end - at);
+        }
+        return null;
+    }
+
+    static int Checks()
     {
         string? root = SteamRoot();
         if (root == null)
@@ -268,18 +309,26 @@ static class ValveSteamCheck
         // The config-set name is Steam's own per-model classification, and
         // it is the assertion that separates "some Valve device" from "this
         // Valve device".
-        Persona Deck() => new Persona { Id = "steam-deck-composite",       Pid = "1205", Product = "Steam Controller", ConfigSet = "configset_controller_neptune.vdf",                Model = "neptune" };
+        Persona Deck() => new Persona { Id = "steam-deck-composite",       Pid = "1205", Product = "Steam Controller", ConfigSet = "configset_controller_neptune.vdf",                Model = "neptune", KeysByUnitSerial = true, Haptics = true };
         Persona Gordon() => new Persona { Id = "steam-controller-composite", Pid = "1102", Product = "Wired Controller", ConfigSet = "configset_controller_steamcontroller_gordon.vdf", Model = "steamcontroller_gordon" };
-        Persona Triton() => new Persona { Id = "steam-controller-2",         Pid = "1302", Product = "Steam Controller", ConfigSet = "configset_controller_triton.vdf",                 Model = "triton" };
-        var cases = pairs
-            ? new[] { Deck(), Deck(), Triton(), Triton() }
-            : new[] { Deck(), Gordon(), Triton() };
+        Persona Triton() => new Persona { Id = "steam-controller-2",         Pid = "1302", Product = "Steam Controller", ConfigSet = "configset_controller_triton.vdf",                 Model = "triton", KeysByUnitSerial = true };
+        // A second Deck and a second 2026 controller after the three
+        // (issue #72). Steam names a unit's config set after the unit serial
+        // it reads, so each second unit has to land on its own.
+        var deck = Deck();
+        var triton = Triton();
+        var deck2 = Deck();
+        deck2.First = deck;
+        var triton2 = Triton();
+        triton2.First = triton;
+        var cases = new[] { deck, Gordon(), triton, deck2, triton2 };
 
         var clock = Stopwatch.StartNew();
         try
         {
-            // The three are held together. Each is created once Steam has
-            // opened the one before. Each one's lines in the log run from
+            // The five are held together. Each is created once Steam has
+            // opened the one before and named its config set. Each one's
+            // lines in the log run from
             // the "Local Device Found" block that names one of its own
             // interface paths to the next block, so another program's
             // device, opened or closed meanwhile, is never read as one of
@@ -293,6 +342,7 @@ static class ValveSteamCheck
                 {
                     var c = ctx.CreateController(t.Profile);
                     t.Pad = c;
+                    t.UnitSerial = ServedUnitSerial(c);
                     t.UsbId = $@"USB\VID_28DE&PID_{t.Pid}\{c.UsbipHandle?.Device.Descriptors.SerialString}";
                     // Every command Steam writes down to this device, in
                     // arrival order. Valve frames a command-channel write as
@@ -330,13 +380,19 @@ static class ValveSteamCheck
                         if (own.Contains("Steam controller device opened", StringComparison.Ordinal)) { t.OpenedAt = clock.ElapsedMilliseconds; break; }
                         Thread.Sleep(100);
                     }
-                    // A pair's second unit is created once Steam has named
-                    // the first one's config set, so each set lands in its
-                    // own device's block.
+                    // The next unit is created once Steam has named this
+                    // one's config set, so each set lands in its own
+                    // device's block: for a model Steam keys by unit serial,
+                    // the set named after the serial this unit serves. The
+                    // wait has the open's 90 s bound, since the set lands
+                    // after Steam's account round trip.
+                    string naming = t.KeysByUnitSerial && t.UnitSerial != null ? $"configset_{t.UnitSerial}.vdf" : "configset_";
                     var named = Stopwatch.StartNew();
-                    while (pairs && t.OpenedAt >= 0 && named.ElapsedMilliseconds < 30_000
-                           && !SteamDeviceLog.Own(SteamDeviceLog.Read(log, t.Baseline), t.Paths).Contains("configset_", StringComparison.Ordinal))
+                    while (t.OpenedAt >= 0 && named.ElapsedMilliseconds < 90_000
+                           && !SteamDeviceLog.Own(SteamDeviceLog.Read(log, t.Baseline), t.Paths).Contains(naming, StringComparison.Ordinal))
                         Thread.Sleep(200);
+                    if (t.OpenedAt >= 0 && !SteamDeviceLog.Own(SteamDeviceLog.Read(log, t.Baseline), t.Paths).Contains(naming, StringComparison.Ordinal))
+                        t.Error = $"Steam named no config set ({naming}) for this unit within 90 s of its open";
                 }
                 catch (Exception ex) { t.Error = ex.Message; }
             }
@@ -356,7 +412,10 @@ static class ValveSteamCheck
                 long now = clock.ElapsedMilliseconds;
                 bool done = held.All(t => now - t.OpenedAt >= HoldMs
                                           && (now - t.OpenedAt >= 90_000
-                                              || SteamDeviceLog.Read(log, t.Baseline).Contains(t.ConfigSet, StringComparison.OrdinalIgnoreCase)));
+                                              || (SteamDeviceLog.Read(log, t.Baseline).Contains(t.ConfigSet, StringComparison.OrdinalIgnoreCase)
+                                                  && (!t.KeysByUnitSerial
+                                                      || SteamDeviceLog.Own(SteamDeviceLog.Read(log, t.Baseline), t.Paths)
+                                                             .Contains($"configset_{t.UnitSerial}.vdf", StringComparison.OrdinalIgnoreCase)))));
                 if (done) break;
                 Thread.Sleep(200);
             }
@@ -367,7 +426,7 @@ static class ValveSteamCheck
                 Console.WriteLine($"-- {t.Id} --");
                 Check("profile is in the catalog", t.Profile != null);
                 if (t.Profile == null) continue;
-                if (t.Error != null) { Check("persona ran without throwing", false, t.Error); continue; }
+                if (t.Error != null) { Check("persona was created and Steam named its config set", false, t.Error); continue; }
 
                 string after = SteamDeviceLog.Read(log, t.Baseline);
                 string own = SteamDeviceLog.Own(after, t.Paths);
@@ -389,6 +448,24 @@ static class ValveSteamCheck
                 // Which Valve device Steam decided this is.
                 Check("Steam classifies it as this specific Valve model",
                       after.Contains(t.ConfigSet, StringComparison.OrdinalIgnoreCase), t.ConfigSet);
+
+                // Issue #72. Steam keeps a unit's configuration in a set
+                // named after the unit serial it reads over 0xAE, so each
+                // unit has to serve its own and get its own set.
+                if (t.KeysByUnitSerial)
+                {
+                    string mine = $"configset_{t.UnitSerial}.vdf";
+                    Check("Steam names this unit's config set after the unit serial it serves",
+                          t.UnitSerial != null && own.Contains(mine, StringComparison.OrdinalIgnoreCase), mine);
+                }
+                if (t.First != null)
+                {
+                    string theirs = $"configset_{t.First.UnitSerial}.vdf";
+                    Check("the second unit serves a unit serial of its own",
+                          t.UnitSerial != null && t.UnitSerial != t.First.UnitSerial, $"{t.UnitSerial} and the first unit's {t.First.UnitSerial}");
+                    Check("Steam never gives the second unit the first unit's config set",
+                          !own.Contains(theirs, StringComparison.OrdinalIgnoreCase), theirs);
+                }
 
                 // Steam's close line names no device, and another program's
                 // device closing beside this one writes it too (05:47:51 on
@@ -438,6 +515,12 @@ static class ValveSteamCheck
                                     || w.Id == ID_CLEAR_DIGITAL_MAPPINGS
                                     || w.Id == ID_GET_ATTRIBUTES_VALUES),
                       "settings, mappings or attributes");
+                // Issue #72: Steam sends a Deck haptic pulses while it
+                // configures it, and the 2015 and 2026 personas none.
+                if (t.Haptics)
+                    Check("Steam sends it TRIGGER_HAPTIC_PULSE",
+                          cmds.Exists(w => w.Id == ID_TRIGGER_HAPTIC_PULSE),
+                          $"{cmds.Count(w => w.Id == ID_TRIGGER_HAPTIC_PULSE)} writes");
 
                 // What Steam's interface for this device is built from.
                 // The classification above is a name. These are the
@@ -482,7 +565,7 @@ static class ValveSteamCheck
 
         Console.WriteLine();
         Console.WriteLine(s_fail == 0
-            ? "=== STEAM CLAIMS AND CLASSIFIES ALL THREE VALVE PERSONAS ==="
+            ? "=== STEAM CLAIMS AND CLASSIFIES EVERY VALVE PERSONA, EACH UNIT ON ITS OWN CONFIG SET ==="
             : $"=== {s_fail} check(s) FAILED ===");
         return s_fail == 0 ? 0 : 1;
     }

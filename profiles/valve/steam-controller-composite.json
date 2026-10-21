@@ -11,7 +11,7 @@
   "backend": "usbip",
   "descriptor": "0600ff0901a101150026ff00750895400901810295400901910295400901b102c0",
   "inputReportSize": 64,
-  "notes": "Issue #56, from PadForge discussion #337. The wired 2015 Steam Controller at 28DE:1102. Every USB descriptor here is verbatim from a real unit's dump (deckdumps/sc_blobs.json): the device and configuration blobs, the 63-byte keyboard and 56-byte mouse report descriptors its lizard mode drives, and the 33-byte vendor-page controller descriptor. Three interfaces, because SDL_hidapi_steam.c binds the pad only on interface 2. extendedReport packs ValveInReport_t + ValveControllerStatePacket_t: header 01 00 01 3C, then an advancing unPacketNum, which UpdateSteamControllerState requires or it treats the frame as a repeat. The pad has one stick and the wire has no separate stick field: with STEAM_LEFTPAD_FINGERDOWN clear, FormatStatePacketUntilGyro reads sLeftPadX/Y as the joystick, so that is where the stick is written and the finger-down bits stay clear. Motion is the SDK's calibrated channel, which SDL reads back as the wire's gyro (X, Z, Y) and accel (X, Z, -Y) at 32768 counts per 2000 deg/s and 16384 per g (SDL_hidapi_steam.c:1536-1543). The trigger bits set at the top of the 8-bit trigger, 255, where the pad's trigger switches close at the end of travel (OpenSteamController buttons.c, GPIO_L_TRIGGER and GPIO_R_TRIGGER, read apart from the analog channel).",
+  "notes": "Issue #56, from PadForge discussion #337. The wired 2015 Steam Controller at 28DE:1102. Every USB descriptor here is verbatim from a real unit's dump (deckdumps/sc_blobs.json): the device and configuration blobs, the 63-byte keyboard and 56-byte mouse report descriptors its lizard mode drives, and the 33-byte vendor-page controller descriptor. Three interfaces, because SDL_hidapi_steam.c binds the pad only on interface 2. extendedReport packs ValveInReport_t + ValveControllerStatePacket_t: header 01 00 01 3C, then an advancing unPacketNum, which UpdateSteamControllerState requires or it treats the frame as a repeat. The pad has one stick and the wire has no separate stick field: with STEAM_LEFTPAD_FINGERDOWN clear, FormatStatePacketUntilGyro reads sLeftPadX/Y as the joystick, so that is where the stick is written and the finger-down bits stay clear. Issue #72: the pad reports on its own 9 ms clock (extendedReport.send \"clock\"), whatever rate the consumer submits at, each report carrying the latest state. 9 ms is the 9000 the 0x83 answer gives for ATTRIB_CONNECTION_INTERVAL_IN_US, SDL's own default in ResetSteamController, and SDL_hidapi_steam.c credits each report that much sensor time. No public capture records a wired 2015 unit's report interval, so the persona's own answer sets it. Motion is the SDK's calibrated channel, which SDL reads back as the wire's gyro (X, Z, Y) and accel (X, Z, -Y) at 32768 counts per 2000 deg/s and 16384 per g (SDL_hidapi_steam.c:1536-1543). The trigger bits set at the top of the 8-bit trigger, 255, where the pad's trigger switches close at the end of travel (OpenSteamController buttons.c, GPIO_L_TRIGGER and GPIO_R_TRIGGER, read apart from the analog channel).",
   "featureStubs": {
     "reports": [
       {
@@ -40,7 +40,15 @@
         "size": 64,
         "data": "ae1400484d424f415244303030303031",
         "notify": true,
-        "comment": "ATTRIB_STR_BOARD_SERIAL. Same command channel as the Deck's, so the same per-index rule applies. No capture of a 2015 unit's serial format exists, so the framing is the Deck's verified one and the string itself is this project's, not a real unit's."
+        "patch": [
+          {
+            "at": 3,
+            "length": 13,
+            "encoding": "ascii",
+            "source": "instanceSerial"
+          }
+        ],
+        "comment": "ATTRIB_STR_BOARD_SERIAL. Same command channel as the Deck's, so the same per-index rule applies. No capture of a 2015 unit's serial format exists, so the framing is the Deck's verified one and the string itself is this project's, not a real unit's. Each controller answers its own (issue #72): serial variant 0, a keyless controller at index 0, keeps HMBOARD000001, and another variant is added into the trailing digits."
       },
       {
         "id": "0x00",
@@ -56,7 +64,15 @@
         "size": 64,
         "data": "ae1401484d554e495430303030303031",
         "notify": true,
-        "comment": "ATTRIB_STR_UNIT_SERIAL, and distinct from index 0 as on real hardware."
+        "patch": [
+          {
+            "at": 3,
+            "length": 13,
+            "encoding": "ascii",
+            "source": "instanceSerial"
+          }
+        ],
+        "comment": "ATTRIB_STR_UNIT_SERIAL, and distinct from index 0 as on real hardware. Steam refuses this string (\"Invalid or missing unit serial number\") and names the 2015 controller's config set after its USB ids instead, but the kernel reads it into the device's uniq (hid-steam.c steam_get_serial), so each controller answers its own (issue #72): serial variant 0, a keyless controller at index 0, keeps HMUNIT0000001, and another variant is added into the trailing digits. A controller created with an identity key, as PadForge creates them, answers its identity's own unit serial."
       },
       {
         "id": "0x00",
@@ -165,7 +181,8 @@
     "reportId": "0x00",
     "size": 64,
     "alwaysArmed": true,
-    "idleFrameIntervalMs": 8,
+    "idleFrameIntervalMs": 9,
+    "send": "clock",
     "fields": [
       {
         "byte": 0,

@@ -85,12 +85,12 @@ internal static class Cost
         var all = ProfileDatabase.LoadEmbedded().All;
         var ds = all.First(p => p.Id == "dualsense-bt");
         var triton = all.First(p => p.Id == "steam-controller-2");
-        var dsTable = FeatureStubTable.From(ds, 0, "HM-CTL-0000")!;
+        var dsTable = FeatureStubTable.From(ds, 0, "HM-CTL-0000", 0)!;
         // The captured stamp: a reader that finds no file, as on a machine
         // without Steam. The base has no such path: it read Steam's config.
         var tritonTable = FeatureStubTable.From(triton, 0, "FXA9960200001", _ => null)!;
         // Steam's config, read through the value source as a device reads it.
-        var tritonSteam = FeatureStubTable.From(triton, 0, "FXA9960200001")!;
+        var tritonSteam = FeatureStubTable.From(triton, 0, "FXA9960200001", 0)!;
         tritonSteam.OnSetFeature(1, new byte[] { 0x01, 0x83, 0x00 });
         byte[] set = { 0x01, 0x83, 0x00 };
         int sink = 0;
@@ -107,7 +107,7 @@ internal static class Cost
         Console.WriteLine($"cost,lookup,steam-controller-2 SET 0x83 then GET,{Ns(200_000, Tri):F1}");
         Console.WriteLine($"cost,alloc,dualsense-bt 0x05,{Bytes(10_000, Ds):F1}");
         Console.WriteLine($"cost,alloc,steam-controller-2 SET 0x83 then GET,{Bytes(10_000, Tri):F1}");
-        Console.WriteLine($"cost,compile,FeatureStubTable.From dualsense-bt,{Ns(2_000, () => sink += FeatureStubTable.From(ds, 1, "HM-CTL-0001")!.Entries.Count):F1}");
+        Console.WriteLine($"cost,compile,FeatureStubTable.From dualsense-bt,{Ns(2_000, () => sink += FeatureStubTable.From(ds, 1, "HM-CTL-0001", 1)!.Entries.Count):F1}");
         Console.WriteLine($"cost,compile,FeatureAnswers blob dualsense-bt,{Ns(2_000, () => sink += DeviceOrchestrator.FeatureAnswersBlob(ds, 1).Length):F1}");
         Console.WriteLine($"cost,compile,FeatureStubTable.From steam-controller-2,{Ns(2_000, () => sink += FeatureStubTable.From(triton, 1, "FXA9960200001", _ => null)!.Entries.Count):F1}");
         GC.KeepAlive(sink);

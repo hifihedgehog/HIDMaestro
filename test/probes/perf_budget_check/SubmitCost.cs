@@ -16,10 +16,12 @@
 //     mode (0x30, sent on every tick) and in the simple mode (0x3F, sent
 //     on change), each after a SubmitState that changes the state, as the
 //     clock finds it between a consumer's frames
-//   - submit-repeat: SubmitState on dualshock-4-v2 and the armed
-//     dualsense-bt with their idle repeat running, as on a live
+//   - one tick of steam-deck-composite's idle repeat, RepeatLastFrame
+//     called directly: the clock's work from its wake to the section write
+//   - submit-repeat: SubmitState on dualshock-4-v2, the armed dualsense-bt
+//     and steam-deck-composite with their idle repeat running, as on a live
 //     controller, where a consumer's frame also keeps what the repeat
-//     sends. b4d29d9 has no repeat for either. A launch of its own, since
+//     sends. b4d29d9 has no repeat for the first two. A launch of its own, since
 //     the repeat's clock wakes every period and would land on the other
 //     variants' times
 // Variants run interleaved run by run, at high process priority, and each
@@ -97,7 +99,7 @@ internal static class SubmitCost
         }
 
         if (repeat)
-            foreach (var (id, armed) in new[] { ("dualshock-4-v2", false), ("dualsense-bt", true) })
+            foreach (var (id, armed) in new[] { ("dualshock-4-v2", false), ("dualsense-bt", true), ("steam-deck-composite", false) })
             {
                 var c = Make(id, armed, repeat: true);
                 variants.Add(($"SubmitState,{id}{(armed ? " armed" : "")} with its idle repeat", i => c.SubmitState((i & 1) == 0 ? a : b)));
@@ -125,6 +127,20 @@ internal static class SubmitCost
             var raw = new byte[48];
             variants.Add(("SubmitRawReport,switch-pro", i => { raw[5] = (byte)i; c.SubmitRawReport(raw); }));
         }
+#if !HM_BASE
+        if (!repeat)
+        {
+            // One tick of the idle repeat, the work from the clock's wake to
+            // the section write: the last state encoded again and written.
+            // Called directly, on a controller without its clock, after one
+            // SubmitState, whose state every call repeats.
+            var c = Make("steam-deck-composite", false);
+            var tick = typeof(HMController).GetMethod("RepeatLastFrame", Instance)!.CreateDelegate<Action>(c);
+            typeof(HMController).GetField("_idleThread", Instance)!.SetValue(c, new System.Threading.Thread(() => { }));
+            c.SubmitState(a);
+            variants.Add(("idle tick,steam-deck-composite", i => tick()));
+        }
+#endif
 #if !HM_BASE
         // The protocol host's tick, in each of switch-pro's two modes. A
         // subcommand 0x02 (device info) is the host speaking the protocol,

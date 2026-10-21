@@ -25,7 +25,9 @@ internal enum MissedTick : byte
     Owe,
     /// <summary>The grid holds. A tick that finds no read waiting sends
     /// nothing, and a read waits for the next tick. The first tick of a run is
-    /// the next grid point.</summary>
+    /// the next grid point. A tick that comes late skips the grid points it
+    /// missed rather than sending them in a burst, the rule of a device that
+    /// reports on its own clock (extendedReport.send "clock").</summary>
     NextPoll,
     /// <summary>The period restarts from a late tick, and from the consumer's
     /// own frame: the idle repeat's rule, a report again one period after the
@@ -59,7 +61,8 @@ internal interface IClockTick
 /// <summary>The device clock of mechanism 2: one class for every report a
 /// device sends on its own time, with a period, an origin, a missed-tick rule
 /// and a high-resolution waitable timer. The GameCube adapter's host-poll
-/// grid, the Switch 2 Pro's 4 ms reports and the idle repeat all run on it.
+/// grid, the Switch 2 Pro's 4 ms reports, the idle repeat and the reports of
+/// a profile that sends on its own clock all run on it.
 /// The period is a whole number of Stopwatch ticks, so a period of 1.25 ms
 /// runs as 1.25 ms. A clock held up past several ticks skips them rather than
 /// sending a burst. A plain wait rounds up to the 15.6 ms system tick, so the

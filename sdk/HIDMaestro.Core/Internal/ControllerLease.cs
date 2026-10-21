@@ -110,11 +110,13 @@ internal sealed class ControllerLease : IDisposable
             // next create replace this one's devnode. The cost is everything
             // derived from the index: a keyless controller's token, paths and
             // container id, a keyless composite's USB serial and USB instance
-            // id (DeviceIdentity.SerialVariant), and for every controller the
-            // HID serial HM-CTL-<index>, the DualSense and Switch Pro MAC
-            // bytes, a byte of the XUSB capabilities and the USB/IP bus id. A program
-            // restarted after a crash takes its old index back only when it
-            // is at least LegacyClearance.
+            // id (DeviceIdentity.SerialVariant), a keyless Valve persona's
+            // 0xAE board and unit serials by the same variant, which Steam
+            // names its config sets after (instanceSerial), and for every
+            // controller the HID serial HM-CTL-<index>, the DualSense and
+            // Switch Pro MAC bytes, a byte of the XUSB capabilities and the
+            // USB/IP bus id. A program restarted after a crash takes its old
+            // index back only when it is at least LegacyClearance.
             int floor = Floor(census);
             if (floor > 0)
                 DeviceOrchestrator.LogDiag($"    a v1.12.0 program runs: transport indices from {floor}");

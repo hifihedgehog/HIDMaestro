@@ -10,15 +10,19 @@ namespace HIDMaestro.Internal;
 /// <summary>v2.0.0: per-controller values inside feature answers (design
 /// note, mechanism 5). A patch writes a value from a named source over
 /// bytes of an answer's data: <c>index</c>, the transport index,
-/// <c>serial</c>, the serial the device serves, or a source the profile's
+/// <c>serial</c>, the serial the device serves, <c>instanceSerial</c>, the
+/// answer's own captured text varied per controller by the serial variant
+/// that varies a captured USB serial, or a source the profile's
 /// <c>valueSources</c> declares. The one declared kind is
 /// <c>keyedHexFile</c>, which reads a <c>KEY:HEX</c> line of a file, the
-/// form of Steam's updater config. This replaces SteamHardwareUpdater, which
-/// held Steam's install and file format in code (issue #62).</summary>
+/// form of Steam's updater config. This replaces SteamHardwareUpdater,
+/// which held Steam's install and file format in code (issue
+/// #62).</summary>
 internal static class ValueSources
 {
     public const string Index = "index";
     public const string Serial = "serial";
+    public const string InstanceSerial = "instanceSerial";
     public const string KeyedHexFile = "keyedHexFile";
 
     /// <summary>Where the file a keyedHexFile source reads is, and the
@@ -26,8 +30,12 @@ internal static class ValueSources
     /// same on every machine.</summary>
     internal delegate string? FileReader(ValueSourceSpec source);
 
-    /// <summary>The values a table's patches read for one controller.</summary>
-    internal readonly record struct Values(int Index, string? Serial, IReadOnlyDictionary<string, ValueSourceSpec>? Sources, FileReader Files);
+    /// <summary>The values a table's patches read for one controller.
+    /// <c>SerialVariant</c> is the number an instanceSerial patch folds into
+    /// its text, the one the controller's captured USB serial takes
+    /// (<see cref="DeviceIdentity.SerialVariant"/>).</summary>
+    internal readonly record struct Values(int Index, string? Serial, int SerialVariant,
+                                           IReadOnlyDictionary<string, ValueSourceSpec>? Sources, FileReader Files);
 
     // ── Checks at load ───────────────────────────────────────────────────
 
@@ -42,7 +50,7 @@ internal static class ValueSources
             {
                 string at = HMLayoutValidator.Member("$.valueSources", name);
                 if (s == null) throw new ProfileDefectException(at, "is null.");
-                if (name is Index or Serial)
+                if (name is Index or Serial or InstanceSerial)
                     throw new ProfileDefectException(at, $"'{name}' is a built-in source's name. Give the source another.");
                 if (s.Kind != KeyedHexFile)
                     throw new ProfileDefectException(at + ".kind", $"\"{s.Kind}\" is not a kind. The one kind is \"{KeyedHexFile}\".");
@@ -85,7 +93,7 @@ internal static class ValueSources
                 // A patch with no source is refused there, before any check
                 // that reads the source.
                 if (p.Source == null)
-                    throw new ProfileDefectException(at + ".source", "is null. Name index, serial or a valueSources entry.");
+                    throw new ProfileDefectException(at + ".source", "is null. Name index, serial, instanceSerial or a valueSources entry.");
                 bool text = p.Encoding is "ascii";
                 int width = p.Encoding switch { "uint8" => 1, "uint16-le" => 2, "uint32-le" => 4, "ascii" or "ascii-decimal" => 0, _ => -1 };
                 if (width < 0)
@@ -104,6 +112,11 @@ internal static class ValueSources
                     if (p.Key != null) throw new ProfileDefectException(at + ".key", "only a keyedHexFile source takes a key.");
                     continue;
                 }
+                if (p.Source == InstanceSerial)
+                {
+                    CheckInstanceSerial(r.Data, p, at);
+                    continue;
+                }
                 if (text) throw new ProfileDefectException(at + ".encoding", $"{p.Source} is a number. ascii writes text, ascii-decimal writes a number's digits.");
                 if (p.Source == Index)
                 {
@@ -111,18 +124,60 @@ internal static class ValueSources
                     continue;
                 }
                 if (sources == null || !sources.ContainsKey(p.Source))
-                    throw new ProfileDefectException(at + ".source", $"\"{p.Source}\" is not index, serial or a valueSources name.");
+                    throw new ProfileDefectException(at + ".source", $"\"{p.Source}\" is not index, serial, instanceSerial or a valueSources name.");
                 if (string.IsNullOrWhiteSpace(p.Key))
                     throw new ProfileDefectException(at + ".key", "a keyedHexFile value needs its key.");
             }
         }
     }
 
+    /// <summary>An instanceSerial patch varies the captured text under it,
+    /// so that text is printable ASCII and ends in the digit run the variant
+    /// is added into, as a captured USB serial does
+    /// (<see cref="Usbip.UsbDescriptorSet.InstanceSerial"/>).</summary>
+    private static void CheckInstanceSerial(string? data, AnswerPatchSpec p, string at)
+    {
+        if (p.Encoding != "ascii")
+            throw new ProfileDefectException(at + ".encoding", "an instance serial is the answer's own text, so its encoding is ascii.");
+        if (p.Add != 0) throw new ProfileDefectException(at + ".add", "an instance serial is text and takes no add.");
+        if (p.Key != null) throw new ProfileDefectException(at + ".key", "only a keyedHexFile source takes a key.");
+        // The patched bytes alone, decoded without an allocation when the
+        // data has no spaces, which is every catalog profile's form. A
+        // create compiles this check with its table.
+        string hex = data ?? "";
+        Span<byte> text = stackalloc byte[Math.Clamp(p.Length, 0, 64)];
+        bool decoded;
+        if (hex.Contains(' '))
+        {
+            byte[] bytes;
+            try { bytes = Convert.FromHexString(hex.Replace(" ", "")); }
+            catch (FormatException) { throw new ProfileDefectException(at, "the answer's data is not whole hex bytes."); }
+            decoded = p.At + p.Length <= bytes.Length && p.Length <= text.Length;
+            if (decoded) bytes.AsSpan(p.At, p.Length).CopyTo(text);
+        }
+        else
+        {
+            decoded = 2 * (p.At + p.Length) <= hex.Length && p.Length <= text.Length
+                && Convert.FromHexString(hex.AsSpan(2 * p.At, 2 * p.Length), text, out _, out int written) == System.Buffers.OperationStatus.Done
+                && written == p.Length;
+        }
+        if (!decoded)
+            throw new ProfileDefectException(at + ".at", $"bytes {p.At} to {p.At + p.Length - 1} are not whole hex bytes inside the answer's data.");
+        text = text[..p.Length];
+        foreach (byte b in text)
+            if (b is < 0x20 or > 0x7E)
+                throw new ProfileDefectException(at + ".at",
+                    $"bytes {p.At} to {p.At + p.Length - 1} hold 0x{b:X2}. An instance serial varies captured text, which is printable ASCII.");
+        if (text[^1] is < (byte)'0' or > (byte)'9')
+            throw new ProfileDefectException(at + ".length",
+                $"the captured text ends in '{(char)text[^1]}'. An instance serial adds its variant into the digit run its text ends in.");
+    }
+
     // ── Values ───────────────────────────────────────────────────────────
 
     /// <summary>True for a patch whose value comes from a file, read when
     /// the answer is asked for.</summary>
-    internal static bool ReadsFile(AnswerPatchSpec p) => p.Source is not (null or Index or Serial);
+    internal static bool ReadsFile(AnswerPatchSpec p) => p.Source is not (null or Index or Serial or InstanceSerial);
 
     /// <summary>Writes a patch's value over its bytes. A keyedHexFile value
     /// that is absent leaves the captured bytes, as Steam's absence left the
@@ -136,6 +191,27 @@ internal static class ValueSources
             dst.Clear();
             string s = v.Serial ?? "";
             for (int i = 0; i < s.Length && i < dst.Length; i++) dst[i] = (byte)(s[i] < 0x80 ? s[i] : '?');
+            return;
+        }
+        if (p.Source == InstanceSerial)
+        {
+            // Issue #72. The captured text, varied in place by the rule a
+            // captured USB serial follows (UsbDescriptorSet.InstanceSerial):
+            // the variant is added into the trailing digit run, a carry past
+            // the run is dropped, and the length stays. Variant 0 keeps the
+            // text byte for byte, and each later variant answers another
+            // serial. A profile with sharedSerial keeps its USB serial
+            // unvaried, and its instanceSerial text is varied all the same:
+            // the flag names the USB string only. The load checked that it is printable ASCII ending in a
+            // digit. It runs once, when the table compiles.
+            int carry = v.SerialVariant;
+            for (int i = dst.Length - 1; i >= 0 && carry > 0 && dst[i] is >= (byte)'0' and <= (byte)'9'; i--)
+            {
+                int d = dst[i] - '0' + carry % 10;
+                carry /= 10;
+                if (d > 9) { d -= 10; carry++; }
+                dst[i] = (byte)('0' + d);
+            }
             return;
         }
         long value;

@@ -1840,12 +1840,15 @@ function Scenario-Valve-Sdl {
 # own controller log is read back for the claim, the protocol it picked and
 # the per-model config set it loaded (neptune, steamcontroller_gordon,
 # triton), plus the absence of the hid_read-failure close an idle device
-# used to produce. Starts Steam with -silent and shuts it back down when it
+# used to produce. A second Deck and a second 2026 controller each get the
+# config set named after the unit serial they serve over 0xAE, never the
+# first unit's, and Steam sends the Deck TRIGGER_HAPTIC_PULSE (issue #72).
+# Starts Steam with -silent and shuts it back down when it
 # started it. Submits nothing, so nothing can reach the desktop through a
 # Steam desktop layout. SKIPs when no Steam client is installed.
 function Scenario-Valve-Steam {
     Invoke-Probe -Dir 'valve_steam_check' -Exe 'ValveSteamCheck.exe' `
-                 -Message 'Steam stopped claiming a Valve persona, stopped classifying it as that model, or dropped it after opening it (see probe stdout)' -SkipCodes 2
+                 -Message 'Steam stopped claiming a Valve persona, stopped classifying it as that model, dropped it after opening it, gave a second unit the first unit''s config set, or stopped sending the Deck haptic pulses (see probe stdout)' -SkipCodes 2
 }
 
 # S55: several Valve personas at once. S51-S54 each drive one device, so

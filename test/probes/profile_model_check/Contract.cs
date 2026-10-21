@@ -236,7 +236,7 @@ internal static class Contract
             Write(sony, 2, idA);
             using var k = Key(@"SOFTWARE\HIDMaestro\Controller2");
             if (k?.GetValue("FeatureAnswers") is not byte[] blob) return (false, "no FeatureAnswers");
-            var want = HIDMaestro.Internal.Usbip.FeatureStubTable.From(sony, 2, "HM-CTL-0002")!.ToBlob();
+            var want = HIDMaestro.Internal.Usbip.FeatureStubTable.From(sony, 2, "HM-CTL-0002", 2)!.ToBlob();
             return (blob.AsSpan().SequenceEqual(want) && BinaryPrimitives.ReadUInt32LittleEndian(blob.AsSpan(4)) == 4,
                     $"{blob.Length} bytes");
         });
