@@ -16,7 +16,9 @@
 //
 // Exit codes: 0 removed, or a preview with nothing blocking it. 3 removed,
 // with items Windows deletes when it next starts. 2 blocked: other programs
-// that use HIDMaestro are running, and nothing was changed. 1 failed, or did
+// that use HIDMaestro are running. Found before the removal started, nothing
+// was changed. Found after one started during it, the removal stopped before
+// the step that would take what it uses. 1 failed, or did
 // not run (a bad option, the question answered no, no administrator rights).
 using System;
 using System.IO;
