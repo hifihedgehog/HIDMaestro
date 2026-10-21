@@ -16,9 +16,11 @@
 //   5. Audio out: WASAPI renders a tone to the endpoint and the SDK's
 //      UsbAudio.Output delivers the PCM windows (speaker/haptic lanes).
 //   6. Microphone: the SDK's feed is captured by WASAPI as live audio. A
-//      silent capture is a skip when a loopback of the composite's own
-//      speaker is silent too, as in Windows Sandbox, whose audio engine
-//      silences every capture.
+//      silent capture is a skip only when, in one window with a tone on the
+//      composite's speaker, a loopback of that speaker is silent while the
+//      device receives the tone, or, with --sandbox (S73 in Windows
+//      Sandbox, whose audio engine silences every stream), while the device
+//      receives silence too.
 //   7. Teardown detaches cleanly: the devnode and endpoints disappear.
 //   8. A FramesReceived handler can dispose its controller with another,
 //      through DisposeControllersInParallel and then HMContext.Dispose,
@@ -59,6 +61,7 @@ internal static partial class Program
 
     static int Main()
     {
+        s_sandbox = Environment.GetCommandLineArgs().Contains("--sandbox");
         // --dump-wire: what a Valve persona actually puts on the interrupt
         // endpoint. Submits sticks only, never a button, so a Steam desktop
         // layout claiming the device cannot type or click while it runs.
@@ -457,29 +460,49 @@ internal static partial class Program
                                   $"streaming {c.UsbAudio.Microphone.IsStreaming}, capture format {wi.WaveFormat}");
                 Check("capture endpoint recorded data", Interlocked.Read(ref captured) > 0,
                       $"{Interlocked.Read(ref captured)} bytes");
-                // A silent capture is judged against a capture that never
-                // touches the device: a loopback of the composite's own
-                // speaker while a tone plays. Windows Sandbox's audio engine
-                // hands every capture client silence, a loopback included,
-                // so there a silent microphone says nothing of the device.
-                double loopback = Interlocked.Read(ref energy) > 0 || render == null ? double.NaN : LoopbackEnergy(render);
-                if (loopback == 0)
-                    Console.WriteLine("  [SKIP] captured audio is the fed signal, not silence: this machine's audio engine silences every capture, " +
-                                      "and a loopback of the composite's speaker during a tone is silent too");
+                // A silent capture is judged against two controls taken in
+                // one window while a tone plays to the composite's speaker: a
+                // loopback of that speaker, a capture that never touches the
+                // device, and the tone's PCM as the device receives it. A
+                // silent loopback while the device receives the tone means
+                // this machine's capture path, not the device, is silent, and
+                // the check is a skip. Windows Sandbox's audio engine
+                // silences every stream, the tone the device receives
+                // included (measured 2026-10-21), so with --sandbox a silent
+                // loopback beside a silent tone is a skip too. Anything else
+                // fails.
+                var control = Interlocked.Read(ref energy) > 0 || render == null ? (Loopback: double.NaN, Tone: -1L) : LoopbackControl(render, c);
+                bool skip = control.Loopback == 0 && (control.Tone > 0 || (s_sandbox && control.Tone == 0));
+                string controls = double.IsNaN(control.Loopback) ? ""
+                    : FormattableString.Invariant($", loopback control energy {control.Loopback:F1}, nonzero tone samples at the device {control.Tone}");
+                if (skip)
+                    Console.WriteLine("  [SKIP] captured audio is the fed signal, not silence: this machine's capture path is silent, " +
+                                      $"a loopback of the composite's speaker during a tone is silent too{controls}");
                 else
                     Check("captured audio is the fed signal, not silence", Interlocked.Read(ref energy) > 0,
-                          $"mean-abs accum {Interlocked.Read(ref energy)}{(double.IsNaN(loopback) ? "" : FormattableString.Invariant($", loopback control energy {loopback:F1}"))}");
+                          $"mean-abs accum {Interlocked.Read(ref energy)}{controls}");
                 Check("mic stream open observed", micStreamed);
             }
         }
     }
 
-    /// <summary>The summed magnitude of a 1.5 s loopback capture of
-    /// <paramref name="render"/> while a 440 Hz tone plays to it, 32-bit
-    /// float as the shared-mode engine delivers it. 0 when every sample is
-    /// silent, NaN when the capture could not run.</summary>
-    static double LoopbackEnergy(MMDevice render)
+    /// <summary>A 440 Hz tone played to <paramref name="render"/> for about
+    /// 2 s: the summed magnitude of a 1.5 s loopback capture of it, 32-bit
+    /// float as the shared-mode engine delivers it, and the nonzero 16-bit
+    /// samples <paramref name="c"/>'s speaker stream received meanwhile.
+    /// Loopback 0 when every sample is silent, NaN when the capture could not
+    /// run.</summary>
+    static (double Loopback, long Tone) LoopbackControl(MMDevice render, HMController c)
     {
+        long tone = 0;
+        void Count(HMAudioOutput _, ReadOnlyMemory<byte> pcm)
+        {
+            var span = pcm.Span;
+            long n = 0;
+            for (int i = 0; i + 1 < span.Length; i += 2) if ((short)(span[i] | (span[i + 1] << 8)) != 0) n++;
+            Interlocked.Add(ref tone, n);
+        }
+        c.UsbAudio!.Output.FramesReceived += Count;
         try
         {
             using var output = new WasapiOut(render, AudioClientShareMode.Shared, true, 50);
@@ -499,10 +522,14 @@ internal static partial class Program
             loop.StopRecording();
             output.Stop();
             Thread.Sleep(100);
-            lock (loop) return energy;
+            lock (loop) return (energy, Interlocked.Read(ref tone));
         }
-        catch { return double.NaN; }
+        catch { return (double.NaN, Interlocked.Read(ref tone)); }
+        finally { c.UsbAudio!.Output.FramesReceived -= Count; }
     }
+
+    /// <summary>--sandbox: the probe runs in Windows Sandbox (S73's E).</summary>
+    static bool s_sandbox;
 
     enum HandlerDispose { WarmUp, Set, Context }
 
