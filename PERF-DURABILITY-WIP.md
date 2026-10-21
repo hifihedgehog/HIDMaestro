@@ -10,14 +10,14 @@
 **Version target:** v1.3.0. Major-minor bump because the new `HIDMAESTRO_TIMEOUT_SCALE` env var is a public-surface addition and the cache behavior changes are user-observable.
 
 **Reference machines:**
-- **Dev (ceiling):** AMD Ryzen 9955HX3D, NVMe, Win 11 26200. Battery wall: ~33 min, 26/26 PASS on v1.2.2.
+- **Development laptop (ceiling):** Lenovo Legion Pro 7 16AFR10H, AMD Ryzen 9 9955HX3D, NVMe, Win 11 26200. Battery wall: ~33 min, 26/26 PASS on v1.2.2.
 - **Floor target:** Intel Atom x5-Z8350, eMMC, Win 10 IoT Enterprise LTSC 2021. ~1/10 single-thread, ~1/70 multi-core, ~1/30 storage. Battery wall projected: ~3 hours.
 
 **Status legend:** `pending` / `in-progress` / `done` / `deferred` / `n/a`
 
 ---
 
-## Table 1: Baseline measurements (v1.2.2, dev box)
+## Table 1: Baseline measurements (v1.2.2, development laptop)
 
 To be filled before any Tier 1 changes land. All times are wall-clock; battery sourced from prior runs.
 
@@ -106,7 +106,7 @@ For v1.3.0 this session: I've reached the user-mode floor for the existing archi
 | Tier 10 | HidReportBuilder cache, IsDriverInstalled prewarm, step-6 walk dedup | Per-CreateController parse cost amortized; first-SetupController gate hits cache |
 | Tier 11 | T22-T39 sweep | T22 prewarm GameInputSvc, T23 10ms slot wait, T24 cache instId, T25 FinalizeNames cadence, T26 OEM dedup, T27/T31 GIP-skip non-Xbox, T28 byte-aligned WriteBits, T29 parallel prewarm, T30/T35 thread-local devID buffer, T32 button bit-pop, T33/T34 persistent diag StreamWriter, T36 DeviceOverrides dedup, **T37 SwdRemove timeout 30s→8s (d3xMachina #18)**, **T38 IsDriverInstalled filesystem fast-path (d3xMachina #18)**, T39 devcon TimeoutScale.Apply |
 
-**Headline numbers (dev-box, post-T22 measurement):**
+**Headline numbers (development laptop, post-T22 measurement):**
 - Warm-launch 3-controller create: 1287 ms → 1065 ms (**-17.3%**)
 - Battery wall: 2016 s → 1977 s (-1.9%, within 30 s noise band)
 - Stuck-cascade 3-controller teardown (d3x #18): ~90 s → ~24 s (**-66 s direct user impact**)
@@ -138,7 +138,7 @@ User feedback (2026-04-30): consumers reporting ~30 s for 3-controller add/remov
 - **Direct XInput class membership:** ViGEmBus's Xbox 360 virtuals join the XUSB device interface class natively at child-PDO publish time. We must publish a separate `HIDMAESTRO\*` SWD child that registers `{EC87F1E3-...}` after the main HID devnode is up: adding ~50 ms create + ~10–60 ms slot-claim wait per Xbox-family controller.
 - **Bus-driver-side teardown:** ViGEmBus removes a child PDO via a fast in-kernel call. Our teardown traverses DIF_REMOVE → WaitForDeviceRemoval → parent unbind → HID child cascade → companion close, with the xinputhid filter unbind being the dominant 5–11 s component on Series BT.
 
-### Where we now stand (post-T22, dev-box measurements)
+### Where we now stand (post-T22, development laptop measurements)
 
 Single warm-launch 3-controller create = **1065 ms** total. Step breakdown:
 
@@ -300,4 +300,4 @@ Every wall-clock budget that could trip on slow hardware. Categories from the au
 - Battery is the gate: any checkpoint that doesn't pass every scenario blocks tier completion. The 26/26 figures in this doc are the v1.3.0-era battery. It is 60 scenarios as of v1.8.1.
 - All Tier 1 changes are additive at scale=1.0: battery numbers should be statistically identical to v1.2.2 baseline.
 - Tier 2's manifest hash needs a build-time MSBuild target to compute SHA256 of the embedded resources and bake the constant into the assembly. Implementation note: PowerShell + MSBuild Task element generates `Manifest.cs` with `internal const string EmbeddedManifestSha256 = "..."`.
-- Atom validation happens on the Atom box once SSH is up; iteration on the dev box up to that point.
+- Atom validation happens on the Atom box once SSH is up. Until then, iteration happens on the development laptop.
