@@ -48,7 +48,7 @@
             "source": "instanceSerial"
           }
         ],
-        "comment": "ATTRIB_STR_BOARD_SERIAL. Steam asks for this index by name during the claim, so it needs its own answer: a real Deck returns [0xAE][0x14][index][12-char serial], zero-padded. The 4-char model prefix is the real one; the 8-char tail that identifies an individual unit is not, because a captured serial is device-unique and does not belong in a shipped profile. Each controller answers its own, as each real unit does (issue #72): the first keeps MHDA00000001 and a later one adds its serial variant into the trailing digits, as the USB serial does."
+        "comment": "ATTRIB_STR_BOARD_SERIAL. Steam asks for this index by name during the claim, so it needs its own answer: a real Deck returns [0xAE][0x14][index][12-char serial], zero-padded. The 4-char model prefix is the real one; the 8-char tail that identifies an individual unit is not, because a captured serial is device-unique and does not belong in a shipped profile. Each controller answers its own, as each real unit does (issue #72): serial variant 0, a keyless controller at index 0, keeps MHDA00000001, and another variant is added into the trailing digits, as it is into the USB serial."
       },
       {
         "id": "0x00",
@@ -72,7 +72,7 @@
             "source": "instanceSerial"
           }
         ],
-        "comment": "ATTRIB_STR_UNIT_SERIAL, index 1. Steam reads index 1 and index 0 back to back, and the two must differ and each echo the index asked for. Answering both from one entry, as this profile did before, is what left Steam re-asking. Steam names a Deck's config set after this string (configset_<unit serial>.vdf), and the kernel reads it into the device's uniq (hid-steam.c steam_get_serial). So each controller answers its own, varied as the USB serial is: the first keeps FX1A00000001 and the second answers FX1A00000002 (issue #72)."
+        "comment": "ATTRIB_STR_UNIT_SERIAL, index 1. Steam reads index 1 and index 0 back to back, and the two must differ and each echo the index asked for. Answering both from one entry, as this profile did before, is what left Steam re-asking. Steam names a Deck's config set after this string (configset_<unit serial>.vdf), and the kernel reads it into the device's uniq (hid-steam.c steam_get_serial). So each controller answers its own, varied as the USB serial is: serial variant 0, a keyless controller at index 0, keeps FX1A00000001, and variant 1 answers FX1A00000002, the USB serial it serves (issue #72)."
       },
       {
         "id": "0x00",

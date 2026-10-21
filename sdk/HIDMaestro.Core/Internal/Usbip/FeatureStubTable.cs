@@ -23,9 +23,9 @@ namespace HIDMaestro.Internal.Usbip;
 ///
 /// <para>The table compiles once per controller: every patch from the
 /// index, the serial and the instance serial and every CRC is written into
-/// final bytes then. On
-/// USB/IP it serves the answers from those arrays into one buffer, with
-/// only a file-backed patch written as the answer is asked for. On UMDF2
+/// final bytes then. On USB/IP it serves the answers from those arrays into
+/// one buffer, with only a file-backed patch written as the answer is asked
+/// for. On UMDF2
 /// the SDK writes it as the <c>FeatureAnswers</c> blob
 /// (<see cref="ToBlob"/>), which the driver parses once at its add into
 /// arrays of the same shape and serves the same way.</para></summary>
