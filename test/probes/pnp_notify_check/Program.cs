@@ -189,7 +189,9 @@ internal static class Program
     /// PnP lock was let go fails whether the window sees it or not. A
     /// window that closes before the PnP lock was let go fails its timing
     /// as not judged.</summary>
-    const int WindowMs = 10_000;
+    // The SDK's wait scales it, and a create and dispose on a slow, loaded
+    // machine at its timeout scale can pass 10 s, so it is a hang bound.
+    const int WindowMs = 60_000;
 
     /// <summary>One create and dispose timed through a held-open
     /// all-instances registration, which the wait for a HID child of a
@@ -255,6 +257,19 @@ internal static class Program
         /// <summary>Ends the held-open wait. Called once the dispose has
         /// returned.</summary>
         internal void Close() => _close.Set();
+
+        /// <summary>Waits until the held-open wait has made its
+        /// registration, or its task <paramref name="held"/> has ended, so
+        /// the create starts inside the window. A fixed sleep let a slow
+        /// thread pool start the wait after the create began. Bounded by a
+        /// hang bound of a minute at the timeout scale.</summary>
+        internal void WaitRegistered(Task held)
+        {
+            var sw = Stopwatch.StartNew();
+            int bound = TimeoutScale.Apply(60_000);
+            while (!Volatile.Read(ref _registered) && !held.IsCompleted && sw.ElapsedMilliseconds < bound)
+                Thread.Sleep(5);
+        }
 
         internal void CreateStarting() => _createAt = Now;
 
@@ -353,6 +368,7 @@ internal static class Program
         var window = timing.Hold();
         using var closeInterfaceWindow = new ManualResetEventSlim();
         var interfaceWindow = Task.Run(() => DeviceManager.WaitForDeviceInterface(NoSuchDevice, HidInterfaceClass, WindowMs, () => closeInterfaceWindow.IsSet));
+        timing.WaitRegistered(window);
         Thread.Sleep(250);
 
         timing.CreateStarting();
@@ -403,7 +419,7 @@ internal static class Program
             var r0 = Removals();
             var timedHere = id == "xbox-360-wired" ? new ChildTiming() : null;
             var held = timedHere?.Hold();
-            if (held != null) Thread.Sleep(250);
+            if (held != null) timedHere!.WaitRegistered(held);
             timedHere?.CreateStarting();
             var more = ctx.CreateController(ctx.GetProfile(id)!, "pnp-notify-check-" + id);
             timedHere?.DisposeStarting(more.InstanceId, ChildrenOf(more.InstanceId));
