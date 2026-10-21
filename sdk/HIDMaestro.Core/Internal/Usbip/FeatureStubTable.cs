@@ -25,8 +25,7 @@ namespace HIDMaestro.Internal.Usbip;
 /// index, the serial and the instance serial and every CRC is written into
 /// final bytes then. On USB/IP it serves the answers from those arrays into
 /// one buffer, with only a file-backed patch written as the answer is asked
-/// for. On UMDF2
-/// the SDK writes it as the <c>FeatureAnswers</c> blob
+/// for. On UMDF2 the SDK writes it as the <c>FeatureAnswers</c> blob
 /// (<see cref="ToBlob"/>), which the driver parses once at its add into
 /// arrays of the same shape and serves the same way.</para></summary>
 internal sealed class FeatureStubTable
@@ -122,13 +121,14 @@ internal sealed class FeatureStubTable
     /// <c>serial</c> patch writes. <paramref name="serialVariant"/> is the
     /// number an <c>instanceSerial</c> patch folds into its captured text,
     /// the controller identity's <see cref="DeviceIdentity.SerialVariant"/>.
-    /// Without it the index's default identity's, which is the index.</summary>
-    public static FeatureStubTable? From(ControllerProfile profile, int index, string? serial, int? serialVariant = null) =>
+    /// Every caller names it, so none takes the index by default.</summary>
+    public static FeatureStubTable? From(ControllerProfile profile, int index, string? serial, int serialVariant) =>
         From(profile, index, serial, ValueSources.ReadFile, serialVariant);
 
     /// <summary>The same with a given reader for the files value sources
     /// read, so a check can exercise an answer with Steam present and
-    /// absent on any machine.</summary>
+    /// absent on any machine. Without a variant the table takes the index's
+    /// default identity's, which is the index.</summary>
     internal static FeatureStubTable? From(ControllerProfile profile, int index, string? serial, ValueSources.FileReader files,
                                            int? serialVariant = null)
     {

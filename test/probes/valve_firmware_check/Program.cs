@@ -83,25 +83,19 @@ internal static class Program
         Check("the persona is in the catalog", profile != null);
         if (profile == null) return Finish();
 
-        // The serial the updater reports is the unit serial the persona
-        // serves at string index 1.
-        // Asked as Steam asks it: ID_GET_STRING_ATTRIBUTE with index 1 on
-        // feature report 1, then a GET on that report.
-        var table = FeatureStubTable.From(profile.Inner, 0, null, _ => null);
-        byte[]? served = null;
-        if (table != null)
-        {
-            table.OnSetFeature(1, new byte[] { 0x01, 0xAE, 0x00, 0x01 });
-            int n = table.Lookup(1, 64, out _);
-            if (n > 0) served = table.Answer(n).ToArray();
-        }
-        string serial = served == null ? "" : Ascii(served, 4);
-        Check("the persona serves a unit serial", serial.Length > 0, serial);
-        if (serial.Length == 0) return Finish();
+        // The serial the updater reports is the unit serial each persona
+        // serves at string index 1. It follows the controller's serial
+        // variant (issue #72), so it is read off the live device's own
+        // answers, whatever index another program left it.
+        var served = new List<string>();
 
         Console.WriteLine("\n-- The persona as shipped --");
         using (var ctrl = ctx.CreateController(profile))
         {
+            string serial = ServedUnitSerial(ctrl) ?? "";
+            Check("the persona serves a unit serial", serial.Length > 0, serial);
+            if (serial.Length == 0) return Finish();
+            served.Add(serial);
             var seen = WaitForListing(exe, dir!, "--show-all-devices", serial);
             Check("--show-all-devices lists the persona", seen != null,
                   seen == null ? "not found within 60 s" : $"serial {serial}");
@@ -132,6 +126,9 @@ internal static class Program
                 if (stale != null)
                 {
                     using var ctrl = ctx.CreateController(stale);
+                    string serial = ServedUnitSerial(ctrl) ?? "";
+                    Check("the variant serves a unit serial", serial.Length > 0, serial);
+                    if (serial.Length > 0) served.Add(serial);
                     var seen = WaitForListing(exe, dir!, "--check-for-updates", serial);
                     Check("--check-for-updates offers it an update", seen != null,
                           seen is JsonElement o ? $"0x{Stamp(o, "current_ts"):X8} -> 0x{Stamp(o, "update_ts"):X8}" : "not listed within 60 s");
@@ -152,17 +149,19 @@ internal static class Program
         // the updater is asked at once: a persona it still lists is one the
         // teardown left.
         Console.WriteLine("\n-- Teardown --");
-        // The listing is read again until the persona leaves it, so an
-        // enumeration that lags the removal does not fail the check.
+        // The listing is read again until every persona this run created
+        // leaves it, each by the serial it served, so an enumeration that
+        // lags the removal does not fail the check.
         var (rcAll, all) = Updater(exe, dir!, "--show-all-devices");
         for (var gone = Stopwatch.StartNew();
-             rcAll == 0 && all != null && all.Any(e => Serial(e) == serial) && gone.ElapsedMilliseconds < 60_000;)
+             rcAll == 0 && all != null && all.Any(e => served.Contains(Serial(e))) && gone.ElapsedMilliseconds < 60_000;)
         {
             Thread.Sleep(500);
             (rcAll, all) = Updater(exe, dir!, "--show-all-devices");
         }
         Check("the updater no longer sees the persona",
-              rcAll == 0 && all != null && all.All(e => Serial(e) != serial), $"exit {rcAll}");
+              served.Count > 0 && rcAll == 0 && all != null && all.All(e => !served.Contains(Serial(e))),
+              $"exit {rcAll}, serials {string.Join(", ", served)}");
 
         return Finish();
     }
@@ -270,10 +269,24 @@ internal static class Program
         return uint.TryParse(hex, System.Globalization.NumberStyles.AllowHexSpecifier, null, out uint u) ? u : 0;
     }
 
-    static string Ascii(byte[] b, int off)
+    /// <summary>The unit serial a live controller serves for
+    /// ID_GET_STRING_ATTRIBUTE (0xAE) index 1, read off its compiled answers:
+    /// the bytes after [0xAE][length][index], from the message's own offset,
+    /// up to the first zero. Null when it has no such answer.</summary>
+    static string? ServedUnitSerial(HMController c)
     {
-        int end = off;
-        while (end < b.Length && b[end] != 0) end++;
-        return Encoding.ASCII.GetString(b, off, end - off);
+        var table = c.UsbipHandle?.Device.FeatureAnswers;
+        if (table == null) return null;
+        foreach (var e in table.Entries)
+        {
+            if (!e.IsMessage || !e.HasParam || e.ParamValue != 1 || e.Value.Length != 1 || e.Value[0] != 0xAE
+                || e.Pages.Length == 0)
+                continue;
+            var page = e.Pages[0];
+            int at = e.At + 3, end = at;
+            while (end < page.Length && page[end] != 0) end++;
+            return Encoding.ASCII.GetString(page, at, end - at);
+        }
+        return null;
     }
 }

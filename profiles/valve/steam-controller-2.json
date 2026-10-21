@@ -104,7 +104,7 @@
         ],
         "replyHead": "requestReportId",
         "notify": true,
-        "comment": "Index 1, the unit serial. Steam names the controller's config set after it (configset_<unit serial>.vdf), so two controllers answering one serial shared one configuration. Each controller answers its own (issue #72): serial variant 0, a keyless controller at index 0, keeps FXA9960200001, and variant 1 answers FXA9960200002."
+        "comment": "Index 1, the unit serial. Steam names the controller's config set after it (configset_<unit serial>.vdf), so two controllers answering one serial shared one configuration. Each controller answers its own (issue #72): serial variant 0, a keyless controller at index 0, keeps FXA9960200001, and variant 1 answers FXA9960200002. A controller created with an identity key, as PadForge creates them, answers its identity's own unit serial, so Steam files it under a new config set once, the way it files any new unit."
       },
       {
         "id": "0x01",
