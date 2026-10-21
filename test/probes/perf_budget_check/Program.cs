@@ -892,7 +892,7 @@ internal static partial class Program
     /// it.</summary>
     static void HostReadPass(HMController c, ProfileArg p, int runs)
     {
-        using var dev = OpenOwnInterface(c, d => d.InputLength > 0, out string why);
+        using var dev = OpenStateInterface(c, out string why);
         if (dev == null) { Check($"{p.Text}: a HID interface with input reports", false, why); return; }
         // The writes go first: the handle is synchronous, so the I/O manager
         // runs one request on it at a time, and a write would wait behind

@@ -21,6 +21,7 @@
 using System;
 using System.Runtime.InteropServices;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using HIDMaestro;
 
@@ -242,10 +243,11 @@ static class ValveSdlCheck
         {
             int seconds = args.Length > 1 ? int.Parse(args[1]) : 10;
             string? only = args.Length > 2 ? args[2] : null;
+            s_rawReader = args.Contains("raw");
             foreach (var t in cases)
             {
                 if (only != null && t.Id != only) continue;
-                if (args[0] == "cadence") Cadence(ctx, t.Id, t.Vid, t.Pid, seconds);
+                if (args[0] == "cadence") Cadence(ctx, t.Id, t.Vid, t.Pid, seconds, assert: true);
                 else Motion(ctx, t.Id, t.Vid, t.Pid);
             }
             SDL_Quit();
@@ -451,6 +453,11 @@ static class ValveSdlCheck
             }
         }
 
+        // Issue #72 item 2: each persona reports on its own clock, so the
+        // sensor time SDL credits matches wall time at any submit rate.
+        foreach (var t in cases)
+            if (ctx.GetProfile(t.Id) != null) Cadence(ctx, t.Id, t.Vid, t.Pid, 2, assert: true);
+
         SDL_Quit();
         Console.WriteLine();
         Console.WriteLine(s_fail == 0
@@ -476,6 +483,100 @@ static class ValveSdlCheck
         SDL_SetGamepadSensorEnabled(gp, SENSOR_GYRO, true);
         SDL_SetGamepadSensorEnabled(gp, SENSOR_ACCEL, true);
         return (c, gp);
+    }
+
+    /// <summary>cadence ... raw: a second reader on the persona's HID
+    /// collection beside SDL, which reads every input report as HID class
+    /// hands it over, so a gap in SDL's events can be told apart from a gap
+    /// on the wire in the same window.</summary>
+    static bool s_rawReader;
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr CreateFileW(string p, uint a, uint s, IntPtr sa, uint d, uint f, IntPtr t);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool ReadFile(IntPtr h, byte[] buf, int n, out int read, IntPtr ov);
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    static extern int CM_Get_Device_Interface_List_SizeW(out uint len, ref Guid c, string? d, uint f);
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    static extern int CM_Get_Device_Interface_ListW(ref Guid c, string? d, char[] b, uint bl, uint f);
+    [DllImport("hid.dll")] static extern bool HidD_GetPreparsedData(IntPtr h, out IntPtr pp);
+    [DllImport("hid.dll")] static extern bool HidD_FreePreparsedData(IntPtr pp);
+    [DllImport("hid.dll")] static extern int HidP_GetCaps(IntPtr pp, byte[] caps);
+    [DllImport("hid.dll")] static extern bool HidD_SetNumInputBuffers(IntPtr h, uint n);
+
+    sealed class RawLog
+    {
+        readonly IntPtr _h;
+        readonly Thread _t;
+        public readonly List<(long T, byte[] F)> Reports = new();
+
+        RawLog(IntPtr h, int len)
+        {
+            _h = h;
+            _t = new Thread(() =>
+            {
+                var buf = new byte[len];
+                while (ReadFile(_h, buf, buf.Length, out int n, IntPtr.Zero) && n > 0)
+                    lock (Reports) Reports.Add((System.Diagnostics.Stopwatch.GetTimestamp(), (byte[])buf.Clone()));
+            }) { IsBackground = true, Priority = ThreadPriority.Highest };
+            _t.Start();
+        }
+
+        /// <summary>The persona's collection with the longest input report,
+        /// the controller's, opened shared beside SDL's handle.</summary>
+        public static RawLog? Start(ushort vid, ushort pid)
+        {
+            var guid = new Guid("4D1E55B2-F16F-11CF-88CB-001111000030");
+            if (CM_Get_Device_Interface_List_SizeW(out uint len, ref guid, null, 0) != 0 || len == 0) return null;
+            var buf = new char[len];
+            if (CM_Get_Device_Interface_ListW(ref guid, null, buf, len, 0) != 0) return null;
+            string? best = null;
+            int bestLen = 0;
+            foreach (string p in new string(buf).Split('\0', StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (p.IndexOf($"vid_{vid:x4}", StringComparison.OrdinalIgnoreCase) < 0 || p.IndexOf($"pid_{pid:x4}", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                IntPtr h = CreateFileW(p, 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
+                if (h == new IntPtr(-1)) continue;
+                try
+                {
+                    if (!HidD_GetPreparsedData(h, out IntPtr pp)) continue;
+                    var caps = new byte[64];
+                    HidP_GetCaps(pp, caps);
+                    HidD_FreePreparsedData(pp);
+                    int inLen = BitConverter.ToUInt16(caps, 4);
+                    if (inLen > bestLen) { best = p; bestLen = inLen; }
+                }
+                finally { CloseHandle(h); }
+            }
+            if (best == null) return null;
+            IntPtr handle = CreateFileW(best, 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
+            if (handle == new IntPtr(-1)) return null;
+            HidD_SetNumInputBuffers(handle, 512);
+            return new RawLog(handle, bestLen);
+        }
+
+        /// <summary>Stops the reader and prints the window's reports: their
+        /// rate, the longest gap and the reports either side of it, and how
+        /// many carry the same sensor stamp as the report before.</summary>
+        public void Stop(int stampAt)
+        {
+            CloseHandle(_h);
+            _t.Join(500);
+            List<(long T, byte[] F)> r;
+            lock (Reports) r = new(Reports);
+            if (r.Count < 2) { Console.WriteLine($"     raw: {r.Count} report(s)"); return; }
+            double f = System.Diagnostics.Stopwatch.Frequency;
+            int maxAt = 1, sameStamp = 0;
+            for (int i = 1; i < r.Count; i++)
+            {
+                if (r[i].T - r[i - 1].T > r[maxAt].T - r[maxAt - 1].T) maxAt = i;
+                if (stampAt >= 0 && r[i].F.AsSpan(stampAt, 4).SequenceEqual(r[i - 1].F.AsSpan(stampAt, 4))) sameStamp++;
+            }
+            uint Stamp(byte[] b) => stampAt >= 0 ? BitConverter.ToUInt32(b, stampAt) : 0;
+            Console.WriteLine($"     raw: {r.Count} reports, {(r.Count - 1) * f / (r[^1].T - r[0].T):F1}/s, longest gap {(r[maxAt].T - r[maxAt - 1].T) * 1000 / f:F2} ms "
+                + $"at {(r[maxAt].T - r[0].T) * 1000 / f:F0} ms, stamps {Stamp(r[maxAt - 1].F)} then {Stamp(r[maxAt].F)}, {sameStamp} report(s) repeat the stamp before");
+        }
     }
 
     static void Close(HMController c, IntPtr gp, ushort vid, ushort pid)
@@ -541,8 +642,16 @@ static class ValveSdlCheck
     /// 1 kHz, 250 Hz and 125 Hz. SDL stamps each Deck and 2015 report with a
     /// fixed interval, so the span of its sensor timestamps against the
     /// wall-clock span of the same events is how much rotation SDL
-    /// integrates per unit of real rotation. 1.00 is right.</summary>
-    static unsafe void Cadence(HMContext ctx, string id, ushort vid, ushort pid, int seconds)
+    /// integrates per unit of real rotation. 1.00 is right. With
+    /// <paramref name="assert"/>, each rate checks from 0.97 to 1.03 the
+    /// median sensor time SDL credits a report over the median wall time
+    /// between reports. Medians hold under load and under a stall of SDL's
+    /// own thread: on 2026-10-21 the bench saw SDL's Triton events stop for
+    /// 110 to 120 ms while a second reader on the same collection, in the
+    /// same window, read every report about 4 ms apart (cadence ... raw).
+    /// Such a stall at the end of a window moves the ratio of the two spans,
+    /// which is printed beside it, by several percent.</summary>
+    static unsafe void Cadence(HMContext ctx, string id, ushort vid, ushort pid, int seconds, bool assert = false)
     {
         Console.WriteLine();
         Console.WriteLine($"-- {id}: cadence, {seconds} s per rate --");
@@ -581,6 +690,7 @@ static class ValveSdlCheck
                 var sensorTs = new List<ulong>();
                 var wallTs = new List<ulong>();
                 float lastY = 0;
+                var raw = s_rawReader ? RawLog.Start(vid, pid) : null;
                 var window = System.Diagnostics.Stopwatch.StartNew();
                 int submitsAtStart = submits;
                 while (window.ElapsedMilliseconds < seconds * 1000L)
@@ -598,20 +708,46 @@ static class ValveSdlCheck
                 int submitted = submits - submitsAtStart;
                 stop.Set();
                 submitter.Join();
+                if (raw != null)
+                {
+                    // The Triton's IMU stamp, report byte 30 (TritonMTUNoQuat_t
+                    // behind the report ID). The Deck and the 2015 controller
+                    // carry none SDL reads.
+                    raw.Stop(id == "steam-controller-2" ? 30 : -1);
+                    if (wallTs.Count > 1)
+                    {
+                        int at = 1;
+                        for (int i = 1; i < wallTs.Count; i++) if (wallTs[i] - wallTs[i - 1] > wallTs[at] - wallTs[at - 1]) at = i;
+                        Console.WriteLine($"     SDL: longest gap {(wallTs[at] - wallTs[at - 1]) / 1e6:F2} ms at {(wallTs[at] - wallTs[0]) / 1e6:F0} ms");
+                    }
+                }
                 if (sensorTs.Count < 2)
                 {
                     Console.WriteLine($"  {hz,5} Hz submits: {sensorTs.Count} gyro event(s)");
+                    if (assert) Check($"{id}: SDL's sensor time keeps wall time under {hz} Hz submits", false, "too few gyro events to measure");
                     continue;
                 }
                 double sensorSpan = (sensorTs[^1] - sensorTs[0]) / 1e9;
                 double wallSpan = (wallTs[^1] - wallTs[0]) / 1e9;
                 var gaps = new List<double>();
-                for (int i = 1; i < wallTs.Count; i++) gaps.Add((wallTs[i] - wallTs[i - 1]) / 1e6);
+                var sensorGaps = new List<double>();
+                for (int i = 1; i < wallTs.Count; i++)
+                {
+                    gaps.Add((wallTs[i] - wallTs[i - 1]) / 1e6);
+                    sensorGaps.Add((sensorTs[i] - sensorTs[i - 1]) / 1e6);
+                }
                 gaps.Sort();
+                sensorGaps.Sort();
+                // The sensor time SDL credits a report over the wall time
+                // between reports, each the median over the window.
+                double perReport = sensorGaps[sensorGaps.Count / 2] / gaps[gaps.Count / 2];
                 Console.WriteLine($"  {hz,5} Hz submits ({submitted} in {seconds} s): {sensorTs.Count} gyro events, "
                     + $"{(sensorTs.Count - 1) / wallSpan:F1}/s, sensor time {sensorSpan:F3} s over wall {wallSpan:F3} s = "
-                    + $"{sensorSpan / wallSpan:F3}x, gap p50 {gaps[gaps.Count / 2]:F2} ms p95 {gaps[(int)(gaps.Count * 0.95)]:F2} ms, "
+                    + $"{sensorSpan / wallSpan:F3}x, per report {perReport:F3}x, gap p50 {gaps[gaps.Count / 2]:F2} ms p95 {gaps[(int)(gaps.Count * 0.95)]:F2} ms max {gaps[^1]:F2} ms, "
                     + $"last gyro y {lastY:F4}");
+                if (assert)
+                    Check($"{id}: SDL's sensor time keeps wall time under {hz} Hz submits",
+                          perReport >= 0.97 && perReport <= 1.03, $"{perReport:F3}x per report, {sensorSpan / wallSpan:F3}x over the window");
             }
         }
         finally { Close(c, gp, vid, pid); }
