@@ -57,9 +57,10 @@ public static class HMVR
     /// exception.</para></summary>
     public static bool EnsureDriverRegistered()
     {
-        // Waits, once per process, for a removal of HIDMaestro another
-        // process runs (Uninstall.RemovalGate).
-        Internal.Uninstall.RemovalGate.Pass();
+        // The owner claim first, through the removal gate
+        // (Uninstall.RemovalGate), so the registration waits for a removal
+        // another process runs and a removal sees this program.
+        MachineClaims.TryEnsureOwner();
         return VrDriverBuilder.EnsureDriverRegistered();
     }
 

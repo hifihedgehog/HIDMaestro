@@ -45,10 +45,18 @@ internal static class OwnerSweep
     }
 
     /// <summary>Once per process, ahead of the first create, for programs
-    /// that create without calling InstallDriver first.</summary>
+    /// that create without calling InstallDriver first. A thread that loses
+    /// the race still takes the owner claim through the removal gate
+    /// (Uninstall.RemovalGate), so a second create at the same moment waits
+    /// for a removal another process runs and does not claim during it.
+    /// Once the claim is held that costs one field read.</summary>
     internal static void SessionSweepOnce()
     {
-        if (Interlocked.Exchange(ref s_sessionSwept, 1) != 0) return;
+        if (Interlocked.Exchange(ref s_sessionSwept, 1) != 0)
+        {
+            MachineClaims.TryEnsureOwner();
+            return;
+        }
         ReclaimDeadOwners();
     }
 
