@@ -92,6 +92,15 @@ if errorlevel 1 (
     popd
     exit /b 2
 )
+rem The removal tool ships in the release ZIP as NativeAOT for x64 and
+rem ARM64, which this build publishes into aot-x64\ and aot-arm64\, and
+rem uninstall_check (S101) runs it.
+dotnet build tools\HIDMaestroUninstall\HIDMaestroUninstall.csproj -c Release --nologo -v:minimal >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] HIDMaestroUninstall build failed.
+    popd
+    exit /b 2
+)
 rem Rebuild every managed probe so the battery's probe scenarios (S24+)
 rem run the SDK built THIS run, not whatever a prior iteration left in
 rem bin\. RID-agnostic (plain dotnet build): the harness consumes that

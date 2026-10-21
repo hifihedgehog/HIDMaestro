@@ -285,6 +285,20 @@ Battery scenario S71 runs programs side by side, with peers built on v1.12.0 and
 
 ---
 
+## Removing HIDMaestro.
+
+As of 2.0.1 HIDMaestro removes itself from a computer: every virtual controller and its device records, the driver packages, the signing certificate, its registry keys and files, its OpenVR registration and its OEM name overrides, with the shared Windows keys it changed put back. `HIDMaestroUninstall.exe`, in the release ZIP for x64 and ARM64, does it from a prompt or an installer:
+
+```
+HIDMaestroUninstall [--preview] [--yes] [--include-usbip] [--json]
+```
+
+A program that embeds HIDMaestro does the same with `HMUninstall.Preview()` and `HMUninstall.Run()`, from its own uninstaller or a settings button. The driver is shared by every HIDMaestro program on the machine, so a removal refuses while another one runs and lists it, and the others install the driver again at their next `InstallDriver` or create. usbip-win2's root-hub filter always stays, since removing it restarts every USB root hub, and so does usbip-win2 itself unless HIDMaestro installed it or `--include-usbip` asks. [What is removed and what stays](docs/UNINSTALL.md).
+
+Battery scenario S101 checks that a preview changes nothing, and removes HIDMaestro inside Windows Sandbox and checks that nothing is left.
+
+---
+
 ## NativeAOT, trimmed and single-file apps.
 
 As of v2.0.0 `HIDMaestro.Core` publishes as NativeAOT and as a trimmed single-file app, for x64 and ARM64. Profiles and layouts load through `HMJsonContext`, a source-generated `JsonSerializerContext` with no reflection behind it, and every Win32 declaration is `LibraryImport`. `hmswd.exe` comes from the embedded resource and never from beside the assembly, whose location is empty in a single-file app. The project sets `IsAotCompatible`, and the trim, single-file and AOT analyzers report as errors in a Release build.
