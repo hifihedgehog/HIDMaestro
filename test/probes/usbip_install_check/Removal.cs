@@ -107,6 +107,7 @@ internal static partial class Program
         Record("remove: a removal proves it, and would take the host controller and its package",
                Has(latePreview, "devnode", l => l.StartsWith(late + " "), "WouldRemove")
                && Has(latePreview, "driver package", l => l.StartsWith(Pnp.DriverInf(late) + " "), "WouldRemove"));
+        ResetRecordCheck();
         HMContext.InstallUsbipBackend();
         Record("remove: the next create on the working transport records the package",
                RecordValue("OemInf") is string lateOem && lateOem.Equals(Pnp.DriverInf(late), StringComparison.OrdinalIgnoreCase),
@@ -114,6 +115,35 @@ internal static partial class Program
         var lateRemoved = Remove("remove: bound late, removed", preview: false, includeUnproven: false);
         Record("remove: and a default removal takes it all",
                !Pnp.Known(late) && UdePackages().Count == 0 && !KeyExists(RecordKey) && lateRemoved.All(e => e.Outcome != "Failed"), Snapshot());
+
+        // ── R01: another program's package bound to that devnode ──────────
+        // The same record with no package, but usbip-win2 0.9.8.0's own
+        // package forced onto the devnode, as another program's installer
+        // forces its own. Neither the next create nor a removal takes it for
+        // HIDMaestro's.
+        string foreignInf = Path.Combine(ForeignDir, "usbip2_ude.inf");
+        if (!File.Exists(foreignInf)) Note("remove: no other usbip-win2 release's package in the sandbox, so a foreign bind is not checked");
+        else
+        {
+            var (other, otherToken) = RegisterOnly();
+            WriteRecordWithNoDriver(other, otherToken);
+            int forced = Pnp.ForceDriver(foreignInf, UdeHardwareId);
+            string? foreignOem = Pnp.DriverInf(other);
+            Record("remove: another release's package binds to HIDMaestro's devnode",
+                   forced == 0 && foreignOem != null && !InfDriverVer(foreignOem).Equals(PinnedVer, StringComparison.OrdinalIgnoreCase),
+                   $"force {forced}, {other} runs {foreignOem} at {(foreignOem == null ? "" : InfDriverVer(foreignOem))}");
+            ResetRecordCheck();
+            HMContext.InstallUsbipBackend();
+            Record("remove: the next create does not record it", RecordValue("OemInf") == null, $"OemInf {RecordValue("OemInf") ?? "none"}");
+            var foreignPreview = Remove("remove: foreign bind", preview: true, includeUnproven: false);
+            Record("remove: and a default removal keeps the host controller and that package",
+                   Has(foreignPreview, "devnode", l => l.StartsWith(other + " "), "Kept")
+                   && foreignOem != null && Has(foreignPreview, "driver package", l => l.StartsWith(foreignOem + " "), "Kept"));
+            var foreignCleared = Remove("remove: foreign bind, usbip-win2 included", preview: false, includeUnproven: true);
+            Record("remove: with usbip-win2 included, it all goes",
+                   Pnp.RootDevnodes(UdeHardwareId).Count == 0 && UdePackages().Count == 0 && foreignCleared.All(e => e.Outcome != "Failed"), Snapshot());
+            Registry.LocalMachine.DeleteSubKeyTree(RecordKey, throwOnMissingSubKey: false);
+        }
 
         // ── R0: an install cut short between its devnode and its driver ────
         // The SDK's own registration, called as an install calls it, then
@@ -128,6 +158,30 @@ internal static partial class Program
         Record("remove: a default removal takes it, with its record",
                Has(finished, "devnode", l => l.StartsWith(cut + " "), "Removed") && !Pnp.Known(cut) && !KeyExists(RecordKey)
                && finished.All(e => e.Outcome != "Failed"));
+
+        // ── R02: a rebuilt record beside a user's own install ─────────────
+        // A user's usbip-win2 0.9.8.1 install left its package, identical to
+        // HIDMaestro's, and its Apps entry. HIDMaestro's devnode lost its
+        // record. The record the next install writes again counts that
+        // package as one the store held before, so a default removal keeps
+        // it.
+        string stagedInf = StagedPinnedInf();
+        var added = Run(Path.Combine(Environment.SystemDirectory, "pnputil.exe"), 120_000, "/add-driver", stagedInf);
+        var users = UdePackages();
+        PlantAppsEntry();
+        var (rebuilt, _) = RegisterOnly();
+        HMContext.InstallUsbipBackend();
+        Record("remove: beside a user's package and Apps entry, the next install finishes HIDMaestro's devnode on that package",
+               added.Exit == 0 && users.Count == 1 && Pnp.DriverInf(rebuilt)?.Equals(users[0], StringComparison.OrdinalIgnoreCase) == true && Answers(),
+               $"pnputil {added.Exit}, store {string.Join(",", users)}, {rebuilt} runs {Pnp.DriverInf(rebuilt)}");
+        var userPreview = Remove("remove: beside a user's package", preview: true, includeUnproven: false);
+        Record("remove: a default removal would take HIDMaestro's devnode and keep the user's package",
+               Has(userPreview, "devnode", l => l.StartsWith(rebuilt + " "), "WouldRemove")
+               && users.Count == 1 && Has(userPreview, "driver package", l => l.StartsWith(users[0] + " "), "Kept", "before HIDMaestro's install"));
+        var userCleared = Remove("remove: beside a user's package, usbip-win2 included", preview: false, includeUnproven: true);
+        Record("remove: with usbip-win2 included, it all goes",
+               Pnp.RootDevnodes(UdeHardwareId).Count == 0 && UdePackages().Count == 0 && !KeyExists(UninstallKey) && !KeyExists(RecordKey)
+               && userCleared.All(e => e.Outcome != "Failed"), Snapshot());
 
         (cut, cutToken) = RegisterOnly();
         var resumed = Stopwatch.StartNew();
@@ -337,6 +391,45 @@ internal static partial class Program
         var installer = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.Usbip.UsbipDriverInstaller", throwOnError: true)!;
         string inf = (string)installer.GetMethod("StageUdePackage", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, null)!;
         installer.GetMethod("RunForceDriver", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, new object[] { inf });
+    }
+
+    /// <summary>Where the host put another usbip-win2 release's host
+    /// controller package for R01.</summary>
+    const string ForeignDir = @"C:\results\foreign";
+
+    static Type Installer => typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.Usbip.UsbipDriverInstaller", throwOnError: true)!;
+
+    /// <summary>The SDK's pinned package, staged as an install stages it.</summary>
+    static string StagedPinnedInf() =>
+        (string)Installer.GetMethod("StageUdePackage", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, null)!;
+
+    static string PinnedVer => InfDriverVerOf(ReadInf(StagedPinnedInf()));
+
+    /// <summary>The DriverVer version of a published INF.</summary>
+    static string InfDriverVer(string published) =>
+        InfDriverVerOf(ReadInf(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "INF", published)));
+
+    static string InfDriverVerOf(string text)
+    {
+        foreach (string raw in text.Split('\n'))
+        {
+            string line = raw.Split(';')[0].Trim();
+            if (line.StartsWith("DriverVer", StringComparison.OrdinalIgnoreCase)) return line[(line.LastIndexOf(',') + 1)..].Trim();
+        }
+        return "";
+    }
+
+    /// <summary>Let the next create in this process check the record again,
+    /// as the next process's first create does.</summary>
+    static void ResetRecordCheck() =>
+        Installer.GetField("s_recordChecked", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, false);
+
+    static void PlantAppsEntry()
+    {
+        using var k = Registry.LocalMachine.CreateSubKey(UninstallKey);
+        k.SetValue("DisplayName", "USBip version 0.9.8.1");
+        k.SetValue("DisplayVersion", "0.9.8.1");
+        k.SetValue("UninstallString", "\"C:\\Program Files\\USBip\\unins000.exe\"");
     }
 
     static string? RecordValue(string name)
