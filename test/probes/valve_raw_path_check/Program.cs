@@ -53,6 +53,15 @@ static class ValveRawPathCheck
     [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_GetPreparsedData(IntPtr h, out IntPtr pp);
     [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_FreePreparsedData(IntPtr pp);
     [DllImport("hid.dll")] static extern int HidP_GetCaps(IntPtr pp, byte[] caps);
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_SetNumInputBuffers(IntPtr h, uint n);
+
+    // The Atom runs the battery at HIDMAESTRO_TIMEOUT_SCALE=2. Every wait
+    // here is a hang bound, so it stretches with the scale.
+    static readonly double s_scale =
+        double.TryParse(Environment.GetEnvironmentVariable("HIDMAESTRO_TIMEOUT_SCALE"),
+                        System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out var sc) && sc > 1
+            ? sc : 1.0;
 
     [DllImport("setupapi.dll", CharSet = CharSet.Unicode)]
     static extern IntPtr SetupDiGetClassDevsW(ref Guid g, IntPtr e, IntPtr h, uint f);
@@ -153,6 +162,8 @@ static class ValveRawPathCheck
             _h = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_RW,
                              IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
             if (_h == INVALID) return;
+            // Windows' default queue holds 32 reports, 128 ms of a 4 ms stream.
+            HidD_SetNumInputBuffers(_h, 512);
             new Thread(() =>
             {
                 var buf = new byte[Math.Max(inLen, 1)];
@@ -209,7 +220,10 @@ static class ValveRawPathCheck
     {
         l.Reset();
         for (int i = 0; i < 40; i++) { submit(); Thread.Sleep(5); }
-        for (int i = 0; i < 20; i++)
+        // The frame reaches the wire within milliseconds; only one that never
+        // arrives runs the minute out.
+        var wait = System.Diagnostics.Stopwatch.StartNew();
+        while (wait.Elapsed.TotalSeconds < 60 * s_scale)
         {
             var hit = l.FirstFrameWith(seq);
             if (hit != null) return hit;
@@ -258,7 +272,9 @@ static class ValveRawPathCheck
             c = ctx.CreateController(prof);
 
             List<(string Path, int InLen)> cols = new();
-            for (int i = 0; i < 60 && cols.Count == 0; i++)
+            // Wait for the controller's own collection, not for any collection.
+            var colWait = System.Diagnostics.Stopwatch.StartNew();
+            while (!cols.Any(x => x.InLen == FrameSize) && colWait.Elapsed.TotalSeconds < 60 * s_scale)
             {
                 Thread.Sleep(500);
                 cols = Collections(prof.VendorId, prof.ProductId).Where(x => !before.Contains(x.Path)).ToList();
