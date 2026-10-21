@@ -39,11 +39,19 @@ function Test-FileHash([string]$Path, [string]$Expected) {
         (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.Equals($Expected, [StringComparison]::OrdinalIgnoreCase)
 }
 
+# A download lands under a name of this process's own and is moved into
+# place only once its hash checks, so a build killed partway, or another
+# build sharing build\downloads, never leaves a partial file at $Path.
 function Get-VerifiedFile([string]$Url, [string]$Path, [string]$Hash) {
     if (Test-FileHash $Path $Hash) { return }
-    if (Test-Path -LiteralPath $Path) { throw "Hash mismatch in cached file: $Path" }
-    Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Path
-    if (!(Test-FileHash $Path $Hash)) { throw "Downloaded file failed SHA256 verification: $Path" }
+    if (Test-Path -LiteralPath $Path) { throw "Hash mismatch in cached file: $Path. Delete it and rebuild to fetch it again." }
+    $partial = "$Path.$PID.tmp"
+    try {
+        Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $partial
+        if (!(Test-FileHash $partial $Hash)) { throw "Downloaded file failed SHA256 verification: $Url" }
+        Move-Item -LiteralPath $partial -Destination $Path -Force
+    }
+    finally { if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Force } }
 }
 
 # Nothing to do when every output is already in place and correct.
