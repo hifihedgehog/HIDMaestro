@@ -601,9 +601,6 @@ internal static partial class ProtectedStaging
         }
     }
 
-    /// <summary>True when the directory open as <paramref name="handle"/> is
-    /// what <see cref="IsProtected(string)"/> requires, read through the
-    /// handle, so the directory checked is the directory held.</summary>
     /// <summary>Whether the folder open as <paramref name="handle"/> (opened
     /// as itself, with READ_CONTROL) is a real folder that only
     /// Administrators and SYSTEM can change, read through the handle. A full
@@ -611,6 +608,9 @@ internal static partial class ProtectedStaging
     /// a folder (Uninstall.SafeDelete).</summary>
     internal static bool IsProtectedFolder(SafeFileHandle handle) => IsProtected(handle);
 
+    /// <summary>True when the directory open as <paramref name="handle"/> is
+    /// what <see cref="IsProtected(string)"/> requires, read through the
+    /// handle, so the directory checked is the directory held.</summary>
     private static bool IsProtected(SafeFileHandle handle)
     {
         try
