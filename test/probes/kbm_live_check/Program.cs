@@ -116,9 +116,19 @@ internal static class Program
         return a is { } v && Tag(v.Vid, v.Pid).Equals(tag, StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>Raw Input devices that appeared since <paramref name="before"/>.</summary>
+    /// <summary>A hang bound for a wait that ends on its condition: a
+    /// minute at the run's timeout scale. Windows lists a device, reads it
+    /// and delivers its input in well under a second, but a loaded machine
+    /// can take far longer with no defect.</summary>
+    static readonly int HangMs = (int)(60_000 * Math.Max(1.0,
+        double.TryParse(Environment.GetEnvironmentVariable("HIDMAESTRO_TIMEOUT_SCALE"),
+            System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double scale) ? scale : 1.0));
+
+    /// <summary>Raw Input devices that appeared since <paramref name="before"/>,
+    /// waited for at least <see cref="HangMs"/>.</summary>
     static List<(IntPtr Handle, uint Type, string Name)> WaitNew(HashSet<string> before, Func<(IntPtr Handle, uint Type, string Name), bool> want, int count, int timeoutMs)
     {
+        timeoutMs = Math.Max(timeoutMs, HangMs);
         var sw = Stopwatch.StartNew();
         List<(IntPtr, uint, string)> found = new();
         while (sw.ElapsedMilliseconds < timeoutMs)
@@ -143,7 +153,7 @@ internal static class Program
     static void Readable(params HMController[] keyboards)
     {
         var sw = Stopwatch.StartNew();
-        while (sw.ElapsedMilliseconds < 1000 && keyboards.Any(k => k.KeyboardLeds == null)) Thread.Sleep(10);
+        while (sw.ElapsedMilliseconds < HangMs && keyboards.Any(k => k.KeyboardLeds == null)) Thread.Sleep(10);
         if (keyboards.Length == 0) Thread.Sleep(300);
     }
 
@@ -560,7 +570,7 @@ internal static class Program
             pad.SubmitMouse(new HMMouseState { X = 16384, Y = 16384 });
             var sw = Stopwatch.StartNew();
             RawInputSink.Mouse? m = null;
-            while (sw.ElapsedMilliseconds < 2000 && m == null)
+            while (sw.ElapsedMilliseconds < HangMs && m == null)
             {
                 m = sink.Mice.FirstOrDefault(x => x.Device == dev[0].Handle);
                 Thread.Sleep(20);
@@ -596,7 +606,7 @@ internal static class Program
             pad.SubmitMouse(new HMMouseState { Buttons = HMMouseButtons.Button6 | HMMouseButtons.Button8 });
             pad.SubmitMouse(new HMMouseState());
             var sw = Stopwatch.StartNew();
-            while (sw.ElapsedMilliseconds < 2000 && sink.Reports.Count(r => r.Device == vendor[0].Handle) < 2) Thread.Sleep(20);
+            while (sw.ElapsedMilliseconds < HangMs && sink.Reports.Count(r => r.Device == vendor[0].Handle) < 2) Thread.Sleep(20);
             var reports = sink.Reports.Where(r => r.Device == vendor[0].Handle).Select(r => Convert.ToHexString(r.Report)).ToList();
             Check("buttons 6 and 8 arrive as report 2, 0x05, then the release",
                   reports.Count >= 2 && reports[0] == "0205" && reports[^1] == "0200", string.Join(",", reports));
@@ -679,7 +689,7 @@ internal static class Program
             k1.SubmitKeyboard(HMKeyModifiers.None, new[] { HMKey.F24 });
             k1.SubmitKeyboard(HMKeyModifiers.None, ReadOnlySpan<HMKey>.Empty);
             var sw = Stopwatch.StartNew();
-            while (sw.ElapsedMilliseconds < 2000 && !sink.Keys.Any(k => k.Device == dev1[0].Handle && (k.Flags & 1) == 1)) Thread.Sleep(20);
+            while (sw.ElapsedMilliseconds < HangMs && !sink.Keys.Any(k => k.Device == dev1[0].Handle && (k.Flags & 1) == 1)) Thread.Sleep(20);
             var keys = sink.Keys.Where(k => k.Device == dev1[0].Handle).ToList();
             // Windows repeats a held key after the keyboard delay, 250 ms at
             // the shortest. When other work holds this thread that long
@@ -705,7 +715,7 @@ internal static class Program
             w1.Clear();
             w2.Clear();
             PressScrollLock(k1);
-            bool got1 = WaitLeds(w1.Leds, !initial, 3000), got2 = WaitLeds(w2.Leds, !initial, 3000);
+            bool got1 = WaitLeds(w1.Leds, !initial, HangMs), got2 = WaitLeds(w2.Leds, !initial, HangMs);
             var want = held ^ HMKeyboardLeds.ScrollLock;
             Check($"Scroll Lock {(initial ? "off" : "on")}: the keyboard without report IDs reads {want}",
                   got1 && k1.KeyboardLeds == want, w1.Seen);
@@ -715,9 +725,9 @@ internal static class Program
             w1.Clear();
             w2.Clear();
             PressScrollLock(k1);
-            bool back1 = WaitLeds(w1.Leds, initial, 3000), back2 = WaitLeds(w2.Leds, initial, 3000);
+            bool back1 = WaitLeds(w1.Leds, initial, HangMs), back2 = WaitLeds(w2.Leds, initial, HangMs);
             var rw = Stopwatch.StartNew();
-            while (rw.ElapsedMilliseconds < 1000 && ScrollLockOn() != initial) Thread.Sleep(20);
+            while (rw.ElapsedMilliseconds < HangMs && ScrollLockOn() != initial) Thread.Sleep(20);
             Check($"pressing it again restores Scroll Lock {(initial ? "on" : "off")} on both",
                   back1 && back2 && ScrollLockOn() == initial && k1.KeyboardLeds == held && k2.KeyboardLeds == held,
                   $"{w1.Seen} | {w2.Seen}");
@@ -747,7 +757,7 @@ internal static class Program
             pad.SubmitConsumer(new ushort[] { 0x0069 });
             pad.SubmitConsumer(ReadOnlySpan<ushort>.Empty);
             var sw = Stopwatch.StartNew();
-            while (sw.ElapsedMilliseconds < 2000 && sink.Reports.Count(r => r.Device == dev[0].Handle) < 2) Thread.Sleep(20);
+            while (sw.ElapsedMilliseconds < HangMs && sink.Reports.Count(r => r.Device == dev[0].Handle) < 2) Thread.Sleep(20);
             var reports = sink.Reports.Where(r => r.Device == dev[0].Handle).Select(r => Convert.ToHexString(r.Report)).ToList();
             // Raw Input's RAWHID report starts with the report ID, 0 here.
             Check("usage 0x0069 arrives, then the release", reports.Count == 2 && reports[0] == "006900" && reports[1] == "000000",
@@ -822,7 +832,7 @@ internal static class Program
                         var sw = Stopwatch.StartNew();
                         HMOutputPacket p = default;
                         bool have = false;
-                        while (sw.ElapsedMilliseconds < 2000 && !(have = got.TryDequeue(out p))) Thread.Sleep(10);
+                        while (sw.ElapsedMilliseconds < HangMs && !(have = got.TryDequeue(out p))) Thread.Sleep(10);
                         Check($"Report ID {rid}, {name}: ReportId 0x{wantId:X2}, Data {wantData}",
                               sent && have && p.Source == source && p.ReportId == wantId && Convert.ToHexString(p.Data.Span) == wantData,
                               !sent ? "the call failed" : !have ? "no packet" : $"{p.Source} 0x{p.ReportId:X2} {Convert.ToHexString(p.Data.Span)}");
@@ -854,7 +864,7 @@ internal static class Program
             sink.Clear();
             kb.Dispose();
             var sw = Stopwatch.StartNew();
-            while (sw.ElapsedMilliseconds < 2000 && !sink.Keys.Any(k => k.Device == kd[0].Handle && k.VKey == 0x87 && (k.Flags & 1) == 1))
+            while (sw.ElapsedMilliseconds < HangMs && !sink.Keys.Any(k => k.Device == kd[0].Handle && k.VKey == 0x87 && (k.Flags & 1) == 1))
                 Thread.Sleep(20);
             Check("Dispose with F24 held sends F24 up first",
                   sink.Keys.Any(k => k.Device == kd[0].Handle && k.VKey == 0x87 && (k.Flags & 1) == 1));
@@ -900,7 +910,7 @@ internal static class Program
         // where it was. Then 500 ms, ten of Windows' key repeats, for a key
         // that goes down again or a pointer that moves after them.
         long released = -1;
-        while (clock.ElapsedMilliseconds < 3000)
+        while (clock.ElapsedMilliseconds < HangMs)
         {
             if (released < 0
                 && sink.Keys.Any(k => k.Device == hk && k.VKey == 0x87 && (k.Flags & 1) == 1)
@@ -929,7 +939,7 @@ internal static class Program
         HMContext.RemoveAllVirtualControllers();
         long cleanupMs = cleanup.ElapsedMilliseconds;
         var left = held.Where(id => !DeviceGone(id)).ToList();
-        while (left.Count > 0 && cleanup.ElapsedMilliseconds < cleanupMs + 5000)
+        while (left.Count > 0 && cleanup.ElapsedMilliseconds < cleanupMs + HangMs)
         {
             Thread.Sleep(100);
             left = held.Where(id => !DeviceGone(id)).ToList();
@@ -1038,7 +1048,7 @@ internal static class Program
                     pad.SubmitKeyboard(HMKeyModifiers.None, ReadOnlySpan<HMKey>.Empty);
                 }
                 var aw = Stopwatch.StartNew();
-                while (!pad.DeliversEveryReport && aw.ElapsedMilliseconds < 2000) Thread.Sleep(20);
+                while (!pad.DeliversEveryReport && aw.ElapsedMilliseconds < HangMs) Thread.Sleep(20);
                 if (!pad.DeliversEveryReport) failures.Add($"{p.Id}: no delivery acknowledgement");
             }
             catch (Exception ex) { failures.Add($"{p.Id}: {ex.GetType().Name}: {ex.Message}"); }
