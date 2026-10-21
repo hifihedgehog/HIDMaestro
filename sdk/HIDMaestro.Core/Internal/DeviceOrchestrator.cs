@@ -498,7 +498,7 @@ internal static partial class DeviceOrchestrator
             subName.Contains("ROOT#SYSTEM#", StringComparison.OrdinalIgnoreCase);
         // Decode the symbolic-link form back to a devnode instance path. The
         // leading `##?#` (or `\??\`) and trailing `#{guid}` are interface-link
-        // encoding; the middle is `Enumerator#Device#Instance`.
+        // encoding, and the middle is `Enumerator#Device#Instance`.
         devPath = subName;
         int guidStart = devPath.LastIndexOf("#{");
         if (guidStart > 0) devPath = devPath.Substring(0, guidStart);

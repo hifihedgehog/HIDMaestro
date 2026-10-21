@@ -11,8 +11,8 @@
 //   --yes            remove without asking
 //   --include-usbip  also remove usbip-win2 when no record shows HIDMaestro
 //                    installed it (never its root-hub filter)
-//   --json           write the report as JSON on stdout (needs --preview or
-//                    --yes); docs/UNINSTALL.md gives the schema
+//   --json           write the report as JSON on stdout, with --preview or
+//                    --yes. docs/UNINSTALL.md gives the schema
 //
 // Exit codes: 0 removed, or a preview with nothing blocking it. 3 removed,
 // with items Windows deletes when it next starts. 2 blocked: other programs

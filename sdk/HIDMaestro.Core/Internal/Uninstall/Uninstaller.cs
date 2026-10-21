@@ -745,7 +745,7 @@ internal static class Uninstaller
     }
 
     /// <summary>The driver store folder a WUDF service key's ImagePath
-    /// names, when it is one of HIDMaestro's; null otherwise.</summary>
+    /// names when it is one of HIDMaestro's, and null otherwise.</summary>
     private static string? WudfFolder(RegistryKey k)
     {
         if (k.GetValue("ImagePath") is not string image || image.Length == 0) return null;
