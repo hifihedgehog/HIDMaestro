@@ -37,6 +37,11 @@
 //     personas' bits clear one count below their thresholds and set at them
 //   - uint16-pressure sends a pad pressure by the one arithmetic, 0 on a
 //     contact as full pressure, NaN and negatives as 0
+//   - the calibrated counts equal their rounding rule on every float
+//   The float proofs compare monotone step functions by the least float
+//   that reaches each step, a binary search over the ordered floats, and
+//   check the monotony on a dense sample. --exhaustive also sweeps all 2^32
+//   floats.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -122,12 +127,132 @@ internal static class Vocabulary
         Check("triggerThreshold max 65535 at 65535 is accepted", fine == null, fine ?? "");
     }
 
+    /// <summary>Set by --exhaustive: the float proofs below also sweep all 2^32
+    /// bit patterns, about twelve passes over every float. A one-off proof,
+    /// out of the battery's default run.</summary>
+    public static bool Exhaustive;
+
+    /// <summary>Every float there is, by its bits, split across the
+    /// processors: how many <paramref name="wrong"/> holds for, and the
+    /// lowest such bits.</summary>
+    static (long Differ, uint First) AllFloats(Func<float, bool> wrong)
+    {
+        long differ = 0;
+        uint first = 0;
+        object gate = new();
+        System.Threading.Tasks.Parallel.For(0, 1 << 16, hi =>
+        {
+            long d = 0;
+            uint f0 = 0;
+            for (uint lo = 0; lo < 1u << 16; lo++)
+            {
+                uint bits = ((uint)hi << 16) | lo;
+                if (wrong(BitConverter.UInt32BitsToSingle(bits)) && d++ == 0) f0 = bits;
+            }
+            if (d != 0) lock (gate) { if (differ == 0 || f0 < first) first = f0; differ += d; }
+        });
+        return (differ, first);
+    }
+
+    // Every float but NaN in value order, as an integer key: +0 and the
+    // positives keep their bits, and -0 and the negatives count down from
+    // -1. -Infinity is the least key and +Infinity the greatest.
+    static readonly long KeyMin = Key(float.NegativeInfinity), KeyMax = Key(float.PositiveInfinity);
+
+    static long Key(float v)
+    {
+        int b = BitConverter.SingleToInt32Bits(v);
+        return b >= 0 ? b : -(long)(b & 0x7FFFFFFF) - 1;
+    }
+
+    static float FromKey(long k) =>
+        BitConverter.UInt32BitsToSingle(k >= 0 ? (uint)k : (uint)(-(k + 1)) | 0x80000000u);
+
+    /// <summary>The least key at which <paramref name="p"/> holds, by binary
+    /// search over the ordered floats, or KeyMax + 1 when it holds at none.
+    /// Right only for a predicate that, once true, stays true: the callers
+    /// check that by construction and on <see cref="Sample"/>.</summary>
+    static long LeastTrue(Func<float, bool> p)
+    {
+        long lo = KeyMin, hi = KeyMax + 1;
+        while (lo < hi)
+        {
+            long mid = lo + (hi - lo) / 2;
+            if (p(FromKey(mid))) hi = mid; else lo = mid + 1;
+        }
+        return lo;
+    }
+
+    /// <summary>A dense sample of the ordered floats: every 2048th key from
+    /// -Infinity to +Infinity, about 2.1 million in all, with each given key and
+    /// the three keys either side of it, ascending.</summary>
+    static long[] Sample(IEnumerable<long> around)
+    {
+        var keys = new List<long>();
+        for (long k = KeyMin; k <= KeyMax; k += 2048) keys.Add(k);
+        keys.Add(KeyMax);
+        foreach (long t in around)
+            for (long k = t - 3; k <= t + 3; k++)
+                if (k >= KeyMin && k <= KeyMax) keys.Add(k);
+        keys.Sort();
+        return keys.Distinct().ToArray();
+    }
+
+    /// <summary>Whether <paramref name="f"/> never decreases along the
+    /// ascending <paramref name="keys"/>.</summary>
+    static bool NonDecreasing(long[] keys, Func<float, int> f)
+    {
+        bool ok = true;
+        System.Threading.Tasks.Parallel.For(0, (keys.Length + 4095) / 4096, chunk =>
+        {
+            int from = chunk * 4096, to = Math.Min(keys.Length, from + 4097);
+            int prev = f(FromKey(keys[from]));
+            for (int i = from + 1; i < to; i++)
+            {
+                int cur = f(FromKey(keys[i]));
+                if (cur < prev) { ok = false; return; }
+                prev = cur;
+            }
+        });
+        return ok;
+    }
+
+    /// <summary>Two trigger rules agree on every float when both hold or
+    /// fail alike on NaN and, as predicates that once true stay true, turn
+    /// true at the same float. Each side's least float comes from a binary
+    /// search over the ordered floats, and each side is checked for that
+    /// order on the dense sample around the thresholds. The checks then
+    /// compare the two on the same sample as well.</summary>
+    static (bool Ok, string Detail) SameStep(Func<float, bool>[] sides)
+    {
+        var least = sides.Select(LeastTrue).ToArray();
+        bool nan = sides.All(s => s(float.NaN) == sides[0](float.NaN));
+        var keys = Sample(least);
+        bool ordered = sides.All(s => NonDecreasing(keys, v => s(v) ? 1 : 0));
+        bool equal = true;
+        System.Threading.Tasks.Parallel.For(0, keys.Length, i =>
+        {
+            float v = FromKey(keys[i]);
+            bool a = sides[0](v);
+            for (int j = 1; j < sides.Length; j++) if (sides[j](v) != a) { equal = false; return; }
+        });
+        bool same = least.All(l => l == least[0]);
+        return (same && nan && ordered && equal,
+            $"from {(least[0] > KeyMax ? "none" : FromKey(least[0]).ToString("R"))}{(same ? "" : $", sides at {string.Join(", ", least.Select(l => FromKey(l).ToString("R")))}")}"
+            + $"{(nan ? "" : ", NaN differs")}{(ordered ? "" : ", a side decreases")}{(equal ? "" : ", the sample differs")}, {keys.Length:N0} sampled");
+    }
+
     /// <summary>A mask without triggerThreshold sets its trigger bits by the
     /// v2.0.0 rule, c x 255 above 0.5. That rule is triggerThreshold max 255
-    /// at 1, RoundHalfEven(c x 255) at least 1, on every float there is: all
-    /// 2^32 bit patterns, NaN, the infinities and the negatives among them.
-    /// Then the codec writes the same bytes for both masks on states that
-    /// press every trigger value on and beside its first step.</summary>
+    /// at 1, RoundHalfEven(c x 255) at least 1, on every float there is,
+    /// NaN, the infinities and the negatives among them. Each rule is a
+    /// predicate that once true stays true as the float grows (a compare of
+    /// a monotone expression, by construction), so the rules agree on every
+    /// float when they turn true at the same one and agree on NaN
+    /// (<see cref="SameStep"/>). With --exhaustive the checks also sweep all
+    /// 2^32 bit patterns. Then the codec writes the same bytes for both masks
+    /// on states that press every trigger value on and beside its first
+    /// step.</summary>
     static void TriggerThresholdDefault()
     {
         // The extras a mask with the key compiles to, through the codec's own
@@ -139,44 +264,48 @@ internal static class Vocabulary
             VendorBlobProgram.Check(spec, spec.Size, "threshold", output: false, portBlock: false);
             return VendorBlobProgram.Get(spec).Fields[0].Extras!;
         }
-        // Every float there is, by its bits, split across the processors.
-        static (long Differ, uint First) AllFloats(Func<float, bool> wrong)
-        {
-            long differ = 0;
-            uint first = 0;
-            object gate = new();
-            System.Threading.Tasks.Parallel.For(0, 1 << 16, hi =>
-            {
-                long d = 0;
-                uint f0 = 0;
-                for (uint lo = 0; lo < 1u << 16; lo++)
-                {
-                    uint bits = ((uint)hi << 16) | lo;
-                    if (wrong(BitConverter.UInt32BitsToSingle(bits)) && d++ == 0) f0 = bits;
-                }
-                if (d != 0) lock (gate) { if (differ == 0 || f0 < first) first = f0; differ += d; }
-            });
-            return (differ, first);
-        }
         var x = Compiled(255, 1);
-        var (differ, first) = AllFloats(v =>
+        var (ok, detail) = SameStep(new Func<float, bool>[]
         {
-            bool rule = v * 255.0 > 0.5;
-            return VendorBlobCodec.TriggerBit(v, x) != rule || VendorBlobCodec.TriggerBit(v, null) != rule
-                || (WireArith.Linear(v, 0, 255, false, 0) >= 1) != rule;
+            v => v * 255.0 > 0.5,
+            v => VendorBlobCodec.TriggerBit(v, x),
+            v => VendorBlobCodec.TriggerBit(v, null),
+            v => WireArith.Linear(v, 0, 255, false, 0) >= 1,
         });
-        Check("max 255 at 1 sets the trigger bit exactly where c x 255 > 0.5 does, and a mask without the key does too, on all 4,294,967,296 floats",
-            differ == 0, differ == 0 ? "" : $"{differ} differ, first {BitConverter.UInt32BitsToSingle(first):R}");
+        Check("max 255 at 1 sets the trigger bit exactly where c x 255 > 0.5 does, and a mask without the key does too, on every float (same least float, same NaN)", ok, detail);
+        if (Exhaustive)
+        {
+            var (differ, first) = AllFloats(v =>
+            {
+                bool rule = v * 255.0 > 0.5;
+                return VendorBlobCodec.TriggerBit(v, x) != rule || VendorBlobCodec.TriggerBit(v, null) != rule
+                    || (WireArith.Linear(v, 0, 255, false, 0) >= 1) != rule;
+            });
+            Check("--exhaustive: max 255 at 1 against c x 255 > 0.5 on all 4,294,967,296 floats",
+                differ == 0, differ == 0 ? "" : $"{differ} differ, first {BitConverter.UInt32BitsToSingle(first):R}");
+        }
         // The encode compares the trigger with the least float that reaches
         // the threshold (WireArith.LeastAtLeast). That is the rule itself,
-        // RoundHalfEven of the clamped trigger times max at least at, on
-        // every float, for the catalog's thresholds and the range's ends.
+        // RoundHalfEven of the clamped trigger times max at least at, here
+        // written with Math.Round apart from the SDK's arithmetic, and the
+        // SDK's own Linear, for the catalog's thresholds and the range's ends.
         foreach (var (max, at) in new[] { (32767, 29490), (255, 255), (1, 1), (65535, 1), (65535, 65535), (32767, 13107), (1023, 512) })
         {
             var e = Compiled(max, at);
-            var (d, f) = AllFloats(v => VendorBlobCodec.TriggerBit(v, e) != (WireArith.Linear(v, 0, max, false, 0) >= at));
-            Check($"max {max} at {at}: the encode's compare is RoundHalfEven(c x {max}) >= {at} on all 4,294,967,296 floats",
-                d == 0, d == 0 ? $"from {e.TriggerFrom:R}" : $"{d} differ, first {BitConverter.UInt32BitsToSingle(f):R}");
+            var (sameOk, sameDetail) = SameStep(new Func<float, bool>[]
+            {
+                v => Math.Round(Math.Clamp((double)v, 0.0, 1.0) * max, MidpointRounding.ToEven) >= at,
+                v => VendorBlobCodec.TriggerBit(v, e),
+                v => WireArith.Linear(v, 0, max, false, 0) >= at,
+            });
+            Check($"max {max} at {at}: the encode's compare is RoundHalfEven(c x {max}) >= {at} on every float (same least float, same NaN)",
+                sameOk && FromKey(LeastTrue(v => VendorBlobCodec.TriggerBit(v, e))) == e.TriggerFrom, sameDetail);
+            if (Exhaustive)
+            {
+                var (d, f) = AllFloats(v => VendorBlobCodec.TriggerBit(v, e) != (WireArith.Linear(v, 0, max, false, 0) >= at));
+                Check($"--exhaustive: max {max} at {at} on all 4,294,967,296 floats",
+                    d == 0, d == 0 ? "" : $"{d} differ, first {BitConverter.UInt32BitsToSingle(f):R}");
+            }
         }
 
         var plain = Spec(2, """{"byte":1,"type":"button-mask","buttons":["LT_DIGITAL","RT_DIGITAL","A"]}""");
@@ -237,31 +366,66 @@ internal static class Vocabulary
     /// count the design note's rule gives, RoundHalfEven(v x n / d) in
     /// double clamped to int16 and a NaN 0, on every float, for a dyadic
     /// and a non-dyadic ratio of each sign and a dyadic one whose quotient
-    /// is not whole.</summary>
+    /// is not whole.
+    /// <para>Each side is a step function of the float that only rises with
+    /// it (only falls, for a negative ratio): a correctly rounded product or
+    /// quotient by a constant, a clamp and a rounding are each monotone. So
+    /// two sides agree on every float when they agree on NaN and at
+    /// -Infinity and, for each count from the second to the last, reach it
+    /// at the same least float, found by binary search over the ordered
+    /// floats. The monotony is checked on a dense sample. With --exhaustive
+    /// the check also sweeps all 2^32 bit patterns.</para></summary>
     static void CalibratedCounts()
     {
         foreach (var (n, d) in new[] { (16384.0, 1.0), (-2048.0, 125.0), (13371.0, 936.0), (32767.0, 8.0) })
         {
             double m = WireArith.ExactMultiplier(n, d);
-            long differ = 0;
-            uint first = 0;
-            object gate = new();
-            System.Threading.Tasks.Parallel.For(0, 1 << 16, hi =>
+            int sign = n / d > 0 ? 1 : -1;
+            short Want(float v) => float.IsNaN(v) ? (short)0 : (short)Math.Clamp(Math.Round((double)v * n / d, MidpointRounding.ToEven), short.MinValue, short.MaxValue);
+            var sides = new List<Func<float, short>> { Want, v => WireArith.Scaled(v, n, d) };
+            if (m != 0) sides.Add(v => WireArith.ScaledBy(v, m));
+            // The count with the ratio's sign taken out, so it only rises.
+            int Up(Func<float, short> f, float v) => sign * f(v);
+            int lowest = sign > 0 ? short.MinValue : -short.MaxValue, highest = sign > 0 ? short.MaxValue : -short.MinValue;
+            var steps = new long[sides.Count][];
+            for (int s = 0; s < sides.Count; s++)
             {
-                long dd = 0;
-                uint f0 = 0;
-                for (uint lo = 0; lo < 1u << 16; lo++)
+                var side = sides[s];
+                var least = new long[highest - lowest];
+                System.Threading.Tasks.Parallel.For(0, least.Length, i =>
                 {
-                    uint bits = ((uint)hi << 16) | lo;
-                    float v = BitConverter.UInt32BitsToSingle(bits);
-                    short want = float.IsNaN(v) ? (short)0 : (short)Math.Clamp(Math.Round((double)v * n / d, MidpointRounding.ToEven), short.MinValue, short.MaxValue);
-                    bool bad = WireArith.Scaled(v, n, d) != want || (m != 0 && WireArith.ScaledBy(v, m) != want);
-                    if (bad && dd++ == 0) f0 = bits;
-                }
-                if (dd != 0) lock (gate) { if (differ == 0 || f0 < first) first = f0; differ += dd; }
+                    int k = lowest + 1 + i;
+                    least[i] = LeastTrue(v => Up(side, v) >= k);
+                });
+                steps[s] = least;
+            }
+            int stepDiffer = 0;
+            for (int i = 0; i < steps[0].Length; i++)
+                for (int s = 1; s < sides.Count; s++)
+                    if (steps[s][i] != steps[0][i]) stepDiffer++;
+            bool ends = sides.All(f => f(float.NaN) == 0 && f(float.NegativeInfinity) == sides[0](float.NegativeInfinity));
+            var keys = Sample(steps[0].Where((_, i) => i % 64 == 0));
+            bool ordered = sides.All(f => NonDecreasing(keys, v => Up(f, v)));
+            bool sampleEqual = true;
+            System.Threading.Tasks.Parallel.For(0, keys.Length, i =>
+            {
+                float v = FromKey(keys[i]);
+                short a = sides[0](v);
+                for (int s = 1; s < sides.Count; s++) if (sides[s](v) != a) { sampleEqual = false; return; }
             });
-            Check($"scale {n}/{d}: Scaled{(m != 0 ? " and ScaledBy give" : " gives")} RoundHalfEven(v x n / d) clamped to int16 on all 4,294,967,296 floats",
-                differ == 0, differ == 0 ? "" : $"{differ} differ, first {BitConverter.UInt32BitsToSingle(first):R}");
+            Check($"scale {n}/{d}: Scaled{(m != 0 ? " and ScaledBy give" : " gives")} RoundHalfEven(v x n / d) clamped to int16 on every float (each of {steps[0].Length:N0} counts reached at the same least float, the same NaN and -Infinity)",
+                stepDiffer == 0 && ends && ordered && sampleEqual,
+                $"{stepDiffer} steps differ{(ends ? "" : ", NaN or -Infinity differs")}{(ordered ? "" : ", a side is not monotone")}{(sampleEqual ? "" : ", the sample differs")}, {keys.Length:N0} sampled");
+            if (Exhaustive)
+            {
+                var (differ, first) = AllFloats(v =>
+                {
+                    short want = Want(v);
+                    return WireArith.Scaled(v, n, d) != want || (m != 0 && WireArith.ScaledBy(v, m) != want);
+                });
+                Check($"--exhaustive: scale {n}/{d} on all 4,294,967,296 floats",
+                    differ == 0, differ == 0 ? "" : $"{differ} differ, first {BitConverter.UInt32BitsToSingle(first):R}");
+            }
         }
         Check("a ratio whose denominator is not a power of two has no multiplier, and one whose denominator is has n / d",
             WireArith.ExactMultiplier(2048, 125) == 0 && WireArith.ExactMultiplier(13371, 936) == 0
