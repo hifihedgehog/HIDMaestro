@@ -19,6 +19,7 @@ internal sealed unsafe class StateProgram
     private readonly byte[] _template;
     private readonly Group[] _groups;
     private readonly FlagW[] _flags;
+    private readonly GpTriggerBitOp[] _triggerBits;
     private readonly GpLinearOp[] _linear;
     private readonly GpScaledOp[] _scaled;
     // Every other op, in list order, and the CRC, which runs last.
@@ -33,6 +34,7 @@ internal sealed unsafe class StateProgram
         _template = v.Template;
         var groups = new Dictionary<(int, int), uint>();
         var flags = new List<FlagW>();
+        var triggerBits = new List<GpTriggerBitOp>();
         var linear = new List<GpLinearOp>();
         var scaled = new List<GpScaledOp>();
         var others = new List<Op>();
@@ -52,10 +54,11 @@ internal sealed unsafe class StateProgram
                 case GpFlagsOp g:
                     for (int i = 0; i < g.Flags.Length; i++) flags.Add(new FlagW(g.Flags[i], g.Bits[i] >> 3, (byte)(1 << (g.Bits[i] & 7))));
                     break;
+                case GpTriggerBitOp g: triggerBits.Add(g); break;
                 case GpLinearOp g: linear.Add(g); break;
                 case GpScaledOp g: scaled.Add(g); break;
                 case GpCrc32Op g: _crc = g; _crcStart = Crc32.Update(0xFFFFFFFFu, g.Prefix); break;
-                case GpRawOp or GpPressureOp or GpTableOp or GpFingerOp or GpPadOp or GpSelectOp or GpTenBitOp or GpStick12Op or CounterOp: others.Add(op); break;
+                case GpRawOp or GpPressureOp or GpTableOp or GpFingerOp or GpPadOp or GpPadPressureOp or GpTenBitOp or GpStick12Op or CounterOp: others.Add(op); break;
                 default: throw new InvalidOperationException("no state stage for " + op.GetType().Name);
             }
         }
@@ -63,6 +66,7 @@ internal sealed unsafe class StateProgram
         int n = 0;
         foreach (var ((dst, shift), mask) in groups) _groups[n++] = new Group(dst, shift, mask);
         _flags = flags.ToArray();
+        _triggerBits = triggerBits.ToArray();
         _linear = linear.ToArray();
         _scaled = scaled.ToArray();
         _others = others.ToArray();
@@ -144,9 +148,13 @@ internal sealed unsafe class StateProgram
                 d[g.Dst] = (byte)v; d[g.Dst + 1] = (byte)(v >> 8);
                 break;
             }
-            case GpSelectOp g:
+            case GpPadPressureOp g:
             {
-                int v = Holds(g.Flag, in st, sl) ? g.WhenSet : g.WhenClear;
+                // A pressure not above 0 (0, negative or NaN) on a contact is
+                // full pressure, as the codec's uint16-pressure writes it.
+                float p = g.Finger == 1 ? st.TouchpadFinger1Pressure : st.TouchpadFinger0Pressure;
+                bool down = g.Finger == 1 ? st.TouchpadFinger1Active : st.TouchpadFinger0Active;
+                int v = WireArith.Linear(p > 0 ? p : down ? 1.0 : 0.0, g.Min, g.Max, false, 0);
                 d[g.Dst] = (byte)v; d[g.Dst + 1] = (byte)(v >> 8);
                 break;
             }
@@ -220,6 +228,8 @@ internal sealed unsafe class StateProgram
             d[g.Dst] |= (byte)((g.Shift >= 0 ? b >> g.Shift : b << -g.Shift) & g.Mask);
         foreach (var f in _flags)
             if (Holds(f.Flag, in st, sl)) d[f.Dst] |= f.Bit;
+        foreach (var t in _triggerBits)
+            if (WireArith.Linear(sl[(int)t.Src], 0, t.Max, false, 0) >= t.At) d[t.Bit >> 3] |= (byte)(1 << (t.Bit & 7));
         foreach (var l in _linear)
         {
             int v = WireArith.Linear(sl[(int)l.Src], l.Min, l.Max, l.Invert, l.Rest);

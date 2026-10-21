@@ -11,7 +11,7 @@
   "backend": "usbip",
   "descriptor": "05010902a10185400901a100050919012902150025017501950281027506950181010501093009311581257f750895028106950109388106050c0a380295018106c0c005010906a1018541050719e029e71500250175019508810281011900296515002565750895068100c00600ff0901a1018542150026ff0075089535094281028544150026ff0075089505094481028579150026ff0075089501097981028543150026ff007508950e09438102857b150026ff007508950c097b81028545150026ff007508952d094581028580150026ff0075089509098091028581150026ff0075089507098191028582150026ff0075089503098291028583150026ff0075089509098391028584150026ff0075089508098491028585150026ff0075089503098591028586150026ff0075089503098691028587150026ff007508953f098791028589150026ff007508953f098991028588150026ff007508953f098891028501953f0901b1028502953f0901b102c0",
   "inputReportSize": 54,
-  "notes": "Issue #56, from PadForge discussion #337. Valve's 2026 Steam Controller, the one SDL calls Triton (k_eControllerType_SteamControllerTriton, controller_list.h: 28DE:1302 wired, 0x1303 BLE, 0x1304 and 0x1305 the Proteus and Nereid dongles). SDL_hidapi_steam_triton.c binds it on any interface of a wired unit and names it 'Steam Controller'. Unlike the Deck and the 2015 controller, Triton presents ONE HID interface carrying everything by report id: 0x40 mouse and 0x41 keyboard (its lizard reports live in the same descriptor rather than on their own interfaces), 0x42 the 53-byte controller state SDL reads as ID_TRITON_CONTROLLER_STATE, 0x45 the 45-byte BLE state, 0x43 battery, 0x79 wireless status, the 0x80..0x89 haptic and rumble output reports, and a 63-byte command channel on feature reports 1 and 2. The descriptor is verbatim from OpenPuck's ReversePuckFirmware (ctrl_usb.cpp CTRL_HID_DESC), an emulation of this controller that a live Steam client already accepts, and every report id in it matches SDL's own ID_TRITON_* constants. The feature answers are grounded on two independent reads of real hardware that agree record for record: OpenPuck's identity.cpp ATTR83 (read with 'scmd 1302 --up 1 83') and CouchTurtle/sc2-research docs/FIRMWARE_PROTOCOL.md, which logs the same five tags in the same order off a live controller and matches Steam's own update JSON on two of the values. The firmware build timestamp shipped here is the newer of the two real builds (0x6A18D057, 2026-05-28) so Steam sees a current unit. Consumers drive report 0x42 through SubmitRawReport; Steam's haptic writes arrive on OutputReceived as output reports 0x80 and up.",
+  "notes": "Issue #56, from PadForge discussion #337. Valve's 2026 Steam Controller, the one SDL calls Triton (k_eControllerType_SteamControllerTriton, controller_list.h: 28DE:1302 wired, 0x1303 BLE, 0x1304 and 0x1305 the Proteus and Nereid dongles). SDL_hidapi_steam_triton.c binds it on any interface of a wired unit and names it 'Steam Controller'. Unlike the Deck and the 2015 controller, Triton presents ONE HID interface carrying everything by report id: 0x40 mouse and 0x41 keyboard (its lizard reports live in the same descriptor rather than on their own interfaces), 0x42 the 53-byte controller state SDL reads as ID_TRITON_CONTROLLER_STATE, 0x45 the 45-byte BLE state, 0x43 battery, 0x79 wireless status, the 0x80..0x89 haptic and rumble output reports, and a 63-byte command channel on feature reports 1 and 2. The descriptor is verbatim from OpenPuck's ReversePuckFirmware (ctrl_usb.cpp CTRL_HID_DESC), an emulation of this controller that a live Steam client already accepts, and every report id in it matches SDL's own ID_TRITON_* constants. The feature answers are grounded on two independent reads of real hardware that agree record for record: OpenPuck's identity.cpp ATTR83 (read with 'scmd 1302 --up 1 83') and CouchTurtle/sc2-research docs/FIRMWARE_PROTOCOL.md, which logs the same five tags in the same order off a live controller and matches Steam's own update JSON on two of the values. The firmware build timestamp shipped here is the newer of the two real builds (0x6A18D057, 2026-05-28) so Steam sees a current unit. Consumers drive report 0x42 through SubmitRawReport; Steam's haptic writes arrive on OutputReceived as output reports 0x80 and up. Through SubmitState, motion is the SDK's calibrated channel, which SDL reads back as the IMU block's (X, Z, -Y) at 32768 counts per 2000 deg/s and 16384 per g (SDL_hidapi_steam_triton.c:279-286). Touchpad finger 0 is the left trackpad and finger 1 the right, each with its pressure. The trigger bits set at 29490 of 32767, 90 percent, the default of the firmware's SETTING_TRIGGER_THRESHOLD_PERCENT (settings entry 68 in Steam's IBEX_FW_6941BF08.fw and IBEX_FW_6AC686B3.fw, range 40 to 99).",
   "valueSources": {
     "steamUpdater": {
       "kind": "keyedHexFile",
@@ -212,6 +212,10 @@
         "byte": 2,
         "bits": "0-29",
         "type": "button-mask",
+        "triggerThreshold": {
+          "max": 32767,
+          "at": 29490
+        },
         "buttons": [
           "A",
           "B",
@@ -324,32 +328,49 @@
       {
         "byte": 34,
         "type": "int16-le",
-        "semantic": "accelX"
+        "semantic": "accelGX",
+        "scale": 16384
       },
       {
         "byte": 36,
         "type": "int16-le",
-        "semantic": "accelY"
+        "semantic": "accelGZ",
+        "scale": 16384,
+        "negate": true
       },
       {
         "byte": 38,
         "type": "int16-le",
-        "semantic": "accelZ"
+        "semantic": "accelGY",
+        "scale": 16384
       },
       {
         "byte": 40,
         "type": "int16-le",
-        "semantic": "gyroPitch"
+        "semantic": "gyroDpsX",
+        "scale": [
+          2048,
+          125
+        ]
       },
       {
         "byte": 42,
         "type": "int16-le",
-        "semantic": "gyroYaw"
+        "semantic": "gyroDpsZ",
+        "scale": [
+          2048,
+          125
+        ],
+        "negate": true
       },
       {
         "byte": 44,
         "type": "int16-le",
-        "semantic": "gyroRoll"
+        "semantic": "gyroDpsY",
+        "scale": [
+          2048,
+          125
+        ]
       }
     ]
   },

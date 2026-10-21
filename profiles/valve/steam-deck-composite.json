@@ -212,7 +212,7 @@
     "size": 64,
     "alwaysArmed": true,
     "idleFrameIntervalMs": 4,
-    "comment": "SteamDeckStatePacket_t behind a ValveInReportHeader_t, from SDL3 controller_structs.h and cross-checked against the input frames in a real Steam Deck USB capture. Without this the profile had no field list, so SubmitState packed nothing and Steam decoded a frame of zeros: recognised as a Steam Deck Controller, every axis reading 0. Button bits are SDL_hidapi_steamdeck.c's SteamDeckButtons, LSB-first across the 64-bit ulButtons field. Trackpad coordinates and pad pressures are left zero: HMGamepadState has no trackpad, and a consumer that wants them submits the frame through SubmitRawReport.",
+    "comment": "SteamDeckStatePacket_t behind a ValveInReportHeader_t, from SDL3 controller_structs.h and cross-checked against the input frames in a real Steam Deck USB capture. Without this the profile had no field list, so SubmitState packed nothing and Steam decoded a frame of zeros: recognized as a Steam Deck Controller, every axis reading 0. Button bits are SDL_hidapi_steamdeck.c's SteamDeckButtons, LSB-first across the 64-bit ulButtons field. Touchpad finger 0 is the left trackpad and finger 1 the right, each with its pressure, and a contact at pressure 0 reads as full pressure. Motion is the SDK's calibrated channel, which SDL reads back as the wire's (X, Z, -Y) at 32768 counts per 2000 deg/s and 16384 per g (SDL_hidapi_steamdeck.c:250-257). The trigger bits set at 29490 of 32767, 90 percent, the default of the firmware's SETTING_TRIGGER_THRESHOLD_PERCENT (settings entry 68 in jupiter-hw-support's D21_APP_REL_69C6B03E.bin, range 40 to 99).",
     "fields": [
       {
         "byte": 0,
@@ -249,6 +249,10 @@
         "byte": 8,
         "bits": "0-63",
         "type": "button-mask",
+        "triggerThreshold": {
+          "max": 32767,
+          "at": 29490
+        },
         "semantic": "buttons",
         "buttons": [
           "RT_DIGITAL",
@@ -342,32 +346,49 @@
       {
         "byte": 24,
         "type": "int16-le",
-        "semantic": "accelX"
+        "semantic": "accelGX",
+        "scale": 16384
       },
       {
         "byte": 26,
         "type": "int16-le",
-        "semantic": "accelY"
+        "semantic": "accelGZ",
+        "scale": 16384,
+        "negate": true
       },
       {
         "byte": 28,
         "type": "int16-le",
-        "semantic": "accelZ"
+        "semantic": "accelGY",
+        "scale": 16384
       },
       {
         "byte": 30,
         "type": "int16-le",
-        "semantic": "gyroPitch"
+        "semantic": "gyroDpsX",
+        "scale": [
+          2048,
+          125
+        ]
       },
       {
         "byte": 32,
         "type": "int16-le",
-        "semantic": "gyroYaw"
+        "semantic": "gyroDpsZ",
+        "scale": [
+          2048,
+          125
+        ],
+        "negate": true
       },
       {
         "byte": 34,
         "type": "int16-le",
-        "semantic": "gyroRoll"
+        "semantic": "gyroDpsY",
+        "scale": [
+          2048,
+          125
+        ]
       },
       {
         "byte": 44,

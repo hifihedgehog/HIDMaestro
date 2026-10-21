@@ -150,7 +150,7 @@ internal sealed class VendorBlobProgram
 
     /// <summary>The parameters only a few fields set: a calibrated field's
     /// scale and repeat, a level map's charging value, a packed-uint's
-    /// parts.</summary>
+    /// parts, a button mask's trigger threshold.</summary>
     public sealed class FieldExtras
     {
         public double ScaleNumerator;
@@ -163,6 +163,12 @@ internal sealed class VendorBlobProgram
         /// <summary>An int16-le field with a center: its words are unsigned,
         /// clamped to 0 to 65535 as uint10-be clamps to its range.</summary>
         public bool OffsetBinary;
+        /// <summary>A button mask's triggerThreshold: its LT_DIGITAL and
+        /// RT_DIGITAL bits hold while RoundHalfEven(c x TriggerMax) is at
+        /// least TriggerAt. 0 for a mask without one, whose bits follow
+        /// <see cref="VendorBlobCodec.TriggerOn"/>.</summary>
+        public int TriggerMax;
+        public int TriggerAt;
     }
 
     public readonly struct CompiledField
@@ -194,8 +200,8 @@ internal sealed class VendorBlobProgram
         // The ones a frame reads on common fields are stored here. The rest,
         // which only a few fields set, sit in Extras, so the field array an
         // encode walks stays as short as it can.
-        /// <summary>Wire value at the SDK's 0 and at 1, or the released and
-        /// pressed values of a pad pressure.</summary>
+        /// <summary>Wire value at the SDK's 0 and at 1, a pad pressure's
+        /// among them.</summary>
         public int Min { get; init; }
         public int Max { get; init; }
         /// <summary>The d-pad from HatDegrees, HatHundredths, HatRaw or Hat,
@@ -597,7 +603,7 @@ internal sealed class VendorBlobProgram
                 // An int16-le field with a center writes offset binary out of
                 // line too, so the encode loop stays as it was for the rest.
                 Extras = f.Scale == null && f.Negate == null && f.Repeat == null && f.Levels == null
-                         && f.ChargingValue == null && op != FieldOp.PackedUint
+                         && f.ChargingValue == null && op != FieldOp.PackedUint && f.TriggerThreshold == null
                          && !(op == FieldOp.I16 && f.Center != null) ? null : new FieldExtras
                 {
                     ScaleNumerator = f.Scale?.Numerator ?? 0,
@@ -608,6 +614,10 @@ internal sealed class VendorBlobProgram
                     ChargingValue = f.ChargingValue ?? -1,
                     OffsetBinary = op == FieldOp.I16 && f.Center != null,
                     Parts = op == FieldOp.PackedUint ? CompileParts(f, i) : null,
+                    // Check refuses a threshold outside 1 <= at <= max <= 65535
+                    // before any report is built.
+                    TriggerMax = f.TriggerThreshold?.Max ?? 0,
+                    TriggerAt = f.TriggerThreshold?.At ?? 0,
                 },
             };
 
@@ -939,6 +949,22 @@ internal sealed class VendorBlobProgram
         else if (src.Parts != null)
         {
             throw new InvalidOperationException($"{at} ('{src.Type}').parts go with packed-uint.");
+        }
+
+        // v2.0.2: where the trigger bits of an input button mask set.
+        if (src.TriggerThreshold is { } tt)
+        {
+            bool triggerBit = f.Op == FieldOp.ButtonMask && f.ButtonBits != null
+                && Array.Exists(f.ButtonBits, x => x is ButtonLtDigital or ButtonRtDigital);
+            if (output || !triggerBit)
+                throw new InvalidOperationException(
+                    $"{at} ('{src.Type}').triggerThreshold: only an input button-mask with LT_DIGITAL or RT_DIGITAL has a trigger bit to set.");
+            if (tt.Max is not int max || max < 1 || max > 65535)
+                throw new InvalidOperationException(
+                    $"{at}.triggerThreshold.max {(tt.Max is int m ? m.ToString(System.Globalization.CultureInfo.InvariantCulture) : "is missing")}: the counts of a full pull, 1 to 65535.");
+            if (tt.At is not int count || count < 1 || count > max)
+                throw new InvalidOperationException(
+                    $"{at}.triggerThreshold.at {(tt.At is int a ? a.ToString(System.Globalization.CultureInfo.InvariantCulture) : "is missing")}: the count at which the bit sets, 1 to max ({max}).");
         }
     }
 

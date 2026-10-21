@@ -425,16 +425,19 @@ internal static class VendorBlobCodec
                 }
                 case VendorBlobProgram.FieldOp.U16Pressure:
                 {
-                    // Pad pressure. HMGamepadState carries no analog
-                    // pressure, so a contact reports max and no contact min,
-                    // which is the same shape a capacitive pad without a
-                    // force sensor reports. Valve's profiles set max 32767,
-                    // full scale for SDL, which divides by 32768.0f.
+                    // Pad pressure, finger 0 on the left pad and finger 1
+                    // on the right, by the one arithmetic from min at 0 to
+                    // max at 1. A pressure of 0 on a contact is full pressure,
+                    // so a consumer that knows only touch sends max, the
+                    // pressure-sensitive buttons' rule. p > 0 is false for 0,
+                    // a negative pressure and NaN, each of which reads as 0.
+                    // Valve's profiles set max 32767, full scale for SDL,
+                    // which divides by 32768.0f.
                     if (f.B < 0 || f.B + 1 >= buffer.Length) break;
-                    bool pdown = f.Source == VendorBlobProgram.SrcOp.RightPadPressure
-                        ? state.TouchpadFinger1Active
-                        : state.TouchpadFinger0Active;
-                    ushort pv = (ushort)(pdown ? f.Max : f.Min);
+                    bool right = f.Source == VendorBlobProgram.SrcOp.RightPadPressure;
+                    bool pdown = right ? state.TouchpadFinger1Active : state.TouchpadFinger0Active;
+                    float pp = right ? state.TouchpadFinger1Pressure : state.TouchpadFinger0Pressure;
+                    int pv = WireArith.Linear(pp > 0 ? pp : pdown ? 1.0 : 0.0, f.Min, f.Max, invert: false, rest: 0);
                     buffer[f.B]     = (byte)(pv & 0xFF);
                     buffer[f.B + 1] = (byte)((pv >> 8) & 0xFF);
                     break;
@@ -597,13 +600,16 @@ internal static class VendorBlobCodec
                         // SDL's PS4 and PS5 drivers read a set bit over a
                         // zero trigger byte as a full pull, which a bare
                         // "above zero" test produced for any value under
-                        // half of the first step.
+                        // half of the first step. A mask with a
+                        // triggerThreshold sets them further along the
+                        // travel, where the device's own switch or firmware
+                        // threshold sets them (TriggerBit).
                         var h = state.Hat;
                         bool r = f.DpadResolved;
                         bool on = bits switch
                         {
-                            VendorBlobProgram.ButtonLtDigital => TriggerOn(leftTrigger),
-                            VendorBlobProgram.ButtonRtDigital => TriggerOn(rightTrigger),
+                            VendorBlobProgram.ButtonLtDigital => TriggerBit(leftTrigger, f.Extras),
+                            VendorBlobProgram.ButtonRtDigital => TriggerBit(rightTrigger, f.Extras),
                             VendorBlobProgram.ButtonDpadUp    => r ? dUp : h is HMHat.North or HMHat.NorthEast or HMHat.NorthWest,
                             VendorBlobProgram.ButtonDpadDown  => r ? dDown : h is HMHat.South or HMHat.SouthEast or HMHat.SouthWest,
                             VendorBlobProgram.ButtonDpadLeft  => r ? dLeft : h is HMHat.West  or HMHat.NorthWest or HMHat.SouthWest,
@@ -958,6 +964,17 @@ internal static class VendorBlobCodec
     /// when c x 255, an exact product, is above 0.5, and a NaN, at its rest
     /// of 0, is not.</summary>
     internal static bool TriggerOn(float v) => v * 255.0 > 0.5;
+
+    /// <summary>A trigger bit of a button mask: with the mask's
+    /// triggerThreshold, whether the trigger's value on a scale of its max
+    /// counts, by the one arithmetic, is at least its at count. A NaN takes
+    /// the trigger's rest, 0, and at is 1 or more, so it never sets. Without
+    /// one, <see cref="TriggerOn"/>, which is the same test at max 255 and
+    /// at 1: RoundHalfEven(c x 255) is 1 or more exactly when c x 255 is
+    /// above 0.5.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    internal static bool TriggerBit(float v, VendorBlobProgram.FieldExtras? x) =>
+        x is { TriggerMax: > 0 } t ? WireArith.Linear(v, 0, t.TriggerMax, invert: false, rest: 0) >= t.TriggerAt : TriggerOn(v);
 
     /// <summary>A pressure-sensitive button's byte: the consumer's pressure
     /// when it sets one, otherwise 255 while the button is pressed and 0

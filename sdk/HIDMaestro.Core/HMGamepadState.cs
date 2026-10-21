@@ -99,6 +99,23 @@ public struct HMGamepadState
     /// <summary>Finger 1 tracking ID (7 bits).</summary>
     public byte TouchpadFinger1Id;
 
+    // A trackpad that measures how hard it is pressed reports a pressure
+    // beside each contact. Profiles with a uint16-pressure field (the
+    // Steam Deck and the Steam Controller 2, whose two pads are finger 0
+    // and finger 1) send these, by the same rule as the pressure-sensitive
+    // buttons below: a pressure of 0 on an active finger is sent as full
+    // pressure, so a consumer that only knows touch still presses fully. A
+    // nonzero pressure is sent as given, whether or not the finger is
+    // active. NaN reads as 0, and a value outside 0 to 1 is clamped.
+
+    /// <summary>Finger 0 pressure, 0 to 1. 0 on an active finger sends full
+    /// pressure.</summary>
+    public float TouchpadFinger0Pressure;
+
+    /// <summary>Finger 1 pressure, 0 to 1. 0 on an active finger sends full
+    /// pressure.</summary>
+    public float TouchpadFinger1Pressure;
+
     /// <summary>Monotonic touchpad packet counter, intended to increment per
     /// touch event. The DualShock 4 profiles send it in the touch report's
     /// packet-counter byte (USB byte 34, Bluetooth byte 36), the
@@ -107,6 +124,10 @@ public struct HMGamepadState
     public byte TouchpadPacketCounter;
 
     // ── IMU (raw firmware units) ──────────────────────────────────────────
+    //
+    // The Sony profiles read these: the DualSense, DualShock 4 and
+    // DualShock 3 families copy them to the wire as they are. Every other
+    // profile with motion reads the calibrated channel below.
 
     /// <summary>Gyro pitch, signed 16-bit. Raw firmware units (no calibration).</summary>
     public short GyroPitch;
@@ -138,8 +159,9 @@ public struct HMGamepadState
 
     // ── IMU (calibrated physical units) ───────────────────────────────────
     //
-    // Optional motion channel for profiles whose layout declares imu
-    // (issue #33: Switch Pro 0x30 streaming). Accel in g, gyro in deg/s.
+    // The motion channel of the Switch Pro, Switch 2 Pro composite, PS Move,
+    // Steam Deck, Steam Controller and Steam Controller 2 profiles (issue
+    // #33, issue #72). Accel in g, gyro in deg/s.
     //
     // Frame: the SDL-STANDARD sensor frame, the cross-controller
     // convention SDL normalizes every pad to ("shuffled to match
@@ -155,8 +177,8 @@ public struct HMGamepadState
     // stateBlock permutes SDL->wire and scales g x 4096,
     // deg/s x 13371/936), so an SDL-reading consumer's vector
     // round-trips bit-consistent to SDL on the client side. Distinct
-    // from the RAW shorts above, which carry Sony-firmware units for
-    // the extendedReport codec path.
+    // from the RAW shorts above, which carry Sony-firmware units and which
+    // these profiles do not read.
 
     /// <summary>Accelerometer X in g (SDL sensor frame: + right).</summary>
     public float AccelGX;

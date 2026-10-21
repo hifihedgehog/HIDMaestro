@@ -385,11 +385,16 @@ internal static class Emitter
                     body.Add("        }");
                     break;
                 }
-                case GpSelectOp g:
+                case GpPadPressureOp g:
+                    // VendorBlobCodec's uint16-pressure: a pressure not above
+                    // 0 on a contact is full pressure.
                     Whole(g.Dst, 2);
-                    hat |= g.Flag is GpFlag.DpadUp or GpFlag.DpadDown or GpFlag.DpadLeft or GpFlag.DpadRight;
-                    resolved |= g.Flag >= GpFlag.DpadUpResolved;
-                    body.Add(F($"        {{ int v = {Flag(g.Flag)} ? {g.WhenSet} : {g.WhenClear}; d[{g.Dst}] = (byte)v; d[{g.Dst + 1}] = (byte)(v >> 8); }}"));
+                    body.Add(F($"        {{ float p = st.TouchpadFinger{g.Finger}Pressure;"));
+                    body.Add(F($"          int v = global::HIDMaestro.Internal.WireArith.Linear(p > 0 ? p : st.TouchpadFinger{g.Finger}Active ? 1.0 : 0.0, {g.Min}, {g.Max}, false, 0);"));
+                    body.Add(F($"          d[{g.Dst}] = (byte)v; d[{g.Dst + 1}] = (byte)(v >> 8); }}"));
+                    break;
+                case GpTriggerBitOp g:
+                    AddOr(g.Bit >> 3, F($"(global::HIDMaestro.Internal.WireArith.Linear(sl[{(int)g.Src}], 0, {g.Max}, false, 0) >= {g.At} ? 0x{1 << (g.Bit & 7):X2}u : 0u)"));
                     break;
                 case GpTenBitOp g:
                     Whole(g.Dst, 2);

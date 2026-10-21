@@ -211,8 +211,8 @@ internal static class ProgramForm
             string path = $"$.ops[{i}]";
             // A state program's ops read HMGamepadState, and its template is
             // its only state-free op. A report program reads its state block.
-            bool gamepadOp = p.Ops[i] is GpButtonsOp or GpFlagsOp or GpLinearOp or GpStick12Op or GpScaledOp or GpRawOp or GpPressureOp
-                or GpTableOp or GpFingerOp or GpPadOp or GpSelectOp or GpTenBitOp or GpCrc32Op;
+            bool gamepadOp = p.Ops[i] is GpButtonsOp or GpFlagsOp or GpTriggerBitOp or GpLinearOp or GpStick12Op or GpScaledOp or GpRawOp or GpPressureOp
+                or GpTableOp or GpFingerOp or GpPadOp or GpPadPressureOp or GpTenBitOp or GpCrc32Op;
             if (p.Gamepad && !gamepadOp && p.Ops[i] is not (ConstOp or CounterOp))
                 throw new FormException(path, "a state program reads HMGamepadState and its counter slots over a template");
             if (!p.Gamepad && gamepadOp)
@@ -238,6 +238,14 @@ internal static class ProgramForm
                         TakeBits($"{path}.bits[{k}]", gf.Bits[k] >> 3, (byte)(1 << (gf.Bits[k] & 7)));
                     }
                     unconditional.Add(gf);
+                    break;
+                case GpTriggerBitOp gt:
+                    if (gt.Src is not (GpFloat.LeftTrigger or GpFloat.RightTrigger)) throw new FormException(path + ".src", "a trigger bit reads a trigger's slot");
+                    if (gt.Max < 1 || gt.Max > 65535) throw new FormException(path + ".max", "a full pull is 1 to 65535 counts");
+                    if (gt.At < 1 || gt.At > gt.Max) throw new FormException(path + ".at", "the bit sets at a count from 1 to max");
+                    if (gt.Bit < 0 || gt.Bit >= p.Size * 8) throw new FormException(path + ".bit", "the report bit is outside the block");
+                    TakeBits(path + ".bit", gt.Bit >> 3, (byte)(1 << (gt.Bit & 7)));
+                    unconditional.Add(gt);
                     break;
                 case GpLinearOp gl:
                     if (!Enum.IsDefined(gl.Src) || gl.Src > GpFloat.RightTrigger) throw new FormException(path + ".src", "a linear value reads one of the six slots");
@@ -287,10 +295,11 @@ internal static class ProgramForm
                     TakeWhole(path, gpa.Dst, 2);
                     unconditional.Add(gpa);
                     break;
-                case GpSelectOp gse:
-                    if (!Enum.IsDefined(gse.Flag)) throw new FormException(path + ".flag", "no such flag");
-                    TakeWhole(path, gse.Dst, 2);
-                    unconditional.Add(gse);
+                case GpPadPressureOp gpp:
+                    if (gpp.Finger is not (0 or 1)) throw new FormException(path + ".finger", "a finger is 0 or 1");
+                    if (gpp.Min < 0 || gpp.Min > 65535 || gpp.Max < 0 || gpp.Max > 65535) throw new FormException(path + ".max", "a pressure's ends are 16-bit wire values, 0 to 65535");
+                    TakeWhole(path, gpp.Dst, 2);
+                    unconditional.Add(gpp);
                     break;
                 case GpTenBitOp gtb:
                     if (!Enum.IsDefined(gtb.Src) || gtb.Src > GpRaw.AccelZ) throw new FormException(path + ".src", "a ten-bit value reads a raw motion value");
@@ -528,7 +537,8 @@ internal static class ProgramForm
             case GpTableOp g: sb.Append(I, $"gptable({(int)g.Src},{Hex(g.Table)},{g.Full},{g.Charging},{g.Dst},{g.BitLo},{g.BitHi},{(g.Whole ? 1 : 0)})"); break;
             case GpFingerOp g: sb.Append(I, $"gpfinger({g.Finger},{g.Dst})"); break;
             case GpPadOp g: sb.Append(I, $"gppad({g.Pad},{(g.IsY ? 1 : 0)},{(g.OrStick ? 1 : 0)},{g.Min},{g.Max},{(g.Invert ? 1 : 0)},{g.Dst})"); break;
-            case GpSelectOp g: sb.Append(I, $"gpselect({(int)g.Flag},{g.WhenSet},{g.WhenClear},{g.Dst})"); break;
+            case GpPadPressureOp g: sb.Append(I, $"gppadpressure({g.Finger},{g.Min},{g.Max},{g.Dst})"); break;
+            case GpTriggerBitOp g: sb.Append(I, $"gptriggerbit({(int)g.Src},{g.Max},{g.At},{g.Bit})"); break;
             case GpTenBitOp g: sb.Append(I, $"gpten({(int)g.Src},{g.Resolution},{g.SourceResolution},{g.Center},{(g.Invert ? 1 : 0)},{g.Dst})"); break;
             case GpCrc32Op g: sb.Append(I, $"gpcrc({Hex(g.Prefix)},{g.From},{g.To},{g.Dst})"); break;
             case ConstOp c: sb.Append(I, $"const({c.At},{Hex(c.Bytes)})"); break;
