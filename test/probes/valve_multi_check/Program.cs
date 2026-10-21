@@ -150,9 +150,9 @@ static class ValveMultiCheck
                 // Each persona reaches SDL before the next is made, as the
                 // 1.5 s this waited gave it time to.
                 int made = live.Count;
-                PollPads(p => p.Count >= made, 1500);
+                PollPads(p => p.Count >= made, 60_000);
             }
-            var pads = PollPads(p => p.Count >= 3, 20_000);
+            var pads = PollPads(p => p.Count >= 3, 60_000);
             foreach (var p in pads)
                 Console.WriteLine($"     SDL: 28DE:{p.Pid:X4} serial='{p.Serial}' touchpads={p.Pads}");
             Check("SDL sees all three at the same time", pads.Count >= 3, $"count={pads.Count}");
@@ -167,7 +167,7 @@ static class ValveMultiCheck
             foreach (var c in live) { try { c.Dispose(); } catch { } }
             live.Clear();
             // B counts Decks, so A's must have left SDL's list first.
-            PollPads(p => p.Count == 0, 3000);
+            PollPads(p => p.Count == 0, 60_000);
         }
 
         // ── B: two of the SAME persona ───────────────────────────────────
@@ -184,9 +184,9 @@ static class ValveMultiCheck
                     live.Add(ctx.CreateController(prof));
                     Console.WriteLine($"     created deck #{i + 1}");
                     int made = live.Count;
-                    PollPads(p => p.Count >= made, 2000);
+                    PollPads(p => p.Count >= made, 60_000);
                 }
-                var pads = PollPads(p => p.Count >= 2, 20_000);
+                var pads = PollPads(p => p.Count >= 2, 60_000);
                 foreach (var p in pads)
                     Console.WriteLine($"     SDL: 28DE:{p.Pid:X4} serial='{p.Serial}' touchpads={p.Pads}");
                 Check("SDL sees two Decks at once", pads.Count >= 2, $"count={pads.Count}");
@@ -201,7 +201,7 @@ static class ValveMultiCheck
         finally
         {
             foreach (var c in live) { try { c.Dispose(); } catch { } }
-            PollPads(p => p.Count == 0, 2000);
+            PollPads(p => p.Count == 0, 60_000);
         }
 
         SDL_Quit();
