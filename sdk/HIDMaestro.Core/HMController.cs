@@ -159,6 +159,14 @@ public sealed partial class HMController : IDisposable
     // Sized at HidReportBuilder.InputReportByteSize, computed in the ctor.
     private readonly byte[] _reportBuffer;
 
+    // The lookups a descriptor frame keeps for its trigger passes, which
+    // then look none of their keys up again (HidReportBuilder.BuildReportInto).
+    // Per controller, since a profile's builder is shared and a
+    // controller's frames run one at a time under _submitLock. Null when
+    // the profile's trigger passes read no key: a descriptor with neither
+    // trigger buttons nor a combined trigger.
+    private readonly float[]? _keptAxes;
+
     // v1.3.0: per-controller reusable raw report buffer. SubmitRawReport
     // (DualSense / vendor-protocol path) used to do report.ToArray() per
     // call. This buffer absorbs the copy without the alloc churn. Sized to
@@ -567,6 +575,7 @@ public sealed partial class HMController : IDisposable
         // re-parsing the descriptor on every ctor.
         _reportBuilder = profile.Inner.GetOrBuildReportBuilder();
         _reportBuffer = new byte[_reportBuilder.InputReportByteSize];
+        _keptAxes = _reportBuilder.KeepsLookups ? new float[HidReportBuilder.MaxKeptWrites] : null;
 
         // Snapshot the layout projections once (audit 1n): see the field
         // declarations. Profile.Sticks/Triggers allocate per access.
@@ -937,8 +946,11 @@ public sealed partial class HMController : IDisposable
             // v1.3.9: unified axes dict drives every declared analog input.
             // Hat priority chain (HatDegrees > HatHundredths > HatRaw > Hat)
             // picks the first non-null and ignores the rest.
+            // _keptAxes holds the lookups the trigger passes reread, and is
+            // null, an empty span, for a profile whose passes read none.
             _reportBuilder.BuildReportInto(_reportBuffer,
                 axes: state.Axes,
+                kept: _keptAxes,
                 hatValue: (int)state.Hat,
                 buttonMask: (uint)state.Buttons,
                 hatDegrees: state.HatDegrees,
@@ -1054,18 +1066,15 @@ public sealed partial class HMController : IDisposable
         gip[6]  = (byte)(gipRy & 0xFF); gip[7]  = (byte)(gipRy >> 8);
         gip[8]  = (byte)(gipLt & 0xFF); gip[9]  = (byte)(gipLt >> 8);
         gip[10] = (byte)(gipRt & 0xFF); gip[11] = (byte)(gipRt >> 8);
-        // Button low byte: A,B,X,Y,LB,RB,LS,RS (XInput XUSB convention)
+        // Button low byte: A,B,X,Y,LB,RB,LS,RS (XInput XUSB convention).
+        // HMButton holds A through RightBumper at bits 0..5, where this
+        // byte holds them, and LeftStick and RightStick at bits 8 and 9,
+        // which go to 0x40 and 0x80.
         uint b = (uint)state.Buttons;
-        byte btnLow = 0;
-        if ((b & (uint)HMButton.A)           != 0) btnLow |= 0x01;
-        if ((b & (uint)HMButton.B)           != 0) btnLow |= 0x02;
-        if ((b & (uint)HMButton.X)           != 0) btnLow |= 0x04;
-        if ((b & (uint)HMButton.Y)           != 0) btnLow |= 0x08;
-        if ((b & (uint)HMButton.LeftBumper)  != 0) btnLow |= 0x10;
-        if ((b & (uint)HMButton.RightBumper) != 0) btnLow |= 0x20;
-        if ((b & (uint)HMButton.LeftStick)   != 0) btnLow |= 0x40;
-        if ((b & (uint)HMButton.RightStick)  != 0) btnLow |= 0x80;
-        gip[12] = btnLow;
+        const uint LowSix = (uint)(HMButton.A | HMButton.B | HMButton.X | HMButton.Y
+                                   | HMButton.LeftBumper | HMButton.RightBumper);
+        const uint Thumbs = (uint)(HMButton.LeftStick | HMButton.RightStick);
+        gip[12] = (byte)((b & LowSix) | ((b & Thumbs) >> 2));
         // Button high byte. Bits 0..1 are Back/Start, bits 2..5 carry the
         // 4-bit hat: companion.c does (btnHigh >> 2) & 0x0F and switches
         // the result into wButtons.DPAD_* (companion.c:421-426). Guide
@@ -1079,12 +1088,13 @@ public sealed partial class HMController : IDisposable
         // unaffected because BuildReportInto correctly populates the
         // descriptor's Hat Switch usage. Mask against 0x0F so a future
         // HMHat extension can't smear into Back/Start bits below.
-        byte btnHigh = 0;
-        if ((b & (uint)HMButton.Back)  != 0) btnHigh |= 0x01;
-        if ((b & (uint)HMButton.Start) != 0) btnHigh |= 0x02;
-        btnHigh |= (byte)(((byte)state.Hat & 0x0F) << 2);
-        if ((b & (uint)HMButton.Guide) != 0) btnHigh |= 0x40;
-        gip[13] = btnHigh;
+        // HMButton holds Back and Start at bits 6 and 7, which go to 0x01
+        // and 0x02, and Guide at bit 10, which goes to 0x40.
+        const uint BackStart = (uint)(HMButton.Back | HMButton.Start);
+        uint btnHigh = ((b & BackStart) >> 6)
+                     | (((uint)(byte)state.Hat & 0x0F) << 2)
+                     | ((b & (uint)HMButton.Guide) >> 4);
+        gip[13] = (byte)btnHigh;
     }
 
     /// <summary>The XUSB slice's 10-bit trigger for <paramref name="v"/>, in [0, 1]:

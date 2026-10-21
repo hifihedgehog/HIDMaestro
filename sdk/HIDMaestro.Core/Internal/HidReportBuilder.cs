@@ -38,19 +38,16 @@ public class HidReportBuilder
     /// default heuristic is wrong (e.g. Sony uses Z/Rz for right stick,
     /// Rx/Ry for triggers: opposite of the Xbox convention).</summary>
     // Canonical trigger positions for the combined-Z synthesis, resolved
-    // lazily on first BuildReportInto (issue #34). Every repo path assigns
-    // AxisMap during Parse, before any frame is built, but the setter
-    // still invalidates the cache (audit of #34) so a late assignment can
-    // never leave stale canonicals behind.
+    // into the frame plan (issue #34). Every repo path assigns AxisMap
+    // during Parse, before any frame is built, but the setter still drops
+    // the plan (audit of #34) so a late assignment can never leave stale
+    // canonicals behind.
     private Dictionary<string, string>? _axisMap;
-    private bool _canonicalTriggersResolved;
-    private HMAxis _canonicalLtCached;
-    private HMAxis _canonicalRtCached;
 
     public Dictionary<string, string>? AxisMap
     {
         get => _axisMap;
-        set { _axisMap = value; _canonicalTriggersResolved = false; }
+        set { _axisMap = value; _plan = null; }
     }
 
     // The per-axis pass, compiled when the builder is parsed and again when
@@ -59,12 +56,56 @@ public class HidReportBuilder
     // at when the consumer leaves it out or writes NaN and, for a field its
     // profile centers, the center and the two slopes WireArith.Centered
     // takes. Min and Span are the field's WireArith.Linear terms, so an
-    // input GetAxisValue has already clamped takes WireArith.Unit.
+    // input already clamped takes WireArith.Unit.
+    // Skip marks a field the combined-trigger pass writes after this one,
+    // over every bit of it. Keep marks a key a trigger pass reads, which
+    // the per-axis pass keeps for it, so that pass looks it up once.
     private readonly record struct AxisWrite(HMAxis Key, InputField Field, double Rest, int Min, double Span,
-                                             bool IsCentered, int Center, double SlopeLow, double SlopeStep);
-    private AxisWrite[]? _axisWrites;
+                                             bool IsCentered, int Center, double SlopeLow, double SlopeStep,
+                                             bool Skip = false, bool Keep = false);
+
+    /// <summary>Where a trigger pass reads one key: the per-axis write at
+    /// Index, which kept its lookup, or the dictionary when Index is
+    /// -1.</summary>
+    private readonly record struct TriggerKey(HMAxis Key, int Index);
+
+    /// <summary>The frame's compiled form: the per-axis writes and the
+    /// keys the trigger passes read. Immutable, so a frame reads it once
+    /// and a builder shared across controllers stays safe. Compiled at
+    /// create, and again whenever a field, the axis map, the trigger
+    /// buttons or a semantic slot it reads changes.</summary>
+    private sealed class FramePlan
+    {
+        public required AxisWrite[] Writes { get; init; }
+        /// <summary>Some write keeps its lookup.</summary>
+        public bool Keeps { get; init; }
+        /// <summary>The combined-Z synthesis runs on these three fields.</summary>
+        public InputField? Combined { get; init; }
+        public InputField? LeftField { get; init; }
+        public InputField? RightField { get; init; }
+        public TriggerKey CanonLt { get; init; }
+        public TriggerKey CanonRt { get; init; }
+        /// <summary>The LeftTrigger and RightTrigger fields' own keys, read
+        /// when both slots are set.</summary>
+        public bool HasFieldKeys { get; init; }
+        public TriggerKey FieldLt { get; init; }
+        public TriggerKey FieldRt { get; init; }
+    }
+    private FramePlan? _plan;
     private HashSet<HMAxis>? _stickAxes;
     private Dictionary<HMAxis, int>? _axisCenters;
+
+    /// <summary>The most writes whose lookup a frame keeps: one bit each in
+    /// its found mask, and the length of the buffer a controller keeps
+    /// them in. AxisFields holds only defined <see cref="HMAxis"/> values,
+    /// 42 of them.</summary>
+    internal const int MaxKeptWrites = 64;
+
+    /// <summary>Some per-axis write keeps its lookup for a trigger pass,
+    /// which a frame does in a buffer its caller passes. The per-axis pass
+    /// keeps nothing, and the trigger passes look their keys up again,
+    /// when the buffer is empty.</summary>
+    internal bool KeepsLookups => (_plan ??= CompilePlan()).Keeps;
 
     /// <summary>The axes the profile's layout names as sticks. One that the
     /// consumer leaves out of <see cref="HMGamepadState.Axes"/> rests at
@@ -74,7 +115,7 @@ public class HidReportBuilder
     public void SetStickAxes(IEnumerable<HMAxis>? sticks)
     {
         _stickAxes = sticks == null ? null : new HashSet<HMAxis>(sticks);
-        _axisWrites = CompileAxisWrites();
+        _plan = CompilePlan();
     }
 
     /// <summary>The profile's <c>axisCenters</c>: for a device whose hosts
@@ -95,7 +136,64 @@ public class HidReportBuilder
                         $"axisCenters.{axis} {c} is outside the field's logical range {f.LogicalMin}..{f.LogicalMax}.");
             }
         _axisCenters = centers == null ? null : new Dictionary<HMAxis, int>(centers);
-        _axisWrites = CompileAxisWrites();
+        _plan = CompilePlan();
+    }
+
+    private FramePlan CompilePlan()
+    {
+        var writes = CompileAxisWrites();
+        static HMAxis FieldKey(InputField f) => (HMAxis)((f.UsagePage << 8) | f.Usage);
+        // A key a trigger pass reads, kept by the write that looks it up,
+        // when its index fits the found mask.
+        TriggerKey Read(HMAxis key)
+        {
+            for (int i = 0; i < writes.Length && i < MaxKeptWrites; i++)
+            {
+                if (writes[i].Key != key) continue;
+                writes[i] = writes[i] with { Keep = true };
+                return new TriggerKey(key, i);
+            }
+            return new TriggerKey(key, -1);
+        }
+
+        bool hasFieldKeys = LeftTrigger != null && RightTrigger != null;
+        TriggerKey fieldLt = default, fieldRt = default, canonLt = default, canonRt = default;
+        InputField? combined = null;
+        if (hasFieldKeys)
+        {
+            // Only the combined pass and the trigger-button pass read the
+            // two fields' keys.
+            bool read = CombinedTrigger != null || TriggerButtons is { Length: >= 2 };
+            HMAxis lk = FieldKey(LeftTrigger!), rk = FieldKey(RightTrigger!);
+            fieldLt = read ? Read(lk) : new TriggerKey(lk, -1);
+            fieldRt = read ? Read(rk) : new TriggerKey(rk, -1);
+            if (CombinedTrigger != null)
+            {
+                // Shares HMController.ResolveCanonicalAxis so both lanes
+                // resolve identically (the v1.3.17 lesson: fix all readers
+                // in lockstep).
+                combined = CombinedTrigger;
+                canonLt = Read(HMController.ResolveCanonicalAxis(AxisMap, "lefttrigger", HMAxis.Z));
+                canonRt = Read(HMController.ResolveCanonicalAxis(AxisMap, "righttrigger", HMAxis.Rz));
+                // The combined pass writes these three fields after the
+                // per-axis pass, over every bit of each, so their per-axis
+                // writes never reach the report.
+                for (int i = 0; i < writes.Length; i++)
+                {
+                    var f = writes[i].Field;
+                    if (ReferenceEquals(f, CombinedTrigger) || ReferenceEquals(f, LeftTrigger) || ReferenceEquals(f, RightTrigger))
+                        writes[i] = writes[i] with { Skip = true };
+                }
+            }
+        }
+        return new FramePlan
+        {
+            Writes = writes,
+            Keeps = Array.Exists(writes, w => w.Keep),
+            Combined = combined, LeftField = combined != null ? LeftTrigger : null, RightField = combined != null ? RightTrigger : null,
+            CanonLt = canonLt, CanonRt = canonRt,
+            HasFieldKeys = hasFieldKeys, FieldLt = fieldLt, FieldRt = fieldRt,
+        };
     }
 
     private AxisWrite[] CompileAxisWrites()
@@ -133,7 +231,14 @@ public class HidReportBuilder
     /// trigger axis is nonzero. Array of two: [LT_button_index, RT_button_index].
     /// DS4/DualSense hardware reports L2/R2 as both analog axis AND digital button;
     /// this field replicates that behavior so consumers see both.</summary>
-    public int[]? TriggerButtons { get; set; }
+    public int[]? TriggerButtons
+    {
+        get => _triggerButtons;
+        // The frame plan keeps the two trigger keys only for a pass that
+        // reads them.
+        set { _triggerButtons = value; _plan = null; }
+    }
+    private int[]? _triggerButtons;
 
     // Semantic axis mapping (resolved after parsing)
     public InputField? LeftStickX { get; private set; }
@@ -222,7 +327,7 @@ public class HidReportBuilder
             builder.AxisMap = axisMap;
             builder.ApplyAxisMap(axisMap);
         }
-        builder._axisWrites = builder.CompileAxisWrites();
+        builder._plan = builder.CompilePlan();
         return builder;
     }
 
@@ -354,6 +459,8 @@ public class HidReportBuilder
                 CombinedTrigger = null;
                 break;
         }
+        // The trigger passes read the slots just set.
+        _plan = CompilePlan();
     }
 
     /// <summary>The names an axisMap value takes, in any case.</summary>
@@ -786,7 +893,10 @@ public class HidReportBuilder
     /// synthesis, hat priority chain (HatDegrees &gt; HatHundredths &gt;
     /// HatRaw &gt; Hat), trigger-to-button derivation, Guide routing, and
     /// button packing all run as before: only the axis-write path
-    /// changed from named slots to dict-driven.</para></summary>
+    /// changed from named slots to dict-driven.</para>
+    ///
+    /// <para>A field the combined pass writes over is not written before
+    /// it (the frame plan).</para></summary>
     public void BuildReportInto(byte[] report,
         IReadOnlyDictionary<HMAxis, float>? axes,
         int hatValue = 0,
@@ -794,6 +904,16 @@ public class HidReportBuilder
         float? hatDegrees = null,
         int? hatHundredths = null,
         ushort? hatRaw = null)
+        => BuildReportInto(report, axes, Span<float>.Empty, hatValue, buttonMask, hatDegrees, hatHundredths, hatRaw);
+
+    /// <summary><see cref="BuildReportInto(byte[], IReadOnlyDictionary{HMAxis, float}?, int, uint, float?, int?, ushort?)"/>
+    /// that looks each key up once a frame: a key a trigger pass reads is
+    /// kept in <paramref name="kept"/> by the per-axis write that looks it
+    /// up, when <paramref name="kept"/> holds its index. The caller owns
+    /// the buffer, one per controller, whose frames its submit lock
+    /// serializes, so the frame needs no stack buffer.</summary>
+    internal void BuildReportInto(byte[] report, IReadOnlyDictionary<HMAxis, float>? axes, Span<float> kept,
+        int hatValue, uint buttonMask, float? hatDegrees, int? hatHundredths, ushort? hatRaw)
     {
         if (report == null) throw new ArgumentNullException(nameof(report));
         if (report.Length < InputReportByteSize)
@@ -817,27 +937,36 @@ public class HidReportBuilder
                       WireArith.Linear(normalized, field.LogicalMin, field.LogicalMax, invert: false, rest: 0));
         }
 
-        double GetAxisValue(HMAxis key, double def)
-        {
-            // A NaN writes the field's rest, what an unwritten one takes.
-            if (axes != null && axes.TryGetValue(key, out var v))
-                return WireArith.Normalized(v, def);
-            return def;
-        }
-
         // Per-axis pass: write every declared analog input from the dict.
         // An axis the dict leaves out, or gives NaN, rests at 0.5 when it is
         // a stick or a signed field, and at 0.0 otherwise (CompileAxisWrites).
         // Until v2.0.0 an unsigned stick left out rested at 0, full left or
-        // up. A builder made other than by Parse compiles here, once.
-        var axisWrites = _axisWrites ??= CompileAxisWrites();
+        // up. A NaN writes the field's rest, what an unwritten one takes. A
+        // write marked Keep keeps its lookup for the trigger passes below,
+        // its value in kept and its bit in found, when kept holds its index.
+        // kept[i] is read only where found has bit i, set after kept[i] is
+        // written. A builder made other than by Parse compiles its plan
+        // here, once.
+        var plan = _plan ??= CompilePlan();
+        ulong found = 0;
+        var axisWrites = plan.Writes;
         for (int i = 0; i < axisWrites.Length; i++)
         {
             ref readonly var w = ref axisWrites[i];
-            // GetAxisValue gives a value in [0, 1], a NaN at the field's rest,
-            // so each field takes WireArith's form for such an input,
-            // Linear's or Centered's value on it.
-            double v = GetAxisValue(w.Key, w.Rest);
+            // v is a value in [0, 1], a NaN at the field's rest, so each
+            // field takes WireArith's form for such an input, Linear's or
+            // Centered's value on it.
+            double v = w.Rest;
+            if (axes != null && axes.TryGetValue(w.Key, out var f))
+            {
+                v = WireArith.Normalized(f, w.Rest);
+                if (w.Keep && (uint)i < (uint)kept.Length)
+                {
+                    kept[i] = f;
+                    found |= 1UL << i;
+                }
+            }
+            if (w.Skip) continue;
             int raw = w.IsCentered ? WireArith.CenteredUnit(v, w.Center, w.SlopeLow, w.SlopeStep)
                 : unchecked(w.Min + WireArith.Unit(v, w.Span));
             WriteBits(report, w.Field.BitOffset + idOffset, w.Field.BitSize, raw);
@@ -859,48 +988,23 @@ public class HidReportBuilder
         // default), then write both the combined Z byte AND the separate
         // Vx / Vy bytes so dinput sees the combined value and WGI sees the
         // raw triggers.
-        if (CombinedTrigger != null && LeftTrigger != null && RightTrigger != null)
+        if (plan.Combined != null)
         {
-            // Canonical trigger positions, resolved once per builder
-            // (issue #34). The builder instance is per-profile cached
-            // (GetOrBuildReportBuilder) and AxisMap is fixed after
-            // construction, so the axisMap walk (hex parse + role
-            // compares) that used to run per frame is a constant. Shares
-            // HMController.ResolveCanonicalAxis so both lanes resolve
-            // identically (the v1.3.17 lesson: fix all readers in
-            // lockstep).
-            if (!_canonicalTriggersResolved)
-            {
-                _canonicalLtCached = HMController.ResolveCanonicalAxis(AxisMap, "lefttrigger", HMAxis.Z);
-                _canonicalRtCached = HMController.ResolveCanonicalAxis(AxisMap, "righttrigger", HMAxis.Rz);
-                _canonicalTriggersResolved = true;
-            }
-            HMAxis canonicalLt = _canonicalLtCached;
-            HMAxis canonicalRt = _canonicalRtCached;
-            var leftFieldKey  = (HMAxis)((LeftTrigger.UsagePage  << 8) | LeftTrigger.Usage);
-            var rightFieldKey = (HMAxis)((RightTrigger.UsagePage << 8) | RightTrigger.Usage);
-            // Source the trigger values from the canonical (user-facing)
-            // position first: PadForge / HMGamepadStateHelpers write here.
-            // Fall back to the wire field's own Usage so the test-fixture
-            // path (HidReportBuilder.StandardAxes writes to LeftTrigger.Usage
-            // = Vx) keeps working without a canonical entry.
-            double GetTrigger(HMAxis canonical, HMAxis fieldKey, double def)
-            {
-                if (axes != null)
-                {
-                    if (axes.TryGetValue(canonical, out var vCanon))
-                        return WireArith.Normalized(vCanon, def);
-                    if (axes.TryGetValue(fieldKey, out var vField))
-                        return WireArith.Normalized(vField, def);
-                }
-                return def;
-            }
-            double lt = GetTrigger(canonicalLt, leftFieldKey,  0.0);
-            double rt = GetTrigger(canonicalRt, rightFieldKey, 0.0);
+            // Canonical trigger positions, resolved once per plan (issue
+            // #34) from AxisMap. Source the trigger values from the
+            // canonical (user-facing) position first: PadForge /
+            // HMGamepadStateHelpers write here. Fall back to the wire
+            // field's own Usage so the test-fixture path
+            // (HidReportBuilder.StandardAxes writes to LeftTrigger.Usage =
+            // Vx) keeps working without a canonical entry.
+            double lt = TryRead(plan.CanonLt, kept, found, axes, out var cl) ? WireArith.Normalized(cl, 0.0)
+                      : TryRead(plan.FieldLt, kept, found, axes, out var fl) ? WireArith.Normalized(fl, 0.0) : 0.0;
+            double rt = TryRead(plan.CanonRt, kept, found, axes, out var cr) ? WireArith.Normalized(cr, 0.0)
+                      : TryRead(plan.FieldRt, kept, found, axes, out var fr) ? WireArith.Normalized(fr, 0.0) : 0.0;
             double combined = Math.Clamp(0.5 + (rt - lt) * 0.5, 0.0, 1.0);
-            WriteField(CombinedTrigger, combined);
-            WriteField(LeftTrigger,  lt);
-            WriteField(RightTrigger, rt);
+            WriteField(plan.Combined, combined);
+            WriteField(plan.LeftField,  lt);
+            WriteField(plan.RightField, rt);
         }
 
         if (HatSwitch != null)
@@ -962,12 +1066,11 @@ public class HidReportBuilder
         // as both analog axes AND digital buttons (buttons 7/8 in the DS4
         // descriptor). When TriggerButtons is set, any nonzero trigger value
         // automatically engages the corresponding descriptor button.
-        if (TriggerButtons != null && TriggerButtons.Length >= 2 && LeftTrigger != null && RightTrigger != null)
+        // The plan has the two fields' keys when both trigger slots are set.
+        if (TriggerButtons != null && TriggerButtons.Length >= 2 && plan.HasFieldKeys)
         {
-            var ltKey = (HMAxis)((LeftTrigger.UsagePage << 8) | LeftTrigger.Usage);
-            var rtKey = (HMAxis)((RightTrigger.UsagePage << 8) | RightTrigger.Usage);
-            double lt = GetAxisValue(ltKey, 0.0);
-            double rt = GetAxisValue(rtKey, 0.0);
+            double lt = TryRead(plan.FieldLt, kept, found, axes, out var tl) ? WireArith.Normalized(tl, 0.0) : 0.0;
+            double rt = TryRead(plan.FieldRt, kept, found, axes, out var tr) ? WireArith.Normalized(tr, 0.0) : 0.0;
             if (lt > 0.0 && TriggerButtons[0] >= 0 && TriggerButtons[0] < Buttons.Count)
                 WriteBits(report, Buttons[TriggerButtons[0]].BitOffset + idOffset,
                           Buttons[TriggerButtons[0]].BitSize, 1);
@@ -1029,6 +1132,26 @@ public class HidReportBuilder
             }
         }
 
+    }
+
+    /// <summary>The frame's lookup of <paramref name="k"/>: the value its
+    /// write kept, when the plan keeps it, or the dictionary's. The same
+    /// answer as a lookup of the key, since the write looked it up in this
+    /// frame, and a lookup has no side effect.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    private static bool TryRead(in TriggerKey k, ReadOnlySpan<float> kept, ulong found,
+                                IReadOnlyDictionary<HMAxis, float>? axes, out float v)
+    {
+        // An index past kept, -1 among them, was not kept this frame.
+        if ((uint)k.Index < (uint)kept.Length)
+        {
+            bool has = ((found >> k.Index) & 1) != 0;
+            v = has ? kept[k.Index] : 0f;
+            return has;
+        }
+        if (axes != null) return axes.TryGetValue(k.Key, out v);
+        v = 0f;
+        return false;
     }
 
     static void WriteBits(byte[] buffer, int bitOffset, int bitSize, int value)
