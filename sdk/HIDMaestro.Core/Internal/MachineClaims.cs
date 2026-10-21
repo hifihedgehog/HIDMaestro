@@ -187,6 +187,23 @@ internal static partial class MachineClaims
         catch (UnauthorizedAccessException) { return false; }
     }
 
+    /// <summary>The owner claim a public call takes, through the removal
+    /// gate, right before its first machine-wide write. False only while
+    /// this process runs a removal of HIDMaestro itself, when the call must
+    /// write nothing. In a process that is not elevated it is true, and the
+    /// call's own write reports the missing rights as before. The removal
+    /// itself writes through none of these calls.</summary>
+    internal static bool ClaimBeforeWrite()
+    {
+        if (Uninstall.RemovalGate.RemovingHere) return false;
+        return TryEnsureOwner() || !Uninstall.RemovalGate.RemovingHere;
+    }
+
+    /// <summary>The message of the InvalidOperationException a public call
+    /// throws when this process's own removal of HIDMaestro is running.</summary>
+    internal const string RemovingHereMessage =
+        "This process is removing HIDMaestro (HMUninstall.Run), and nothing is written until the removal ends.";
+
     private static void TryWriteRecord()
     {
         lock (s_lock) TryWriteRecordLocked();

@@ -141,6 +141,9 @@ internal static partial class Uninstaller
         RemovalGate.RemovingHere = true;
         try
         {
+            // An extract of this process already staging, such as the
+            // prewarm's, ends before the first step. Later ones refuse.
+            DriverBuilder.WaitForExtract();
             OwnerSweep.CreateGate.EnterWriteLock();
             MachineClaims.NoNewClaim = true;
             try { return RunGated(options); }

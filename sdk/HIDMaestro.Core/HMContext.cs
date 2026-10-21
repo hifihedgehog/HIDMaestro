@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -183,12 +183,16 @@ public sealed class HMContext : IDisposable
     /// and does not change the outcome.</summary>
     /// <exception cref="HMPayloadMissingException">This build carries no
     /// USB/IP transport for this machine's architecture.</exception>
+    /// <exception cref="InvalidOperationException">This process is running
+    /// <see cref="HMUninstall.Run"/>. Nothing is installed.</exception>
     public static void InstallUsbipBackend(Action<string>? progress = null)
     {
+        HMBuildInfo.ThrowIfMissing(HMPayload.UsbipTransport);
         // The owner claim first, through the removal gate
         // (Uninstall.RemovalGate), so the install waits for a removal
         // another process runs and a removal sees this program.
-        Internal.MachineClaims.TryEnsureOwner();
+        if (!Internal.MachineClaims.ClaimBeforeWrite())
+            throw new InvalidOperationException(Internal.MachineClaims.RemovingHereMessage);
         Internal.Usbip.UsbipDriverInstaller.EnsureInstalled(progress);
     }
 
@@ -318,7 +322,9 @@ public sealed class HMContext : IDisposable
         // (Uninstall.RemovalGate): RemoveOrphaned does it itself.
         if (scope == HMCleanupScope.Everything)
         {
-            Internal.MachineClaims.TryEnsureOwner();
+            // While this process runs a removal, which removes all of it,
+            // the cleanup does nothing, as RemoveOrphaned does.
+            if (!Internal.MachineClaims.ClaimBeforeWrite()) return;
             Internal.DeviceOrchestrator.RemoveEverything(preserveInstall);
         }
         else

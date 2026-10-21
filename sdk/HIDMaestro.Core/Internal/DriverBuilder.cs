@@ -210,12 +210,26 @@ public static class DriverBuilder
     /// checks the files again under its pin.</para></summary>
     private static readonly object s_extractLock = new();
 
+    /// <summary>Return once no extract of this process is in flight. A
+    /// removal calls it after it sets RemovalGate.RemovingHere, so every
+    /// later extract refuses and none started earlier is still writing.</summary>
+    internal static void WaitForExtract()
+    {
+        lock (s_extractLock) { }
+    }
+
     public static string EnsureExtracted()
     {
         // Serialized so the constructor's prewarm and a foreground deploy
         // never stage the same file at once.
         lock (s_extractLock)
         {
+            // While this process removes HIDMaestro, nothing is staged
+            // beside the removal's deletes (Uninstaller.Run waits for an
+            // extract in flight before it starts).
+            if (Uninstall.RemovalGate.RemovingHere)
+                throw new InvalidOperationException(MachineClaims.RemovingHereMessage);
+
             // A build without this machine's driver stops here, before the
             // staging directory exists.
             HMBuildInfo.ThrowIfMissing(HMPayload.Driver);

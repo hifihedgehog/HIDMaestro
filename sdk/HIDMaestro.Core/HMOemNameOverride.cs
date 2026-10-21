@@ -96,17 +96,24 @@ public static class HMOemNameOverride
     /// <exception cref="ArgumentNullException"><paramref name="label"/> is null.</exception>
     /// <exception cref="UnauthorizedAccessException">The process is not
     /// elevated.</exception>
+    /// <exception cref="InvalidOperationException">This process is running
+    /// <see cref="HMUninstall.Run"/>. Nothing is written.</exception>
     public static void Set(ushort vid, ushort pid, string label)
     {
+        if (label is null) throw new ArgumentNullException(nameof(label));
         // The owner claim first, through the removal gate
         // (Uninstall.RemovalGate), so the write waits for a removal another
         // process runs and a removal sees this program.
-        MachineClaims.TryEnsureOwner();
+        if (!MachineClaims.ClaimBeforeWrite())
+            throw new InvalidOperationException(MachineClaims.RemovingHereMessage);
         OemNameOverrideStore.Claim(vid, pid, label);
     }
 
     /// <summary>Restore the pre-Set DirectInput OEM-name label for (vid, pid).
-    /// If no prior Set is tracked for this VID:PID, this is a no-op.</summary>
+    /// If no prior Set is tracked for this VID:PID, this is a no-op. With a
+    /// record pending it waits for a removal another program runs, and while
+    /// this process runs <see cref="HMUninstall.Run"/> it does nothing, since
+    /// that removal restores the record.</summary>
     /// <param name="vid">USB Vendor ID.</param>
     /// <param name="pid">USB Product ID.</param>
     /// <exception cref="UnauthorizedAccessException">The process is not
@@ -119,7 +126,9 @@ public static class HMOemNameOverride
     /// <summary>Scan the HIDMaestro pending-override hive and restore every
     /// prior override left behind by a crashed, force-killed, or otherwise
     /// uncleanly-exited consumer. Safe to call on every startup. Returns the
-    /// number of overrides restored.</summary>
+    /// number of overrides restored. With a record pending it waits for a
+    /// removal another program runs, and while this process runs
+    /// <see cref="HMUninstall.Run"/> it restores nothing and returns 0.</summary>
     /// <exception cref="UnauthorizedAccessException">The process is not
     /// elevated, and an override is pending.</exception>
     public static int RecoverOrphans() =>

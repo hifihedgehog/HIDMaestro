@@ -54,21 +54,23 @@ public static class HMVR
     ///
     /// <para>A failure to update the registry throws
     /// <see cref="InvalidOperationException"/> with the cause as its inner
-    /// exception.</para></summary>
-    public static bool EnsureDriverRegistered()
-    {
-        // The owner claim first, through the removal gate
-        // (Uninstall.RemovalGate), so the registration waits for a removal
-        // another process runs and a removal sees this program.
-        MachineClaims.TryEnsureOwner();
-        return VrDriverBuilder.EnsureDriverRegistered();
-    }
+    /// exception.</para>
+    ///
+    /// <para>With SteamVR present, the call takes the program's HIDMaestro
+    /// owner claim before it writes, so it waits for a removal another
+    /// program runs (<see cref="HMUninstall"/>), and a removal refuses while
+    /// this program runs. Without SteamVR it claims nothing. While this
+    /// process's own removal runs it throws
+    /// <see cref="InvalidOperationException"/> and writes nothing.</para></summary>
+    public static bool EnsureDriverRegistered() => VrDriverBuilder.EnsureDriverRegistered();
 
     /// <summary>Unregister the driver from the same OpenVR path registry
     /// <see cref="EnsureDriverRegistered"/> writes, and clear the idempotence
     /// gate. A failure to update the registry throws
     /// <see cref="InvalidOperationException"/> with the cause as its inner
-    /// exception. Requires admin.</summary>
+    /// exception. Requires admin. Waits for a removal another program runs,
+    /// and does nothing while this process's own removal runs, which takes
+    /// the registration itself.</summary>
     public static void UnregisterDriver() =>
         VrDriverBuilder.UnregisterDriver();
 

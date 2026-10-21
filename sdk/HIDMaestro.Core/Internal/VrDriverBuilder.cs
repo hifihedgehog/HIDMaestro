@@ -141,6 +141,11 @@ internal static class VrDriverBuilder
         string? steamVr = FindSteamVR();
         if (steamVr == null)
             return false;
+        // The owner claim, through the removal gate, now that there is
+        // something to write: a removal another process runs ends first,
+        // and a removal started later sees this program.
+        if (!MachineClaims.ClaimBeforeWrite())
+            throw new InvalidOperationException(MachineClaims.RemovingHereMessage);
 
         var asm = typeof(VrDriverBuilder).Assembly;
         string[] names = asm.GetManifestResourceNames()
@@ -277,6 +282,10 @@ internal static class VrDriverBuilder
     /// stay as they were.</summary>
     public static void UnregisterDriver()
     {
+        // Through the removal gate, so this never edits the path registry
+        // beside a removal's own edit of it. While this process runs a
+        // removal, that removal takes the registration.
+        if (!MachineClaims.ClaimBeforeWrite()) return;
         OpenVrPathRegistry.RemoveDriver(ExtractRoot);
         using var k = Registry.LocalMachine.CreateSubKey(RegKeyPath);
         k.DeleteValue(VrManifestRegValue, throwOnMissingValue: false);
