@@ -131,4 +131,70 @@ internal static class Hid
     }
 
     sealed class StopFlag { public volatile bool Set; }
+
+    /// <summary>A reader on the interface that notes the moment a report
+    /// carries a given value at one byte position: <see cref="Arm"/> sets the
+    /// value and returns the time it was set, and <see cref="Hit"/> is the
+    /// time a report read after that carried it, 0 until one does. Times are
+    /// Stopwatch timestamps.</summary>
+    internal sealed class Watch : IDisposable
+    {
+        readonly IntPtr _h;
+        readonly Thread _reader;
+        readonly int _index;
+        volatile bool _stop;
+        volatile int _want = -1;
+        long _hit;
+
+        internal bool Open => _h != Invalid;
+
+        internal Watch(string path, int index)
+        {
+            _index = index;
+            _h = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_RW, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+            int len = 0;
+            if (_h != Invalid && HidD_GetPreparsedData(_h, out IntPtr pp))
+            {
+                var caps = new byte[64];
+                if (HidP_GetCaps(pp, caps) == HIDP_STATUS_SUCCESS) len = BitConverter.ToUInt16(caps, 4);
+                HidD_FreePreparsedData(pp);
+            }
+            if (_h != Invalid) HidD_SetNumInputBuffers(_h, 512);
+            _reader = new Thread(() =>
+            {
+                if (len == 0) return;
+                var buf = new byte[len];
+                while (!_stop)
+                {
+                    if (!ReadFile(_h, buf, len, out int read, IntPtr.Zero)) break;
+                    long at = Stopwatch.GetTimestamp();
+                    int want = _want;
+                    // The value is read again after the compare, so a report
+                    // matched against a value Arm has since replaced is not
+                    // taken for the new one.
+                    if (want >= 0 && read > _index && buf[_index] == want && _want == want)
+                        Interlocked.CompareExchange(ref _hit, at, 0);
+                }
+            }) { IsBackground = true, Priority = ThreadPriority.Highest };
+            _reader.Start();
+        }
+
+        internal long Arm(byte value)
+        {
+            _want = -1;
+            Interlocked.Exchange(ref _hit, 0);
+            _want = value;
+            return Stopwatch.GetTimestamp();
+        }
+
+        internal long Hit => Interlocked.Read(ref _hit);
+
+        public void Dispose()
+        {
+            _stop = true;
+            if (_h != Invalid) CancelIoEx(_h, IntPtr.Zero);
+            _reader.Join(2000);
+            if (_h != Invalid) CloseHandle(_h);
+        }
+    }
 }

@@ -15,7 +15,10 @@
 //      real stack.
 //   5. Audio out: WASAPI renders a tone to the endpoint and the SDK's
 //      UsbAudio.Output delivers the PCM windows (speaker/haptic lanes).
-//   6. Microphone: the SDK's feed is captured by WASAPI as live audio.
+//   6. Microphone: the SDK's feed is captured by WASAPI as live audio. A
+//      silent capture is a skip when a loopback of the composite's own
+//      speaker is silent too, as in Windows Sandbox, whose audio engine
+//      silences every capture.
 //   7. Teardown detaches cleanly: the devnode and endpoints disappear.
 //   8. A FramesReceived handler can dispose its controller with another,
 //      through DisposeControllersInParallel and then HMContext.Dispose,
@@ -401,6 +404,7 @@ internal static partial class Program
             {
                 // Feed a loud 1 kHz square continuously while WASAPI records.
                 var feeding = true;
+                long accepted = 0;
                 var feeder = new Thread(() =>
                 {
                     var block = new byte[192 * 4]; // 4 ms per push
@@ -412,13 +416,19 @@ internal static partial class Program
                             block[i] = (byte)(v & 0xFF); block[i + 1] = (byte)(v >> 8);
                             block[i + 2] = block[i]; block[i + 3] = block[i + 1];
                         }
-                        c.UsbAudio!.Microphone.Submit(block);
+                        Interlocked.Add(ref accepted, c.UsbAudio!.Microphone.Submit(block));
                         Thread.Sleep(3);
                     }
                 }) { IsBackground = true };
                 feeder.Start();
 
                 long captured = 0, energy = 0;
+                try
+                {
+                    var volume = capture.AudioEndpointVolume;
+                    Console.WriteLine($"  [diag] capture endpoint muted={volume.Mute} level={volume.MasterVolumeLevelScalar:F2} hardware support=0x{volume.HardwareSupport:X}");
+                }
+                catch (Exception ex) { Console.WriteLine($"  [diag] capture endpoint volume unreadable: {ex.GetType().Name}"); }
                 using var wi = new WasapiCapture(capture);
                 wi.DataAvailable += (_, e) =>
                 {
@@ -439,13 +449,59 @@ internal static partial class Program
                 wi.StopRecording();
                 feeding = false;
                 feeder.Join(200);
+                // What the device side handed the host: the fed bytes the
+                // engine accepted, less what still waits in its ring. A
+                // silent capture with bytes handed over was silenced after
+                // the transport.
+                Console.WriteLine($"  [diag] microphone: {Interlocked.Read(ref accepted)} bytes fed, {c.UsbAudio!.Microphone.BufferedBytes} still buffered, " +
+                                  $"streaming {c.UsbAudio.Microphone.IsStreaming}, capture format {wi.WaveFormat}");
                 Check("capture endpoint recorded data", Interlocked.Read(ref captured) > 0,
                       $"{Interlocked.Read(ref captured)} bytes");
-                Check("captured audio is the fed signal, not silence", Interlocked.Read(ref energy) > 0,
-                      $"mean-abs accum {Interlocked.Read(ref energy)}");
+                // A silent capture is judged against a capture that never
+                // touches the device: a loopback of the composite's own
+                // speaker while a tone plays. Windows Sandbox's audio engine
+                // hands every capture client silence, a loopback included,
+                // so there a silent microphone says nothing of the device.
+                double loopback = Interlocked.Read(ref energy) > 0 || render == null ? double.NaN : LoopbackEnergy(render);
+                if (loopback == 0)
+                    Console.WriteLine("  [SKIP] captured audio is the fed signal, not silence: this machine's audio engine silences every capture, " +
+                                      "and a loopback of the composite's speaker during a tone is silent too");
+                else
+                    Check("captured audio is the fed signal, not silence", Interlocked.Read(ref energy) > 0,
+                          $"mean-abs accum {Interlocked.Read(ref energy)}{(double.IsNaN(loopback) ? "" : FormattableString.Invariant($", loopback control energy {loopback:F1}"))}");
                 Check("mic stream open observed", micStreamed);
             }
         }
+    }
+
+    /// <summary>The summed magnitude of a 1.5 s loopback capture of
+    /// <paramref name="render"/> while a 440 Hz tone plays to it, 32-bit
+    /// float as the shared-mode engine delivers it. 0 when every sample is
+    /// silent, NaN when the capture could not run.</summary>
+    static double LoopbackEnergy(MMDevice render)
+    {
+        try
+        {
+            using var output = new WasapiOut(render, AudioClientShareMode.Shared, true, 50);
+            output.Init(new SignalGenerator(48000, 2) { Type = SignalGeneratorType.Sin, Frequency = 440, Gain = 0.5 });
+            output.Play();
+            Thread.Sleep(300);
+            double energy = 0;
+            using var loop = new WasapiLoopbackCapture(render);
+            loop.DataAvailable += (_, e) =>
+            {
+                double sum = 0;
+                for (int i = 0; i + 3 < e.BytesRecorded; i += 4) sum += Math.Abs(BitConverter.ToSingle(e.Buffer, i));
+                lock (loop) energy += sum;
+            };
+            loop.StartRecording();
+            Thread.Sleep(1500);
+            loop.StopRecording();
+            output.Stop();
+            Thread.Sleep(100);
+            lock (loop) return energy;
+        }
+        catch { return double.NaN; }
     }
 
     enum HandlerDispose { WarmUp, Set, Context }

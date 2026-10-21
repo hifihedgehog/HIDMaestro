@@ -1,30 +1,45 @@
-// The usbip-win2 install on a clean machine, in Windows Sandbox.
+// usbip-win2's host controller on a clean machine, in Windows Sandbox: the
+// SDK's install with no vendor installer, the composite with no root-hub
+// filter, and the usbip-win2 part of a full removal.
 //
-//   A. clean    A composite create on a machine without usbip-win2 runs the
-//               bundled installer, when A runs alone. In the sandbox it
-//               shares with B and C, C's creates run it and A's checks read
-//               that install. Afterward there is no Start menu folder,
-//               no desktop shortcut, and no GUI, SDK or PDB file. The VC++
-//               runtime the host controller's own installer step needs is
-//               there, and the composite enumerates and carries input.
+//   A. clean    A composite create on a machine without usbip-win2 installs
+//               the host controller from the package HIDMaestro.Core carries
+//               (C's creates install it when A runs with B and C, and A's
+//               checks read that install). One ROOT\USBIP_WIN2\UDE devnode
+//               with HIDMaestro's stamp after usbip-win2's id, the package
+//               in the driver store, and an install record naming both. No
+//               usbip2_filter package or service, no Apps entry, program
+//               folder, scheduled task, Start menu folder or shortcut, and no
+//               KMDF debug values. The composite enumerates and carries input
+//               with no filter on its root hub.
 //   B. record   A machine holds usbip-win2's uninstall entry, pointing at an
-//               uninstaller that exists, but not its driver package. The SDK
-//               refuses instead of running the installer, which would run
-//               that uninstaller first.
+//               uninstaller that exists, but not its driver package. The
+//               install goes ahead from the SDK's own package, the planted
+//               uninstaller never runs, and the entry is left as it was.
 //   C. together Two programs create their first composite at the same
 //               moment on a clean machine. One installs, the other waits for
-//               it under the deploy lock: one host controller, and both
+//               it under the transport lock: one host controller, and both
 //               composites appear.
+//   E. e2e      With A's install, S45's probe (usbip_e2e_check: HID input,
+//               output, feature, audio out and the microphone) and S65's
+//               (switch2_composite_check: a HID and WinUSB composite, its bulk
+//               commands and rumble) run inside the sandbox, so every check
+//               they make runs with no filter on the root hub.
+//   R. remove   The usbip-win2 part of a full removal (UsbipRemoval.Remove):
+//               a preview that changes nothing, a removal of an install the
+//               record proves, a reinstall after it, an install with no
+//               record (kept, then taken when usbip-win2 is included, refused
+//               while another program that uses usbip-win2 is installed), and
+//               a host controller that carried a composite since Windows
+//               started (kept until a restart, its persona's records gone).
 //   N. nostream A, with the composite's profile loaded from a file without
 //               its idle stream ("stream"), the one change in what the
 //               device sends between v1.12.0 and 2.0.0. Runs only when named.
-//   K. killed-loader
-//               One program's first composite while the installer's loader
-//               is ended mid-install: a watcher ends the loader with exit
-//               code 255 once its setup child runs. The setup finishes the
-//               install alone, and the create still succeeds, reading the
-//               machine again after the failing exit code. The SDK's
-//               diagnostic log must name both steps. Runs only when named.
+//   V. verifier The USB/IP input path with KMDF's verifier values on and off:
+//               SubmitState to the ReadFile that shows it, on a host
+//               controller restarted unused after the values were set or
+//               left out, in sandboxes that alternate on, off, on, off.
+//               Runs only when named.
 //
 // --offline checks, on this machine with no sandbox, no device and no
 // elevation, the parts of A and N that can be: N's profile differs from the
@@ -39,16 +54,15 @@
 // Notes print as [NOTE] and are not checks.
 //
 // The host role starts a sandbox with wsb.exe, which opens no window, runs
-// this program inside it as SYSTEM, and reports what it wrote back. A, B
-// and C share one sandbox, since each sandbox starts clean and its
-// usbip-win2 install takes about four minutes (the sandbox itself starts in
-// about 2 s, measured 2026-10-18): B runs first and leaves the machine without usbip-win2, C installs it on
-// that clean machine, and A's checks then read C's install and a
-// composite created over it. Any other selection, N included, starts a
-// sandbox per scenario. Inside, the program runs as a self-contained copy
-// published to sandbox\ beside this one, since the sandbox has no .NET
-// runtime. Run with /VERYSILENT as its first argument, it is the planted
-// uninstaller of scenario B and only leaves a marker.
+// this program inside it as SYSTEM, and reports what it wrote back. B, C, A
+// and E share one sandbox: B plants its entry, C installs on that machine,
+// A's checks read C's install and a composite created over it, and E runs
+// the two probes over the same install. R runs in a sandbox of its own, and
+// so does each of N and V's runs. Inside, the programs run as self-contained
+// copies published beside this one (sandbox\, sandbox-e2e\ and
+// sandbox-switch2\), since the sandbox has no .NET runtime. Run with
+// /VERYSILENT as its first argument, it is the planted uninstaller of
+// scenario B and only leaves a marker.
 //
 // Requires elevation for nothing on the host. Exit 0 PASS, 1 FAIL, 2 when
 // Windows Sandbox is not available.
@@ -62,9 +76,14 @@ using System.Threading;
 using HIDMaestro;
 using Microsoft.Win32;
 
-internal static class Program
+internal static partial class Program
 {
     const string UninstallKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{199505b0-b93d-4521-a8c7-897818e0205a}_is1";
+    const string RecordKey = @"SOFTWARE\HIDMaestroUsbip";
+    const string UdeHardwareId = @"ROOT\USBIP_WIN2\UDE";
+    const string StampHardwareId = @"ROOT\HIDMAESTRO_UDE";
+    const string WdfKey = @"SYSTEM\CurrentControlSet\Services\usbip2_ude\Parameters\Wdf";
+    const string DetachTask = "USBip Detach All On Reboot Or Shutdown";
     const string Marker = @"C:\results\uninstaller-ran.marker";
 
     static int s_total, s_failures;
@@ -88,8 +107,7 @@ internal static class Program
         if (args.Length >= 3 && args[0] == "--in-sandbox")
         {
             bool diag = args.Length >= 4 && args[3] == "diag";
-            // K reads the SDK's diagnostic lines, so it always runs with them.
-            if (diag || args[1] == "killed-loader") DiagLog.Start(Path.Combine(args[2], "main-diag.log"));
+            if (diag) DiagLog.Start(Path.Combine(args[2], "main-diag.log"));
             if (!diag) return InSandbox(args[1], args[2]);
             using (DiagLog.SampleInstallers(Path.Combine(args[2], "processes.log")))
             {
@@ -104,27 +122,24 @@ internal static class Program
                 DiagLog.Start(Path.Combine(Path.GetDirectoryName(args[2])!, $"child{args[3]}-diag.log"));
             return CreateComposite(args[1], args[2], args[3]);
         }
-        if (args.Length >= 2 && args[0] == "--record-create")
-            return RecordCreate(args[1]);
         if (args.Length > 0 && args[0] == "--offline")
             return Offline();
         int at = Array.IndexOf(args, "--diag");
         if (at >= 0 && at + 1 < args.Length) s_diagDir = Path.GetFullPath(args[at + 1]);
-        return Host(args.Length > 0 && !args[0].StartsWith("--", StringComparison.Ordinal) ? args[0].ToUpperInvariant() : "ABC");
+        return Host(args.Length > 0 && !args[0].StartsWith("--", StringComparison.Ordinal) ? args[0].ToUpperInvariant() : "ABCER");
     }
 
     // ── Host ───────────────────────────────────────────────────────────
 
     // --diag <dir>: each program inside the sandbox runs with HIDMAESTRO_DIAG=1
     // and writes the SDK's diagnostic lines to a log of its own. Those logs, a
-    // once-a-second list of the installer processes, the VC++ runtime's
-    // bundle and package logs, the Windows Installer events and Windows'
-    // setupapi logs are copied to <dir> (DiagLog).
+    // once-a-second list of the install's processes and Windows' setupapi
+    // logs are copied to <dir> (DiagLog).
     static string? s_diagDir;
 
     static int Host(string only)
     {
-        Console.WriteLine("=== The usbip-win2 install on a clean machine ===");
+        Console.WriteLine("=== usbip-win2's host controller on a clean machine ===");
         string? wsb = FindOnPath("wsb.exe");
         if (wsb == null)
         {
@@ -138,29 +153,36 @@ internal static class Program
             return 1;
         }
 
-        var scenarios = new (char Id, string Name, string Title)[]
-        {
-            ('A', "clean", "a clean machine"),
-            ('B', "record", "an uninstall entry without the driver package"),
-            ('C', "together", "two programs' first composites at the same moment"),
-            ('N', "nostream", "a clean machine, the composite without its idle stream"),
-            ('K', "killed-loader", "one program's first composite while the installer's loader is ended mid-install"),
-        };
-        if (only.Contains('A') && only.Contains('B') && only.Contains('C'))
+        if (only.Contains('A') || only.Contains('B') || only.Contains('C') || only.Contains('E'))
         {
             Console.WriteLine();
-            Console.WriteLine("B, C, A. an uninstall entry without the driver package, two programs' first composites at the same moment, then a clean install's checks");
-            try { RunInSandbox(wsb, publish, "all"); }
+            Console.WriteLine("B, C, A, E. an uninstall entry without the driver package, two programs' first composites at the same moment, a clean install's checks, then S45's and S65's probes over it");
+            try { RunInSandbox(wsb, publish, only.Contains('E') ? "all" : "all-no-e2e"); }
             catch (Exception ex) { Check("B, C, A ran to the end", false, $"{ex.GetType().Name}: {ex.Message}"); }
-            only = only.Replace("A", "").Replace("B", "").Replace("C", "");
         }
-        foreach (var (id, name, title) in scenarios)
+        if (only.Contains('R'))
         {
-            if (!only.Contains(id)) continue;
             Console.WriteLine();
-            Console.WriteLine($"{id}. {title}");
-            try { RunInSandbox(wsb, publish, name); }
-            catch (Exception ex) { Check($"{id} ran to the end", false, $"{ex.GetType().Name}: {ex.Message}"); }
+            Console.WriteLine("R. the usbip-win2 part of a full removal");
+            try { RunInSandbox(wsb, publish, "remove"); }
+            catch (Exception ex) { Check("R ran to the end", false, $"{ex.GetType().Name}: {ex.Message}"); }
+        }
+        if (only.Contains('N'))
+        {
+            Console.WriteLine();
+            Console.WriteLine("N. a clean machine, the composite without its idle stream");
+            try { RunInSandbox(wsb, publish, "nostream"); }
+            catch (Exception ex) { Check("N ran to the end", false, $"{ex.GetType().Name}: {ex.Message}"); }
+        }
+        if (only.Contains('V'))
+        {
+            Console.WriteLine();
+            Console.WriteLine("V. the USB/IP input path with KMDF's verifier values on and off");
+            foreach (string mode in new[] { "verifier-on", "verifier-off", "verifier-on", "verifier-off" })
+            {
+                try { RunInSandbox(wsb, publish, mode); }
+                catch (Exception ex) { Check($"{mode} ran to the end", false, $"{ex.GetType().Name}: {ex.Message}"); }
+            }
         }
 
         Console.WriteLine();
@@ -179,11 +201,17 @@ internal static class Program
         int tries = 0;
         try
         {
-            string config =
-                "<Configuration><Networking>Disable</Networking><MappedFolders>" +
+            string mapped =
                 $"<MappedFolder><HostFolder>{Xml(publish)}</HostFolder><SandboxFolder>C:\\probe</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder>" +
-                $"<MappedFolder><HostFolder>{Xml(results)}</HostFolder><SandboxFolder>C:\\results</SandboxFolder><ReadOnly>false</ReadOnly></MappedFolder>" +
-                "</MappedFolders></Configuration>";
+                $"<MappedFolder><HostFolder>{Xml(results)}</HostFolder><SandboxFolder>C:\\results</SandboxFolder><ReadOnly>false</ReadOnly></MappedFolder>";
+            // S45's and S65's probes, for E.
+            foreach (var (dir, inside) in new[] { ("sandbox-e2e", "C:\\probe-e2e"), ("sandbox-switch2", "C:\\probe-switch2") })
+            {
+                string host = Path.Combine(AppContext.BaseDirectory, dir);
+                if (scenario == "all" && Directory.Exists(host))
+                    mapped += $"<MappedFolder><HostFolder>{Xml(host)}</HostFolder><SandboxFolder>{inside}</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder>";
+            }
+            string config = "<Configuration><Networking>Disable</Networking><MappedFolders>" + mapped + "</MappedFolders></Configuration>";
             // Windows Sandbox runs one instance at a time, and a run killed
             // before its finally leaves its sandbox running, so the next
             // start fails CO_E_APPSINGLEUSE. Each run records the sandbox it
@@ -219,7 +247,7 @@ internal static class Program
             if (!ready) { Check($"{scenario}: the sandbox accepts a command", false); return; }
 
             step.Restart();
-            var ran = Run(wsb, 1_200_000, "exec", "--id", id, "-c",
+            var ran = Run(wsb, 1_800_000, "exec", "--id", id, "-c",
                 $"C:\\probe\\UsbipInstallCheck.exe --in-sandbox {scenario} C:\\results{(s_diagDir != null ? " diag" : "")}", "-r", "System", "--raw");
             runS = step.Elapsed.TotalSeconds;
             string file = Path.Combine(results, "results.txt");
@@ -236,6 +264,7 @@ internal static class Program
             }
             if (!File.ReadAllLines(file).Contains("DONE"))
                 Check($"{scenario}: the run inside the sandbox finished", false, ran.Output.Trim());
+            if (scenario == "all") EndToEnd(wsb, id, results);
         }
         finally
         {
@@ -282,59 +311,42 @@ internal static class Program
         try
         {
             Record($"{scenario}: the machine starts without usbip-win2",
-                   UninstallerPath() == null && !DriverPackagePresent() && !Directory.Exists(InstallDir));
+                   UninstallerPath() == null && !DriverPackagePresent("usbip2_ude") && !Directory.Exists(InstallDir)
+                   && Pnp.RootDevnodes(UdeHardwareId).Count == 0);
 
-            if (scenario == "all")
+            switch (scenario)
             {
-                All(results);
-                s_lines.Add("DONE");
-                File.WriteAllLines(Path.Combine(results, "results.txt"), s_lines);
-                return s_lines.Any(l => l.StartsWith("FAIL", StringComparison.Ordinal)) ? 1 : 0;
+                case "all":
+                case "all-no-e2e":
+                    All(results);
+                    break;
+                case "remove":
+                    Removal();
+                    break;
+                case "verifier-on":
+                case "verifier-off":
+                    Measure(scenario == "verifier-on");
+                    break;
+                default:
+                {
+                    using var ctx = new HMContext();
+                    ctx.LoadDefaultProfiles();
+                    ctx.InstallDriver();
+                    HMProfile profile = scenario == "nostream" ? WithoutStream(ctx) : ctx.GetProfile("dualsense-composite")!;
+                    HMController? c = null;
+                    Exception? error = null;
+                    DateTime createdFrom = DateTime.UtcNow;
+                    var made = Stopwatch.StartNew();
+                    DiagLog.Note($"probe: {scenario} create starts");
+                    try { c = ctx.CreateController(profile, "sandbox-composite"); }
+                    catch (Exception ex) { error = ex; }
+                    DiagLog.Note($"probe: {scenario} create returned after {made.ElapsedMilliseconds} ms{(error == null ? "" : ": " + error)}");
+                    Note(FormattableString.Invariant($"{scenario}: the create took {made.Elapsed.TotalSeconds:F1} s"));
+                    CleanChecks(scenario, c, error, createdFrom);
+                    c?.Dispose();
+                    break;
+                }
             }
-
-            if (scenario == "record")
-            {
-                using var k = Registry.LocalMachine.CreateSubKey(UninstallKey);
-                k.SetValue("DisplayName", "USBip");
-                k.SetValue("UninstallString", "\"C:\\probe\\UsbipInstallCheck.exe\"");
-                Record("record: the planted uninstall entry reads as an existing install",
-                       UninstallerPath() != null, UninstallerPath() ?? "");
-            }
-
-            if (scenario == "together")
-            {
-                Together(results);
-                s_lines.Add("DONE");
-                File.WriteAllLines(Path.Combine(results, "results.txt"), s_lines);
-                return s_lines.Any(l => l.StartsWith("FAIL", StringComparison.Ordinal)) ? 1 : 0;
-            }
-
-            if (scenario == "killed-loader")
-            {
-                KilledLoader(results);
-                s_lines.Add("DONE");
-                File.WriteAllLines(Path.Combine(results, "results.txt"), s_lines);
-                return s_lines.Any(l => l.StartsWith("FAIL", StringComparison.Ordinal)) ? 1 : 0;
-            }
-
-            using var ctx = new HMContext();
-            ctx.LoadDefaultProfiles();
-            ctx.InstallDriver();
-            HMProfile profile = scenario == "nostream" ? WithoutStream(ctx) : ctx.GetProfile("dualsense-composite")!;
-            HMController? c = null;
-            Exception? error = null;
-            DateTime createdFrom = DateTime.UtcNow;
-            var made = Stopwatch.StartNew();
-            DiagLog.Note($"probe: {scenario} create starts");
-            try { c = ctx.CreateController(profile, "sandbox-composite"); }
-            catch (Exception ex) { error = ex; }
-            DiagLog.Note($"probe: {scenario} create returned after {made.ElapsedMilliseconds} ms{(error == null ? "" : ": " + error)}");
-            Note(FormattableString.Invariant($"{scenario}: the create took {made.Elapsed.TotalSeconds:F1} s"));
-
-            if (scenario == "record") RecordChecks(error != null, error == null ? "" : $"{error.GetType().Name}: {error.Message}");
-            else CleanChecks(scenario, c, error, createdFrom);
-
-            c?.Dispose();
         }
         catch (Exception ex)
         {
@@ -369,21 +381,41 @@ internal static class Program
             ?? throw new InvalidOperationException("the profile without its stream did not load");
     }
 
-    static void CleanChecks(string scenario, HMController? c, Exception? error, DateTime createdFrom)
+    /// <summary>What the install leaves, read directly: the host controller,
+    /// its package, the install record, and none of what usbip-win2's own
+    /// installer adds.</summary>
+    static void InstallChecks(string p)
     {
-        string p = scenario + ":";
-        Record($"{p} the composite creates", c != null, error == null ? "" : $"{error.GetType().Name}: {error.Message}");
+        var controllers = Pnp.RootDevnodes(UdeHardwareId);
+        Record($"{p} one host controller devnode, present", controllers.Count == 1 && controllers[0].Present,
+               string.Join(", ", controllers.Select(c => $"{c.Id} ({(c.Present ? "present" : "not present")})")));
+        if (controllers.Count == 0) return;
+        var hc = controllers[0];
+        Record($"{p} its hardware ids are usbip-win2's, then HIDMaestro's stamp",
+               hc.HardwareIds.Length == 2 && hc.HardwareIds[0].Equals(UdeHardwareId, StringComparison.OrdinalIgnoreCase)
+               && hc.HardwareIds[1].Equals(StampHardwareId, StringComparison.OrdinalIgnoreCase),
+               string.Join(";", hc.HardwareIds));
+        string? inf = Pnp.DriverInf(hc.Id);
+        Record($"{p} its driver is a usbip2_ude.inf package in the driver store", inf != null && InfOriginal(inf) == "usbip2_ude.inf", inf ?? "no driver");
 
-        // The positive controls: the install happened.
-        Record($"{p} usbip-win2's driver package is installed", DriverPackagePresent());
-        Record($"{p} its uninstall entry is there", UninstallerPath() != null);
-        Record($"{p} devnode.exe and usbip.exe are installed",
-               File.Exists(Path.Combine(InstallDir, "devnode.exe")) && File.Exists(Path.Combine(InstallDir, "usbip.exe")), InstallDir);
-        Record($"{p} the VC++ runtime devnode.exe imports is installed",
-               File.Exists(Path.Combine(Environment.SystemDirectory, "vcruntime140.dll")) &&
-               File.Exists(Path.Combine(Environment.SystemDirectory, "msvcp140.dll")));
+        using (var k = Registry.LocalMachine.OpenSubKey(RecordKey))
+        {
+            Record($"{p} the install record names that devnode and package, added by the install, 0.9.8.1",
+                   k != null && (k.GetValue("Instance") as string)?.Equals(hc.Id, StringComparison.OrdinalIgnoreCase) == true
+                   && (k.GetValue("OemInf") as string)?.Equals(inf, StringComparison.OrdinalIgnoreCase) == true
+                   && k.GetValue("PackageAdded") is int added && added == 1 && k.GetValue("Version") as string == "0.9.8.1"
+                   && k.GetValue("InstalledUtc") is string when && DateTime.TryParse(when, out _),
+                   k == null ? "no record" : string.Join(", ", k.GetValueNames().Select(n => $"{n}={k.GetValue(n)}")));
+        }
 
-        // What the installer must not leave.
+        // The filter: neither its package nor its service, so no root hub,
+        // the host controller's own included, has it in its stack.
+        Record($"{p} no usbip2_filter package in the driver store", !DriverPackagePresent("usbip2_filter"));
+        Record($"{p} no usbip2_filter service", !KeyExists(@"SYSTEM\CurrentControlSet\Services\usbip2_filter"));
+
+        // What usbip-win2's installer adds and this install does not.
+        Record($"{p} no usbip-win2 Apps entry", UninstallerPath() == null && !KeyExists(UninstallKey));
+        Record($"{p} no program folder", !Directory.Exists(InstallDir), InstallDir);
         string[] menus =
         {
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonPrograms), "USBip"),
@@ -396,11 +428,15 @@ internal static class Program
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "USBip.lnk"),
         };
         Record($"{p} no desktop shortcut", !shortcuts.Any(File.Exists), string.Join(", ", shortcuts.Where(File.Exists)));
-        Record($"{p} no GUI", !File.Exists(Path.Combine(InstallDir, "wusbip.exe")));
-        Record($"{p} no SDK headers or library",
-               !Directory.Exists(Path.Combine(InstallDir, "include")) && !Directory.Exists(Path.Combine(InstallDir, "lib")));
-        string[] pdbs = Directory.Exists(InstallDir) ? Directory.GetFiles(InstallDir, "*.pdb") : Array.Empty<string>();
-        Record($"{p} no PDB files", pdbs.Length == 0, string.Join(", ", pdbs.Select(Path.GetFileName)));
+        Record($"{p} no detach task", Run(Path.Combine(Environment.SystemDirectory, "schtasks.exe"), 30_000, "/query", "/tn", DetachTask).Exit != 0);
+        Record($"{p} no KMDF debug values for usbip2_ude", WdfDebugValues().Count == 0, string.Join(", ", WdfDebugValues()));
+    }
+
+    static void CleanChecks(string scenario, HMController? c, Exception? error, DateTime createdFrom)
+    {
+        string p = scenario + ":";
+        Record($"{p} the composite creates", c != null, error == null ? "" : $"{error.GetType().Name}: {error.Message}");
+        InstallChecks(p);
 
         // The composite works end to end.
         if (c == null) return;
@@ -457,11 +493,7 @@ internal static class Program
         // must find nothing, which shows it does not take a steady byte that
         // ignores the state for the state.
         var idle = ReadWith(paths[0], new HMGamepadState());
-        var held = ReadWith(paths[0], new HMGamepadState
-        {
-            Buttons = HMButton.A | HMButton.B | HMButton.X | HMButton.Y | HMButton.LeftBumper | HMButton.RightBumper | HMButton.Back | HMButton.Start,
-            Hat = HMHat.North,
-        });
+        var held = ReadWith(paths[0], Pressed);
         var idleAgain = ReadWith(paths[0], new HMGamepadState());
         var changed = SteadyDifferences(idle, held);
         Record($"{p} the submitted state is what the host reads", changed.Count > 0,
@@ -486,6 +518,12 @@ internal static class Program
         foreach (string e in Pnp.Events(createdFrom, match, Run))
             Note($"{scenario}: event {e}");
     }
+
+    static readonly HMGamepadState Pressed = new()
+    {
+        Buttons = HMButton.A | HMButton.B | HMButton.X | HMButton.Y | HMButton.LeftBumper | HMButton.RightBumper | HMButton.Back | HMButton.Start,
+        Hat = HMHat.North,
+    };
 
     /// <summary>Each node of the chain as it stands, and whether Windows had
     /// device installation pending at that moment.</summary>
@@ -644,8 +682,8 @@ internal static class Program
         }
         Record("together: both programs' first composite creates", answers.All(a => a?.StartsWith("created", StringComparison.Ordinal) == true),
                string.Join(" / ", answers.Select(a => a ?? "no answer")));
-        Record("together: usbip-win2 was installed once: one host controller",
-               HostControllers() == 1, $"{HostControllers()} host controller(s)");
+        int controllers = Pnp.WithHardwareId(UdeHardwareId);
+        Record("together: the host controller was installed once: one host controller", controllers == 1, $"{controllers} host controller(s)");
         var paths = new List<string>();
         var wait = Stopwatch.StartNew();
         while (paths.Count < 2 && wait.ElapsedMilliseconds < 30_000)
@@ -697,138 +735,12 @@ internal static class Program
         }
     }
 
-    // ── The loader ended mid-install ───────────────────────────────────
-
-    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
-    static extern bool TerminateProcess(Microsoft.Win32.SafeHandles.SafeProcessHandle process, uint exitCode);
-
-    /// <summary>The exit code the watcher ends the loader with: the code
-    /// the failed S73 run reported.</summary>
-    const uint KilledLoaderExitCode = 255;
-
-    /// <summary>One program's first composite. A watcher polls the process
-    /// list every 100 ms for the setup Inno Setup's loader runs
-    /// (USBip-*.tmp), and once it runs, ends the loader (the other USBip-*
-    /// process) with exit code 255, then follows the setup to its exit. The
-    /// SDK's diagnostic lines are read from the log the probe's tap
-    /// writes.</summary>
-    static void KilledLoader(string results)
-    {
-        using var ctx = new HMContext();
-        ctx.LoadDefaultProfiles();
-        ctx.InstallDriver();
-
-        var run = Stopwatch.StartNew();
-        int loaderPid = -1, setupPid = -1, loaderExit = int.MinValue, setupExit = int.MinValue;
-        long killedAt = -1, setupEndedAt = -1;
-        bool setupRanAfterKill = false;
-        string watchError = "";
-        var stop = new ManualResetEventSlim();
-        var watcher = new Thread(() =>
-        {
-            try
-            {
-                Process? setup = null, loader = null;
-                while (setup == null && !stop.Wait(100))
-                {
-                    foreach (var p in Process.GetProcesses())
-                    {
-                        string n;
-                        try { n = p.ProcessName; } catch { p.Dispose(); continue; }
-                        if (!n.StartsWith("USBip-", StringComparison.OrdinalIgnoreCase)) { p.Dispose(); continue; }
-                        if (n.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)) setup ??= p;
-                        else loader ??= p;
-                    }
-                    if (setup == null) { loader?.Dispose(); loader = null; }
-                }
-                if (setup == null) return;
-                if (loader == null) { watchError = $"the setup child (pid {setup.Id}) ran with no loader beside it"; return; }
-                loaderPid = loader.Id;
-                setupPid = setup.Id;
-                // A handle held from here keeps the setup's exit code
-                // readable after it ends.
-                _ = setup.SafeHandle;
-                if (!TerminateProcess(loader.SafeHandle, KilledLoaderExitCode))
-                {
-                    watchError = $"TerminateProcess failed with Win32 error {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}";
-                    return;
-                }
-                killedAt = run.ElapsedMilliseconds;
-                loader.WaitForExit(10_000);
-                loaderExit = loader.ExitCode;
-                setupRanAfterKill = !setup.HasExited;
-                if (setup.WaitForExit(600_000))
-                {
-                    setupEndedAt = run.ElapsedMilliseconds;
-                    setupExit = setup.ExitCode;
-                }
-            }
-            catch (Exception ex) { watchError = $"{ex.GetType().Name}: {ex.Message}"; }
-        }) { IsBackground = true, Name = "killed-loader watcher" };
-        watcher.Start();
-
-        HMController? c = null;
-        Exception? error = null;
-        DiagLog.Note("probe: killed-loader create starts");
-        try { c = ctx.CreateController(ctx.GetProfile("dualsense-composite")!, "sandbox-composite"); }
-        catch (Exception ex) { error = ex; }
-        long created = run.ElapsedMilliseconds;
-        DiagLog.Note($"probe: killed-loader create returned after {created} ms{(error == null ? "" : ": " + error)}");
-        Note(FormattableString.Invariant($"killed-loader: the create took {created / 1000.0:F1} s"));
-        // The setup has ended by the time the create returns, unless the
-        // create gave up first.
-        if (!watcher.Join(15_000)) { stop.Set(); watcher.Join(5_000); }
-        stop.Set();
-
-        Record("killed-loader: the watcher ended the loader while its setup child ran (positive control)",
-               killedAt >= 0 && setupRanAfterKill,
-               killedAt < 0
-                   ? (watchError.Length > 0 ? watchError : "the watcher never saw the setup child, so no fault was injected")
-                   : FormattableString.Invariant($"loader pid {loaderPid} ended with exit code {loaderExit} at {killedAt} ms into the create, setup pid {setupPid} {(setupRanAfterKill ? "still running" : "already gone")}") +
-                     (setupEndedAt >= 0 ? FormattableString.Invariant($", the setup exited {setupExit} at {setupEndedAt} ms") : ", the setup's exit not seen") +
-                     (watchError.Length > 0 ? $", {watchError}" : ""));
-        Record("killed-loader: the composite creates", c != null, error == null ? "" : $"{error.GetType().Name}: {error.Message}");
-
-        var paths = new List<string>();
-        var sw = Stopwatch.StartNew();
-        while (c != null && paths.Count == 0 && sw.ElapsedMilliseconds < 30_000)
-        {
-            paths = Hid.Paths(0x054C, 0x0CE6);
-            if (paths.Count == 0) Thread.Sleep(250);
-        }
-        Record("killed-loader: the composite's HID interface appears", paths.Count > 0, $"{paths.Count} interface(s)");
-
-        string diag = "";
-        try
-        {
-            using var fs = new FileStream(Path.Combine(results, "main-diag.log"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            using var reader = new StreamReader(fs);
-            diag = reader.ReadToEnd();
-        }
-        catch (Exception ex) { diag = ""; Note($"killed-loader: the diag log could not be read: {ex.GetType().Name}: {ex.Message}"); }
-        string exited = $"the installer exited {loaderExit}; reading the machine again";
-        string answers = $"the host controller answers after the installer exited {loaderExit}";
-        bool sawExit = loaderExit != int.MinValue && diag.Contains(exited, StringComparison.Ordinal);
-        bool sawAnswer = loaderExit != int.MinValue && diag.Contains(answers, StringComparison.Ordinal);
-        Record("killed-loader: the diag log names the loader's exit code, then the host controller answering after it",
-               sawExit && sawAnswer,
-               $"\"{exited}\" {(sawExit ? "found" : "missing")}, \"{answers}\" {(sawAnswer ? "found" : "missing")}");
-        foreach (string line in diag.Split('\n'))
-            if (line.Contains("UsbipDriverInstaller:", StringComparison.Ordinal))
-                Note($"killed-loader: diag {line.Trim()}");
-
-        c?.Dispose();
-    }
-
-    /// <summary>Host controller devnodes usbip-win2's devnode.exe made: the
-    /// devnodes with the hardware ID of its emulated host controller.</summary>
-    static int HostControllers() => Pnp.WithHardwareId(@"ROOT\USBIP_WIN2\UDE");
-
-    /// <summary>B, C and A in one sandbox. B's create runs in a child
-    /// process, so nothing it leaves in a process reaches A's, and the
-    /// planted entry goes once it has run. C then installs usbip-win2 on
-    /// the clean machine, and A's checks read that install and a composite
-    /// this process creates over it.</summary>
+    /// <summary>B, C and A in one sandbox. B plants usbip-win2's uninstall
+    /// entry, C's two programs install the host controller on that machine,
+    /// B's checks read what the install did to the entry, the planted entry
+    /// goes, and A's checks read the install and a composite this process
+    /// creates over it. E follows in the same sandbox once this program has
+    /// ended (EndToEnd).</summary>
     static void All(string results)
     {
         var part = Stopwatch.StartNew();
@@ -839,23 +751,12 @@ internal static class Program
         }
         Record("record: the planted uninstall entry reads as an existing install",
                UninstallerPath() != null, UninstallerPath() ?? "");
-        string answer = Path.Combine(results, "record.txt");
-        var psi = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, CreateNoWindow = true };
-        psi.ArgumentList.Add("--record-create");
-        psi.ArgumentList.Add(answer);
-        using (var child = Process.Start(psi)!)
-        {
-            if (!child.WaitForExit(300_000)) try { child.Kill(); } catch { }
-        }
-        string said = File.Exists(answer) ? File.ReadAllText(answer).Trim() : "no answer";
-        RecordChecks(said.StartsWith("refused ", StringComparison.Ordinal), said);
-        Registry.LocalMachine.DeleteSubKeyTree(UninstallKey, throwOnMissingSubKey: false);
-        Record("record: the machine is without usbip-win2 again once the planted entry is gone",
-               UninstallerPath() == null && !DriverPackagePresent() && !Directory.Exists(InstallDir));
-        Note(FormattableString.Invariant($"record: took {part.Elapsed.TotalSeconds:F1} s"));
 
-        part.Restart();
         Together(results);
+        Record("record: the planted uninstaller never ran", !File.Exists(Marker));
+        Record("record: the planted entry is as it was planted", UninstallerPath() == "C:\\probe\\UsbipInstallCheck.exe", UninstallerPath() ?? "gone");
+        Registry.LocalMachine.DeleteSubKeyTree(UninstallKey, throwOnMissingSubKey: false);
+        Note(FormattableString.Invariant($"record and together: took {part.Elapsed.TotalSeconds:F1} s"));
 
         // C's programs dispose their composites as they exit, and A's
         // checks read the HID interface of the composite created next, so
@@ -864,55 +765,55 @@ internal static class Program
         while (Hid.Paths(0x054C, 0x0CE6).Count > 0 && gone.ElapsedMilliseconds < 30_000) Thread.Sleep(250);
         int left = Hid.Paths(0x054C, 0x0CE6).Count;
         Record("together: both composites are gone once their programs dispose them", left == 0, $"{left} interface(s) left");
-        Note(FormattableString.Invariant($"together: took {part.Elapsed.TotalSeconds:F1} s"));
 
         part.Restart();
-        using var ctx = new HMContext();
-        ctx.LoadDefaultProfiles();
-        ctx.InstallDriver();
-        HMController? c = null;
-        Exception? error = null;
-        DateTime createdFrom = DateTime.UtcNow;
-        var made = Stopwatch.StartNew();
-        try { c = ctx.CreateController(ctx.GetProfile("dualsense-composite")!, "sandbox-composite"); }
-        catch (Exception ex) { error = ex; }
-        Note(FormattableString.Invariant($"clean: the create took {made.Elapsed.TotalSeconds:F1} s"));
-        CleanChecks("clean", c, error, createdFrom);
-        c?.Dispose();
+        using (var ctx = new HMContext())
+        {
+            ctx.LoadDefaultProfiles();
+            ctx.InstallDriver();
+            HMController? c = null;
+            Exception? error = null;
+            DateTime createdFrom = DateTime.UtcNow;
+            var made = Stopwatch.StartNew();
+            try { c = ctx.CreateController(ctx.GetProfile("dualsense-composite")!, "sandbox-composite"); }
+            catch (Exception ex) { error = ex; }
+            Note(FormattableString.Invariant($"clean: the create took {made.Elapsed.TotalSeconds:F1} s"));
+            CleanChecks("clean", c, error, createdFrom);
+            c?.Dispose();
+        }
         Note(FormattableString.Invariant($"clean: took {part.Elapsed.TotalSeconds:F1} s"));
     }
 
-    /// <summary>B's create, in a child process: refused or created, written
-    /// to <paramref name="answer"/>.</summary>
-    static int RecordCreate(string answer)
+    /// <summary>E: S45's and S65's probes over A's install, each a
+    /// self-contained copy started in the sandbox once this program's run
+    /// there has ended: each refuses its live part while another program of
+    /// the SDK runs. Each of their check lines is a check here, under the
+    /// probe's name, and a skip line a note.</summary>
+    static void EndToEnd(string wsb, string id, string results)
     {
-        try
+        foreach (var (name, exe) in new[]
+                 {
+                     ("S45", @"C:\probe-e2e\UsbipE2ECheck.exe"),
+                     ("S65", @"C:\probe-switch2\Switch2CompositeCheck.exe"),
+                 })
         {
-            using var ctx = new HMContext();
-            ctx.LoadDefaultProfiles();
-            ctx.InstallDriver();
-            try
+            var sw = Stopwatch.StartNew();
+            var ran = Run(wsb, 1_200_000, "exec", "--id", id, "-c", $"cmd.exe /c {exe} > C:\\results\\{name}.txt 2>&1", "-r", "System", "--raw");
+            int? exit = JsonInt(ran.Output, "ExitCode");
+            string file = Path.Combine(results, $"{name}.txt");
+            if (!File.Exists(file)) { Check($"e2e: {name}'s probe ran in the sandbox", false, ran.Output.Trim()); continue; }
+            int pass = 0, fail = 0, skip = 0;
+            foreach (string raw in File.ReadAllLines(file))
             {
-                using var c = ctx.CreateController(ctx.GetProfile("dualsense-composite")!, "sandbox-composite");
-                File.WriteAllText(answer, "created");
+                string line = raw.Trim();
+                if (line.StartsWith("[PASS]", StringComparison.Ordinal)) { pass++; Check($"e2e {name}: {line[6..].Trim()}", true); }
+                else if (line.StartsWith("[FAIL]", StringComparison.Ordinal)) { fail++; Check($"e2e {name}: {line[6..].Trim()}", false); }
+                else if (line.Contains("SKIP", StringComparison.Ordinal)) { skip++; Console.WriteLine($"  [NOTE] e2e {name}: {line}"); }
             }
-            catch (Exception ex) { File.WriteAllText(answer, $"refused {ex.GetType().Name}: {ex.Message}"); }
-            return 0;
+            Console.WriteLine(FormattableString.Invariant($"  [NOTE] e2e {name}: exit {exit}, {pass} passed, {fail} failed, {skip} skip line(s), {sw.Elapsed.TotalSeconds:F1} s"));
+            Check($"e2e: {name}'s probe ran to its end and passed what it ran", (exit == 0 || exit == 2) && pass > 0 && fail == 0,
+                  $"exit {exit}, {pass} passed, {fail} failed");
         }
-        catch (Exception ex)
-        {
-            File.WriteAllText(answer, $"failed {ex.GetType().Name}: {ex.Message}");
-            return 1;
-        }
-    }
-
-    static void RecordChecks(bool refused, string refusal)
-    {
-        Record("record: the composite create is refused", refused);
-        Record("record: the refusal names the existing usbip-win2 install",
-               refused && refusal.Contains("uninstall entry", StringComparison.OrdinalIgnoreCase), refusal);
-        Record("record: the planted uninstaller never ran", !File.Exists(Marker));
-        Record("record: usbip-win2 was not installed", !DriverPackagePresent() && !Directory.Exists(InstallDir));
     }
 
     static string InstallDir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "USBip");
@@ -941,15 +842,54 @@ internal static class Program
         return null;
     }
 
-    static bool DriverPackagePresent()
+    /// <summary>True when a published INF in %windir%\INF names
+    /// <paramref name="text"/>: a package of usbip2_ude or usbip2_filter.</summary>
+    static bool DriverPackagePresent(string text)
     {
         string inf = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "INF");
         foreach (string f in Directory.EnumerateFiles(inf, "oem*.inf"))
         {
-            try { if (File.ReadAllText(f).Contains("usbip2_ude", StringComparison.OrdinalIgnoreCase)) return true; }
+            try { if (ReadInf(f).Contains(text, StringComparison.OrdinalIgnoreCase)) return true; }
             catch { }
         }
         return false;
+    }
+
+    /// <summary>The original INF name of a published INF: usbip2_ude.inf for a
+    /// package of the host controller, read from its text.</summary>
+    static string? InfOriginal(string published)
+    {
+        try
+        {
+            string text = ReadInf(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "INF", published));
+            if (text.Contains("usbip2_ude", StringComparison.OrdinalIgnoreCase) && text.Contains(UdeHardwareId, StringComparison.OrdinalIgnoreCase)) return "usbip2_ude.inf";
+            return null;
+        }
+        catch { return null; }
+    }
+
+    static string ReadInf(string path)
+    {
+        byte[] raw = File.ReadAllBytes(path);
+        return raw.Length >= 2 && raw[0] == 0xFF && raw[1] == 0xFE
+            ? System.Text.Encoding.Unicode.GetString(raw, 2, raw.Length - 2)
+            : System.Text.Encoding.UTF8.GetString(raw);
+    }
+
+    static bool KeyExists(string path)
+    {
+        using var k = Registry.LocalMachine.OpenSubKey(path);
+        return k != null;
+    }
+
+    static List<string> WdfDebugValues()
+    {
+        var found = new List<string>();
+        using var k = Registry.LocalMachine.OpenSubKey(WdfKey);
+        if (k == null) return found;
+        foreach (string v in new[] { "VerifierOn", "VerboseOn" })
+            if (k.GetValue(v) != null) found.Add(v);
+        return found;
     }
 
     // ── Helpers ────────────────────────────────────────────────────────
