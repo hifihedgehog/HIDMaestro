@@ -88,8 +88,24 @@ internal static partial class UsbipDriverInstaller
             // first composites arrive together, one installs and the other
             // finds the host controller. Two installers at once would each
             // create a host controller devnode.
-            return TransportWork.Run(work => IsInstalled || InstallLocked(work), progress);
+            return TransportWork.Run(work =>
+            {
+                if (IsInstalled) return true;
+                ThrowIfRemovingHere();
+                return InstallLocked(work);
+            }, progress);
         }
+    }
+
+    /// <summary>The caller's claim went through the removal gate before the
+    /// transport lock was taken (MachineClaims.ClaimBeforeWrite), so a
+    /// removal this process started since then is caught here, under the
+    /// lock and before the first write, and the call writes nothing, as
+    /// HMContext's calls do while that removal runs.</summary>
+    private static void ThrowIfRemovingHere()
+    {
+        if (Uninstall.RemovalGate.RemovingHere)
+            throw new InvalidOperationException(MachineClaims.RemovingHereMessage);
     }
 
     // ── The transport lock ───────────────────────────────────────────────
@@ -372,11 +388,18 @@ internal static partial class UsbipDriverInstaller
             // transport answers already, so nothing here fails the create. A
             // lock this process could not take leaves the move for its next
             // composite create.
-            bool ran = false;
+            bool ran = false, removing = false;
             try
             {
                 TransportWork.Run(work =>
                 {
+                    // This process's own removal, started after the caller's
+                    // claim: no move, and the move stays for a later create.
+                    if (Uninstall.RemovalGate.RemovingHere)
+                    {
+                        Volatile.Write(ref removing, true);
+                        return false;
+                    }
                     Volatile.Write(ref ran, true);
                     ReplaceLegacyTransport(work);
                     return true;
@@ -392,6 +415,7 @@ internal static partial class UsbipDriverInstaller
                     : $"UsbipDriverInstaller: legacy replace not checked, the transport lock was not taken: {ex.GetType().Name}: {ex.Message}");
             }
             if (Volatile.Read(ref ran)) s_legacyChecked = true;
+            if (Volatile.Read(ref removing)) throw new InvalidOperationException(MachineClaims.RemovingHereMessage);
         }
     }
 

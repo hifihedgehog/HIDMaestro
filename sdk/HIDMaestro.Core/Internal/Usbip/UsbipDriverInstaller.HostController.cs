@@ -226,6 +226,9 @@ internal static partial class UsbipDriverInstaller
             if (!held) return;
             try
             {
+                // This process's own removal, started after the caller's
+                // claim, owns the record: left for a later create.
+                if (Uninstall.RemovalGate.RemovingHere) return;
                 s_recordChecked = true;
                 s_lateBindResult = UsbipInstallRecord.CompleteLateBind() ? 1 : 0;
             }
