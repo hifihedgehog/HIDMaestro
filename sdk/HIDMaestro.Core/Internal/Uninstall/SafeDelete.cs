@@ -215,9 +215,12 @@ internal static partial class SafeDelete
                 return (UninstallOutcome.Failed, $"{full} could not be opened (Win32 error {err})");
             // Held open by another program, or refusing DELETE: a folder is
             // emptied and queued as one below it would be, and a file or
-            // link is queued where that is allowed.
-            if (IsRealFolder(parent.Last, leaf)) EmptyHeldElsewhere(parent.Last, leaf, full, state, chainProtected, err);
-            else Defer(full, state, leafMayDefer, $"in use (Win32 error {err})");
+            // link is queued where that is allowed. One whose kind cannot be
+            // read fails: a folder queued with entries in it would not go.
+            bool? folder = IsRealFolder(parent.Last, leaf, out int readError);
+            if (folder == true) EmptyHeldElsewhere(parent.Last, leaf, full, state, chainProtected, err);
+            else if (folder == false) Defer(full, state, leafMayDefer, $"in use (Win32 error {err})");
+            else state.Fail(full, $"in use (Win32 error {err}), and whether it is a folder could not be read (Win32 error {readError})");
             return Outcome(state);
         }
         using (target)
@@ -244,12 +247,13 @@ internal static partial class SafeDelete
 
     /// <summary>Whether <paramref name="name"/> in the held folder is a
     /// folder and not a link, read through a handle that asks for no access
-    /// another program's open can refuse.</summary>
-    private static bool IsRealFolder(SafeFileHandle dir, string name)
+    /// another program's open can refuse. Null, with the error, when even
+    /// that open fails.</summary>
+    private static bool? IsRealFolder(SafeFileHandle dir, string name, out int error)
     {
         using var h = OpenRelative(dir, name, FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, out _);
-        if (h == null) return false;
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, out error);
+        if (h == null) return null;
         uint attrs = Attributes(h);
         return (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 && (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
     }
