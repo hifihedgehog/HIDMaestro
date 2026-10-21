@@ -56,6 +56,15 @@ internal static class Program
             return ExitFailed;
         }
 
+        // Without administrator rights a preview cannot read HIDMaestro's
+        // protected folders and a removal cannot run, so the tool says that
+        // first rather than report what it could not read.
+        if (!Environment.IsPrivilegedProcess)
+        {
+            Console.Error.WriteLine("Removing HIDMaestro, or previewing it, needs administrator rights. Run this from an elevated prompt.");
+            return ExitFailed;
+        }
+
         var options = new HMUninstallOptions { IncludeUsbip = usbip };
         try
         {
@@ -69,12 +78,12 @@ internal static class Program
                 }
                 Write(found, json: false);
                 if (found.Status == HMUninstallStatus.Blocked) return ExitBlocked;
+                // As with --yes, an item the preview could not read does not
+                // stop the removal, which reads the machine again and
+                // reports it.
                 if (found.Status == HMUninstallStatus.Failed)
-                {
-                    Console.WriteLine("Part of the machine could not be read, so nothing was changed. The failed items say why.");
-                    return ExitFailed;
-                }
-                if (!found.Entries.Any(e => e.Outcome == HMUninstallOutcome.WouldRemove))
+                    Console.WriteLine("Part of the machine could not be read. The removal tries those items again and reports them.");
+                if (!found.Entries.Any(e => e.Outcome is HMUninstallOutcome.WouldRemove or HMUninstallOutcome.Failed))
                 {
                     Console.WriteLine("Nothing of HIDMaestro is left to remove.");
                     return ExitRemoved;
