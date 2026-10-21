@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using Microsoft.Win32;
 
@@ -96,6 +96,30 @@ internal static class OemNameOverrideStore
     private static bool OtherAccount(string? recordSid) =>
         recordSid != null && !string.Equals(recordSid, CurrentUserSid(), StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The label HIDMaestro last wrote to the HKCU target of the
+    /// account the record belongs to: WrittenUserLabel, else WrittenLabel,
+    /// else, for a record from 2.0.0, which wrote one label to all three
+    /// targets and recorded none, the DirectInput target's value now.</summary>
+    private static string? UserLabelOf(RegistryKey pending, string vidPid) =>
+        pending.GetValue(V_WrittenUserLabel) as string
+        ?? pending.GetValue(V_WrittenLabel) as string
+        ?? ReadOriginal(Registry.LocalMachine, $@"{DirectInputRoot}\{vidPid}\{DirectInputOemSubkey}", DirectInputOemNameValue).val;
+
+    /// <summary>Whether the record's HKCU part belongs to the account this
+    /// process runs as. A record that names an account belongs to it. One
+    /// with no HKCU part yet belongs to whoever captures it. A record from
+    /// 2.0.0, which names none, belongs to this account only while this
+    /// hive's HKCU target holds the label HIDMaestro wrote there: another
+    /// account's original must never be written into this hive.</summary>
+    private static bool HiveOwnsRecord(RegistryKey pending, string vidPid)
+    {
+        if (pending.GetValue(V_UserSid) is string sid) return !OtherAccount(sid);
+        if (ReadExistedFlag(pending, JU_OriginalExisted) is null) return true;
+        string? label = UserLabelOf(pending, vidPid);
+        return label != null
+            && ReadOriginal(Registry.CurrentUser, $@"{JoystickRoot}\{vidPid}", JoystickOemNameValue).val == label;
+    }
+
     private static string? CurrentUserSid()
     {
         try
@@ -130,10 +154,24 @@ internal static class OemNameOverrideStore
             // account leaves that hive's original and label alone and writes
             // the HKLM targets only, since its own per-user original was
             // never captured.
-            string? recordSid;
+            // A record from 2.0.0 names no account: its HKCU part is this
+            // account's only while this hive holds the label HIDMaestro
+            // wrote there (HiveOwnsRecord), and then the account is stamped.
+            bool user = true, stamp = false;
+            string? keepUserLabel = null;
             using (var existing = Registry.LocalMachine.OpenSubKey(PendingEntryPath(vidPid), writable: false))
-                recordSid = existing?.GetValue(V_UserSid) as string;
-            bool user = !OtherAccount(recordSid);
+            {
+                if (existing != null)
+                {
+                    bool hasUserPart = ReadExistedFlag(existing, JU_OriginalExisted) != null;
+                    user = HiveOwnsRecord(existing, vidPid);
+                    stamp = user && hasUserPart && existing.GetValue(V_UserSid) == null;
+                    // The label the owning account's hive holds, kept apart
+                    // before this Set changes WrittenLabel.
+                    if (!user && hasUserPart && existing.GetValue(V_WrittenUserLabel) == null)
+                        keepUserLabel = UserLabelOf(existing, vidPid);
+                }
+            }
             bool userCaptured = CaptureMissingOriginals(vidPid);
 
             // The labels go in the record before the targets, so a full
@@ -141,9 +179,10 @@ internal static class OemNameOverrideStore
             // HIDMaestro wrote (RestoreForUninstall).
             using (var pending = Registry.LocalMachine.CreateSubKey(PendingEntryPath(vidPid), writable: true)!)
             {
+                if (keepUserLabel != null) pending.SetValue(V_WrittenUserLabel, keepUserLabel, RegistryValueKind.String);
                 pending.SetValue(V_WrittenLabel, label, RegistryValueKind.String);
                 if (user) pending.SetValue(V_WrittenUserLabel, label, RegistryValueKind.String);
-                if (userCaptured && CurrentUserSid() is { } sid) pending.SetValue(V_UserSid, sid, RegistryValueKind.String);
+                if ((userCaptured || stamp) && CurrentUserSid() is { } sid) pending.SetValue(V_UserSid, sid, RegistryValueKind.String);
             }
 
             WriteAllTargets(vidPid, label, user);
@@ -164,6 +203,10 @@ internal static class OemNameOverrideStore
         // restoring it needs elevation anyway.
         using (var pending = Registry.LocalMachine.OpenSubKey(PendingEntryPath(vidPid), writable: false))
             if (pending is null) return;
+        // The owner claim, through the removal gate, before the restore
+        // writes. While this process runs a removal, the removal restores
+        // the record itself.
+        if (!MachineClaims.ClaimBeforeWrite()) return;
         using var mutex = AcquireMutex();
         try { RestoreFromPendingStore(vidPid); }
         finally { mutex.ReleaseMutex(); }
@@ -177,6 +220,7 @@ internal static class OemNameOverrideStore
         // when nothing is pending.
         using (var probe = Registry.LocalMachine.OpenSubKey(PendingRoot, writable: false))
             if (probe is null || probe.SubKeyCount == 0) return 0;
+        if (!MachineClaims.ClaimBeforeWrite()) return 0;
         using var mutex = AcquireMutex();
         try
         {
@@ -224,7 +268,8 @@ internal static class OemNameOverrideStore
     /// holds no label, so no target can be shown to hold HIDMaestro's, and
     /// the record stays with every target as it is. The HKCU target is
     /// restored only from the account the record names (UserSid), whose hive
-    /// Claim wrote. From any other account the HKLM targets are restored,
+    /// Claim wrote, or, for a record that names none, from an account whose
+    /// HKCU target holds the label HIDMaestro wrote. From any other account the HKLM targets are restored,
     /// and the record stays with the HKCU target alone, for a removal run
     /// from that account. The caller has established that no other
     /// HIDMaestro program runs. Needs elevation.</summary>
@@ -236,9 +281,11 @@ internal static class OemNameOverrideStore
         {
             string? written, writtenUser, sid, diOrig, jmOrig, juOrig;
             bool? diExisted, jmExisted, juExisted;
+            bool own;
             using (var pending = Registry.LocalMachine.OpenSubKey(PendingEntryPath(vidPid), writable: false))
             {
                 if (pending is null) return new UninstallRestore(false, null);
+                own       = HiveOwnsRecord(pending, vidPid);
                 written   = pending.GetValue(V_WrittenLabel) as string;
                 writtenUser = pending.GetValue(V_WrittenUserLabel) as string ?? written;
                 sid       = pending.GetValue(V_UserSid) as string;
@@ -278,10 +325,12 @@ internal static class OemNameOverrideStore
             }
             if (juExisted != null)
             {
-                if (sid == null || !string.Equals(sid, CurrentUserSid(), StringComparison.OrdinalIgnoreCase))
+                if (!own)
                 {
-                    // Another account's hive: the HKLM parts are done, and
-                    // the record keeps the HKCU part alone.
+                    // Another account's hive, or, for a record that names
+                    // none, a hive that does not hold HIDMaestro's label:
+                    // the HKLM parts are done, and the record keeps the HKCU
+                    // part alone.
                     DropMachineParts(vidPid);
                     return new UninstallRestore(true,
                         $"the DirectInput and joy.cpl labels were put back. The per-user joy.cpl label belongs to {AccountName(sid)}, whose program set it, so the record stays for a removal run from that account");
@@ -467,12 +516,17 @@ internal static class OemNameOverrideStore
         string? diOrig; bool? diExisted;
         string? jmOrig; bool? jmExisted;
         string? juOrig; bool? juExisted;
-        string? sid;
+        bool own;
 
-        using (var pending = Registry.LocalMachine.OpenSubKey(PendingEntryPath(vidPid), writable: false))
+        using (var pending = Registry.LocalMachine.OpenSubKey(PendingEntryPath(vidPid), writable: true))
         {
             if (pending is null) return; // nothing to restore; idempotent
-            sid       = pending.GetValue(V_UserSid) as string;
+            // Read before the DirectInput target goes back, which a 2.0.0
+            // record's label is read from. When the HKCU part is another
+            // account's, the label its hive holds is kept in the record.
+            own = HiveOwnsRecord(pending, vidPid);
+            if (!own && pending.GetValue(V_WrittenUserLabel) == null && UserLabelOf(pending, vidPid) is { } userLabel)
+                pending.SetValue(V_WrittenUserLabel, userLabel, RegistryValueKind.String);
 
             diOrig    = pending.GetValue(DI_OriginalName) as string;
             diExisted = ReadExistedFlag(pending, DI_OriginalExisted);
@@ -500,7 +554,7 @@ internal static class OemNameOverrideStore
 
         // The HKCU original of another account goes back only from that
         // account: the record keeps it alone, and this hive is not touched.
-        if (juExisted != null && OtherAccount(sid))
+        if (juExisted != null && !own)
         {
             DropMachineParts(vidPid);
             return;
