@@ -341,46 +341,28 @@ internal static partial class UsbipRemoval
     /// is HIDMaestro's install, or null when it does. It proves it when the
     /// devnode is still there with usbip-win2's id and the owner token the
     /// install wrote on it, which a devnode another installer registers on
-    /// the same instance id does not carry, when usbip-win2's own installer
-    /// has not written its Apps entry since, and when the devnode runs the
-    /// package the install put on it, or, for an install cut short before its
-    /// driver, runs none.</summary>
+    /// the same instance id does not carry, when usbip-win2's Apps entry is
+    /// as the install recorded it (no clock is compared), and when the
+    /// devnode runs the package the install recorded, or, for an install cut
+    /// short before it recorded one, runs none or a package the driver store
+    /// did not hold before it.</summary>
     private static string? RecordMismatch(UsbipInstallRecord record, List<(string Id, bool Present)> controllers)
     {
         if (!controllers.Exists(c => string.Equals(c.Id, record.Instance, StringComparison.OrdinalIgnoreCase)))
             return $"{record.Instance} is gone";
         if (record.Token == null || UsbipDriverInstaller.OwnerTokenOf(record.Instance) != record.Token)
             return $"{record.Instance} is not the devnode HIDMaestro registered";
-        if (AppsEntryWrittenUtc() is DateTime written && written > record.InstalledUtc)
-            return $"usbip-win2's installer wrote its Apps entry at {written:yyyy-MM-dd HH:mm}Z, after HIDMaestro's install";
+        if (UsbipDriverInstaller.AppsEntryStamp() != record.AppsEntry)
+            return "usbip-win2's Apps entry was written or removed since HIDMaestro's install";
         string? now = UsbipDriverInstaller.DriverInfPathOf(record.Instance);
         if (record.OemInf == null)
-            return now == null ? null : $"{record.Instance} runs {now}, which HIDMaestro's install did not record";
+            // An install cut short before it recorded a package: the devnode
+            // has no driver, or binds one the store did not hold before, the
+            // package RecordCovers takes.
+            return now == null || RecordCovers(record, now) ? null : $"{record.Instance} runs {now}, which the driver store held before HIDMaestro's install";
         if (!string.Equals(now, record.OemInf, StringComparison.OrdinalIgnoreCase))
             return $"{record.Instance} now runs {now ?? "no driver"}, not {record.OemInf}";
         return null;
-    }
-
-    /// <summary>When usbip-win2's installer last wrote its Apps entry, the
-    /// latest of the views it is found in, or null when there is none.</summary>
-    private static DateTime? AppsEntryWrittenUtc()
-    {
-        DateTime? latest = null;
-        foreach (var (hive, view, _) in AppsViews())
-        {
-            try
-            {
-                using var root = RegistryKey.OpenBaseKey(hive, view);
-                using var k = root.OpenSubKey(UsbipDriverInstaller.UninstallEntryKey);
-                if (k == null) continue;
-                if (RegQueryInfoKeyW(k.Handle, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero,
-                        IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, out long fileTime) != 0) continue;
-                var at = DateTime.FromFileTimeUtc(fileTime);
-                if (latest == null || at > latest) latest = at;
-            }
-            catch { }
-        }
-        return latest;
     }
 
     /// <summary>Whether a usbip2_ude package is the install record's to take:
@@ -772,9 +754,4 @@ internal static partial class UsbipRemoval
     [LibraryImport("setupapi.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool SetupDiDestroyDeviceInfoList(IntPtr DeviceInfoSet);
-
-    [LibraryImport("advapi32.dll")]
-    private static partial int RegQueryInfoKeyW(Microsoft.Win32.SafeHandles.SafeRegistryHandle hKey, IntPtr lpClass, IntPtr lpcchClass, IntPtr lpReserved,
-        IntPtr lpcSubKeys, IntPtr lpcbMaxSubKeyLen, IntPtr lpcbMaxClassLen, IntPtr lpcValues, IntPtr lpcbMaxValueNameLen,
-        IntPtr lpcbMaxValueLen, IntPtr lpcbSecurityDescriptor, out long lpftLastWriteTime);
 }

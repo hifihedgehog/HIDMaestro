@@ -74,6 +74,7 @@ internal static partial class UsbipDriverInstaller
         {
             ReplaceLegacyTransportOnce(progress);
             ClearStaleVerifierOnce();
+            CompleteRecordOnce();
             StampOwnerHardwareIdOnChange();
             return true;
         }
@@ -252,13 +253,21 @@ internal static partial class UsbipDriverInstaller
         // interface-less by an interrupted PnP operation. Restarting the
         // devnode republishes the interface in seconds. A second host
         // controller beside it is never the repair.
-        foreach (var (id, present) in HostControllers())
+        var present = HostControllers().FindAll(c => c.Present);
+        // One HIDMaestro registered whose driver install was cut short has no
+        // driver, which no restart gives it. The driver install goes by
+        // hardware id to every present devnode that carries it (hmswd
+        // force-driver), so it runs only when that devnode is the one present
+        // host controller: it never reaches another program's.
+        if (present.Count == 1 && DriverInfPathOf(present[0].Id) == null && OwnerTokenOf(present[0].Id) is string token)
+            return FinishInterruptedInstall(work, present[0].Id, token);
+        foreach (var (id, _) in present)
         {
-            if (!present) continue;
-            // One HIDMaestro registered whose driver install was cut short
-            // has no driver, which no restart gives it.
-            if (DriverInfPathOf(id) == null && OwnerTokenOf(id) is string token)
-                return FinishInterruptedInstall(work, id, token);
+            if (DriverInfPathOf(id) == null && OwnerTokenOf(id) != null)
+            {
+                DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: {id} is HIDMaestro's and has no driver, and another host controller is present, so it is left.");
+                continue;
+            }
             work.Report("Repairing the existing USB audio transport...");
             if (TryRestartHostController(work)) return true;
 
@@ -267,6 +276,11 @@ internal static partial class UsbipDriverInstaller
                 "available, and restarting the device did not recover it. HIDMaestro does not install " +
                 "a second one beside it. Repair or reinstall usbip-win2, or restart Windows, and try again.");
         }
+        if (present.Count > 0)
+            throw new InvalidOperationException(
+                $"usbip-win2's host controllers ({string.Join(", ", present.ConvertAll(c => c.Id))}) are present with no driver, beside one " +
+                "another, so HIDMaestro neither installs a driver on them nor adds another. Remove HIDMaestro's usbip-win2 install " +
+                "with the uninstall tool, or repair usbip-win2, and try again.");
 
         return InstallHostController(work);
     }
@@ -291,13 +305,15 @@ internal static partial class UsbipDriverInstaller
     // Only the host controller driver (usbip2_ude) changes. The root-hub
     // filter is left exactly as it is. The filter hands the host
     // controller its select-configuration, select-interface and pipe-reset
-    // requests as a tagged control transfer, and that encoding is the same
-    // in 0.9.7.5 and 0.9.8.1 (ude_filter/request.h, ude/filter_request.cpp).
+    // requests as a tagged control transfer, whose marker 0.9.8.1 reads
+    // differently from 0.9.7.x, so beside an older filter those requests
+    // never reach the device (UsbAudioEngine's notes on stream state).
     //
-    // It acts on the exact drivers HIDMaestro installed and nothing else. A
-    // host controller whose bytes are none of them was put there by
-    // something other than HIDMaestro (VIIPER, DS4Windows, Handheld
-    // Companion) and may be what that program needs, so it is left alone.
+    // It acts on host controllers whose usbip2_ude.sys bytes match a release
+    // an earlier HIDMaestro installed (LegacyUdes), whoever installed them:
+    // the same release from usbip-win2's own installer, as Handheld
+    // Companion's 0.9.7.7, has the same bytes and is moved too. A host
+    // controller whose bytes are none of them is left alone.
 
     /// <summary>A host controller an earlier HIDMaestro release installed:
     /// its usbip2_ude.sys hash, and the build stamp in its INF DriverVer,

@@ -55,7 +55,7 @@ internal static partial class UsbipDriverInstaller
         var (instance, token) = RegisterHostController();
         // Written before the driver install, so an install that is cut short
         // leaves a record a later create finishes from and a removal takes.
-        var record = new UsbipInstallRecord(instance, token, null, false, before.ToArray(), Version, DateTime.UtcNow, MachineClaims.SdkVersion);
+        var record = new UsbipInstallRecord(instance, token, null, false, before.ToArray(), AppsEntryStamp(), Version, DateTime.UtcNow, MachineClaims.SdkVersion);
         UsbipInstallRecord.Write(record);
         DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: registered {instance}; installing the host controller driver.");
         return FinishHostController(work, inf, record, rollBack: true);
@@ -66,8 +66,10 @@ internal static partial class UsbipDriverInstaller
     /// answer. A driver install that fails outright removes the devnode and
     /// the record when <paramref name="rollBack"/> says this run registered
     /// it. One that times out leaves both: a driver install still running
-    /// cannot be undone from here, and the next create finishes it
-    /// (<see cref="InstallLocked"/>).</summary>
+    /// cannot be undone from here. When it binds on its own, the next create
+    /// finds the transport answering and completes the record
+    /// (<see cref="CompleteRecordOnce"/>), and when it does not, the next
+    /// create installs the driver again (<see cref="InstallLocked"/>).</summary>
     private static bool FinishHostController(TransportWork work, string inf, UsbipInstallRecord record, bool rollBack)
     {
         // The service key outlives a host controller removed without its
@@ -117,13 +119,84 @@ internal static partial class UsbipDriverInstaller
     {
         work.Report($"Finishing the USB audio transport install (usbip-win2 {Version} host controller)...");
         DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: {instance} is HIDMaestro's and has no driver, so the driver install runs again.");
+        string inf = StageUdePackage();
         var known = UsbipInstallRecord.Read();
-        var record = known != null && string.Equals(known.Instance, instance, StringComparison.OrdinalIgnoreCase) && known.Token == token
-            ? known
-            : new UsbipInstallRecord(instance, token, null, false, UdePackageNames().ToArray(), Version, DateTime.UtcNow, MachineClaims.SdkVersion);
+        UsbipInstallRecord record;
+        if (known != null && string.Equals(known.Instance, instance, StringComparison.OrdinalIgnoreCase) && known.Token == token)
+            record = known;
+        else
+        {
+            // The process that registered the devnode ended before its
+            // record. A kill between the package's add and its bind leaves
+            // the pinned package in the store, and it is that install's, so
+            // a package of the pinned DriverVer is not taken for one the
+            // store held before.
+            string? pinned = DriverVerOf(ReadInfText(inf));
+            var before = UdePackages().Where(p => pinned == null || !p.DriverVersion.Contains(pinned, StringComparison.OrdinalIgnoreCase))
+                                      .Select(p => p.PublishedName).ToArray();
+            record = new UsbipInstallRecord(instance, token, null, false, before, AppsEntryStamp(), Version, DateTime.UtcNow, MachineClaims.SdkVersion);
+        }
         UsbipInstallRecord.Write(record);
-        return FinishHostController(work, StageUdePackage(), record, rollBack: false);
+        return FinishHostController(work, inf, record, rollBack: false);
     }
+
+    /// <summary>The version in an INF's DriverVer line ("09/22/2026,12.1.30.403"
+    /// gives "12.1.30.403"), or null.</summary>
+    internal static string? DriverVerOf(string infText)
+    {
+        foreach (string raw in infText.Split('\n'))
+        {
+            int semi = raw.IndexOf(';');
+            string line = (semi >= 0 ? raw[..semi] : raw).Trim();
+            if (!line.StartsWith("DriverVer", StringComparison.OrdinalIgnoreCase)) continue;
+            int comma = line.LastIndexOf(',');
+            return comma >= 0 ? line[(comma + 1)..].Trim() : null;
+        }
+        return null;
+    }
+
+    private static volatile bool s_recordChecked;
+
+    /// <summary>Once per process, on a machine whose transport answers:
+    /// record the package of an install whose driver install timed out and
+    /// then bound on its own (<see cref="UsbipInstallRecord.RefreshDriver"/>,
+    /// which acts only on the devnode carrying the record's token).</summary>
+    private static void CompleteRecordOnce()
+    {
+        if (s_recordChecked) return;
+        s_recordChecked = true;
+        try { UsbipInstallRecord.RefreshDriver(); }
+        catch (Exception ex) { DeviceOrchestrator.LogDiag($"UsbipInstallRecord: not checked: {ex.GetType().Name}: {ex.Message}"); }
+    }
+
+    /// <summary>The state of usbip-win2's Apps entry in the two views of HKLM
+    /// its installer writes: each view's key, its last-write time and its
+    /// DisplayVersion, or "" when there is none. An install records it, and
+    /// a removal compares: any change means usbip-win2's installer, or
+    /// something else, wrote the entry since. No clock is compared.</summary>
+    internal static string AppsEntryStamp()
+    {
+        var parts = new List<string>();
+        foreach (var (view, label) in new[] { (Microsoft.Win32.RegistryView.Registry64, "64"), (Microsoft.Win32.RegistryView.Registry32, "32") })
+        {
+            try
+            {
+                using var root = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, view);
+                using var k = root.OpenSubKey(UninstallEntryKey);
+                if (k == null) continue;
+                long written = RegQueryInfoKeyW(k.Handle, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero,
+                    IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, out long fileTime) == 0 ? fileTime : 0;
+                parts.Add(FormattableString.Invariant($"{label}:{written}:{k.GetValue("DisplayVersion") as string}"));
+            }
+            catch { parts.Add($"{label}:unreadable"); }
+        }
+        return string.Join(";", parts);
+    }
+
+    [LibraryImport("advapi32.dll")]
+    private static partial int RegQueryInfoKeyW(Microsoft.Win32.SafeHandles.SafeRegistryHandle hKey, IntPtr lpClass, IntPtr lpcchClass, IntPtr lpReserved,
+        IntPtr lpcSubKeys, IntPtr lpcbMaxSubKeyLen, IntPtr lpcbMaxClassLen, IntPtr lpcValues, IntPtr lpcbMaxValueNameLen,
+        IntPtr lpcbMaxValueLen, IntPtr lpcbSecurityDescriptor, out long lpftLastWriteTime);
 
     /// <summary>The custom device property HIDMaestro writes on the host
     /// controller it registers: a token its install record keeps too. Windows
@@ -378,6 +451,13 @@ internal static partial class UsbipDriverInstaller
     internal static List<string> UdePackageNames() =>
         UdePackageNames(() => PnputilHelper.ListPackages(n => string.Equals(n, ProductInf, StringComparison.OrdinalIgnoreCase)));
 
+    /// <summary>Every usbip2_ude.inf package in the driver store, with its
+    /// DriverVer.</summary>
+    /// <exception cref="InvalidOperationException">The driver store could not
+    /// be read.</exception>
+    internal static List<PnputilHelper.DriverRecord> UdePackages() =>
+        PnputilHelper.ListPackages(n => string.Equals(n, ProductInf, StringComparison.OrdinalIgnoreCase));
+
     /// <summary>The same, with <paramref name="list"/> for the listing.
     /// Coexistence probe OF11 calls it through reflection with listings
     /// that fail. A failed listing is never an empty one: it throws with
@@ -450,8 +530,10 @@ internal static partial class UsbipDriverInstaller
         {
             using var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(WdfParametersKey);
             if (k == null) return found;
+            // Only a REG_DWORD reads back as an int, and a missing value as
+            // null, so each value is read on its own and none throws.
             foreach (string v in WdfDebugValues)
-                if (k.GetValueKind(v) == Microsoft.Win32.RegistryValueKind.DWord && k.GetValue(v) is int one && one == 1) found.Add(v);
+                if (k.GetValue(v) is int one && one == 1) found.Add(v);
         }
         catch { }
         return found;
@@ -559,29 +641,40 @@ internal static partial class UsbipDriverInstaller
 /// <param name="PackagesBefore">The usbip2_ude packages the driver store
 /// held before the install. A package not among them that the devnode runs
 /// is the install's.</param>
+/// <param name="AppsEntry">The state of usbip-win2's Apps entry when the
+/// install ran (<see cref="UsbipDriverInstaller.AppsEntryStamp"/>). A
+/// different state later means its installer, or something else, wrote the
+/// entry since.</param>
 /// <param name="Version">The usbip-win2 release installed.</param>
 /// <param name="InstalledUtc">When.</param>
 /// <param name="SdkVersion">The HIDMaestro version that installed it.</param>
 internal sealed record UsbipInstallRecord(string Instance, string? Token, string? OemInf, bool PackageAdded, string[] PackagesBefore,
-                                          string Version, DateTime InstalledUtc, string SdkVersion)
+                                          string AppsEntry, string Version, DateTime InstalledUtc, string SdkVersion)
 {
     internal const string Key = @"SOFTWARE\HIDMaestroUsbip";
 
+    /// <summary>Write the record. Instance goes last, and a record of
+    /// another instance loses its Instance first: a record that names an
+    /// instance always carries that install's token and the rest, so a crash
+    /// part way through leaves no record rather than a wrong one.</summary>
     internal static void Write(UsbipInstallRecord r)
     {
         try
         {
             using var k = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(Key);
-            k.SetValue("Instance", r.Instance, Microsoft.Win32.RegistryValueKind.String);
+            if (!string.Equals(k.GetValue("Instance") as string, r.Instance, StringComparison.OrdinalIgnoreCase))
+                k.DeleteValue("Instance", throwOnMissingValue: false);
             if (r.Token != null) k.SetValue("Token", r.Token, Microsoft.Win32.RegistryValueKind.String);
             else k.DeleteValue("Token", throwOnMissingValue: false);
             if (r.OemInf != null) k.SetValue("OemInf", r.OemInf, Microsoft.Win32.RegistryValueKind.String);
             else k.DeleteValue("OemInf", throwOnMissingValue: false);
             k.SetValue("PackageAdded", r.PackageAdded ? 1 : 0, Microsoft.Win32.RegistryValueKind.DWord);
             k.SetValue("PackagesBefore", r.PackagesBefore, Microsoft.Win32.RegistryValueKind.MultiString);
+            k.SetValue("AppsEntry", r.AppsEntry, Microsoft.Win32.RegistryValueKind.String);
             k.SetValue("Version", r.Version, Microsoft.Win32.RegistryValueKind.String);
             k.SetValue("InstalledUtc", r.InstalledUtc.ToString("o", System.Globalization.CultureInfo.InvariantCulture), Microsoft.Win32.RegistryValueKind.String);
             k.SetValue("SdkVersion", r.SdkVersion, Microsoft.Win32.RegistryValueKind.String);
+            k.SetValue("Instance", r.Instance, Microsoft.Win32.RegistryValueKind.String);
         }
         catch (Exception ex)
         {
@@ -605,6 +698,7 @@ internal sealed record UsbipInstallRecord(string Instance, string? Token, string
                 k.GetValue("OemInf") as string,
                 k.GetValue("PackageAdded") is int added && added != 0,
                 k.GetValue("PackagesBefore") as string[] ?? Array.Empty<string>(),
+                k.GetValue("AppsEntry") as string ?? "",
                 k.GetValue("Version") as string ?? "",
                 when,
                 k.GetValue("SdkVersion") as string ?? "");
@@ -629,10 +723,13 @@ internal sealed record UsbipInstallRecord(string Instance, string? Token, string
         catch (Exception ex) { DeviceOrchestrator.LogDiag($"UsbipInstallRecord: not deleted: {ex.GetType().Name}: {ex.Message}"); }
     }
 
-    /// <summary>After the SDK put a new driver on the host controller the
-    /// record names (the move to a newer pin), record the package it runs
-    /// now, so the install stays HIDMaestro's. Only when the devnode still
-    /// carries the record's token.</summary>
+    /// <summary>Record the package the devnode the record names runs now,
+    /// when it is not the one recorded: an install whose driver install timed
+    /// out and then bound, which recorded none, or a move of that devnode to
+    /// a newer pin. Only on the devnode that carries the record's token. It
+    /// changes no other part of the proof: a removal still needs the token
+    /// and an unchanged Apps entry, and an installer that put an older driver
+    /// on the devnode before a move has usually written that entry.</summary>
     internal static void RefreshDriver()
     {
         var r = Read();
@@ -644,4 +741,3 @@ internal sealed record UsbipInstallRecord(string Instance, string? Token, string
         DeviceOrchestrator.LogDiag($"UsbipInstallRecord: {r.Instance} now runs {oem}.");
     }
 }
-
