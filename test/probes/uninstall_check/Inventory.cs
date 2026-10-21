@@ -360,15 +360,36 @@ internal sealed class Inventory
         return hubs;
     }
 
-    /// <summary>The paths Windows deletes at its next start
-    /// (PendingFileRenameOperations entries with an empty target).</summary>
+    /// <summary>Every path PendingFileRenameOperations names, without the
+    /// \??\ prefix. Sources and targets are not told apart, which the
+    /// probe's questions (is this path queued, is anything under that
+    /// folder queued) do not need.</summary>
     internal static List<string> PendingDeletes()
     {
+        // Read raw: the list holds empty strings, which a REG_MULTI_SZ
+        // reader may take for its end.
         var list = new List<string>();
-        using var k = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Session Manager");
-        if (k?.GetValue("PendingFileRenameOperations") is not string[] ops) return list;
-        for (int n = 0; n + 1 < ops.Length; n += 2)
-            if (ops[n + 1].Length == 0) list.Add(ops[n].StartsWith(@"\??\", StringComparison.Ordinal) ? ops[n][4..] : ops[n]);
+        uint size = 0;
+        const uint RRF_RT_ANY = 0xFFFF;
+        const string key = @"SYSTEM\CurrentControlSet\Control\Session Manager", value = "PendingFileRenameOperations";
+        if (RegGetValueW(HKEY_LOCAL_MACHINE, key, value, RRF_RT_ANY, out _, null, ref size) != 0 || size == 0) return list;
+        var buf = new byte[size];
+        if (RegGetValueW(HKEY_LOCAL_MACHINE, key, value, RRF_RT_ANY, out _, buf, ref size) != 0) return list;
+        foreach (string raw in Encoding.Unicode.GetString(buf, 0, (int)size).Split('\0'))
+        {
+            // Windows 11 writes a source as *1\??\C:\..., with a flag
+            // before the NT path prefix (read in Windows Sandbox,
+            // 2026-10-21).
+            string op = raw;
+            if (op.StartsWith('*')) op = op.TrimStart('*').TrimStart("0123456789".ToCharArray());
+            if (op.StartsWith(@"\??\", StringComparison.Ordinal)) op = op[4..];
+            if (op.Length > 0) list.Add(op);
+        }
         return list;
     }
+
+    private static readonly IntPtr HKEY_LOCAL_MACHINE = unchecked((IntPtr)(int)0x80000002);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+    private static extern int RegGetValueW(IntPtr hkey, string subKey, string value, uint flags, out uint type, byte[]? data, ref uint size);
 }

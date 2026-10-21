@@ -69,6 +69,11 @@ internal static class Program
                 }
                 Write(found, json: false);
                 if (found.Status == HMUninstallStatus.Blocked) return ExitBlocked;
+                if (found.Status == HMUninstallStatus.Failed)
+                {
+                    Console.WriteLine("Part of the machine could not be read, so nothing was changed. The failed items say why.");
+                    return ExitFailed;
+                }
                 if (!found.Entries.Any(e => e.Outcome == HMUninstallOutcome.WouldRemove))
                 {
                     Console.WriteLine("Nothing of HIDMaestro is left to remove.");
@@ -143,9 +148,11 @@ internal static class Program
         Console.WriteLine(r.Status switch
         {
             HMUninstallStatus.Previewed => "Nothing was changed.",
-            HMUninstallStatus.Blocked => "Nothing was changed.",
+            HMUninstallStatus.Blocked when r.IsPreview || r.Entries.Count == 0 => "Nothing was changed.",
+            HMUninstallStatus.Blocked => "The removal stopped part way because a HIDMaestro program started. Run it again once that program has exited.",
             HMUninstallStatus.Removed => "HIDMaestro was removed.",
             HMUninstallStatus.RemovedRestartPending => "HIDMaestro was removed. Some files are deleted when Windows next starts.",
+            _ when r.IsPreview => "Part of the machine could not be read. The failed items say why.",
             _ => "The removal did not finish. The failed items say why.",
         });
     }

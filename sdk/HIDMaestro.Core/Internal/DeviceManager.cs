@@ -1845,10 +1845,12 @@ public static partial class DeviceManager
     /// phantom is uninstalled. <paramref name="holdLock"/> takes the PnP lock
     /// for each uninstall, null when its budget ran out first, and the
     /// phantom is then left for the next run. Without it the lock is waited
-    /// for as any removal waits.
+    /// for as any removal waits. A phantom <paramref name="include"/> answers
+    /// false for is left: a full removal leaves usbip-win2's host controller
+    /// records to its usbip-win2 part.
     /// </summary>
     internal static int RemoveAccumulatedHmPhantoms(Func<string, bool>? afterUninstall = null, Func<bool>? stop = null,
-                                                    Func<PnpLockHold?>? holdLock = null)
+                                                    Func<PnpLockHold?>? holdLock = null, Func<string, bool>? include = null)
     {
         int removed = 0;
         var source = PhantomSource;
@@ -1857,7 +1859,7 @@ public static partial class DeviceManager
             foreach (var (id, uninstall) in source())
             {
                 if (stop?.Invoke() == true) break;
-                if (IsHmInstance(id) && RemovePhantom(id, uninstall, afterUninstall, holdLock)) removed++;
+                if (IsHmInstance(id) && include?.Invoke(id) != false && RemovePhantom(id, uninstall, afterUninstall, holdLock)) removed++;
             }
             return removed;
         }
@@ -1889,7 +1891,7 @@ public static partial class DeviceManager
                         continue;
                     string instanceId = new string(idBuf, 0, (int)idLen - 1);
 
-                    if (!IsHmInstance(instanceId)) continue;
+                    if (!IsHmInstance(instanceId) || include?.Invoke(instanceId) == false) continue;
                     if (stop?.Invoke() == true) break;
                     IntPtr data = devInfoHandle.AddrOfPinnedObject();
                     if (RemovePhantom(instanceId, () => SetupDiRemoveDevice(dis, data), afterUninstall, holdLock))

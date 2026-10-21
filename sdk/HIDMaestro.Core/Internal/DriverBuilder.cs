@@ -267,7 +267,13 @@ public static class DriverBuilder
     {
         using var lmMy = new X509Store(StoreName.My, StoreLocation.LocalMachine);
         lmMy.Open(OpenFlags.ReadOnly);
-        return lmMy.Certificates.Find(X509FindType.FindBySubjectName, name, false).Count > 0;
+        // Only a copy with its private key can sign. One without it, left by
+        // a removal cut short between the store and the key, does not count,
+        // so a new certificate is made.
+        bool usable = false;
+        foreach (var c in lmMy.Certificates.Find(X509FindType.FindBySubjectName, name, false))
+            using (c) usable |= c.HasPrivateKey;
+        return usable;
     }
 
     private static void CreateTestCertificate(string name)
