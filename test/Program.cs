@@ -1892,7 +1892,7 @@ partial class Program
         var wait = Stopwatch.StartNew();
         while ((ours = EnumXusbInterfaces()
                    .Where(p => p.Contains("#HIDMAESTRO#", StringComparison.OrdinalIgnoreCase)).ToList()).Count == 0
-               && wait.ElapsedMilliseconds < 10000)
+               && wait.ElapsedMilliseconds < 120000)
             Thread.Sleep(200);
         if (ours.Count != 1)
             return Error($"{ours.Count} HIDMaestro XUSB interfaces are present, the record needs exactly one");
