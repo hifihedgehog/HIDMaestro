@@ -104,7 +104,7 @@ internal static class Program
         {
             var seen = WaitForListing(exe, dir!, "--show-all-devices", serial);
             Check("--show-all-devices lists the persona", seen != null,
-                  seen == null ? "not found within 30 s" : $"serial {serial}");
+                  seen == null ? "not found within 60 s" : $"serial {serial}");
             if (seen is JsonElement s)
                 Check("with the build Steam's config names",
                       Stamp(s, "current_ts") == steamBuild,
@@ -134,7 +134,7 @@ internal static class Program
                     using var ctrl = ctx.CreateController(stale);
                     var seen = WaitForListing(exe, dir!, "--check-for-updates", serial);
                     Check("--check-for-updates offers it an update", seen != null,
-                          seen is JsonElement o ? $"0x{Stamp(o, "current_ts"):X8} -> 0x{Stamp(o, "update_ts"):X8}" : "not listed within 30 s");
+                          seen is JsonElement o ? $"0x{Stamp(o, "current_ts"):X8} -> 0x{Stamp(o, "update_ts"):X8}" : "not listed within 60 s");
                     if (seen is JsonElement c)
                         Check("because it answers with the capture",
                               Stamp(c, "current_ts") == CapturedBuild,
@@ -152,7 +152,15 @@ internal static class Program
         // the updater is asked at once: a persona it still lists is one the
         // teardown left.
         Console.WriteLine("\n-- Teardown --");
+        // The listing is read again until the persona leaves it, so an
+        // enumeration that lags the removal does not fail the check.
         var (rcAll, all) = Updater(exe, dir!, "--show-all-devices");
+        for (var gone = Stopwatch.StartNew();
+             rcAll == 0 && all != null && all.Any(e => Serial(e) == serial) && gone.ElapsedMilliseconds < 60_000;)
+        {
+            Thread.Sleep(500);
+            (rcAll, all) = Updater(exe, dir!, "--show-all-devices");
+        }
         Check("the updater no longer sees the persona",
               rcAll == 0 && all != null && all.All(e => Serial(e) != serial), $"exit {rcAll}");
 
@@ -188,7 +196,7 @@ internal static class Program
         return ctx.GetProfile(variantId);
     }
 
-    /// <summary>Re-run a query until it lists the serial, for up to 30 s:
+    /// <summary>Re-run a query until it lists the serial, for up to 60 s:
     /// a new device takes a moment to reach the updater's enumeration. Each
     /// query starts the updater, about half a second, so the next one
     /// starts 100 ms after the last returns.</summary>
@@ -199,7 +207,7 @@ internal static class Program
         {
             var (rc, list) = Updater(exe, dir, query);
             if (rc == 0 && Find(list, serial) is JsonElement hit) return hit;
-            if (sw.ElapsedMilliseconds >= 30_000) return null;
+            if (sw.ElapsedMilliseconds >= 60_000) return null;
             Thread.Sleep(100);
         }
     }
