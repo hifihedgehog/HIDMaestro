@@ -542,7 +542,7 @@
             "at"
           ],
           "additionalProperties": false,
-          "description": "button-mask with LT_DIGITAL or RT_DIGITAL: each trigger bit is set while the trigger's value on a scale of max counts, min + RoundHalfEven(c x max) with c clamped to 0..1 and a NaN read as 0, is at least at. Without it a bit sets at the first count of an 8-bit trigger, max 255 and at 1. The bit keeps no state from one report to the next. Input reports only."
+          "description": "button-mask with LT_DIGITAL or RT_DIGITAL: each trigger bit is set while the trigger's value on a scale of max counts, RoundHalfEven(c x max) with c clamped to 0..1 and a NaN read as 0, is at least at. Without it a bit sets at the first count of an 8-bit trigger, max 255 and at 1. The bit keeps no state from one report to the next. Input reports only."
         },
         "levels": {
           "type": "array",

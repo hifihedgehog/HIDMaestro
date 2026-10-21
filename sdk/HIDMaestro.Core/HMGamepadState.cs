@@ -108,12 +108,18 @@ public struct HMGamepadState
     // nonzero pressure is sent as given, whether or not the finger is
     // active. NaN reads as 0, and a value outside 0 to 1 is clamped.
 
-    /// <summary>Finger 0 pressure, 0 to 1. 0 on an active finger sends full
-    /// pressure.</summary>
+    /// <summary>Finger 0 pressure, 0 to 1, for a profile with a
+    /// uint16-pressure field. 0 on an active finger sends full pressure, so
+    /// a consumer that only knows touch still presses fully. A nonzero
+    /// pressure is sent as given, whether or not the finger is active. NaN
+    /// reads as 0, and a value outside 0 to 1 is clamped.</summary>
     public float TouchpadFinger0Pressure;
 
-    /// <summary>Finger 1 pressure, 0 to 1. 0 on an active finger sends full
-    /// pressure.</summary>
+    /// <summary>Finger 1 pressure, 0 to 1, for a profile with a
+    /// uint16-pressure field. 0 on an active finger sends full pressure, so
+    /// a consumer that only knows touch still presses fully. A nonzero
+    /// pressure is sent as given, whether or not the finger is active. NaN
+    /// reads as 0, and a value outside 0 to 1 is clamped.</summary>
     public float TouchpadFinger1Pressure;
 
     /// <summary>Monotonic touchpad packet counter, intended to increment per
