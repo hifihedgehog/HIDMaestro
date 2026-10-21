@@ -1320,6 +1320,11 @@ public static partial class DeviceManager
     /// <see cref="RemoveDevice"/> (with its children, its fallbacks and
     /// hmswd.exe's close), each orphan of <see cref="RemoveOrphanHidChildren"/>
     /// and each phantom of <see cref="RemoveAccumulatedHmPhantoms"/>. Also
+    /// held by the usbip-win2 host controller's registration (its
+    /// DIF_REGISTERDEVICE, and its DIF_REMOVE when its driver install
+    /// failed), the host controller stamp's removal, and each step of a full
+    /// removal's usbip-win2 part that registers, removes or writes a
+    /// devnode (Usbip.UsbipRemoval). Also
     /// held by a full driver deploy's pnputil /add-driver /install, which
     /// reinstalls every present devnode the package matches, other
     /// programs' controllers and their HID children included, by the bus
@@ -1352,18 +1357,18 @@ public static partial class DeviceManager
     /// controller answers and starting it failed, when no import has a
     /// subtree, before CM_Setup_DevNode and CM_Reenumerate_DevNode bring it
     /// back.</item>
-    /// <item>The usbip-win2 installer's own ROOT\USB devnode, the host
-    /// controller's hardware id stamp and a WinUSB restore's
-    /// CONFIGFLAG_REINSTALL, written on a devnode that has left. None is a
-    /// HIDClass devnode.</item>
+    /// <item>The host controller's hardware id stamp and a WinUSB restore's
+    /// CONFIGFLAG_REINSTALL, written on a devnode that has left. Neither is
+    /// a HIDClass devnode.</item>
     /// </list>
     /// <list type="bullet">
     /// <item>A USB/IP import's attach and detach, the vhci plugin and
     /// plugout requests. Plug and Play enumerates and removes the import's
     /// HIDClass children after each.</item>
-    /// <item>The transport driver update: hmswd.exe force-driver on the host
-    /// controller, under the deploy lock, which restarts every import's
-    /// subtree. Run only on a transport swap.</item>
+    /// <item>The transport driver install and update: hmswd.exe
+    /// force-driver on the host controller, under the transport lock. On a
+    /// transport swap it restarts every import's subtree. On an install it
+    /// runs on the devnode just registered, which has no children.</item>
     /// <item>A WinUSB bind, DiInstallDevice on the device, which takes its
     /// HID collections away, after the null driver where its driver list
     /// cannot carry the package (Windows 10). Only a persona that declares a
@@ -1412,9 +1417,12 @@ public static partial class DeviceManager
     /// deploy lock held. Under this lock the SDK stages hmswd.exe
     /// (SwdDeviceFactory), which takes the staging lock, and tries identity
     /// claims, which never wait, and takes no other machine-wide lock. The
-    /// WinUSB devnode and follow-up locks, the registry ledger's lock and
-    /// the transport lock are never held with it: none of their holders
-    /// registers, removes or reinstalls a devnode through the SDK. In
+    /// transport lock comes before it: the host controller's registration
+    /// and its rollback take this lock with the transport lock held, and no
+    /// holder of this lock waits for the transport lock. The WinUSB devnode
+    /// and follow-up locks and the registry ledger's lock are never held
+    /// with it: none of their holders registers, removes or reinstalls a
+    /// devnode through the SDK. In
     /// process, <see cref="OwnerSweep.CreateGate"/> and a controller's
     /// teardown gate come before it.</para></summary>
     /// <exception cref="UnauthorizedAccessException">The process is not

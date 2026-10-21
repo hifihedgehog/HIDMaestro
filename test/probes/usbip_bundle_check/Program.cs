@@ -1,21 +1,21 @@
 ﻿// Bundled-transport deploy check (issue #39).
 //
 // Composite USB personas must work with nothing for a user to install,
-// which means the USB transport ships inside HIDMaestro.Core.dll and
-// deploys itself. This probe exercises that deploy path's own code
-// rather than the upstream installer's:
+// which means usbip-win2's host controller ships inside HIDMaestro.Core.dll
+// and deploys itself. This probe exercises that deploy path's own code:
 //
-//   1. The installer binary is embedded and byte-exact against its
-//      pinned SHA-256.
-//   2. Extraction stages it intact in the administrators-only staging
-//      directory, alongside the BSD-2-Clause notice redistribution
+//   1. The host controller's INF, SYS and CAT are embedded and byte-exact
+//      against their pinned SHA-256, the license notice is embedded, and
+//      usbip-win2's installer is not: the SDK never runs it.
+//   2. Staging writes the package intact to the administrators-only
+//      staging directory, alongside the BSD-2-Clause notice redistribution
 //      requires.
 //   3. A staged copy changed on disk is replaced from the embedded bytes
-//      (ProtectedStaging.StageStream, the step extraction runs, on a
-//      private copy), the hash check (ProtectedStaging.VerifyBeforeUse)
-//      refuses tampered bytes, and the launch itself (RunSilentInstall)
-//      refuses a tampered file in the staging directory before it starts
-//      anything.
+//      (ProtectedStaging.StageStream, the step staging runs, on a private
+//      copy), the hash check (ProtectedStaging.VerifyBeforeUse) refuses
+//      tampered bytes, and the hold the driver install takes on each file
+//      (ProtectedStaging.PinFile) refuses a tampered file in the staging
+//      directory.
 //   4. EnsureInstalled is idempotent and returns true on a machine that
 //      already has the transport, without reinstalling.
 //   5. The public API surface makes composites unconditional: there is a
@@ -23,21 +23,20 @@
 //   6. The host controller answers exactly one of the request layouts the
 //      client knows, and it is the one its installed driver speaks.
 //
-// Running the upstream installer itself from an absent state is covered
-// by the live E2E probe and by the from-scratch installs performed on
-// both test machines.
+// The install itself, from an absent state, is covered by S73's run in
+// Windows Sandbox (usbip_install_check).
 //
 // `--offline` runs only what needs no elevation and no transport: the
 // embedded payload, the hash check on copies in %TEMP%, the public
 // contract, and that the deploy and repair steps it reaches exist. The
-// rest requires elevation, since the installer stages in an
-// administrators-only directory and its launch refuses a file anywhere
-// else. Exit 0 PASS / 1 FAIL.
+// rest requires elevation, since the package stages in an
+// administrators-only directory. Exit 0 PASS / 1 FAIL.
 
 using System;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 
 using HIDMaestro;
@@ -55,11 +54,10 @@ internal static class Program
     }
 
     // Read the pin from the code under test rather than repeating it.
-    // A probe that carries its own copy of the version, the file name and
-    // the digest goes stale the moment the pin moves, and then it reports
-    // a missing bundle when the bundle is fine.
-    static string ExpectedSha => UsbipDriverInstaller.InstallerSha256;
-    static string InstallerRes => "HIDMaestro.Resources." + UsbipDriverInstaller.InstallerFile;
+    // A probe that carries its own copy of the file names and the digests
+    // goes stale the moment the pin moves, and then it reports a missing
+    // bundle when the bundle is fine.
+    static string SysSha => UsbipDriverInstaller.PinnedUdeHash("usbip2_ude.sys");
     const string NoticeRes = "HIDMaestro.Resources.THIRD-PARTY-NOTICES.txt";
 
     static int Main(string[] args)
@@ -71,35 +69,28 @@ internal static class Program
         // ── The bundle ───────────────────────────────────────────────────
         Console.WriteLine("\n-- Embedded payload --");
         var names = asm.GetManifestResourceNames();
-        Check("installer embedded in HIDMaestro.Core.dll", names.Contains(InstallerRes));
-        Check("license notice embedded", names.Contains(NoticeRes));
-
-        long embeddedSize = 0;
-        string embeddedHash = "";
-        using (var s = asm.GetManifestResourceStream(InstallerRes))
+        var udeRes = UsbipDriverInstaller.UdeResourcesFor(RuntimeInformation.OSArchitecture).ToList();
+        foreach (string res in udeRes)
         {
-            if (s != null)
-            {
-                embeddedSize = s.Length;
-                embeddedHash = Convert.ToHexString(SHA256.HashData(s)).ToLowerInvariant();
-            }
+            string file = res[(res.LastIndexOf(".usbip2_ude", StringComparison.Ordinal) + 1)..];
+            using var s = asm.GetManifestResourceStream(res);
+            string hash = s == null ? "missing" : Convert.ToHexString(SHA256.HashData(s)).ToLowerInvariant();
+            Check($"{file} embedded and matches its pinned SHA-256 byte for byte", hash == UsbipDriverInstaller.PinnedUdeHash(file), hash);
         }
-        Check("embedded installer matches its pinned SHA-256 byte for byte",
-              embeddedHash == ExpectedSha, embeddedHash);
-        // The digest above already pins the bytes exactly. This asserts
-        // the resource is a whole installer rather than a stub.
-        Check("embedded installer is a full binary", embeddedSize > 10_000_000,
-              $"{embeddedSize:N0} bytes");
+        Check("license notice embedded", names.Contains(NoticeRes));
+        Check("usbip-win2's installer is not embedded",
+              !names.Any(n => n.StartsWith("HIDMaestro.Resources.USBip-", StringComparison.OrdinalIgnoreCase)));
 
         // ── The hash check ───────────────────────────────────────────────
         //
-        // A driver installer that fails its hash must never be executed.
-        // ProtectedStaging.VerifyBeforeUse runs here on two copies in
+        // A driver file that fails its hash must never reach the driver
+        // store. ProtectedStaging.VerifyBeforeUse runs here on two copies in
         // %TEMP%: the embedded bytes, and the same bytes with one byte
         // flipped.
         Console.WriteLine("\n-- Deploy: the hash check --");
+        string sysRes = udeRes.Single(r => r.EndsWith(".usbip2_ude.sys", StringComparison.Ordinal));
         byte[] good;
-        using (var s = asm.GetManifestResourceStream(InstallerRes)!)
+        using (var s = asm.GetManifestResourceStream(sysRes)!)
         using (var ms = new MemoryStream())
         {
             s.CopyTo(ms);
@@ -114,37 +105,38 @@ internal static class Program
             string genuine = Path.Combine(scratch, "genuine.bin"), tampered = Path.Combine(scratch, "tampered.bin");
             File.WriteAllBytes(genuine, good);
             File.WriteAllBytes(tampered, corrupt);
-            Check("the hash check accepts the genuine installer", Verifies(genuine));
+            Check("the hash check accepts the genuine host controller driver", Verifies(genuine));
             Check("the hash check refuses tampered bytes", !Verifies(tampered));
         }
         finally { try { Directory.Delete(scratch, recursive: true); } catch { } }
 
-        var launch = typeof(UsbipDriverInstaller).GetMethod("RunSilentInstall",
-            BindingFlags.NonPublic | BindingFlags.Static, new[] { typeof(string) });
-        Check("deploy path exposes its installer launch", launch != null);
-        var extract = typeof(UsbipDriverInstaller).GetMethod("ExtractInstaller",
-            BindingFlags.NonPublic | BindingFlags.Static, Type.EmptyTypes);
-        Check("deploy path exposes its extraction step", extract != null);
+        var stage = typeof(UsbipDriverInstaller).GetMethod("StageUdePackage", BindingFlags.NonPublic | BindingFlags.Static, Type.EmptyTypes);
+        Check("deploy path exposes its staging step", stage != null);
+        var force = typeof(UsbipDriverInstaller).GetMethod("RunForceDriver", BindingFlags.NonPublic | BindingFlags.Static, new[] { typeof(string) });
+        Check("deploy path exposes its driver install", force != null);
         // The production repair: the overload TryRestartHostController(work)
         // runs, with the transport's own availability check, the devnode
         // restart and its 30 s budget.
         var restartDevnode = typeof(UsbipDriverInstaller).GetMethod("RestartHostControllerDevnode",
             BindingFlags.NonPublic | BindingFlags.Static, Type.EmptyTypes);
         Check("deploy path exposes its devnode restart", restartDevnode != null);
-        if (launch == null || extract == null || restartDevnode == null) { Summary(); return 1; }
+        if (stage == null || force == null || restartDevnode == null) { Summary(); return 1; }
 
         if (!offline)
         {
-            // ── Extraction ───────────────────────────────────────────────
-            Console.WriteLine("\n-- Deploy: extraction and verification --");
-            string extracted = (string)extract.Invoke(null, null)!;
-            string notice = Path.Combine(Path.GetDirectoryName(extracted)!, "THIRD-PARTY-NOTICES.txt");
-            Check("extraction produced the installer on disk", File.Exists(extracted), extracted);
-            Check("extracted bytes hash to the pinned digest",
-                  File.Exists(extracted) &&
-                  Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(extracted)))
-                      .Equals(ExpectedSha, StringComparison.OrdinalIgnoreCase));
-            Check("BSD-2-Clause notice written beside the binary", File.Exists(notice), notice);
+            // ── Staging ──────────────────────────────────────────────────
+            Console.WriteLine("\n-- Deploy: staging and verification --");
+            string inf = (string)stage.Invoke(null, null)!;
+            string dir = Path.GetDirectoryName(inf)!;
+            foreach (string file in new[] { "usbip2_ude.inf", "usbip2_ude.sys", "usbip2_ude.cat" })
+            {
+                string path = Path.Combine(dir, file);
+                Check($"staging wrote {file}, at its pinned digest",
+                      File.Exists(path) && Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)))
+                          .Equals(UsbipDriverInstaller.PinnedUdeHash(file), StringComparison.OrdinalIgnoreCase), path);
+            }
+            string notice = Path.Combine(dir, "THIRD-PARTY-NOTICES.txt");
+            Check("BSD-2-Clause notice written beside the package", File.Exists(notice), notice);
             if (File.Exists(notice))
             {
                 string text = File.ReadAllText(notice);
@@ -156,52 +148,42 @@ internal static class Program
             //
             // Staging reuses a staged file only when its hash still matches,
             // so a copy changed on disk is replaced from the embedded bytes
-            // rather than trusted. Extraction stages through
-            // ProtectedStaging.StageStream. The step runs here on a private
-            // copy, never on the machine's staged installer, which another
-            // program of this build may be about to run.
+            // rather than trusted. The step runs here on a private copy,
+            // never on the machine's staged package, which another program
+            // of this build may be about to install.
             Console.WriteLine("\n-- Deploy: tamper refusal --");
             string own = Path.Combine(Path.GetTempPath(), $"hm-bundle-stage-{Environment.ProcessId}");
             Directory.CreateDirectory(own);
             try
             {
-                string copy = Path.Combine(own, Path.GetFileName(extracted));
-                var changed = File.ReadAllBytes(extracted);
-                changed[changed.Length / 2] ^= 0xFF;
-                File.WriteAllBytes(copy, changed);
-                using (var src = asm.GetManifestResourceStream(InstallerRes)!)
-                    HIDMaestro.Internal.ProtectedStaging.StageStream(own, Path.GetFileName(extracted), src, ExpectedSha);
+                string copy = Path.Combine(own, "usbip2_ude.sys");
+                File.WriteAllBytes(copy, corrupt);
+                using (var src = asm.GetManifestResourceStream(sysRes)!)
+                    HIDMaestro.Internal.ProtectedStaging.StageStream(own, "usbip2_ude.sys", src, SysSha);
                 string afterHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(copy))).ToLowerInvariant();
-                Check("a corrupted staged copy is not trusted, and good bytes are restored",
-                      afterHash == ExpectedSha, afterHash);
-                Check("and the launch's hash check accepts it", Verifies(copy));
+                Check("a corrupted staged copy is not trusted, and good bytes are restored", afterHash == SysSha, afterHash);
+                Check("and the hash check accepts it", Verifies(copy));
             }
             finally { try { Directory.Delete(own, recursive: true); } catch { } }
 
-            // ── The launch's refusal ─────────────────────────────────────
+            // ── The hold's refusal ───────────────────────────────────────
             //
-            // RunSilentInstall pins the installer's directory, which must be
-            // in the administrators-only staging tree, and holds the file to
-            // the pinned hash before it starts it. The file here sits beside
-            // the staged installer and could never start: the PE header's
-            // first byte is flipped too, so if the launch lost its hash
-            // check, CreateProcess would fail with a bad-format error and
-            // nothing would run.
-            Console.WriteLine("\n-- Deploy: the launch's refusal --");
-            string unlaunchable = Path.Combine(Path.GetDirectoryName(extracted)!, $"unlaunchable-{Environment.ProcessId}.exe");
+            // The driver install holds each staged file to its pinned hash
+            // until it returns (PinUdePackage). The file here sits beside
+            // the staged package and carries tampered bytes.
+            Console.WriteLine("\n-- Deploy: the hold's refusal --");
+            string tamperedSys = Path.Combine(dir, $"tampered-{Environment.ProcessId}.sys");
             try
             {
-                var bad = (byte[])corrupt.Clone();
-                bad[0] ^= 0xFF;
-                File.WriteAllBytes(unlaunchable, bad);
+                File.WriteAllBytes(tamperedSys, corrupt);
                 Exception? refused = null;
-                try { launch.Invoke(null, new object[] { unlaunchable }); }
-                catch (TargetInvocationException tie) { refused = tie.InnerException; }
-                Check("the installer launch refuses tampered bytes with its hash check, before it starts anything",
+                try { using var pin = HIDMaestro.Internal.ProtectedStaging.PinFile(tamperedSys, SysSha); }
+                catch (Exception ex) { refused = ex; }
+                Check("the hold refuses tampered bytes with its hash check",
                       refused is InvalidOperationException ioe && ioe.Message.Contains("does not match its expected SHA-256"),
                       refused == null ? "no exception" : $"{refused.GetType().Name}: {refused.Message}");
             }
-            finally { try { File.Delete(unlaunchable); } catch { } }
+            finally { try { File.Delete(tamperedSys); } catch { } }
         }
 
         // ── Idempotence and the public contract ──────────────────────────
@@ -224,17 +206,13 @@ internal static class Program
         }
         else
         {
-            // Distinguish "never installed here" from "installed but its
-            // host controller is not usable". The second is the case that
-            // must be repaired rather than reinstalled: reinstalling
-            // detaches a filter driver from every USB root hub.
-            var isProduct = typeof(UsbipDriverInstaller).GetMethod("IsProductInstalled",
-                BindingFlags.NonPublic | BindingFlags.Static, Type.EmptyTypes);
-            Check("deploy path can tell 'absent' from 'present but broken'", isProduct != null);
-            bool productPresent = isProduct != null && (bool)isProduct.Invoke(null, null)!;
-            Console.WriteLine($"  [note] driver package present in the store: {productPresent}");
+            // A present host controller that does not answer is repaired,
+            // never installed over: the SDK does not put a second host
+            // controller beside it.
+            bool present = UsbipDriverInstaller.HostControllers().Any(c => c.Present);
+            Console.WriteLine($"  [note] a usbip-win2 host controller is present: {present}");
 
-            if (productPresent)
+            if (present)
             {
                 var restart = (Action)Delegate.CreateDelegate(typeof(Action), restartDevnode);
                 // The repair polls until its budget runs out when the
@@ -354,12 +332,13 @@ internal static class Program
         return k?.GetValue("HardwareID") as string[] ?? Array.Empty<string>();
     }
 
-    /// <summary>Whether the launch's hash check passes the file.</summary>
+    /// <summary>Whether the hash check passes the file as the pinned
+    /// usbip2_ude.sys.</summary>
     static bool Verifies(string path)
     {
         try
         {
-            HIDMaestro.Internal.ProtectedStaging.VerifyBeforeUse(path, ExpectedSha);
+            HIDMaestro.Internal.ProtectedStaging.VerifyBeforeUse(path, SysSha);
             return true;
         }
         catch (InvalidOperationException) { return false; }

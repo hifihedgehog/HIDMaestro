@@ -19,7 +19,7 @@ public enum HMPayload
     /// only.</summary>
     Driver = 0,
 
-    /// <summary>usbip-win2's installer and host controller files for one
+    /// <summary>usbip-win2's host controller files for one
     /// architecture, the transport composite personas ride
     /// (<see cref="HMProfile.RequiresUsbipBackend"/>). A build made with
     /// <c>HMSkipUsbip</c> carries none, and one made with
@@ -129,9 +129,7 @@ public static class HMBuildInfo
         bool driver(Architecture a) =>
             DriverBuilder.PayloadFor(a).All(p => names.Contains(p.Logical)) &&
             names.Contains(DriverBuilder.NativePrefixFor(a) + SwdDeviceFactory.HelperFile);
-        bool usbip(Architecture a) =>
-            names.Contains(UsbipDriverInstaller.InstallerResourceFor(a)) &&
-            UsbipDriverInstaller.UdeResourcesFor(a).All(names.Contains);
+        bool usbip(Architecture a) => UsbipDriverInstaller.UdeResourcesFor(a).All(names.Contains);
 
         return new State(
             Array.AsReadOnly(s_built.Where(driver).ToArray()),

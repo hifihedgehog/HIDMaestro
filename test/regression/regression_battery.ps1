@@ -2178,20 +2178,22 @@ function Scenario-Protected-Staging {
                  -Message 'the offline staging checks failed (see probe stdout)'
 }
 
-# S73: the usbip-win2 install on a clean machine, in Windows Sandbox started
-# without a window. A composite create on a machine without usbip-win2 runs
-# the bundled installer and leaves no Start menu folder, desktop shortcut,
-# GUI, SDK or PDB file, while the composite enumerates and carries input. A
-# machine holding usbip-win2's uninstall entry without its driver package
-# gets a refusal instead of the installer, which would run that entry's
-# uninstaller first. Two programs whose first composites arrive together
-# install once: one host controller, both composites up. Exit 2 when Windows
-# Sandbox is not available. The sandbox is a machine of its own, so the
-# battery starts this probe before S01 and the slot collects its result.
+# S73: usbip-win2's host controller on a clean machine, in Windows Sandbox
+# started without a window. A composite create on a machine without
+# usbip-win2 installs the host controller from the SDK's own package: one
+# stamped host controller, its package and the install record, and no
+# root-hub filter, Apps entry, folder, task or shortcut, while the composite
+# enumerates and carries input. A planted uninstall entry does not stop the
+# install and its uninstaller never runs. Two programs whose first composites
+# arrive together install once. S45's and S65's probes then run in the same
+# sandbox with no filter on the machine, and a second sandbox runs the
+# usbip-win2 part of a full removal. Exit 2 when Windows Sandbox is not
+# available. The sandboxes are machines of their own, so the battery starts
+# this probe before S01 and the slot collects its result.
 function Scenario-Usbip-Clean-Install {
-    $message = 'the bundled usbip-win2 install left a shortcut, Start menu folder, GUI, SDK or PDB file, broke the composite, ran over an existing install, or ran twice for two programs at once (see probe stdout)'
-    # About four and a half minutes, so its hang deadline is ten times
-    # that, 45, which load or another program cannot reach.
+    $message = 'the usbip-win2 host controller install left a filter, Apps entry, folder, task or shortcut, broke a composite, ran a planted uninstaller, installed twice for two programs at once, or the usbip-win2 removal took the wrong thing (see probe stdout)'
+    # About a minute and a half, so a deadline of 45 minutes is far past
+    # anything load or another program can cause.
     if ($script:S73Run) {
         $run = $script:S73Run
         $script:S73Run = $null
@@ -2689,12 +2691,10 @@ $scenarios = @(
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
 
-# S73 runs in Windows Sandbox and spends about four minutes there, nearly
-# all of it idle while Windows Installer's signature check of each of the
-# VC++ runtime's two packages times out at 120 s in the fresh image. The
-# sandbox adds no devnode to this machine and its probe loads no
-# HIDMaestro.Core.dll here, so it starts now, beside S01 to S72, and its
-# slot collects the result.
+# S73 runs in Windows Sandbox, two sandboxes one after the other, for about
+# a minute and a half. The sandboxes add no devnode to this machine and its
+# probe loads no HIDMaestro.Core.dll here, so it starts now, beside S01 to
+# S72, and its slot collects the result.
 $script:S73Run = $null
 if ('S73_Usbip_Clean_Install' -like $Filter) {
     $script:S73Run = Start-BackgroundProbe -Dir 'usbip_install_check' -Exe 'UsbipInstallCheck.exe'

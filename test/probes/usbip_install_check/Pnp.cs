@@ -84,6 +84,81 @@ internal static class Pnp
         return -1;
     }
 
+    /// <summary>The root-enumerated devnodes with <paramref name="hardwareId"/>
+    /// among their hardware IDs, present or not, each with all its hardware
+    /// IDs in order.</summary>
+    internal static List<(string Id, bool Present, string[] HardwareIds)> RootDevnodes(string hardwareId)
+    {
+        var found = new List<(string, bool, string[])>();
+        foreach (string id in IdList("ROOT"))
+        {
+            string[] ids = HardwareIds(id);
+            if (ids.Any(h => h.Equals(hardwareId, StringComparison.OrdinalIgnoreCase)))
+                found.Add((id, CM_Locate_DevNodeW(out _, id, 0) == CR_SUCCESS, ids));
+        }
+        return found;
+    }
+
+    /// <summary>Every device instance id under an enumerator, present or
+    /// not, or every one with a null enumerator.</summary>
+    internal static List<string> IdList(string? enumerator)
+    {
+        uint flags = enumerator == null ? 0 : CM_GETIDLIST_FILTER_ENUMERATOR;
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            if (CM_Get_Device_ID_List_SizeW(out uint length, enumerator, flags) != CR_SUCCESS) break;
+            var list = new char[length];
+            uint cr = CM_Get_Device_ID_ListW(enumerator, list, length, flags);
+            if (cr == CR_BUFFER_SMALL) continue;
+            if (cr != CR_SUCCESS) break;
+            return new string(list).Split('\0', StringSplitOptions.RemoveEmptyEntries).ToList();
+        }
+        return new List<string>();
+    }
+
+    /// <summary>A devnode's hardware IDs, present or not.</summary>
+    internal static string[] HardwareIds(string id)
+    {
+        if (CM_Locate_DevNodeW(out uint dev, id, CM_LOCATE_DEVNODE_PHANTOM) != CR_SUCCESS) return Array.Empty<string>();
+        var key = HardwareIdsKey;
+        uint size = 0;
+        CM_Get_DevNode_PropertyW(dev, ref key, out _, null, ref size, 0);
+        if (size == 0) return Array.Empty<string>();
+        var buf = new byte[size];
+        if (CM_Get_DevNode_PropertyW(dev, ref key, out uint type, buf, ref size, 0) != CR_SUCCESS || type != DEVPROP_TYPE_STRING_LIST)
+            return Array.Empty<string>();
+        return Encoding.Unicode.GetString(buf, 0, (int)size).Split('\0', StringSplitOptions.RemoveEmptyEntries);
+    }
+
+    // devpkey.h: DEVPKEY_Device_DriverInfPath {a8b865dd-...},5 and
+    // DEVPKEY_Device_Parent {4340a6c5-...},8, both DEVPROP_TYPE_STRING.
+    static readonly DEVPROPKEY DriverInfPathKey = new() { fmtid = new Guid("a8b865dd-2e3d-4094-ad97-e593a70c75d6"), pid = 5 };
+    static readonly DEVPROPKEY ParentKey = new() { fmtid = new Guid("4340a6c5-93fa-4706-972c-7b648008a5a7"), pid = 8 };
+
+    /// <summary>The published INF a devnode's driver came from, or null.</summary>
+    internal static string? DriverInf(string id) => StringProperty(id, DriverInfPathKey);
+
+    /// <summary>A devnode's parent, present or not, or null.</summary>
+    internal static string? Parent(string id) => StringProperty(id, ParentKey);
+
+    /// <summary>True when Windows holds a record of the devnode, present or
+    /// not.</summary>
+    internal static bool Known(string id) => CM_Locate_DevNodeW(out _, id, CM_LOCATE_DEVNODE_PHANTOM) == CR_SUCCESS;
+
+    /// <summary>True when the devnode is in the tree.</summary>
+    internal static bool Present(string id) => CM_Locate_DevNodeW(out _, id, 0) == CR_SUCCESS;
+
+    static string? StringProperty(string id, DEVPROPKEY key)
+    {
+        if (CM_Locate_DevNodeW(out uint dev, id, CM_LOCATE_DEVNODE_PHANTOM) != CR_SUCCESS) return null;
+        uint size = 0;
+        CM_Get_DevNode_PropertyW(dev, ref key, out _, null, ref size, 0);
+        if (size == 0) return null;
+        var buf = new byte[size];
+        if (CM_Get_DevNode_PropertyW(dev, ref key, out uint type, buf, ref size, 0) != CR_SUCCESS || type != DEVPROP_TYPE_STRING) return null;
+        return Encoding.Unicode.GetString(buf, 0, (int)size).TrimEnd('\0');
+    }
+
     /// <summary>The devnode of a device interface, then each parent up to the
     /// host controller, a root-enumerated node, which ends the list.</summary>
     internal static List<string> Chain(string interfacePath)

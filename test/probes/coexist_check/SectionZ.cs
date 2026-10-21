@@ -275,7 +275,7 @@ internal static partial class Program
             if (!Ok(c)) { Check("Z1: the program's current directory is the planted one's", false, c); return; }
             string r1 = peer.Send("zproduct");
             long ms1 = LongField(r1, "ms");
-            Check("Z1: IsProductInstalled reads the driver store, with no pnputil, planted or not, and answers within 30 s",
+            Check("Z1: UdePackageNames reads the driver store, with no pnputil, planted or not, and answers within 30 s",
                   PeerProcess.Field(r1, "installed") == "True" && ms1 >= 0 && ms1 < 30_000, r1);
             string r2 = peer.Send("zpnputil /enum-drivers");
             long ms2 = LongField(r2, "ms");
@@ -1194,7 +1194,7 @@ internal static partial class Program
 /// reflection, as in Peer.cs.
 ///
 ///   zcwd &lt;dir&gt;            set the program's current directory
-///   zproduct              UsbipDriverInstaller.IsProductInstalled, timed
+///   zproduct              UsbipDriverInstaller.UdePackageNames, timed
 ///   zpnputil &lt;args&gt;       UsbipDriverInstaller.RunPnputil, timed
 ///   zruntool &lt;ms&gt; &lt;path&gt;  PnputilHelper.RunTool on a program, timed
 ///   zrun &lt;ms&gt; &lt;mode&gt;     UsbipDriverInstaller.RunForProbe: work that
@@ -1280,7 +1280,7 @@ internal static class PeerZ
                 var sw = Stopwatch.StartNew();
                 // The overload with no parameters, the one that lists the
                 // driver store. The other takes the listing to read.
-                bool v = (bool)Exact(Installer, "IsProductInstalled").Invoke(null, null)!;
+                bool v = ((System.Collections.Generic.List<string>)Exact(Installer, "UdePackageNames").Invoke(null, null)!).Count > 0;
                 return $"OK zproduct installed={v} ms={sw.ElapsedMilliseconds}";
             }
             case "zpnputil":

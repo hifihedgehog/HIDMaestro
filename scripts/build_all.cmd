@@ -7,7 +7,7 @@ setlocal
 :: releases set neither. docs/design/coexistence.md ("Building from source")
 :: lists them with the kit settings.
 ::   HMSkipArm64=true  x64 only: no ARM64 driver, companion or SWD helper,
-::                     and no ARM64 usbip-win2 installer in the SDK.
+::                     and no ARM64 usbip-win2 host controller in the SDK.
 ::   HMSkipUsbip=true  no USB/IP transport in the SDK.
 ::
 :: Every INF of both architectures is stamped with one time, taken here

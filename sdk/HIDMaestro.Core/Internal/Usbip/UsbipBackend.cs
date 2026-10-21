@@ -421,6 +421,19 @@ internal static class UsbipBackend
         catch { /* best-effort: eviction must never throw out of a sweep */ }
     }
 
+    /// <summary>The vhci's imports, each with whether it is HIDMaestro's
+    /// (<see cref="IsOurLocation"/>). Empty when the transport does not
+    /// answer.</summary>
+    internal static List<(int Port, string BusId, string Service, string Host, bool Ours)> ClassifiedImports()
+    {
+        var result = new List<(int, string, string, string, bool)>();
+        if (!VhciClient.IsAvailable()) return result;
+        var recorded = RecordedPorts();
+        foreach (var row in VhciClient.GetImportedDevices())
+            result.Add((row.Port, row.BusId, row.Service, row.Host, IsOurLocation(row.Host, row.Service, recorded, out _)));
+        return result;
+    }
+
     /// <summary>A loopback import on one of the SDK's port ranges, or on a
     /// port an owner record names: a server binds an OS-assigned port when
     /// every port in both ranges is taken, and its record carries the port

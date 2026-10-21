@@ -27,27 +27,6 @@ internal static class DiagLog
         orchestrator.GetField("DiagTap", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!
             .SetValue(null, (Action<string>)Note);
         Note($"probe: pid {Environment.ProcessId}, {Environment.CommandLine}");
-        Note($"probe: VC++ runtime {VcRuntime()}");
-    }
-
-    /// <summary>The VC++ 14 x64 runtime as Windows records it: the
-    /// redistributable's registry entry and the two DLLs devnode.exe imports.</summary>
-    internal static string VcRuntime()
-    {
-        string entry = "no registry entry";
-        try
-        {
-            using var b = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, Microsoft.Win32.RegistryView.Registry64);
-            using var k = b.OpenSubKey(@"SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64");
-            if (k != null) entry = $"Installed={k.GetValue("Installed")} Version={k.GetValue("Version")}";
-        }
-        catch (Exception ex) { entry = ex.GetType().Name; }
-        string Dll(string n)
-        {
-            string p = Path.Combine(Environment.SystemDirectory, n);
-            return File.Exists(p) ? $"{n} {FileVersionInfo.GetVersionInfo(p).FileVersion}" : $"{n} absent";
-        }
-        return $"{entry}, {Dll("vcruntime140.dll")}, {Dll("msvcp140.dll")}";
     }
 
     internal static void Note(string line)
@@ -81,9 +60,11 @@ internal static class DiagLog
                         try
                         {
                             string n = p.ProcessName;
+                            // An install of usbip-win2 by its own installer would
+                            // show as USBip-*, devnode or msiexec: none should.
                             if (!(n.StartsWith("USBip-", StringComparison.OrdinalIgnoreCase) || n.Equals("devnode", StringComparison.OrdinalIgnoreCase)
                                   || n.Equals("pnputil", StringComparison.OrdinalIgnoreCase) || n.Equals("drvinst", StringComparison.OrdinalIgnoreCase)
-                                  || n.StartsWith("vc_redist", StringComparison.OrdinalIgnoreCase) || n.Equals("msiexec", StringComparison.OrdinalIgnoreCase)
+                                  || n.Equals("msiexec", StringComparison.OrdinalIgnoreCase)
                                   || n.Equals("hmswd", StringComparison.OrdinalIgnoreCase) || n.Equals("UsbipInstallCheck", StringComparison.OrdinalIgnoreCase)
                                   || n.Equals("certutil", StringComparison.OrdinalIgnoreCase)))
                                 return null;
@@ -115,12 +96,10 @@ internal static class DiagLog
     }
 
     /// <summary>Copy into the results folder Windows' device installation
-    /// logs, the SDK's own diagnostic folder, the logs the installer's
-    /// children write to their temporary folders (the VC++ runtime's bundle
-    /// and its packages), and the Windows Installer events.</summary>
+    /// logs, the SDK's own diagnostic folder, the logs in the system's
+    /// temporary folders, and HIDMaestro's staging folder's logs.</summary>
     internal static void Collect(string results)
     {
-        Note($"probe: VC++ runtime at the end {VcRuntime()}");
         string win = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
         foreach (string name in new[] { "setupapi.dev.log", "setupapi.app.log" })
             try { File.Copy(Path.Combine(win, "INF", name), Path.Combine(results, name), true); } catch { }
@@ -129,16 +108,6 @@ internal static class DiagLog
         CopyLogs(Path.Combine(win, "Temp"), Path.Combine(results, "windows-temp"), SearchOption.TopDirectoryOnly);
         CopyLogs(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "HIDMaestro"),
                  Path.Combine(results, "staging"), SearchOption.AllDirectories);
-        try
-        {
-            var psi = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "wevtutil.exe"))
-            { UseShellExecute = false, RedirectStandardOutput = true, CreateNoWindow = true };
-            foreach (string a in new[] { "qe", "Application", "/q:*[System[Provider[@Name='MsiInstaller']]]", "/f:text" }) psi.ArgumentList.Add(a);
-            using var p = Process.Start(psi)!;
-            File.WriteAllText(Path.Combine(results, "msiinstaller-events.txt"), p.StandardOutput.ReadToEnd());
-            p.WaitForExit(30_000);
-        }
-        catch { }
     }
 
     static void CopyLogs(string from, string to, SearchOption depth)

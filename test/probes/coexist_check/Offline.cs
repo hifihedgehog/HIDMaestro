@@ -51,9 +51,9 @@
 //        (ProtectedStaging.PruneWouldDelete): a moved-aside directory is
 //        never pruned, an old version no record names is, and a version a
 //        live record names is kept.
-//   OF10 Diagnostic files. The usbip-win2 installer's own start info
-//        (BuildInstallerStartInfo) points TEMP and TMP at its staging
-//        folder (ProtectedStaging.ConfineChildTemp), not the user's
+//   OF10 Diagnostic files. The usbip-win2 host controller install's start
+//        info (BuildForceDriverStartInfo) points TEMP and TMP at its helper's
+//        staging folder (ProtectedStaging.ConfineChildTemp), not the user's
 //        %TEMP%. A diagnostic log the SDK
 //        opens (DeviceOrchestrator.OpenUserLog) is created with its folder
 //        and is appendable. Its owner is the user only when the process is
@@ -67,7 +67,7 @@
 //        squat that makes a %ProgramData% folder refuse (OF4) has nowhere to
 //        stand in front of staging. I10 runs it live against the real root.
 //   OF11 An unread driver-store listing is never taken for "absent". The
-//        usbip-win2 check (UsbipDriverInstaller.IsProductInstalled, given a
+//        usbip-win2 check (UsbipDriverInstaller.UdePackageNames, given a
 //        stand-in listing) throws on a listing that fails, naming why, and
 //        answers from a whole listing only. RemoveAllHidMaestroPackages,
 //        given a failed listing, throws before any delete, and HIDMaestro's
@@ -527,22 +527,22 @@ internal static partial class Program
     static void OfflineDiagFiles()
     {
         var asm = typeof(HIDMaestro.HMContext).Assembly;
-        var build = asm.GetType("HIDMaestro.Internal.Usbip.UsbipDriverInstaller")?.GetMethod("BuildInstallerStartInfo", BindingFlags.NonPublic | BindingFlags.Static);
+        var build = asm.GetType("HIDMaestro.Internal.Usbip.UsbipDriverInstaller")?.GetMethod("BuildForceDriverStartInfo", BindingFlags.NonPublic | BindingFlags.Static);
         var open = asm.GetType("HIDMaestro.Internal.DeviceOrchestrator")?.GetMethod("OpenUserLog", BindingFlags.NonPublic | BindingFlags.Static);
         if (build == null || open == null)
         {
-            Check("OF10: UsbipDriverInstaller.BuildInstallerStartInfo and DeviceOrchestrator.OpenUserLog exist", false);
+            Check("OF10: UsbipDriverInstaller.BuildForceDriverStartInfo and DeviceOrchestrator.OpenUserLog exist", false);
             return;
         }
-        // The installer's own ProcessStartInfo, built the way RunSilentInstall
-        // builds it, so dropping the confinement there fails this. TEMP and
-        // TMP must be the installer's protected staging folder, not the
-        // user's %TEMP%.
-        string exe = Path.Combine(Path.GetTempPath(), "hmof10", "usbip", "installer.exe");
-        var psi = Call<System.Diagnostics.ProcessStartInfo>(build, new object[] { exe });
+        // The host controller's driver install's ProcessStartInfo, built the
+        // way RunForceDriver builds it, so dropping the confinement there
+        // fails this. TEMP and TMP must be the helper's protected staging
+        // folder, not the user's %TEMP%.
+        string exe = Path.Combine(Path.GetTempPath(), "hmof10", "swd", "hmswd.exe");
+        var psi = Call<System.Diagnostics.ProcessStartInfo>(build, new object[] { exe, Path.Combine(Path.GetTempPath(), "hmof10", "usbip-ude", "usbip2_ude.inf") });
         string want = Path.GetDirectoryName(exe)!;
         string userTemp = Path.GetTempPath().TrimEnd('\\');
-        Check("OF10: the installer's TEMP and TMP are its own staging folder, not the user's %TEMP%",
+        Check("OF10: the host controller install's TEMP and TMP are its helper's staging folder, not the user's %TEMP%",
               psi.Environment["TEMP"] == want && psi.Environment["TMP"] == want
               && !string.Equals(psi.Environment["TEMP"], userTemp, StringComparison.OrdinalIgnoreCase),
               $"TEMP={psi.Environment["TEMP"]}, TMP={psi.Environment["TMP"]}");
@@ -659,7 +659,7 @@ internal static partial class Program
         var refusalType = asm.GetType("HIDMaestro.Internal.ProtectedStaging+ChildTempUnavailableException");
         var listType = recordType == null ? null : typeof(List<>).MakeGenericType(recordType);
         var listerType = listType == null ? null : typeof(Func<>).MakeGenericType(listType);
-        var isProduct = listerType == null ? null : installer?.GetMethod("IsProductInstalled", BindingFlags.NonPublic | BindingFlags.Static, null, new[] { listerType }, null);
+        var isProduct = listerType == null ? null : installer?.GetMethod("UdePackageNames", BindingFlags.NonPublic | BindingFlags.Static, null, new[] { listerType }, null);
         var removeAll = listerType == null ? null : pnputil?.GetMethod("RemoveAllHidMaestroPackages", BindingFlags.NonPublic | BindingFlags.Static, null, new[] { listerType }, null);
         var installedFrom = listerType == null ? null : pnputil?.GetMethod("InstalledFrom", BindingFlags.NonPublic | BindingFlags.Static, null, new[] { listerType }, null);
         var recordCtor = recordType?.GetConstructor(new[] { typeof(string), typeof(string), typeof(string), typeof(string) });
@@ -668,7 +668,7 @@ internal static partial class Program
             new[] { typeof(string), typeof(Exception) }, null);
         if (recordType == null || recordCtor == null || isProduct == null || removeAll == null || installedFrom == null || answer == null || refusalCtor == null)
         {
-            Check("OF11: PnputilHelper.DriverRecord, UsbipDriverInstaller.IsProductInstalled(list), RemoveAllHidMaestroPackages(list), InstalledFrom(list), HMContext.AnswerInstalled and the refusal's type exist", false);
+            Check("OF11: PnputilHelper.DriverRecord, UsbipDriverInstaller.UdePackageNames(list), RemoveAllHidMaestroPackages(list), InstalledFrom(list), HMContext.AnswerInstalled and the refusal's type exist", false);
             return;
         }
 
@@ -692,7 +692,7 @@ internal static partial class Program
         string Product(object list, out Exception? thrown)
         {
             thrown = null;
-            try { return Call<bool>(isProduct, new[] { list }) ? "installed" : "not installed"; }
+            try { return Call<List<string>>(isProduct, new[] { list }).Count > 0 ? "installed" : "not installed"; }
             catch (Exception e) { thrown = e; return $"{e.GetType().Name}: {e.Message}"; }
         }
         Exception? t;
