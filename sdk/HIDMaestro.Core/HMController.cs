@@ -163,8 +163,7 @@ public sealed partial class HMController : IDisposable
     // then look none of their keys up again (HidReportBuilder.BuildReportInto).
     // Per controller, since a profile's builder is shared and a
     // controller's frames run one at a time under _submitLock. Null when
-    // the profile's trigger passes read no key: a descriptor with neither
-    // trigger buttons nor a combined trigger.
+    // no per-axis write keeps a lookup (HidReportBuilder.KeepsLookups).
     private readonly float[]? _keptAxes;
 
     // v1.3.0: per-controller reusable raw report buffer. SubmitRawReport

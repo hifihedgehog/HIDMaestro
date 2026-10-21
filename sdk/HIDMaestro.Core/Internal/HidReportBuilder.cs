@@ -71,9 +71,9 @@ public class HidReportBuilder
 
     /// <summary>The frame's compiled form: the per-axis writes and the
     /// keys the trigger passes read. Immutable, so a frame reads it once
-    /// and a builder shared across controllers stays safe. Compiled at
-    /// create, and again whenever a field, the axis map, the trigger
-    /// buttons or a semantic slot it reads changes.</summary>
+    /// and a builder shared across controllers stays safe. Compiled by
+    /// Parse, SetStickAxes, SetAxisCenters and ApplyLayoutSemantics, and
+    /// dropped by the AxisMap and TriggerButtons setters.</summary>
     private sealed class FramePlan
     {
         public required AxisWrite[] Writes { get; init; }
@@ -97,8 +97,8 @@ public class HidReportBuilder
 
     /// <summary>The most writes whose lookup a frame keeps: one bit each in
     /// its found mask, and the length of the buffer a controller keeps
-    /// them in. AxisFields holds only defined <see cref="HMAxis"/> values,
-    /// 42 of them.</summary>
+    /// them in. AxisFields holds only defined <see cref="HMAxis"/> values
+    /// other than the hat, at most 41 of them.</summary>
     internal const int MaxKeptWrites = 64;
 
     /// <summary>Some per-axis write keeps its lookup for a trigger pass,
@@ -157,7 +157,10 @@ public class HidReportBuilder
         }
 
         bool hasFieldKeys = LeftTrigger != null && RightTrigger != null;
-        TriggerKey fieldLt = default, fieldRt = default, canonLt = default, canonRt = default;
+        // A key no pass reads keeps index -1, so a read without its guard
+        // would look it up rather than take write 0's value.
+        var none = new TriggerKey(HMAxis.None, -1);
+        TriggerKey fieldLt = none, fieldRt = none, canonLt = none, canonRt = none;
         InputField? combined = null;
         if (hasFieldKeys)
         {
