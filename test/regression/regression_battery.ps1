@@ -447,14 +447,15 @@ if ($env:HIDMAESTRO_TIMEOUT_SCALE) {
 function HMScaleMs { param([int]$Ms) [int][Math]::Min([int]::MaxValue, $Ms * $script:HMScale) }
 
 # How long a step may take before it counts as a hang: a probe's run, the
-# test app's answer to a command, the test app's exit after quit. Every
-# scenario but S71 and S73 finishes in about two minutes, and those two
-# pass their own. The deadline is ten times that, so a run that load or
-# another program slows still ends inside it and only a hang reaches it.
+# test app's answer to a command, the test app's exit after quit. On the
+# slowest machine S90 takes 14 minutes, S89 5.5, S94 4.5 and S59 3.5, and
+# S71 and S73 pass their own deadlines. The deadline is an hour, so a run
+# that load or another program slows still ends inside it at any timeout
+# scale and only a hang reaches it.
 # A hang fails its scenario and stops the process tree. Beside the
 # 2026-10-19 gate a probe looped for 14 minutes, and with no deadline the
 # battery would have waited for it forever.
-$script:HangSeconds = 1200
+$script:HangSeconds = 3600
 
 # Waits for a process to exit by the hang deadline, scaled. At the
 # deadline it stops the process tree and throws.
@@ -691,6 +692,17 @@ function Test-Scenario {
     # @() would make that array the single element of another, so an
     # empty result would count as one leftover.
     $leftovers = Get-HMLeftovers -Baseline $baseline -After $after
+    # Windows removes devices from a backlog, so a devnode still present
+    # here may be on its way out. Wait for each one to go. Only a devnode
+    # still present at the hang bound is a leftover.
+    if ($leftovers.Count -gt 0) {
+        $leftSw = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($leftovers.Count -gt 0 -and $leftSw.ElapsedMilliseconds -lt (HMScaleMs 120000)) {
+            Start-Sleep -Milliseconds 250
+            $after = Get-HMPresentDevnodes
+            $leftovers = Get-HMLeftovers -Baseline $baseline -After $after
+        }
+    }
 
     $sw.Stop()
     $beside = [HMForeign]::Stop()
