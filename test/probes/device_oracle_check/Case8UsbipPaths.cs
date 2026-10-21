@@ -214,6 +214,10 @@ internal sealed class Case8UsbipPaths : IOracleCase
         var protocol = json["protocol"]!.AsObject();
         protocol["state"]!.AsArray().Add(JsonNode.Parse("{\"name\":\"halted\",\"initial\":false}"));
         protocol["input"] = JsonNode.Parse("{\"endpoint\":\"0x81\"}");
+        // The input endpoint's protocol sends the reports now, so the
+        // report's own clock rule goes: the load refuses it beside
+        // protocol.input.
+        json["extendedReport"]!.AsObject().Remove("send");
         protocol["halt"] = JsonNode.Parse("{\"while\":[\"halted\"],\"status\":\"EPROTO\"}");
         protocol["commands"]!["rules"]!.AsArray().Insert(0, JsonNode.Parse("{\"match\":\"01 F2\",\"set\":{\"halted\":true}}"));
         var p = ControllerProfile.Parse(Encoding.UTF8.GetBytes(json.ToJsonString()))!;

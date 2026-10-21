@@ -275,8 +275,16 @@
         "object",
         "null"
       ],
-      "description": "Data-driven vendor-blob INPUT spec (Sony BT Report 0x31/0x11, Switch 2 Pro Report 0x09, DualShock 3 Report 0x01): { reportId, size, armOn, alwaysArmed, fields[] }. Drives VendorBlobCodec.EncodeInput. armOn lists the host reads or writes that switch the pad into this report. With alwaysArmed set the report goes out from the first frame, for firmware that streams it from power-on.",
+      "description": "Data-driven vendor-blob INPUT spec (Sony BT Report 0x31/0x11, Switch 2 Pro Report 0x09, DualShock 3 Report 0x01): { reportId, size, armOn, alwaysArmed, idleFrameIntervalMs, send, fields[] }. Drives VendorBlobCodec.EncodeInput. armOn lists the host reads or writes that switch the pad into this report. With alwaysArmed set the report goes out from the first frame, for firmware that streams it from power-on.",
       "properties": {
+        "send": {
+          "type": "string",
+          "enum": [
+            "submit",
+            "clock"
+          ],
+          "description": "Issue #72: when the report goes out. submit, the default, sends each frame as the consumer submits it and repeats the last one every idleFrameIntervalMs while the consumer is quiet. clock sends one report every idleFrameIntervalMs on the device's own clock, carrying the consumer's latest frame, as a device with a firmware frame clock reports: a submit only replaces what the next report carries, and reaches the wire up to one period later. clock needs idleFrameIntervalMs and is refused beside stream, ports, a state block, protocol.input and on a keyboard or mouse."
+        },
         "fields": {
           "type": "array",
           "items": {

@@ -264,6 +264,44 @@ internal static class Strict
             // still reads the group.
             new("i-escaped-key.json", EscapedKey(), "user-escaped-key",
                 "Refused", "$.inputReports", "needs a stateBlock"),
+            // Issue #72: extendedReport.send, a value it does not take, and
+            // "clock" wherever the device clock cannot carry every report.
+            new("i-send-unknown.json", WithId("user-send-unknown", o => o["extendedReport"] = JsonNode.Parse(
+                "{\"reportId\":\"0x01\",\"size\":8,\"idleFrameIntervalMs\":4,\"send\":\"sometimes\",\"fields\":[]}")), "user-send-unknown",
+                "Refused", "$.extendedReport.send", "\"sometimes\" is not one of submit, clock"),
+            new("i-send-clock-no-period.json", WithId("user-send-clock-no-period", o => o["extendedReport"] = JsonNode.Parse(
+                "{\"reportId\":\"0x01\",\"size\":8,\"send\":\"clock\",\"fields\":[]}")), "user-send-clock-no-period",
+                "Refused", "$.extendedReport.send", "needs extendedReport.idleFrameIntervalMs"),
+            new("i-send-clock-stream.json", WithId("user-send-clock-stream", o =>
+                {
+                    o["extendedReport"] = JsonNode.Parse("{\"reportId\":\"0x01\",\"size\":8,\"idleFrameIntervalMs\":4,\"send\":\"clock\",\"fields\":[]}");
+                    o["stream"] = JsonNode.Parse("{\"periodMs\":4}");
+                }), "user-send-clock-stream",
+                "Refused", "$.extendedReport.send", "stream"),
+            new("i-send-clock-ports.json", Catalog("nintendo/gamecube-adapter.json", "user-send-clock-ports", o =>
+                {
+                    o["extendedReport"]!["idleFrameIntervalMs"] = 8;
+                    o["extendedReport"]!["send"] = "clock";
+                }), "user-send-clock-ports",
+                "Refused", "$.extendedReport.send", "extendedReport.ports"),
+            new("i-send-clock-state-block.json", Catalog("nintendo/switch2-pro-composite.json", "user-send-clock-state-block", o =>
+                {
+                    o["extendedReport"]!["idleFrameIntervalMs"] = 4;
+                    o["extendedReport"]!["send"] = "clock";
+                }), "user-send-clock-state-block",
+                "Refused", "$.extendedReport.send", "state block"),
+            new("i-send-clock-protocol-input.json", Catalog("valve/steam-controller-2.json", "user-send-clock-protocol-input",
+                o => o["protocol"]!["input"] = JsonNode.Parse("{\"endpoint\":\"0x81\"}")), "user-send-clock-protocol-input",
+                "Refused", "$.extendedReport.send", "protocol.input"),
+            new("i-send-clock-keyboard.json", Catalog("8bitdo/retro-mechanical-keyboard.json", "user-send-clock-keyboard",
+                o => o["extendedReport"] = JsonNode.Parse("{\"reportId\":\"0x01\",\"size\":8,\"idleFrameIntervalMs\":4,\"send\":\"clock\",\"fields\":[]}")),
+                "user-send-clock-keyboard",
+                "Refused", "$.extendedReport.send", "keyboard or mouse"),
+            new("i-send-output.json", WithId("user-send-output", o => o["extendedOutputReport"] = JsonNode.Parse(
+                "{\"reportId\":\"0x01\",\"size\":8,\"send\":\"clock\",\"fields\":[]}")), "user-send-output",
+                "Refused", "$.extendedOutputReport.send", "belongs to extendedReport"),
+            new("j-send-submit.json", WithId("user-send-submit", o => o["extendedReport"] = JsonNode.Parse(
+                "{\"reportId\":\"0x01\",\"size\":8,\"idleFrameIntervalMs\":4,\"send\":\"submit\",\"fields\":[]}")), null, null, null, null),
             new("j-good.json", WithId("user-good"), null, null, null, null),
         };
     }
@@ -333,7 +371,7 @@ internal static class Strict
                     && Api.Prop(d.Inner, "SourceFile") is string f && Path.GetFileName(f) == "e-dup-1.json");
             c.Check("nothing in the models folder is read as a profile", !loaded.Contains("user-in-models")
                     && !issues.Any(i => i.File.Contains("k-in-models", StringComparison.Ordinal)));
-            c.Check("LoadProfilesFromDirectory counts the two profiles it added", added == 2, $"{added}");
+            c.Check("LoadProfilesFromDirectory counts the three profiles it added", added == 3, $"{added}");
             // A directory loaded again: its own model files and identity
             // entries are not repeats of themselves, and a repeat across
             // loads is listed once. At f00f0482 the second load refused the
