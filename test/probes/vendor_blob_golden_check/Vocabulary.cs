@@ -31,6 +31,12 @@
 //     bytes a step, gives the register a bit-at-a-time CRC-32/ISO-HDLC gives
 //     on every length from 0 to 300 at every start offset modulo 16, from
 //     random registers, and 0xCBF43926 on "123456789"
+//   - triggerThreshold (v2.0.2) is refused outside 1 <= at <= max <= 65535,
+//     on a field without a trigger bit and on an output field, max 255 at 1
+//     is the rule a mask without it keeps on every float, and the Valve
+//     personas' bits clear one count below their thresholds and set at them
+//   - uint16-pressure sends a pad pressure by the one arithmetic, 0 on a
+//     contact as full pressure, NaN and negatives as 0
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -70,8 +76,232 @@ internal static class Vocabulary
         Run("the int16 center", Int16Center);
         Run("the Triton timestamp while its IMU is off", () => TritonImuHold(db["steam-controller-2"]));
         Run("the sliced CRC-32", SlicedCrc);
+        Run("the trigger threshold's refusals", TriggerThresholdRefusals);
+        Run("the trigger threshold's default", TriggerThresholdDefault);
+        Run("the Valve trigger bits", () => ValveTriggerBits(db));
+        Run("the pad pressures", () => PadPressures(db["steam-deck-composite"]));
+        Run("the calibrated counts", CalibratedCounts);
         Console.WriteLine($"=== vocabulary: {(s_fail == 0 ? "PASS" : $"{s_fail} FAIL")} ===");
         return s_fail;
+    }
+
+    /// <summary>triggerThreshold is refused, naming its path, outside the
+    /// values it takes and on a field it would not change.</summary>
+    static void TriggerThresholdRefusals()
+    {
+        static string? Refusal(string field, bool output = false)
+        {
+            try
+            {
+                var spec = Spec(4, field);
+                VendorBlobProgram.Check(spec, spec.Size, "threshold", output, portBlock: false);
+                return null;
+            }
+            catch (InvalidOperationException e) { return e.Message; }
+        }
+        foreach (var (field, what, names) in new[]
+        {
+            ("""{"byte":1,"type":"button-mask","triggerThreshold":{"max":0,"at":0},"buttons":["LT_DIGITAL"]}""", "max below 1", ".triggerThreshold.max"),
+            ("""{"byte":1,"type":"button-mask","triggerThreshold":{"max":65536,"at":1},"buttons":["LT_DIGITAL"]}""", "max past 65535", ".triggerThreshold.max"),
+            ("""{"byte":1,"type":"button-mask","triggerThreshold":{"at":1},"buttons":["LT_DIGITAL"]}""", "no max", ".triggerThreshold.max"),
+            ("""{"byte":1,"type":"button-mask","triggerThreshold":{"max":255,"at":0},"buttons":["RT_DIGITAL"]}""", "at below 1", ".triggerThreshold.at"),
+            ("""{"byte":1,"type":"button-mask","triggerThreshold":{"max":255,"at":256},"buttons":["RT_DIGITAL"]}""", "at above max", ".triggerThreshold.at"),
+            ("""{"byte":1,"type":"button-mask","triggerThreshold":{"max":255},"buttons":["RT_DIGITAL"]}""", "no at", ".triggerThreshold.at"),
+            ("""{"byte":1,"type":"button-mask","triggerThreshold":{"max":255,"at":1},"buttons":["A","B"]}""", "a mask with no trigger bit", ".triggerThreshold"),
+            ("""{"byte":1,"type":"uint8-trigger","semantic":"leftTrigger","triggerThreshold":{"max":255,"at":1}}""", "a field that is not a button mask", ".triggerThreshold"),
+        })
+        {
+            string? r = Refusal(field);
+            Check($"triggerThreshold with {what} is refused, naming fields[0]{names}",
+                r != null && r.Contains("fields[0]", StringComparison.Ordinal) && r.Contains(names, StringComparison.Ordinal), r ?? "accepted");
+        }
+        string? output = Refusal("""{"byte":1,"type":"button-mask","triggerThreshold":{"max":255,"at":1},"buttons":["LT_DIGITAL"]}""", output: true);
+        Check("triggerThreshold on an output button mask, whose decode ignores it, is refused naming it",
+            output != null && output.Contains("fields[0]", StringComparison.Ordinal) && output.Contains(".triggerThreshold", StringComparison.Ordinal), output ?? "accepted");
+        string? fine = Refusal("""{"byte":1,"type":"button-mask","triggerThreshold":{"max":65535,"at":65535},"buttons":["LT_DIGITAL","RT_DIGITAL"]}""");
+        Check("triggerThreshold max 65535 at 65535 is accepted", fine == null, fine ?? "");
+    }
+
+    /// <summary>A mask without triggerThreshold sets its trigger bits by the
+    /// v2.0.0 rule, c x 255 above 0.5. That rule is triggerThreshold max 255
+    /// at 1, RoundHalfEven(c x 255) at least 1, on every float there is: all
+    /// 2^32 bit patterns, NaN, the infinities and the negatives among them.
+    /// Then the codec writes the same bytes for both masks on states that
+    /// press every trigger value on and beside its first step.</summary>
+    static void TriggerThresholdDefault()
+    {
+        // The extras a mask with the key compiles to, through the codec's own
+        // compile, so the threshold the encode compares with is the one under
+        // test.
+        static VendorBlobProgram.FieldExtras Compiled(int max, int at)
+        {
+            var spec = Spec(2, "{\"byte\":1,\"type\":\"button-mask\",\"triggerThreshold\":{\"max\":" + max + ",\"at\":" + at + "},\"buttons\":[\"LT_DIGITAL\"]}");
+            VendorBlobProgram.Check(spec, spec.Size, "threshold", output: false, portBlock: false);
+            return VendorBlobProgram.Get(spec).Fields[0].Extras!;
+        }
+        // Every float there is, by its bits, split across the processors.
+        static (long Differ, uint First) AllFloats(Func<float, bool> wrong)
+        {
+            long differ = 0;
+            uint first = 0;
+            object gate = new();
+            System.Threading.Tasks.Parallel.For(0, 1 << 16, hi =>
+            {
+                long d = 0;
+                uint f0 = 0;
+                for (uint lo = 0; lo < 1u << 16; lo++)
+                {
+                    uint bits = ((uint)hi << 16) | lo;
+                    if (wrong(BitConverter.UInt32BitsToSingle(bits)) && d++ == 0) f0 = bits;
+                }
+                if (d != 0) lock (gate) { if (differ == 0 || f0 < first) first = f0; differ += d; }
+            });
+            return (differ, first);
+        }
+        var x = Compiled(255, 1);
+        var (differ, first) = AllFloats(v =>
+        {
+            bool rule = v * 255.0 > 0.5;
+            return VendorBlobCodec.TriggerBit(v, x) != rule || VendorBlobCodec.TriggerBit(v, null) != rule
+                || (WireArith.Linear(v, 0, 255, false, 0) >= 1) != rule;
+        });
+        Check("max 255 at 1 sets the trigger bit exactly where c x 255 > 0.5 does, and a mask without the key does too, on all 4,294,967,296 floats",
+            differ == 0, differ == 0 ? "" : $"{differ} differ, first {BitConverter.UInt32BitsToSingle(first):R}");
+        // The encode compares the trigger with the least float that reaches
+        // the threshold (WireArith.LeastAtLeast). That is the rule itself,
+        // RoundHalfEven of the clamped trigger times max at least at, on
+        // every float, for the catalog's thresholds and the range's ends.
+        foreach (var (max, at) in new[] { (32767, 29490), (255, 255), (1, 1), (65535, 1), (65535, 65535), (32767, 13107), (1023, 512) })
+        {
+            var e = Compiled(max, at);
+            var (d, f) = AllFloats(v => VendorBlobCodec.TriggerBit(v, e) != (WireArith.Linear(v, 0, max, false, 0) >= at));
+            Check($"max {max} at {at}: the encode's compare is RoundHalfEven(c x {max}) >= {at} on all 4,294,967,296 floats",
+                d == 0, d == 0 ? $"from {e.TriggerFrom:R}" : $"{d} differ, first {BitConverter.UInt32BitsToSingle(f):R}");
+        }
+
+        var plain = Spec(2, """{"byte":1,"type":"button-mask","buttons":["LT_DIGITAL","RT_DIGITAL","A"]}""");
+        var keyed = Spec(2, """{"byte":1,"type":"button-mask","triggerThreshold":{"max":255,"at":1},"buttons":["LT_DIGITAL","RT_DIGITAL","A"]}""");
+        VendorBlobProgram.Check(keyed, keyed.Size, "threshold", output: false, portBlock: false);
+        var a = new byte[2];
+        var b = new byte[2];
+        int bytesDiffer = 0, n = 0;
+        foreach (int step in Enumerable.Range(-2, 6))
+            foreach (double nudge in new[] { -1e-7, 0, 1e-7 })
+                foreach (double half in new[] { 0, 0.5 })
+                {
+                    float v = (float)((step + half) / 255.0 + nudge);
+                    var s = new HMGamepadState { Buttons = HMButton.A };
+                    VendorBlobCodec.EncodeInput(plain, in s, 0.5f, 0.5f, 0.5f, 0.5f, v, 1f - v, a, new VendorBlobCodec.EncoderState());
+                    VendorBlobCodec.EncodeInput(keyed, in s, 0.5f, 0.5f, 0.5f, 0.5f, v, 1f - v, b, new VendorBlobCodec.EncoderState());
+                    n++;
+                    if (!a.AsSpan().SequenceEqual(b)) bytesDiffer++;
+                }
+        Check($"the codec writes the same mask with and without triggerThreshold max 255 at 1 on {n} trigger values beside the first step", bytesDiffer == 0, $"{bytesDiffer} differ");
+    }
+
+    /// <summary>The catalog's Valve personas: each trigger bit clear one count
+    /// below the profile's threshold and set at it, on the scale the trigger
+    /// field writes, and a NaN trigger clear. The Deck and the Triton at
+    /// 29490 of 32767, Valve's firmware default of 90 percent (settings entry
+    /// 68 in jupiter-hw-support's D20, D21 and RA images and Steam's
+    /// IBEX_FW_6941BF08 and IBEX_FW_6AC686B3, default 90, range 40 to 99),
+    /// the comparison sc26re makes (app/src/analog.c:158-178). The 2015
+    /// controller at 255 of 255.</summary>
+    static void ValveTriggerBits(Dictionary<string, ControllerProfile> db)
+    {
+        foreach (var (id, max, at, ltBit, rtBit, btn) in new[]
+        {
+            ("steam-deck-composite", 32767, 29490, 1, 0, 8),
+            ("steam-controller-2", 32767, 29490, 27, 23, 2),
+            ("steam-controller-composite", 255, 255, 1, 0, 8),
+        })
+        {
+            var spec = db[id].ExtendedReport!;
+            var buf = new byte[spec.Size];
+            bool Bit(float lt, float rt, int bit)
+            {
+                var s = new HMGamepadState();
+                VendorBlobCodec.EncodeInput(spec, in s, 0.5f, 0.5f, 0.5f, 0.5f, lt, rt, buf, new VendorBlobCodec.EncoderState());
+                return (buf[btn + bit / 8] & (1 << (bit % 8))) != 0;
+            }
+            float below = (float)((at - 1) / (double)max), on = (float)(at / (double)max);
+            bool ok = !Bit(below, 0, ltBit) && Bit(on, 0, ltBit) && !Bit(0, below, rtBit) && Bit(0, on, rtBit)
+                && !Bit(float.NaN, float.NaN, ltBit) && !Bit(float.NaN, float.NaN, rtBit) && Bit(2f, 2f, ltBit) && Bit(2f, 2f, rtBit);
+            Check($"{id}: LT_DIGITAL and RT_DIGITAL clear at {at - 1} of {max}, set at {at} and past a full pull, clear for NaN", ok);
+        }
+    }
+
+    /// <summary>v2.0.2: WireArith.Scaled clamps a product and then rounds it
+    /// by the 1.5 x 2^52 bias, and ScaledBy multiplies by numerator /
+    /// denominator when the denominator is a power of two. Both give the
+    /// count the design note's rule gives, RoundHalfEven(v x n / d) in
+    /// double clamped to int16 and a NaN 0, on every float, for a dyadic
+    /// and a non-dyadic ratio of each sign and a dyadic one whose quotient
+    /// is not whole.</summary>
+    static void CalibratedCounts()
+    {
+        foreach (var (n, d) in new[] { (16384.0, 1.0), (-2048.0, 125.0), (13371.0, 936.0), (32767.0, 8.0) })
+        {
+            double m = WireArith.ExactMultiplier(n, d);
+            long differ = 0;
+            uint first = 0;
+            object gate = new();
+            System.Threading.Tasks.Parallel.For(0, 1 << 16, hi =>
+            {
+                long dd = 0;
+                uint f0 = 0;
+                for (uint lo = 0; lo < 1u << 16; lo++)
+                {
+                    uint bits = ((uint)hi << 16) | lo;
+                    float v = BitConverter.UInt32BitsToSingle(bits);
+                    short want = float.IsNaN(v) ? (short)0 : (short)Math.Clamp(Math.Round((double)v * n / d, MidpointRounding.ToEven), short.MinValue, short.MaxValue);
+                    bool bad = WireArith.Scaled(v, n, d) != want || (m != 0 && WireArith.ScaledBy(v, m) != want);
+                    if (bad && dd++ == 0) f0 = bits;
+                }
+                if (dd != 0) lock (gate) { if (differ == 0 || f0 < first) first = f0; differ += dd; }
+            });
+            Check($"scale {n}/{d}: Scaled{(m != 0 ? " and ScaledBy give" : " gives")} RoundHalfEven(v x n / d) clamped to int16 on all 4,294,967,296 floats",
+                differ == 0, differ == 0 ? "" : $"{differ} differ, first {BitConverter.UInt32BitsToSingle(first):R}");
+        }
+        Check("a ratio whose denominator is not a power of two has no multiplier, and one whose denominator is has n / d",
+            WireArith.ExactMultiplier(2048, 125) == 0 && WireArith.ExactMultiplier(13371, 936) == 0
+                && WireArith.ExactMultiplier(32767, 8) == 32767 / 8.0 && WireArith.ExactMultiplier(-16384, 1) == -16384);
+    }
+
+    /// <summary>uint16-pressure on the Deck's left pad (byte 56, max 32767):
+    /// a pressure is sent as min + RoundHalfEven(p x (max - min)), NaN read as
+    /// 0 and clamped to 0..1, and a pressure of 0 on a contact as full
+    /// pressure, as the pressure-sensitive buttons do. SDL reads it back as
+    /// the value over 32768 (SDL_hidapi_steamdeck.c:272).</summary>
+    static void PadPressures(ControllerProfile deck)
+    {
+        var spec = deck.ExtendedReport!;
+        var buf = new byte[spec.Size];
+        int Wire(float p, bool down)
+        {
+            var s = new HMGamepadState { TouchpadFinger0Active = down, TouchpadFinger0Pressure = p };
+            VendorBlobCodec.EncodeInput(spec, in s, 0.5f, 0.5f, 0.5f, 0.5f, 0, 0, buf, new VendorBlobCodec.EncoderState());
+            return buf[56] | buf[57] << 8;
+        }
+        var cases = new (float P, bool Down, int Want, string What)[]
+        {
+            (0f, true, 32767, "0 on a contact is full pressure"),
+            (0f, false, 0, "0 with no contact is 0"),
+            (0.25f, true, 8192, "0.25 is 8192, 0.25 to SDL"),
+            (0.25f, false, 8192, "0.25 with no contact is sent as given"),
+            (1f, true, 32767, "1 is 32767"),
+            (2f, true, 32767, "past 1 clamps"),
+            (-1f, true, 32767, "a negative pressure on a contact reads as 0, so full"),
+            (-1f, false, 0, "a negative pressure with no contact is 0"),
+            (float.NaN, true, 32767, "NaN on a contact reads as 0, so full"),
+            (float.NaN, false, 0, "NaN with no contact is 0"),
+            (1e-30f, true, 0, "a pressure above 0 is sent as given, even one that rounds to 0"),
+        };
+        foreach (var (p, down, want, what) in cases)
+        {
+            int got = Wire(p, down);
+            Check($"steam-deck-composite left pad pressure: {what}", got == want, $"{got}, want {want}");
+        }
     }
 
     /// <summary>Programs.Crc32 takes sixteen bytes a step through sliced

@@ -108,8 +108,66 @@ internal static class WireArith
     public static short Scaled(float v, double numerator, double denominator)
     {
         if (float.IsNaN(v)) return 0;
-        double x = Math.Round((double)v * numerator / denominator);
-        return (short)Math.Clamp(x, short.MinValue, short.MaxValue);
+        return Counts((double)v * numerator / denominator);
+    }
+
+    /// <summary>A product as int16 counts: RoundHalfEven, clamped to the
+    /// int16 range. The value is clamped first and rounded by
+    /// <see cref="RoundingBias"/> after, which gives the same count: the
+    /// bounds are whole, so a value inside them rounds as it would unclamped,
+    /// and one past a bound rounds to it or past it, where the clamp takes
+    /// it back. The generated kernels write the same (Emitter, GpScaledOp).
+    /// Not for NaN, which the callers take to 0 first.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static short Counts(double x) =>
+        (short)(int)BitConverter.DoubleToInt64Bits(Math.Min(Math.Max(x, -32768.0), 32767.0) + RoundingBias);
+
+    /// <summary><see cref="Scaled"/> for a ratio whose denominator is a power
+    /// of two, 1 among them, as <paramref name="multiplier"/>, numerator over
+    /// denominator, computed once when the profile compiles. Dividing by a
+    /// power of two only moves the exponent, so v x multiplier is the
+    /// correctly rounded v x numerator / denominator itself, and the value
+    /// is the one <see cref="Scaled"/> gives, without its division.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static short ScaledBy(float v, double multiplier)
+    {
+        if (float.IsNaN(v)) return 0;
+        return Counts((double)v * multiplier);
+    }
+
+    /// <summary>The multiplier <see cref="ScaledBy"/> takes for
+    /// <paramref name="numerator"/> / <paramref name="denominator"/>, or 0
+    /// when the denominator is not a positive power of two and the value
+    /// needs the division.</summary>
+    public static double ExactMultiplier(double numerator, double denominator)
+    {
+        if (!(denominator > 0) || !double.IsFinite(denominator) || !double.IsFinite(numerator)) return 0;
+        long bits = BitConverter.DoubleToInt64Bits(denominator);
+        bool powerOfTwo = (bits & 0xFFFFFFFFFFFFFL) == 0 && ((bits >> 52) & 0x7FF) is > 0 and < 0x7FF;
+        if (!powerOfTwo) return 0;
+        double m = numerator / denominator;
+        // A quotient that underflows or overflows is not the exact scaling
+        // the rule rests on.
+        return double.IsNormal(m) ? m : 0;
+    }
+
+    /// <summary>The least float c with <c>Linear(c, 0, max, false, 0)</c> at
+    /// least <paramref name="at"/>, for 1 &lt;= at &lt;= max. Linear only
+    /// grows with c, and a nonnegative float's bits order as its value, so a
+    /// search over the bits from 0 to 1.0 finds it, and for every input v,
+    /// <c>v &gt;= c</c> is exactly <c>Linear(v, 0, max, false, 0) &gt;= at</c>:
+    /// past 1 both hold, below 0 and for NaN neither does. Computed once,
+    /// when a profile compiles.</summary>
+    public static float LeastAtLeast(int max, int at)
+    {
+        uint lo = 0, hi = BitConverter.SingleToUInt32Bits(1f);
+        while (lo < hi)
+        {
+            uint mid = lo + (hi - lo) / 2;
+            if (Linear(BitConverter.UInt32BitsToSingle(mid), 0, max, false, 0) >= at) hi = mid;
+            else lo = mid + 1;
+        }
+        return BitConverter.UInt32BitsToSingle(lo);
     }
 
     /// <summary>A value a program wrote into HMGamepadState.Axes, clamped to

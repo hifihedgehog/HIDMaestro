@@ -150,11 +150,23 @@ internal sealed class VendorBlobProgram
 
     /// <summary>The parameters only a few fields set: a calibrated field's
     /// scale and repeat, a level map's charging value, a packed-uint's
-    /// parts.</summary>
+    /// parts, a button mask's trigger threshold.</summary>
     public sealed class FieldExtras
     {
         public double ScaleNumerator;
         public double ScaleDenominator = 1;
+        /// <summary>The numerator with the negation folded in: -v x n / d is
+        /// v x -n / d, the same double, since IEEE 754 rounds both signs
+        /// alike.</summary>
+        public double SignedNumerator;
+        /// <summary>SignedNumerator / ScaleDenominator as one multiplier when
+        /// the denominator is a power of two (WireArith.ExactMultiplier),
+        /// else 0.</summary>
+        public double ScaleMultiplier;
+        /// <summary>The byte offset in HMGamepadState of the calibrated
+        /// value the field reads (VendorBlobCodec.MotionOffset), -1 for
+        /// none.</summary>
+        public nint MotionOffset = -1;
         public bool Negate;
         public int RepeatCount = 1;
         public int RepeatStride;
@@ -163,6 +175,17 @@ internal sealed class VendorBlobProgram
         /// <summary>An int16-le field with a center: its words are unsigned,
         /// clamped to 0 to 65535 as uint10-be clamps to its range.</summary>
         public bool OffsetBinary;
+        /// <summary>A button mask's triggerThreshold: its LT_DIGITAL and
+        /// RT_DIGITAL bits hold while RoundHalfEven(c x TriggerMax) is at
+        /// least TriggerAt. 0 for a mask without one, whose bits follow
+        /// <see cref="VendorBlobCodec.TriggerOn"/>.</summary>
+        public int TriggerMax;
+        public int TriggerAt;
+        /// <summary>The least float whose value on TriggerMax counts is at
+        /// least TriggerAt (WireArith.LeastAtLeast). The value only grows
+        /// with the input, so a trigger at or past it is exactly the
+        /// threshold's rule, and NaN, below every float, is not.</summary>
+        public float TriggerFrom;
     }
 
     public readonly struct CompiledField
@@ -194,8 +217,8 @@ internal sealed class VendorBlobProgram
         // The ones a frame reads on common fields are stored here. The rest,
         // which only a few fields set, sit in Extras, so the field array an
         // encode walks stays as short as it can.
-        /// <summary>Wire value at the SDK's 0 and at 1, or the released and
-        /// pressed values of a pad pressure.</summary>
+        /// <summary>Wire value at the SDK's 0 and at 1, a pad pressure's
+        /// among them.</summary>
         public int Min { get; init; }
         public int Max { get; init; }
         /// <summary>The d-pad from HatDegrees, HatHundredths, HatRaw or Hat,
@@ -217,7 +240,10 @@ internal sealed class VendorBlobProgram
         public ButtonGroup[]? ButtonGroups { get; init; }
         /// <summary>A button-mask's other positions, each read on its own:
         /// the trigger, d-pad and pad-touch bits and any position that names
-        /// more than one HMButton bit. Null for any other field.</summary>
+        /// more than one HMButton bit. Each entry is the position in its low
+        /// 16 bits and its <see cref="SingleKind"/> above them, so an encode
+        /// picks its source from a jump table. Null for any other
+        /// field.</summary>
         public int[]? ButtonSingles { get; init; }
 
         /// <summary>A calibrated int16-le field's counts per unit, as a
@@ -256,8 +282,30 @@ internal sealed class VendorBlobProgram
     /// or right by -Shift.</summary>
     public readonly record struct ButtonGroup(int Shift, ulong Mask);
 
+    /// <summary>What a single position of a button mask reads: an HMButton
+    /// mask, a trigger's digital bit, a d-pad direction or a pad's
+    /// touch.</summary>
+    internal enum SingleKind
+    {
+        Mask, LtDigital, RtDigital, DpadUp, DpadDown, DpadLeft, DpadRight, Pad0Touch, Pad1Touch,
+    }
+
+    internal static SingleKind KindOf(ulong bits) => bits switch
+    {
+        ButtonLtDigital => SingleKind.LtDigital,
+        ButtonRtDigital => SingleKind.RtDigital,
+        ButtonDpadUp => SingleKind.DpadUp,
+        ButtonDpadDown => SingleKind.DpadDown,
+        ButtonDpadLeft => SingleKind.DpadLeft,
+        ButtonDpadRight => SingleKind.DpadRight,
+        ButtonPad0Touch => SingleKind.Pad0Touch,
+        ButtonPad1Touch => SingleKind.Pad1Touch,
+        _ => SingleKind.Mask,
+    };
+
     /// <summary>The groups and singles of a button-mask field's positions,
-    /// in the range its bits declare.</summary>
+    /// in the range its bits declare. A single is its position with its
+    /// <see cref="SingleKind"/> shifted 16 bits up.</summary>
     internal static (ButtonGroup[] Groups, int[] Singles) GroupButtons(ulong[] bits, int bitLo, int bitHi)
     {
         var groups = new List<ButtonGroup>();
@@ -266,7 +314,7 @@ internal sealed class VendorBlobProgram
         {
             ulong b = bits[i];
             if (b == 0) continue;
-            if (b >= 1UL << 32 || (b & (b - 1)) != 0) { singles.Add(i); continue; }
+            if (b >= 1UL << 32 || (b & (b - 1)) != 0) { singles.Add(i | (int)KindOf(b) << 16); continue; }
             int shift = bitLo + i - System.Numerics.BitOperations.TrailingZeroCount(b);
             int at = groups.FindIndex(g => g.Shift == shift);
             if (at < 0) groups.Add(new ButtonGroup(shift, b));
@@ -303,8 +351,20 @@ internal sealed class VendorBlobProgram
     /// null. The controller compiles it against the protocol's registers.</summary>
     public readonly string? HoldWhile;
 
+    /// <summary>The bytes an input encode starts from, the report's size:
+    /// the report ID at byte 0, then each constant byte (uint8) no other
+    /// field writes and no CRC before it reads. Null when the report ID
+    /// does not read as a byte or the report has no bytes, and the encode
+    /// clears the report and writes the ID itself.</summary>
+    public readonly byte[]? InputTemplate;
+
+    /// <summary>The fields an input encode writes over
+    /// <see cref="InputTemplate"/>, in order: every field but the constants
+    /// it holds.</summary>
+    public readonly CompiledField[] InputFields;
+
     private VendorBlobProgram(CompiledField[] fields, int decodeFieldCount, uint[] counterInitials, bool resolvesDpad,
-                              bool accumulates, uint nominalTicks, string? holdWhile = null)
+                              bool accumulates, uint nominalTicks, string? holdWhile, ExtendedReportSpec spec)
     {
         HoldWhile = holdWhile;
         Fields = fields;
@@ -313,6 +373,45 @@ internal sealed class VendorBlobProgram
         ResolvesDpad = resolvesDpad;
         Accumulates = accumulates;
         NominalTicks = nominalTicks;
+        (InputTemplate, InputFields) = Template(fields, spec);
+    }
+
+    /// <summary>The template and the fields left to write. A constant goes
+    /// into the template only where the encode would leave its value in the
+    /// report whatever ran before or after it: no other field's bytes
+    /// (<see cref="Extent"/>) cover its byte, and no CRC, which reads the
+    /// bytes written before it, comes earlier. The template starts as the
+    /// cleared report with its ID at byte 0, as the encode starts.</summary>
+    private static (byte[]? Template, CompiledField[] Fields) Template(CompiledField[] fields, ExtendedReportSpec spec)
+    {
+        int size = spec.Size;
+        byte reportId;
+        try { reportId = spec.ReportIdByte; }
+        catch (Exception e) when (e is FormatException or OverflowException) { return (null, fields); }
+        if (size < 1) return (null, fields);
+        var template = new byte[size];
+        template[0] = reportId;
+        var writers = new int[size];
+        foreach (var f in fields)
+        {
+            var (lo, hi) = Extent(in f, size);
+            if (lo < 0) continue;
+            for (long b = Math.Max(lo, 0); b <= Math.Min(hi, size - 1); b++) writers[b]++;
+        }
+        var kept = new List<CompiledField>(fields.Length);
+        bool crcSeen = false;
+        foreach (var f in fields)
+        {
+            crcSeen |= f.Op == FieldOp.Crc32;
+            if (!crcSeen && f.Op == FieldOp.U8Const && f.Source != SrcOp.TouchpadPacketCounter
+                && f.B >= 0 && f.B < size && writers[f.B] == 1)
+            {
+                template[f.B] = f.Initial;
+                continue;
+            }
+            kept.Add(f);
+        }
+        return (template, kept.ToArray());
     }
 
     /// <summary>Get (or build) the compiled program for a spec. The spec is
@@ -597,17 +696,26 @@ internal sealed class VendorBlobProgram
                 // An int16-le field with a center writes offset binary out of
                 // line too, so the encode loop stays as it was for the rest.
                 Extras = f.Scale == null && f.Negate == null && f.Repeat == null && f.Levels == null
-                         && f.ChargingValue == null && op != FieldOp.PackedUint
+                         && f.ChargingValue == null && op != FieldOp.PackedUint && f.TriggerThreshold == null
                          && !(op == FieldOp.I16 && f.Center != null) ? null : new FieldExtras
                 {
                     ScaleNumerator = f.Scale?.Numerator ?? 0,
                     ScaleDenominator = f.Scale?.Denominator ?? 1,
+                    SignedNumerator = f.Negate == true ? -(f.Scale?.Numerator ?? 0) : f.Scale?.Numerator ?? 0,
+                    ScaleMultiplier = f.Scale is { } sc ? WireArith.ExactMultiplier(f.Negate == true ? -sc.Numerator : sc.Numerator, sc.Denominator) : 0,
+                    MotionOffset = VendorBlobCodec.MotionOffset(source),
                     Negate = f.Negate == true,
                     RepeatCount = f.Repeat is { Count: 2 } r ? r[0] : 1,
                     RepeatStride = f.Repeat is { Count: 2 } s ? s[1] : 0,
                     ChargingValue = f.ChargingValue ?? -1,
                     OffsetBinary = op == FieldOp.I16 && f.Center != null,
                     Parts = op == FieldOp.PackedUint ? CompileParts(f, i) : null,
+                    // Check refuses a threshold outside 1 <= at <= max <= 65535
+                    // before any report is built.
+                    TriggerMax = f.TriggerThreshold?.Max ?? 0,
+                    TriggerAt = f.TriggerThreshold?.At ?? 0,
+                    TriggerFrom = f.TriggerThreshold is { Max: int tm, At: int ta } && tm >= 1 && tm <= 65535 && ta >= 1 && ta <= tm
+                        ? WireArith.LeastAtLeast(tm, ta) : float.NaN,
                 },
             };
 
@@ -625,7 +733,7 @@ internal sealed class VendorBlobProgram
             if (producesEntry) decodeCount++;
         }
         return new VendorBlobProgram(fields, decodeCount, counterInitials.ToArray(), resolvesDpad,
-            accumulates, (uint)Math.Clamp((long)spec.IdleFrameIntervalMs * 3000, 0, uint.MaxValue), holdWhile);
+            accumulates, (uint)Math.Clamp((long)spec.IdleFrameIntervalMs * 3000, 0, uint.MaxValue), holdWhile, spec);
     }
 
     /// <summary>The wire values at the SDK's 0 and 1 a type takes when its
@@ -939,6 +1047,22 @@ internal sealed class VendorBlobProgram
         else if (src.Parts != null)
         {
             throw new InvalidOperationException($"{at} ('{src.Type}').parts go with packed-uint.");
+        }
+
+        // v2.0.2: where the trigger bits of an input button mask set.
+        if (src.TriggerThreshold is { } tt)
+        {
+            bool triggerBit = f.Op == FieldOp.ButtonMask && f.ButtonBits != null
+                && Array.Exists(f.ButtonBits, x => x is ButtonLtDigital or ButtonRtDigital);
+            if (output || !triggerBit)
+                throw new InvalidOperationException(
+                    $"{at} ('{src.Type}').triggerThreshold: only an input button-mask with LT_DIGITAL or RT_DIGITAL has a trigger bit to set.");
+            if (tt.Max is not int max || max < 1 || max > 65535)
+                throw new InvalidOperationException(
+                    $"{at}.triggerThreshold.max {(tt.Max is int m ? m.ToString(System.Globalization.CultureInfo.InvariantCulture) : "is missing")}: the counts of a full pull, 1 to 65535.");
+            if (tt.At is not int count || count < 1 || count > max)
+                throw new InvalidOperationException(
+                    $"{at}.triggerThreshold.at {(tt.At is int a ? a.ToString(System.Globalization.CultureInfo.InvariantCulture) : "is missing")}: the count at which the bit sets, 1 to max ({max}).");
         }
     }
 

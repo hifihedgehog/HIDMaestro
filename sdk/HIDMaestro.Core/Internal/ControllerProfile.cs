@@ -1638,13 +1638,14 @@ public sealed class FieldSpec
     /// (<c>uint8-axis</c>, <c>uint8-trigger</c>, <c>stick12-pair</c>,
     /// <c>int16-axis</c>, <c>int16-pad-or-stick</c>'s stick,
     /// <c>uint16-trigger</c>), the wire value at the SDK's 0, and for
-    /// <c>uint16-pressure</c> the value with no contact. Defaults to the
+    /// <c>uint16-pressure</c> the value at pressure 0. Defaults to the
     /// type's full range: 0, or -32767 for the signed axes.</summary>
     [JsonPropertyName("min")]
     public int? Min { get; set; }
 
     /// <summary>v2.0.0: the wire value at the SDK's 1, and for
-    /// <c>uint16-pressure</c> the value of a contact. Defaults to 255,
+    /// <c>uint16-pressure</c> the value at pressure 1, which a contact at
+    /// pressure 0 also sends. Defaults to 255,
     /// 4095, 32767 or 65535 by the type's width.</summary>
     [JsonPropertyName("max")]
     public int? Max { get; set; }
@@ -1713,6 +1714,31 @@ public sealed class FieldSpec
     /// until a host's command sets them.</summary>
     [JsonPropertyName("holdWhile")]
     public string? HoldWhile { get; set; }
+
+    /// <summary>v2.0.2: on a <c>button-mask</c> with <c>LT_DIGITAL</c> or
+    /// <c>RT_DIGITAL</c>, the travel at which each trigger's digital bit
+    /// sets: the trigger's value on a scale of <see cref="TriggerThresholdSpec.Max"/>
+    /// counts, by the one arithmetic, at least <see cref="TriggerThresholdSpec.At"/>.
+    /// Without it a bit sets at the first count of an 8-bit trigger, max 255
+    /// and at 1.</summary>
+    [JsonPropertyName("triggerThreshold")]
+    public TriggerThresholdSpec? TriggerThreshold { get; set; }
+}
+
+/// <summary>v2.0.2: where a trigger's digital bit sets
+/// (<see cref="FieldSpec.TriggerThreshold"/>). The bit holds while
+/// <c>RoundHalfEven(c x Max)</c> is at least <see cref="At"/>, c the
+/// trigger's value clamped to 0 to 1 and a NaN read as 0. It keeps no state
+/// from one report to the next.</summary>
+public sealed class TriggerThresholdSpec
+{
+    /// <summary>The counts of a full pull, 1 to 65535.</summary>
+    [JsonPropertyName("max")]
+    public int? Max { get; set; }
+
+    /// <summary>The count at which the bit sets, 1 to <see cref="Max"/>.</summary>
+    [JsonPropertyName("at")]
+    public int? At { get; set; }
 }
 
 /// <summary>v1.3.5: CRC32 scope spec for a crc32-le field. The CRC is

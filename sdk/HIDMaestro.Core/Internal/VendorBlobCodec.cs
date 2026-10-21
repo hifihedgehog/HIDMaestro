@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace HIDMaestro.Internal;
 
@@ -172,11 +174,17 @@ internal static class VendorBlobCodec
         if (buffer.Length < spec.Size)
             throw new ArgumentException($"Buffer too small: need {spec.Size}, got {buffer.Length}");
 
-        Array.Clear(buffer, 0, spec.Size);
-        buffer[0] = spec.ReportIdByte;
-
         var prog = VendorBlobProgram.Get(spec);
-        var fields = prog.Fields;
+        // The cleared report with its ID and its constant bytes in place,
+        // compiled once, and the fields left to write. The ID is read when
+        // the program compiles, so a frame parses no text.
+        var fields = prog.InputFields;
+        if (prog.InputTemplate is { } template) template.AsSpan().CopyTo(buffer);
+        else
+        {
+            Array.Clear(buffer, 0, spec.Size);
+            buffer[0] = spec.ReportIdByte;
+        }
         var counters = prog.CounterInitials.Length > 0 ? encState.CountersFor(prog) : null;
         // One advance of the timestamp accumulator per frame, for a program
         // with a "clock": "accumulate" field.
@@ -425,16 +433,19 @@ internal static class VendorBlobCodec
                 }
                 case VendorBlobProgram.FieldOp.U16Pressure:
                 {
-                    // Pad pressure. HMGamepadState carries no analog
-                    // pressure, so a contact reports max and no contact min,
-                    // which is the same shape a capacitive pad without a
-                    // force sensor reports. Valve's profiles set max 32767,
-                    // full scale for SDL, which divides by 32768.0f.
+                    // Pad pressure, finger 0 on the left pad and finger 1
+                    // on the right, by the one arithmetic from min at 0 to
+                    // max at 1. A pressure of 0 on a contact is full pressure,
+                    // so a consumer that knows only touch sends max, the
+                    // pressure-sensitive buttons' rule. p > 0 is false for 0,
+                    // a negative pressure and NaN, each of which reads as 0.
+                    // Valve's profiles set max 32767, full scale for SDL,
+                    // which divides by 32768.0f.
                     if (f.B < 0 || f.B + 1 >= buffer.Length) break;
-                    bool pdown = f.Source == VendorBlobProgram.SrcOp.RightPadPressure
-                        ? state.TouchpadFinger1Active
-                        : state.TouchpadFinger0Active;
-                    ushort pv = (ushort)(pdown ? f.Max : f.Min);
+                    bool right = f.Source == VendorBlobProgram.SrcOp.RightPadPressure;
+                    bool pdown = right ? state.TouchpadFinger1Active : state.TouchpadFinger0Active;
+                    float pp = right ? state.TouchpadFinger1Pressure : state.TouchpadFinger0Pressure;
+                    int pv = WireArith.Linear(pp > 0 ? pp : pdown ? 1.0 : 0.0, f.Min, f.Max, invert: false, rest: 0);
                     buffer[f.B]     = (byte)(pv & 0xFF);
                     buffer[f.B + 1] = (byte)((pv >> 8) & 0xFF);
                     break;
@@ -578,9 +589,11 @@ internal static class VendorBlobCodec
                         ulong moved = mask & g.Mask;
                         packed |= g.Shift >= 0 ? moved << g.Shift : moved >> -g.Shift;
                     }
-                    foreach (int i in f.ButtonSingles!)
+                    var h = state.Hat;
+                    bool r = f.DpadResolved;
+                    foreach (int single in f.ButtonSingles!)
                     {
-                        ulong bits = f.ButtonBits[i];
+                        int i = single & 0xFFFF;
                         // Magic trigger-engaged digital buttons: DS4/DS5
                         // report L2/R2 as both analog axis AND digital button.
                         // D-pad directions come from state.Hat, not from the
@@ -597,20 +610,23 @@ internal static class VendorBlobCodec
                         // SDL's PS4 and PS5 drivers read a set bit over a
                         // zero trigger byte as a full pull, which a bare
                         // "above zero" test produced for any value under
-                        // half of the first step.
-                        var h = state.Hat;
-                        bool r = f.DpadResolved;
-                        bool on = bits switch
+                        // half of the first step. A mask with a
+                        // triggerThreshold sets them further along the
+                        // travel, where the device's own switch or firmware
+                        // threshold sets them (TriggerBit). The kind was
+                        // read from the position's name when the program
+                        // compiled, so this is one jump.
+                        bool on = (VendorBlobProgram.SingleKind)(single >> 16) switch
                         {
-                            VendorBlobProgram.ButtonLtDigital => TriggerOn(leftTrigger),
-                            VendorBlobProgram.ButtonRtDigital => TriggerOn(rightTrigger),
-                            VendorBlobProgram.ButtonDpadUp    => r ? dUp : h is HMHat.North or HMHat.NorthEast or HMHat.NorthWest,
-                            VendorBlobProgram.ButtonDpadDown  => r ? dDown : h is HMHat.South or HMHat.SouthEast or HMHat.SouthWest,
-                            VendorBlobProgram.ButtonDpadLeft  => r ? dLeft : h is HMHat.West  or HMHat.NorthWest or HMHat.SouthWest,
-                            VendorBlobProgram.ButtonDpadRight => r ? dRight : h is HMHat.East  or HMHat.NorthEast or HMHat.SouthEast,
-                            VendorBlobProgram.ButtonPad0Touch => state.TouchpadFinger0Active,
-                            VendorBlobProgram.ButtonPad1Touch => state.TouchpadFinger1Active,
-                            _ => (mask & (uint)bits) != 0,
+                            VendorBlobProgram.SingleKind.LtDigital => TriggerBit(leftTrigger, f.Extras),
+                            VendorBlobProgram.SingleKind.RtDigital => TriggerBit(rightTrigger, f.Extras),
+                            VendorBlobProgram.SingleKind.DpadUp    => r ? dUp : h is HMHat.North or HMHat.NorthEast or HMHat.NorthWest,
+                            VendorBlobProgram.SingleKind.DpadDown  => r ? dDown : h is HMHat.South or HMHat.SouthEast or HMHat.SouthWest,
+                            VendorBlobProgram.SingleKind.DpadLeft  => r ? dLeft : h is HMHat.West  or HMHat.NorthWest or HMHat.SouthWest,
+                            VendorBlobProgram.SingleKind.DpadRight => r ? dRight : h is HMHat.East  or HMHat.NorthEast or HMHat.SouthEast,
+                            VendorBlobProgram.SingleKind.Pad0Touch => state.TouchpadFinger0Active,
+                            VendorBlobProgram.SingleKind.Pad1Touch => state.TouchpadFinger1Active,
+                            _ => (mask & (uint)f.ButtonBits[i]) != 0,
                         };
                         if (on) packed |= 1UL << (f.BitLo + i);
                     }
@@ -618,6 +634,19 @@ internal static class VendorBlobCodec
                     // declared range. The range may span more than one byte:
                     // Valve's state packets carry a 64-bit button field, and
                     // a single-byte write would drop every button above 7.
+                    // With eight bytes of buffer from the field on, that is
+                    // one little-endian read, mask and write of a 64-bit
+                    // word: bits BitLo to BitHi from packed, every other bit
+                    // of the word as it was, the bytes past the field's
+                    // among them.
+                    if ((long)f.B + 8 <= buffer.Length && f.BitLo >= 0 && f.BitHi <= 63)
+                    {
+                        ulong range = (f.BitHi >= 63 ? ulong.MaxValue : (1UL << (f.BitHi + 1)) - 1) & ~((1UL << f.BitLo) - 1);
+                        ref byte at = ref buffer[f.B];
+                        ulong word = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(MemoryMarshal.CreateReadOnlySpan(ref at, 8));
+                        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(MemoryMarshal.CreateSpan(ref at, 8), (word & ~range) | (packed & range));
+                        break;
+                    }
                     int nBytes = (f.BitHi / 8) + 1;
                     for (int by = 0; by < nBytes; by++)
                     {
@@ -959,6 +988,19 @@ internal static class VendorBlobCodec
     /// of 0, is not.</summary>
     internal static bool TriggerOn(float v) => v * 255.0 > 0.5;
 
+    /// <summary>A trigger bit of a button mask: with the mask's
+    /// triggerThreshold, whether the trigger's value on a scale of its max
+    /// counts, by the one arithmetic, is at least its at count, which is the
+    /// trigger at or past the least float that reaches it, found when the
+    /// program compiled (WireArith.LeastAtLeast). A NaN takes the trigger's
+    /// rest, 0, and at is 1 or more, so it never sets. Without one,
+    /// <see cref="TriggerOn"/>, which is the same test at max 255 and at 1:
+    /// RoundHalfEven(c x 255) is 1 or more exactly when c x 255 is above
+    /// 0.5.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    internal static bool TriggerBit(float v, VendorBlobProgram.FieldExtras? x) =>
+        x is { TriggerMax: > 0 } t ? v >= t.TriggerFrom : TriggerOn(v);
+
     /// <summary>A pressure-sensitive button's byte: the consumer's pressure
     /// when it sets one, otherwise 255 while the button is pressed and 0
     /// while it is not, so digital-only state still presses fully.</summary>
@@ -996,17 +1038,16 @@ internal static class VendorBlobCodec
         short v;
         if (x.ScaleNumerator != 0)
         {
-            float g = f.Source switch
-            {
-                VendorBlobProgram.SrcOp.AccelGX  => state.AccelGX,
-                VendorBlobProgram.SrcOp.AccelGY  => state.AccelGY,
-                VendorBlobProgram.SrcOp.AccelGZ  => state.AccelGZ,
-                VendorBlobProgram.SrcOp.GyroDpsX => state.GyroDpsX,
-                VendorBlobProgram.SrcOp.GyroDpsY => state.GyroDpsY,
-                VendorBlobProgram.SrcOp.GyroDpsZ => state.GyroDpsZ,
-                _ => 0f,
-            };
-            v = WireArith.Scaled(x.Negate ? -g : g, x.ScaleNumerator, x.ScaleDenominator);
+            // The value at its offset in the state, with no switch, and the
+            // negation folded into the scale when the program compiled. A
+            // denominator that is a power of two is a multiplier there too,
+            // which leaves the division to the ratios that need it.
+            float g = x.MotionOffset >= 0
+                ? Unsafe.ReadUnaligned<float>(ref Unsafe.AddByteOffset(ref Unsafe.As<HMGamepadState, byte>(ref Unsafe.AsRef(in state)), x.MotionOffset))
+                : 0f;
+            v = x.ScaleMultiplier != 0
+                ? WireArith.ScaledBy(g, x.ScaleMultiplier)
+                : WireArith.Scaled(g, x.SignedNumerator, x.ScaleDenominator);
         }
         else
         {
@@ -1026,12 +1067,47 @@ internal static class VendorBlobCodec
         // as uint10-be clamps to its range. A report that carries several
         // motion frames of one sample writes it in each (repeat).
         int w = x.OffsetBinary ? Math.Clamp(v + f.Center, 0, 65535) : v;
+        // One frame, the common case, the caller having checked its two
+        // bytes, needs no loop.
+        if (x.RepeatCount == 1)
+        {
+            buffer[f.B]     = (byte)(w & 0xFF);
+            buffer[f.B + 1] = (byte)((w >> 8) & 0xFF);
+            return;
+        }
         for (int k = 0, at = f.B, n = x.RepeatCount, stride = x.RepeatStride; k < n && at + 1 < buffer.Length; k++, at += stride)
         {
             buffer[at]     = (byte)(w & 0xFF);
             buffer[at + 1] = (byte)((w >> 8) & 0xFF);
         }
     }
+
+    /// <summary>The byte offsets of HMGamepadState's calibrated values,
+    /// AccelGX to GyroDpsZ in SrcOp order, read from the layout the runtime
+    /// gave the struct.</summary>
+    private static readonly nint[] s_motionOffsets = MotionOffsets();
+
+    private static nint[] MotionOffsets()
+    {
+        var s = new HMGamepadState();
+        ref byte at = ref Unsafe.As<HMGamepadState, byte>(ref s);
+        return new[]
+        {
+            Unsafe.ByteOffset(ref at, ref Unsafe.As<float, byte>(ref s.AccelGX)),
+            Unsafe.ByteOffset(ref at, ref Unsafe.As<float, byte>(ref s.AccelGY)),
+            Unsafe.ByteOffset(ref at, ref Unsafe.As<float, byte>(ref s.AccelGZ)),
+            Unsafe.ByteOffset(ref at, ref Unsafe.As<float, byte>(ref s.GyroDpsX)),
+            Unsafe.ByteOffset(ref at, ref Unsafe.As<float, byte>(ref s.GyroDpsY)),
+            Unsafe.ByteOffset(ref at, ref Unsafe.As<float, byte>(ref s.GyroDpsZ)),
+        };
+    }
+
+    /// <summary>The offset a calibrated source reads at, -1 for any other
+    /// source. Called when a program compiles.</summary>
+    internal static nint MotionOffset(VendorBlobProgram.SrcOp source) =>
+        source is >= VendorBlobProgram.SrcOp.AccelGX and <= VendorBlobProgram.SrcOp.GyroDpsZ
+            ? s_motionOffsets[source - VendorBlobProgram.SrcOp.AccelGX]
+            : -1;
 
     /// <summary>v2.0.0: the d-pad a <c>dpad: "resolved"</c> field reads: the
     /// first of HatDegrees, HatHundredths, HatRaw and Hat that is set, as an

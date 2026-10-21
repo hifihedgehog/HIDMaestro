@@ -1807,10 +1807,13 @@ function Scenario-Valve-Personas {
 # TritonMTUFull_t). S51 pins the descriptors and feature answers with no
 # device; this pins that input actually reaches a consumer, which is the
 # half that shipped broken. Submits no buttons, so nothing reaches the
-# desktop even with a Steam desktop layout bound to the device.
+# desktop even with a Steam desktop layout bound to the device. Since 2.0.2
+# (issue #72) it also checks the calibrated motion words in SDL's axes, the
+# pad pressure words, and each trigger's digital bit clear one count below
+# the profile's triggerThreshold and set at it.
 function Scenario-Valve-Wire {
     Invoke-Probe -Dir 'valve_wire_check' -Exe 'ValveWireCheck.exe' `
-                 -Message 'a Valve persona stopped emitting correct input frames (see probe stdout)'
+                 -Message 'a Valve persona stopped emitting correct input frames: sticks, triggers, trackpads, pad pressures, calibrated motion, trigger bits or the idle stream (see probe stdout)'
 }
 
 # S53: the three Valve personas through STOCK upstream SDL3. S52 decodes
@@ -1820,14 +1823,16 @@ function Scenario-Valve-Wire {
 # persona SDL binds, names and reads is one a Valve-aware consumer reads.
 # Every rear button, both trackpad clicks and QAM land on the SDL gamepad
 # button SDL documents for them, and the stick and grip touch sensors on its
-# capacitive-sense readings. Each persona's cadence follows (issue #72): under
-# 1 kHz, 250 Hz and 125 Hz submits, the sensor time SDL credits a report
-# matches the wall time between reports. SKIPs when the sibling
-# SDL3-build/build-stock checkout is absent. The fork beside it deliberately
-# skips HIDMaestro devices and is never used here.
+# capacitive-sense readings. The calibrated motion fields read back as the
+# vector submitted, and on the Deck and Triton a touch at pressure 0.25
+# reads 0.25 and one at pressure 0 reads 1.0. Each persona's cadence
+# follows: under 1 kHz, 250 Hz and 125 Hz submits, the sensor time SDL
+# credits a report matches the wall time between reports (issue #72).
+# SKIPs when the sibling SDL3-build/build-stock checkout is absent. The fork
+# beside it deliberately skips HIDMaestro devices and is never used here.
 function Scenario-Valve-Sdl {
     Invoke-Probe -Dir 'valve_sdl_check' -Exe 'ValveSdlCheck.exe' `
-                 -Message 'stock SDL stopped reading a Valve persona: enumeration, the Valve driver binding, sticks, triggers, rear buttons, trackpads, touch sensors, motion or cadence (see probe stdout)' -SkipCodes 2
+                 -Message 'stock SDL stopped reading a Valve persona: enumeration, the Valve driver binding, sticks, triggers, rear buttons, trackpads, pad pressure, touch sensors, motion or cadence (see probe stdout)' -SkipCodes 2
 }
 
 # S54: the three Valve personas against the REAL Steam client. S53 proves

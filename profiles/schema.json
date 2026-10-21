@@ -476,11 +476,11 @@
         },
         "min": {
           "type": "integer",
-          "description": "The wire value at the SDK's 0 for uint8-axis, uint8-trigger, stick12-pair, int16-axis, int16-pad-or-stick's stick and uint16-trigger, and the no-contact value of uint16-pressure. Defaults to 0, or -32767 for the signed axes. Input reports only: an output field refuses it."
+          "description": "The wire value at the SDK's 0 for uint8-axis, uint8-trigger, stick12-pair, int16-axis, int16-pad-or-stick's stick and uint16-trigger, and of uint16-pressure at pressure 0. Defaults to 0, or -32767 for the signed axes. Input reports only: an output field refuses it."
         },
         "max": {
           "type": "integer",
-          "description": "The wire value at the SDK's 1, and the contact value of uint16-pressure. Defaults to 255, 4095 or 32767 by the type's width. Required on uint16-trigger and uint16-pressure, where v1 wrote 32767 without it: give 32767 for v1's bytes or 65535 for the full width. Input reports only: an output field refuses it."
+          "description": "The wire value at the SDK's 1, and of uint16-pressure at pressure 1, which a contact at pressure 0 also sends. Defaults to 255, 4095 or 32767 by the type's width. Required on uint16-trigger and uint16-pressure, where v1 wrote 32767 without it: give 32767 for v1's bytes or 65535 for the full width. Input reports only: an output field refuses it."
         },
         "invert": {
           "type": "boolean",
@@ -521,6 +521,28 @@
             "resolved"
           ],
           "description": "button-mask with DPAD_* names, hat-octant: the d-pad from HatDegrees, then HatHundredths, then HatRaw, then Hat. Input reports only."
+        },
+        "triggerThreshold": {
+          "type": "object",
+          "properties": {
+            "max": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "description": "The counts of a full pull."
+            },
+            "at": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "The count at which the bit sets, 1 to max."
+            }
+          },
+          "required": [
+            "max",
+            "at"
+          ],
+          "additionalProperties": false,
+          "description": "button-mask with LT_DIGITAL or RT_DIGITAL: each trigger bit is set while the trigger's value on a scale of max counts, min + RoundHalfEven(c x max) with c clamped to 0..1 and a NaN read as 0, is at least at. Without it a bit sets at the first count of an 8-bit trigger, max 255 and at 1. The bit keeps no state from one report to the next. Input reports only."
         },
         "levels": {
           "type": "array",

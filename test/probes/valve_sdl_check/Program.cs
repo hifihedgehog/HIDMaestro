@@ -404,9 +404,8 @@ static class ValveSdlCheck
                     }
                 }
 
-                // Motion. SDL scales the raw firmware units into rad/s and
-                // m/s2, so the assertion is that non-zero motion arrives on
-                // every axis, not a specific magnitude.
+                // Motion: the calibrated fields, in SDL's sensor frame, read
+                // back as the same vector on the same axes (issue #72).
                 bool hasGyro = SDL_GamepadHasSensor(gp, SENSOR_GYRO);
                 bool hasAccel = SDL_GamepadHasSensor(gp, SENSOR_ACCEL);
                 Check("SDL publishes gyroscope and accelerometer sensors", hasGyro && hasAccel,
@@ -415,30 +414,16 @@ static class ValveSdlCheck
                 {
                     SDL_SetGamepadSensorEnabled(gp, SENSOR_GYRO, true);
                     SDL_SetGamepadSensorEnabled(gp, SENSOR_ACCEL, true);
-                    Drive(c, new HMGamepadState
-                    {
-                        Axes = HMGamepadStateHelpers.StandardAxes(prof, 0.5f, 0.5f, 0.5f, 0.5f, 0.0f, 0.0f),
-                        AccelX = 8000, AccelY = -12000, AccelZ = 16000,
-                        GyroPitch = -20000, GyroYaw = 24000, GyroRoll = -28000,
-                    }, () =>
-                    {
-                        var gs = new float[3];
-                        var acs = new float[3];
-                        SDL_GetGamepadSensorData(gp, SENSOR_GYRO, gs, 3);
-                        SDL_GetGamepadSensorData(gp, SENSOR_ACCEL, acs, 3);
-                        return gs[0] != 0f && gs[1] != 0f && gs[2] != 0f && acs[0] != 0f && acs[1] != 0f && acs[2] != 0f;
-                    });
-                    var g = new float[3];
-                    var a = new float[3];
-                    SDL_GetGamepadSensorData(gp, SENSOR_GYRO, g, 3);
-                    SDL_GetGamepadSensorData(gp, SENSOR_ACCEL, a, 3);
-                    Check("SDL reports angular velocity on all three gyro axes",
-                          g[0] != 0f && g[1] != 0f && g[2] != 0f,
-                          $"[{g[0]:F2},{g[1]:F2},{g[2]:F2}] rad/s");
-                    Check("SDL reports acceleration on all three axes",
-                          a[0] != 0f && a[1] != 0f && a[2] != 0f,
-                          $"[{a[0]:F2},{a[1]:F2},{a[2]:F2}] m/s2");
+                    CalibratedMotion(c, gp, prof);
                 }
+
+                // Pad pressure. The Deck and Triton drivers pass the wire's
+                // pressure through as the touch's (SDL_hidapi_steamdeck.c:272
+                // and 284, SDL_hidapi_steam_triton.c:258 and 270). The 2015
+                // driver makes up its own from the touch and click bits
+                // (SDL_hidapi_steam.c:1498 and 1518), so it has none to check.
+                if (t.Id != "steam-controller-composite" && pads >= 2)
+                    PadPressure(c, gp, prof);
             }
             catch (Exception ex) { Check("persona ran without throwing", false, ex.Message); }
             finally
@@ -600,35 +585,7 @@ static class ValveSdlCheck
         var (c, gp) = o;
         try
         {
-            float[] dps = { 30f, 90f, -60f };
-            float[] g = { 0.25f, 1.0f, -0.5f };
-            var st = new HMGamepadState
-            {
-                Axes = HMGamepadStateHelpers.StandardAxes(prof, 0.5f, 0.5f, 0.5f, 0.5f, 0.0f, 0.0f),
-                GyroDpsX = dps[0], GyroDpsY = dps[1], GyroDpsZ = dps[2],
-                AccelGX = g[0], AccelGY = g[1], AccelGZ = g[2],
-                TouchpadFinger0Active = true, TouchpadFinger0X = 960, TouchpadFinger0Y = 540,
-            };
-            var gy = new float[3];
-            var ac = new float[3];
-            bool Close3(float[] got, float[] want, float tol)
-                => Math.Abs(got[0] - want[0]) <= tol && Math.Abs(got[1] - want[1]) <= tol && Math.Abs(got[2] - want[2]) <= tol;
-            var wantGyro = Array.ConvertAll(dps, d => d * MathF.PI / 180f);
-            var wantAccel = Array.ConvertAll(g, v => v * 9.80665f);
-            Drive(c, st, () =>
-            {
-                SDL_GetGamepadSensorData(gp, SENSOR_GYRO, gy, 3);
-                SDL_GetGamepadSensorData(gp, SENSOR_ACCEL, ac, 3);
-                return Close3(gy, wantGyro, 0.01f) && Close3(ac, wantAccel, 0.02f);
-            });
-            SDL_GetGamepadSensorData(gp, SENSOR_GYRO, gy, 3);
-            SDL_GetGamepadSensorData(gp, SENSOR_ACCEL, ac, 3);
-            Check("SDL reads GyroDps (30, 90, -60) as that angular velocity",
-                  Close3(gy, wantGyro, 0.01f),
-                  $"got [{gy[0]:F4},{gy[1]:F4},{gy[2]:F4}] rad/s, want [{wantGyro[0]:F4},{wantGyro[1]:F4},{wantGyro[2]:F4}]");
-            Check("SDL reads AccelG (0.25, 1, -0.5) as that acceleration",
-                  Close3(ac, wantAccel, 0.02f),
-                  $"got [{ac[0]:F3},{ac[1]:F3},{ac[2]:F3}] m/s2, want [{wantAccel[0]:F3},{wantAccel[1]:F3},{wantAccel[2]:F3}]");
+            CalibratedMotion(c, gp, prof);
             if (SDL_GetNumGamepadTouchpads(gp) > 0)
             {
                 SDL_GetGamepadTouchpadFinger(gp, 0, 0, out bool down, out float x, out float y, out float p);
@@ -636,6 +593,81 @@ static class ValveSdlCheck
             }
         }
         finally { Close(c, gp, vid, pid); }
+    }
+
+    /// <summary>The calibrated motion fields, in SDL's frame, read back
+    /// through stock SDL with sensors on. Distinct magnitudes on every axis
+    /// so a swapped or negated axis shows. A finger rests on the left pad,
+    /// so the frame differs from an idle one on every persona.</summary>
+    static void CalibratedMotion(HMController c, IntPtr gp, HMProfile prof)
+    {
+        float[] dps = { 30f, 90f, -60f };
+        float[] g = { 0.25f, 1.0f, -0.5f };
+        var st = new HMGamepadState
+        {
+            Axes = HMGamepadStateHelpers.StandardAxes(prof, 0.5f, 0.5f, 0.5f, 0.5f, 0.0f, 0.0f),
+            GyroDpsX = dps[0], GyroDpsY = dps[1], GyroDpsZ = dps[2],
+            AccelGX = g[0], AccelGY = g[1], AccelGZ = g[2],
+            TouchpadFinger0Active = true, TouchpadFinger0X = 960, TouchpadFinger0Y = 540,
+        };
+        var gy = new float[3];
+        var ac = new float[3];
+        bool Close3(float[] got, float[] want, float tol)
+            => Math.Abs(got[0] - want[0]) <= tol && Math.Abs(got[1] - want[1]) <= tol && Math.Abs(got[2] - want[2]) <= tol;
+        var wantGyro = Array.ConvertAll(dps, d => d * MathF.PI / 180f);
+        var wantAccel = Array.ConvertAll(g, v => v * 9.80665f);
+        Drive(c, st, () =>
+        {
+            SDL_GetGamepadSensorData(gp, SENSOR_GYRO, gy, 3);
+            SDL_GetGamepadSensorData(gp, SENSOR_ACCEL, ac, 3);
+            return Close3(gy, wantGyro, 0.01f) && Close3(ac, wantAccel, 0.02f);
+        });
+        SDL_GetGamepadSensorData(gp, SENSOR_GYRO, gy, 3);
+        SDL_GetGamepadSensorData(gp, SENSOR_ACCEL, ac, 3);
+        Check("SDL reads GyroDps (30, 90, -60) as that angular velocity",
+              Close3(gy, wantGyro, 0.01f),
+              $"got [{gy[0]:F4},{gy[1]:F4},{gy[2]:F4}] rad/s, want [{wantGyro[0]:F4},{wantGyro[1]:F4},{wantGyro[2]:F4}]");
+        Check("SDL reads AccelG (0.25, 1, -0.5) as that acceleration",
+              Close3(ac, wantAccel, 0.02f),
+              $"got [{ac[0]:F3},{ac[1]:F3},{ac[2]:F3}] m/s2, want [{wantAccel[0]:F3},{wantAccel[1]:F3},{wantAccel[2]:F3}]");
+    }
+
+    /// <summary>Issue #72 item 4: a touch at pressure 0.25 on each pad reads
+    /// 0.25 through SDL, and a touch at pressure 0, a consumer that knows
+    /// only touch, still reads full pressure.</summary>
+    static void PadPressure(HMController c, IntPtr gp, HMProfile prof)
+    {
+        foreach (float sent in new[] { 0.25f, 0f })
+        {
+            float want = sent == 0f ? 1f : sent;
+            var st = new HMGamepadState
+            {
+                Axes = HMGamepadStateHelpers.StandardAxes(prof, 0.5f, 0.5f, 0.5f, 0.5f, 0.0f, 0.0f),
+                TouchpadFinger0Active = true, TouchpadFinger0X = 480, TouchpadFinger0Y = 270, TouchpadFinger0Pressure = sent,
+                TouchpadFinger1Active = true, TouchpadFinger1X = 1440, TouchpadFinger1Y = 810, TouchpadFinger1Pressure = sent,
+            };
+            float p0 = -1, p1 = -1;
+            bool d0 = false, d1 = false;
+            Drive(c, st, () =>
+            {
+                SDL_GetGamepadTouchpadFinger(gp, 0, 0, out d0, out _, out _, out p0);
+                SDL_GetGamepadTouchpadFinger(gp, 1, 0, out d1, out _, out _, out p1);
+                return d0 && d1 && Math.Abs(p0 - want) <= 0.01f && Math.Abs(p1 - want) <= 0.01f;
+            });
+            SDL_GetGamepadTouchpadFinger(gp, 0, 0, out d0, out _, out _, out p0);
+            SDL_GetGamepadTouchpadFinger(gp, 1, 0, out d1, out _, out _, out p1);
+            Check($"SDL reads a touch at pressure {sent:0.##} as {want:0.##} on both pads",
+                  d0 && d1 && Math.Abs(p0 - want) <= 0.01f && Math.Abs(p1 - want) <= 0.01f,
+                  $"left down={d0} p={p0:F4}, right down={d1} p={p1:F4}");
+        }
+        // Lift, so the next persona's first frames are not a touch.
+        var up = new HMGamepadState { Axes = HMGamepadStateHelpers.StandardAxes(prof, 0.5f, 0.5f, 0.5f, 0.5f, 0.0f, 0.0f) };
+        Drive(c, up, () =>
+        {
+            SDL_GetGamepadTouchpadFinger(gp, 0, 0, out bool a, out _, out _, out _);
+            SDL_GetGamepadTouchpadFinger(gp, 1, 0, out bool b, out _, out _, out _);
+            return !a && !b;
+        });
     }
 
     /// <summary>Issue #72 item 2. A constant motion vector submitted at

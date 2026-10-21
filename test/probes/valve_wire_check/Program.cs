@@ -419,17 +419,37 @@ static class Program
         // IdleMs is each profile's extendedReport.idleFrameIntervalMs. OwnId
         // marks the frame that carries its own report id, which a raw
         // consumer sends through SubmitRawExtendedReport.
+        //
+        // GyroZPlus marks the 2015 controller, whose SDL driver reads gyro Z
+        // as +sGyroY where the Deck and Triton drivers read -sGyroY
+        // (SDL_hidapi_steam.c:1536-1543, SDL_hidapi_steamdeck.c:250-257,
+        // SDL_hidapi_steam_triton.c:279-286). Accel Z is -sAccelY on all
+        // three.
+        //
+        // The trigger bits: LtBit and RtBit in the button word, TrigL the
+        // left trigger's wire value, and the value on the scale of TrigMax
+        // counts at which each bit sets, TrigAt (profile triggerThreshold).
+        // The Deck and Triton set it at Valve's firmware default, 90% of
+        // 32767 (jupiter-hw-support D21_APP_REL_69C6B03E.bin and Steam's
+        // IBEX_FW_6AC686B3.fw, settings entry 68, default 90, range 40 to
+        // 99), and the 2015 controller at the top of its 8-bit trigger,
+        // where its switch closes (OpenSteamController buttons.c,
+        // GPIO_L_TRIGGER and GPIO_R_TRIGGER).
         var cases = new (string Id, ushort Vid, ushort Pid, int Len, byte[] Head, int Lsx, int TrigR,
                          int Btn, int BtnBytes, int TouchL, int TouchR,
                          int LPad, int RPad, int PressL, int PressR, int Accel, int Gyro,
-                         int IdleMs, bool OwnId)[]
+                         int IdleMs, bool OwnId, bool GyroZPlus,
+                         int LtBit, int RtBit, int TrigL, int TrigWidth, int TrigMax, int TrigAt)[]
         {
             ("steam-deck-composite",       0x28DE, 0x1205, 65, new byte[]{0x01,0x00,0x09,0x40}, 48, 46,
-             8, 8, 19, 20, 16, 20, 56, 58, 24, 30, 4, false),
+             8, 8, 19, 20, 16, 20, 56, 58, 24, 30, 4, false, false,
+             1, 0, 44, 2, 32767, 29490),
             ("steam-controller-composite", 0x28DE, 0x1102, 65, new byte[]{0x01,0x00,0x01,0x3C}, 16, 26,
-             8, 8, 19, 20, 16, 20, -1, -1, 28, 34, 9, false),
+             8, 8, 19, 20, 16, 20, -1, -1, 28, 34, 9, false, true,
+             1, 0, 11, 1, 255, 255),
             ("steam-controller-2",         0x28DE, 0x1302, 54, new byte[]{0x42},                10,  8,
-             2, 4, 25, 21, 18, 24, 22, 28, 34, 40, 4, true),
+             2, 4, 25, 21, 18, 24, 22, 28, 34, 40, 4, true, false,
+             27, 23, 6, 2, 32767, 29490),
         };
 
         foreach (var t in cases)
@@ -518,24 +538,37 @@ static class Program
 
                 // ── trackpads and IMU ────────────────────────────────
                 // One contact on each pad, at opposite corners so an
-                // encoder that wrote a constant cannot pass, plus six
-                // distinct IMU values. Read back through SDL's own
-                // arithmetic: pads are x = padX / 65536 + 0.5 and
-                // y = -padY / 65536 + 0.5 in every one of the three
-                // drivers, and the whole pad lane is gated on the
-                // finger-down bit, so the bit is asserted too.
+                // encoder that wrote a constant cannot pass, plus a
+                // distinct calibrated motion value on every axis. Read back
+                // through SDL's own arithmetic: pads are
+                // x = padX / 65536 + 0.5 and y = -padY / 65536 + 0.5 in
+                // every one of the three drivers, and the whole pad lane is
+                // gated on the finger-down bit, so the bit is asserted too.
+                // The left contact presses at 0.25 and the right at 0, which
+                // an active finger sends as full pressure.
+                float[] dps = { 30f, 90f, -60f };
+                float[] gs = { 0.25f, 1.0f, -0.5f };
                 var touch = new HMGamepadState
                 {
                     Buttons = 0,
                     Axes = HMGamepadStateHelpers.StandardAxes(prof, 0.5f, 0.5f, 0.5f, 0.5f, 0.0f, 0.0f),
                     TouchpadFinger0Active = true,
                     TouchpadFinger0X = 1919, TouchpadFinger0Y = 0,      // right edge, top
+                    TouchpadFinger0Pressure = 0.25f,
                     TouchpadFinger1Active = true,
                     TouchpadFinger1X = 0, TouchpadFinger1Y = 1079,      // left edge, bottom
-                    AccelX = 1000, AccelY = -2000, AccelZ = 3000,
-                    GyroPitch = -4000, GyroYaw = 5000, GyroRoll = -6000,
+                    AccelGX = gs[0], AccelGY = gs[1], AccelGZ = gs[2],
+                    GyroDpsX = dps[0], GyroDpsY = dps[1], GyroDpsZ = dps[2],
                 };
-                var raw3 = ReadFrame(path, inLen, c, touch, r => S16(P(r), t.Accel) == 1000);
+                // The words SDL's decode needs for those values: accel
+                // (X, -Z, Y) at 16384 counts per g and gyro (X, -Z, Y), or
+                // (X, +Z, Y) on the 2015 controller, at 32768 counts per
+                // 2000 deg/s, each rounded to nearest with ties to even.
+                static short Count(double v) => (short)Math.Round(v, MidpointRounding.ToEven);
+                const double PerG = 16384, PerDps = 32768.0 / 2000.0;
+                short[] wantAccel = { Count(gs[0] * PerG), Count(-gs[2] * PerG), Count(gs[1] * PerG) };
+                short[] wantGyro = { Count(dps[0] * PerDps), Count((t.GyroZPlus ? dps[2] : -dps[2]) * PerDps), Count(dps[1] * PerDps) };
+                var raw3 = ReadFrame(path, inLen, c, touch, r => S16(P(r), t.Accel) == wantAccel[0]);
                 Check("a frame arrives with both pads touched", raw3 != null);
                 if (raw3 != null)
                 {
@@ -559,19 +592,32 @@ static class Program
 
                     if (t.PressL >= 0)
                     {
-                        Check("both pads report pressure while touched",
-                              U16(f3, t.PressL) >= 32000 && U16(f3, t.PressR) >= 32000,
-                              $"L={U16(f3, t.PressL)} R={U16(f3, t.PressR)}");
+                        // 0.25 x 32767 = 8191.75, so 8192, which SDL reads
+                        // as 8192 / 32768 = 0.25. The right contact's 0 is
+                        // full pressure, 32767.
+                        Check("the left pad's pressure 0.25 reaches the wire as 8192",
+                              U16(f3, t.PressL) == 8192, $"L={U16(f3, t.PressL)}");
+                        Check("the right pad's pressure 0 on a contact reaches the wire as full, 32767",
+                              U16(f3, t.PressR) == 32767, $"R={U16(f3, t.PressR)}");
                     }
 
-                    Check("the accelerometer triple reaches the wire",
-                          S16(f3, t.Accel) == 1000 && S16(f3, t.Accel + 2) == -2000
-                                                   && S16(f3, t.Accel + 4) == 3000,
-                          $"{S16(f3, t.Accel)},{S16(f3, t.Accel + 2)},{S16(f3, t.Accel + 4)}");
-                    Check("the gyroscope triple reaches the wire",
-                          S16(f3, t.Gyro) == -4000 && S16(f3, t.Gyro + 2) == 5000
-                                                   && S16(f3, t.Gyro + 4) == -6000,
-                          $"{S16(f3, t.Gyro)},{S16(f3, t.Gyro + 2)},{S16(f3, t.Gyro + 4)}");
+                    Check("the calibrated accelerometer reaches the wire in SDL's axes",
+                          S16(f3, t.Accel) == wantAccel[0] && S16(f3, t.Accel + 2) == wantAccel[1]
+                                                          && S16(f3, t.Accel + 4) == wantAccel[2],
+                          $"{S16(f3, t.Accel)},{S16(f3, t.Accel + 2)},{S16(f3, t.Accel + 4)}, want {string.Join(",", wantAccel)}");
+                    Check("the calibrated gyroscope reaches the wire in SDL's axes",
+                          S16(f3, t.Gyro) == wantGyro[0] && S16(f3, t.Gyro + 2) == wantGyro[1]
+                                                        && S16(f3, t.Gyro + 4) == wantGyro[2],
+                          $"{S16(f3, t.Gyro)},{S16(f3, t.Gyro + 2)},{S16(f3, t.Gyro + 4)}, want {string.Join(",", wantGyro)}");
+                    // SDL's decode of those words, as each driver writes it.
+                    double sgx = S16(f3, t.Gyro) / 32768.0 * 2000, sgy = S16(f3, t.Gyro + 4) / 32768.0 * 2000;
+                    double sgz = (t.GyroZPlus ? 1 : -1) * S16(f3, t.Gyro + 2) / 32768.0 * 2000;
+                    double sax = S16(f3, t.Accel) / 32768.0 * 2, say = S16(f3, t.Accel + 4) / 32768.0 * 2;
+                    double saz = -S16(f3, t.Accel + 2) / 32768.0 * 2;
+                    Check("SDL's decode returns the submitted motion",
+                          Math.Abs(sgx - dps[0]) < 0.05 && Math.Abs(sgy - dps[1]) < 0.05 && Math.Abs(sgz - dps[2]) < 0.05
+                          && Math.Abs(sax - gs[0]) < 0.001 && Math.Abs(say - gs[1]) < 0.001 && Math.Abs(saz - gs[2]) < 0.001,
+                          $"gyro ({sgx:F3},{sgy:F3},{sgz:F3}) deg/s, accel ({sax:F4},{say:F4},{saz:F4}) g");
 
                     // Lifting has to clear the gate, or a consumer sees a
                     // contact stuck on the pad forever.
@@ -588,6 +634,39 @@ static class Program
                         for (int i = 0; i < t.BtnBytes; i++) b4 |= (ulong)f4[t.Btn + i] << (8 * i);
                         Check("both finger-down bits clear when the contacts lift",
                               (b4 & (1UL << t.TouchL)) == 0 && (b4 & (1UL << t.TouchR)) == 0);
+                        if (t.PressL >= 0)
+                            Check("both pads report no pressure once lifted",
+                                  U16(f4, t.PressL) == 0 && U16(f4, t.PressR) == 0,
+                                  $"L={U16(f4, t.PressL)} R={U16(f4, t.PressR)}");
+                    }
+                }
+
+                // ── trigger bits ─────────────────────────────────────
+                // Each trigger one count below its digital threshold, then
+                // at it, on the profile's scale. The analog value on the
+                // wire is that count too (the trigger field's own max is the
+                // same scale), so the frame shows both.
+                foreach (bool right in new[] { false, true })
+                {
+                    int at = right ? t.TrigL + t.TrigWidth : t.TrigL;
+                    int bit = right ? t.RtBit : t.LtBit;
+                    string side = right ? "right" : "left";
+                    foreach (int k in new[] { t.TrigAt - 1, t.TrigAt })
+                    {
+                        float v = (float)((double)k / t.TrigMax);
+                        var pull = new HMGamepadState
+                        {
+                            Buttons = 0,
+                            Axes = HMGamepadStateHelpers.StandardAxes(prof, 0.5f, 0.5f, 0.5f, 0.5f, right ? 0f : v, right ? v : 0f),
+                        };
+                        int Wire(byte[] g) => t.TrigWidth == 2 ? U16(g, at) : g[at];
+                        var rawT = ReadFrame(path, inLen, c, pull, r => Wire(P(r)) == k);
+                        if (rawT == null) { Check($"a frame arrives with the {side} trigger at {k}", false); continue; }
+                        var fT = P(rawT);
+                        bool set = (Bits(fT) & (1UL << bit)) != 0;
+                        bool want = k >= t.TrigAt;
+                        Check($"{side} trigger at {k} of {t.TrigMax}: digital bit {(want ? "set" : "clear")}",
+                              Wire(fT) == k && set == want, $"wire={Wire(fT)} bit {bit}={(set ? 1 : 0)}");
                     }
                 }
 

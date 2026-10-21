@@ -23,7 +23,8 @@ internal enum GpFloat : byte
 }
 
 /// <summary>A one-bit value a state program reads: a trigger past the first
-/// step of its 8-bit value (the codec's TriggerOn, v x 255 above 0.5), a
+/// step of its 8-bit value (the codec's TriggerOn, v x 255 above 0.5, for a
+/// button mask without a triggerThreshold, see GpTriggerBitOp), a
 /// direction of HMGamepadState.Hat (a diagonal sets both of its
 /// components), a flag of HMGamepadState, or a direction resolved from
 /// HatDegrees, HatHundredths, HatRaw or Hat, the first set, as the codec
@@ -58,6 +59,12 @@ internal sealed record GpButtonsOp(int[] Moves) : Op;
 
 /// <summary>Flags to report bits, flag i to report bit Bits[i]. An OR op.</summary>
 internal sealed record GpFlagsOp(GpFlag[] Flags, int[] Bits) : Op;
+
+/// <summary>A trigger's digital bit at a threshold (the codec's
+/// triggerThreshold): report bit <see cref="Bit"/> is set while
+/// WireArith.Linear(src, 0, max, false, 0), the trigger on a scale of
+/// <see cref="Max"/> counts, is at least <see cref="At"/>. An OR op.</summary>
+internal sealed record GpTriggerBitOp(GpFloat Src, int Max, int At, int Bit) : Op;
 
 /// <summary>WireArith.Linear(src, min, max, invert, rest): a NaN takes rest,
 /// the value is clamped to [0, 1], inverted if asked, and min + RoundHalfEven
@@ -101,8 +108,12 @@ internal sealed record GpFingerOp(int Finger, int Dst) : Op;
 /// stick's value through WireArith.Linear.</summary>
 internal sealed record GpPadOp(int Pad, bool IsY, bool OrStick, int Min, int Max, bool Invert, int Dst) : Op;
 
-/// <summary>One of two values by a flag, its low 16 bits little-endian.</summary>
-internal sealed record GpSelectOp(GpFlag Flag, int WhenSet, int WhenClear, int Dst) : Op;
+/// <summary>A Valve pad's pressure (the codec's uint16-pressure): finger
+/// <see cref="Finger"/>'s pressure p, or with p not above 0 (0, negative or
+/// NaN) 1 while the finger is down and 0 while it is up, through
+/// WireArith.Linear(v, min, max, false, 0), its low 16 bits
+/// little-endian.</summary>
+internal sealed record GpPadPressureOp(int Finger, int Min, int Max, int Dst) : Op;
 
 /// <summary>The CRC-32 (IEEE, reflected) of the prefix and the block's bytes
 /// From to To as the other ops wrote them, little-endian at Dst. It runs
@@ -262,7 +273,7 @@ internal static class StateLowering
     /// is left to the codec.</summary>
     static readonly Dictionary<string, string[]> s_keys = new(StringComparer.Ordinal)
     {
-        ["button-mask"] = new[] { "byte", "type", "semantic", "buttons", "bits", "dpad" },
+        ["button-mask"] = new[] { "byte", "type", "semantic", "buttons", "bits", "dpad", "triggerThreshold" },
         ["stick12-pair"] = new[] { "byte", "type", "semantic", "min", "max", "invert" },
         ["uint8-axis"] = new[] { "byte", "type", "semantic", "min", "max", "invert", "center" },
         ["uint8-trigger"] = new[] { "byte", "type", "semantic", "min", "max", "invert" },
@@ -408,9 +419,28 @@ internal static class StateLowering
                     bool resolved = Str(keys, "dpad") is string dp
                         ? (dp == "resolved" ? true : throw new InvalidOperationException($"dpad '{dp}'"))
                         : false;
+                    // "triggerThreshold" moves the trigger bits along the
+                    // travel. A value the codec's check refuses leaves the
+                    // block to the codec, which refuses it with its path.
+                    int tMax = 0, tAt = 0;
+                    if (keys.TryGetValue("triggerThreshold", out var tt))
+                    {
+                        if (tt.ValueKind != JsonValueKind.Object) { reason = $"{where}.triggerThreshold"; return null; }
+                        var tk = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
+                        foreach (var x in tt.EnumerateObject())
+                        {
+                            if (tk.ContainsKey(x.Name)) { reason = $"{where}.triggerThreshold writes a key twice"; return null; }
+                            tk[x.Name] = x.Value;
+                        }
+                        if (tk.Keys.Any(k => !k.Equals("max", StringComparison.OrdinalIgnoreCase) && !k.Equals("at", StringComparison.OrdinalIgnoreCase))
+                            || Int(tk, "max") is not int m || Int(tk, "at") is not int a || m < 1 || m > 65535 || a < 1 || a > m)
+                        { reason = $"{where}.triggerThreshold"; return null; }
+                        tMax = m; tAt = a;
+                    }
                     var moves = new List<int>();
                     var flags = new List<GpFlag>();
                     var flagBits = new List<int>();
+                    var triggerBits = new List<GpTriggerBitOp>();
                     for (int j = 0; j < names.Count; j++)
                     {
                         string? name = names[j];
@@ -420,6 +450,11 @@ internal static class StateLowering
                         int bit = lo + j;
                         if (bit > hi || b + bit / 8 >= size) continue;
                         int reportBit = b * 8 + bit;
+                        if (tMax > 0 && name is "LT_DIGITAL" or "RT_DIGITAL")
+                        {
+                            triggerBits.Add(new GpTriggerBitOp(name == "LT_DIGITAL" ? GpFloat.LeftTrigger : GpFloat.RightTrigger, tMax, tAt, reportBit));
+                            continue;
+                        }
                         if (s_buttonFlags.TryGetValue(name, out var flag)) { flags.Add(resolved ? Resolved(flag) : flag); flagBits.Add(reportBit); continue; }
                         if (name.Length > 1 && name[0] == '#')
                         {
@@ -433,6 +468,7 @@ internal static class StateLowering
                     }
                     if (moves.Count > 0) ops.Add(new GpButtonsOp(moves.ToArray()));
                     if (flags.Count > 0) ops.Add(new GpFlagsOp(flags.ToArray(), flagBits.ToArray()));
+                    ops.AddRange(triggerBits);
                     break;
                 }
                 case "stick12-pair":
@@ -619,8 +655,9 @@ internal static class StateLowering
                 {
                     if (b + 2 > size) continue;
                     if (!ClaimBytes(b, 2)) { reason = $"{where} writes bytes another field writes"; return null; }
-                    var flag = semantic == "rightPadPressure" ? GpFlag.Finger1Active : GpFlag.Finger0Active;
-                    ops.Add(new GpSelectOp(flag, Int(keys, "max") ?? 65535, Int(keys, "min") ?? 0, b));
+                    // The codec reads finger 1 for rightPadPressure and
+                    // finger 0 for any other semantic.
+                    ops.Add(new GpPadPressureOp(semantic == "rightPadPressure" ? 1 : 0, Int(keys, "min") ?? 0, Int(keys, "max") ?? 65535, b));
                     break;
                 }
                 case "uint8-rolling":

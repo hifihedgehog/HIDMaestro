@@ -65,7 +65,12 @@ internal static class Program
     // decode row still matches the v1.3.18 capture.
     // The Valve, Switch 2 Pro and GameCube adapter rows were added in
     // v2.0.0 and record the one arithmetic and the Triton's accumulating
-    // timestamp.
+    // timestamp. In v2.0.2 (issue #72) the nine Valve rows were
+    // regenerated: with --bytes before and after, each report differs only
+    // in its six motion words, now the calibrated channel in SDL's axes,
+    // in a pad pressure the state sets above 0, and in the trigger bits,
+    // LT_DIGITAL clear below 90 percent on the Deck and the Triton and
+    // both clear below 255 on the 2015 controller.
     static readonly string[] Goldens =
     {
         "golden dualsense in 0 728BEC8461DD20621FBC713B28165DAD10DBB0722B6362B707CB35E3DDA1949D",
@@ -142,15 +147,15 @@ internal static class Program
         "golden dualshock-3 out 1 E39DCB23E21D2275F87D4B91219F8B4B9FA006CA0AC9F619F499BF6DF73DBB51",
         "golden dualshock-3 out 2 3554DA9900A9966F77128BF999984D3012AF0A7C653AC6409522E69D63576FAC",
         "golden dualshock-3 dec 0 C317D8EC38CC58B36E3AFA5C53AF37BF02C90C18CE30EF18E257E45874E08F09",
-        "golden steam-controller-2 in 0 B4445C6EA167593F1C20F35E3D33656DB7FE094363ADB1D51D4A226AF5795C95",
-        "golden steam-controller-2 in 1 8DD02DD914B10B222EC9AE43DEA7849E63948F032BE3C958784E9E77AE226EA0",
-        "golden steam-controller-2 in 2 5B8A6DBC35C7BA7B0D24D4788F7D46F6C99120D878D9635D376DDE5D0B555DF6",
-        "golden steam-controller-composite in 0 0AAE6417DA4F8C0580617E144D0A2964869A371F1B1FFF8DA9B0956EDA11497A",
-        "golden steam-controller-composite in 1 77AEA134B1AA38AD21DE3147A6C868823825763AC8E5866D83919D0DE3DB1195",
-        "golden steam-controller-composite in 2 DE6D75DF05C29F8A221CBD9C72BED28E06B20EAF843C9F9B03DC68FC5DE5B712",
-        "golden steam-deck-composite in 0 9BE9DDFF9D800666C6103903A7D6A2A6D140115FEE4D6B49B3FA0292CFE9EA0A",
-        "golden steam-deck-composite in 1 D3F068736F79CF00525D937DF42FB974832AEA6EDE00F8AB887BE2CA7266A33A",
-        "golden steam-deck-composite in 2 B5FD8C39785E79191FDE05D17E45295DF650240E4ADE6E6E6085B28BED2B5860",
+        "golden steam-controller-2 in 0 D9ECB25187D4865CDE7A18FF930BC4BB679C2651846B9F82852616BD4B5874BF",
+        "golden steam-controller-2 in 1 87919187E859CF55D1D47B1E8CFF561C40B941343D4F8EE25BD2A64EACBF7842",
+        "golden steam-controller-2 in 2 4D6A447F7F48B6D9F0770588B70D92C818C4A59CBF547BB127F46969F0F25D79",
+        "golden steam-controller-composite in 0 62E24A0E0AF5EDB3505CF6397C59E73AA75AAB6D45D17B991012E9A7670D98C0",
+        "golden steam-controller-composite in 1 0B500CC2CD13BBCBFB7D6D970DDB7C017298616C5E53B9929CE83B376A9813E8",
+        "golden steam-controller-composite in 2 48D940E99CCA4F48B968CA25E08F5578C936BDB3A5432CB97741CE87EC95EF01",
+        "golden steam-deck-composite in 0 DD18B466F0CDA79A5653E6F300535227F1CC59AB474ACDFE50502702A9B4FE5A",
+        "golden steam-deck-composite in 1 8FD14BB08E57ADEAD765AA2ABC6CE808EEFD05C6764806C549509A433CD2B446",
+        "golden steam-deck-composite in 2 A7A493DA9D0FC8EEF3B44C303E40CB911231B38C7BE2FD9127319A08F394584B",
         "golden switch2-pro-controller in 0 0A5F70A8AB3065F9A3BE2F6AF739BB5E1191210005591FEF7DA3327FE4C919EB",
         "golden switch2-pro-controller in 1 2E99685BD96B43AE6A312F91DCFDBBDA4AF2FBFAC662F25A15FE7256A415A8C0",
         "golden switch2-pro-controller in 2 FF6EAF68724CBACD1E31A1AB8A60D7F2120E24F6B122EA9A669322CEFCB3F7D1",
@@ -281,6 +286,19 @@ internal static class Program
         BatteryFull = false,
         MicMuted = frame == 2,
         HeadphonesConnected = true,
+        // v2.0.2 (issue #72): of the reports listed, only the Valve
+        // personas' read the calibrated motion and the pad pressures, so
+        // adding them left every other row untouched. Frame 0 presses
+        // finger 0 at 0, which a contact sends as full pressure, and frame
+        // 1 lifts finger 1 with its pressure at 0.
+        AccelGX = 0.25f + frame * 0.125f,
+        AccelGY = 1f - frame * 0.0625f,
+        AccelGZ = -0.5f + frame * 0.03125f,
+        GyroDpsX = 30f + frame * 7.5f,
+        GyroDpsY = 90f - frame * 11f,
+        GyroDpsZ = -60f + frame * 13f,
+        TouchpadFinger0Pressure = 0.25f * frame,
+        TouchpadFinger1Pressure = frame == 2 ? 0.75f : 0f,
     };
 
     // Deterministic per-semantic values: scalars from a name hash, rgb24
