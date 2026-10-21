@@ -130,10 +130,11 @@ internal static partial class UsbipDriverInstaller
         // before: a pinned package that install may have added outlives a
         // default removal, which is safe, where taking one a user's own
         // usbip-win2 install added would not be. Either way the record names
-        // this assembly's release, the package forced on below: the process
-        // that registered the devnode may have carried another pin.
+        // this assembly's release, the package forced on below, with its
+        // usbip-win2 and SDK versions: the process that registered the
+        // devnode may have carried another pin.
         var record = known != null && string.Equals(known.Instance, instance, StringComparison.OrdinalIgnoreCase) && known.Token == token
-            ? known with { DriverVer = PinnedDriverVer() }
+            ? known with { DriverVer = PinnedDriverVer(), Version = UsbipDriverInstaller.Version, SdkVersion = MachineClaims.SdkVersion }
             : new UsbipInstallRecord(instance, token, null, false, UdePackageNames().ToArray(), AppsEntryStamp(), PinnedDriverVer(), Version, DateTime.UtcNow, MachineClaims.SdkVersion);
         UsbipInstallRecord.Write(record);
         return FinishHostController(work, inf, record, rollBack: false);
@@ -821,7 +822,7 @@ internal sealed record UsbipInstallRecord(string Instance, string? Token, string
         string? oem = UsbipDriverInstaller.DriverInfPathOf(r.Instance);
         if (oem == null || string.Equals(oem, r.OemInf, StringComparison.OrdinalIgnoreCase)) return;
         if (!UsbipDriverInstaller.IsPinnedPackage(oem)) return;
-        Record(r with { DriverVer = UsbipDriverInstaller.PinnedDriverVer() }, oem);
+        Record(r with { DriverVer = UsbipDriverInstaller.PinnedDriverVer(), Version = UsbipDriverInstaller.Version, SdkVersion = MachineClaims.SdkVersion }, oem);
     }
 
     /// <summary>An install whose driver install timed out and then bound

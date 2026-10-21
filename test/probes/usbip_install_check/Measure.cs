@@ -63,7 +63,7 @@ internal static partial class Program
         Thread.Sleep(1000);
 
         // Which byte tells A from B, and its value in each.
-        s_controller = c;
+        Sdk.Controller = c;
         var stateA = new HMGamepadState { Buttons = HMButton.A };
         var stateB = new HMGamepadState { Buttons = HMButton.B };
         var a = ReadWith(paths[0], stateA);
