@@ -8,9 +8,11 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Threading;
 using HIDMaestro;
 using Microsoft.Win32;
+using Microsoft.Win32.SafeHandles;
 
 internal static partial class Program
 {
@@ -99,7 +101,7 @@ internal static partial class Program
         // binds after the create gave up. A removal proves it, and the next
         // create on the working transport records the package.
         var (late, lateToken) = RegisterOnly();
-        WriteRecordWithNoDriver(late, lateToken);
+        WriteRecordWithNoDriver(late, lateToken, PinnedWholeVer);
         ForceDriverAsTheSdkDoes();
         Record("remove: a driver install that bound after its timeout leaves a working host controller and a record with no package",
                Answers() && Pnp.DriverInf(late) != null && RecordValue("OemInf") == null, $"{late} runs {Pnp.DriverInf(late)}");
@@ -107,8 +109,7 @@ internal static partial class Program
         Record("remove: a removal proves it, and would take the host controller and its package",
                Has(latePreview, "devnode", l => l.StartsWith(late + " "), "WouldRemove")
                && Has(latePreview, "driver package", l => l.StartsWith(Pnp.DriverInf(late) + " "), "WouldRemove"));
-        ResetRecordCheck();
-        HMContext.InstallUsbipBackend();
+        CreateOnWorkingTransport("remove: bound late: the next create's record check ran (the positive control)");
         Record("remove: the next create on the working transport records the package",
                RecordValue("OemInf") is string lateOem && lateOem.Equals(Pnp.DriverInf(late), StringComparison.OrdinalIgnoreCase),
                $"OemInf {RecordValue("OemInf") ?? "none"}");
@@ -117,23 +118,25 @@ internal static partial class Program
                !Pnp.Known(late) && UdePackages().Count == 0 && !KeyExists(RecordKey) && lateRemoved.All(e => e.Outcome != "Failed"), Snapshot());
 
         // ── R01: another program's package bound to that devnode ──────────
-        // The same record with no package, but usbip-win2 0.9.8.0's own
-        // package forced onto the devnode, as another program's installer
+        // The same record with no package, but another usbip-win2 release's
+        // own package forced onto the devnode, as another program's installer
         // forces its own. Neither the next create nor a removal takes it for
-        // HIDMaestro's.
+        // HIDMaestro's. The host copies the package from the build's
+        // downloads (CopyForeignPackage), and a tree without one fails here.
         string foreignInf = Path.Combine(ForeignDir, "usbip2_ude.inf");
-        if (!File.Exists(foreignInf)) Note("remove: no other usbip-win2 release's package in the sandbox, so a foreign bind is not checked");
-        else
+        string foreignFrom = File.Exists(Path.Combine(ForeignDir, "source.txt")) ? File.ReadAllText(Path.Combine(ForeignDir, "source.txt")).Trim() : "";
+        Record("remove: the tree holds another usbip-win2 release's host controller package for the foreign bind",
+               File.Exists(foreignInf), File.Exists(foreignInf) ? foreignFrom : @"none under build\downloads\usbip-<release>-<arch>\{tmp}");
+        if (File.Exists(foreignInf))
         {
             var (other, otherToken) = RegisterOnly();
-            WriteRecordWithNoDriver(other, otherToken);
+            WriteRecordWithNoDriver(other, otherToken, PinnedWholeVer);
             int forced = Pnp.ForceDriver(foreignInf, UdeHardwareId);
             string? foreignOem = Pnp.DriverInf(other);
-            Record("remove: another release's package binds to HIDMaestro's devnode",
+            Record($"remove: another release's package ({foreignFrom}) binds to HIDMaestro's devnode",
                    forced == 0 && foreignOem != null && !InfDriverVer(foreignOem).Equals(PinnedVer, StringComparison.OrdinalIgnoreCase),
                    $"force {forced}, {other} runs {foreignOem} at {(foreignOem == null ? "" : InfDriverVer(foreignOem))}");
-            ResetRecordCheck();
-            HMContext.InstallUsbipBackend();
+            CreateOnWorkingTransport("remove: foreign bind: the next create's record check ran (the positive control)");
             Record("remove: the next create does not record it", RecordValue("OemInf") == null, $"OemInf {RecordValue("OemInf") ?? "none"}");
             var foreignPreview = Remove("remove: foreign bind", preview: true, includeUnproven: false);
             Record("remove: and a default removal keeps the host controller and that package",
@@ -283,8 +286,47 @@ internal static partial class Program
                Snapshot() == companion ? "" : $"before {companion} / after {Snapshot()}");
         Registry.LocalMachine.DeleteSubKeyTree(CompanionKey, throwOnMissingSubKey: false);
 
-        var taken = Remove("remove: included", preview: false, includeUnproven: true);
-        Record("remove: with usbip-win2 included, no step failed", taken.All(e => e.Outcome != "Failed"), string.Join("; ", taken.Where(e => e.Outcome == "Failed")));
+        // What usbip-win2's installer left, with entries another program
+        // holds open. Outside %ProgramFiles%\HIDMaestro nothing waits for the
+        // next start: a held entry fails and says to close the program, the
+        // rest goes, and a removal after the program closes takes what is
+        // left.
+        string menuDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonPrograms), "USBip");
+        string heldDir = Path.Combine(menuDir, "held");
+        string heldExe = Path.Combine(InstallDir, "usbip.exe");
+        Directory.CreateDirectory(heldDir);
+        File.WriteAllText(Path.Combine(heldDir, "inside.txt"), "planted by the probe");
+        File.WriteAllText(Path.Combine(menuDir, "USBip.lnk"), "planted by the probe");
+        File.WriteAllText(PublicLink, "planted by the probe");
+        File.WriteAllText(heldExe, "planted by the probe");
+        List<Entry> taken;
+        using (new FileStream(heldExe, FileMode.Open, FileAccess.Read, FileShare.None))
+        using (new FileStream(PublicLink, FileMode.Open, FileAccess.Read, FileShare.None))
+        using (OpenFolderWithoutDeleteSharing(heldDir))
+            taken = Remove("remove: included, entries held", preview: false, includeUnproven: true);
+        Record("remove: a held file in usbip-win2's program folder fails and says to close the program, and the rest of the folder goes",
+               Has(taken, "folder", l => l.Equals(InstallDir, StringComparison.OrdinalIgnoreCase), "Failed", "Close the program using it")
+               && File.Exists(heldExe) && !File.Exists(Path.Combine(InstallDir, "Readme.md")),
+               string.Join("; ", taken.Where(e => e.Location.Equals(InstallDir, StringComparison.OrdinalIgnoreCase))));
+        // The link is the removal's target itself, which a held handle keeps
+        // from being opened at all, so its reason is the open's error.
+        Record("remove: a held all-users desktop link fails and stays",
+               Has(taken, "file", l => l.Equals(PublicLink, StringComparison.OrdinalIgnoreCase), "Failed", "Win32 error 32") && File.Exists(PublicLink),
+               string.Join("; ", taken.Where(e => e.Location.Equals(PublicLink, StringComparison.OrdinalIgnoreCase))));
+        Record("remove: a held folder in usbip-win2's Start menu folder is emptied, and the Start menu folder fails the same way",
+               Has(taken, "folder", l => l.Equals(menuDir, StringComparison.OrdinalIgnoreCase), "Failed", "Close the program using it")
+               && Directory.Exists(heldDir) && !File.Exists(Path.Combine(heldDir, "inside.txt")) && !File.Exists(Path.Combine(menuDir, "USBip.lnk")),
+               string.Join("; ", taken.Where(e => e.Location.Equals(menuDir, StringComparison.OrdinalIgnoreCase))));
+        Record("remove: nothing of usbip-win2's is queued for the next start", !PendingRenames().Any(p => p.Contains(@"\USBip", StringComparison.OrdinalIgnoreCase)),
+               string.Join(", ", PendingRenames()));
+        Record("remove: the rest of that removal went with nothing else failed",
+               taken.Where(e => e.Outcome == "Failed").All(e => e.Location.Equals(InstallDir, StringComparison.OrdinalIgnoreCase)
+                   || e.Location.Equals(PublicLink, StringComparison.OrdinalIgnoreCase) || e.Location.Equals(menuDir, StringComparison.OrdinalIgnoreCase)),
+               string.Join("; ", taken.Where(e => e.Outcome == "Failed")));
+        taken = Remove("remove: included, once nothing holds them", preview: false, includeUnproven: true);
+        Record("remove: with usbip-win2 included, a removal once nothing holds them takes them, with no step failed",
+               taken.All(e => e.Outcome != "Failed") && !Directory.Exists(menuDir) && !File.Exists(PublicLink),
+               string.Join("; ", taken.Where(e => e.Outcome == "Failed")));
         Record("remove: the host controller, its package, its service, the Apps entry and the folder are gone",
                Pnp.RootDevnodes(UdeHardwareId).Count == 0 && UdePackages().Count == 0 && !KeyExists(UdeServiceKey)
                && !KeyExists(UninstallKey) && !Directory.Exists(InstallDir), Snapshot());
@@ -343,10 +385,17 @@ internal static partial class Program
         }
         Directory.CreateDirectory(InstallDir);
         File.WriteAllText(Path.Combine(InstallDir, "Readme.md"), "planted by the probe");
-        var included = Remove("remove: used, usbip-win2 included", preview: false, includeUnproven: true);
+        File.WriteAllText(PublicLink, "planted by the probe");
+        List<Entry> included;
+        using (new FileStream(PublicLink, FileMode.Open, FileAccess.Read, FileShare.None))
+            included = Remove("remove: used, usbip-win2 included", preview: false, includeUnproven: true);
         Record("remove: with usbip-win2 included, the Apps entry and folder stay with the host controller until a restart",
                Has(included, "devnode", l => l.StartsWith(hc + " "), "Kept", "since Windows started")
-               && Has(included, "Apps entry", _ => true, "Kept", "until a restart") && KeyExists(UninstallKey) && Directory.Exists(InstallDir));
+               && Has(included, "Apps entry", _ => true, "Kept", "until a restart") && KeyExists(UninstallKey)
+               && Has(included, "folder", l => l.Equals(InstallDir, StringComparison.OrdinalIgnoreCase), "Kept", "until a restart") && File.Exists(Path.Combine(InstallDir, "Readme.md")));
+        Record("remove: and so does the all-users desktop link, held or not, with no delete tried",
+               Has(included, "file", l => l.Equals(PublicLink, StringComparison.OrdinalIgnoreCase), "Kept", "until a restart") && File.Exists(PublicLink),
+               string.Join("; ", included.Where(e => e.Location.Equals(PublicLink, StringComparison.OrdinalIgnoreCase))));
     }
 
     /// <summary>--preview, on this machine: what the usbip-win2 part of a
@@ -405,6 +454,23 @@ internal static partial class Program
 
     static string PinnedVer => InfDriverVerOf(ReadInf(StagedPinnedInf()));
 
+    /// <summary>The pinned package's whole DriverVer value, date and version,
+    /// as an install record stores it.</summary>
+    static string PinnedWholeVer => InfDriverVerWholeOf(ReadInf(StagedPinnedInf()));
+
+    /// <summary>An INF's whole DriverVer value with the spaces around each
+    /// part taken out ("09/22/2026,12.1.30.403"), or "".</summary>
+    static string InfDriverVerWholeOf(string text)
+    {
+        foreach (string raw in text.Split('\n'))
+        {
+            string line = raw.Split(';')[0].Trim();
+            if (!line.StartsWith("DriverVer", StringComparison.OrdinalIgnoreCase) || line.IndexOf('=') < 0) continue;
+            return string.Join(",", line[(line.IndexOf('=') + 1)..].Split(',').Select(s => s.Trim()));
+        }
+        return "";
+    }
+
     /// <summary>The DriverVer version of a published INF.</summary>
     static string InfDriverVer(string published) =>
         InfDriverVerOf(ReadInf(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "INF", published)));
@@ -424,6 +490,57 @@ internal static partial class Program
     static void ResetRecordCheck() =>
         Installer.GetField("s_recordChecked", BindingFlags.NonPublic | BindingFlags.Static)!.SetValue(null, false);
 
+    static bool RecordChecked() =>
+        (bool)Installer.GetField("s_recordChecked", BindingFlags.NonPublic | BindingFlags.Static)!.GetValue(null)!;
+
+    /// <summary>A create's transport step on a transport that answers, as
+    /// the next process's first create runs it, until its record check has
+    /// run: the check runs only on that path (EnsureInstalled), and only when
+    /// it takes the transport lock with no wait, which a transport step that
+    /// just ended may still hold for a moment. Passes once it ran, within
+    /// 15 s, recorded as <paramref name="label"/>.</summary>
+    static void CreateOnWorkingTransport(string label)
+    {
+        if (!Answers()) { Record(label, false, "the transport did not answer within 30 s"); return; }
+        ResetRecordCheck();
+        var sw = Stopwatch.StartNew();
+        int creates = 0;
+        while (sw.ElapsedMilliseconds < 15_000)
+        {
+            HMContext.InstallUsbipBackend();
+            creates++;
+            if (RecordChecked()) { Record(label, true, $"after {creates} create(s)"); return; }
+            Thread.Sleep(250);
+        }
+        Record(label, false, $"the record check never ran in {creates} create(s): the transport lock stayed held");
+    }
+
+    /// <summary>usbip-win2's all-users desktop link (setup.iss's
+    /// desktopicon task).</summary>
+    static string PublicLink => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), "USBip.lnk");
+
+    /// <summary>A folder held open as another program holds one: read and
+    /// write sharing, no delete sharing, so it cannot be deleted while the
+    /// handle is open.</summary>
+    static SafeFileHandle OpenFolderWithoutDeleteSharing(string path)
+    {
+        var h = CreateFileW(path, 0x80000000 /* GENERIC_READ */, 0x1 | 0x2 /* FILE_SHARE_READ | FILE_SHARE_WRITE */, IntPtr.Zero,
+                            3 /* OPEN_EXISTING */, 0x02000000 /* FILE_FLAG_BACKUP_SEMANTICS */, IntPtr.Zero);
+        if (h.IsInvalid) throw new IOException($"{path} could not be opened (Win32 error {Marshal.GetLastWin32Error()})");
+        return h;
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+
+    /// <summary>The paths queued for deletion at the next start
+    /// (Session Manager's PendingFileRenameOperations).</summary>
+    static string[] PendingRenames()
+    {
+        using var k = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Session Manager");
+        return k?.GetValue("PendingFileRenameOperations") as string[] ?? Array.Empty<string>();
+    }
+
     static void PlantAppsEntry()
     {
         using var k = Registry.LocalMachine.CreateSubKey(UninstallKey);
@@ -439,8 +556,9 @@ internal static partial class Program
     }
 
     /// <summary>The record an install writes before its driver install, on a
-    /// machine with no usbip-win2 Apps entry.</summary>
-    static void WriteRecordWithNoDriver(string instance, string token)
+    /// machine with no usbip-win2 Apps entry. With no DriverVer it is a record
+    /// from before the record kept one.</summary>
+    static void WriteRecordWithNoDriver(string instance, string token, string? driverVer = null)
     {
         using var k = Registry.LocalMachine.CreateSubKey(RecordKey);
         k.SetValue("Instance", instance);
@@ -448,6 +566,8 @@ internal static partial class Program
         k.SetValue("PackageAdded", 0, RegistryValueKind.DWord);
         k.SetValue("PackagesBefore", Array.Empty<string>(), RegistryValueKind.MultiString);
         k.SetValue("AppsEntry", "");
+        if (driverVer != null) k.SetValue("DriverVer", driverVer);
+        else k.DeleteValue("DriverVer", throwOnMissingValue: false);
         k.SetValue("Version", "0.9.8.1");
         k.SetValue("InstalledUtc", DateTime.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture));
         k.SetValue("SdkVersion", "probe");

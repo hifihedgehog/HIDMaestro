@@ -55,7 +55,7 @@ internal static partial class UsbipDriverInstaller
         var (instance, token) = RegisterHostController();
         // Written before the driver install, so an install that is cut short
         // leaves a record a later create finishes from and a removal takes.
-        var record = new UsbipInstallRecord(instance, token, null, false, before.ToArray(), AppsEntryStamp(), Version, DateTime.UtcNow, MachineClaims.SdkVersion);
+        var record = new UsbipInstallRecord(instance, token, null, false, before.ToArray(), AppsEntryStamp(), DriverVerOf(ReadInfText(inf)), Version, DateTime.UtcNow, MachineClaims.SdkVersion);
         UsbipInstallRecord.Write(record);
         DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: registered {instance}; installing the host controller driver.");
         return FinishHostController(work, inf, record, rollBack: true);
@@ -128,15 +128,17 @@ internal static partial class UsbipDriverInstaller
         // usbip-win2 install added would not be.
         var record = known != null && string.Equals(known.Instance, instance, StringComparison.OrdinalIgnoreCase) && known.Token == token
             ? known
-            : new UsbipInstallRecord(instance, token, null, false, UdePackageNames().ToArray(), AppsEntryStamp(), Version, DateTime.UtcNow, MachineClaims.SdkVersion);
+            : new UsbipInstallRecord(instance, token, null, false, UdePackageNames().ToArray(), AppsEntryStamp(), DriverVerOf(ReadInfText(inf)), Version, DateTime.UtcNow, MachineClaims.SdkVersion);
         UsbipInstallRecord.Write(record);
         return FinishHostController(work, inf, record, rollBack: false);
     }
 
-    /// <summary>The version in an INF's DriverVer line ("09/22/2026,12.1.30.403"
-    /// gives "12.1.30.403"), or null. Both sides of a comparison are read
-    /// from INF text this way, never from pnputil's listing, which formats
-    /// the version its own way (PnputilHelper.DriverVersionText).</summary>
+    /// <summary>The whole value of an INF's DriverVer line, date and
+    /// version, with the spaces around each part taken out
+    /// ("DriverVer = 09/22/2026, 12.1.30.403" gives "09/22/2026,12.1.30.403"),
+    /// or null. Both sides of a comparison are read from INF text this way,
+    /// never from pnputil's listing, which formats the value its own way
+    /// (PnputilHelper.DriverVersionText).</summary>
     internal static string? DriverVerOf(string infText)
     {
         foreach (string raw in infText.Split('\n'))
@@ -144,8 +146,11 @@ internal static partial class UsbipDriverInstaller
             int semi = raw.IndexOf(';');
             string line = (semi >= 0 ? raw[..semi] : raw).Trim();
             if (!line.StartsWith("DriverVer", StringComparison.OrdinalIgnoreCase)) continue;
-            int comma = line.LastIndexOf(',');
-            return comma >= 0 ? line[(comma + 1)..].Trim() : null;
+            int eq = line.IndexOf('=');
+            if (eq < 0) return null;
+            string[] parts = line[(eq + 1)..].Split(',');
+            for (int i = 0; i < parts.Length; i++) parts[i] = parts[i].Trim();
+            return string.Join(",", parts);
         }
         return null;
     }
@@ -171,13 +176,20 @@ internal static partial class UsbipDriverInstaller
 
     /// <summary>True when the published INF (oemNN.inf) is a package of the
     /// pinned release: its DriverVer is the embedded INF's.</summary>
-    internal static bool IsPinnedPackage(string publishedInf)
+    internal static bool IsPinnedPackage(string publishedInf) => IsPackageOf(publishedInf, PinnedDriverVer());
+
+    /// <summary>True when the published INF (oemNN.inf) is a package of the
+    /// release an install record names: its own DriverVer, or this
+    /// assembly's pin for a record that has none.</summary>
+    internal static bool IsRecordedRelease(UsbipInstallRecord record, string publishedInf) =>
+        IsPackageOf(publishedInf, record.DriverVer ?? PinnedDriverVer());
+
+    private static bool IsPackageOf(string publishedInf, string? driverVer)
     {
         try
         {
-            string? pinned = PinnedDriverVer();
             string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "INF", Path.GetFileName(publishedInf));
-            return pinned != null && File.Exists(path) && DriverVerOf(ReadInfText(path)) == pinned;
+            return driverVer != null && File.Exists(path) && DriverVerOf(ReadInfText(path)) == driverVer;
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
     }
@@ -697,11 +709,15 @@ internal static partial class UsbipDriverInstaller
 /// install ran (<see cref="UsbipDriverInstaller.AppsEntryStamp"/>). A
 /// different state later means its installer, or something else, wrote the
 /// entry since.</param>
+/// <param name="DriverVer">The whole DriverVer of the package the install
+/// put on, date and version (<see cref="UsbipDriverInstaller.DriverVerOf"/>),
+/// so a program on another pin still knows the release. Null in a record
+/// that predates it, read then as the running assembly's pin.</param>
 /// <param name="Version">The usbip-win2 release installed.</param>
 /// <param name="InstalledUtc">When.</param>
 /// <param name="SdkVersion">The HIDMaestro version that installed it.</param>
 internal sealed record UsbipInstallRecord(string Instance, string? Token, string? OemInf, bool PackageAdded, string[] PackagesBefore,
-                                          string AppsEntry, string Version, DateTime InstalledUtc, string SdkVersion)
+                                          string AppsEntry, string? DriverVer, string Version, DateTime InstalledUtc, string SdkVersion)
 {
     internal const string Key = @"SOFTWARE\HIDMaestroUsbip";
 
@@ -724,6 +740,8 @@ internal sealed record UsbipInstallRecord(string Instance, string? Token, string
             k.SetValue("PackageAdded", r.PackageAdded ? 1 : 0, Microsoft.Win32.RegistryValueKind.DWord);
             k.SetValue("PackagesBefore", r.PackagesBefore, Microsoft.Win32.RegistryValueKind.MultiString);
             k.SetValue("AppsEntry", r.AppsEntry, Microsoft.Win32.RegistryValueKind.String);
+            if (r.DriverVer != null) k.SetValue("DriverVer", r.DriverVer, Microsoft.Win32.RegistryValueKind.String);
+            else k.DeleteValue("DriverVer", throwOnMissingValue: false);
             k.SetValue("Version", r.Version, Microsoft.Win32.RegistryValueKind.String);
             k.SetValue("InstalledUtc", r.InstalledUtc.ToString("o", System.Globalization.CultureInfo.InvariantCulture), Microsoft.Win32.RegistryValueKind.String);
             k.SetValue("SdkVersion", r.SdkVersion, Microsoft.Win32.RegistryValueKind.String);
@@ -752,6 +770,7 @@ internal sealed record UsbipInstallRecord(string Instance, string? Token, string
                 k.GetValue("PackageAdded") is int added && added != 0,
                 k.GetValue("PackagesBefore") as string[] ?? Array.Empty<string>(),
                 k.GetValue("AppsEntry") as string ?? "",
+                k.GetValue("DriverVer") as string,
                 k.GetValue("Version") as string ?? "",
                 when,
                 k.GetValue("SdkVersion") as string ?? "");
@@ -778,33 +797,39 @@ internal sealed record UsbipInstallRecord(string Instance, string? Token, string
 
     /// <summary>After the SDK moved the devnode the record names to the
     /// pinned driver, having checked the image it replaced
-    /// (ReplaceLegacyTransport), record the package it runs now. Only on the
-    /// devnode that carries the record's token. It changes no other part of
-    /// the proof: a removal still needs the token and an unchanged Apps
-    /// entry, and an installer that put an older driver on the devnode before
-    /// a move has usually written that entry.</summary>
+    /// (ReplaceLegacyTransport), record the package it runs now and its
+    /// release. Only on the devnode that carries the record's token, and only
+    /// for a package of the pinned release, the one the move put on. It
+    /// changes no other part of the proof: a removal still needs the token
+    /// and an unchanged Apps entry, and an installer that put an older driver
+    /// on the devnode before a move has usually written that entry.</summary>
     internal static void RefreshDriver()
     {
         var r = Read();
         if (r?.Token == null || UsbipDriverInstaller.OwnerTokenOf(r.Instance) != r.Token) return;
         string? oem = UsbipDriverInstaller.DriverInfPathOf(r.Instance);
         if (oem == null || string.Equals(oem, r.OemInf, StringComparison.OrdinalIgnoreCase)) return;
-        Record(r, oem);
+        if (!UsbipDriverInstaller.IsPinnedPackage(oem)) return;
+        Record(r with { DriverVer = UsbipDriverInstaller.PinnedDriverVer() }, oem);
     }
 
     /// <summary>An install whose driver install timed out and then bound
     /// recorded no package: record the one its devnode runs, only when the
-    /// record still has none, the devnode carries the record's token, and
-    /// the package is of the pinned release, which is what the install put
-    /// on it. Another program's package bound to the devnode is never taken
-    /// for HIDMaestro's.</summary>
-    internal static void CompleteLateBind()
+    /// record still has none, the devnode carries the record's token,
+    /// usbip-win2's Apps entry is as the install found it, and the package
+    /// is of the release the record names, which is what the install put on
+    /// it. Another program's package bound to the devnode, or one a vendor
+    /// install brought since, is never taken for HIDMaestro's. Returns
+    /// whether it recorded one.</summary>
+    internal static bool CompleteLateBind()
     {
         var r = Read();
-        if (r == null || r.OemInf != null || r.Token == null || UsbipDriverInstaller.OwnerTokenOf(r.Instance) != r.Token) return;
+        if (r == null || r.OemInf != null || r.Token == null || UsbipDriverInstaller.OwnerTokenOf(r.Instance) != r.Token) return false;
+        if (UsbipDriverInstaller.AppsEntryStamp() != r.AppsEntry) return false;
         string? oem = UsbipDriverInstaller.DriverInfPathOf(r.Instance);
-        if (oem == null || !UsbipDriverInstaller.IsPinnedPackage(oem)) return;
+        if (oem == null || !UsbipDriverInstaller.IsRecordedRelease(r, oem)) return false;
         Record(r, oem);
+        return true;
     }
 
     private static void Record(UsbipInstallRecord r, string oem)

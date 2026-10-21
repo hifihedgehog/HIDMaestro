@@ -344,8 +344,8 @@ internal static partial class UsbipRemoval
     /// the same instance id does not carry, when usbip-win2's Apps entry is
     /// as the install recorded it (no clock is compared), and when the
     /// devnode runs the package the install recorded, or, for an install cut
-    /// short before it recorded one, runs none or a package of the pinned
-    /// release the driver store did not hold before it.</summary>
+    /// short before it recorded one, runs none or a package of the release
+    /// the record names.</summary>
     private static string? RecordMismatch(UsbipInstallRecord record, List<(string Id, bool Present)> controllers)
     {
         if (!controllers.Exists(c => string.Equals(c.Id, record.Instance, StringComparison.OrdinalIgnoreCase)))
@@ -357,9 +357,11 @@ internal static partial class UsbipRemoval
         string? now = UsbipDriverInstaller.DriverInfPathOf(record.Instance);
         if (record.OemInf == null)
             // An install cut short before it recorded a package: the devnode
-            // has no driver, or binds a package of the pinned release the
-            // store did not hold before, the package RecordCovers takes.
-            return now == null || RecordCovers(record, now) ? null : $"{record.Instance} runs {now}, which is not a package HIDMaestro's install put on it";
+            // has no driver, or binds a package of the release the record
+            // names, which is what the install put on it. That package may
+            // be one the store held before, a user's identical one, which
+            // RecordCovers then keeps while the devnode goes.
+            return now == null || UsbipDriverInstaller.IsRecordedRelease(record, now) ? null : $"{record.Instance} runs {now}, which is not a package HIDMaestro's install put on it";
         if (!string.Equals(now, record.OemInf, StringComparison.OrdinalIgnoreCase))
             return $"{record.Instance} now runs {now ?? "no driver"}, not {record.OemInf}";
         return null;
@@ -368,16 +370,16 @@ internal static partial class UsbipRemoval
     /// <summary>Whether a usbip2_ude package is the install record's to take:
     /// one the devnode ran when the install returned and that was not in the
     /// driver store before it, or, for an install cut short before it
-    /// recorded a package, one of the pinned release not in the store before
-    /// it.</summary>
+    /// recorded a package, one of the release the record names not in the
+    /// store before it.</summary>
     private static bool RecordCovers(UsbipInstallRecord record, string oem)
     {
         if (Array.Exists(record.PackagesBefore, p => string.Equals(p, oem, StringComparison.OrdinalIgnoreCase))) return false;
-        // With no package recorded, only one of the pinned release, the one
-        // the install put on, is the install's: another program's package
-        // bound later is not (UsbipInstallRecord.CompleteLateBind).
+        // With no package recorded, only one of the release the record names,
+        // the one the install put on, is the install's: another program's
+        // package bound later is not (UsbipInstallRecord.CompleteLateBind).
         return record.OemInf == null
-            ? UsbipDriverInstaller.IsPinnedPackage(oem)
+            ? UsbipDriverInstaller.IsRecordedRelease(record, oem)
             : string.Equals(oem, record.OemInf, StringComparison.OrdinalIgnoreCase);
     }
 
