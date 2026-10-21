@@ -122,17 +122,19 @@ To watch the SDK work without writing any code, install PadForge. If you are bui
 | Project | What it does with HIDMaestro |
 |--|--|
 | [foundation-sunshine](https://github.com/AlkaidLab/foundation-sunshine) | Sunshine fork. Its DualSense support is built on HIDMaestro |
+| [Vibepollo](https://github.com/Nonary/Vibepollo) | Sunshine fork. Its DualSense over USB/IP draws on HIDMaestro's composite descriptors |
+| [Sunshine Control Panel](https://github.com/qiin2333/sunshine-control-panel) | Installs Foundation Sunshine's DualSense sidecar, HIDMaestro Core included |
+| [Kitsune Input](https://kitsuneinput.com/app) | DualSense bridge app. Its virtual gamepad is derived from HIDMaestro |
+| [HHL Gamepad WLAN](https://github.com/HandHeldLegend/hhl-gamepad-link) | HandHeld Legend's app for HOJA gamepads over WLAN, on a pinned HIDMaestro |
 | [JoystickGremlinEx](https://github.com/muchimi/JoystickGremlinEx) | Flight-sim remapper. Drives the SDK from Python over pythonnet |
+| [Rubylight](https://github.com/RamazanKara/Rubylight) | Moonlight streaming host. Its DualSense haptics draw on HIDMaestro's composite descriptors |
 | [Nearcade](https://github.com/TheRealFame/Nearcade) | Remote-play bridge. Pins the SDK as a submodule |
-| [dualsense-command](https://github.com/shiftedx/dualsense-command) | Bundles the runtime in its bridge installers |
-| [DirectXInput](https://github.com/dumbie/DirectXInput) | Ships the runtime with its controller tooling |
+| [GKME](https://github.com/4zyz4/GKME) | Android phone as a Windows gamepad. Credits HIDMaestro as its driver framework |
 | [FlexInput](https://github.com/x-iso/FlexInput) | Uses HIDMaestro as its default virtual-device backend |
+| [DirectXInput](https://github.com/dumbie/DirectXInput) | Its source drives Xbox pads, keyboards and mice through HIDMaestro |
+| [dualsense-command](https://github.com/shiftedx/dualsense-command) | Bundles the runtime in its bridge installers |
 
-LizardByte's [libvirtualhid](https://github.com/LizardByte/libvirtualhid), from the organization behind Sunshine, reuses this project's force-feedback descriptor byte for byte and says so in its own source:
-
-> HIDMaestro's MIT-licensed `MinimumViablePidFfbBlock`, byte-for-byte. The complete Output report set is required for DirectInput to enumerate the device as PID force-feedback capable.
-
-Their header also describes the layout as "the constant-force and sine-periodic subset of the PID descriptor proven by HIDMaestro", and their alternatives table lists HIDMaestro beside ViGEmBus, inputtino and WinUHid.
+The [full list](https://hidmaestro.org/specs.html#adopters) is on hidmaestro.org.
 
 ---
 
