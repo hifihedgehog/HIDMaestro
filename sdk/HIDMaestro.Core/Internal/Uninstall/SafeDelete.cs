@@ -218,6 +218,8 @@ internal static partial class SafeDelete
             // link is queued where that is allowed. One whose kind cannot be
             // read fails: a folder queued with entries in it would not go.
             bool? folder = IsRealFolder(parent.Last, leaf, out int readError);
+            // Its holder deleted it in between: it is gone.
+            if (folder == null && readError is ERROR_FILE_NOT_FOUND or ERROR_PATH_NOT_FOUND) return (UninstallOutcome.Removed, null);
             if (folder == true) EmptyHeldElsewhere(parent.Last, leaf, full, state, chainProtected, err);
             else if (folder == false) Defer(full, state, leafMayDefer, $"in use (Win32 error {err})");
             else state.Fail(full, $"in use (Win32 error {err}), and whether it is a folder could not be read (Win32 error {readError})");
