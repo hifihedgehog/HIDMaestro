@@ -14,9 +14,20 @@
        fetched, unpacked and checked against ForeignUsbipPackage.json the way
        the SDK's build handles the pinned release, into foreign-usbip\<arch>
        beside the probe. The installer is cached in build\downloads. Only
-       the probe uses them. The SDK never embeds them. -->
-  <Target Name="PrepareForeignUsbip" AfterTargets="Build" Condition="'$(HMSandboxPublish)' != 'true'">
+       the probe uses them. The SDK never embeds them. Both architectures:
+       this output is staged to other machines as built, and the probe takes
+       the package for the architecture of the machine it runs on. -->
+  <ItemGroup>
+    <_HMForeignUsbipInput Include="$(MSBuildProjectDirectory)\ForeignUsbipPackage.json;$(MSBuildProjectDirectory)\..\..\..\scripts\prepare_usbip.ps1" />
+    <_HMForeignUsbipOutput Include="$(OutDir)foreign-usbip\x64\usbip2_ude.inf;$(OutDir)foreign-usbip\x64\usbip2_ude.sys;$(OutDir)foreign-usbip\x64\usbip2_ude.cat;$(OutDir)foreign-usbip\arm64\usbip2_ude.inf;$(OutDir)foreign-usbip\arm64\usbip2_ude.sys;$(OutDir)foreign-usbip\arm64\usbip2_ude.cat" />
+  </ItemGroup>
+  <Target Name="PrepareForeignUsbip" AfterTargets="Build" Condition="'$(HMSandboxPublish)' != 'true'"
+          Inputs="@(_HMForeignUsbipInput)" Outputs="@(_HMForeignUsbipOutput)">
     <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\..\..\..\scripts\prepare_usbip.ps1&quot; -ManifestPath &quot;$(MSBuildProjectDirectory)\ForeignUsbipPackage.json&quot; -FetchInstallers -InstallerDirectory &quot;$(MSBuildProjectDirectory)\..\..\..\build\downloads&quot; -CacheDirectory &quot;$(MSBuildProjectDirectory)\$(BaseIntermediateOutputPath)foreign-usbip&quot; -DestinationDirectory &quot;$(OutDir)foreign-usbip&quot; -Architectures x64,arm64" />
+    <!-- The unpacked files keep the installer's timestamps, and a run that
+         finds them already in place writes nothing, so the outputs are
+         stamped here for the next build's up-to-date check. -->
+    <Touch Files="@(_HMForeignUsbipOutput)" />
   </Target>
 
   <!-- Windows Sandbox has no .NET runtime, so the copy that runs inside it

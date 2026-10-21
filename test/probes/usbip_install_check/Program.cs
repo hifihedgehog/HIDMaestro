@@ -215,6 +215,14 @@ internal static partial class Program
             }
         }
 
+        // The battery runs this host part beside the other scenarios, whose
+        // probes skip while another program has the SDK loaded. The SDK runs
+        // only inside the sandbox.
+        var loaded = AppDomain.CurrentDomain.GetAssemblies().FirstOrDefault(a => a.GetName().Name == "HIDMaestro.Core");
+        Console.WriteLine();
+        Check("the host part never loaded HIDMaestro.Core.dll, so probes beside S73 do not skip", loaded == null,
+              loaded == null ? "" : $"the host part loaded HIDMaestro.Core.dll ({loaded.Location}), which makes probes beside S73 skip");
+
         Console.WriteLine();
         Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
@@ -508,7 +516,7 @@ internal static partial class Program
 
         // The composite works end to end.
         if (c == null) return;
-        s_controller = c;
+        Sdk.Controller = c;
         var paths = new List<string>();
         var sw = Stopwatch.StartNew();
         while (paths.Count == 0 && sw.ElapsedMilliseconds < 30_000)
@@ -561,7 +569,7 @@ internal static partial class Program
         // must find nothing, which shows it does not take a steady byte that
         // ignores the state for the state.
         var idle = ReadWith(paths[0], new HMGamepadState());
-        var held = ReadWith(paths[0], Pressed);
+        var held = ReadWith(paths[0], Sdk.Pressed);
         var idleAgain = ReadWith(paths[0], new HMGamepadState());
         var changed = SteadyDifferences(idle, held);
         Record($"{p} the submitted state is what the host reads", changed.Count > 0,
@@ -587,11 +595,21 @@ internal static partial class Program
             Note($"{scenario}: event {e}");
     }
 
-    static readonly HMGamepadState Pressed = new()
+    /// <summary>Every static of an SDK type, kept out of Program's own
+    /// statics: HMGamepadState is a struct, so a static field of it in
+    /// Program loads HIDMaestro.Core.dll when Program's statics load, in the
+    /// host part too, and the battery's probes beside S73 then skip. Only the
+    /// code that runs inside the sandbox touches this class.</summary>
+    static class Sdk
     {
-        Buttons = HMButton.A | HMButton.B | HMButton.X | HMButton.Y | HMButton.LeftBumper | HMButton.RightBumper | HMButton.Back | HMButton.Start,
-        Hat = HMHat.North,
-    };
+        internal static readonly HMGamepadState Pressed = new()
+        {
+            Buttons = HMButton.A | HMButton.B | HMButton.X | HMButton.Y | HMButton.LeftBumper | HMButton.RightBumper | HMButton.Back | HMButton.Start,
+            Hat = HMHat.North,
+        };
+
+        internal static HMController? Controller;
+    }
 
     /// <summary>Each node of the chain as it stands, and whether Windows had
     /// device installation pending at that moment.</summary>
@@ -608,12 +626,11 @@ internal static partial class Program
     /// after the settle, so its queue holds only reports of this state.</summary>
     static Hid.Reading ReadWith(string path, HMGamepadState state)
     {
-        void Submit() { try { s_controller!.SubmitState(in state); } catch { } }
+        void Submit() { try { Sdk.Controller!.SubmitState(in state); } catch { } }
         for (int i = 0; i < 40; i++) { Submit(); Thread.Sleep(8); }
         return Hid.CountReports(path, 600, Submit);
     }
 
-    static HMController? s_controller;
 
     /// <summary>The byte positions that hold one value in every report of
     /// <paramref name="a"/>, one value in every report of <paramref name="b"/>,
