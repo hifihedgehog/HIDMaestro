@@ -89,6 +89,24 @@ internal static class SendClock
         short Stick(byte[] e) => BitConverter.ToInt16(e, stickAt);
         Check("the catalog's steam-deck-composite sends on its clock, every 4 ms", spec.Send == "clock" && spec.IdleFrameIntervalMs == 4);
 
+        // The first report at create, on a copy whose period is a minute: the
+        // clock's first tick is a minute after the constructor's write, and
+        // the check reads the section well inside that minute, so only the
+        // constructor can have written it. Each write moves the section's
+        // sequence number by 2.
+        var slow = JsonNode.Parse(json)!.AsObject();
+        slow["extendedReport"]!["idleFrameIntervalMs"] = 60_000;
+        var made = System.Diagnostics.Stopwatch.StartNew();
+        using (var d = new Offline(slow.ToJsonString(), 7953))
+        {
+            uint atCreate = d.Seq;
+            int extLength = d.Ext().Length;
+            bool inside = made.ElapsedMilliseconds < 60_000;
+            d.Clock?.Stop(1000);
+            Check("the first report goes out at create, before the clock's first tick",
+                inside && atCreate == 2 && extLength == spec.Size, $"seq {atCreate}, {extLength} bytes, read {made.ElapsedMilliseconds} ms after the create began");
+        }
+
         using (var d = new Offline(json, 7950))
         {
             var clock = d.Clock;
@@ -97,7 +115,6 @@ internal static class SendClock
             clock?.Stop(1000);
             Check("the clock stops when asked", clock != null && !clock.Thread.IsAlive);
             uint created = d.Seq;
-            Check("the first report goes out at create", created != 0 && d.Ext().Length == spec.Size, $"seq {created}, {d.Ext().Length} bytes");
 
             var axes = new Dictionary<HMAxis, float> { [HMAxis.X] = 0f, [HMAxis.Y] = 0.5f, [HMAxis.Rx] = 0.5f, [HMAxis.Ry] = 0.5f };
             d.C.SubmitState(new HMGamepadState { Axes = axes });
@@ -125,6 +142,16 @@ internal static class SendClock
             Check("the tick sends the raw frame byte for byte", d.Ext().AsSpan().SequenceEqual(raw), Checks.Hex(d.Ext()));
             d.Tick();
             Check("the next tick repeats it until the next submit", d.Ext().AsSpan().SequenceEqual(raw));
+            // A state after raw frames: the next tick sends the state, not
+            // the raw frame.
+            uint beforeState = d.Seq;
+            d.C.SubmitState(new HMGamepadState { Axes = new Dictionary<HMAxis, float> { [HMAxis.X] = 0f } });
+            Check("SubmitState after raw frames sends nothing", d.Seq == beforeState);
+            d.Tick();
+            var afterRaw = d.Ext();
+            Check("the tick after it sends the state, not the raw frame",
+                !afterRaw.AsSpan().SequenceEqual(raw) && Stick(afterRaw) <= -32000 && Counter(afterRaw) != Counter(raw),
+                $"leftStickX {Stick(afterRaw)}, counter {Counter(afterRaw)}");
 
             var a = new HMGamepadState { Buttons = HMButton.A, Axes = new Dictionary<HMAxis, float> { [HMAxis.X] = 0.25f } };
             var b = new HMGamepadState { Buttons = HMButton.B, Axes = new Dictionary<HMAxis, float> { [HMAxis.X] = 0.75f } };
@@ -153,8 +180,73 @@ internal static class SendClock
             Check("without the key SubmitState sends at once", d.Seq != before, $"seq {before} then {d.Seq}");
         }
 
+        Stamps();
+
         var tick = new StreamGridTick(1000, 123, () => { });
         Check("the grid tick runs from its origin and nothing moves it",
             tick.Running(out long origin) && origin == 123 && tick.NotBefore == 0 && tick.Period == 1000);
+    }
+
+    /// <summary>The catalog's steam-controller-2, whose IMU stamp is a
+    /// "clock": "accumulate" field (byte 30, uint32-le, divisor 3), on a
+    /// clock the check scripts: 4 ms a report. Its IMU register's hold is
+    /// lifted, as SDL's IMU write lifts it on the device. While the
+    /// consumer's stamps are 0 the field moves 4000 us a report, on the
+    /// SDK's clock. Then stamped states 8 ms apart, half the tick rate, two
+    /// ticks each: the first tick after a new stamp moves the field by the
+    /// stamp's 8000 us advance, the second repeats it, and the field's
+    /// whole movement is the consumer's time.</summary>
+    static void Stamps()
+    {
+        string json = Device.Catalog("steam-controller-2");
+        var spec = ControllerProfile.Parse(Encoding.UTF8.GetBytes(json))!.ExtendedReport!;
+        var field = spec.Fields.First(f => f.Semantic == "sensorTimestamp");
+        Check("the catalog's steam-controller-2 accumulates its stamp and sends on its clock",
+            field.Clock == "accumulate" && field.Byte == 30 && spec.Send == "clock");
+        using var d = new Offline(json, 7952);
+        d.Clock?.Stop(1000);
+        var enc = (VendorBlobCodec.EncoderState)typeof(HMController).GetField("_extEncoderState", Instance)!.GetValue(d.C)!;
+        enc.Hold = null;
+        // The constructor's report started the accumulator on the Stopwatch,
+        // so the scripted clock continues from the Stopwatch's now, in its
+        // units, and moves 4 ms a tick.
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        long fourMs = System.Diagnostics.Stopwatch.Frequency * 4 / 1000;
+        enc.TimestampClock = () => now;
+        uint Stamp() => BitConverter.ToUInt32(d.Ext(), 30);
+        void Tick() { now += fourMs; d.Tick(); }
+
+        d.C.SubmitState(new HMGamepadState());
+        Tick();
+        var own = new List<long>();
+        for (int i = 0; i < 6; i++) { uint s0 = Stamp(); Tick(); own.Add(Stamp() - (long)s0); }
+        Check("on the SDK's clock (stamp 0) the stamp moves 4000 us every report",
+            own.All(x => x == 4000), string.Join(" ", own));
+
+        const uint Step = 24_000;   // 8 ms of 1/3 microsecond ticks
+        uint consumer = 0x0100_0000;
+        d.C.SubmitState(new HMGamepadState { SensorTimestamp = consumer });
+        Tick();   // the switch to the consumer's stamps adds the clock's time once
+        var firsts = new List<long>();
+        var seconds = new List<long>();
+        uint start = Stamp();
+        const int Submits = 10;
+        for (int k = 1; k <= Submits; k++)
+        {
+            d.C.SubmitState(new HMGamepadState { SensorTimestamp = consumer + (uint)k * Step });
+            uint s0 = Stamp();
+            Tick();
+            uint s1 = Stamp();
+            Tick();
+            firsts.Add(s1 - (long)s0);
+            seconds.Add(Stamp() - (long)s1);
+        }
+        long total = Stamp() - (long)start;
+        Check("stamped submits at half the tick rate: the first tick after each new stamp moves the field by its 8000 us",
+            firsts.All(x => x == 8000), string.Join(" ", firsts));
+        Check("the second tick repeats the stamp already counted",
+            seconds.All(x => x == 0), string.Join(" ", seconds));
+        Check("the field's movement over the stamped reports is the consumer's time",
+            total == Submits * 8000L, $"{total} us over {Submits} stamps 8000 us apart");
     }
 }
