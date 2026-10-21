@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <RootNamespace>HIDMaestro.Uninstall</RootNamespace>
+    <AssemblyName>HIDMaestroUninstall</AssemblyName>
+    <!-- Removing drivers, certificates and machine-wide keys needs
+         administrator rights, so Windows asks for them at launch. -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
+  </ItemGroup>
+
+  <!-- The tool ships as NativeAOT for x64 and ARM64, each published beside
+       the build output into aot-x64\ and aot-arm64\, the way
+       test\probes\aot_smoke publishes its apps. Each publish gets its own
+       intermediate directory under obj\ and passes HMToolPublish so it does
+       not publish again. -->
+  <ItemGroup Condition="'$(HMToolPublish)' != 'true'">
+    <HMToolApp Include="aot-x64" Rid="win-x64" />
+    <HMToolApp Include="aot-arm64" Rid="win-arm64" />
+  </ItemGroup>
+
+  <!-- NativeAOT finds the linker through vcvarsall.bat, which runs
+       vswhere.exe from PATH, so the publish gets the Visual Studio Installer
+       folder on PATH. Escaped because EnvironmentVariables splits on
+       semicolons. -->
+  <PropertyGroup>
+    <_HMToolPath>$([MSBuild]::Escape('$(MSBuildProgramFiles32)\Microsoft Visual Studio\Installer;$(PATH)'))</_HMToolPath>
+  </PropertyGroup>
+  <!-- A publish whose steps are current prints none of their warnings, so
+       each app's intermediate directory is deleted first. The build fails
+       when the publish prints any trim, single-file or NativeAOT warning or
+       error (IL2xxx, IL3xxx), as aot_smoke's does. -->
+  <Target Name="PublishToolApps" AfterTargets="Build" Condition="'$(HMToolPublish)' != 'true'">
+    <RemoveDir Directories="$(MSBuildProjectDirectory)\obj\$(Configuration)\%(HMToolApp.Identity)" />
+    <Exec EnvironmentVariables="PATH=$(_HMToolPath)" ConsoleToMSBuild="true" Command="dotnet publish &quot;$(MSBuildProjectFullPath)&quot; -c $(Configuration) -r %(HMToolApp.Rid) -p:PublishAot=true -p:HMToolPublish=true -p:IntermediateOutputPath=obj\$(Configuration)\%(HMToolApp.Identity)\ -o &quot;$(OutDir)%(HMToolApp.Identity)&quot; --nologo -v:quiet">
+      <Output TaskParameter="ConsoleOutput" ItemName="_HMToolOutput" />
+    </Exec>
+    <ItemGroup>
+      <_HMToolIlWarning Include="@(_HMToolOutput)" Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('%(Identity)', '(warning|error) IL\d{4}:'))" />
+    </ItemGroup>
+    <Error Condition="'@(_HMToolIlWarning)' != ''" Text="The tool's NativeAOT publish reported trimming, single-file or NativeAOT warnings: @(_HMToolIlWarning, ' | ')" />
+  </Target>
+</Project>
