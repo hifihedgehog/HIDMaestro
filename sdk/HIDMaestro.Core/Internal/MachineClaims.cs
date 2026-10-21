@@ -223,12 +223,31 @@ internal static partial class MachineClaims
 
     private static string? s_stagingTag;
     private static int s_usbipPort;
+    private static volatile bool s_noNewClaim;
+
+    /// <summary>Whether this process holds its owner claim.</summary>
+    internal static bool HoldsOwnerClaim => Volatile.Read(ref s_ownerClaim) != null;
+
+    /// <summary>While set, a staging note in a process with no owner claim
+    /// takes none (<see cref="NoteStaging"/>). HMUninstall.Run sets it for
+    /// its length.</summary>
+    internal static bool NoNewClaim
+    {
+        get => s_noNewClaim;
+        set => s_noNewClaim = value;
+    }
 
     /// <summary>Name the staging directory this process uses, the build's
     /// <c>&lt;version&gt;-&lt;hash&gt;</c>, in its record, so a deploy by
     /// another build keeps the directory while this process runs.</summary>
     internal static void NoteStaging(string tag)
     {
+        // A full removal stages the SWD helper to remove software devices,
+        // and takes no owner claim for it: the process that runs the removal
+        // is no program with controllers, and its record would outlive the
+        // records the removal deletes. A process that already holds its
+        // claim notes the staging as always.
+        if (s_noNewClaim && Volatile.Read(ref s_ownerClaim) == null) return;
         EnsureOwner();
         lock (s_lock)
         {

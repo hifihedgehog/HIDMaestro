@@ -436,9 +436,7 @@ internal static partial class DeviceOrchestrator
     /// sweep passes false.</param>
     internal static void RemoveOwnedInterfaceEntries(bool phantomOnly, Func<DeviceManager.PnpLockHold?>? holdLock = null)
     {
-        foreach (var guid in new[] {
-            "{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}",
-            "{6c53d5fd-6480-440f-b618-476750c5e1a6}" })
+        foreach (var guid in InterfaceClassGuids)
         {
             try
             {
@@ -447,46 +445,14 @@ internal static partial class DeviceOrchestrator
                 if (classKey == null) continue;
                 foreach (var subName in classKey.GetSubKeyNames())
                 {
-                    bool exclusivelyOurs =
-                        subName.Contains("ROOT#HIDMAESTRO", StringComparison.OrdinalIgnoreCase) ||
-                        subName.Contains("SWD#HIDMAESTRO", StringComparison.OrdinalIgnoreCase) ||
-                        subName.Contains("ROOT#HMCOMPANION", StringComparison.OrdinalIgnoreCase);
-                    bool sharedShape =
-                        subName.Contains("ROOT#VID_", StringComparison.OrdinalIgnoreCase) ||
-                        subName.Contains("ROOT#HIDCLASS", StringComparison.OrdinalIgnoreCase) ||
-                        subName.Contains("ROOT#HID_IG", StringComparison.OrdinalIgnoreCase) ||
-                        subName.Contains("ROOT#XNACOMPOSITE", StringComparison.OrdinalIgnoreCase) ||
-                        subName.Contains("ROOT#SYSTEM#", StringComparison.OrdinalIgnoreCase);
-
-                    bool isOurDevice = exclusivelyOurs;
-                    // Decode the symbolic-link form back to a devnode
-                    // instance path. The leading `##?#` (or `\??\`) and
-                    // trailing `#{guid}` are interface-link encoding;
-                    // the middle is `Enumerator#Device#Instance`.
-                    string devPath = subName;
-                    int guidStart = devPath.LastIndexOf("#{");
-                    if (guidStart > 0) devPath = devPath.Substring(0, guidStart);
-                    devPath = devPath.Replace("##?#", string.Empty);
-                    devPath = devPath.Replace('#', '\\');
-                    if (!exclusivelyOurs && !sharedShape) continue;
+                    if (!InterfaceEntryShape(subName, out string devPath, out bool exclusivelyOurs)) continue;
                     // A present devnode and an entry not shown to be ours are
                     // left without taking the lock, which is the safe side,
                     // so a call with nothing to delete waits for no other
                     // program.
                     if (phantomOnly && CM_Locate_DevNodeW(out _, devPath, 0) == 0)
                         continue;
-                    if (!isOurDevice && sharedShape)
-                    {
-                        bool recordExists;
-                        try
-                        {
-                            using var rec = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{devPath}");
-                            recordExists = rec != null;
-                        }
-                        catch { recordExists = true; }
-                        isOurDevice = !recordExists || DeviceManager.IsHidMaestroOwned(devPath);
-                    }
-                    if (!isOurDevice) continue;
+                    if (!exclusivelyOurs && !SharedInterfaceEntryOurs(devPath)) continue;
                     // The presence check again and the delete under the PnP
                     // lock, so a create of this release cannot make the
                     // devnode present in between: its registration holds the
@@ -501,6 +467,102 @@ internal static partial class DeviceOrchestrator
             }
             catch { }
         }
+    }
+
+    /// <summary>The XUSB and WinExInput interface classes whose entries
+    /// <see cref="RemoveOwnedInterfaceEntries"/> walks.</summary>
+    internal static readonly string[] InterfaceClassGuids =
+    {
+        "{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}",
+        "{6c53d5fd-6480-440f-b618-476750c5e1a6}",
+    };
+
+    /// <summary>Whether an interface-class entry has one of the shapes
+    /// <see cref="RemoveOwnedInterfaceEntries"/> considers, the devnode
+    /// instance path the entry encodes, and whether the shape is
+    /// HIDMaestro's alone (ROOT#HIDMAESTRO*, SWD#HIDMAESTRO*,
+    /// ROOT#HMCOMPANION). The shared shapes (ROOT#VID_*, ROOT#HIDCLASS,
+    /// ROOT#HID_IG_*, ROOT#XNACOMPOSITE, ROOT#SYSTEM#) still need
+    /// <see cref="SharedInterfaceEntryOurs"/>.</summary>
+    internal static bool InterfaceEntryShape(string subName, out string devPath, out bool exclusivelyOurs)
+    {
+        exclusivelyOurs =
+            subName.Contains("ROOT#HIDMAESTRO", StringComparison.OrdinalIgnoreCase) ||
+            subName.Contains("SWD#HIDMAESTRO", StringComparison.OrdinalIgnoreCase) ||
+            subName.Contains("ROOT#HMCOMPANION", StringComparison.OrdinalIgnoreCase);
+        bool sharedShape =
+            subName.Contains("ROOT#VID_", StringComparison.OrdinalIgnoreCase) ||
+            subName.Contains("ROOT#HIDCLASS", StringComparison.OrdinalIgnoreCase) ||
+            subName.Contains("ROOT#HID_IG", StringComparison.OrdinalIgnoreCase) ||
+            subName.Contains("ROOT#XNACOMPOSITE", StringComparison.OrdinalIgnoreCase) ||
+            subName.Contains("ROOT#SYSTEM#", StringComparison.OrdinalIgnoreCase);
+        // Decode the symbolic-link form back to a devnode instance path. The
+        // leading `##?#` (or `\??\`) and trailing `#{guid}` are interface-link
+        // encoding; the middle is `Enumerator#Device#Instance`.
+        devPath = subName;
+        int guidStart = devPath.LastIndexOf("#{");
+        if (guidStart > 0) devPath = devPath.Substring(0, guidStart);
+        devPath = devPath.Replace("##?#", string.Empty);
+        devPath = devPath.Replace('#', '\\');
+        return exclusivelyOurs || sharedShape;
+    }
+
+    /// <summary>A shared-shape entry is HIDMaestro's when its devnode's
+    /// record carries a HIDMaestro hardware ID, or when no record is left:
+    /// an entry whose instance key is gone describes no device, ours or
+    /// anyone's.</summary>
+    internal static bool SharedInterfaceEntryOurs(string devPath)
+    {
+        bool recordExists;
+        try
+        {
+            using var rec = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{devPath}");
+            recordExists = rec != null;
+        }
+        catch { recordExists = true; }
+        return !recordExists || DeviceManager.IsHidMaestroOwned(devPath);
+    }
+
+    /// <summary>The entries <see cref="RemoveOwnedInterfaceEntries"/> with
+    /// phantomOnly false would delete, and the XUSB and WinExInput entries of
+    /// HIDMaestro's HID devnodes that carry the xinputhid filter and are not
+    /// present (<see cref="RemoveGhostXusbInterfaces"/>), as registry paths
+    /// under HKLM. Reads only.</summary>
+    internal static List<string> ListOwnedInterfaceEntries()
+    {
+        var list = new List<string>();
+        var ghostDevPaths = new List<string>();
+        foreach (var guid in InterfaceClassGuids)
+        {
+            string classPath = $@"SYSTEM\CurrentControlSet\Control\DeviceClasses\{guid}";
+            try
+            {
+                using var classKey = Registry.LocalMachine.OpenSubKey(classPath);
+                if (classKey == null) continue;
+                foreach (var subName in classKey.GetSubKeyNames())
+                {
+                    if (InterfaceEntryShape(subName, out string devPath, out bool exclusivelyOurs))
+                    {
+                        if (exclusivelyOurs || SharedInterfaceEntryOurs(devPath)) list.Add($@"{classPath}\{subName}");
+                        continue;
+                    }
+                    // RemoveGhostXusbInterfaces' test: a HID# entry whose
+                    // devnode carries a HIDMaestro hardware ID and the
+                    // xinputhid filter and is not present.
+                    if (subName.Contains("ROOT#", StringComparison.OrdinalIgnoreCase)
+                        || !subName.Contains("HID#", StringComparison.OrdinalIgnoreCase)
+                        || !DeviceManager.IsHidMaestroOwned(devPath)
+                        || CM_Locate_DevNodeW(out _, devPath, 0) == 0)
+                        continue;
+                    using var devKey = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{devPath}");
+                    if (devKey?.GetValue("UpperFilters") is string[] filters
+                        && filters.Any(f => f.Equals("xinputhid", StringComparison.OrdinalIgnoreCase)))
+                        list.Add($@"{classPath}\{subName}");
+                }
+            }
+            catch { }
+        }
+        return list;
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -2613,6 +2675,34 @@ internal static partial class DeviceOrchestrator
         return amp > 0 && ownedPrefixes.Contains(childInstance.Substring(0, amp));
     }
 
+    /// <summary>The HID children the HID orphan phase of
+    /// <see cref="RemoveEverything"/> counts as HIDMaestro's, present or not:
+    /// the same segments (<see cref="SweepsOrphanChildren"/>) and the same
+    /// ownership test (<see cref="OrphanChildIsOurs"/>). A full removal
+    /// lists them with the devnodes it removes. Reads only.</summary>
+    internal static List<string> ListOwnedHidChildren()
+    {
+        var list = new List<string>();
+        var src = SystemOrphanSource.Instance;
+        var ownedPrefixes = OwnedPrefixes(src);
+        try
+        {
+            using var hidEnum = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\HID");
+            if (hidEnum == null) return list;
+            foreach (var sub in hidEnum.GetSubKeyNames())
+            {
+                if (!SweepsOrphanChildren(sub)) continue;
+                using var childEnum = hidEnum.OpenSubKey(sub);
+                if (childEnum == null) continue;
+                foreach (var inst in childEnum.GetSubKeyNames())
+                    if (OrphanChildIsOurs(inst, TryResolveHidChildParent(childEnum, inst), src, ownedPrefixes))
+                        list.Add($@"HID\{sub}\{inst}");
+            }
+        }
+        catch { }
+        return list;
+    }
+
     /// <summary>The uninstall-grade sweep, <see cref="HMCleanupScope.Everything"/>:
     /// every HIDMaestro device and USB/IP import on the machine, whoever made
     /// it, then the ledger, and with <paramref name="preserveInstall"/> false
@@ -2644,7 +2734,24 @@ internal static partial class DeviceOrchestrator
     /// the sweep acts on nothing. Null outside the probe.</summary>
     internal static Action? BeforeEverythingActs;
 
-    private static void RemoveEverythingGated(bool preserveInstall)
+    /// <summary>The device part of a full removal of HIDMaestro
+    /// (HMUninstall.Run): <see cref="RemoveEverything"/> with the packages
+    /// and <c>SOFTWARE\HIDMaestro</c> kept for the removal's own later steps,
+    /// which delete the packages without <c>/uninstall</c> or <c>/force</c>.
+    /// It differs from the preserving sweep in two ways. It always waits for
+    /// the driver hosts to exit and drains the ones left, since the packages
+    /// go next. And it removes present <c>ROOT\HMCOMPANION*</c> devnodes,
+    /// the April 2026 companion form, which only the phantom pass reaches
+    /// otherwise. The caller holds <see cref="OwnerSweep.CreateGate"/> for
+    /// writing.</summary>
+    internal static void RemoveEverythingForUninstall()
+    {
+        OwnerSweep.CreateGate.EnterWriteLock();
+        try { RemoveEverythingGated(preserveInstall: true, forUninstall: true); }
+        finally { OwnerSweep.CreateGate.ExitWriteLock(); }
+    }
+
+    private static void RemoveEverythingGated(bool preserveInstall, bool forUninstall = false)
     {
         var sweepSw = System.Diagnostics.Stopwatch.StartNew();
         long lastMs = 0;
@@ -2690,7 +2797,8 @@ internal static partial class DeviceOrchestrator
                 // HIDCLASS, SYSTEM are all shared with third-party drivers
                 //: require IsHidMaestroOwned on every instance under those.
                 bool exclusivelyOurs = sub.Equals("HIDMAESTRO", StringComparison.OrdinalIgnoreCase)
-                    || sub.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
+                    || sub.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase)
+                    || (forUninstall && enumRoot == "ROOT" && sub.StartsWith("HMCOMPANION", StringComparison.OrdinalIgnoreCase));
 
                 bool shared = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)
                     || sub.Equals("XnaComposite", StringComparison.OrdinalIgnoreCase)
@@ -2868,7 +2976,7 @@ internal static partial class DeviceOrchestrator
         // the wait removes the ~1.7 s the recovery path spent watching
         // orphaned hosts exit gracefully (2026-07-21 perf audit). Any
         // version change or full-nuke cleanup keeps the full discipline.
-        bool skipWudfSteps = preserveInstall && DriverBuilder.WillTakeFastPath();
+        bool skipWudfSteps = !forUninstall && preserveInstall && DriverBuilder.WillTakeFastPath();
 
         // Wait for WUDFHost processes to release our DLLs.
         if (!skipWudfSteps)

@@ -241,6 +241,14 @@ internal static partial class ProtectedStaging
         }
     }
 
+    /// <summary>Forget this process's child-temp folder, after a full
+    /// removal of HIDMaestro deleted it, so the next elevated tool gets a
+    /// folder made again.</summary>
+    internal static void ForgetChildTemp()
+    {
+        lock (s_lock) s_childTemp = null;
+    }
+
     /// <summary>Point an elevated child process's TEMP and TMP at a protected
     /// folder, so it writes its temporary files there and not in the user's
     /// own %TEMP%, a folder any of the user's programs can change. Every

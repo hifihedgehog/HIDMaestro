@@ -55,6 +55,15 @@ internal static partial class DeviceNodeCreator
     private static readonly System.Collections.Generic.HashSet<string> s_deviceOverridesWritten =
         new(StringComparer.OrdinalIgnoreCase);
     private static readonly object s_deviceOverridesLock = new();
+
+    /// <summary>Forget which DeviceOverrides keys this process wrote, after
+    /// a full removal of HIDMaestro deleted them, so the next create writes
+    /// its key again.</summary>
+    internal static void ForgetDeviceOverrides()
+    {
+        lock (s_deviceOverridesLock) s_deviceOverridesWritten.Clear();
+    }
+
     /// <summary>HID class GUID: every virtual controller is created in this class.</summary>
     private static readonly Guid HIDClassGuid =
         new Guid("745a17a0-74d3-11d0-b6fe-00a0c90f57da");

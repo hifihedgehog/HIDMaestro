@@ -254,7 +254,7 @@ internal sealed partial class OwnerCensus
     /// acknowledgement section without the driver's ended marker, as in
     /// <see cref="LegacyPipeLive"/>. A program that is not elevated can make
     /// the pipe name but neither section.</summary>
-    private static bool LegacyProgramOn(int index) =>
+    internal static bool LegacyProgramOn(int index) =>
         MachineClaims.IsHeld(MachineClaims.LegacyOwnerPipeName(index))
         && SectionExists($@"Global\HIDMaestroInput{index}")
         && AckWatchEnded(index) == false;
