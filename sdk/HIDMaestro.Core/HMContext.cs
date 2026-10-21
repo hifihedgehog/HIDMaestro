@@ -96,12 +96,12 @@ public sealed class HMContext : IDisposable
                 if (HMBuildInfo.Carries(HMPayload.Driver, System.Runtime.InteropServices.RuntimeInformation.OSArchitecture) &&
                     !Internal.DriverBuilder.WillTakeFastPath())
                 {
-                    // Staging claims this process's owner: it waits first for
-                    // a removal another process runs (Uninstall.RemovalGate),
-                    // holding no lock, as staging takes the staging lock. A
-                    // removal this process runs stages nothing in its wake.
-                    Internal.Uninstall.RemovalGate.Pass();
-                    if (!Internal.Uninstall.RemovalGate.RemovingHere)
+                    // Staging needs this process's owner claim. It is taken
+                    // here, holding no lock, through the removal gate, which
+                    // waits for a removal another process runs. While this
+                    // process runs a removal itself it takes no claim, and
+                    // nothing is staged in the removal's wake.
+                    if (Internal.MachineClaims.TryEnsureOwner())
                         Internal.DriverBuilder.EnsureExtracted();
                 }
             }
@@ -185,7 +185,10 @@ public sealed class HMContext : IDisposable
     /// USB/IP transport for this machine's architecture.</exception>
     public static void InstallUsbipBackend(Action<string>? progress = null)
     {
-        Internal.Uninstall.RemovalGate.Pass();
+        // The owner claim first, through the removal gate
+        // (Uninstall.RemovalGate), so the install waits for a removal
+        // another process runs and a removal sees this program.
+        Internal.MachineClaims.TryEnsureOwner();
         Internal.Usbip.UsbipDriverInstaller.EnsureInstalled(progress);
     }
 
@@ -311,11 +314,13 @@ public sealed class HMContext : IDisposable
     /// transport index and its sections.</para></summary>
     public static void RemoveAllVirtualControllers(HMCleanupScope scope, bool preserveInstall)
     {
-        // Waits, once per process, for a removal of HIDMaestro another
-        // process runs (Uninstall.RemovalGate).
-        Internal.Uninstall.RemovalGate.Pass();
+        // Each branch takes the owner claim first, through the removal gate
+        // (Uninstall.RemovalGate): RemoveOrphaned does it itself.
         if (scope == HMCleanupScope.Everything)
+        {
+            Internal.MachineClaims.TryEnsureOwner();
             Internal.DeviceOrchestrator.RemoveEverything(preserveInstall);
+        }
         else
             Internal.OwnerSweep.RemoveOrphaned(preserveInstall);
     }

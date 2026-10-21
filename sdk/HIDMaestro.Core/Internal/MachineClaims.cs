@@ -174,14 +174,16 @@ internal static partial class MachineClaims
         return member;
     }
 
-    /// <summary><see cref="EnsureOwner"/> for the sweeps, which have
-    /// nothing to do in a process that is not elevated: false there.</summary>
+    /// <summary><see cref="EnsureOwner"/> for the sweeps and the public calls
+    /// that write machine-wide state: false in a process that is not
+    /// elevated, and while this process runs a removal of HIDMaestro, which
+    /// takes no claim.</summary>
     internal static bool TryEnsureOwner()
     {
         // The first claim waits for a removal of HIDMaestro another process
         // runs, and is taken under that removal's mutex
         // (Uninstall.RemovalGate). Its callers hold no lock of the SDK's.
-        try { Uninstall.RemovalGate.Pass(EnsureOwner); return true; }
+        try { return Uninstall.RemovalGate.Claim(EnsureOwner); }
         catch (UnauthorizedAccessException) { return false; }
     }
 

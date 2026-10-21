@@ -15,9 +15,12 @@
 //            HIDMaestro device record, package, certificate, registry key or
 //            folder is left, the OEM targets hold what they held before, the
 //            OpenVR registration is gone, and no USB root hub arrived again.
-//            A program that starts while the tool removes HIDMaestro waits
-//            for the removal to end, does not block it, and then installs
-//            again and keeps its controller. A junction at
+//            Programs that start while the tool removes HIDMaestro, one
+//            installing and one creating from two threads, wait at the gate
+//            while the probe holds the removal at the deploy lock, do not
+//            block it, and then install again and keep their controllers. A
+//            running program that only set an OEM name override blocks a
+//            removal. A junction at
 //            %ProgramData%\HIDMaestro goes as a link with its target intact,
 //            and usbip-win2's link on the all-users desktop is removed.
 //            Then a program in this process installs, creates, and calls
@@ -72,7 +75,8 @@ internal static class Program
         if (args.Length >= 2 && args[0] == "--in-sandbox") return InSandbox(args[1]);
         if (args.Length >= 2 && args[0] == "--hold") return Hold(args[1]);
         if (args.Length >= 2 && args[0] == "--hold-one") return Hold(args[1], one: true);
-        if (args.Length >= 3 && args[0] == "--late") return Late(args[1], args[2]);
+        if (args.Length >= 4 && args[0] == "--late") return Late(args[1], args[2], args[3]);
+        if (args.Length >= 2 && args[0] == "--oem-only") return OemOnly(args[1]);
         string part = args.Length > 0 ? args[0].ToLowerInvariant() : "all";
         int code;
         switch (part)
@@ -450,7 +454,7 @@ internal static class Program
         string[] said = Array.Empty<string>();
         while (wait.ElapsedMilliseconds < 900_000 && !holder.HasExited)
         {
-            try { if (File.Exists(answer)) said = File.ReadAllLines(answer); } catch { }
+            try { if (File.Exists(answer)) said = ReadAnswer(answer); } catch { }
             if (said.Contains("ready")) break;
             Thread.Sleep(500);
         }
@@ -733,82 +737,153 @@ internal static class Program
         return 0;
     }
 
+    /// <summary>Replace the answer file whole. The probe reads it with
+    /// delete sharing, so the replace never meets its read, and a replace
+    /// another reader still refuses is tried again.</summary>
     static void SayTo(string answer, List<string> lines)
     {
         string tmp = answer + ".tmp";
         File.WriteAllLines(tmp, lines);
-        File.Move(tmp, answer, overwrite: true);
+        for (int i = 0; ; i++)
+        {
+            try { File.Move(tmp, answer, overwrite: true); return; }
+            catch (Exception e) when (i < 100 && e is IOException or UnauthorizedAccessException) { Thread.Sleep(20); }
+        }
     }
 
-    /// <summary>A program that starts while a removal runs. It is started
-    /// before the removal and waits on <paramref name="eventName"/> without
-    /// touching HIDMaestro. Once set, it notes the time, constructs its
-    /// context, installs the driver, notes the time again, creates one
-    /// controller and waits.</summary>
-    static int Late(string answer, string eventName)
+    static string[] ReadAnswer(string answer)
+    {
+        using var fs = new FileStream(answer, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var r = new StreamReader(fs);
+        return r.ReadToEnd().Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
+    }
+
+    /// <summary>A program that starts while a removal runs. It constructs its
+    /// context and loads its profiles before the removal starts, which
+    /// claims nothing on a machine whose driver is current, then waits on
+    /// <paramref name="eventName"/>. What the removal gate logs reaches its
+    /// answer file at once, through the SDK's diagnostic hook. With
+    /// <paramref name="mode"/> "install" it installs the driver and creates
+    /// one controller. With "two" it creates two controllers from two
+    /// threads at once, with no InstallDriver first.</summary>
+    static int Late(string answer, string eventName, string mode)
     {
         var lines = new List<string>();
         var held = new List<HMController>();
-        using (var go = new EventWaitHandle(false, EventResetMode.ManualReset, eventName))
-        {
-            lines.Add("waiting");
-            SayTo(answer, lines);
-            if (!go.WaitOne(600_000)) { lines.Add("never signaled"); SayTo(answer, lines); return 1; }
-        }
-        lines.Add(FormattableString.Invariant($"signaled {DateTime.UtcNow.Ticks}"));
-        // The SDK's diagnostic hook, set by reflection: the removal gate
-        // says there when it waits, from whichever thread passes it first.
-        var gate = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        void Say(string line) { lock (lines) { lines.Add(line); SayTo(answer, lines); } }
         typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.DeviceOrchestrator")!
             .GetField("DiagTap", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
-            .SetValue(null, (Action<string>)(m => { if (m.StartsWith("removal gate:", StringComparison.Ordinal)) gate.Enqueue(m); }));
+            .SetValue(null, (Action<string>)(m => { if (m.StartsWith("removal gate:", StringComparison.Ordinal)) Say("gate " + m); }));
         try
         {
             var ctx = new HMContext();
             ctx.LoadDefaultProfiles();
-            ctx.InstallDriver();
-            lines.Add(FormattableString.Invariant($"installed {DateTime.UtcNow.Ticks}"));
-            held.Add(ctx.CreateController(ctx.GetProfile("dualshock-4-v2")!, "uninstall-late"));
-            lines.Add("created dualshock-4-v2");
+            var profile = ctx.GetProfile("dualshock-4-v2")!;
+            using (var go = new EventWaitHandle(false, EventResetMode.ManualReset, eventName))
+            {
+                Say("waiting");
+                if (!go.WaitOne(600_000)) { Say("never signaled"); return 1; }
+            }
+            Say("signaled");
+            if (mode == "two")
+            {
+                var threads = new List<Thread>();
+                for (int i = 1; i <= 2; i++)
+                {
+                    int n = i;
+                    var t = new Thread(() =>
+                    {
+                        try
+                        {
+                            var c = ctx.CreateController(profile, $"uninstall-two-{n}");
+                            lock (held) held.Add(c);
+                            Say($"created {n}");
+                        }
+                        catch (Exception ex) { Say($"failed {n} {ex.GetType().Name}: {ex.Message} at {ex.StackTrace?.Replace(Environment.NewLine, " <- ")}"); }
+                    });
+                    threads.Add(t);
+                }
+                foreach (var t in threads) t.Start();
+                foreach (var t in threads) t.Join();
+            }
+            else
+            {
+                ctx.InstallDriver();
+                Say("installed");
+                held.Add(ctx.CreateController(profile, "uninstall-late"));
+                Say("created dualshock-4-v2");
+            }
         }
-        catch (Exception ex) { lines.Add($"failed {ex.GetType().Name}: {ex.Message}"); }
-        lines.AddRange(gate.Select(m => "gate " + m));
-        lines.Add("ready");
-        SayTo(answer, lines);
+        catch (Exception ex) { Say($"failed {ex.GetType().Name}: {ex.Message} at {ex.StackTrace?.Replace(Environment.NewLine, " <- ")}"); }
+        Say("ready");
         Thread.Sleep(Timeout.Infinite);
         GC.KeepAlive(held);
         return 0;
     }
 
-    static string[] WaitFor(string answer, Process p, string word, int timeoutMs)
+    /// <summary>A program that sets an OEM name override and nothing else,
+    /// then waits.</summary>
+    static int OemOnly(string answer)
+    {
+        var lines = new List<string>();
+        try { HMOemNameOverride.Set(0xBEEF, 0x0A03, "HIDMaestro removal check, OEM only"); lines.Add("set"); }
+        catch (Exception ex) { lines.Add($"failed {ex.GetType().Name}: {ex.Message}"); }
+        lines.Add("ready");
+        SayTo(answer, lines);
+        Thread.Sleep(Timeout.Infinite);
+        return 0;
+    }
+
+    static string[] WaitFor(string answer, Process p, string word, int timeoutMs) =>
+        WaitUntil(answer, p, said => said.Contains(word), timeoutMs);
+
+    static string[] WaitUntil(string answer, Process p, Func<string[], bool> done, int timeoutMs)
     {
         var wait = Stopwatch.StartNew();
         string[] said = Array.Empty<string>();
         while (wait.ElapsedMilliseconds < timeoutMs && !p.HasExited)
         {
-            try { if (File.Exists(answer)) said = File.ReadAllLines(answer); } catch { }
-            if (said.Contains(word)) break;
-            Thread.Sleep(100);
+            try { if (File.Exists(answer)) said = ReadAnswer(answer); } catch { }
+            if (done(said)) break;
+            Thread.Sleep(50);
         }
         return said;
     }
 
-    static long TicksAfter(string[] said, string word) =>
-        said.FirstOrDefault(s => s.StartsWith(word + " ", StringComparison.Ordinal)) is { } line
-        && long.TryParse(line[(word.Length + 1)..], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out long t) ? t : 0;
+    static Process StartSelf(params string[] args)
+    {
+        var psi = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, CreateNoWindow = true };
+        foreach (string a in args) psi.ArgumentList.Add(a);
+        return Process.Start(psi)!;
+    }
 
-    /// <summary>A program that starts while the tool removes HIDMaestro
-    /// waits for the removal to end, then installs the driver again and
-    /// keeps its controller, and the removal is not blocked by it. A killed
-    /// program's controller gives the removal devices to remove, and the
-    /// late program is let go once the tool holds the removal's lock.</summary>
+    /// <summary>A name in the SDK's admin namespace, by reflection.</summary>
+    static string AdminName(string objectName) =>
+        (string)typeof(HMUninstall).Assembly.GetType("HIDMaestro.Internal.AdminNamespace")!
+            .GetMethod("Name", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
+            .Invoke(null, new object[] { objectName })!;
+
+    static bool Has(string[] said, string prefix) => said.Any(s => s.StartsWith(prefix, StringComparison.Ordinal));
+
+    const string GateWaits = "gate removal gate: another process is removing HIDMaestro";
+    const string GateWaited = "gate removal gate: waited";
+    const string GateBehindThread = "gate removal gate: another thread of this program is at the gate";
+
+    /// <summary>Programs that start while the tool removes HIDMaestro wait
+    /// for the removal to end, do not block it, and then install again and
+    /// keep their controllers. The probe holds the driver deploy lock, so
+    /// the removal stops at its deploy-lock step holding its own lock, and
+    /// releases it only once each late program's log shows it waiting at the
+    /// gate: nothing here depends on how fast either side runs. One late
+    /// program installs and creates. The other creates from two threads at
+    /// once with no InstallDriver first, and the thread that loses the
+    /// session sweep's race must wait at the gate too. Then a program that
+    /// only set an OEM name override is running, and the removal is blocked
+    /// by it.</summary>
     static void LateStart(string results)
     {
         string oneAnswer = Path.Combine(results, "hold-one.txt");
-        var psi = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, CreateNoWindow = true };
-        psi.ArgumentList.Add("--hold-one");
-        psi.ArgumentList.Add(oneAnswer);
-        using (var one = Process.Start(psi)!)
+        using (var one = StartSelf("--hold-one", oneAnswer))
         {
             var said = WaitFor(oneAnswer, one, "ready", 600_000);
             Record("late: a program installs and creates a controller (positive control)", said.Contains("created dualshock-4-v2"), string.Join(" / ", said));
@@ -818,15 +893,24 @@ internal static class Program
         var devices = Inventory.Take().HidMaestroDevnodes();
         Record("late: the killed program's devices are there (positive control)", devices.Count > 0, $"{devices.Count} device record(s)");
 
-        string lateAnswer = Path.Combine(results, "late.txt");
+        string aAnswer = Path.Combine(results, "late-install.txt"), bAnswer = Path.Combine(results, "late-two.txt");
         string eventName = "HIDMaestroUninstallCheckLate_" + Guid.NewGuid().ToString("N");
         using var go = new EventWaitHandle(false, EventResetMode.ManualReset, eventName);
-        var lpsi = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, CreateNoWindow = true };
-        lpsi.ArgumentList.Add("--late");
-        lpsi.ArgumentList.Add(lateAnswer);
-        lpsi.ArgumentList.Add(eventName);
-        using var late = Process.Start(lpsi)!;
-        WaitFor(lateAnswer, late, "waiting", 60_000);
+        using var a = StartSelf("--late", aAnswer, eventName, "install");
+        using var b = StartSelf("--late", bAnswer, eventName, "two");
+        var aReady = WaitFor(aAnswer, a, "waiting", 300_000);
+        var bReady = WaitFor(bAnswer, b, "waiting", 300_000);
+        Record("late: both late programs are up before the removal, with nothing claimed (positive control)",
+               aReady.Contains("waiting") && bReady.Contains("waiting") && !Has(aReady, "gate ") && !Has(bReady, "gate "),
+               $"{string.Join(" / ", aReady)} | {string.Join(" / ", bReady)}");
+
+        string deployName = AdminName((string)typeof(HMUninstall).Assembly.GetType("HIDMaestro.Internal.DriverDeploy")!
+            .GetField("MutexObject", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!);
+        string uninstallName = AdminName("Uninstall");
+        var deploy = new Mutex(false, deployName);
+        bool deployHeld = false;
+        try { deployHeld = deploy.WaitOne(60_000); } catch (AbandonedMutexException) { deployHeld = true; }
+        Record("late: the probe holds the driver deploy lock (positive control)", deployHeld);
 
         var tpsi = new ProcessStartInfo(SandboxTool)
         {
@@ -837,58 +921,73 @@ internal static class Program
         using var tool = Process.Start(tpsi)!;
         var stdout = tool.StandardOutput.ReadToEndAsync();
         var stderr = tool.StandardError.ReadToEndAsync();
-        // The late program is let go once the tool holds the removal's
-        // mutex, which the probe finds by its name in the SDK's admin
-        // namespace and tries without waiting. The tool takes it before its
-        // first look for running programs.
-        string mutexName = (string)typeof(HMUninstall).Assembly.GetType("HIDMaestro.Internal.AdminNamespace")!
-            .GetMethod("Name", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
-            .Invoke(null, new object[] { "Uninstall" })!;
+        // The removal takes its own lock first and then stops at the deploy
+        // lock, so the probe finds its lock held for as long as it likes.
         var sw = Stopwatch.StartNew();
-        bool sawRemoval = false;
-        while (!tool.HasExited && sw.ElapsedMilliseconds < 600_000)
+        bool removalHolds = false;
+        while (!tool.HasExited && sw.ElapsedMilliseconds < 300_000)
         {
-            if (Mutex.TryOpenExisting(mutexName, out var mx))
+            if (Mutex.TryOpenExisting(uninstallName, out var mx))
                 using (mx)
                 {
                     bool free;
                     try { free = mx.WaitOne(0); } catch (AbandonedMutexException) { free = true; }
                     if (free) mx.ReleaseMutex();
-                    else { sawRemoval = true; break; }
+                    else { removalHolds = true; break; }
                 }
-            Thread.Sleep(5);
+            Thread.Sleep(20);
         }
+        Record("late: the removal holds its lock and waits at the deploy lock (positive control)", removalHolds && !tool.HasExited);
+
         go.Set();
+        var aWait = WaitUntil(aAnswer, a, s => Has(s, GateWaits), 120_000);
+        var bWait = WaitUntil(bAnswer, b, s => Has(s, GateWaits) && Has(s, GateBehindThread), 120_000);
+        bool stillRunning = !tool.HasExited;
+        if (deployHeld) deploy.ReleaseMutex();
+        deploy.Dispose();
+        Record("late: a program that installs waits at the gate while the removal runs", Has(aWait, GateWaits) && stillRunning,
+               string.Join(" / ", aWait));
+        Record("late: a program creating from two threads waits at the gate on both, the one that lost the session sweep's race behind the other",
+               Has(bWait, GateWaits) && Has(bWait, GateBehindThread) && stillRunning, string.Join(" / ", bWait));
+
         bool exited = tool.WaitForExit(1_800_000);
         if (!exited) { try { tool.Kill(entireProcessTree: true); } catch { } }
-        long toolEnd = exited ? tool.ExitTime.ToUniversalTime().Ticks : 0;
-        string output = stdout.Result + stderr.Result;
-        var report = Report.Parse(output);
-        Record("late: the program is let go while the tool holds the removal's lock (positive control)", sawRemoval && exited,
-               sawRemoval ? "" : "the tool ended before it was seen holding the lock");
-
-        var lateSaid = WaitFor(lateAnswer, late, "ready", 900_000);
-        foreach (string s in lateSaid.Where(s => s.StartsWith("failed", StringComparison.Ordinal))) Note($"late: {s}");
-        long signaled = TicksAfter(lateSaid, "signaled"), installed = TicksAfter(lateSaid, "installed");
-        Record("late: the removal is not blocked by it and removes HIDMaestro",
+        var report = Report.Parse(stdout.Result + stderr.Result);
+        Record("late: the removal is not blocked by them and removes HIDMaestro",
                exited && tool.ExitCode is 0 or 3 && report?.Status is "Removed" or "RemovedRestartPending",
-               $"exit {(exited ? tool.ExitCode : -1)}, status {report?.Status}: {string.Join("; ", report?.Entries.Where(e => e.Outcome is "Failed" or "Blocked").Take(4) ?? Enumerable.Empty<Entry>())}");
-        Record("late: the program started before the removal ended (positive control)", signaled > 0 && toolEnd > 0 && signaled < toolEnd,
-               FormattableString.Invariant($"started {(toolEnd - signaled) / 10_000} ms before the removal ended"));
-        Record("late: it waited at the removal gate",
-               lateSaid.Any(s => s.StartsWith("gate removal gate: waited", StringComparison.Ordinal)),
-               string.Join(" / ", lateSaid.Where(s => s.StartsWith("gate ", StringComparison.Ordinal))));
-        Record("late: its InstallDriver returned only after the removal ended", installed > 0 && toolEnd > 0 && installed > toolEnd,
-               FormattableString.Invariant($"returned {(installed - toolEnd) / 10_000} ms after the removal ended"));
-        var after = Inventory.Take();
-        Record("late: it installs the driver again and keeps its controller",
-               lateSaid.Contains("created dualshock-4-v2") && !late.HasExited && after.Packages.Count > 0 && after.HidMaestroDevnodes().Count > 0,
-               $"{string.Join(" / ", lateSaid)}; {after.Packages.Count} package(s), {after.HidMaestroDevnodes().Count} device record(s)");
+               $"exit {(exited ? tool.ExitCode : -1)}, status {report?.Status}, programs {string.Join(", ", report?.Programs ?? new List<int>())}: " +
+               string.Join("; ", report?.Entries.Where(e => e.Outcome is "Failed").Take(4) ?? Enumerable.Empty<Entry>()));
 
-        try { late.Kill(); late.WaitForExit(30_000); } catch { }
+        var aSaid = WaitFor(aAnswer, a, "ready", 900_000);
+        var bSaid = WaitFor(bAnswer, b, "ready", 900_000);
+        foreach (string s in aSaid.Concat(bSaid).Where(s => s.StartsWith("failed", StringComparison.Ordinal))) Note($"late: {s}");
+        var after = Inventory.Take();
+        Record("late: after the removal they pass the gate, install again and keep their controllers",
+               Has(aSaid, GateWaited) && Has(bSaid, GateWaited) && aSaid.Contains("created dualshock-4-v2")
+               && bSaid.Contains("created 1") && bSaid.Contains("created 2") && !a.HasExited && !b.HasExited
+               && after.Packages.Count > 0 && after.HidMaestroDevnodes().Count > 0,
+               $"{string.Join(" / ", aSaid)} | {string.Join(" / ", bSaid)}; {after.Packages.Count} package(s), {after.HidMaestroDevnodes().Count} device record(s)");
+        try { a.Kill(); a.WaitForExit(30_000); } catch { }
+        try { b.Kill(); b.WaitForExit(30_000); } catch { }
+
+        // A program that has only set an OEM name override holds its owner
+        // claim, so a removal sees it and is blocked by it.
+        string oemAnswer = Path.Combine(results, "oem-only.txt");
+        using (var oem = StartSelf("--oem-only", oemAnswer))
+        {
+            var oemSaid = WaitFor(oemAnswer, oem, "ready", 300_000);
+            var (oexit, oout) = Run(SandboxTool, 1_800_000, "--yes", "--json");
+            var oreport = Report.Parse(oout);
+            Record("late: a running program that only set an OEM name override blocks a removal and is named",
+                   oemSaid.Contains("set") && oexit == 2 && oreport?.Status == "Blocked" && oreport.Programs.Contains(oem.Id),
+                   $"{string.Join(" / ", oemSaid)}; exit {oexit}, status {oreport?.Status}, programs {string.Join(", ", oreport?.Programs ?? new List<int>())}, holder {oem.Id}");
+            try { oem.Kill(); oem.WaitForExit(30_000); } catch { }
+        }
+
         var (cexit, cout) = Run(SandboxTool, 1_800_000, "--yes", "--json");
         var clean = Inventory.Take();
-        Record("late: a removal afterward leaves the machine clean", cexit is 0 or 3 && clean.Packages.Count == 0 && clean.HidMaestroDevnodes().Count == 0,
+        Record("late: a removal afterward leaves the machine clean", cexit is 0 or 3 && clean.Packages.Count == 0 && clean.HidMaestroDevnodes().Count == 0
+               && !Inventory.KeyExists(@"HKLM\SOFTWARE\HIDMaestroOemOverrides"),
                $"exit {cexit}, status {Report.Parse(cout)?.Status}");
     }
 

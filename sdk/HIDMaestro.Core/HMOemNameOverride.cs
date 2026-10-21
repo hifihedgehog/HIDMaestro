@@ -61,7 +61,17 @@ namespace HIDMaestro;
 ///         workstation that matches the DirectInput scope visually; on a
 ///         multi-user machine, only the user who called <see cref="Set"/>
 ///         sees the joy.cpl label change: the HKLM paths still carry the
-///         override for DirectInput consumers regardless of user.</item>
+///         override for DirectInput consumers regardless of user. While a
+///         record set from another account is pending for the same VID:PID,
+///         <see cref="Set"/> writes the two HKLM targets only, since the
+///         record holds that account's per-user original, and
+///         <see cref="Clear"/> and <see cref="RecoverOrphans"/> put back the
+///         HKLM targets and leave the per-user part of the record for that
+///         account.</item>
+///   <item><see cref="Set"/> takes the program's HIDMaestro owner claim, so
+///         a full removal (<see cref="HMUninstall"/>) refuses while the
+///         program runs, and a Set made while another program removes
+///         HIDMaestro waits for the removal to end.</item>
 ///   <item>DirectInput and joy.cpl both cache OEM names per-process on first
 ///         enumeration. A joy.cpl window that was already open when the
 ///         override changes keeps showing the stale label until it is
@@ -88,9 +98,10 @@ public static class HMOemNameOverride
     /// elevated.</exception>
     public static void Set(ushort vid, ushort pid, string label)
     {
-        // Waits, once per process, for a removal of HIDMaestro another
-        // process runs (Uninstall.RemovalGate).
-        Internal.Uninstall.RemovalGate.Pass();
+        // The owner claim first, through the removal gate
+        // (Uninstall.RemovalGate), so the write waits for a removal another
+        // process runs and a removal sees this program.
+        MachineClaims.TryEnsureOwner();
         OemNameOverrideStore.Claim(vid, pid, label);
     }
 

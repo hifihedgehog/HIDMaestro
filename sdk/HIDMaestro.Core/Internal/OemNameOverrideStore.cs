@@ -84,8 +84,17 @@ internal static class OemNameOverrideStore
     private const string V_ClaimedAt        = "ClaimedAtFileTime";
     // The label the last Claim wrote to all three targets (2.0.1).
     private const string V_WrittenLabel     = "WrittenLabel";
-    // The SID of the account whose HKCU target the last Claim wrote (2.0.1).
+    // The SID of the account whose HKCU original the record holds (2.0.1).
     private const string V_UserSid          = "UserSid";
+    // The label the last Claim from that account wrote to its HKCU target
+    // (2.0.1). A Claim from another account changes WrittenLabel, not this.
+    private const string V_WrittenUserLabel = "WrittenUserLabel";
+
+    /// <summary>Whether the record names an account other than the one this
+    /// process runs as. Its HKCU original then belongs to that account's
+    /// hive, which this process neither writes nor restores.</summary>
+    private static bool OtherAccount(string? recordSid) =>
+        recordSid != null && !string.Equals(recordSid, CurrentUserSid(), StringComparison.OrdinalIgnoreCase);
 
     private static string? CurrentUserSid()
     {
@@ -117,19 +126,27 @@ internal static class OemNameOverrideStore
             // alone, so Clear always restores to the true pre-HIDMaestro
             // state, not the prior Set's label. The account whose HKCU target
             // is captured is recorded with it, and only then: the per-user
-            // original belongs to that account's hive.
+            // original belongs to that account's hive. A Set from another
+            // account leaves that hive's original and label alone and writes
+            // the HKLM targets only, since its own per-user original was
+            // never captured.
+            string? recordSid;
+            using (var existing = Registry.LocalMachine.OpenSubKey(PendingEntryPath(vidPid), writable: false))
+                recordSid = existing?.GetValue(V_UserSid) as string;
+            bool user = !OtherAccount(recordSid);
             bool userCaptured = CaptureMissingOriginals(vidPid);
 
-            // The label goes in the record before the targets, so a full
+            // The labels go in the record before the targets, so a full
             // removal restores a target only while it still holds what
             // HIDMaestro wrote (RestoreForUninstall).
             using (var pending = Registry.LocalMachine.CreateSubKey(PendingEntryPath(vidPid), writable: true)!)
             {
                 pending.SetValue(V_WrittenLabel, label, RegistryValueKind.String);
+                if (user) pending.SetValue(V_WrittenUserLabel, label, RegistryValueKind.String);
                 if (userCaptured && CurrentUserSid() is { } sid) pending.SetValue(V_UserSid, sid, RegistryValueKind.String);
             }
 
-            WriteAllTargets(vidPid, label);
+            WriteAllTargets(vidPid, label, user);
         }
         finally
         {
@@ -217,12 +234,13 @@ internal static class OemNameOverrideStore
         using var mutex = AcquireMutex();
         try
         {
-            string? written, sid, diOrig, jmOrig, juOrig;
+            string? written, writtenUser, sid, diOrig, jmOrig, juOrig;
             bool? diExisted, jmExisted, juExisted;
             using (var pending = Registry.LocalMachine.OpenSubKey(PendingEntryPath(vidPid), writable: false))
             {
                 if (pending is null) return new UninstallRestore(false, null);
                 written   = pending.GetValue(V_WrittenLabel) as string;
+                writtenUser = pending.GetValue(V_WrittenUserLabel) as string ?? written;
                 sid       = pending.GetValue(V_UserSid) as string;
                 diOrig    = pending.GetValue(DI_OriginalName) as string;
                 diExisted = ReadExistedFlag(pending, DI_OriginalExisted);
@@ -237,7 +255,8 @@ internal static class OemNameOverrideStore
 
             string diPath = $@"{DirectInputRoot}\{vidPid}\{DirectInputOemSubkey}";
             string joyPath = $@"{JoystickRoot}\{vidPid}";
-            bool Ours(RegistryKey hive, string path, string value) => ReadOriginal(hive, path, value).val == written;
+            bool Ours(RegistryKey hive, string path, string value) =>
+                ReadOriginal(hive, path, value).val == (hive == Registry.CurrentUser ? writtenUser : written);
 
             if (diExisted != null)
             {
@@ -263,9 +282,7 @@ internal static class OemNameOverrideStore
                 {
                     // Another account's hive: the HKLM parts are done, and
                     // the record keeps the HKCU part alone.
-                    using (var pending = Registry.LocalMachine.OpenSubKey(PendingEntryPath(vidPid), writable: true))
-                        foreach (string v in new[] { DI_OriginalName, DI_OriginalExisted, JM_OriginalName, JM_OriginalExisted })
-                            pending?.DeleteValue(v, throwOnMissingValue: false);
+                    DropMachineParts(vidPid);
                     return new UninstallRestore(true,
                         $"the DirectInput and joy.cpl labels were put back. The per-user joy.cpl label belongs to {AccountName(sid)}, whose program set it, so the record stays for a removal run from that account");
                 }
@@ -283,6 +300,15 @@ internal static class OemNameOverrideStore
                 : $"restored, except {string.Join(" and ", left)}, which another program changed since HIDMaestro wrote it, and which stays as it is");
         }
         finally { mutex.ReleaseMutex(); }
+    }
+
+    /// <summary>Drop the HKLM targets' originals from a record whose HKLM
+    /// targets were put back, so it holds the HKCU part alone.</summary>
+    private static void DropMachineParts(string vidPid)
+    {
+        using var pending = Registry.LocalMachine.OpenSubKey(PendingEntryPath(vidPid), writable: true);
+        foreach (string v in new[] { DI_OriginalName, DI_OriginalExisted, JM_OriginalName, JM_OriginalExisted })
+            pending?.DeleteValue(v, throwOnMissingValue: false);
     }
 
     private static string AccountName(string? sid)
@@ -320,7 +346,7 @@ internal static class OemNameOverrideStore
     //  Write pass: mutate all three targets
     // ────────────────────────────────────────────────────────────────
 
-    private static void WriteAllTargets(string vidPid, string label)
+    private static void WriteAllTargets(string vidPid, string label, bool user)
     {
         // 1. DirectInput (HKLM)
         using (var key = Registry.LocalMachine.CreateSubKey($@"{DirectInputRoot}\{vidPid}\{DirectInputOemSubkey}", writable: true)!)
@@ -334,7 +360,9 @@ internal static class OemNameOverrideStore
             key.SetValue(JoystickOemNameValue, label, RegistryValueKind.String);
         }
 
-        // 3. Joystick (HKCU): wins over HKLM, what joy.cpl actually shows
+        // 3. Joystick (HKCU): wins over HKLM, what joy.cpl actually shows.
+        // Not for an account whose original the record does not hold.
+        if (!user) return;
         using (var key = Registry.CurrentUser.CreateSubKey($@"{JoystickRoot}\{vidPid}", writable: true)!)
         {
             key.SetValue(JoystickOemNameValue, label, RegistryValueKind.String);
@@ -439,10 +467,12 @@ internal static class OemNameOverrideStore
         string? diOrig; bool? diExisted;
         string? jmOrig; bool? jmExisted;
         string? juOrig; bool? juExisted;
+        string? sid;
 
         using (var pending = Registry.LocalMachine.OpenSubKey(PendingEntryPath(vidPid), writable: false))
         {
             if (pending is null) return; // nothing to restore; idempotent
+            sid       = pending.GetValue(V_UserSid) as string;
 
             diOrig    = pending.GetValue(DI_OriginalName) as string;
             diExisted = ReadExistedFlag(pending, DI_OriginalExisted);
@@ -467,6 +497,14 @@ internal static class OemNameOverrideStore
         else if (jmExisted == false)
             DeleteSubkeyFromParent(Registry.LocalMachine, JoystickRoot, vidPid);
         // jmExisted == null → v1 record; no joystick write happened, nothing to restore
+
+        // The HKCU original of another account goes back only from that
+        // account: the record keeps it alone, and this hive is not touched.
+        if (juExisted != null && OtherAccount(sid))
+        {
+            DropMachineParts(vidPid);
+            return;
+        }
 
         // Joystick HKCU target
         if (juExisted == true)

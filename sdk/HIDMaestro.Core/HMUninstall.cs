@@ -39,10 +39,12 @@ public static class HMUninstall
     /// Requires administrator rights.
     ///
     /// <para>A program on HIDMaestro 2.0.1 or later that starts during the
-    /// removal waits for its end before its first owner claim,
-    /// <see cref="HMContext.InstallDriver"/>, cleanup, OEM name override,
-    /// VR driver registration or transport install, and then installs the
-    /// driver again. An older program does not wait. The removal checks for
+    /// removal waits for its end before its first owner claim, which
+    /// <see cref="HMContext.InstallDriver"/>, a create, a cleanup, an OEM
+    /// name override, the VR driver registration and the transport install
+    /// each take first, and then installs the driver again. A program that
+    /// holds its claim counts as running, one that only set an OEM name
+    /// override included. An older program does not wait. The removal checks for
     /// running programs before it removes devices, before it puts back the
     /// OEM names and while it holds the driver deploy lock, and one it finds
     /// stops it before that step with the status Blocked.</para>
