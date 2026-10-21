@@ -296,6 +296,23 @@ internal static partial class Program
         Record("remove: the transport no longer answers", !HMContext.IsUsbipBackendAvailable);
         Record("remove: the filter was never there and is not now", !DriverPackagePresent("usbip2_filter") && !KeyExists(@"SYSTEM\CurrentControlSet\Services\usbip2_filter"));
 
+        // A removal this process starts after a create's claim, before the
+        // create takes the transport lock: the install under the lock sees it
+        // and writes nothing. The create's transport step is called past the
+        // claim, as the race leaves it.
+        var removingHere = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.Uninstall.RemovalGate", throwOnError: true)!
+            .GetField("RemovingHere", BindingFlags.NonPublic | BindingFlags.Static)!;
+        string beforeRace = Snapshot();
+        Exception? raceRefusal = null;
+        removingHere.SetValue(null, true);
+        try { Installer.GetMethod("EnsureInstalled", BindingFlags.Public | BindingFlags.Static)!.Invoke(null, new object?[] { null }); }
+        catch (TargetInvocationException tie) { raceRefusal = tie.InnerException; }
+        finally { removingHere.SetValue(null, false); }
+        Record("remove: an install that finds this process's own removal running under the transport lock refuses and writes nothing",
+               raceRefusal is InvalidOperationException && raceRefusal.Message.Contains("HMUninstall.Run") && Snapshot() == beforeRace
+               && Pnp.RootDevnodes(UdeHardwareId).Count == 0,
+               $"{raceRefusal?.GetType().Name ?? "no exception"}: {raceRefusal?.Message}" + (Snapshot() == beforeRace ? "" : $"; before {beforeRace} / after {Snapshot()}"));
+
         // ── R2: a reinstall after the removal ─────────────────────────────
         install.Restart();
         HMContext.InstallUsbipBackend();
