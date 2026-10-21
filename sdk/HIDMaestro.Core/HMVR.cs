@@ -33,7 +33,10 @@ public static class HMVR
 
     /// <summary>Record the location of a steamcmd-style SteamVR install
     /// (no registry footprint of its own) so discovery finds it from now
-    /// on. Requires admin.</summary>
+    /// on. Requires admin. Takes the program's HIDMaestro owner claim first,
+    /// so it waits for a removal another program runs, and throws
+    /// <see cref="InvalidOperationException"/> with nothing written while
+    /// this process runs <see cref="HMUninstall.Run"/>.</summary>
     public static void SetSteamVRPathHint(string steamVrDir) =>
         VrDriverBuilder.SetSteamVRPathHint(steamVrDir);
 
@@ -59,9 +62,10 @@ public static class HMVR
     /// <para>With SteamVR present, the call takes the program's HIDMaestro
     /// owner claim before it writes, so it waits for a removal another
     /// program runs (<see cref="HMUninstall"/>), and a removal refuses while
-    /// this program runs. Without SteamVR it claims nothing. While this
-    /// process's own removal runs it throws
-    /// <see cref="InvalidOperationException"/> and writes nothing.</para></summary>
+    /// this program runs. Without SteamVR it returns false and claims
+    /// nothing, whatever else runs. With SteamVR present and this process's
+    /// own removal running, it throws <see cref="InvalidOperationException"/>
+    /// and writes nothing.</para></summary>
     public static bool EnsureDriverRegistered() => VrDriverBuilder.EnsureDriverRegistered();
 
     /// <summary>Unregister the driver from the same OpenVR path registry

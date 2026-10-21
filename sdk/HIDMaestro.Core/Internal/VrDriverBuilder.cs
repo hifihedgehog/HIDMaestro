@@ -116,6 +116,9 @@ internal static class VrDriverBuilder
     /// finds it on every later run. Requires admin (HKLM).</summary>
     public static void SetSteamVRPathHint(string steamVrDir)
     {
+        // The owner claim, through the removal gate, before the HKLM write.
+        if (!MachineClaims.ClaimBeforeWrite())
+            throw new InvalidOperationException(MachineClaims.RemovingHereMessage);
         using var k = Registry.LocalMachine.CreateSubKey(RegKeyPath);
         k.SetValue(SteamVrPathRegValue, steamVrDir);
     }
