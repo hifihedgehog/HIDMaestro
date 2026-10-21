@@ -38,6 +38,12 @@ internal static class RemovalGate
 {
     private static readonly SemaphoreSlim s_oneThread = new(1, 1);
 
+    /// <summary>The managed thread that holds <see cref="s_oneThread"/>, or
+    /// 0. A call from that thread back into the gate, such as a diagnostic
+    /// hook the wait's log line runs, goes past the semaphore it already
+    /// holds.</summary>
+    private static int s_holder;
+
     /// <summary>Set while this process runs a removal and holds its
     /// mutex.</summary>
     internal static volatile bool RemovingHere;
@@ -55,10 +61,25 @@ internal static class RemovalGate
     internal static bool Claim(Action claim)
     {
         if (MachineClaims.HoldsOwnerClaim || !Environment.IsPrivilegedProcess) { claim(); return true; }
-        if (!s_oneThread.Wait(0))
+        int me = Environment.CurrentManagedThreadId;
+        var clock = Stopwatch.StartNew();
+        bool haveSemaphore = false;
+        if (Volatile.Read(ref s_holder) != me)
         {
-            DeviceOrchestrator.LogDiag("removal gate: another thread of this program is at the gate, and this one waits behind it");
-            s_oneThread.Wait();
+            if (!(haveSemaphore = s_oneThread.Wait(0)))
+            {
+                DeviceOrchestrator.LogDiag("removal gate: another thread of this program is at the gate, and this one waits behind it");
+                while (!(haveSemaphore = s_oneThread.Wait(250)))
+                {
+                    if (RemovingHere) return false;
+                    if (clock.ElapsedMilliseconds >= TimeoutScale.Apply(WaitBoundMs))
+                    {
+                        DeviceOrchestrator.LogDiag("removal gate: another thread of this program held the gate for ten minutes, so this one goes on");
+                        break;
+                    }
+                }
+            }
+            if (haveSemaphore) Volatile.Write(ref s_holder, me);
         }
         try
         {
@@ -73,7 +94,6 @@ internal static class RemovalGate
             }
             using (m)
             {
-                var clock = Stopwatch.StartNew();
                 bool got = false, waited = false;
                 try
                 {
@@ -93,10 +113,12 @@ internal static class RemovalGate
                     }
                 }
                 catch (AbandonedMutexException) { got = true; }
-                if (waited)
-                    DeviceOrchestrator.LogDiag($"removal gate: waited {clock.ElapsedMilliseconds} ms for another process's removal of HIDMaestro");
+                // From here the mutex may be held: whatever throws, the
+                // finally lets it go.
                 try
                 {
+                    if (waited)
+                        DeviceOrchestrator.LogDiag($"removal gate: waited {clock.ElapsedMilliseconds} ms for another process's removal of HIDMaestro");
                     if (!got && RemovingHere) return false;
                     claim();
                     return true;
@@ -104,6 +126,13 @@ internal static class RemovalGate
                 finally { if (got) m.ReleaseMutex(); }
             }
         }
-        finally { s_oneThread.Release(); }
+        finally
+        {
+            if (haveSemaphore)
+            {
+                Volatile.Write(ref s_holder, 0);
+                s_oneThread.Release();
+            }
+        }
     }
 }
