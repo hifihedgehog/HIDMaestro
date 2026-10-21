@@ -109,26 +109,24 @@ internal static class OemNameOverrideStore
         using var mutex = AcquireMutex();
         try
         {
-            // Capture prior values ONLY on the first Set for this VID:PID.
-            // Subsequent Sets replace the label but leave the original-state
-            // record alone, so Clear always restores to the true pre-HIDMaestro
-            // state, not the prior Set's label.
-            bool recordExists;
-            using (var pending = Registry.LocalMachine.OpenSubKey(PendingEntryPath(vidPid), writable: false))
-            {
-                recordExists = pending is not null;
-            }
-            if (!recordExists)
-                CaptureAllOriginalsToPendingStore(vidPid);
+            // Capture a target's prior value only when the record does not
+            // hold it yet: on the first Set for this VID:PID, and for a
+            // target a full removal run from another account already put
+            // back and dropped from a record it kept (RestoreForUninstall).
+            // Later Sets replace the label but leave each captured original
+            // alone, so Clear always restores to the true pre-HIDMaestro
+            // state, not the prior Set's label. The account whose HKCU target
+            // is captured is recorded with it, and only then: the per-user
+            // original belongs to that account's hive.
+            bool userCaptured = CaptureMissingOriginals(vidPid);
 
-            // The label and the account whose HKCU target this writes go in
-            // the record before the targets, so a full removal restores a
-            // target only while it still holds what HIDMaestro wrote, and the
-            // per-user target only from that account (RestoreForUninstall).
+            // The label goes in the record before the targets, so a full
+            // removal restores a target only while it still holds what
+            // HIDMaestro wrote (RestoreForUninstall).
             using (var pending = Registry.LocalMachine.CreateSubKey(PendingEntryPath(vidPid), writable: true)!)
             {
                 pending.SetValue(V_WrittenLabel, label, RegistryValueKind.String);
-                if (CurrentUserSid() is { } sid) pending.SetValue(V_UserSid, sid, RegistryValueKind.String);
+                if (userCaptured && CurrentUserSid() is { } sid) pending.SetValue(V_UserSid, sid, RegistryValueKind.String);
             }
 
             WriteAllTargets(vidPid, label);
@@ -346,6 +344,46 @@ internal static class OemNameOverrideStore
     // ────────────────────────────────────────────────────────────────
     //  Capture pass: save originals for all three targets
     // ────────────────────────────────────────────────────────────────
+
+    /// <summary>Capture each target the record does not hold yet, creating
+    /// the record when there is none. Returns true when the HKCU target was
+    /// captured now.</summary>
+    private static bool CaptureMissingOriginals(string vidPid)
+    {
+        bool di, jm, ju, exists;
+        using (var pending = Registry.LocalMachine.OpenSubKey(PendingEntryPath(vidPid), writable: false))
+        {
+            exists = pending is not null;
+            di = pending is null || ReadExistedFlag(pending, DI_OriginalExisted) is null;
+            jm = pending is null || ReadExistedFlag(pending, JM_OriginalExisted) is null;
+            ju = pending is null || ReadExistedFlag(pending, JU_OriginalExisted) is null;
+        }
+        if (!exists) { CaptureAllOriginalsToPendingStore(vidPid); return true; }
+        if (!di && !jm && !ju) return false;
+        // A target missing from a record was put back and dropped by a
+        // removal from another account, or was never written under a record
+        // from a build before the joystick targets existed. Either way its
+        // value now is the original.
+        using var record = Registry.LocalMachine.CreateSubKey(PendingEntryPath(vidPid), writable: true)!;
+        if (di)
+        {
+            var (o, e) = ReadOriginal(Registry.LocalMachine, $@"{DirectInputRoot}\{vidPid}\{DirectInputOemSubkey}", DirectInputOemNameValue);
+            WriteOriginalPair(record, DI_OriginalName, DI_OriginalExisted, o, e);
+        }
+        if (jm)
+        {
+            var (o, e) = RegistryLedger.TryGetJoystickOriginal(vidPid, out string? ledgerName, out bool ledgerKeyExisted)
+                ? (ledgerName, ledgerKeyExisted)
+                : ReadOriginal(Registry.LocalMachine, $@"{JoystickRoot}\{vidPid}", JoystickOemNameValue);
+            WriteOriginalPair(record, JM_OriginalName, JM_OriginalExisted, o, e);
+        }
+        if (ju)
+        {
+            var (o, e) = ReadOriginal(Registry.CurrentUser, $@"{JoystickRoot}\{vidPid}", JoystickOemNameValue);
+            WriteOriginalPair(record, JU_OriginalName, JU_OriginalExisted, o, e);
+        }
+        return ju;
+    }
 
     private static void CaptureAllOriginalsToPendingStore(string vidPid)
     {
