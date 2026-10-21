@@ -35,6 +35,7 @@ if (Environment.GetEnvironmentVariable("HIDMAESTRO_DIAG") is { Length: > 0 })
 Console.WriteLine("=== protocol_engine_check: the protocol engine and the device clock, offline ===");
 Engine.Run();
 Clock.Run();
+SendClock.Run();
 DeviceLifetime.Run();
 OutputOnce.Run();
 Umdf2.Run();
@@ -677,9 +678,12 @@ internal static class Clock
             ["dualshock-4-v1"] = 4, ["dualshock-4-v1-full"] = 4, ["dualshock-4-v2"] = 4, ["dualshock-4-v2-composite"] = 4, ["steam-deck"] = 4,
             ["thrustmaster-t-gt"] = 250, ["thrustmaster-t150"] = 250, ["thrustmaster-t248"] = 250, ["thrustmaster-t300rs-ps3"] = 250,
             ["thrustmaster-t300rs-ps3-adv"] = 250, ["openffboard"] = 101,
-            // The Valve personas' extendedReport.idleFrameIntervalMs, as
-            // v1.12.0 repeated them.
-            ["steam-controller-2"] = 4, ["steam-controller-composite"] = 8, ["steam-deck-composite"] = 4,
+            // The Valve personas' extendedReport.idleFrameIntervalMs, the
+            // period each reports on since issue #72: the firmware's frame
+            // rate of 4 on the Deck and the 2026 controller, and the 9000
+            // microseconds the 2015 controller answers for its connection
+            // interval (v1.12.0 repeated it every 8 ms).
+            ["steam-controller-2"] = 4, ["steam-controller-composite"] = 9, ["steam-deck-composite"] = 4,
         };
         var actual = new Dictionary<string, double>(StringComparer.Ordinal);
         foreach (var cp in ProfileDatabase.LoadEmbedded().All)

@@ -114,11 +114,64 @@ internal static partial class Program
         return null;
     }
 
-    /// <summary>The device path of the controller's first HID interface
-    /// with input reports, or null when none appears in 5 s.</summary>
+    /// <summary>The interface a host reads the controller's state on. A
+    /// profile whose own descriptor opens on a vendor-defined usage page,
+    /// as the Steam Deck's and the 2015 Steam Controller's do, sits beside
+    /// a lizard mouse and keyboard of the same device, which come first:
+    /// for it, the interface whose top-level collection is the profile's
+    /// own, waited for as long as the device's interfaces take to appear.
+    /// Every other profile, and one whose collection never appears, takes
+    /// the first interface with input reports.</summary>
+    static HidDevice? OpenStateInterface(HMController c, out string why)
+    {
+        var (page, usage) = TopLevelUsage(c.Profile.GetDescriptorBytes() ?? Array.Empty<byte>());
+        if (page >= 0xFF00)
+        {
+            var sw = Stopwatch.StartNew();
+            int waitMs = InterfaceWaitMs(c);
+            do
+            {
+                var d = OpenOwnInterface(c, d => d.InputLength > 0 && d.UsagePage == page && d.Usage == usage, out why);
+                if (d != null) return d;
+                Thread.Sleep(100);
+            }
+            while (sw.ElapsedMilliseconds < waitMs);
+        }
+        return OpenOwnInterface(c, d => d.InputLength > 0, out why);
+    }
+
+    /// <summary>The usage page and usage a report descriptor declares
+    /// before its first collection, as HIDP_CAPS reports them for the
+    /// top-level collection. Short items only, the form every catalog
+    /// descriptor takes. (0, 0) when there is none.</summary>
+    static (ushort Page, ushort Usage) TopLevelUsage(byte[] d)
+    {
+        ushort page = 0, usage = 0;
+        for (int i = 0; i < d.Length;)
+        {
+            byte b = d[i];
+            if (b == 0xFE) return (0, 0);
+            int size = (b & 3) == 3 ? 4 : b & 3;
+            if (i + 1 + size > d.Length) break;
+            uint v = 0;
+            for (int k = 0; k < size; k++) v |= (uint)d[i + 1 + k] << (8 * k);
+            switch (b & 0xFC)
+            {
+                case 0x04: page = (ushort)v; break;
+                case 0x08: usage = (ushort)v; break;
+                case 0xA0: return (page, usage);
+            }
+            i += 1 + size;
+        }
+        return (0, 0);
+    }
+
+    /// <summary>The device path of the interface a host reads the
+    /// controller's state on (<see cref="OpenStateInterface"/>), or null
+    /// when none appears.</summary>
     internal static string? OwnInputInterface(HMController c)
     {
-        using var d = OpenOwnInterface(c, d => d.InputLength > 0, out _);
+        using var d = OpenStateInterface(c, out _);
         return d?.Path;
     }
 

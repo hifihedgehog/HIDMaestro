@@ -137,3 +137,35 @@ internal struct StreamTick : IClockTick
 
     public void RunEnded() { }
 }
+
+/// <summary>The stream of a profile that reports on its own clock
+/// (issue #72, <c>extendedReport.send</c> <c>"clock"</c>): a report each
+/// period on a grid from the clock's origin, carrying the consumer's
+/// latest frame. Nothing the consumer sends moves it.</summary>
+internal readonly struct StreamGridTick : IClockTick
+{
+    private readonly long _period;
+    private readonly long _origin;
+    private readonly Action _send;
+
+    public StreamGridTick(long period, long origin, Action send)
+    {
+        _period = period;
+        _origin = origin;
+        _send = send;
+    }
+
+    public bool Running(out long origin)
+    {
+        origin = _origin;
+        return true;
+    }
+
+    public long Period => _period;
+
+    public long NotBefore => 0;
+
+    public void Tick(long due) => _send();
+
+    public void RunEnded() { }
+}

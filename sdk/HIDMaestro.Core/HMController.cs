@@ -288,6 +288,13 @@ public sealed partial class HMController : IDisposable
     private Thread? _idleThread;
     private IDeviceClock? _idleClock;
     private StreamClock? _stream;
+    // Issue #72: extendedReport.send "clock". Every report goes out on the
+    // device clock, one a period, carrying the consumer's latest frame, and
+    // a submit only stores that frame. _clockAxes is the controller's own
+    // copy of a submitted state's axes, which the clock reads after the
+    // consumer may have reused its dictionary. Guarded by _submitLock.
+    private readonly bool _sendOnClock;
+    private readonly Dictionary<HMAxis, float>? _clockAxes;
 
     // v2.0.0: a device that builds its own reports (design note, mechanism
     // 2). SubmitState encodes the profile's state block, and the device
@@ -364,7 +371,11 @@ public sealed partial class HMController : IDisposable
     /// Two submits on different threads can run the handler at the same
     /// time, so a handler that keeps state must synchronize it. Keep the
     /// handler short: log to a ring buffer or counter, and don't
-    /// block.</summary>
+    /// block. On a profile that reports on its own clock
+    /// (<c>extendedReport.send</c> <c>"clock"</c>) it times the call alone,
+    /// which stores the state: the frame goes out on the device clock's next
+    /// tick, up to one period later, and the tick's own encode is not
+    /// counted.</summary>
     public Action<long>? OnSubmitLatencyMicros { get; set; }
 
     // PID FFB state section. Lazy: created on the first PublishPid* call so
@@ -680,7 +691,35 @@ public sealed partial class HMController : IDisposable
         // (rare: only LocalService permission issues) we just don't raise
         // OutputReceived events.
         _stream = StreamClock.Compile(profile.Inner, model.Registers);
-        if (_stream != null)
+        if (_stream != null && profile.Inner.ExtendedReport is { SendsOnClock: true })
+        {
+            // Issue #72: the device reports on its own clock. The first
+            // report goes out now, so the device streams before any driver
+            // opens it, and the grid runs from it: a report each period,
+            // whatever the consumer submits. MissedTick.NextPoll holds the
+            // grid, and a late wake skips the periods it missed rather than
+            // sending them in a burst (DeviceClock.NextDue). A submit never
+            // moves the clock: its NotBefore is 0 and no submit path calls
+            // FrameSent.
+            _sendOnClock = true;
+            _clockAxes = new Dictionary<HMAxis, float>();
+            _lastSubmitted = new HMGamepadState();
+            long origin;
+            lock (_submitLock)
+            {
+                // The clock's containment contract (RepeatLastFrameFromClock):
+                // a frame that fails to go out does not end the device.
+                try { SubmitStateCore(in _lastSubmitted); } catch { }
+                origin = System.Diagnostics.Stopwatch.GetTimestamp();
+            }
+            var grid = new StreamGridTick(_stream.PeriodTicks, origin, RepeatLastFrameFromClock);
+            var clock = new DeviceClock<StreamGridTick>(grid, MissedTick.NextPoll, $"HMIdleFrames_{index}",
+                everyChangeWakes: true);
+            _idleClock = clock;
+            _idleThread = clock.Thread;
+            clock.Start();
+        }
+        else if (_stream != null)
         {
             // Publish one frame immediately so the device is already
             // streaming when a driver opens it, then keep the cadence up
@@ -789,13 +828,37 @@ public sealed partial class HMController : IDisposable
 
     /// <summary>Push the next input frame to the virtual controller.
     /// The SDK encodes <paramref name="state"/> into the active profile's
-    /// HID report layout and publishes it via shared memory.</summary>
+    /// HID report layout and publishes it via shared memory.
+    ///
+    /// <para>A profile whose <c>extendedReport.send</c> is <c>"clock"</c>
+    /// (the Steam Deck, the 2015 Steam Controller and the 2026 Steam
+    /// Controller) reports on its own clock, one report every
+    /// <c>idleFrameIntervalMs</c>, as the real device does. On it this call
+    /// stores the state and sends nothing: the next report carries it,
+    /// encoded then, so the device's packet counter advances once a report.
+    /// A state that a later call replaces before that report never goes
+    /// out. The report rate is the device's whatever rate this is called
+    /// at, and the state reaches the wire up to one period later, half a
+    /// period on average. The state's <see cref="HMGamepadState.Axes"/>
+    /// are copied, so the dictionary may be reused once this
+    /// returns.</para></summary>
     public void SubmitState(in HMGamepadState state)
     {
         ThrowIfDisposed();
 
         var latency = OnSubmitLatencyMicros;
         long micros;
+        if (_sendOnClock)
+        {
+            long start = latency != null ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+            lock (_submitLock)
+            {
+                ThrowIfDisposed();
+                KeepStateForClock(in state);
+            }
+            if (latency != null) latency(ElapsedMicros(start));
+            return;
+        }
         // Every submit path writes the shared section under _submitLock.
         // The section is a single-writer seqlock: two threads writing one
         // controller's frames at once could publish a frame mixed from both.
@@ -821,6 +884,24 @@ public sealed partial class HMController : IDisposable
         // Consumer code runs with no SDK lock held: a handler that disposes
         // this controller, on this thread or another, finds the lock free.
         if (latency != null) latency(micros);
+    }
+
+    /// <summary>Keep a state for the device clock's next report (issue #72):
+    /// the state as given, with its axes copied into the controller's own
+    /// dictionary, whose entries are rewritten in place, so a call allocates
+    /// nothing. Caller holds _submitLock.</summary>
+    private void KeepStateForClock(in HMGamepadState state)
+    {
+        Dictionary<HMAxis, float>? own = null;
+        if (state.Axes is { } axes)
+        {
+            own = _clockAxes!;
+            own.Clear();
+            foreach (var kv in axes) own[kv.Key] = kv.Value;
+        }
+        _lastSubmitted = state;
+        _lastSubmitted.Axes = own;
+        _lastSubmitWasRaw = false;
     }
 
     /// <summary>Encode and write one state. Returns the microseconds it took
@@ -1252,6 +1333,12 @@ public sealed partial class HMController : IDisposable
     /// <see cref="ArgumentException"/> naming the size for any other length.
     /// Which report it sends, and when, belongs to the device, as it does on
     /// the real one.</para>
+    ///
+    /// <para>On a profile that reports on its own clock
+    /// (<c>extendedReport.send</c> <c>"clock"</c>, as on
+    /// <see cref="SubmitState"/>) the frame is stored and goes out, byte for
+    /// byte, on the clock's next tick, which repeats it until the next
+    /// submit.</para>
     /// </summary>
     public void SubmitRawReport(ReadOnlySpan<byte> report)
     {
@@ -1266,6 +1353,11 @@ public sealed partial class HMController : IDisposable
         lock (_submitLock)
         {
             ThrowIfDisposed();
+            if (_sendOnClock)
+            {
+                RememberRawFrame(report, extended: false);
+                return;
+            }
             AwaitPreviousDelivery();
             SubmitRawReportCore(report);
             NoteFrameWritten();
@@ -1375,6 +1467,10 @@ public sealed partial class HMController : IDisposable
     ///
     /// <para>A device that builds its own reports takes it as its state
     /// block, as <see cref="SubmitRawReport"/> does.</para>
+    ///
+    /// <para>On a profile that reports on its own clock the frame goes out
+    /// on the clock's next tick, as <see cref="SubmitRawReport"/>
+    /// says.</para>
     /// </summary>
     /// <param name="report">The complete frame, report id included.</param>
     public void SubmitRawExtendedReport(ReadOnlySpan<byte> report)
@@ -1392,6 +1488,11 @@ public sealed partial class HMController : IDisposable
         lock (_submitLock)
         {
             ThrowIfDisposed();
+            if (_sendOnClock)
+            {
+                RememberRawFrame(report, extended: true);
+                return;
+            }
             AwaitPreviousDelivery();
             SubmitRawExtendedReportCore(report);
             NoteFrameWritten();
@@ -1602,7 +1703,10 @@ public sealed partial class HMController : IDisposable
 
     /// <summary>Keep a raw consumer's frame for the idle pump, which repeats
     /// it through the same path, byte for byte. Called under
-    /// <see cref="_submitLock"/> once the frame has gone out.</summary>
+    /// <see cref="_submitLock"/> once the frame has gone out, or in its
+    /// place on a profile that reports on its own clock, whose next tick
+    /// sends it. That clock keeps its grid, so the frame's time is not
+    /// recorded for it.</summary>
     private void RememberRawFrame(ReadOnlySpan<byte> report, bool extended)
     {
         _lastRawFrame ??= new byte[SharedMemoryIO.DATA_CAPACITY];
@@ -1610,6 +1714,7 @@ public sealed partial class HMController : IDisposable
         _lastRawLength = report.Length;
         _lastRawWasExtended = extended;
         _lastSubmitWasRaw = true;
+        if (_sendOnClock) return;
         long at = System.Diagnostics.Stopwatch.GetTimestamp();
         Volatile.Write(ref _lastSubmitTimestamp, at);
         _idleClock?.FrameSent(at);
@@ -1711,13 +1816,15 @@ public sealed partial class HMController : IDisposable
     /// lock every submit path takes. The clock read the last frame's time
     /// before this lock, so a frame the consumer sent since then is found
     /// here, and the repeat goes a period after that frame instead
-    /// (<see cref="Internal.StreamTick.NotBefore"/>).</summary>
+    /// (<see cref="Internal.StreamTick.NotBefore"/>). On a profile that
+    /// reports on its own clock this is every report: no submit sends one,
+    /// so none is skipped for a recent submit.</summary>
     private void RepeatLastFrame()
     {
         lock (_submitLock)
         {
             if (_disposed) return;
-            if (_stream != null)
+            if (_stream != null && !_sendOnClock)
             {
                 long last = Volatile.Read(ref _lastSubmitTimestamp);
                 if (last != 0 && System.Diagnostics.Stopwatch.GetTimestamp() - last < _stream.Period(_protocolEngine?.RegisterWords))

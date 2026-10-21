@@ -480,6 +480,37 @@ public sealed class ControllerProfile
             throw new InvalidOperationException(
                 $"Profile '{Id}': extendedReport.size {input.Size} is larger than the {SharedMemoryIO.EXTENDED_DATA_CAPACITY} " +
                 "bytes the extended report lane carries.");
+        CheckSendRule();
+    }
+
+    /// <summary>Issue #72: <c>extendedReport.send</c>. <c>"clock"</c> is
+    /// refused wherever the device clock cannot carry every report the
+    /// consumer's frames make: without a fixed period of its own, on a
+    /// device whose reports something else sends, and on a keyboard or
+    /// mouse, which delivers every report in order where a clock sends the
+    /// latest.</summary>
+    private void CheckSendRule()
+    {
+        if (ExtendedOutputReport?.Send != null)
+            throw new ProfileDefectException("$.extendedOutputReport.send",
+                "an output report goes out when the host writes it. The send rule belongs to extendedReport.");
+        var spec = ExtendedReport;
+        if (spec?.Send is not { } send || send == ExtendedReportSpec.SendSubmit) return;
+        const string at = "$.extendedReport.send";
+        if (send != ExtendedReportSpec.SendClock)
+            throw new ProfileDefectException(at, $"\"{send}\" is not one of submit, clock.");
+        if (spec.IdleFrameIntervalMs < 1)
+            throw new ProfileDefectException(at, "\"clock\" needs extendedReport.idleFrameIntervalMs, the period the device reports on.");
+        if (Stream != null)
+            throw new ProfileDefectException(at, "\"clock\" takes its period from extendedReport.idleFrameIntervalMs. A stream's condition or period register would stop or move the clock.");
+        if (spec.Ports != null)
+            throw new ProfileDefectException(at, "\"clock\" does not go with extendedReport.ports: each port's frame goes out as the consumer sends it.");
+        if (StateBlock != null || BuildsItsOwnReports)
+            throw new ProfileDefectException(at, "\"clock\" does not go with a state block: the device builds its reports on its protocol's clock already.");
+        if (Protocol?.Input != null)
+            throw new ProfileDefectException(at, "\"clock\" does not go with protocol.input, which sends the device's reports.");
+        if (IsKeyboardOrMouse || (HasDescriptor && DeliversEveryReport(GetOrBuildKeyboardMousePacker())))
+            throw new ProfileDefectException(at, "\"clock\" does not go with a keyboard or mouse, which delivers every report in order. A clock sends the latest.");
     }
 
     private void CheckExtendedReport(ExtendedReportSpec? spec, string name, bool output)
@@ -1116,6 +1147,27 @@ public sealed class ExtendedReportSpec
     /// 4 ms whether or not anything is moving.</summary>
     [JsonPropertyName("idleFrameIntervalMs")]
     public int IdleFrameIntervalMs { get; set; }
+
+    /// <summary>Issue #72: when the input report goes out. <c>"submit"</c>,
+    /// the default, sends each frame as the consumer submits it and repeats
+    /// the last one at <see cref="IdleFrameIntervalMs"/> while the consumer
+    /// is quiet. <c>"clock"</c> sends one report each
+    /// <see cref="IdleFrameIntervalMs"/> on the device's own clock, carrying
+    /// the consumer's latest frame, as a device whose firmware reports on a
+    /// frame clock does: a submit only replaces what the next report
+    /// carries. Valve's Deck and 2026 controller firmware report on a frame
+    /// clock whose setting defaults to 4 ms, whatever the host polls, and
+    /// SDL's Deck and 2015 drivers credit each report one interval of
+    /// sensor time.</summary>
+    [JsonPropertyName("send")]
+    public string? Send { get; set; }
+
+    /// <summary>True for <c>"send": "clock"</c>.</summary>
+    [JsonIgnore]
+    internal bool SendsOnClock => Send == SendClock;
+
+    internal const string SendClock = "clock";
+    internal const string SendSubmit = "submit";
 
     /// <summary>Ordered field descriptors. See VendorBlobCodec for the type
     /// vocabulary.</summary>

@@ -11,7 +11,7 @@
   "backend": "usbip",
   "descriptor": "0600ff0901a101150026ff00750895400901810295400901910295400901b102c0",
   "inputReportSize": 64,
-  "notes": "Issue #56, from PadForge discussion #337. The wired 2015 Steam Controller at 28DE:1102. Every USB descriptor here is verbatim from a real unit's dump (deckdumps/sc_blobs.json): the device and configuration blobs, the 63-byte keyboard and 56-byte mouse report descriptors its lizard mode drives, and the 33-byte vendor-page controller descriptor. Three interfaces, because SDL_hidapi_steam.c binds the pad only on interface 2. extendedReport packs ValveInReport_t + ValveControllerStatePacket_t: header 01 00 01 3C, then an advancing unPacketNum, which UpdateSteamControllerState requires or it treats the frame as a repeat. The pad has one stick and the wire has no separate stick field: with STEAM_LEFTPAD_FINGERDOWN clear, FormatStatePacketUntilGyro reads sLeftPadX/Y as the joystick, so that is where the stick is written and the finger-down bits stay clear.",
+  "notes": "Issue #56, from PadForge discussion #337. The wired 2015 Steam Controller at 28DE:1102. Every USB descriptor here is verbatim from a real unit's dump (deckdumps/sc_blobs.json): the device and configuration blobs, the 63-byte keyboard and 56-byte mouse report descriptors its lizard mode drives, and the 33-byte vendor-page controller descriptor. Three interfaces, because SDL_hidapi_steam.c binds the pad only on interface 2. extendedReport packs ValveInReport_t + ValveControllerStatePacket_t: header 01 00 01 3C, then an advancing unPacketNum, which UpdateSteamControllerState requires or it treats the frame as a repeat. The pad has one stick and the wire has no separate stick field: with STEAM_LEFTPAD_FINGERDOWN clear, FormatStatePacketUntilGyro reads sLeftPadX/Y as the joystick, so that is where the stick is written and the finger-down bits stay clear. Issue #72: the pad reports on its own 9 ms clock (extendedReport.send \"clock\"), whatever rate the consumer submits at, each report carrying the latest state. 9 ms is the 9000 the 0x83 answer gives for ATTRIB_CONNECTION_INTERVAL_IN_US, SDL's own default in ResetSteamController, and SDL_hidapi_steam.c credits each report that much sensor time. No public capture records a wired 2015 unit's report interval, so the persona's own answer sets it.",
   "featureStubs": {
     "reports": [
       {
@@ -181,7 +181,8 @@
     "reportId": "0x00",
     "size": 64,
     "alwaysArmed": true,
-    "idleFrameIntervalMs": 8,
+    "idleFrameIntervalMs": 9,
+    "send": "clock",
     "fields": [
       {
         "byte": 0,
