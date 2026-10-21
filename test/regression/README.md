@@ -1,6 +1,6 @@
 # regression_battery.ps1: the regression battery
 
-Runs 99 scenarios and verifies every one leaves zero HIDMaestro PnP
+Runs 100 scenarios and verifies every one leaves zero HIDMaestro PnP
 devnodes in the `PRESENT` state. S01 to S23 drive `HIDMaestroTest.exe`
 through single- and multi-controller create/swap/remove/force-kill
 sequences, and S24 and up run the probe programs under `test/probes`.
@@ -66,9 +66,9 @@ command, and the test app's exit after quit get 3600 s, S71 6300 s and S73
 still running then fails its scenario as a hang, with the probe's
 transcript, and its process tree is stopped.
 
-Total wall time: 29 minutes for all 99
+Total wall time: 26 minutes for all 100
 scenarios, every section and check, on the development laptop, a 16-core
-Lenovo Legion Pro 7, and 39 minutes on a 4-core Celeron J4125 at
+Lenovo Legion Pro 7, and 38 minutes on a 4-core Celeron J4125 at
 `HIDMAESTRO_TIMEOUT_SCALE=2`. Use `-Filter` to run one scenario when
 iterating.
 

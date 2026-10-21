@@ -4,7 +4,7 @@ rem  pre-tag-validate.cmd
 rem
 rem  Mandatory pre-release validation. Run before `git tag vX.Y.Z`.
 rem  - Builds the SDK + test app
-rem  - Runs the full regression battery (99 scenarios, 29 min
+rem  - Runs the full regression battery (100 scenarios, 26 min
 rem    on the development laptop, a Lenovo Legion Pro 7)
 rem  - Exits non-zero if any scenario FAILed; do NOT tag/push/release in
 rem    that case
@@ -20,7 +20,7 @@ rem      and orphan the regression script's stdin pipe).
 rem    - sudo/gsudo NOT used here (caller is responsible for elevation).
 rem
 rem  Exit codes:
-rem    0  All 99 scenarios PASSED. Safe to tag/push/release.
+rem    0  All 100 scenarios PASSED. Safe to tag/push/release.
 rem    1  At least one scenario FAILED. Do NOT release.
 rem    2  Build failed. Fix before re-running.
 rem ====================================================================
@@ -136,7 +136,7 @@ echo       BUILD OK
 echo.
 
 rem 3. Run the full regression battery
-echo [2/3] Running regression battery (99 scenarios)...
+echo [2/3] Running regression battery (100 scenarios)...
 echo.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "test\regression\regression_battery.ps1" -StopOnFailure
 set BATTERY_EXIT=%ERRORLEVEL%
@@ -154,7 +154,7 @@ if %BATTERY_EXIT% neq 0 (
 echo [3/3] Validation complete.
 echo.
 echo ====================================================================
-echo  [PASS] 99/99 scenarios passed. Safe to:
+echo  [PASS] 100/100 scenarios passed. Safe to:
 echo         git tag vX.Y.Z
 echo         git push origin master vX.Y.Z
 echo         gh release create vX.Y.Z ...
