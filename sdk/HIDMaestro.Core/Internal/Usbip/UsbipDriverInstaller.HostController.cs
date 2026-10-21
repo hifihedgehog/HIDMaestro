@@ -116,7 +116,7 @@ internal static partial class UsbipDriverInstaller
     private static bool FinishInterruptedInstall(TransportWork work, string instance, string token)
     {
         work.Report($"Finishing the USB audio transport install (usbip-win2 {Version} host controller)...");
-        DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: {instance} is HIDMaestro's and has no driver; installing it again.");
+        DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: {instance} is HIDMaestro's and has no driver, so the driver install runs again.");
         var known = UsbipInstallRecord.Read();
         var record = known != null && string.Equals(known.Instance, instance, StringComparison.OrdinalIgnoreCase) && known.Token == token
             ? known
