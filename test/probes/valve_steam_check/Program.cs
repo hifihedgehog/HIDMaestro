@@ -198,9 +198,10 @@ static class ValveSteamCheck
     static int Main(string[] args)
     {
         if (args.Length == 2 && args[0] == "record-switch-pro") return RecordSwitchPro(args[1]);
+        if (args.Length == 1 && args[0] == "pairs") return Checks(pairs: true);
         if (args.Length != 0)
         {
-            Console.WriteLine("usage: ValveSteamCheck [record-switch-pro <out dir>]");
+            Console.WriteLine("usage: ValveSteamCheck [pairs | record-switch-pro <out dir>]");
             return 1;
         }
         return Checks();
@@ -226,10 +227,28 @@ static class ValveSteamCheck
         public string UsbId = "";
         public List<string> Paths = new();
         public readonly List<(byte Id, int Len)> Written = new();
+        /// <summary>Every write in full: the report id, then the data.</summary>
+        public readonly List<byte[]> Payloads = new();
         public string? Error;
     }
 
-    static int Checks()
+    /// <summary>The settings of one SET_SETTINGS_VALUES write, as Valve's
+    /// ControllerSetting records (settingNum u8, settingValue u16-LE, SDL's
+    /// controller_structs.h). The message id is the report id on a channel
+    /// without report ids (Deck, 2015) and the first data byte on Triton's.
+    /// The length byte follows it.</summary>
+    static List<(byte Num, ushort Value)> Settings(byte[] w)
+    {
+        var list = new List<(byte, ushort)>();
+        int msgAt = w.Length > 1 && w[1] == ID_SET_SETTINGS_VALUES ? 1 : 0;
+        if (w[msgAt] != ID_SET_SETTINGS_VALUES || w.Length < msgAt + 2) return list;
+        int len = w[msgAt + 1];
+        for (int at = msgAt + 2; at + 3 <= w.Length && at + 3 <= msgAt + 2 + len; at += 3)
+            list.Add((w[at], (ushort)(w[at + 1] | (w[at + 2] << 8))));
+        return list;
+    }
+
+    static int Checks(bool pairs = false)
     {
         string? root = SteamRoot();
         if (root == null)
@@ -249,12 +268,12 @@ static class ValveSteamCheck
         // The config-set name is Steam's own per-model classification, and
         // it is the assertion that separates "some Valve device" from "this
         // Valve device".
-        var cases = new[]
-        {
-            new Persona { Id = "steam-deck-composite",       Pid = "1205", Product = "Steam Controller", ConfigSet = "configset_controller_neptune.vdf",                Model = "neptune" },
-            new Persona { Id = "steam-controller-composite", Pid = "1102", Product = "Wired Controller", ConfigSet = "configset_controller_steamcontroller_gordon.vdf", Model = "steamcontroller_gordon" },
-            new Persona { Id = "steam-controller-2",         Pid = "1302", Product = "Steam Controller", ConfigSet = "configset_controller_triton.vdf",                 Model = "triton" },
-        };
+        Persona Deck() => new Persona { Id = "steam-deck-composite",       Pid = "1205", Product = "Steam Controller", ConfigSet = "configset_controller_neptune.vdf",                Model = "neptune" };
+        Persona Gordon() => new Persona { Id = "steam-controller-composite", Pid = "1102", Product = "Wired Controller", ConfigSet = "configset_controller_steamcontroller_gordon.vdf", Model = "steamcontroller_gordon" };
+        Persona Triton() => new Persona { Id = "steam-controller-2",         Pid = "1302", Product = "Steam Controller", ConfigSet = "configset_controller_triton.vdf",                 Model = "triton" };
+        var cases = pairs
+            ? new[] { Deck(), Deck(), Triton(), Triton() }
+            : new[] { Deck(), Gordon(), Triton() };
 
         var clock = Stopwatch.StartNew();
         try
@@ -280,8 +299,13 @@ static class ValveSteamCheck
                     // [message][length][parameters], so byte 0 of the
                     // payload is the message id.
                     var written = t.Written;
+                    var payloads = t.Payloads;
                     c.OutputReceived += (_, pkt) =>
                     {
+                        var full = new byte[pkt.Data.Length + 1];
+                        full[0] = pkt.ReportId;
+                        pkt.Data.Span.CopyTo(full.AsSpan(1));
+                        lock (payloads) payloads.Add(full);
                         // Where the message id sits depends on whether the
                         // device's feature channel carries report ids at
                         // all, the same split FeatureStubTable.MessageByte
@@ -306,6 +330,13 @@ static class ValveSteamCheck
                         if (own.Contains("Steam controller device opened", StringComparison.Ordinal)) { t.OpenedAt = clock.ElapsedMilliseconds; break; }
                         Thread.Sleep(100);
                     }
+                    // A pair's second unit is created once Steam has named
+                    // the first one's config set, so each set lands in its
+                    // own device's block.
+                    var named = Stopwatch.StartNew();
+                    while (pairs && t.OpenedAt >= 0 && named.ElapsedMilliseconds < 30_000
+                           && !SteamDeviceLog.Own(SteamDeviceLog.Read(log, t.Baseline), t.Paths).Contains("configset_", StringComparison.Ordinal))
+                        Thread.Sleep(200);
                 }
                 catch (Exception ex) { t.Error = ex.Message; }
             }
@@ -384,6 +415,21 @@ static class ValveSteamCheck
                 foreach (var w in cmds) kinds.Add(NameMessage(w.Id));
                 Console.WriteLine($"     Steam wrote {cmds.Count} command(s): "
                                   + (kinds.Count > 0 ? string.Join(", ", kinds) : "none"));
+                Console.WriteLine($"     TRIGGER_HAPTIC_PULSE writes: {cmds.Count(w => w.Id == ID_TRIGGER_HAPTIC_PULSE)}");
+                List<byte[]> all;
+                lock (t.Payloads) all = new List<byte[]>(t.Payloads);
+                var seenSettings = new HashSet<string>();
+                foreach (var w in all)
+                {
+                    var s = Settings(w);
+                    if (s.Count == 0) continue;
+                    string line = string.Join(" ", s.Select(x => $"{x.Num:X2}={x.Value:X4}"));
+                    if (seenSettings.Add(line)) Console.WriteLine($"     SET_SETTINGS_VALUES {line}");
+                }
+                foreach (var l in own.Split('\n'))
+                    if (l.Contains("configset_", StringComparison.Ordinal) || l.Contains("unit serial", StringComparison.Ordinal)
+                        || l.Contains("serial_number", StringComparison.Ordinal))
+                        Console.WriteLine($"     log: {l.Trim()}");
 
                 Check("Steam drives the device over Valve's command channel",
                       cmds.Count > 0, $"{cmds.Count} writes");

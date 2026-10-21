@@ -57,6 +57,14 @@ static class ValveSdlCheck
     [DllImport(SDL)] static extern bool SDL_GetGamepadButton(IntPtr gp, int button);
     [DllImport(SDL)] static extern bool SDL_GamepadHasCapSense(IntPtr gp, int type);
     [DllImport(SDL)] static extern bool SDL_GetGamepadCapSense(IntPtr gp, int type);
+    [DllImport(SDL)] static extern unsafe bool SDL_PollEvent(byte* ev);
+    [DllImport(SDL)] static extern uint SDL_GetGamepadID(IntPtr gp);
+    [DllImport(SDL)] static extern ulong SDL_GetTicksNS();
+
+    // SDL_EVENT_GAMEPAD_SENSOR_UPDATE (SDL_events.h: SDL_EVENT_GAMEPAD_AXIS_MOTION
+    // 0x650 and the ninth after it) and SDL_GamepadSensorEvent's layout:
+    // which at 16, sensor at 20, data[3] at 24, sensor_timestamp at 40.
+    const uint EV_GAMEPAD_SENSOR_UPDATE = 0x659;
 
     // SDL_GamepadButton (SDL_gamepad.h:156-177) and SDL_GamepadCapSenseType
     // (:243-251).
@@ -184,7 +192,7 @@ static class ValveSdlCheck
         return System.IO.File.Exists(local) ? local : null;
     }
 
-    static int Main()
+    static int Main(string[] args)
     {
         string? dll = FindStockSdl();
         if (dll == null)
@@ -229,6 +237,20 @@ static class ValveSdlCheck
             ("steam-controller-composite", 0x28DE, 0x1102, 0.25f),
             ("steam-controller-2",         0x28DE, 0x1302, 0.10f),
         };
+
+        if (args.Length > 0 && (args[0] == "cadence" || args[0] == "motion"))
+        {
+            int seconds = args.Length > 1 ? int.Parse(args[1]) : 10;
+            string? only = args.Length > 2 ? args[2] : null;
+            foreach (var t in cases)
+            {
+                if (only != null && t.Id != only) continue;
+                if (args[0] == "cadence") Cadence(ctx, t.Id, t.Vid, t.Pid, seconds);
+                else Motion(ctx, t.Id, t.Vid, t.Pid);
+            }
+            SDL_Quit();
+            return s_fail == 0 ? 0 : 1;
+        }
 
         foreach (var t in cases)
         {
@@ -435,5 +457,163 @@ static class ValveSdlCheck
             ? "=== STOCK SDL READS ALL THREE VALVE PERSONAS ==="
             : $"=== {s_fail} check(s) FAILED ===");
         return s_fail == 0 ? 0 : 1;
+    }
+
+    /// <summary>Create one persona, wait for stock SDL to list it and turn
+    /// its sensors on. Null when SDL never lists it.</summary>
+    static (HMController C, IntPtr Gp)? Open(HMContext ctx, string id, ushort vid, ushort pid)
+    {
+        var prof = ctx.GetProfile(id)!;
+        var present = JoystickIds();
+        var c = ctx.CreateController(prof);
+        IntPtr gp = WaitForGamepad(vid, pid, 60, present);
+        if (gp == IntPtr.Zero)
+        {
+            Check($"{id}: stock SDL enumerates the persona", false);
+            c.Dispose();
+            return null;
+        }
+        SDL_SetGamepadSensorEnabled(gp, SENSOR_GYRO, true);
+        SDL_SetGamepadSensorEnabled(gp, SENSOR_ACCEL, true);
+        return (c, gp);
+    }
+
+    static void Close(HMController c, IntPtr gp, ushort vid, ushort pid)
+    {
+        SDL_CloseGamepad(gp);
+        c.Dispose();
+        var gone = System.Diagnostics.Stopwatch.StartNew();
+        do { SDL_UpdateGamepads(); }
+        while (Listed(vid, pid) && gone.ElapsedMilliseconds < 60_000 && Sleep10());
+    }
+
+    /// <summary>Issue #72 item 1: the calibrated motion fields, in SDL's
+    /// frame, read back through stock SDL. Distinct magnitudes on every axis
+    /// so a swapped or negated axis shows.</summary>
+    static void Motion(HMContext ctx, string id, ushort vid, ushort pid)
+    {
+        Console.WriteLine();
+        Console.WriteLine($"-- {id}: calibrated motion --");
+        if (Open(ctx, id, vid, pid) is not { } o) return;
+        var prof = ctx.GetProfile(id)!;
+        var (c, gp) = o;
+        try
+        {
+            float[] dps = { 30f, 90f, -60f };
+            float[] g = { 0.25f, 1.0f, -0.5f };
+            var st = new HMGamepadState
+            {
+                Axes = HMGamepadStateHelpers.StandardAxes(prof, 0.5f, 0.5f, 0.5f, 0.5f, 0.0f, 0.0f),
+                GyroDpsX = dps[0], GyroDpsY = dps[1], GyroDpsZ = dps[2],
+                AccelGX = g[0], AccelGY = g[1], AccelGZ = g[2],
+                TouchpadFinger0Active = true, TouchpadFinger0X = 960, TouchpadFinger0Y = 540,
+            };
+            var gy = new float[3];
+            var ac = new float[3];
+            bool Close3(float[] got, float[] want, float tol)
+                => Math.Abs(got[0] - want[0]) <= tol && Math.Abs(got[1] - want[1]) <= tol && Math.Abs(got[2] - want[2]) <= tol;
+            var wantGyro = Array.ConvertAll(dps, d => d * MathF.PI / 180f);
+            var wantAccel = Array.ConvertAll(g, v => v * 9.80665f);
+            Drive(c, st, () =>
+            {
+                SDL_GetGamepadSensorData(gp, SENSOR_GYRO, gy, 3);
+                SDL_GetGamepadSensorData(gp, SENSOR_ACCEL, ac, 3);
+                return Close3(gy, wantGyro, 0.01f) && Close3(ac, wantAccel, 0.02f);
+            });
+            SDL_GetGamepadSensorData(gp, SENSOR_GYRO, gy, 3);
+            SDL_GetGamepadSensorData(gp, SENSOR_ACCEL, ac, 3);
+            Check("SDL reads GyroDps (30, 90, -60) as that angular velocity",
+                  Close3(gy, wantGyro, 0.01f),
+                  $"got [{gy[0]:F4},{gy[1]:F4},{gy[2]:F4}] rad/s, want [{wantGyro[0]:F4},{wantGyro[1]:F4},{wantGyro[2]:F4}]");
+            Check("SDL reads AccelG (0.25, 1, -0.5) as that acceleration",
+                  Close3(ac, wantAccel, 0.02f),
+                  $"got [{ac[0]:F3},{ac[1]:F3},{ac[2]:F3}] m/s2, want [{wantAccel[0]:F3},{wantAccel[1]:F3},{wantAccel[2]:F3}]");
+            if (SDL_GetNumGamepadTouchpads(gp) > 0)
+            {
+                SDL_GetGamepadTouchpadFinger(gp, 0, 0, out bool down, out float x, out float y, out float p);
+                Console.WriteLine($"     touch 0: down={down} ({x:F3},{y:F3}) pressure={p:F4}");
+            }
+        }
+        finally { Close(c, gp, vid, pid); }
+    }
+
+    /// <summary>Issue #72 item 2. A constant motion vector submitted at
+    /// 1 kHz, 250 Hz and 125 Hz. SDL stamps each Deck and 2015 report with a
+    /// fixed interval, so the span of its sensor timestamps against the
+    /// wall-clock span of the same events is how much rotation SDL
+    /// integrates per unit of real rotation. 1.00 is right.</summary>
+    static unsafe void Cadence(HMContext ctx, string id, ushort vid, ushort pid, int seconds)
+    {
+        Console.WriteLine();
+        Console.WriteLine($"-- {id}: cadence, {seconds} s per rate --");
+        if (Open(ctx, id, vid, pid) is not { } o) return;
+        var prof = ctx.GetProfile(id)!;
+        var (c, gp) = o;
+        uint jid = SDL_GetGamepadID(gp);
+        byte* ev = stackalloc byte[256];
+        try
+        {
+            var st = new HMGamepadState
+            {
+                Axes = HMGamepadStateHelpers.StandardAxes(prof, 0.5f, 0.5f, 0.5f, 0.5f, 0.0f, 0.0f),
+                GyroYaw = 4096, AccelY = 8192, GyroDpsY = 90f, AccelGY = 1f,
+            };
+            foreach (int hz in new[] { 1000, 250, 125 })
+            {
+                long period = System.Diagnostics.Stopwatch.Frequency / hz;
+                int submits = 0;
+                var stop = new ManualResetEventSlim();
+                var submitter = new Thread(() =>
+                {
+                    long next = System.Diagnostics.Stopwatch.GetTimestamp();
+                    while (!stop.IsSet)
+                    {
+                        c.SubmitState(st);
+                        submits++;
+                        next += period;
+                        while (System.Diagnostics.Stopwatch.GetTimestamp() < next) Thread.SpinWait(20);
+                    }
+                }) { IsBackground = true, Priority = ThreadPriority.Highest };
+                submitter.Start();
+                // One second to settle, then drain what SDL holds from it.
+                var settle = System.Diagnostics.Stopwatch.StartNew();
+                while (settle.ElapsedMilliseconds < 1000) { while (SDL_PollEvent(ev)) { } Thread.SpinWait(200); }
+                var sensorTs = new List<ulong>();
+                var wallTs = new List<ulong>();
+                float lastY = 0;
+                var window = System.Diagnostics.Stopwatch.StartNew();
+                int submitsAtStart = submits;
+                while (window.ElapsedMilliseconds < seconds * 1000L)
+                {
+                    while (SDL_PollEvent(ev))
+                    {
+                        if (*(uint*)ev != EV_GAMEPAD_SENSOR_UPDATE) continue;
+                        if (*(uint*)(ev + 16) != jid || *(int*)(ev + 20) != SENSOR_GYRO) continue;
+                        wallTs.Add(*(ulong*)(ev + 8));
+                        sensorTs.Add(*(ulong*)(ev + 40));
+                        lastY = *(float*)(ev + 28);
+                    }
+                    Thread.SpinWait(200);
+                }
+                int submitted = submits - submitsAtStart;
+                stop.Set();
+                submitter.Join();
+                if (sensorTs.Count < 2)
+                {
+                    Console.WriteLine($"  {hz,5} Hz submits: {sensorTs.Count} gyro event(s)");
+                    continue;
+                }
+                double sensorSpan = (sensorTs[^1] - sensorTs[0]) / 1e9;
+                double wallSpan = (wallTs[^1] - wallTs[0]) / 1e9;
+                var gaps = new List<double>();
+                for (int i = 1; i < wallTs.Count; i++) gaps.Add((wallTs[i] - wallTs[i - 1]) / 1e6);
+                gaps.Sort();
+                Console.WriteLine($"  {hz,5} Hz submits ({submitted} in {seconds} s): {sensorTs.Count} gyro events, "
+                    + $"{(sensorTs.Count - 1) / wallSpan:F1}/s, sensor time {sensorSpan:F3} s over wall {wallSpan:F3} s = "
+                    + $"{sensorSpan / wallSpan:F3}x, gap p50 {gaps[gaps.Count / 2]:F2} ms p95 {gaps[(int)(gaps.Count * 0.95)]:F2} ms, "
+                    + $"last gyro y {lastY:F4}");
+            }
+        }
+        finally { Close(c, gp, vid, pid); }
     }
 }
