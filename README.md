@@ -293,9 +293,9 @@ As of 2.0.1 HIDMaestro removes itself from a computer: every virtual controller 
 HIDMaestroUninstall [--preview] [--yes] [--include-usbip] [--json]
 ```
 
-A program that embeds HIDMaestro does the same with `HMUninstall.Preview()` and `HMUninstall.Run()`, from its own uninstaller or a settings button. The driver is shared by every HIDMaestro program on the machine, so a removal refuses while another one runs and lists it, and the others install the driver again at their next `InstallDriver` or create. usbip-win2's root-hub filter always stays, since removing it restarts every USB root hub, and so does usbip-win2 itself unless HIDMaestro installed it or `--include-usbip` asks. [What is removed and what stays](docs/UNINSTALL.md).
+A program that embeds HIDMaestro does the same with `HMUninstall.Preview()` and `HMUninstall.Run()`, from its own uninstaller or a settings button. The driver is shared by every HIDMaestro program on the machine, so a removal refuses while another one runs and lists it, stops when one starts during it, and the others install the driver again at their next `InstallDriver` or create. usbip-win2's host controller goes when HIDMaestro's install record shows HIDMaestro installed it and nothing else uses it, and `--include-usbip` also takes what usbip-win2's own installer left. Its root-hub filter always stays, since removing it restarts every USB root hub. Files in each account's `%TEMP%` and `%ProgramData%` are deleted from the profile or `%ProgramData%` down without following a link. [What is removed and what stays](docs/UNINSTALL.md).
 
-Battery scenario S101 checks that a preview changes nothing, and removes HIDMaestro inside Windows Sandbox and checks that nothing is left.
+Battery scenario S101 checks that a preview changes nothing, and removes HIDMaestro inside Windows Sandbox, a composite controller included, and checks that nothing but the items the report keeps is left, that planted junctions are not followed, and that a file in use waits for the next start only inside `%ProgramFiles%\HIDMaestro`.
 
 ---
 
