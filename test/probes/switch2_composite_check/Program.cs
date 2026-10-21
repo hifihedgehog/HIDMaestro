@@ -338,10 +338,14 @@ internal static partial class Program
     /// with no defect. The median's ceiling is 1.5 steps for the same
     /// reason: load only makes a report late, and a late tick moved the
     /// median past a tight bound (4.155 ms under a 1 ms submit load in
-    /// Windows Sandbox), while a clock on the wrong step, such as one report
-    /// every 8 ms, still puts it past 6 ms.</summary>
+    /// Windows Sandbox), while one report every 8 ms still puts it past
+    /// 6 ms. A step between, such as 5 ms, fails the 5th percentile's
+    /// ceiling of 4.15 ms. The grid holds, so a late tick shortens the gap
+    /// after it and load only lowers that percentile: 3.55 to 3.89 ms in
+    /// runs on the development laptop and the Celeron. A clock that wakes on
+    /// a 1 ms system timer puts it at most near 4.05 ms.</summary>
     static bool OnTheClock((double Mean, double Median, double P5, double P95, double Min, double Max) c)
-        => c.Median > 3.85 && c.Median < 6.0 && c.Mean > 3.96;
+        => c.Median > 3.85 && c.Median < 6.0 && c.Mean > 3.96 && c.P5 < 4.15;
 
     static string Describe((double Mean, double Median, double P5, double P95, double Min, double Max) c)
         => $"mean {c.Mean:F4} ms, median {c.Median:F3}, 5th to 95th percentile {c.P5:F3} to {c.P95:F3}, min {c.Min:F3}, max {c.Max:F3}";
