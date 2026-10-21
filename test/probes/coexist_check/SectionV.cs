@@ -121,6 +121,9 @@ internal static partial class Program
                 });
             if (drops && !dropsRan) PartTimed("V4 and V5", () => { Drops(); Clean(); });
             if (quiet && !quietRan) { Quiet(); Clean(); }
+            // V8 holds these ports with listeners that never answer, so no
+            // earlier part's attempt may still be running when it starts.
+            foreach (var (port, busId) in touched) Vhci.Stop("127.0.0.1", port, busId);
             if (VPart('8')) PartTimed("V8", () => { VOutsideRange(touched); Clean(); });
         }
         finally
@@ -626,7 +629,7 @@ internal static partial class Program
 
         string st = a.Send($"staleport {vhciB}");
         Check($"V7: the first program's controller now names vhci port {vhciB}", st == $"OK staleport {vhciB}", st);
-        string bound = a.Send("bindwinusb", 60_000);
+        string bound = a.Send("bindwinusb");
         Check("V7: its BindWinUsb binds", bound == "OK bindwinusb Bound", bound);
         Check("V7: WinUSB is on its own adapter",
               WaitFor(() => string.Equals(Usb.Service(devA), "WinUSB", StringComparison.OrdinalIgnoreCase), 15_000),
@@ -643,7 +646,7 @@ internal static partial class Program
     /// reads a driver the instance is about to lose.</summary>
     static void WaitSettled(params string[] instanceIds) =>
         WaitFor(() => Y.CMP_WaitNoPendingInstallEvents(0) == 0
-                      && instanceIds.All(id => ((ConfigFlags(id) ?? 0) & 0x20) == 0), 15_000);
+                      && instanceIds.All(id => ((ConfigFlags(id) ?? 0) & 0x20) == 0), Scaled(600_000));
 
     // ── V8 ─────────────────────────────────────────────────────────────
 

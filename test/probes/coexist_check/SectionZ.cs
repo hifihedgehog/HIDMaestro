@@ -285,7 +285,8 @@ internal static partial class Program
 
             // The runner itself, given a program that hangs and leaves a
             // process holding its output: a 3 s timeout, the kill, up to 5 s
-            // for the exit and the read's own 5 s bound. A read with no bound
+            // for the exit and the read's own 5 s bound, each scaled as the
+            // peer scales them. A read with no bound
             // waits for that process, 40 s.
             string orphan = Path.Combine(dir, OrphanName + ".exe");
             File.Copy(planted, orphan);
@@ -299,7 +300,7 @@ internal static partial class Program
             Check("Z1: a process the planted program left holds its output past the kill (positive control)",
                   held && ms3 >= 7000, r3);
             Check("Z1: the pnputil runner ends a program that hangs at its timeout and returns within its bounded read",
-                  Ok(r3) && ms3 >= 2500 && ms3 < 16_000, r3);
+                  Ok(r3) && ms3 >= Scaled(3000) - 500 && ms3 < Scaled(3000) + 2 * Scaled(5000) + 3000, r3);
         }
         finally
         {

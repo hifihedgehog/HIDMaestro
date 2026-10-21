@@ -1039,7 +1039,7 @@ internal static partial class Program
         }
         finally
         {
-            try { child?.Kill(); } catch { }
+            try { child?.Kill(entireProcessTree: true); } catch { }
         }
     }
 
@@ -1462,8 +1462,8 @@ internal static partial class Program
         bool before = StagingCataloged(dir);
         if (dir != null && !before)
         {
-            p.Send("builderstep SignDrivers", 180_000);
-            p.Send("builderstep GenerateCatalogs", 180_000);
+            p.Send("builderstep SignDrivers");
+            p.Send("builderstep GenerateCatalogs");
         }
         bool done = StagingCataloged(dir);
         Check($"{section}: the v1.12.0 program's staging carries its signed catalogs, as section E's install leaves it", done,

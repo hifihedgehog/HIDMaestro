@@ -31,6 +31,8 @@ internal sealed class HidCapture : IDisposable
     {
         IntPtr h = Native.CreateFileW(path, Native.GENERIC_READ, Native.FILE_SHARE_RW, IntPtr.Zero, Native.OPEN_EXISTING, 0, IntPtr.Zero);
         if (h == Native.INVALID) return null;
+        // Windows' default 32-report queue overflows when a loaded reader falls behind.
+        Native.HidD_SetNumInputBuffers(h, 512);
         if (!Native.HidD_GetPreparsedData(h, out IntPtr pp)) { Native.CloseHandle(h); return null; }
         var caps = new byte[64];
         int len = Native.HidP_GetCaps(pp, caps) == Native.HIDP_STATUS_SUCCESS ? BitConverter.ToUInt16(caps, 4) : 0;

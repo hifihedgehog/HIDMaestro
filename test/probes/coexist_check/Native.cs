@@ -26,6 +26,7 @@ internal static class Native
     [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] internal static extern bool HidD_GetAttributes(IntPtr h, ref HIDD_ATTRIBUTES a);
     [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] internal static extern bool HidD_GetPreparsedData(IntPtr h, out IntPtr pp);
     [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] internal static extern bool HidD_FreePreparsedData(IntPtr pp);
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] internal static extern bool HidD_SetNumInputBuffers(IntPtr h, uint n);
     [DllImport("hid.dll")] internal static extern int HidP_GetCaps(IntPtr pp, byte[] caps);
     [DllImport("hid.dll")]
     internal static extern int HidP_GetUsages(int reportType, ushort usagePage, ushort collection,

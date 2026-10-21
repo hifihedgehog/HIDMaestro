@@ -147,7 +147,10 @@ internal static partial class Program
             var (controlPort, controlBus) = locations[1];
             if (allGone)
             {
-                int control = Vhci.Stop("127.0.0.1", controlPort, controlBus);
+                // The driver registers the attempt after the import is gone and
+                // the device is plugged out, so poll for it.
+                int control = 0;
+                WaitFor(() => (control += Vhci.Stop("127.0.0.1", controlPort, controlBus)) >= 1, Scaled(60_000));
                 Check($"X7 ({label}): the driver started a re-attach attempt for a killed program ({controlPort}/{controlBus})",
                       control >= 1, $"{control} canceled by the probe");
             }
