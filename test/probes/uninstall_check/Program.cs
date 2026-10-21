@@ -18,8 +18,10 @@
 //            Programs that start while the tool removes HIDMaestro, one
 //            installing and one creating from two threads, wait at the gate
 //            while the probe holds the removal at the deploy lock, do not
-//            block it, and then install again and keep their controllers. A
-//            running program that only set an OEM name override blocks a
+//            block it, claim and install nothing until the removal's lock
+//            goes, and then install again and keep their controllers. A
+//            running program that only set an OEM name override, registered
+//            the OpenVR driver or installed the USB/IP transport blocks a
 //            removal. A junction at
 //            %ProgramData%\HIDMaestro goes as a link with its target intact,
 //            and usbip-win2's link on the all-users desktop is removed.
@@ -236,8 +238,13 @@ internal static class Program
         }
         check($"{p}: no HIDMaestro driver package is left", after.Packages.Count == 0 || KeptPackages(report, after),
               string.Join(", ", after.Packages));
-        check($"{p}: the certificate is gone from My, Root and TrustedPublisher", after.Certificates.Count == 0,
-              string.Join(", ", after.Certificates));
+        // A certificate counts as kept only when the report keeps it, in that
+        // store, with a reason.
+        var certsUnexplained = after.Certificates.Where(c => !report.Entries.Any(e => e.Outcome == "Kept" && !string.IsNullOrEmpty(e.Reason)
+            && e.Kind == "certificate" && e.Location.Equals($@"LocalMachine\{c}", StringComparison.OrdinalIgnoreCase))).ToList();
+        check($"{p}: the certificate is gone from My, Root and TrustedPublisher", certsUnexplained.Count == 0,
+              after.Certificates.Count == 0 ? "" : $"kept, with the reason in the report: {string.Join(", ", after.Certificates.Except(certsUnexplained))}" +
+              (certsUnexplained.Count > 0 ? $"; left with no reason: {string.Join(", ", certsUnexplained)}" : ""));
         foreach (string key in Inventory.WatchedKeys.Take(5).Concat(Inventory.WatchedKeys.Skip(6).Take(2)))
         {
             bool kept = report.Entries.Any(e => e.Outcome == "Kept" && e.Location.Equals(key, StringComparison.OrdinalIgnoreCase));
@@ -865,17 +872,26 @@ internal static class Program
                 catch { }
             }));
         string lockName = AdminName("Uninstall");
-        // Whether the removal's lock is free now, read without waiting.
+        // Whether the removal's lock is free now, read without waiting. The
+        // read takes the lock for a moment, so the late programs' reads go
+        // one at a time under a probe-only mutex: a read never sees another
+        // read's hold, and "held" means the removal holds it.
         string LockState()
         {
-            if (!Mutex.TryOpenExisting(lockName, out var mx)) return "free";
-            using (mx)
+            using var reads = new Mutex(false, "HIDMaestroUninstallCheck.LockRead");
+            try { reads.WaitOne(); } catch (AbandonedMutexException) { }
+            try
             {
-                bool free;
-                try { free = mx.WaitOne(0); } catch (AbandonedMutexException) { free = true; }
-                if (free) mx.ReleaseMutex();
-                return free ? "free" : "held";
+                if (!Mutex.TryOpenExisting(lockName, out var mx)) return "free";
+                using (mx)
+                {
+                    bool free;
+                    try { free = mx.WaitOne(0); } catch (AbandonedMutexException) { free = true; }
+                    if (free) mx.ReleaseMutex();
+                    return free ? "free" : "held";
+                }
             }
+            finally { reads.ReleaseMutex(); }
         }
         try
         {
