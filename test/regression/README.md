@@ -66,9 +66,9 @@ command, and the test app's exit after quit get 3600 s, S71 6300 s and S73
 still running then fails its scenario as a hang, with the probe's
 transcript, and its process tree is stopped.
 
-Total wall time: 26 minutes for all 100
+Total wall time: 33 minutes for all 100
 scenarios, every section and check, on the development laptop, a 16-core
-Lenovo Legion Pro 7, and 38 minutes on a 4-core Celeron J4125 at
+Lenovo Legion Pro 7, and 39 minutes on a 4-core Celeron J4125 at
 `HIDMAESTRO_TIMEOUT_SCALE=2`. Use `-Filter` to run one scenario when
 iterating.
 
@@ -135,9 +135,9 @@ not run elevated.
 | `S49_Sony_Extra_Buttons`          | Sony extra-button wire placement | Mic mute (0x04) and the Edge paddles and Fn buttons (0x10-0x80) stay where they belong. |
 | `S50_Vr_Controller_Smoke`         | The OpenVR controller subsystem, live SteamVR | IPC protocol parity between the C# and C++ mirrors, driver registration, enumeration, hand roles, haptics. |
 | `S51_Valve_Personas`              | Valve persona descriptors, no device | Descriptor sets, endpoints, declared report ids and the feature stubs Steam interrogates. |
-| `S52_Valve_Wire`                  | Valve personas emitting input | Each persona still puts correct frames on the wire, reports at its declared idle cadence, and carries only a raw consumer's own frames. |
-| `S53_Valve_Sdl`                   | Stock SDL reading a Valve persona | Enumeration, the Valve driver binding, sticks, triggers and buttons. |
-| `S54_Valve_Steam`                 | The Steam client claiming a Valve persona | Steam claims it, classifies it as the right model, and keeps it. |
+| `S52_Valve_Wire`                  | Valve personas emitting input | Each persona puts correct frames on the wire, its sticks, triggers, trackpads, pad pressures, calibrated motion and trigger bits, reports at its declared cadence, and carries only a raw consumer's own frames. |
+| `S53_Valve_Sdl`                   | Stock SDL reading a Valve persona | Enumeration, the Valve driver binding, sticks, triggers, rear buttons, trackpads, pad pressure, touch sensors and calibrated motion, and under 1 kHz, 250 Hz and 125 Hz submits the sensor time SDL credits each report matches the wall time between reports. |
+| `S54_Valve_Steam`                 | The Steam client claiming a Valve persona | Steam claims it, classifies it as the right model, and keeps it. A second Deck and a second 2026 controller each get their own config set, and Steam drives the Deck's haptics. |
 | `S55_Valve_Multi`                 | Three Valve models at once, and two of one | Personas coexist, and the per-instance identity holds. |
 | `S56_Valve_Raw_Path`              | The Triton raw path | Frames land on the declared report id instead of falling back to the lizard-mode layout. |
 | `S57_Xusb_Wgi_Single`             | One XUSB pad through WGI | The tripwire admits exactly one WGI Gamepad for a single XUSB controller. In thirty quick create-and-dispose cycles under one identity key, no XInput slot reads connected again after Dispose returns. |
