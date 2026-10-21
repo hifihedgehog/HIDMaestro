@@ -16,7 +16,10 @@ internal enum ClockOrigin : byte
     InputOpened,
 }
 
-/// <summary>What a device clock does about a tick it could not use.</summary>
+/// <summary>What a device clock does about a tick it could not use. Under
+/// Owe and NextPoll a tick that comes late skips the grid points it missed
+/// rather than running them in a burst (<see cref="DeviceClock{TTick}.NextDue"/>),
+/// and the grid stays where it was.</summary>
 internal enum MissedTick : byte
 {
     /// <summary>The grid holds. A tick that finds no read waiting leaves one
@@ -25,9 +28,8 @@ internal enum MissedTick : byte
     Owe,
     /// <summary>The grid holds. A tick that finds no read waiting sends
     /// nothing, and a read waits for the next tick. The first tick of a run is
-    /// the next grid point. A tick that comes late skips the grid points it
-    /// missed rather than sending them in a burst, the rule of a device that
-    /// reports on its own clock (extendedReport.send "clock").</summary>
+    /// the next grid point. The rule of a device that reports on its own
+    /// clock (extendedReport.send "clock").</summary>
     NextPoll,
     /// <summary>The period restarts from a late tick, and from the consumer's
     /// own frame: the idle repeat's rule, a report again one period after the

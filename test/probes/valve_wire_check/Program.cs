@@ -204,23 +204,26 @@ static class Program
         return gaps[gaps.Count / 2];
     }
 
-    /// <summary>Frames the 1 kHz window skips first: the device's queue of
-    /// eight and the reports a reader's open finds waiting, which arrive
+    /// <summary>Frames a fast-submit window skips first: the device's queue
+    /// of eight and the reports a reader's open finds waiting, which arrive
     /// together and say nothing about the clock.</summary>
     const int FastSkipFrames = 16;
 
-    /// <summary>Frames the 1 kHz window measures the rate over: 1 s at a
-    /// 4 ms period, so a stall of the reader at either end moves the rate a
-    /// few percent at most.</summary>
-    const int FastRateFrames = 250;
+    /// <summary>Frames a fast-submit window measures the rate over: 2 s at a
+    /// 4 ms period, 4.5 s at 9 ms.</summary>
+    const int FastRateFrames = 500;
 
-    /// <summary>SubmitState once a millisecond on a spin-waited grid, as
-    /// valve_sdl_check's cadence mode submits, while a reader collects the
-    /// reports. The wire rate over the window must stay within a quarter of
-    /// the declared rate. Before issue #72 every submit went out, so the
-    /// rate was the submit rate: four times the Deck's and nine times the
-    /// 2015 controller's.</summary>
-    static void FastSubmitRate(HMController c, HMProfile prof, string path, int inLen, int idleMs)
+    /// <summary>SubmitState at <paramref name="hz"/> on a spin-waited grid,
+    /// as valve_sdl_check's cadence mode submits, while a reader collects the
+    /// reports. The wire rate over the window, the least-squares slope of the
+    /// reports' arrival times against their order, must stay within 5
+    /// percent of the declared rate. A stall of the reader moves a few
+    /// arrivals and the slope little, and load delays reports without
+    /// adding any. Before issue #72 every submit went out, so at 1 kHz the
+    /// rate was the submit rate, four times the Deck's and nine times the
+    /// 2015 controller's, and at 250 Hz the 2015 controller's was 2.25
+    /// times.</summary>
+    static void FastSubmitRate(HMController c, HMProfile prof, string path, int inLen, int idleMs, int hz)
     {
         var st = new HMGamepadState
         {
@@ -233,7 +236,7 @@ static class Program
         {
             try
             {
-                long period = System.Diagnostics.Stopwatch.Frequency / 1000;
+                long period = System.Diagnostics.Stopwatch.Frequency / hz;
                 long next = System.Diagnostics.Stopwatch.GetTimestamp();
                 while (!stop.IsSet)
                 {
@@ -250,18 +253,24 @@ static class Program
         try { got = Collect(path, inLen, l => l.Count >= FastSkipFrames + FastRateFrames); }
         finally { stop.Set(); submitter.Join(1000); }
         double declared = 1000.0 / idleMs;
+        string what = $"under {hz} Hz SubmitState the wire keeps the declared {declared:F1}/s";
         if (got.Count < FastSkipFrames + 2)
         {
-            Check($"under 1 kHz SubmitState the wire keeps the declared {declared:F0}/s", false, $"{got.Count} frames read");
+            Check(what, false, $"{got.Count} frames read");
             return;
         }
         var window = got.GetRange(FastSkipFrames, got.Count - FastSkipFrames);
+        int n = window.Count;
+        double mx = (n - 1) / 2.0, my = 0;
+        foreach (var r in window) my += r.T;
+        my /= n;
+        double sxy = 0, sxx = 0;
+        for (int i = 0; i < n; i++) { sxy += (i - mx) * (window[i].T - my); sxx += (i - mx) * (i - mx); }
+        double slopeMs = sxx > 0 ? sxy / sxx : 0;
+        double rate = slopeMs > 0 ? 1000.0 / slopeMs : double.MaxValue;
         double spanMs = window[^1].T - window[0].T;
-        double rate = spanMs > 0 ? (window.Count - 1) * 1000.0 / spanMs : double.MaxValue;
-        double gap = MedianGap(window);
-        Check($"under 1 kHz SubmitState the wire keeps the declared {declared:F0}/s",
-              window.Count >= FastRateFrames && rate <= 1.25 * declared && gap <= Math.Max(1.5 * idleMs, TickBoundMs),
-              $"{rate:F1}/s ({rate / declared:F2}x) over {window.Count} frames, median gap {gap:F2} ms, {submits} submits");
+        Check(what, n >= FastRateFrames && rate <= 1.05 * declared,
+              $"{rate:F1}/s ({rate / declared:F3}x) over {n} frames, first to last {(n - 1) * 1000.0 / spanMs:F1}/s, {submits} submits");
     }
 
     static short S16(byte[] f, int o) => (short)(f[o] | (f[o + 1] << 8));
@@ -597,12 +606,12 @@ static class Program
                       $"{idle.Count} frames, median gap {idleGap:F1} ms, declared {t.IdleMs} ms");
 
                 // Issue #72 item 2. A consumer that submits every
-                // millisecond does not speed the device up: the persona
-                // reports on its own clock, one report a period, carrying
-                // the latest state. Load only delays reports, so the upper
-                // bound holds on a loaded machine, and the median gap is
-                // held to the idle check's bound.
-                FastSubmitRate(c, prof, path, inLen, t.IdleMs);
+                // millisecond, or every 4 ms, does not speed the device up:
+                // the persona reports on its own clock, one report a period,
+                // carrying the latest state. Load only delays reports, so
+                // the upper bound holds on a loaded machine.
+                FastSubmitRate(c, prof, path, inLen, t.IdleMs, 1000);
+                FastSubmitRate(c, prof, path, inLen, t.IdleMs, 250);
 
                 // A raw consumer is the only source on the wire. PadForge
                 // feeds Valve personas only through SubmitRawReport, so an

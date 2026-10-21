@@ -836,6 +836,10 @@ public sealed partial class HMController : IDisposable
     /// <c>idleFrameIntervalMs</c>, as the real device does. On it this call
     /// stores the state and sends nothing: the next report carries it,
     /// encoded then, so the device's packet counter advances once a report.
+    /// An accumulating sensor timestamp (the 2026 Steam Controller's) advances
+    /// once a report while <see cref="HMGamepadState.SensorTimestamp"/> is 0,
+    /// on the SDK's own clock, and once per new consumer stamp otherwise: a
+    /// report that carries a stamp already counted repeats the field.
     /// A state that a later call replaces before that report never goes
     /// out. The report rate is the device's whatever rate this is called
     /// at, and the state reaches the wire up to one period later, half a
@@ -1552,7 +1556,10 @@ public sealed partial class HMController : IDisposable
     /// report can hold is sent as several reports. Thread-safe. On a
     /// keyboard or mouse profile it returns once the previous report has
     /// been delivered, which takes well under a millisecond while Windows
-    /// is reading the device.</summary>
+    /// is reading the device. On a profile whose state report goes out on
+    /// its own clock (<c>extendedReport.send</c> <c>"clock"</c>) the mouse
+    /// report still goes out at once: the clock carries only the state
+    /// report.</summary>
     /// <exception cref="InvalidOperationException">The profile's descriptor
     /// declares no mouse collection.</exception>
     public void SubmitMouse(in HMMouseState state)
@@ -1574,7 +1581,9 @@ public sealed partial class HMController : IDisposable
     /// <summary>Send one keyboard report: the modifiers and up to as many
     /// keys as the profile's keyboard report holds, all held down. Send
     /// another report without a key to release it. More keys than the
-    /// report holds report ErrorRollOver, as a real keyboard does.</summary>
+    /// report holds report ErrorRollOver, as a real keyboard does. On a
+    /// profile whose state report goes out on its own clock the keyboard
+    /// report still goes out at once.</summary>
     /// <exception cref="InvalidOperationException">The profile's descriptor
     /// declares no keyboard collection.</exception>
     public void SubmitKeyboard(HMKeyModifiers modifiers, ReadOnlySpan<HMKey> keys)
@@ -1591,7 +1600,9 @@ public sealed partial class HMController : IDisposable
 
     /// <summary>Send one consumer-control report with these usages held
     /// (HID Usage Tables, Consumer page: 0x00E9 Volume Increment, 0x00CD
-    /// Play/Pause and so on). Send an empty span to release them.</summary>
+    /// Play/Pause and so on). Send an empty span to release them. On a
+    /// profile whose state report goes out on its own clock the consumer
+    /// control report still goes out at once.</summary>
     /// <exception cref="InvalidOperationException">The profile's descriptor
     /// declares no consumer control collection.</exception>
     public void SubmitConsumer(ReadOnlySpan<ushort> usages)
