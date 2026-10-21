@@ -168,6 +168,8 @@ internal static class Program
         return s_failures == 0 ? 0 : 1;
     }
 
+    static readonly string SandboxIdFile = Path.Combine(Path.GetTempPath(), "HIDMaestro", "usbip_install_check.sandbox");
+
     static void RunInSandbox(string wsb, string publish, string scenario)
     {
         string results = Path.Combine(Path.GetTempPath(), $"HIDMaestro_sandbox_{scenario}_{Guid.NewGuid():N}");
@@ -182,10 +184,22 @@ internal static class Program
                 $"<MappedFolder><HostFolder>{Xml(publish)}</HostFolder><SandboxFolder>C:\\probe</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder>" +
                 $"<MappedFolder><HostFolder>{Xml(results)}</HostFolder><SandboxFolder>C:\\results</SandboxFolder><ReadOnly>false</ReadOnly></MappedFolder>" +
                 "</MappedFolders></Configuration>";
+            // Windows Sandbox runs one instance at a time, and a run killed
+            // before its finally leaves its sandbox running, so the next
+            // start fails CO_E_APPSINGLEUSE. Each run records the sandbox it
+            // started and stops the one an earlier run left, and no other.
+            if (File.Exists(SandboxIdFile))
+            {
+                string left = File.ReadAllText(SandboxIdFile).Trim();
+                if (left.Length > 0) Run(wsb, 120_000, "stop", "--id", left);
+                File.Delete(SandboxIdFile);
+            }
             var step = Stopwatch.StartNew();
             var started = Run(wsb, 120_000, "start", "--config", config, "--raw");
             id = JsonString(started.Output, "Id");
             if (id == null) { Check($"{scenario}: a sandbox starts", false, started.Output.Trim()); return; }
+            Directory.CreateDirectory(Path.GetDirectoryName(SandboxIdFile)!);
+            File.WriteAllText(SandboxIdFile, id);
             startS = step.Elapsed.TotalSeconds;
 
             // The first command can arrive before the sandbox has finished
@@ -227,6 +241,7 @@ internal static class Program
         {
             var stop = Stopwatch.StartNew();
             if (id != null) Run(wsb, 120_000, "stop", "--id", id);
+            try { File.Delete(SandboxIdFile); } catch { }
             // What Windows Sandbox itself takes, apart from the probe's run
             // inside it.
             Console.WriteLine(FormattableString.Invariant(
