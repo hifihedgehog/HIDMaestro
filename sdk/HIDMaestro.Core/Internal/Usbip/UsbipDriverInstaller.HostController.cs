@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -36,50 +37,58 @@ internal static partial class UsbipDriverInstaller
 
     /// <summary>Install the host controller on a machine where none is
     /// present: register a <c>ROOT\USB</c> devnode with usbip-win2's hardware
-    /// id and HIDMaestro's stamp, force the pinned package onto it, and
-    /// write the install record. The caller holds the transport lock and
-    /// found no present host controller.</summary>
+    /// id and HIDMaestro's stamp, mark it with HIDMaestro's owner token,
+    /// write the install record, and force the pinned package onto it. The
+    /// caller holds the transport lock and found no present host
+    /// controller.</summary>
     private static bool InstallHostController(TransportWork work)
     {
         work.Report($"Installing USB audio transport (usbip-win2 {Version} host controller)...");
 
         // The packages the driver store held before. A published name that
-        // is new after the install is one this install added, and only that
-        // one is the install record's to remove. A listing that fails throws
-        // here, before anything changes.
-        var before = new HashSet<string>(UdePackageNames(), StringComparer.OrdinalIgnoreCase);
+        // is new after the install is one this install added, and only such
+        // a package is the install record's to remove. A listing that fails
+        // throws here, before anything changes.
+        var before = UdePackageNames();
 
         string inf = StageUdePackage();
-        // The service key outlives a host controller removed without its
-        // package, and an earlier 0.9.7.5 install left KMDF's debug values in
-        // it. The driver reads them when it loads, which the forced install
-        // below does.
-        ClearStaleVerifier(new[] { ReadInfText(inf) }, "before the install");
-
-        string instance = RegisterHostController();
-        var record = new UsbipInstallRecord(instance, null, false, Version, DateTime.UtcNow, MachineClaims.SdkVersion);
+        var (instance, token) = RegisterHostController();
+        // Written before the driver install, so an install that is cut short
+        // leaves a record a later create finishes from and a removal takes.
+        var record = new UsbipInstallRecord(instance, token, null, false, before.ToArray(), Version, DateTime.UtcNow, MachineClaims.SdkVersion);
         UsbipInstallRecord.Write(record);
         DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: registered {instance}; installing the host controller driver.");
+        return FinishHostController(work, inf, record, rollBack: true);
+    }
+
+    /// <summary>Put the pinned package on the host controller HIDMaestro
+    /// registered, update the install record, and wait for the controller to
+    /// answer. A driver install that fails outright removes the devnode and
+    /// the record when <paramref name="rollBack"/> says this run registered
+    /// it. One that times out leaves both: a driver install still running
+    /// cannot be undone from here, and the next create finishes it
+    /// (<see cref="InstallLocked"/>).</summary>
+    private static bool FinishHostController(TransportWork work, string inf, UsbipInstallRecord record, bool rollBack)
+    {
+        // The service key outlives a host controller removed without its
+        // package, and may hold KMDF's debug values. The driver reads them
+        // when it loads, which the forced install below does.
+        ClearStaleVerifier(new[] { ReadInfText(inf) }, "before the install");
 
         var sw = Stopwatch.StartNew();
         try { RunForceDriver(inf); }
-        catch (TimeoutException)
+        catch (TimeoutException) { throw; }
+        catch when (rollBack)
         {
-            // The devnode stays, and so does the record that names it: a
-            // driver install still running cannot be undone from here, and a
-            // removal later finds both.
-            throw;
-        }
-        catch
-        {
-            UnregisterHostController(instance);
+            UnregisterHostController(record.Instance);
             UsbipInstallRecord.Delete();
             throw;
         }
 
-        string? oem = DriverInfPathOf(instance);
-        UsbipInstallRecord.Write(record with { OemInf = oem, PackageAdded = oem != null && !before.Contains(oem) });
-        DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: {instance} runs {oem ?? "an unknown package"} ({(oem != null && !before.Contains(oem) ? "added by this install" : "already in the driver store")}).");
+        string? oem = DriverInfPathOf(record.Instance);
+        bool added = oem != null && !record.PackagesBefore.Contains(oem, StringComparer.OrdinalIgnoreCase);
+        UsbipInstallRecord.Write(record with { OemInf = oem, PackageAdded = added });
+        DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: {record.Instance} runs {oem ?? "an unknown package"} ({(added ? "added by this install" : "already in the driver store")}).");
 
         while (sw.ElapsedMilliseconds < TimeoutScale.Apply(60_000))
         {
@@ -93,15 +102,51 @@ internal static partial class UsbipDriverInstaller
             Thread.Sleep(250);
         }
         throw new InvalidOperationException(
-            $"The usbip-win2 {Version} host controller ({instance}) was installed but did not answer within the timeout. " +
+            $"The usbip-win2 {Version} host controller ({record.Instance}) was installed but did not answer within the timeout. " +
             "Check Device Manager for 'USBip 3.X Emulated Host Controller'.");
     }
 
+    /// <summary>Finish the install of a present host controller HIDMaestro
+    /// registered that has no driver: an install a timeout or a killed
+    /// process cut short between the registration and the driver. A restart
+    /// cannot help a devnode with no driver, so the package goes on it again,
+    /// which is what devnode.exe install does after its registration
+    /// (main.cpp:276-283). Its record is completed, or written again from the
+    /// devnode's owner token when the process ended before it.</summary>
+    private static bool FinishInterruptedInstall(TransportWork work, string instance, string token)
+    {
+        work.Report($"Finishing the USB audio transport install (usbip-win2 {Version} host controller)...");
+        DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: {instance} is HIDMaestro's and has no driver; installing it again.");
+        var known = UsbipInstallRecord.Read();
+        var record = known != null && string.Equals(known.Instance, instance, StringComparison.OrdinalIgnoreCase) && known.Token == token
+            ? known
+            : new UsbipInstallRecord(instance, token, null, false, UdePackageNames().ToArray(), Version, DateTime.UtcNow, MachineClaims.SdkVersion);
+        UsbipInstallRecord.Write(record);
+        return FinishHostController(work, StageUdePackage(), record, rollBack: false);
+    }
+
+    /// <summary>The custom device property HIDMaestro writes on the host
+    /// controller it registers: a token its install record keeps too. Windows
+    /// deletes it with the devnode, so a host controller another installer
+    /// registers later, on the same instance id, does not carry it.</summary>
+    private static readonly DEVPROPKEY OwnerTokenKey =
+        new() { fmtid = new Guid("48494430-4d41-4553-5553-4249504f574e"), pid = 2 };
+
+    /// <summary>The owner token on a devnode, present or not, or null.</summary>
+    internal static string? OwnerTokenOf(string instanceId)
+    {
+        if (CM_Locate_DevNodeW(out uint devInst, instanceId, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS &&
+            CM_Locate_DevNodeW(out devInst, instanceId, CM_LOCATE_DEVNODE_PHANTOM) != CR_SUCCESS)
+            return null;
+        string? token = GetStringProperty(devInst, OwnerTokenKey);
+        return string.IsNullOrEmpty(token) ? null : token;
+    }
+
     /// <summary>Register the host controller's devnode, as devnode.exe does
-    /// (main.cpp:248-265), with HIDMaestro's stamp after usbip-win2's id, and
-    /// return its instance id. Under the PnP lock, as every devnode
-    /// registration of the SDK is.</summary>
-    private static string RegisterHostController()
+    /// (main.cpp:248-265), with HIDMaestro's stamp after usbip-win2's id and
+    /// HIDMaestro's owner token, and return its instance id and the token.
+    /// Under the PnP lock, as every devnode registration of the SDK is.</summary>
+    private static (string Instance, string Token) RegisterHostController()
     {
         using var pnp = DeviceManager.HoldPnpLock();
         Guid cls = UdeClassGuid;
@@ -123,18 +168,22 @@ internal static partial class UsbipDriverInstaller
             if (!SetupDiCallClassInstaller(DIF_REGISTERDEVICE, set, ref data))
                 throw new InvalidOperationException($"DIF_REGISTERDEVICE for the usbip-win2 host controller failed ({Marshal.GetLastWin32Error()}).");
 
+            string token = Guid.NewGuid().ToString("N");
+            byte[] value = System.Text.Encoding.Unicode.GetBytes(token + "\0");
             var buf = new char[512];
-            if (!SetupDiGetDeviceInstanceIdW(set, ref data, buf, (uint)buf.Length, out uint len) || len == 0)
-            {
-                int err = Marshal.GetLastWin32Error();
-                SetupDiCallClassInstaller(DIF_REMOVE, set, ref data);
-                throw new InvalidOperationException($"The registered host controller's instance id could not be read ({err}).");
-            }
-            return new string(buf, 0, (int)len - 1);
+            int err = 0;
+            var key = OwnerTokenKey;
+            if (!SetupDiSetDevicePropertyW(set, ref data, ref key, DEVPROP_TYPE_STRING, value, (uint)value.Length, 0))
+                err = Marshal.GetLastWin32Error();
+            else if (!SetupDiGetDeviceInstanceIdW(set, ref data, buf, (uint)buf.Length, out uint len) || len == 0)
+                err = Marshal.GetLastWin32Error();
+            else
+                return (new string(buf, 0, (int)len - 1), token);
+            SetupDiCallClassInstaller(DIF_REMOVE, set, ref data);
+            throw new InvalidOperationException($"The registered host controller could not be marked or named ({err}).");
         }
         finally { SetupDiDestroyDeviceInfoList(set); }
     }
-
     /// <summary>Remove a host controller devnode this install registered
     /// and could not put a driver on, as devnode.exe's rollback does
     /// (main.cpp:267-269). A devnode with no driver has nothing to stop, so
@@ -350,13 +399,14 @@ internal static partial class UsbipDriverInstaller
 
     // ── KMDF's debug values ──────────────────────────────────────────────
     //
-    // The 0.9.7.5 INF that SDK v1.9.0 and v1.9.1 installed writes
-    // HKR,Parameters\Wdf,VerboseOn and VerifierOn (research, extracted INF
-    // lines 77-78). 0.9.7.7 and 0.9.8.1 carry the same lines commented out
-    // (usbip2_ude.inf at v.0.9.8.1, lines 54-58). Nothing deletes a value an
-    // older INF wrote, so a machine moved from 0.9.7.5 keeps the KMDF
-    // verifier on for every later driver, read at each load. They are
-    // cleared once the driver in use is one whose INF does not write them.
+    // usbip-win2 0.9.7.5's INF writes HKR,Parameters\Wdf,VerboseOn and
+    // VerifierOn, each the DWORD 1 (extracted INF lines 77-78). 0.9.7.7 and
+    // 0.9.8.1 carry the same lines commented out (usbip2_ude.inf at
+    // v.0.9.8.1, lines 54-58). Nothing deletes a value an older INF wrote, so
+    // a machine that ever ran 0.9.7.5, from any installer, keeps the KMDF
+    // verifier on for every later driver, read at each load. The pair is
+    // deleted, only while each holds 1, once no driver in use has an INF that
+    // writes them. Nothing else under the key is touched.
 
     private static volatile bool s_verifierChecked;
 
@@ -391,7 +441,8 @@ internal static partial class UsbipDriverInstaller
         }
     }
 
-    /// <summary>The KMDF debug values the service key holds now.</summary>
+    /// <summary>The KMDF debug values the service key holds now, only the
+    /// ones set to 1, the value the 0.9.7.5 INF writes.</summary>
     internal static List<string> StaleVerifierValues()
     {
         var found = new List<string>();
@@ -400,27 +451,29 @@ internal static partial class UsbipDriverInstaller
             using var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(WdfParametersKey);
             if (k == null) return found;
             foreach (string v in WdfDebugValues)
-                if (k.GetValue(v) != null) found.Add(v);
+                if (k.GetValueKind(v) == Microsoft.Win32.RegistryValueKind.DWord && k.GetValue(v) is int one && one == 1) found.Add(v);
         }
         catch { }
         return found;
     }
 
-    /// <summary>Delete the KMDF debug values unless one of
-    /// <paramref name="infTexts"/> writes them. Returns the values
-    /// deleted.</summary>
+    /// <summary>Delete VerifierOn and VerboseOn under the service's
+    /// Parameters\Wdf, each only when it is the DWORD 1 the 0.9.7.5 INF
+    /// writes, and none when one of <paramref name="infTexts"/> writes them.
+    /// Returns the values deleted.</summary>
     internal static List<string> ClearStaleVerifier(IEnumerable<string> infTexts, string when)
     {
         var deleted = new List<string>();
         foreach (string text in infTexts)
             if (InfWritesWdfDebugValues(text)) return deleted;
+        var stale = StaleVerifierValues();
+        if (stale.Count == 0) return deleted;
         try
         {
             using var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(WdfParametersKey, writable: true);
             if (k == null) return deleted;
-            foreach (string v in WdfDebugValues)
+            foreach (string v in stale)
             {
-                if (k.GetValue(v) == null) continue;
                 k.DeleteValue(v, throwOnMissingValue: false);
                 deleted.Add(v);
             }
@@ -430,7 +483,7 @@ internal static partial class UsbipDriverInstaller
             DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: KMDF debug values not cleared: {ex.GetType().Name}: {ex.Message}");
         }
         if (deleted.Count > 0)
-            DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: cleared {string.Join(" and ", deleted)} under usbip2_ude's Parameters\\Wdf {when}; they take effect at the driver's next load.");
+            DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: deleted {string.Join(" and ", deleted.Select(v => v + "=1"))} under usbip2_ude's Parameters\\Wdf {when}; the driver reads them at its next load.");
         return deleted;
     }
 
@@ -481,26 +534,36 @@ internal static partial class UsbipDriverInstaller
     [LibraryImport("setupapi.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool SetupDiGetDeviceInstanceIdW(IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData, [Out] char[] DeviceInstanceId, uint DeviceInstanceIdSize, out uint RequiredSize);
+
+    [LibraryImport("setupapi.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiSetDevicePropertyW(IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData, ref DEVPROPKEY PropertyKey, uint PropertyType, byte[] PropertyBuffer, uint PropertyBufferSize, uint Flags);
 }
 
 /// <summary>What HIDMaestro installed of usbip-win2 on this machine:
 /// <c>HKLM\SOFTWARE\HIDMaestroUsbip</c>, written when the SDK registers a
-/// host controller and installs its driver. It sits outside
-/// <c>HKLM\SOFTWARE\HIDMaestro</c>, which the Everything cleanup deletes,
-/// because it answers a question a removal asks later: whether that host
-/// controller and package are HIDMaestro's to take away. A machine holds
-/// one record, of the last install.</summary>
+/// host controller, before its driver install, and completed after it. It
+/// sits outside <c>HKLM\SOFTWARE\HIDMaestro</c>, which the Everything
+/// cleanup deletes, because it answers a question a removal asks later:
+/// whether that host controller and package are HIDMaestro's to take away.
+/// A machine holds one record, of the last install.</summary>
 /// <param name="Instance">The host controller devnode the install
 /// registered (<c>ROOT\USB\000N</c>).</param>
+/// <param name="Token">The owner token the install wrote on that devnode
+/// (<see cref="UsbipDriverInstaller.OwnerTokenOf"/>). A devnode another
+/// installer registers later under the same instance id carries none.</param>
 /// <param name="OemInf">The published INF the devnode's driver came from,
 /// null until the driver install has returned.</param>
-/// <param name="PackageAdded">True when the install added that package to
-/// the driver store. False when the store held it before, as a vendor
-/// install of the same release leaves it.</param>
+/// <param name="PackageAdded">True when that package was not in the driver
+/// store before the install.</param>
+/// <param name="PackagesBefore">The usbip2_ude packages the driver store
+/// held before the install. A package not among them that the devnode runs
+/// is the install's.</param>
 /// <param name="Version">The usbip-win2 release installed.</param>
 /// <param name="InstalledUtc">When.</param>
 /// <param name="SdkVersion">The HIDMaestro version that installed it.</param>
-internal sealed record UsbipInstallRecord(string Instance, string? OemInf, bool PackageAdded, string Version, DateTime InstalledUtc, string SdkVersion)
+internal sealed record UsbipInstallRecord(string Instance, string? Token, string? OemInf, bool PackageAdded, string[] PackagesBefore,
+                                          string Version, DateTime InstalledUtc, string SdkVersion)
 {
     internal const string Key = @"SOFTWARE\HIDMaestroUsbip";
 
@@ -510,9 +573,12 @@ internal sealed record UsbipInstallRecord(string Instance, string? OemInf, bool 
         {
             using var k = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(Key);
             k.SetValue("Instance", r.Instance, Microsoft.Win32.RegistryValueKind.String);
+            if (r.Token != null) k.SetValue("Token", r.Token, Microsoft.Win32.RegistryValueKind.String);
+            else k.DeleteValue("Token", throwOnMissingValue: false);
             if (r.OemInf != null) k.SetValue("OemInf", r.OemInf, Microsoft.Win32.RegistryValueKind.String);
             else k.DeleteValue("OemInf", throwOnMissingValue: false);
             k.SetValue("PackageAdded", r.PackageAdded ? 1 : 0, Microsoft.Win32.RegistryValueKind.DWord);
+            k.SetValue("PackagesBefore", r.PackagesBefore, Microsoft.Win32.RegistryValueKind.MultiString);
             k.SetValue("Version", r.Version, Microsoft.Win32.RegistryValueKind.String);
             k.SetValue("InstalledUtc", r.InstalledUtc.ToString("o", System.Globalization.CultureInfo.InvariantCulture), Microsoft.Win32.RegistryValueKind.String);
             k.SetValue("SdkVersion", r.SdkVersion, Microsoft.Win32.RegistryValueKind.String);
@@ -535,8 +601,10 @@ internal sealed record UsbipInstallRecord(string Instance, string? OemInf, bool 
                 System.Globalization.DateTimeStyles.RoundtripKind, out DateTime when);
             return new UsbipInstallRecord(
                 instance,
+                k.GetValue("Token") as string,
                 k.GetValue("OemInf") as string,
                 k.GetValue("PackageAdded") is int added && added != 0,
+                k.GetValue("PackagesBefore") as string[] ?? Array.Empty<string>(),
                 k.GetValue("Version") as string ?? "",
                 when,
                 k.GetValue("SdkVersion") as string ?? "");
@@ -560,4 +628,20 @@ internal sealed record UsbipInstallRecord(string Instance, string? OemInf, bool 
         try { Microsoft.Win32.Registry.LocalMachine.DeleteSubKeyTree(Key, throwOnMissingSubKey: false); }
         catch (Exception ex) { DeviceOrchestrator.LogDiag($"UsbipInstallRecord: not deleted: {ex.GetType().Name}: {ex.Message}"); }
     }
+
+    /// <summary>After the SDK put a new driver on the host controller the
+    /// record names (the move to a newer pin), record the package it runs
+    /// now, so the install stays HIDMaestro's. Only when the devnode still
+    /// carries the record's token.</summary>
+    internal static void RefreshDriver()
+    {
+        var r = Read();
+        if (r?.Token == null || UsbipDriverInstaller.OwnerTokenOf(r.Instance) != r.Token) return;
+        string? oem = UsbipDriverInstaller.DriverInfPathOf(r.Instance);
+        if (oem == null || string.Equals(oem, r.OemInf, StringComparison.OrdinalIgnoreCase)) return;
+        bool added = !Array.Exists(r.PackagesBefore, p => string.Equals(p, oem, StringComparison.OrdinalIgnoreCase));
+        Write(r with { OemInf = oem, PackageAdded = added });
+        DeviceOrchestrator.LogDiag($"UsbipInstallRecord: {r.Instance} now runs {oem}.");
+    }
 }
+

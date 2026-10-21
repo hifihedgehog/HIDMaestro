@@ -1488,6 +1488,11 @@ public static partial class DeviceManager
     /// bounds.</summary>
     private static readonly object s_pnpGate = new();
 
+    /// <summary>True when the calling thread holds the PnP lock's in-process
+    /// gate, so a take of the lock from another thread would wait for
+    /// it.</summary>
+    internal static bool PnpGateHeldHere => Monitor.IsEntered(s_pnpGate);
+
     /// <summary>How often a thread queued on the gate looks at its bound.</summary>
     private const int GateSliceMs = 10;
 

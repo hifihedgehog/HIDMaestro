@@ -58,9 +58,21 @@ internal static partial class UsbipRemoval
 
     /// <summary>Remove usbip-win2's pieces as the class describes, or with
     /// <paramref name="preview"/> report what a removal would do and change
-    /// nothing.</summary>
+    /// nothing. A preview starts no process and writes nothing.
+    ///
+    /// <para>A removal runs on a thread of its own that takes the transport
+    /// lock and then, step by step, the PnP lock. The caller must hold
+    /// neither: that thread would wait for the caller, and the caller for
+    /// it.</para></summary>
+    /// <exception cref="InvalidOperationException">The calling thread holds
+    /// the PnP lock or runs transport work, and <paramref name="preview"/> is
+    /// false.</exception>
     internal static IReadOnlyList<UninstallEntry> Remove(bool preview, bool includeUnproven)
     {
+        if (!preview && DeviceManager.PnpGateHeldHere)
+            throw new InvalidOperationException("UsbipRemoval.Remove was called with the PnP lock held. Its own thread takes that lock, so the call would never return.");
+        if (!preview && UsbipDriverInstaller.TransportLockHeldHere)
+            throw new InvalidOperationException("UsbipRemoval.Remove was called from transport work, which holds the transport lock its own thread takes, so the call would never return.");
         var entries = new List<UninstallEntry>();
         try
         {
@@ -156,9 +168,10 @@ internal static partial class UsbipRemoval
                 continue;
             }
             if (preview) { entries.Add(new("devnode", where, UninstallOutcome.WouldRemove)); continue; }
-            string? failed = c.Present ? RemoveHostController(c.Id) : RemoveRecord(c.Id) ? null : "its record could not be removed";
-            entries.Add(new("devnode", where, failed == null ? UninstallOutcome.Removed : UninstallOutcome.Failed, failed));
-            if (failed != null && UsbipDriverInstaller.IsPresent(c.Id)) stayed.Add(c.Id);
+            var (outcome, reason) = c.Present ? RemoveHostController(c.Id)
+                : RemoveRecord(c.Id) ? (UninstallOutcome.Removed, null) : (UninstallOutcome.Failed, "its record could not be removed");
+            entries.Add(new("devnode", where, outcome, reason));
+            if (outcome != UninstallOutcome.Removed && UsbipDriverInstaller.IsPresent(c.Id)) stayed.Add(c.Id);
         }
 
         // The removed host controllers' root hubs keep a record of their own.
@@ -187,7 +200,7 @@ internal static partial class UsbipRemoval
                     inUse.Add(oem);
             foreach (string oem in packages)
             {
-                bool covered = take && (includeUnproven || (record!.PackageAdded && string.Equals(oem, record.OemInf, StringComparison.OrdinalIgnoreCase)));
+                bool covered = take && (includeUnproven || RecordCovers(record!, oem));
                 string where = $"{oem} ({UsbipDriverInstaller.ProductInf})";
                 if (!covered)
                 {
@@ -214,7 +227,7 @@ internal static partial class UsbipRemoval
         {
             bool nothingLeft = preview
                 ? take && stayed.Count == 0 && controllers.TrueForAll(c => targets.Exists(t => t.Id == c.Id))
-                  && packages != null && packages.TrueForAll(p => includeUnproven || (record!.PackageAdded && string.Equals(p, record.OemInf, StringComparison.OrdinalIgnoreCase)))
+                  && packages != null && packages.TrueForAll(p => includeUnproven || RecordCovers(record!, p))
                 : take && UsbipDriverInstaller.HostControllers().Count == 0 && SafeUdePackageCount() == 0;
             if (nothingLeft)
             {
@@ -233,9 +246,10 @@ internal static partial class UsbipRemoval
             }
             else
             {
-                // usbip-win2 stays. KMDF's debug values an earlier HIDMaestro
-                // install left in its service key go, unless the installed
-                // driver's INF writes them itself.
+                // usbip-win2 stays. VerifierOn=1 and VerboseOn=1, the KMDF
+                // debug pair usbip-win2 0.9.7.5's INF writes, go from its
+                // service key unless the installed driver's INF writes them
+                // itself. Nothing else there is touched.
                 var stale = UsbipDriverInstaller.StaleVerifierValues();
                 if (stale.Count > 0)
                 {
@@ -251,15 +265,15 @@ internal static partial class UsbipRemoval
                     bool written = !readable || texts.Exists(UsbipDriverInstaller.InfWritesWdfDebugValues);
                     foreach (string v in stale)
                     {
-                        string where = $@"HKLM\{UdeServiceKey}\Parameters\Wdf\{v}";
+                        string where = $@"HKLM\{UdeServiceKey}\Parameters\Wdf\{v}=1";
                         if (written) entries.Add(new("registry value", where, UninstallOutcome.Kept, "the installed driver's INF writes it."));
-                        else if (preview) entries.Add(new("registry value", where, UninstallOutcome.WouldRemove, "KMDF's debug value an earlier HIDMaestro install left"));
+                        else if (preview) entries.Add(new("registry value", where, UninstallOutcome.WouldRemove, "a KMDF debug value usbip-win2 0.9.7.5's INF writes, which keeps the KMDF verifier on"));
                     }
                     if (!written && !preview)
                     {
                         var cleared = UsbipDriverInstaller.ClearStaleVerifier(texts, "in the removal");
                         foreach (string v in stale)
-                            entries.Add(new("registry value", $@"HKLM\{UdeServiceKey}\Parameters\Wdf\{v}",
+                            entries.Add(new("registry value", $@"HKLM\{UdeServiceKey}\Parameters\Wdf\{v}=1",
                                 cleared.Contains(v) ? UninstallOutcome.Removed : UninstallOutcome.Failed,
                                 cleared.Contains(v) ? "takes effect at the driver's next load" : "could not be deleted"));
                     }
@@ -324,18 +338,59 @@ internal static partial class UsbipRemoval
         "It attaches to no USB root hub but usbip-win2's own.";
 
     /// <summary>Why a record does not prove the host controller it names
-    /// is HIDMaestro's install, or null when it does: the devnode is still
-    /// there with usbip-win2's id, and its driver is still the package the
-    /// install put on it.</summary>
+    /// is HIDMaestro's install, or null when it does. It proves it when the
+    /// devnode is still there with usbip-win2's id and the owner token the
+    /// install wrote on it, which a devnode another installer registers on
+    /// the same instance id does not carry, when usbip-win2's own installer
+    /// has not written its Apps entry since, and when the devnode runs the
+    /// package the install put on it, or, for an install cut short before its
+    /// driver, runs none.</summary>
     private static string? RecordMismatch(UsbipInstallRecord record, List<(string Id, bool Present)> controllers)
     {
         if (!controllers.Exists(c => string.Equals(c.Id, record.Instance, StringComparison.OrdinalIgnoreCase)))
             return $"{record.Instance} is gone";
-        if (record.OemInf == null) return $"{record.Instance}'s driver install never finished";
+        if (record.Token == null || UsbipDriverInstaller.OwnerTokenOf(record.Instance) != record.Token)
+            return $"{record.Instance} is not the devnode HIDMaestro registered";
+        if (AppsEntryWrittenUtc() is DateTime written && written > record.InstalledUtc)
+            return $"usbip-win2's installer wrote its Apps entry at {written:yyyy-MM-dd HH:mm}Z, after HIDMaestro's install";
         string? now = UsbipDriverInstaller.DriverInfPathOf(record.Instance);
+        if (record.OemInf == null)
+            return now == null ? null : $"{record.Instance} runs {now}, which HIDMaestro's install did not record";
         if (!string.Equals(now, record.OemInf, StringComparison.OrdinalIgnoreCase))
             return $"{record.Instance} now runs {now ?? "no driver"}, not {record.OemInf}";
         return null;
+    }
+
+    /// <summary>When usbip-win2's installer last wrote its Apps entry, the
+    /// latest of the views it is found in, or null when there is none.</summary>
+    private static DateTime? AppsEntryWrittenUtc()
+    {
+        DateTime? latest = null;
+        foreach (var (hive, view, _) in AppsViews())
+        {
+            try
+            {
+                using var root = RegistryKey.OpenBaseKey(hive, view);
+                using var k = root.OpenSubKey(UsbipDriverInstaller.UninstallEntryKey);
+                if (k == null) continue;
+                if (RegQueryInfoKeyW(k.Handle, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero,
+                        IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, out long fileTime) != 0) continue;
+                var at = DateTime.FromFileTimeUtc(fileTime);
+                if (latest == null || at > latest) latest = at;
+            }
+            catch { }
+        }
+        return latest;
+    }
+
+    /// <summary>Whether a usbip2_ude package is the install record's to take:
+    /// one the devnode ran when the install returned and that was not in the
+    /// driver store before it, or, for an install cut short before it
+    /// recorded a package, any not in the store before it.</summary>
+    private static bool RecordCovers(UsbipInstallRecord record, string oem)
+    {
+        if (Array.Exists(record.PackagesBefore, p => string.Equals(p, oem, StringComparison.OrdinalIgnoreCase))) return false;
+        return record.OemInf == null || string.Equals(oem, record.OemInf, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>Other programs that install usbip-win2 and use it: Handheld
@@ -364,21 +419,40 @@ internal static partial class UsbipRemoval
             }
             catch { }
         }
-        try
+        foreach (string profile in ProfileFolders())
         {
-            string users = Path.GetDirectoryName(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)) ?? @"C:\Users";
-            foreach (string profile in Directory.EnumerateDirectories(users))
-            {
-                string exe = Path.Combine(profile, "AppData", "Local", "VIIPER", "viiper.exe");
-                if (File.Exists(exe)) found.Add($"VIIPER is installed ({exe})");
-            }
+            string exe = Path.Combine(profile, "AppData", "Local", "VIIPER", "viiper.exe");
+            if (File.Exists(exe)) found.Add($"VIIPER is installed ({exe})");
         }
-        catch { }
         foreach (var p in Process.GetProcessesByName("viiper"))
         {
             found.Add($"VIIPER is running (process {p.Id})");
             p.Dispose();
         }
+        return found;
+    }
+
+    /// <summary>Every account's profile folder, SYSTEM's and the service
+    /// accounts' included: each ProfileImagePath under the ProfileList key,
+    /// which holds the profile of every account that has signed in, wherever
+    /// the profiles live. A process running as SYSTEM finds the same set as
+    /// one running as a user.</summary>
+    private static List<string> ProfileFolders()
+    {
+        var found = new List<string>();
+        try
+        {
+            using var list = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList");
+            if (list == null) return found;
+            foreach (string sid in list.GetSubKeyNames())
+            {
+                using var k = list.OpenSubKey(sid);
+                if (k?.GetValue("ProfileImagePath") is not string path || path.Length == 0) continue;
+                string full = Environment.ExpandEnvironmentVariables(path);
+                if (Directory.Exists(full) && !found.Contains(full, StringComparer.OrdinalIgnoreCase)) found.Add(full);
+            }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
         return found;
     }
 
@@ -488,8 +562,10 @@ internal static partial class UsbipRemoval
     /// <summary>Remove a present host controller devnode and its subtree,
     /// out of process with a timeout: <c>pnputil /remove-device</c>, the
     /// documented form of the DiUninstallDevice call devnode.exe makes
-    /// (main.cpp:325-336). Null when it is gone, else why not.</summary>
-    private static string? RemoveHostController(string instanceId)
+    /// (main.cpp:325-336). Removed when it is gone, RemovedAtRestart when
+    /// pnputil answers 3010 (ERROR_SUCCESS_REBOOT_REQUIRED: the removal
+    /// finishes when Windows next starts), Failed otherwise.</summary>
+    private static (UninstallOutcome Outcome, string? Reason) RemoveHostController(string instanceId)
     {
         int rc;
         string output;
@@ -498,9 +574,10 @@ internal static partial class UsbipRemoval
         var sw = Stopwatch.StartNew();
         while (UsbipDriverInstaller.IsKnown(instanceId) && sw.ElapsedMilliseconds < TimeoutScale.Apply(5_000))
             Thread.Sleep(100);
-        if (!UsbipDriverInstaller.IsKnown(instanceId)) return null;
-        if (!UsbipDriverInstaller.IsPresent(instanceId) && RemoveRecord(instanceId)) return null;
-        return $"pnputil /remove-device returned {rc}: {output.Trim()}";
+        if (!UsbipDriverInstaller.IsKnown(instanceId)) return (UninstallOutcome.Removed, null);
+        if (!UsbipDriverInstaller.IsPresent(instanceId) && RemoveRecord(instanceId)) return (UninstallOutcome.Removed, null);
+        if (rc == 3010) return (UninstallOutcome.RemovedAtRestart, "Windows finishes the removal when it next starts");
+        return (UninstallOutcome.Failed, $"pnputil /remove-device returned {rc}: {output.Trim()}");
     }
 
     /// <summary>Uninstall the record of a devnode that is not present,
@@ -613,18 +690,9 @@ internal static partial class UsbipRemoval
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
 
-        var temps = new List<string>
-        {
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Temp"),
-            Path.Combine(Environment.SystemDirectory, @"config\systemprofile\AppData\Local\Temp"),
-        };
-        try
-        {
-            string users = Path.GetDirectoryName(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)) ?? @"C:\Users";
-            foreach (string profile in Directory.EnumerateDirectories(users))
-                temps.Add(Path.Combine(profile, "AppData", "Local", "Temp"));
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        var temps = new List<string> { Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Temp") };
+        foreach (string profile in ProfileFolders())
+            temps.Add(Path.Combine(profile, "AppData", "Local", "Temp"));
         foreach (string temp in temps)
         {
             try
@@ -638,68 +706,20 @@ internal static partial class UsbipRemoval
         return found;
     }
 
-    /// <summary>Delete a folder without following a reparse point: a link
-    /// inside it is removed as a link and never entered, so a link a user
-    /// planted cannot steer the delete outside the folder. A file in use is
-    /// deleted at the next restart.</summary>
+    /// <summary>Delete a folder through the full removal's own delete
+    /// (<see cref="SafeDelete.Tree"/>), which follows no link, changes no
+    /// attribute, and leaves an entry in use for the next start.</summary>
     private static void DeleteFolder(List<UninstallEntry> entries, string dir, bool preview)
     {
         if (preview) { entries.Add(new("folder", dir, UninstallOutcome.WouldRemove)); return; }
-        bool atRestart = false;
-        string? error = null;
-        try { DeleteTree(dir, ref atRestart, ref error); }
-        catch (Exception ex) { error = ex.Message; }
-        entries.Add(error != null
-            ? new("folder", dir, UninstallOutcome.Failed, error)
-            : new("folder", dir, atRestart ? UninstallOutcome.RemovedAtRestart : UninstallOutcome.Removed,
-                  atRestart ? "a file in it is in use" : null));
-    }
-
-    private static void DeleteTree(string dir, ref bool atRestart, ref string? error)
-    {
-        var info = new DirectoryInfo(dir);
-        if ((info.Attributes & FileAttributes.ReparsePoint) != 0)
-        {
-            // The link itself, never its target.
-            info.Delete();
-            return;
-        }
-        foreach (var entry in info.EnumerateFileSystemInfos())
-        {
-            if (entry is DirectoryInfo sub) { DeleteTree(sub.FullName, ref atRestart, ref error); continue; }
-            try
-            {
-                entry.Attributes = FileAttributes.Normal;
-                entry.Delete();
-            }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
-            {
-                if (MoveFileExW(entry.FullName, null, MOVEFILE_DELAY_UNTIL_REBOOT)) atRestart = true;
-                else error ??= $"{entry.FullName}: {e.Message}";
-            }
-        }
-        try { info.Delete(); }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
-        {
-            if (MoveFileExW(info.FullName, null, MOVEFILE_DELAY_UNTIL_REBOOT)) atRestart = true;
-            else error ??= $"{info.FullName}: {e.Message}";
-        }
+        var (outcome, reason) = SafeDelete.Tree(dir);
+        entries.Add(new("folder", dir, outcome, reason));
     }
 
     private static UninstallEntry DeleteFile(string path)
     {
-        try
-        {
-            File.SetAttributes(path, FileAttributes.Normal);
-            File.Delete(path);
-            return new("file", path, UninstallOutcome.Removed);
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
-        {
-            return MoveFileExW(path, null, MOVEFILE_DELAY_UNTIL_REBOOT)
-                ? new("file", path, UninstallOutcome.RemovedAtRestart, "it is in use")
-                : new("file", path, UninstallOutcome.Failed, e.Message);
-        }
+        var (outcome, reason) = SafeDelete.Tree(path);
+        return new("file", path, outcome, reason);
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────
@@ -727,8 +747,6 @@ internal static partial class UsbipRemoval
 
     // ── Win32 ────────────────────────────────────────────────────────────
 
-    private const uint MOVEFILE_DELAY_UNTIL_REBOOT = 0x4;
-
     [StructLayout(LayoutKind.Sequential)]
     private struct SP_DEVINFO_DATA
     {
@@ -753,7 +771,8 @@ internal static partial class UsbipRemoval
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool SetupDiDestroyDeviceInfoList(IntPtr DeviceInfoSet);
 
-    [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool MoveFileExW(string lpExistingFileName, string? lpNewFileName, uint dwFlags);
+    [LibraryImport("advapi32.dll")]
+    private static partial int RegQueryInfoKeyW(Microsoft.Win32.SafeHandles.SafeRegistryHandle hKey, IntPtr lpClass, IntPtr lpcchClass, IntPtr lpReserved,
+        IntPtr lpcSubKeys, IntPtr lpcbMaxSubKeyLen, IntPtr lpcbMaxClassLen, IntPtr lpcValues, IntPtr lpcbMaxValueNameLen,
+        IntPtr lpcbMaxValueLen, IntPtr lpcbSecurityDescriptor, out long lpftLastWriteTime);
 }

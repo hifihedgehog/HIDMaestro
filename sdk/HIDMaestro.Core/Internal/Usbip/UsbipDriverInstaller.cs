@@ -147,6 +147,7 @@ internal static partial class UsbipDriverInstaller
                 try
                 {
                     m = AcquireTransportLock();
+                    t_holdsTransportLock = true;
                     T r = work(job);
                     lock (job) result = r;
                 }
@@ -159,6 +160,7 @@ internal static partial class UsbipDriverInstaller
                     // The outcome goes back now. The lock stays with this
                     // thread until every thread the work left behind ends.
                     job._progress.CompleteAdding();
+                    t_holdsTransportLock = false;
                     if (m != null)
                     {
                         Thread[] lingering;
@@ -183,6 +185,14 @@ internal static partial class UsbipDriverInstaller
             throw thrown.SourceException; // not reached: Throw does not return
         }
     }
+
+    /// <summary>True on the thread that runs transport work, while it holds
+    /// the transport lock. Another take of the lock from that work would
+    /// wait for a thread that waits for it.</summary>
+    [ThreadStatic] private static bool t_holdsTransportLock;
+
+    /// <summary>True when the calling thread runs transport work.</summary>
+    internal static bool TransportLockHeldHere => t_holdsTransportLock;
 
     /// <summary>Acquire the transport lock. An abandoned one is acquired,
     /// and the work reads the machine again before it acts.</summary>
@@ -245,6 +255,10 @@ internal static partial class UsbipDriverInstaller
         foreach (var (id, present) in HostControllers())
         {
             if (!present) continue;
+            // One HIDMaestro registered whose driver install was cut short
+            // has no driver, which no restart gives it.
+            if (DriverInfPathOf(id) == null && OwnerTokenOf(id) is string token)
+                return FinishInterruptedInstall(work, id, token);
             work.Report("Repairing the existing USB audio transport...");
             if (TryRestartHostController(work)) return true;
 
@@ -452,6 +466,9 @@ internal static partial class UsbipDriverInstaller
                     int rc = RunPnputil($"/delete-driver {oem}");
                     DeviceOrchestrator.LogDiag($"UsbipDriverInstaller:   pnputil /delete-driver {oem} -> {rc}");
                 }
+                // A host controller HIDMaestro installed stays HIDMaestro's
+                // on its new package.
+                UsbipInstallRecord.RefreshDriver();
                 DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: host controller is {Version} after {sw.ElapsedMilliseconds} ms.");
                 work.Report("USB audio transport ready.");
                 return;
@@ -475,6 +492,7 @@ internal static partial class UsbipDriverInstaller
             // The controller's one present child is its virtual root hub,
             // and every attached device is a child of that hub.
             var hubs = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            int driven = 0;
             for (int n = 0; n < 16; n++)
             {
                 if (CM_Locate_DevNodeW(out uint devInst, $"ROOT\\USB\\{n:D4}", CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS) continue;
@@ -482,11 +500,16 @@ internal static partial class UsbipDriverInstaller
                 foreach (var id in GetMultiSz(devInst, CM_DRP_HARDWAREID))
                     if (id.IndexOf("USBIP_WIN2", StringComparison.OrdinalIgnoreCase) >= 0) { isUde = true; break; }
                 if (!isUde) continue;
+                // A host controller with no driver, an install cut short
+                // before it, has loaded nothing and carried nothing.
+                if (GetStringProperty(devInst, DEVPKEY_Device_DriverInfPath) == null) continue;
+                driven++;
                 if (CM_Get_Child(out uint hub, devInst, 0) != CR_SUCCESS) { why = $"ROOT\\USB\\{n:D4} has no root hub to inspect"; return true; }
                 var buf = new char[512];
                 if (CM_Get_Device_IDW(hub, buf, buf.Length, 0) != CR_SUCCESS) { why = "root hub id unreadable"; return true; }
                 hubs.Add(new string(buf).TrimEnd('\0'));
             }
+            if (driven == 0) { why = ""; return false; }
             if (hubs.Count == 0) { why = "no usbip root hub found"; return true; }
 
             if (CM_Get_Device_ID_List_SizeW(out uint len, "USB", CM_GETIDLIST_FILTER_ENUMERATOR) != CR_SUCCESS) { why = "device list unreadable"; return true; }
