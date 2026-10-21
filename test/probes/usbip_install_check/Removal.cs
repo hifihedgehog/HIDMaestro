@@ -214,6 +214,45 @@ internal static partial class Program
         var again = Remove("remove: used, again", preview: false, includeUnproven: false);
         Record("remove: a second removal before a restart keeps the host controller too",
                Has(again, "devnode", l => l.StartsWith(hc + " "), "Kept", "since Windows started") && Pnp.Present(hc) && KeyExists(RecordKey));
+
+        // With usbip-win2 included, what its installer left stays with the
+        // host controller it belongs to.
+        using (var k = Registry.LocalMachine.CreateSubKey(UninstallKey))
+        {
+            k.SetValue("DisplayName", "USBip version 0.9.8.1");
+            k.SetValue("UninstallString", "\"C:\\Program Files\\USBip\\unins000.exe\"");
+        }
+        Directory.CreateDirectory(InstallDir);
+        File.WriteAllText(Path.Combine(InstallDir, "Readme.md"), "planted by the probe");
+        var included = Remove("remove: used, usbip-win2 included", preview: false, includeUnproven: true);
+        Record("remove: with usbip-win2 included, the Apps entry and folder stay with the host controller until a restart",
+               Has(included, "devnode", l => l.StartsWith(hc + " "), "Kept", "since Windows started")
+               && Has(included, "Apps entry", _ => true, "Kept", "until a restart") && KeyExists(UninstallKey) && Directory.Exists(InstallDir));
+    }
+
+    /// <summary>--preview, on this machine: what the usbip-win2 part of a
+    /// full removal would do, with usbip-win2 included and not, and that
+    /// neither preview changed anything a removal acts on.</summary>
+    static int Preview()
+    {
+        Console.WriteLine("=== The usbip-win2 part of a full removal, previewed on this machine ===");
+        string before = Snapshot();
+        foreach (bool include in new[] { false, true })
+        {
+            s_lines.Clear();
+            var entries = Remove($"preview{(include ? ", usbip-win2 included" : "")}", preview: true, includeUnproven: include);
+            foreach (string line in s_lines) Console.WriteLine("  " + line);
+            Check($"the preview{(include ? " with usbip-win2 included" : "")} reports nothing removed or failed",
+                  entries.All(e => e.Outcome is "WouldRemove" or "Kept"),
+                  string.Join("; ", entries.Where(e => e.Outcome is not ("WouldRemove" or "Kept"))));
+            Check($"the preview{(include ? " with usbip-win2 included" : "")} never names the root-hub filter for removal",
+                  !entries.Any(e => e.Location.Contains("usbip2_filter", StringComparison.OrdinalIgnoreCase) && e.Outcome != "Kept"));
+        }
+        string after = Snapshot();
+        Check("the previews changed nothing", after == before, after == before ? before : $"before {before} / after {after}");
+        Console.WriteLine();
+        Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");
+        return s_failures == 0 ? 0 : 1;
     }
 
     /// <summary>A devnode's record and every record below it, by each

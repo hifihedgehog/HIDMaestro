@@ -46,6 +46,10 @@
 // catalog's only in its stream, and the devnode chain, arrival times and
 // Kernel-PnP events read back from this machine's own HID devices.
 //
+// --preview, on this machine and elevated, prints what the usbip-win2 part
+// of a full removal would do here, with usbip-win2 included and not, and
+// checks that neither preview changed anything a removal acts on.
+//
 // Scenarios A and N also note what Windows did to the composite's devnodes
 // while the probe read it (Pnp.cs): each node from the HID interface up to
 // the host controller with its last arrival and removal, read when the
@@ -124,6 +128,8 @@ internal static partial class Program
         }
         if (args.Length > 0 && args[0] == "--offline")
             return Offline();
+        if (args.Length > 0 && args[0] == "--preview")
+            return Preview();
         int at = Array.IndexOf(args, "--diag");
         if (at >= 0 && at + 1 < args.Length) s_diagDir = Path.GetFullPath(args[at + 1]);
         return Host(args.Length > 0 && !args[0].StartsWith("--", StringComparison.Ordinal) ? args[0].ToUpperInvariant() : "ABCER");

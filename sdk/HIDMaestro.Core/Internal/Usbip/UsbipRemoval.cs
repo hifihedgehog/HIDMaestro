@@ -271,7 +271,14 @@ internal static partial class UsbipRemoval
         // HIDMaestro's own install adds none of these. An SDK through v2.0.0
         // ran usbip-win2's installer, and so do other programs, so only a
         // removal that includes usbip-win2 takes them.
-        VendorPieces(entries, preview, take && includeUnproven, take ? "HIDMaestro's install record does not cover it. A removal with usbip-win2 included takes it." : keptReason);
+        // While a host controller this removal would take stays until a
+        // restart, they stay with it: its uninstaller and tools go with the
+        // driver they belong to.
+        bool deferred = targets.Exists(t => stayed.Contains(t.Id));
+        VendorPieces(entries, preview, take && includeUnproven && !deferred,
+            !take ? keptReason
+            : deferred ? "the host controller stays until a restart, and a removal after it takes this with it."
+            : "HIDMaestro's install record does not cover it. A removal with usbip-win2 included takes it.");
 
         // ── The filter ────────────────────────────────────────────────────
         List<PnputilHelper.DriverRecord>? filters = PnputilHelper.TryEnumerateDrivers(n => string.Equals(n, FilterInf, StringComparison.OrdinalIgnoreCase));
