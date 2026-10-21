@@ -30,14 +30,17 @@ internal static class ChangeHistory
         }
         string newest = lanes[^1];
         string dir = Path.GetDirectoryName(Path.GetFullPath(path))!;
-        var (code, root) = Git(dir, "rev-parse", "--show-toplevel");
+        // git's own prefix for the directory, not a path made relative to the
+        // top level git reports: that is the real path, and a tree reached
+        // through a junction would give a path outside it, with no history.
+        var (code, prefix) = Git(dir, "rev-parse", "--show-prefix");
         if (code != 0)
         {
             basis = "";
             problems.Add($"git cannot read the history of {path}, so no other lane's lines can be checked");
             return problems;
         }
-        string rel = Path.GetRelativePath(root.Trim(), Path.GetFullPath(path)).Replace('\\', '/');
+        string rel = prefix.Trim() + Path.GetFileName(path);
         var (logCode, log) = Git(dir, "log", "--format=%H", "--", ":(top)" + rel);
         if (logCode != 0)
         {
