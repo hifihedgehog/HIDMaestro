@@ -76,7 +76,7 @@ internal static class Program
         if (args.Length >= 2 && args[0] == "--hold") return Hold(args[1]);
         if (args.Length >= 2 && args[0] == "--hold-one") return Hold(args[1], one: true);
         if (args.Length >= 4 && args[0] == "--late") return Late(args[1], args[2], args[3]);
-        if (args.Length >= 2 && args[0] == "--oem-only") return OemOnly(args[1]);
+        if (args.Length >= 3 && args[0] == "--only") return OnlyOne(args[1], args[2]);
         string part = args.Length > 0 ? args[0].ToLowerInvariant() : "all";
         int code;
         switch (part)
@@ -618,6 +618,8 @@ internal static class Program
 
         try { InUseAndRecords(ctx); }
         catch (Exception ex) { Record("held: the run ran to the end", false, $"{ex.GetType().Name}: {ex.Message}"); }
+        try { RecordsFrom200(); }
+        catch (Exception ex) { Record("2.0.0 records: the run ran to the end", false, $"{ex.GetType().Name}: {ex.Message}"); }
     }
 
     /// <summary>Files in use, and override records a removal cannot prove.
@@ -687,6 +689,67 @@ internal static class Program
         Record("held: once nothing holds them, a removal ends with nothing failed",
                again.Entries.All(e => e.Outcome != HMUninstallOutcome.Failed),
                string.Join("; ", again.Entries.Where(e => e.Outcome == HMUninstallOutcome.Failed).Take(4)));
+    }
+
+    /// <summary>OEM override records as 2.0.0 wrote them, naming no
+    /// account. One another account made, whose label this account's hive
+    /// does not hold: a Set and a Clear from here leave this hive alone and
+    /// keep that account's part. One this account made, whose label this
+    /// hive holds: a Set from here takes it over, and a full removal puts
+    /// this hive back and drops the record.</summary>
+    static void RecordsFrom200()
+    {
+        const string di = @"SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\DirectInput";
+        const string joy = @"SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM";
+        const string pending = @"SOFTWARE\HIDMaestroOemOverrides";
+        string me = System.Security.Principal.WindowsIdentity.GetCurrent().User!.Value;
+        string? Read(RegistryKey hive, string path, string value) { using var k = hive.OpenSubKey(path); return k?.GetValue(value) as string; }
+        void Plant(string id, string label, bool thisHive)
+        {
+            using (var k = Registry.LocalMachine.CreateSubKey($@"{di}\{id}\OEM")) k.SetValue("OEM Name", label);
+            using (var k = Registry.LocalMachine.CreateSubKey($@"{joy}\{id}")) k.SetValue("OEMName", label);
+            if (thisHive) using (var k = Registry.CurrentUser.CreateSubKey($@"{joy}\{id}")) k.SetValue("OEMName", label);
+            using var r = Registry.LocalMachine.CreateSubKey($@"{pending}\{id}");
+            r.SetValue("OriginalKeyExisted", 0, RegistryValueKind.DWord);
+            r.SetValue("OriginalJoystickKeyExisted_HKLM", 0, RegistryValueKind.DWord);
+            r.SetValue("OriginalJoystickKeyExisted_HKCU", 0, RegistryValueKind.DWord);
+        }
+
+        // Another account's: its label is on the HKLM targets, and this
+        // hive has no key for the identity.
+        Plant("VID_BEEF&PID_0A05", "label of another account", thisHive: false);
+        HMOemNameOverride.Set(0xBEEF, 0x0A05, "label of this account");
+        bool hiveUntouched = Read(Registry.CurrentUser, $@"{joy}\VID_BEEF&PID_0A05", "OEMName") == null;
+        bool machineSet = Read(Registry.LocalMachine, $@"{di}\VID_BEEF&PID_0A05\OEM", "OEM Name") == "label of this account";
+        HMOemNameOverride.Clear(0xBEEF, 0x0A05);
+        string? keptUserLabel; bool keptUserPart;
+        using (var r = Registry.LocalMachine.OpenSubKey($@"{pending}\VID_BEEF&PID_0A05"))
+        {
+            keptUserLabel = r?.GetValue("WrittenUserLabel") as string;
+            keptUserPart = r?.GetValue("OriginalJoystickKeyExisted_HKCU") is 0 && r.GetValue("OriginalKeyExisted") == null;
+        }
+        Record("2.0.0 records: another account's record gets no write to this hive from a Set or a Clear, and keeps that account's part and label",
+               hiveUntouched && machineSet && keptUserPart && keptUserLabel == "label of another account"
+               && Read(Registry.CurrentUser, $@"{joy}\VID_BEEF&PID_0A05", "OEMName") == null
+               && !Inventory.KeyExists($@"HKLM\{di}\VID_BEEF&PID_0A05\OEM"),
+               $"hive untouched after Set {hiveUntouched}, HKLM set {machineSet}, record kept {keptUserPart}, label {keptUserLabel ?? "none"}");
+        Registry.LocalMachine.DeleteSubKeyTree($@"{pending}\VID_BEEF&PID_0A05", throwOnMissingSubKey: false);
+        Registry.LocalMachine.DeleteSubKeyTree($@"{di}\VID_BEEF&PID_0A05", throwOnMissingSubKey: false);
+        Registry.LocalMachine.DeleteSubKeyTree($@"{joy}\VID_BEEF&PID_0A05", throwOnMissingSubKey: false);
+
+        // This account's: its label is on all three targets.
+        Plant("VID_BEEF&PID_0A04", "label from 2.0.0", thisHive: true);
+        HMOemNameOverride.Set(0xBEEF, 0x0A04, "label from 2.0.1");
+        string? stamped;
+        using (var r = Registry.LocalMachine.OpenSubKey($@"{pending}\VID_BEEF&PID_0A04")) stamped = r?.GetValue("UserSid") as string;
+        bool hiveSet = Read(Registry.CurrentUser, $@"{joy}\VID_BEEF&PID_0A04", "OEMName") == "label from 2.0.1";
+        var report = HMUninstall.Run();
+        var entry = report.Entries.FirstOrDefault(e => e.Location.EndsWith("VID_BEEF&PID_0A04", StringComparison.OrdinalIgnoreCase));
+        Record("2.0.0 records: this account's record is taken over by a Set and put back by a full removal",
+               hiveSet && stamped == me && entry?.Outcome == HMUninstallOutcome.Removed
+               && !Inventory.KeyExists($@"HKLM\{pending}\VID_BEEF&PID_0A04")
+               && Read(Registry.CurrentUser, $@"{joy}\VID_BEEF&PID_0A04", "OEMName") == null,
+               $"hive set {hiveSet}, account stamped {stamped == me}, removal said {entry?.ToString() ?? "nothing"}");
     }
 
     static bool IsLinkPath(string p)
@@ -776,9 +839,44 @@ internal static class Program
         var lines = new List<string>();
         var held = new List<HMController>();
         void Say(string line) { lock (lines) { lines.Add(line); SayTo(answer, lines); } }
+        // The installing program also calls back into the gate from the
+        // gate's own wait, on the same thread, as a diagnostic hook or a
+        // message pumped on an STA thread can: the call must wait with it,
+        // not hang.
+        int reentered = mode == "install" ? 0 : 1;
+        var tryEnsureOwner = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.MachineClaims")!
+            .GetMethod("TryEnsureOwner", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
         typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.DeviceOrchestrator")!
             .GetField("DiagTap", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
-            .SetValue(null, (Action<string>)(m => { if (m.StartsWith("removal gate:", StringComparison.Ordinal)) Say("gate " + m); }));
+            .SetValue(null, (Action<string>)(m =>
+            {
+                // A probe file problem never reaches the SDK.
+                try
+                {
+                    if (!m.StartsWith("removal gate:", StringComparison.Ordinal)) return;
+                    Say("gate " + m);
+                    if (m.StartsWith("removal gate: another process is removing", StringComparison.Ordinal)
+                        && Interlocked.Exchange(ref reentered, 1) == 0)
+                    {
+                        Say("reentering");
+                        Say($"reentry returned {tryEnsureOwner.Invoke(null, null)}");
+                    }
+                }
+                catch { }
+            }));
+        string lockName = AdminName("Uninstall");
+        // Whether the removal's lock is free now, read without waiting.
+        string LockState()
+        {
+            if (!Mutex.TryOpenExisting(lockName, out var mx)) return "free";
+            using (mx)
+            {
+                bool free;
+                try { free = mx.WaitOne(0); } catch (AbandonedMutexException) { free = true; }
+                if (free) mx.ReleaseMutex();
+                return free ? "free" : "held";
+            }
+        }
         try
         {
             var ctx = new HMContext();
@@ -801,8 +899,10 @@ internal static class Program
                         try
                         {
                             var c = ctx.CreateController(profile, $"uninstall-two-{n}");
+                            string state = LockState();
                             lock (held) held.Add(c);
                             Say($"created {n}");
+                            Say($"lock {state} after created {n}");
                         }
                         catch (Exception ex) { Say($"failed {n} {ex.GetType().Name}: {ex.Message} at {ex.StackTrace?.Replace(Environment.NewLine, " <- ")}"); }
                     });
@@ -814,9 +914,13 @@ internal static class Program
             else
             {
                 ctx.InstallDriver();
+                string state = LockState();
                 Say("installed");
+                Say($"lock {state} after installed");
                 held.Add(ctx.CreateController(profile, "uninstall-late"));
+                state = LockState();
                 Say("created dualshock-4-v2");
+                Say($"lock {state} after created dualshock-4-v2");
             }
         }
         catch (Exception ex) { Say($"failed {ex.GetType().Name}: {ex.Message} at {ex.StackTrace?.Replace(Environment.NewLine, " <- ")}"); }
@@ -826,12 +930,21 @@ internal static class Program
         return 0;
     }
 
-    /// <summary>A program that sets an OEM name override and nothing else,
-    /// then waits.</summary>
-    static int OemOnly(string answer)
+    /// <summary>A program that makes one machine-wide call and nothing
+    /// else, then waits: "oem" sets an OEM name override, "vr" registers
+    /// the OpenVR driver, "usbip" installs the USB/IP transport.</summary>
+    static int OnlyOne(string answer, string what)
     {
         var lines = new List<string>();
-        try { HMOemNameOverride.Set(0xBEEF, 0x0A03, "HIDMaestro removal check, OEM only"); lines.Add("set"); }
+        try
+        {
+            switch (what)
+            {
+                case "oem": HMOemNameOverride.Set(0xBEEF, 0x0A03, "HIDMaestro removal check, OEM only"); lines.Add("done"); break;
+                case "vr": lines.Add($"done registered {HMVR.EnsureDriverRegistered()}"); break;
+                case "usbip": HMContext.InstallUsbipBackend(); lines.Add("done"); break;
+            }
+        }
         catch (Exception ex) { lines.Add($"failed {ex.GetType().Name}: {ex.Message}"); }
         lines.Add("ready");
         SayTo(answer, lines);
@@ -906,8 +1019,9 @@ internal static class Program
         var aReady = WaitFor(aAnswer, a, "waiting", 300_000);
         var bReady = WaitFor(bAnswer, b, "waiting", 300_000);
         Record("late: both late programs are up before the removal, with nothing claimed (positive control)",
-               aReady.Contains("waiting") && bReady.Contains("waiting") && !Has(aReady, "gate ") && !Has(bReady, "gate "),
-               $"{string.Join(" / ", aReady)} | {string.Join(" / ", bReady)}");
+               aReady.Contains("waiting") && bReady.Contains("waiting") && !Has(aReady, "gate ") && !Has(bReady, "gate ")
+               && !OwnerPids().Overlaps(new[] { a.Id, b.Id }),
+               $"{string.Join(" / ", aReady)} | {string.Join(" / ", bReady)}; owner records of {string.Join(", ", OwnerPids())}, late programs {a.Id}, {b.Id}");
 
         string deployName = AdminName((string)typeof(HMUninstall).Assembly.GetType("HIDMaestro.Internal.DriverDeploy")!
             .GetField("MutexObject", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!);
@@ -945,11 +1059,20 @@ internal static class Program
         Record("late: the removal holds its lock and waits at the deploy lock (positive control)", removalHolds && !tool.HasExited);
 
         go.Set();
-        var aWait = WaitUntil(aAnswer, a, s => Has(s, GateWaits), 120_000);
+        var aWait = WaitUntil(aAnswer, a, s => Has(s, GateWaits) && s.Contains("reentering"), 120_000);
         var bWait = WaitUntil(bAnswer, b, s => Has(s, GateWaits) && Has(s, GateBehindThread), 120_000);
         bool stillRunning = !tool.HasExited;
+        // Read again right before the lock goes: nothing of either program
+        // may have got past the gate, and neither may hold a claim.
+        aWait = WaitUntil(aAnswer, a, _ => true, 1_000);
+        bWait = WaitUntil(bAnswer, b, _ => true, 1_000);
+        var claimedWhileWaiting = OwnerPids();
         if (deployHeld) deploy.ReleaseMutex();
         deploy.Dispose();
+        bool NothingPast(string[] s) => !Has(s, "installed") && !Has(s, "created") && !Has(s, "reentry returned") && !Has(s, "lock ");
+        Record("late: while the removal holds its lock, neither program has installed, created or claimed",
+               NothingPast(aWait) && NothingPast(bWait) && !claimedWhileWaiting.Overlaps(new[] { a.Id, b.Id }),
+               $"{string.Join(" / ", aWait)} | {string.Join(" / ", bWait)}; owner records of {string.Join(", ", claimedWhileWaiting)}");
         Record("late: a program that installs waits at the gate while the removal runs", Has(aWait, GateWaits) && stillRunning,
                string.Join(" / ", aWait));
         Record("late: a program creating from two threads waits at the gate on both, the one that lost the session sweep's race behind the other",
@@ -967,6 +1090,11 @@ internal static class Program
         var bSaid = WaitFor(bAnswer, b, "ready", 900_000);
         foreach (string s in aSaid.Concat(bSaid).Where(s => s.StartsWith("failed", StringComparison.Ordinal))) Note($"late: {s}");
         var after = Inventory.Take();
+        string[] lockLines = aSaid.Concat(bSaid).Where(s => s.StartsWith("lock ", StringComparison.Ordinal)).ToArray();
+        Record("late: each install and create returned with the removal's lock free",
+               lockLines.Length == 4 && lockLines.All(s => s.StartsWith("lock free ", StringComparison.Ordinal)), string.Join(" / ", lockLines));
+        Record("late: a call back into the gate from the gate's own wait, on the same thread, waits with it and returns",
+               aSaid.Contains("reentry returned True"), string.Join(" / ", aSaid.Where(s => s.StartsWith("reentr", StringComparison.Ordinal))));
         Record("late: after the removal they pass the gate, install again and keep their controllers",
                Has(aSaid, GateWaited) && Has(bSaid, GateWaited) && aSaid.Contains("created dualshock-4-v2")
                && bSaid.Contains("created 1") && bSaid.Contains("created 2") && !a.HasExited && !b.HasExited
@@ -975,25 +1103,60 @@ internal static class Program
         try { a.Kill(); a.WaitForExit(30_000); } catch { }
         try { b.Kill(); b.WaitForExit(30_000); } catch { }
 
-        // A program that has only set an OEM name override holds its owner
-        // claim, so a removal sees it and is blocked by it.
-        string oemAnswer = Path.Combine(results, "oem-only.txt");
-        using (var oem = StartSelf("--oem-only", oemAnswer))
+        // A program that has made one machine-wide call holds its owner
+        // claim, so a removal sees it and is blocked by it. The stand-in
+        // SteamVR from the first removal stays for the OpenVR case.
+        bool steamVr = File.Exists(@"C:\SteamVR\bin\win64\vrpathreg.exe");
+        foreach (var (what, label) in new[] { ("oem", "set an OEM name override"), ("vr", "registered the OpenVR driver"), ("usbip", "installed the USB/IP transport") })
         {
-            var oemSaid = WaitFor(oemAnswer, oem, "ready", 300_000);
+            if (what == "vr" && !steamVr) { Note("late: SteamVR's stand-in is missing, so the OpenVR registration case did not run"); continue; }
+            string answer = Path.Combine(results, $"only-{what}.txt");
+            using var only = StartSelf("--only", answer, what);
+            var said = WaitFor(answer, only, "ready", 600_000);
             var (oexit, oout) = Run(SandboxTool, 1_800_000, "--yes", "--json");
             var oreport = Report.Parse(oout);
-            Record("late: a running program that only set an OEM name override blocks a removal and is named",
-                   oemSaid.Contains("set") && oexit == 2 && oreport?.Status == "Blocked" && oreport.Programs.Contains(oem.Id),
-                   $"{string.Join(" / ", oemSaid)}; exit {oexit}, status {oreport?.Status}, programs {string.Join(", ", oreport?.Programs ?? new List<int>())}, holder {oem.Id}");
-            try { oem.Kill(); oem.WaitForExit(30_000); } catch { }
+            Record($"late: a running program that only {label} blocks a removal and is named",
+                   oexit == 2 && oreport?.Status == "Blocked" && oreport.Programs.Contains(only.Id),
+                   $"{string.Join(" / ", said)}; exit {oexit}, status {oreport?.Status}, programs {string.Join(", ", oreport?.Programs ?? new List<int>())}, holder {only.Id}");
+            try { only.Kill(); only.WaitForExit(30_000); } catch { }
         }
 
-        var (cexit, cout) = Run(SandboxTool, 1_800_000, "--yes", "--json");
-        var clean = Inventory.Take();
-        Record("late: a removal afterward leaves the machine clean", cexit is 0 or 3 && clean.Packages.Count == 0 && clean.HidMaestroDevnodes().Count == 0
-               && !Inventory.KeyExists(@"HKLM\SOFTWARE\HIDMaestroOemOverrides"),
-               $"exit {cexit}, status {Report.Parse(cout)?.Status}");
+        // Without SteamVR the OpenVR registration writes nothing and claims
+        // nothing, so the removal that cleans up runs beside it unblocked.
+        bool moved = false;
+        try { if (steamVr) { Directory.Move(@"C:\SteamVR", @"C:\SteamVR.away"); moved = true; } }
+        catch (Exception ex) { Note($"late: the SteamVR stand-in could not be moved aside: {ex.Message}"); }
+        string noVrAnswer = Path.Combine(results, "only-vr-absent.txt");
+        using (var noVr = StartSelf("--only", noVrAnswer, "vr"))
+        {
+            var said = WaitFor(noVrAnswer, noVr, "ready", 600_000);
+            var (cexit, cout) = Run(SandboxTool, 1_800_000, "--yes", "--json");
+            var creport = Report.Parse(cout);
+            Record("late: without SteamVR a program that asks for the OpenVR registration claims nothing and does not block a removal",
+                   said.Contains("done registered False") && cexit is 0 or 3 && creport?.Programs.Contains(noVr.Id) != true,
+                   $"{string.Join(" / ", said)}; exit {cexit}, status {creport?.Status}");
+            try { noVr.Kill(); noVr.WaitForExit(30_000); } catch { }
+            var clean = Inventory.Take();
+            Record("late: a removal afterward leaves the machine clean", cexit is 0 or 3 && clean.Packages.Count == 0 && clean.HidMaestroDevnodes().Count == 0
+                   && !Inventory.KeyExists(@"HKLM\SOFTWARE\HIDMaestroOemOverrides"),
+                   $"exit {cexit}, status {creport?.Status}");
+        }
+        try { if (moved) Directory.Move(@"C:\SteamVR.away", @"C:\SteamVR"); }
+        catch (Exception ex) { Note($"late: the SteamVR stand-in could not be put back: {ex.Message}"); }
+    }
+
+    /// <summary>The process IDs the owner records name.</summary>
+    static HashSet<int> OwnerPids()
+    {
+        var pids = new HashSet<int>();
+        using var root = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestroOwners");
+        if (root == null) return pids;
+        foreach (string id in root.GetSubKeyNames())
+        {
+            using var rec = root.OpenSubKey(id);
+            if (rec?.GetValue("Pid") is int pid) pids.Add(pid);
+        }
+        return pids;
     }
 
     /// <summary>A junction planted at %ProgramData%\HIDMaestro goes as a
