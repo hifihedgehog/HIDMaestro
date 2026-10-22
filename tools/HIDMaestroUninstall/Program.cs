@@ -10,7 +10,8 @@
 //   --preview        list only, change nothing
 //   --yes            remove without asking
 //   --include-usbip  also remove usbip-win2 when no record shows HIDMaestro
-//                    installed it (never its root-hub filter)
+//                    installed it, its root-hub filter included, which
+//                    restarts every USB 3 root hub
 //   --json           write the report as JSON on stdout, with --preview or
 //                    --yes. docs/UNINSTALL.md gives the schema
 //
@@ -120,7 +121,8 @@ internal static class Program
         "Usage: HIDMaestroUninstall [--preview] [--yes] [--include-usbip] [--json]\n" +
         "  --preview        list what would be removed, change nothing\n" +
         "  --yes            remove without asking\n" +
-        "  --include-usbip  also remove usbip-win2 when no record shows HIDMaestro installed it\n" +
+        "  --include-usbip  also remove usbip-win2 when no record shows HIDMaestro installed it,\n" +
+        "                   its root-hub filter included, which restarts every USB 3 root hub\n" +
         "  --json           write the report as JSON (needs --preview or --yes)\n" +
         "Exit codes: 0 removed, 3 removed with items deleted at the next restart,\n" +
         "2 blocked by running HIDMaestro programs, 1 failed or did not run.";

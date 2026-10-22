@@ -74,10 +74,11 @@ public static class HMUninstall
 public sealed class HMUninstallOptions
 {
     /// <summary>Remove usbip-win2's host controller, its driver package, its
-    /// scheduled task, its folder and its Apps entry even when no install
-    /// record shows HIDMaestro installed it. Never its root-hub filter, whose
-    /// removal restarts every USB root hub. Still refused when another
-    /// program uses usbip-win2.</summary>
+    /// scheduled task, its folder, its Apps entry and its root-hub filter
+    /// even when no install record shows HIDMaestro installed it. Taking the
+    /// filter off restarts every USB 3 root hub, so the USB devices on them
+    /// disconnect for a moment. Still refused when another program uses
+    /// usbip-win2.</summary>
     public bool IncludeUsbip { get; init; }
 }
 

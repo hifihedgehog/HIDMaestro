@@ -17,7 +17,7 @@ HIDMaestroUninstall [--preview] [--yes] [--include-usbip] [--json]
 | none | List what would be removed and kept, ask, then remove |
 | `--preview` | List only. Nothing on the machine changes |
 | `--yes` | Remove without asking |
-| `--include-usbip` | Also remove what usbip-win2's own installer left, as the usbip-win2 section describes. Never its root-hub filter |
+| `--include-usbip` | Also remove what usbip-win2's own installer left, its root-hub filter included, as the usbip-win2 section describes |
 | `--json` | Write the report as JSON on stdout. Needs `--preview` or `--yes`, since it asks no question |
 
 | Exit code | Meaning |
@@ -97,15 +97,15 @@ Files and folders are deleted from a fixed starting folder down: the profile fol
 
 A file or folder another program has open inside `%ProgramFiles%\HIDMaestro` is deleted when Windows next starts, when every folder from `%ProgramFiles%\HIDMaestro` down to the one holding it is one only administrators can change. Each folder is checked through its own handle. A folder that cannot be opened for delete, the one the removal starts from included, is emptied through a handle that does not delete, and then waits for the next start too. A folder that keeps an item the removal could not take stays. Anything held open anywhere else, such as the OpenVR driver while SteamVR runs, stays and is reported `Failed` with the Windows error, such as `in use (Win32 error 32)`: close that program and run the removal again.
 
-A run never restarts the computer or a USB root hub, and never creates a virtual keyboard or mouse. A driver host that runs only HIDMaestro's driver and outlives its devices is ended, as the `Everything` cleanup ends it, and a host that runs any other driver is never touched.
+A run never restarts the computer and never creates a virtual keyboard or mouse. It restarts USB root hubs only when it takes usbip-win2's root-hub filter, as the next section describes. A driver host that runs only HIDMaestro's driver and outlives its devices is ended, as the `Everything` cleanup ends it, and a host that runs any other driver is never touched.
 
 ### usbip-win2
 
 USB/IP composite controllers ride usbip-win2's virtual host controller, which several programs install: VIIPER, DS4Windows, Handheld Companion, and users themselves. 2.0.1 installs the host controller from the SDK's own copy of its driver package, records the install under `HKLM\SOFTWARE\HIDMaestroUsbip`, and never runs usbip-win2's installer or installs its root-hub filter.
 
-A removal unplugs HIDMaestro's own imports. With the install record, it also takes the host controller, its driver package and its service. With `--include-usbip` (`IncludeUsbip`) it also takes what usbip-win2's own installer left, as from an SDK through 2.0.0 that ran it: the detach task, `C:\Program Files\USBip`, the Start menu entries and the Apps entry. It never runs that installer's uninstaller. Either way it takes usbip-win2 only when nothing else uses it. A host controller that has carried a device since Windows started stays, and so do its package and the install record: run the removal again after a restart.
+A removal unplugs HIDMaestro's own imports. With the install record, it also takes the host controller, its driver package and its service. With `--include-usbip` (`IncludeUsbip`) it also takes what usbip-win2's own installer left, as from an SDK through 2.0.0 that ran it: the detach task, `C:\Program Files\USBip`, the Start menu entries, the Apps entry and the root-hub filter. It never runs that installer's uninstaller. Either way it takes usbip-win2 only when nothing else uses it. A host controller that has carried a device since Windows started stays, and so do its package, the install record and what the installer left: run the removal again after a restart.
 
-The root-hub filter, `usbip2_filter`, always stays: its package, its service and its registration on each USB 3 root hub. Removing it restarts every USB root hub on the machine, and disabling it while it is registered stops every root hub at the next start. On a physical hub it attaches to nothing.
+The root-hub filter, `usbip2_filter`, is an extension driver registered on every USB 3 root hub. The removal deletes its package with `pnputil /delete-driver /uninstall`, after the host controller, as usbip-win2's own uninstaller does. Windows reinstalls each USB 3 root hub without the filter, which restarts the hub, so the USB devices on it disconnect for a moment. A hub Windows cannot restart while a program holds a device below it finishes at the next start, and a hub that is not plugged in is reinstalled when it next arrives. Windows marks the `usbip2_filter` service for deletion and deletes it at the next start, and the report lists it as `RemovedAtRestart`. A hub record that still names the filter with no reinstall pending is reported `Failed`, and the service then stays, since that hub would not start without it.
 
 ## What stays
 
@@ -118,7 +118,8 @@ The root-hub filter, `usbip2_filter`, always stays: its package, its service and
 - Another account's OpenVR registration in a path registry its `VR_PATHREG_OVERRIDE` names.
 - The `%TEMP%` folders of a profile reached through a junction or other link. The removal does not walk a link, and the report lists that `%TEMP%` as `Kept` with the reason.
 - The audio endpoint records Windows keeps under `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices` for a composite's speaker and microphone. Windows' audio service owns them.
-- usbip-win2's root-hub filter, and the VC++ runtime its installer added, which other programs share.
+- The VC++ runtime usbip-win2's installer added, which other programs share.
+- usbip-win2's root-hub filter, unless the removal includes usbip-win2.
 - What Windows records about drivers and devices: `C:\Windows\INF\setupapi.dev.log`, the Kernel-PnP and DriverFrameworks-UserMode event logs, Prefetch and Amcache. HIDMaestro never edits Windows' own logs.
 
 A program built on HIDMaestro older than v1.12.0 leaves no sign that it runs, so a removal cannot see it, and the program does not wait for the removal.

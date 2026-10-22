@@ -15,25 +15,25 @@ namespace HIDMaestro.Internal.Usbip;
 /// after HIDMaestro's own imports are unplugged and before HIDMaestro's
 /// staged files are deleted.
 ///
-/// <para>It never touches usbip-win2's root-hub filter, whose removal
-/// restarts every USB root hub. It removes the host controller, its driver
-/// package and the rest of usbip-win2 only when HIDMaestro's install record
-/// shows HIDMaestro installed it, or when the caller's
-/// <c>includeUnproven</c> asks for it, and in either case only
-/// when no other program uses usbip-win2.</para>
+/// <para>It removes the host controller, its driver package and its service
+/// when HIDMaestro's install record shows HIDMaestro installed it, or when
+/// the caller's <c>includeUnproven</c> asks for it. What usbip-win2's own
+/// installer added, which an SDK through v2.0.0 ran, goes only with
+/// <c>includeUnproven</c>: its scheduled task, its folders, its Apps entry
+/// and its root-hub filter. Nothing of usbip-win2 goes while another
+/// program uses it.</para>
 ///
-/// <para>The steps follow usbip-win2's own uninstaller and leave out its
-/// filter step. Its [UninstallRun] removes the host controller devnodes
-/// with "devnode.exe remove ROOT\USBIP_WIN2\UDE root", which calls
+/// <para>The steps follow usbip-win2's own uninstaller. Its [UninstallRun]
+/// removes the host controller devnodes with
+/// "devnode.exe remove ROOT\USBIP_WIN2\UDE root", which calls
 /// DiUninstallDevice on each (userspace/devnode/main.cpp:297-371), then
-/// deletes the host controller's packages, then the filter's (setup.iss at
-/// v.0.9.8.1, 181 and 320-424). The filter's
-/// <c>pnputil /delete-driver /uninstall</c> reinstalls every
-/// USB\ROOT_HUB30 the extension INF matched
-/// (drivers/ude_filter/usbip2_filter.inf:32-43), which restarts each hub
-/// (drivers/ude_filter/readme.txt). The filter stays: its package, its
-/// service and its registration on each hub. It attaches to no hub that is
-/// not usbip-win2's own (drivers/ude_filter/device.cpp:310-324).</para>
+/// deletes the host controller's packages, then the filter's, each with
+/// <c>pnputil /delete-driver /uninstall</c> (setup.iss at v.0.9.8.1, 181 and
+/// 320-424, whose <c>/force</c> pnputil ignores beside
+/// <c>/uninstall</c>). The filter is an extension INF on every
+/// USB\ROOT_HUB30 (drivers/ude_filter/usbip2_filter.inf:32-43), so taking it
+/// off reinstalls each USB 3 root hub, which restarts it, and the devices
+/// below a hub disconnect for a moment (drivers/ude_filter/readme.txt).</para>
 ///
 /// <para>A host controller that has carried a device since Windows started
 /// is left until a restart: forcing a driver onto one, measured
@@ -282,25 +282,23 @@ internal static partial class UsbipRemoval
         }
 
         // ── What usbip-win2's own installer left ──────────────────────────
-        // HIDMaestro's own install adds none of these. An SDK through v2.0.0
-        // ran usbip-win2's installer, and so do other programs, so only a
-        // removal that includes usbip-win2 takes them.
-        // While a host controller this removal would take stays until a
-        // restart, they stay with it: its uninstaller and tools go with the
-        // driver they belong to.
+        // HIDMaestro's own install adds none of these, the root-hub filter
+        // among them. An SDK through v2.0.0 ran usbip-win2's installer, and
+        // so do other programs, so only a removal that includes usbip-win2
+        // takes them. While a host controller this removal would take stays
+        // until a restart, they stay with it: its uninstaller, its tools and
+        // its filter go with the driver they belong to.
         bool deferred = targets.Exists(t => stayed.Contains(t.Id));
-        VendorPieces(entries, preview, take && includeUnproven && !deferred,
-            !take ? keptReason
+        bool vendor = take && includeUnproven && !deferred;
+        string vendorKept = !take ? keptReason
             : deferred ? "the host controller stays until a restart, and a removal after it takes this with it."
-            : "HIDMaestro's install record does not cover it. A removal with usbip-win2 included takes it.");
+            : "HIDMaestro's install record does not cover it. A removal with usbip-win2 included takes it.";
+        VendorPieces(entries, preview, vendor, vendorKept);
 
         // ── The filter ────────────────────────────────────────────────────
-        List<PnputilHelper.DriverRecord>? filters = PnputilHelper.TryEnumerateDrivers(n => string.Equals(n, FilterInf, StringComparison.OrdinalIgnoreCase));
-        if (filters != null)
-            foreach (var f in filters)
-                entries.Add(new("driver package", $"{f.PublishedName} ({FilterInf})", UninstallOutcome.Kept, FilterReason));
-        if (KeyExists(FilterServiceKey))
-            entries.Add(new("service", "usbip2_filter", UninstallOutcome.Kept, FilterReason));
+        // Last, as usbip-win2's own uninstaller deletes it: after the host
+        // controllers and their package.
+        RootHubFilter(entries, preview, vendor, vendorKept);
 
         // ── HIDMaestro's stamp on host controllers that stay ──────────────
         foreach (string id in stayed)
@@ -333,9 +331,8 @@ internal static partial class UsbipRemoval
             DeleteFolder(entries, dir, preview);
     }
 
-    private const string FilterReason =
-        "usbip-win2's root-hub filter. Removing it restarts every USB root hub, so HIDMaestro never touches it. " +
-        "It attaches to no USB root hub but usbip-win2's own.";
+    private const string FilterRestart =
+        "usbip-win2's root-hub filter. Taking it off restarts every USB 3 root hub, so the USB devices on them disconnect for a moment.";
 
     /// <summary>Why a record does not prove the host controller it names
     /// is HIDMaestro's install, or null when it does. It proves it when the
@@ -610,8 +607,9 @@ internal static partial class UsbipRemoval
             }
         }
 
-        // The Apps entry. Its uninstaller is never run: it removes the
-        // filter, which restarts every USB root hub.
+        // The Apps entry. Its uninstaller is never run: the removal takes
+        // each of its pieces itself, and the uninstaller asks Windows to
+        // restart (setup.iss at v.0.9.8.1, UninstallNeedRestart).
         foreach (var (hive, view, label) in AppsViews())
         {
             string where = $@"{(hive == RegistryHive.LocalMachine ? "HKLM" : "HKCU")}\{UsbipDriverInstaller.UninstallEntryKey} ({label})";
@@ -653,6 +651,151 @@ internal static partial class UsbipRemoval
             else if (preview) entries.Add(new("file", link, UninstallOutcome.WouldRemove));
             else entries.Add(DeleteFile(link));
         }
+    }
+
+    /// <summary>usbip-win2's root-hub filter, which its installer adds with
+    /// "pnputil /add-driver usbip2_filter.inf /install" (setup.iss at
+    /// v.0.9.8.1, 176): the driver package, the usbip2_filter service, and
+    /// the filter's registration under each USB 3 root hub's record, in
+    /// Filters\*Upper (usbip2_filter.inf:37-43). Each package goes with
+    /// <c>pnputil /delete-driver /uninstall</c>, as usbip-win2's uninstaller
+    /// deletes it (setup.iss 320-424).
+    ///
+    /// <para>Measured in Windows Sandbox on 0.9.8.1, that delete takes the
+    /// registration off each hub that is present and restarts the hub, marks
+    /// the record of a hub that is not present for reinstall at its next
+    /// arrival (CONFIGFLAG_REINSTALL in ConfigFlags), deletes the package,
+    /// and marks the service for deletion at the next start (DeleteFlag 1).
+    /// A service the delete leaves unmarked is deleted only once no hub
+    /// record names the filter outside a pending reinstall: a hub whose
+    /// record names a filter with no service behind it stops at its next
+    /// start.</para></summary>
+    private static void RootHubFilter(List<UninstallEntry> entries, bool preview, bool remove, string keptReason)
+    {
+        var packages = PnputilHelper.TryEnumerateDrivers(n => string.Equals(n, FilterInf, StringComparison.OrdinalIgnoreCase));
+        bool service = KeyExists(FilterServiceKey);
+        if (packages == null)
+        {
+            // A failed listing is not an empty one, and the service goes
+            // only after its package.
+            entries.Add(new("driver package", FilterInf, UninstallOutcome.Failed, "the driver store could not be listed"));
+            if (service) entries.Add(new("service", "usbip2_filter", UninstallOutcome.Kept, "its package could not be looked for, and the service goes only after it."));
+            return;
+        }
+        if (packages.Count == 0 && !service) return;
+        if (!remove)
+        {
+            foreach (var f in packages)
+                entries.Add(new("driver package", $"{f.PublishedName} ({FilterInf})", UninstallOutcome.Kept, keptReason));
+            if (service) entries.Add(new("service", "usbip2_filter", UninstallOutcome.Kept, keptReason));
+            return;
+        }
+        if (preview)
+        {
+            foreach (var f in packages)
+                entries.Add(new("driver package", $"{f.PublishedName} ({FilterInf})", UninstallOutcome.WouldRemove, FilterRestart));
+            if (service) entries.Add(new("service", "usbip2_filter", UninstallOutcome.WouldRemove));
+            return;
+        }
+
+        bool packageLeft = false;
+        foreach (var f in packages)
+        {
+            string where = $"{f.PublishedName} ({FilterInf})";
+            int rc;
+            string output;
+            // Under the PnP lock, as a host controller's removal: the delete
+            // reinstalls and restarts devices.
+            using (var pnp = DeviceManager.HoldPnpLock())
+                (rc, output) = PnputilHelper.Run($"/delete-driver {f.PublishedName} /uninstall", timeoutMs: 180_000);
+            var left = PnputilHelper.TryEnumerateDrivers(n => string.Equals(n, FilterInf, StringComparison.OrdinalIgnoreCase));
+            if (left == null || left.Exists(l => string.Equals(l.PublishedName, f.PublishedName, StringComparison.OrdinalIgnoreCase)))
+            {
+                packageLeft = true;
+                entries.Add(new("driver package", where, UninstallOutcome.Failed, left == null
+                    ? $"the driver store could not be listed after pnputil /delete-driver /uninstall returned {rc}"
+                    : $"pnputil /delete-driver /uninstall returned {rc}: {output.Trim()}"));
+            }
+            else if (rc == 3010)
+                entries.Add(new("driver package", where, UninstallOutcome.RemovedAtRestart,
+                    "a USB 3 root hub that could not restart now runs without it once Windows next starts"));
+            else
+                entries.Add(new("driver package", where, UninstallOutcome.Removed, "each USB 3 root hub restarted without it"));
+        }
+        if (packageLeft)
+        {
+            // The hubs still load the filter from the package that stays.
+            if (service) entries.Add(new("service", "usbip2_filter", UninstallOutcome.Kept, "its package stays, and the service goes only after it."));
+            return;
+        }
+
+        // A hub record that still names the filter outside a pending
+        // reinstall would start that hub with the filter's service gone.
+        var stale = HubsNamingFilter();
+        if (stale != null)
+            foreach (string hub in stale)
+                entries.Add(new("devnode", hub, UninstallOutcome.Failed,
+                    "its record still names usbip2_filter as an upper filter, and no reinstall is pending"));
+
+        if (!KeyExists(FilterServiceKey))
+        {
+            if (service) entries.Add(new("service", "usbip2_filter", UninstallOutcome.Removed));
+        }
+        else if (MarkedForDeletion(FilterServiceKey))
+            entries.Add(new("service", "usbip2_filter", UninstallOutcome.RemovedAtRestart, "marked for deletion, which Windows finishes when it next starts"));
+        else if (stale == null)
+            entries.Add(new("service", "usbip2_filter", UninstallOutcome.Kept, "the USB 3 root hub records could not be read, and a hub that still names the filter stops without it."));
+        else if (stale.Count > 0)
+            entries.Add(new("service", "usbip2_filter", UninstallOutcome.Kept, "a USB 3 root hub record still names it, and that hub stops without it."));
+        else
+        {
+            var (rc, output) = RunSystemTool("sc.exe", "delete usbip2_filter");
+            // 1060: no such service, 1072: marked for deletion, gone once
+            // nothing holds it open.
+            entries.Add(rc == 0 || rc == 1060
+                ? new("service", "usbip2_filter", UninstallOutcome.Removed)
+                : rc == 1072
+                    ? new("service", "usbip2_filter", UninstallOutcome.RemovedAtRestart, "marked for deletion")
+                    : new("service", "usbip2_filter", UninstallOutcome.Failed, $"sc delete returned {rc}: {output.Trim()}"));
+        }
+    }
+
+    /// <summary>The USB 3 root hubs, present or not, whose records name
+    /// usbip2_filter in Filters\*Upper while no reinstall is pending
+    /// (CONFIGFLAG_REINSTALL, 0x20, clear in ConfigFlags), or null when the
+    /// records could not be read.</summary>
+    private static List<string>? HubsNamingFilter()
+    {
+        const int ConfigFlagReinstall = 0x20;
+        var found = new List<string>();
+        try
+        {
+            using var hubs = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\USB\ROOT_HUB30");
+            if (hubs == null) return found;
+            foreach (string instance in hubs.GetSubKeyNames())
+            {
+                using var upper = hubs.OpenSubKey(instance + @"\Filters\*Upper");
+                if (upper == null || !Array.Exists(upper.GetValueNames(), v => string.Equals(v, "usbip2_filter", StringComparison.OrdinalIgnoreCase))) continue;
+                using var record = hubs.OpenSubKey(instance);
+                if (record?.GetValue("ConfigFlags") is int flags && (flags & ConfigFlagReinstall) != 0) continue;
+                found.Add(@"USB\ROOT_HUB30\" + instance);
+            }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException) { return null; }
+        return found;
+    }
+
+    /// <summary>Whether the service under <paramref name="serviceKey"/> is
+    /// marked for deletion, DeleteFlag 1, which the service control manager
+    /// finishes at the next start.</summary>
+    private static bool MarkedForDeletion(string serviceKey)
+    {
+        try
+        {
+            using var k = Registry.LocalMachine.OpenSubKey(serviceKey);
+            return k?.GetValue("DeleteFlag") is int flag && flag != 0;
+        }
+        catch { return false; }
     }
 
     // ── HIDMaestro's residue ─────────────────────────────────────────────

@@ -520,8 +520,24 @@ internal static partial class Program
             Check($"the preview{(include ? " with usbip-win2 included" : "")} reports nothing removed or failed",
                   entries.All(e => e.Outcome is "WouldRemove" or "Kept"),
                   string.Join("; ", entries.Where(e => e.Outcome is not ("WouldRemove" or "Kept"))));
-            Check($"the preview{(include ? " with usbip-win2 included" : "")} never names the root-hub filter for removal",
-                  !entries.Any(e => e.Location.Contains("usbip2_filter", StringComparison.OrdinalIgnoreCase) && e.Outcome != "Kept"));
+            var filter = entries.Where(e => e.Location.Contains("usbip2_filter", StringComparison.OrdinalIgnoreCase)).ToList();
+            if (!include)
+                Check("the preview never names the root-hub filter for removal", filter.All(e => e.Outcome == "Kept"),
+                      string.Join("; ", filter.Where(e => e.Outcome != "Kept")));
+            else
+            {
+                // The filter goes with what usbip-win2's installer left: named
+                // for removal with a warning that the root hubs restart, or
+                // kept with the reason the other leftovers give.
+                Check("with usbip-win2 included, the preview names the root-hub filter for removal with the restart warning, or keeps it with a reason",
+                      filter.All(e => e.Outcome == "Kept" ? !string.IsNullOrEmpty(e.Reason)
+                                    : e.Outcome == "WouldRemove" && (e.Kind != "driver package" || (e.Reason?.Contains("restarts every USB 3 root hub", StringComparison.Ordinal) ?? false))),
+                      string.Join("; ", filter));
+                var others = entries.Where(e => e.Kind is "Apps entry" or "scheduled task").ToList();
+                Check("with usbip-win2 included, the root-hub filter goes exactly when the rest of what usbip-win2's installer left goes",
+                      filter.Select(e => e.Outcome).Concat(others.Select(e => e.Outcome)).Distinct().Count() <= 1,
+                      string.Join("; ", filter.Concat(others)));
+            }
         }
         string after = Snapshot();
         Check("the previews changed nothing", after == before, after == before ? before : $"before {before} / after {after}");
