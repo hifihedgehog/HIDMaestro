@@ -55,13 +55,15 @@
 //                  the driver hosts, the reader and this process, on a
 //                  DualShock 4 and an Xbox 360 pad or the profiles named
 //                  (RateLive.cs)
-//   create [runs] [profile ...] [--settle=<ms>]
+//   create [runs] [profile ...] [--settle=<ms>] [--gap=<ms>]
 //                  CreateController and Dispose for four kinds of device, or
 //                  the catalog profiles named, with the SDK's own step
 //                  timings (HIDMAESTRO_TIMING), each controller up for <ms>
-//                  first. A keyboard or a mouse types and moves the pointer
-//                  on the desktop of whoever works at the machine, so none
-//                  is among the four: one is measured only when named
+//                  first, and with --gap an untimed pause after each Dispose
+//                  before the next create. A keyboard or a mouse types and
+//                  moves the pointer on the desktop of whoever works at the
+//                  machine, so none is among the four: one is measured only
+//                  when named
 //   report [runs] [calls]
 //                  offline, no elevation: one launch of the hot path's cost
 //                  under the one arithmetic, BuildReportInto, EncodeInput and
@@ -122,8 +124,10 @@
 //                  offline: the budgets' non-inferiority rule over two
 //                  sides' measurements, the offline modes' launch lines or a
 //                  live mode's summaries (Compare.cs)
-//   start [runs]   process start to the first controller, each run in a
-//                  fresh process, with the session cleanup step's time
+//   start [runs] [--gap=<ms>]
+//                  process start to the first controller, each run in a
+//                  fresh process, with the session cleanup step's time, and
+//                  with --gap an untimed pause after each child exits
 //   claim [runs]   the owner claim, the census and the lease (this release)
 //   census         the census walk over Enum keys it cannot read (scratch
 //                  keys under HKCU: denied, deleted, gone) gives what the
@@ -353,13 +357,13 @@ internal static partial class Program
                 break;
             case "create":
                 int create = Create(runs, args.Skip(2).Where(a => !a.StartsWith("--", StringComparison.Ordinal)).ToArray(),
-                    SettleMs(args), s_key);
+                    SettleMs(args), s_key, GapMs(args));
                 if (create != 0) return create;
                 break;
 #if !HM_BASE
             case "install": return Install();
 #endif
-            case "start": Start(runs); break;
+            case "start": Start(runs, GapMs(args)); break;
             case "usbip": Usbip(runs, gate: false); break;
 #if !HM_BASE
             case "claim": Claim(runs); break;
@@ -1170,7 +1174,7 @@ internal static partial class Program
     /// <summary>The catalog profiles named after the run count, in that
     /// order, or the default set. Returns 1 when a name is refused, 5 when a
     /// devnode runs another driver.</summary>
-    static int Create(int runs, string[] only, int settleMs, string? key)
+    static int Create(int runs, string[] only, int settleMs, string? key, int gapMs = 0)
     {
         var named = ParseProfileArgs(only, "create");
         if (named == null) return 1;
@@ -1197,6 +1201,7 @@ internal static partial class Program
             // binding, the USB/IP server's first start) is not a sample.
             using (var first = ctx.CreateController(profile, key))
                 if (!OnEmbeddedDriver(first, id)) return 5;
+            if (gapMs > 0) Thread.Sleep(gapMs);
             long logStart = new FileInfo(log).Exists ? new FileInfo(log).Length : 0;
             var create = new List<double>(runs);
             var dispose = new List<double>(runs);
@@ -1213,8 +1218,10 @@ internal static partial class Program
                 if (s_trace) Console.WriteLine($"    [{DateTime.Now:HH:mm:ss.fff}] dispose returned after {(t3 - t2) * 1000.0 / Stopwatch.Frequency:F1} ms");
                 create.Add((t1 - t0) * 1000.0 / Stopwatch.Frequency);
                 dispose.Add((t3 - t2) * 1000.0 / Stopwatch.Frequency);
+                if (gapMs > 0) Thread.Sleep(gapMs);
             }
             Report($"{id}: CreateController, ms", create, runs, "");
+            ReportStalls($"{id}: CreateController", create, runs);
             Report($"{id}: Dispose, ms", dispose, runs, "");
             foreach (var (step, values) in TimingSteps(log, logStart, id))
                 Report($"{id}: step {step}, ms", values, runs, "");
@@ -1231,6 +1238,43 @@ internal static partial class Program
         return 0;
     }
 
+    // A create stalls when Plug and Play holds its device install or its
+    // device start for a few hundred milliseconds: setupapi.dev.log on the
+    // development laptop (2026-10-24) shows 32 to 81% of a run's installs of
+    // one device 400 to 700 ms longer than the rest, on every build tried,
+    // in the wait before the PnP service's core install or in the device
+    // start, where the device's WUDFHost process was created late. A run's
+    // median then lands near the fast or the slow level as the share
+    // crosses one half. The stall margin sits between the two levels: the
+    // median of a run's other installs was within about 20 ms of the median
+    // of its fastest quarter.
+    const double StallMarginMs = 150;
+
+    /// <summary>The samples of a run that no stall held, and how many one
+    /// did: a sample stalled when it is more than <see cref="StallMarginMs"/>
+    /// above the run's 10th percentile (nearest rank). Prints the two as
+    /// rows of their own.</summary>
+    static void ReportStalls(string name, List<double> samples, int runs)
+    {
+        if (samples.Count == 0) return;
+        var s = samples.OrderBy(x => x).ToList();
+        double floor = s[Math.Clamp((int)Math.Ceiling(0.10 * s.Count) - 1, 0, s.Count - 1)];
+        var clear = samples.Where(x => x <= floor + StallMarginMs).ToList();
+        int stalled = samples.Count - clear.Count;
+        Report($"{name} without a Plug and Play stall, ms", clear, runs, $", {stalled} of {samples.Count} stalled");
+        Report($"{name}, the share that stalled, percent", new List<double> { 100.0 * stalled / samples.Count }, runs, "");
+    }
+
+    /// <summary>--gap=&lt;ms&gt;: the untimed pause after each timed Dispose of
+    /// the create mode before the next create, and after each child of the
+    /// start mode before the next child.</summary>
+    static int GapMs(string[] args)
+    {
+        foreach (string a in args)
+            if (a.StartsWith("--gap=", StringComparison.Ordinal) && int.TryParse(a[6..], out int ms)) return ms;
+        return 0;
+    }
+
     /// <summary>The value of --key=, or null.</summary>
     static string? KeyArg(string[] args)
     {
@@ -1244,7 +1288,7 @@ internal static partial class Program
     /// <summary>Fresh processes, each creating one DualShock 4 on the
     /// installed driver and exiting. One run first makes sure the driver is
     /// current, so every timed run takes the same-version fast path.</summary>
-    static void Start(int runs)
+    static void Start(int runs, int gapMs = 0)
     {
         string self = Environment.ProcessPath!;
         string log = TimingLog();
@@ -1262,6 +1306,9 @@ internal static partial class Program
             using var p = Process.Start(psi)!;
             string output = p.StandardOutput.ReadToEnd();
             p.WaitForExit();
+            // --gap: the untimed pause after a child's controller is gone,
+            // before the next child starts.
+            if (gapMs > 0) Thread.Sleep(gapMs);
             if (run < 0) continue;
             var line = output.Split('\n').FirstOrDefault(l => l.StartsWith("ready ", StringComparison.Ordinal));
             if (line == null) { Console.WriteLine($"start: run {run} gave no time: {output.Trim()}"); continue; }
@@ -1270,6 +1317,7 @@ internal static partial class Program
                 if (step == "0.ghost_cleanup") sweep.AddRange(values);
         }
         Report("process start to the first controller, ms", ready, runs, "");
+        ReportStalls("process start to the first controller", ready, runs);
         Report("the session cleanup step in that create (0.ghost_cleanup), ms", sweep, runs, "");
     }
 
