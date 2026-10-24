@@ -948,7 +948,7 @@ internal static partial class SharedMemoryIO
     /// <para>The stores go through the view's pointer. Each Marshal.WriteInt32
     /// and Marshal.Copy they replace was a call the JIT does not inline,
     /// four or five a frame, and the bytes and the order of the stores
-    /// around the two barriers are the same. A view of zero still throws
+    /// around the sequence number are the same. A view of zero still throws
     /// before anything is written, as Marshal.WriteInt32 threw. The two
     /// lanes take spans, so a caller writes its frame from where it already
     /// is, with no copy into a buffer of its own first.</para>
@@ -970,10 +970,17 @@ internal static partial class SharedMemoryIO
         if (view == IntPtr.Zero) throw new AccessViolationException();
         byte* v = (byte*)view;
 
-        // 1. Mark write in progress (odd seqNo)
+        // 1. Mark write in progress (odd seqNo). The payload's stores must
+        // not become visible before the odd number. Volatile.WriteBarrier
+        // orders every later write after every earlier access, which is
+        // all the writer's side of a seqlock needs here. The JIT emits no
+        // instruction for it on x64, whose stores stay in program order,
+        // and dmb ish on ARM64, as Thread.MemoryBarrier did. On x64 the two
+        // full fences this replaces each waited for the store buffer to
+        // drain, about half of the writer's time a frame.
         uint pending = seqNo + 1;
         Volatile.Write(ref *(uint*)v, pending);
-        Thread.MemoryBarrier();
+        Volatile.WriteBarrier();
 
         // 2. The payload: DataSize, the data lane, the GIP slice and the
         // extended lane, each copied from the caller's span straight into
@@ -1016,8 +1023,12 @@ internal static partial class SharedMemoryIO
             Unsafe.WriteUnaligned(v + EXTENDED_SIZE_OFFSET, 0);
         }
 
-        // 3. Mark write complete (even seqNo)
-        Thread.MemoryBarrier();
+        // 3. Mark write complete (even seqNo). A volatile write is a
+        // release: it is not observable before every earlier write is
+        // (docs/design/specs/Memory-model.md, "Volatile writes"), so the
+        // payload is visible to a reader that sees the even number with
+        // no fence of its own between them. stlr on ARM64, a plain store
+        // on x64.
         seqNo = pending + 1;
         Volatile.Write(ref *(uint*)v, seqNo);
 
