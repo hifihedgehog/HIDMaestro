@@ -170,6 +170,22 @@ internal static partial class SharedMemoryIO
     // v2.0.0: the version handshake, guarded by the s_inputViews lock.
     private static readonly Dictionary<int, IntPtr> s_versionHandles = new();
     private static readonly Dictionary<int, IntPtr> s_versionViews = new();
+    // 2.1.0: the signal gate (HIDMAESTRO_SIGNAL in driver/hm_contract.h),
+    // guarded by the s_inputViews lock. A view of zero means every frame
+    // signals as before.
+    private static readonly Dictionary<int, IntPtr> s_signalHandles = new();
+    private static readonly Dictionary<int, IntPtr> s_signalViews = new();
+
+    // HIDMAESTRO_SIGNAL (driver/hm_contract.h), 256 bytes: each count in a
+    // cache line of its own.
+    public const int SIGNAL_SIZE = 256;
+    public const int SIGNAL_OFFSET_LAYOUT = 0;
+    public const int SIGNAL_OFFSET_DRIVER_CAPS = 4;
+    public const int SIGNAL_OFFSET_COMPANION_CAPS = 8;
+    public const int SIGNAL_OFFSET_INPUT_WAITERS = 64;
+    public const int SIGNAL_OFFSET_COMPANION_PARKED = 128;
+    public const int SIGNAL_LAYOUT = 1;
+    public const int SIGNAL_CAP_INPUT_WAITERS = 1, SIGNAL_CAP_COMPANION_PARKED = 1;
 
     // HIDMAESTRO_VERSION_INFO (driver/driver.h), 64 bytes.
     public const int VERSION_INFO_SIZE = 64;
@@ -422,6 +438,7 @@ internal static partial class SharedMemoryIO
         $@"Global\HIDMaestroOutputEvent{controllerIndex}",
         $@"Global\HIDMaestroPidState{controllerIndex}",
         $@"Global\HIDMaestroVersion{controllerIndex}",
+        $@"Global\HIDMaestroSignal{controllerIndex}",
         $@"\\.\pipe\HIDMaestroOwner{controllerIndex}",
     };
 
@@ -429,7 +446,7 @@ internal static partial class SharedMemoryIO
     /// creating the section on first call. Thread-safe via per-call lock
     /// callers can issue concurrent EnsureInputMapping requests for distinct
     /// controllerIndex values without races. Idempotent for the same index.</summary>
-    public static IntPtr EnsureInputMapping(int controllerIndex)
+    public static unsafe IntPtr EnsureInputMapping(int controllerIndex)
     {
         lock (s_inputViews)
         {
@@ -525,6 +542,26 @@ internal static partial class SharedMemoryIO
                 s_versionHandles[controllerIndex] = vh;
                 s_versionViews[controllerIndex] = vv;
 
+                // 2.1.0: the signal gate (docs/design/signal-gate.md). Made
+                // before the input event, which the worker maps it with.
+                // Never zeroed: a section that already exists is held by a
+                // driver host of a device on this index, which may be
+                // counting in it right now, and clearing a count would hide
+                // a waiter. One the SDK did not make, or of another layout,
+                // is let go, and every frame signals.
+                (IntPtr sh, IntPtr sv, bool existed) = CreateSectionOrOpen($@"Global\HIDMaestroSignal{controllerIndex}", SIGNAL_SIZE);
+                if (!existed)
+                    Volatile.Write(ref *(int*)((byte*)sv + SIGNAL_OFFSET_LAYOUT), SIGNAL_LAYOUT);
+                else if (Volatile.Read(ref *(int*)((byte*)sv + SIGNAL_OFFSET_LAYOUT)) != SIGNAL_LAYOUT
+                         || !IsOwnedByAdmin(sh, allowLocalService: false))
+                {
+                    UnmapViewOfFile(sv);
+                    CloseHandle(sh);
+                    sh = sv = IntPtr.Zero;
+                }
+                s_signalHandles[controllerIndex] = sh;
+                s_signalViews[controllerIndex] = sv;
+
                 // Driver signaling event. Auto-reset (manual_reset=FALSE), not
                 // initially set. The driver's per-device worker thread waits on
                 // this with a 50ms safety timeout to replace the old 1ms busy poll.
@@ -580,6 +617,15 @@ internal static partial class SharedMemoryIO
                 return ev;
         CloseHandle(ev);
         return IntPtr.Zero;
+    }
+
+    /// <summary>2.1.0: the signal gate's view for the index
+    /// (HIDMAESTRO_SIGNAL), or IntPtr.Zero when there is none and every
+    /// frame signals.</summary>
+    public static IntPtr GetSignalView(int controllerIndex)
+    {
+        lock (s_inputViews)
+            return s_signalViews.TryGetValue(controllerIndex, out var v) ? v : IntPtr.Zero;
     }
 
     /// <summary>Companion input doorbell handle for
@@ -965,7 +1011,7 @@ internal static partial class SharedMemoryIO
                                        ReadOnlySpan<byte> data, int dataLen, byte[]? gipData,
                                        int dataOffset = 0,
                                        ReadOnlySpan<byte> extendedData = default, int extendedLen = 0,
-                                       IntPtr companionEvent = default)
+                                       IntPtr companionEvent = default, IntPtr signalView = default)
     {
         if (view == IntPtr.Zero) throw new AccessViolationException();
         byte* v = (byte*)view;
@@ -1037,8 +1083,30 @@ internal static partial class SharedMemoryIO
         // feed its WAIT_FOR_INPUT pump, so non-Xbox profiles pay nothing
         // for it).
         IntPtr companion = gipData != null ? companionEvent : IntPtr.Zero;
-        if (eventHandle != IntPtr.Zero || companion != IntPtr.Zero)
-            Signal(eventHandle, companion);
+        if (eventHandle == IntPtr.Zero && companion == IntPtr.Zero) return;
+
+        // 5. 2.1.0: the signal gate (docs/design/signal-gate.md). The full
+        // fence orders the even SeqNo's store before the loads of the
+        // counts, the one order a release store leaves open, so a worker
+        // that counted itself before it last looked at the section either
+        // saw this frame or is seen here. A count of zero with the
+        // capability announced means nobody waits who has not seen the
+        // frame. Without the section, or without the capability, every
+        // frame signals as before.
+        if (signalView != IntPtr.Zero)
+        {
+            Thread.MemoryBarrier();
+            byte* s = (byte*)signalView;
+            if ((Volatile.Read(ref *(int*)(s + SIGNAL_OFFSET_DRIVER_CAPS)) & SIGNAL_CAP_INPUT_WAITERS) != 0
+                && Volatile.Read(ref *(int*)(s + SIGNAL_OFFSET_INPUT_WAITERS)) == 0)
+                eventHandle = IntPtr.Zero;
+            if (companion != IntPtr.Zero
+                && (Volatile.Read(ref *(int*)(s + SIGNAL_OFFSET_COMPANION_CAPS)) & SIGNAL_CAP_COMPANION_PARKED) != 0
+                && Volatile.Read(ref *(int*)(s + SIGNAL_OFFSET_COMPANION_PARKED)) == 0)
+                companion = IntPtr.Zero;
+            if (eventHandle == IntPtr.Zero && companion == IntPtr.Zero) return;
+        }
+        Signal(eventHandle, companion);
     }
 
     /// <summary>The frame's doorbells, after its sequence number is even.
@@ -1163,6 +1231,10 @@ internal static partial class SharedMemoryIO
             UnmapViewOfFile(vv);
         if (s_versionHandles.Remove(controllerIndex, out IntPtr vh) && vh != IntPtr.Zero)
             CloseHandle(vh);
+        if (s_signalViews.Remove(controllerIndex, out IntPtr sv) && sv != IntPtr.Zero)
+            UnmapViewOfFile(sv);
+        if (s_signalHandles.Remove(controllerIndex, out IntPtr sh) && sh != IntPtr.Zero)
+            CloseHandle(sh);
     }
 
     /// <summary>The input section, its event and the objects mapped beside
@@ -1242,7 +1314,8 @@ internal static partial class SharedMemoryIO
             foreach (int i in Indexes(s_inputViews.Keys, s_inputHandles.Keys, s_inputEvents.Keys,
                                       s_companionInputEvents.Keys, s_inputAckViews.Keys, s_inputAckHandles.Keys,
                                       s_inputAckEvents.Keys, s_removeEvents.Keys, s_removedEvents.Keys,
-                                      s_ownerPipes.Keys, s_versionViews.Keys, s_versionHandles.Keys))
+                                      s_ownerPipes.Keys, s_versionViews.Keys, s_versionHandles.Keys,
+                                      s_signalViews.Keys, s_signalHandles.Keys))
                 if (!IsHeld(i)) ReleaseInputLocked(i);
                 else ForgetDriverLocked(i);
         }
@@ -1275,14 +1348,22 @@ internal static partial class SharedMemoryIO
     /// write, and DriverVersion names a driver that is gone. Bit 31, the
     /// driver's own marker, stays. A driver that still serves the index
     /// writes all of them again when its worker next opens the sections
-    /// (driver.c, TryOpenInputAck and AnnounceVersion). Caller holds
-    /// s_inputViews.</summary>
+    /// (driver.c, TryOpenInputAck and AnnounceVersion). The signal gate's
+    /// capability words go too (2.1.0), so a device the next create makes
+    /// on the index gets every signal until its own driver host counts
+    /// itself and says so (driver.c TryOpenSignal, companion.c at add).
+    /// Caller holds s_inputViews.</summary>
     private static unsafe void ForgetDriverLocked(int controllerIndex)
     {
         if (s_inputAckViews.TryGetValue(controllerIndex, out IntPtr av) && av != IntPtr.Zero)
             Interlocked.And(ref *(int*)(av + INPUT_ACK_OFFSET_CAPS), ~(INPUT_ACK_CAP_DELIVERED | INPUT_ACK_CAP_RELEASE));
         if (s_versionViews.TryGetValue(controllerIndex, out IntPtr vv) && vv != IntPtr.Zero)
             Interlocked.Exchange(ref *(int*)(vv + VERSION_OFFSET_DRIVER_PROTOCOL), 0);
+        if (s_signalViews.TryGetValue(controllerIndex, out IntPtr sv) && sv != IntPtr.Zero)
+        {
+            Interlocked.And(ref *(int*)(sv + SIGNAL_OFFSET_DRIVER_CAPS), ~SIGNAL_CAP_INPUT_WAITERS);
+            Interlocked.And(ref *(int*)(sv + SIGNAL_OFFSET_COMPANION_CAPS), ~SIGNAL_CAP_COMPANION_PARKED);
+        }
     }
 
     /// <summary>Every index the key sets name, copied, so the caller can
@@ -1298,6 +1379,14 @@ internal static partial class SharedMemoryIO
 
     private static (IntPtr handle, IntPtr view) CreateSection(string name, int size)
     {
+        var (h, v, _) = CreateSectionOrOpen(name, size);
+        return (h, v);
+    }
+
+    /// <summary><see cref="CreateSection"/>, and whether the section existed
+    /// before this call (CreateFileMappingW's ERROR_ALREADY_EXISTS).</summary>
+    private static (IntPtr handle, IntPtr view, bool existed) CreateSectionOrOpen(string name, int size)
+    {
         if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 Sddl, 1, out IntPtr sd, IntPtr.Zero))
             throw new Win32Exception();
@@ -1312,10 +1401,13 @@ internal static partial class SharedMemoryIO
         Marshal.StructureToPtr(sa, saPtr, false);
 
         IntPtr hMap;
+        bool existed;
         try
         {
             hMap = CreateFileMappingW(new IntPtr(-1), saPtr,
                 PAGE_READWRITE, 0, (uint)size, name);
+            // Read before the frees below, whose P/Invokes set it again.
+            existed = hMap != IntPtr.Zero && Marshal.GetLastPInvokeError() == ERROR_ALREADY_EXISTS;
         }
         finally
         {
@@ -1334,7 +1426,7 @@ internal static partial class SharedMemoryIO
             CloseHandle(hMap);
             throw new Win32Exception(err);
         }
-        return (hMap, view);
+        return (hMap, view, existed);
     }
 
     /// <summary>Creates a named auto-reset event under the same SDDL used
@@ -1460,7 +1552,7 @@ internal static partial class SharedMemoryIO
     // name before the index. The driver host, which runs as LocalService,
     // creates StopEvent and OutputEvent. The SDK creates the rest, owned by
     // Administrators, so only those two may be LocalService-owned.
-    private static readonly string[] IndexSections = { "Input", "InputAck", "Output", "PidState", "Version" };
+    private static readonly string[] IndexSections = { "Input", "InputAck", "Output", "PidState", "Version", "Signal" };
     private static readonly string[] IndexEvents = { "InputEvent", "CompanionInputEvent", "InputAckEvent", "OutputEvent", "StopEvent" };
 
     private static bool DriverCreates(string eventKind) => eventKind is "OutputEvent" or "StopEvent";

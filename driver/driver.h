@@ -340,6 +340,17 @@ typedef struct _DEVICE_CONTEXT {
      * that predates it creates no section, and the open fails quietly. */
     WCHAR   VersionMappingName[64];       /* e.g. L"Global\\HIDMaestroVersion0" */
 
+    /* 2.1.0: the signal gate (hm_contract.h, HIDMAESTRO_SIGNAL). The worker
+     * maps the section with the input section, sets
+     * HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS, and counts itself in InputWaiters
+     * across each wait on the input event. Kept mapped until the device
+     * goes, as the acknowledgement is. NULL against an SDK that makes no
+     * such section, and the SDK signals every frame. */
+    WCHAR   SignalMappingName[64];        /* e.g. L"Global\\HIDMaestroSignal0" */
+    HANDLE  SignalMemHandle;
+    struct _HIDMAESTRO_SIGNAL *SignalPtr;  /* hm_contract.h, included below */
+    BOOLEAN SignalBroken;                  /* the count was found below zero: never announce again */
+
     /* 2.1.0: AckSignal under the contract. FALSE when the controller's SDK
      * said no thread waits on the acknowledgement's event: DeliveredSeqNo
      * is still stored on every delivery, and only the SetEvent is skipped.

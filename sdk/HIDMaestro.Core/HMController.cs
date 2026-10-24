@@ -116,6 +116,8 @@ public sealed partial class HMController : IDisposable
     // worker thread can wake immediately instead of busy-polling. Cached at
     // construction time alongside the view pointer.
     private readonly IntPtr _inputEvent;
+    // 2.1.0: the signal gate's view (SharedMemoryIO.GetSignalView), or zero.
+    private readonly IntPtr _signalView;
     private uint _inputSeqNo;
 
     // Output passthrough reader (rumble/haptics/FFB): background thread
@@ -629,6 +631,9 @@ public sealed partial class HMController : IDisposable
         _inputEvent = SharedMemoryIO.GetInputEvent(index);
         _companionInputEvent = _packsGipBuffer
             ? SharedMemoryIO.GetCompanionInputEvent(index) : IntPtr.Zero;
+        // A USB/IP device's input pump waits on the input event too and
+        // counts itself nowhere, so its frames always signal.
+        _signalView = usbipHandle == null ? SharedMemoryIO.GetSignalView(index) : IntPtr.Zero;
 
         // Issue #67. A keyboard or mouse profile gets every frame delivered,
         // and so does an "other" profile whose descriptor is a mouse or a
@@ -998,7 +1003,7 @@ public sealed partial class HMController : IDisposable
                 _inputView, _inputEvent, ref _inputSeqNo,
                 Array.Empty<byte>(), 0, null,
                 dataOffset: 0,
-                extendedData: _stateBlockBuffer!, extendedLen: _stateBlockSpec.Size);
+                extendedData: _stateBlockBuffer!, extendedLen: _stateBlockSpec.Size, signalView: _signalView);
 
             return ElapsedMicros(startTicks);
         }
@@ -1123,7 +1128,7 @@ public sealed partial class HMController : IDisposable
                 _packsGipBuffer ? _gipBuf : null,
                 companionEvent: _companionInputEvent,
                 dataOffset: 0,
-                extendedData: report, extendedLen: extLen);
+                extendedData: report, extendedLen: extLen, signalView: _signalView);
         }
         else
         {
@@ -1132,7 +1137,7 @@ public sealed partial class HMController : IDisposable
             SharedMemoryIO.WriteInputFrame(
                 _inputView, _inputEvent, ref _inputSeqNo, report, dataLen,
                 _packsGipBuffer ? _gipBuf : null, dataStart,
-                companionEvent: _companionInputEvent);
+                companionEvent: _companionInputEvent, signalView: _signalView);
         }
 
         return ElapsedMicros(startTicks);
@@ -1436,7 +1441,7 @@ public sealed partial class HMController : IDisposable
             SharedMemoryIO.WriteInputFrame(
                 _inputView, _inputEvent, ref _inputSeqNo, report, report.Length,
                 _packsGipBuffer ? _gipBuf : null,
-                companionEvent: _companionInputEvent);
+                companionEvent: _companionInputEvent, signalView: _signalView);
             return;
         }
 
@@ -1497,7 +1502,7 @@ public sealed partial class HMController : IDisposable
         SharedMemoryIO.WriteInputFrame(
             _inputView, _inputEvent, ref _inputSeqNo, _rawReportBuffer, report.Length,
             _packsGipBuffer ? _gipBuf : null,
-            companionEvent: _companionInputEvent);
+            companionEvent: _companionInputEvent, signalView: _signalView);
     }
 
     /// <summary>Submit a complete extended report, emitted verbatim with no
@@ -1783,7 +1788,7 @@ public sealed partial class HMController : IDisposable
             _packsGipBuffer ? _gipBuf : null,
             companionEvent: _companionInputEvent,
             dataOffset: 0,
-            extendedData: report, extendedLen: report.Length);
+            extendedData: report, extendedLen: report.Length, signalView: _signalView);
     }
 
     /// <summary>Emit through the extended path, prepending the declared
@@ -1810,7 +1815,7 @@ public sealed partial class HMController : IDisposable
             _packsGipBuffer ? _gipBuf : null,
             companionEvent: _companionInputEvent,
             dataOffset: 0,
-            extendedData: buffer, extendedLen: emitLen);
+            extendedData: buffer, extendedLen: emitLen, signalView: _signalView);
     }
 
     /// <summary>v1.3.5: instance-level <see cref="HMOutputEncoder.Encode"/>
@@ -2306,7 +2311,7 @@ public sealed partial class HMController : IDisposable
         {
             if (_c._disposed) return _c._inputSeqNo;
             SharedMemoryIO.WriteInputFrame(_c._inputView, _c._inputEvent, ref _c._inputSeqNo,
-                data, dataLen, null, extendedData: extendedLen > 0 ? extended : null, extendedLen: extendedLen);
+                data, dataLen, null, extendedData: extendedLen > 0 ? extended : null, extendedLen: extendedLen, signalView: _c._signalView);
             return _c._inputSeqNo;
         }
 

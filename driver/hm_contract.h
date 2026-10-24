@@ -63,6 +63,49 @@ C_ASSERT(sizeof(HIDMAESTRO_VERSION_INFO) == 64);
 C_ASSERT(FIELD_OFFSET(HIDMAESTRO_VERSION_INFO, DriverProtocolMin) == 36);
 C_ASSERT(FIELD_OFFSET(HIDMAESTRO_VERSION_INFO, IdentityTag) == 48);
 C_ASSERT(FIELD_OFFSET(HIDMAESTRO_VERSION_INFO, DriverConfigError) == 56);
+
+/* 2.1.0: the signal gate (docs/design/signal-gate.md). Global\HIDMaestroSignal<N>,
+ * 256 bytes, created by an SDK of 2.1.0 or later before the device exists,
+ * and never written by it again: an SDK that finds the section already
+ * there leaves its words as they are, since a driver of a device on the
+ * index may be counting in them. Each driver host maps it once and keeps it
+ * until its device goes.
+ *
+ * The HID driver's worker counts itself in InputWaiters across every wait
+ * on the input event, with an interlocked increment before it checks the
+ * input section's SeqNo one last time and an interlocked decrement when the
+ * wait returns. The SDK stores the frame's even SeqNo, issues a full fence,
+ * and calls SetEvent on the input event only when InputWaiters is not zero
+ * or DriverCaps lacks HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS.
+ *
+ * The XUSB companion counts the WAIT_FOR_INPUT requests in its manual queue
+ * in CompanionParked: up once the request is in the queue, then a look at
+ * the input section's SeqNo that kicks the pump itself when the section
+ * holds a frame the last completion did not carry, and down when the pump
+ * or the timer takes the request or the framework cancels it. The pump can
+ * take a request before its increment, so the count can be -1 for a moment.
+ * The SDK rings the companion doorbell when CompanionParked is not zero or
+ * CompanionCaps lacks HIDMAESTRO_SIGNAL_CAP_COMPANION_PARKED.
+ *
+ * Each counted word sits in a cache line of its own, since two processes
+ * write them. InputWaiters below zero is never right: a worker that finds
+ * it so clears its capability bit, and the SDK signals every frame again. */
+#define HIDMAESTRO_SIGNAL_LAYOUT                1
+#define HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS     0x00000001u   /* DriverCaps */
+#define HIDMAESTRO_SIGNAL_CAP_COMPANION_PARKED  0x00000001u   /* CompanionCaps */
+typedef struct _HIDMAESTRO_SIGNAL {
+    volatile LONG   LayoutVersion;       /* SDK: HIDMAESTRO_SIGNAL_LAYOUT, written when it creates the section */
+    volatile LONG   DriverCaps;          /* HID driver: HIDMAESTRO_SIGNAL_CAP_* it keeps */
+    volatile LONG   CompanionCaps;       /* companion: HIDMAESTRO_SIGNAL_CAP_* it keeps */
+    LONG            Reserved0[13];
+    volatile LONG   InputWaiters;        /* HID driver workers inside a counted wait */
+    LONG            Reserved1[15];
+    volatile LONG   CompanionParked;     /* WAIT_FOR_INPUT requests the companion holds */
+    LONG            Reserved2[31];
+} HIDMAESTRO_SIGNAL, *PHIDMAESTRO_SIGNAL;
+C_ASSERT(sizeof(HIDMAESTRO_SIGNAL) == 256);
+C_ASSERT(FIELD_OFFSET(HIDMAESTRO_SIGNAL, InputWaiters) == 64);
+C_ASSERT(FIELD_OFFSET(HIDMAESTRO_SIGNAL, CompanionParked) == 128);
 #pragma pack(pop)
 
 /* The identity tag (decision (c)): the 64-bit FNV-1a hash of the token's
@@ -139,3 +182,20 @@ HmReadIdentityIndex(_In_ const WCHAR *token, _Out_ ULONG *index)
  * the SetEvent. Any other value, or none (a program before 2.1.0), and the
  * driver signals every delivered frame. */
 #define HIDMAESTRO_ACK_SIGNAL_VALUE  L"AckSignal"
+
+/* The signal section of a controller's index, mapped read and write, or
+ * NULL when there is none or its layout is another. *handle is the
+ * section's handle, or NULL. */
+static __inline PHIDMAESTRO_SIGNAL
+HmMapSignal(_In_z_ const WCHAR *name, _Out_ HANDLE *handle)
+{
+    PHIDMAESTRO_SIGNAL view;
+    *handle = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, name);
+    if (*handle == NULL) return NULL;
+    view = (PHIDMAESTRO_SIGNAL)MapViewOfFile(*handle, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(HIDMAESTRO_SIGNAL));
+    if (view != NULL && view->LayoutVersion == HIDMAESTRO_SIGNAL_LAYOUT) return view;
+    if (view != NULL) UnmapViewOfFile(view);
+    CloseHandle(*handle);
+    *handle = NULL;
+    return NULL;
+}

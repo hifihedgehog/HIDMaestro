@@ -138,6 +138,12 @@ InitInstancePaths(
         RtlCopyMemory(ctx->VersionMappingName, prefix, sizeof(prefix));
         AppendUlongDecimal(ctx->VersionMappingName, index, cap);
     }
+    {
+        static const WCHAR prefix[] = L"Global\\HIDMaestroSignal";
+        SIZE_T cap = sizeof(ctx->SignalMappingName) / sizeof(WCHAR);
+        RtlCopyMemory(ctx->SignalMappingName, prefix, sizeof(prefix));
+        AppendUlongDecimal(ctx->SignalMappingName, index, cap);
+    }
 
     /* Per-instance serial number. Format: "HM-CTL-<index>" zero-padded to
      * at least 4 digits so it sorts naturally. SDL3 / HIDAPI use this string
@@ -812,6 +818,7 @@ static VOID OwnerGone(_In_ PDEVICE_CONTEXT ctx);
 static VOID DeliverReleaseFrames(_In_ PDEVICE_CONTEXT ctx);
 static HANDLE CreateHostEvent(_In_ BOOL manualReset, _In_ BOOL takeOverNullDacl, _In_ LPCWSTR name);
 static VOID TryCreateDoorbell(_In_ PDEVICE_CONTEXT ctx);
+static VOID TryOpenSignal(_In_ PDEVICE_CONTEXT ctx);
 
 /* Create the output doorbell if there is none yet, and publish it for
  * PublishOutput. EvtDeviceAdd may have found the name unusable, held by an
@@ -829,6 +836,45 @@ TryCreateDoorbell(_In_ PDEVICE_CONTEXT ctx)
         InterlockedExchangePointer((PVOID volatile *)&ctx->OutputSignalEvent, ev);
 }
 
+/* 2.1.0: map the signal section once and announce that this worker counts
+ * itself in InputWaiters (hm_contract.h, HIDMAESTRO_SIGNAL). Worker thread
+ * only, before any wait the count would cover, and again at each map of
+ * the input section, as the acknowledgement's bits are: an SDK sweep that
+ * removed a device clears the bit (SharedMemoryIO.ForgetDriverLocked).
+ * Never again once the worker found the count broken (SignalBroken).
+ * Mapped until the device goes, as the acknowledgement is: the name stays
+ * bound to this object while the driver holds it, so the next SDK on the
+ * index opens the same section and finds the count as it is. A section the
+ * SDK did not make, or none, and the worker counts nothing and the SDK
+ * signals every frame. */
+static VOID
+TryOpenSignal(_In_ PDEVICE_CONTEXT ctx)
+{
+    if (ctx->SignalPtr == NULL) {
+        HANDLE h;
+        PHIDMAESTRO_SIGNAL view = HmMapSignal(ctx->SignalMappingName, &h);
+        if (view == NULL) return;
+        ctx->SignalMemHandle = h;
+        ctx->SignalPtr = view;
+    }
+    if (!ctx->SignalBroken)
+        InterlockedOr(&ctx->SignalPtr->DriverCaps, (LONG)HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS);
+}
+
+/* 2.1.0: a frame the worker has not read is in the input section. Read
+ * after the interlocked increment of InputWaiters, a full barrier, so this
+ * load cannot run ahead of that store (docs/design/signal-gate.md). An odd
+ * SeqNo is a write in progress: its writer stores the even number, fences
+ * and finds the worker counted, so it signals. Worker thread only. */
+static BOOLEAN
+FrameWaiting(_In_ PDEVICE_CONTEXT ctx)
+{
+    ULONG seq;
+    if (ctx->SharedMemPtr == NULL) return FALSE;
+    seq = ((volatile HIDMAESTRO_SHARED_INPUT *)ctx->SharedMemPtr)->SeqNo;
+    return (seq & 1) == 0 && seq != ctx->SeenSeqNo;
+}
+
 /* Try to open and map the named section. Returns TRUE on success.
  * On failure, leaves SharedMemHandle/SharedMemPtr unchanged (NULL). */
 static BOOLEAN
@@ -842,6 +888,7 @@ TryOpenSharedMapping(_In_ PDEVICE_CONTEXT ctx)
 
     ctx->SharedMemHandle = h;
     ctx->SharedMemPtr = view;
+    TryOpenSignal(ctx);
     TryOpenInputAck(ctx);
     TryOpenOwnerWatch(ctx);
     AnnounceVersion(ctx);
@@ -1883,7 +1930,27 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                 waits[count] = ctx->RemoveEvent;
                 removeAt = count++;
             }
-            DWORD rc = WaitForMultipleObjects(count, waits, FALSE, 500);
+            /* 2.1.0: the signal gate (docs/design/signal-gate.md). Counted in
+             * InputWaiters from before the last look at the section until
+             * the wait returns, so the SDK skips its SetEvent only for a
+             * frame this look finds. Such a frame is read without blocking:
+             * the wait polls the other events with a zero timeout, and its
+             * timeout stands for the input event. A count the increment
+             * finds below zero is wrong: clearing the capability sends the
+             * SDK back to a SetEvent every frame. */
+            volatile LONG *waiters = ctx->SignalPtr != NULL ? &ctx->SignalPtr->InputWaiters : NULL;
+            BOOLEAN pending = FALSE;
+            if (waiters != NULL) {
+                if (InterlockedIncrement(waiters) <= 0) {
+                    ctx->SignalBroken = TRUE;
+                    InterlockedAnd(&ctx->SignalPtr->DriverCaps, ~(LONG)HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS);
+                }
+                pending = FrameWaiting(ctx);
+                if (pending) InterlockedDecrement(waiters);
+            }
+            DWORD rc = WaitForMultipleObjects(count, waits, FALSE, pending ? 0 : 500);
+            if (waiters != NULL && !pending) InterlockedDecrement(waiters);
+            if (pending && rc == WAIT_TIMEOUT) rc = WAIT_OBJECT_0 + 1;
 
             /* Issue #38: TearingDown is the authoritative exit
              * condition, checked on EVERY wake including timeouts. The
@@ -2073,6 +2140,8 @@ static VOID ReleaseIndexObjects(_In_ PDEVICE_CONTEXT ctx)
      * read path can be touching the acknowledgement any more. */
     CloseInputAckLocked(ctx);
     CloseOwnerWatch(ctx);
+    if (ctx->SignalPtr) { UnmapViewOfFile(ctx->SignalPtr); ctx->SignalPtr = NULL; }
+    if (ctx->SignalMemHandle) { CloseHandle(ctx->SignalMemHandle); ctx->SignalMemHandle = NULL; }
     if (ctx->OutputMemPtr) { UnmapViewOfFile(ctx->OutputMemPtr); ctx->OutputMemPtr = NULL; }
     if (ctx->OutputMemHandle) { CloseHandle(ctx->OutputMemHandle); ctx->OutputMemHandle = NULL; }
     if (ctx->PidStateMemPtr) { UnmapViewOfFile(ctx->PidStateMemPtr); ctx->PidStateMemPtr = NULL; }

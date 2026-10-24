@@ -21,9 +21,10 @@ EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL CompanionIoControl;
 EVT_WDF_OBJECT_CONTEXT_CLEANUP CompanionDeviceCleanup;
 EVT_WDF_DEVICE_SELF_MANAGED_IO_FLUSH CompanionSelfManagedIoFlush;
 EVT_WDF_TIMER CompanionPumpTimer;
+EVT_WDF_IO_QUEUE_IO_CANCELED_ON_QUEUE CompanionWaitCanceled;
 static DWORD WINAPI CompanionInputPumpProc(LPVOID param);
 struct _COMPANION_CTX;
-static BOOLEAN ReadGipDataLocked(struct _COMPANION_CTX *ctx, UCHAR gipOut[14]);
+static BOOLEAN ReadGipDataLocked(struct _COMPANION_CTX *ctx, UCHAR gipOut[14], ULONG *seqOut);
 
 static const GUID XUSB_GUID =
     { 0xEC87F1E3, 0xC13B, 0x4100, { 0xB5, 0xF7, 0x8B, 0x84, 0xD5, 0x42, 0x60, 0xCB } };
@@ -124,6 +125,24 @@ typedef struct _COMPANION_CTX {
      * on the WGI Gamepad's IGameControllerInputSink. See Ghidra decomp. */
     WDFQUEUE WaitForInputQueue;
     WDFTIMER PumpTimer;
+    /* 2.1.0: the signal gate (hm_contract.h, HIDMAESTRO_SIGNAL), mapped at
+     * add under the contract and kept until the device goes. Each
+     * WAIT_FOR_INPUT in WaitForInputQueue is counted in CompanionParked:
+     * up once it is in the queue, down when CompanionPumpOnce takes it or
+     * the framework cancels it (CompanionWaitCanceled). The SDK rings the
+     * doorbell only while the count is not zero. NULL without a section,
+     * and the SDK rings on every GIP frame. */
+    WCHAR SignalMappingName[64]; /* e.g. L"Global\HIDMaestroSignal0" */
+    HANDLE SignalMemHandle;
+    PHIDMAESTRO_SIGNAL SignalPtr;
+    /* With the gate, a WAIT_FOR_INPUT that comes in after the SDK last
+     * looked at the count gets no doorbell for that frame. Its IOCTL thread
+     * then sets this unnamed auto-reset event, which the pump also waits
+     * on, when the section holds a frame newer than the last completion
+     * carried (WaitServedSeq). NULL when it could not be made, and such a
+     * request waits for the next frame or the 8 ms timer. */
+    HANDLE ParkKick;
+    volatile LONG WaitServedSeq;
 } COMPANION_CTX, *PCOMPANION_CTX;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(COMPANION_CTX, GetCompanionCtx)
@@ -202,7 +221,8 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING Regi
     return WdfDriverCreate(DriverObject, RegistryPath, WDF_NO_OBJECT_ATTRIBUTES, &config, WDF_NO_HANDLE);
 }
 
-static BOOLEAN ReadGipData(PCOMPANION_CTX ctx, UCHAR gipOut[14])
+/* *seqOut, when given, is the SeqNo of the frame the bytes came from. */
+static BOOLEAN ReadGipData(PCOMPANION_CTX ctx, UCHAR gipOut[14], ULONG *seqOut)
 {
     /* Serialize against the other completers. The timer callback, the
      * input-doorbell thread, and GET_STATE dispatch all land here; the
@@ -210,12 +230,12 @@ static BOOLEAN ReadGipData(PCOMPANION_CTX ctx, UCHAR gipOut[14])
      * ctx state, and interleaved byte-copies into LastGoodGip would blend
      * two frames into one served payload. Uncontended cost is tens of ns. */
     EnterCriticalSection(&ctx->GipLock);
-    BOOLEAN ok = ReadGipDataLocked(ctx, gipOut);
+    BOOLEAN ok = ReadGipDataLocked(ctx, gipOut, seqOut);
     LeaveCriticalSection(&ctx->GipLock);
     return ok;
 }
 
-static BOOLEAN ReadGipDataLocked(PCOMPANION_CTX ctx, UCHAR gipOut[14])
+static BOOLEAN ReadGipDataLocked(PCOMPANION_CTX ctx, UCHAR gipOut[14], ULONG *seqOut)
 {
     /* Lazy-open named section. RAM-only, no disk fallback. */
     if (ctx->SharedMemPtr == NULL) {
@@ -249,6 +269,7 @@ static BOOLEAN ReadGipDataLocked(PCOMPANION_CTX ctx, UCHAR gipOut[14])
         if (!ctx->HaveGoodGip) return FALSE;
         for (int i = 0; i < 14; i++) gipOut[i] = ctx->LastGoodGip[i];
         ctx->GipChanged = FALSE;
+        if (seqOut) *seqOut = ctx->LastGipSeqNo;
         return TRUE;
     }
 
@@ -259,6 +280,7 @@ static BOOLEAN ReadGipDataLocked(PCOMPANION_CTX ctx, UCHAR gipOut[14])
     for (int i = 0; i < 14; i++) ctx->LastGoodGip[i] = tmp[i];
     ctx->HaveGoodGip = TRUE;
     for (int i = 0; i < 14; i++) gipOut[i] = tmp[i];
+    if (seqOut) *seqOut = seq1;
 
     /* Stale-handle recovery (issue #1): if the SDK tore down and recreated
      * the shared memory section (RemoveAllVirtualControllers → Cleanup →
@@ -297,6 +319,7 @@ static VOID CompanionRelease(PCOMPANION_CTX ctx)
         ctx->PumpThread = NULL;
     }
     if (ctx->PumpStopEvent)      { CloseHandle(ctx->PumpStopEvent);      ctx->PumpStopEvent = NULL; }
+    if (ctx->ParkKick)           { CloseHandle(ctx->ParkKick);           ctx->ParkKick = NULL; }
     if (ctx->CompanionInputEvent){ CloseHandle(ctx->CompanionInputEvent); ctx->CompanionInputEvent = NULL; }
     if (ctx->PumpTimer) { WdfTimerStop(ctx->PumpTimer, TRUE); ctx->PumpTimer = NULL; }
     /* After the doorbell thread is joined and the timer is stopped
@@ -307,6 +330,10 @@ static VOID CompanionRelease(PCOMPANION_CTX ctx)
     if (ctx->OutputMemPtr) { UnmapViewOfFile(ctx->OutputMemPtr); ctx->OutputMemPtr = NULL; }
     if (ctx->OutputMemHandle) { CloseHandle(ctx->OutputMemHandle); ctx->OutputMemHandle = NULL; }
     if (ctx->OutputSignalEvent) { CloseHandle(ctx->OutputSignalEvent); ctx->OutputSignalEvent = NULL; }
+    /* The queues were purged before the flush, and the pump and the timer
+     * are stopped above, so nothing counts in the section any more. */
+    if (ctx->SignalPtr) { UnmapViewOfFile(ctx->SignalPtr); ctx->SignalPtr = NULL; }
+    if (ctx->SignalMemHandle) { CloseHandle(ctx->SignalMemHandle); ctx->SignalMemHandle = NULL; }
 }
 
 /* The device is gone: surprise removed, or removed. A host can process
@@ -730,6 +757,19 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
             }
         }
 
+        /* 2.1.0: the signal gate, before any queue exists, so every
+         * WAIT_FOR_INPUT the queue ever holds is counted. */
+        if (ctx->Contract) {
+            static const WCHAR sigPrefix[] = L"Global\\HIDMaestroSignal";
+            SIZE_T cap = sizeof(ctx->SignalMappingName) / sizeof(WCHAR);
+            for (int i = 0; sigPrefix[i]; i++) ctx->SignalMappingName[i] = sigPrefix[i];
+            ctx->SignalMappingName[(sizeof(sigPrefix) / sizeof(WCHAR)) - 1] = L'\0';
+            AppendUlongDecimal(ctx->SignalMappingName, ctx->ControllerIndex, cap);
+            ctx->SignalPtr = HmMapSignal(ctx->SignalMappingName, &ctx->SignalMemHandle);
+            if (ctx->SignalPtr != NULL)
+                InterlockedOr(&ctx->SignalPtr->CompanionCaps, (LONG)HIDMAESTRO_SIGNAL_CAP_COMPANION_PARKED);
+        }
+
         /* A v1 program's devnode whose index has no Controller<N> key was
          * left behind by a program and fails its start: there is no default
          * device. Under the contract LoadAnswers reads that key and names
@@ -751,6 +791,12 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
     {
         WDF_IO_QUEUE_CONFIG manualCfg;
         WDF_IO_QUEUE_CONFIG_INIT(&manualCfg, WdfIoQueueDispatchManual);
+        /* A request canceled in the queue, or purged with it, comes back
+         * here, so it leaves CompanionParked as it entered it. The
+         * framework calls this for a request it presented to the driver
+         * (Windows-Driver-Frameworks fxioqueue.cpp, CancelForQueue), which
+         * every forwarded WAIT_FOR_INPUT is. */
+        manualCfg.EvtIoCanceledOnQueue = CompanionWaitCanceled;
         PCOMPANION_CTX ctx = GetCompanionCtx(device);
         status = WdfIoQueueCreate(device, &manualCfg, WDF_NO_OBJECT_ATTRIBUTES,
                                   &ctx->WaitForInputQueue);
@@ -774,6 +820,8 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
          * CompanionInputPumpProc. Non-fatal on failure; the 8 ms timer
          * remains the pump. */
         ctx->PumpStopEvent = CreateEventW(NULL, TRUE /* manual reset */, FALSE, NULL);
+        if (ctx->SignalPtr != NULL)
+            ctx->ParkKick = CreateEventW(NULL, FALSE /* auto reset */, FALSE, NULL);
         if (ctx->PumpStopEvent != NULL) {
             ctx->PumpThread = CreateThread(NULL, 0, CompanionInputPumpProc,
                                            (LPVOID)device, 0, NULL);
@@ -820,14 +868,14 @@ static VOID DecodeGipToXInput(
     PCOMPANION_CTX ctx,
     USHORT *outButtons, UCHAR *outLT, UCHAR *outRT,
     SHORT *outLX, SHORT *outLY, SHORT *outRX, SHORT *outRY,
-    BOOLEAN *outValid)
+    BOOLEAN *outValid, ULONG *seqOut)
 {
     *outButtons = 0; *outLT = 0; *outRT = 0;
     *outLX = 0; *outLY = 0; *outRX = 0; *outRY = 0;
     *outValid = FALSE;
 
     UCHAR gip[14];
-    if (!ReadGipData(ctx, gip)) return;
+    if (!ReadGipData(ctx, gip, seqOut)) return;
 
     PUCHAR d = gip;
     UCHAR btnLow = d[12], btnHigh = d[13];
@@ -871,7 +919,7 @@ static VOID BuildXusbStateForGetState(PCOMPANION_CTX ctx, UCHAR state[29])
     state[2] = 0x01;
 
     USHORT buttons; UCHAR lt, rt; SHORT lx, ly, rx, ry; BOOLEAN valid;
-    DecodeGipToXInput(ctx, &buttons, &lt, &rt, &lx, &ly, &rx, &ry, &valid);
+    DecodeGipToXInput(ctx, &buttons, &lt, &rt, &lx, &ly, &rx, &ry, &valid, NULL);
     /* Perf audit 2026-07-21 (I8): the packet number advances only when
      * the state actually changed, matching physical xusb22 behavior so
      * consumers can skip unchanged-state processing. */
@@ -904,7 +952,7 @@ static VOID BuildXusbStateForGetState(PCOMPANION_CTX ctx, UCHAR state[29])
  *     IOCTL_XUSB_GET_STATE (wButtons[11-12], LT[13], RT[14], sticks[15-22]).
  *     Gamepad::OnInputReceived at 0x180029d30 reads data[2] = state[12]
  *     = wButtons.high to extract the GUIDE bit. */
-static VOID BuildXusbStateForWaitInput(PCOMPANION_CTX ctx, UCHAR state[29])
+static VOID BuildXusbStateForWaitInput(PCOMPANION_CTX ctx, UCHAR state[29], ULONG *seqOut)
 {
     RtlZeroMemory(state, 29);
     *(USHORT*)&state[0] = 0x0103;
@@ -926,7 +974,7 @@ static VOID BuildXusbStateForWaitInput(PCOMPANION_CTX ctx, UCHAR state[29])
     state[10] = 0x14;                 /* payload size gate (XInput packet len) */
 
     USHORT buttons; UCHAR lt, rt; SHORT lx, ly, rx, ry; BOOLEAN valid;
-    DecodeGipToXInput(ctx, &buttons, &lt, &rt, &lx, &ly, &rx, &ry, &valid);
+    DecodeGipToXInput(ctx, &buttons, &lt, &rt, &lx, &ly, &rx, &ry, &valid, seqOut);
     if (valid && ctx->GipChanged) ctx->PacketCount++;
     *(DWORD*)&state[5] = ctx->PacketCount;
     if (!valid) return;
@@ -966,10 +1014,41 @@ static VOID CompanionPumpOnce(_In_ PCOMPANION_CTX ctx)
     WDFREQUEST req;
     NTSTATUS s = WdfIoQueueRetrieveNextRequest(ctx->WaitForInputQueue, &req);
     if (!NT_SUCCESS(s)) return;  /* nothing pended */
+    /* Out of the queue: no longer counted for the SDK's doorbell. The
+     * state goes in below, read after this, so a frame the SDK writes
+     * after it finds the count lower is in it or rings again. */
+    if (ctx->SignalPtr != NULL) InterlockedDecrement(&ctx->SignalPtr->CompanionParked);
 
     UCHAR state[29];
-    BuildXusbStateForWaitInput(ctx, state);
+    ULONG seq = 0;
+    BuildXusbStateForWaitInput(ctx, state, &seq);
+    /* The frame this completion carries, for the WAIT_FOR_INPUT that comes
+     * next (FrameNewerThanServed), stored before the completion that makes
+     * the caller send it. */
+    InterlockedExchange(&ctx->WaitServedSeq, (LONG)seq);
     CopyToRequest(req, state, 29);
+}
+
+/* 2.1.0: whether the input section holds a frame newer than the last
+ * WAIT_FOR_INPUT completion carried, or cannot say (no view yet). Under
+ * GipLock, which keeps the view mapped. Any IOCTL thread. */
+static BOOLEAN FrameNewerThanServed(_In_ PCOMPANION_CTX ctx)
+{
+    BOOLEAN newer = TRUE;
+    EnterCriticalSection(&ctx->GipLock);
+    if (ctx->SharedMemPtr != NULL) {
+        ULONG seq = ((volatile SHARED_INPUT *)ctx->SharedMemPtr)->SeqNo;
+        newer = (seq & 1) == 0 && seq != (ULONG)ctx->WaitServedSeq;
+    }
+    LeaveCriticalSection(&ctx->GipLock);
+    return newer;
+}
+
+VOID CompanionWaitCanceled(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request)
+{
+    PCOMPANION_CTX ctx = GetCompanionCtx(WdfIoQueueGetDevice(Queue));
+    if (ctx->SignalPtr != NULL) InterlockedDecrement(&ctx->SignalPtr->CompanionParked);
+    WdfRequestComplete(Request, STATUS_CANCELLED);
 }
 
 VOID CompanionPumpTimer(_In_ WDFTIMER Timer)
@@ -1005,10 +1084,15 @@ static DWORD WINAPI CompanionInputPumpProc(LPVOID param)
             }
         }
 
-        HANDLE waits[2] = { ctx->PumpStopEvent, ctx->CompanionInputEvent };
-        DWORD rc = WaitForMultipleObjects(2, waits, FALSE, 2000);
+        HANDLE waits[3] = { ctx->PumpStopEvent, ctx->CompanionInputEvent, ctx->ParkKick };
+        DWORD rc = WaitForMultipleObjects(ctx->ParkKick != NULL ? 3 : 2, waits, FALSE, 2000);
         if (rc == WAIT_OBJECT_0)
             return 0;
+        if (rc == WAIT_OBJECT_0 + 2) {
+            /* A WAIT_FOR_INPUT came in after the SDK looked at the count. */
+            CompanionPumpOnce(ctx);
+            continue;
+        }
         /* A doorbell this device could not make, while a program held its
          * name, is retried on a steady input stream every 256 frames and
          * on each 2 s idle wake, as the main driver's worker does. Output
@@ -1148,6 +1232,20 @@ void CompanionIoControl(
         NTSTATUS s = WdfRequestForwardToIoQueue(Request, ctx->WaitForInputQueue);
         if (!NT_SUCCESS(s)) {
             WdfRequestComplete(Request, s);
+            break;
+        }
+        /* 2.1.0: counted once it is in the queue, by an interlocked
+         * increment, a full barrier, and then the section's SeqNo is read.
+         * The SDK stores the SeqNo, fences and reads the count. So the SDK
+         * either finds the count and rings, or this read finds its frame,
+         * and the pump is kicked when that frame is newer than the last
+         * completion carried (docs/design/signal-gate.md). The pump can take
+         * the request before the increment: the count is then -1 for a
+         * moment, and the SDK rings on any count but 0. */
+        if (ctx->SignalPtr != NULL) {
+            InterlockedIncrement(&ctx->SignalPtr->CompanionParked);
+            if (ctx->ParkKick != NULL && FrameNewerThanServed(ctx))
+                SetEvent(ctx->ParkKick);
         }
         break;
     }
