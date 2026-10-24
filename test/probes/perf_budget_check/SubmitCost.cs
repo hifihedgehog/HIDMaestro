@@ -46,7 +46,7 @@ internal static class SubmitCost
 
     public static void Run(int runs, int calls, bool repeat)
     {
-        Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.High;
+        using (var me = Process.GetCurrentProcess()) me.PriorityClass = ProcessPriorityClass.High;
         var db = ProfileDatabase.LoadEmbedded().All.ToDictionary(p => p.Id, StringComparer.Ordinal);
         var a = new HMGamepadState { Buttons = HMButton.A, Axes = new Dictionary<HMAxis, float> { [HMAxis.X] = 0.25f, [HMAxis.Y] = 0.75f } };
         var b = new HMGamepadState { Buttons = HMButton.B, Axes = new Dictionary<HMAxis, float> { [HMAxis.X] = 0.75f, [HMAxis.Y] = 0.25f } };

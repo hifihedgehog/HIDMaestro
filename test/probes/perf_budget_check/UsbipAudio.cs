@@ -40,7 +40,7 @@ internal static partial class Program
             // A URB's worth of microphone PCM, fed as a consumer feeds it,
             // 48 kHz, two channels of 16 bits: 192 bytes a millisecond.
             var mic = new byte[Packets * 192];
-            var self = Process.GetCurrentProcess();
+            using var self = Process.GetCurrentProcess();
             long urbTicks = Stopwatch.Frequency * Packets / 1000;
             int capacity = (int)(seconds * 1000 / Packets * 2) + 16;
             var speakerAt = new long[capacity];

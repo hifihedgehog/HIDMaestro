@@ -107,7 +107,7 @@ internal static partial class Program
     static void RateRun(HMController c, in HMGamepadState a, in HMGamepadState b, Process reader, Process[] hosts,
         double seconds, SafeWaitHandle? timer, RateWindow into)
     {
-        var self = Process.GetCurrentProcess();
+        using var self = Process.GetCurrentProcess();
         long reads0 = ReaderCount(reader);
         ulong self0 = Cycles(self), reader0 = Cycles(reader), hosts0 = hosts.Aggregate(0UL, (s, p) => s + Cycles(p));
         long t0 = Stopwatch.GetTimestamp();

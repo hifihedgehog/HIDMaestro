@@ -245,12 +245,24 @@ internal static partial class Program
     // it each create takes the index's default identity.
     internal static string? s_key;
 
+    [DllImport("kernel32.dll")]
+    static extern uint SetErrorMode(uint mode);
+    const uint SEM_FAILCRITICALERRORS = 0x0001, SEM_NOGPFAULTERRORBOX = 0x0002, SEM_NOOPENFILEERRORBOX = 0x8000;
+
     static int Main(string[] args)
     {
+        // Before any child starts: the probe and every process it starts
+        // (the readers, the start and catalog children) inherit this error
+        // mode, so a crash or a loader failure ends in an exit code and never
+        // in a dialog on the desktop. The bits already set are kept, as
+        // coexist_check's PeerProcess sets them.
+        SetErrorMode(SetErrorMode(0) | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
         // Read once by the SDK's first create, so it is set before any.
         Environment.SetEnvironmentVariable("HIDMAESTRO_TIMING", "1");
         s_trace = args.Contains("--trace");
         ProbeMarks.On = args.Contains("--marks");
+        // Registered now, before any pass, so no timed frame pays for it.
+        if (ProbeMarks.On) ProbeMarks.Register();
         args = args.Where(a => a != "--trace" && a != "--marks").ToArray();
         s_key = KeyArg(args);
         args = args.Where(a => !a.StartsWith("--key=", StringComparison.Ordinal)).ToArray();
@@ -1390,7 +1402,8 @@ internal static partial class Program
         // Each part from the same clock, the process's creation time the
         // first mark.
         long t0 = Stopwatch.GetTimestamp();
-        DateTime started = Process.GetCurrentProcess().StartTime.ToUniversalTime();
+        DateTime started;
+        using (var me = Process.GetCurrentProcess()) started = me.StartTime.ToUniversalTime();
         double main = (DateTime.UtcNow - started).TotalMilliseconds - Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
         long t1 = Stopwatch.GetTimestamp();
         using var ctx = new HMContext();
@@ -1462,7 +1475,8 @@ internal static partial class Program
     static int CatalogChild()
     {
         long t0 = Stopwatch.GetTimestamp();
-        DateTime started = Process.GetCurrentProcess().StartTime.ToUniversalTime();
+        DateTime started;
+        using (var me = Process.GetCurrentProcess()) started = me.StartTime.ToUniversalTime();
         double main = (DateTime.UtcNow - started).TotalMilliseconds - Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
         long t1 = Stopwatch.GetTimestamp();
         using var ctx = new HMContext();

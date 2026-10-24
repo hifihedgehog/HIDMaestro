@@ -4,9 +4,10 @@
 // ticks, the clock of an xperf trace at its default -clocktype
 // PerfCounter) and the operating system thread IDs that started and ended
 // it, and is written after the frame's end time is taken, so it adds
-// nothing to the time measured. Without --marks the provider is never
-// registered. With --marks and no session listening, a frame costs one
-// IsEnabled check after it ends.
+// nothing to the time measured. --marks registers the provider when Main
+// parses it. Without --marks the provider is never registered. With
+// --marks and no session listening, a frame costs one IsEnabled check
+// after it ends.
 //
 // Provider HIDMaestro-PerfProbe, a4016e05-b2d3-4fdb-8315-2b510bccd188,
 // event 1 Frame:
@@ -33,9 +34,13 @@ internal sealed class ProbeMarks : EventSource
 
     static ProbeMarks? s_log;
 
-    /// <summary>The provider, registered on the first frame of a --marks
-    /// run.</summary>
+    /// <summary>The provider, registered by <see cref="Register"/> when
+    /// --marks is parsed.</summary>
     static ProbeMarks Log => s_log ??= new ProbeMarks();
+
+    /// <summary>Registers the provider. Main calls it when it parses
+    /// --marks, before any pass starts.</summary>
+    internal static void Register() => _ = Log;
 
     ProbeMarks() : base(EventSourceSettings.EtwManifestEventFormat) { }
 

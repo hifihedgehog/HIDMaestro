@@ -23,7 +23,7 @@ internal static partial class Program
             Console.WriteLine($"program-file: {file} does not exist");
             return 1;
         }
-        Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.High;
+        using (var me = Process.GetCurrentProcess()) me.PriorityClass = ProcessPriorityClass.High;
         var db = ProfileDatabase.Load(Path.GetDirectoryName(file)!);
         var mine = db.All.Where(p => string.Equals(p.SourceFile, file, StringComparison.OrdinalIgnoreCase)).ToList();
         foreach (var issue in db.Issues.Where(i => string.Equals(i.File, file, StringComparison.OrdinalIgnoreCase)))

@@ -22,7 +22,7 @@ internal static class EncodeCost
 
     public static void Run(int runs, int calls)
     {
-        Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.High;
+        using (var me = Process.GetCurrentProcess()) me.PriorityClass = ProcessPriorityClass.High;
         var db = ProfileDatabase.LoadEmbedded();
         var (states, slots) = EncodeStates.Make();
         var variants = new List<(string Name, Action<int> Batch)>();
