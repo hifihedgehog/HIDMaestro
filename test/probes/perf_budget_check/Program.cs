@@ -140,6 +140,17 @@
 //                  composite, answered and stalled: bytes per request and
 //                  the time of each. Then the protocol engine's lock per
 //                  frame, beside an uncontended lock alone
+//   usbip-audio [runs] [seconds]
+//                  a DualSense composite's speaker and microphone streaming
+//                  in this process, two URBs of ten packets in flight on
+//                  each: the process's cycles per second and per URB, each
+//                  reply's lateness past its stream's grid, and the cycles
+//                  per second attached at rest (UsbipAudio.cs)
+//   usbip-bytes [frames]
+//                  a hash of what each catalog USB/IP profile puts on the
+//                  wire: control replies, input frames and microphone URBs,
+//                  for two trees' outputs to compare line by line
+//                  (UsbipBytes.cs)
 //   gate           S84: no submit path allocates, a USB/IP device's send
 //                  paths, its output and audio transfers and its control
 //                  requests included, the codec path, consumer
@@ -358,6 +369,10 @@ internal static partial class Program
 #endif
             case "start": Start(runs); break;
             case "usbip": Usbip(runs, gate: false); break;
+            case "usbip-bytes": UsbipBytes(args.Length > 1 && int.TryParse(args[1], out int bf) ? bf : 200); break;
+            case "usbip-audio":
+                UsbipAudio(runs, args.Length > 2 ? double.Parse(args[2], System.Globalization.CultureInfo.InvariantCulture) : 2);
+                break;
 #if !HM_BASE
             case "claim": Claim(runs); break;
             case "census": CensusFallback(); break;
@@ -2041,6 +2056,9 @@ internal static partial class Program
                 gotB |= got == b;
             }
         }
+
+        /// <summary>Read the next reply and return its seqnum.</summary>
+        public uint ReadAny() => ReadReply(out _);
 
         uint ReadReply(out int status)
         {
