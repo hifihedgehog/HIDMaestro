@@ -4,7 +4,8 @@
 // with its own identity (--key=<k> gives <k>-0 to <k>-3) and its own reader,
 // a child process of this probe reading the controller's HID input reports
 // as a game does (the rate mode's reader). Each run has two windows of
-// [seconds] (3 unless given):
+// [seconds] (2 unless given, the length perf210.ps1 runs and the 2.1.0
+// sessions measured):
 //   active   one thread submits every controller once a millisecond, each
 //            tick a point of a 1 ms grid waited for on a high-resolution
 //            waitable timer, as one consumer loop drives several pads
@@ -43,7 +44,7 @@ internal static partial class Program
 
     static int Load(int runs, string[] args)
     {
-        double seconds = 3;
+        double seconds = 2;
         foreach (string a in args)
             if (double.TryParse(a, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double s) && s > 0) seconds = s;
         if (!Elevated("load")) return 3;
@@ -53,6 +54,7 @@ internal static partial class Program
         var pads = new List<HMController>();
         var readers = new List<Process>();
         var labels = new List<string>();
+        Exception? consumer = null;
         try
         {
             for (int n = 0; n < LoadSet.Length; n++)
@@ -105,17 +107,24 @@ internal static partial class Program
             int ds4 = Array.IndexOf(LoadSet, Ds4);
             var others = pads.Where((_, i) => i != ds4).ToArray();
             using var stop = new ManualResetEventSlim(false);
+            // What ended the consumer thread early, rethrown on this thread
+            // once the pads are torn down.
+            Exception? consumerFault = null;
             var loop = new Thread(() =>
             {
-                using var t = HighResolutionTimer();
-                long period = Stopwatch.Frequency / 1000, next = Stopwatch.GetTimestamp();
-                bool flip = false;
-                while (!stop.IsSet)
+                try
                 {
-                    WaitUntil(t, next += period);
-                    flip = !flip;
-                    foreach (var c in others) c.SubmitState(flip ? b : a);
+                    using var t = HighResolutionTimer();
+                    long period = Stopwatch.Frequency / 1000, next = Stopwatch.GetTimestamp();
+                    bool flip = false;
+                    while (!stop.IsSet)
+                    {
+                        WaitUntil(t, next += period);
+                        flip = !flip;
+                        foreach (var c in others) c.SubmitState(flip ? b : a);
+                    }
                 }
+                catch (Exception e) { Volatile.Write(ref consumerFault, e); }
             }) { IsBackground = true, Name = "load consumer" };
             loop.Start();
             try
@@ -129,8 +138,16 @@ internal static partial class Program
             finally
             {
                 stop.Set();
-                loop.Join(2000);
+                // The pads are disposed only after the consumer has left
+                // SubmitState. A consumer that has not left within 2 s fails
+                // the run, and the teardown then waits up to 30 s more.
+                if (!loop.Join(2000))
+                {
+                    Check("load: the consumer thread stops within 2 s", false, "SubmitState still running after the stop");
+                    loop.Join(30_000);
+                }
             }
+            consumer = Volatile.Read(ref consumerFault);
         }
         finally
         {
@@ -145,13 +162,15 @@ internal static partial class Program
             // Disposed one at a time, in the order created.
             foreach (var c in pads) c.Dispose();
         }
+        // The consumer's own failure, after the teardown it had to wait for.
+        if (consumer != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(consumer).Throw();
         return 0;
     }
 
     static void LoadRun(List<HMController> pads, in HMGamepadState a, in HMGamepadState b, List<Process> readers, Process[] hosts,
         double seconds, Microsoft.Win32.SafeHandles.SafeWaitHandle? timer, LoadWindow into)
     {
-        var self = Process.GetCurrentProcess();
+        using var self = Process.GetCurrentProcess();
         long w0 = Stopwatch.GetTimestamp();
         long[] reads0 = readers.Select(ReaderCount).ToArray();
         ulong self0 = Cycles(self), readers0 = readers.Aggregate(0UL, (s, p) => s + Cycles(p)), hosts0 = hosts.Aggregate(0UL, (s, p) => s + Cycles(p));
