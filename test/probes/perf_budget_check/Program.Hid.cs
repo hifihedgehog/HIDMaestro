@@ -372,6 +372,10 @@ internal static partial class Program
         /// armed pattern, or 0.</summary>
         public long Hit => Interlocked.Read(ref _hit);
 
+        /// <summary>The operating system ID of the thread that reads, for
+        /// --marks (ProbeMarks.cs), or 0 before it starts.</summary>
+        public abstract uint ThreadId { get; }
+
         public abstract void Dispose();
     }
 
@@ -385,6 +389,11 @@ internal static partial class Program
         readonly Thread _thread;
         readonly byte[] _buf;
         volatile bool _stop;
+        uint _threadId;
+
+        public override uint ThreadId => Volatile.Read(ref _threadId);
+
+        [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
 
         public HidReader(HidDevice dev) : base(dev.InputLength)
         {
@@ -396,6 +405,7 @@ internal static partial class Program
 
         void Loop()
         {
+            Volatile.Write(ref _threadId, GetCurrentThreadId());
             while (!_stop)
             {
                 if (!ReadFile(_dev.Handle, _buf, _buf.Length, out int read, IntPtr.Zero))

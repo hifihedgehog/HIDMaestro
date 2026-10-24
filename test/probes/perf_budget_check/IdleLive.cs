@@ -50,11 +50,12 @@ internal static class IdleLive
             // repeat path, so the window reads the steady state.
             Thread.Sleep(3000);
             var hosts = Process.GetProcessesByName("WUDFHost");
-            ulong self0 = Cycles(Process.GetCurrentProcess()), reader0 = Cycles(reader), hosts0 = Sum(hosts);
+            using var me = Process.GetCurrentProcess();
+            ulong self0 = Cycles(me), reader0 = Cycles(reader), hosts0 = Sum(hosts);
             reader.StandardInput.WriteLine("mark");
             long t0 = Stopwatch.GetTimestamp();
             Thread.Sleep(TimeSpan.FromSeconds(seconds));
-            ulong self1 = Cycles(Process.GetCurrentProcess()), reader1 = Cycles(reader), hosts1 = Sum(hosts);
+            ulong self1 = Cycles(me), reader1 = Cycles(reader), hosts1 = Sum(hosts);
             long t1 = Stopwatch.GetTimestamp();
             reader.StandardInput.WriteLine("mark");
             reader.StandardInput.Close();

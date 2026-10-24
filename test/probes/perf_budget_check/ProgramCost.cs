@@ -46,7 +46,7 @@ internal static unsafe class ProgramCost
 
     public static void Run(int runs, int calls)
     {
-        Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.High;
+        using (var me = Process.GetCurrentProcess()) me.PriorityClass = ProcessPriorityClass.High;
         var p = ProfileDatabase.LoadEmbedded().All.First(x => x.Id == Composite);
         var rng = new Random(20261017);
         var bodies = new byte[64][];

@@ -76,7 +76,7 @@ internal static unsafe class Ds3Cost
 
     public static void Run(int runs, int calls)
     {
-        Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.High;
+        using (var me = Process.GetCurrentProcess()) me.PriorityClass = ProcessPriorityClass.High;
         var all = ProfileDatabase.LoadEmbedded().All;
         var ds3 = all.First(x => x.Id == "dualshock-3-full");
         var sw = all.First(x => x.Id == "switch-pro");
