@@ -2234,9 +2234,12 @@ EvtDeviceAdd(
                                    haveHardwareIndex, hardwareIndex, &controllerIndex, &contract);
     if (!NT_SUCCESS(status)) return status;
 
-    /* FunctionMode=1 skips filter mode so we can register XUSB on the HID device.
-     * This tells DI to use XInput mapping (5 axes) instead of raw HID.
-     * Also used later to skip WinExInput on main device (companion handles it). */
+    /* FunctionMode=1, which the SDK writes for every profile with an XUSB
+     * companion (PresentationPlan), runs the device as a function driver
+     * instead of a filter. It once let the HID device register XUSB, which
+     * it no longer does (v1.3.4). Since then it changes what the framework
+     * does with requests no queue handles, with create, cleanup and close,
+     * and whether the queues are power managed. */
     DWORD functionMode = 0;
     {
         HKEY hFm;
@@ -2256,6 +2259,15 @@ EvtDeviceAdd(
         RegCloseKey(hFm);
         if (!functionMode)
             WdfFdoInitSetFilter(DeviceInit);
+        else
+            /* HidClass owns power policy for a HID minidriver stack. A
+             * function driver owns it too by default, and a UMDF owner
+             * that receives a device power IRP it never asked for hits
+             * WDF_POWER_MULTIPLE_PPO and UMDF ends the host. The WER
+             * records of a system sleep show that failure in this
+             * device's host. A filter gives ownership up, and so does
+             * this. */
+            WdfDeviceInitSetPowerPolicyOwnership(DeviceInit, FALSE);
     }
 
     {
