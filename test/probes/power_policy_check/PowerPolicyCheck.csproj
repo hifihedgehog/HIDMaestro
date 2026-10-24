@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AssemblyName>PowerPolicyCheck</AssemblyName>
+    <!-- A build with its own BaseIntermediateOutputPath (HmSdkDll below)
+         stops excluding obj\, so the generated sources of every build's
+         intermediate folder stay out of the compile glob. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);obj\**;obj-*\**</DefaultItemExcludes>
+  </PropertyGroup>
+  <!-- -p:HmSdkDll=<path> compiles this source against the SDK assembly
+       another tree built (its HIDMaestro.Core.dll, which embeds that
+       tree's driver), so the check runs on that tree's driver: v2.0.3's
+       for the failure before the fix. Give it its own -o and
+       -p:BaseIntermediateOutputPath. -->
+  <ItemGroup Condition="'$(HmSdkDll)' == ''">
+    <ProjectReference Include="..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(HmSdkDll)' != ''">
+    <Reference Include="HIDMaestro.Core">
+      <HintPath>$(HmSdkDll)</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+  <Target Name="CheckSdkDll" BeforeTargets="ResolveAssemblyReferences;BeforeBuild" Condition="'$(HmSdkDll)' != ''">
+    <Error Condition="!Exists('$(HmSdkDll)')" Text="HmSdkDll: no SDK assembly at $(HmSdkDll)." />
+  </Target>
+</Project>
