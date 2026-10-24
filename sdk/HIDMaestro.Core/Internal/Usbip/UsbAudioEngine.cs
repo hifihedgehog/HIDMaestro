@@ -563,11 +563,12 @@ internal sealed partial class UsbAudioEngine : IDisposable
                 n = free - ((used + free) % _micFrameBytes);
                 if (n < 0) n = 0;
             }
-            for (int i = 0; i < n; i++)
-            {
-                _micRing[_micHead] = pcm[i];
-                _micHead = (_micHead + 1) % _micRing.Length;
-            }
+            // At most two runs: to the ring's end, then from its start.
+            int first = Math.Min(n, _micRing.Length - _micHead);
+            pcm[..first].CopyTo(_micRing.AsSpan(_micHead));
+            pcm[first..n].CopyTo(_micRing);
+            _micHead += n;
+            if (_micHead >= _micRing.Length) _micHead -= _micRing.Length;
             if (n < pcm.Length) NoteMicDrop(pcm.Length - n);
             return n;
         }
@@ -762,11 +763,11 @@ internal sealed partial class UsbAudioEngine : IDisposable
                 int want = data.Length;
                 int take = Math.Min(buffered, want);
                 take -= take % _micFrameBytes; // never hand over a partial frame
-                for (int i = 0; i < take; i++)
-                {
-                    data[i] = _micRing[_micTail];
-                    _micTail = (_micTail + 1) % _micRing.Length;
-                }
+                int first = Math.Min(take, _micRing.Length - _micTail);
+                _micRing.AsSpan(_micTail, first).CopyTo(data);
+                _micRing.AsSpan(0, take - first).CopyTo(data[first..]);
+                _micTail += take;
+                if (_micTail >= _micRing.Length) _micTail -= _micRing.Length;
                 // The rest is silence.
                 data[take..].Clear();
             }
