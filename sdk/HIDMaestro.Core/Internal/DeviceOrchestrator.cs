@@ -777,11 +777,11 @@ internal static partial class DeviceOrchestrator
     private static partial bool CloseServiceHandle(IntPtr handle);
 
     /// <summary>T11: pre-warm hook called from HMContext's background ctor
-    /// task. Same logic as the gated <see cref="EnsureGameInputService"/>
-    /// but exposed at internal scope so callers outside of SetupController
-    /// can pre-prime the per-process cache. Safe to call concurrently with
-    /// SetupController's own EnsureGameInputService invocation: the
-    /// volatile-bool gate means only one path actually does the sc.exe work.</summary>
+    /// task, so the per-process cache is usually set before the first
+    /// SetupController. It may run at the same time as SetupController's own
+    /// <see cref="EnsureGameInputService"/>: each call opens its own service
+    /// control manager handles, so both may query, and both run sc.exe config
+    /// and start only when the service exists and is not running.</summary>
     internal static void PrewarmGameInputService() => EnsureGameInputService();
 
     // ════════════════════════════════════════════════════════════════════

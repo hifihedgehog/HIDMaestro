@@ -79,7 +79,7 @@ public sealed class HMContext : IDisposable
         // IsDriverInstalled → PrewarmGameInputService, taking ~150-250 ms
         // total on a cold launch. Splitting into independent threads lets
         // CPU-bound (Sha256, JSON parse) overlap with I/O-bound (filesystem
-        // staging dir creation, sc.exe spawn). Saves 50-100 ms in worst
+        // staging dir creation, the GameInputSvc query). Saves 50-100 ms in worst
         // case where the consumer's foreground InstallDriver fires before
         // prewarm completes. Catches per-task so one failure doesn't kill
         // the rest.
