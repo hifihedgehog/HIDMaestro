@@ -519,12 +519,14 @@ internal sealed class UsbipServer : IDisposable
         // OUT data and its isochronous descriptors that arrived together cost
         // one call, and so do commands the host controller sent back to back.
         // Bytes _rxStart to _rxEnd are received and not yet read. Only the
-        // connection's reader touches it. A command and its OUT data and
-        // descriptors up to 4 KB in all are read in place. Longer ones, such
-        // as a DualSense speaker URB of ten 392-byte packets (4,128 bytes with
-        // its header), go to the arrays above in a second call. A 64 KB buffer
-        // measured slower per control request than the 48-byte reads it
-        // replaces, and a 4 KB one did not.
+        // connection's reader touches it. A command whose OUT data and
+        // descriptors together, not counting its 48-byte header, fit in the
+        // buffer is read in place. A DualSense speaker URB of ten 392-byte
+        // packets is 4,080 such bytes: the bytes left after its header move
+        // to the front of the buffer and a second Receive brings the rest.
+        // Longer commands go to the arrays above. A 64 KB buffer measured
+        // slower per control request than the 48-byte reads it replaces, and
+        // a 4 KB one did not.
         private const int RxBufferSize = 4096;
         private byte[] _rx = Array.Empty<byte>();
         private int _rxStart, _rxEnd;
