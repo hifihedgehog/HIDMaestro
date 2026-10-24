@@ -1384,11 +1384,8 @@ public sealed partial class HMController : IDisposable
     {
         ThrowIfDisposed();
         if (_stateBlockSpec != null && SubmitRawStateBlock(report)) return;
-        if (report.Length == 0) throw new ArgumentException("Report cannot be empty.", nameof(report));
-        if (report.Length > SharedMemoryIO.DATA_CAPACITY)
-            throw new ArgumentException(
-                $"Report length {report.Length} exceeds the {SharedMemoryIO.DATA_CAPACITY}-byte shared section payload.",
-                nameof(report));
+        if ((uint)(report.Length - 1) >= SharedMemoryIO.DATA_CAPACITY)
+            ThrowReportLength(report.Length, SharedMemoryIO.DATA_CAPACITY, "shared section payload");
 
         lock (_submitLock)
         {
@@ -1401,24 +1398,30 @@ public sealed partial class HMController : IDisposable
             AwaitPreviousDelivery();
             SubmitRawReportCore(report);
             NoteFrameWritten();
-            if (_deliverEvery && _kbm != null)
-            {
-                // The driver sends this lane's data under the profile's
-                // dataReportId or the descriptor's first input report ID
-                // (DeviceOrchestrator.DriverInputReport).
-                byte id = _kbmDataReportId;
-                if (id == 0) NoteReleaseFrame(report);
-                else
-                {
-                    var b = _kbmBuffers ??= new KeyboardMouseBuffers();
-                    var full = b.RawFrame ??= new byte[SharedMemoryIO.DATA_CAPACITY + 1];
-                    full[0] = id;
-                    report.CopyTo(full.AsSpan(1));
-                    NoteReleaseFrame(full.AsSpan(0, report.Length + 1));
-                }
-            }
+            if (_deliverEvery && _kbm != null) NoteRawReleaseFrame(report);
             if (_idleThread != null)
                 RememberRawFrame(report, extended: false);
+        }
+    }
+
+    /// <summary>A keyboard or mouse raw frame's release frame, kept as the
+    /// driver sends the frame. Its own method, so its buffers stay out of
+    /// SubmitRawReport's frame. Caller holds _submitLock.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private void NoteRawReleaseFrame(ReadOnlySpan<byte> report)
+    {
+        // The driver sends this lane's data under the profile's
+        // dataReportId or the descriptor's first input report ID
+        // (DeviceOrchestrator.DriverInputReport).
+        byte id = _kbmDataReportId;
+        if (id == 0) NoteReleaseFrame(report);
+        else
+        {
+            var b = _kbmBuffers ??= new KeyboardMouseBuffers();
+            var full = b.RawFrame ??= new byte[SharedMemoryIO.DATA_CAPACITY + 1];
+            full[0] = id;
+            report.CopyTo(full.AsSpan(1));
+            NoteReleaseFrame(full.AsSpan(0, report.Length + 1));
         }
     }
 
@@ -1517,13 +1520,10 @@ public sealed partial class HMController : IDisposable
     {
         ThrowIfDisposed();
         if (_stateBlockSpec != null && SubmitRawStateBlock(report)) return;
-        if (report.Length == 0) throw new ArgumentException("Report cannot be empty.", nameof(report));
         // The extended lane carries the whole frame in an 80-byte field. The
         // writer used to cut a longer one there without a word.
-        if (report.Length > SharedMemoryIO.EXTENDED_DATA_CAPACITY)
-            throw new ArgumentException(
-                $"Report length {report.Length} exceeds the {SharedMemoryIO.EXTENDED_DATA_CAPACITY}-byte extended report field.",
-                nameof(report));
+        if ((uint)(report.Length - 1) >= SharedMemoryIO.EXTENDED_DATA_CAPACITY)
+            ThrowReportLength(report.Length, SharedMemoryIO.EXTENDED_DATA_CAPACITY, "extended report field");
 
         lock (_submitLock)
         {
@@ -1723,10 +1723,17 @@ public sealed partial class HMController : IDisposable
     /// one. Gives up after DeliveryTimeoutMs (Windows not reading the
     /// device, say while it starts), and after three misses in a row stops
     /// waiting until an acknowledgement shows up again. Caller holds
-    /// _submitLock.</summary>
+    /// _submitLock. The test inlines into every submit, and a gamepad's
+    /// frame, which never waits, makes no call.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
     private void AwaitPreviousDelivery()
     {
-        if (!_deliverEvery || !_deliveryPending) return;
+        if (_deliverEvery && _deliveryPending) AwaitPreviousDeliveryCore();
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private void AwaitPreviousDeliveryCore()
+    {
         if (SharedMemoryIO.InputAckSupported(Index))
         {
             int timeout = _deliveryMisses >= 3 ? 0 : DeliveryTimeoutMs;
@@ -2230,7 +2237,23 @@ public sealed partial class HMController : IDisposable
     private bool _disposed;
     private void ThrowIfDisposed()
     {
-        if (_disposed) throw new ObjectDisposedException(nameof(HMController));
+        if (_disposed) ThrowDisposed();
+    }
+
+    // The throws of the submit paths, out of line: an exception built in
+    // the method itself, a formatted message most of all, grows the frame
+    // every call sets up and zeroes.
+    [System.Diagnostics.CodeAnalysis.DoesNotReturn]
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void ThrowDisposed() => throw new ObjectDisposedException(nameof(HMController));
+
+    [System.Diagnostics.CodeAnalysis.DoesNotReturn]
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void ThrowReportLength(int length, int capacity, string field)
+    {
+        if (length == 0) throw new ArgumentException("Report cannot be empty.", "report");
+        throw new ArgumentException(
+            $"Report length {length} exceeds the {capacity}-byte {field}.", "report");
     }
 
     /// <summary>A device that builds each report from its state block has no

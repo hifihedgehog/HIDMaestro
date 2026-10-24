@@ -251,8 +251,9 @@ internal static partial class VrSharedMemory
     }
 
     /// <summary>Seqlock-write one input frame and signal the driver. The
-    /// odd/even protocol is SharedMemoryIO.WriteInputFrame's exactly:
-    /// odd seqno, barrier, payload, barrier, even seqno, SetEvent.</summary>
+    /// odd/even protocol is SharedMemoryIO.WriteInputFrame's exactly: odd
+    /// seqno, a write barrier, payload, even seqno as a release store,
+    /// SetEvent.</summary>
     public static void WriteInputFrame(Channel ch, ReadOnlySpan<byte> frame208)
     {
         if (frame208.Length != InputFrameSize)
@@ -260,8 +261,8 @@ internal static partial class VrSharedMemory
 
         ref uint seq = ref MarshalRef<uint>(ch.View, InputSeqNoOffset);
         uint odd = (seq + 1) | 1u;
-        seq = odd;
-        Thread.MemoryBarrier();
+        Volatile.Write(ref seq, odd);
+        Volatile.WriteBarrier();
         unsafe
         {
             fixed (byte* src = frame208)
@@ -269,8 +270,7 @@ internal static partial class VrSharedMemory
                 Buffer.MemoryCopy(src, (void*)(ch.View + InputFrameOffset), InputFrameSize, InputFrameSize);
             }
         }
-        Thread.MemoryBarrier();
-        seq = odd + 1;
+        Volatile.Write(ref seq, odd + 1);
         SetEvent(ch.InputEvent);
     }
 
