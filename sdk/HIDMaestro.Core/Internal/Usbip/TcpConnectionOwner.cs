@@ -2,6 +2,7 @@ using System;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace HIDMaestro.Internal.Usbip;
 
@@ -60,10 +61,18 @@ internal static partial class TcpConnectionOwner
         return MemoryMarshal.Read<uint>(bytes);
     }
 
+    // The size the last read of the table used, which a successful call
+    // writes back to pdwSize whatever the buffer's size (tested on the bench
+    // machine), plus SlackRows rows. The next read starts with that much
+    // room, so one call reads the table while the machine has not opened
+    // more connections than the slack, the import's own two included, where
+    // a call that only asks the size would walk the table first.
+    private static uint s_lastSize;
+
     private static unsafe int Find(uint localAddr, int localPort, uint remoteAddr, int remotePort)
     {
-        uint size = 0;
-        void* table = null;
+        uint size = Volatile.Read(ref s_lastSize);
+        void* table = size > 0 ? NativeMemory.Alloc(size) : null;
         try
         {
             // The size the call asks for is the table's size at that call,
@@ -73,7 +82,11 @@ internal static partial class TcpConnectionOwner
             for (int attempt = 0; ; attempt++)
             {
                 uint err = GetExtendedTcpTable(table, ref size, false, AF_INET, TCP_TABLE_OWNER_PID_CONNECTIONS, 0);
-                if (err == 0) break;
+                if (err == 0)
+                {
+                    Volatile.Write(ref s_lastSize, size + SlackRows * RowSize);
+                    break;
+                }
                 if (err != ERROR_INSUFFICIENT_BUFFER || attempt == MaxReads) return -1;
                 NativeMemory.Free(table);
                 table = null;
