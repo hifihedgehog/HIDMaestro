@@ -293,7 +293,9 @@ internal static partial class VrSharedMemory
         ulong want = cursor + 1;
         int slotOffset = HapticRingOffset + (int)((want - 1) % HapticSlots) * HapticReplySize;
 
-        ulong seq1 = MarshalRef<ulong>(ch.View, slotOffset);
+        // An acquire, so the slot's fields are read after its seqNo, as in
+        // SharedMemoryIO.TryReadOutputFrame.
+        ulong seq1 = Volatile.Read(ref MarshalRef<ulong>(ch.View, slotOffset));
         if (seq1 != want)
             return false;   // producer mid-write; retry on the next signal
         hand = MarshalRef<uint>(ch.View, slotOffset + 8);
