@@ -122,8 +122,13 @@
 //                  offline: the budgets' non-inferiority rule over two
 //                  sides' measurements, the offline modes' launch lines or a
 //                  live mode's summaries (Compare.cs)
-//   start [runs]   process start to the first controller, each run in a
-//                  fresh process, with the session cleanup step's time
+//   start [runs] [--settle=<ms>]
+//                  process start to the first controller, each run in a
+//                  fresh process, with the session cleanup step's time.
+//                  With --settle the controller stays up that long before
+//                  its Dispose is timed
+//   load [runs]    offline: process start to the catalog loaded, each run in
+//                  a fresh process, with the JIT's time and methods
 //   claim [runs]   the owner claim, the census and the lease (this release)
 //   census         the census walk over Enum keys it cannot read (scratch
 //                  keys under HKCU: denied, deleted, gone) gives what the
@@ -226,7 +231,8 @@ internal static partial class Program
         args = args.Where(a => !a.StartsWith("--key=", StringComparison.Ordinal)).ToArray();
         string mode = args.Length > 0 ? args[0] : "gate";
         int runs = args.Length > 1 && int.TryParse(args[1], out int r) ? r : 30;
-        if (mode == "start-child") return StartChild();
+        if (mode == "start-child") return StartChild(args.Length > 1 && int.TryParse(args[1], out int childSettle) ? childSettle : 0);
+        if (mode == "load-child") return LoadChild();
         if (mode == "idle-reader") return IdleLive.Reader(args[1]);
         if (mode == "rate-reader") return RateReader(args[1]);
 #if !HM_BASE
@@ -285,6 +291,11 @@ internal static partial class Program
             return 0;
         }
 #endif
+        if (mode == "load")
+        {
+            Load(runs);
+            return 0;
+        }
         if (mode is "submit" or "submit-repeat")
         {
             SubmitCost.Run(runs, args.Length > 2 && int.TryParse(args[2], out int calls) ? calls : 100_000, mode == "submit-repeat");
@@ -356,7 +367,7 @@ internal static partial class Program
 #if !HM_BASE
             case "install": return Install();
 #endif
-            case "start": Start(runs); break;
+            case "start": Start(runs, SettleMs(args)); break;
             case "usbip": Usbip(runs, gate: false); break;
 #if !HM_BASE
             case "claim": Claim(runs); break;
@@ -1211,16 +1222,21 @@ internal static partial class Program
     /// <summary>Fresh processes, each creating one DualShock 4 on the
     /// installed driver and exiting. One run first makes sure the driver is
     /// current, so every timed run takes the same-version fast path.</summary>
-    static void Start(int runs)
+    static void Start(int runs, int settleMs)
     {
         string self = Environment.ProcessPath!;
         string log = TimingLog();
         var ready = new List<double>(runs);
         var sweep = new List<double>(runs);
+        // The child's parts, in the order it runs them, and the SDK's step
+        // timings of its one create.
+        string[] partNames = { "main", "context", "profiles", "create", "dispose", "jit", "jitted", "jit-profiles" };
+        var parts = partNames.ToDictionary(n => n, _ => new List<double>(runs));
+        var steps = new SortedDictionary<string, List<double>>(StringComparer.Ordinal);
         for (int run = -1; run < runs; run++)
         {
             long logStart = File.Exists(log) ? new FileInfo(log).Length : 0;
-            var psi = new ProcessStartInfo(self, "start-child")
+            var psi = new ProcessStartInfo(self, settleMs > 0 ? $"start-child {settleMs}" : "start-child")
             {
                 RedirectStandardOutput = true,
                 UseShellExecute = false,
@@ -1230,24 +1246,130 @@ internal static partial class Program
             string output = p.StandardOutput.ReadToEnd();
             p.WaitForExit();
             if (run < 0) continue;
-            var line = output.Split('\n').FirstOrDefault(l => l.StartsWith("ready ", StringComparison.Ordinal));
+            var lines = output.Split('\n');
+            var line = lines.FirstOrDefault(l => l.StartsWith("ready ", StringComparison.Ordinal));
             if (line == null) { Console.WriteLine($"start: run {run} gave no time: {output.Trim()}"); continue; }
             ready.Add(double.Parse(line[6..].Trim(), System.Globalization.CultureInfo.InvariantCulture));
+            foreach (string l in lines)
+            {
+                if (!l.StartsWith("part ", StringComparison.Ordinal)) continue;
+                var f = l[5..].Trim().Split(' ');
+                if (f.Length == 2 && parts.TryGetValue(f[0], out var list))
+                    list.Add(double.Parse(f[1], System.Globalization.CultureInfo.InvariantCulture));
+            }
             foreach (var (step, values) in TimingSteps(log, logStart, Ds4))
+            {
                 if (step == "0.ghost_cleanup") sweep.AddRange(values);
+                if (!steps.TryGetValue(step, out var all)) steps[step] = all = new List<double>(runs);
+                all.AddRange(values);
+            }
         }
         Report("process start to the first controller, ms", ready, runs, "");
         Report("the session cleanup step in that create (0.ghost_cleanup), ms", sweep, runs, "");
+        Report("start part: process start to Main, ms", parts["main"], runs, "");
+        Report("start part: the HMContext constructor, ms", parts["context"], runs, "");
+        Report("start part: LoadDefaultProfiles, ms", parts["profiles"], runs, "");
+        Report("start part: the first CreateController, ms", parts["create"], runs, "");
+        Report("start part: its Dispose, ms", parts["dispose"], runs, "");
+        Report("start part: JIT time in the process to the first controller, ms", parts["jit"], runs, "");
+        Report("start part: methods the JIT compiled to the first controller", parts["jitted"], runs, "");
+        Report("start part: JIT time in the process to the end of LoadDefaultProfiles, ms", parts["jit-profiles"], runs, "");
+        foreach (var (step, values) in steps)
+            Report($"start part: step {step}, ms", values, runs, "");
     }
 
-    static int StartChild()
+    static int StartChild(int settleMs)
     {
-        using var ctx = new HMContext();
-        ctx.LoadDefaultProfiles();
-        using var c = ctx.CreateController(ctx.GetProfile(Ds4)!);
+        // Each part from the same clock, the process's creation time the
+        // first mark.
+        long t0 = Stopwatch.GetTimestamp();
         DateTime started = Process.GetCurrentProcess().StartTime.ToUniversalTime();
-        double ms = (DateTime.UtcNow - started).TotalMilliseconds;
+        double main = (DateTime.UtcNow - started).TotalMilliseconds - Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
+        long t1 = Stopwatch.GetTimestamp();
+        using var ctx = new HMContext();
+        long t2 = Stopwatch.GetTimestamp();
+        ctx.LoadDefaultProfiles();
+        long t3 = Stopwatch.GetTimestamp();
+        double jitProfiles = System.Runtime.JitInfo.GetCompilationTime(currentThread: false).TotalMilliseconds;
+        // Disposed below, and by the context's Dispose when anything before
+        // that throws.
+        var c = ctx.CreateController(ctx.GetProfile(Ds4)!);
+        long t4 = Stopwatch.GetTimestamp();
+        double ms = main + Stopwatch.GetElapsedTime(t0, t4).TotalMilliseconds;
+        // The JIT's share: its time on every thread of the process, and the
+        // methods it compiled, up to the first controller.
+        double jit = System.Runtime.JitInfo.GetCompilationTime(currentThread: false).TotalMilliseconds;
+        long jitted = System.Runtime.JitInfo.GetCompiledMethodCount(currentThread: false);
         Console.WriteLine(FormattableString.Invariant($"ready {ms:F1}"));
+        if (settleMs > 0) Thread.Sleep(settleMs);
+        long t4d = Stopwatch.GetTimestamp();
+        c.Dispose();
+        long t5 = Stopwatch.GetTimestamp();
+        Console.WriteLine(FormattableString.Invariant($"part main {main:F1}"));
+        Console.WriteLine(FormattableString.Invariant($"part context {Stopwatch.GetElapsedTime(t1, t2).TotalMilliseconds:F1}"));
+        Console.WriteLine(FormattableString.Invariant($"part profiles {Stopwatch.GetElapsedTime(t2, t3).TotalMilliseconds:F1}"));
+        Console.WriteLine(FormattableString.Invariant($"part create {Stopwatch.GetElapsedTime(t3, t4).TotalMilliseconds:F1}"));
+        Console.WriteLine(FormattableString.Invariant($"part dispose {Stopwatch.GetElapsedTime(t4d, t5).TotalMilliseconds:F1}"));
+        Console.WriteLine(FormattableString.Invariant($"part jit {jit:F1}"));
+        Console.WriteLine(FormattableString.Invariant($"part jitted {jitted}"));
+        Console.WriteLine(FormattableString.Invariant($"part jit-profiles {jitProfiles:F1}"));
+        return 0;
+    }
+
+    /// <summary>Offline, no elevation: fresh processes, each making an
+    /// HMContext and loading the catalog, the part of the start mode's child
+    /// before its create, with the JIT's time and methods.</summary>
+    static void Load(int runs)
+    {
+        string self = Environment.ProcessPath!;
+        string[] names = { "main", "context", "profiles", "ready", "jit", "jitted" };
+        var parts = names.ToDictionary(n => n, _ => new List<double>(runs));
+        for (int run = -1; run < runs; run++)
+        {
+            var psi = new ProcessStartInfo(self, "load-child")
+            {
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            using var p = Process.Start(psi)!;
+            string output = p.StandardOutput.ReadToEnd();
+            p.WaitForExit();
+            if (run < 0) continue;
+            foreach (string l in output.Split('\n'))
+            {
+                if (!l.StartsWith("part ", StringComparison.Ordinal)) continue;
+                var f = l[5..].Trim().Split(' ');
+                if (f.Length == 2 && parts.TryGetValue(f[0], out var list))
+                    list.Add(double.Parse(f[1], System.Globalization.CultureInfo.InvariantCulture));
+            }
+        }
+        Report("load: process start to the catalog loaded, ms", parts["ready"], runs, "");
+        Report("load part: process start to Main, ms", parts["main"], runs, "");
+        Report("load part: the HMContext constructor, ms", parts["context"], runs, "");
+        Report("load part: LoadDefaultProfiles, ms", parts["profiles"], runs, "");
+        Report("load part: JIT time in the process, ms", parts["jit"], runs, "");
+        Report("load part: methods the JIT compiled", parts["jitted"], runs, "");
+    }
+
+    static int LoadChild()
+    {
+        long t0 = Stopwatch.GetTimestamp();
+        DateTime started = Process.GetCurrentProcess().StartTime.ToUniversalTime();
+        double main = (DateTime.UtcNow - started).TotalMilliseconds - Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
+        long t1 = Stopwatch.GetTimestamp();
+        using var ctx = new HMContext();
+        long t2 = Stopwatch.GetTimestamp();
+        ctx.LoadDefaultProfiles();
+        long t3 = Stopwatch.GetTimestamp();
+        double jit = System.Runtime.JitInfo.GetCompilationTime(currentThread: false).TotalMilliseconds;
+        long jitted = System.Runtime.JitInfo.GetCompiledMethodCount(currentThread: false);
+        Console.WriteLine(FormattableString.Invariant($"part main {main:F1}"));
+        Console.WriteLine(FormattableString.Invariant($"part context {Stopwatch.GetElapsedTime(t1, t2).TotalMilliseconds:F1}"));
+        Console.WriteLine(FormattableString.Invariant($"part profiles {Stopwatch.GetElapsedTime(t2, t3).TotalMilliseconds:F1}"));
+        Console.WriteLine(FormattableString.Invariant($"part ready {main + Stopwatch.GetElapsedTime(t0, t3).TotalMilliseconds:F1}"));
+        Console.WriteLine(FormattableString.Invariant($"part jit {jit:F1}"));
+        Console.WriteLine(FormattableString.Invariant($"part jitted {jitted}"));
         return 0;
     }
 
