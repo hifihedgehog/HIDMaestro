@@ -1032,17 +1032,29 @@ internal static partial class SharedMemoryIO
         seqNo = pending + 1;
         Volatile.Write(ref *(uint*)v, seqNo);
 
-        // 4. Wake the driver's worker thread. Auto-reset event: one
-        // successful wait consumes the signal. If the driver is still
-        // processing a previous frame the signal stays latched until
-        // it returns to WaitForMultipleObjects.
+        // 4. Wake the driver's worker thread, and the companion's pump on a
+        // frame that carries GIP bytes (perf audit 2026-07-21: only those
+        // feed its WAIT_FOR_INPUT pump, so non-Xbox profiles pay nothing
+        // for it).
+        IntPtr companion = gipData != null ? companionEvent : IntPtr.Zero;
+        if (eventHandle != IntPtr.Zero || companion != IntPtr.Zero)
+            Signal(eventHandle, companion);
+    }
+
+    /// <summary>The frame's doorbells, after its sequence number is even.
+    /// The input event is auto-reset: one successful wait consumes the
+    /// signal, and a signal that comes while the driver is still on the
+    /// previous frame stays set until it waits again. Never inlined: a
+    /// method that holds a P/Invoke sets up a native-call frame each time it
+    /// is entered, and WriteInputFrame inlines into submit paths that often
+    /// return without writing, as the 2.0.2 OnState fix found (ProtocolHost.SendState).
+    /// Here only a frame that signals pays for that setup.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]
+    private static void Signal(IntPtr eventHandle, IntPtr companionEvent)
+    {
         if (eventHandle != IntPtr.Zero)
             SetEvent(eventHandle);
-
-        // 5. Companion doorbell (perf audit 2026-07-21): only frames that
-        // carry GIP bytes feed the XUSB companion's WAIT_FOR_INPUT pump,
-        // so non-Xbox profiles pay nothing here.
-        if (companionEvent != IntPtr.Zero && gipData != null)
+        if (companionEvent != IntPtr.Zero)
             SetEvent(companionEvent);
     }
 
