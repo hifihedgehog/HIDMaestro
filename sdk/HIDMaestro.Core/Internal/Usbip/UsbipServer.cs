@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
@@ -507,54 +506,134 @@ internal sealed class UsbipServer : IDisposable
         }
 
         // The reader's buffers for a submit's OUT data and isochronous
-        // packets, grown to the host's sizes and reused, so a transfer
-        // allocates nothing. Every use of them ends inside HandleSubmit.
+        // descriptors when the two do not fit the receive buffer together, and
+        // for its isochronous packets, grown to the host's sizes and reused, so
+        // a transfer allocates nothing. Every use of them ends inside
+        // HandleSubmit.
         private byte[] _outData = Array.Empty<byte>();
+        private byte[] _isoDescs = Array.Empty<byte>();
         private (uint Offset, uint Length)[] _isoPackets = Array.Empty<(uint, uint)>();
+
+        // The command loop's receive buffer. Each Receive takes what the
+        // socket holds, up to the buffer's size, so a command's header, its
+        // OUT data and its isochronous descriptors that arrived together cost
+        // one call, and so do commands the host controller sent back to back.
+        // Bytes _rxStart to _rxEnd are received and not yet read. Only the
+        // connection's reader touches it. A command and its OUT data and
+        // descriptors up to 4 KB in all are read in place. Longer ones, such
+        // as a DualSense speaker URB of ten 392-byte packets (4,128 bytes with
+        // its header), go to the arrays above in a second call. A 64 KB buffer
+        // measured slower per control request than the 48-byte reads it
+        // replaces, and a 4 KB one did not.
+        private const int RxBufferSize = 4096;
+        private byte[] _rx = Array.Empty<byte>();
+        private int _rxStart, _rxEnd;
+
+        /// <summary>The next <paramref name="n"/> bytes of the stream, at
+        /// most <see cref="RxBufferSize"/>, read in place. The span stays
+        /// valid until the next call. A longer read goes through
+        /// <see cref="ReadInto"/>.</summary>
+        private ReadOnlySpan<byte> Take(int n)
+        {
+            if (_rxEnd - _rxStart < n) Fill(n);
+            var taken = new ReadOnlySpan<byte>(_rx, _rxStart, n);
+            _rxStart += n;
+            if (_rxStart == _rxEnd) _rxStart = _rxEnd = 0;
+            return taken;
+        }
+
+        /// <summary>Receive until the buffer holds <paramref name="n"/>
+        /// bytes from <see cref="_rxStart"/>. Kept out of <see cref="Take"/>,
+        /// which often returns without a call to the socket: a method the
+        /// JIT inlines a native call into sets up the call's frame on every
+        /// entry.</summary>
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        private void Fill(int n)
+        {
+            // A longer read would ask the socket for bytes with no room left
+            // to put them.
+            if (n > _rx.Length) throw new InvalidOperationException($"a read of {n} bytes past the {_rx.Length}-byte receive buffer");
+            if (_rxStart + n > _rx.Length)
+            {
+                // What is left moves to the front, so the rest of the
+                // command lands after it.
+                int left = _rxEnd - _rxStart;
+                _rx.AsSpan(_rxStart, left).CopyTo(_rx);
+                _rxStart = 0;
+                _rxEnd = left;
+            }
+            while (_rxEnd - _rxStart < n)
+            {
+                int got = _socket.Receive(_rx.AsSpan(_rxEnd), SocketFlags.None);
+                if (got <= 0) throw new SocketException((int)SocketError.ConnectionReset);
+                _rxEnd += got;
+            }
+        }
+
+        /// <summary>The next <paramref name="dst"/>.Length bytes of the
+        /// stream into <paramref name="dst"/>, of any length: what the receive
+        /// buffer holds, then the rest straight from the socket, which runs
+        /// only once the buffer is empty.</summary>
+        private void ReadInto(Span<byte> dst)
+        {
+            int held = Math.Min(_rxEnd - _rxStart, dst.Length);
+            Take(held).CopyTo(dst);
+            ReadExactly(dst[held..]);
+        }
 
         private void CommandLoop(UsbipEmulatedDevice device)
         {
-            var header = new byte[UsbipProtocol.HeaderSize];
+            _rx = new byte[RxBufferSize];
             while (true)
             {
-                ReadExactly(header);
+                var cmd = UsbipProtocol.ParseHeader(Take(UsbipProtocol.HeaderSize));
                 // A device disposed under an open connection answers nothing
                 // more. Ending the connection lets usbip-win2 detach it
                 // (wsk_receive_events.cpp async_reattach), and the re-attach
                 // that follows finds no device.
                 if (device.IsDisposed) return;
-                var cmd = UsbipProtocol.ParseHeader(header);
 
                 if (cmd.Command == UsbipProtocol.CmdSubmit)
                 {
-                    Span<byte> payload = default;
+                    ReadOnlySpan<byte> payload = default;
                     Span<(uint Offset, uint Length)> iso = default;
 
                     bool isIsoch = cmd.NumberOfPackets != UsbipProtocol.NumberOfPacketsNonIsoch;
                     if (isIsoch && (cmd.NumberOfPackets < 0 || cmd.NumberOfPackets > UsbipProtocol.MaxIsoPackets))
                         throw new InvalidOperationException($"number_of_packets {cmd.NumberOfPackets} out of range");
 
-                    if (!cmd.IsIn && cmd.TransferBufferLength > 0)
+                    int dataLength = !cmd.IsIn && cmd.TransferBufferLength > 0 ? cmd.TransferBufferLength : 0;
+                    int descLength = isIsoch ? cmd.NumberOfPackets * UsbipProtocol.IsoDescriptorSize : 0;
+                    ReadOnlySpan<byte> descs = default;
+                    if ((long)dataLength + descLength <= RxBufferSize)
                     {
-                        if (_outData.Length < cmd.TransferBufferLength)
-                            _outData = new byte[cmd.TransferBufferLength];
-                        payload = _outData.AsSpan(0, cmd.TransferBufferLength);
-                        ReadExactly(payload);
+                        // Both in place, from one take, so neither moves
+                        // while the other is read.
+                        var rest = Take(dataLength + descLength);
+                        payload = rest[..dataLength];
+                        descs = rest[dataLength..];
+                    }
+                    else
+                    {
+                        // Longer than the buffer together, which an
+                        // isochronous URB of up to 1024 packets can be on
+                        // its descriptors alone: each into its own array.
+                        if (_outData.Length < dataLength) _outData = new byte[dataLength];
+                        if (_isoDescs.Length < descLength) _isoDescs = new byte[descLength];
+                        var data = _outData.AsSpan(0, dataLength);
+                        var desc = _isoDescs.AsSpan(0, descLength);
+                        ReadInto(data);
+                        ReadInto(desc);
+                        payload = data;
+                        descs = desc;
                     }
                     if (isIsoch)
                     {
                         int n = cmd.NumberOfPackets;
-                        var descs = ArrayPool<byte>.Shared.Rent(n * UsbipProtocol.IsoDescriptorSize);
-                        try
-                        {
-                            ReadExactly(descs.AsSpan(0, n * UsbipProtocol.IsoDescriptorSize));
-                            if (_isoPackets.Length < n) _isoPackets = new (uint, uint)[n];
-                            iso = _isoPackets.AsSpan(0, n);
-                            for (int i = 0; i < n; i++)
-                                iso[i] = UsbipProtocol.ReadIsoDescriptor(
-                                    descs.AsSpan(i * UsbipProtocol.IsoDescriptorSize));
-                        }
-                        finally { ArrayPool<byte>.Shared.Return(descs); }
+                        if (_isoPackets.Length < n) _isoPackets = new (uint, uint)[n];
+                        iso = _isoPackets.AsSpan(0, n);
+                        for (int i = 0; i < n; i++)
+                            iso[i] = UsbipProtocol.ReadIsoDescriptor(descs[(i * UsbipProtocol.IsoDescriptorSize)..]);
                     }
 
                     device.HandleSubmit(in cmd, payload, iso);
@@ -580,16 +659,28 @@ internal sealed class UsbipServer : IDisposable
         /// own.</summary>
         public void SendRetSubmitNonIso(uint seqnum, int status, int actualLength, ReadOnlySpan<byte> inPayload)
         {
-            int payloadLen = inPayload.Length;
-            var buf = ArrayPool<byte>.Shared.Rent(UsbipProtocol.HeaderSize + payloadLen);
-            try
+            int total = UsbipProtocol.HeaderSize + inPayload.Length;
+            lock (_sendLock)
             {
+                var buf = TxBuffer(total);
                 UsbipProtocol.WriteRetSubmit(buf, seqnum, status, actualLength, 0,
                     UsbipProtocol.NumberOfPacketsNonIsoch, 0);
                 inPayload.CopyTo(buf.AsSpan(UsbipProtocol.HeaderSize));
-                Send(buf.AsSpan(0, UsbipProtocol.HeaderSize + payloadLen));
+                SendLocked(buf.AsSpan(0, total));
             }
-            finally { ArrayPool<byte>.Shared.Return(buf); }
+        }
+
+        // The reply being sent, built under _sendLock in a buffer the
+        // connection keeps: grown to the longest reply and reused, so a reply
+        // allocates nothing.
+        private byte[] _tx = new byte[UsbipProtocol.HeaderSize + 4096];
+
+        /// <summary>The send buffer, at least <paramref name="length"/> bytes
+        /// long. Caller holds <see cref="_sendLock"/>.</summary>
+        private byte[] TxBuffer(int length)
+        {
+            if (_tx.Length < length) _tx = new byte[length];
+            return _tx;
         }
 
         /// <summary>Isochronous RET_SUBMIT. IN: compacted data then the
@@ -602,9 +693,9 @@ internal sealed class UsbipServer : IDisposable
             int n = p.PacketCount;
             int dataLen = p.IsIn ? inCompacted.Length : 0;
             int total = UsbipProtocol.HeaderSize + dataLen + n * UsbipProtocol.IsoDescriptorSize;
-            var buf = ArrayPool<byte>.Shared.Rent(total);
-            try
+            lock (_sendLock)
             {
+                var buf = TxBuffer(total);
                 int actual = p.IsIn ? perPacketActual * n : p.TransferBufferLength;
                 UsbipProtocol.WriteRetSubmit(buf, p.Seqnum, 0, actual, p.FrameAtCompletion, n, 0);
                 if (dataLen > 0) inCompacted.CopyTo(buf.AsSpan(UsbipProtocol.HeaderSize));
@@ -617,9 +708,8 @@ internal sealed class UsbipServer : IDisposable
                         actualLength: p.IsIn ? (uint)perPacketActual : p.Packets[i].Length,
                         status: 0);
                 }
-                Send(buf.AsSpan(0, total));
+                SendLocked(buf.AsSpan(0, total));
             }
-            finally { ArrayPool<byte>.Shared.Return(buf); }
         }
 
         public void SendRetUnlink(uint seqnum, int status)
@@ -631,15 +721,18 @@ internal sealed class UsbipServer : IDisposable
 
         private void Send(ReadOnlySpan<byte> data)
         {
-            lock (_sendLock)
+            lock (_sendLock) SendLocked(data);
+        }
+
+        /// <summary>Caller holds <see cref="_sendLock"/>.</summary>
+        private void SendLocked(ReadOnlySpan<byte> data)
+        {
+            int sent = 0;
+            while (sent < data.Length)
             {
-                int sent = 0;
-                while (sent < data.Length)
-                {
-                    int n = _socket.Send(data[sent..], SocketFlags.None);
-                    if (n <= 0) throw new SocketException((int)SocketError.ConnectionReset);
-                    sent += n;
-                }
+                int n = _socket.Send(data[sent..], SocketFlags.None);
+                if (n <= 0) throw new SocketException((int)SocketError.ConnectionReset);
+                sent += n;
             }
         }
 
