@@ -826,7 +826,13 @@ internal sealed class Case8UsbipPaths : IOracleCase
             Set("_streamSendLock", new object());
             Set("_frameQueue", Activator.CreateInstance(t.GetField("_frameQueue", Instance)!.FieldType));
             Set("_spareFrames", new Stack<byte[]>());
-            Set("_pendingInterruptIn", new Dictionary<byte, Queue<uint>>());
+            // The input pump's queue of parked reads, made and kept as the
+            // constructor makes it (UsbipEmulatedDevice.cs, _primaryPending).
+            var pending = new Dictionary<byte, Queue<uint>>();
+            var primaryPending = new Queue<uint>();
+            pending[inEndpoint] = primaryPending;
+            Set("_pendingInterruptIn", pending);
+            Set("_primaryPending", primaryPending);
             Set("_parkedBulkLength", new Dictionary<uint, int>());
             Set("_readsPerEp", new Dictionary<byte, long>());
             Set("_completionsPerEp", new Dictionary<byte, long>());
@@ -1310,6 +1316,9 @@ internal sealed class Case8UsbipPaths : IOracleCase
             const BindingFlags f = BindingFlags.Instance | BindingFlags.NonPublic;
             (t.GetField("_socket", f) ?? throw new MissingFieldException(t.Name, "_socket")).SetValue(Connection, _server);
             (t.GetField("_sendLock", f) ?? throw new MissingFieldException(t.Name, "_sendLock")).SetValue(Connection, new object());
+            // The reply buffer its field initializer makes (UsbipServer.cs,
+            // Connection._tx), which no constructor run sets here.
+            (t.GetField("_tx", f) ?? throw new MissingFieldException(t.Name, "_tx")).SetValue(Connection, new byte[UsbipProtocol.HeaderSize + 4096]);
         }
 
         public uint Submit(UsbipEmulatedDevice dev, byte endpoint, bool isIn, int length, ReadOnlySpan<byte> payload, ulong setup = 0)
