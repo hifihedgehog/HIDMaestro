@@ -542,13 +542,13 @@ KeepFeatureSet(_In_ PDEVICE_CONTEXT ctx, _In_reads_(size) const UCHAR *buf, _In_
         if (ctx->FeatureOnReports[slot] == rid) break;
     if (slot == ctx->FeatureOnReportCount) return;
     if (len > HM_FEATURE_MAX_DATA) len = HM_FEATURE_MAX_DATA;
-    WdfWaitLockAcquire(ctx->FeatureLock, NULL);
+    AcquireSRWLockExclusive(&ctx->FeatureLock);
     RtlCopyMemory(ctx->FeatureKept[slot], data, len);
     ctx->FeatureKeptLength[slot] = len;
     for (ULONG i = 0; i < ctx->FeatureCount; i++)
         if ((ctx->FeatureEntries[i].Flags & HM_FEATURE_FLAG_MESSAGE) && ctx->FeatureEntries[i].OnSlot == slot)
             ctx->FeaturePage[i] = 0;
-    WdfWaitLockRelease(ctx->FeatureLock);
+    ReleaseSRWLockExclusive(&ctx->FeatureLock);
 }
 
 /* The entry a GET on a report takes: a message entry whose message and
@@ -587,9 +587,9 @@ ServeFeature(_In_ PDEVICE_CONTEXT ctx, _In_ UCHAR requestId, _Out_writes_(outSiz
     *written = 0;
     *notify = FALSE;
     *status = STATUS_SUCCESS;
-    WdfWaitLockAcquire(ctx->FeatureLock, NULL);
+    AcquireSRWLockExclusive(&ctx->FeatureLock);
     LONG at = FindFeatureEntry(ctx, id);
-    if (at < 0) { WdfWaitLockRelease(ctx->FeatureLock); return FALSE; }
+    if (at < 0) { ReleaseSRWLockExclusive(&ctx->FeatureLock); return FALSE; }
     const HM_FEATURE_ENTRY *e = &ctx->FeatureEntries[at];
     const UCHAR *arena = ctx->FeatureArena + e->ArenaOffset;
     const UCHAR *sizes = arena + e->ValueLength;
@@ -601,7 +601,7 @@ ServeFeature(_In_ PDEVICE_CONTEXT ctx, _In_ UCHAR requestId, _Out_writes_(outSiz
         n = e->Size < outSize ? e->Size : outSize;
     }
     if (n == 0) {
-        WdfWaitLockRelease(ctx->FeatureLock);
+        ReleaseSRWLockExclusive(&ctx->FeatureLock);
         *status = STATUS_BUFFER_TOO_SMALL;
         return TRUE;
     }
@@ -619,7 +619,7 @@ ServeFeature(_In_ PDEVICE_CONTEXT ctx, _In_ UCHAR requestId, _Out_writes_(outSiz
     }
     if (e->Flags & HM_FEATURE_FLAG_REPLY_HEAD) full[0] = requestId;
     *notify = (e->Flags & HM_FEATURE_FLAG_NOTIFY) != 0;
-    WdfWaitLockRelease(ctx->FeatureLock);
+    ReleaseSRWLockExclusive(&ctx->FeatureLock);
     RtlCopyMemory(out, full, n);
     *written = n;
     return TRUE;
@@ -878,7 +878,7 @@ TryOpenInputAck(_In_ PDEVICE_CONTEXT ctx)
     if (view == NULL) { CloseHandle(h); return; }
     HANDLE ev = OpenEventW(EVENT_MODIFY_STATE, FALSE, ctx->InputAckEventName);
 
-    WdfWaitLockAcquire(ctx->InputLock, NULL);
+    AcquireSRWLockExclusive(&ctx->InputLock);
     CloseInputAckLocked(ctx);
     ctx->InputAckMemHandle = h;
     ctx->InputAckMemPtr = (volatile LONG *)view;
@@ -897,7 +897,7 @@ TryOpenInputAck(_In_ PDEVICE_CONTEXT ctx)
                           | ((ULONG)old & HIDMAESTRO_INPUT_ACK_WATCH_ENDED));
         } while (InterlockedCompareExchange(caps, want, old) != old);
     }
-    WdfWaitLockRelease(ctx->InputLock);
+    ReleaseSRWLockExclusive(&ctx->InputLock);
 }
 
 /* Caller holds InputLock (or is the only thread left, at release). */
@@ -1048,11 +1048,11 @@ TryOpenOwnerWatch(_In_ PDEVICE_CONTEXT ctx)
      * refused) still watches the next program. */
     {
         BOOLEAN allowed;
-        WdfWaitLockAcquire(ctx->InputLock, NULL);
+        AcquireSRWLockExclusive(&ctx->InputLock);
         allowed = ctx->InputAckMemPtr != NULL
             && (((ULONG)((PHIDMAESTRO_INPUT_ACK)ctx->InputAckMemPtr)->Capabilities
                  & HIDMAESTRO_INPUT_ACK_WATCH_ENDED) == 0);
-        WdfWaitLockRelease(ctx->InputLock);
+        ReleaseSRWLockExclusive(&ctx->InputLock);
         if (!allowed) return;
     }
     HANDLE p = CreateFileW(ctx->OwnerPipeName, GENERIC_READ, 0, NULL,
@@ -1072,11 +1072,11 @@ TryOpenOwnerWatch(_In_ PDEVICE_CONTEXT ctx)
     }
     RecordOwnerConnected(ctx, p);
 
-    WdfWaitLockAcquire(ctx->InputLock, NULL);
+    AcquireSRWLockExclusive(&ctx->InputLock);
     if (ctx->InputAckMemPtr)
         InterlockedOr(&((PHIDMAESTRO_INPUT_ACK)ctx->InputAckMemPtr)->Capabilities,
                       (LONG)HIDMAESTRO_INPUT_ACK_CAP_RELEASE);
-    WdfWaitLockRelease(ctx->InputLock);
+    ReleaseSRWLockExclusive(&ctx->InputLock);
 }
 
 /* Cancel the pending read and wait for it to finish before the OVERLAPPED
@@ -1120,14 +1120,14 @@ OwnerGone(_In_ PDEVICE_CONTEXT ctx)
      * mapped here. Mark the watch ended in it (TryOpenOwnerWatch) before
      * the values say so: the census reads OwnerConnected 0 beside a clear
      * marker as a program that started since (OwnerCensus.LegacyPipeLive). */
-    WdfWaitLockAcquire(ctx->InputLock, NULL);
+    AcquireSRWLockExclusive(&ctx->InputLock);
     if (ctx->InputAckMemPtr != NULL)
         InterlockedOr(&((PHIDMAESTRO_INPUT_ACK)ctx->InputAckMemPtr)->Capabilities,
                       (LONG)HIDMAESTRO_INPUT_ACK_WATCH_ENDED);
-    WdfWaitLockRelease(ctx->InputLock);
+    ReleaseSRWLockExclusive(&ctx->InputLock);
     RecordOwnerGone(ctx);
 
-    WdfWaitLockAcquire(ctx->InputLock, NULL);
+    AcquireSRWLockExclusive(&ctx->InputLock);
     volatile HIDMAESTRO_INPUT_ACK *ack = (volatile HIDMAESTRO_INPUT_ACK *)ctx->InputAckMemPtr;
     ULONG count = 0;
     if (ack != NULL) {
@@ -1174,7 +1174,7 @@ OwnerGone(_In_ PDEVICE_CONTEXT ctx)
             break;
         }
     }
-    WdfWaitLockRelease(ctx->InputLock);
+    ReleaseSRWLockExclusive(&ctx->InputLock);
 
     DeliverReleaseFrames(ctx);
 }
@@ -1191,9 +1191,9 @@ DeliverReleaseFrames(_In_ PDEVICE_CONTEXT ctx)
         BOOLEAN more;
         WDFREQUEST pendingRead;
 
-        WdfWaitLockAcquire(ctx->InputLock, NULL);
+        AcquireSRWLockExclusive(&ctx->InputLock);
         more = ctx->ReleaseNext < ctx->ReleaseCount;
-        WdfWaitLockRelease(ctx->InputLock);
+        ReleaseSRWLockExclusive(&ctx->InputLock);
         if (!more) return;
 
         /* The queue is taken outside InputLock, as ProcessSharedInput
@@ -1201,16 +1201,16 @@ DeliverReleaseFrames(_In_ PDEVICE_CONTEXT ctx)
          * then the read goes back where it was. */
         if (!NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead)))
             return;
-        WdfWaitLockAcquire(ctx->InputLock, NULL);
+        AcquireSRWLockExclusive(&ctx->InputLock);
         if (ctx->ReleaseNext >= ctx->ReleaseCount) {
-            WdfWaitLockRelease(ctx->InputLock);
+            ReleaseSRWLockExclusive(&ctx->InputLock);
             WdfRequestRequeue(pendingRead);
             return;
         }
         size = ctx->ReleaseSizes[ctx->ReleaseNext];
         RtlCopyMemory(frame, ctx->ReleaseFrames[ctx->ReleaseNext], size);
         ctx->ReleaseNext++;
-        WdfWaitLockRelease(ctx->InputLock);
+        ReleaseSRWLockExclusive(&ctx->InputLock);
 
         NTSTATUS cs = RequestCopyFromBuffer(pendingRead, frame, size);
         WdfRequestComplete(pendingRead, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
@@ -1456,12 +1456,13 @@ PublishOutput(_In_ PDEVICE_CONTEXT ctx,
     /* Serialize writers (the queue dispatches IOCTLs in parallel, so two
      * threads can call PublishOutput concurrently). v1.1.40 ring buffer
      * uses per-slot seqlock for torn-write detection on the reader side;
-     * the WdfWaitLock here ensures only one writer increments Head and
-     * fills its slot at a time. */
-    WdfWaitLockAcquire(ctx->OutputLock, NULL);
+     * the lock here ensures only one writer increments Head and fills its
+     * slot at a time, and that no writer fills a slot while
+     * EnsureOutputMapping maps the section again. */
+    AcquireSRWLockExclusive(&ctx->OutputLock);
 
     if (!EnsureOutputMapping(ctx)) {
-        WdfWaitLockRelease(ctx->OutputLock);
+        ReleaseSRWLockExclusive(&ctx->OutputLock);
         return;
     }
 
@@ -1504,7 +1505,7 @@ PublishOutput(_In_ PDEVICE_CONTEXT ctx,
     MemoryBarrier();
     slot->SeqNo = newSeq;
 
-    WdfWaitLockRelease(ctx->OutputLock);
+    ReleaseSRWLockExclusive(&ctx->OutputLock);
 
     /* Doorbell LAST (issue #34): Head is already published, so a reader
      * woken by this signal always sees the new packet. Signaling outside
@@ -1561,7 +1562,7 @@ KeepLiveFeatureLocked(_In_ PDEVICE_CONTEXT ctx, _In_ const HIDMAESTRO_SHARED_INP
  * Called from the event-driven worker thread whenever the SDK signals
  * InputDataEvent (or the 50 ms safety tick fires). Doing all the HID
  * report-build + manual-queue drain here: no WDF timer, no IRQL games:
- * WdfRequestComplete / WdfWaitLock* are documented safe from a raw worker
+ * WdfRequestComplete and the SRW locks are documented safe from a raw worker
  * thread in UMDF2. */
 static void
 ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
@@ -1585,9 +1586,9 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
      * feature report, never an input report. A frame that carries nothing
      * else only replaces the answer. */
     if (ctx->LiveFeatureReport != 0 && shared.ExtendedReportSize == 0) {
-        WdfWaitLockAcquire(ctx->InputLock, NULL);
+        AcquireSRWLockExclusive(&ctx->InputLock);
         KeepLiveFeatureLocked(ctx, &shared);
-        WdfWaitLockRelease(ctx->InputLock);
+        ReleaseSRWLockExclusive(&ctx->InputLock);
         return;
     }
 
@@ -1683,7 +1684,7 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
          * so the next IOCTL_HID_READ_REPORT for this seqno completes
          * directly (the parked one, if any, was taken above and completes
          * below). */
-        WdfWaitLockAcquire(ctx->InputLock, NULL);
+        AcquireSRWLockExclusive(&ctx->InputLock);
         RtlCopyMemory(ctx->InputReport, inputReport, inputSize);
         ctx->InputReportSize = inputSize;
         ctx->InputReportReady = TRUE;
@@ -1713,7 +1714,7 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
             ctx->LastDeliveredInputSeqNo = seqNo;
             NoteFrameCompletedLocked(ctx, seqNo);
         }
-        WdfWaitLockRelease(ctx->InputLock);
+        ReleaseSRWLockExclusive(&ctx->InputLock);
         /* Complete only now. HID class can send its next READ_REPORT the
          * moment this one completes, and that read has to find AckPending
          * set. Completing before the lock let it arrive first, find nothing
@@ -2016,10 +2017,10 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
              * starts again on the index counts its frames from the start.
              * The delivered gate goes with SharedMemSeqNo, under the lock
              * READ_REPORT reads both under, as OwnerGone resets them. */
-            WdfWaitLockAcquire(ctx->InputLock, NULL);
+            AcquireSRWLockExclusive(&ctx->InputLock);
             ctx->SharedMemSeqNo = 0;
             ctx->LastDeliveredInputSeqNo = 0;
-            WdfWaitLockRelease(ctx->InputLock);
+            ReleaseSRWLockExclusive(&ctx->InputLock);
             ctx->SeenSeqNo = 0;
         }
     }
@@ -2388,13 +2389,7 @@ EvtDeviceAdd(
      * standard-gamepad mapping heuristic based on VID:PID and descriptor
      * shape, not on WinExInput presence. */
 
-    /* Create locks */
-    status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->InputLock);
-    if (!NT_SUCCESS(status)) return status;
-    status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->OutputLock);
-    if (!NT_SUCCESS(status)) return status;
-    status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->FeatureLock);
-    if (!NT_SUCCESS(status)) return status;
+    /* The locks are the zeroed context's SRWLOCK_INIT (driver.h). */
 
     /* Default queue (parallel): HID IOCTLs from MsHidUmdf */
     WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queueConfig, WdfIoQueueDispatchParallel);
@@ -2582,8 +2577,15 @@ EvtIoDeviceControl(
          * burn a core per device hammering the kernel↔user mode bridge.
          * GET_INPUT_REPORT (a different IOCTL, polled diagnostic path) is
          * unaffected: it still reads the cache directly.
+         *
+         * The report to send is copied out under InputLock and into the
+         * request after it, so the worker, which takes the lock for every
+         * frame, never waits on the framework's buffer calls.
          */
-        WdfWaitLockAcquire(ctx->InputLock, NULL);
+        UCHAR served[HIDMAESTRO_MAX_REPORT_SIZE];
+        ULONG servedSize = 0;
+        BOOLEAN serve = FALSE;
+        AcquireSRWLockExclusive(&ctx->InputLock);
 
         /* HID class asks again only after its completion routine has put
          * the last completed frame in its buffer: acknowledge that frame
@@ -2597,19 +2599,21 @@ EvtIoDeviceControl(
          * first, one per read. */
         if (ctx->ReleaseNext < ctx->ReleaseCount) {
             ULONG i = ctx->ReleaseNext++;
-            status = RequestCopyFromBuffer(Request, ctx->ReleaseFrames[i], ctx->ReleaseSizes[i]);
-            WdfWaitLockRelease(ctx->InputLock);
-            break;
-        }
-
-        if (ctx->InputReportReady && ctx->SharedMemSeqNo > ctx->LastDeliveredInputSeqNo) {
-            status = RequestCopyFromBuffer(Request,
-                ctx->InputReport, ctx->InputReportSize);
+            servedSize = ctx->ReleaseSizes[i];
+            RtlCopyMemory(served, ctx->ReleaseFrames[i], servedSize);
+            serve = TRUE;
+        } else if (ctx->InputReportReady && ctx->SharedMemSeqNo > ctx->LastDeliveredInputSeqNo) {
+            servedSize = ctx->InputReportSize;
+            RtlCopyMemory(served, ctx->InputReport, servedSize);
             ctx->LastDeliveredInputSeqNo = ctx->SharedMemSeqNo;
             NoteFrameCompletedLocked(ctx, ctx->SharedMemSeqNo);
-            WdfWaitLockRelease(ctx->InputLock);
+            serve = TRUE;
+        }
+        ReleaseSRWLockExclusive(&ctx->InputLock);
+
+        if (serve) {
+            status = RequestCopyFromBuffer(Request, served, servedSize);
         } else {
-            WdfWaitLockRelease(ctx->InputLock);
             status = WdfRequestForwardToIoQueue(Request, ctx->ManualQueue);
             if (NT_SUCCESS(status)) {
                 completeRequest = FALSE;
@@ -2815,10 +2819,10 @@ EvtIoDeviceControl(
         if (ctx->LiveFeatureReport != 0
             && (!ctx->UsesReportIds || reportId == (UCHAR)(ctx->LiveFeatureReport - 1))) {
             ULONG n;
-            WdfWaitLockAcquire(ctx->InputLock, NULL);
+            AcquireSRWLockExclusive(&ctx->InputLock);
             n = ctx->LiveFeatureSize < (ULONG)outSize ? ctx->LiveFeatureSize : (ULONG)outSize;
             RtlCopyMemory(outBuf, ctx->LiveFeature, n);
-            WdfWaitLockRelease(ctx->InputLock);
+            ReleaseSRWLockExclusive(&ctx->InputLock);
             WdfRequestSetInformation(Request, n);
             status = STATUS_SUCCESS;
             break;
@@ -3068,7 +3072,7 @@ EvtIoDeviceControl(
         /* Standard input report (Report ID 1 or no-RID descriptors): return
          * the latest cached input frame the SDK published. v2.0.0: with a
          * cached-ID list, the latest frame of a listed report. */
-        WdfWaitLockAcquire(ctx->InputLock, NULL);
+        AcquireSRWLockExclusive(&ctx->InputLock);
         {
             BOOLEAN listed = ctx->CachedInputIdCount > 0;
             BOOLEAN ready = listed ? ctx->PolledReportReady : ctx->InputReportReady;
@@ -3077,11 +3081,11 @@ EvtIoDeviceControl(
                 status = RequestCopyFromBuffer(Request,
                     listed ? ctx->PolledReport : ctx->InputReport,
                     listed ? ctx->PolledReportSize : ctx->InputReportSize);
-                WdfWaitLockRelease(ctx->InputLock);
+                ReleaseSRWLockExclusive(&ctx->InputLock);
                 break;
             }
         }
-        WdfWaitLockRelease(ctx->InputLock);
+        ReleaseSRWLockExclusive(&ctx->InputLock);
 
         /* Anything else: vJoy parity: STATUS_NOT_SUPPORTED. */
         status = STATUS_NOT_SUPPORTED;

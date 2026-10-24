@@ -188,7 +188,7 @@ typedef struct _DEVICE_CONTEXT {
      * to HM_FEATURE_MAX_DATA bytes, from the report ID for a descriptor
      * with IDs and from the first data byte for one without, and each
      * entry's next page. FeatureLock guards the kept data and the pages. */
-    WDFWAITLOCK FeatureLock;
+    SRWLOCK FeatureLock;
     ULONG   FeatureCount;
     ULONG   FeatureOnReportCount;
     UCHAR   FeatureOnReports[HM_FEATURE_MAX_ONREPORTS];
@@ -244,9 +244,14 @@ typedef struct _DEVICE_CONTEXT {
     WDFQUEUE    DefaultQueue;        /* Parallel: HID IOCTLs + our custom IOCTLs */
     WDFQUEUE    ManualQueue;         /* Manual: pending IOCTL_HID_READ_REPORT */
 
-    /* Synchronization */
-    WDFWAITLOCK InputLock;
-    WDFWAITLOCK OutputLock;
+    /* Synchronization. Slim reader/writer locks, taken exclusive only:
+     * an uncontended acquire and release stay in this process. UMDF's wait
+     * lock is an auto-reset event, a WaitForSingleObjectEx to acquire and a
+     * SetEvent to release, two system calls on every frame that takes it
+     * (WDF's mxeventum.h, MxEvent::WaitFor and MxEvent::Set). Zeroed with
+     * the context, which is SRWLOCK_INIT, and nothing to free. */
+    SRWLOCK InputLock;
+    SRWLOCK OutputLock;
 
     /* Shared memory data injection (bypasses upper filter drivers) */
     HANDLE  SharedMemHandle;     /* CreateFileMapping handle */
