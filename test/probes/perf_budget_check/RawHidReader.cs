@@ -20,6 +20,8 @@ internal static partial class Program
         readonly (ushort Page, ushort Usage) _usage;
         IntPtr _hwnd, _device;
         uint _threadId;
+
+        public override uint ThreadId => Volatile.Read(ref _threadId);
         WndProc? _proc;
         byte[] _raw = new byte[1024];
         readonly byte[] _report;

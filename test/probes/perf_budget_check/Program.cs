@@ -150,8 +150,10 @@
 //                  key, and hid.dll's BOOLEAN results read as one byte
 //
 // --trace prints wall-clock times around each Dispose, to set beside the
-// SDK's diag log. Every measurement prints one line with p50 and p95 over
-// all samples.
+// SDK's diag log. --marks writes one ETW event per timed frame of the e2e
+// and output passes (ProbeMarks.cs), for a trace of the threads a frame
+// wakes. Every measurement prints one line with p50 and p95 over all
+// samples.
 // Requires elevation, except census, report-build, selftest, compare and
 // the offline measuring modes. Exit 0 PASS, 1 FAIL (gate, census,
 // selftest, compare) or an argument refused before
@@ -221,7 +223,8 @@ internal static partial class Program
         // Read once by the SDK's first create, so it is set before any.
         Environment.SetEnvironmentVariable("HIDMAESTRO_TIMING", "1");
         s_trace = args.Contains("--trace");
-        args = args.Where(a => a != "--trace").ToArray();
+        ProbeMarks.On = args.Contains("--marks");
+        args = args.Where(a => a != "--trace" && a != "--marks").ToArray();
         s_key = KeyArg(args);
         args = args.Where(a => !a.StartsWith("--key=", StringComparison.Ordinal)).ToArray();
         string mode = args.Length > 0 ? args[0] : "gate";
@@ -807,7 +810,11 @@ internal static partial class Program
                         break;
                     }
                 }
-                if (hit != 0) samples.Add((hit - t0) * 1e6 / Stopwatch.Frequency);
+                if (hit != 0)
+                {
+                    samples.Add((hit - t0) * 1e6 / Stopwatch.Frequency);
+                    if (ProbeMarks.On) { uint me = ProbeMarks.GetCurrentThreadId(); ProbeMarks.Frame(3, run * 50 + i, t0, hit, me, me); }
+                }
                 else { missed++; Thread.Sleep(200); }
             }
         }
@@ -851,7 +858,12 @@ internal static partial class Program
                         if ((int)((uint)Marshal.ReadInt32(view, 0) - seq) >= 0) { seen = true; break; }
                         Thread.SpinWait(16);
                     }
-                    if (seen) samples.Add((Stopwatch.GetTimestamp() - t0) * 1e6 / Stopwatch.Frequency);
+                    if (seen)
+                    {
+                        long t1 = Stopwatch.GetTimestamp();
+                        samples.Add((t1 - t0) * 1e6 / Stopwatch.Frequency);
+                        if (ProbeMarks.On) { uint me = ProbeMarks.GetCurrentThreadId(); ProbeMarks.Frame(1, run * 50 + i, t0, t1, me, me); }
+                    }
                     else missed++;
                 }
                 // A driver that acknowledges none of a profile's frames (the
@@ -947,7 +959,11 @@ internal static partial class Program
                 long hit = 0;
                 while (Stopwatch.GetTimestamp() < deadline && (hit = reader.Hit) == 0) Thread.SpinWait(16);
                 reader.Disarm();
-                if (hit != 0) samples.Add((hit - t0) * 1e6 / Stopwatch.Frequency);
+                if (hit != 0)
+                {
+                    samples.Add((hit - t0) * 1e6 / Stopwatch.Frequency);
+                    if (ProbeMarks.On) ProbeMarks.Frame(2, run * 50 + i, t0, hit, ProbeMarks.GetCurrentThreadId(), reader.ThreadId);
+                }
                 else { missed++; Thread.Sleep(200); }
             }
         }
@@ -1050,6 +1066,10 @@ internal static partial class Program
         }
         if (slot < 0) { Check($"{id}: an XInput slot the create connected", false, $"none in {XInputSlotWaitMs / 1000} s"); return; }
         long sent = 0;
+        // --marks: the last delivered send's times and the thread that
+        // raised OutputReceived, read after got is set.
+        long markStart = 0, markEnd = 0;
+        uint markThread = 0;
         using var got = new AutoResetEvent(false);
         var rtts = new List<double>(runs * 100);
         c.OutputReceived += (_, pkt) =>
@@ -1060,6 +1080,7 @@ internal static partial class Program
             if (s != 0)
             {
                 rtts.Add((t - s) * 1e6 / Stopwatch.Frequency);
+                if (ProbeMarks.On) { markStart = s; markEnd = t; markThread = ProbeMarks.GetCurrentThreadId(); }
                 got.Set();
             }
         };
@@ -1076,7 +1097,11 @@ internal static partial class Program
                 var v = new XInputVibration { Left = (ushort)(i % 2 == 0 ? 0x100 * (1 + ((run * 100 + i) % 254)) : 0), Right = 0 };
                 Interlocked.Exchange(ref sent, Stopwatch.GetTimestamp());
                 if (XInputSetState(slot, ref v) != 0) { Interlocked.Exchange(ref sent, 0); lost++; continue; }
-                if (got.WaitOne(500)) delivered++;
+                if (got.WaitOne(500))
+                {
+                    delivered++;
+                    if (ProbeMarks.On) ProbeMarks.Frame(5, run * 100 + i, markStart, markEnd, ProbeMarks.GetCurrentThreadId(), markThread);
+                }
                 else { Interlocked.Exchange(ref sent, 0); lost++; }
             }
             long bytes = GC.GetTotalAllocatedBytes(precise: true) - bytes0;
@@ -1091,6 +1116,9 @@ internal static partial class Program
     static void OutputOne(HMController c, ProfileArg p, int runs)
     {
         long sent = 0;
+        // --marks: as in XInputOutputOne.
+        long markStart = 0, markEnd = 0;
+        uint markThread = 0;
         using var got = new AutoResetEvent(false);
         var rtts = new List<double>(runs * 100);
         c.OutputReceived += (_, pkt) =>
@@ -1101,6 +1129,7 @@ internal static partial class Program
             if (s != 0)
             {
                 rtts.Add((t - s) * 1e6 / Stopwatch.Frequency);
+                if (ProbeMarks.On) { markStart = s; markEnd = t; markThread = ProbeMarks.GetCurrentThreadId(); }
                 got.Set();
             }
         };
@@ -1121,7 +1150,11 @@ internal static partial class Program
                 report[vary] = (byte)(1 + ((run * 100 + i) % 254));
                 Interlocked.Exchange(ref sent, Stopwatch.GetTimestamp());
                 if (!HidD_SetOutputReport(dev.Handle, report, report.Length)) { Interlocked.Exchange(ref sent, 0); lost++; continue; }
-                if (got.WaitOne(500)) delivered++;
+                if (got.WaitOne(500))
+                {
+                    delivered++;
+                    if (ProbeMarks.On) ProbeMarks.Frame(4, run * 100 + i, markStart, markEnd, ProbeMarks.GetCurrentThreadId(), markThread);
+                }
                 else { Interlocked.Exchange(ref sent, 0); lost++; }
                 Spin(1_000);
             }
