@@ -132,3 +132,10 @@ HmReadIdentityIndex(_In_ const WCHAR *token, _Out_ ULONG *index)
     if (ok) *index = val;
     return ok;
 }
+
+/* 2.1.0: Controller<N>\AckSignal (REG_DWORD), read under the contract. 0
+ * when no thread of the controller's SDK waits on the delivery
+ * acknowledgement's event, so the driver stores DeliveredSeqNo and skips
+ * the SetEvent. Any other value, or none (a program before 2.1.0), and the
+ * driver signals every delivered frame. */
+#define HIDMAESTRO_ACK_SIGNAL_VALUE  L"AckSignal"

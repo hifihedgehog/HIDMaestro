@@ -353,6 +353,18 @@ LoadLiveFeature(_In_ PDEVICE_CONTEXT ctx, _In_ HKEY hKey)
     return TRUE;
 }
 
+/* 2.1.0: AckSignal into the context. Only a REG_DWORD of 0 turns the
+ * acknowledgement's SetEvent off. Absent or anything else and the driver
+ * signals, as every driver before 2.1.0 did, so a value it cannot read
+ * never fails the start. */
+static VOID
+LoadAckSignal(_In_ PDEVICE_CONTEXT ctx, _In_ HKEY hKey)
+{
+    DWORD value = 1, size = sizeof(value), type = 0;
+    LONG rc = RegQueryValueExW(hKey, HIDMAESTRO_ACK_SIGNAL_VALUE, NULL, &type, (LPBYTE)&value, &size);
+    ctx->AckSignal = !(rc == ERROR_SUCCESS && type == REG_DWORD && size == sizeof(value) && value == 0);
+}
+
 /* The controller's v2.0.0 values, read only under the contract. Returns
  * 0 or the HIDMAESTRO_CONFIG_ERROR_* of the value it could not read. */
 static LONG
@@ -365,6 +377,7 @@ LoadContractValues(_In_ PDEVICE_CONTEXT ctx)
                : !LoadCachedInputIds(ctx, hKey) ? HIDMAESTRO_CONFIG_ERROR_CACHED_INPUT_IDS
                : !LoadLiveFeature(ctx, hKey) ? HIDMAESTRO_CONFIG_ERROR_LIVE_FEATURE
                : 0;
+    LoadAckSignal(ctx, hKey);
     RegCloseKey(hKey);
     return error;
 }
@@ -915,7 +928,8 @@ AckInputDeliveredLocked(_In_ PDEVICE_CONTEXT ctx, _In_ ULONG seqNo)
 {
     if (ctx->InputAckMemPtr == NULL) return;
     InterlockedExchange(&((PHIDMAESTRO_INPUT_ACK)ctx->InputAckMemPtr)->DeliveredSeqNo, (LONG)seqNo);
-    if (ctx->InputAckEvent) SetEvent(ctx->InputAckEvent);
+    /* 2.1.0: only for a controller whose SDK waits on the event (AckSignal). */
+    if (ctx->InputAckEvent && ctx->AckSignal) SetEvent(ctx->InputAckEvent);
 }
 
 /* A READ_REPORT just completed with the frame with this SeqNo. Its
@@ -2275,6 +2289,9 @@ EvtDeviceAdd(
     ctx = GetDeviceContext(device);
     RtlZeroMemory(ctx, sizeof(DEVICE_CONTEXT));
     ctx->Device = device;
+    /* Every delivery signals the acknowledgement's event unless the
+     * controller's SDK says no thread waits on it (AckSignal). */
+    ctx->AckSignal = TRUE;
 
     /* Initialize per-instance paths (registry key, shared file) from the
      * controller index */

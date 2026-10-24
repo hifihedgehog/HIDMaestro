@@ -864,6 +864,12 @@ internal static partial class DeviceOrchestrator
         // report 0, which 9bd6279's driver derived itself under Ds3Sixaxis).
         if (LiveFeatureReportValue(profile) is { } live)
             key.SetValue("LiveFeatureReport", live, RegistryValueKind.DWord);
+        // 2.1.0: whether a thread of this SDK waits on the delivery
+        // acknowledgement's event (SharedMemoryIO.WaitInputDelivered): the
+        // keyboard and mouse writer that delivers every report, and a
+        // protocol host's reply wait. 0 lets the driver skip that SetEvent
+        // on every delivered frame. It stores DeliveredSeqNo either way.
+        key.SetValue("AckSignal", WaitsOnDelivery(profile) ? 1 : 0, RegistryValueKind.DWord);
         if (profile.ProductString != null)
             key.SetValue("ProductString", profile.ProductString, RegistryValueKind.String);
         // Both written or cleared every time, so an index another profile
@@ -905,6 +911,14 @@ internal static partial class DeviceOrchestrator
             if (l.ReportId >= 0 && !ids.Contains((byte)l.ReportId)) ids.Add((byte)l.ReportId);
         return ids.ToArray();
     }
+
+    /// <summary>2.1.0: whether HMController waits on the driver's delivery
+    /// acknowledgement for a UMDF2 controller of this profile: the same two
+    /// tests it makes, every report delivered (DeliversEveryReport) and a
+    /// protocol host (ProtocolHost's reply wait on SectionChannel.Delivered).</summary>
+    internal static bool WaitsOnDelivery(ControllerProfile profile) =>
+        (profile.HasDescriptor && profile.DeliversEveryReport(profile.GetOrBuildKeyboardMousePacker()))
+        || (!profile.RequiresUsbipBackend && profile.Protocol != null);
 
     /// <summary>The LiveFeatureReport value: one plus the ID of a UMDF2
     /// protocol host's live feature report, or null for none.</summary>

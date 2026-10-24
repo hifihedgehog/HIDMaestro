@@ -340,6 +340,12 @@ typedef struct _DEVICE_CONTEXT {
      * that predates it creates no section, and the open fails quietly. */
     WCHAR   VersionMappingName[64];       /* e.g. L"Global\\HIDMaestroVersion0" */
 
+    /* 2.1.0: AckSignal under the contract. FALSE when the controller's SDK
+     * said no thread waits on the acknowledgement's event: DeliveredSeqNo
+     * is still stored on every delivery, and only the SetEvent is skipped.
+     * TRUE otherwise, a program before 2.1.0 included. Set at add. */
+    BOOLEAN AckSignal;
+
     /* Release frames waiting for a READ_REPORT, under InputLock. */
     UCHAR   ReleaseFrames[HIDMAESTRO_RELEASE_SLOTS][HIDMAESTRO_RELEASE_FRAME_CAP];
     ULONG   ReleaseSizes[HIDMAESTRO_RELEASE_SLOTS];
