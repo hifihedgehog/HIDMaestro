@@ -704,8 +704,15 @@ internal static partial class DeviceOrchestrator
         if (s_gameInputSvcRunning) return;
         try
         {
-            var (_, status) = RunProcess("sc.exe", "query GameInputSvc");
-            if (!status.Contains("RUNNING"))
+            // The state sc.exe query prints, read from the service control
+            // manager, so no process that uses the SDK starts sc.exe for it.
+            // That run took 290 to 790 ms on the bench machine on
+            // 2026-10-24, and the query 0.2 to 3.3 ms. A service that does
+            // not exist is left alone, as sc.exe config and start leave it.
+            // Any other state, and a query that fails, takes the two sc.exe
+            // steps as before.
+            uint state = GameInputServiceState(out bool missing);
+            if (state != SERVICE_RUNNING && !missing)
             {
                 RunProcess("sc.exe", "config GameInputSvc start= auto");
                 RunProcess("sc.exe", "start GameInputSvc");
@@ -714,6 +721,60 @@ internal static partial class DeviceOrchestrator
         }
         catch { }
     }
+
+    // winsvc.h of the 10.0.26100.0 SDK: SC_MANAGER_CONNECT, SERVICE_QUERY_STATUS
+    // and SERVICE_RUNNING. winerror.h: ERROR_SERVICE_DOES_NOT_EXIST.
+    private const uint SC_MANAGER_CONNECT = 0x0001, SERVICE_QUERY_STATUS = 0x0004, SERVICE_RUNNING = 0x00000004;
+    private const int ERROR_SERVICE_DOES_NOT_EXIST = 1060;
+
+    /// <summary>GameInputSvc's dwCurrentState (QueryServiceStatus), or 0
+    /// when it could not be read. <paramref name="missing"/> when OpenService
+    /// failed with ERROR_SERVICE_DOES_NOT_EXIST. "To use OpenService, no
+    /// privileges are required aside from SC_MANAGER_CONNECT" (Learn,
+    /// OpenServiceW), and the handle QueryServiceStatus reads "must have the
+    /// SERVICE_QUERY_STATUS access right" (Learn, QueryServiceStatus), which
+    /// returns the same state as QueryServiceStatusEx, so it answers in a
+    /// process that is not elevated, as sc.exe query does.</summary>
+    private static uint GameInputServiceState(out bool missing)
+    {
+        missing = false;
+        IntPtr scm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
+        if (scm == IntPtr.Zero) return 0;
+        try
+        {
+            IntPtr svc = OpenServiceW(scm, "GameInputSvc", SERVICE_QUERY_STATUS);
+            if (svc == IntPtr.Zero)
+            {
+                missing = Marshal.GetLastPInvokeError() == ERROR_SERVICE_DOES_NOT_EXIST;
+                return 0;
+            }
+            try { return QueryServiceStatus(svc, out SERVICE_STATUS status) ? status.dwCurrentState : 0; }
+            finally { CloseServiceHandle(svc); }
+        }
+        finally { CloseServiceHandle(scm); }
+    }
+
+    // winsvc.h:723, SERVICE_STATUS: seven DWORDs.
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SERVICE_STATUS
+    {
+        public uint dwServiceType, dwCurrentState, dwControlsAccepted, dwWin32ExitCode,
+            dwServiceSpecificExitCode, dwCheckPoint, dwWaitHint;
+    }
+
+    [LibraryImport("advapi32.dll", EntryPoint = "OpenSCManagerW", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    private static partial IntPtr OpenSCManagerW(string? machineName, string? databaseName, uint desiredAccess);
+
+    [LibraryImport("advapi32.dll", EntryPoint = "OpenServiceW", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    private static partial IntPtr OpenServiceW(IntPtr scManager, string serviceName, uint desiredAccess);
+
+    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool QueryServiceStatus(IntPtr service, out SERVICE_STATUS status);
+
+    [LibraryImport("advapi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool CloseServiceHandle(IntPtr handle);
 
     /// <summary>T11: pre-warm hook called from HMContext's background ctor
     /// task. Same logic as the gated <see cref="EnsureGameInputService"/>
