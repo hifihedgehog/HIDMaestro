@@ -290,6 +290,8 @@ typedef struct HmWdfKey {
 typedef struct HmDeviceInit {
     int        kind;
     int        filter;
+    int        ppoSet;           /* WdfDeviceInitSetPowerPolicyOwnership ran, */
+    int        ppo;              /* with this value */
     WCHAR      instanceId[128];  /* DEVPKEY_Device_InstanceId's value */
     HmRegKey  *hwKey;            /* the device node's hardware key and its */
     HmRegKey  *hwSubKey;         /* service-name subkey (WdfFdoInitOpenRegistryKey) */
@@ -353,6 +355,7 @@ struct HmDevice {
     HmRegKey  *hwSubKey;      /* the same with WDF_REGKEY_DEVICE_SUBKEY */
     int        removed;
     int        filter;        /* WdfFdoInitSetFilter ran before the create */
+    int        powerPolicyOwner;  /* as the framework decides it at the create */
     WDF_PNPPOWER_EVENT_CALLBACKS pnp;   /* WdfDeviceInitSetPnpPowerEventCallbacks */
     int        started;       /* IRP_MN_START_DEVICE completed */
     int        stopped;       /* a rebalance stop, not yet restarted */

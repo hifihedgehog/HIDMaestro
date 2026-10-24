@@ -90,6 +90,19 @@ static VOID WDFAPI HmWdfFdoInitSetFilter(PWDF_DRIVER_GLOBALS g, PWDFDEVICE_INIT 
     RecOut("fdo.filter", NULL, 0);
 }
 
+/* Kept on the init for the create to read. Not recorded, so the streams
+ * of a driver that never calls it stay as they were. */
+static VOID WDFAPI HmWdfDeviceInitSetPowerPolicyOwnership(PWDF_DRIVER_GLOBALS g, PWDFDEVICE_INIT DeviceInit,
+                                                          BOOLEAN IsPowerPolicyOwner)
+{
+    (void)g;
+    HmDeviceInit *init = (HmDeviceInit *)Expect(DeviceInit, WK_INIT, "WdfDeviceInitSetPowerPolicyOwnership");
+    if (g_addingDevice && g_addingDevice->context)
+        HmFail("WdfDeviceInitSetPowerPolicyOwnership after the create");
+    init->ppoSet = 1;
+    init->ppo = IsPowerPolicyOwner ? 1 : 0;
+}
+
 /* DEVPKEY_Device_InstanceId, {78c34fc8-104a-4aca-9ea4-524d52996e57} 256
  * (devpkey.h). */
 static const GUID k_instanceIdFmtid =
@@ -180,6 +193,11 @@ static NTSTATUS WDFAPI HmWdfDeviceCreate(PWDF_DRIVER_GLOBALS g, PWDFDEVICE_INIT 
     if (!dev->context) HmFail("out of memory");
     dev->cleanup = attrs->EvtCleanupCallback;
     dev->filter = init->filter;
+    /* FxDeviceInit::IsPwrPolOwner (Windows-Driver-Frameworks b6191d9,
+     * fxdeviceinit.hpp:264-289) for the FDO init the harness hands out:
+     * the value WdfDeviceInitSetPowerPolicyOwnership gave, else the owner
+     * unless a filter. */
+    dev->powerPolicyOwner = init->ppoSet ? init->ppo : !init->filter;
     *DeviceInit = NULL;
     *Device = (WDFDEVICE)dev;
     return STATUS_SUCCESS;
@@ -727,6 +745,7 @@ void WdfInit(void)
 {
     SET(WdfDriverCreate, PFN_WDFDRIVERCREATE, HmWdfDriverCreate);
     SET(WdfFdoInitSetFilter, PFN_WDFFDOINITSETFILTER, HmWdfFdoInitSetFilter);
+    SET(WdfDeviceInitSetPowerPolicyOwnership, PFN_WDFDEVICEINITSETPOWERPOLICYOWNERSHIP, HmWdfDeviceInitSetPowerPolicyOwnership);
     SET(WdfFdoInitQueryPropertyEx, PFN_WDFFDOINITQUERYPROPERTYEX, HmWdfFdoInitQueryPropertyEx);
     SET(WdfFdoInitOpenRegistryKey, PFN_WDFFDOINITOPENREGISTRYKEY, HmWdfFdoInitOpenRegistryKey);
     SET(WdfDeviceCreate, PFN_WDFDEVICECREATE, HmWdfDeviceCreate);

@@ -134,7 +134,7 @@ static const char *const k_pidNames[] = {
  * is no filter (driver.c EvtDeviceAdd), so its queues are power managed
  * and the framework purges them before the flush. The plan's profiles
  * carry FunctionMode 0, a filter with queues that are not power managed.
- * Checks the mode took. */
+ * Checks the mode took, and that neither mode owns power policy. */
 static int HidStart(Ctl *c, PlanProfile *p, int fm, const char *label)
 {
     char what[192];
@@ -148,6 +148,12 @@ static int HidStart(Ctl *c, PlanProfile *p, int fm, const char *label)
     if (!c->dev) return 0;
     snprintf(what, sizeof(what), "%s: the driver is %s", label, fm ? "no filter" : "a filter");
     Check(what, c->dev->filter == !fm, NULL);
+    /* HidClass owns power policy for the stack. A second owner in the
+     * driver is ended by UMDF at the first device power IRP it did not
+     * request (fdopower.cpp:311-327), the failure the WER records of a
+     * system sleep show. */
+    snprintf(what, sizeof(what), "%s: the driver does not own power policy", label);
+    Check(what, !c->dev->powerPolicyOwner, NULL);
     DeviceStart(c->dev);
     return 1;
 }
