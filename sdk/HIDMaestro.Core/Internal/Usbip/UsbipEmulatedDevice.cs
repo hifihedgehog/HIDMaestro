@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -191,6 +192,11 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     /// a secondary HID interface and simply parks its reads.</summary>
     private readonly byte _primaryInEndpoint;
 
+    /// <summary>The parked reads of <see cref="_primaryInEndpoint"/>, the
+    /// queue <see cref="_pendingInterruptIn"/> holds for it. Guarded by
+    /// <see cref="_hidLock"/>.</summary>
+    private readonly Queue<uint> _primaryPending;
+
     /// <summary>The answers the device gives on request (issue #56, design
     /// note mechanism 4), compiled for this controller: plain entries by
     /// report ID, message entries by the last SET on their report, which the
@@ -266,6 +272,8 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 break;
             }
         }
+        // The input pump's queue, found once rather than per frame.
+        _primaryPending = PendingFor(_primaryInEndpoint);
         Devid = (1u << 16) | (uint)(index + 1);
 
         _builder = profile.GetOrBuildReportBuilder();
@@ -487,7 +495,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                         report.CopyTo(_inputReports[slot]);
                         _inputReportLength[slot] = length;
                     }
-                    var pending = PendingFor(_primaryInEndpoint);
+                    var pending = _primaryPending;
                     if (pending.Count > 0)
                     {
                         seq = pending.Dequeue();
@@ -522,62 +530,61 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     /// report build, mirroring driver.c ReadSharedInput + the report
     /// assembly in its worker (driver.c:1240-1296). The report goes into
     /// <paramref name="report"/>, <see cref="_reportCapacity"/> bytes long.</summary>
-    private bool TryReadInputFrame(Span<byte> report, out int length)
+    private unsafe bool TryReadInputFrame(Span<byte> report, out int length)
     {
         length = 0;
         IntPtr view = _inputView;
         if (view == IntPtr.Zero) return false;
 
-        Span<byte> snap = stackalloc byte[SharedMemoryIO.SHARED_INPUT_SIZE];
+        // Between the two reads of the sequence number, only the bytes the
+        // report takes are copied: the two sizes, then the extended report
+        // or the data. A size read while the writer was mid-frame is caught
+        // by the sequence check like any other byte, and each length is cut
+        // to its region before the copy.
+        int expectedSize = _builder.InputReportByteSize > 0 ? _builder.InputReportByteSize : 17;
+        bool hasReportId = _builder.InputReportId != 0;
+        int maxData = hasReportId ? Math.Max(expectedSize - 1, 16) : expectedSize;
+        if (hasReportId && expectedSize > 1) maxData = expectedSize - 1;
         uint seq1, seq2;
         int retries = 4;
         do
         {
             seq1 = (uint)Marshal.ReadInt32(view, 0);
             Thread.MemoryBarrier();
-            unsafe
+            int extSize = Unsafe.ReadUnaligned<int>((byte*)view + SharedMemoryIO.EXTENDED_SIZE_OFFSET);
+            if (extSize > 0 && extSize <= SharedMemoryIO.EXTENDED_DATA_CAPACITY)
             {
-                fixed (byte* dst = snap)
-                    Buffer.MemoryCopy((void*)view, dst, snap.Length, snap.Length);
+                new ReadOnlySpan<byte>((byte*)view + SharedMemoryIO.EXTENDED_DATA_OFFSET, extSize).CopyTo(report);
+                length = extSize;
+            }
+            else
+            {
+                int dataLen = Unsafe.ReadUnaligned<int>((byte*)view + 4);
+                if (dataLen > maxData) dataLen = maxData;
+                if (dataLen > SharedMemoryIO.DATA_CAPACITY) dataLen = SharedMemoryIO.DATA_CAPACITY;
+                if (dataLen < 0) dataLen = 0;
+
+                // The report is expectedSize bytes, zero past the data.
+                var r = report[..expectedSize];
+                r.Clear();
+                var data = new ReadOnlySpan<byte>((byte*)view + SharedMemoryIO.DATA_OFFSET, dataLen);
+                if (hasReportId)
+                {
+                    r[0] = _builder.InputReportId;
+                    data[..Math.Min(dataLen, expectedSize - 1)].CopyTo(r[1..]);
+                }
+                else
+                {
+                    data.CopyTo(r);
+                }
+                length = expectedSize;
             }
             Thread.MemoryBarrier();
             seq2 = (uint)Marshal.ReadInt32(view, 0);
         } while ((seq1 != seq2 || (seq1 & 1) != 0) && --retries > 0);
-        if (seq1 != seq2 || (seq1 & 1) != 0) return false;
-        if (seq1 == _lastSharedSeqNo) return false; // no new frame
+        if (seq1 != seq2 || (seq1 & 1) != 0) { length = 0; return false; }
+        if (seq1 == _lastSharedSeqNo) { length = 0; return false; } // no new frame
         _lastSharedSeqNo = seq1;
-
-        int expectedSize = _builder.InputReportByteSize > 0 ? _builder.InputReportByteSize : 17;
-        int extSize = BitConverter.ToInt32(snap[SharedMemoryIO.EXTENDED_SIZE_OFFSET..]);
-        if (extSize > 0 && extSize <= SharedMemoryIO.EXTENDED_DATA_CAPACITY)
-        {
-            snap.Slice(SharedMemoryIO.EXTENDED_DATA_OFFSET, extSize).CopyTo(report);
-            length = extSize;
-            return true;
-        }
-
-        int dataLen = BitConverter.ToInt32(snap[4..]);
-        bool hasReportId = _builder.InputReportId != 0;
-        int maxData = hasReportId ? Math.Max(expectedSize - 1, 16) : expectedSize;
-        if (hasReportId && expectedSize > 1) maxData = expectedSize - 1;
-        if (dataLen > maxData) dataLen = maxData;
-        if (dataLen > SharedMemoryIO.DATA_CAPACITY) dataLen = SharedMemoryIO.DATA_CAPACITY;
-        if (dataLen < 0) dataLen = 0;
-
-        // The report is expectedSize bytes, zero past the data.
-        var r = report[..expectedSize];
-        r.Clear();
-        if (hasReportId)
-        {
-            r[0] = _builder.InputReportId;
-            dataLen = Math.Min(dataLen, expectedSize - 1);
-            snap.Slice(SharedMemoryIO.DATA_OFFSET, dataLen).CopyTo(r[1..]);
-        }
-        else
-        {
-            snap.Slice(SharedMemoryIO.DATA_OFFSET, dataLen).CopyTo(r);
-        }
-        length = expectedSize;
         return true;
     }
 
