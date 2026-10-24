@@ -129,19 +129,24 @@ internal static partial class VhciClient
     // them all.
     private const int CensusRows = 16;
 
-    // The host controller as the creating thread holds it open for one
-    // composite create (HoldOpen): the census of the create's lease, the
-    // stale sweep and the attach then share one open. An open of the host
-    // controller took about 700 microseconds on the bench machine on
-    // 2026-10-19 (CreateFileW alone, p50 of 50), and a composite create made
-    // two. The handle is closed when the create's hold ends, so no handle
-    // outlives a create, as none outlives a call outside one.
+    // The host controller as one thread holds it open across a sequence of
+    // calls (HoldOpen). A composite create holds it for the census of its
+    // lease, the stale sweep and the attach. A composite's dispose holds it
+    // for the listing, the plugout and the attempt cancel. DetachOwn and
+    // DetachAllOwned hold it across their devices, DetachOwn across each
+    // device's Dispose as well. An open of the host controller took about
+    // 700 microseconds on the bench machine on 2026-10-19 (CreateFileW
+    // alone, p50 of 50). The handle is closed when the outermost hold ends,
+    // so no handle outlives the sequence that opened it, as none outlives a
+    // call outside one.
     [ThreadStatic] private static IntPtr t_held;
     [ThreadStatic] private static int t_holds;
 
     /// <summary>Keep the host controller open on this thread, once the
     /// first call opens it, until the returned scope is disposed. A
-    /// composite create holds it from its lease to its attach.</summary>
+    /// composite create holds it from its lease to its attach, a
+    /// composite's dispose across its plugout and cancel, and the eviction
+    /// paths across all their devices. Holds nest.</summary>
     internal static IDisposable HoldOpen()
     {
         t_holds++;

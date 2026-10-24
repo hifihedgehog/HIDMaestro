@@ -359,6 +359,9 @@ internal static class UsbipBackend
         {
             var server = UsbipServer.Current;
             if (server == null) return;
+            // The devices' plugouts and the cancel share one open of the host
+            // controller (VhciClient.HoldOpen).
+            using var vhci = VhciClient.HoldOpen();
             var locations = new List<(int, string)>();
             foreach (var device in server.SnapshotDevices())
             {
@@ -410,6 +413,9 @@ internal static class UsbipBackend
             }
 
             if (!VhciClient.IsAvailable()) return;
+            // The listing, each plugout and the cancel share one open of the
+            // host controller (VhciClient.HoldOpen).
+            using var vhci = VhciClient.HoldOpen();
             var recorded = RecordedPorts();
             foreach (var row in VhciClient.GetImportedDevices())
             {
@@ -488,14 +494,20 @@ internal sealed class UsbipBackendHandle : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        // By location: after a dropped connection the driver plugs the
-        // device in again on a new port, and the port it had may hold
-        // another program's device.
-        try { VhciClient.DetachLocation("127.0.0.1", _server.Port, Device.BusId); } catch { }
-        // An import that dropped while the controller lived left an attempt
-        // for this location, and no record names it once the controller's
-        // entry goes.
-        VhciClient.StopAttachAttempts("127.0.0.1", _server.Port, Device.BusId);
+        // The listing, the plugout and the cancel share one open of the host
+        // controller, as a create's steps do (VhciClient.HoldOpen), closed
+        // before the device's own teardown.
+        using (VhciClient.HoldOpen())
+        {
+            // By location: after a dropped connection the driver plugs the
+            // device in again on a new port, and the port it had may hold
+            // another program's device.
+            try { VhciClient.DetachLocation("127.0.0.1", _server.Port, Device.BusId); } catch { }
+            // An import that dropped while the controller lived left an
+            // attempt for this location, and no record names it once the
+            // controller's entry goes.
+            VhciClient.StopAttachAttempts("127.0.0.1", _server.Port, Device.BusId);
+        }
         _server.Unregister(Device);
         Device.Dispose();
     }
