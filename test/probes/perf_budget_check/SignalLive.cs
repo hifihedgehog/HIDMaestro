@@ -9,12 +9,17 @@
 //     process's own, which no other process maps: the positive control
 //     that tells the writer's cost from what other readers of the section
 //     add to it
-//   - a frame written and signaled, as every submit ends
+//   - a frame written and signaled, as every submit ended before 2.1.0 and
+//     as a program before 2.1.0 still does on this driver
+//   - from 2.1.0, a frame written and signaled through the signal gate
+//     (docs/design/signal-gate.md), as a submit now ends: the signal only
+//     while the driver waits. An SDK without the gate has no such row
 // The frames are the controller's own last report and continue its
 // sequence numbers, so the driver sends each as it sends a submit's. It
 // builds against b4d29d9 too, whose writer takes the same arguments, so the
 // two releases' drivers and companions are timed by the same calls.
 using System;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using HIDMaestro;
@@ -65,6 +70,12 @@ internal static partial class Program
             finally { Marshal.FreeHGlobal(own); }
             Measure($"a frame written and signaled, {id}", runs, 20_000, () =>
                 SharedMemoryIO.WriteInputFrame(view, input, ref seq, frame, dataLen, gipOrNull, companionEvent: companion), gate: false);
+            if (GatedWriter() is { } gated)
+            {
+                IntPtr signal = (IntPtr)t.GetField("_signalView", Any)!.GetValue(c)!;
+                Measure($"a frame written and signaled through the signal gate, {id}", runs, 20_000, () =>
+                    gated(view, input, ref seq, frame, dataLen, gipOrNull, 0, default, 0, companion, signal), gate: false);
+            }
             // The controller's next frame follows the probe's.
             seqField.SetValue(c, seq);
         }
@@ -73,4 +84,17 @@ internal static partial class Program
 
     [DllImport("kernel32.dll", EntryPoint = "SetEvent")]
     static extern bool SignalSetEvent(IntPtr handle);
+
+    delegate void GatedWrite(IntPtr view, IntPtr eventHandle, ref uint seqNo, ReadOnlySpan<byte> data, int dataLen,
+        byte[]? gipData, int dataOffset, ReadOnlySpan<byte> extendedData, int extendedLen, IntPtr companionEvent, IntPtr signalView);
+
+    /// <summary>The SDK's frame writer with its signal-gate argument
+    /// (2.1.0), or null on an SDK without one, found by its signature so
+    /// this source builds against v2.0.3's SDK as it is.</summary>
+    static GatedWrite? GatedWriter()
+    {
+        var m = typeof(SharedMemoryIO).GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .FirstOrDefault(x => x.Name == "WriteInputFrame" && x.GetParameters().Any(p => p.Name == "signalView"));
+        return m == null ? null : m.CreateDelegate<GatedWrite>();
+    }
 }
