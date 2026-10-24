@@ -55,13 +55,23 @@
 //                  the driver hosts, the reader and this process, on a
 //                  DualShock 4 and an Xbox 360 pad or the profiles named
 //                  (RateLive.cs)
-//   create [runs] [profile ...] [--settle=<ms>]
+//   load [runs] [seconds] [--key=<identity>]
+//                  a consumer's whole load: two Xbox 360 pads, a DualShock 4
+//                  and a DualSense over Bluetooth up at once, each with a
+//                  reader in a child process, all submitting every
+//                  millisecond and then at rest: the cycles a second of this
+//                  process, the readers and the driver hosts, each pad's
+//                  reports read, and the DualShock 4's e2e latency beside the
+//                  other three (LoadLive.cs)
+//   create [runs] [profile ...] [--settle=<ms>] [--gap=<ms>]
 //                  CreateController and Dispose for four kinds of device, or
 //                  the catalog profiles named, with the SDK's own step
 //                  timings (HIDMAESTRO_TIMING), each controller up for <ms>
-//                  first. A keyboard or a mouse types and moves the pointer
-//                  on the desktop of whoever works at the machine, so none
-//                  is among the four: one is measured only when named
+//                  first, and with --gap an untimed pause after each Dispose
+//                  before the next create. A keyboard or a mouse types and
+//                  moves the pointer on the desktop of whoever works at the
+//                  machine, so none is among the four: one is measured only
+//                  when named
 //   report [runs] [calls]
 //                  offline, no elevation: one launch of the hot path's cost
 //                  under the one arithmetic, BuildReportInto, EncodeInput and
@@ -122,13 +132,14 @@
 //                  offline: the budgets' non-inferiority rule over two
 //                  sides' measurements, the offline modes' launch lines or a
 //                  live mode's summaries (Compare.cs)
-//   start [runs] [--settle=<ms>]
+//   start [runs] [--settle=<ms>] [--gap=<ms>]
 //                  process start to the first controller, each run in a
 //                  fresh process, with the session cleanup step's time.
 //                  With --settle the controller stays up that long before
-//                  its Dispose is timed
-//   load [runs]    offline: process start to the catalog loaded, each run in
-//                  a fresh process, with the JIT's time and methods
+//                  its Dispose is timed, and with --gap an untimed pause
+//                  follows each child's exit
+//   catalog [runs] offline: process start to the catalog loaded, each run
+//                  in a fresh process, with the JIT's time and methods
 //   claim [runs]   the owner claim, the census and the lease (this release)
 //   census         the census walk over Enum keys it cannot read (scratch
 //                  keys under HKCU: denied, deleted, gone) gives what the
@@ -166,8 +177,10 @@
 //                  key, and hid.dll's BOOLEAN results read as one byte
 //
 // --trace prints wall-clock times around each Dispose, to set beside the
-// SDK's diag log. Every measurement prints one line with p50 and p95 over
-// all samples.
+// SDK's diag log. --marks writes one ETW event per timed frame of the e2e
+// and output passes (ProbeMarks.cs), for a trace of the threads a frame
+// wakes. Every measurement prints one line with p50 and p95 over all
+// samples.
 // Requires elevation, except census, report-build, selftest, compare and
 // the offline measuring modes. Exit 0 PASS, 1 FAIL (gate, census,
 // selftest, compare) or an argument refused before
@@ -237,13 +250,14 @@ internal static partial class Program
         // Read once by the SDK's first create, so it is set before any.
         Environment.SetEnvironmentVariable("HIDMAESTRO_TIMING", "1");
         s_trace = args.Contains("--trace");
-        args = args.Where(a => a != "--trace").ToArray();
+        ProbeMarks.On = args.Contains("--marks");
+        args = args.Where(a => a != "--trace" && a != "--marks").ToArray();
         s_key = KeyArg(args);
         args = args.Where(a => !a.StartsWith("--key=", StringComparison.Ordinal)).ToArray();
         string mode = args.Length > 0 ? args[0] : "gate";
         int runs = args.Length > 1 && int.TryParse(args[1], out int r) ? r : 30;
         if (mode == "start-child") return StartChild(args.Length > 1 && int.TryParse(args[1], out int childSettle) ? childSettle : 0);
-        if (mode == "load-child") return LoadChild();
+        if (mode == "catalog-child") return CatalogChild();
         if (mode == "idle-reader") return IdleLive.Reader(args[1]);
         if (mode == "rate-reader") return RateReader(args[1]);
 #if !HM_BASE
@@ -302,9 +316,9 @@ internal static partial class Program
             return 0;
         }
 #endif
-        if (mode == "load")
+        if (mode == "catalog")
         {
-            Load(runs);
+            Catalog(runs);
             return 0;
         }
         if (mode is "submit" or "submit-repeat")
@@ -370,15 +384,19 @@ internal static partial class Program
                 int rate = Rate(runs, args.Skip(2).ToArray());
                 if (rate != 0) return rate;
                 break;
+            case "load":
+                int load = Load(runs, args.Skip(2).ToArray());
+                if (load != 0) return load;
+                break;
             case "create":
                 int create = Create(runs, args.Skip(2).Where(a => !a.StartsWith("--", StringComparison.Ordinal)).ToArray(),
-                    SettleMs(args), s_key);
+                    SettleMs(args), s_key, GapMs(args));
                 if (create != 0) return create;
                 break;
 #if !HM_BASE
             case "install": return Install();
 #endif
-            case "start": Start(runs, SettleMs(args)); break;
+            case "start": Start(runs, SettleMs(args), GapMs(args)); break;
             case "usbip": Usbip(runs, gate: false); break;
             case "usbip-bytes": UsbipBytes(args.Length > 1 && int.TryParse(args[1], out int bf) ? bf : 200); break;
             case "usbip-audio":
@@ -833,7 +851,11 @@ internal static partial class Program
                         break;
                     }
                 }
-                if (hit != 0) samples.Add((hit - t0) * 1e6 / Stopwatch.Frequency);
+                if (hit != 0)
+                {
+                    samples.Add((hit - t0) * 1e6 / Stopwatch.Frequency);
+                    if (ProbeMarks.On) { uint me = ProbeMarks.GetCurrentThreadId(); ProbeMarks.Frame(3, run * 50 + i, t0, hit, me, me); }
+                }
                 else { missed++; Thread.Sleep(200); }
             }
         }
@@ -877,7 +899,12 @@ internal static partial class Program
                         if ((int)((uint)Marshal.ReadInt32(view, 0) - seq) >= 0) { seen = true; break; }
                         Thread.SpinWait(16);
                     }
-                    if (seen) samples.Add((Stopwatch.GetTimestamp() - t0) * 1e6 / Stopwatch.Frequency);
+                    if (seen)
+                    {
+                        long t1 = Stopwatch.GetTimestamp();
+                        samples.Add((t1 - t0) * 1e6 / Stopwatch.Frequency);
+                        if (ProbeMarks.On) { uint me = ProbeMarks.GetCurrentThreadId(); ProbeMarks.Frame(1, run * 50 + i, t0, t1, me, me); }
+                    }
                     else missed++;
                 }
                 // A driver that acknowledges none of a profile's frames (the
@@ -973,7 +1000,11 @@ internal static partial class Program
                 long hit = 0;
                 while (Stopwatch.GetTimestamp() < deadline && (hit = reader.Hit) == 0) Thread.SpinWait(16);
                 reader.Disarm();
-                if (hit != 0) samples.Add((hit - t0) * 1e6 / Stopwatch.Frequency);
+                if (hit != 0)
+                {
+                    samples.Add((hit - t0) * 1e6 / Stopwatch.Frequency);
+                    if (ProbeMarks.On) ProbeMarks.Frame(2, run * 50 + i, t0, hit, ProbeMarks.GetCurrentThreadId(), reader.ThreadId);
+                }
                 else { missed++; Thread.Sleep(200); }
             }
         }
@@ -1076,6 +1107,10 @@ internal static partial class Program
         }
         if (slot < 0) { Check($"{id}: an XInput slot the create connected", false, $"none in {XInputSlotWaitMs / 1000} s"); return; }
         long sent = 0;
+        // --marks: the last delivered send's times and the thread that
+        // raised OutputReceived, read after got is set.
+        long markStart = 0, markEnd = 0;
+        uint markThread = 0;
         using var got = new AutoResetEvent(false);
         var rtts = new List<double>(runs * 100);
         c.OutputReceived += (_, pkt) =>
@@ -1086,6 +1121,7 @@ internal static partial class Program
             if (s != 0)
             {
                 rtts.Add((t - s) * 1e6 / Stopwatch.Frequency);
+                if (ProbeMarks.On) { markStart = s; markEnd = t; markThread = ProbeMarks.GetCurrentThreadId(); }
                 got.Set();
             }
         };
@@ -1102,7 +1138,11 @@ internal static partial class Program
                 var v = new XInputVibration { Left = (ushort)(i % 2 == 0 ? 0x100 * (1 + ((run * 100 + i) % 254)) : 0), Right = 0 };
                 Interlocked.Exchange(ref sent, Stopwatch.GetTimestamp());
                 if (XInputSetState(slot, ref v) != 0) { Interlocked.Exchange(ref sent, 0); lost++; continue; }
-                if (got.WaitOne(500)) delivered++;
+                if (got.WaitOne(500))
+                {
+                    delivered++;
+                    if (ProbeMarks.On) ProbeMarks.Frame(5, run * 100 + i, markStart, markEnd, ProbeMarks.GetCurrentThreadId(), markThread);
+                }
                 else { Interlocked.Exchange(ref sent, 0); lost++; }
             }
             long bytes = GC.GetTotalAllocatedBytes(precise: true) - bytes0;
@@ -1117,6 +1157,9 @@ internal static partial class Program
     static void OutputOne(HMController c, ProfileArg p, int runs)
     {
         long sent = 0;
+        // --marks: as in XInputOutputOne.
+        long markStart = 0, markEnd = 0;
+        uint markThread = 0;
         using var got = new AutoResetEvent(false);
         var rtts = new List<double>(runs * 100);
         c.OutputReceived += (_, pkt) =>
@@ -1127,6 +1170,7 @@ internal static partial class Program
             if (s != 0)
             {
                 rtts.Add((t - s) * 1e6 / Stopwatch.Frequency);
+                if (ProbeMarks.On) { markStart = s; markEnd = t; markThread = ProbeMarks.GetCurrentThreadId(); }
                 got.Set();
             }
         };
@@ -1147,7 +1191,11 @@ internal static partial class Program
                 report[vary] = (byte)(1 + ((run * 100 + i) % 254));
                 Interlocked.Exchange(ref sent, Stopwatch.GetTimestamp());
                 if (!HidD_SetOutputReport(dev.Handle, report, report.Length)) { Interlocked.Exchange(ref sent, 0); lost++; continue; }
-                if (got.WaitOne(500)) delivered++;
+                if (got.WaitOne(500))
+                {
+                    delivered++;
+                    if (ProbeMarks.On) ProbeMarks.Frame(4, run * 100 + i, markStart, markEnd, ProbeMarks.GetCurrentThreadId(), markThread);
+                }
                 else { Interlocked.Exchange(ref sent, 0); lost++; }
                 Spin(1_000);
             }
@@ -1163,7 +1211,7 @@ internal static partial class Program
     /// <summary>The catalog profiles named after the run count, in that
     /// order, or the default set. Returns 1 when a name is refused, 5 when a
     /// devnode runs another driver.</summary>
-    static int Create(int runs, string[] only, int settleMs, string? key)
+    static int Create(int runs, string[] only, int settleMs, string? key, int gapMs = 0)
     {
         var named = ParseProfileArgs(only, "create");
         if (named == null) return 1;
@@ -1190,6 +1238,7 @@ internal static partial class Program
             // binding, the USB/IP server's first start) is not a sample.
             using (var first = ctx.CreateController(profile, key))
                 if (!OnEmbeddedDriver(first, id)) return 5;
+            if (gapMs > 0) Thread.Sleep(gapMs);
             long logStart = new FileInfo(log).Exists ? new FileInfo(log).Length : 0;
             var create = new List<double>(runs);
             var dispose = new List<double>(runs);
@@ -1206,8 +1255,10 @@ internal static partial class Program
                 if (s_trace) Console.WriteLine($"    [{DateTime.Now:HH:mm:ss.fff}] dispose returned after {(t3 - t2) * 1000.0 / Stopwatch.Frequency:F1} ms");
                 create.Add((t1 - t0) * 1000.0 / Stopwatch.Frequency);
                 dispose.Add((t3 - t2) * 1000.0 / Stopwatch.Frequency);
+                if (gapMs > 0) Thread.Sleep(gapMs);
             }
             Report($"{id}: CreateController, ms", create, runs, "");
+            ReportStalls($"{id}: CreateController", create, runs);
             Report($"{id}: Dispose, ms", dispose, runs, "");
             foreach (var (step, values) in TimingSteps(log, logStart, id))
                 Report($"{id}: step {step}, ms", values, runs, "");
@@ -1224,6 +1275,43 @@ internal static partial class Program
         return 0;
     }
 
+    // A create stalls when Plug and Play holds its device install or its
+    // device start for a few hundred milliseconds: setupapi.dev.log on the
+    // development laptop (2026-10-24) shows 32 to 81% of a run's installs of
+    // one device 400 to 700 ms longer than the rest, on every build tried,
+    // in the wait before the PnP service's core install or in the device
+    // start, where the device's WUDFHost process was created late. A run's
+    // median then lands near the fast or the slow level as the share
+    // crosses one half. The stall margin sits between the two levels: the
+    // median of a run's other installs was within about 20 ms of the median
+    // of its fastest quarter.
+    const double StallMarginMs = 150;
+
+    /// <summary>The samples of a run that no stall held, and how many one
+    /// did: a sample stalled when it is more than <see cref="StallMarginMs"/>
+    /// above the run's 10th percentile (nearest rank). Prints the two as
+    /// rows of their own.</summary>
+    static void ReportStalls(string name, List<double> samples, int runs)
+    {
+        if (samples.Count == 0) return;
+        var s = samples.OrderBy(x => x).ToList();
+        double floor = s[Math.Clamp((int)Math.Ceiling(0.10 * s.Count) - 1, 0, s.Count - 1)];
+        var clear = samples.Where(x => x <= floor + StallMarginMs).ToList();
+        int stalled = samples.Count - clear.Count;
+        Report($"{name} without a Plug and Play stall, ms", clear, runs, $", {stalled} of {samples.Count} stalled");
+        Report($"{name}, the share that stalled, percent", new List<double> { 100.0 * stalled / samples.Count }, runs, "");
+    }
+
+    /// <summary>--gap=&lt;ms&gt;: the untimed pause after each timed Dispose of
+    /// the create mode before the next create, and after each child of the
+    /// start mode before the next child.</summary>
+    static int GapMs(string[] args)
+    {
+        foreach (string a in args)
+            if (a.StartsWith("--gap=", StringComparison.Ordinal) && int.TryParse(a[6..], out int ms)) return ms;
+        return 0;
+    }
+
     /// <summary>The value of --key=, or null.</summary>
     static string? KeyArg(string[] args)
     {
@@ -1237,7 +1325,7 @@ internal static partial class Program
     /// <summary>Fresh processes, each creating one DualShock 4 on the
     /// installed driver and exiting. One run first makes sure the driver is
     /// current, so every timed run takes the same-version fast path.</summary>
-    static void Start(int runs, int settleMs)
+    static void Start(int runs, int settleMs, int gapMs = 0)
     {
         string self = Environment.ProcessPath!;
         string log = TimingLog();
@@ -1260,6 +1348,9 @@ internal static partial class Program
             using var p = Process.Start(psi)!;
             string output = p.StandardOutput.ReadToEnd();
             p.WaitForExit();
+            // --gap: the untimed pause after a child's controller is gone,
+            // before the next child starts.
+            if (gapMs > 0) Thread.Sleep(gapMs);
             if (run < 0) continue;
             var lines = output.Split('\n');
             var line = lines.FirstOrDefault(l => l.StartsWith("ready ", StringComparison.Ordinal));
@@ -1280,6 +1371,7 @@ internal static partial class Program
             }
         }
         Report("process start to the first controller, ms", ready, runs, "");
+        ReportStalls("process start to the first controller", ready, runs);
         Report("the session cleanup step in that create (0.ghost_cleanup), ms", sweep, runs, "");
         Report("start part: process start to Main, ms", parts["main"], runs, "");
         Report("start part: the HMContext constructor, ms", parts["context"], runs, "");
@@ -1334,14 +1426,14 @@ internal static partial class Program
     /// <summary>Offline, no elevation: fresh processes, each making an
     /// HMContext and loading the catalog, the part of the start mode's child
     /// before its create, with the JIT's time and methods.</summary>
-    static void Load(int runs)
+    static void Catalog(int runs)
     {
         string self = Environment.ProcessPath!;
         string[] names = { "main", "context", "profiles", "ready", "jit", "jitted" };
         var parts = names.ToDictionary(n => n, _ => new List<double>(runs));
         for (int run = -1; run < runs; run++)
         {
-            var psi = new ProcessStartInfo(self, "load-child")
+            var psi = new ProcessStartInfo(self, "catalog-child")
             {
                 RedirectStandardOutput = true,
                 UseShellExecute = false,
@@ -1359,15 +1451,15 @@ internal static partial class Program
                     list.Add(double.Parse(f[1], System.Globalization.CultureInfo.InvariantCulture));
             }
         }
-        Report("load: process start to the catalog loaded, ms", parts["ready"], runs, "");
-        Report("load part: process start to Main, ms", parts["main"], runs, "");
-        Report("load part: the HMContext constructor, ms", parts["context"], runs, "");
-        Report("load part: LoadDefaultProfiles, ms", parts["profiles"], runs, "");
-        Report("load part: JIT time in the process, ms", parts["jit"], runs, "");
-        Report("load part: methods the JIT compiled", parts["jitted"], runs, "");
+        Report("catalog: process start to the catalog loaded, ms", parts["ready"], runs, "");
+        Report("catalog part: process start to Main, ms", parts["main"], runs, "");
+        Report("catalog part: the HMContext constructor, ms", parts["context"], runs, "");
+        Report("catalog part: LoadDefaultProfiles, ms", parts["profiles"], runs, "");
+        Report("catalog part: JIT time in the process, ms", parts["jit"], runs, "");
+        Report("catalog part: methods the JIT compiled", parts["jitted"], runs, "");
     }
 
-    static int LoadChild()
+    static int CatalogChild()
     {
         long t0 = Stopwatch.GetTimestamp();
         DateTime started = Process.GetCurrentProcess().StartTime.ToUniversalTime();
