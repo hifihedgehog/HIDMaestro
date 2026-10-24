@@ -26,8 +26,9 @@ internal sealed partial class UsbipEmulatedDevice
     internal ProtocolEngine? Protocol => _engine;
 
     // One IN transfer on the protocol's input endpoint, filled a packet per
-    // host poll the way a host controller fills it. The buffer is rented and
-    // the node reused, so a read allocates nothing once the pools warm.
+    // host poll the way a host controller fills it. The buffer is rented, and
+    // a spare node keeps it for the next read, so a read allocates nothing and
+    // rents nothing once the pools warm.
     private sealed class ProtocolRead
     {
         public uint Seq;
@@ -105,10 +106,14 @@ internal sealed partial class UsbipEmulatedDevice
     /// <summary>Caller holds _hidLock.</summary>
     private void RecycleRead(LinkedListNode<ProtocolRead> node)
     {
+        if (_spareReads.Count < 16)
+        {
+            _spareReads.Push(node);
+            return;
+        }
         var read = node.Value;
         if (read.Buffer.Length > 0) ArrayPool<byte>.Shared.Return(read.Buffer);
         read.Buffer = Array.Empty<byte>();
-        if (_spareReads.Count < 16) _spareReads.Push(node);
     }
 
     /// <summary>An IN transfer on the input endpoint. It parks until a host
@@ -123,7 +128,11 @@ internal sealed partial class UsbipEmulatedDevice
             read.Seq = seqnum;
             read.Capacity = capacity;
             read.Filled = 0;
-            read.Buffer = capacity > 0 ? ArrayPool<byte>.Shared.Rent(capacity) : Array.Empty<byte>();
+            if (read.Buffer.Length < capacity)
+            {
+                if (read.Buffer.Length > 0) ArrayPool<byte>.Shared.Return(read.Buffer);
+                read.Buffer = ArrayPool<byte>.Shared.Rent(capacity);
+            }
             if (DiagPath != null)
                 _readsPerEp[_engine!.Protocol.InputEndpoint] =
                     _readsPerEp.TryGetValue(_engine.Protocol.InputEndpoint, out var rc) ? rc + 1 : 1;
