@@ -89,6 +89,11 @@ internal sealed partial class UsbAudioEngine : IDisposable
     // "no stream in flight; next URB re-anchors to now".
     private long _outCursor;
     private long _inCursor;
+
+    // The earliest due tick the pump's last pass found, which it waits for
+    // next, or long.MaxValue while it parks with nothing pending. Written by
+    // the pump at each pass and read by SubmitIso, both under _lock.
+    private long _armedDue = long.MaxValue;
     private static readonly long TicksPerMs = Stopwatch.Frequency / 1000;
     private static readonly double TicksPerUs = Stopwatch.Frequency / 1_000_000.0;
 
@@ -317,7 +322,10 @@ internal sealed partial class UsbAudioEngine : IDisposable
                     QueueAltLocked(iface, urb.AltSetting);
                 }
             }
-            _wake.Set();
+            // The pump wakes for an URB due before the tick it waits for, or
+            // when it is parked. A later one it finds at that tick's pass,
+            // which scans the whole list.
+            if (urb.DueTick < _armedDue) _wake.Set();
         }
     }
 
@@ -702,6 +710,7 @@ internal sealed partial class UsbAudioEngine : IDisposable
                         nextDue = p.DueTick;
                     }
                 }
+                _armedDue = nextDue;
             }
 
             // Oldest first: _pending is submit-ordered and the reverse walk
