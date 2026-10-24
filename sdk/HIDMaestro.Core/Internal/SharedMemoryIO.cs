@@ -1068,7 +1068,7 @@ internal static partial class SharedMemoryIO
     /// between the previous LastSeen and current Head get drained: see
     /// <see cref="HMController.OutputPollLoop"/>. Pre-1.1.40 single-slot
     /// channel coalesced PID FFB packet bursts; this ring drains them.</summary>
-    public static bool TryReadOutputFrame(
+    public static unsafe bool TryReadOutputFrame(
         IntPtr view, ref uint lastSeq,
         out byte source, out byte reportId, out int dataSize, byte[] dataBuf)
     {
@@ -1101,7 +1101,12 @@ internal static partial class SharedMemoryIO
         uint slotSeqAfter = 0;
         do
         {
-            uint slotSeqBefore = (uint)Marshal.ReadInt32(view, slotBase + OUTPUT_SLOT_OFFSET_SEQNO);
+            // An acquire: no read of the slot below may run ahead of it.
+            // An ordinary read gives no such order (the .NET memory model,
+            // "Order of memory operations"), and on ARM64 the processor
+            // could load the payload first, then the producer's new SeqNo,
+            // and the check after the barrier would pass an older payload.
+            uint slotSeqBefore = Volatile.Read(ref *(uint*)((byte*)view + slotBase + OUTPUT_SLOT_OFFSET_SEQNO));
             if (slotSeqBefore != nextSeq)
             {
                 // Slot hasn't been written for our expected SeqNo yet.
