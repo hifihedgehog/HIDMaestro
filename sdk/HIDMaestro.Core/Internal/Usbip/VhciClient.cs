@@ -255,24 +255,44 @@ internal static partial class VhciClient
     public static int Attach(string host, int port, string busid)
     {
         using var h = Open();
-        var layout = Probe(h.Handle, out _, out _);
-        var buf = new byte[layout.PluginSize];
+        // The kept layout, which the create's census found, goes first. The
+        // driver refuses a request of another layout's size before it acts
+        // on it (vhci_ioctl.cpp plugin_hardware, the size checks ahead of the
+        // attach), so a driver changed under the kept layout costs one
+        // refused request, the probe, and the attach on the layout it finds.
+        Layout? kept = Volatile.Read(ref s_layout);
+        var layout = kept ?? Keep(Probe(h.Handle, out _, out _));
+        byte[] buf;
+        while (!TryPlugin(h.Handle, layout, host, port, busid, out buf))
+        {
+            int error = Marshal.GetLastWin32Error();
+            Layout probed = kept == null ? layout : Keep(Probe(h.Handle, out _, out _));
+            if (ReferenceEquals(probed, layout))
+                throw new Win32Exception(error, $"usbip-win2 {layout.Name} attach of {busid} at {host}:{port} failed.");
+            layout = probed;
+            kept = null;
+        }
+
+        int vhciPort = BitConverter.ToInt32(buf, HeaderSize);
+        if (vhciPort < 1)
+            throw new InvalidOperationException($"usbip-win2 attach of {busid} returned port {vhciPort}.");
+        return vhciPort;
+    }
+
+    /// <summary>One PLUGIN_HARDWARE_ONCE request on
+    /// <paramref name="layout"/>. False when the driver refused it, with the
+    /// error in the last Win32 error.</summary>
+    private static bool TryPlugin(IntPtr handle, Layout layout, string host, int port, string busid, out byte[] buf)
+    {
+        buf = new byte[layout.PluginSize];
         BitConverter.GetBytes((uint)layout.PluginSize).CopyTo(buf, 0);
         WriteLocation(buf, HeaderSize + layout.BusIdOffset, busid, port.ToString(), host);
         // 0.9.8.x serial and wsk_events stay zero. An empty serial leaves
         // the device's own serial string in place (wsk_receive.cpp only
         // substitutes a non-empty one), and wsk_events false keeps the IRP
         // receive path rather than WSK event callbacks (vhci_ioctl.cpp).
-
-        if (!DeviceIoControl(h.Handle, PLUGIN_HARDWARE_ONCE, buf, (uint)buf.Length,
-                buf, (uint)buf.Length, out _, IntPtr.Zero))
-            throw new Win32Exception(Marshal.GetLastWin32Error(),
-                $"usbip-win2 {layout.Name} attach of {busid} at {host}:{port} failed.");
-
-        int vhciPort = BitConverter.ToInt32(buf, HeaderSize);
-        if (vhciPort < 1)
-            throw new InvalidOperationException($"usbip-win2 attach of {busid} returned port {vhciPort}.");
-        return vhciPort;
+        return DeviceIoControl(handle, PLUGIN_HARDWARE_ONCE, buf, (uint)buf.Length,
+            buf, (uint)buf.Length, out _, IntPtr.Zero);
     }
 
     /// <summary>Detach the device on a vhci port. portOrZero &lt;= 0
