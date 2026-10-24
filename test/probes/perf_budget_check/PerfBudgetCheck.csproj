@@ -5,6 +5,10 @@
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyName>PerfBudgetCheck</AssemblyName>
+    <!-- A build with its own BaseIntermediateOutputPath (HmSdkDll below)
+         stops excluding obj\, so the generated sources of every build's
+         intermediate folder stay out of the compile glob. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);obj\**;obj-*\**</DefaultItemExcludes>
     <!-- -p:HmBase=true builds against a b4d29d9 tree for the "before"
          measurements, leaving out what b4d29d9 lacks. -->
     <DefineConstants Condition="'$(HmBase)' == 'true'">$(DefineConstants);HM_BASE</DefineConstants>
@@ -36,7 +40,14 @@
        assembly a b4d29d9 build already made (its HIDMaestro.Core.dll, which
        embeds that build's driver) instead of a b4d29d9 tree, so the before
        probe runs the very SDK and driver of the earlier measurements. -->
-  <ItemGroup Condition="'$(HmBaseSdkDll)' == ''">
+  <!-- -p:HmSdkDll=<path> compiles this source as it is against the SDK
+       assembly another 2.x tree built (its HIDMaestro.Core.dll, which embeds
+       that tree's driver), with none of the HM_BASE or HM_BASELINE
+       exclusions: the base side of a release A/B, such as v2.0.3's build,
+       when this source carries modes or rows that tree's probe lacks. Give
+       it its own -o and -p:BaseIntermediateOutputPath, so it never shares
+       an output with this tree's own build. -->
+  <ItemGroup Condition="'$(HmBaseSdkDll)' == '' and '$(HmSdkDll)' == ''">
     <ProjectReference Include="$(_HmSdkProject)" />
   </ItemGroup>
   <ItemGroup Condition="'$(HmBaseSdkDll)' != ''">
@@ -45,6 +56,16 @@
       <Private>true</Private>
     </Reference>
   </ItemGroup>
+  <ItemGroup Condition="'$(HmSdkDll)' != ''">
+    <Reference Include="HIDMaestro.Core">
+      <HintPath>$(HmSdkDll)</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+  <Target Name="CheckSdkDll" BeforeTargets="ResolveAssemblyReferences;BeforeBuild" Condition="'$(HmSdkDll)' != ''">
+    <Error Condition="!Exists('$(HmSdkDll)')" Text="HmSdkDll: no SDK assembly at $(HmSdkDll)." />
+    <Error Condition="'$(HmBaseSdkDll)' != '' or '$(HmBaselineTree)' != '' or '$(HmBase)' == 'true'" Text="HmSdkDll builds against a 2.x SDK as is. It does not combine with HmBase, HmBaseSdkDll or HmBaselineTree." />
+  </Target>
   <!-- The program-file mode measures a profile file's programs on the
        interpreter with the profile check tool's own code, which only a
        tree with report programs builds. -->
