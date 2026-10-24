@@ -750,6 +750,9 @@ internal sealed class Case4UsbipFeatures : IOracleCase
             const BindingFlags f = BindingFlags.Instance | BindingFlags.NonPublic;
             (t.GetField("_socket", f) ?? throw new MissingFieldException(t.Name, "_socket")).SetValue(Connection, _server);
             (t.GetField("_sendLock", f) ?? throw new MissingFieldException(t.Name, "_sendLock")).SetValue(Connection, new object());
+            // The reply buffer its field initializer makes (UsbipServer.cs,
+            // Connection._tx), which no constructor run sets here.
+            (t.GetField("_tx", f) ?? throw new MissingFieldException(t.Name, "_tx")).SetValue(Connection, new byte[UsbipProtocol.HeaderSize + 4096]);
         }
 
         /// <summary>One control transfer on endpoint 0: a CMD_SUBMIT through
