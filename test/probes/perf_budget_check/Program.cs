@@ -55,6 +55,14 @@
 //                  the driver hosts, the reader and this process, on a
 //                  DualShock 4 and an Xbox 360 pad or the profiles named
 //                  (RateLive.cs)
+//   load [runs] [seconds] [--key=<identity>]
+//                  a consumer's whole load: two Xbox 360 pads, a DualShock 4
+//                  and a DualSense over Bluetooth up at once, each with a
+//                  reader in a child process, all submitting every
+//                  millisecond and then at rest: the cycles a second of this
+//                  process, the readers and the driver hosts, each pad's
+//                  reports read, and the DualShock 4's e2e latency beside the
+//                  other three (LoadLive.cs)
 //   create [runs] [profile ...] [--settle=<ms>] [--gap=<ms>]
 //                  CreateController and Dispose for four kinds of device, or
 //                  the catalog profiles named, with the SDK's own step
@@ -354,6 +362,10 @@ internal static partial class Program
             case "rate":
                 int rate = Rate(runs, args.Skip(2).ToArray());
                 if (rate != 0) return rate;
+                break;
+            case "load":
+                int load = Load(runs, args.Skip(2).ToArray());
+                if (load != 0) return load;
                 break;
             case "create":
                 int create = Create(runs, args.Skip(2).Where(a => !a.StartsWith("--", StringComparison.Ordinal)).ToArray(),
