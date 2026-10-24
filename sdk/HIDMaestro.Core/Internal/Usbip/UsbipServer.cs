@@ -580,16 +580,28 @@ internal sealed class UsbipServer : IDisposable
         /// own.</summary>
         public void SendRetSubmitNonIso(uint seqnum, int status, int actualLength, ReadOnlySpan<byte> inPayload)
         {
-            int payloadLen = inPayload.Length;
-            var buf = ArrayPool<byte>.Shared.Rent(UsbipProtocol.HeaderSize + payloadLen);
-            try
+            int total = UsbipProtocol.HeaderSize + inPayload.Length;
+            lock (_sendLock)
             {
+                var buf = TxBuffer(total);
                 UsbipProtocol.WriteRetSubmit(buf, seqnum, status, actualLength, 0,
                     UsbipProtocol.NumberOfPacketsNonIsoch, 0);
                 inPayload.CopyTo(buf.AsSpan(UsbipProtocol.HeaderSize));
-                Send(buf.AsSpan(0, UsbipProtocol.HeaderSize + payloadLen));
+                SendLocked(buf.AsSpan(0, total));
             }
-            finally { ArrayPool<byte>.Shared.Return(buf); }
+        }
+
+        // The reply being sent, built under _sendLock in a buffer the
+        // connection keeps: grown to the longest reply and reused, so a reply
+        // allocates nothing.
+        private byte[] _tx = new byte[UsbipProtocol.HeaderSize + 4096];
+
+        /// <summary>The send buffer, at least <paramref name="length"/> bytes
+        /// long. Caller holds <see cref="_sendLock"/>.</summary>
+        private byte[] TxBuffer(int length)
+        {
+            if (_tx.Length < length) _tx = new byte[length];
+            return _tx;
         }
 
         /// <summary>Isochronous RET_SUBMIT. IN: compacted data then the
@@ -602,9 +614,9 @@ internal sealed class UsbipServer : IDisposable
             int n = p.PacketCount;
             int dataLen = p.IsIn ? inCompacted.Length : 0;
             int total = UsbipProtocol.HeaderSize + dataLen + n * UsbipProtocol.IsoDescriptorSize;
-            var buf = ArrayPool<byte>.Shared.Rent(total);
-            try
+            lock (_sendLock)
             {
+                var buf = TxBuffer(total);
                 int actual = p.IsIn ? perPacketActual * n : p.TransferBufferLength;
                 UsbipProtocol.WriteRetSubmit(buf, p.Seqnum, 0, actual, p.FrameAtCompletion, n, 0);
                 if (dataLen > 0) inCompacted.CopyTo(buf.AsSpan(UsbipProtocol.HeaderSize));
@@ -617,9 +629,8 @@ internal sealed class UsbipServer : IDisposable
                         actualLength: p.IsIn ? (uint)perPacketActual : p.Packets[i].Length,
                         status: 0);
                 }
-                Send(buf.AsSpan(0, total));
+                SendLocked(buf.AsSpan(0, total));
             }
-            finally { ArrayPool<byte>.Shared.Return(buf); }
         }
 
         public void SendRetUnlink(uint seqnum, int status)
@@ -631,15 +642,18 @@ internal sealed class UsbipServer : IDisposable
 
         private void Send(ReadOnlySpan<byte> data)
         {
-            lock (_sendLock)
+            lock (_sendLock) SendLocked(data);
+        }
+
+        /// <summary>Caller holds <see cref="_sendLock"/>.</summary>
+        private void SendLocked(ReadOnlySpan<byte> data)
+        {
+            int sent = 0;
+            while (sent < data.Length)
             {
-                int sent = 0;
-                while (sent < data.Length)
-                {
-                    int n = _socket.Send(data[sent..], SocketFlags.None);
-                    if (n <= 0) throw new SocketException((int)SocketError.ConnectionReset);
-                    sent += n;
-                }
+                int n = _socket.Send(data[sent..], SocketFlags.None);
+                if (n <= 0) throw new SocketException((int)SocketError.ConnectionReset);
+                sent += n;
             }
         }
 
