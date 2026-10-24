@@ -145,6 +145,7 @@ internal static partial class Program
 
         if (!args.Contains("teardown")) DeclaredInputReports(ctx, server);
         if (!args.Contains("teardown")) ProtocolInputGetReport(ctx, server);
+        if (!args.Contains("teardown")) LongIsoUrbs(ctx, server);
         Teardown(ctx, server);
         if (!args.Contains("teardown")) DisposeTiming(ctx);
 
@@ -1379,6 +1380,108 @@ internal static partial class Program
         }
         var lines = (stdout.Result + "\n" + stderr.Result).Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).ToList();
         return (p.ExitCode, lines.LastOrDefault(l => l.StartsWith("CHILD ", StringComparison.Ordinal)) ?? lines.FirstOrDefault() ?? "no output");
+    }
+
+    /// <summary>Isochronous URBs as long as the protocol allows. usbip-win2
+    /// caps number_of_packets at 1024 (include/usbip/proto.h, max_iso_packets,
+    /// checked in drivers/ude/device_ioctl.cpp), and a high-speed endpoint
+    /// may take that many in one URB, so the server reads 16 KB of
+    /// descriptors and OUT data of any length. Each case runs on a
+    /// connection of its own, and the connection must still answer after
+    /// it.</summary>
+    static void LongIsoUrbs(HMContext ctx, UsbipServer server)
+    {
+        Console.WriteLine("\n-- Isochronous URBs past 256 packets --");
+        var profile = ctx.GetProfile("dualsense-composite")!.Inner;
+
+        void Case(string name, Action<Client, UsbipEmulatedDevice> run)
+        {
+            var device = new UsbipEmulatedDevice(profile, Index);
+            server.Register(device);
+            try
+            {
+                using var cl = new Client(server.Port);
+                cl.SendImport(device.BusId);
+                cl.ReadExactly(8);
+                cl.ReadExactly(312);
+                try
+                {
+                    run(cl, device);
+                    var st = cl.ControlIn(0x80, 0x00, 0, 0, 2);
+                    Check($"{name}: the connection answers GET_STATUS after it", st.Status == 0 && st.Data.Length == 2,
+                          $"status {st.Status}");
+                }
+                catch (Exception e)
+                {
+                    Check($"{name}: the device answered", false, $"{e.GetType().Name}: {e.Message}");
+                }
+            }
+            finally
+            {
+                server.Unregister(device);
+                device.Dispose();
+                SharedMemoryIO.DestroyController(Index);
+            }
+        }
+
+        // 1024 packets, 16 KB of descriptors: the microphone, with PCM fed
+        // for the first packets and silence after.
+        Case("an IN URB of 1024 packets", (cl, device) =>
+        {
+            const int Pkts = 1024, Cap = 196, Per = 192;
+            var pcm = MakePattern(Per * 8, 0x21);
+            device.Audio.SubmitMicSamples(pcm);
+            uint seq = cl.NextSeq();
+            cl.SendSubmitIsoIn(seq, 2, Pkts, Cap);
+            var r = cl.ReadRet(seq);
+            Check("an IN URB of 1024 packets: all 1024 descriptors back, offsets echoed, 192 bytes each",
+                  r.RawNumberOfPackets == Pkts && r.IsoDescs != null && r.IsoDescs.Length == Pkts
+                  && r.IsoDescs.Select((d, i) => d.Offset == (uint)(i * Cap) && d.Actual == Per).All(b => b),
+                  $"{r.RawNumberOfPackets} packets, actual {r.ActualLength}");
+            Check("an IN URB of 1024 packets: the fed PCM first, then silence",
+                  r.ActualLength == Pkts * Per && r.Data.Length == Pkts * Per
+                  && r.Data.AsSpan(0, pcm.Length).SequenceEqual(pcm) && r.Data.Skip(pcm.Length).All(b => b == 0),
+                  $"{r.Data.Length} bytes");
+        });
+
+        // More than 4 KB of data and more than 256 packets: the speaker.
+        Case("an OUT URB of 300 packets and 117,600 bytes", (cl, device) =>
+        {
+            const int Pkts = 300, Per = 392;
+            var heard = new MemoryStream();
+            device.Audio.OutFrames += f => { lock (heard) heard.Write(f.Span); };
+            var payload = MakePattern(Pkts * Per, 0x52);
+            uint seq = cl.NextSeq();
+            cl.SendSubmitIsoOut(seq, 1, payload, Pkts, Per);
+            var r = cl.ReadRet(seq);
+            Check("an OUT URB of 300 packets and 117,600 bytes: answered with 300 descriptors, actual the buffer length",
+                  r.Status == 0 && r.RawNumberOfPackets == Pkts && r.ActualLength == payload.Length
+                  && r.IsoDescs != null && r.IsoDescs.Length == Pkts && r.IsoDescs[Pkts - 1].Offset == (uint)((Pkts - 1) * Per),
+                  $"status {r.Status}, {r.RawNumberOfPackets} packets, actual {r.ActualLength}");
+            WaitUntil(() => { lock (heard) return heard.Length >= payload.Length; }, Hang);
+            lock (heard)
+                Check("an OUT URB of 300 packets and 117,600 bytes: OutFrames carries every byte in order",
+                      heard.ToArray().SequenceEqual(payload), $"{heard.Length}/{payload.Length} bytes");
+        });
+
+        // More than 4 KB of data with few packets.
+        Case("an OUT URB of 20 packets and 7,840 bytes", (cl, device) =>
+        {
+            const int Pkts = 20, Per = 392;
+            var heard = new MemoryStream();
+            device.Audio.OutFrames += f => { lock (heard) heard.Write(f.Span); };
+            var payload = MakePattern(Pkts * Per, 0x63);
+            uint seq = cl.NextSeq();
+            cl.SendSubmitIsoOut(seq, 1, payload, Pkts, Per);
+            var r = cl.ReadRet(seq);
+            Check("an OUT URB of 20 packets and 7,840 bytes: answered, actual the buffer length",
+                  r.Status == 0 && r.RawNumberOfPackets == Pkts && r.ActualLength == payload.Length,
+                  $"status {r.Status}, actual {r.ActualLength}");
+            WaitUntil(() => { lock (heard) return heard.Length >= payload.Length; }, Hang);
+            lock (heard)
+                Check("an OUT URB of 20 packets and 7,840 bytes: OutFrames carries every byte in order",
+                      heard.ToArray().SequenceEqual(payload), $"{heard.Length}/{payload.Length} bytes");
+        });
     }
 
     /// <summary>GET_REPORT(Input) on a persona whose descriptor declares
