@@ -351,6 +351,8 @@ internal static partial class Program
                 int output = Output(runs, args.Skip(2).ToArray());
                 if (output != 0) return output;
                 break;
+            case "signal-stress":
+                return SignalStress(args.Skip(1).ToArray());
             case "signal":
                 int signal = Signal(runs);
                 if (signal != 0) return signal;
