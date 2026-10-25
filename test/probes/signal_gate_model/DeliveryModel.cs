@@ -344,7 +344,7 @@ internal static class DeliveryModel
         if (n.StopUsed != s.StopUsed) return L_STOP;
         if (s.Pc == W_GONE && n.Pc != W_GONE) return L_ADD;
         if (NeedsRead(s) && s.Pc == n.Pc && s.SdkPc == n.SdkPc && s.Tear == n.Tear && (n.Parked || n.Delivered != s.Delivered)) return L_HID;
-        if (s.Pc == W_READ) return L_READ;
+        if (s.Pc == W_READ && n.Pc != W_READ && s.Tear == 0) return L_READ;
         return 0;
     }
 
@@ -449,6 +449,7 @@ internal static class DeliveryModel
         public string? Example;
         public List<State>? Path;
         public List<State>? UnalignedPath;
+        public List<string>? PairedSide;
     }
 
     // v2.0.3's side of the pairing for one scenario: its steps from each
@@ -604,6 +605,29 @@ internal static class DeliveryModel
             return r;
         }
 
+        // The paired v2.0.3 set at a failing final state: its size, the
+        // outcomes of its final states, and a few states that are not final
+        // with the steps they can take.
+        public List<string> Describe(int v)
+        {
+            var lines = new List<string>();
+            var finalsOut = sets[v].Where(x => Of(x).S.Length == 0).Select(x => Show(x.C & OutMask)).Distinct().ToList();
+            lines.Add($"paired v2.0.3 set: {sets[v].Length} states, {finalsOut.Count} final outcome(s): " +
+                      (finalsOut.Count == 0 ? "none" : string.Join(" | ", finalsOut.Select(o => "[" + o + "]"))));
+            foreach (var xk in sets[v].Where(x => Of(x).S.Length > 0 && Of(x).S.All(y => y.Label is not (0 or L_READ))).Take(4))
+            {
+                var x = Unpack(xk);
+                lines.Add($"  waits: worker {PcName(x.Pc)}, sdk {SdkName(x.SdkPc)}, parked {x.Parked}, event {x.Event}, seen {x.Seen}, seq {x.Seq}, " +
+                          $"delivered [{Show(x.Delivered & OutMask)}], its steps: " +
+                          string.Join(", ", Of(xk).S.Select(y => y.Label switch
+                          {
+                              L_PROG => "program", L_RECYCLE => "recycle", L_GOES => "goes", L_MAP => "map", L_STOP => "stop", L_ADD => "add",
+                              L_KILL => "kill", L_HID => "READ_REPORT", L_READ => "read", _ => "own",
+                          })));
+            }
+            return lines;
+        }
+
         public bool Matches(int v, ulong mine)
         {
             if (!finals.TryGetValue(v, out var outs))
@@ -667,6 +691,7 @@ internal static class DeliveryModel
                 {
                     res.Example = Show(mine) + (V == None ? " (after a step v2.0.3 could not take)" : "");
                     if (parent != null) res.Path = PathTo(parent, (tk, V));
+                    if (parent != null && V != None) res.PairedSide = v203.Describe(V);
                 }
                 continue;
             }

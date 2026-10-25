@@ -208,6 +208,8 @@ internal static class Program
         Console.WriteLine($"    witness, {path.Count - 1} steps, this driver delivers [{a.Example}]:");
         for (int i = 1; i < path.Count; i++)
             Console.WriteLine($"    {i,3}. {DeliveryModel.Describe(path[i - 1], path[i])}");
+        if (a.PairedSide != null)
+            foreach (var l in a.PairedSide) Console.WriteLine($"    {l}");
         if (a.UnalignedPath != null)
         {
             var u = a.UnalignedPath;
