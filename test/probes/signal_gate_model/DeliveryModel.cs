@@ -139,22 +139,59 @@ internal static class DeliveryModel
         public bool Round6NoReplace { get; init; }         // taken away: a pending final is not replaced, the next frame goes provisional
         public bool Round6ExactTake { get; init; }         // the summary's reading: a take's read sends only the SeqNo taken
         // T1: a take the owner pipe answered at teardown signals the frame
-        // back before its read, and a take's read the teardown overtook
-        // signals it back when no READ_REPORT completed with it.
+        // back before its read.
         public bool TearCheckedRead { get; init; }
+        // Taken away (R6-1, 10ddf75e): a take's read the teardown overtook
+        // signals the frame back when no READ_REPORT completed with it.
+        public bool TearPostRead { get; init; }
         public bool TearCheckDelivered { get; init; }      // candidate: that check asks whether the frame read was delivered by any read
-        public bool NoTearPostRead { get; init; }          // candidate: no signal back after a take's read, only before it
         public bool NoTakeBackOverUntaken { get; init; }   // the SDK skips the take-back when its exchange replaced a frame not taken
     }
 
-    // Round 6 as committed: no take or owed signal at OwnerGone, CloseGate
-    // signals every final frame and drops a provisional one, the watch tried
-    // again only at a map or every 256th frame, NextProgramStarted and
-    // NextFrameSeq gone, B1, B2, D1 and D2 as before.
+    // This driver as of c5b207a3, rule by rule (driver/driver.c and
+    // sdk/HIDMaestro.Core/Internal/SharedMemoryIO.cs at that commit):
+    //   Round6: the SDK reads InputHandoff and replaces a final SeqNo there
+    //     with its frame's final one by one compare-exchange, with no
+    //     SetEvent (SharedMemoryIO.cs 1186). Otherwise it exchanges the
+    //     provisional SeqNo in (1191), rechecks the capability and the
+    //     count, and makes it final (1196) or takes it back (1200, Reclaim),
+    //     and it signals unless it left the frame final. A take drops a
+    //     provisional SeqNo and reads on a final one (driver.c 918,
+    //     HandoffFinal 901).
+    //   CountFirst, TakeBeforeWait: the increment (driver.c 2050), then the
+    //     take (2061), then the wait.
+    //   ClearAtStart off: the SDK leaves InputHandoff as found at its start
+    //     (SharedMemoryIO.cs 532).
+    //   SdkSkipsZero: NextEvenSeq steps over 0 (SharedMemoryIO.cs 693).
+    //   SkipZero, ZeroForgets: a zeroed section sets SeenSeqNo to 0 and
+    //     caches the zero report, and completes no read (driver.c 1739,
+    //     1742, 1844).
+    //   LateReadNotEqual off: a late READ_REPORT takes the cache only above
+    //     the last SeqNo delivered (driver.c 2869).
+    //   DropSentAtTake off: a take's read sends any SeqNo but the last one
+    //     sent, as a signal's read does (driver.c 1727).
+    //   TearCheckedRead: at teardown the owner path signals a taken frame
+    //     back before its read (driver.c 2084), and TearPostRead off: no
+    //     check follows the read (2089, 2144).
+    //   WaitAgainAfterOwner: after that read the worker waits again
+    //     (driver.c 2091).
+    //   SignalTakenOnExit, BackOnlyAlone off: a frame taken and not read is
+    //     signaled back at teardown or the stop event, whatever program runs
+    //     (driver.c 2117, 2123).
+    //   TakeAtOwnerGone off: OwnerGone leaves the handoff alone (driver.c
+    //     1241), and forgets SeenSeqNo (1267). RetryAfterOwnerGone off: the
+    //     watch is tried again at a map or every 256th frame (driver.c 966,
+    //     2163). TakeReadNoNext and TakeReadNextSeq off: the read takes
+    //     whatever the section holds (driver.c 2089, 2144).
+    //   CloseGate, CloseSignalsSent: CloseGate clears the capability, takes
+    //     the handoff, and signals any final SeqNo, the one last sent too,
+    //     and drops a provisional one (driver.c 934, 942). It runs at a
+    //     recycle (2236) and as the device goes (ClearCapAtGo, 2294).
+    //   ForgetAtRecycle: the recycle forgets SeenSeqNo (driver.c 2264).
     internal static readonly Rules This = new Rules("this driver") with
     {
         Round6 = true, TearCheckedRead = true, CloseSignalsSent = true, TakeAtOwnerGone = false, RetryAfterOwnerGone = false,
-        TakeReadNoNext = false, TakeReadNextSeq = false, BackOnlyAlone = false,
+        TakeReadNoNext = false, TakeReadNextSeq = false, BackOnlyAlone = false, ClearAtStart = false,
     };
 
     internal static readonly Rules[] Broken =
@@ -162,7 +199,7 @@ internal static class DeliveryModel
         This with { Name = "a SetEvent with no take-back", Reclaim = false },
         This with { Name = "no take before the wait", TakeBeforeWait = false },
         This with { Name = "a take before the count", CountFirst = false },
-        This with { Name = "the handoff left at a 2.1.0 start", ClearAtStart = false },
+        This with { Name = "the handoff cleared at a 2.1.0 start (10ddf75e)", ClearAtStart = true },
         This with { Name = "a zeroed section read as a frame", SkipZero = false },
         This with { Name = "SeqNo 0 stored at the wrap", SdkSkipsZero = false },
         This with { Name = "the recycle keeps the last SeqNo", ForgetAtRecycle = false },
@@ -179,17 +216,16 @@ internal static class DeliveryModel
         This with { Name = "a take's read at teardown not signaled back (T1)", TearCheckedRead = false },
         This with { Name = "the watch tried again after OwnerGone (W1)", RetryAfterOwnerGone = true },
         This with { Name = "OwnerGone takes the handoff as b17050c1 did", TakeAtOwnerGone = true },
+        This with { Name = "a take's read at teardown signaled back after it (R6-1, 10ddf75e)", TearPostRead = true },
     };
 
-    // Candidate changes for the orders this driver loses (the model section
-    // of docs/design/signal-gate.md), each run in place of this driver's
-    // rules by the check command's rule c0, c1 or c2.
+    // Candidate changes (the model section of docs/design/signal-gate.md),
+    // each run in place of this driver's rules by the check command's rule
+    // c0 or c1.
     internal static readonly Rules[] Candidates =
     {
         This with { Name = "round 6 with the summary's exact-SeqNo take", Round6ExactTake = true },
-        This with { Name = "round 6 with the teardown check asking whether the frame went out", TearCheckDelivered = true },
-        This with { Name = "round 6 with no signal back after a take's read, only before it", NoTearPostRead = true },
-        This with { Name = "round 6 with no signal back after a take's read and no handoff clear at a 2.1.0 start", NoTearPostRead = true, ClearAtStart = false },
+        This with { Name = "round 6 with the post-read teardown check asking whether the frame went out", TearPostRead = true, TearCheckDelivered = true },
     };
 
     internal static IEnumerable<Scenario> Scenarios()
@@ -502,6 +538,8 @@ internal static class DeliveryModel
         return res;
     }
 
+    internal static bool SetStats;
+
     internal sealed class AlignedResult
     {
         public long States, Finals, Unaligned, Sets, SetItems, V203States, Subsumed;
@@ -553,9 +591,8 @@ internal static class DeliveryModel
         readonly Dictionary<Key, int> idOf = new();
         readonly List<Key> keyOf = new();
         readonly List<Info?> info = new();
-        readonly List<int[]> sets = new();
-        readonly List<ulong> sigs = new();
-        readonly Dictionary<SetKey, int> ids = new();
+        readonly SetStore store = new();
+        readonly List<int> items = new();
         readonly Dictionary<(int, int), int> closed = new();
         readonly Dictionary<(int, int, int, int, int, int), int> follow = new();
         readonly Dictionary<int, ulong[]> finals = new();
@@ -563,10 +600,10 @@ internal static class DeliveryModel
         readonly List<State> buf = new();
         readonly HashSet<int> scratch = new();
         readonly Stack<int> work = new();
-        public long SetItems;
+        public long SetItems => store.Members;
 
         public V203Side(Scenario sc, int frames) { this.sc = sc; this.frames = frames; }
-        public int SetCount => sets.Count;
+        public int SetCount => store.Sets;
         public int StateCount => keyOf.Count;
 
         readonly record struct Succ(int M, int Label, int Match, int Phase);
@@ -574,22 +611,6 @@ internal static class DeliveryModel
         // Pending: a wake waits to be read (the input event set, or a wait
         // the input event ended).
         sealed record Info(Succ[] S, int Waits, bool Pending);
-
-        readonly struct SetKey : IEquatable<SetKey>
-        {
-            public readonly int[] Items;
-            readonly int hash;
-            public SetKey(int[] items)
-            {
-                Items = items;
-                var h = new HashCode();
-                foreach (var x in items) h.Add(x);
-                hash = h.ToHashCode();
-            }
-            public bool Equals(SetKey o) => hash == o.hash && Items.AsSpan().SequenceEqual(o.Items);
-            public override bool Equals(object? o) => o is SetKey k && Equals(k);
-            public override int GetHashCode() => hash;
-        }
 
         int Id(Key k)
         {
@@ -623,21 +644,7 @@ internal static class DeliveryModel
             return a;
         }
 
-        int Intern(HashSet<int> h)
-        {
-            var arr = h.ToArray();
-            Array.Sort(arr);
-            var k = new SetKey(arr);
-            if (ids.TryGetValue(k, out int id)) return id;
-            id = sets.Count;
-            sets.Add(arr);
-            ulong sig = 0;
-            foreach (var x in arr) sig |= 1UL << (int)((uint)(x * 0x9E3779B1) >> 26);
-            sigs.Add(sig);
-            SetItems += arr.Length;
-            ids[k] = id;
-            return id;
-        }
+        int Intern(HashSet<int> h) => store.Intern(h);
 
         // The steps a v2.0.3 state takes as its own while this driver's side
         // waits for thisWaits: what it alone waits for, or else its worker's,
@@ -669,7 +676,7 @@ internal static class DeliveryModel
         {
             if (closed.TryGetValue((v, thisWaits), out int c)) return c;
             scratch.Clear();
-            foreach (var x in sets[v]) scratch.Add(x);
+            foreach (var x in store.Fill(v, items)) scratch.Add(x);
             c = CloseScratch(thisWaits);
             closed[(v, thisWaits)] = c;
             return c;
@@ -690,7 +697,7 @@ internal static class DeliveryModel
         {
             if (restricted.TryGetValue((v, bits, thisWaits), out int r)) return r;
             scratch.Clear();
-            foreach (var x in sets[v]) if ((Of(x).Waits & bits) == bits) scratch.Add(x);
+            foreach (var x in store.Fill(v, items)) if ((Of(x).Waits & bits) == bits) scratch.Add(x);
             r = scratch.Count == 0 ? -1 : CloseScratch(thisWaits);
             restricted[(v, bits, thisWaits)] = r;
             return r;
@@ -701,26 +708,18 @@ internal static class DeliveryModel
         {
             if (waits.TryGetValue(v, out int w)) return w;
             w = 0;
-            foreach (var x in sets[v]) w |= Of(x).Waits;
+            foreach (var x in store.Fill(v, items)) w |= Of(x).Waits;
             waits[v] = w;
             return w;
         }
 
+        // Measures of the set store and the caches over it.
+        public string Stats() =>
+            $"sets {store.Sets} members {store.Members} nodes {store.Nodes} store-bytes {store.Bytes} " +
+            $"states {keyOf.Count} closed {closed.Count} follow {follow.Count} restricted {restricted.Count} waits {waits.Count} finals {finals.Count}";
+
         // Set a is a subset of set b.
-        public bool Subset(int a, int b)
-        {
-            if (a == b) return true;
-            var x = sets[a]; var y = sets[b];
-            if (x.Length > y.Length || (sigs[a] & ~sigs[b]) != 0) return false;
-            int j = 0;
-            foreach (var e in x)
-            {
-                while (j < y.Length && y[j] < e) j++;
-                if (j == y.Length || y[j] != e) return false;
-                j++;
-            }
-            return true;
-        }
+        public bool Subset(int a, int b) => store.Subset(a, b);
 
         // The set v2.0.3 reaches from set V through the shared event this
         // driver took, or -1 when no state of V can take it. Every state of
@@ -742,7 +741,7 @@ internal static class DeliveryModel
             if (follow.TryGetValue(key, out int r)) return r;
             scratch.Clear();
             int want = label == L_READ0 ? L_READ : label;
-            foreach (var xi in sets[v])
+            foreach (var xi in store.Fill(v, items))
             {
                 var x = Of(xi);
                 if ((x.Waits & ~waitsBefore) != 0) continue;
@@ -773,10 +772,11 @@ internal static class DeliveryModel
         public List<string> Describe(int v)
         {
             var lines = new List<string>();
-            var finalsOut = sets[v].Where(x => Of(x).S.Length == 0).Select(x => Show(keyOf[x].C & OutMask)).Distinct().ToList();
-            lines.Add($"paired v2.0.3 set: {sets[v].Length} states, {finalsOut.Count} final outcome(s): " +
+            var members = store.Fill(v, new List<int>());
+            var finalsOut = members.Where(x => Of(x).S.Length == 0).Select(x => Show(keyOf[x].C & OutMask)).Distinct().ToList();
+            lines.Add($"paired v2.0.3 set: {members.Count} states, {finalsOut.Count} final outcome(s): " +
                       (finalsOut.Count == 0 ? "none" : string.Join(" | ", finalsOut.Select(o => "[" + o + "]"))));
-            foreach (var xi in sets[v].Where(x => Of(x).S.Length > 0 && Of(x).S.All(y => y.Label is not (0 or L_READ))).Take(4))
+            foreach (var xi in members.Where(x => Of(x).S.Length > 0 && Of(x).S.All(y => y.Label is not (0 or L_READ))).Take(4))
             {
                 var x = Unpack(keyOf[xi]);
                 lines.Add($"  waits: worker {PcName(x.Pc)}, sdk {SdkName(x.SdkPc)}, parked {x.Parked}, event {x.Event}, seen {x.Seen}, seq {x.Seq}, " +
@@ -805,7 +805,7 @@ internal static class DeliveryModel
             if (!finals.TryGetValue(v, out var outs))
             {
                 var o = new HashSet<ulong>();
-                foreach (var x in sets[v])
+                foreach (var x in store.Fill(v, items))
                     if (Of(x).S.Length == 0) o.Add(keyOf[x].C & OutMask);
                 outs = o.ToArray();
                 finals[v] = outs;
@@ -957,6 +957,7 @@ internal static class DeliveryModel
                 if (Visit(nk, V2, nw)) { parent?.TryAdd((nk, V2), (tk, V)); stack.Push((nk, V2)); }
             }
         }
+        if (SetStats) Console.Error.WriteLine($"{sc.Name}: " + v203.Stats() + $" covers {covers.Count} listed {covers.Values.Sum(l => (long)l.Count)} explored {res.States}");
         res.Sets = v203.SetCount;
         res.SetItems = v203.SetItems;
         res.V203States = v203.StateCount;
@@ -1230,7 +1231,7 @@ internal static class DeliveryModel
                 // (WatchRetryNext). Every 256th frame does too in both
                 // drivers, which a model run never reaches.
                 var n = Read(s with { Pc = s.AfterOwner ? W_OWNER : W_TOP, AfterOwner = false, NoRetry = false, Took = 0 }, d, r, out bool fresh, s.Took, NextStarted(s), sc.Wrap);
-                if (d == Driver.This && r.TearCheckedRead && !r.NoTearPostRead && s.Took != 0)
+                if (d == Driver.This && r.TearCheckedRead && r.TearPostRead && s.Took != 0)
                 {
                     // ProcessSharedInput reports whether a READ_REPORT
                     // completed. The teardown check follows the read.

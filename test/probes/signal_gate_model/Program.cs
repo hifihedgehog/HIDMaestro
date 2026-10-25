@@ -23,10 +23,12 @@
 //     this driver's rules, then each rule taken away. Exit 0 when every
 //     verdict is the expected one.
 //   SignalGateModel check <frames> <rule> [--shard k/n] [-j N] [--index i]
-//     [--quiet] [--progress] [--max-states n]   the delivery check alone.
-//     Rule -1 is this driver, an index takes that rule away (Broken), c<i>
-//     runs a candidate change (Candidates). Shards split the scenarios by
-//     index modulo n, so separate processes can run them.
+//     [--quiet] [--progress] [--max-states n] [--base c<i>] [--outcomes]
+//     [--set-stats]   the delivery check alone. Rule -1 is this driver, an
+//     index takes that rule away (Broken), c<i> runs a candidate change
+//     (Candidates), and --base takes the rule away from a candidate.
+//     Shards split the scenarios by index modulo n, so separate processes
+//     can run them. --set-stats prints each scenario's set store size.
 //   SignalGateModel scenarios   each scenario's index and name.
 //   SignalGateModel outcomes <frames> <scenario> [v203]   one driver's
 //     outcomes in a scenario, unpaired.
@@ -135,6 +137,7 @@ internal static class Program
             else if (args[i] == "--scenario") only = args[++i];
             else if (args[i] == "--quiet") quiet = true;
             else if (args[i] == "--progress") s_progress = true;
+            else if (args[i] == "--set-stats") DeliveryModel.SetStats = true;
             else if (args[i] == "--index") s_index = int.Parse(args[++i]);
             else if (args[i] == "--outcomes") s_outcomes = true;
             else if (args[i] == "--base") s_base = args[++i];
