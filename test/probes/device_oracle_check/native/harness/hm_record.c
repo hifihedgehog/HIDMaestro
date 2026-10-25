@@ -372,7 +372,7 @@ void SdkCreate(Sdk *s, int index, int flags)
         if (SdkWritesSignal()) {
             /* 2.1.0: the signal gate's section, opened when a driver host
              * holds it and never zeroed then, layout 1 when made, its
-             * handoff cleared. The SDK counts its frames from above the
+             * handoff left as found. The SDK counts its frames from above the
              * SeqNo a section of the index left, with the acknowledgement
              * starting there (SharedMemoryIO.EnsureInputMapping). */
             Name(n, ARRAYSIZE(n), L"Global\\HIDMaestroSignal", index);
@@ -381,7 +381,6 @@ void SdkCreate(Sdk *s, int index, int flags)
             Hold(&s->signal->o);
             int32_t layout = 1;
             if (!held) memcpy(s->signal->buf, &layout, 4);
-            memset(s->signal->buf + 68, 0, 4);
             s->seq = EvenAbove(seqLeft, 0);
             memcpy(s->ack->buf, &s->seq, 4);
         }

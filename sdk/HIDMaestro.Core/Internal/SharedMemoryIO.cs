@@ -529,10 +529,12 @@ internal static partial class SharedMemoryIO
                 }
                 s_signalHandles[controllerIndex] = sh;
                 s_signalViews[controllerIndex] = sv;
-                // A frame the program before this one handed to a worker is
-                // gone with the zeroing above, so its handoff goes too.
-                if (sv != IntPtr.Zero)
-                    Interlocked.Exchange(ref *(int*)((byte*)sv + SIGNAL_OFFSET_INPUT_HANDOFF), 0);
+                // InputHandoff is left as found. A final SeqNo the program
+                // before this one left there is a read the worker owes, and
+                // this program's first frame replaces it (WriteInputFrame),
+                // as the left signal of that program's last frame woke
+                // v2.0.3's worker for this program's frame. A provisional
+                // one the worker's next take drops.
 
                 // Companion input doorbell (perf audit 2026-07-21). The XUSB
                 // companion's WAIT_FOR_INPUT pump was purely 8 ms

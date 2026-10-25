@@ -565,6 +565,9 @@ extern int (*g_waitAnswerHook)(HmThread *t, DWORD result);
 /* Run once at the next SRW lock a driver thread takes, before it is taken
  * (hm_win32.c). */
 extern void (*g_srwHook)(void);
+/* Run once when a driver thread next releases an SRW lock or a wait lock
+ * and holds no other, after the release (hm_win32.c, hm_wdf.c). */
+extern void (*g_lockReleaseHook)(void);
 /* Run once at the next zero-timeout poll a driver thread makes, before it
  * is answered (hm_win32.c FiberWait). */
 extern void (*g_pollHook)(void);
