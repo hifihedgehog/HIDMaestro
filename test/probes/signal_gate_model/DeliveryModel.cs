@@ -119,6 +119,10 @@ internal static class DeliveryModel
         public bool WaitAgainAfterOwner { get; init; } = true; // a taken frame read on the pipe's close waits again before OwnerGone
         public bool SignalTakenOnExit { get; init; } = true;   // a frame taken and not read when the worker leaves its loop is signaled
         public bool OwedOnlyNextProgram { get; init; } = true; // OwnerGone signals only the next program's frame, not the ended one's
+        // Candidate changes, off in this driver (Candidates below).
+        public bool CloseSignalsSent { get; init; }        // CloseGate signals a handed frame equal to the last one sent too
+        public bool StaleTakeOnExit { get; init; }         // a take of the frame last sent counts for the SetEvent as the worker leaves its loop
+        public bool NoTakeBackOverUntaken { get; init; }   // the SDK skips the take-back when its exchange replaced a frame not taken
     }
 
     internal static readonly Rules This = new("this driver");
@@ -142,6 +146,16 @@ internal static class DeliveryModel
         This with { Name = "OwnerGone straight after a taken frame read on the pipe's close", WaitAgainAfterOwner = false },
         This with { Name = "a taken frame dropped as the worker leaves its loop (B1)", SignalTakenOnExit = false },
         This with { Name = "OwnerGone signals the ended program's own frame (FIX-1)", OwedOnlyNextProgram = false },
+    };
+
+    // Candidate changes for the orders this driver loses (the model section
+    // of docs/design/signal-gate.md), each run in place of this driver's
+    // rules by the check command's rule c0, c1 or c2.
+    internal static readonly Rules[] Candidates =
+    {
+        This with { Name = "CloseGate and a stale take signal the frame last sent", CloseSignalsSent = true, StaleTakeOnExit = true },
+        This with { Name = "no take-back over a frame not taken", NoTakeBackOverUntaken = true },
+        This with { Name = "both", CloseSignalsSent = true, StaleTakeOnExit = true, NoTakeBackOverUntaken = true },
     };
 
     internal static IEnumerable<Scenario> Scenarios()
@@ -227,7 +241,7 @@ internal static class DeliveryModel
         public bool RecycleUsed, ReAddUsed, StopUsed, KillUsed, StopSig;
         public int Tear;
         public int Ack, WatchP, RelQ, RelFor, RelDone, Handed;
-        public bool AckBit, AckEnded;
+        public bool AckBit, AckEnded, StaleTook, Replaced;
         public int ReadOnce;
         public ulong Delivered;
     }
@@ -272,7 +286,7 @@ internal static class DeliveryModel
         b.Put(s.RecycleUsed); b.Put(s.ReAddUsed); b.Put(s.StopUsed); b.Put(s.KillUsed); b.Put(s.StopSig);
         b.Put(s.Tear, 2);
         b.Put(s.Ack, 2); b.Put(s.WatchP, 2); b.Put(s.RelQ, 2); b.Put(s.RelFor, 2); b.Put(s.RelDone, 3); b.Put(s.Handed, 8);
-        b.Put(s.AckBit); b.Put(s.AckEnded);
+        b.Put(s.AckBit); b.Put(s.AckEnded); b.Put(s.StaleTook); b.Put(s.Replaced);
         // The delivery counts take 45 bits of the third word, the frames read
         // the 18 above them.
         return new Key(a.W, b.W, s.Delivered | (ulong)(uint)s.ReadOnce << ReadShift);
@@ -293,7 +307,7 @@ internal static class DeliveryModel
         s.RecycleUsed = b.Bit(); s.ReAddUsed = b.Bit(); s.StopUsed = b.Bit(); s.KillUsed = b.Bit(); s.StopSig = b.Bit();
         s.Tear = b.Get(2);
         s.Ack = b.Get(2); s.WatchP = b.Get(2); s.RelQ = b.Get(2); s.RelFor = b.Get(2); s.RelDone = b.Get(3); s.Handed = b.Get(8);
-        s.AckBit = b.Bit(); s.AckEnded = b.Bit();
+        s.AckBit = b.Bit(); s.AckEnded = b.Bit(); s.StaleTook = b.Bit(); s.Replaced = b.Bit();
         s.ReadOnce = (int)(k.C >> ReadShift);
         s.Delivered = k.C & ((1UL << ReadShift) - 1);
         return s;
@@ -420,7 +434,7 @@ internal static class DeliveryModel
     internal sealed class AlignedResult
     {
         public long States, Finals, Unaligned, Sets, V203States;
-        public bool Canceled;
+        public bool Canceled, OwnFails;
         public readonly HashSet<ulong> Worse = new();
         public bool ZeroSent;
         public string? Example;
@@ -702,12 +716,13 @@ internal static class DeliveryModel
             }
             case S_CHECK:
                 // A 2.1.0 SDK with the capability hands the frame over.
-                next.Add(prog.Is21 && s.Cap ? s with { Hand = s.SdkSeq, SdkPc = S_RECLAIM } : s with { SdkPc = S_SIGNAL });
+                next.Add(prog.Is21 && s.Cap ? s with { Hand = s.SdkSeq, Replaced = r.NoTakeBackOverUntaken && s.Hand != 0, SdkPc = S_RECLAIM }
+                                            : s with { SdkPc = S_SIGNAL });
                 break;
             case S_RECLAIM:
                 // The capability again, then the count.
-                if (s.Cap && s.Waiters == 0) next.Add(AfterFrame(s));
-                else if (!r.Reclaim) next.Add(s with { SdkPc = S_SIGNAL });
+                if (s.Cap && s.Waiters == 0) next.Add(AfterFrame(s) with { Replaced = false });
+                else if (!r.Reclaim || s.Replaced) next.Add(s with { Replaced = false, SdkPc = S_SIGNAL });
                 else if (s.Hand == s.SdkSeq) next.Add(s with { Hand = 0, SdkPc = S_SIGNAL });
                 else next.Add(AfterFrame(s));
                 break;
@@ -788,16 +803,16 @@ internal static class DeliveryModel
                 break;
             case W_TOP:
                 if (gating)
-                    next.Add(r.CountFirst ? s with { Waiters = s.Waiters + 1, Counted = true, Pc = W_LOOK } : s with { Pc = W_LOOK });
+                    next.Add(r.CountFirst ? s with { Waiters = s.Waiters + 1, Counted = true, StaleTook = false, Pc = W_LOOK } : s with { StaleTook = false, Pc = W_LOOK });
                 else
-                    next.Add(s with { Pc = W_BLOCK });
+                    next.Add(s with { StaleTook = false, Pc = W_BLOCK });
                 if (CanConnect(s, prog)) next.Add(Connect(s, prog, d));
                 break;
             case W_LOOK:
             {
                 bool took = r.TakeBeforeWait && s.Hand != 0 && (s.Hand != s.Seen || !r.DropSentAtTake);
                 var n = took ? s with { Hand = 0, Waiters = s.Counted ? s.Waiters - 1 : s.Waiters, Counted = false, Pc = W_POLL }
-                             : s with { Hand = r.TakeBeforeWait ? 0 : s.Hand, Pc = W_BLOCK };
+                             : s with { Hand = r.TakeBeforeWait ? 0 : s.Hand, StaleTook = r.StaleTakeOnExit && r.TakeBeforeWait && s.Hand != 0, Pc = W_BLOCK };
                 // The broken order counts itself only after a take that found
                 // nothing, as a step of its own.
                 if (!r.CountFirst && !took) n = n with { Pc = W_COUNT };
@@ -833,9 +848,10 @@ internal static class DeliveryModel
                     // The wait finds what is already set, the stop event
                     // first, or blocks.
                     var u = s with { Waiters = s.Counted ? s.Waiters - 1 : s.Waiters, Counted = false };
-                    if (s.StopSig) next.Add(StopReturned(u, sc, d, r, prog));
-                    else if (s.Event) next.Add(u with { Event = false, Pc = s.Tear != 0 ? W_EXITED : W_READ, AfterOwner = false });
-                    else if (s.OwnerSig) next.Add(s.Tear != 0 ? u with { Pc = W_EXITED } : OwnerGone(u with { OwnerSig = false }, d, r));
+                    var back = s.StaleTook ? u with { Event = true, StaleTook = false } : u;
+                    if (s.StopSig) next.Add(StopReturned(back, sc, d, r, prog));
+                    else if (s.Event) next.Add(s.Tear != 0 ? back with { Event = s.StaleTook, Pc = W_EXITED } : u with { Event = false, Pc = W_READ, AfterOwner = false });
+                    else if (s.OwnerSig) next.Add(s.Tear != 0 ? back with { Pc = W_EXITED } : OwnerGone(u with { OwnerSig = false }, d, r));
                     else next.Add(s with { Blocked = true });
                 }
                 else
@@ -843,11 +859,12 @@ internal static class DeliveryModel
                     // A blocked wait returns with whichever event was set
                     // first, or times out.
                     var u = s with { Blocked = false, Waiters = s.Counted ? s.Waiters - 1 : s.Waiters, Counted = false };
-                    if (s.StopSig) next.Add(StopReturned(u, sc, d, r, prog));
-                    if (s.OwnerSig) next.Add(s.Tear != 0 ? u with { Pc = W_EXITED } : OwnerGone(u with { OwnerSig = false }, d, r));
+                    var back = s.StaleTook ? u with { Event = true, StaleTook = false } : u;
+                    if (s.StopSig) next.Add(StopReturned(back, sc, d, r, prog));
+                    if (s.OwnerSig) next.Add(s.Tear != 0 ? back with { Pc = W_EXITED } : OwnerGone(u with { OwnerSig = false }, d, r));
                     if (!s.StopSig && !s.OwnerSig)
                     {
-                        if (s.Tear != 0) next.Add(u with { Pc = W_EXITED });
+                        if (s.Tear != 0) next.Add(back with { Pc = W_EXITED });
                         else if (recycleNow) next.Add(Recycle(u, sc, d, r, prog, true));
                         // A timeout takes the handoff again, which matters
                         // only when a frame waits there under the count: the
@@ -978,7 +995,7 @@ internal static class DeliveryModel
     {
         if (d != Driver.This || !s.SigMapped || !r.CloseGate) return s;
         var n = s with { Cap = false, Hand = 0 };
-        if (s.Hand != 0 && s.Hand != s.Seen && s.Ev) n = n with { Event = true };
+        if (s.Hand != 0 && (s.Hand != s.Seen || r.CloseSignalsSent) && s.Ev) n = n with { Event = true };
         return n;
     }
 

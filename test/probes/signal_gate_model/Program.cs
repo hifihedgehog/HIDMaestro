@@ -110,7 +110,9 @@ internal static class Program
     // witness. Exit 0 when the verdict is the expected one.
     static int Check(string[] args)
     {
-        int frames = int.Parse(args[1]), rule = int.Parse(args[2]);
+        int frames = int.Parse(args[1]);
+        // c<index>: a candidate change in place of this driver's rules.
+        int rule = args[2].StartsWith("c") ? -100 - int.Parse(args[2].Substring(1)) : int.Parse(args[2]);
         int shard = 0, shards = 1, jobs = 1;
         string? only = null;
         bool quiet = false;
@@ -127,7 +129,7 @@ internal static class Program
 
     static int RunCheck(int frames, int rule, int shard, int shards, int jobs, string? only, bool witness)
     {
-        var rules = rule < 0 ? DeliveryModel.This : DeliveryModel.Broken[rule];
+        var rules = rule <= -100 ? DeliveryModel.Candidates[-100 - rule] : rule < 0 ? DeliveryModel.This : DeliveryModel.Broken[rule];
         var all = DeliveryModel.Scenarios().Select((sc, i) => (sc, i)).ToList();
         var mine = all.Where(x => x.i % shards == shard && (only == null || x.sc.Name == only)).ToList();
         var results = new DeliveryModel.AlignedResult?[mine.Count];
@@ -138,6 +140,14 @@ internal static class Program
             if (rule >= 0 && k > Volatile.Read(ref best)) return;
             var a = DeliveryModel.ExploreAligned(mine[k].sc, rules, frames, false,
                                                  rule >= 0 ? () => k > Volatile.Read(ref best) : null);
+            // A rule taken away breaks the check only in a scenario this
+            // driver's own rules pass.
+            if (rule >= 0 && !a.Canceled && (a.Worse.Count > 0 || a.ZeroSent))
+            {
+                var own = DeliveryModel.ExploreAligned(mine[k].sc, DeliveryModel.This, frames, false,
+                                                       () => k > Volatile.Read(ref best));
+                if (own.Canceled || own.Worse.Count > 0 || own.ZeroSent) { a.OwnFails = !own.Canceled; a.Worse.Clear(); a.ZeroSent = false; }
+            }
             results[k] = a;
             if (rule >= 0 && !a.Canceled && (a.Worse.Count > 0 || a.ZeroSent))
             {
@@ -145,13 +155,14 @@ internal static class Program
                 do { seen = Volatile.Read(ref best); } while (k < seen && Interlocked.CompareExchange(ref best, k, seen) != seen);
             }
         });
-        long states = 0, finals = 0, unaligned = 0, v203 = 0, largest = 0;
+        long states = 0, finals = 0, unaligned = 0, v203 = 0, largest = 0, ownFails = 0;
         string largestName = "";
         var failures = new List<int>();
         for (int k = 0; k < mine.Count; k++)
         {
             var a = results[k];
             if (a == null || a.Canceled) continue;
+            if (a.OwnFails) ownFails++;
             states += a.States; finals += a.Finals; unaligned += a.Unaligned; v203 += a.V203States;
             if (a.States > largest) { largest = a.States; largestName = mine[k].sc.Name; }
             if (a.Worse.Count > 0 || a.ZeroSent) failures.Add(k);
@@ -182,7 +193,8 @@ internal static class Program
             if (witness) PrintWitness(mine[k].sc, rules, frames);
             return 0;
         }
-        Console.WriteLine($"[NO BREAK] {rules.Name}, {where}: no scenario breaks the check. {totals}");
+        Console.WriteLine($"[NO BREAK] {rules.Name}, {where}: no scenario breaks the check" +
+                          (ownFails > 0 ? $" ({ownFails} scenario(s) skipped where this driver's own rules fail)" : "") + $". {totals}");
         return 1;
     }
 
