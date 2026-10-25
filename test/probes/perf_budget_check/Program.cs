@@ -684,13 +684,17 @@ internal static partial class Program
 
     /// <summary>Whether the controller's devnode runs this SDK's driver,
     /// printed. A measurement on another driver would be filed under the
-    /// wrong tree, so the mode stops and exits 5.</summary>
+    /// wrong tree, so the mode stops and exits 5. With
+    /// HIDMAESTRO_PROBE_DRIVER=any it goes on, for a session that times one
+    /// SDK on two drivers (an older SDK on this tree's driver), and prints
+    /// the driver it runs on.</summary>
     static bool OnEmbeddedDriver(HMController c, string label)
     {
         bool ok = RunsEmbeddedDriver(c, out string detail);
-        Console.WriteLine($"  {label}: {(ok ? "" : "[WRONG DRIVER] ")}{detail}");
-        if (!ok) s_wrongDriver = true;
-        return ok;
+        bool any = Environment.GetEnvironmentVariable("HIDMAESTRO_PROBE_DRIVER") == "any";
+        Console.WriteLine($"  {label}: {(ok ? "" : any ? "[OTHER DRIVER, allowed] " : "[WRONG DRIVER] ")}{detail}");
+        if (!ok && !any) s_wrongDriver = true;
+        return ok || any;
     }
 
     /// <summary>frame --settle=&lt;ms&gt;: each measurement waits this long

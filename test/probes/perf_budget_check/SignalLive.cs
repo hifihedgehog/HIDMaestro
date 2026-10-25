@@ -9,8 +9,12 @@
 //     process's own, which no other process maps: the positive control
 //     that tells the writer's cost from what other readers of the section
 //     add to it
-//   - a frame written and signaled, as every submit ended before 2.1.0 and
-//     as a program before 2.1.0 still does on this driver
+//   - a frame written and signaled, as every submit ended before 2.1.0.
+//     From 2.1.0 the controller's device has the signal section, so its
+//     driver counts itself and reads a frame it finds before it waits,
+//     which a program before 2.1.0 does not give it: this row is the
+//     writer before 2.1.0 against a driver that counts. A program before
+//     2.1.0 on this driver is timed by that release's own probe
 //   - from 2.1.0, a frame written and signaled through the signal gate
 //     (docs/design/signal-gate.md), as a submit now ends: the signal only
 //     while the driver waits. An SDK without the gate has no such row
