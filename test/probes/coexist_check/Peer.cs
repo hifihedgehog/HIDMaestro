@@ -521,11 +521,12 @@ internal static class Peer
                         // inf2cat and pnputil, on a tool that exits at once
                         // and leaves a child that holds the same output for
                         // a[1] seconds (2 when absent) and then writes its
-                        // last line. "beyond" holds it 15 s against the
+                        // last line. "beyond" holds it 60 s against the
                         // runner's 10 s drain bound, both scaled by this
                         // process's HIDMAESTRO_TIMEOUT_SCALE
                         // (TimeoutScale.Apply), so the two timers keep their
-                        // ratio at any scale.
+                        // ratio at any scale, and load that delays the
+                        // runner's return cannot carry it to the hold.
                         var builder = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.DriverBuilder");
                         var m = builder?.GetMethod("Run", BindingFlags.NonPublic | BindingFlags.Static);
                         if (m == null) { Reply("ERR runtool no DriverBuilder.Run"); break; }
@@ -538,7 +539,7 @@ internal static class Peer
                                 ?.GetMethod("Apply", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static, new[] { typeof(int) });
                             if (drainMs == null || apply == null) { Reply("ERR runtool no drain bound"); break; }
                             drain = (int)apply.Invoke(null, new object[] { (int)drainMs.GetValue(null)! })!;
-                            hold = ((int)apply.Invoke(null, new object[] { 15_000 })! + 999) / 1000;
+                            hold = ((int)apply.Invoke(null, new object[] { 60_000 })! + 999) / 1000;
                         }
                         else if (a.Length > 1) hold = int.Parse(a[1], CultureInfo.InvariantCulture);
                         string cmd = System.IO.Path.Combine(Environment.SystemDirectory, "cmd.exe");

@@ -1177,9 +1177,16 @@ internal static partial class Program
         }
         // The companion by its identity's name. Under this release's driver
         // a v1 program's companion registers no XUSB interface (driver
-        // companion.c, decision (c)), so its interface cannot name it.
+        // companion.c, decision (c)), so its interface cannot name it. The
+        // v1.11.0 create returns when its wait for that interface gives up,
+        // and Plug and Play starts the companion when its install ends,
+        // which on a loaded machine comes after that return (2026-10-25: the
+        // install ended at the create's return and the check read the
+        // companion installed and not yet started). Nothing removes it, so
+        // it starts: the wait is a hang detector, 5 minutes scaled.
         string companion = $@"SWD\HIDMAESTRO\{IdentityToken("coexist-m")}";
-        Check("M: the killed program's companion is still started", Native.IsStarted(companion),
+        Check("M: the killed program's companion is still started",
+              WaitFor(() => Native.IsStarted(companion), ScaledMs(300_000)),
               $"{companion} {Native.StatusOf(companion)}");
 
         using (var claim = Native.HoldPipe("HIDMaestro.Index.0"))
@@ -1757,15 +1764,18 @@ internal static partial class Program
     /// keeps the output open longer holds the runner for a bounded time.</summary>
     static void SectionT5()
     {
-        // T6. A child holding the output for 15 s against the runner's 10 s
+        // T6. A child holding the output for 60 s against the runner's 10 s
         // drain bound, both as the peer scales them
         // (HIDMAESTRO_TIMEOUT_SCALE): the runner gives up on the output at
         // the bound, says so, and keeps the tool's exit code, so the deploy
         // lock is not held until the child ends. The peer runs at half this
         // probe's scale, never below 0.5: the hold and the bound keep their
         // ratio at any scale, and a runner that waits for the child returns
-        // at the hold, past the check's limit of the hold less 1 s. The
-        // offline mode runs the same check at scales 1, 1.5 and 2 (OF3).
+        // at the hold, past the check's limit of the hold less 1 s. The hold
+        // was 15 s, and on 2026-10-25 a loaded laptop's runner returned
+        // 2.1 s past its 5 s bound, past that limit: 60 s leaves the limit
+        // 24 s past the bound at half scale. The offline mode runs the same
+        // check at scales 1, 1.5 and 2 (OF3).
         // T6 runs in its own peer while T5 runs in another, since neither
         // runner's timers depend on the other's.
         using var t6 = PeerProcess.Start("T6", timeoutScale: HalfTimeoutScale());
@@ -1783,13 +1793,22 @@ internal static partial class Program
     /// <summary>Half the timeout scale this probe runs at, as the SDK reads
     /// it (TimeoutScale.ResolveFactor: 1 when unset, not a number or outside
     /// 0.1 to 100), and at least 0.5.</summary>
-    static string HalfTimeoutScale()
+    static string HalfTimeoutScale() =>
+        Math.Max(0.5, TimeoutScaleFactor() / 2).ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>The timeout scale this probe runs at, as the SDK reads it
+    /// (TimeoutScale.ResolveFactor: 1 when unset, not a number or outside
+    /// 0.1 to 100).</summary>
+    static double TimeoutScaleFactor()
     {
         string? raw = Environment.GetEnvironmentVariable("HIDMAESTRO_TIMEOUT_SCALE");
-        double f = double.TryParse(raw, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double v)
-                   && v >= 0.1 && v <= 100.0 ? v : 1.0;
-        return Math.Max(0.5, f / 2).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        return double.TryParse(raw, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double v)
+               && v >= 0.1 && v <= 100.0 ? v : 1.0;
     }
+
+    /// <summary><paramref name="ms"/> at this probe's timeout scale, never
+    /// below <paramref name="ms"/>.</summary>
+    static int ScaledMs(int ms) => (int)Math.Min(int.MaxValue, ms * Math.Max(1.0, TimeoutScaleFactor()));
 
     /// <summary>A "runtool beyond" reply in which the runner returned at its
     /// drain bound with the output still open and the tool's exit code,
