@@ -677,13 +677,18 @@ static class ValveSdlCheck
         public List<long> Stop(int stampAt)
         {
             // The loop ends at its next report, 4 to 9 ms away while the
-            // persona streams. A read still waiting is canceled, and only
-            // then is the handle closed, so no read runs on a closed handle.
+            // persona streams. A read still waiting is canceled. The handles
+            // close only once the thread has ended, so no read runs on a
+            // closed handle. A thread still running after a second keeps
+            // them open.
             _stopping = true;
             for (int i = 0; i < 20 && !_t.Join(50); i++)
                 if (_self != IntPtr.Zero) CancelSynchronousIo(_self);
-            if (_self != IntPtr.Zero) CloseHandle(_self);
-            CloseHandle(_h);
+            if (!_t.IsAlive)
+            {
+                if (_self != IntPtr.Zero) CloseHandle(_self);
+                CloseHandle(_h);
+            }
             List<(long T, byte[] F)> r;
             lock (Reports) r = new(Reports);
             var credited = new List<long>();
@@ -826,12 +831,13 @@ static class ValveSdlCheck
     /// clock for this. Each is taken when a thread reads a report, so on a
     /// loaded machine both come in bursts, and only a span over many
     /// reports holds. On 2026-10-24 a Celeron J4125 running two busy loops
-    /// read 50x to 250x per report from the medians of SDL's event gaps, on
-    /// 2.0.2's build as on 2.1.0's, while the reader timed 236 to 254
-    /// reports a second in the same windows. With the probe's own two
-    /// threads spinning as well, the medians of the reader's gaps fell to
-    /// 0.07 ms while its mean rate held. A mean also counts a report the
-    /// device should not have sent, which a median of gaps passes over.
+    /// read 50x to 250x per report on the 2026 controller from the medians
+    /// of SDL's event gaps, on 2.0.2's build as on 2.1.0's, while the reader
+    /// timed 236 to 254 reports a second in the same windows. With the
+    /// probe's own two threads spinning as well, the medians of the reader's
+    /// gaps fell to 0.07 ms while its mean rate held. A mean also counts a
+    /// report the device should not have sent, which a median of gaps
+    /// passes over.
     /// SDL drops a report only past its 64 input buffers (hidapi's
     /// windows/hid.c), a stall of 256 ms at 4 ms a report. The submitter
     /// and SDL's reader wait on high-resolution timers rather than spin
