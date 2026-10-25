@@ -353,7 +353,6 @@ typedef struct _DEVICE_CONTEXT {
     HANDLE  SignalMemHandle;
     struct _HIDMAESTRO_SIGNAL *SignalPtr;  /* hm_contract.h, included below */
     BOOLEAN SignalBroken;                  /* the count was found below zero: never announce again */
-    BOOLEAN WatchRetryNext;                /* retry the owner watch after the next frame */
 
     /* 2.1.0: AckSignal under the contract. FALSE when the controller's SDK
      * said no thread waits on the acknowledgement's event: DeliveredSeqNo

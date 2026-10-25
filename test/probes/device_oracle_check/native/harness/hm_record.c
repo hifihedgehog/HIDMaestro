@@ -422,19 +422,32 @@ void SdkWriteFrame(Sdk *s, const uint8_t *data, uint32_t dataLen, const uint8_t 
     memcpy(b, &s->seq, 4);
     int input = 1, companion = gip != NULL;
     if (s->signal) {
-        /* 2.1.0: the gate (docs/design/signal-gate.md). With the capability
-         * the frame is handed over, and it signals only when it takes the
-         * handoff back while a worker is counted. */
+        /* 2.1.0: the gate (docs/design/signal-gate.md,
+         * SharedMemoryIO.WriteInputFrame). With the capability the frame is
+         * handed over: in place of a final SeqNo still waiting for its take,
+         * or as a provisional one (low bit set) made final with the
+         * capability still set and no worker counted, or taken back. It
+         * signals unless it left the frame final. */
         int32_t caps, waiters, ccaps, parked, handoff;
         memcpy(&caps, s->signal->buf + 4, 4);
         memcpy(&ccaps, s->signal->buf + 8, 4);
         if (caps & 1) {
-            memcpy(s->signal->buf + 68, &s->seq, 4);
-            memcpy(&caps, s->signal->buf + 4, 4);
-            memcpy(&waiters, s->signal->buf + 64, 4);
+            int32_t fin = (int32_t)s->seq, prov = fin | 1;
             memcpy(&handoff, s->signal->buf + 68, 4);
-            if (((caps & 1) && waiters == 0) || handoff != (int32_t)s->seq) input = 0;
-            else memset(s->signal->buf + 68, 0, 4);
+            if (handoff != 0 && (handoff & 1) == 0) {
+                memcpy(s->signal->buf + 68, &fin, 4);
+                input = 0;
+            } else {
+                memcpy(s->signal->buf + 68, &prov, 4);
+                memcpy(&caps, s->signal->buf + 4, 4);
+                memcpy(&waiters, s->signal->buf + 64, 4);
+                memcpy(&handoff, s->signal->buf + 68, 4);
+                if ((caps & 1) && waiters == 0) {
+                    if (handoff == prov) { memcpy(s->signal->buf + 68, &fin, 4); input = 0; }
+                } else if (handoff == prov) {
+                    memset(s->signal->buf + 68, 0, 4);
+                }
+            }
         }
         memcpy(&parked, s->signal->buf + 128, 4);
         if ((ccaps & 1) && parked == 0) companion = 0;
