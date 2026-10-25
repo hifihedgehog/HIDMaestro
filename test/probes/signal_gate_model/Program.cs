@@ -149,7 +149,7 @@ internal static class Program
             var a = DeliveryModel.ExploreAligned(mine[k].sc, rules, frames, false,
                                                  rule >= 0 ? () => k > Volatile.Read(ref best) : null, s_maxStates);
             if (s_progress)
-                Console.Error.WriteLine($"{mine[k].i}	{a.States}	{a.Sets}	{a.SetItems}	{a.V203States}	{(a.TooLarge ? "TOO LARGE" : "")}	{sw.Elapsed.TotalSeconds:F1}s	{mine[k].sc.Name}	subsumed {a.Subsumed}	worse {a.Worse.Count}");
+                Console.Error.WriteLine($"{mine[k].i}	{a.States}	{a.Sets}	{a.SetItems}	{a.V203States}	{(a.TooLarge ? "TOO LARGE" : "")}	{sw.Elapsed.TotalSeconds:F1}s	{mine[k].sc.Name}	subsumed {a.Subsumed}	worse {a.Worse.Count}	extra {a.Extra.Count}");
             // A rule taken away breaks the check only in a scenario this
             // driver's own rules pass.
             if (rule >= 0 && !a.Canceled && (a.Worse.Count > 0 || a.ZeroSent))
@@ -165,7 +165,7 @@ internal static class Program
                 do { seen = Volatile.Read(ref best); } while (k < seen && Interlocked.CompareExchange(ref best, k, seen) != seen);
             }
         });
-        long states = 0, finals = 0, unaligned = 0, v203 = 0, largest = 0, ownFails = 0, subsumed = 0, setItems = 0, largestSets = 0;
+        long states = 0, finals = 0, unaligned = 0, v203 = 0, largest = 0, ownFails = 0, subsumed = 0, setItems = 0, largestSets = 0, extraScenarios = 0;
         string largestName = "";
         var failures = new List<int>();
         for (int k = 0; k < mine.Count; k++)
@@ -175,11 +175,12 @@ internal static class Program
             if (a.OwnFails) ownFails++;
             states += a.States; finals += a.Finals; unaligned += a.Unaligned; v203 += a.V203States; 
             setItems += a.SetItems; subsumed += a.Subsumed; largestSets = Math.Max(largestSets, a.SetItems);
+            if (a.Extra.Count > 0) extraScenarios++;
             if (a.States > largest) { largest = a.States; largestName = mine[k].sc.Name; }
             if (a.Worse.Count > 0 || a.ZeroSent) failures.Add(k);
         }
         string where = $"{frames} frame(s) a program, shard {shard}/{shards}, {mine.Count} scenario(s)";
-        string totals = $"{states} paired states, {finals} final, {v203} v2.0.3 states, {unaligned} shared step(s) v2.0.3 could not take, " +
+        string totals = $"{extraScenarios} scenario(s) with an extra frame, {states} paired states, {finals} final, {v203} v2.0.3 states, {unaligned} shared step(s) v2.0.3 could not take, " +
                         $"{subsumed} pair(s) subsumed, {setItems} v2.0.3 set members (largest scenario {largestSets}), " +
                         $"largest scenario {largest} paired states ({largestName}), {clock.Elapsed.TotalSeconds:F0} s";
         if (rule < 0)
@@ -190,6 +191,12 @@ internal static class Program
                 Console.WriteLine($"[FAIL] {mine[k].sc.Name} (scenario {mine[k].i}): {a.Worse.Count} outcome(s) no paired v2.0.3 run matches, such as [{a.Example}]" +
                                   (a.ZeroSent ? ", a zeroed section sent" : ""));
                 if (witness) PrintWitness(mine[k].sc, rules, frames);
+            }
+            for (int k = 0; k < mine.Count; k++)
+            {
+                var a = results[k];
+                if (a == null || a.Extra.Count == 0) continue;
+                Console.WriteLine($"[EXTRA] {mine[k].sc.Name} (scenario {mine[k].i}): {a.Extra.Count} outcome(s) send a frame no paired v2.0.3 run sends, such as [{a.ExtraExample}]");
             }
             Console.WriteLine($"[{(failures.Count == 0 ? "PASS" : "FAIL")}] delivery with {rules.Name}, {where}: " +
                               (failures.Count == 0 ? "every outcome matched or bettered by a paired v2.0.3 run" : $"{failures.Count} scenario(s) fail") +
@@ -210,6 +217,14 @@ internal static class Program
         return 1;
     }
 
+    static void PrintExtra(DeliveryModel.AlignedResult a)
+    {
+        if (a.ExtraPath == null) return;
+        Console.WriteLine($"    an extra frame, {a.ExtraPath.Count - 1} steps, this driver delivers [{a.ExtraExample}]:");
+        for (int i = 1; i < a.ExtraPath.Count; i++)
+            Console.WriteLine($"    {i,3}. {DeliveryModel.Describe(a.ExtraPath[i - 1], a.ExtraPath[i])}");
+    }
+
     // The failing order, state by state, as the fields each step changed.
     static void PrintWitness(DeliveryModel.Scenario sc, DeliveryModel.Rules rules, int frames)
     {
@@ -221,6 +236,7 @@ internal static class Program
             Console.WriteLine($"    {i,3}. {DeliveryModel.Describe(path[i - 1], path[i])}");
         if (a.PairedSide != null)
             foreach (var l in a.PairedSide) Console.WriteLine($"    {l}");
+        PrintExtra(a);
         if (a.UnalignedPath != null)
         {
             var u = a.UnalignedPath;

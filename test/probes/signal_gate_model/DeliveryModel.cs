@@ -122,9 +122,12 @@ internal static class DeliveryModel
         public bool RetryAfterOwnerGone { get; init; } = true; // the watch is tried again after the first frame read after OwnerGone
         public bool ZeroForgets { get; init; } = true;     // a zeroed section forgets SeenSeqNo and SharedMemSeqNo and sends nothing
         public bool LateReadNotEqual { get; init; }        // taken away: a late READ_REPORT takes any cached SeqNo but the last delivered
+        public bool TakeReadNoNext { get; init; } = true;  // a read a take alone woke sends no frame of a next program that started (B3)
+        public bool TakeReadNextSeq { get; init; } = true; // ... and only the frame taken or its program's next SeqNo (NextFrameSeq)
+        public bool BackOnlyAlone { get; init; } = true;   // a taken unread frame at a stop or teardown is signaled back only with no next program
         // Candidate changes, off in this driver (Candidates below).
         public bool CloseSignalsSent { get; init; }        // CloseGate signals a handed frame equal to the last one sent too
-        public bool SkipNextEarly { get; init; }           // a read a take woke is skipped when the section moved past the handed frame and a next program started (B3)
+        public bool TakeReadSendsTaken { get; init; }      // a take's read sends, and a stop signals back, the frame taken when the section still holds it
         public bool NoTakeBackOverUntaken { get; init; }   // the SDK skips the take-back when its exchange replaced a frame not taken
     }
 
@@ -151,6 +154,9 @@ internal static class DeliveryModel
         This with { Name = "OwnerGone signals the ended program's own frame (FIX-1)", OwedOnlyNextProgram = false },
         This with { Name = "a zeroed section keeps the last SeqNo and the cache (D1)", ZeroForgets = false },
         This with { Name = "a late read takes any SeqNo but the last delivered (D2)", LateReadNotEqual = true },
+        This with { Name = "a read a take alone woke sends a next program's frame (B3)", TakeReadNoNext = false },
+        This with { Name = "a read a take alone woke sends any SeqNo (NextFrameSeq)", TakeReadNextSeq = false },
+        This with { Name = "a taken frame signaled back at a stop with a next program started", BackOnlyAlone = false },
     };
 
     // Candidate changes for the orders this driver loses (the model section
@@ -161,9 +167,9 @@ internal static class DeliveryModel
         This with { Name = "CloseGate signals a handed frame equal to the last one sent", CloseSignalsSent = true },
         This with { Name = "no take-back over a frame not taken", NoTakeBackOverUntaken = true },
         This with { Name = "the watch tried again only at a map, as 533ca4a4", RetryAfterOwnerGone = false },
-        This with { Name = "B3's skip of the next program's frame at a take", SkipNextEarly = true },
-        This with { Name = "all four", CloseSignalsSent = true, NoTakeBackOverUntaken = true, RetryAfterOwnerGone = false, SkipNextEarly = true },
-        This with { Name = "all but B3's skip", CloseSignalsSent = true, NoTakeBackOverUntaken = true, RetryAfterOwnerGone = false },
+        This with { Name = "all three", CloseSignalsSent = true, NoTakeBackOverUntaken = true, RetryAfterOwnerGone = false },
+        This with { Name = "a take's read sends the frame taken with a next program started", TakeReadSendsTaken = true },
+        This with { Name = "all four", CloseSignalsSent = true, NoTakeBackOverUntaken = true, RetryAfterOwnerGone = false, TakeReadSendsTaken = true },
     };
 
     internal static IEnumerable<Scenario> Scenarios()
@@ -415,6 +421,17 @@ internal static class DeliveryModel
         return late == 0;
     }
 
+    // Every frame and release frame this outcome sends, that one sends.
+    internal static bool NoExtra(ulong mine, ulong theirs)
+    {
+        for (int slot = 0; slot < 21; slot++)
+        {
+            if (slot < RelSlot && slot % 6 == 0) continue;
+            if (Count(mine, slot) >= 1 && Count(theirs, slot) == 0) return false;
+        }
+        return true;
+    }
+
     internal static string Show(ulong v)
     {
         var parts = new List<string>();
@@ -464,6 +481,11 @@ internal static class DeliveryModel
         public long States, Finals, Unaligned, Sets, SetItems, V203States, Subsumed;
         public bool Canceled, OwnFails, TooLarge;
         public readonly HashSet<ulong> Worse = new();
+        // Outcomes matched only by v2.0.3 runs that deliver fewer frames:
+        // an extra frame, neither a loss nor a duplicate.
+        public readonly HashSet<ulong> Extra = new();
+        public string? ExtraExample;
+        public List<State>? ExtraPath;
         public bool ZeroSent;
         public string? Example;
         public List<State>? Path;
@@ -724,6 +746,16 @@ internal static class DeliveryModel
             return lines;
         }
 
+        // 2: some final state of V matches with no frame this one sends that
+        // it does not, 1: only with such an extra frame, 0: none matches.
+        public int MatchClass(int v, ulong mine)
+        {
+            if (!Matches(v, mine)) return 0;
+            foreach (var t in finals[v])
+                if (NoWorse(mine, t) && NoExtra(mine, t)) return 2;
+            return 1;
+        }
+
         public bool Matches(int v, ulong mine)
         {
             if (!finals.TryGetValue(v, out var outs))
@@ -813,7 +845,13 @@ internal static class DeliveryModel
                 res.Finals++;
                 ulong mine = t.Delivered & OutMask;
                 for (int pr = 1; pr <= 3; pr++) if (Count(t.Delivered, Slot(pr, 0)) > 0) res.ZeroSent = true;
-                bool matched = V != None && v203.Matches(V, mine);
+                int cls = V == None ? 0 : v203.MatchClass(V, mine);
+                bool matched = cls != 0;
+                if (cls == 1 && res.Extra.Add(mine) && res.ExtraExample == null)
+                {
+                    res.ExtraExample = Show(mine);
+                    if (parent != null) res.ExtraPath = PathTo(parent, (tk, V));
+                }
                 if (!matched && res.Worse.Add(mine) && res.Example == null)
                 {
                     res.Example = Show(mine) + (V == None ? " (after a step v2.0.3 could not take)" : "");
@@ -1027,7 +1065,7 @@ internal static class DeliveryModel
             case W_LOOK:
             {
                 bool took = r.TakeBeforeWait && s.Hand != 0 && (s.Hand != s.Seen || !r.DropSentAtTake);
-                var n = took ? s with { Hand = 0, Took = r.SkipNextEarly ? s.Hand : 0, Waiters = s.Counted ? s.Waiters - 1 : s.Waiters, Counted = false, Pc = W_POLL }
+                var n = took ? s with { Hand = 0, Took = s.Hand, Waiters = s.Counted ? s.Waiters - 1 : s.Waiters, Counted = false, Pc = W_POLL }
                              : s with { Hand = r.TakeBeforeWait ? 0 : s.Hand, Pc = W_BLOCK };
                 // The broken order counts itself only after a take that found
                 // nothing, as a step of its own.
@@ -1048,11 +1086,15 @@ internal static class DeliveryModel
                 // stop event, and at teardown, the taken frame goes back to
                 // the input event as a SetEvent before the worker leaves its
                 // loop.
-                var back = r.SignalTakenOnExit ? s with { Event = true } : s;
+                // A taken frame left unread goes back to the input event
+                // only while no next program has started (b17050c1), and
+                // always when the poll consumed the input event.
+                bool alone = !r.BackOnlyAlone || !NextStarted(s) || (r.TakeReadSendsTaken && s.Seq == s.Took);
+                var back = r.SignalTakenOnExit && alone ? s with { Event = true, Took = 0 } : s with { Took = 0 };
                 if (s.StopSig) next.Add(StopReturned(back, sc, d, r, prog));
                 else if (s.Event)
-                    next.Add(s.Tear != 0 ? (r.SignalTakenOnExit ? s : s with { Event = false }) with { Pc = W_EXITED }
-                                         : s with { Event = false, Pc = W_READ, AfterOwner = false });
+                    next.Add(s.Tear != 0 ? (r.SignalTakenOnExit ? s : s with { Event = false }) with { Took = 0, Pc = W_EXITED }
+                                         : s with { Event = false, Took = 0, Pc = W_READ, AfterOwner = false });
                 else if (s.OwnerSig && !r.WaitAgainAfterOwner) next.Add(s with { OwnerSig = false, Pc = W_READ, AfterOwner = true, NoRetry = true });
                 else if (s.OwnerSig) next.Add(s with { Pc = W_READ, AfterOwner = false, NoRetry = true });
                 else next.Add(s.Tear != 0 ? back with { Pc = W_EXITED } : s with { Pc = W_READ, AfterOwner = false });
@@ -1094,20 +1136,11 @@ internal static class DeliveryModel
                 break;
             case W_READ:
             {
-                // B3's candidate: a read a take woke is skipped when the
-                // section holds another frame than the one handed and the
-                // acknowledgement's release bit is clear (a next program
-                // zeroed it). That frame's own take or signal reads it.
-                if (s.Took != 0 && s.Seq != s.Took && !s.AckBit)
-                {
-                    next.Add(s with { Took = 0, Pc = s.AfterOwner ? W_OWNER : W_TOP, AfterOwner = false, NoRetry = false });
-                    break;
-                }
                 // A read the input event (or a take standing for it)
                 // answered tries the watch again after OwnerGone
                 // (WatchRetryNext). Every 256th frame does too in both
                 // drivers, which a model run never reaches.
-                var n = Read(s with { Pc = s.AfterOwner ? W_OWNER : W_TOP, AfterOwner = false, NoRetry = false, Took = 0 }, d, r, out bool fresh);
+                var n = Read(s with { Pc = s.AfterOwner ? W_OWNER : W_TOP, AfterOwner = false, NoRetry = false, Took = 0 }, d, r, out bool fresh, s.Took, NextStarted(s), sc.Wrap);
                 if (n.Pc == W_TOP && !s.NoRetry && s.RetryNext)
                     n = (CanConnect(n, prog) ? Connect(n, prog, d) : n) with { RetryNext = false };
                 next.Add(n);
@@ -1171,9 +1204,23 @@ internal static class DeliveryModel
                  SdkPc = s.P < sc.Programs.Length ? S_NEXT : S_DONE };
 
     // ProcessSharedInput. v2.0.3 sends a zeroed section as a frame.
-    static State Read(State s, Driver d, Rules r, out bool fresh)
+    // NextProgramStarted: the watch is open and the acknowledgement's release
+    // bit is clear, so a next program zeroed it.
+    static bool NextStarted(in State s) => s.Watch && !s.AckBit;
+
+    // NextFrameSeq: the SeqNo a 2.1.0 program writes after this one, 0
+    // stepped over at the wrap (the wrap scenarios wrap at 16).
+    static int NextFrameSeq(int seq, int wrap)
+    {
+        int n = seq + 2;
+        if (wrap > 0) n %= wrap;
+        return n == 0 ? 2 : n;
+    }
+
+    static State Read(State s, Driver d, Rules r, out bool fresh, int taken = 0, bool nextStarted = false, int wrap = 0)
     {
         fresh = false;
+        if (s.Seq == s.Seen) return s;
         if (s.Prog == 0 && d == Driver.This && r.SkipZero)
         {
             // A zeroed section is SeqNo 0: no news when SeenSeqNo is 0.
@@ -1185,6 +1232,13 @@ internal static class DeliveryModel
             fresh = true;
             return s with { Seen = 0, Cache = Slot(s.P, 0) + 1, CacheSeq = 0 };
         }
+        // A read a take alone woke sends only the frame taken or its
+        // program's next one, and nothing once a next program started
+        // (b17050c1).
+        if (d == Driver.This && taken != 0 && s.Prog != 0
+            && ((r.TakeReadNoNext && nextStarted && (s.Seq != taken || !r.TakeReadSendsTaken))
+                || (r.TakeReadNextSeq && s.Seq != taken && s.Seq != NextFrameSeq(taken, wrap))))
+            return s;
         int slot = s.Prog == 0 ? Slot(s.P, 0) : Slot(s.Prog, s.Idx);
         fresh = s.Seq != s.Seen;
         if (!fresh) return s;
