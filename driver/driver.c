@@ -819,7 +819,7 @@ static VOID DeliverReleaseFrames(_In_ PDEVICE_CONTEXT ctx);
 static HANDLE CreateHostEvent(_In_ BOOL manualReset, _In_ BOOL takeOverNullDacl, _In_ LPCWSTR name);
 static VOID TryCreateDoorbell(_In_ PDEVICE_CONTEXT ctx);
 static VOID TryOpenSignal(_In_ PDEVICE_CONTEXT ctx);
-static void ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx, _In_ ULONG taken, _In_ BOOLEAN nextStarted);
+static BOOLEAN ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx);
 
 /* Create the output doorbell if there is none yet, and publish it for
  * PublishOutput. EvtDeviceAdd may have found the name unusable, held by an
@@ -886,86 +886,60 @@ TryOpenSignal(_In_ PDEVICE_CONTEXT ctx)
     AnnounceGate(ctx);
 }
 
-/* 2.1.0: take a frame the SDK handed over instead of signaling it. The SDK
- * exchanges the frame's SeqNo into InputHandoff and then signals only when
- * it takes the same value back, so exactly one of this take and that
- * SetEvent wakes a read for the frame (docs/design/signal-gate.md). A frame
- * taken here is read, or, when the worker leaves its loop first on the stop
- * event or at teardown, signaled on the input event, where v2.0.3's program
- * left its signal. The exchange comes after the interlocked increment of
+/* 2.1.0: the handoff's two kinds of value (hm_contract.h). The SDK hands a
+ * frame over in two steps: an exchange of its SeqNo with the low bit set
+ * (provisional), the recheck of the capability and the count, then a
+ * compare-exchange that makes it final (no worker waits) or takes it back
+ * and signals. A final SeqNo is a frame whose program finished its handoff,
+ * the counterpart of v2.0.3's SetEvent, and a take of it reads the section
+ * as v2.0.3's worker read on that signal. A provisional one is a frame
+ * whose program has not decided yet, or died before it did: a take drops
+ * it. While the program runs its compare-exchange then fails, and it calls
+ * SetEvent. A program that died there never called SetEvent on v2.0.3
+ * either, and nothing reads that frame. */
+static BOOLEAN
+HandoffFinal(_In_ ULONG handed)
+{
+    return handed != 0 && (handed & 1) == 0;
+}
+
+/* 2.1.0: take a frame the SDK handed over instead of signaling it
+ * (HandoffFinal). The exchange comes after the interlocked increment of
  * InputWaiters, so the two full barriers face the SDK's exchange and its
- * load of the count. A frame handed over after a read had already sent it
- * wakes a read too, as v2.0.3's worker read on every input event, the
- * leftover signal of a frame it had read included: that read finds the
- * frame and sends nothing, or a newer frame the program stored since. A
- * program killed between that newer frame's store and its exchange leaves
- * no other wakeup for it. The read skips a frame of the next program
- * (NextProgramStarted). Worker thread only. */
-static ULONG
+ * load of the count (docs/design/signal-gate.md). A final frame taken is
+ * read, or, when the worker leaves its loop first on the stop event or at
+ * teardown, signaled on the input event, where v2.0.3's program left its
+ * signal. The read takes whatever the section holds, as v2.0.3's read on
+ * the frame's signal did: the frame, or a newer one its program stored and
+ * died before handing over, whose wakeup this is, as the left signal of the
+ * frame before it was on v2.0.3. Returns TRUE for a final frame. Worker
+ * thread only. */
+static BOOLEAN
 TakeHandoff(_In_ PHIDMAESTRO_SIGNAL sig)
 {
-    return (ULONG)InterlockedExchange(&sig->InputHandoff, 0);
-}
-
-/* 2.1.0: the SeqNo a program writes after the one given (SharedMemoryIO
- * NextEvenSeq: up by two, and over 0 to 2). */
-static ULONG
-NextFrameSeq(_In_ ULONG seqNo)
-{
-    ULONG next = seqNo + 2;
-    return next == 0 ? 2 : next;
-}
-
-/* 2.1.0: a program has started on the index since this context's owner
- * watch connected to the program before it. Every SDK with an owner pipe
- * zeroes the acknowledgement as it starts, before it writes the input
- * section, and that clears the release bit the watch set at its connect
- * (TryOpenOwnerWatch, TryOpenInputAck), so with the bit clear the input
- * section holds that program's frames or its zeroing, never the last
- * program's. A read a take alone woke (no input event) sends no such
- * frame: the handoff it took was the last program's, left there when it
- * died between its exchange and its signal, a wakeup v2.0.3's program
- * never gave, and the next program's frame has its own take or signal. Sent
- * by that read, it went out again after OwnerGone forgot the SeqNo. Read
- * right before the section, with an ARM64 fence between, so the section
- * read sees whatever the zeroing that cleared the bit wrote before it. The
- * worker owns the acknowledgement's pointer, so no lock. Worker thread
- * only. */
-static BOOLEAN
-NextProgramStarted(_In_ PDEVICE_CONTEXT ctx)
-{
-    BOOLEAN started;
-    if (ctx->OwnerPipe == NULL || ctx->InputAckMemPtr == NULL) return FALSE;
-    started = ((ULONG)((PHIDMAESTRO_INPUT_ACK)ctx->InputAckMemPtr)->Capabilities
-               & HIDMAESTRO_INPUT_ACK_CAP_RELEASE) == 0;
-#if defined(_M_ARM64)
-    MemoryBarrier();
-#endif
-    return started;
+    return HandoffFinal((ULONG)InterlockedExchange(&sig->InputHandoff, 0));
 }
 
 /* 2.1.0: the gate closes as the worker lets go of the input event, at a
  * recycle and as the device goes, so no handoff outlives a worker that
- * holds the event: the capability goes, and a frame handed over before
- * that becomes a SetEvent on the program's own input event, which goes
- * with the program, as v2.0.3's signal did. The SDK loads the capability
- * again after its exchange, and this clear is a full barrier before the
- * take, so either the take finds the frame or the SDK sees the capability
- * gone and signals the frame itself. A frame already sent is dropped.
- * The capability comes back at the next map (TryOpenSignal). Worker
- * thread, or the release after its join of the worker. */
+ * holds the event: the capability goes, and a final frame handed over
+ * before that becomes a SetEvent on the program's own input event, which
+ * goes with the program, as v2.0.3's signal did. A provisional one is
+ * dropped: its program, rechecking the capability after its exchange,
+ * finds it gone or finds its frame taken, and signals it itself. This
+ * clear is a full barrier before the take. The capability comes back at
+ * the next map (TryOpenSignal). Worker thread, or the release after its
+ * join of the worker. */
 static VOID
 CloseGate(_In_ PDEVICE_CONTEXT ctx)
 {
-    LONG handed;
     PHIDMAESTRO_SIGNAL sig = SignalView(ctx);
     if (sig == NULL) return;
     InterlockedAnd(&sig->DriverCaps, ~(LONG)HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS);
 #if defined(_M_ARM64)
     MemoryBarrier();
 #endif
-    handed = InterlockedExchange(&sig->InputHandoff, 0);
-    if (handed == 0 || (ULONG)handed == ctx->SeenSeqNo) return;
+    if (!TakeHandoff(sig)) return;
     if (ctx->InputDataEvent != NULL) {
         SetEvent(ctx->InputDataEvent);
     } else {
@@ -1266,48 +1240,18 @@ CloseOwnerWatch(_In_ PDEVICE_CONTEXT ctx)
 static VOID
 OwnerGone(_In_ PDEVICE_CONTEXT ctx)
 {
-    /* 2.1.0: the handoff before anything else, as v2.0.3's wait took an
-     * input event before the pipe's close. Only while the worker holds the
-     * input event: in Phase 1, after a recycle, the gate is closed
-     * (CloseGate), and a frame handed over then is another device
-     * context's on the index (issue #38), for its own take.
-     *   A frame the worker already sent is dropped here, where SeenSeqNo
-     *   still names it: taken after the reset below, it would go out again.
-     *   A frame of the program that ended is dropped too. It waits here only
-     *   when the program died between its exchange and its SetEvent
-     *   (SharedMemoryIO.WriteInputFrame), and v2.0.3 never read a frame its
-     *   program did not signal, so the release frames stay the last report.
-     *   A frame of the next program, which can make its pipe as soon as
-     *   this program's end closed, with this client handle still open, is
-     *   owed: it becomes a SetEvent after the reset and the release frames,
-     *   as v2.0.3's read of that program's signal came after them, and it
-     *   reaches the read cache after the reset that would otherwise hide it
-     *   from a late read.
-     * A program zeroes the acknowledgement before its first frame, which
-     * clears the release bit this watch set when it connected, so a frame
-     * taken beside that bit clear is the next program's. The bit is read
-     * after the take and the SeqNo after the bit: an SDK zeroes the input
-     * section before the acknowledgement (2.1.0 with a full fence between,
-     * its handoff clear), so beside a cleared bit the section no longer
-     * holds the ended program's frame. */
-    ULONG handed = 0;
-    BOOLEAN owed = FALSE;
-    PHIDMAESTRO_SIGNAL sig = SignalView(ctx);
-    if (sig != NULL && ctx->InputDataEvent != NULL) {
-        handed = (ULONG)InterlockedExchange(&sig->InputHandoff, 0);
-        if (handed != 0 && handed != ctx->SeenSeqNo && ctx->SharedMemPtr != NULL) {
-            BOOLEAN started;
-            AcquireSRWLockExclusive(&ctx->InputLock);
-            started = ctx->InputAckMemPtr != NULL
-                && ((ULONG)((PHIDMAESTRO_INPUT_ACK)ctx->InputAckMemPtr)->Capabilities
-                    & HIDMAESTRO_INPUT_ACK_CAP_RELEASE) == 0;
-            ReleaseSRWLockExclusive(&ctx->InputLock);
-#if defined(_M_ARM64)
-            MemoryBarrier();
-#endif
-            owed = started && ((volatile HIDMAESTRO_SHARED_INPUT *)ctx->SharedMemPtr)->SeqNo == handed;
-        }
-    }
+    /* 2.1.0: OwnerGone leaves the handoff alone. A provisional SeqNo there
+     * is the program's that ended, left as it died between its exchange and
+     * its compare-exchange, or the next program's, whose SDK signals it:
+     * the next take drops it, and v2.0.3, whose program died before its
+     * SetEvent, read nothing for it either. A final one is the next
+     * program's, which can make its pipe as soon as this program's end
+     * closed: a program's final frames come only while the worker is
+     * outside its counted wait, so the worker's take at its next loop top
+     * reads them before any wait that could return this pipe's close. The
+     * next take reads it after the reset below, as v2.0.3's read of that
+     * program's SetEvent came after OwnerGone, and it reaches the read cache
+     * after that reset. */
     CloseOwnerWatch(ctx);
 
     /* A program before 2.1.0 that starts next on this index zeroes the
@@ -1315,10 +1259,12 @@ OwnerGone(_In_ PDEVICE_CONTEXT ctx)
      * the idle window, before any recycle. SeenSeqNo is forgotten as v2.0.3
      * forgot it here, so its frame equal to this program's last goes out.
      * SharedMemSeqNo is reset under InputLock below. The watch is tried
-     * again after the next frame, which the next program sends after it
-     * made its pipe. */
+     * again at the next map or the 256th frame, as v2.0.3 tried it. Tried
+     * at the next frame, it watched a program that started inside the idle
+     * window, and that program's end ran an OwnerGone v2.0.3 did not, whose
+     * reset hid its last frame, cached with no read parked, from the read
+     * that came after. */
     ctx->SeenSeqNo = 0;
-    ctx->WatchRetryNext = TRUE;
 
     /* The watch connects only beside the acknowledgement section, so it is
      * mapped here. Mark the watch ended in it (TryOpenOwnerWatch) before
@@ -1381,7 +1327,6 @@ OwnerGone(_In_ PDEVICE_CONTEXT ctx)
     ReleaseSRWLockExclusive(&ctx->InputLock);
 
     DeliverReleaseFrames(ctx);
-    if (owed) SetEvent(ctx->InputDataEvent);
 }
 
 /* Hand queued release frames to the READ_REPORTs HID class has parked, one
@@ -1769,17 +1714,18 @@ KeepLiveFeatureLocked(_In_ PDEVICE_CONTEXT ctx, _In_ const HIDMAESTRO_SHARED_INP
  * report-build + manual-queue drain here: no WDF timer, no IRQL games:
  * WdfRequestComplete and the SRW locks are documented safe from a raw worker
  * thread in UMDF2. 2.1.0: also when the worker took a frame the SDK
- * handed over instead of signaling it (TakeHandoff). */
-static void
-ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx, _In_ ULONG taken, _In_ BOOLEAN nextStarted)
+ * handed over instead of signaling it (TakeHandoff). Returns TRUE when a
+ * parked READ_REPORT completed with the frame. */
+static BOOLEAN
+ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
 {
     HIDMAESTRO_SHARED_INPUT shared;
-    if (!ReadSharedInput(ctx, &shared)) return;
+    if (!ReadSharedInput(ctx, &shared)) return FALSE;
 
     ULONG seqNo = shared.SeqNo;
     /* A frame is new when it is not the last one sent, whether a signal or
      * a handed-over frame woke this read (TakeHandoff). */
-    if (seqNo == ctx->SeenSeqNo) return; /* No new data */
+    if (seqNo == ctx->SeenSeqNo) return FALSE; /* No new data */
     /* 2.1.0: SeqNo 0 with no data is a section an SDK zeroed as it mapped
      * the index, and no frame. v2.0.3 read it as one: SeenSeqNo became 0,
      * the cache took an all-zero report at SeqNo 0 (with LiveFeatureReport,
@@ -1792,19 +1738,6 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx, _In_ ULONG taken, _In_ BOOLEAN next
      * completes with the all-zero one. A program before 2.1.0 stores 0 with
      * its frame at every 2^31st frame, and that frame goes on. */
     BOOLEAN zeroed = seqNo == 0 && shared.DataSize == 0 && shared.ExtendedReportSize == 0;
-    /* 2.1.0: a read a take alone woke (taken, the SeqNo it took) sends
-     * only the frame taken or the one its program writes after it, which a
-     * program killed before that frame's exchange left with no other
-     * wakeup. Anything else in the section is a next program's or has a
-     * take or signal of its own: with a next program started on the index
-     * (NextProgramStarted, which covers every SDK with an owner pipe), and
-     * by SeqNo for a v1.11.0 program, which counts from 0 and makes no
-     * acknowledgement. Sent here, a next program's frame went out again
-     * after OwnerGone forgot the SeqNo. A zeroed section is still read as
-     * above, since v2.0.3 read it on the last program's left signal, and a
-     * program before 2.1.0 counting from 0 needs SeenSeqNo forgotten. */
-    if (taken != 0 && !zeroed
-        && (nextStarted || (seqNo != taken && seqNo != NextFrameSeq(taken)))) return;
     /* v2.0.0: the worker's stale-wakeup count reads SeenSeqNo, since a
      * frame the driver does not send leaves SharedMemSeqNo alone. */
     ctx->SeenSeqNo = seqNo;
@@ -1822,7 +1755,7 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx, _In_ ULONG taken, _In_ BOOLEAN next
         AcquireSRWLockExclusive(&ctx->InputLock);
         KeepLiveFeatureLocked(ctx, &shared);
         ReleaseSRWLockExclusive(&ctx->InputLock);
-        return;
+        return FALSE;
     }
 
     /* Build HID input report from shared file Data (native descriptor format).
@@ -1882,7 +1815,7 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx, _In_ ULONG taken, _In_ BOOLEAN next
         /* v2.0.0: only at its report's declared length. Any other frame
          * is not sent, and the last sent report stands. */
         if (!ExtendedFrameDeclared(ctx, shared.ExtendedReportData, shared.ExtendedReportSize))
-            return;
+            return FALSE;
         RtlZeroMemory(inputReport, inputSize);
         RtlCopyMemory(inputReport, shared.ExtendedReportData, shared.ExtendedReportSize);
         inputSize = shared.ExtendedReportSize;
@@ -1956,6 +1889,7 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx, _In_ ULONG taken, _In_ BOOLEAN next
          * full delivery timeout, most often on a busy machine. */
         if (servedOne)
             WdfRequestComplete(pendingRead, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
+        return servedOne;
     }
 }
 
@@ -2114,7 +2048,6 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
             PHIDMAESTRO_SIGNAL sig = Gating(ctx);
             volatile LONG *waiters = sig != NULL ? &sig->InputWaiters : NULL;
             BOOLEAN pending = FALSE;
-            ULONG taken = 0;
             if (waiters != NULL) {
                 if (InterlockedIncrement(waiters) <= 0) {
                     ctx->SignalBroken = TRUE;
@@ -2127,15 +2060,11 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                  * the count's store. The full fence closes that. */
                 MemoryBarrier();
 #endif
-                taken = TakeHandoff(sig);
-                pending = taken != 0;
+                pending = TakeHandoff(sig);
                 if (pending) InterlockedDecrement(waiters);
             }
             DWORD rc = WaitForMultipleObjects(count, waits, FALSE, pending ? 0 : 500);
             if (waiters != NULL && !pending) InterlockedDecrement(waiters);
-            /* The take alone woke this pass: the poll consumed no input
-             * event. */
-            BOOLEAN takeOnly = pending && rc != WAIT_OBJECT_0 + 1;
             if (pending && rc == WAIT_TIMEOUT) rc = WAIT_OBJECT_0 + 1;
             /* 2.1.0: the input event comes before the owner pipe and the
              * remove event in the wait, so a frame the SDK signaled is read
@@ -2147,8 +2076,21 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
              * input event a program set meanwhile is taken first, as
              * v2.0.3's wait took it before the pipe's close. */
             else if (pending && rc != WAIT_OBJECT_0 && rc != WAIT_OBJECT_0 + 1) {
+                /* At teardown a taken frame goes back to the input event,
+                 * before a read or after one that completed no READ_REPORT:
+                 * the queues are purged then, so that read sent the frame
+                 * nowhere and spent its wakeup, where v2.0.3's signal, not
+                 * yet waited on, reached the next device context. */
+                if (ctx->TearingDown) {
+                    SetEvent(ctx->InputDataEvent);
+                    return 0;
+                }
                 idleTimeouts = 0;
-                ProcessSharedInput(ctx, taken, NextProgramStarted(ctx));
+                BOOLEAN served = ProcessSharedInput(ctx);
+                if (ctx->TearingDown) {
+                    if (!served) SetEvent(ctx->InputDataEvent);
+                    return 0;
+                }
                 pending = FALSE;
                 if (rc == WAIT_OBJECT_0 + 2) continue;
             }
@@ -2160,11 +2102,8 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
              * section. Dropped, the frame waited for the program's next one.
              * The add and the recycle forget SeenSeqNo in both drivers, so
              * a taken frame already sent goes out again there only where
-             * v2.0.3's left signal sent it again. With a next program
-             * started (NextProgramStarted), the take had no v2.0.3 signal
-             * to stand for, and that program's frames have their own: no
-             * SetEvent. An input event the poll consumed is set again in
-             * every case. */
+             * v2.0.3's left signal sent it again. A provisional take is no
+             * frame (HandoffFinal): its program signals it. */
 
             /* Issue #38: TearingDown is the authoritative exit
              * condition, checked on EVERY wake including timeouts. The
@@ -2180,12 +2119,12 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
              * exit latency is one 500 ms wait, inside cleanup's 2 s
              * join. */
             if (ctx->TearingDown) {
-                if (pending && (!takeOnly || !NextProgramStarted(ctx))) SetEvent(ctx->InputDataEvent);
+                if (pending) SetEvent(ctx->InputDataEvent);
                 return 0;
             }
 
             if (rc == WAIT_OBJECT_0) {
-                if (pending && !NextProgramStarted(ctx)) SetEvent(ctx->InputDataEvent);
+                if (pending) SetEvent(ctx->InputDataEvent);
                 /* FOREIGN signal on the shared named event (another
                  * process's sweep, or a same-index orphan's late
                  * cleanup). Returning here left a healthy device frozen
@@ -2206,7 +2145,12 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
             if (rc == WAIT_OBJECT_0 + 1) {
                 idleTimeouts = 0;
                 ULONG prevSeq = ctx->SeenSeqNo;
-                ProcessSharedInput(ctx, takeOnly ? taken : 0, takeOnly && NextProgramStarted(ctx));
+                BOOLEAN served = ProcessSharedInput(ctx);
+                /* A taken frame at teardown, as in the owner path above. */
+                if (pending && ctx->TearingDown) {
+                    if (!served) SetEvent(ctx->InputDataEvent);
+                    return 0;
+                }
                 if (ctx->SeenSeqNo == prevSeq) {
                     if (++staleWakeups > 250) { recycle = TRUE; break; }
                 } else {
@@ -2225,8 +2169,7 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                  *   ended marker first, so a squatter's pipe is still
                  *   refused. While no pipe exists the cost is one failed
                  *   CreateFileW. */
-                if ((++frameTick & 0xFF) == 0 || ctx->WatchRetryNext) {
-                    ctx->WatchRetryNext = FALSE;
+                if ((++frameTick & 0xFF) == 0) {
                     if (ctx->OutputSignalEvent == NULL)
                         TryCreateDoorbell(ctx);
                     if (ctx->OwnerPipe == NULL)

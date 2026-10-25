@@ -306,7 +306,7 @@ static int NextAtOwnerAnswer(HmThread *t, DWORD result)
     if (c->sdk.signal) memcpy(&caps, c->sdk.signal->buf + 4, 4);
     if (caps & 1) {
         /* The SDK ran after the worker's decrement: the count was zero,
-         * so it kept the frame and signaled nothing. */
+         * so it made the frame final and signaled nothing. */
         c->sdk.inputEv->signaled = FALSE;
         memcpy(c->sdk.signal->buf + 68, &c->sdk.seq, 4);
     }
@@ -457,7 +457,7 @@ static void StreamX5Kill(PlanProfile *p, int release)
     for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0xA0 + i);
     SdkWriteFrame(&c.sdk, data, 63, NULL, NULL, 0);
     c.sdk.inputEv->signaled = FALSE;
-    if (c.sdk.signal && (caps & 1)) memcpy(c.sdk.signal->buf + 68, &c.sdk.seq, 4);
+    if (c.sdk.signal && (caps & 1)) { uint32_t prov = c.sdk.seq | 1; memcpy(c.sdk.signal->buf + 68, &prov, 4); }
     PipeServerClose(c.sdk.pipe);
     ThreadResume(CtlThread(&c, 0));
     Timeout(&c, 0, 1);
@@ -639,24 +639,35 @@ static void X6Signal(Sdk *s)
         int32_t caps, waiters, handoff;
         memcpy(&caps, s->signal->buf + 4, 4);
         if (caps & 1) {
-            memcpy(s->signal->buf + 68, &s->seq, 4);
-            memcpy(&caps, s->signal->buf + 4, 4);
-            memcpy(&waiters, s->signal->buf + 64, 4);
+            int32_t fin = (int32_t)s->seq, prov = fin | 1;
             memcpy(&handoff, s->signal->buf + 68, 4);
-            if (((caps & 1) && waiters == 0) || handoff != (int32_t)s->seq) input = 0;
-            else memset(s->signal->buf + 68, 0, 4);
+            if (handoff != 0 && (handoff & 1) == 0) {
+                memcpy(s->signal->buf + 68, &fin, 4);
+                input = 0;
+            } else {
+                memcpy(s->signal->buf + 68, &prov, 4);
+                memcpy(&caps, s->signal->buf + 4, 4);
+                memcpy(&waiters, s->signal->buf + 64, 4);
+                memcpy(&handoff, s->signal->buf + 68, 4);
+                if ((caps & 1) && waiters == 0) {
+                    if (handoff == prov) { memcpy(s->signal->buf + 68, &fin, 4); input = 0; }
+                } else if (handoff == prov) {
+                    memset(s->signal->buf + 68, 0, 4);
+                }
+            }
         }
     }
     if (input) EventSet(s->inputEv);
 }
 
 /* The exchange done and the program killed before its recheck: the frame
- * sits in the handoff (2.1.0 on a gated driver) with no SetEvent. */
+ * sits in the handoff, provisional (2.1.0 on a gated driver), with no
+ * SetEvent. */
 static void X6ExchangeOnly(Sdk *s)
 {
     int32_t caps = 0;
     if (s->signal) memcpy(&caps, s->signal->buf + 4, 4);
-    if (s->signal && (caps & 1)) memcpy(s->signal->buf + 68, &s->seq, 4);
+    if (s->signal && (caps & 1)) { uint32_t prov = s->seq | 1; memcpy(s->signal->buf + 68, &prov, 4); }
 }
 
 /* A take of a frame already sent. P is signaled. At the wait's answer,
@@ -1098,6 +1109,307 @@ static void StreamX7KillStuckAlone(PlanProfile *p)
     CtlStop(&c);
 }
 
+/* x8: a frame left in the handoff before its program's recheck, and the next program's own handoff at the switch between programs. */
+/* The program, stopped between its exchange and its recheck, resumes: the
+ * recheck and the compare-exchange. A take dropped the provisional SeqNo,
+ * so the compare-exchange fails and the frame is signaled. On a driver
+ * without the capability this is the SetEvent after the store. */
+static void X6Resume(Sdk *s)
+{
+    int input = 1;
+    if (s->signal) {
+        int32_t caps, waiters, handoff, fin = (int32_t)s->seq, prov = fin | 1;
+        memcpy(&caps, s->signal->buf + 4, 4);
+        memcpy(&handoff, s->signal->buf + 68, 4);
+        if ((caps & 1) || handoff == prov) {
+            memcpy(&waiters, s->signal->buf + 64, 4);
+            if ((caps & 1) && waiters == 0) {
+                if (handoff == prov) { memcpy(s->signal->buf + 68, &fin, 4); input = 0; }
+            } else if (handoff == prov) {
+                memset(s->signal->buf + 68, 0, 4);
+            }
+        }
+    }
+    if (input) EventSet(s->inputEv);
+}
+static Ctl *g_x8Ctl;
+static int g_x8Mode, g_x8Done;
+
+/* What another process does at the worker's zero-timeout poll (this
+ * driver) or, on a driver that never polls, from the scenario at the same
+ * point after the worker's timeout wake. */
+static void X8Act(void)
+{
+    if (g_x8Done) return;
+    g_x8Done = 1;
+    Ctl *c = g_x8Ctl;
+    uint32_t left;
+    switch (g_x8Mode) {
+    case 0:
+        /* A's pipe closes and a 2.1.0 B starts: input zeroed, handoff
+         * cleared, B1 stored at left + 2. B's acknowledgement zeroing is
+         * left for later: the worker's load of the release bit came before
+         * it, its load of the section after B1's store. */
+        PipeServerClose(c->sdk.pipe);
+        memcpy(&left, c->sdk.input->buf, 4);
+        memset(c->sdk.input->buf, 0, c->sdk.input->size);
+        if (c->sdk.signal) memset(c->sdk.signal->buf + 68, 0, 4);
+        c->sdk.seq = (left & 1) ? left + 1 : left;
+        X6Store(&c->sdk, 0x70);
+        break;
+    case 1:
+        /* A's pipe closes and a v1.11.0 B starts: input zeroed, no
+         * acknowledgement and no pipe, B1 stored at SeqNo 2. */
+        PipeServerClose(c->sdk.pipe);
+        memset(c->sdk.input->buf, 0, c->sdk.input->size);
+        c->sdk.signal = NULL;
+        c->sdk.seq = 0;
+        X6Store(&c->sdk, 0x70);
+        break;
+    case 2:
+        /* The live program, preempted between X's exchange and its
+         * recheck, resumes: X's compare-exchange finds the provisional
+         * SeqNo taken and signals X, and X+2 and X+4 run whole. */
+        X6Resume(&c->sdk);
+        X6Store(&c->sdk, 0x50);
+        X6Signal(&c->sdk);
+        X6Store(&c->sdk, 0x60);
+        X6Signal(&c->sdk);
+        break;
+    case 3:
+        /* As 2, killed between X+4's store and its exchange. */
+        X6Resume(&c->sdk);
+        X6Store(&c->sdk, 0x50);
+        X6Signal(&c->sdk);
+        X6Store(&c->sdk, 0x60);
+        break;
+    }
+}
+static void X8Arm(int mode) { g_x8Done = 0; g_x8Mode = mode; g_pollHook = X8Act; }
+
+/* A frame X in the handoff with the worker counted and no SetEvent
+ * (killed, or preempted, between its exchange and its recheck), the worker
+ * at a loop top before it sees anything else (a timeout here), and
+ * something happening between its take and its read. */
+static void StreamX8(PlanProfile *p, int mode, int probe)
+{
+    static const char *names[] = { "next-gated-between-bit-and-section", "next-v1110-repeats-taken",
+                                   "live-overwrite-skips", "kill-overwrite-skips" };
+    Ctl c;
+    StreamBegin("threads/%s/x8-%s%s", p->id, names[mode], probe ? "" : "-first");
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    if (probe) Probe(&c, 0, 1);
+    HidRead(&c, len);
+    g_x8Ctl = &c;
+    X6Store(&c.sdk, 0x30);
+    X6ExchangeOnly(&c.sdk);
+    X8Arm(mode);
+    ThreadResume(CtlThread(&c, 0));
+    X8Act();
+    g_pollHook = NULL;
+    if (mode == 0) memset(c.sdk.ack->buf, 0, c.sdk.ack->size);
+    ThreadResume(CtlThread(&c, 0));
+    HidRead(&c, len);
+    if (mode <= 1) X6Signal(&c.sdk);
+    RunWorker(&c);
+    RunWorker(&c);
+    HidRead(&c, len);
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x90 + i);
+    if (mode != 3) Frame(&c, data, 63, NULL, NULL, 0);
+    HidRead(&c, len);
+    CtlStop(&c);
+}
+
+/* Two contexts, or a removal that did not take: the sweep that removed the
+ * index's other device clears the acknowledgement's release and delivered
+ * bits and the gate's capabilities for the index the program still holds
+ * (SharedMemoryIO.ForgetDriverLocked), and this device context lives on
+ * with its watch connected. AnnounceGate sets the gate's capability again
+ * at the 256th frame, the release bit stays clear. Then a frame handed over
+ * while the worker completes a read, and nothing after it. */
+static void X8HandY(void)
+{
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0xB0 + i);
+    SdkWriteFrame(&g_x8Ctl->sdk, data, 63, NULL, NULL, 0);
+}
+static void StreamX8Forgotten(PlanProfile *p)
+{
+    Ctl c;
+    StreamBegin("threads/%s/x8-forget-driver-then-handed-frame", p->id);
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    Probe(&c, 0, 1);
+    int32_t caps;
+    memcpy(&caps, c.sdk.ack->buf + 4, 4);
+    caps &= ~3;
+    memcpy(c.sdk.ack->buf + 4, &caps, 4);
+    if (c.sdk.signal) { memset(c.sdk.signal->buf + 4, 0, 4); memset(c.sdk.signal->buf + 8, 0, 4); }
+    uint8_t data[64];
+    for (int f = 0; f < 260; f++) {
+        for (int i = 0; i < 64; i++) data[i] = (uint8_t)(f + i);
+        Frame(&c, data, 63, NULL, NULL, 0);
+    }
+    int32_t dc = 0;
+    if (c.sdk.signal) memcpy(&dc, c.sdk.signal->buf + 4, 4);
+    RecOut("x8.drivercaps", &dc, 4);
+    memcpy(&caps, c.sdk.ack->buf + 4, 4);
+    RecOut("x8.ackcaps", &caps, 4);
+    HidRead(&c, len);
+    g_x8Ctl = &c;
+    g_completeHook = X8HandY;
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0xA0 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    g_completeHook = NULL;
+    HidRead(&c, len);
+    for (int i = 0; i < 3; i++) ThreadResume(CtlThread(&c, 0));
+    CtlStop(&c);
+}
+
+/* Issue #67 with a frame left provisional. A keyboard-style program
+ * holds a key, its release frame queued. It is killed between X's exchange
+ * (key down) and its recheck, with the worker counted. The worker reaches
+ * its take before it sees the pipe close (a timeout here), reads and sends
+ * X, then handles the close. The release frame must still be last. */
+static void StreamX8StuckAloneRelease(PlanProfile *p)
+{
+    Ctl c;
+    StreamBegin("threads/%s/x8-stuck-alone-release-last", p->id);
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    Probe(&c, 0, 1);
+    uint8_t *a = c.sdk.ack->buf;
+    int32_t seq = 2, cnt = 1, sz = 78;
+    memcpy(a + 8, &seq, 4);
+    memcpy(a + 12, &cnt, 4);
+    memcpy(a + 16, &sz, 4);
+    memset(a + 20, 0, 80);
+    a[20] = 0x01;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    HidRead(&c, len);
+    HidRead(&c, len);
+    X6Store(&c.sdk, 0xA0);
+    X6ExchangeOnly(&c.sdk);
+    ThreadResume(CtlThread(&c, 0));
+    PipeServerClose(c.sdk.pipe);
+    ThreadResume(CtlThread(&c, 0));
+    ThreadResume(CtlThread(&c, 0));
+    HidRead(&c, len);
+    ThreadResume(CtlThread(&c, 0));
+    CtlStop(&c);
+}
+
+/* The switch between programs with the worker slow: while it completes a
+ * read for A's frame, A ends, B (2.1.0) starts and writes B1, which is
+ * handed over with no SetEvent since the worker is not counted. The worker
+ * takes B1 before it handles A's pipe close. v2.0.3 reads B1 on its
+ * SetEvent before the close and delivers it. */
+static void X8SwitchHook(void)
+{
+    Ctl *c = g_x8Ctl;
+    PipeServerClose(c->sdk.pipe);
+    MapNextProgram(c, 0);
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x70 + i);
+    SdkWriteFrame(&c->sdk, data, 63, NULL, NULL, 0);
+}
+static void StreamX8NextHandedAtTake(PlanProfile *p)
+{
+    Ctl c;
+    StreamBegin("threads/%s/x8-next-handed-at-take-before-ownergone", p->id);
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    Probe(&c, 0, 1);
+    HidRead(&c, len);
+    g_x8Ctl = &c;
+    g_completeHook = X8SwitchHook;
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x30 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    if (g_completeHook) HmFail("x8: the switch hook never ran");
+    HidRead(&c, len);
+    for (int i = 0; i < 3; i++) ThreadResume(CtlThread(&c, 0));
+    HidRead(&c, len);
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x90 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    HidRead(&c, len);
+    CtlStop(&c);
+}
+
+/* x9: the first atomic step of a frame's handoff, then the program dies.
+ * With a final SeqNo still waiting for its take, that step is the one
+ * compare-exchange that puts this frame's final SeqNo in its place;
+ * otherwise it is the exchange of the provisional SeqNo. On a driver
+ * without the capability nothing is written: the program died before its
+ * SetEvent. */
+static void X9FirstStep(Sdk *s)
+{
+    int32_t caps = 0, handoff;
+    if (!s->signal) return;
+    memcpy(&caps, s->signal->buf + 4, 4);
+    if (!(caps & 1)) return;
+    memcpy(&handoff, s->signal->buf + 68, 4);
+    uint32_t v = handoff != 0 && (handoff & 1) == 0 ? s->seq : (s->seq | 1);
+    memcpy(s->signal->buf + 68, &v, 4);
+}
+
+/* x9-newer-first-step-then-kill: X is read before its handoff lands, and
+ * X's handoff completes while the worker is busy, so X is final and its
+ * take still to come (v2.0.3: X's SetEvent came after the read, a left
+ * signal). The program stores Y, takes the first step of Y's handoff and
+ * dies. The final SeqNo Y replaced is the read X's take owed, and that
+ * read sends Y, as 533ca4a4's read on X's left signal does. idle: the same
+ * with X's handoff done and taken already, and the first step Y's
+ * provisional exchange: nothing sends Y, as on 533ca4a4, where no signal
+ * was left. */
+static Ctl *g_x9Ctl;
+static void X9Complete(void)
+{
+    Ctl *c = g_x9Ctl;
+    X6Signal(&c->sdk);
+    X6Store(&c->sdk, 0x50);
+    X9FirstStep(&c->sdk);
+}
+static int X9Answer(HmThread *t, DWORD result)
+{
+    Ctl *c = g_x9Ctl;
+    if (t != CtlThread(c, 0) || result != WAIT_OBJECT_0 + 1) return 0;
+    X6Store(&c->sdk, 0x30);
+    g_completeHook = X9Complete;
+    return 1;
+}
+static void StreamX9FirstStepKill(PlanProfile *p, int idle)
+{
+    Ctl c;
+    StreamBegin("threads/%s/x9-newer-first-step-then-kill%s", p->id, idle ? "-idle" : "");
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    uint8_t data[64];
+    Probe(&c, 0, 1);
+    HidRead(&c, len);
+    g_x9Ctl = &c;
+    if (idle) {
+        for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x30 + i);
+        Frame(&c, data, 63, NULL, NULL, 0);
+        HidRead(&c, len);
+        ThreadResume(CtlThread(&c, 0));
+        X6Store(&c.sdk, 0x50);
+        X9FirstStep(&c.sdk);
+    } else {
+        for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x20 + i);
+        g_waitAnswerHook = X9Answer;
+        SdkWriteFrame(&c.sdk, data, 63, NULL, NULL, 0);
+        RunWorker(&c);
+        if (g_waitAnswerHook || g_completeHook) HmFail("x9: a hook never ran");
+        HidRead(&c, len);
+    }
+    PipeServerClose(c.sdk.pipe);
+    for (int i = 0; i < 3; i++) ThreadResume(CtlThread(&c, 0));
+    HidRead(&c, len);
+    ThreadResume(CtlThread(&c, 0));
+    CtlStop(&c);
+}
 void CaseThreads(void)
 {
     PlanProfile *sw = PlanFind("switch", NULL);
@@ -1147,4 +1459,14 @@ void CaseThreads(void)
     for (int st = 0; st < 2; st++) { StreamX7KillStuck(ds, st, 1); StreamX7KillStuck(ds, st, 0); }
     StreamX7KillStuckAlone(ds);
     for (int st = 0; st < 2; st++) StreamX7KillStuck(ds, st, 2);
+    StreamX8(ds, 0, 1);
+    StreamX8(ds, 1, 1);
+    StreamX8(ds, 1, 0);
+    StreamX8(ds, 2, 1);
+    StreamX8(ds, 3, 1);
+    StreamX8Forgotten(ds);
+    StreamX8StuckAloneRelease(ds);
+    StreamX8NextHandedAtTake(ds);
+    StreamX9FirstStepKill(ds, 0);
+    StreamX9FirstStepKill(ds, 1);
 }

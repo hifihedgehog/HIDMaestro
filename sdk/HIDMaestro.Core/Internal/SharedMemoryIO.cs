@@ -1152,18 +1152,27 @@ internal static partial class SharedMemoryIO
         if (eventHandle == IntPtr.Zero && companion == IntPtr.Zero) return;
 
         // 5. 2.1.0: the signal gate (docs/design/signal-gate.md). With the
-        // capability announced the frame is handed over: the exchange
-        // puts its SeqNo in InputHandoff, and as a full fence it orders the
-        // even SeqNo's store and the handoff before the loads after it. A
-        // worker counts itself, then takes the handoff with an exchange of
-        // its own, so with the capability still set and a count of zero
-        // the next take finds this frame. Otherwise a worker may be waiting,
-        // or the gate closed (the worker clears the capability, then takes
-        // the handoff): the compare-exchange takes the frame back, and only
-        // then does the SetEvent run. One of the take and the SetEvent
-        // wakes a read for the frame, never both. Without the capability
-        // the full fence serves the companion's count below, and every
-        // frame signals.
+        // capability announced the frame is handed over in InputHandoff,
+        // in two steps, so a worker can tell a frame whose handoff is done
+        // (final, the even SeqNo) from one whose program has not decided
+        // yet or died before it did (provisional, the SeqNo with its low
+        // bit set), which a take drops.
+        //   A final SeqNo still there is a read the worker owes: that read
+        //   finds this frame too, so one compare-exchange puts this frame's
+        //   final SeqNo in its place, with no recheck and no SetEvent. As a
+        //   full fence it orders the even SeqNo's store before it.
+        //   Otherwise the exchange puts the provisional SeqNo there, a full
+        //   fence before the loads after it. A worker counts itself, then
+        //   takes the handoff with an exchange of its own. With the
+        //   capability still set and a count of zero, a compare-exchange
+        //   makes the frame final for the next take. Otherwise a worker may
+        //   be waiting, or the gate closed (the worker clears the
+        //   capability, then takes the handoff): the compare-exchange takes
+        //   the frame back. Either compare-exchange that fails found the
+        //   provisional SeqNo taken and dropped. In both cases, and only
+        //   then, the SetEvent runs.
+        // Without the capability the full fence serves the companion's
+        // count below, and every frame signals.
         if (signalView != IntPtr.Zero)
         {
             byte* s = (byte*)signalView;
@@ -1171,11 +1180,23 @@ internal static partial class SharedMemoryIO
                 && (Volatile.Read(ref *(int*)(s + SIGNAL_OFFSET_DRIVER_CAPS)) & SIGNAL_CAP_INPUT_WAITERS) != 0)
             {
                 ref int handoff = ref *(int*)(s + SIGNAL_OFFSET_INPUT_HANDOFF);
-                Interlocked.Exchange(ref handoff, (int)seqNo);
-                bool kept = (Volatile.Read(ref *(int*)(s + SIGNAL_OFFSET_DRIVER_CAPS)) & SIGNAL_CAP_INPUT_WAITERS) != 0
-                            && Volatile.Read(ref *(int*)(s + SIGNAL_OFFSET_INPUT_WAITERS)) == 0;
-                if (kept || Interlocked.CompareExchange(ref handoff, 0, (int)seqNo) != (int)seqNo)
+                int final = (int)seqNo, owed = Volatile.Read(ref handoff);
+                if (owed != 0 && (owed & 1) == 0 && Interlocked.CompareExchange(ref handoff, final, owed) == owed)
                     eventHandle = IntPtr.Zero;
+                else
+                {
+                    int provisional = final | 1;
+                    Interlocked.Exchange(ref handoff, provisional);
+                    bool kept = (Volatile.Read(ref *(int*)(s + SIGNAL_OFFSET_DRIVER_CAPS)) & SIGNAL_CAP_INPUT_WAITERS) != 0
+                                && Volatile.Read(ref *(int*)(s + SIGNAL_OFFSET_INPUT_WAITERS)) == 0;
+                    if (kept)
+                    {
+                        if (Interlocked.CompareExchange(ref handoff, final, provisional) == provisional)
+                            eventHandle = IntPtr.Zero;
+                    }
+                    else
+                        Interlocked.CompareExchange(ref handoff, 0, provisional);
+                }
             }
             else
                 Thread.MemoryBarrier();
