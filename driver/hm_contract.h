@@ -78,23 +78,25 @@ C_ASSERT(FIELD_OFFSET(HIDMAESTRO_VERSION_INFO, DriverConfigError) == 56);
  * The HID driver's worker counts itself in InputWaiters across every wait
  * on the input event, with an interlocked increment and then an
  * interlocked exchange that takes InputHandoff, and an interlocked
- * decrement when the wait returns. A take that finds a SeqNo reads the
- * section without waiting, or, when the worker leaves its loop first on
- * the stop event or at teardown, signals the input event for it. The SDK
- * stores the frame's even SeqNo and, with HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS
- * set, exchanges that SeqNo into InputHandoff, then loads the capability
- * again and InputWaiters. With the capability still set and the count zero it
- * leaves the frame there for the worker's next take. With any other count,
- * or with the capability gone, it takes the SeqNo back with a
- * compare-exchange and calls SetEvent only when that succeeds, so a frame
- * gets one wakeup, the take or the signal, never both, and never neither
- * while its program runs. A frame a program left there as it died, between
- * its exchange and its compare-exchange, OwnerGone drops, as v2.0.3 never
- * read a frame whose program died before its SetEvent. A take of it before
- * the owner pipe's close reads the section and sends that frame where
- * v2.0.3 in the same order sent nothing. It sends no frame of a next
- * program there, which has its own take or signal. Without the capability
- * it signals every frame.
+ * decrement when the wait returns. InputHandoff holds a frame's even SeqNo
+ * once final, the SeqNo with its low bit set while provisional, or 0. A
+ * take that finds a final SeqNo reads the section without waiting, or,
+ * when the worker leaves its loop first on the stop event or at teardown,
+ * signals the input event for it. A take that finds a provisional SeqNo
+ * drops it. The SDK stores the frame's even SeqNo and, with
+ * HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS set, reads InputHandoff. A final
+ * SeqNo still there is a read the worker owes, which finds this frame too:
+ * one compare-exchange puts this frame's final SeqNo in its place, and no
+ * SetEvent runs. Otherwise it exchanges the provisional SeqNo in, then
+ * loads the capability again and InputWaiters. With the capability still
+ * set and the count zero, a compare-exchange makes the frame final for the
+ * worker's next take. With any other count, or with the capability gone, a
+ * compare-exchange takes it back. It calls SetEvent unless it left the
+ * frame final: a compare-exchange that fails found the provisional SeqNo
+ * taken and dropped. So a frame gets a wakeup that reads the section after
+ * its store, the take or the signal. A frame left provisional by a program
+ * that died there gets none, as v2.0.3 never read a frame whose program
+ * died before its SetEvent. Without the capability it signals every frame.
  *
  * The XUSB companion counts the WAIT_FOR_INPUT requests in its manual queue
  * in CompanionParked: up once the request is in the queue, then a look at
