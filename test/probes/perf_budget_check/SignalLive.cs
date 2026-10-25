@@ -20,11 +20,26 @@
 //   - from 2.1.0, a frame written and signaled through the signal gate
 //     (docs/design/signal-gate.md), as a submit now ends: the signal only
 //     while the driver waits. An SDK without the gate has no such row
+//   - two rows at 1 kHz, where the worker is back in its wait before each
+//     frame, as under a program that submits once a millisecond: each write
+//     follows a 1 ms wait on a high-resolution waitable timer, and only the
+//     write is timed. A run's sample is its mean ns per write.
+//     "a submit's frame write at 1 kHz" is the write each release's submit
+//     makes: the gated writer with the controller's signal view on an SDK
+//     with the gate, else the writer that signals every frame, so the row
+//     pairs v2.0.3's submit with 2.1.0's. "a frame written and signaled at
+//     1 kHz" is the writer that signals every frame on both, which tells the
+//     driver's part from the gate's. On an SDK with the gate an untimed pass
+//     after them prints the share of paced writes that found InputWaiters
+//     nonzero just before the write, which shows the row times the gate's
+//     signaled branch
 // The frames are the controller's own last report and continue its
 // sequence numbers, so the driver sends each as it sends a submit's. It
 // builds against b4d29d9 too, whose writer takes the same arguments, so the
 // two releases' drivers and companions are timed by the same calls.
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -74,14 +89,19 @@ internal static partial class Program
                     SharedMemoryIO.WriteInputFrame(own, IntPtr.Zero, ref ownSeq, frame, dataLen, gipOrNull), gate: false);
             }
             finally { Marshal.FreeHGlobal(own); }
-            Measure($"a frame written and signaled, {id}", runs, 20_000, () =>
-                SharedMemoryIO.WriteInputFrame(view, input, ref seq, frame, dataLen, gipOrNull, companionEvent: companion), gate: false);
-            if (GatedWriter() is { } gated)
+            Action signaled = () =>
+                SharedMemoryIO.WriteInputFrame(view, input, ref seq, frame, dataLen, gipOrNull, companionEvent: companion);
+            Measure($"a frame written and signaled, {id}", runs, 20_000, signaled, gate: false);
+            var gated = GatedWriter();
+            IntPtr signal = IntPtr.Zero;
+            Action submit = signaled;
+            if (gated != null)
             {
-                IntPtr signal = (IntPtr)t.GetField("_signalView", Any)!.GetValue(c)!;
-                Measure($"a frame written and signaled through the signal gate, {id}", runs, 20_000, () =>
-                    gated(view, input, ref seq, frame, dataLen, gipOrNull, 0, default, 0, companion, signal), gate: false);
+                signal = (IntPtr)t.GetField("_signalView", Any)!.GetValue(c)!;
+                submit = () => gated(view, input, ref seq, frame, dataLen, gipOrNull, 0, default, 0, companion, signal);
+                Measure($"a frame written and signaled through the signal gate, {id}", runs, 20_000, submit, gate: false);
             }
+            PacedRows(id, submit, signaled, signal);
             // The controller's next frame follows the probe's.
             seqField.SetValue(c, seq);
         }
@@ -90,6 +110,97 @@ internal static partial class Program
 
     [DllImport("kernel32.dll", EntryPoint = "SetEvent")]
     static extern bool SignalSetEvent(IntPtr handle);
+
+    // The paced rows: 20 runs of 500 writes, a write a millisecond, and an
+    // untimed pass of 1,500. Four rows and two passes make 43,200 waits a
+    // launch across the two controllers, 43 to 65 s for a 1 ms wait that
+    // takes 1.0 to 1.5 ms (1.52 ms measured at idle priority, 2026-10-25).
+    const int PacedRuns = 20, PacedWrites = 500, PacedWarmup = 50, PacedCheckWrites = 1_500;
+    // InputWaiters in Global\HIDMaestroSignal<N> (driver\hm_contract.h), as a
+    // literal so this source builds against an SDK without the gate.
+    const int PacedWaitersOffset = 64;
+    const uint CreateWaitableTimerHighResolution = 0x2, TimerAllAccess = 0x1F0003, Infinite = 0xFFFFFFFF;
+
+    [DllImport("kernel32.dll", EntryPoint = "CreateWaitableTimerExW", SetLastError = true)]
+    static extern IntPtr PacedCreateTimer(IntPtr attributes, IntPtr name, uint flags, uint access);
+    [DllImport("kernel32.dll", EntryPoint = "SetWaitableTimer", SetLastError = true)]
+    static extern bool PacedSetTimer(IntPtr timer, ref long dueTime, int period, IntPtr completion, IntPtr arg, bool resume);
+    [DllImport("kernel32.dll", EntryPoint = "WaitForSingleObject")]
+    static extern uint PacedWaitObject(IntPtr handle, uint ms);
+    [DllImport("kernel32.dll", EntryPoint = "CloseHandle")]
+    static extern bool PacedCloseHandle(IntPtr handle);
+
+    /// <summary>The 1 kHz rows of one controller. signal is its signal view
+    /// on an SDK with the gate, else zero, which skips the check pass.</summary>
+    static void PacedRows(string id, Action submit, Action signaled, IntPtr signal)
+    {
+        IntPtr timer = PacedCreateTimer(IntPtr.Zero, IntPtr.Zero, CreateWaitableTimerHighResolution, TimerAllAccess);
+        if (timer == IntPtr.Zero)
+        {
+            Console.WriteLine($"  the 1 kHz rows, {id}: no high-resolution waitable timer (error {Marshal.GetLastWin32Error()}), none timed");
+            return;
+        }
+        try
+        {
+            PacedMeasure($"a submit's frame write at 1 kHz, {id}", timer, submit);
+            PacedMeasure($"a frame written and signaled at 1 kHz, {id}", timer, signaled);
+            if (signal != IntPtr.Zero) PacedCheck(id, timer, submit, signal);
+        }
+        finally { PacedCloseHandle(timer); }
+    }
+
+    /// <summary>A 1 ms wait on the high-resolution timer, relative, in
+    /// 100 ns units.</summary>
+    static void PacedTick(IntPtr timer)
+    {
+        long due = -10_000;
+        if (!PacedSetTimer(timer, ref due, 0, IntPtr.Zero, IntPtr.Zero, false))
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        PacedWaitObject(timer, Infinite);
+    }
+
+    /// <summary>A row in Measure's line format: a run is PacedWrites paced
+    /// writes, its sample the mean of the writes alone, each between two
+    /// Stopwatch timestamps with the wait outside them.</summary>
+    static void PacedMeasure(string name, IntPtr timer, Action write)
+    {
+        for (int i = 0; i < PacedWarmup; i++) { PacedTick(timer); write(); }
+        var perCall = new List<double>(PacedRuns);
+        long worstBytes = 0;
+        for (int run = 0; run < PacedRuns; run++)
+        {
+            long ticks = 0;
+            long bytes0 = GC.GetAllocatedBytesForCurrentThread();
+            for (int i = 0; i < PacedWrites; i++)
+            {
+                PacedTick(timer);
+                long t0 = Stopwatch.GetTimestamp();
+                write();
+                ticks += Stopwatch.GetTimestamp() - t0;
+            }
+            worstBytes = Math.Max(worstBytes, GC.GetAllocatedBytesForCurrentThread() - bytes0);
+            perCall.Add(ticks * 1e9 / Stopwatch.Frequency / PacedWrites);
+        }
+        Report($"{name}: ns per call", perCall, PacedRuns, $", most bytes allocated in one run of {PacedWrites} calls {worstBytes}");
+    }
+
+    /// <summary>Untimed: paced writes through the submit's writer, each
+    /// after a read of InputWaiters, and the share that found it nonzero. A
+    /// write that finds a worker counted takes the gate's signaled branch,
+    /// unless the worker leaves its wait between the read and the write's
+    /// recheck. A plain line, not a row.</summary>
+    static void PacedCheck(string id, IntPtr timer, Action submit, IntPtr signal)
+    {
+        int found = 0;
+        for (int i = 0; i < PacedCheckWrites; i++)
+        {
+            PacedTick(timer);
+            if (Marshal.ReadInt32(signal, PacedWaitersOffset) != 0) found++;
+            submit();
+        }
+        Console.WriteLine(FormattableString.Invariant(
+            $"  the 1 kHz submit write, {id}, untimed: {found} of {PacedCheckWrites} paced writes found InputWaiters nonzero just before the write ({100.0 * found / PacedCheckWrites:F1} percent)"));
+    }
 
     delegate void GatedWrite(IntPtr view, IntPtr eventHandle, ref uint seqNo, ReadOnlySpan<byte> data, int dataLen,
         byte[]? gipData, int dataOffset, ReadOnlySpan<byte> extendedData, int extendedLen, IntPtr companionEvent, IntPtr signalView);

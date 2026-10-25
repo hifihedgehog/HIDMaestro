@@ -548,10 +548,18 @@ internal static partial class Program
                 (0, 0, 0), (0, 0x90000000u, 0x90000000u), (0x90000000u, 0, 0x90000000u),
                 (0, 0xFFFFFFFFu, 2), (0xFFFFFFFFu, 0, 2), (4, 0x80000006u, 4), (0xFFFFFFFEu, 2, 2), (6, 9, 10),
             };
-            var got = cases.Select(c => SharedMemoryIO.EvenAbove(c.A, c.B)).ToArray();
-            Check("the SeqNo a program counts from takes 0 for no SeqNo, and the later of two across the wrap",
-                cases.Select(c => c.Want).SequenceEqual(got),
-                string.Join(" ", cases.Zip(got, (c, g) => $"({c.A:X},{c.B:X})={g:X}")));
+            // Found by name, so this source builds against v2.0.3's SDK, which
+            // has no EvenAbove (HmSdkDll).
+            var evenAbove = typeof(SharedMemoryIO).GetMethod("EvenAbove", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            if (evenAbove == null)
+                Console.WriteLine("  this SDK has no SharedMemoryIO.EvenAbove: the start SeqNo check needs 2.1.0's");
+            else
+            {
+                var got = cases.Select(c => (uint)evenAbove.Invoke(null, new object[] { c.A, c.B })!).ToArray();
+                Check("the SeqNo a program counts from takes 0 for no SeqNo, and the later of two across the wrap",
+                    cases.Select(c => c.Want).SequenceEqual(got),
+                    string.Join(" ", cases.Zip(got, (c, g) => $"({c.A:X},{c.B:X})={g:X}")));
+            }
         }
 
         // Profile arguments.

@@ -67,11 +67,13 @@ C_ASSERT(FIELD_OFFSET(HIDMAESTRO_VERSION_INFO, DriverConfigError) == 56);
 /* 2.1.0: the signal gate (docs/design/signal-gate.md). Global\HIDMaestroSignal<N>,
  * 256 bytes, created by an SDK of 2.1.0 or later as it maps the index,
  * after the owner pipe and after it zeroes the input section. An SDK that
- * finds the section already there leaves the counts as they are, since a
- * driver host of a device on the index may be counting in them, and zeroes
- * InputHandoff, a frame of the program before it, whose input section it
- * has just zeroed. The capability words are the one other thing an SDK
- * writes in it again: a sweep that removed the index's device clears them.
+ * finds the section already there leaves the counts and InputHandoff as
+ * they are. A driver host of a device on the index may be counting in
+ * them, and a final SeqNo the program before it left in InputHandoff is a
+ * read the worker still owes, which this program's first frame replaces.
+ * Outside its frames, the capability words are the one thing an SDK
+ * writes in a section it found: its sweep of a removed device on the index
+ * clears them (SharedMemoryIO.ForgetDriverLocked).
  * Each driver host maps it once and keeps it until its device goes, and
  * the XUSB companion holds it from its add to its release.
  *

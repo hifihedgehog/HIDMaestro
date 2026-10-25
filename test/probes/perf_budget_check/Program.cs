@@ -46,7 +46,8 @@
 //                  live: on a DualShock 4 and an Xbox 360 pad, SetEvent on
 //                  the input event and the companion's doorbell alone, and a
 //                  frame written to the section without and with its signal,
-//                  and to this process's own memory (SignalLive.cs). It
+//                  and to this process's own memory, and the submit's write
+//                  and the signaled write at 1 kHz (SignalLive.cs). It
 //                  builds against b4d29d9 as is
 //   rate [runs] [seconds] [profile ...] [--key=<identity>]
 //                  sustained throughput: SubmitState every millisecond and
