@@ -234,9 +234,10 @@ static void StreamLateReadWrap(PlanProfile *p, int legacy)
  * OwnerGone and serves it to the read, from the cache when it comes late. */
 static Ctl *g_nextCtl;
 static int g_nextLegacy;
-static void StartNextProgram(void)
+/* The next program's start up to its first frame: it zeroes the input
+ * section and the acknowledgement and makes its pipe. */
+static void MapNextProgram(Ctl *c, int legacy)
 {
-    Ctl *c = g_nextCtl;
     WCHAR n[96];
     uint32_t left;
     memcpy(&left, c->sdk.input->buf, 4);
@@ -244,13 +245,19 @@ static void StartNextProgram(void)
     memset(c->sdk.ack->buf, 0, c->sdk.ack->size);
     swprintf_s(n, ARRAYSIZE(n), L"\\\\.\\pipe\\HIDMaestroOwner%d", c->index);
     c->sdk.pipe = PipeServerNew(n, 0x2F44);
-    if (g_nextLegacy) {
+    if (legacy) {
         c->sdk.signal = NULL;
         c->sdk.seq = 0;
     } else {
         if (c->sdk.signal) memset(c->sdk.signal->buf + 68, 0, 4);
         c->sdk.seq = (left & 1) ? left + 1 : left;
     }
+}
+
+static void StartNextProgram(void)
+{
+    Ctl *c = g_nextCtl;
+    MapNextProgram(c, g_nextLegacy);
     uint8_t data[64];
     for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x70 + i);
     SdkWriteFrame(&c->sdk, data, 63, NULL, NULL, 0);
@@ -458,6 +465,155 @@ static void StreamX5Kill(PlanProfile *p, int release)
     CtlStop(&c);
 }
 
+/* HID class keeps one READ_REPORT outstanding: it sends the next once the
+ * last completed. */
+static void KeepOneRead(Ctl *c)
+{
+    uint32_t len = c->p->readLength ? c->p->readLength : 64;
+    if (Parked(c) == 0) HidRead(c, len);
+}
+
+static void FrameData(uint8_t data[64], uint8_t base)
+{
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(base + i);
+}
+
+/* Two programs before 2.1.0 on the index, the second starting early: it
+ * zeroes the input section before the worker has handled the first one's
+ * pipe close. Each step a wait answer the stream picks runs at that
+ * answer, before the worker reads (g_waitAnswerHook).
+ *
+ * legacy-next-after-zero-read: A1 (SeqNo 2) is read and delivered. A2's
+ * signal wakes the worker, and before it reads, A ends and B zeroes the
+ * section. The worker reads the zeroed section. B1, SeqNo 2 again, is
+ * signaled and read before OwnerGone. v2.0.3 forgot SeenSeqNo at the zero
+ * read and sends B1. */
+static Ctl *g_zCtl;
+static int ZeroReadAnswer(HmThread *t, DWORD result)
+{
+    Ctl *c = g_zCtl;
+    if (t != CtlThread(c, 0) || result != WAIT_OBJECT_0 + 1) return 0;
+    PipeServerClose(c->sdk.pipe);
+    MapNextProgram(c, 1);
+    return 1;
+}
+
+static void StreamZeroReadNext(PlanProfile *p)
+{
+    Ctl c;
+    int saved = g_sdkSignal;
+    g_sdkSignal = 0;
+    StreamBegin("threads/%s/legacy-next-after-zero-read", p->id);
+    if (CtlStart(&c, p, 0, SDK_ALL, 0)) {
+        uint8_t data[64];
+        KeepOneRead(&c);
+        FrameData(data, 0x10);
+        Frame(&c, data, 63, NULL, NULL, 0);
+        KeepOneRead(&c);
+        FrameData(data, 0x20);
+        SdkWriteFrame(&c.sdk, data, 63, NULL, NULL, 0);
+        g_zCtl = &c;
+        g_waitAnswerHook = ZeroReadAnswer;
+        RunWorker(&c);
+        if (g_waitAnswerHook) HmFail("zero-read: the wait never answered the input event");
+        KeepOneRead(&c);
+        FrameData(data, 0x70);
+        SdkWriteFrame(&c.sdk, data, 63, NULL, NULL, 0);
+        RunWorker(&c);
+        KeepOneRead(&c);
+        RunWorker(&c);
+        KeepOneRead(&c);
+        FrameData(data, 0x90);
+        Frame(&c, data, 63, NULL, NULL, 0);
+        KeepOneRead(&c);
+        CtlStop(&c);
+    }
+    g_sdkSignal = saved;
+}
+
+/* legacy-next-zero-read-late-after-recycle: A1's signal wakes the worker,
+ * and A2 (SeqNo 4) is stored and signaled before it reads, so it reads and
+ * delivers A2 and A2's signal stays set. A foreign stop recycles the
+ * worker, which forgets the SeqNos, and A2's signal has it read A2 again
+ * into the cache with no read parked. A3's signal wakes it, and before it
+ * reads, A ends and B zeroes the section. Then a read comes. v2.0.3 put
+ * its all-zero report at SeqNo 0 in the cache, and the read parks.
+ *
+ * legacy-next-late-below-last-delivered: A2 is delivered as above. A2's
+ * signal wakes the worker, and before it reads, A ends, B zeroes the
+ * section and stores B1 (SeqNo 2) without signaling yet. The worker reads
+ * B1 with no read parked, and then a read comes: below the SeqNo last
+ * delivered, it parks in v2.0.3. OwnerGone runs, then B1's signal comes. */
+static int g_zMode;
+static int SecondFrameAnswer(HmThread *t, DWORD result)
+{
+    Ctl *c = g_zCtl;
+    if (t != CtlThread(c, 0) || result != WAIT_OBJECT_0 + 1) return 0;
+    uint8_t data[64];
+    FrameData(data, 0x20);
+    SdkWriteFrame(&c->sdk, data, 63, NULL, NULL, 0);
+    return 1;
+}
+
+static int NextStartsAnswer(HmThread *t, DWORD result)
+{
+    Ctl *c = g_zCtl;
+    if (t != CtlThread(c, 0) || result != WAIT_OBJECT_0 + 1) return 0;
+    PipeServerClose(c->sdk.pipe);
+    MapNextProgram(c, 1);
+    if (g_zMode == 1) {
+        uint8_t data[64];
+        FrameData(data, 0x70);
+        SdkWriteFrame(&c->sdk, data, 63, NULL, NULL, 0);
+        c->sdk.inputEv->signaled = FALSE;
+    }
+    return 1;
+}
+
+static void StreamTwoProgramLate(PlanProfile *p, int mode)
+{
+    Ctl c;
+    int saved = g_sdkSignal;
+    g_sdkSignal = 0;
+    StreamBegin(mode == 0 ? "threads/%s/legacy-next-zero-read-late-after-recycle" : "threads/%s/legacy-next-late-below-last-delivered", p->id);
+    if (CtlStart(&c, p, 0, SDK_ALL, 0)) {
+        uint8_t data[64];
+        uint32_t len = c.p->readLength ? c.p->readLength : 64;
+        g_zCtl = &c;
+        g_zMode = mode;
+        KeepOneRead(&c);
+        FrameData(data, 0x10);
+        SdkWriteFrame(&c.sdk, data, 63, NULL, NULL, 0);
+        g_waitAnswerHook = SecondFrameAnswer;
+        RunWorker(&c);
+        if (g_waitAnswerHook) HmFail("two-program: the first wait never answered the input event");
+        if (mode == 0) {
+            HmObj *o = ObjFromHandle(c.dev->threads[0]->waitHandles[0]);
+            if (!o || o->kind != HK_EVENT || !((HmEvent *)o)->manual) HmFail("two-program: no stop event");
+            EventSet((HmEvent *)o);
+            RunWorker(&c);
+            RunWorker(&c);
+            FrameData(data, 0x30);
+            SdkWriteFrame(&c.sdk, data, 63, NULL, NULL, 0);
+        }
+        g_waitAnswerHook = NextStartsAnswer;
+        RunWorker(&c);
+        if (g_waitAnswerHook) HmFail("two-program: the next program's wait never answered the input event");
+        HidRead(&c, len);
+        RunWorker(&c);
+        KeepOneRead(&c);
+        if (mode == 1) {
+            EventSet(c.sdk.inputEv);
+            RunWorker(&c);
+            KeepOneRead(&c);
+        }
+        FrameData(data, 0x90);
+        Frame(&c, data, 63, NULL, NULL, 0);
+        KeepOneRead(&c);
+        CtlStop(&c);
+    }
+    g_sdkSignal = saved;
+}
 void CaseThreads(void)
 {
     PlanProfile *sw = PlanFind("switch", NULL);
@@ -492,4 +648,7 @@ void CaseThreads(void)
     StreamX5GateOff(ds);
     StreamX5Kill(ds, 1);
     StreamX5Kill(ds, 0);
+    StreamZeroReadNext(ds);
+    StreamTwoProgramLate(ds, 0);
+    StreamTwoProgramLate(ds, 1);
 }

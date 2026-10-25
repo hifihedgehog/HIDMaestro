@@ -884,9 +884,10 @@ TryOpenSignal(_In_ PDEVICE_CONTEXT ctx)
  * left its signal. The exchange comes after the interlocked increment of
  * InputWaiters, so the two full barriers face the SDK's exchange and its
  * load of the count. A frame handed over after a read had already sent it
- * wakes nothing: v2.0.3's worker read only on the frame's own signal, and a
- * read for it now would take whatever the section holds next before that
- * frame's own wakeup. Worker thread only. */
+ * wakes nothing: a read now finds that frame and sends nothing, or a newer
+ * frame, which its own take or signal reads. v2.0.3's worker read on every
+ * input event, a leftover one included, so it could read that newer frame
+ * sooner. Worker thread only. */
 static BOOLEAN
 TakeHandoff(_In_ PDEVICE_CONTEXT ctx)
 {
@@ -1727,15 +1728,29 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
     if (!ReadSharedInput(ctx, &shared)) return;
 
     ULONG seqNo = shared.SeqNo;
-    /* 2.1.0: SeqNo 0 with no data is a section an SDK zeroed as it mapped
-     * the index, and no frame. v2.0.3 sent it as an all-zero report when an
-     * input event left set for the last program's frame found it. A
-     * program before 2.1.0 stores 0 with its frame at every 2^31st frame,
-     * and that frame goes on. */
-    if (seqNo == 0 && shared.DataSize == 0 && shared.ExtendedReportSize == 0) return;
     /* A frame is new when it is not the last one sent, whether a signal or
      * a handed-over frame woke this read (TakeHandoff). */
     if (seqNo == ctx->SeenSeqNo) return; /* No new data */
+    /* 2.1.0: SeqNo 0 with no data is a section an SDK zeroed as it mapped
+     * the index, and no frame. v2.0.3 read it as one: SeenSeqNo became 0,
+     * and the cache took an all-zero report at SeqNo 0, sent to a read
+     * parked. This driver sends nothing and forgets both SeqNos as that
+     * read did, so a program before 2.1.0 that starts next, counting from
+     * 0, has its first frame go out, and a read that comes late parks
+     * instead of taking the last program's frame from the cache. The
+     * stale-wakeup count sees the read as new, as v2.0.3's did. With
+     * LiveFeatureReport the cache holds no data-lane frame, and only
+     * SeenSeqNo goes. A program before 2.1.0 stores 0 with its frame at
+     * every 2^31st frame, and that frame goes on. */
+    if (seqNo == 0 && shared.DataSize == 0 && shared.ExtendedReportSize == 0) {
+        ctx->SeenSeqNo = 0;
+        if (ctx->LiveFeatureReport == 0) {
+            AcquireSRWLockExclusive(&ctx->InputLock);
+            ctx->SharedMemSeqNo = 0;
+            ReleaseSRWLockExclusive(&ctx->InputLock);
+        }
+        return;
+    }
     /* v2.0.0: the worker's stale-wakeup count reads SeenSeqNo, since a
      * frame the driver does not send leaves SharedMemSeqNo alone. */
     ctx->SeenSeqNo = seqNo;
@@ -2846,11 +2861,13 @@ EvtIoDeviceControl(
             servedSize = ctx->ReleaseSizes[i];
             RtlCopyMemory(served, ctx->ReleaseFrames[i], servedSize);
             serve = TRUE;
-        /* 2.1.0: any other SeqNo than the one last delivered is a frame not
-         * delivered yet. Greater-than missed the frame after the SeqNo
-         * wrap, which a 2.1.0 SDK reaches across programs, its numbering
-         * continuing from the last (SharedMemoryIO.InputSeqStart). */
-        } else if (ctx->InputReportReady && ctx->SharedMemSeqNo != ctx->LastDeliveredInputSeqNo) {
+        /* Greater-than, as v2.0.3 tested it. A frame after the SeqNo wrap
+         * waits for the next frame, as it did there. Before OwnerGone runs,
+         * the next program's first frame can carry a SeqNo below the last
+         * program's last one delivered, and that read parks too: served
+         * here, the frame went out again once OwnerGone forgot the SeqNo
+         * and the program's own signal read it again. */
+        } else if (ctx->InputReportReady && ctx->SharedMemSeqNo > ctx->LastDeliveredInputSeqNo) {
             servedSize = ctx->InputReportSize;
             RtlCopyMemory(served, ctx->InputReport, servedSize);
             ctx->LastDeliveredInputSeqNo = ctx->SharedMemSeqNo;
