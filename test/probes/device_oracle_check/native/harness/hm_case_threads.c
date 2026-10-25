@@ -821,6 +821,274 @@ static void StreamZeroReadPolled(PlanProfile *p)
     }
     g_sdkSignal = saved;
 }
+/* x7: the take of a frame already sent against a newer frame, and a frame a killed program left in the handoff, taken at a loop top. */
+static Ctl *g_x7Ctl;
+static int g_x7Done, g_x7Mode, g_x7Legacy;
+
+/* One action, run once, at the first of: this driver's zero-timeout poll
+ * (g_pollHook), or a wait answer of the input event (g_waitAnswerHook), the
+ * point after the worker's wake decision and before its read on 533ca4a4. */
+static void X7Act(void)
+{
+    if (g_x7Done) return;
+    g_x7Done = 1;
+    Ctl *c = g_x7Ctl;
+    if (g_x7Mode == 0) {
+        X6Store(&c->sdk, 0x50);
+    } else if (g_x7Mode == 1) {
+        X6Store(&c->sdk, 0x50);
+        X6Signal(&c->sdk);
+    } else {
+        PipeServerClose(c->sdk.pipe);
+        MapNextProgram(c, g_x7Legacy);
+        X6Store(&c->sdk, 0x70);
+    }
+}
+static int X7Answer(HmThread *t, DWORD result)
+{
+    if (t != CtlThread(g_x7Ctl, 0) || result != WAIT_OBJECT_0 + 1) return 0;
+    X7Act();
+    return 1;
+}
+static void X7Arm(int mode)
+{
+    g_x7Done = 0;
+    g_x7Mode = mode;
+    g_pollHook = X7Act;
+    g_waitAnswerHook = X7Answer;
+}
+static void X7Disarm(void) { g_pollHook = NULL; g_waitAnswerHook = NULL; }
+
+/* X read before its gate part: P signaled, X stored at the wait's answer,
+ * X's gate part at the read's completion (signalX) or left for later. A
+ * stop event can be set there too (stopAfter). */
+static int g_x7SignalX, g_x7StopAfter;
+static void X7Complete(void)
+{
+    Ctl *c = g_x7Ctl;
+    if (g_x7SignalX) X6Signal(&c->sdk);
+    if (g_x7StopAfter) {
+        HmObj *o = ObjFromHandle(c->dev->threads[0]->waitHandles[0]);
+        if (!o || o->kind != HK_EVENT || !((HmEvent *)o)->manual) HmFail("x7: no stop event");
+        EventSet((HmEvent *)o);
+    }
+}
+static int g_x7Arm1AfterX, g_x7ArmMode = 1;
+static int X7AnswerX(HmThread *t, DWORD result)
+{
+    Ctl *c = g_x7Ctl;
+    if (t != CtlThread(c, 0) || result != WAIT_OBJECT_0 + 1) return 0;
+    X6Store(&c->sdk, 0x30);
+    g_completeHook = X7Complete;
+    return 1;
+}
+static void X7ReadXEarly(Ctl *c, int signalX)
+{
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x20 + i);
+    g_x7SignalX = signalX;
+    g_waitAnswerHook = X7AnswerX;
+    SdkWriteFrame(&c->sdk, data, 63, NULL, NULL, 0);
+    RunWorker(c);
+    if (g_waitAnswerHook || g_completeHook) HmFail("x7: a hook never ran");
+}
+
+/* x6-take-sent-then-newer-kill with Y stored at the same point on both
+ * drivers: after the wake decision (this driver's take of the sent X, 533ca4a4's
+ * left signal) and before the read (before-read), or after that read
+ * (after-read). Then the program dies before Y's gate part. */
+static int X7AnswerVariant(HmThread *t, DWORD result);
+static void StreamX7KillOrder(PlanProfile *p, int afterRead)
+{
+    Ctl c;
+    StreamBegin("threads/%s/x7-take-sent-newer-%s-kill", p->id, afterRead ? "after-read" : "before-read");
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    uint8_t data[64];
+    Probe(&c, 0, 1);
+    HidRead(&c, len);
+    g_x7Ctl = &c;
+    g_x7StopAfter = 0;
+    if (afterRead) {
+        X7ReadXEarly(&c, 1);
+        HidRead(&c, len);
+        ThreadResume(CtlThread(&c, 0));
+        X6Store(&c.sdk, 0x50);
+    } else {
+        for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x20 + i);
+        g_x7Arm1AfterX = 1;
+        g_x7ArmMode = 0;
+        g_waitAnswerHook = X7AnswerVariant;
+        SdkWriteFrame(&c.sdk, data, 63, NULL, NULL, 0);
+        RunWorker(&c);
+        g_x7ArmMode = 1;
+        HidRead(&c, len);
+        ThreadResume(CtlThread(&c, 0));
+        if (!g_x7Done) HmFail("x7: Y never stored");
+    }
+    X7Disarm();
+    PipeServerClose(c.sdk.pipe);
+    ThreadResume(CtlThread(&c, 0));
+    ThreadResume(CtlThread(&c, 0));
+    CtlStop(&c);
+}
+
+/* a take of a sent frame X racing the newer frame Y's own gate part,
+ * with the program alive. Y is stored and its gate part run: before the
+ * worker's next take (at X's completion), between the take and the read
+ * (533ca4a4: between its wake and read), or after the read. Gated (2.1.0)
+ * and ungated (a program before 2.1.0, which signals every frame). */
+static void X7CompleteBefore(void)
+{
+    Ctl *c = g_x7Ctl;
+    X6Signal(&c->sdk);
+    X6Store(&c->sdk, 0x50);
+    X6Signal(&c->sdk);
+}
+static void X7CompleteThenArm(void)
+{
+    X6Signal(&g_x7Ctl->sdk);
+    X7Arm(g_x7ArmMode);
+}
+static int X7AnswerVariant(HmThread *t, DWORD result)
+{
+    Ctl *c = g_x7Ctl;
+    if (t != CtlThread(c, 0) || result != WAIT_OBJECT_0 + 1) return 0;
+    X6Store(&c->sdk, 0x30);
+    g_completeHook = g_x7Arm1AfterX ? X7CompleteThenArm : X7CompleteBefore;
+    return 1;
+}
+static void StreamX7Race(PlanProfile *p, int when, int legacy)
+{
+    Ctl c;
+    int saved = g_sdkSignal;
+    if (legacy) g_sdkSignal = 0;
+    static const char *names[] = { "before-take", "in-take-read", "after-read" };
+    StreamBegin("threads/%s/x7-take-sent-race-%s%s", p->id, names[when], legacy ? "-legacy" : "");
+    if (CtlStart(&c, p, 0, SDK_ALL, 0)) {
+        uint32_t len = c.p->readLength ? c.p->readLength : 64;
+        uint8_t data[64];
+        Probe(&c, 0, 1);
+        HidRead(&c, len);
+        g_x7Ctl = &c;
+        g_x7StopAfter = 0;
+        if (when == 2) {
+            X7ReadXEarly(&c, 1);
+        } else {
+            for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x20 + i);
+            g_x7Arm1AfterX = when == 1;
+            g_waitAnswerHook = X7AnswerVariant;
+            SdkWriteFrame(&c.sdk, data, 63, NULL, NULL, 0);
+            RunWorker(&c);
+            if (g_completeHook) HmFail("x7: the completion hook never ran");
+        }
+        HidRead(&c, len);
+        for (int i = 0; i < 2; i++) ThreadResume(CtlThread(&c, 0));
+        if (when == 1 && !g_x7Done) X7Act();
+        if (when == 2) { X6Store(&c.sdk, 0x50); X6Signal(&c.sdk); }
+        X7Disarm();
+        for (int i = 0; i < 3; i++) ThreadResume(CtlThread(&c, 0));
+        HidRead(&c, len);
+        for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x90 + i);
+        Frame(&c, data, 63, NULL, NULL, 0);
+        HidRead(&c, len);
+        CtlStop(&c);
+    }
+    g_sdkSignal = saved;
+}
+
+/* Recycle: X read early and its gate part run, then a foreign stop
+ * before the worker's next take. This driver takes X, signals it back and
+ * recycles. 533ca4a4 returns the stop with X's left signal set and recycles.
+ * Both forget SeenSeqNo there. */
+static void StreamX7Recycle(PlanProfile *p)
+{
+    Ctl c;
+    StreamBegin("threads/%s/x7-take-sent-then-foreign-stop", p->id);
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    Probe(&c, 0, 1);
+    HidRead(&c, len);
+    g_x7Ctl = &c;
+    g_x7StopAfter = 1;
+    X7ReadXEarly(&c, 1);
+    g_x7StopAfter = 0;
+    HidRead(&c, len);
+    for (int i = 0; i < 3; i++) ThreadResume(CtlThread(&c, 0));
+    HidRead(&c, len);
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x90 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    CtlStop(&c);
+}
+
+/* A frame left in the handoff by a program killed between its exchange and
+ * its compare-exchange, with the worker counted, then taken at a loop top
+ * (here after a timeout) before the pipe's close is seen. Between that take
+ * and its read the program's pipe closes and the next program B starts and
+ * stores B1 (on 533ca4a4, after its timeout wake, before its next wait's
+ * answer). B1's SetEvent comes after OwnerGone. sent: X was read before
+ * its exchange. */
+static void StreamX7KillStuck(PlanProfile *p, int sent, int legacy)
+{
+    Ctl c;
+    StreamBegin("threads/%s/x7-kill-stuck-%s-next-%s-at-take", p->id, sent ? "sent" : "unsent", legacy ? "legacy" : "gated");
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    Probe(&c, 0, 1);
+    HidRead(&c, len);
+    g_x7Ctl = &c;
+    g_x7StopAfter = 0;
+    if (sent) {
+        X7ReadXEarly(&c, 0);
+        HidRead(&c, len);
+    } else {
+        X6Store(&c.sdk, 0x30);
+    }
+    X6ExchangeOnly(&c.sdk);
+    g_x7Legacy = legacy;
+    X7Arm(2);
+    g_waitAnswerHook = NULL;
+    ThreadResume(CtlThread(&c, 0));
+    X7Act();
+    X7Disarm();
+    ThreadResume(CtlThread(&c, 0));
+    HidRead(&c, len);
+    X6Signal(&c.sdk);
+    RunWorker(&c);
+    RunWorker(&c);
+    HidRead(&c, len);
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x90 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    HidRead(&c, len);
+    CtlStop(&c);
+}
+
+/* x7-kill-stuck-unsent-alone-at-take: as x7-kill-stuck-unsent-*, with no
+ * next program. The frame a program left in the handoff as it died is
+ * taken at a loop top before the pipe's close is seen, and read. v2.0.3,
+ * whose program died before its SetEvent in the same order, never sends
+ * it. */
+static void StreamX7KillStuckAlone(PlanProfile *p)
+{
+    Ctl c;
+    StreamBegin("threads/%s/x7-kill-stuck-unsent-alone-at-take", p->id);
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    Probe(&c, 0, 1);
+    HidRead(&c, len);
+    X6Store(&c.sdk, 0x30);
+    X6ExchangeOnly(&c.sdk);
+    ThreadResume(CtlThread(&c, 0));
+    PipeServerClose(c.sdk.pipe);
+    ThreadResume(CtlThread(&c, 0));
+    ThreadResume(CtlThread(&c, 0));
+    HidRead(&c, len);
+    ThreadResume(CtlThread(&c, 0));
+    CtlStop(&c);
+}
+
 void CaseThreads(void)
 {
     PlanProfile *sw = PlanFind("switch", NULL);
@@ -863,4 +1131,10 @@ void CaseThreads(void)
     for (int lg = 0; lg < 2; lg++)
         for (int ss = 0; ss < 2; ss++)
             for (int pk = 0; pk < 2; pk++) StreamKillNextInOwnerGone(ds, lg, ss, pk);
+    StreamX7KillOrder(ds, 0);
+    StreamX7KillOrder(ds, 1);
+    for (int w = 0; w < 3; w++) { StreamX7Race(ds, w, 0); StreamX7Race(ds, w, 1); }
+    StreamX7Recycle(ds);
+    for (int st = 0; st < 2; st++) { StreamX7KillStuck(ds, st, 1); StreamX7KillStuck(ds, st, 0); }
+    StreamX7KillStuckAlone(ds);
 }
