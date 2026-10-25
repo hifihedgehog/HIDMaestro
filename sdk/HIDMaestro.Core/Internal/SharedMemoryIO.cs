@@ -462,6 +462,34 @@ internal static partial class SharedMemoryIO
             IntPtr h = IntPtr.Zero, view = IntPtr.Zero;
             try
             {
+                // 2.1.0: the signal gate (docs/design/signal-gate.md). Made
+                // first, before the owner pipe and the input event, which the
+                // worker maps it with. Never zeroed: a section that already
+                // exists is held by a driver host of a device on this index,
+                // which may be counting in it right now, and clearing a count
+                // would hide a waiter. One the SDK did not make, or of another
+                // layout, is let go, and every frame signals.
+                (IntPtr sh, IntPtr sv, bool existed) = CreateSectionOrOpen($@"Global\HIDMaestroSignal{controllerIndex}", SIGNAL_SIZE);
+                if (!existed)
+                    Volatile.Write(ref *(int*)((byte*)sv + SIGNAL_OFFSET_LAYOUT), SIGNAL_LAYOUT);
+                else if (Volatile.Read(ref *(int*)((byte*)sv + SIGNAL_OFFSET_LAYOUT)) != SIGNAL_LAYOUT
+                         || !IsOwnedByAdmin(sh, allowLocalService: false))
+                {
+                    UnmapViewOfFile(sv);
+                    CloseHandle(sh);
+                    sh = sv = IntPtr.Zero;
+                }
+                s_signalHandles[controllerIndex] = sh;
+                s_signalViews[controllerIndex] = sv;
+                // This program counts itself in SdkStarts before it makes its
+                // owner pipe, its input event and its first frame: a driver
+                // worker whose owner watch connects to this program's pipe
+                // reads the count with this program in it, and one that sees
+                // the count move knows the frames since count from above
+                // every frame it read and are never the last program's
+                // (driver.h, Boundary).
+                if (sv != IntPtr.Zero)
+                    Interlocked.Increment(ref *(int*)((byte*)sv + SIGNAL_OFFSET_SDK_STARTS));
                 // Issue #67: the owner pipe. The driver connects and keeps a
                 // read pending that never gets data. Windows closes these ends
                 // when this process ends, however it ends, and the read
@@ -551,25 +579,6 @@ internal static partial class SharedMemoryIO
                 s_versionHandles[controllerIndex] = vh;
                 s_versionViews[controllerIndex] = vv;
 
-                // 2.1.0: the signal gate (docs/design/signal-gate.md). Made
-                // before the input event, which the worker maps it with.
-                // Never zeroed: a section that already exists is held by a
-                // driver host of a device on this index, which may be
-                // counting in it right now, and clearing a count would hide
-                // a waiter. One the SDK did not make, or of another layout,
-                // is let go, and every frame signals.
-                (IntPtr sh, IntPtr sv, bool existed) = CreateSectionOrOpen($@"Global\HIDMaestroSignal{controllerIndex}", SIGNAL_SIZE);
-                if (!existed)
-                    Volatile.Write(ref *(int*)((byte*)sv + SIGNAL_OFFSET_LAYOUT), SIGNAL_LAYOUT);
-                else if (Volatile.Read(ref *(int*)((byte*)sv + SIGNAL_OFFSET_LAYOUT)) != SIGNAL_LAYOUT
-                         || !IsOwnedByAdmin(sh, allowLocalService: false))
-                {
-                    UnmapViewOfFile(sv);
-                    CloseHandle(sh);
-                    sh = sv = IntPtr.Zero;
-                }
-                s_signalHandles[controllerIndex] = sh;
-                s_signalViews[controllerIndex] = sv;
 
                 // 2.1.0: the first frame of this program is a SeqNo no driver
                 // worker on the index has read. A worker compares the section
@@ -580,13 +589,7 @@ internal static partial class SharedMemoryIO
                 // program left and the one the last worker read
                 // (DriverSeenSeq), even. The acknowledgement starts there, so
                 // a wait for delivery compares within this program's frames.
-                // This program counts itself in SdkStarts before the input
-                // event exists and before its first frame: a driver worker
-                // that sees the count move knows the frames since count from
-                // above every frame it read, and are never the last
-                // program's (driver.h, Boundary).
-                if (sv != IntPtr.Zero)
-                    Interlocked.Increment(ref *(int*)((byte*)sv + SIGNAL_OFFSET_SDK_STARTS));
+
                 uint seen = sv != IntPtr.Zero ? Volatile.Read(ref *(uint*)((byte*)sv + SIGNAL_OFFSET_DRIVER_SEEN_SEQ)) : 0;
                 uint start = EvenAbove(leftSeq, seen);
                 s_inputSeqStarts[controllerIndex] = start;

@@ -362,6 +362,7 @@ typedef struct _DEVICE_CONTEXT {
     BOOLEAN FrameRead;                     /* a frame has been read since add */
     BOOLEAN Boundary;
     BOOLEAN RecycleWatchCheck;             /* a recycle's map is to look for an owner watch */
+    BOOLEAN RecycleEventGone;              /* ... and Phase 1 found no input event first */
     BOOLEAN WatchRetryNext;                /* retry the owner watch after the next frame */
     LONG    BoundaryStarts;                /* SdkStarts at the boundary */
     LONG    WatchStarts;                   /* SdkStarts when the owner watch connected */

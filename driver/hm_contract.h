@@ -68,9 +68,11 @@ C_ASSERT(FIELD_OFFSET(HIDMAESTRO_VERSION_INFO, DriverConfigError) == 56);
  * 256 bytes, created by an SDK of 2.1.0 or later before the device exists.
  * An SDK that finds the section already there leaves the counts and
  * DriverSeenSeq as they are, since a driver of a device on the index may be
- * counting in them. The one thing an SDK writes again is the capability
- * words, which a sweep that removed the index's device clears. Each driver
- * host maps it once and keeps it until its device goes.
+ * counting in them. An SDK writes two things in it again: one more in
+ * SdkStarts each time it maps the index, before it makes the owner pipe,
+ * and the capability words, which a sweep that removed the index's device
+ * clears. Each driver host maps it once and keeps it until its device
+ * goes.
  *
  * The HID driver's worker counts itself in InputWaiters across every wait
  * on the input event, with an interlocked increment before it checks the

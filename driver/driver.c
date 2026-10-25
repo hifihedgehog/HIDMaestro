@@ -919,12 +919,17 @@ TryOpenSharedMapping(_In_ PDEVICE_CONTEXT ctx)
     TryOpenOwnerWatch(ctx);
     /* 2.1.0: after a recycle. With a watch connected the worker sees the
      * end of the program on the index, and the frame the section holds is
-     * still the last one read. With none, a program may end unseen, which
-     * v2.0.3 met with the reset of SeenSeqNo here: a boundary instead. */
+     * still the last one read. With none, and the input event gone when
+     * Phase 1 first looked for it, the program that held it ended unseen
+     * and the next may count from 0, which v2.0.3 met with the reset of
+     * SeenSeqNo here: a boundary instead. An event still there is held by
+     * the same program, and a boundary would send a frame already read
+     * again on an input event left set for it. */
     if (ctx->RecycleWatchCheck) {
         ctx->RecycleWatchCheck = FALSE;
-        if (ctx->OwnerPipe == NULL)
+        if (ctx->OwnerPipe == NULL && ctx->RecycleEventGone)
             SetBoundary(ctx);
+        ctx->RecycleEventGone = FALSE;
     }
     AnnounceVersion(ctx);
     TryCreateDoorbell(ctx);
@@ -1923,6 +1928,8 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                 OwnerGone(ctx);
             HANDLE ev = OpenEventW(EVENT_MODIFY_STATE | SYNCHRONIZE, FALSE,
                                    ctx->InputEventName);
+            if (ev == NULL && ctx->RecycleWatchCheck)
+                ctx->RecycleEventGone = TRUE;
             if (ev != NULL) {
                 ctx->InputDataEvent = ev;
                 /* The remove events, which an SDK of this release
