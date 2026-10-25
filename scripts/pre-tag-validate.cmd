@@ -4,7 +4,7 @@ rem  pre-tag-validate.cmd
 rem
 rem  Mandatory pre-release validation. Run before `git tag vX.Y.Z`.
 rem  - Builds the SDK + test app
-rem  - Runs the full regression battery (100 scenarios, 33 min
+rem  - Runs the full regression battery (100 scenarios, 60 min
 rem    on the development laptop, a Lenovo Legion Pro 7)
 rem  - Exits non-zero if any scenario FAILed; do NOT tag/push/release in
 rem    that case
