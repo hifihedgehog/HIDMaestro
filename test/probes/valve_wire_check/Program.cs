@@ -213,16 +213,15 @@ static class Program
     /// 4 ms period, 4.5 s at 9 ms.</summary>
     const int FastRateFrames = 500;
 
-    /// <summary>SubmitState at <paramref name="hz"/> on a spin-waited grid,
-    /// as valve_sdl_check's cadence mode submits, while a reader collects the
-    /// reports. The wire rate over the window, the least-squares slope of the
-    /// reports' arrival times against their order, must stay within 5
-    /// percent of the declared rate. A stall of the reader moves a few
-    /// arrivals and the slope little, and load delays reports without
-    /// adding any. Before issue #72 every submit went out, so at 1 kHz the
-    /// rate was the submit rate, four times the Deck's and nine times the
-    /// 2015 controller's, and at 250 Hz the 2015 controller's was 2.25
-    /// times.</summary>
+    /// <summary>SubmitState at <paramref name="hz"/> on a spin-waited grid
+    /// while a reader collects the reports. The wire rate over the window,
+    /// the least-squares slope of the reports' arrival times against their
+    /// order, must stay within 5 percent of the declared rate. A stall of
+    /// the reader moves a few arrivals and the slope little, and load
+    /// delays reports without adding any. Before issue #72 every submit
+    /// went out, so at 1 kHz the rate was the submit rate, four times the
+    /// Deck's and nine times the 2015 controller's, and at 250 Hz the 2015
+    /// controller's was 2.25 times.</summary>
     static void FastSubmitRate(HMController c, HMProfile prof, string path, int inLen, int idleMs, int hz)
     {
         var st = new HMGamepadState
