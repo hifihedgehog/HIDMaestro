@@ -184,6 +184,47 @@ static void StreamGateSeqWrap(PlanProfile *p)
     CtlStop(&c);
 }
 
+/* The same wrap under a program before 2.1.0, which stores SeqNo 0 with its
+ * frame and signals it: that frame goes out as every other does. */
+static void StreamLegacySeqWrap(PlanProfile *p)
+{
+    Ctl c;
+    int saved = g_sdkSignal;
+    g_sdkSignal = 0;
+    StreamBegin("threads/%s/legacy-seq-wrap", p->id);
+    if (CtlStart(&c, p, 0, SDK_ALL, 0)) {
+        c.sdk.seq = 0xFFFFFFFCu;
+        Probe(&c, 0, 1);
+        Probe(&c, 0, 2);
+        Probe(&c, 0, 3);
+        CtlStop(&c);
+    }
+    g_sdkSignal = saved;
+}
+
+/* The frame after the wrap with no read parked, then a read: the read takes
+ * that frame from the cache at once, under the plan's SDK and under one
+ * before 2.1.0 (legacy), whose frame after 0xFFFFFFFE is SeqNo 0. */
+static void StreamLateReadWrap(PlanProfile *p, int legacy)
+{
+    Ctl c;
+    int saved = g_sdkSignal;
+    if (legacy) g_sdkSignal = 0;
+    StreamBegin(legacy ? "threads/%s/legacy-late-read-wrap" : "threads/%s/gate-late-read-wrap", p->id);
+    if (CtlStart(&c, p, 0, SDK_ALL, 0)) {
+        c.sdk.seq = 0xFFFFFFFCu;
+        Probe(&c, 0, 1);
+        uint8_t data[64];
+        for (int i = 0; i < 64; i++) data[i] = (uint8_t)((legacy ? 0x60 : 0x50) + i);
+        Frame(&c, data, 63, NULL, NULL, 0);
+        uint32_t len = c.p->readLength ? c.p->readLength : 64;
+        HidRead(&c, len);
+        Timeout(&c, 0, 1);
+        CtlStop(&c);
+    }
+    g_sdkSignal = saved;
+}
+
 void CaseThreads(void)
 {
     PlanProfile *sw = PlanFind("switch", NULL);
@@ -204,4 +245,7 @@ void CaseThreads(void)
     StreamGateOwnerGone(ds);
     StreamGateRelease(ds);
     StreamGateSeqWrap(ds);
+    StreamLegacySeqWrap(ds);
+    StreamLateReadWrap(ds, 0);
+    StreamLateReadWrap(ds, 1);
 }
