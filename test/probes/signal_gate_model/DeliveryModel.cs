@@ -120,9 +120,9 @@ internal static class DeliveryModel
         public bool SignalTakenOnExit { get; init; } = true;   // a frame taken and not read when the worker leaves its loop is signaled
         public bool OwedOnlyNextProgram { get; init; } = true; // OwnerGone signals only the next program's frame, not the ended one's
         public bool RetryAfterOwnerGone { get; init; } = true; // the watch is tried again after the first frame read after OwnerGone
-        public bool LateReadNotEqual { get; init; } = true;   // a late READ_REPORT takes any cached SeqNo but the last delivered
+        public bool ZeroForgets { get; init; } = true;     // a zeroed section forgets SeenSeqNo and SharedMemSeqNo and sends nothing
+        public bool LateReadNotEqual { get; init; }        // taken away: a late READ_REPORT takes any cached SeqNo but the last delivered
         // Candidate changes, off in this driver (Candidates below).
-        public bool ZeroForgets { get; init; }             // a zeroed section forgets SeenSeqNo and SharedMemSeqNo and sends nothing
         public bool CloseSignalsSent { get; init; }        // CloseGate signals a handed frame equal to the last one sent too
         public bool StaleTakeOnExit { get; init; }         // a take of the frame last sent counts for the SetEvent as the worker leaves its loop
         public bool NoTakeBackOverUntaken { get; init; }   // the SDK skips the take-back when its exchange replaced a frame not taken
@@ -149,6 +149,8 @@ internal static class DeliveryModel
         This with { Name = "OwnerGone straight after a taken frame read on the pipe's close", WaitAgainAfterOwner = false },
         This with { Name = "a taken frame dropped as the worker leaves its loop (B1)", SignalTakenOnExit = false },
         This with { Name = "OwnerGone signals the ended program's own frame (FIX-1)", OwedOnlyNextProgram = false },
+        This with { Name = "a zeroed section keeps the last SeqNo and the cache (D1)", ZeroForgets = false },
+        This with { Name = "a late read takes any SeqNo but the last delivered (D2)", LateReadNotEqual = true },
     };
 
     // Candidate changes for the orders this driver loses (the model section
@@ -159,8 +161,12 @@ internal static class DeliveryModel
         This with { Name = "CloseGate and a stale take signal the frame last sent", CloseSignalsSent = true, StaleTakeOnExit = true },
         This with { Name = "no take-back over a frame not taken", NoTakeBackOverUntaken = true },
         This with { Name = "CloseGate, a stale take and no take-back over a frame not taken", CloseSignalsSent = true, StaleTakeOnExit = true, NoTakeBackOverUntaken = true },
-        This with { Name = "a zeroed section forgets the last SeqNo, and a late read takes only a greater SeqNo", ZeroForgets = true, LateReadNotEqual = false },
-        This with { Name = "all of them", CloseSignalsSent = true, StaleTakeOnExit = true, NoTakeBackOverUntaken = true, ZeroForgets = true, LateReadNotEqual = false },
+        This with { Name = "the watch tried again only at a map, as 533ca4a4", RetryAfterOwnerGone = false },
+        This with { Name = "a take of the frame last sent reads the section (B2)", DropSentAtTake = false },
+        This with { Name = "B2's take, CloseGate signals the frame last sent, no take-back over a frame not taken, the watch as 533ca4a4",
+                    DropSentAtTake = false, CloseSignalsSent = true, NoTakeBackOverUntaken = true, RetryAfterOwnerGone = false },
+        This with { Name = "CloseGate signals the frame last sent, no take-back over a frame not taken, the watch as 533ca4a4",
+                    CloseSignalsSent = true, NoTakeBackOverUntaken = true, RetryAfterOwnerGone = false },
     };
 
     internal static IEnumerable<Scenario> Scenarios()
@@ -332,7 +338,7 @@ internal static class DeliveryModel
     // never makes, for a frame a take already found), so its reads are its
     // own steps as well.
     static bool SharedPc(int pc) => pc is S_CLAIM or S_START or S_WRITE or S_FRAMEDONE or S_EXIT or S_NEXT;
-    const int L_PROG = 1, L_RECYCLE = 2, L_GOES = 3, L_MAP = 4, L_STOP = 5, L_ADD = 6, L_KILL = 7, L_HID = 8, L_READ = 9;
+    const int L_PROG = 1, L_RECYCLE = 2, L_GOES = 3, L_MAP = 4, L_STOP = 5, L_ADD = 6, L_KILL = 7, L_HID = 8, L_READ = 9, L_READ0 = 10;
 
     static int Label(in State s, in State n)
     {
@@ -344,9 +350,12 @@ internal static class DeliveryModel
         if (n.StopUsed != s.StopUsed) return L_STOP;
         if (s.Pc == W_GONE && n.Pc != W_GONE) return L_ADD;
         if (NeedsRead(s) && s.Pc == n.Pc && s.SdkPc == n.SdkPc && s.Tear == n.Tear && (n.Parked || n.Delivered != s.Delivered)) return L_HID;
-        if (s.Pc == W_READ && n.Pc != W_READ && s.Tear == 0) return L_READ;
+        if (s.Pc == W_READ && n.Pc != W_READ && s.Tear == 0)
+            return n.Seen == s.Seen && n.Cache == s.Cache && n.CacheSeq == s.CacheSeq && n.LastDel == s.LastDel && n.Delivered == s.Delivered
+                   && n.Parked == s.Parked ? L_READ0 : L_READ;
         return 0;
     }
+
 
     // HID class has no READ_REPORT at the driver and the device is up: the
     // next one is HID class's to send.
@@ -442,8 +451,8 @@ internal static class DeliveryModel
 
     internal sealed class AlignedResult
     {
-        public long States, Finals, Unaligned, Sets, V203States, Excused;
-        public bool Canceled, OwnFails;
+        public long States, Finals, Unaligned, Sets, SetItems, V203States, Subsumed;
+        public bool Canceled, OwnFails, TooLarge;
         public readonly HashSet<ulong> Worse = new();
         public bool ZeroSent;
         public string? Example;
@@ -452,44 +461,62 @@ internal static class DeliveryModel
         public List<string>? PairedSide;
     }
 
-    // v2.0.3's side of the pairing for one scenario: its steps from each
-    // state, the sets of its states the pairing reaches, each set's closure
-    // under v2.0.3's own steps, the step from a set through a shared event,
-    // and each set's final outcomes.
-    //
-    // HID class: a READ_REPORT arrival is shared while both sides wait for
-    // one, so HID class is as slow on both. When only one side completed a
-    // read, that side's HID class sends its next one before any other step
-    // of that side. The closure takes a mode for this: whether this
-    // driver's side waits for a READ_REPORT. Without it, a v2.0.3 state that
-    // waits for one takes only its arrival. With it, the arrival waits for
-    // this driver's.
+    // The two time-driven steps a worker waits for, by side: HID class's
+    // next READ_REPORT (bit 1) and the Phase 1 map (bit 2). Each is shared
+    // while both sides wait for it, so HID class and the 200 ms poll are as
+    // slow on both. When only one side waits, that side takes it before any
+    // other step of its own.
+    const int M_READ = 1, M_MAP = 2;
+
+    static bool MapReady(in State s, Scenario sc, Driver d, Rules r, int frames, List<State> scratch)
+    {
+        if (s.Pc != W_P1 || s.OwnerSig || !s.Ev) return false;
+        scratch.Clear();
+        Steps(s, sc, d, r, frames, scratch);
+        foreach (var n in scratch) if (Label(s, n) == L_MAP) return true;
+        return false;
+    }
+
+    // v2.0.3's side of the pairing for one scenario: its states, numbered,
+    // their steps, the sets of them the pairing reaches (sorted numbers),
+    // the closure of a set under v2.0.3's own steps, the step from a set
+    // through a shared event, and each set's final outcomes. A closure takes
+    // the waits of this driver's side (M_READ, M_MAP): a v2.0.3 state that
+    // waits for a step this driver's side does not wait for takes that step
+    // and nothing else, and one that waits for a step this driver's side
+    // also waits for takes it only with this driver.
     sealed class V203Side
     {
         readonly Scenario sc;
         readonly int frames;
-        readonly Dictionary<Key, Info> info = new();
-        readonly List<Key[]> sets = new();
+        readonly Dictionary<Key, int> idOf = new();
+        readonly List<Key> keyOf = new();
+        readonly List<Info?> info = new();
+        readonly List<int[]> sets = new();
+        readonly List<ulong> sigs = new();
         readonly Dictionary<SetKey, int> ids = new();
-        readonly Dictionary<(int, bool), int> closed = new();
-        readonly Dictionary<(int, int, int, int, bool, bool), (int, bool)> follow = new();
+        readonly Dictionary<(int, int), int> closed = new();
+        readonly Dictionary<(int, int, int, int, int, int), int> follow = new();
         readonly Dictionary<int, ulong[]> finals = new();
-        readonly Dictionary<int, bool> anyNeeds = new();
+        readonly Dictionary<int, int> waits = new();
         readonly List<State> buf = new();
-        public long Excused;
+        readonly HashSet<int> scratch = new();
+        readonly Stack<int> work = new();
+        public long SetItems;
 
         public V203Side(Scenario sc, int frames) { this.sc = sc; this.frames = frames; }
         public int SetCount => sets.Count;
-        public int StateCount => info.Count;
+        public int StateCount => keyOf.Count;
 
-        readonly record struct Succ(Key M, int Label, int Match, int Phase);
-        sealed record Info(Succ[] S, bool Needs);
+        readonly record struct Succ(int M, int Label, int Match, int Phase);
+        // Waits: the time-driven steps the state waits for (M_READ, M_MAP).
+        sealed record Info(Succ[] S, int Waits);
 
         readonly struct SetKey : IEquatable<SetKey>
         {
-            public readonly Key[] Items;
+            public readonly int[] Items;
             readonly int hash;
-            public SetKey(Key[] items)
+            public SetKey(int[] items)
             {
                 Items = items;
                 var h = new HashCode();
@@ -501,24 +528,39 @@ internal static class DeliveryModel
             public override int GetHashCode() => hash;
         }
 
-        Info Of(Key k)
+        int Id(Key k)
         {
-            if (info.TryGetValue(k, out var a)) return a;
-            var v = Unpack(k);
+            if (idOf.TryGetValue(k, out int id)) return id;
+            id = keyOf.Count;
+            idOf[k] = id;
+            keyOf.Add(k);
+            info.Add(null);
+            return id;
+        }
+
+        Info Of(int id)
+        {
+            var a = info[id];
+            if (a != null) return a;
+            var v = Unpack(keyOf[id]);
             buf.Clear();
             Steps(v, sc, Driver.V203, This, frames, buf);
-            var s = new Succ[buf.Count];
-            for (int i = 0; i < buf.Count; i++)
+            var states = buf.ToArray();
+            var s = new Succ[states.Length];
+            int w = NeedsRead(v) ? M_READ : 0;
+            for (int i = 0; i < states.Length; i++)
             {
-                int l = Label(v, buf[i]);
-                s[i] = new Succ(Pack(buf[i]), l, MatchKey(l, buf[i]), KillPhase(v.SdkPc));
+                int l = Label(v, states[i]);
+                if (l == L_READ0) l = L_READ;
+                if (l == L_MAP) w |= M_MAP;
+                s[i] = new Succ(Id(Pack(states[i])), l, MatchKey(l, states[i]), KillPhase(v.SdkPc));
             }
-            a = new Info(s, NeedsRead(v));
-            info[k] = a;
+            a = new Info(s, w);
+            info[id] = a;
             return a;
         }
 
-        int Intern(HashSet<Key> h)
+        int Intern(HashSet<int> h)
         {
             var arr = h.ToArray();
             Array.Sort(arr);
@@ -526,82 +568,121 @@ internal static class DeliveryModel
             if (ids.TryGetValue(k, out int id)) return id;
             id = sets.Count;
             sets.Add(arr);
+            ulong sig = 0;
+            foreach (var x in arr) sig |= 1UL << (int)((uint)(x * 0x9E3779B1) >> 26);
+            sigs.Add(sig);
+            SetItems += arr.Length;
             ids[k] = id;
             return id;
         }
 
-        // v2.0.3's own steps from a set, to a fixed point: its worker's, its
-        // program's private ones, and its reads. thisNeeds: this driver's
-        // side waits for a READ_REPORT.
-        public int Close(int seed, bool thisNeeds)
+        // The steps a v2.0.3 state takes as its own while this driver's side
+        // waits for thisWaits: what it alone waits for, or else its worker's,
+        // its program's private ones and its reads.
+        static bool Own(Info x, Succ y, int thisWaits)
         {
-            if (closed.TryGetValue((seed, thisNeeds), out int c)) return c;
-            var all = new HashSet<Key>(sets[seed]);
-            var work = new Stack<Key>(sets[seed]);
+            int alone = x.Waits & ~thisWaits;
+            if (alone != 0)
+                return ((alone & M_READ) != 0 && y.Label == L_HID) || ((alone & M_MAP) != 0 && y.Label == L_MAP);
+            return y.Label is 0 or L_READ;
+        }
+
+        int CloseScratch(int thisWaits)
+        {
+            work.Clear();
+            foreach (var x in scratch) work.Push(x);
             while (work.Count > 0)
             {
                 var x = Of(work.Pop());
-                bool prompt = !thisNeeds && x.Needs;
                 foreach (var y in x.S)
-                    if ((prompt ? y.Label == L_HID : y.Label is 0 or L_READ) && all.Add(y.M)) work.Push(y.M);
+                    if (Own(x, y, thisWaits) && scratch.Add(y.M)) work.Push(y.M);
             }
-            c = Intern(all);
-            closed[(seed, thisNeeds)] = c;
-            closed[(c, thisNeeds)] = c;
+            int c = Intern(scratch);
+            closed[(c, thisWaits)] = c;
             return c;
         }
 
-        public int Initial(bool thisNeeds) => Close(Intern(new HashSet<Key> { Pack(Start()) }), thisNeeds);
-
-        // Some state of set V waits for a READ_REPORT.
-        public bool AnyNeeds(int v)
+        public int Close(int v, int thisWaits)
         {
-            if (anyNeeds.TryGetValue(v, out bool b)) return b;
-            b = sets[v].Any(x => Of(x).Needs);
-            anyNeeds[v] = b;
-            return b;
+            if (closed.TryGetValue((v, thisWaits), out int c)) return c;
+            scratch.Clear();
+            foreach (var x in sets[v]) scratch.Add(x);
+            c = CloseScratch(thisWaits);
+            closed[(v, thisWaits)] = c;
+            return c;
+        }
+
+        public int Initial(int thisWaits)
+        {
+            scratch.Clear();
+            scratch.Add(Id(Pack(Start())));
+            return CloseScratch(thisWaits);
+        }
+
+        // The time-driven steps some state of set V waits for.
+        public int Waits(int v)
+        {
+            if (waits.TryGetValue(v, out int w)) return w;
+            w = 0;
+            foreach (var x in sets[v]) w |= Of(x).Waits;
+            waits[v] = w;
+            return w;
+        }
+
+        // Set a is a subset of set b.
+        public bool Subset(int a, int b)
+        {
+            if (a == b) return true;
+            var x = sets[a]; var y = sets[b];
+            if (x.Length > y.Length || (sigs[a] & ~sigs[b]) != 0) return false;
+            int j = 0;
+            foreach (var e in x)
+            {
+                while (j < y.Length && y[j] < e) j++;
+                if (j == y.Length || y[j] != e) return false;
+                j++;
+            }
+            return true;
         }
 
         // The set v2.0.3 reaches from set V through the shared event this
-        // driver took, or -1 when no state of V can take it.
-        public int Follow(int v, int label, int match, int phase, bool needsBefore, bool needsAfter)
+        // driver took, or -1 when no state of V can take it. Every state of
+        // V that can take the event takes it. A state that cannot take a
+        // READ_REPORT arrival, the Phase 1 map or the idle recycle lets the
+        // time pass and goes on (the recycle's one chance under its program
+        // spent): it was not waiting for it, or its worker was busy. A state
+        // that alone waits for a step takes that step first, so the state
+        // after it stands for it here. A read of this driver's that changed
+        // nothing (a wake for a frame it had read) pairs with a read of
+        // every v2.0.3 run that can read then. A run with no wake to read on
+        // goes on, since that read can change no outcome.
+        public int Follow(int v, int label, int match, int phase, int waitsBefore, int waitsAfter)
         {
-            var key = (v, label, match, phase, needsBefore, needsAfter);
-            if (follow.TryGetValue(key, out var hit)) { if (hit.Item2) Excused++; return hit.Item1; }
-            bool excused = false;
-            var h = new HashSet<Key>();
-            foreach (var xk in sets[v])
+            var key = (v, label, match, phase, waitsBefore, waitsAfter);
+            if (follow.TryGetValue(key, out int r)) return r;
+            scratch.Clear();
+            int want = label == L_READ0 ? L_READ : label;
+            foreach (var xi in sets[v])
             {
-                var x = Of(xk);
-                // A state whose HID class owes a READ_REPORT sends it first.
-                if (!needsBefore && x.Needs) continue;
-                if (label == L_HID && !x.Needs) { h.Add(xk); continue; }
+                var x = Of(xi);
+                if ((x.Waits & ~waitsBefore) != 0) continue;
+                bool took = false;
                 foreach (var y in x.S)
-                    if (y.Label == label && y.Match == match && (label != L_KILL || (y.Phase & phase) != 0))
-                        h.Add(y.M);
-            }
-            // The idle or stale recycle and the Phase 1 map come from time
-            // passing, and happen only to a worker in the state for them:
-            // idle in its wait, stale after a read, or in Phase 1 with the
-            // event there. Every v2.0.3 run that can be in that state takes
-            // the step with this driver, so v2.0.3 is as prompt. When no
-            // v2.0.3 run can, its worker is busy in all of them: the time
-            // passes and the runs go on, the recycle's one chance under its
-            // program spent (counted in Excused).
-            if (h.Count == 0 && label is L_RECYCLE or L_MAP)
-            {
-                Excused++;
-                excused = true;
-                foreach (var xk in sets[v])
+                    if (y.Label == want && y.Match == match && (label != L_KILL || (y.Phase & phase) != 0))
+                    {
+                        scratch.Add(y.M);
+                        took = true;
+                    }
+                if (!took && label is L_HID or L_MAP or L_READ0) scratch.Add(xi);
+                if (!took && label == L_RECYCLE)
                 {
-                    if (!needsBefore && Of(xk).Needs) continue;
-                    var u = Unpack(xk);
-                    if (label == L_RECYCLE) u.RecycleUsed = true;
-                    h.Add(Pack(u));
+                    var u = Unpack(keyOf[xi]);
+                    u.RecycleUsed = true;
+                    scratch.Add(Id(Pack(u)));
                 }
             }
-            int r = h.Count == 0 ? -1 : Close(Intern(h), needsAfter);
-            follow[key] = (r, excused);
+            r = scratch.Count == 0 ? -1 : CloseScratch(waitsAfter);
+            follow[key] = r;
             return r;
         }
 
@@ -611,15 +692,15 @@ internal static class DeliveryModel
         public List<string> Describe(int v)
         {
             var lines = new List<string>();
-            var finalsOut = sets[v].Where(x => Of(x).S.Length == 0).Select(x => Show(x.C & OutMask)).Distinct().ToList();
+            var finalsOut = sets[v].Where(x => Of(x).S.Length == 0).Select(x => Show(keyOf[x].C & OutMask)).Distinct().ToList();
             lines.Add($"paired v2.0.3 set: {sets[v].Length} states, {finalsOut.Count} final outcome(s): " +
                       (finalsOut.Count == 0 ? "none" : string.Join(" | ", finalsOut.Select(o => "[" + o + "]"))));
-            foreach (var xk in sets[v].Where(x => Of(x).S.Length > 0 && Of(x).S.All(y => y.Label is not (0 or L_READ))).Take(4))
+            foreach (var xi in sets[v].Where(x => Of(x).S.Length > 0 && Of(x).S.All(y => y.Label is not (0 or L_READ))).Take(4))
             {
-                var x = Unpack(xk);
+                var x = Unpack(keyOf[xi]);
                 lines.Add($"  waits: worker {PcName(x.Pc)}, sdk {SdkName(x.SdkPc)}, parked {x.Parked}, event {x.Event}, seen {x.Seen}, seq {x.Seq}, " +
                           $"delivered [{Show(x.Delivered & OutMask)}], its steps: " +
-                          string.Join(", ", Of(xk).S.Select(y => y.Label switch
+                          string.Join(", ", Of(xi).S.Select(y => y.Label switch
                           {
                               L_PROG => "program", L_RECYCLE => "recycle", L_GOES => "goes", L_MAP => "map", L_STOP => "stop", L_ADD => "add",
                               L_KILL => "kill", L_HID => "READ_REPORT", L_READ => "read", _ => "own",
@@ -634,7 +715,7 @@ internal static class DeliveryModel
             {
                 var o = new HashSet<ulong>();
                 foreach (var x in sets[v])
-                    if (Of(x).S.Length == 0) o.Add(x.C & OutMask);
+                    if (Of(x).S.Length == 0) o.Add(keyOf[x].C & OutMask);
                 outs = o.ToArray();
                 finals[v] = outs;
             }
@@ -646,7 +727,7 @@ internal static class DeliveryModel
 
     // The order-aligned check. Each state of this driver's is paired with the
     // set of v2.0.3 states reachable through the same outside events, the
-    // same READ_REPORT arrivals and a read at each of this driver's reads
+    // same time-driven steps and a read at each of this driver's reads
     // (Label), each driver taking any steps of its own in between. At a
     // final state of this driver's, some final state in that set must
     // deliver every frame this one does not lose, send twice every frame
@@ -654,33 +735,64 @@ internal static class DeliveryModel
     // frames wherever this one does. A shared step v2.0.3 cannot follow from
     // any state of the set is counted (Unaligned): this driver's run
     // continues, paired with no v2.0.3 run, so its final state fails.
-    internal static AlignedResult ExploreAligned(Scenario sc, Rules r, int framesArg, bool trace = false, Func<bool>? stop = null)
+    //
+    // Pairs are pruned by subsumption. Every step of the pairing is
+    // monotone in the v2.0.3 set: a larger set follows to a larger set and
+    // matches whatever a smaller one matches. This driver's steps depend on
+    // the set only through the time-driven steps some state of it waits for.
+    // So a pair (t, V2) whose set holds the set V1 of a pair (t, V1) already
+    // explored, with the same waits, fails only where (t, V1) fails, and it
+    // is not explored. A pair paired with no v2.0.3 run covers every pair of
+    // its state. The pruning keeps every failure the full exploration finds,
+    // and reports each failing scenario with one witness.
+    internal static AlignedResult ExploreAligned(Scenario sc, Rules r, int framesArg, bool trace = false, Func<bool>? stop = null, long maxStates = long.MaxValue)
     {
         int frames = sc.FramesFor(framesArg);
         var res = new AlignedResult();
         var v203 = new V203Side(sc, frames);
         var buf = new List<State>();
+        var scratch = new List<State>();
         const int None = -1;
 
-        var t0 = Pack(Start());
-        int v0 = v203.Initial(NeedsRead(Start()));
-        var seen = new HashSet<(Key, int)> { (t0, v0) };
+        int TWaits(in State t) => (NeedsRead(t) ? M_READ : 0) | (MapReady(t, sc, Driver.This, r, frames, scratch) ? M_MAP : 0);
+
+        // The explored pairs: by this driver's state and the waits of the
+        // set, the sets explored with it that no other of them holds.
+        var covers = new Dictionary<(Key, int), List<int>>();
+        var unpaired = new HashSet<Key>();
+        bool Visit(Key k, int v, int tw)
+        {
+            if (unpaired.Contains(k)) { res.Subsumed++; return false; }
+            if (v == None) { unpaired.Add(k); return true; }
+            var key = (k, v203.Waits(v) & tw);
+            if (!covers.TryGetValue(key, out var lst)) { covers[key] = new List<int> { v }; return true; }
+            foreach (var v1 in lst) if (v203.Subset(v1, v)) { res.Subsumed++; return false; }
+            lst.RemoveAll(v1 => v203.Subset(v, v1));
+            lst.Add(v);
+            return true;
+        }
+
+        var start = Start();
+        var t0 = Pack(start);
+        int v0 = v203.Initial(TWaits(start));
+        Visit(t0, v0, TWaits(start));
         var parent = trace ? new Dictionary<(Key, int), (Key, int)>() : null;
         var stack = new Stack<(Key, int)>();
         stack.Push((t0, v0));
         while (stack.Count > 0)
         {
             if ((res.States & 0xFFFF) == 0 && stop != null && stop()) { res.Canceled = true; break; }
+            if (res.States >= maxStates) { res.TooLarge = true; break; }
             var (tk, V) = stack.Pop();
             var t = Unpack(tk);
             res.States++;
             buf.Clear();
             Steps(t, sc, Driver.This, r, frames, buf);
-            bool tNeeds = NeedsRead(t);
-            // This driver's HID class alone owes a READ_REPORT: it sends it
-            // first.
-            if (tNeeds && V != None && !v203.AnyNeeds(V))
-                buf.RemoveAll(n => Label(t, n) != L_HID);
+            int tw = TWaits(t);
+            // What this driver's side alone waits for, it takes first.
+            int alone = V == None ? 0 : tw & ~v203.Waits(V);
+            if (alone != 0)
+                buf.RemoveAll(n => Label(t, n) is var l && !(((alone & M_READ) != 0 && l == L_HID) || ((alone & M_MAP) != 0 && l == L_MAP)));
             if (buf.Count == 0)
             {
                 res.Finals++;
@@ -699,13 +811,13 @@ internal static class DeliveryModel
             {
                 int V2 = V;
                 int label = Label(t, n);
-                bool nNeeds = NeedsRead(n);
+                int nw = TWaits(n);
                 if (V != None)
                 {
                     if (label != 0)
-                        V2 = v203.Follow(V, label, MatchKey(label, n), label == L_KILL ? KillPhase(t.SdkPc) : 0, tNeeds, nNeeds);
-                    else if (nNeeds != tNeeds)
-                        V2 = v203.Close(V, nNeeds);
+                        V2 = v203.Follow(V, label, MatchKey(label, n), label == L_KILL ? KillPhase(t.SdkPc) : 0, tw, nw);
+                    else if (nw != tw)
+                        V2 = v203.Close(V, nw);
                     if (V2 == None)
                     {
                         res.Unaligned++;
@@ -716,13 +828,13 @@ internal static class DeliveryModel
                         }
                     }
                 }
-                var nk = (Pack(n), V2);
-                if (seen.Add(nk)) { parent?.Add(nk, (tk, V)); stack.Push(nk); }
+                var nk = Pack(n);
+                if (Visit(nk, V2, nw)) { parent?.TryAdd((nk, V2), (tk, V)); stack.Push((nk, V2)); }
             }
         }
         res.Sets = v203.SetCount;
+        res.SetItems = v203.SetItems;
         res.V203States = v203.StateCount;
-        res.Excused = v203.Excused;
         return res;
     }
 
@@ -748,7 +860,7 @@ internal static class DeliveryModel
             sb.Append(f.Name).Append(' ').Append(Fmt(x)).Append("->").Append(Fmt(y));
         }
         int l = Label(a, b);
-        return (l == 0 ? "" : l == L_READ ? "[read, paired] " : l == L_HID ? "[READ_REPORT arrives] " : "[shared] ") + sb;
+        return (l == 0 ? "" : l == L_READ ? "[read, paired] " : l == L_READ0 ? "[read of nothing new, paired] " : l == L_HID ? "[READ_REPORT arrives] " : "[shared] ") + sb;
     }
 
     static string PcName(int pc) => pc switch

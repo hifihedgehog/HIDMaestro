@@ -122,24 +122,34 @@ internal static class Program
             else if (args[i] == "-j") jobs = int.Parse(args[++i]);
             else if (args[i] == "--scenario") only = args[++i];
             else if (args[i] == "--quiet") quiet = true;
+            else if (args[i] == "--progress") s_progress = true;
+            else if (args[i] == "--index") s_index = int.Parse(args[++i]);
+            else if (args[i] == "--max-states") s_maxStates = long.Parse(args[++i]);
             else only = args[i];
         }
         return RunCheck(frames, rule, shard, shards, jobs, only, !quiet);
     }
 
+    static bool s_progress;
+    static int s_index = -1;
+    static long s_maxStates = long.MaxValue;
+
     static int RunCheck(int frames, int rule, int shard, int shards, int jobs, string? only, bool witness)
     {
         var rules = rule <= -100 ? DeliveryModel.Candidates[-100 - rule] : rule < 0 ? DeliveryModel.This : DeliveryModel.Broken[rule];
         var all = DeliveryModel.Scenarios().Select((sc, i) => (sc, i)).ToList();
-        var mine = all.Where(x => x.i % shards == shard && (only == null || x.sc.Name == only)).ToList();
+        var mine = all.Where(x => x.i % shards == shard && (only == null || x.sc.Name == only) && (s_index < 0 || x.i == s_index)).ToList();
         var results = new DeliveryModel.AlignedResult?[mine.Count];
         int best = int.MaxValue;
         var clock = System.Diagnostics.Stopwatch.StartNew();
         Parallel.For(0, mine.Count, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, jobs) }, k =>
         {
             if (rule >= 0 && k > Volatile.Read(ref best)) return;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             var a = DeliveryModel.ExploreAligned(mine[k].sc, rules, frames, false,
-                                                 rule >= 0 ? () => k > Volatile.Read(ref best) : null);
+                                                 rule >= 0 ? () => k > Volatile.Read(ref best) : null, s_maxStates);
+            if (s_progress)
+                Console.Error.WriteLine($"{mine[k].i}	{a.States}	{a.Sets}	{a.SetItems}	{a.V203States}	{(a.TooLarge ? "TOO LARGE" : "")}	{sw.Elapsed.TotalSeconds:F1}s	{mine[k].sc.Name}	subsumed {a.Subsumed}	worse {a.Worse.Count}");
             // A rule taken away breaks the check only in a scenario this
             // driver's own rules pass.
             if (rule >= 0 && !a.Canceled && (a.Worse.Count > 0 || a.ZeroSent))
@@ -155,7 +165,7 @@ internal static class Program
                 do { seen = Volatile.Read(ref best); } while (k < seen && Interlocked.CompareExchange(ref best, k, seen) != seen);
             }
         });
-        long states = 0, finals = 0, unaligned = 0, v203 = 0, largest = 0, ownFails = 0, excused = 0;
+        long states = 0, finals = 0, unaligned = 0, v203 = 0, largest = 0, ownFails = 0, subsumed = 0, setItems = 0, largestSets = 0;
         string largestName = "";
         var failures = new List<int>();
         for (int k = 0; k < mine.Count; k++)
@@ -163,13 +173,14 @@ internal static class Program
             var a = results[k];
             if (a == null || a.Canceled) continue;
             if (a.OwnFails) ownFails++;
-            states += a.States; finals += a.Finals; unaligned += a.Unaligned; v203 += a.V203States; excused += a.Excused;
+            states += a.States; finals += a.Finals; unaligned += a.Unaligned; v203 += a.V203States; 
+            setItems += a.SetItems; subsumed += a.Subsumed; largestSets = Math.Max(largestSets, a.SetItems);
             if (a.States > largest) { largest = a.States; largestName = mine[k].sc.Name; }
             if (a.Worse.Count > 0 || a.ZeroSent) failures.Add(k);
         }
         string where = $"{frames} frame(s) a program, shard {shard}/{shards}, {mine.Count} scenario(s)";
         string totals = $"{states} paired states, {finals} final, {v203} v2.0.3 states, {unaligned} shared step(s) v2.0.3 could not take, " +
-                        $"{excused} time step(s) no v2.0.3 run could take, " +
+                        $"{subsumed} pair(s) subsumed, {setItems} v2.0.3 set members (largest scenario {largestSets}), " +
                         $"largest scenario {largest} paired states ({largestName}), {clock.Elapsed.TotalSeconds:F0} s";
         if (rule < 0)
         {
