@@ -79,14 +79,20 @@ C_ASSERT(FIELD_OFFSET(HIDMAESTRO_VERSION_INFO, DriverConfigError) == 56);
  * on the input event, with an interlocked increment and then an
  * interlocked exchange that takes InputHandoff, and an interlocked
  * decrement when the wait returns. A take that finds a SeqNo reads the
- * section without waiting. The SDK stores the frame's even SeqNo and, with
- * HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS set, exchanges that SeqNo into
- * InputHandoff and loads InputWaiters. With the count zero it leaves the
- * frame there for the worker's next take. With a count above zero it
- * takes the SeqNo back with a compare-exchange and calls SetEvent only
- * when that succeeds, so a frame gets one wakeup, the take or the signal,
- * never both and never neither. Without the capability it signals every
- * frame.
+ * section without waiting, or, when the worker leaves its loop first on
+ * the stop event or at teardown, signals the input event for it. The SDK
+ * stores the frame's even SeqNo and, with HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS
+ * set, exchanges that SeqNo into InputHandoff, then loads the capability
+ * again and InputWaiters. With the capability still set and the count zero it
+ * leaves the frame there for the worker's next take. With any other count,
+ * or with the capability gone, it takes the SeqNo back with a
+ * compare-exchange and calls SetEvent only when that succeeds, so a frame
+ * gets one wakeup, the take or the signal, never both, and never neither
+ * while its program runs. A frame a program left there as it died, between
+ * its exchange and its compare-exchange, is read when the worker's take
+ * finds it before the owner pipe's close, and dropped when OwnerGone takes
+ * it: v2.0.3's program, killed just after or just before its SetEvent, had
+ * the same two outcomes. Without the capability it signals every frame.
  *
  * The XUSB companion counts the WAIT_FOR_INPUT requests in its manual queue
  * in CompanionParked: up once the request is in the queue, then a look at
