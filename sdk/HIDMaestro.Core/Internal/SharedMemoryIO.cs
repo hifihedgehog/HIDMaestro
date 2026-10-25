@@ -175,6 +175,9 @@ internal static partial class SharedMemoryIO
     // signals as before.
     private static readonly Dictionary<int, IntPtr> s_signalHandles = new();
     private static readonly Dictionary<int, IntPtr> s_signalViews = new();
+    // 2.1.0: the SeqNo each index's frames count from (InputSeqStart), set
+    // when EnsureInputMapping makes the mapping. Same lock.
+    private static readonly Dictionary<int, uint> s_inputSeqStarts = new();
 
     // HIDMAESTRO_SIGNAL (driver/hm_contract.h), 256 bytes: each count in a
     // cache line of its own.
@@ -182,7 +185,9 @@ internal static partial class SharedMemoryIO
     public const int SIGNAL_OFFSET_LAYOUT = 0;
     public const int SIGNAL_OFFSET_DRIVER_CAPS = 4;
     public const int SIGNAL_OFFSET_COMPANION_CAPS = 8;
+    public const int SIGNAL_OFFSET_SDK_STARTS = 12;
     public const int SIGNAL_OFFSET_INPUT_WAITERS = 64;
+    public const int SIGNAL_OFFSET_DRIVER_SEEN_SEQ = 68;
     public const int SIGNAL_OFFSET_COMPANION_PARKED = 128;
     public const int SIGNAL_LAYOUT = 1;
     public const int SIGNAL_CAP_INPUT_WAITERS = 1, SIGNAL_CAP_COMPANION_PARKED = 1;
@@ -488,6 +493,10 @@ internal static partial class SharedMemoryIO
                 s_ownerPipes[controllerIndex] = pipes;
 
                 (h, view) = CreateSection(name, SHARED_INPUT_SIZE);
+                // 2.1.0: the SeqNo a program before this one left, which a
+                // driver worker may hold as the last frame it read. The
+                // frames of this program count from above it (InputSeqStart).
+                uint leftSeq = Volatile.Read(ref *(uint*)view);
 
                 // Zero-init: pagefile-backed sections start zero already, but we
                 // explicitly write SeqNo=0 so a stale section from a previous
@@ -562,6 +571,27 @@ internal static partial class SharedMemoryIO
                 s_signalHandles[controllerIndex] = sh;
                 s_signalViews[controllerIndex] = sv;
 
+                // 2.1.0: the first frame of this program is a SeqNo no driver
+                // worker on the index has read. A worker compares the section
+                // with the last frame it read before it waits (the signal
+                // gate), and a program before this one counted from 0 too, so
+                // a frame of this program equal to that one would never be
+                // read when its signal was skipped. Above the SeqNo the last
+                // program left and the one the last worker read
+                // (DriverSeenSeq), even. The acknowledgement starts there, so
+                // a wait for delivery compares within this program's frames.
+                // This program counts itself in SdkStarts before the input
+                // event exists and before its first frame: a driver worker
+                // that sees the count move knows the frames since count from
+                // above every frame it read, and are never the last
+                // program's (driver.h, Boundary).
+                if (sv != IntPtr.Zero)
+                    Interlocked.Increment(ref *(int*)((byte*)sv + SIGNAL_OFFSET_SDK_STARTS));
+                uint seen = sv != IntPtr.Zero ? Volatile.Read(ref *(uint*)((byte*)sv + SIGNAL_OFFSET_DRIVER_SEEN_SEQ)) : 0;
+                uint start = EvenAbove(leftSeq, seen);
+                s_inputSeqStarts[controllerIndex] = start;
+                Volatile.Write(ref *(uint*)((byte*)av + INPUT_ACK_OFFSET_DELIVERED), start);
+
                 // Driver signaling event. Auto-reset (manual_reset=FALSE), not
                 // initially set. The driver's per-device worker thread waits on
                 // this with a 50ms safety timeout to replace the old 1ms busy poll.
@@ -626,6 +656,33 @@ internal static partial class SharedMemoryIO
     {
         lock (s_inputViews)
             return s_signalViews.TryGetValue(controllerIndex, out var v) ? v : IntPtr.Zero;
+    }
+
+    /// <summary>2.1.0: the SeqNo a controller on the index counts its frames
+    /// from: even, and at or above the one the program before left, the
+    /// one a driver worker last read, and the one an earlier controller of
+    /// this process left in the section. Its first frame is two above, a
+    /// frame no worker has read (EnsureInputMapping).</summary>
+    public static unsafe uint InputSeqStart(int controllerIndex)
+    {
+        lock (s_inputViews)
+        {
+            uint start = s_inputSeqStarts.TryGetValue(controllerIndex, out uint s) ? s : 0;
+            if (s_inputViews.TryGetValue(controllerIndex, out IntPtr view) && view != IntPtr.Zero)
+                start = EvenAbove(start, Volatile.Read(ref *(uint*)view));
+            if (s_signalViews.TryGetValue(controllerIndex, out IntPtr sv) && sv != IntPtr.Zero)
+                start = EvenAbove(start, Volatile.Read(ref *(uint*)((byte*)sv + SIGNAL_OFFSET_DRIVER_SEEN_SEQ)));
+            return start;
+        }
+    }
+
+    /// <summary>The larger of two SeqNos as numbers that count up from the
+    /// first, an odd one (a write in progress) taken up to the even one it
+    /// becomes.</summary>
+    static uint EvenAbove(uint a, uint b)
+    {
+        uint m = (int)(b - a) > 0 ? b : a;
+        return (m + 1) & ~1u;
     }
 
     /// <summary>Companion input doorbell handle for
@@ -1231,6 +1288,7 @@ internal static partial class SharedMemoryIO
             UnmapViewOfFile(vv);
         if (s_versionHandles.Remove(controllerIndex, out IntPtr vh) && vh != IntPtr.Zero)
             CloseHandle(vh);
+        s_inputSeqStarts.Remove(controllerIndex);
         if (s_signalViews.Remove(controllerIndex, out IntPtr sv) && sv != IntPtr.Zero)
             UnmapViewOfFile(sv);
         if (s_signalHandles.Remove(controllerIndex, out IntPtr sh) && sh != IntPtr.Zero)

@@ -350,6 +350,21 @@ typedef struct _DEVICE_CONTEXT {
     HANDLE  SignalMemHandle;
     struct _HIDMAESTRO_SIGNAL *SignalPtr;  /* hm_contract.h, included below */
     BOOLEAN SignalBroken;                  /* the count was found below zero: never announce again */
+    /* 2.1.0: which frame is new (docs/design/signal-gate.md). SeenSeqNo is
+     * never reset after add: the section still holds the frame it names,
+     * and that frame read again would go out twice. A boundary is the end
+     * of a program seen (OwnerGone), or a recycle that finds no owner watch
+     * to connect: the next program, if it is one before 2.1.0, counts from
+     * 0, and its first frame may carry SeenSeqNo. The first frame read
+     * after a boundary goes out even when its SeqNo equals SeenSeqNo,
+     * unless a 2.1.0 SDK started on the index since (SdkStarts), whose
+     * frames count from above every frame read. Worker thread only. */
+    BOOLEAN FrameRead;                     /* a frame has been read since add */
+    BOOLEAN Boundary;
+    BOOLEAN RecycleWatchCheck;             /* a recycle's map is to look for an owner watch */
+    BOOLEAN WatchRetryNext;                /* retry the owner watch after the next frame */
+    LONG    BoundaryStarts;                /* SdkStarts at the boundary */
+    LONG    WatchStarts;                   /* SdkStarts when the owner watch connected */
 
     /* 2.1.0: AckSignal under the contract. FALSE when the controller's SDK
      * said no thread waits on the acknowledgement's event: DeliveredSeqNo

@@ -628,6 +628,10 @@ public sealed partial class HMController : IDisposable
         // its hold on CreateGate's read side kept the release out until now.
         SharedMemoryIO.Hold(index, OnDeviceRemoved);
         _inputView = SharedMemoryIO.EnsureInputMapping(index);
+        // 2.1.0: count from above every frame a driver worker on the index
+        // may have read, so the signal gate never takes this controller's
+        // frame for one already read.
+        _inputSeqNo = SharedMemoryIO.InputSeqStart(index);
         _inputEvent = SharedMemoryIO.GetInputEvent(index);
         _companionInputEvent = _packsGipBuffer
             ? SharedMemoryIO.GetCompanionInputEvent(index) : IntPtr.Zero;

@@ -65,6 +65,19 @@ internal static class Program
             if (r.Lost != null) Console.WriteLine($"         {r.Lost}");
             if (r.InvariantBroken != null) Console.WriteLine($"         count invariant broken: {r.InvariantBroken}");
         }
+        foreach (var v in DeliveryModel.Variants)
+        {
+            var r = DeliveryModel.Explore(v);
+            bool ok = v.Expect == null ? r.Duplicate == null && r.Lost == null
+                    : v.Expect == "duplicate" ? r.Duplicate != null : r.Lost != null;
+            if (!ok) bad++;
+            Console.WriteLine($"[{(ok ? "PASS" : "FAIL")}] {v.Name}: {r.States} states, {r.Finals} final, " +
+                (r.Duplicate != null ? "a frame sent twice" : "no frame sent twice") + ", " +
+                (r.Lost != null ? "a frame never sent" : "every last frame sent") +
+                (v.Expect != null ? $" (expected: {(v.Expect == "duplicate" ? "a frame sent twice" : "a frame never sent")})" : ""));
+            if (r.Duplicate != null) Console.WriteLine($"         {r.Duplicate}");
+            if (r.Lost != null) Console.WriteLine($"         {r.Lost}");
+        }
         Console.WriteLine(bad == 0 ? "signal_gate_model: PASS" : $"signal_gate_model: FAIL ({bad})");
         return bad == 0 ? 0 : 1;
     }

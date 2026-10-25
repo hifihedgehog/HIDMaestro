@@ -65,18 +65,26 @@ C_ASSERT(FIELD_OFFSET(HIDMAESTRO_VERSION_INFO, IdentityTag) == 48);
 C_ASSERT(FIELD_OFFSET(HIDMAESTRO_VERSION_INFO, DriverConfigError) == 56);
 
 /* 2.1.0: the signal gate (docs/design/signal-gate.md). Global\HIDMaestroSignal<N>,
- * 256 bytes, created by an SDK of 2.1.0 or later before the device exists,
- * and never written by it again: an SDK that finds the section already
- * there leaves its words as they are, since a driver of a device on the
- * index may be counting in them. Each driver host maps it once and keeps it
- * until its device goes.
+ * 256 bytes, created by an SDK of 2.1.0 or later before the device exists.
+ * An SDK that finds the section already there leaves the counts and
+ * DriverSeenSeq as they are, since a driver of a device on the index may be
+ * counting in them. The one thing an SDK writes again is the capability
+ * words, which a sweep that removed the index's device clears. Each driver
+ * host maps it once and keeps it until its device goes.
  *
  * The HID driver's worker counts itself in InputWaiters across every wait
  * on the input event, with an interlocked increment before it checks the
  * input section's SeqNo one last time and an interlocked decrement when the
  * wait returns. The SDK stores the frame's even SeqNo, issues a full fence,
  * and calls SetEvent on the input event only when InputWaiters is not zero
- * or DriverCaps lacks HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS.
+ * or DriverCaps lacks HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS. That look finds
+ * a frame whose SeqNo is not the last one the worker read, so the worker
+ * stores that SeqNo in DriverSeenSeq after each read: the next device on
+ * the index starts from it, and an SDK that maps the index adds one to
+ * SdkStarts and counts its frames from above DriverSeenSeq and the
+ * section's own SeqNo, so no frame of its equals one a worker already
+ * read. DriverBoundary carries an open boundary (driver.h) to the next
+ * device on the index.
  *
  * The XUSB companion counts the WAIT_FOR_INPUT requests in its manual queue
  * in CompanionParked: up once the request is in the queue, then a look at
@@ -97,14 +105,20 @@ typedef struct _HIDMAESTRO_SIGNAL {
     volatile LONG   LayoutVersion;       /* SDK: HIDMAESTRO_SIGNAL_LAYOUT, written when it creates the section */
     volatile LONG   DriverCaps;          /* HID driver: HIDMAESTRO_SIGNAL_CAP_* it keeps */
     volatile LONG   CompanionCaps;       /* companion: HIDMAESTRO_SIGNAL_CAP_* it keeps */
-    LONG            Reserved0[13];
+    volatile LONG   SdkStarts;           /* SDK: one more for each program that maps the index */
+    LONG            Reserved0[12];
     volatile LONG   InputWaiters;        /* HID driver workers inside a counted wait */
-    LONG            Reserved1[15];
+    volatile ULONG  DriverSeenSeq;       /* HID driver: the SeqNo of the last frame a worker read */
+    volatile LONG   DriverBoundary;      /* HID driver: 0, or 1 plus SdkStarts at an open boundary */
+    LONG            Reserved1[13];
     volatile LONG   CompanionParked;     /* WAIT_FOR_INPUT requests the companion holds */
     LONG            Reserved2[31];
 } HIDMAESTRO_SIGNAL, *PHIDMAESTRO_SIGNAL;
 C_ASSERT(sizeof(HIDMAESTRO_SIGNAL) == 256);
 C_ASSERT(FIELD_OFFSET(HIDMAESTRO_SIGNAL, InputWaiters) == 64);
+C_ASSERT(FIELD_OFFSET(HIDMAESTRO_SIGNAL, SdkStarts) == 12);
+C_ASSERT(FIELD_OFFSET(HIDMAESTRO_SIGNAL, DriverSeenSeq) == 68);
+C_ASSERT(FIELD_OFFSET(HIDMAESTRO_SIGNAL, DriverBoundary) == 72);
 C_ASSERT(FIELD_OFFSET(HIDMAESTRO_SIGNAL, CompanionParked) == 128);
 #pragma pack(pop)
 
