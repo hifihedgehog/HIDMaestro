@@ -136,6 +136,8 @@ internal static class Program
             else if (args[i] == "--quiet") quiet = true;
             else if (args[i] == "--progress") s_progress = true;
             else if (args[i] == "--index") s_index = int.Parse(args[++i]);
+            else if (args[i] == "--outcomes") s_outcomes = true;
+            else if (args[i] == "--base") s_base = args[++i];
             else if (args[i] == "--max-states") s_maxStates = long.Parse(args[++i]);
             else only = args[i];
         }
@@ -144,11 +146,31 @@ internal static class Program
 
     static bool s_progress;
     static int s_index = -1;
+    static bool s_outcomes;
+    static string? s_base;
+
+    // The rules a run starts from: this driver, or a candidate change
+    // (--base c<i>), and a rule taken away on top of them.
+    static DeliveryModel.Rules Base() => s_base == null ? DeliveryModel.This : DeliveryModel.Candidates[int.Parse(s_base.Substring(1))];
+
+    static DeliveryModel.Rules Compose(DeliveryModel.Rules removal)
+    {
+        var b = Base();
+        if (s_base == null) return removal;
+        var r = b with { Name = removal.Name + " (on " + b.Name + ")" };
+        foreach (var p in typeof(DeliveryModel.Rules).GetProperties())
+        {
+            if (p.Name is "Name" or "EqualityContract" || !p.CanWrite) continue;
+            var v = p.GetValue(removal);
+            if (!Equals(v, p.GetValue(DeliveryModel.This))) p.SetValue(r, v);
+        }
+        return r;
+    }
     static long s_maxStates = long.MaxValue;
 
     static int RunCheck(int frames, int rule, int shard, int shards, int jobs, string? only, bool witness)
     {
-        var rules = rule <= -100 ? DeliveryModel.Candidates[-100 - rule] : rule < 0 ? DeliveryModel.This : DeliveryModel.Broken[rule];
+        var rules = rule <= -100 ? DeliveryModel.Candidates[-100 - rule] : rule < 0 ? Base() : Compose(DeliveryModel.Broken[rule]);
         var all = DeliveryModel.Scenarios().Select((sc, i) => (sc, i)).ToList();
         var mine = all.Where(x => x.i % shards == shard && (only == null || x.sc.Name == only) && (s_index < 0 || x.i == s_index)).ToList();
         var results = new DeliveryModel.AlignedResult?[mine.Count];
@@ -160,13 +182,15 @@ internal static class Program
             var sw = System.Diagnostics.Stopwatch.StartNew();
             var a = DeliveryModel.ExploreAligned(mine[k].sc, rules, frames, false,
                                                  rule >= 0 ? () => k > Volatile.Read(ref best) : null, s_maxStates);
+            if (s_outcomes)
+                lock (results) foreach (var o in a.Worse.OrderBy(x => x)) Console.WriteLine($"outcome {mine[k].i} [{DeliveryModel.Show(o)}]");
             if (s_progress)
                 Console.Error.WriteLine($"{mine[k].i}	{a.States}	{a.Sets}	{a.SetItems}	{a.V203States}	{(a.TooLarge ? "TOO LARGE" : "")}	{sw.Elapsed.TotalSeconds:F1}s	{mine[k].sc.Name}	subsumed {a.Subsumed}	worse {a.Worse.Count}	extra {a.Extra.Count}");
             // A rule taken away breaks the check where it gives a failing
             // outcome this driver's own rules do not give in that scenario.
             if (rule >= 0 && !a.Canceled && (a.Worse.Count > 0 || a.ZeroSent))
             {
-                var own = DeliveryModel.ExploreAligned(mine[k].sc, DeliveryModel.This, frames, false,
+                var own = DeliveryModel.ExploreAligned(mine[k].sc, Base(), frames, false,
                                                        () => k > Volatile.Read(ref best), s_maxStates);
                 if (own.Canceled) { a.Worse.Clear(); a.ZeroSent = false; }
                 else
