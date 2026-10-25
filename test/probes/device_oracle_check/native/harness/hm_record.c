@@ -300,10 +300,12 @@ static void Name(WCHAR *dst, size_t cap, const WCHAR *prefix, int index)
     swprintf_s(dst, cap, L"%s%d", prefix, index);
 }
 
-/* The objects SharedMemoryIO.EnsureInputMapping (SharedMemoryIO.cs:340-434)
- * makes, in its order: the owner pipe, the input section, the companion
- * input event, the acknowledgement and its event, the version section
- * with the SDK's half, and the input event last. Then the output ring
+/* The objects SharedMemoryIO.EnsureInputMapping makes: the owner pipe
+ * first, then the input section, the companion input event, the
+ * acknowledgement and its event, the version section with the SDK's half,
+ * the signal section of a 2.1.0 SDK, and the input event last. The SDK
+ * makes the signal section right after it zeroes the input section, and
+ * nothing the driver reads lies between. Then the output ring
  * (HMController's EnsureOutputMapping). All exist before the device node,
  * as DeviceOrchestrator creates them first. */
 void SdkCreate(Sdk *s, int index, int flags)
@@ -369,19 +371,16 @@ void SdkCreate(Sdk *s, int index, int flags)
         if (SdkWritesSignal()) {
             /* 2.1.0: the signal gate's section, opened when a driver host
              * holds it and never zeroed then, layout 1 when made. The SDK
-             * counts itself in SdkStarts and counts its frames from above
-             * the SeqNo a section of the index left and the one a driver
-             * worker last read (DriverSeenSeq), with the acknowledgement
-             * starting there (SharedMemoryIO.EnsureInputMapping). */
+             * counts its frames from above the SeqNo a section of the index
+             * left and the one a driver worker last read (DriverSeenSeq),
+             * with the acknowledgement starting there
+             * (SharedMemoryIO.EnsureInputMapping). */
             Name(n, ARRAYSIZE(n), L"Global\\HIDMaestroSignal", index);
             HmObj *held = ObjFindNamed(n);
             s->signal = held && held->kind == HK_SECTION ? (HmSection *)held : SectionNew(n, SIGNAL_SIZE);
             Hold(&s->signal->o);
-            int32_t layout = 1, starts;
+            int32_t layout = 1;
             if (!held) memcpy(s->signal->buf, &layout, 4);
-            memcpy(&starts, s->signal->buf + 12, 4);
-            starts++;
-            memcpy(s->signal->buf + 12, &starts, 4);
             uint32_t seen;
             memcpy(&seen, s->signal->buf + 68, 4);
             s->seq = EvenAbove(seqLeft, seen);

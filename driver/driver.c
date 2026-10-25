@@ -819,6 +819,7 @@ static VOID DeliverReleaseFrames(_In_ PDEVICE_CONTEXT ctx);
 static HANDLE CreateHostEvent(_In_ BOOL manualReset, _In_ BOOL takeOverNullDacl, _In_ LPCWSTR name);
 static VOID TryCreateDoorbell(_In_ PDEVICE_CONTEXT ctx);
 static VOID TryOpenSignal(_In_ PDEVICE_CONTEXT ctx);
+static void ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx, _In_ BOOLEAN lookOnly);
 
 /* Create the output doorbell if there is none yet, and publish it for
  * PublishOutput. EvtDeviceAdd may have found the name unusable, held by an
@@ -836,24 +837,44 @@ TryCreateDoorbell(_In_ PDEVICE_CONTEXT ctx)
         InterlockedExchangePointer((PVOID volatile *)&ctx->OutputSignalEvent, ev);
 }
 
-/* 2.1.0: map the signal section once and announce that this worker counts
- * itself in InputWaiters (hm_contract.h, HIDMAESTRO_SIGNAL). Worker thread
- * only, before any wait the count would cover, and again at each map of
- * the input section, as the acknowledgement's bits are: an SDK sweep that
- * removed a device clears the bit (SharedMemoryIO.ForgetDriverLocked).
- * Never again once the worker found the count broken (SignalBroken).
+/* 2.1.0: the gate's capability, while the owner watch is connected to the
+ * program on the index and the count has never been found broken. Without
+ * a watch the worker cannot tell one program from the next, so it neither
+ * counts nor looks, and reads on the input event alone as v2.0.3 did
+ * (docs/design/signal-gate.md). Set again here at each map and every 256
+ * frames, as the acknowledgement's bits are: an SDK sweep that removed a
+ * device clears it (SharedMemoryIO.ForgetDriverLocked), and so does another
+ * context on the index as its device goes. Worker thread only. */
+static BOOLEAN
+Gating(_In_ PDEVICE_CONTEXT ctx)
+{
+    return ctx->SignalPtr != NULL && ctx->OwnerPipe != NULL && !ctx->SignalBroken;
+}
+
+static VOID
+AnnounceGate(_In_ PDEVICE_CONTEXT ctx)
+{
+    if (Gating(ctx) && !(ctx->SignalPtr->DriverCaps & HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS))
+        InterlockedOr(&ctx->SignalPtr->DriverCaps, (LONG)HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS);
+}
+
+/* 2.1.0: map the signal section once (hm_contract.h, HIDMAESTRO_SIGNAL), and
+ * announce the gate while the owner watch is connected. Worker thread only.
  * Mapped until the device goes, as the acknowledgement is: the name stays
  * bound to this object while the driver holds it, so the next SDK on the
  * index opens the same section and finds the count as it is. A section the
  * SDK did not make, or none, and the worker counts nothing and the SDK
  * signals every frame.
  *
- * A context that has read no frame yet starts from the frame the last
- * worker on the index read (DriverSeenSeq), and from its open boundary: the
- * section still holds that frame, and a device added again on the index
- * sends it neither by the gate's look nor on an input event the last
- * worker left set. A frame the SDK wrote after that read is another SeqNo
- * and is read. */
+ * A context that has read no frame takes GateSeq from the frame the last
+ * worker on the index read (DriverSeenSeq): the section still holds that
+ * frame, and the gate's look must not send it again. From DriverCarry it
+ * takes what a device that went while it gated left: the last frame it
+ * sent, while the program it watched runs on, so an input event that
+ * device left set does not send that frame again, and a look before the
+ * first wait for a frame the SDK skipped signaling before that device
+ * stopped counting. A context that read frames before the section existed
+ * records its own last read instead. */
 static VOID
 TryOpenSignal(_In_ PDEVICE_CONTEXT ctx)
 {
@@ -863,32 +884,24 @@ TryOpenSignal(_In_ PDEVICE_CONTEXT ctx)
         if (view == NULL) return;
         ctx->SignalMemHandle = h;
         ctx->SignalPtr = view;
-        if (!ctx->FrameRead) {
-            LONG bound = view->DriverBoundary;
-            ctx->SeenSeqNo = view->DriverSeenSeq;
-            ctx->Boundary = bound != 0;
-            ctx->BoundaryStarts = bound != 0 ? bound - 1 : 0;
+        if (ctx->FrameRead) {
+            view->DriverSeenSeq = ctx->GateSeq;
+        } else {
+            ULONG carry = (ULONG)InterlockedExchange((volatile LONG *)&view->DriverCarry, 0);
+            ctx->GateSeq = view->DriverSeenSeq;
+            if (carry != 0) {
+                ctx->SeenSeqNo = carry & ~1u;
+                ctx->LookNext = TRUE;
+            }
         }
     }
-    if (!ctx->SignalBroken)
-        InterlockedOr(&ctx->SignalPtr->DriverCaps, (LONG)HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS);
+    AnnounceGate(ctx);
 }
 
-/* 2.1.0: the end of a program, or of what the worker can tell of it
- * (driver.h, Boundary). Recorded in the signal section too, for the next
- * device on the index. Worker thread only. */
-static VOID
-SetBoundary(_In_ PDEVICE_CONTEXT ctx)
-{
-    ctx->Boundary = TRUE;
-    ctx->BoundaryStarts = ctx->SignalPtr != NULL ? ctx->SignalPtr->SdkStarts : 0;
-    if (ctx->SignalPtr != NULL)
-        ctx->SignalPtr->DriverBoundary = ctx->BoundaryStarts + 1;
-}
-
-/* 2.1.0: a frame the worker has not read is in the input section. Read
- * after the interlocked increment of InputWaiters, a full barrier, so this
- * load cannot run ahead of that store (docs/design/signal-gate.md). An odd
+/* 2.1.0: a frame the worker has not read is in the input section: a SeqNo
+ * other than GateSeq. Read after the interlocked increment of InputWaiters,
+ * or the clear of the capability, a full barrier, so this load cannot run
+ * ahead of that store (docs/design/signal-gate.md). An odd
  * SeqNo is a write in progress: its writer stores the even number, fences
  * and finds the worker counted, so it signals. A SeqNo of 0 is a section no
  * frame has been written to. Worker thread only. */
@@ -898,7 +911,7 @@ FrameWaiting(_In_ PDEVICE_CONTEXT ctx)
     ULONG seq;
     if (ctx->SharedMemPtr == NULL) return FALSE;
     seq = ((volatile HIDMAESTRO_SHARED_INPUT *)ctx->SharedMemPtr)->SeqNo;
-    return (seq & 1) == 0 && seq != 0 && seq != ctx->SeenSeqNo;
+    return (seq & 1) == 0 && seq != 0 && seq != ctx->GateSeq;
 }
 
 /* Try to open and map the named section. Returns TRUE on success.
@@ -917,20 +930,6 @@ TryOpenSharedMapping(_In_ PDEVICE_CONTEXT ctx)
     TryOpenSignal(ctx);
     TryOpenInputAck(ctx);
     TryOpenOwnerWatch(ctx);
-    /* 2.1.0: after a recycle. With a watch connected the worker sees the
-     * end of the program on the index, and the frame the section holds is
-     * still the last one read. With none, and the input event gone when
-     * Phase 1 first looked for it, the program that held it ended unseen
-     * and the next may count from 0, which v2.0.3 met with the reset of
-     * SeenSeqNo here: a boundary instead. An event still there is held by
-     * the same program, and a boundary would send a frame already read
-     * again on an input event left set for it. */
-    if (ctx->RecycleWatchCheck) {
-        ctx->RecycleWatchCheck = FALSE;
-        if (ctx->OwnerPipe == NULL && ctx->RecycleEventGone)
-            SetBoundary(ctx);
-        ctx->RecycleEventGone = FALSE;
-    }
     AnnounceVersion(ctx);
     TryCreateDoorbell(ctx);
     return TRUE;
@@ -1166,11 +1165,6 @@ TryOpenOwnerWatch(_In_ PDEVICE_CONTEXT ctx)
     ctx->OwnerOverlapped.hEvent = ev;
     ctx->OwnerPipe = p;
     ctx->OwnerReadEvent = ev;
-    /* 2.1.0: a 2.1.0 SDK counts itself in SdkStarts before it creates the
-     * input event and before its first frame, which this connect follows,
-     * so a later start shows as another value when this program ends
-     * (OwnerGone). */
-    ctx->WatchStarts = ctx->SignalPtr != NULL ? ctx->SignalPtr->SdkStarts : 0;
     if (!ReadFile(p, &ctx->OwnerReadByte, 1, NULL, &ctx->OwnerOverlapped)
         && GetLastError() != ERROR_IO_PENDING) {
         /* The SDK's end closed between the open and the read. */
@@ -1183,6 +1177,10 @@ TryOpenOwnerWatch(_In_ PDEVICE_CONTEXT ctx)
         InterlockedOr(&((PHIDMAESTRO_INPUT_ACK)ctx->InputAckMemPtr)->Capabilities,
                       (LONG)HIDMAESTRO_INPUT_ACK_CAP_RELEASE);
     ReleaseSRWLockExclusive(&ctx->InputLock);
+    /* 2.1.0: the watch sees this program's end, so the gate opens. The
+     * worker counts itself and looks before its next wait, and finds any
+     * frame the SDK skips signaling from here. */
+    AnnounceGate(ctx);
 }
 
 /* Cancel the pending read and wait for it to finish before the OVERLAPPED
@@ -1212,21 +1210,27 @@ CloseOwnerWatch(_In_ PDEVICE_CONTEXT ctx)
 static VOID
 OwnerGone(_In_ PDEVICE_CONTEXT ctx)
 {
+    BOOLEAN gated = Gating(ctx);
     CloseOwnerWatch(ctx);
 
     /* A program before 2.1.0 that starts next on this index zeroes the
      * input section and counts its frames from 1, and it can start inside
-     * the idle window, before any recycle. Its first frame read goes out
-     * even when its SeqNo equals this program's last (a boundary). v2.0.3
-     * reset SeenSeqNo here instead, which with the signal gate sent the
-     * frame the section still holds a second time (docs/design/
-     * signal-gate.md). No boundary when a 2.1.0 SDK has started on the
-     * index since the watch connected: it counts from above every frame
-     * read, and the frames read since may be its own. SharedMemSeqNo is
-     * reset under InputLock below. The watch is tried again after the
-     * next frame, which the next program sends after it made its pipe. */
-    if (ctx->SignalPtr == NULL || ctx->SignalPtr->SdkStarts == ctx->WatchStarts)
-        SetBoundary(ctx);
+     * the idle window, before any recycle. SeenSeqNo is forgotten as v2.0.3
+     * forgot it here, so its frame equal to this program's last goes out.
+     * The gate closes with the watch (Gating): the capability goes, and
+     * the look below finds a frame the SDK skipped signaling before the
+     * clear. SharedMemSeqNo is reset under InputLock below. The watch is
+     * tried again after the next frame, which the next program sends after
+     * it made its pipe. */
+    ctx->SeenSeqNo = 0;
+    if (gated) {
+        InterlockedAnd(&ctx->SignalPtr->DriverCaps, ~(LONG)HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS);
+#if defined(_M_ARM64)
+        /* As after the increment in the worker's wait: the SeqNo load in
+         * the look below must not run ahead of the clear. */
+        MemoryBarrier();
+#endif
+    }
     ctx->WatchRetryNext = TRUE;
 
     /* The watch connects only beside the acknowledgement section, so it is
@@ -1239,6 +1243,17 @@ OwnerGone(_In_ PDEVICE_CONTEXT ctx)
                       (LONG)HIDMAESTRO_INPUT_ACK_WATCH_ENDED);
     ReleaseSRWLockExclusive(&ctx->InputLock);
     RecordOwnerGone(ctx);
+
+    /* 2.1.0: the look the gate owes (FrameWaiting, against GateSeq, which
+     * the reset above leaves). A frame skipped before the clear is read
+     * now, ahead of the release frames, as the wait reads a frame before
+     * the pipe's close. After the ended marker: a map here connects no
+     * watch to this program's pipe. After a recycle the input section is
+     * mapped here, as ReadSharedInput maps it. */
+    if (gated) {
+        if (ctx->SharedMemPtr == NULL) TryOpenSharedMapping(ctx);
+        if (FrameWaiting(ctx)) ProcessSharedInput(ctx, TRUE);
+    }
 
     AcquireSRWLockExclusive(&ctx->InputLock);
     volatile HIDMAESTRO_INPUT_ACK *ack = (volatile HIDMAESTRO_INPUT_ACK *)ctx->InputAckMemPtr;
@@ -1685,23 +1700,21 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx, _In_ BOOLEAN lookOnly)
     if (!ReadSharedInput(ctx, &shared)) return;
 
     ULONG seqNo = shared.SeqNo;
-    /* 2.1.0: a 2.1.0 SDK never stores SeqNo 0 (SharedMemoryIO.WriteInputFrame
-     * steps over it at the wrap), so 0 found by the look is a section no
-     * frame has been written to since an SDK zeroed it. A program before
-     * 2.1.0 stores 0 at every 2^31st frame and signals it, so a signaled 0
-     * goes on as v2.0.3 took it. */
-    if (seqNo == 0 && lookOnly) return;
-    /* 2.1.0: an equal SeqNo is the frame already read, except the first
-     * read after a boundary, when no 2.1.0 SDK started since (driver.h). */
-    BOOLEAN fresh = seqNo != ctx->SeenSeqNo
-        || (ctx->Boundary && (ctx->SignalPtr == NULL || ctx->SignalPtr->SdkStarts == ctx->BoundaryStarts));
+    /* 2.1.0: SeqNo 0 with no data is a section an SDK zeroed as it mapped
+     * the index, and no frame. v2.0.3 sent it as an all-zero report when an
+     * input event left set for the last program's frame found it. A
+     * program before 2.1.0 stores 0 with its frame at every 2^31st frame,
+     * and that frame goes on. */
+    if (seqNo == 0 && shared.DataSize == 0 && shared.ExtendedReportSize == 0) return;
+    /* 2.1.0: which frame is new (driver.h, GateSeq). A frame read on the
+     * input event is new when it is not the last one sent, as v2.0.3 took
+     * it. One the look read, with no signal behind it, when it is not the
+     * last one read. */
+    BOOLEAN fresh = lookOnly ? seqNo != ctx->GateSeq : seqNo != ctx->SeenSeqNo;
+    ctx->GateSeq = seqNo;
     ctx->FrameRead = TRUE;
-    if (ctx->SignalPtr != NULL) {
-        /* The index's record, for the next device and the next SDK on it. */
-        ctx->SignalPtr->DriverSeenSeq = seqNo;
-        if (ctx->Boundary) ctx->SignalPtr->DriverBoundary = 0;
-    }
-    ctx->Boundary = FALSE;
+    /* The index's record, for the next device and the next SDK on it. */
+    if (ctx->SignalPtr != NULL) ctx->SignalPtr->DriverSeenSeq = seqNo;
     if (!fresh) return; /* No new data */
     /* v2.0.0: the worker's stale-wakeup count reads SeenSeqNo, since a
      * frame the driver does not send leaves SharedMemSeqNo alone. */
@@ -1928,8 +1941,6 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                 OwnerGone(ctx);
             HANDLE ev = OpenEventW(EVENT_MODIFY_STATE | SYNCHRONIZE, FALSE,
                                    ctx->InputEventName);
-            if (ev == NULL && ctx->RecycleWatchCheck)
-                ctx->RecycleEventGone = TRUE;
             if (ev != NULL) {
                 ctx->InputDataEvent = ev;
                 /* The remove events, which an SDK of this release
@@ -1990,6 +2001,12 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
         BOOLEAN recycle = FALSE;
 
         for (;;) {
+            /* 2.1.0: a look owed from the map (DriverCarry), before the
+             * first wait, with or without the gate. */
+            if (ctx->LookNext) {
+                ctx->LookNext = FALSE;
+                if (FrameWaiting(ctx)) ProcessSharedInput(ctx, TRUE);
+            }
             /* The owner watch (issue #67) joins the wait while it is open.
              * After it fires it is closed and the wait is back to two. */
             /* The remove event joins last, after the owner read while
@@ -2002,15 +2019,16 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                 waits[count] = ctx->RemoveEvent;
                 removeAt = count++;
             }
-            /* 2.1.0: the signal gate (docs/design/signal-gate.md). Counted in
-             * InputWaiters from before the last look at the section until
-             * the wait returns, so the SDK skips its SetEvent only for a
-             * frame this look finds. Such a frame is read without blocking:
-             * the wait polls the other events with a zero timeout, and its
-             * timeout stands for the input event. A count the increment
-             * finds below zero is wrong: clearing the capability sends the
-             * SDK back to a SetEvent every frame. */
-            volatile LONG *waiters = ctx->SignalPtr != NULL ? &ctx->SignalPtr->InputWaiters : NULL;
+            /* 2.1.0: the signal gate (docs/design/signal-gate.md), while the
+             * owner watch is connected (Gating). Counted in InputWaiters
+             * from before the last look at the section until the wait
+             * returns, so the SDK skips its SetEvent only for a frame this
+             * look finds. Such a frame is read without blocking: the wait
+             * polls the other events with a zero timeout, and its timeout
+             * stands for the input event. A count the increment finds below
+             * zero is wrong: clearing the capability sends the SDK back to
+             * a SetEvent every frame. */
+            volatile LONG *waiters = Gating(ctx) ? &ctx->SignalPtr->InputWaiters : NULL;
             BOOLEAN pending = FALSE;
             if (waiters != NULL) {
                 if (InterlockedIncrement(waiters) <= 0) {
@@ -2106,10 +2124,8 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                     /* 2.1.0: the gate's capability again, which another
                      * context on the index clears as its device goes, and
                      * which a streaming consumer's worker otherwise sets
-                     * only at a map. */
-                    if (ctx->SignalPtr != NULL && !ctx->SignalBroken
-                        && !(ctx->SignalPtr->DriverCaps & HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS))
-                        InterlockedOr(&ctx->SignalPtr->DriverCaps, (LONG)HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS);
+                     * only at a map or a connect. */
+                    AnnounceGate(ctx);
                 }
                 continue;
             }
@@ -2196,18 +2212,17 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
             ctx->SharedMemSeqNo = 0;
             ctx->LastDeliveredInputSeqNo = 0;
             ReleaseSRWLockExclusive(&ctx->InputLock);
-            /* 2.1.0: with the signal section mapped, SeenSeqNo stays. The
-             * section still holds the frame it names, and an input event
-             * left set for that frame, or set by a SetEvent that ran as the
-             * wait timed out, would send it again. The map after the
-             * recycle sets a boundary when it connects no owner watch
-             * (TryOpenSharedMapping). Without the section no 2.1.0 SDK is
-             * on the index, the worker reads only on a signal, and the
-             * recycle forgets the last SeqNo as v2.0.3's did. */
-            if (ctx->SignalPtr == NULL)
-                SetBoundary(ctx);
-            else
-                ctx->RecycleWatchCheck = TRUE;
+            /* 2.1.0: while the gate is open SeenSeqNo stays. The owner
+             * watch sees the program's end (OwnerGone): every SDK with an
+             * owner pipe closes it as its controller goes. Until then the
+             * section holds the frame SeenSeqNo names, which an input event
+             * left set for it, or set by a SetEvent that ran as the wait
+             * timed out, would send again. With no watch the program may
+             * have ended unseen and the next may count from 0, and with no
+             * gate the worker reads on the input event alone, so the
+             * recycle forgets it as v2.0.3's did. */
+            if (!Gating(ctx))
+                ctx->SeenSeqNo = 0;
         }
     }
 }
@@ -2244,14 +2259,28 @@ static VOID ReleaseIndexObjects(_In_ PDEVICE_CONTEXT ctx)
     /* Workers are joined and the queues purged before this runs, so no
      * read path can be touching the acknowledgement any more. */
     CloseInputAckLocked(ctx);
-    CloseOwnerWatch(ctx);
     /* 2.1.0: this context counts no more, so its capability goes with it,
      * and the SDK signals every frame until a worker on the index sets it
-     * again. Frames the SDK skipped before this are other SeqNos than
-     * DriverSeenSeq, and the next device's worker reads them at its first
-     * look. */
+     * again. While it gated, DriverCarry tells the next device on the index
+     * to look once for a frame the SDK skipped before this, and, while the
+     * program it watched runs on, which frame it sent last, since an input
+     * event left set for that frame would send it again (TryOpenSignal).
+     * Without the gate the next device reads on the input event as
+     * v2.0.3's did, from SeenSeqNo 0. Stored after the clear, both
+     * interlocked: a context that reads it reads the section after the
+     * clear, and so finds any frame whose SetEvent the SDK skipped before
+     * it. */
+    ULONG carry = 0;
+    if (Gating(ctx)) {
+        /* The watch's read still pending: the program runs on. A read
+         * that completed, or failed at once, is its end. */
+        BOOLEAN running = !HasOverlappedIoCompleted(&ctx->OwnerOverlapped);
+        carry = (running ? ctx->SeenSeqNo : 0) | 1u;
+    }
+    CloseOwnerWatch(ctx);
     if (ctx->SignalPtr) {
         InterlockedAnd(&ctx->SignalPtr->DriverCaps, ~(LONG)HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS);
+        InterlockedExchange((volatile LONG *)&ctx->SignalPtr->DriverCarry, (LONG)carry);
         UnmapViewOfFile(ctx->SignalPtr);
         ctx->SignalPtr = NULL;
     }

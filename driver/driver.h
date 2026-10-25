@@ -208,7 +208,10 @@ typedef struct _DEVICE_CONTEXT {
     ULONG   PolledReportSize;
     BOOLEAN PolledReportReady;
 
-    /* The last shared-input SeqNo the worker read, sent or not. A frame
+    /* The last shared-input SeqNo the worker sent, which a frame read on
+     * the input event must differ from to go out (v2.0.3's rule). Reset at
+     * the end of a program the owner watch saw, at a recycle with no watch,
+     * and at add, as v2.0.3 reset it (docs/design/signal-gate.md). A frame
      * the driver does not send leaves SharedMemSeqNo and the cache as they
      * were. */
     ULONG   SeenSeqNo;
@@ -260,7 +263,7 @@ typedef struct _DEVICE_CONTEXT {
 
     /* Sequence-number gate for IOCTL_HID_READ_REPORT. The READ_REPORT
      * handler returns a cached input report immediately ONLY when there's
-     * new data since the last delivery (SharedMemSeqNo > LastDeliveredSeqNo).
+     * new data since the last delivery (SharedMemSeqNo != LastDeliveredInputSeqNo).
      * Otherwise the request is parked in ManualQueue and the worker thread
      * completes it on the next ProcessSharedInput tick. Without this gate,
      * HIDClass hammers READ_REPORT in a tight loop because every call
@@ -341,31 +344,26 @@ typedef struct _DEVICE_CONTEXT {
     WCHAR   VersionMappingName[64];       /* e.g. L"Global\\HIDMaestroVersion0" */
 
     /* 2.1.0: the signal gate (hm_contract.h, HIDMAESTRO_SIGNAL). The worker
-     * maps the section with the input section, sets
-     * HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS, and counts itself in InputWaiters
-     * across each wait on the input event. Kept mapped until the device
-     * goes, as the acknowledgement is. NULL against an SDK that makes no
-     * such section, and the SDK signals every frame. */
+     * maps the section with the input section. While its owner watch is
+     * connected it sets HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS and counts
+     * itself in InputWaiters across each wait on the input event. Kept
+     * mapped until the device goes, as the acknowledgement is. NULL against
+     * an SDK that makes no such section, and the SDK signals every frame. */
     WCHAR   SignalMappingName[64];        /* e.g. L"Global\\HIDMaestroSignal0" */
     HANDLE  SignalMemHandle;
     struct _HIDMAESTRO_SIGNAL *SignalPtr;  /* hm_contract.h, included below */
     BOOLEAN SignalBroken;                  /* the count was found below zero: never announce again */
-    /* 2.1.0: which frame is new (docs/design/signal-gate.md). SeenSeqNo is
-     * never reset after add: the section still holds the frame it names,
-     * and that frame read again would go out twice. A boundary is the end
-     * of a program seen (OwnerGone), or a recycle that finds no owner watch
-     * to connect: the next program, if it is one before 2.1.0, counts from
-     * 0, and its first frame may carry SeenSeqNo. The first frame read
-     * after a boundary goes out even when its SeqNo equals SeenSeqNo,
-     * unless a 2.1.0 SDK started on the index since (SdkStarts), whose
-     * frames count from above every frame read. Worker thread only. */
+    /* 2.1.0: which frame is new (docs/design/signal-gate.md). GateSeq is
+     * the last SeqNo the worker read, sent or not, never reset: the gate's
+     * look and a frame that look reads compare with it, since the section
+     * still holds that frame. A context that has read no frame takes
+     * DriverSeenSeq at its first map, and SeenSeqNo from DriverCarry.
+     * LookNext asks the worker for one look before its next wait.
+     * Worker thread only. */
+    ULONG   GateSeq;
     BOOLEAN FrameRead;                     /* a frame has been read since add */
-    BOOLEAN Boundary;
-    BOOLEAN RecycleWatchCheck;             /* a recycle's map is to look for an owner watch */
-    BOOLEAN RecycleEventGone;              /* ... and Phase 1 found no input event first */
+    BOOLEAN LookNext;
     BOOLEAN WatchRetryNext;                /* retry the owner watch after the next frame */
-    LONG    BoundaryStarts;                /* SdkStarts at the boundary */
-    LONG    WatchStarts;                   /* SdkStarts when the owner watch connected */
 
     /* 2.1.0: AckSignal under the contract. FALSE when the controller's SDK
      * said no thread waits on the acknowledgement's event: DeliveredSeqNo
