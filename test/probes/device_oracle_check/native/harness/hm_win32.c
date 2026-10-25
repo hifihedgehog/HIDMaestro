@@ -277,6 +277,8 @@ void PipeServerClose(HmPipeServer *s)
 
 static void *g_mainFiber;
 static HmThread *g_current;
+int HmOnDriverThread(void) { return g_current != NULL; }
+int (*g_waitAnswerHook)(HmThread *t, DWORD result);
 
 void FiberInit(void)
 {
@@ -323,6 +325,7 @@ void ThreadRun(HmThread *t, DWORD result)
                        (unsigned long long)(g_clockMs - t->waitStartMs), (unsigned long)t->waitTimeout);
         }
         RecordWait("wait.answer", t->index, result, (DWORD)(g_clockMs - t->waitStartMs), 0);
+        if (g_waitAnswerHook && g_waitAnswerHook(t, result)) g_waitAnswerHook = NULL;
     }
     t->result = result;
     t->started = 1;

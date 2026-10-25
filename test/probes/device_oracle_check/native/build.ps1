@@ -171,6 +171,9 @@ foreach ($f in $flavors) {
     } else {
         "int HmDriverHasIdentityTag = 0;`nunsigned long long HmDriverIdentityTag(const unsigned short *t) { (void)t; return 0; }`n"
     }
+    # TearingDown's offset in the flavor's device context, for the streams
+    # that start a teardown from another thread (hm_case_threads.c).
+    $tagSource = "#include `"driver.h`"`nunsigned HmTearingDownOffset = (unsigned)FIELD_OFFSET(DEVICE_CONTEXT, TearingDown);`n" + $tagSource
     [IO.File]::WriteAllText($tagC, $tagSource, (New-Object System.Text.ASCIIEncoding))
     # Both drivers define DriverEntry, so the companion's is renamed.
     $cmd = @"

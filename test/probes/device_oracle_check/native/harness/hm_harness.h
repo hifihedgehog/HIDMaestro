@@ -556,6 +556,17 @@ extern int g_sdkSignal;
 /* Run once when the driver closes an owner pipe client handle: a stream
  * starts the next program at that moment. */
 extern void (*g_pipeClientCloseHook)(void);
+/* Run once at the next completion a driver thread makes, before it is
+ * recorded (hm_wdf.c). */
+extern void (*g_completeHook)(void);
+/* Run at each blocking wait's answer, after the answer is chosen and
+ * recorded and before the thread runs on, until it returns nonzero. */
+extern int (*g_waitAnswerHook)(HmThread *t, DWORD result);
+/* The code runs on a driver thread, not on the scenario's fiber. */
+int HmOnDriverThread(void);
+/* FIELD_OFFSET(DEVICE_CONTEXT, TearingDown) in the flavor's driver.h
+ * (build.ps1's driver_tag.c). */
+extern unsigned HmTearingDownOffset;
 /* This stream's SDK writes the version contract: a tagged parameter, or
  * the default one under "sdk 2". */
 int SdkWritesContract(void);
