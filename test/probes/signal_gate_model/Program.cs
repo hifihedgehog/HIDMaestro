@@ -67,11 +67,11 @@ internal static class Program
         }
         foreach (var v in DeliveryModel.Variants)
         {
-            var r = DeliveryModel.Explore(v);
+            var r = DeliveryModel.Explore(v, frames);
             bool ok = v.Expect == null ? r.Duplicate == null && r.Lost == null
                     : v.Expect == "duplicate" ? r.Duplicate != null : r.Lost != null;
             if (!ok) bad++;
-            Console.WriteLine($"[{(ok ? "PASS" : "FAIL")}] {v.Name}: {r.States} states, {r.Finals} final, " +
+            Console.WriteLine($"[{(ok ? "PASS" : "FAIL")}] {v.Name}, {r.Frames} frames a program: {r.States} states, {r.Finals} final, " +
                 (r.Duplicate != null ? "a frame sent twice" : "no frame sent twice") + ", " +
                 (r.Lost != null ? "a frame never sent" : "every last frame sent") +
                 (v.Expect != null ? $" (expected: {(v.Expect == "duplicate" ? "a frame sent twice" : "a frame never sent")})" : ""));
