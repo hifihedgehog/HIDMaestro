@@ -94,8 +94,9 @@ internal static class LockCoverage
         // reinstall flag.
         ("SetupDiSetDeviceRegistryPropertyW(", "StampOne", "hardware id stamp"),
         ("CM_Set_DevNode_Registry_PropertyW(", "WriteConfigFlags", "CONFIGFLAG_REINSTALL"),
-        // A USB/IP import's attach and detach.
-        ("PLUGIN_HARDWARE_ONCE,", "Attach", "attach and detach"),
+        // A USB/IP import's attach and detach. Attach sends the plugin
+        // request through TryPlugin, once per layout it tries.
+        ("PLUGIN_HARDWARE_ONCE,", "TryPlugin", "attach and detach"),
         ("PLUGOUT_HARDWARE,", "Detach", "attach and detach"),
         // The transport driver install and update.
         ("\"force-driver\"", "BuildForceDriverStartInfo", "hmswd.exe force-driver"),

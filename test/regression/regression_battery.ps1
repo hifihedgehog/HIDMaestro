@@ -1827,7 +1827,8 @@ function Scenario-Valve-Wire {
 # vector submitted, and on the Deck and Triton a touch at pressure 0.25
 # reads 0.25 and one at pressure 0 reads 1.0. Each persona's cadence
 # follows: under 1 kHz, 250 Hz and 125 Hz submits, the sensor time SDL
-# credits a report matches the wall time between reports (issue #72).
+# credits a report matches the time between reports at the HID layer
+# (issue #72).
 # SKIPs when the sibling SDL3-build/build-stock checkout is absent. The fork
 # beside it deliberately skips HIDMaestro devices and is never used here.
 function Scenario-Valve-Sdl {
