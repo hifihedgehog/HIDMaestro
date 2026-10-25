@@ -105,6 +105,69 @@ static void StreamPump(PlanProfile *p)
     CtlStop(&c);
 }
 
+/* 2.1.0's signal gate never sends a frame twice (docs/design/signal-gate.md,
+ * "Which frame is new"). One frame delivered, a read parked, and nothing
+ * more from the SDK through two recycles: no completion of that read may
+ * come, since the section still holds the frame HID class already has. */
+static void StreamGateIdle(PlanProfile *p)
+{
+    Ctl c;
+    StreamBegin("threads/%s/gate-idle-no-repeat", p->id);
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    Probe(&c, 0, 1);
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    HidRead(&c, len);
+    Timeout(&c, 0, 8);
+    Timeout(&c, 0, 8);
+    Timeout(&c, 0, 2);
+    CtlStop(&c);
+}
+
+/* One frame delivered, two reads parked, then the owner pipe closes (the
+ * program ended) and the worker runs: OwnerGone sends nothing again. */
+static void StreamGateOwnerGone(PlanProfile *p)
+{
+    Ctl c;
+    StreamBegin("threads/%s/gate-owner-gone-no-repeat", p->id);
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    Probe(&c, 0, 1);
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    HidRead(&c, len);
+    HidRead(&c, len);
+    PipeServerClose(c.sdk.pipe);
+    ThreadResume(CtlThread(&c, 0));
+    Timeout(&c, 0, 1);
+    Timeout(&c, 0, 1);
+    CtlStop(&c);
+}
+
+/* Issue #67 with the gate: one frame delivered (a key held), the SDK's
+ * release frame in the acknowledgement section, two reads parked, then the
+ * owner pipe closes and the worker runs. The release frame is the last
+ * report HID class gets. */
+static void StreamGateRelease(PlanProfile *p)
+{
+    Ctl c;
+    StreamBegin("threads/%s/gate-release-last", p->id);
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    Probe(&c, 0, 1);
+    uint8_t *a = c.sdk.ack->buf;
+    int32_t seq = 2, cnt = 1, sz = 78;
+    memcpy(a + 8, &seq, 4);
+    memcpy(a + 12, &cnt, 4);
+    memcpy(a + 16, &sz, 4);
+    memset(a + 20, 0, 80);
+    a[20] = 0x01;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    HidRead(&c, len);
+    HidRead(&c, len);
+    PipeServerClose(c.sdk.pipe);
+    ThreadResume(CtlThread(&c, 0));
+    Timeout(&c, 0, 1);
+    Timeout(&c, 0, 1);
+    CtlStop(&c);
+}
+
 void CaseThreads(void)
 {
     PlanProfile *sw = PlanFind("switch", NULL);
@@ -121,4 +184,7 @@ void CaseThreads(void)
     StreamStaleRecycle(sw, 1);
     StreamStaleRecycle(ds, 0);
     StreamPump(xusb);
+    StreamGateIdle(ds);
+    StreamGateOwnerGone(ds);
+    StreamGateRelease(ds);
 }

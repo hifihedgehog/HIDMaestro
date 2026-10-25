@@ -494,6 +494,7 @@ uint32_t     PlanDword(PlanProfile *p, const char *name, uint32_t fallback);
 typedef struct Sdk {
     int         index;
     HmSection  *input, *ack, *version, *output, *pid;
+    HmSection  *signal;   /* 2.1.0's signal gate, under "sdk 3" (SdkWritesSignal) */
     HmEvent    *inputEv, *ackEv, *companionEv;
     HmPipeServer *pipe;
     uint32_t    seq;
@@ -546,14 +547,25 @@ int VersionTagged(int param);
  * for a parameter runs as the tree's SDK. The plan a recording kept, from
  * 9bd6279's SDK, does not. */
 extern int g_sdkV2;
+/* The plan's "sdk 3": this tree's SDK from 2.1.0, which also makes the
+ * signal gate's section (SharedMemoryIO.EnsureInputMapping), counts its
+ * frames from above the SeqNo a driver worker last read, and skips the
+ * input event and the companion doorbell when the gate says nobody waits
+ * (SharedMemoryIO.WriteInputFrame). Replay's plans carry it. */
+extern int g_sdkSignal;
 /* This stream's SDK writes the version contract: a tagged parameter, or
  * the default one under "sdk 2". */
 int SdkWritesContract(void);
+/* This stream's SDK makes the signal section: the default parameter under
+ * "sdk 3". */
+int SdkWritesSignal(void);
 /* Under a parameter: the section's bytes, then the clear or the close. */
 void SdkVersionMidRun(Sdk *s);
 /* SharedMemoryIO.WriteInputFrame: odd SeqNo, DataSize and Data, the GIP
  * slice when one is given, the extended lane or its size cleared, even
- * SeqNo, then the input event and, with a GIP slice, the companion's. */
+ * SeqNo, then the input event and, with a GIP slice, the companion's, each
+ * skipped under the signal gate when its capability is set and its count
+ * is zero. */
 void SdkWriteFrame(Sdk *s, const uint8_t *data, uint32_t dataLen, const uint8_t *gip,
                    const uint8_t *ext, uint32_t extLen);
 /* HMController.EnsurePidStateViewLocked and PublishPidPool. */

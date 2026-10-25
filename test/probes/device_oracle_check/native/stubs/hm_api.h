@@ -52,6 +52,8 @@ VOID WINAPI HmInitializeCriticalSection(LPCRITICAL_SECTION lpCriticalSection);
 VOID WINAPI HmEnterCriticalSection(LPCRITICAL_SECTION lpCriticalSection);
 VOID WINAPI HmLeaveCriticalSection(LPCRITICAL_SECTION lpCriticalSection);
 VOID WINAPI HmDeleteCriticalSection(LPCRITICAL_SECTION lpCriticalSection);
+VOID WINAPI HmAcquireSRWLockExclusive(PSRWLOCK SRWLock);
+VOID WINAPI HmReleaseSRWLockExclusive(PSRWLOCK SRWLock);
 ULONGLONG WINAPI HmGetTickCount64(VOID);
 VOID WINAPI HmGetSystemTimeAsFileTime(LPFILETIME lpSystemTimeAsFileTime);
 VOID NTAPI HmRtlInitUnicodeString(PUNICODE_STRING DestinationString, PCWSTR SourceString);

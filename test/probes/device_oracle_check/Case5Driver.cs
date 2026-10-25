@@ -397,16 +397,17 @@ internal sealed class Case5Driver : IOracleCase
     }
 
     /// <summary>A plan whose default streams model this tree's SDK: the
-    /// harness's "sdk 2" line, after the header (hm_harness.h g_sdkV2). The
-    /// tree's SDK writes the version contract, protocols 4 to 4 with the
-    /// controller's identity tag, and the identity entry, before any PnP
-    /// work. 9bd6279's SDK, whose plan the recording kept, wrote protocols 2
-    /// to 3 and no tag.</summary>
+    /// harness's "sdk 3" line, after the header (hm_harness.h g_sdkV2 and
+    /// g_sdkSignal). The tree's SDK writes the version contract, protocols 4
+    /// to 4 with the controller's identity tag, and the identity entry,
+    /// before any PnP work, and from 2.1.0 makes the signal gate's section
+    /// and skips the signals it says nobody waits for. 9bd6279's SDK, whose
+    /// plan the recording kept, wrote protocols 2 to 3 and no tag.</summary>
     internal static string AsTreeSdk(string plan)
     {
         const string header = "hm-driver-plan 1\n";
         if (!plan.StartsWith(header, StringComparison.Ordinal)) throw new InvalidDataException("not a driver plan");
-        return header + "sdk 2\n" + plan[header.Length..];
+        return header + "sdk 3\n" + plan[header.Length..];
     }
 
     internal static void AddProfile(StringBuilder sb, string group, ControllerProfile p, List<RegValue> values, string? name = null)
@@ -476,8 +477,12 @@ internal sealed class Case5Driver : IOracleCase
     // takes the machine-wide ledger lock in the administrators' private
     // namespace (DeviceOrchestrator.cs:690-691, RegistryLedger.cs:192-196).
     // It is skipped for a keyboard or mouse, so the call runs with the
-    // profile's Type set to "keyboard" and restored after. No value the
-    // call writes into Controller<N> reads Type. When the process is not
+    // profile's Type set to "keyboard" and restored after. One value the
+    // call writes into Controller<N> reads Type: AckSignal (2.1.0), 1 when
+    // a thread of the controller's SDK waits on the delivery
+    // acknowledgement (DeviceOrchestrator.WaitsOnDelivery), which every
+    // keyboard does. It is taken from WaitsOnDelivery for the profile's own
+    // Type in place of what the call wrote. When the process is not
     // elevated, the ledger lock throws UnauthorizedAccessException before
     // it creates anything (AdminNamespace cannot open its namespace), so
     // each profile is also written once with its own Type, the exception
@@ -542,6 +547,14 @@ internal sealed class Case5Driver : IOracleCase
         return result;
     }
 
+    static readonly MethodInfo? s_waitsOnDelivery =
+        typeof(DeviceOrchestrator).GetMethod("WaitsOnDelivery", BindingFlags.NonPublic | BindingFlags.Static);
+
+    /// <summary>DeviceOrchestrator.WaitsOnDelivery for the profile as it
+    /// is, the AckSignal its own create writes.</summary>
+    static bool WaitsOnDelivery(ControllerProfile p) =>
+        (bool)(s_waitsOnDelivery ?? throw new MissingMethodException("DeviceOrchestrator.WaitsOnDelivery")).Invoke(null, new object[] { p })!;
+
     static List<RegValue> Write(ControllerProfile p, bool asKeyboard)
     {
         Registry.LocalMachine.DeleteSubKeyTree("SOFTWARE", throwOnMissingSubKey: false);
@@ -566,6 +579,9 @@ internal sealed class Case5Driver : IOracleCase
             values.Add(new RegValue(name, kind, data.AsSpan(0, size).ToArray()));
         }
         Registry.LocalMachine.DeleteSubKeyTree("SOFTWARE", throwOnMissingSubKey: false);
+        int ack = values.FindIndex(r => r.Name == "AckSignal");
+        if (ack >= 0)
+            values[ack] = values[ack] with { Data = BitConverter.GetBytes(WaitsOnDelivery(p) ? 1 : 0) };
         return values;
 
         static void rc(int code, string name)

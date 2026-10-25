@@ -965,6 +965,23 @@ VOID WINAPI HmDeleteCriticalSection(LPCRITICAL_SECTION cs)
     cs->SpinCount = HM_CS_DELETED;
 }
 
+/* A slim reader/writer lock, taken exclusive, is a held mark in its own
+ * word. SRWLOCK_INIT is all zero, so a zeroed device context holds free
+ * ones, and an SRW lock is never deleted. Taking one already held would
+ * deadlock a real thread, and stops the run here. */
+VOID WINAPI HmAcquireSRWLockExclusive(PSRWLOCK l)
+{
+    if (l->Ptr != NULL) HmFail("AcquireSRWLockExclusive on a lock already held");
+    l->Ptr = (PVOID)1;
+    g_locksHeld++;
+}
+VOID WINAPI HmReleaseSRWLockExclusive(PSRWLOCK l)
+{
+    if (l->Ptr == NULL) HmFail("ReleaseSRWLockExclusive on a free lock");
+    l->Ptr = NULL;
+    g_locksHeld--;
+}
+
 ULONGLONG WINAPI HmGetTickCount64(VOID) { return g_clockMs; }
 
 VOID WINAPI HmGetSystemTimeAsFileTime(LPFILETIME ft)
