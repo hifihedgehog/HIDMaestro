@@ -155,7 +155,7 @@ internal static class Program
                 do { seen = Volatile.Read(ref best); } while (k < seen && Interlocked.CompareExchange(ref best, k, seen) != seen);
             }
         });
-        long states = 0, finals = 0, unaligned = 0, v203 = 0, largest = 0, ownFails = 0;
+        long states = 0, finals = 0, unaligned = 0, v203 = 0, largest = 0, ownFails = 0, excused = 0;
         string largestName = "";
         var failures = new List<int>();
         for (int k = 0; k < mine.Count; k++)
@@ -163,12 +163,13 @@ internal static class Program
             var a = results[k];
             if (a == null || a.Canceled) continue;
             if (a.OwnFails) ownFails++;
-            states += a.States; finals += a.Finals; unaligned += a.Unaligned; v203 += a.V203States;
+            states += a.States; finals += a.Finals; unaligned += a.Unaligned; v203 += a.V203States; excused += a.Excused;
             if (a.States > largest) { largest = a.States; largestName = mine[k].sc.Name; }
             if (a.Worse.Count > 0 || a.ZeroSent) failures.Add(k);
         }
         string where = $"{frames} frame(s) a program, shard {shard}/{shards}, {mine.Count} scenario(s)";
         string totals = $"{states} paired states, {finals} final, {v203} v2.0.3 states, {unaligned} shared step(s) v2.0.3 could not take, " +
+                        $"{excused} time step(s) no v2.0.3 run could take, " +
                         $"largest scenario {largest} paired states ({largestName}), {clock.Elapsed.TotalSeconds:F0} s";
         if (rule < 0)
         {
