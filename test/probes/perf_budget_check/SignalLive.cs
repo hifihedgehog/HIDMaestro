@@ -14,7 +14,9 @@
 //     driver counts itself and reads a frame it finds before it waits,
 //     which a program before 2.1.0 does not give it: this row is the
 //     writer before 2.1.0 against a driver that counts. A program before
-//     2.1.0 on this driver is timed by that release's own probe
+//     2.1.0 on this driver is timed by that release's own probe. On this
+//     driver the row reads slower than on v2.0.3's. It is not the
+//     path a 2.1.0 submit takes: that is the gated row below
 //   - from 2.1.0, a frame written and signaled through the signal gate
 //     (docs/design/signal-gate.md), as a submit now ends: the signal only
 //     while the driver waits. An SDK without the gate has no such row
