@@ -128,6 +128,14 @@ internal static class DeliveryModel
         // Candidate changes, off in this driver (Candidates below).
         public bool CloseSignalsSent { get; init; }        // CloseGate signals a handed frame equal to the last one sent too
         public bool TakeReadSendsTaken { get; init; }      // a take's read sends, and a stop signals back, the frame taken when the section still holds it
+        // Round 6 as the design summary gives it (no commit yet): a
+        // provisional SeqNo goes in the handoff first, the recheck takes it
+        // back and signals with a waiter or a closed gate and makes it final
+        // otherwise, signaling when a take dropped it meanwhile; a pending
+        // final value is replaced by the new frame's final one; a take drops
+        // a provisional value and reads a final one, sending only the frame
+        // with exactly that SeqNo.
+        public bool Round6 { get; init; }
         public bool NoTakeBackOverUntaken { get; init; }   // the SDK skips the take-back when its exchange replaced a frame not taken
     }
 
@@ -170,6 +178,9 @@ internal static class DeliveryModel
         This with { Name = "all three", CloseSignalsSent = true, NoTakeBackOverUntaken = true, RetryAfterOwnerGone = false },
         This with { Name = "a take's read sends the frame taken with a next program started", TakeReadSendsTaken = true },
         This with { Name = "all four", CloseSignalsSent = true, NoTakeBackOverUntaken = true, RetryAfterOwnerGone = false, TakeReadSendsTaken = true },
+        This with { Name = "round 6 as summarized", Round6 = true, TakeReadNoNext = false, TakeReadNextSeq = false, BackOnlyAlone = false },
+        This with { Name = "round 6 as summarized, the watch as 533ca4a4, CloseGate signals a sent frame",
+                    Round6 = true, TakeReadNoNext = false, TakeReadNextSeq = false, BackOnlyAlone = false, RetryAfterOwnerGone = false, CloseSignalsSent = true },
     };
 
     internal static IEnumerable<Scenario> Scenarios()
@@ -257,7 +268,7 @@ internal static class DeliveryModel
         public bool RecycleUsed, ReAddUsed, StopUsed, KillUsed, StopSig;
         public int Tear;
         public int Ack, WatchP, RelQ, RelFor, RelDone, Handed;
-        public bool AckBit, AckEnded, Replaced, RetryNext, NoRetry;
+        public bool AckBit, AckEnded, Replaced, RetryNext, NoRetry, HandFinal;
         public int Took;
         public ulong Delivered;
     }
@@ -302,7 +313,7 @@ internal static class DeliveryModel
         b.Put(s.RecycleUsed); b.Put(s.ReAddUsed); b.Put(s.StopUsed); b.Put(s.KillUsed); b.Put(s.StopSig);
         b.Put(s.Tear, 2);
         b.Put(s.Ack, 2); b.Put(s.WatchP, 2); b.Put(s.RelQ, 2); b.Put(s.RelFor, 2); b.Put(s.RelDone, 3); b.Put(s.Handed, 8);
-        b.Put(s.AckBit); b.Put(s.AckEnded); b.Put(s.Replaced); b.Put(s.RetryNext); b.Put(s.NoRetry);
+        b.Put(s.AckBit); b.Put(s.AckEnded); b.Put(s.Replaced); b.Put(s.RetryNext); b.Put(s.NoRetry); b.Put(s.HandFinal && s.Hand != 0);
         // The delivery counts take 45 bits of the third word, Took the 8 above.
         if ((uint)s.Took >= 256) throw new InvalidOperationException("Took out of range");
         return new Key(a.W, b.W, s.Delivered | (ulong)(uint)s.Took << 45);
@@ -323,7 +334,7 @@ internal static class DeliveryModel
         s.RecycleUsed = b.Bit(); s.ReAddUsed = b.Bit(); s.StopUsed = b.Bit(); s.KillUsed = b.Bit(); s.StopSig = b.Bit();
         s.Tear = b.Get(2);
         s.Ack = b.Get(2); s.WatchP = b.Get(2); s.RelQ = b.Get(2); s.RelFor = b.Get(2); s.RelDone = b.Get(3); s.Handed = b.Get(8);
-        s.AckBit = b.Bit(); s.AckEnded = b.Bit(); s.Replaced = b.Bit(); s.RetryNext = b.Bit(); s.NoRetry = b.Bit();
+        s.AckBit = b.Bit(); s.AckEnded = b.Bit(); s.Replaced = b.Bit(); s.RetryNext = b.Bit(); s.NoRetry = b.Bit(); s.HandFinal = b.Bit();
         s.Delivered = k.C & ((1UL << 45) - 1);
         s.Took = (int)(k.C >> 45);
         return s;
@@ -969,10 +980,26 @@ internal static class DeliveryModel
             }
             case S_CHECK:
                 // A 2.1.0 SDK with the capability hands the frame over.
-                next.Add(prog.Is21 && s.Cap ? s with { Hand = s.SdkSeq, Replaced = r.NoTakeBackOverUntaken && s.Hand != 0, SdkPc = S_RECLAIM }
-                                            : s with { SdkPc = S_SIGNAL });
+                if (r.Round6 && prog.Is21 && s.Cap && s.Hand != 0 && s.HandFinal)
+                    // A pending final value becomes the new frame's, in one
+                    // compare-exchange: its wake carries this frame.
+                    next.Add(AfterFrame(s with { Hand = s.SdkSeq, HandFinal = true }));
+                else
+                    next.Add(prog.Is21 && s.Cap ? s with { Hand = s.SdkSeq, HandFinal = false, Replaced = r.NoTakeBackOverUntaken && s.Hand != 0, SdkPc = S_RECLAIM }
+                                                : s with { SdkPc = S_SIGNAL });
                 break;
             case S_RECLAIM:
+                if (r.Round6)
+                {
+                    // The recheck: provisional to final with no waiter and
+                    // the gate open, taken back and signaled otherwise. A
+                    // take that dropped the provisional value leaves the
+                    // signal to this step.
+                    bool mine = s.Hand == s.SdkSeq && !s.HandFinal;
+                    if (s.Cap && s.Waiters == 0 && mine) next.Add(AfterFrame(s with { HandFinal = true }));
+                    else next.Add(s with { Hand = mine ? 0 : s.Hand, HandFinal = mine ? false : s.HandFinal, SdkPc = S_SIGNAL });
+                    break;
+                }
                 // The capability again, then the count.
                 if (s.Cap && s.Waiters == 0) next.Add(AfterFrame(s) with { Replaced = false });
                 else if (!r.Reclaim || s.Replaced) next.Add(s with { Replaced = false, SdkPc = S_SIGNAL });
@@ -1066,7 +1093,7 @@ internal static class DeliveryModel
                 break;
             case W_LOOK:
             {
-                bool took = r.TakeBeforeWait && s.Hand != 0 && (s.Hand != s.Seen || !r.DropSentAtTake);
+                bool took = r.TakeBeforeWait && s.Hand != 0 && (s.Hand != s.Seen || !r.DropSentAtTake) && (!r.Round6 || s.HandFinal);
                 var n = took ? s with { Hand = 0, Took = s.Hand, Waiters = s.Counted ? s.Waiters - 1 : s.Waiters, Counted = false, Pc = W_POLL }
                              : s with { Hand = r.TakeBeforeWait ? 0 : s.Hand, Pc = W_BLOCK };
                 // The broken order counts itself only after a take that found
@@ -1155,7 +1182,8 @@ internal static class DeliveryModel
                 break;
             case W_OG_TAKE:
                 // OwnerGone's take, while the worker holds the input event.
-                next.Add(s with { Handed = s.Hand, Hand = 0, Pc = W_OG_LOOK });
+                // Round 6: a provisional value is dropped.
+                next.Add(s with { Handed = r.Round6 && !s.HandFinal ? 0 : s.Hand, Hand = 0, Pc = W_OG_LOOK });
                 break;
             case W_OG_LOOK:
             {
@@ -1237,6 +1265,7 @@ internal static class DeliveryModel
         // A read a take alone woke sends only the frame taken or its
         // program's next one, and nothing once a next program started
         // (b17050c1).
+        if (d == Driver.This && taken != 0 && s.Prog != 0 && r.Round6 && s.Seq != taken) return s;
         if (d == Driver.This && taken != 0 && s.Prog != 0
             && ((r.TakeReadNoNext && nextStarted && (s.Seq != taken || !r.TakeReadSendsTaken))
                 || (r.TakeReadNextSeq && s.Seq != taken && s.Seq != NextFrameSeq(taken, wrap))))
@@ -1286,7 +1315,7 @@ internal static class DeliveryModel
     {
         if (d != Driver.This || !s.SigMapped || !r.CloseGate) return s;
         var n = s with { Cap = false, Hand = 0 };
-        if (s.Hand != 0 && (s.Hand != s.Seen || r.CloseSignalsSent) && s.Ev) n = n with { Event = true };
+        if (s.Hand != 0 && (!r.Round6 || s.HandFinal) && (s.Hand != s.Seen || r.CloseSignalsSent) && s.Ev) n = n with { Event = true };
         return n;
     }
 
