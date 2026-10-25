@@ -983,6 +983,7 @@ VOID WINAPI HmDeleteCriticalSection(LPCRITICAL_SECTION cs)
  * ones, and an SRW lock is never deleted. Taking one already held would
  * deadlock a real thread, and stops the run here. */
 void (*g_srwHook)(void);
+void (*g_lockReleaseHook)(void);
 void (*g_pollHook)(void);
 VOID WINAPI HmAcquireSRWLockExclusive(PSRWLOCK l)
 {
@@ -996,6 +997,11 @@ VOID WINAPI HmReleaseSRWLockExclusive(PSRWLOCK l)
     if (l->Ptr == NULL) HmFail("ReleaseSRWLockExclusive on a free lock");
     l->Ptr = NULL;
     g_locksHeld--;
+    if (g_lockReleaseHook && g_current && g_locksHeld == 0) {
+        void (*hook)(void) = g_lockReleaseHook;
+        g_lockReleaseHook = NULL;
+        hook();
+    }
 }
 
 ULONGLONG WINAPI HmGetTickCount64(VOID) { return g_clockMs; }

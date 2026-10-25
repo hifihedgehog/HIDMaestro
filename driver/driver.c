@@ -819,7 +819,7 @@ static VOID DeliverReleaseFrames(_In_ PDEVICE_CONTEXT ctx);
 static HANDLE CreateHostEvent(_In_ BOOL manualReset, _In_ BOOL takeOverNullDacl, _In_ LPCWSTR name);
 static VOID TryCreateDoorbell(_In_ PDEVICE_CONTEXT ctx);
 static VOID TryOpenSignal(_In_ PDEVICE_CONTEXT ctx);
-static BOOLEAN ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx);
+static void ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx);
 
 /* Create the output doorbell if there is none yet, and publish it for
  * PublishOutput. EvtDeviceAdd may have found the name unusable, held by an
@@ -1714,18 +1714,17 @@ KeepLiveFeatureLocked(_In_ PDEVICE_CONTEXT ctx, _In_ const HIDMAESTRO_SHARED_INP
  * report-build + manual-queue drain here: no WDF timer, no IRQL games:
  * WdfRequestComplete and the SRW locks are documented safe from a raw worker
  * thread in UMDF2. 2.1.0: also when the worker took a frame the SDK
- * handed over instead of signaling it (TakeHandoff). Returns TRUE when a
- * parked READ_REPORT completed with the frame. */
-static BOOLEAN
+ * handed over instead of signaling it (TakeHandoff). */
+static void
 ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
 {
     HIDMAESTRO_SHARED_INPUT shared;
-    if (!ReadSharedInput(ctx, &shared)) return FALSE;
+    if (!ReadSharedInput(ctx, &shared)) return;
 
     ULONG seqNo = shared.SeqNo;
     /* A frame is new when it is not the last one sent, whether a signal or
      * a handed-over frame woke this read (TakeHandoff). */
-    if (seqNo == ctx->SeenSeqNo) return FALSE; /* No new data */
+    if (seqNo == ctx->SeenSeqNo) return; /* No new data */
     /* 2.1.0: SeqNo 0 with no data is a section an SDK zeroed as it mapped
      * the index, and no frame. v2.0.3 read it as one: SeenSeqNo became 0,
      * the cache took an all-zero report at SeqNo 0 (with LiveFeatureReport,
@@ -1755,7 +1754,7 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
         AcquireSRWLockExclusive(&ctx->InputLock);
         KeepLiveFeatureLocked(ctx, &shared);
         ReleaseSRWLockExclusive(&ctx->InputLock);
-        return FALSE;
+        return;
     }
 
     /* Build HID input report from shared file Data (native descriptor format).
@@ -1815,7 +1814,7 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
         /* v2.0.0: only at its report's declared length. Any other frame
          * is not sent, and the last sent report stands. */
         if (!ExtendedFrameDeclared(ctx, shared.ExtendedReportData, shared.ExtendedReportSize))
-            return FALSE;
+            return;
         RtlZeroMemory(inputReport, inputSize);
         RtlCopyMemory(inputReport, shared.ExtendedReportData, shared.ExtendedReportSize);
         inputSize = shared.ExtendedReportSize;
@@ -1889,7 +1888,6 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
          * full delivery timeout, most often on a busy machine. */
         if (servedOne)
             WdfRequestComplete(pendingRead, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
-        return servedOne;
     }
 }
 
@@ -2076,21 +2074,19 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
              * input event a program set meanwhile is taken first, as
              * v2.0.3's wait took it before the pipe's close. */
             else if (pending && rc != WAIT_OBJECT_0 && rc != WAIT_OBJECT_0 + 1) {
-                /* At teardown a taken frame goes back to the input event,
-                 * before a read or after one that completed no READ_REPORT:
-                 * the queues are purged then, so that read sent the frame
-                 * nowhere and spent its wakeup, where v2.0.3's signal, not
-                 * yet waited on, reached the next device context. */
+                /* At teardown a taken frame goes back to the input event
+                 * unread, as at the stop event below, for the next device
+                 * context. A read that has begun is not undone: v2.0.3's
+                 * wait, which the take stands for, had returned the signal
+                 * by then and read it the same way, and a READ_REPORT that
+                 * comes late can still take the frame from the cache, so a
+                 * frame signaled back after its read would go out twice. */
                 if (ctx->TearingDown) {
                     SetEvent(ctx->InputDataEvent);
                     return 0;
                 }
                 idleTimeouts = 0;
-                BOOLEAN served = ProcessSharedInput(ctx);
-                if (ctx->TearingDown) {
-                    if (!served) SetEvent(ctx->InputDataEvent);
-                    return 0;
-                }
+                ProcessSharedInput(ctx);
                 pending = FALSE;
                 if (rc == WAIT_OBJECT_0 + 2) continue;
             }
@@ -2145,12 +2141,7 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
             if (rc == WAIT_OBJECT_0 + 1) {
                 idleTimeouts = 0;
                 ULONG prevSeq = ctx->SeenSeqNo;
-                BOOLEAN served = ProcessSharedInput(ctx);
-                /* A taken frame at teardown, as in the owner path above. */
-                if (pending && ctx->TearingDown) {
-                    if (!served) SetEvent(ctx->InputDataEvent);
-                    return 0;
-                }
+                ProcessSharedInput(ctx);
                 if (ctx->SeenSeqNo == prevSeq) {
                     if (++staleWakeups > 250) { recycle = TRUE; break; }
                 } else {

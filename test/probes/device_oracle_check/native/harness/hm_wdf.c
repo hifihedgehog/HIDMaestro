@@ -682,6 +682,11 @@ static VOID WDFAPI HmWdfWaitLockRelease(PWDF_DRIVER_GLOBALS g, WDFWAITLOCK Lock)
     if (!l->held) HmFail("a wait lock released while free");
     l->held = 0;
     g_locksHeld--;
+    if (g_lockReleaseHook && HmOnDriverThread() && g_locksHeld == 0) {
+        void (*hook)(void) = g_lockReleaseHook;
+        g_lockReleaseHook = NULL;
+        hook();
+    }
 }
 
 static NTSTATUS WDFAPI HmWdfTimerCreate(PWDF_DRIVER_GLOBALS g, PWDF_TIMER_CONFIG Config, PWDF_OBJECT_ATTRIBUTES attrs, WDFTIMER *Timer)

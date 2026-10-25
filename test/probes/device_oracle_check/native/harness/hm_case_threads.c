@@ -249,7 +249,6 @@ static void MapNextProgram(Ctl *c, int legacy)
         c->sdk.signal = NULL;
         c->sdk.seq = 0;
     } else {
-        if (c->sdk.signal) memset(c->sdk.signal->buf + 68, 0, 4);
         c->sdk.seq = (left & 1) ? left + 1 : left;
     }
 }
@@ -735,8 +734,7 @@ static void StreamTakeSentThenNewer(PlanProfile *p, int kill)
  * program B starts inside OwnerGone: at the first SRW lock a driver thread
  * takes after the wait answers the pipe's close, or at the pipe client's
  * close, whichever comes first. B zeroes the input section and the
- * acknowledgement, and under 2.1.0 clears the handoff, then writes B1,
- * handed or signaled. sameseq: X is A's first frame, SeqNo 2, which a B1
+ * acknowledgement, then writes B1, handed or signaled. sameseq: X is A's first frame, SeqNo 2, which a B1
  * before 2.1.0 repeats. The record x6.bstart says where B started: 1 at
  * the SRW lock, 2 at the pipe client's close. */
 static int g_x6Legacy, g_x6Done;
@@ -1144,14 +1142,13 @@ static void X8Act(void)
     uint32_t left;
     switch (g_x8Mode) {
     case 0:
-        /* A's pipe closes and a 2.1.0 B starts: input zeroed, handoff
-         * cleared, B1 stored at left + 2. B's acknowledgement zeroing is
-         * left for later: the worker's load of the release bit came before
-         * it, its load of the section after B1's store. */
+        /* A's pipe closes and a 2.1.0 B starts: input zeroed, B1 stored
+         * at left + 2. B's acknowledgement zeroing is left for later: the
+         * worker's load of the release bit came before it, its load of
+         * the section after B1's store. */
         PipeServerClose(c->sdk.pipe);
         memcpy(&left, c->sdk.input->buf, 4);
         memset(c->sdk.input->buf, 0, c->sdk.input->size);
-        if (c->sdk.signal) memset(c->sdk.signal->buf + 68, 0, 4);
         c->sdk.seq = (left & 1) ? left + 1 : left;
         X6Store(&c->sdk, 0x70);
         break;
@@ -1522,6 +1519,136 @@ static void StreamX10NextHandedStop(PlanProfile *p)
     HidRead(&c, len);
     CtlStop(&c);
 }
+/* x11-take-read-late-read-teardown: while the worker completes a read, X
+ * is handed over final, or signaled on a driver without the gate. The
+ * worker's read of X finds no read parked and caches X. Right after the
+ * cache write a READ_REPORT comes and takes X from the cache, and the
+ * device's teardown sets TearingDown. X has gone out, so the device added
+ * again must not send it a second time, and 533ca4a4 does not. The read
+ * comes at the worker's first SRW release after its take's poll, or after
+ * its wait's answer on a driver that does not poll. */
+static Ctl *g_x11Ctl;
+static int g_x11Done;
+static void X11LateReadThenTear(void)
+{
+    Ctl *c = g_x11Ctl;
+    HidRead(c, c->p->readLength ? c->p->readLength : 64);
+    *(volatile LONG *)((uint8_t *)c->dev->context + HmTearingDownOffset) = 1;
+}
+static void X11ArmRelease(void)
+{
+    if (g_x11Done) return;
+    g_x11Done = 1;
+    g_lockReleaseHook = X11LateReadThenTear;
+}
+static int X11AnswerArm(HmThread *t, DWORD result)
+{
+    if (t != CtlThread(g_x11Ctl, 0) || result != WAIT_OBJECT_0 + 1) return 0;
+    X11ArmRelease();
+    return 1;
+}
+static void X11HandX(void)
+{
+    Ctl *c = g_x11Ctl;
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x30 + i);
+    SdkWriteFrame(&c->sdk, data, 63, NULL, NULL, 0);
+    g_pollHook = X11ArmRelease;
+    g_waitAnswerHook = X11AnswerArm;
+}
+static void StreamX11TakeReadLateReadTeardown(PlanProfile *p)
+{
+    Ctl c;
+    StreamBegin("threads/%s/x11-take-read-late-read-teardown", p->id);
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    uint8_t data[64];
+    Probe(&c, 0, 1);
+    HidRead(&c, len);
+    g_x11Ctl = &c;
+    g_x11Done = 0;
+    g_completeHook = X11HandX;
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x20 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    if (g_completeHook) HmFail("x11: the completion hook never ran");
+    ThreadResume(CtlThread(&c, 0));
+    g_pollHook = NULL;
+    g_waitAnswerHook = NULL;
+    if (!g_x11Done || g_lockReleaseHook) HmFail("x11: the late read never ran");
+    DeviceRemove(c.dev);
+    ConfigWrite(p, 0);
+    c.dev = DeviceAdd(0);
+    if (!c.dev) HmFail("x11: re-add failed");
+    HidRead(&c, len);
+    RunWorker(&c);
+    RunWorker(&c);
+    HidRead(&c, len);
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x90 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    CtlStop(&c);
+}
+
+/* x11-next-first-frame-at-owed-take: while the worker completes a read of
+ * A's frame, A hands X over final (signaled on a driver without the gate)
+ * and is killed, and B (2.1.0) starts, zeroing the input section. B's start
+ * leaves the handoff alone, so the worker still owes X a read. B1 is stored
+ * between that take and its read (533ca4a4: between the wait's answer on
+ * X's left signal and its read), so the read sends B1 to the read parked,
+ * before A's OwnerGone, as 533ca4a4 does. A start that cleared the handoff
+ * left the worker no take, and B1 went out after OwnerGone. */
+static void X11StoreB1(void)
+{
+    if (g_x11Done) return;
+    g_x11Done = 1;
+    Ctl *c = g_x11Ctl;
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x70 + i);
+    SdkWriteFrame(&c->sdk, data, 63, NULL, NULL, 0);
+}
+static int X11AnswerStore(HmThread *t, DWORD result)
+{
+    if (t != CtlThread(g_x11Ctl, 0) || result != WAIT_OBJECT_0 + 1) return 0;
+    X11StoreB1();
+    return 1;
+}
+static void X11KillAndStart(void)
+{
+    Ctl *c = g_x11Ctl;
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x50 + i);
+    SdkWriteFrame(&c->sdk, data, 63, NULL, NULL, 0);
+    PipeServerClose(c->sdk.pipe);
+    MapNextProgram(c, 0);
+    g_pollHook = X11StoreB1;
+    g_waitAnswerHook = X11AnswerStore;
+}
+static void StreamX11NextAtOwedTake(PlanProfile *p)
+{
+    Ctl c;
+    StreamBegin("threads/%s/x11-next-first-frame-at-owed-take", p->id);
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    uint8_t data[64];
+    Probe(&c, 0, 1);
+    HidRead(&c, len);
+    HidRead(&c, len);
+    g_x11Ctl = &c;
+    g_x11Done = 0;
+    g_completeHook = X11KillAndStart;
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x30 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    if (g_completeHook) HmFail("x11: the completion hook never ran");
+    ThreadResume(CtlThread(&c, 0));
+    X11StoreB1();
+    g_pollHook = NULL;
+    g_waitAnswerHook = NULL;
+    for (int i = 0; i < 3; i++) ThreadResume(CtlThread(&c, 0));
+    HidRead(&c, len);
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x90 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    HidRead(&c, len);
+    CtlStop(&c);
+}
 void CaseThreads(void)
 {
     PlanProfile *sw = PlanFind("switch", NULL);
@@ -1585,4 +1712,6 @@ void CaseThreads(void)
     StreamX10IdleWindowNext(ds, 1);
     StreamX10TakeOwnerTeardown(ds);
     StreamX10NextHandedStop(ds);
+    StreamX11TakeReadLateReadTeardown(ds);
+    StreamX11NextAtOwedTake(ds);
 }
