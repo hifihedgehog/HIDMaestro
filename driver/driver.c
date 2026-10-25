@@ -837,23 +837,34 @@ TryCreateDoorbell(_In_ PDEVICE_CONTEXT ctx)
         InterlockedExchangePointer((PVOID volatile *)&ctx->OutputSignalEvent, ev);
 }
 
+/* 2.1.0: the signal section's view, loaded once. A release whose join of
+ * the worker timed out stores NULL while the worker may still run, and
+ * leaves the view mapped (ReleaseIndexObjects), so each use takes one load
+ * and keeps it. */
+static PHIDMAESTRO_SIGNAL
+SignalView(_In_ PDEVICE_CONTEXT ctx)
+{
+    return *(PHIDMAESTRO_SIGNAL volatile *)&ctx->SignalPtr;
+}
+
 /* 2.1.0: the gate (docs/design/signal-gate.md) runs while the signal
- * section is mapped and the count has never been found broken. Its
- * capability is set again at each map and every 256 frames, as the
- * acknowledgement's bits are: an SDK sweep that removed a device clears it
- * (SharedMemoryIO.ForgetDriverLocked), and so does another context on the
- * index as its device goes. Worker thread only. */
-static BOOLEAN
+ * section is mapped and the count has never been found broken: the view,
+ * or NULL. Its capability is set again at each map and every 256 frames,
+ * as the acknowledgement's bits are: an SDK sweep that removed a device
+ * clears it (SharedMemoryIO.ForgetDriverLocked), and so does another
+ * context on the index as its device goes. Worker thread only. */
+static PHIDMAESTRO_SIGNAL
 Gating(_In_ PDEVICE_CONTEXT ctx)
 {
-    return ctx->SignalPtr != NULL && !ctx->SignalBroken;
+    return ctx->SignalBroken ? NULL : SignalView(ctx);
 }
 
 static VOID
 AnnounceGate(_In_ PDEVICE_CONTEXT ctx)
 {
-    if (Gating(ctx) && !(ctx->SignalPtr->DriverCaps & HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS))
-        InterlockedOr(&ctx->SignalPtr->DriverCaps, (LONG)HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS);
+    PHIDMAESTRO_SIGNAL sig = Gating(ctx);
+    if (sig != NULL && !(sig->DriverCaps & HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS))
+        InterlockedOr(&sig->DriverCaps, (LONG)HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS);
 }
 
 /* 2.1.0: map the signal section once (hm_contract.h, HIDMAESTRO_SIGNAL) and
@@ -884,17 +895,15 @@ TryOpenSignal(_In_ PDEVICE_CONTEXT ctx)
  * left its signal. The exchange comes after the interlocked increment of
  * InputWaiters, so the two full barriers face the SDK's exchange and its
  * load of the count. A frame handed over after a read had already sent it
- * wakes nothing: a read now finds that frame and sends nothing, or a newer
- * frame, which its own take or signal reads. v2.0.3's worker read on every
- * input event, a leftover one included, so it could read that newer frame
- * sooner. Worker thread only. */
+ * wakes a read too, as v2.0.3's worker read on every input event, the
+ * leftover signal of a frame it had read included: that read finds the
+ * frame and sends nothing, or a newer frame the program stored since. A
+ * program killed between that newer frame's store and its exchange leaves
+ * no other wakeup for it. Worker thread only. */
 static BOOLEAN
-TakeHandoff(_In_ PDEVICE_CONTEXT ctx)
+TakeHandoff(_In_ PHIDMAESTRO_SIGNAL sig)
 {
-    LONG handed;
-    if (ctx->SignalPtr == NULL) return FALSE;
-    handed = InterlockedExchange(&ctx->SignalPtr->InputHandoff, 0);
-    return handed != 0 && (ULONG)handed != ctx->SeenSeqNo;
+    return InterlockedExchange(&sig->InputHandoff, 0) != 0;
 }
 
 /* 2.1.0: the gate closes as the worker lets go of the input event, at a
@@ -911,12 +920,13 @@ static VOID
 CloseGate(_In_ PDEVICE_CONTEXT ctx)
 {
     LONG handed;
-    if (ctx->SignalPtr == NULL) return;
-    InterlockedAnd(&ctx->SignalPtr->DriverCaps, ~(LONG)HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS);
+    PHIDMAESTRO_SIGNAL sig = SignalView(ctx);
+    if (sig == NULL) return;
+    InterlockedAnd(&sig->DriverCaps, ~(LONG)HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS);
 #if defined(_M_ARM64)
     MemoryBarrier();
 #endif
-    handed = InterlockedExchange(&ctx->SignalPtr->InputHandoff, 0);
+    handed = InterlockedExchange(&sig->InputHandoff, 0);
     if (handed == 0 || (ULONG)handed == ctx->SeenSeqNo) return;
     if (ctx->InputDataEvent != NULL) {
         SetEvent(ctx->InputDataEvent);
@@ -1244,8 +1254,9 @@ OwnerGone(_In_ PDEVICE_CONTEXT ctx)
      * holds the ended program's frame. */
     ULONG handed = 0;
     BOOLEAN owed = FALSE;
-    if (ctx->SignalPtr != NULL && ctx->InputDataEvent != NULL) {
-        handed = (ULONG)InterlockedExchange(&ctx->SignalPtr->InputHandoff, 0);
+    PHIDMAESTRO_SIGNAL sig = SignalView(ctx);
+    if (sig != NULL && ctx->InputDataEvent != NULL) {
+        handed = (ULONG)InterlockedExchange(&sig->InputHandoff, 0);
         if (handed != 0 && handed != ctx->SeenSeqNo && ctx->SharedMemPtr != NULL) {
             BOOLEAN started;
             AcquireSRWLockExclusive(&ctx->InputLock);
@@ -1733,24 +1744,16 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
     if (seqNo == ctx->SeenSeqNo) return; /* No new data */
     /* 2.1.0: SeqNo 0 with no data is a section an SDK zeroed as it mapped
      * the index, and no frame. v2.0.3 read it as one: SeenSeqNo became 0,
-     * and the cache took an all-zero report at SeqNo 0, sent to a read
-     * parked. This driver sends nothing and forgets both SeqNos as that
-     * read did, so a program before 2.1.0 that starts next, counting from
-     * 0, has its first frame go out, and a read that comes late parks
-     * instead of taking the last program's frame from the cache. The
-     * stale-wakeup count sees the read as new, as v2.0.3's did. With
-     * LiveFeatureReport the cache holds no data-lane frame, and only
-     * SeenSeqNo goes. A program before 2.1.0 stores 0 with its frame at
-     * every 2^31st frame, and that frame goes on. */
-    if (seqNo == 0 && shared.DataSize == 0 && shared.ExtendedReportSize == 0) {
-        ctx->SeenSeqNo = 0;
-        if (ctx->LiveFeatureReport == 0) {
-            AcquireSRWLockExclusive(&ctx->InputLock);
-            ctx->SharedMemSeqNo = 0;
-            ReleaseSRWLockExclusive(&ctx->InputLock);
-        }
-        return;
-    }
+     * the cache took an all-zero report at SeqNo 0 (with LiveFeatureReport,
+     * an empty answer), and a read parked got that report. This driver
+     * does all of it but the read: the polled reports and the SeqNos are
+     * v2.0.3's, so a program before 2.1.0 that starts next, counting from
+     * 0, has its first frame go out, a read that comes late parks instead
+     * of taking the last program's frame from the cache, and a polling
+     * caller no longer sees that program's last report, but no READ_REPORT
+     * completes with the all-zero one. A program before 2.1.0 stores 0 with
+     * its frame at every 2^31st frame, and that frame goes on. */
+    BOOLEAN zeroed = seqNo == 0 && shared.DataSize == 0 && shared.ExtendedReportSize == 0;
     /* v2.0.0: the worker's stale-wakeup count reads SeenSeqNo, since a
      * frame the driver does not send leaves SharedMemSeqNo alone. */
     ctx->SeenSeqNo = seqNo;
@@ -1855,7 +1858,7 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
         BOOLEAN servedOne = FALSE;
         NTSTATUS cs = STATUS_SUCCESS;
         WDFREQUEST pendingRead = NULL;
-        if (NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead))) {
+        if (!zeroed && NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead))) {
             servedOne = TRUE;
             cs = RequestCopyFromBuffer(pendingRead, inputReport, inputSize);
         }
@@ -2057,12 +2060,13 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
              * zero is wrong: clearing the capability sends the SDK back to
              * a SetEvent every frame, and the take after it still finds a
              * frame handed over before the clear. */
-            volatile LONG *waiters = Gating(ctx) ? &ctx->SignalPtr->InputWaiters : NULL;
+            PHIDMAESTRO_SIGNAL sig = Gating(ctx);
+            volatile LONG *waiters = sig != NULL ? &sig->InputWaiters : NULL;
             BOOLEAN pending = FALSE;
             if (waiters != NULL) {
                 if (InterlockedIncrement(waiters) <= 0) {
                     ctx->SignalBroken = TRUE;
-                    InterlockedAnd(&ctx->SignalPtr->DriverCaps, ~(LONG)HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS);
+                    InterlockedAnd(&sig->DriverCaps, ~(LONG)HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS);
                 }
 #if defined(_M_ARM64)
                 /* On a core without the v8.1 atomics the compiler's helper
@@ -2071,7 +2075,7 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                  * the count's store. The full fence closes that. */
                 MemoryBarrier();
 #endif
-                pending = TakeHandoff(ctx);
+                pending = TakeHandoff(sig);
                 if (pending) InterlockedDecrement(waiters);
             }
             DWORD rc = WaitForMultipleObjects(count, waits, FALSE, pending ? 0 : 500);
@@ -2097,9 +2101,10 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
              * to the input event as a SetEvent below. v2.0.3's wait returned
              * the stop event first too, and left the program's signal set,
              * so the next device context or the recycled worker read the
-             * frame. Dropped, it waited for the program's next frame. The
-             * take reported a frame not yet sent, and the add and the
-             * recycle forget SeenSeqNo, so that read sends it once. */
+             * section. Dropped, the frame waited for the program's next one.
+             * The add and the recycle forget SeenSeqNo in both drivers, so
+             * a taken frame already sent goes out again there only where
+             * v2.0.3's left signal sent it again. */
 
             /* Issue #38: TearingDown is the authoritative exit
              * condition, checked on EVERY wake including timeouts. The

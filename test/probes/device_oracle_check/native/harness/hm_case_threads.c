@@ -614,6 +614,213 @@ static void StreamTwoProgramLate(PlanProfile *p, int mode)
     }
     g_sdkSignal = saved;
 }
+/* SdkWriteFrame in two parts, as a program preempted or killed between
+ * them: the frame's store (the section's bytes and its even SeqNo), and the
+ * gate's part (exchange, recheck, take-back, SetEvent). */
+static void X6Store(Sdk *s, uint8_t base)
+{
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(base + i);
+    uint8_t *b = s->input->buf;
+    uint32_t pending = s->seq + 1, len = 63, zero = 0;
+    memcpy(b, &pending, 4);
+    memcpy(b + 4, &len, 4);
+    memcpy(b + 8, data, 63);
+    memcpy(b + 278, &zero, 4);
+    s->seq = pending + 1;
+    if (s->signal && s->seq == 0) s->seq = 2;
+    memcpy(b, &s->seq, 4);
+}
+
+static void X6Signal(Sdk *s)
+{
+    int input = 1;
+    if (s->signal) {
+        int32_t caps, waiters, handoff;
+        memcpy(&caps, s->signal->buf + 4, 4);
+        if (caps & 1) {
+            memcpy(s->signal->buf + 68, &s->seq, 4);
+            memcpy(&caps, s->signal->buf + 4, 4);
+            memcpy(&waiters, s->signal->buf + 64, 4);
+            memcpy(&handoff, s->signal->buf + 68, 4);
+            if (((caps & 1) && waiters == 0) || handoff != (int32_t)s->seq) input = 0;
+            else memset(s->signal->buf + 68, 0, 4);
+        }
+    }
+    if (input) EventSet(s->inputEv);
+}
+
+/* The exchange done and the program killed before its recheck: the frame
+ * sits in the handoff (2.1.0 on a gated driver) with no SetEvent. */
+static void X6ExchangeOnly(Sdk *s)
+{
+    int32_t caps = 0;
+    if (s->signal) memcpy(&caps, s->signal->buf + 4, 4);
+    if (s->signal && (caps & 1)) memcpy(s->signal->buf + 68, &s->seq, 4);
+}
+
+/* A take of a frame already sent. P is signaled. At the wait's answer,
+ * before the worker reads, X is stored with its gate part still to come,
+ * so the read finds X and sends it. At that read's completion X's gate
+ * part runs: 2.1.0 hands it over with the count at 0, and 533ca4a4 gets
+ * its SetEvent, a left signal for a frame already read. Then Y is stored.
+ * live: Y's gate part runs later. kill: the program dies before it, after
+ * the worker's next turn. kill-early: Y is stored at X's completion, and
+ * the program dies before Y's gate part. 533ca4a4 reads Y on X's left
+ * signal. */
+static Ctl *g_x6Ctl;
+static int g_x6Early;
+static void X6Complete(void)
+{
+    X6Signal(&g_x6Ctl->sdk);
+    if (g_x6Early) X6Store(&g_x6Ctl->sdk, 0x50);
+}
+
+static int X6Answer(HmThread *t, DWORD result)
+{
+    Ctl *c = g_x6Ctl;
+    if (t != CtlThread(c, 0) || result != WAIT_OBJECT_0 + 1) return 0;
+    X6Store(&c->sdk, 0x30);
+    g_completeHook = X6Complete;
+    return 1;
+}
+
+static void StreamTakeSentThenNewer(PlanProfile *p, int kill)
+{
+    Ctl c;
+    g_x6Early = kill == 2;
+    StreamBegin("threads/%s/x6-take-sent-then-newer-%s", p->id, kill == 2 ? "kill-early" : kill ? "kill" : "live");
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    Probe(&c, 0, 1);
+    HidRead(&c, len);
+    g_x6Ctl = &c;
+    g_waitAnswerHook = X6Answer;
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x20 + i);
+    SdkWriteFrame(&c.sdk, data, 63, NULL, NULL, 0);
+    RunWorker(&c);
+    if (g_waitAnswerHook || g_completeHook) HmFail("x6: a hook never ran");
+    HidRead(&c, len);
+    if (!g_x6Early) X6Store(&c.sdk, 0x50);
+    if (kill) {
+        PipeServerClose(c.sdk.pipe);
+        ThreadResume(CtlThread(&c, 0));
+        ThreadResume(CtlThread(&c, 0));
+        ThreadResume(CtlThread(&c, 0));
+    } else {
+        RunWorker(&c);
+        X6Signal(&c.sdk);
+        RunWorker(&c);
+        RunWorker(&c);
+        for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x90 + i);
+        HidRead(&c, len);
+        Frame(&c, data, 63, NULL, NULL, 0);
+    }
+    CtlStop(&c);
+}
+
+/* OwnerGone's release-bit rule. Program A (2.1.0) is killed with frame X in
+ * the handoff, its exchange done and no SetEvent. The next program B starts
+ * inside OwnerGone: on this driver between the take and the read of the
+ * release bit (the first SRW lock a driver thread takes after the wait
+ * answers the pipe's close), on a driver without that lock at the pipe
+ * client's close, whichever comes first. B zeroes the input section and the
+ * acknowledgement, and under 2.1.0 clears the handoff, then writes B1,
+ * handed or signaled. sameseq: X is A's first frame, SeqNo 2, which a B1
+ * before 2.1.0 repeats. The record x6.bstart says where B started: 1 at
+ * the SRW lock, 2 at the pipe client's close. */
+static int g_x6Legacy, g_x6Done;
+static void X6StartNext(void)
+{
+    if (g_x6Done) return;
+    g_x6Done = 1;
+    {
+        uint32_t where = g_srwHook == NULL && g_pipeClientCloseHook != NULL ? 1u : 2u;
+        RecOut("x6.bstart", &where, 4);
+    }
+    Ctl *c = g_x6Ctl;
+    MapNextProgram(c, g_x6Legacy);
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x70 + i);
+    SdkWriteFrame(&c->sdk, data, 63, NULL, NULL, 0);
+}
+
+static int X6OwnerAnswer(HmThread *t, DWORD result)
+{
+    if (t != CtlThread(g_x6Ctl, 0) || result != WAIT_OBJECT_0 + 2) return 0;
+    g_srwHook = X6StartNext;
+    g_pipeClientCloseHook = X6StartNext;
+    return 1;
+}
+
+static void StreamKillNextInOwnerGone(PlanProfile *p, int legacy, int sameseq, int parked)
+{
+    Ctl c;
+    StreamBegin("threads/%s/x6-kill-next-%s-in-ownergone%s-%s", p->id, legacy ? "legacy" : "gated",
+                sameseq ? "-sameseq" : "", parked ? "parked" : "late");
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    if (!sameseq) Probe(&c, 0, 1);
+    if (parked) HidRead(&c, len);
+    X6Store(&c.sdk, 0xA0);
+    X6ExchangeOnly(&c.sdk);
+    g_x6Ctl = &c;
+    g_x6Legacy = legacy;
+    g_x6Done = 0;
+    g_waitAnswerHook = X6OwnerAnswer;
+    PipeServerClose(c.sdk.pipe);
+    ThreadResume(CtlThread(&c, 0));
+    g_srwHook = NULL;
+    g_pipeClientCloseHook = NULL;
+    if (!g_x6Done) HmFail("x6: the next program never started");
+    ThreadResume(CtlThread(&c, 0));
+    if (!parked) HidRead(&c, len);
+    ThreadResume(CtlThread(&c, 0));
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x90 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    HidRead(&c, len);
+    CtlStop(&c);
+}
+
+/* legacy-next-zero-read-polled: a program before 2.1.0 starts early as in
+ * legacy-next-after-zero-read, with no read parked when the worker reads
+ * the zeroed section. Then the polled input report, before and after the
+ * next program's first frame. 533ca4a4 cached its all-zero report there,
+ * and a polling caller stopped seeing the last program's report. */
+static void StreamZeroReadPolled(PlanProfile *p)
+{
+    Ctl c;
+    int saved = g_sdkSignal;
+    g_sdkSignal = 0;
+    StreamBegin("threads/%s/legacy-next-zero-read-polled", p->id);
+    if (CtlStart(&c, p, 0, SDK_ALL, 0)) {
+        uint8_t data[64];
+        uint32_t len = c.p->readLength ? c.p->readLength : 64;
+        KeepOneRead(&c);
+        FrameData(data, 0x10);
+        Frame(&c, data, 63, NULL, NULL, 0);
+        HidGetInput(&c, 0x01, len);
+        FrameData(data, 0x20);
+        SdkWriteFrame(&c.sdk, data, 63, NULL, NULL, 0);
+        g_zCtl = &c;
+        g_waitAnswerHook = ZeroReadAnswer;
+        RunWorker(&c);
+        if (g_waitAnswerHook) HmFail("zero-read-polled: the wait never answered the input event");
+        HidGetInput(&c, 0x01, len);
+        HidGetInput(&c, 0x00, len);
+        RunWorker(&c);
+        HidGetInput(&c, 0x01, len);
+        KeepOneRead(&c);
+        FrameData(data, 0x70);
+        Frame(&c, data, 63, NULL, NULL, 0);
+        HidGetInput(&c, 0x01, len);
+        KeepOneRead(&c);
+        CtlStop(&c);
+    }
+    g_sdkSignal = saved;
+}
 void CaseThreads(void)
 {
     PlanProfile *sw = PlanFind("switch", NULL);
@@ -651,4 +858,9 @@ void CaseThreads(void)
     StreamZeroReadNext(ds);
     StreamTwoProgramLate(ds, 0);
     StreamTwoProgramLate(ds, 1);
+    StreamZeroReadPolled(ds);
+    for (int kill = 0; kill < 3; kill++) StreamTakeSentThenNewer(ds, kill);
+    for (int lg = 0; lg < 2; lg++)
+        for (int ss = 0; ss < 2; ss++)
+            for (int pk = 0; pk < 2; pk++) StreamKillNextInOwnerGone(ds, lg, ss, pk);
 }
