@@ -1244,6 +1244,12 @@ void CompanionIoControl(
          * moment, and the SDK rings on any count but 0. */
         if (ctx->SignalPtr != NULL) {
             InterlockedIncrement(&ctx->SignalPtr->CompanionParked);
+#if defined(_M_ARM64)
+            /* Without the v8.1 atomics the increment's helper is an
+             * ldaxr/stlxr loop with no dmb after it: the fence keeps the
+             * SeqNo read below after the count's store. */
+            MemoryBarrier();
+#endif
             if (ctx->ParkKick != NULL && FrameNewerThanServed(ctx))
                 SetEvent(ctx->ParkKick);
         }

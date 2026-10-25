@@ -1945,6 +1945,13 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                     ctx->SignalBroken = TRUE;
                     InterlockedAnd(&ctx->SignalPtr->DriverCaps, ~(LONG)HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS);
                 }
+#if defined(_M_ARM64)
+                /* On a core without the v8.1 atomics the compiler's helper
+                 * for the increment is an ldaxr/stlxr loop with no dmb
+                 * after it, which lets the SeqNo load below run ahead of
+                 * the count's store. The full fence closes that. */
+                MemoryBarrier();
+#endif
                 pending = FrameWaiting(ctx);
                 if (pending) InterlockedDecrement(waiters);
             }
