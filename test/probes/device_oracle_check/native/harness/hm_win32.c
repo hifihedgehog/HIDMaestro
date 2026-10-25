@@ -979,8 +979,10 @@ VOID WINAPI HmDeleteCriticalSection(LPCRITICAL_SECTION cs)
  * word. SRWLOCK_INIT is all zero, so a zeroed device context holds free
  * ones, and an SRW lock is never deleted. Taking one already held would
  * deadlock a real thread, and stops the run here. */
+void (*g_srwHook)(void);
 VOID WINAPI HmAcquireSRWLockExclusive(PSRWLOCK l)
 {
+    if (g_srwHook && g_current) { void (*hook)(void) = g_srwHook; g_srwHook = NULL; hook(); }
     if (l->Ptr != NULL) HmFail("AcquireSRWLockExclusive on a lock already held");
     l->Ptr = (PVOID)1;
     g_locksHeld++;

@@ -562,6 +562,9 @@ extern void (*g_completeHook)(void);
 /* Run at each blocking wait's answer, after the answer is chosen and
  * recorded and before the thread runs on, until it returns nonzero. */
 extern int (*g_waitAnswerHook)(HmThread *t, DWORD result);
+/* Run once at the next SRW lock a driver thread takes, before it is taken
+ * (hm_win32.c). */
+extern void (*g_srwHook)(void);
 /* The code runs on a driver thread, not on the scenario's fiber. */
 int HmOnDriverThread(void);
 /* FIELD_OFFSET(DEVICE_CONTEXT, TearingDown) in the flavor's driver.h
