@@ -1649,6 +1649,265 @@ static void StreamX11NextAtOwedTake(PlanProfile *p)
     HidRead(&c, len);
     CtlStop(&c);
 }
+/* x12: SdkWriteFrame's round 6 handoff split at each of its steps, so a
+ * worker's take, or a kill, lands between them. */
+static Ctl *g_x12Ctl;
+static int32_t g_x12Owed, g_x12Prov, g_x12Fin, g_x12Kept;
+
+static void X12Store(Sdk *s, uint8_t base) { X6Store(s, base); }
+/* Step 3's read of the handoff. */
+static void X12ReadOwed(Sdk *s)
+{
+    memcpy(&g_x12Owed, s->signal->buf + 68, 4);
+    g_x12Fin = (int32_t)s->seq;
+    g_x12Prov = g_x12Fin | 1;
+}
+/* Step 3's compare-exchange, if the owed SeqNo was final. Returns 1 when
+ * it put this frame in its place (done, no SetEvent), 0 otherwise. */
+static int X12ReplaceOwed(Sdk *s)
+{
+    int32_t h;
+    if (g_x12Owed == 0 || (g_x12Owed & 1)) return 0;
+    memcpy(&h, s->signal->buf + 68, 4);
+    if (h != g_x12Owed) return 0;
+    memcpy(s->signal->buf + 68, &g_x12Fin, 4);
+    return 1;
+}
+/* Steps 4 and 5's exchange and recheck. */
+static void X12ExchangeRecheck(Sdk *s)
+{
+    int32_t caps, waiters;
+    memcpy(s->signal->buf + 68, &g_x12Prov, 4);
+    memcpy(&caps, s->signal->buf + 4, 4);
+    memcpy(&waiters, s->signal->buf + 64, 4);
+    g_x12Kept = (caps & 1) && waiters == 0;
+}
+/* Step 5's compare-exchange and step 6's SetEvent. */
+static void X12Finish(Sdk *s)
+{
+    int32_t h;
+    memcpy(&h, s->signal->buf + 68, 4);
+    if (g_x12Kept) {
+        if (h == g_x12Prov) { memcpy(s->signal->buf + 68, &g_x12Fin, 4); return; }
+    } else if (h == g_x12Prov) {
+        memset(s->signal->buf + 68, 0, 4);
+    }
+    EventSet(s->inputEv);
+}
+/* The whole write, for a driver without the gate (533ca4a4), where the SDK
+ * finds no capability and signals. */
+static int X12Gated(Sdk *s)
+{
+    int32_t caps = 0;
+    if (s->signal) memcpy(&caps, s->signal->buf + 4, 4);
+    return (caps & 1) != 0;
+}
+
+/* x12-owed-final-taken-before-replace, step 3 racing the take: a final F0 waits (kept while the worker
+ * completes a read), F1 is stored and reads F0 as owed, then the worker
+ * takes F0 and reads, then F1's compare-exchange fails and F1 goes on to
+ * steps 4 to 6. */
+static void X12HookPoll(void);
+static void X12HookComplete(void)
+{
+    Ctl *c = g_x12Ctl;
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x30 + i);
+    SdkWriteFrame(&c->sdk, data, 63, NULL, NULL, 0);   /* F0, kept final */
+    X12Store(&c->sdk, 0x50);                            /* F1 stored */
+    if (X12Gated(&c->sdk)) { X12ReadOwed(&c->sdk); g_pollHook = X12HookPoll; }
+}
+static void X12HookPoll(void)
+{
+    Ctl *c = g_x12Ctl;
+    if (!X12Gated(&c->sdk)) return;
+    if (!X12ReplaceOwed(&c->sdk)) { X12ExchangeRecheck(&c->sdk); X12Finish(&c->sdk); }
+}
+static void StreamX12StepThreeRace(PlanProfile *p)
+{
+    Ctl c;
+    StreamBegin("threads/%s/x12-owed-final-taken-before-replace", p->id);
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    Probe(&c, 0, 1);
+    HidRead(&c, len);
+    g_x12Ctl = &c;
+    g_completeHook = X12HookComplete;
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x20 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    if (g_completeHook) HmFail("x12: hook never ran");
+    /* This driver: the worker took F0 at its loop top and polled, and F1's
+     * rest ran at that poll. On 533ca4a4, F1's SetEvent runs now. */
+    g_pollHook = NULL;
+    HidRead(&c, len);
+    if (!X12Gated(&c.sdk)) EventSet(c.sdk.inputEv);
+    for (int i = 0; i < 3; i++) ThreadResume(CtlThread(&c, 0));
+    HidRead(&c, len);
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x90 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    HidRead(&c, len);
+    CtlStop(&c);
+}
+
+/* x12-provisional-taken-before-final, step 5 racing the take: the frame's exchange and recheck run while
+ * the worker completes a read (count 0, kept), then the worker takes the
+ * provisional SeqNo and drops it, then step 5's compare-exchange fails and
+ * step 6 signals. kill: the program dies before step 5. */
+static int g_x12Kill;
+static void X12HookExchange(void)
+{
+    Ctl *c = g_x12Ctl;
+    X12Store(&c->sdk, 0x50);
+    if (X12Gated(&c->sdk)) { X12ReadOwed(&c->sdk); X12ExchangeRecheck(&c->sdk); }
+}
+static void StreamX12StepFiveRace(PlanProfile *p, int kill, int release)
+{
+    Ctl c;
+    StreamBegin("threads/%s/x12-provisional-taken-before-final%s%s", p->id, kill ? "-kill" : "", release ? "-release" : "");
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    Probe(&c, 0, 1);
+    if (release) {
+        uint8_t *a = c.sdk.ack->buf;
+        int32_t seq = 2, cnt = 1, sz = 78;
+        memcpy(a + 8, &seq, 4);
+        memcpy(a + 12, &cnt, 4);
+        memcpy(a + 16, &sz, 4);
+        memset(a + 20, 0, 80);
+        a[20] = 0x01;
+    }
+    HidRead(&c, len);
+    g_x12Ctl = &c;
+    g_completeHook = X12HookExchange;
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x20 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    if (g_completeHook) HmFail("x12: hook never ran");
+    HidRead(&c, len);
+    if (!kill) {
+        if (X12Gated(&c.sdk)) X12Finish(&c.sdk); else EventSet(c.sdk.inputEv);
+        for (int i = 0; i < 2; i++) ThreadResume(CtlThread(&c, 0));
+        HidRead(&c, len);
+        for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x90 + i);
+        Frame(&c, data, 63, NULL, NULL, 0);
+    } else {
+        PipeServerClose(c.sdk.pipe);
+        for (int i = 0; i < 3; i++) ThreadResume(CtlThread(&c, 0));
+        HidRead(&c, len);
+        ThreadResume(CtlThread(&c, 0));
+    }
+    CtlStop(&c);
+}
+
+/* x12-kill-between-owed-read-and-replace, a kill between step 3's read
+ * and its compare-exchange: F0 final
+ * waits, F1 is stored and reads it, and the program dies. The take of F0
+ * reads the section, which holds F1. 533ca4a4: F0's signal left set, F1
+ * stored, no SetEvent for F1. */
+static void X12HookKillAtOwed(void)
+{
+    Ctl *c = g_x12Ctl;
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x30 + i);
+    SdkWriteFrame(&c->sdk, data, 63, NULL, NULL, 0);
+    X12Store(&c->sdk, 0x50);
+    if (X12Gated(&c->sdk)) X12ReadOwed(&c->sdk);
+}
+static void StreamX12KillAtOwed(PlanProfile *p)
+{
+    Ctl c;
+    StreamBegin("threads/%s/x12-kill-between-owed-read-and-replace", p->id);
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    Probe(&c, 0, 1);
+    HidRead(&c, len);
+    g_x12Ctl = &c;
+    g_completeHook = X12HookKillAtOwed;
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x20 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    HidRead(&c, len);
+    ThreadResume(CtlThread(&c, 0));
+    PipeServerClose(c.sdk.pipe);
+    for (int i = 0; i < 3; i++) ThreadResume(CtlThread(&c, 0));
+    HidRead(&c, len);
+    CtlStop(&c);
+}
+
+/* x12-next-replaces-last-final, the last program's final frame still waiting when the next program
+ * (2.1.0) writes its first frame: step 3 replaces it with no SetEvent, and
+ * the worker's take reads B1 before OwnerGone. legacy: a next program
+ * before 2.1.0, which signals, with the final frame left as it is. */
+static int g_x12Legacy;
+static void X12HookSwitch(void)
+{
+    Ctl *c = g_x12Ctl;
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x30 + i);
+    SdkWriteFrame(&c->sdk, data, 63, NULL, NULL, 0);   /* A's last, kept final */
+    PipeServerClose(c->sdk.pipe);
+    MapNextProgram(c, g_x12Legacy);
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x70 + i);
+    SdkWriteFrame(&c->sdk, data, 63, NULL, NULL, 0);   /* B1 */
+}
+static void StreamX12NextReplacesFinal(PlanProfile *p, int legacy)
+{
+    Ctl c;
+    StreamBegin("threads/%s/x12-next-replaces-last-final%s", p->id, legacy ? "-legacy" : "");
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    Probe(&c, 0, 1);
+    HidRead(&c, len);
+    g_x12Ctl = &c;
+    g_x12Legacy = legacy;
+    g_completeHook = X12HookSwitch;
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x20 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    HidRead(&c, len);
+    for (int i = 0; i < 3; i++) ThreadResume(CtlThread(&c, 0));
+    HidRead(&c, len);
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x90 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    HidRead(&c, len);
+    CtlStop(&c);
+}
+
+/* x12-next-replaces-last-final-legacy, in the same order on both drivers:
+ * parked, HID class's next read is already parked when the worker reads
+ * B1 (as its completion routine sends one at once). late, the worker reads
+ * B1 on both drivers before the read comes, then OwnerGone. */
+static void StreamX12NextFinalLegacyOrder(PlanProfile *p, int parked)
+{
+    Ctl c;
+    StreamBegin("threads/%s/x12-next-replaces-last-final-legacy-%s", p->id, parked ? "read-parked" : "read-late");
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    Probe(&c, 0, 1);
+    HidRead(&c, len);
+    if (parked) HidRead(&c, len);
+    g_x12Ctl = &c;
+    g_x12Legacy = 1;
+    g_completeHook = X12HookSwitch;
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x20 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    if (!parked) {
+        /* 533ca4a4 reads B1 at this resume. This driver read it already and
+         * answers the owner read here. */
+        RecOut("x12.order", "late", 4);
+    }
+    ThreadResume(CtlThread(&c, 0));
+    HidRead(&c, len);
+    for (int i = 0; i < 3; i++) ThreadResume(CtlThread(&c, 0));
+    HidRead(&c, len);
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x90 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    HidRead(&c, len);
+    CtlStop(&c);
+}
+
 void CaseThreads(void)
 {
     PlanProfile *sw = PlanFind("switch", NULL);
@@ -1714,4 +1973,13 @@ void CaseThreads(void)
     StreamX10NextHandedStop(ds);
     StreamX11TakeReadLateReadTeardown(ds);
     StreamX11NextAtOwedTake(ds);
+    StreamX12StepThreeRace(ds);
+    StreamX12StepFiveRace(ds, 0, 0);
+    StreamX12StepFiveRace(ds, 1, 0);
+    StreamX12StepFiveRace(ds, 1, 1);
+    StreamX12KillAtOwed(ds);
+    StreamX12NextReplacesFinal(ds, 0);
+    StreamX12NextReplacesFinal(ds, 1);
+    StreamX12NextFinalLegacyOrder(ds, 1);
+    StreamX12NextFinalLegacyOrder(ds, 0);
 }

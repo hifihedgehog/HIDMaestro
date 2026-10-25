@@ -80,9 +80,11 @@ C_ASSERT(FIELD_OFFSET(HIDMAESTRO_VERSION_INFO, DriverConfigError) == 56);
  * interlocked exchange that takes InputHandoff, and an interlocked
  * decrement when the wait returns. InputHandoff holds a frame's even SeqNo
  * once final, the SeqNo with its low bit set while provisional, or 0. A
- * take that finds a final SeqNo reads the section without waiting, or,
- * when the worker leaves its loop first on the stop event or at teardown,
- * signals the input event for it. A take that finds a provisional SeqNo
+ * take that finds a final SeqNo reads the section without waiting and
+ * sends whatever new frame it holds, the frame taken or a newer one, not
+ * only a frame whose SeqNo is the one taken. When the worker leaves its
+ * loop first on the stop event or at teardown, it signals the input event
+ * for that frame instead. A take that finds a provisional SeqNo
  * drops it. The SDK stores the frame's even SeqNo and, with
  * HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS set, reads InputHandoff. A final
  * SeqNo still there is a read the worker owes, which finds this frame too:
