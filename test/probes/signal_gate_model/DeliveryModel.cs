@@ -189,6 +189,7 @@ internal static class DeliveryModel
         This with { Name = "round 6 with the summary's exact-SeqNo take", Round6ExactTake = true },
         This with { Name = "round 6 with the teardown check asking whether the frame went out", TearCheckDelivered = true },
         This with { Name = "round 6 with no signal back after a take's read, only before it", NoTearPostRead = true },
+        This with { Name = "round 6 with no signal back after a take's read and no handoff clear at a 2.1.0 start", NoTearPostRead = true, ClearAtStart = false },
     };
 
     internal static IEnumerable<Scenario> Scenarios()
