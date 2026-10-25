@@ -838,9 +838,17 @@ static void X7Act(void)
     } else if (g_x7Mode == 1) {
         X6Store(&c->sdk, 0x50);
         X6Signal(&c->sdk);
-    } else {
+    } else if (g_x7Mode == 2) {
         PipeServerClose(c->sdk.pipe);
         MapNextProgram(c, g_x7Legacy);
+        X6Store(&c->sdk, 0x70);
+    } else {
+        /* A v1.11.0 program: no owner pipe and no acknowledgement. It
+         * zeroes the input section and counts from 0. */
+        PipeServerClose(c->sdk.pipe);
+        memset(c->sdk.input->buf, 0, c->sdk.input->size);
+        c->sdk.signal = NULL;
+        c->sdk.seq = 0;
         X6Store(&c->sdk, 0x70);
     }
 }
@@ -1028,11 +1036,12 @@ static void StreamX7Recycle(PlanProfile *p)
  * and its read the program's pipe closes and the next program B starts and
  * stores B1 (on 533ca4a4, after its timeout wake, before its next wait's
  * answer). B1's SetEvent comes after OwnerGone. sent: X was read before
- * its exchange. */
+ * its exchange. v111: the next program is a v1.11.0 one, with no owner
+ * pipe and no acknowledgement. */
 static void StreamX7KillStuck(PlanProfile *p, int sent, int legacy)
 {
     Ctl c;
-    StreamBegin("threads/%s/x7-kill-stuck-%s-next-%s-at-take", p->id, sent ? "sent" : "unsent", legacy ? "legacy" : "gated");
+    StreamBegin("threads/%s/x7-kill-stuck-%s-next-%s-at-take", p->id, sent ? "sent" : "unsent", legacy == 2 ? "v111" : legacy ? "legacy" : "gated");
     if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
     uint32_t len = c.p->readLength ? c.p->readLength : 64;
     Probe(&c, 0, 1);
@@ -1046,8 +1055,8 @@ static void StreamX7KillStuck(PlanProfile *p, int sent, int legacy)
         X6Store(&c.sdk, 0x30);
     }
     X6ExchangeOnly(&c.sdk);
-    g_x7Legacy = legacy;
-    X7Arm(2);
+    g_x7Legacy = legacy != 0;
+    X7Arm(legacy == 2 ? 3 : 2);
     g_waitAnswerHook = NULL;
     ThreadResume(CtlThread(&c, 0));
     X7Act();
@@ -1137,4 +1146,5 @@ void CaseThreads(void)
     StreamX7Recycle(ds);
     for (int st = 0; st < 2; st++) { StreamX7KillStuck(ds, st, 1); StreamX7KillStuck(ds, st, 0); }
     StreamX7KillStuckAlone(ds);
+    for (int st = 0; st < 2; st++) StreamX7KillStuck(ds, st, 2);
 }

@@ -819,7 +819,7 @@ static VOID DeliverReleaseFrames(_In_ PDEVICE_CONTEXT ctx);
 static HANDLE CreateHostEvent(_In_ BOOL manualReset, _In_ BOOL takeOverNullDacl, _In_ LPCWSTR name);
 static VOID TryCreateDoorbell(_In_ PDEVICE_CONTEXT ctx);
 static VOID TryOpenSignal(_In_ PDEVICE_CONTEXT ctx);
-static void ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx, _In_ BOOLEAN nextStarted);
+static void ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx, _In_ ULONG taken, _In_ BOOLEAN nextStarted);
 
 /* Create the output doorbell if there is none yet, and publish it for
  * PublishOutput. EvtDeviceAdd may have found the name unusable, held by an
@@ -901,10 +901,19 @@ TryOpenSignal(_In_ PDEVICE_CONTEXT ctx)
  * program killed between that newer frame's store and its exchange leaves
  * no other wakeup for it. The read skips a frame of the next program
  * (NextProgramStarted). Worker thread only. */
-static BOOLEAN
+static ULONG
 TakeHandoff(_In_ PHIDMAESTRO_SIGNAL sig)
 {
-    return InterlockedExchange(&sig->InputHandoff, 0) != 0;
+    return (ULONG)InterlockedExchange(&sig->InputHandoff, 0);
+}
+
+/* 2.1.0: the SeqNo a program writes after the one given (SharedMemoryIO
+ * NextEvenSeq: up by two, and over 0 to 2). */
+static ULONG
+NextFrameSeq(_In_ ULONG seqNo)
+{
+    ULONG next = seqNo + 2;
+    return next == 0 ? 2 : next;
 }
 
 /* 2.1.0: a program has started on the index since this context's owner
@@ -1762,7 +1771,7 @@ KeepLiveFeatureLocked(_In_ PDEVICE_CONTEXT ctx, _In_ const HIDMAESTRO_SHARED_INP
  * thread in UMDF2. 2.1.0: also when the worker took a frame the SDK
  * handed over instead of signaling it (TakeHandoff). */
 static void
-ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx, _In_ BOOLEAN nextStarted)
+ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx, _In_ ULONG taken, _In_ BOOLEAN nextStarted)
 {
     HIDMAESTRO_SHARED_INPUT shared;
     if (!ReadSharedInput(ctx, &shared)) return;
@@ -1783,12 +1792,19 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx, _In_ BOOLEAN nextStarted)
      * completes with the all-zero one. A program before 2.1.0 stores 0 with
      * its frame at every 2^31st frame, and that frame goes on. */
     BOOLEAN zeroed = seqNo == 0 && shared.DataSize == 0 && shared.ExtendedReportSize == 0;
-    /* 2.1.0: a read a take alone woke, with a next program started on the
-     * index (NextProgramStarted), sends none of that program's frames: each
-     * has its own take or signal. Its zeroing is still read as above, since
-     * v2.0.3 read it on the last program's left signal, and a program
-     * before 2.1.0 counting from 0 needs SeenSeqNo forgotten. */
-    if (nextStarted && !zeroed) return;
+    /* 2.1.0: a read a take alone woke (taken, the SeqNo it took) sends
+     * only the frame taken or the one its program writes after it, which a
+     * program killed before that frame's exchange left with no other
+     * wakeup. Anything else in the section is a next program's or has a
+     * take or signal of its own: with a next program started on the index
+     * (NextProgramStarted, which covers every SDK with an owner pipe), and
+     * by SeqNo for a v1.11.0 program, which counts from 0 and makes no
+     * acknowledgement. Sent here, a next program's frame went out again
+     * after OwnerGone forgot the SeqNo. A zeroed section is still read as
+     * above, since v2.0.3 read it on the last program's left signal, and a
+     * program before 2.1.0 counting from 0 needs SeenSeqNo forgotten. */
+    if (taken != 0 && !zeroed
+        && (nextStarted || (seqNo != taken && seqNo != NextFrameSeq(taken)))) return;
     /* v2.0.0: the worker's stale-wakeup count reads SeenSeqNo, since a
      * frame the driver does not send leaves SharedMemSeqNo alone. */
     ctx->SeenSeqNo = seqNo;
@@ -2098,6 +2114,7 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
             PHIDMAESTRO_SIGNAL sig = Gating(ctx);
             volatile LONG *waiters = sig != NULL ? &sig->InputWaiters : NULL;
             BOOLEAN pending = FALSE;
+            ULONG taken = 0;
             if (waiters != NULL) {
                 if (InterlockedIncrement(waiters) <= 0) {
                     ctx->SignalBroken = TRUE;
@@ -2110,7 +2127,8 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                  * the count's store. The full fence closes that. */
                 MemoryBarrier();
 #endif
-                pending = TakeHandoff(sig);
+                taken = TakeHandoff(sig);
+                pending = taken != 0;
                 if (pending) InterlockedDecrement(waiters);
             }
             DWORD rc = WaitForMultipleObjects(count, waits, FALSE, pending ? 0 : 500);
@@ -2130,7 +2148,7 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
              * v2.0.3's wait took it before the pipe's close. */
             else if (pending && rc != WAIT_OBJECT_0 && rc != WAIT_OBJECT_0 + 1) {
                 idleTimeouts = 0;
-                ProcessSharedInput(ctx, NextProgramStarted(ctx));
+                ProcessSharedInput(ctx, taken, NextProgramStarted(ctx));
                 pending = FALSE;
                 if (rc == WAIT_OBJECT_0 + 2) continue;
             }
@@ -2188,7 +2206,7 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
             if (rc == WAIT_OBJECT_0 + 1) {
                 idleTimeouts = 0;
                 ULONG prevSeq = ctx->SeenSeqNo;
-                ProcessSharedInput(ctx, takeOnly && NextProgramStarted(ctx));
+                ProcessSharedInput(ctx, takeOnly ? taken : 0, takeOnly && NextProgramStarted(ctx));
                 if (ctx->SeenSeqNo == prevSeq) {
                     if (++staleWakeups > 250) { recycle = TRUE; break; }
                 } else {
