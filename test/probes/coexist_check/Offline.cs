@@ -9,7 +9,7 @@
 //        v1.12.0's %ProgramData%\HIDMaestro included, which grants Users
 //        create and write but no other principal the right to change it.
 //   OF3  T6 at HIDMAESTRO_TIMEOUT_SCALE 1, 1.5 and 2: a peer at each scale
-//        runs a tool whose child holds the output for 15 s scaled, and the
+//        runs a tool whose child holds the output for 60 s scaled, and the
 //        tool runner returns at its 10 s drain bound scaled, with the output
 //        still open and the tool's exit code. The three peers run at once,
 //        beside the checks below.
