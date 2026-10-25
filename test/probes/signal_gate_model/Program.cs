@@ -38,6 +38,12 @@ internal static class Program
         {
             var sc = DeliveryModel.Scenarios().First(x => x.Name == args[2]);
             var drv = args.Length > 5 ? DeliveryModel.Driver.V203 : DeliveryModel.Driver.This;
+            if (args[3] == "outcomes")
+            {
+                foreach (var v in DeliveryModel.Explore(sc, drv, DeliveryModel.This, int.Parse(args[1])).Outcomes.OrderBy(x => x))
+                    Console.WriteLine(DeliveryModel.Show(v));
+                return 0;
+            }
             foreach (var st in DeliveryModel.Witness(sc, drv, DeliveryModel.This, int.Parse(args[1]), args[3], args[4] == "twice"))
                 Console.WriteLine(st);
             return 0;
@@ -49,8 +55,8 @@ internal static class Program
             new Variant("gate, both fences, one worker", Proto.Gated, true, true, 1, false, false),
             new Variant("gate, both fences, two workers", Proto.Gated, true, true, 2, false, false),
             new Variant("gate, both fences, two workers, timeouts", Proto.Gated, true, true, 2, true, false),
-            new Variant("gate, no fence in the SDK, one worker", Proto.Gated, false, true, 1, false, true),
-            new Variant("gate, plain increment in the worker, one worker", Proto.Gated, true, false, 1, false, true),
+            new Variant("gate, a plain store of the handoff in the SDK, one worker", Proto.Gated, false, true, 1, false, true),
+            new Variant("gate, the take before the count in the worker, one worker", Proto.Gated, true, false, 1, false, true),
         };
         int bad = 0;
         foreach (var v in variants)
@@ -140,16 +146,18 @@ internal static class Program
     }
     // Worker program counters.
     const int W_INC = 0, W_CHECK = 1, W_DEC_PENDING = 2, W_TAKE = 3, W_WAIT = 4, W_DEC = 5, W_PROC = 6;
-    // A worker's plain increment (the broken variant): load, then a buffered store.
-    const int W_INC_LOAD = 7, W_INC_STORE = 8;
-    // SDK program counters.
-    const int S_STORE = 0, S_FENCE = 1, S_LOAD = 2, S_SIGNAL = 3, S_DONE = 4;
+    // The broken worker: the take first, then the count.
+    const int W_INC_LATE = 7;
+    // SDK program counters: the frame's store, the exchange into the
+    // handoff, the load of the count, the compare-exchange that takes the
+    // frame back, the SetEvent.
+    const int S_STORE = 0, S_XCHG = 1, S_LOAD = 2, S_SIGNAL = 3, S_DONE = 4, S_RECLAIM = 5;
     // Variables.
-    const int SEQ = 0, WAIT = 1;
+    const int SEQ = 0, WAIT = 1, HAND = 2;
 
     sealed class State
     {
-        public int MemSeq, MemWait, Event;
+        public int MemSeq, MemWait, MemHand, Event;
         public int SdkPc, SdkFrame;
         public List<(int Var, int Val)> SdkBuf = new();
         public int[] Pc = Array.Empty<int>(), Seen = Array.Empty<int>(), Tmp = Array.Empty<int>();
@@ -169,7 +177,7 @@ internal static class Program
 
         public string Key()
         {
-            var parts = new List<string> { $"{MemSeq},{MemWait},{Event}|{SdkPc},{SdkFrame}|{string.Join(";", SdkBuf)}" };
+            var parts = new List<string> { $"{MemSeq},{MemWait},{MemHand},{Event}|{SdkPc},{SdkFrame}|{string.Join(";", SdkBuf)}" };
             for (int i = 0; i < Pc.Length; i++)
                 parts.Add($"{Pc[i]},{Seen[i]},{Tmp[i]},{Blocked[i]}|{string.Join(";", Buf[i])}");
             return string.Join("#", parts);
@@ -192,7 +200,7 @@ internal static class Program
             Blocked = new bool[v.Workers],
             Buf = Enumerable.Range(0, v.Workers).Select(_ => new List<(int, int)>()).ToArray(),
         };
-        for (int i = 0; i < v.Workers; i++) start.Pc[i] = v.Proto == Proto.Always ? W_WAIT : (v.WorkerAtomic ? W_INC : W_INC_LOAD);
+        for (int i = 0; i < v.Workers; i++) start.Pc[i] = v.Proto == Proto.Always ? W_WAIT : (v.WorkerAtomic ? W_INC : W_CHECK);
         var seen = new HashSet<string>();
         var stack = new Stack<State>();
         stack.Push(start);
@@ -238,7 +246,7 @@ internal static class Program
         {
             var n = s.Clone();
             var (var, val) = n.SdkBuf[0]; n.SdkBuf.RemoveAt(0);
-            if (var == SEQ) n.MemSeq = val; else n.MemWait = val;
+            if (var == SEQ) n.MemSeq = val; else if (var == HAND) n.MemHand = val; else n.MemWait = val;
             n.Trace += " sdk:drain";
             yield return n;
         }
@@ -252,7 +260,10 @@ internal static class Program
                 yield return n;
             }
 
-        // The SDK: frame k is a store of SEQ = k, then the gate.
+        // The SDK: frame k is a store of SEQ = k, then the gate: the frame
+        // goes into the handoff with an exchange (a full fence), the count is
+        // loaded, and with a waiter counted a compare-exchange takes the frame
+        // back before the SetEvent.
         if (s.SdkPc != S_DONE)
         {
             switch (s.SdkPc)
@@ -261,15 +272,31 @@ internal static class Program
                 {
                     var n = s.Clone();
                     n.SdkBuf.Add((SEQ, n.SdkFrame + 1));
-                    n.SdkPc = v.Proto == Proto.Always ? S_SIGNAL : (v.SdkFence ? S_FENCE : S_LOAD);
+                    n.SdkPc = v.Proto == Proto.Always ? S_SIGNAL : S_XCHG;
                     n.Trace += $" sdk:store{n.SdkFrame + 1}";
                     yield return n;
                     break;
                 }
-                case S_FENCE:
+                case S_XCHG:
+                    if (!v.SdkFence)
+                    {
+                        // The broken SDK: a plain store, left in the buffer.
+                        var n = s.Clone(); n.SdkBuf.Add((HAND, n.SdkFrame + 1)); n.SdkPc = S_LOAD;
+                        n.Trace += " sdk:store-handoff"; yield return n;
+                    }
+                    else if (s.SdkBuf.Count == 0)
+                    {
+                        var n = s.Clone(); n.MemHand = n.SdkFrame + 1; n.SdkPc = S_LOAD;
+                        n.Trace += " sdk:xchg-handoff"; yield return n;
+                    }
+                    break;
+                case S_RECLAIM:
                     if (s.SdkBuf.Count == 0)
                     {
-                        var n = s.Clone(); n.SdkPc = S_LOAD; n.Trace += " sdk:fence"; yield return n;
+                        var n = s.Clone();
+                        if (n.MemHand == n.SdkFrame + 1) { n.MemHand = 0; n.SdkPc = S_SIGNAL; n.Trace += " sdk:take-back"; }
+                        else { Advance(n, frames); n.Trace += " sdk:taken"; }
+                        yield return n;
                     }
                     break;
                 case S_LOAD:
@@ -277,7 +304,7 @@ internal static class Program
                     var n = s.Clone();
                     int waiters = Load(n.SdkBuf, WAIT, n.MemWait);
                     n.Trace += $" sdk:load-waiters={waiters}";
-                    if (waiters != 0) n.SdkPc = S_SIGNAL;
+                    if (waiters != 0) n.SdkPc = v.Proto == Proto.Gated ? S_RECLAIM : S_SIGNAL;
                     else { n.SdkFrame++; n.SdkPc = n.SdkFrame == frames ? S_DONE : S_STORE; }
                     yield return n;
                     break;
@@ -322,27 +349,25 @@ internal static class Program
                         var n = s.Clone(); n.MemWait++; n.Pc[w] = W_CHECK; n.Trace += $" w{w}:inc"; yield return n;
                     }
                     break;
-                case W_INC_LOAD:
-                {
-                    var n = s.Clone(); n.Tmp[w] = Load(n.Buf[w], WAIT, n.MemWait); n.Pc[w] = W_INC_STORE;
-                    n.Trace += $" w{w}:load-waiters"; yield return n;
+                case W_INC_LATE:
+                    if (s.Buf[w].Count == 0)
+                    {
+                        var n = s.Clone(); n.MemWait++; n.Pc[w] = W_WAIT; n.Trace += $" w{w}:inc"; yield return n;
+                    }
                     break;
-                }
-                case W_INC_STORE:
-                {
-                    var n = s.Clone(); n.Buf[w].Add((WAIT, n.Tmp[w] + 1)); n.Pc[w] = W_CHECK;
-                    n.Trace += $" w{w}:store-waiters"; yield return n;
-                    break;
-                }
                 case W_CHECK:
-                {
-                    var n = s.Clone();
-                    int seq = Load(n.Buf[w], SEQ, n.MemSeq);
-                    n.Pc[w] = seq != n.Seen[w] ? W_DEC_PENDING : W_WAIT;
-                    n.Trace += $" w{w}:check-seq={seq}";
-                    yield return n;
+                    // The take: an exchange of the handoff with 0. A frame
+                    // already read wakes nothing.
+                    if (s.Buf[w].Count == 0)
+                    {
+                        var n = s.Clone();
+                        int took = n.MemHand; n.MemHand = 0;
+                        bool pending = took != 0 && took != n.Seen[w];
+                        n.Pc[w] = !v.WorkerAtomic ? (pending ? W_PROC : W_INC_LATE) : (pending ? W_DEC_PENDING : W_WAIT);
+                        n.Trace += $" w{w}:take={took}";
+                        yield return n;
+                    }
                     break;
-                }
                 case W_DEC_PENDING:
                     if (s.Buf[w].Count == 0)
                     {
@@ -380,7 +405,7 @@ internal static class Program
                 {
                     var n = s.Clone();
                     n.Seen[w] = Load(n.Buf[w], SEQ, n.MemSeq);
-                    n.Pc[w] = v.Proto == Proto.Always ? W_WAIT : (v.WorkerAtomic ? W_INC : W_INC_LOAD);
+                    n.Pc[w] = v.Proto == Proto.Always ? W_WAIT : (v.WorkerAtomic ? W_INC : W_CHECK);
                     n.Trace += $" w{w}:read={n.Seen[w]}";
                     yield return n;
                     break;

@@ -89,6 +89,7 @@ internal static class DeliveryModel
         public bool OwedOnlyMapped { get; init; } = true; // ... and signals it only with the input event open
         public bool OwedOnlyHeld { get; init; } = true;   // ... and only while the section still holds it
         public bool DropSentAtTake { get; init; } = true; // a take of the frame last sent wakes no read
+        public bool WaitAgainAfterOwner { get; init; } = true; // a taken frame read on the pipe's close waits again before OwnerGone
     }
 
     internal static readonly Rules This = new("this driver");
@@ -109,6 +110,7 @@ internal static class DeliveryModel
         This with { Name = "a SetEvent after OwnerGone in Phase 1", OwedOnlyMapped = false },
         This with { Name = "a SetEvent after OwnerGone for a frame overwritten", OwedOnlyHeld = false },
         This with { Name = "a take of the frame last sent read", DropSentAtTake = false },
+        This with { Name = "OwnerGone straight after a taken frame read on the pipe's close", WaitAgainAfterOwner = false },
     };
 
     internal static IEnumerable<Scenario> Scenarios()
@@ -138,7 +140,7 @@ internal static class DeliveryModel
         $"{a} then {b}{(early ? ", early" : "")}{(rc > 0 ? $", recycle under program {rc}" : "")}{(ra > 0 ? $", re-add under program {ra}" : "")}{hold}";
 
     const int S_CLAIM = 0, S_START = 1, S_WRITE = 2, S_CHECK = 3, S_RECLAIM = 4, S_SIGNAL = 5, S_EXIT = 6, S_NEXT = 7, S_DONE = 8;
-    const int W_P1 = 0, W_TOP = 1, W_LOOK = 2, W_POLL = 3, W_BLOCK = 4, W_READ = 5, W_OWNER = 6, W_GONE = 7;
+    const int W_P1 = 0, W_TOP = 1, W_LOOK = 2, W_POLL = 3, W_BLOCK = 4, W_READ = 5, W_OWNER = 6, W_GONE = 7, W_COUNT = 8;
 
     // A frame's identity is its program and its place, 1 to 5, packed into
     // the bits of the delivery counts: two bits a frame, saturating at 2.
@@ -383,15 +385,23 @@ internal static class DeliveryModel
                 bool took = r.TakeBeforeWait && s.Hand != 0 && (s.Hand != s.Seen || !r.DropSentAtTake);
                 var n = took ? s with { Hand = 0, Waiters = s.Counted ? s.Waiters - 1 : s.Waiters, Counted = false, Pc = W_POLL }
                              : s with { Hand = r.TakeBeforeWait ? 0 : s.Hand, Pc = W_BLOCK };
-                if (!r.CountFirst && !took) n = n with { Waiters = n.Waiters + 1, Counted = true };
+                // The broken order counts itself only after a take that found
+                // nothing, as a step of its own.
+                if (!r.CountFirst && !took) n = n with { Pc = W_COUNT };
                 next.Add(n);
                 break;
             }
+            case W_COUNT:
+                next.Add(s with { Waiters = s.Waiters + 1, Counted = true, Pc = W_BLOCK });
+                break;
             case W_POLL:
                 // The wait with a zero timeout: the input event comes first,
-                // then the owner pipe, and a timeout stands for the take.
+                // then the owner pipe, and a timeout stands for the take. On
+                // the owner pipe the worker reads, then waits again: the
+                // pipe's event stays set, and an input event set meanwhile
+                // comes first.
                 if (s.Event) next.Add(s with { Event = false, Pc = W_READ, AfterOwner = false });
-                else if (s.OwnerSig) next.Add(s with { OwnerSig = false, Pc = W_READ, AfterOwner = true });
+                else if (s.OwnerSig && !r.WaitAgainAfterOwner) next.Add(s with { OwnerSig = false, Pc = W_READ, AfterOwner = true });
                 else next.Add(s with { Pc = W_READ, AfterOwner = false });
                 break;
             case W_BLOCK:

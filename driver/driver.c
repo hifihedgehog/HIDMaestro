@@ -2040,10 +2040,15 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
              * remove event in the wait, so a frame the SDK signaled is read
              * before the program's end is handled. A frame taken without a
              * signal is read first too: OwnerGone, which ends a program,
-             * would otherwise run before that program's last frame. */
+             * would otherwise run before that program's last frame. After
+             * that read the worker waits again instead of running OwnerGone:
+             * the owner read's event is manual-reset and stays set, and an
+             * input event a program set meanwhile is taken first, as
+             * v2.0.3's wait took it before the pipe's close. */
             else if (pending && rc != WAIT_OBJECT_0 && rc != WAIT_OBJECT_0 + 1) {
                 idleTimeouts = 0;
                 ProcessSharedInput(ctx);
+                if (rc == WAIT_OBJECT_0 + 2) continue;
             }
 
             /* Issue #38: TearingDown is the authoritative exit
