@@ -12,11 +12,13 @@
 // In a final state the last frame must have been served. A doorbell on
 // every frame with no kick, the protocol before 2.1.0, fails that: the pump
 // can take the last ring before the caller has parked its next request,
-// which then waits for the timer. So does a count raised after the park: a
-// dispatch held between its park and its increment while the pump completes
-// that request leaves the count one short of the next request, which then
-// gets no ring. Counting before the park, with the kick, passes, and taking
-// away the kick or the SDK's fence fails.
+// which then waits for the timer. The count raised after the park, the
+// order companion.c uses (forward the request, then increment), passes: a
+// dispatch held between its park and its increment can let the pump take
+// the request first, and the count reads -1 for a moment, but the SDK rings
+// on any count but 0 and the late dispatch's look kicks the pump for a
+// frame newer than the last completion. Counting before the park passes
+// too. Taking away the kick or the SDK's fence fails.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -31,7 +33,7 @@ internal static class CompanionModel
         new("companion, a doorbell on every frame and the kick (an older SDK on this driver)", false, true, true, true, false, false),
         new("companion gate, count before the park, kick, both fences", true, true, true, true, false, false),
         new("companion gate, count before the park, kick, with the timer", true, true, true, true, true, false),
-        new("companion gate, count after the park, kick", true, true, false, true, false, true),
+        new("companion gate, count after the park, kick (companion.c's order)", true, true, false, true, false, false),
         new("companion gate, count before the park, no kick", true, true, true, false, false, true),
         new("companion gate, count before the park, kick, no fence in the SDK", true, false, true, true, false, true),
     };
