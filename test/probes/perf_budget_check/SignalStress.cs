@@ -23,7 +23,11 @@
 // over 4 ms than twice those of the gate off, plus five: a missed signal
 // that the worker's timeout or the companion's 8 ms timer recovers shows
 // as just such a late frame. --gate-off keeps the gate off for the whole
-// pass. Against an SDK that makes no section it says so and runs as is.
+// pass. The HID driver sets its capability again every 256 frames, so a
+// mode with the input event's gate off clears it before every submit, and a
+// submit that finds it set again afterward is counted apart from its mode
+// and left out of the comparison. Against an SDK that makes no section it
+// says so and runs as is.
 // --any-driver runs on whatever driver is installed, so a v2.0.3 build of
 // this probe can stress the newer driver. Builds against v2.0.3's SDK as it
 // is.
@@ -95,16 +99,19 @@ internal static partial class Program
     }
 
     // The modes a pass switches through: bit 0 the input event's gate, bit 1
-    // the companion doorbell's.
-    const int GateInput = 1, GateCompanion = 2;
+    // the companion doorbell's. Bit 2 marks a submit in a mode with the
+    // input event's gate off that found the HID driver's capability set
+    // again once it returned: the driver's AnnounceGate, every 256 frames,
+    // may have run between the clear and the SDK's read of the word.
+    const int GateInput = 1, GateCompanion = 2, Announced = 4;
 
-    static string ModeName(int mode) => mode switch
+    static string ModeName(int mode) => (mode & ~Announced) switch
     {
         0 => "gate off",
         GateInput => "input gate on",
         GateCompanion => "doorbell gate on",
         _ => "both gates on",
-    };
+    } + ((mode & Announced) != 0 ? ", input capability set again during the submit" : "");
 
     /// <summary>Writes the capability words for the mode: DriverCaps at 4,
     /// CompanionCaps at 8.</summary>
@@ -115,25 +122,50 @@ internal static partial class Program
         Interlocked.Exchange(ref *(int*)((byte*)view + 8), (mode & GateCompanion) != 0 ? 1 : 0);
     }
 
+    /// <summary>Clears the HID driver's capability, DriverCaps at 4, which
+    /// the driver sets again every 256 frames (driver.c AnnounceGate), so
+    /// a mode with the input event's gate off keeps it off.</summary>
+    static unsafe void HoldInputGateOff(IntPtr view)
+    {
+        if (view != IntPtr.Zero) Interlocked.Exchange(ref *(int*)((byte*)view + 4), 0);
+    }
+
+    /// <summary>The HID driver's capability is set.</summary>
+    static unsafe bool InputGateSet(IntPtr view) =>
+        view != IntPtr.Zero && (Volatile.Read(ref *(int*)((byte*)view + 4)) & GateInput) != 0;
+
     /// <summary>The submit schedule: a pause of 0 to 2 ms, a burst, or a
     /// pause past the worker's 500 ms wait, until the time is up, in blocks
     /// of 1 s that take the modes in order, then backward, and again. Calls
     /// <paramref name="submit"/> with the count and returns each submit's
-    /// count, Stopwatch time and mode.</summary>
-    static List<(int Count, long Time, int Mode)> StressSchedule(double seconds, Action<int> submit, int[] modes, Action<int> setMode)
+    /// count, Stopwatch time and mode. In a mode with the input event's gate
+    /// off, the HID driver's capability is cleared before each submit, and
+    /// a submit after which it is set again carries the Announced bit.</summary>
+    static List<(int Count, long Time, int Mode)> StressSchedule(double seconds, Action<int> submit, int[] modes, IntPtr signal)
     {
         var rng = new Random(2101);
         var sent = new List<(int, long, int)>(1 << 20);
         long start = Stopwatch.GetTimestamp();
         long end = start + (long)(seconds * Stopwatch.Frequency);
         long block = Stopwatch.Frequency;
-        int n = 0, bursts = 0, gaps = 0, mode = -1;
+        int n = 0, bursts = 0, gaps = 0, announced = 0, mode = -1;
+        void Send()
+        {
+            n++;
+            bool hold = (mode & GateInput) == 0 && signal != IntPtr.Zero;
+            if (hold) HoldInputGateOff(signal);
+            long t = Stopwatch.GetTimestamp();
+            submit(n);
+            int m = mode;
+            if (hold && InputGateSet(signal)) { m |= Announced; announced++; }
+            sent.Add((n, t, m));
+        }
         while (Stopwatch.GetTimestamp() < end)
         {
             long b = (Stopwatch.GetTimestamp() - start) / block;
             int lap = (int)(b / modes.Length), at = (int)(b % modes.Length);
             int want = modes[lap % 2 == 0 ? at : modes.Length - 1 - at];
-            if (want != mode) { mode = want; setMode(mode); }
+            if (want != mode) { mode = want; SetGate(signal, mode); }
             int roll = rng.Next(1000);
             if (roll < 3)
             {
@@ -144,18 +176,15 @@ internal static partial class Program
             if (roll < 23)
             {
                 int k = rng.Next(50, 201);
-                for (int i = 0; i < k; i++) { n++; long tb = Stopwatch.GetTimestamp(); submit(n); sent.Add((n, tb, mode)); }
+                for (int i = 0; i < k; i++) Send();
                 bursts++;
                 continue;
             }
             Spin(rng.Next(0, 2001));
-            n++;
-            long t = Stopwatch.GetTimestamp();
-            submit(n);
-            sent.Add((n, t, mode));
+            Send();
         }
-        setMode(0);
-        Console.WriteLine($"    {sent.Count} submits, {bursts} bursts, {gaps} pauses past 500 ms");
+        SetGate(signal, 0);
+        Console.WriteLine($"    {sent.Count} submits, {bursts} bursts, {gaps} pauses past 500 ms, {announced} with the input capability set again during the submit");
         return sent;
     }
 
@@ -188,7 +217,7 @@ internal static partial class Program
             int over2 = list.Count(x => x > 2000), over4 = list.Count(x => x > 4000);
             Report($"{name}, {ModeName(mode)}: submit to the first reading that carries it, microseconds", list, 1,
                 FormattableString.Invariant($", {over2} over 2 ms, {over4} over 4 ms"));
-            if (mode != 0 && offLate >= 0)
+            if (mode != 0 && (mode & Announced) == 0 && offLate >= 0)
                 Check($"{name}, {ModeName(mode)}: frames over 4 ms at most twice the gate-off mode's plus five",
                     over4 <= 2 * offLate + 5, $"{over4} against {offLate} with the gate off");
         }
@@ -226,7 +255,7 @@ internal static partial class Program
         {
             BitConverter.TryWriteBytes(report.AsSpan(40), n);
             c.SubmitRawReport(report);
-        }, modes, m => SetGate(signal, m));
+        }, modes, signal);
         Thread.Sleep((int)StressBoundMs * 2);
         Volatile.Write(ref stop, true);
         CancelIoEx(dev.Handle, IntPtr.Zero);
@@ -278,7 +307,7 @@ internal static partial class Program
             state.Axes[HMAxis.X] = Axis(code % 200);
             state.Axes[HMAxis.Z] = Axis(code / 200);
             c.SubmitState(state);
-        }, modes, m => SetGate(signal, m));
+        }, modes, signal);
         Thread.Sleep((int)StressBoundMs * 2);
         Volatile.Write(ref stop, true);
         poller.Join(2000);
