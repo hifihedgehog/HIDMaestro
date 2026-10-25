@@ -282,6 +282,182 @@ static void StreamNextProgramInOwnerGone(PlanProfile *p, int legacy, int parked)
     CtlStop(&c);
 }
 
+/* The next program starts the moment the worker's wait answers the last
+ * program's pipe close, before OwnerGone runs, with no read parked or one
+ * parked all along. Under 2.1.0 the worker has left its counted wait by
+ * then, so the first frame is handed over with no signal, and OwnerGone's
+ * take finds it, beside the acknowledgement the next program zeroed: it
+ * is owed. A program before 2.1.0 signals it. v2.0.3 reads that signal
+ * after OwnerGone and serves it to the read, from the cache when it comes
+ * late. */
+static int NextAtOwnerAnswer(HmThread *t, DWORD result)
+{
+    Ctl *c = g_nextCtl;
+    if (t != CtlThread(c, 0) || result != WAIT_OBJECT_0 + 2) return 0;
+    StartNextProgram();
+    int32_t caps = 0;
+    if (c->sdk.signal) memcpy(&caps, c->sdk.signal->buf + 4, 4);
+    if (caps & 1) {
+        /* The SDK ran after the worker's decrement: the count was zero,
+         * so it kept the frame and signaled nothing. */
+        c->sdk.inputEv->signaled = FALSE;
+        memcpy(c->sdk.signal->buf + 68, &c->sdk.seq, 4);
+    }
+    return 1;
+}
+
+static void StreamNextProgramBeforeTake(PlanProfile *p, int legacy, int parked)
+{
+    Ctl c;
+    StreamBegin("threads/%s/next-%s-before-ownergone-take-%s", p->id, legacy ? "legacy" : "gated", parked ? "parked" : "late");
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    Probe(&c, 0, 1);
+    Probe(&c, 0, 2);
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    if (parked) HidRead(&c, len);
+    g_nextCtl = &c;
+    g_nextLegacy = legacy;
+    g_waitAnswerHook = NextAtOwnerAnswer;
+    PipeServerClose(c.sdk.pipe);
+    ThreadResume(CtlThread(&c, 0));
+    if (g_waitAnswerHook) HmFail("next-before-take: the wait never answered the pipe's close");
+    RecordSections(&c.sdk);
+    ThreadResume(CtlThread(&c, 0));
+    if (!parked) HidRead(&c, len);
+    HidGetInput(&c, 0x01, len);
+    Timeout(&c, 0, 1);
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x90 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    CtlStop(&c);
+}
+
+/* A frame handed over while the worker is outside its counted wait, here
+ * as it completes a parked read, and then a stop event before the worker's
+ * next poll: mode 1 a foreign stop (another program's sweep, or a
+ * same-index sibling's cleanup), mode 2 the device's own teardown
+ * (TearingDown set, as ReleaseIndexObjects sets it from another thread)
+ * and an add of the device again while the program runs. Mode 0 is the
+ * control with no stop. Under 2.1.0 the worker takes the frame and leaves
+ * its loop without reading it. v2.0.3 leaves the input event set for that
+ * frame, and the recycled worker or the next device context reads it. Each
+ * runs under a program before 2.1.0 too (legacy). */
+static Ctl *g_x5Ctl;
+static int g_x5Mode;
+static void X5Hook(void)
+{
+    Ctl *c = g_x5Ctl;
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x70 + i);
+    SdkWriteFrame(&c->sdk, data, 63, NULL, NULL, 0);
+    if (g_x5Mode) {
+        /* The worker's Phase 2 wait puts the stop event first. */
+        HmObj *o = ObjFromHandle(c->dev->threads[0]->waitHandles[0]);
+        if (!o || o->kind != HK_EVENT || !((HmEvent *)o)->manual) HmFail("x5: no stop event");
+        if (g_x5Mode == 2) *(volatile LONG *)((uint8_t *)c->dev->context + HmTearingDownOffset) = 1;
+        EventSet((HmEvent *)o);
+    }
+}
+
+static void StreamX5(PlanProfile *p, int mode, int legacy)
+{
+    Ctl c;
+    int saved = g_sdkSignal;
+    if (legacy) g_sdkSignal = 0;
+    StreamBegin("threads/%s/x5-take-then-%s%s", p->id,
+                mode == 0 ? "nothing" : mode == 1 ? "foreign-stop" : "teardown-readd", legacy ? "-legacy" : "");
+    if (CtlStart(&c, p, 0, SDK_ALL, 0)) {
+        uint32_t len = c.p->readLength ? c.p->readLength : 64;
+        Probe(&c, 0, 1);
+        HidRead(&c, len);
+        g_x5Ctl = &c;
+        g_x5Mode = mode;
+        g_completeHook = X5Hook;
+        uint8_t data[64];
+        for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x50 + i);
+        Frame(&c, data, 63, NULL, NULL, 0);
+        if (g_completeHook) HmFail("x5: the hook never ran");
+        if (mode == 2) {
+            DeviceRemove(c.dev);
+            ConfigWrite(p, 0);
+            c.dev = DeviceAdd(0);
+            if (!c.dev) HmFail("x5: re-add failed");
+        }
+        HidRead(&c, len);
+        RunWorker(&c);
+        RunWorker(&c);
+        RunWorker(&c);
+        for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x90 + i);
+        Frame(&c, data, 63, NULL, NULL, 0);
+        HidRead(&c, len);
+        CtlStop(&c);
+    }
+    g_sdkSignal = saved;
+}
+
+/* The stress probe's gate-off mode (perf_budget_check signal-stress): the
+ * SDK made the signal section and the driver maps it and counts, but the
+ * capability is cleared under it once, so frames signal until the driver's
+ * AnnounceGate sets it again at its 256th frame. Reads parked and late,
+ * through 300 frames, and the capability word every 50. */
+static void StreamX5GateOff(PlanProfile *p)
+{
+    Ctl c;
+    StreamBegin("threads/%s/x5-gate-off-then-announce", p->id);
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    Probe(&c, 0, 1);
+    if (c.sdk.signal) memset(c.sdk.signal->buf + 4, 0, 4);
+    uint8_t data[64];
+    for (int f = 0; f < 300; f++) {
+        for (int i = 0; i < 64; i++) data[i] = (uint8_t)(f + i);
+        if (f % 3 == 0) HidRead(&c, len);
+        Frame(&c, data, 63, NULL, NULL, 0);
+        if (f % 3 == 1) HidRead(&c, len);
+        if ((f % 50 == 0 || f == 299) && c.sdk.signal) { int32_t caps; memcpy(&caps, c.sdk.signal->buf + 4, 4); RecOut("x5.caps", &caps, 4); }
+    }
+    CtlStop(&c);
+}
+
+/* A program killed inside WriteInputFrame after its exchange put frame X
+ * in the handoff and before it read the count and signaled. A worker sits
+ * in its counted wait, so nothing wakes it for X. Then the pipe closes.
+ * With release frames (issue #67, a keyboard's key held) and without (a
+ * gamepad). v2.0.3, killed after the store and before its SetEvent, never
+ * reads X: the release frame, or the frame before X, is the last report. */
+static void StreamX5Kill(PlanProfile *p, int release)
+{
+    Ctl c;
+    StreamBegin("threads/%s/x5-kill-after-exchange%s", p->id, release ? "-release" : "");
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    Probe(&c, 0, 1);
+    if (release) {
+        uint8_t *a = c.sdk.ack->buf;
+        int32_t seq = 2, cnt = 1, sz = 78;
+        memcpy(a + 8, &seq, 4);
+        memcpy(a + 12, &cnt, 4);
+        memcpy(a + 16, &sz, 4);
+        memset(a + 20, 0, 80);
+        a[20] = 0x01;
+    }
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    HidRead(&c, len);
+    HidRead(&c, len);
+    int32_t caps = 0;
+    if (c.sdk.signal) memcpy(&caps, c.sdk.signal->buf + 4, 4);
+    RecOut("x5.caps", &caps, 4);
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0xA0 + i);
+    SdkWriteFrame(&c.sdk, data, 63, NULL, NULL, 0);
+    c.sdk.inputEv->signaled = FALSE;
+    if (c.sdk.signal && (caps & 1)) memcpy(c.sdk.signal->buf + 68, &c.sdk.seq, 4);
+    PipeServerClose(c.sdk.pipe);
+    ThreadResume(CtlThread(&c, 0));
+    Timeout(&c, 0, 1);
+    Timeout(&c, 0, 1);
+    CtlStop(&c);
+}
+
 void CaseThreads(void)
 {
     PlanProfile *sw = PlanFind("switch", NULL);
@@ -309,4 +485,11 @@ void CaseThreads(void)
     StreamNextProgramInOwnerGone(ds, 0, 0);
     StreamNextProgramInOwnerGone(ds, 1, 1);
     StreamNextProgramInOwnerGone(ds, 0, 1);
+    for (int legacy = 1; legacy >= 0; legacy--)
+        for (int parked = 0; parked < 2; parked++)
+            StreamNextProgramBeforeTake(ds, legacy, parked);
+    for (int m = 0; m < 3; m++) { StreamX5(ds, m, 0); StreamX5(ds, m, 1); }
+    StreamX5GateOff(ds);
+    StreamX5Kill(ds, 1);
+    StreamX5Kill(ds, 0);
 }

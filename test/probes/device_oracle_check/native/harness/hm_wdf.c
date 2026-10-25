@@ -607,9 +607,18 @@ static VOID WDFAPI HmWdfRequestSetInformation(PWDF_DRIVER_GLOBALS g, WDFREQUEST 
 
 /* A completion is recorded under the request's tag: its serial (the order
  * the scenario issued it in this stream), the status, the information,
- * and the output buffer's bytes up to the information. */
+ * and the output buffer's bytes up to the information. A stream can run
+ * g_completeHook once at the next completion a driver thread makes, before
+ * it is recorded: the moment the shared-input worker is outside its
+ * counted wait. */
+void (*g_completeHook)(void);
 static void Complete(HmRequest *r, NTSTATUS st)
 {
+    if (g_completeHook && HmOnDriverThread()) {
+        void (*hook)(void) = g_completeHook;
+        g_completeHook = NULL;
+        hook();
+    }
     if (r->completed) HmFail("request %u completed twice", r->serial);
     if (r->inQueue) HmFail("request %u completed while still in a queue", r->serial);
     r->completed = 1;
