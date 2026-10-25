@@ -139,7 +139,16 @@ internal static class DeliveryModel
     static string Name(Prog a, Prog b, bool early, int rc, int ra, string hold) =>
         $"{a} then {b}{(early ? ", early" : "")}{(rc > 0 ? $", recycle under program {rc}" : "")}{(ra > 0 ? $", re-add under program {ra}" : "")}{hold}";
 
-    const int S_CLAIM = 0, S_START = 1, S_WRITE = 2, S_CHECK = 3, S_RECLAIM = 4, S_SIGNAL = 5, S_EXIT = 6, S_NEXT = 7, S_DONE = 8;
+    const int S_CLAIM = 0, S_START = 1, S_WRITE = 2, S_CHECK = 3, S_RECLAIM = 4, S_SIGNAL = 5, S_EXIT = 6, S_NEXT = 7, S_DONE = 8, S_FRAMEDONE = 9;
+
+    // The program steps both drivers share: a step from one of these program
+    // counters that moves the program is the same event under either driver.
+    // A frame's handoff, take-back and SetEvent are each driver's own, between
+    // the frame's store (S_WRITE) and the end of its publication
+    // (S_FRAMEDONE).
+    static bool SharedPc(int pc) => pc is S_CLAIM or S_START or S_WRITE or S_FRAMEDONE or S_EXIT or S_NEXT;
+    // The recycle and the device's going are shared too: the idle time and the PnP removal behind them come from outside the driver.
+    static bool IsShared(State s, State n) => SharedPc(s.SdkPc) && (n.SdkPc != s.SdkPc || n.P != s.P) || n.RecycleUsed != s.RecycleUsed || n.ReAddUsed != s.ReAddUsed;
     const int W_P1 = 0, W_TOP = 1, W_LOOK = 2, W_POLL = 3, W_BLOCK = 4, W_READ = 5, W_OWNER = 6, W_GONE = 7, W_COUNT = 8;
 
     // A frame's identity is its program and its place, 1 to 5, packed into
@@ -274,6 +283,123 @@ internal static class DeliveryModel
 
     static int Count(ulong delivered, int slot) => (int)((delivered >> (2 * slot)) & 3);
 
+    // A set of v2.0.3 states, compared by its members.
+    sealed class StateSet : IEquatable<StateSet>
+    {
+        public readonly HashSet<State> Items;
+        readonly int hash;
+        public StateSet(HashSet<State> items)
+        {
+            Items = items;
+            int h = items.Count;
+            foreach (var x in items) h ^= x.GetHashCode() * 16777619;
+            hash = h;
+        }
+        public bool Equals(StateSet? o) => o != null && o.hash == hash && Items.SetEquals(o.Items);
+        public override bool Equals(object? o) => Equals(o as StateSet);
+        public override int GetHashCode() => hash;
+    }
+
+    internal sealed class AlignedResult
+    {
+        public long States, Finals, Unaligned;
+        public readonly HashSet<ulong> Worse = new();
+        public bool ZeroSent;
+        public string? Example;
+    }
+
+    // The order-aligned check. Each state of this driver's is paired with the
+    // set of v2.0.3 states reachable through the same program steps (SharedPc),
+    // each driver taking any steps of its own in between. At a final state of
+    // this driver's, some final state in that set must deliver every frame
+    // this one does not lose and send twice every frame this one sends twice.
+    internal static AlignedResult ExploreAligned(Scenario sc, Rules r, int framesArg)
+    {
+        int frames = sc.Frames ?? framesArg;
+        var res = new AlignedResult();
+        var buf = new List<State>();
+        var interned = new Dictionary<StateSet, StateSet>();
+        var closures = new Dictionary<StateSet, StateSet>();
+
+        StateSet Intern(HashSet<State> h)
+        {
+            var k = new StateSet(h);
+            if (interned.TryGetValue(k, out var e)) return e;
+            interned[k] = k;
+            return k;
+        }
+        // v2.0.3's own steps from a set, to a fixed point.
+        StateSet Close(StateSet seed)
+        {
+            if (closures.TryGetValue(seed, out var c)) return c;
+            var all = new HashSet<State>(seed.Items);
+            var work = new Stack<State>(seed.Items);
+            var nx = new List<State>();
+            while (work.Count > 0)
+            {
+                var v = work.Pop();
+                nx.Clear();
+                Steps(v, sc, Driver.V203, This, frames, nx);
+                foreach (var n in nx)
+                    if (!IsShared(v, n) && all.Add(n)) work.Push(n);
+            }
+            c = Intern(all);
+            closures[seed] = c;
+            return c;
+        }
+
+        var t0 = Start();
+        var v0 = Close(Intern(new HashSet<State> { Start() }));
+        var seen = new HashSet<(State, StateSet)> { (t0, v0) };
+        var stack = new Stack<(State, StateSet)>();
+        stack.Push((t0, v0));
+        var vn = new List<State>();
+        while (stack.Count > 0)
+        {
+            var (t, V) = stack.Pop();
+            res.States++;
+            buf.Clear();
+            Steps(t, sc, Driver.This, r, frames, buf);
+            if (buf.Count == 0)
+            {
+                res.Finals++;
+                ulong mine = t.Delivered & FrameMask;
+                for (int pr = 1; pr <= 3; pr++) if (Count(t.Delivered, Slot(pr, 0)) > 0) res.ZeroSent = true;
+                bool matched = false;
+                foreach (var v in V.Items)
+                {
+                    vn.Clear();
+                    Steps(v, sc, Driver.V203, This, frames, vn);
+                    if (vn.Count == 0 && NoWorse(mine, v.Delivered & FrameMask)) { matched = true; break; }
+                }
+                if (!matched && res.Worse.Add(mine)) res.Example ??= Show(mine);
+                continue;
+            }
+            foreach (var n in buf)
+            {
+                StateSet V2 = V;
+                if (IsShared(t, n))
+                {
+                    var h = new HashSet<State>();
+                    foreach (var v in V.Items)
+                    {
+                        vn.Clear();
+                        Steps(v, sc, Driver.V203, This, frames, vn);
+                        foreach (var m in vn)
+                            if (IsShared(v, m) && m.SdkPc == n.SdkPc && m.P == n.P && m.Done == n.Done && m.RecycleUsed == n.RecycleUsed && m.ReAddUsed == n.ReAddUsed) h.Add(m);
+                    }
+                    if (h.Count == 0) { res.Unaligned++; continue; }
+                    V2 = Close(Intern(h));
+                }
+                if (seen.Add((n, V2))) stack.Push((n, V2));
+            }
+        }
+        return res;
+    }
+
+    static State Start() => new State(false, false, false, 0, 0, 0, false, false, 0, 0, 1, S_CLAIM, 0, 0, false, false, true,
+                                      false, false, W_P1, false, false, false, false, 0, false, false, 0, 0, 0, false, false, false, 0);
+
     static ulong Deliver(ulong delivered, int slot) =>
         Count(delivered, slot) == 2 ? delivered : delivered + (1UL << (2 * slot));
 
@@ -334,6 +460,9 @@ internal static class DeliveryModel
             case S_EXIT:
                 next.Add(Collect(s with { OwnerSig = s.Watch, PipeOpen = false, Holds = false, EndSeen = false,
                                           SdkPc = s.P < sc.Programs.Length ? S_NEXT : S_DONE }, sc, prog));
+                break;
+            case S_FRAMEDONE:
+                next.Add(s with { SdkPc = s.Done == frames ? S_EXIT : S_WRITE });
                 break;
             case S_NEXT:
                 if (sc.Early || s.EndSeen)
@@ -515,8 +644,7 @@ internal static class DeliveryModel
 
     static State AfterFrame(State s, int frames)
     {
-        int done = s.Done + 1;
-        return s with { Done = done, SdkPc = done == frames ? S_EXIT : S_WRITE };
+        return s with { Done = s.Done + 1, SdkPc = S_FRAMEDONE };
     }
 
     // SharedMemoryIO.EvenAbove(left, 0): the SeqNo left, taken to the even

@@ -31,6 +31,19 @@ internal static class Program
 
     static int Main(string[] args)
     {
+        // rule <frames> <index>: one rule taken away, under the aligned check.
+        if (args.Length >= 3 && args[0] == "rule")
+        {
+            var rules = DeliveryModel.Broken[int.Parse(args[2])];
+            string? found = null;
+            foreach (var sc in DeliveryModel.Scenarios().Where(x => args.Length < 4 || x.Name == args[3]))
+            {
+                var a = DeliveryModel.ExploreAligned(sc, rules, int.Parse(args[1]));
+                if (a.Worse.Count > 0 || a.ZeroSent) { found = $"{sc.Name}: [{a.Example}]{(a.ZeroSent ? ", a zeroed section sent" : "")}"; break; }
+            }
+            Console.WriteLine($"[{(found != null ? "PASS" : "FAIL")}] aligned delivery with {rules.Name}: {(found ?? "no scenario breaks it")}");
+            return found != null ? 0 : 1;
+        }
         int frames = args.Length > 0 && args[0] != "witness" ? int.Parse(args[0]) : 3;
         // witness <frames> <scenario> <frame> twice|lost [v203]: the shortest
         // order, one state a line.
@@ -81,7 +94,7 @@ internal static class Program
             if (r.Lost != null) Console.WriteLine($"         {r.Lost}");
             if (r.InvariantBroken != null) Console.WriteLine($"         count invariant broken: {r.InvariantBroken}");
         }
-        bad += Delivery(frames);
+        bad += Aligned(frames);
         Console.WriteLine(bad == 0 ? "signal_gate_model: PASS" : $"signal_gate_model: FAIL ({bad})");
         return bad == 0 ? 0 : 1;
     }
@@ -128,6 +141,46 @@ internal static class Program
             bool ok = found != null;
             if (!ok) bad++;
             Console.WriteLine($"[{(ok ? "PASS" : "FAIL")}] delivery with {rules.Name}: {(found ?? "no scenario breaks it")}");
+        }
+        return bad;
+    }
+
+    // The delivery rules against v2.0.3's, order by order (DeliveryModel
+    // .ExploreAligned): every final state of this driver's is matched or
+    // bettered by a final state v2.0.3 reaches through the same program
+    // steps, and no zeroed section goes out. Then each rule taken away must
+    // break that somewhere.
+    static int Aligned(int frames)
+    {
+        int bad = 0;
+        long states = 0, finals = 0, unaligned = 0;
+        var scenarios = DeliveryModel.Scenarios().ToList();
+        foreach (var sc in scenarios)
+        {
+            var a = DeliveryModel.ExploreAligned(sc, DeliveryModel.This, frames);
+            states += a.States; finals += a.Finals; unaligned += a.Unaligned;
+            if (a.Worse.Count == 0 && !a.ZeroSent) continue;
+            bad++;
+            Console.WriteLine($"[FAIL] aligned delivery: {sc.Name}: {a.Worse.Count} outcome(s) no v2.0.3 run of the same program steps matches, such as [{a.Example}]" +
+                              (a.ZeroSent ? ", a zeroed section sent" : ""));
+        }
+        Console.WriteLine($"[{(bad == 0 ? "PASS" : "FAIL")}] aligned delivery against v2.0.3, {frames} frame(s) a program: {scenarios.Count} scenarios, " +
+                          $"{states} paired states, {finals} final, {unaligned} program step(s) v2.0.3 could not follow");
+        foreach (var rules in DeliveryModel.Broken)
+        {
+            string? found = null;
+            foreach (var sc in scenarios)
+            {
+                var a = DeliveryModel.ExploreAligned(sc, rules, frames);
+                if (a.Worse.Count > 0 || a.ZeroSent)
+                {
+                    found = $"{sc.Name}: [{a.Example}]{(a.ZeroSent ? ", a zeroed section sent" : "")}";
+                    break;
+                }
+            }
+            bool ok = found != null;
+            if (!ok) bad++;
+            Console.WriteLine($"[{(ok ? "PASS" : "FAIL")}] aligned delivery with {rules.Name}: {(found ?? "no scenario breaks it")}");
         }
         return bad;
     }
