@@ -22,6 +22,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 
 internal static class Program
 {
@@ -31,42 +33,30 @@ internal static class Program
 
     static int Main(string[] args)
     {
-        // rule <frames> <index>: one rule taken away, under the aligned check.
-        if (args.Length >= 3 && args[0] == "rule")
+        // check <frames> <rule> [--shard k/n] [-j N] [--scenario name]: the
+        // delivery check for one rule set (-1: this driver's own rules, an
+        // index: that rule taken away). See Check.
+        if (args.Length >= 3 && (args[0] == "check" || args[0] == "rule"))
+            return Check(args);
+        // scenarios: each scenario's index and name.
+        if (args.Length >= 1 && args[0] == "scenarios")
         {
-            var rules = int.Parse(args[2]) < 0 ? DeliveryModel.This : DeliveryModel.Broken[int.Parse(args[2])];
-            string? found = null;
-            foreach (var sc in DeliveryModel.Scenarios().Where(x => args.Length < 4 || x.Name == args[3]))
-            {
-                var a = DeliveryModel.ExploreAligned(sc, rules, int.Parse(args[1]), args.Length >= 4);
-                if (a.Worse.Count > 0 || a.ZeroSent)
-                {
-                    found = $"{sc.Name}: [{a.Example}]{(a.ZeroSent ? ", a zeroed section sent" : "")}";
-                    if (a.Path != null)
-                        foreach (var st in a.Path) Console.WriteLine(st);
-                    break;
-                }
-            }
-            Console.WriteLine($"[{(found != null ? "PASS" : "FAIL")}] aligned delivery with {rules.Name}: {(found ?? "no scenario breaks it")}");
-            return found != null ? 0 : 1;
-        }
-        int frames = args.Length > 0 && args[0] != "witness" ? int.Parse(args[0]) : 3;
-        // witness <frames> <scenario> <frame> twice|lost [v203]: the shortest
-        // order, one state a line.
-        if (args.Length >= 5 && args[0] == "witness")
-        {
-            var sc = DeliveryModel.Scenarios().First(x => x.Name == args[2]);
-            var drv = args.Length > 5 ? DeliveryModel.Driver.V203 : DeliveryModel.Driver.This;
-            if (args[3] == "outcomes")
-            {
-                foreach (var v in DeliveryModel.Explore(sc, drv, DeliveryModel.This, int.Parse(args[1])).Outcomes.OrderBy(x => x))
-                    Console.WriteLine(DeliveryModel.Show(v));
-                return 0;
-            }
-            foreach (var st in DeliveryModel.Witness(sc, drv, DeliveryModel.This, int.Parse(args[1]), args[3], args[4] == "twice"))
-                Console.WriteLine(st);
+            int i = 0;
+            foreach (var sc in DeliveryModel.Scenarios()) Console.WriteLine($"{i++}\t{sc.Name}");
             return 0;
         }
+        // outcomes <frames> <scenario> [v203]: every outcome one driver
+        // reaches in a scenario, unpaired.
+        if (args.Length >= 3 && args[0] == "outcomes")
+        {
+            var sc = DeliveryModel.Scenarios().First(x => x.Name == args[2]);
+            var drv = args.Length > 3 ? DeliveryModel.Driver.V203 : DeliveryModel.Driver.This;
+            var res = DeliveryModel.Explore(sc, drv, DeliveryModel.This, int.Parse(args[1]));
+            foreach (var v in res.Outcomes.OrderBy(x => x)) Console.WriteLine(DeliveryModel.Show(v));
+            Console.WriteLine($"{res.States} states, {res.Finals} final{(res.ZeroSent ? ", a zeroed section sent" : "")}");
+            return 0;
+        }
+        int frames = args.Length > 0 ? int.Parse(args[0]) : 3;
         var variants = new[]
         {
             new Variant("today: SetEvent every frame, one worker", Proto.Always, true, true, 1, false, false),
@@ -100,109 +90,120 @@ internal static class Program
             if (r.Lost != null) Console.WriteLine($"         {r.Lost}");
             if (r.InvariantBroken != null) Console.WriteLine($"         count invariant broken: {r.InvariantBroken}");
         }
-        bad += Aligned(frames);
+        // The delivery check at one frame a program, in this process: this
+        // driver's rules must pass, and each rule taken away must fail. The
+        // larger runs shard it across processes (check).
+        int jobs = Math.Max(1, Environment.ProcessorCount / 2);
+        if (RunCheck(1, -1, 0, 1, jobs, null, false) != 0) bad++;
+        for (int i = 0; i < DeliveryModel.Broken.Length; i++)
+            if (RunCheck(1, i, 0, 1, jobs, null, false) != 0) bad++;
         Console.WriteLine(bad == 0 ? "signal_gate_model: PASS" : $"signal_gate_model: FAIL ({bad})");
         return bad == 0 ? 0 : 1;
     }
 
-    // The delivery rules against v2.0.3's (DeliveryModel.cs): in every
-    // scenario this driver loses no frame v2.0.3 does not lose, sends none
-    // twice that v2.0.3 does not, and sends no zeroed section. Then each
-    // rule taken away must break that somewhere.
-    static int Delivery(int frames)
+    // check <frames> <rule> [--shard k/n] [-j N] [--scenario name] [--quiet]:
+    // the order-aligned delivery check (DeliveryModel.ExploreAligned) over
+    // the scenarios whose index is k modulo n, N at a time. Rule -1 is this
+    // driver: every scenario must pass, and each failure prints its witness.
+    // A rule index takes that rule away: some scenario must fail, and the
+    // check stops at the first (lowest index) that does and prints its
+    // witness. Exit 0 when the verdict is the expected one.
+    static int Check(string[] args)
     {
-        int bad = 0, dupOld = 0, dupNew = 0, lostOld = 0, lostNew = 0, zeroOld = 0;
-        long oldStates = 0, newStates = 0;
-        var scenarios = DeliveryModel.Scenarios().ToList();
-        var olds = new Dictionary<string, DeliveryModel.Result>();
-        foreach (var sc in scenarios)
+        int frames = int.Parse(args[1]), rule = int.Parse(args[2]);
+        int shard = 0, shards = 1, jobs = 1;
+        string? only = null;
+        bool quiet = false;
+        for (int i = 3; i < args.Length; i++)
         {
-            var o = DeliveryModel.Explore(sc, DeliveryModel.Driver.V203, DeliveryModel.This, frames);
-            var n = DeliveryModel.Explore(sc, DeliveryModel.Driver.This, DeliveryModel.This, frames);
-            olds[sc.Name] = o;
-            if (o.Duplicate.Count > 0) dupOld++;
-            if (n.Duplicate.Count > 0) dupNew++;
-            if (o.Lost.Count > 0) lostOld++;
-            if (n.Lost.Count > 0) lostNew++;
-            if (o.ZeroSent) zeroOld++;
-            oldStates += o.States; newStates += n.States;
-            string? why = Worse(n, o);
-            if (why == null) continue;
-            bad++;
-            Console.WriteLine($"[FAIL] delivery: {sc.Name}: v2.0.3 {o.States} states, this driver {n.States}: {why}");
+            if (args[i] == "--shard") { var p = args[++i].Split('/'); shard = int.Parse(p[0]); shards = int.Parse(p[1]); }
+            else if (args[i] == "-j") jobs = int.Parse(args[++i]);
+            else if (args[i] == "--scenario") only = args[++i];
+            else if (args[i] == "--quiet") quiet = true;
+            else only = args[i];
         }
-        string verdict = bad == 0 ? "PASS" : "FAIL";
-        Console.WriteLine($"[{verdict}] delivery against v2.0.3's rules, {frames} frame(s) a program: {scenarios.Count} scenarios, " +
-            $"{oldStates} states under v2.0.3, {newStates} under this driver. A frame sent twice in {dupOld} scenarios under v2.0.3 " +
-            $"and {dupNew} under this driver, a final frame never sent in {lostOld} and {lostNew}, a zeroed section sent in {zeroOld} and 0" +
-            (bad == 0 ? ". Each outcome of this driver's is matched or bettered by one of v2.0.3's in the same scenario" : ""));
-        foreach (var rules in DeliveryModel.Broken)
-        {
-            string? found = null;
-            foreach (var sc in scenarios)
-            {
-                var why = Worse(DeliveryModel.Explore(sc, DeliveryModel.Driver.This, rules, frames), olds[sc.Name]);
-                if (why != null) { found = $"{sc.Name}: {why}"; break; }
-            }
-            bool ok = found != null;
-            if (!ok) bad++;
-            Console.WriteLine($"[{(ok ? "PASS" : "FAIL")}] delivery with {rules.Name}: {(found ?? "no scenario breaks it")}");
-        }
-        return bad;
+        return RunCheck(frames, rule, shard, shards, jobs, only, !quiet);
     }
 
-    // The delivery rules against v2.0.3's, order by order (DeliveryModel
-    // .ExploreAligned): every final state of this driver's is matched or
-    // bettered by a final state v2.0.3 reaches through the same program
-    // steps, and no zeroed section goes out. Then each rule taken away must
-    // break that somewhere.
-    static int Aligned(int frames)
+    static int RunCheck(int frames, int rule, int shard, int shards, int jobs, string? only, bool witness)
     {
-        int bad = 0;
-        long states = 0, finals = 0, unaligned = 0;
-        var scenarios = DeliveryModel.Scenarios().ToList();
-        foreach (var sc in scenarios)
+        var rules = rule < 0 ? DeliveryModel.This : DeliveryModel.Broken[rule];
+        var all = DeliveryModel.Scenarios().Select((sc, i) => (sc, i)).ToList();
+        var mine = all.Where(x => x.i % shards == shard && (only == null || x.sc.Name == only)).ToList();
+        var results = new DeliveryModel.AlignedResult?[mine.Count];
+        int best = int.MaxValue;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        Parallel.For(0, mine.Count, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, jobs) }, k =>
         {
-            var a = DeliveryModel.ExploreAligned(sc, DeliveryModel.This, frames);
-            states += a.States; finals += a.Finals; unaligned += a.Unaligned;
-            if (a.Worse.Count == 0 && !a.ZeroSent) continue;
-            bad++;
-            Console.WriteLine($"[FAIL] aligned delivery: {sc.Name}: {a.Worse.Count} outcome(s) no v2.0.3 run of the same program steps matches, such as [{a.Example}]" +
+            if (rule >= 0 && k > Volatile.Read(ref best)) return;
+            var a = DeliveryModel.ExploreAligned(mine[k].sc, rules, frames, false,
+                                                 rule >= 0 ? () => k > Volatile.Read(ref best) : null);
+            results[k] = a;
+            if (rule >= 0 && !a.Canceled && (a.Worse.Count > 0 || a.ZeroSent))
+            {
+                int seen;
+                do { seen = Volatile.Read(ref best); } while (k < seen && Interlocked.CompareExchange(ref best, k, seen) != seen);
+            }
+        });
+        long states = 0, finals = 0, unaligned = 0, v203 = 0, largest = 0;
+        string largestName = "";
+        var failures = new List<int>();
+        for (int k = 0; k < mine.Count; k++)
+        {
+            var a = results[k];
+            if (a == null || a.Canceled) continue;
+            states += a.States; finals += a.Finals; unaligned += a.Unaligned; v203 += a.V203States;
+            if (a.States > largest) { largest = a.States; largestName = mine[k].sc.Name; }
+            if (a.Worse.Count > 0 || a.ZeroSent) failures.Add(k);
+        }
+        string where = $"{frames} frame(s) a program, shard {shard}/{shards}, {mine.Count} scenario(s)";
+        string totals = $"{states} paired states, {finals} final, {v203} v2.0.3 states, {unaligned} shared step(s) v2.0.3 could not take, " +
+                        $"largest scenario {largest} paired states ({largestName}), {clock.Elapsed.TotalSeconds:F0} s";
+        if (rule < 0)
+        {
+            foreach (int k in failures)
+            {
+                var a = results[k]!;
+                Console.WriteLine($"[FAIL] {mine[k].sc.Name} (scenario {mine[k].i}): {a.Worse.Count} outcome(s) no paired v2.0.3 run matches, such as [{a.Example}]" +
+                                  (a.ZeroSent ? ", a zeroed section sent" : ""));
+                if (witness) PrintWitness(mine[k].sc, rules, frames);
+            }
+            Console.WriteLine($"[{(failures.Count == 0 ? "PASS" : "FAIL")}] delivery with {rules.Name}, {where}: " +
+                              (failures.Count == 0 ? "every outcome matched or bettered by a paired v2.0.3 run" : $"{failures.Count} scenario(s) fail") +
+                              $". {totals}");
+            return failures.Count == 0 ? 0 : 1;
+        }
+        if (failures.Count > 0)
+        {
+            int k = failures.Min();
+            var a = results[k]!;
+            Console.WriteLine($"[BREAKS] {rules.Name}, {where}: {mine[k].sc.Name} (scenario {mine[k].i}): [{a.Example}]" +
                               (a.ZeroSent ? ", a zeroed section sent" : ""));
+            if (witness) PrintWitness(mine[k].sc, rules, frames);
+            return 0;
         }
-        Console.WriteLine($"[{(bad == 0 ? "PASS" : "FAIL")}] aligned delivery against v2.0.3, {frames} frame(s) a program: {scenarios.Count} scenarios, " +
-                          $"{states} paired states, {finals} final, {unaligned} program step(s) v2.0.3 could not follow");
-        foreach (var rules in DeliveryModel.Broken)
-        {
-            string? found = null;
-            foreach (var sc in scenarios)
-            {
-                var a = DeliveryModel.ExploreAligned(sc, rules, frames);
-                if (a.Worse.Count > 0 || a.ZeroSent)
-                {
-                    found = $"{sc.Name}: [{a.Example}]{(a.ZeroSent ? ", a zeroed section sent" : "")}";
-                    break;
-                }
-            }
-            bool ok = found != null;
-            if (!ok) bad++;
-            Console.WriteLine($"[{(ok ? "PASS" : "FAIL")}] aligned delivery with {rules.Name}: {(found ?? "no scenario breaks it")}");
-        }
-        return bad;
+        Console.WriteLine($"[NO BREAK] {rules.Name}, {where}: no scenario breaks the check. {totals}");
+        return 1;
     }
 
-    // What this driver does worse than v2.0.3 in one scenario, or null: an
-    // outcome (each frame's delivery count in a final state) that no outcome
-    // of v2.0.3's in the scenario matches or betters, or a zeroed section.
-    static string? Worse(DeliveryModel.Result n, DeliveryModel.Result o)
+    // The failing order, state by state, as the fields each step changed.
+    static void PrintWitness(DeliveryModel.Scenario sc, DeliveryModel.Rules rules, int frames)
     {
-        var parts = new List<string>();
-        var worse = n.Outcomes.Where(t => !o.Outcomes.Any(v => DeliveryModel.NoWorse(t, v))).ToList();
-        if (worse.Count > 0)
-            parts.Add($"{worse.Count} outcome(s) v2.0.3 never gives, such as [{DeliveryModel.Show(worse[0])}] (={worse[0]})");
-        if (n.ZeroSent) parts.Add("a zeroed section sent");
-        return parts.Count == 0 ? null : string.Join(", ", parts);
+        var a = DeliveryModel.ExploreAligned(sc, rules, frames, true);
+        var path = a.Path;
+        if (path == null) { Console.WriteLine("    (no witness path)"); return; }
+        Console.WriteLine($"    witness, {path.Count - 1} steps, this driver delivers [{a.Example}]:");
+        for (int i = 1; i < path.Count; i++)
+            Console.WriteLine($"    {i,3}. {DeliveryModel.Describe(path[i - 1], path[i])}");
+        if (a.UnalignedPath != null)
+        {
+            var u = a.UnalignedPath;
+            Console.WriteLine($"    the first shared step v2.0.3 could not take, after {u.Count - 2} steps:");
+            for (int i = 1; i < u.Count; i++)
+                Console.WriteLine($"    {i,3}. {DeliveryModel.Describe(u[i - 1], u[i])}");
+        }
     }
+
     // Worker program counters.
     const int W_INC = 0, W_CHECK = 1, W_DEC_PENDING = 2, W_TAKE = 3, W_WAIT = 4, W_DEC = 5, W_PROC = 6;
     // The broken worker: the take first, then the count.
