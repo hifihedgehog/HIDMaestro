@@ -225,6 +225,63 @@ static void StreamLateReadWrap(PlanProfile *p, int legacy)
     g_sdkSignal = saved;
 }
 
+/* The next program starts on the index the moment the driver lets go of
+ * the last program's pipe (CloseOwnerWatch in OwnerGone): it zeroes the
+ * input section and the acknowledgement, makes its pipe and writes its
+ * first frame, with no read parked. A program before 2.1.0 counts from 0, a
+ * 2.1.0 one from above the SeqNo left. After the worker has run, a read
+ * comes, or one was parked all along. v2.0.3 reads that frame after
+ * OwnerGone and serves it to the read, from the cache when it comes late. */
+static Ctl *g_nextCtl;
+static int g_nextLegacy;
+static void StartNextProgram(void)
+{
+    Ctl *c = g_nextCtl;
+    WCHAR n[96];
+    uint32_t left;
+    memcpy(&left, c->sdk.input->buf, 4);
+    memset(c->sdk.input->buf, 0, c->sdk.input->size);
+    memset(c->sdk.ack->buf, 0, c->sdk.ack->size);
+    swprintf_s(n, ARRAYSIZE(n), L"\\\\.\\pipe\\HIDMaestroOwner%d", c->index);
+    c->sdk.pipe = PipeServerNew(n, 0x2F44);
+    if (g_nextLegacy) {
+        c->sdk.signal = NULL;
+        c->sdk.seq = 0;
+    } else {
+        if (c->sdk.signal) memset(c->sdk.signal->buf + 68, 0, 4);
+        c->sdk.seq = (left & 1) ? left + 1 : left;
+    }
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x70 + i);
+    SdkWriteFrame(&c->sdk, data, 63, NULL, NULL, 0);
+}
+
+static void StreamNextProgramInOwnerGone(PlanProfile *p, int legacy, int parked)
+{
+    Ctl c;
+    StreamBegin("threads/%s/next-%s-in-ownergone-%s", p->id, legacy ? "legacy" : "gated", parked ? "parked" : "late");
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    Probe(&c, 0, 1);
+    Probe(&c, 0, 2);
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    if (parked) HidRead(&c, len);
+    g_nextCtl = &c;
+    g_nextLegacy = legacy;
+    g_pipeClientCloseHook = StartNextProgram;
+    PipeServerClose(c.sdk.pipe);
+    ThreadResume(CtlThread(&c, 0));
+    g_pipeClientCloseHook = NULL;
+    RecordSections(&c.sdk);
+    ThreadResume(CtlThread(&c, 0));
+    if (!parked) HidRead(&c, len);
+    HidGetInput(&c, 0x01, len);
+    Timeout(&c, 0, 1);
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x90 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    CtlStop(&c);
+}
+
 void CaseThreads(void)
 {
     PlanProfile *sw = PlanFind("switch", NULL);
@@ -248,4 +305,8 @@ void CaseThreads(void)
     StreamLegacySeqWrap(ds);
     StreamLateReadWrap(ds, 0);
     StreamLateReadWrap(ds, 1);
+    StreamNextProgramInOwnerGone(ds, 1, 0);
+    StreamNextProgramInOwnerGone(ds, 0, 0);
+    StreamNextProgramInOwnerGone(ds, 1, 1);
+    StreamNextProgramInOwnerGone(ds, 0, 1);
 }

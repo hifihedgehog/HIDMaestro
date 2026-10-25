@@ -544,10 +544,17 @@ BOOL WINAPI HmCloseHandle(HANDLE hObject)
     int i = HandleSlot(hObject);
     if (i < 0 || !g_handles[i]) HmFail("CloseHandle on a handle that is not open");
     HmObj *o = g_handles[i];
+    int pipeClient = o->kind == HK_PIPE_CLIENT;
     g_handles[i] = NULL;
     ObjRelease(o);
+    if (pipeClient && g_pipeClientCloseHook) {
+        void (*hook)(void) = g_pipeClientCloseHook;
+        g_pipeClientCloseHook = NULL;
+        hook();
+    }
     return TRUE;
 }
+void (*g_pipeClientCloseHook)(void);
 
 /* ------------------------------------------------------------------ */
 /*  Sections                                                           */

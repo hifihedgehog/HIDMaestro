@@ -31,7 +31,17 @@ internal static class Program
 
     static int Main(string[] args)
     {
-        int frames = args.Length > 0 ? int.Parse(args[0]) : 3;
+        int frames = args.Length > 0 && args[0] != "witness" ? int.Parse(args[0]) : 3;
+        // witness <frames> <scenario> <frame> twice|lost [v203]: the shortest
+        // order, one state a line.
+        if (args.Length >= 5 && args[0] == "witness")
+        {
+            var sc = DeliveryModel.Scenarios().First(x => x.Name == args[2]);
+            var drv = args.Length > 5 ? DeliveryModel.Driver.V203 : DeliveryModel.Driver.This;
+            foreach (var st in DeliveryModel.Witness(sc, drv, DeliveryModel.This, int.Parse(args[1]), args[3], args[4] == "twice"))
+                Console.WriteLine(st);
+            return 0;
+        }
         var variants = new[]
         {
             new Variant("today: SetEvent every frame, one worker", Proto.Always, true, true, 1, false, false),
@@ -71,13 +81,12 @@ internal static class Program
     }
 
     // The delivery rules against v2.0.3's (DeliveryModel.cs): in every
-    // scenario this driver loses no frame v2.0.3 does not lose and sends none
-    // twice that v2.0.3 does not. Then each rule taken away must break that
-    // somewhere.
+    // scenario this driver loses no frame v2.0.3 does not lose, sends none
+    // twice that v2.0.3 does not, and sends no zeroed section. Then each
+    // rule taken away must break that somewhere.
     static int Delivery(int frames)
     {
-        int bad = 0, dupOld = 0, dupNew = 0, lostOld = 0, lostNew = 0;
-        string? sharedDup = null, sharedLost = null;
+        int bad = 0, dupOld = 0, dupNew = 0, lostOld = 0, lostNew = 0, zeroOld = 0;
         long oldStates = 0, newStates = 0;
         var scenarios = DeliveryModel.Scenarios().ToList();
         var olds = new Dictionary<string, DeliveryModel.Result>();
@@ -90,53 +99,44 @@ internal static class Program
             if (n.Duplicate.Count > 0) dupNew++;
             if (o.Lost.Count > 0) lostOld++;
             if (n.Lost.Count > 0) lostNew++;
+            if (o.ZeroSent) zeroOld++;
             oldStates += o.States; newStates += n.States;
-            var lost = n.Lost.Except(o.Lost).ToList();
-            var dup = n.Duplicate.Except(o.Duplicate).ToList();
-            bool ok = lost.Count == 0 && dup.Count == 0;
-            if (!ok) bad++;
-            if (sharedDup == null && n.Duplicate.Count > 0)
-            {
-                string x = n.Duplicate.Min!;
-                sharedDup = $"{sc.Name}, {x}: v2.0.3{o.Traces["duplicate " + x]}\n           this driver{n.Traces["duplicate " + x]}";
-            }
-            if (sharedLost == null && n.Lost.Count > 0)
-            {
-                string x = n.Lost.Min!;
-                sharedLost = $"{sc.Name}, {x}: v2.0.3{(o.Traces.TryGetValue("lost " + x, out var t) ? t : " (another order)")}\n           this driver{n.Traces["lost " + x]}";
-            }
-            if (!ok)
-            {
-                Console.WriteLine($"[FAIL] delivery: {sc.Name}: v2.0.3 {o.States} states, this driver {n.States}" +
-                    (lost.Count > 0 ? $", lost where v2.0.3 sends: {string.Join(" ", lost)}" : "") +
-                    (dup.Count > 0 ? $", sent twice where v2.0.3 does not: {string.Join(" ", dup)}" : ""));
-                foreach (var x in lost) Console.WriteLine($"         lost {x}: {n.Traces["lost " + x]}");
-                foreach (var x in dup) Console.WriteLine($"         twice {x}: {n.Traces["duplicate " + x]}");
-            }
+            string? why = Worse(n, o);
+            if (why == null) continue;
+            bad++;
+            Console.WriteLine($"[FAIL] delivery: {sc.Name}: v2.0.3 {o.States} states, this driver {n.States}: {why}");
         }
-        Console.WriteLine($"[{(bad == 0 ? "PASS" : "FAIL")}] delivery against v2.0.3's rules, {frames} frames a program: {scenarios.Count} scenarios, " +
-            $"{oldStates} states under v2.0.3, {newStates} under this driver. " +
-            $"A frame sent twice in {dupOld} scenarios under v2.0.3 and {dupNew} under this driver, each one v2.0.3 sends twice too, " +
-            $"a frame never sent in {lostOld} and {lostNew}");
-        if (sharedDup != null) Console.WriteLine($"         first shared duplicate, {sharedDup}");
-        if (sharedLost != null) Console.WriteLine($"         first shared loss, {sharedLost}");
+        string verdict = bad == 0 ? "PASS" : "FAIL";
+        Console.WriteLine($"[{verdict}] delivery against v2.0.3's rules, {frames} frame(s) a program: {scenarios.Count} scenarios, " +
+            $"{oldStates} states under v2.0.3, {newStates} under this driver. A frame sent twice in {dupOld} scenarios under v2.0.3 " +
+            $"and {dupNew} under this driver, a final frame never sent in {lostOld} and {lostNew}, a zeroed section sent in {zeroOld} and 0" +
+            (bad == 0 ? ". Each outcome of this driver's is matched or bettered by one of v2.0.3's in the same scenario" : ""));
         foreach (var rules in DeliveryModel.Broken)
         {
             string? found = null;
             foreach (var sc in scenarios)
             {
-                var n = DeliveryModel.Explore(sc, DeliveryModel.Driver.This, rules, frames);
-                var o = olds[sc.Name];
-                var lost = n.Lost.Except(o.Lost).ToList();
-                var dup = n.Duplicate.Except(o.Duplicate).ToList();
-                if (lost.Count > 0) { found = $"{sc.Name}: lost {lost[0]}"; break; }
-                if (dup.Count > 0) { found = $"{sc.Name}: sent twice {dup[0]}"; break; }
+                var why = Worse(DeliveryModel.Explore(sc, DeliveryModel.Driver.This, rules, frames), olds[sc.Name]);
+                if (why != null) { found = $"{sc.Name}: {why}"; break; }
             }
             bool ok = found != null;
             if (!ok) bad++;
             Console.WriteLine($"[{(ok ? "PASS" : "FAIL")}] delivery with {rules.Name}: {(found ?? "no scenario breaks it")}");
         }
         return bad;
+    }
+
+    // What this driver does worse than v2.0.3 in one scenario, or null: an
+    // outcome (each frame's delivery count in a final state) that no outcome
+    // of v2.0.3's in the scenario matches or betters, or a zeroed section.
+    static string? Worse(DeliveryModel.Result n, DeliveryModel.Result o)
+    {
+        var parts = new List<string>();
+        var worse = n.Outcomes.Where(t => !o.Outcomes.Any(v => DeliveryModel.NoWorse(t, v))).ToList();
+        if (worse.Count > 0)
+            parts.Add($"{worse.Count} outcome(s) v2.0.3 never gives, such as [{DeliveryModel.Show(worse[0])}] (={worse[0]})");
+        if (n.ZeroSent) parts.Add("a zeroed section sent");
+        return parts.Count == 0 ? null : string.Join(", ", parts);
     }
     // Worker program counters.
     const int W_INC = 0, W_CHECK = 1, W_DEC_PENDING = 2, W_TAKE = 3, W_WAIT = 4, W_DEC = 5, W_PROC = 6;

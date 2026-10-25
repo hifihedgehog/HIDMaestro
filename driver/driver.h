@@ -208,11 +208,10 @@ typedef struct _DEVICE_CONTEXT {
     ULONG   PolledReportSize;
     BOOLEAN PolledReportReady;
 
-    /* The last shared-input SeqNo the worker sent, which a frame read on
-     * the input event must differ from to go out (v2.0.3's rule). Reset at
-     * the end of a program the owner watch saw, at a recycle with no watch,
-     * and at add, as v2.0.3 reset it (docs/design/signal-gate.md). A frame
-     * the driver does not send leaves SharedMemSeqNo and the cache as they
+    /* The last shared-input SeqNo the worker sent, which a frame read must
+     * differ from to go out. Reset at the end of a program the owner watch
+     * saw, at every recycle and at add, as v2.0.3 reset it. A frame the
+     * driver does not send leaves SharedMemSeqNo and the cache as they
      * were. */
     ULONG   SeenSeqNo;
 
@@ -344,25 +343,16 @@ typedef struct _DEVICE_CONTEXT {
     WCHAR   VersionMappingName[64];       /* e.g. L"Global\\HIDMaestroVersion0" */
 
     /* 2.1.0: the signal gate (hm_contract.h, HIDMAESTRO_SIGNAL). The worker
-     * maps the section with the input section. While its owner watch is
-     * connected it sets HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS and counts
-     * itself in InputWaiters across each wait on the input event. Kept
-     * mapped until the device goes, as the acknowledgement is. NULL against
-     * an SDK that makes no such section, and the SDK signals every frame. */
+     * maps the section with the input section, sets
+     * HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS, counts itself in InputWaiters
+     * across each wait on the input event and takes InputHandoff before
+     * it. Kept mapped until the device goes, as the acknowledgement is.
+     * NULL against an SDK that makes no such section, and the SDK signals
+     * every frame. */
     WCHAR   SignalMappingName[64];        /* e.g. L"Global\\HIDMaestroSignal0" */
     HANDLE  SignalMemHandle;
     struct _HIDMAESTRO_SIGNAL *SignalPtr;  /* hm_contract.h, included below */
     BOOLEAN SignalBroken;                  /* the count was found below zero: never announce again */
-    /* 2.1.0: which frame is new (docs/design/signal-gate.md). GateSeq is
-     * the last SeqNo the worker read, sent or not, never reset: the gate's
-     * look and a frame that look reads compare with it, since the section
-     * still holds that frame. A context that has read no frame takes
-     * DriverSeenSeq at its first map, and SeenSeqNo from DriverCarry.
-     * LookNext asks the worker for one look before its next wait.
-     * Worker thread only. */
-    ULONG   GateSeq;
-    BOOLEAN FrameRead;                     /* a frame has been read since add */
-    BOOLEAN LookNext;
     BOOLEAN WatchRetryNext;                /* retry the owner watch after the next frame */
 
     /* 2.1.0: AckSignal under the contract. FALSE when the controller's SDK

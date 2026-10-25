@@ -186,7 +186,7 @@ internal static partial class SharedMemoryIO
     public const int SIGNAL_OFFSET_DRIVER_CAPS = 4;
     public const int SIGNAL_OFFSET_COMPANION_CAPS = 8;
     public const int SIGNAL_OFFSET_INPUT_WAITERS = 64;
-    public const int SIGNAL_OFFSET_DRIVER_SEEN_SEQ = 68;
+    public const int SIGNAL_OFFSET_INPUT_HANDOFF = 68;
     public const int SIGNAL_OFFSET_COMPANION_PARKED = 128;
     public const int SIGNAL_LAYOUT = 1;
     public const int SIGNAL_CAP_INPUT_WAITERS = 1, SIGNAL_CAP_COMPANION_PARKED = 1;
@@ -497,10 +497,12 @@ internal static partial class SharedMemoryIO
                 // frames of this program count from above it (InputSeqStart).
                 uint leftSeq = Volatile.Read(ref *(uint*)view);
 
-                // Zero-init: pagefile-backed sections start zero already, but we
-                // explicitly write SeqNo=0 so a stale section from a previous
-                // run (under the same name) doesn't carry forward a non-zero
-                // sequence number that the driver would treat as "no change".
+                // Zero-init: pagefile-backed sections start zero already, but a
+                // section a program before this one left under the same name
+                // still holds its last frame and its data lanes. The zeroing
+                // clears them, and the driver takes SeqNo 0 with no data for no
+                // frame. This program's own frames count from above leftSeq,
+                // so none repeats the SeqNo a driver worker sent last.
                 // Bulk Marshal.Copy from a freshly allocated zero buffer is one
                 // P/Invoke. The prior per-byte loop was 278 P/Invokes per setup.
                 Marshal.Copy(new byte[SHARED_INPUT_SIZE], 0, view, SHARED_INPUT_SIZE);
@@ -527,6 +529,10 @@ internal static partial class SharedMemoryIO
                 }
                 s_signalHandles[controllerIndex] = sh;
                 s_signalViews[controllerIndex] = sv;
+                // A frame the program before this one handed to a worker is
+                // gone with the zeroing above, so its handoff goes too.
+                if (sv != IntPtr.Zero)
+                    Interlocked.Exchange(ref *(int*)((byte*)sv + SIGNAL_OFFSET_INPUT_HANDOFF), 0);
 
                 // Companion input doorbell (perf audit 2026-07-21). The XUSB
                 // companion's WAIT_FOR_INPUT pump was purely 8 ms
@@ -574,18 +580,12 @@ internal static partial class SharedMemoryIO
                 s_versionViews[controllerIndex] = vv;
 
 
-                // 2.1.0: the first frame of this program is a SeqNo no driver
-                // worker on the index has read. A worker compares the section
-                // with the last frame it read before it waits (the signal
-                // gate), and a program before this one counted from 0 too, so
-                // a frame of this program equal to that one would never be
-                // read when its signal was skipped. Above the SeqNo the last
-                // program left and the one the last worker read
-                // (DriverSeenSeq), even. The acknowledgement starts there, so
-                // a wait for delivery compares within this program's frames.
-
-                uint seen = sv != IntPtr.Zero ? Volatile.Read(ref *(uint*)((byte*)sv + SIGNAL_OFFSET_DRIVER_SEEN_SEQ)) : 0;
-                uint start = EvenAbove(leftSeq, seen);
+                // 2.1.0: the frames of this program count from above the SeqNo
+                // the last program left, even. A worker that holds that frame
+                // as the last one it sent then never takes a frame of this
+                // program for it. The acknowledgement starts there, so a wait
+                // for delivery compares within this program's frames.
+                uint start = EvenAbove(leftSeq, 0);
                 s_inputSeqStarts[controllerIndex] = start;
                 Volatile.Write(ref *(uint*)((byte*)av + INPUT_ACK_OFFSET_DELIVERED), start);
 
@@ -656,10 +656,9 @@ internal static partial class SharedMemoryIO
     }
 
     /// <summary>2.1.0: the SeqNo a controller on the index counts its frames
-    /// from: even, and at or above the one the program before left, the
-    /// one a driver worker last read, and the one an earlier controller of
-    /// this process left in the section. Its first frame is two above, a
-    /// frame no worker has read (EnsureInputMapping).</summary>
+    /// from: even, and at or above the one the program before left and the
+    /// one an earlier controller of this process left in the section. Its
+    /// first frame is two above (EnsureInputMapping).</summary>
     public static unsafe uint InputSeqStart(int controllerIndex)
     {
         lock (s_inputViews)
@@ -667,8 +666,6 @@ internal static partial class SharedMemoryIO
             uint start = s_inputSeqStarts.TryGetValue(controllerIndex, out uint s) ? s : 0;
             if (s_inputViews.TryGetValue(controllerIndex, out IntPtr view) && view != IntPtr.Zero)
                 start = EvenAbove(start, Volatile.Read(ref *(uint*)view));
-            if (s_signalViews.TryGetValue(controllerIndex, out IntPtr sv) && sv != IntPtr.Zero)
-                start = EvenAbove(start, Volatile.Read(ref *(uint*)((byte*)sv + SIGNAL_OFFSET_DRIVER_SEEN_SEQ)));
             return start;
         }
     }
@@ -1154,21 +1151,34 @@ internal static partial class SharedMemoryIO
         IntPtr companion = gipData != null ? companionEvent : IntPtr.Zero;
         if (eventHandle == IntPtr.Zero && companion == IntPtr.Zero) return;
 
-        // 5. 2.1.0: the signal gate (docs/design/signal-gate.md). The full
-        // fence orders the even SeqNo's store before the loads of the
-        // counts, the one order a release store leaves open, so a worker
-        // that counted itself before it last looked at the section either
-        // saw this frame or is seen here. A count of zero with the
-        // capability announced means nobody waits who has not seen the
-        // frame. Without the section, or without the capability, every
-        // frame signals as before.
+        // 5. 2.1.0: the signal gate (docs/design/signal-gate.md). With the
+        // capability announced the frame is handed over: the exchange
+        // puts its SeqNo in InputHandoff, and as a full fence it orders the
+        // even SeqNo's store and the handoff before the loads after it. A
+        // worker counts itself, then takes the handoff with an exchange of
+        // its own, so with the capability still set and a count of zero
+        // the next take finds this frame. Otherwise a worker may be waiting,
+        // or the gate closed (the worker clears the capability, then takes
+        // the handoff): the compare-exchange takes the frame back, and only
+        // then does the SetEvent run. One of the take and the SetEvent
+        // wakes a read for the frame, never both. Without the capability
+        // the full fence serves the companion's count below, and every
+        // frame signals.
         if (signalView != IntPtr.Zero)
         {
-            Thread.MemoryBarrier();
             byte* s = (byte*)signalView;
-            if ((Volatile.Read(ref *(int*)(s + SIGNAL_OFFSET_DRIVER_CAPS)) & SIGNAL_CAP_INPUT_WAITERS) != 0
-                && Volatile.Read(ref *(int*)(s + SIGNAL_OFFSET_INPUT_WAITERS)) == 0)
-                eventHandle = IntPtr.Zero;
+            if (eventHandle != IntPtr.Zero
+                && (Volatile.Read(ref *(int*)(s + SIGNAL_OFFSET_DRIVER_CAPS)) & SIGNAL_CAP_INPUT_WAITERS) != 0)
+            {
+                ref int handoff = ref *(int*)(s + SIGNAL_OFFSET_INPUT_HANDOFF);
+                Interlocked.Exchange(ref handoff, (int)seqNo);
+                bool kept = (Volatile.Read(ref *(int*)(s + SIGNAL_OFFSET_DRIVER_CAPS)) & SIGNAL_CAP_INPUT_WAITERS) != 0
+                            && Volatile.Read(ref *(int*)(s + SIGNAL_OFFSET_INPUT_WAITERS)) == 0;
+                if (kept || Interlocked.CompareExchange(ref handoff, 0, (int)seqNo) != (int)seqNo)
+                    eventHandle = IntPtr.Zero;
+            }
+            else
+                Thread.MemoryBarrier();
             if (companion != IntPtr.Zero
                 && (Volatile.Read(ref *(int*)(s + SIGNAL_OFFSET_COMPANION_CAPS)) & SIGNAL_CAP_COMPANION_PARKED) != 0
                 && Volatile.Read(ref *(int*)(s + SIGNAL_OFFSET_COMPANION_PARKED)) == 0)

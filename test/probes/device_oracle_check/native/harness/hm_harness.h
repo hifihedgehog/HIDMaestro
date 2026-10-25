@@ -553,6 +553,9 @@ extern int g_sdkV2;
  * input event and the companion doorbell when the gate says nobody waits
  * (SharedMemoryIO.WriteInputFrame). Replay's plans carry it. */
 extern int g_sdkSignal;
+/* Run once when the driver closes an owner pipe client handle: a stream
+ * starts the next program at that moment. */
+extern void (*g_pipeClientCloseHook)(void);
 /* This stream's SDK writes the version contract: a tagged parameter, or
  * the default one under "sdk 2". */
 int SdkWritesContract(void);

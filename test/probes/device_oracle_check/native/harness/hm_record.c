@@ -371,20 +371,18 @@ void SdkCreate(Sdk *s, int index, int flags)
         }
         if (SdkWritesSignal()) {
             /* 2.1.0: the signal gate's section, opened when a driver host
-             * holds it and never zeroed then, layout 1 when made. The SDK
-             * counts its frames from above the SeqNo a section of the index
-             * left and the one a driver worker last read (DriverSeenSeq),
-             * with the acknowledgement starting there
-             * (SharedMemoryIO.EnsureInputMapping). */
+             * holds it and never zeroed then, layout 1 when made, its
+             * handoff cleared. The SDK counts its frames from above the
+             * SeqNo a section of the index left, with the acknowledgement
+             * starting there (SharedMemoryIO.EnsureInputMapping). */
             Name(n, ARRAYSIZE(n), L"Global\\HIDMaestroSignal", index);
             HmObj *held = ObjFindNamed(n);
             s->signal = held && held->kind == HK_SECTION ? (HmSection *)held : SectionNew(n, SIGNAL_SIZE);
             Hold(&s->signal->o);
             int32_t layout = 1;
             if (!held) memcpy(s->signal->buf, &layout, 4);
-            uint32_t seen;
-            memcpy(&seen, s->signal->buf + 68, 4);
-            s->seq = EvenAbove(seqLeft, seen);
+            memset(s->signal->buf + 68, 0, 4);
+            s->seq = EvenAbove(seqLeft, 0);
             memcpy(s->ack->buf, &s->seq, 4);
         }
         Name(n, ARRAYSIZE(n), L"Global\\HIDMaestroInputEvent", index);
@@ -424,13 +422,21 @@ void SdkWriteFrame(Sdk *s, const uint8_t *data, uint32_t dataLen, const uint8_t 
     memcpy(b, &s->seq, 4);
     int input = 1, companion = gip != NULL;
     if (s->signal) {
-        /* 2.1.0: the gate (docs/design/signal-gate.md). */
-        int32_t caps, waiters, ccaps, parked;
+        /* 2.1.0: the gate (docs/design/signal-gate.md). With the capability
+         * the frame is handed over, and it signals only when it takes the
+         * handoff back while a worker is counted. */
+        int32_t caps, waiters, ccaps, parked, handoff;
         memcpy(&caps, s->signal->buf + 4, 4);
         memcpy(&ccaps, s->signal->buf + 8, 4);
-        memcpy(&waiters, s->signal->buf + 64, 4);
+        if (caps & 1) {
+            memcpy(s->signal->buf + 68, &s->seq, 4);
+            memcpy(&caps, s->signal->buf + 4, 4);
+            memcpy(&waiters, s->signal->buf + 64, 4);
+            memcpy(&handoff, s->signal->buf + 68, 4);
+            if (((caps & 1) && waiters == 0) || handoff != (int32_t)s->seq) input = 0;
+            else memset(s->signal->buf + 68, 0, 4);
+        }
         memcpy(&parked, s->signal->buf + 128, 4);
-        if ((caps & 1) && waiters == 0) input = 0;
         if ((ccaps & 1) && parked == 0) companion = 0;
     }
     if (input) EventSet(s->inputEv);

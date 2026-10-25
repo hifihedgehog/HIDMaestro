@@ -65,29 +65,28 @@ C_ASSERT(FIELD_OFFSET(HIDMAESTRO_VERSION_INFO, IdentityTag) == 48);
 C_ASSERT(FIELD_OFFSET(HIDMAESTRO_VERSION_INFO, DriverConfigError) == 56);
 
 /* 2.1.0: the signal gate (docs/design/signal-gate.md). Global\HIDMaestroSignal<N>,
- * 256 bytes, created by an SDK of 2.1.0 or later before the device exists.
- * An SDK that finds the section already there leaves the counts,
- * DriverSeenSeq and DriverCarry as they are, since a driver of a device on
- * the index may be counting in them. The capability words are the one thing
- * an SDK writes in it again: a sweep that removed the index's device clears
- * them. Each driver host maps it once and keeps it until its device goes.
+ * 256 bytes, created by an SDK of 2.1.0 or later as it maps the index,
+ * after the owner pipe and after it zeroes the input section. An SDK that
+ * finds the section already there leaves the counts as they are, since a
+ * driver host of a device on the index may be counting in them, and zeroes
+ * InputHandoff, a frame of the program before it, whose input section it
+ * has just zeroed. The capability words are the one other thing an SDK
+ * writes in it again: a sweep that removed the index's device clears them.
+ * Each driver host maps it once and keeps it until its device goes, and
+ * the XUSB companion holds it from its add to its release.
  *
- * The HID driver's worker gates only while its owner watch is connected to
- * the program on the index, and sets HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS
- * only then. It counts itself in InputWaiters across every wait on the
- * input event, with an interlocked increment before it checks the input
- * section's SeqNo one last time and an interlocked decrement when the wait
- * returns. The SDK stores the frame's even SeqNo, issues a full fence, and
- * calls SetEvent on the input event only when InputWaiters is not zero or
- * DriverCaps lacks HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS. That look finds a
- * frame whose SeqNo is not the last one the worker read, so the worker
- * stores that SeqNo in DriverSeenSeq after each read: the next device on
- * the index starts from it, and an SDK that maps the index counts its
- * frames from above DriverSeenSeq and the section's own SeqNo, so no frame
- * of its equals one a worker already read. A device that goes while it
- * gates leaves DriverCarry for the next device on the index: 0 when it did
- * not gate, else its last frame sent with bit 0 set, or 1 when the watched
- * program had ended.
+ * The HID driver's worker counts itself in InputWaiters across every wait
+ * on the input event, with an interlocked increment and then an
+ * interlocked exchange that takes InputHandoff, and an interlocked
+ * decrement when the wait returns. A take that finds a SeqNo reads the
+ * section without waiting. The SDK stores the frame's even SeqNo and, with
+ * HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS set, exchanges that SeqNo into
+ * InputHandoff and loads InputWaiters. With the count zero it leaves the
+ * frame there for the worker's next take. With a count above zero it
+ * takes the SeqNo back with a compare-exchange and calls SetEvent only
+ * when that succeeds, so a frame gets one wakeup, the take or the signal,
+ * never both and never neither. Without the capability it signals every
+ * frame.
  *
  * The XUSB companion counts the WAIT_FOR_INPUT requests in its manual queue
  * in CompanionParked: up once the request is in the queue, then a look at
@@ -110,16 +109,14 @@ typedef struct _HIDMAESTRO_SIGNAL {
     volatile LONG   CompanionCaps;       /* companion: HIDMAESTRO_SIGNAL_CAP_* it keeps */
     LONG            Reserved0[13];
     volatile LONG   InputWaiters;        /* HID driver workers inside a counted wait */
-    volatile ULONG  DriverSeenSeq;       /* HID driver: the SeqNo of the last frame a worker read */
-    volatile ULONG  DriverCarry;         /* HID driver: what a device that went while it gated left (above) */
-    LONG            Reserved1[13];
+    volatile LONG   InputHandoff;        /* SDK: a frame's SeqNo handed to a worker, or 0. HID driver: takes it */
+    LONG            Reserved1[14];
     volatile LONG   CompanionParked;     /* WAIT_FOR_INPUT requests the companion holds */
     LONG            Reserved2[31];
 } HIDMAESTRO_SIGNAL, *PHIDMAESTRO_SIGNAL;
 C_ASSERT(sizeof(HIDMAESTRO_SIGNAL) == 256);
 C_ASSERT(FIELD_OFFSET(HIDMAESTRO_SIGNAL, InputWaiters) == 64);
-C_ASSERT(FIELD_OFFSET(HIDMAESTRO_SIGNAL, DriverSeenSeq) == 68);
-C_ASSERT(FIELD_OFFSET(HIDMAESTRO_SIGNAL, DriverCarry) == 72);
+C_ASSERT(FIELD_OFFSET(HIDMAESTRO_SIGNAL, InputHandoff) == 68);
 C_ASSERT(FIELD_OFFSET(HIDMAESTRO_SIGNAL, CompanionParked) == 128);
 #pragma pack(pop)
 
