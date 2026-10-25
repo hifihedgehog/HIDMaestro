@@ -65,23 +65,79 @@ internal static class Program
             if (r.Lost != null) Console.WriteLine($"         {r.Lost}");
             if (r.InvariantBroken != null) Console.WriteLine($"         count invariant broken: {r.InvariantBroken}");
         }
-        foreach (var v in DeliveryModel.Variants)
-        {
-            var r = DeliveryModel.Explore(v, frames);
-            bool ok = v.Expect == null ? r.Duplicate == null && r.Lost == null
-                    : v.Expect == "duplicate" ? r.Duplicate != null : r.Lost != null;
-            if (!ok) bad++;
-            Console.WriteLine($"[{(ok ? "PASS" : "FAIL")}] {v.Name}, {r.Frames} frames a program: {r.States} states, {r.Finals} final, " +
-                (r.Duplicate != null ? "a frame sent twice" : "no frame sent twice") + ", " +
-                (r.Lost != null ? "a frame never sent" : "every last frame sent") +
-                (v.Expect != null ? $" (expected: {(v.Expect == "duplicate" ? "a frame sent twice" : "a frame never sent")})" : ""));
-            if (r.Duplicate != null) Console.WriteLine($"         {r.Duplicate}");
-            if (r.Lost != null) Console.WriteLine($"         {r.Lost}");
-        }
+        bad += Delivery(frames);
         Console.WriteLine(bad == 0 ? "signal_gate_model: PASS" : $"signal_gate_model: FAIL ({bad})");
         return bad == 0 ? 0 : 1;
     }
 
+    // The delivery rules against v2.0.3's (DeliveryModel.cs): in every
+    // scenario this driver loses no frame v2.0.3 does not lose and sends none
+    // twice that v2.0.3 does not. Then each rule taken away must break that
+    // somewhere.
+    static int Delivery(int frames)
+    {
+        int bad = 0, dupOld = 0, dupNew = 0, lostOld = 0, lostNew = 0;
+        string? sharedDup = null, sharedLost = null;
+        long oldStates = 0, newStates = 0;
+        var scenarios = DeliveryModel.Scenarios().ToList();
+        var olds = new Dictionary<string, DeliveryModel.Result>();
+        foreach (var sc in scenarios)
+        {
+            var o = DeliveryModel.Explore(sc, DeliveryModel.Driver.V203, DeliveryModel.This, frames);
+            var n = DeliveryModel.Explore(sc, DeliveryModel.Driver.This, DeliveryModel.This, frames);
+            olds[sc.Name] = o;
+            if (o.Duplicate.Count > 0) dupOld++;
+            if (n.Duplicate.Count > 0) dupNew++;
+            if (o.Lost.Count > 0) lostOld++;
+            if (n.Lost.Count > 0) lostNew++;
+            oldStates += o.States; newStates += n.States;
+            var lost = n.Lost.Except(o.Lost).ToList();
+            var dup = n.Duplicate.Except(o.Duplicate).ToList();
+            bool ok = lost.Count == 0 && dup.Count == 0;
+            if (!ok) bad++;
+            if (sharedDup == null && n.Duplicate.Count > 0)
+            {
+                string x = n.Duplicate.Min!;
+                sharedDup = $"{sc.Name}, {x}: v2.0.3{o.Traces["duplicate " + x]}\n           this driver{n.Traces["duplicate " + x]}";
+            }
+            if (sharedLost == null && n.Lost.Count > 0)
+            {
+                string x = n.Lost.Min!;
+                sharedLost = $"{sc.Name}, {x}: v2.0.3{(o.Traces.TryGetValue("lost " + x, out var t) ? t : " (another order)")}\n           this driver{n.Traces["lost " + x]}";
+            }
+            if (!ok)
+            {
+                Console.WriteLine($"[FAIL] delivery: {sc.Name}: v2.0.3 {o.States} states, this driver {n.States}" +
+                    (lost.Count > 0 ? $", lost where v2.0.3 sends: {string.Join(" ", lost)}" : "") +
+                    (dup.Count > 0 ? $", sent twice where v2.0.3 does not: {string.Join(" ", dup)}" : ""));
+                foreach (var x in lost) Console.WriteLine($"         lost {x}: {n.Traces["lost " + x]}");
+                foreach (var x in dup) Console.WriteLine($"         twice {x}: {n.Traces["duplicate " + x]}");
+            }
+        }
+        Console.WriteLine($"[{(bad == 0 ? "PASS" : "FAIL")}] delivery against v2.0.3's rules, {frames} frames a program: {scenarios.Count} scenarios, " +
+            $"{oldStates} states under v2.0.3, {newStates} under this driver. " +
+            $"A frame sent twice in {dupOld} scenarios under v2.0.3 and {dupNew} under this driver, each one v2.0.3 sends twice too, " +
+            $"a frame never sent in {lostOld} and {lostNew}");
+        if (sharedDup != null) Console.WriteLine($"         first shared duplicate, {sharedDup}");
+        if (sharedLost != null) Console.WriteLine($"         first shared loss, {sharedLost}");
+        foreach (var rules in DeliveryModel.Broken)
+        {
+            string? found = null;
+            foreach (var sc in scenarios)
+            {
+                var n = DeliveryModel.Explore(sc, DeliveryModel.Driver.This, rules, frames);
+                var o = olds[sc.Name];
+                var lost = n.Lost.Except(o.Lost).ToList();
+                var dup = n.Duplicate.Except(o.Duplicate).ToList();
+                if (lost.Count > 0) { found = $"{sc.Name}: lost {lost[0]}"; break; }
+                if (dup.Count > 0) { found = $"{sc.Name}: sent twice {dup[0]}"; break; }
+            }
+            bool ok = found != null;
+            if (!ok) bad++;
+            Console.WriteLine($"[{(ok ? "PASS" : "FAIL")}] delivery with {rules.Name}: {(found ?? "no scenario breaks it")}");
+        }
+        return bad;
+    }
     // Worker program counters.
     const int W_INC = 0, W_CHECK = 1, W_DEC_PENDING = 2, W_TAKE = 3, W_WAIT = 4, W_DEC = 5, W_PROC = 6;
     // A worker's plain increment (the broken variant): load, then a buffered store.
