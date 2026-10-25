@@ -136,6 +136,9 @@ internal static class DeliveryModel
         // a provisional value and reads a final one, sending only the frame
         // with exactly that SeqNo.
         public bool Round6 { get; init; }
+        // T1: a take the owner pipe answered at teardown is signaled back
+        // instead of read into the context that goes.
+        public bool OwnerPathChecksTear { get; init; }
         public bool NoTakeBackOverUntaken { get; init; }   // the SDK skips the take-back when its exchange replaced a frame not taken
     }
 
@@ -181,6 +184,10 @@ internal static class DeliveryModel
         This with { Name = "round 6 as summarized", Round6 = true, TakeReadNoNext = false, TakeReadNextSeq = false, BackOnlyAlone = false },
         This with { Name = "round 6 as summarized, the watch as 533ca4a4, CloseGate signals a sent frame",
                     Round6 = true, TakeReadNoNext = false, TakeReadNextSeq = false, BackOnlyAlone = false, RetryAfterOwnerGone = false, CloseSignalsSent = true },
+        This with { Name = "the b17050c1 fixes so far and T1's", CloseSignalsSent = true, NoTakeBackOverUntaken = true, RetryAfterOwnerGone = false,
+                    TakeReadSendsTaken = true, OwnerPathChecksTear = true },
+        This with { Name = "round 6 as summarized with the watch, CloseGate and T1 changes", Round6 = true, TakeReadNoNext = false, TakeReadNextSeq = false,
+                    BackOnlyAlone = false, RetryAfterOwnerGone = false, CloseSignalsSent = true, OwnerPathChecksTear = true },
     };
 
     internal static IEnumerable<Scenario> Scenarios()
@@ -236,7 +243,7 @@ internal static class DeliveryModel
     // release frame each program left, and bits 42 to 44 say a program's
     // frame went out after the release frames its end queued.
     static int Slot(int prog, int idx) => (prog - 1) * 6 + idx;
-    const int RelSlot = 18, LateBit = 42;
+    const int RelSlot = 18, LateBit = 42, OrderBit = 45, TookShift = 46;
 
     // InSec, Ev, Sig: the input section, its event and the signal section
     // exist. Seq, Prog, Idx: the frame the input section holds (Prog 0: a
@@ -314,9 +321,10 @@ internal static class DeliveryModel
         b.Put(s.Tear, 2);
         b.Put(s.Ack, 2); b.Put(s.WatchP, 2); b.Put(s.RelQ, 2); b.Put(s.RelFor, 2); b.Put(s.RelDone, 3); b.Put(s.Handed, 8);
         b.Put(s.AckBit); b.Put(s.AckEnded); b.Put(s.Replaced); b.Put(s.RetryNext); b.Put(s.NoRetry); b.Put(s.HandFinal && s.Hand != 0);
-        // The delivery counts take 45 bits of the third word, Took the 8 above.
+        // The delivery counts and the late and order bits take 46 bits of the
+        // third word, Took the 8 above.
         if ((uint)s.Took >= 256) throw new InvalidOperationException("Took out of range");
-        return new Key(a.W, b.W, s.Delivered | (ulong)(uint)s.Took << 45);
+        return new Key(a.W, b.W, s.Delivered | (ulong)(uint)s.Took << TookShift);
     }
 
     internal static State Unpack(Key k)
@@ -335,8 +343,8 @@ internal static class DeliveryModel
         s.Tear = b.Get(2);
         s.Ack = b.Get(2); s.WatchP = b.Get(2); s.RelQ = b.Get(2); s.RelFor = b.Get(2); s.RelDone = b.Get(3); s.Handed = b.Get(8);
         s.AckBit = b.Bit(); s.AckEnded = b.Bit(); s.Replaced = b.Bit(); s.RetryNext = b.Bit(); s.NoRetry = b.Bit(); s.HandFinal = b.Bit();
-        s.Delivered = k.C & ((1UL << 45) - 1);
-        s.Took = (int)(k.C >> 45);
+        s.Delivered = k.C & ((1UL << TookShift) - 1);
+        s.Took = (int)(k.C >> TookShift);
         return s;
     }
 
@@ -413,7 +421,7 @@ internal static class DeliveryModel
 
     // The delivery counts and the late bits, without the zeroed sections.
     static readonly ulong OutMask = Enumerable.Range(0, 21).Where(x => x >= RelSlot || x % 6 != 0)
-                                              .Aggregate(0UL, (m, x) => m | (3UL << (2 * x))) | (7UL << LateBit);
+                                              .Aggregate(0UL, (m, x) => m | (3UL << (2 * x))) | (7UL << LateBit) | (1UL << OrderBit);
 
     // An outcome of this driver no worse than one of v2.0.3's: every frame
     // and release frame that one delivers this one delivers, every one this
@@ -429,7 +437,8 @@ internal static class DeliveryModel
             if (m == 2 && t < 2) return false;
         }
         ulong late = (mine & ~theirs) >> LateBit & 7;
-        return late == 0;
+        ulong order = (mine & ~theirs) >> OrderBit & 1;
+        return late == 0 && order == 0;
     }
 
     // Every frame and release frame this outcome sends, that one sends.
@@ -449,6 +458,7 @@ internal static class DeliveryModel
         for (int x = 0; x < 18; x++) if (x % 6 != 0 && Count(v, x) > 0) parts.Add($"{x / 6 + 1}:{x % 6}x{Count(v, x)}");
         for (int q = 1; q <= 3; q++) if (Count(v, RelSlot + q - 1) > 0) parts.Add($"release{q}x{Count(v, RelSlot + q - 1)}");
         for (int p = 1; p <= 3; p++) if ((v >> (LateBit + p - 1) & 1) != 0) parts.Add($"{p}:after-its-release");
+        if ((v >> OrderBit & 1) != 0) parts.Add("out-of-order");
         return string.Join(" ", parts);
     }
 
@@ -495,6 +505,8 @@ internal static class DeliveryModel
         // Outcomes matched only by v2.0.3 runs that deliver fewer frames:
         // an extra frame, neither a loss nor a duplicate.
         public readonly HashSet<ulong> Extra = new();
+        // Outcomes equal to a paired v2.0.3 run's.
+        public readonly HashSet<ulong> Equal = new();
         public string? ExtraExample;
         public List<State>? ExtraPath;
         public bool ZeroSent;
@@ -665,6 +677,20 @@ internal static class DeliveryModel
             return CloseScratch(thisWaits);
         }
 
+        // The states of set V that wait for every step in bits, closed under
+        // the given waits: the runs that, like this driver's side, still
+        // wait when that side lets a step it waits for wait longer.
+        readonly Dictionary<(int, int, int), int> restricted = new();
+        public int Restrict(int v, int bits, int thisWaits)
+        {
+            if (restricted.TryGetValue((v, bits, thisWaits), out int r)) return r;
+            scratch.Clear();
+            foreach (var x in sets[v]) if ((Of(x).Waits & bits) == bits) scratch.Add(x);
+            r = scratch.Count == 0 ? -1 : CloseScratch(thisWaits);
+            restricted[(v, bits, thisWaits)] = r;
+            return r;
+        }
+
         // The time-driven steps some state of set V waits for.
         public int Waits(int v)
         {
@@ -792,8 +818,9 @@ internal static class DeliveryModel
     // deliver every frame this one does not lose, send twice every frame
     // this one sends twice, and send a program's frame after its release
     // frames wherever this one does. A shared step v2.0.3 cannot follow from
-    // any state of the set is counted (Unaligned): this driver's run
-    // continues, paired with no v2.0.3 run, so its final state fails.
+    // any state of the set is counted (Unaligned): the runs of the set go on
+    // without it, and the final state passes only with a better outcome
+    // than theirs, an extra frame and nothing worse.
     //
     // Pairs are pruned by subsumption. Every step of the pairing is
     // monotone in the v2.0.3 set: a larger set follows to a larger set and
@@ -815,19 +842,26 @@ internal static class DeliveryModel
 
         int TWaits(in State t) => (NeedsRead(t) ? M_READ : 0) | (MapReady(t, sc, Driver.This, r, frames, scratch) ? M_MAP : 0);
 
-        // The explored pairs: by this driver's state and the waits of the
-        // set, the sets explored with it that no other of them holds.
-        var covers = new Dictionary<(Key, int), List<int>>();
-        var unpaired = new HashSet<Key>();
+        // A set number at or above 0 is paired; -2 - n is set n after a step
+        // its runs could not follow.
+        static int SetOf(int v) => v >= 0 ? v : -2 - v;
+        static int Diverged(int v) => v >= 0 ? -2 - v : v;
+
+        // The explored pairs: by this driver's state, the waits of the set
+        // and divergence, the sets explored with it that no other holds.
+        var covers = new Dictionary<(Key, int, bool), List<int>>();
         bool Visit(Key k, int v, int tw)
         {
-            if (unpaired.Contains(k)) { res.Subsumed++; return false; }
-            if (v == None) { unpaired.Add(k); return true; }
-            var key = (k, v203.Waits(v) & tw);
-            if (!covers.TryGetValue(key, out var lst)) { covers[key] = new List<int> { v }; return true; }
-            foreach (var v1 in lst) if (v203.Subset(v1, v)) { res.Subsumed++; return false; }
-            lst.RemoveAll(v1 => v203.Subset(v, v1));
-            lst.Add(v);
+            int set = SetOf(v);
+            var key = (k, v203.Waits(set) & tw, v < 0);
+            if (!covers.TryGetValue(key, out var lst)) { covers[key] = new List<int> { set }; return true; }
+            // A diverged pair passes only with a better outcome, which a
+            // larger set can turn into an equal one, so those are kept
+            // exactly.
+            if (v < 0) { if (lst.Contains(set)) return false; lst.Add(set); return true; }
+            foreach (var v1 in lst) if (v203.Subset(v1, set)) { res.Subsumed++; return false; }
+            lst.RemoveAll(v1 => v203.Subset(set, v1));
+            lst.Add(set);
             return true;
         }
 
@@ -849,7 +883,9 @@ internal static class DeliveryModel
             Steps(t, sc, Driver.This, r, frames, buf);
             int tw = TWaits(t);
             // What this driver's side alone waits for, it takes first.
-            int alone = V == None ? 0 : tw & ~v203.Waits(V);
+            int Vset = SetOf(V);
+            bool div = V < 0;
+            int alone = tw & ~v203.Waits(Vset);
             if (alone != 0)
                 buf.RemoveAll(n => Label(t, n) is var l && !(((alone & M_READ) != 0 && l == L_HID) || ((alone & M_MAP) != 0 && l == L_MAP)));
             if (buf.Count == 0)
@@ -857,8 +893,13 @@ internal static class DeliveryModel
                 res.Finals++;
                 ulong mine = t.Delivered & OutMask;
                 for (int pr = 1; pr <= 3; pr++) if (Count(t.Delivered, Slot(pr, 0)) > 0) res.ZeroSent = true;
-                int cls = V == None ? 0 : v203.MatchClass(V, mine);
+                // 2: equal to a paired run's, 1: better (an extra frame, nothing
+                // worse), 0: no paired run's. After a step the runs could not
+                // follow, only a better outcome passes.
+                int cls = v203.MatchClass(Vset, mine);
+                if (div && cls == 2) cls = 0;
                 bool matched = cls != 0;
+                if (cls == 2) res.Equal.Add(mine);
                 if (cls == 1 && res.Extra.Add(mine) && res.ExtraExample == null)
                 {
                     res.ExtraExample = Show(mine);
@@ -867,33 +908,45 @@ internal static class DeliveryModel
                 if (!matched && res.Worse.Add(mine) && parent != null) res.Paths[mine] = PathTo(parent, (tk, V));
                 if (!matched && res.Example == null)
                 {
-                    res.Example = Show(mine) + (V == None ? " (after a step v2.0.3 could not take)" : "");
+                    res.Example = Show(mine) + (div ? " (after a step v2.0.3 could not take)" : "");
                     if (parent != null) res.Path = PathTo(parent, (tk, V));
-                    if (parent != null && V != None) res.PairedSide = v203.Describe(V);
+                    if (parent != null) res.PairedSide = v203.Describe(Vset);
                 }
                 continue;
             }
             foreach (var n in buf)
             {
-                int V2 = V;
                 int label = Label(t, n);
                 int nw = TWaits(n);
-                if (V != None)
+                // HID class sends its next READ_REPORT as soon as one
+                // completes (IOCTL_HID_READ_REPORT, "ping-pong fashion"),
+                // through the reflector to the driver host, so it may arrive
+                // late on both sides alike. When this driver's side lets a
+                // READ_REPORT or the Phase 1 map it waits for wait longer,
+                // only the v2.0.3 runs that wait for it too stay paired: a
+                // run that has its read takes no part in the delay.
+                int delayed = tw & ~((label == L_HID ? M_READ : 0) | (label == L_MAP ? M_MAP : 0));
+                int Vs = delayed == 0 ? Vset : v203.Restrict(Vset, delayed, tw);
+                if (Vs == None) continue;
+                int V2 = Vs;
+                if (label != 0)
+                    V2 = v203.Follow(Vs, label, MatchKey(label, n), label == L_KILL ? KillPhase(t) : 0, tw, nw);
+                else if (nw != tw)
+                    V2 = v203.Close(Vs, nw);
+                if (V2 == None)
                 {
-                    if (label != 0)
-                        V2 = v203.Follow(V, label, MatchKey(label, n), label == L_KILL ? KillPhase(t) : 0, tw, nw);
-                    else if (nw != tw)
-                        V2 = v203.Close(V, nw);
-                    if (V2 == None)
+                    res.Unaligned++;
+                    if (parent != null && res.UnalignedPath == null)
                     {
-                        res.Unaligned++;
-                        if (parent != null && res.UnalignedPath == null)
-                        {
-                            res.UnalignedPath = PathTo(parent, (tk, V));
-                            res.UnalignedPath.Add(n);
-                        }
+                        res.UnalignedPath = PathTo(parent, (tk, V));
+                        res.UnalignedPath.Add(n);
                     }
+                    // The runs go on without that step.
+                    V2 = nw != tw ? v203.Close(Vs, nw) : Vs;
+                    div = true;
                 }
+                if (div) V2 = Diverged(V2);
+                div = V < 0;
                 var nk = Pack(n);
                 if (Visit(nk, V2, nw)) { parent?.TryAdd((nk, V2), (tk, V)); stack.Push((nk, V2)); }
             }
@@ -1125,6 +1178,7 @@ internal static class DeliveryModel
                     next.Add(s.Tear != 0 ? (r.SignalTakenOnExit ? s : s with { Event = false }) with { Took = 0, Pc = W_EXITED }
                                          : s with { Event = false, Took = 0, Pc = W_READ, AfterOwner = false });
                 else if (s.OwnerSig && !r.WaitAgainAfterOwner) next.Add(s with { OwnerSig = false, Pc = W_READ, AfterOwner = true, NoRetry = true });
+                else if (s.OwnerSig && r.OwnerPathChecksTear && s.Tear != 0) next.Add(back with { Pc = W_EXITED });
                 else if (s.OwnerSig) next.Add(s with { Pc = W_READ, AfterOwner = false, NoRetry = true });
                 else next.Add(s.Tear != 0 ? back with { Pc = W_EXITED } : s with { Pc = W_READ, AfterOwner = false });
                 break;
@@ -1173,8 +1227,12 @@ internal static class DeliveryModel
                 if (n.Pc == W_TOP && !s.NoRetry && s.RetryNext)
                     n = (CanConnect(n, prog) ? Connect(n, prog, d) : n) with { RetryNext = false };
                 next.Add(n);
-                // 250 stale wakeups in a row end in a recycle.
-                if (!fresh && recycleNow && n.Pc == W_TOP) next.Add(Recycle(n, sc, d, r, prog, true));
+                // 250 stale wakeups in a row end in a recycle (staleWakeups,
+                // driver.c). No run here reaches 251 wakeups: each is a
+                // SetEvent, a take or a signal back, and the frames bound
+                // them. So that recycle never comes, and only the idle one
+                // (eight timeouts in a row) is modeled.
+                _ = fresh;
                 break;
             }
             case W_OWNER:
@@ -1284,6 +1342,10 @@ internal static class DeliveryModel
         ulong delivered = Deliver(s.Delivered, slot);
         int p = slot / 6 + 1;
         if (slot % 6 != 0 && (s.RelDone >> (p - 1) & 1) != 0) delivered |= 1UL << (LateBit + p - 1);
+        // A program's frame after a later one of the same program.
+        if (slot % 6 != 0)
+            for (int j = slot % 6 + 1; j <= 5; j++)
+                if (Count(s.Delivered, Slot(p, j)) > 0) delivered |= 1UL << OrderBit;
         return s with { Delivered = delivered };
     }
 

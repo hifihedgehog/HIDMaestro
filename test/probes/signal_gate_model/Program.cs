@@ -209,6 +209,7 @@ internal static class Program
             }
         });
         long states = 0, finals = 0, unaligned = 0, v203 = 0, largest = 0, ownFails = 0, subsumed = 0, setItems = 0, largestSets = 0, extraScenarios = 0;
+        long scFail = 0, scBetter = 0, scEqual = 0, outFail = 0, outBetter = 0, outEqual = 0;
         string largestName = "";
         var failures = new List<int>();
         for (int k = 0; k < mine.Count; k++)
@@ -219,11 +220,16 @@ internal static class Program
             states += a.States; finals += a.Finals; unaligned += a.Unaligned; v203 += a.V203States; 
             setItems += a.SetItems; subsumed += a.Subsumed; largestSets = Math.Max(largestSets, a.SetItems);
             if (a.Extra.Count > 0) extraScenarios++;
+            outFail += a.Worse.Count; outBetter += a.Extra.Count; outEqual += a.Equal.Count;
+            if (a.Worse.Count > 0 || a.ZeroSent) scFail++;
+            else if (a.Extra.Count > 0) scBetter++;
+            else scEqual++;
             if (a.States > largest) { largest = a.States; largestName = mine[k].sc.Name; }
             if (a.Worse.Count > 0 || a.ZeroSent) failures.Add(k);
         }
         string where = $"{frames} frame(s) a program, shard {shard}/{shards}, {mine.Count} scenario(s)";
-        string totals = $"{extraScenarios} scenario(s) with an extra frame, {states} paired states, {finals} final, {v203} v2.0.3 states, {unaligned} shared step(s) v2.0.3 could not take, " +
+        string totals = $"scenarios: {scFail} fail, {scBetter} better, {scEqual} equal; outcomes: {outFail} fail, {outBetter} better, {outEqual} equal. " +
+                        $"{extraScenarios} scenario(s) with an extra frame, {states} paired states, {finals} final, {v203} v2.0.3 states, {unaligned} shared step(s) v2.0.3 could not take, " +
                         $"{subsumed} pair(s) subsumed, {setItems} v2.0.3 set members (largest scenario {largestSets}), " +
                         $"largest scenario {largest} paired states ({largestName}), {clock.Elapsed.TotalSeconds:F0} s";
         if (rule < 0)
