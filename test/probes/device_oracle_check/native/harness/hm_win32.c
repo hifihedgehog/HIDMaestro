@@ -380,9 +380,12 @@ static DWORD FiberWait(DWORD n, const HANDLE *hs, DWORD ms)
     t->waitTimeout = ms;
     t->waitStartMs = g_clockMs;
     RecordWait("wait", t->index, n, ms, 0);
+    if (ms == 0 && g_pollHook) { void (*hook)(void) = g_pollHook; g_pollHook = NULL; hook(); }
     if (ms == 0) {
         /* A zero timeout is a poll: it returns at once from the objects'
-         * states, and no other thread runs meanwhile. */
+         * states, and no other thread runs meanwhile. A stream can run
+         * g_pollHook once before it, as what another process did in the
+         * meantime. */
         DWORD r = ThreadAutoResult(t);
         RecordWait("wait.answer", t->index, r, 0, 0);
         t->waitCount = 0;
@@ -980,6 +983,7 @@ VOID WINAPI HmDeleteCriticalSection(LPCRITICAL_SECTION cs)
  * ones, and an SRW lock is never deleted. Taking one already held would
  * deadlock a real thread, and stops the run here. */
 void (*g_srwHook)(void);
+void (*g_pollHook)(void);
 VOID WINAPI HmAcquireSRWLockExclusive(PSRWLOCK l)
 {
     if (g_srwHook && g_current) { void (*hook)(void) = g_srwHook; g_srwHook = NULL; hook(); }

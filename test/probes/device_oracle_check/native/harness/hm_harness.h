@@ -565,6 +565,9 @@ extern int (*g_waitAnswerHook)(HmThread *t, DWORD result);
 /* Run once at the next SRW lock a driver thread takes, before it is taken
  * (hm_win32.c). */
 extern void (*g_srwHook)(void);
+/* Run once at the next zero-timeout poll a driver thread makes, before it
+ * is answered (hm_win32.c FiberWait). */
+extern void (*g_pollHook)(void);
 /* The code runs on a driver thread, not on the scenario's fiber. */
 int HmOnDriverThread(void);
 /* FIELD_OFFSET(DEVICE_CONTEXT, TearingDown) in the flavor's driver.h
