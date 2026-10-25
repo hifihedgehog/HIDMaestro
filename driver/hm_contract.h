@@ -89,10 +89,12 @@ C_ASSERT(FIELD_OFFSET(HIDMAESTRO_VERSION_INFO, DriverConfigError) == 56);
  * compare-exchange and calls SetEvent only when that succeeds, so a frame
  * gets one wakeup, the take or the signal, never both, and never neither
  * while its program runs. A frame a program left there as it died, between
- * its exchange and its compare-exchange, is read when the worker's take
- * finds it before the owner pipe's close, and dropped when OwnerGone takes
- * it: v2.0.3's program, killed just after or just before its SetEvent, had
- * the same two outcomes. Without the capability it signals every frame.
+ * its exchange and its compare-exchange, OwnerGone drops, as v2.0.3 never
+ * read a frame whose program died before its SetEvent. A take of it before
+ * the owner pipe's close reads the section and sends that frame where
+ * v2.0.3 in the same order sent nothing. It sends no frame of a next
+ * program there, which has its own take or signal. Without the capability
+ * it signals every frame.
  *
  * The XUSB companion counts the WAIT_FOR_INPUT requests in its manual queue
  * in CompanionParked: up once the request is in the queue, then a look at
