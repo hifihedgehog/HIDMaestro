@@ -168,6 +168,22 @@ static void StreamGateRelease(PlanProfile *p)
     CtlStop(&c);
 }
 
+/* The SeqNo wrap: frames across 0xFFFFFFFF, each read by a parked read. A
+ * 2.1.0 SDK steps from 0xFFFFFFFF to 2, and the frame after the wrap goes
+ * out as every other does. */
+static void StreamGateSeqWrap(PlanProfile *p)
+{
+    Ctl c;
+    StreamBegin("threads/%s/gate-seq-wrap", p->id);
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    c.sdk.seq = 0xFFFFFFFCu;
+    Probe(&c, 0, 1);
+    Probe(&c, 0, 2);
+    Probe(&c, 0, 3);
+    RecordSections(&c.sdk);
+    CtlStop(&c);
+}
+
 void CaseThreads(void)
 {
     PlanProfile *sw = PlanFind("switch", NULL);
@@ -187,4 +203,5 @@ void CaseThreads(void)
     StreamGateIdle(ds);
     StreamGateOwnerGone(ds);
     StreamGateRelease(ds);
+    StreamGateSeqWrap(ds);
 }

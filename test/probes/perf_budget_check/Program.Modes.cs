@@ -520,6 +520,26 @@ internal static partial class Program
         // The budgets' non-inferiority rule (Compare.cs).
         foreach (var (name, ok, detail) in BudgetCompare.SelfTest()) Check("compare: " + name, ok, detail);
 
+        // The input section's SeqNo across its wrap, written to this
+        // process's own memory as a submit writes the section: no frame
+        // stores 0, which the driver's look before a wait takes for a
+        // section no frame was written to (2.1.0, docs/design/signal-gate.md).
+        unsafe
+        {
+            byte* own = stackalloc byte[512];
+            uint seq = 0xFFFFFFFCu;
+            var stored = new List<uint>();
+            byte[] frame = new byte[8];
+            for (int i = 0; i < 3; i++)
+            {
+                SharedMemoryIO.WriteInputFrame((IntPtr)own, IntPtr.Zero, ref seq, frame, frame.Length, null);
+                stored.Add(*(uint*)own);
+            }
+            Check("a frame across the SeqNo wrap never stores 0, and each is even and new",
+                stored.All(s => s != 0 && (s & 1) == 0) && stored.Distinct().Count() == 3,
+                string.Join(" ", stored.Select(s => s.ToString("X8"))));
+        }
+
         // Profile arguments.
         var args = ParseProfileArgs(new[] { "switch-pro@010000014040000140400330", "dualsense-bt" }, "selftest");
         Check("a profile argument with a report", args != null && args[0].Id == "switch-pro" && args[0].Reports.Length == 1

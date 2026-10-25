@@ -1671,17 +1671,21 @@ KeepLiveFeatureLocked(_In_ PDEVICE_CONTEXT ctx, _In_ const HIDMAESTRO_SHARED_INP
  * InputDataEvent (or the 50 ms safety tick fires). Doing all the HID
  * report-build + manual-queue drain here: no WDF timer, no IRQL games:
  * WdfRequestComplete and the SRW locks are documented safe from a raw worker
- * thread in UMDF2. */
+ * thread in UMDF2. lookOnly: the read the gate's look made, with no
+ * signal behind it. */
 static void
-ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
+ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx, _In_ BOOLEAN lookOnly)
 {
     HIDMAESTRO_SHARED_INPUT shared;
     if (!ReadSharedInput(ctx, &shared)) return;
 
     ULONG seqNo = shared.SeqNo;
-    /* 2.1.0: SeqNo 0 is a section no frame has been written to since an
-     * SDK zeroed it, and nothing to send. */
-    if (seqNo == 0) return;
+    /* 2.1.0: a 2.1.0 SDK never stores SeqNo 0 (SharedMemoryIO.WriteInputFrame
+     * steps over it at the wrap), so 0 found by the look is a section no
+     * frame has been written to since an SDK zeroed it. A program before
+     * 2.1.0 stores 0 at every 2^31st frame and signals it, so a signaled 0
+     * goes on as v2.0.3 took it. */
+    if (seqNo == 0 && lookOnly) return;
     /* 2.1.0: an equal SeqNo is the frame already read, except the first
      * read after a boundary, when no 2.1.0 SDK started since (driver.h). */
     BOOLEAN fresh = seqNo != ctx->SeenSeqNo
@@ -2018,7 +2022,8 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
             }
             DWORD rc = WaitForMultipleObjects(count, waits, FALSE, pending ? 0 : 500);
             if (waiters != NULL && !pending) InterlockedDecrement(waiters);
-            if (pending && rc == WAIT_TIMEOUT) rc = WAIT_OBJECT_0 + 1;
+            BOOLEAN lookOnly = FALSE;
+            if (pending && rc == WAIT_TIMEOUT) { rc = WAIT_OBJECT_0 + 1; lookOnly = TRUE; }
             /* 2.1.0: the input event comes before the owner pipe and the
              * remove event in the wait, so a frame the SDK signaled is read
              * before the program's end is handled. A frame waiting without
@@ -2026,7 +2031,7 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
              * would otherwise run before that program's last frame. */
             else if (pending && rc != WAIT_OBJECT_0 && rc != WAIT_OBJECT_0 + 1) {
                 idleTimeouts = 0;
-                ProcessSharedInput(ctx);
+                ProcessSharedInput(ctx, TRUE);
             }
 
             /* Issue #38: TearingDown is the authoritative exit
@@ -2066,7 +2071,7 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
             if (rc == WAIT_OBJECT_0 + 1) {
                 idleTimeouts = 0;
                 ULONG prevSeq = ctx->SeenSeqNo;
-                ProcessSharedInput(ctx);
+                ProcessSharedInput(ctx, lookOnly);
                 if (ctx->SeenSeqNo == prevSeq) {
                     if (++staleWakeups > 250) { recycle = TRUE; break; }
                 } else {
@@ -2790,7 +2795,11 @@ EvtIoDeviceControl(
             servedSize = ctx->ReleaseSizes[i];
             RtlCopyMemory(served, ctx->ReleaseFrames[i], servedSize);
             serve = TRUE;
-        } else if (ctx->InputReportReady && ctx->SharedMemSeqNo > ctx->LastDeliveredInputSeqNo) {
+        /* 2.1.0: any other SeqNo than the one last delivered is a frame not
+         * delivered yet. Greater-than missed the frame after the SeqNo
+         * wrap, which a 2.1.0 SDK reaches across programs, its numbering
+         * continuing from the last (SharedMemoryIO.InputSeqStart). */
+        } else if (ctx->InputReportReady && ctx->SharedMemSeqNo != ctx->LastDeliveredInputSeqNo) {
             servedSize = ctx->InputReportSize;
             RtlCopyMemory(served, ctx->InputReport, servedSize);
             ctx->LastDeliveredInputSeqNo = ctx->SharedMemSeqNo;

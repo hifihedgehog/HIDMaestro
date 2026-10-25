@@ -287,11 +287,12 @@ uint32_t PlanDword(PlanProfile *p, const char *name, uint32_t fallback)
 #define SIGNAL_SIZE    256u
 
 /* SharedMemoryIO.EvenAbove: the later of two SeqNos as numbers that count
- * up, taken up to even. */
+ * up, an odd one taken up to the even one it becomes, stepping over 0. */
 static uint32_t EvenAbove(uint32_t a, uint32_t b)
 {
     uint32_t m = (int32_t)(b - a) > 0 ? b : a;
-    return (m + 1) & ~1u;
+    if ((m & 1) == 0) return m;
+    return m + 1 == 0 ? 2u : m + 1;
 }
 
 static void Name(WCHAR *dst, size_t cap, const WCHAR *prefix, int index)
@@ -417,6 +418,9 @@ void SdkWriteFrame(Sdk *s, const uint8_t *data, uint32_t dataLen, const uint8_t 
         memcpy(b + 278, &zero, 4);
     }
     s->seq = pending + 1;
+    /* 2.1.0's SDK never stores SeqNo 0: at the wrap it steps to 2
+     * (SharedMemoryIO.NextEvenSeq). */
+    if (s->signal && s->seq == 0) s->seq = 2;
     memcpy(b, &s->seq, 4);
     int input = 1, companion = gip != NULL;
     if (s->signal) {

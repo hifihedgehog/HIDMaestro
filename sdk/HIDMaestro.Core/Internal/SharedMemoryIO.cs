@@ -678,11 +678,24 @@ internal static partial class SharedMemoryIO
 
     /// <summary>The larger of two SeqNos as numbers that count up from the
     /// first, an odd one (a write in progress) taken up to the even one it
-    /// becomes.</summary>
+    /// becomes, which steps over 0 as WriteInputFrame does. 0 only when both
+    /// are 0, a section no frame was written to.</summary>
     static uint EvenAbove(uint a, uint b)
     {
         uint m = (int)(b - a) > 0 ? b : a;
-        return (m + 1) & ~1u;
+        return (m & 1) == 0 ? m : NextEvenSeq(m);
+    }
+
+    /// <summary>The even SeqNo that ends a write begun with the odd one
+    /// given. A frame's SeqNo is never 0: 0 is a section no frame was
+    /// written to, which the driver's look before a wait does not read
+    /// (docs/design/signal-gate.md), so at the wrap the number steps from
+    /// 0xFFFFFFFF to 2.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static uint NextEvenSeq(uint pending)
+    {
+        uint next = pending + 1;
+        return next == 0 ? 2u : next;
     }
 
     /// <summary>Companion input doorbell handle for
@@ -1132,7 +1145,7 @@ internal static partial class SharedMemoryIO
         // payload is visible to a reader that sees the even number with
         // no fence of its own between them. stlr on ARM64, a plain store
         // on x64.
-        seqNo = pending + 1;
+        seqNo = NextEvenSeq(pending);
         Volatile.Write(ref *(uint*)v, seqNo);
 
         // 4. Wake the driver's worker thread, and the companion's pump on a
