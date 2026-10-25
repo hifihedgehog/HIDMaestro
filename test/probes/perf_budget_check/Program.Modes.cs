@@ -539,6 +539,20 @@ internal static partial class Program
                 stored.All(s => s != 0 && (s & 1) == 0) && stored.Distinct().Count() == 3,
                 string.Join(" ", stored.Select(s => s.ToString("X8"))));
         }
+        // The SeqNo a 2.1.0 program counts from (SharedMemoryIO.InputSeqStart):
+        // 0 is no SeqNo, never the later one, and an odd one goes up to the
+        // even one it becomes, stepping over 0.
+        {
+            var cases = new (uint A, uint B, uint Want)[]
+            {
+                (0, 0, 0), (0, 0x90000000u, 0x90000000u), (0x90000000u, 0, 0x90000000u),
+                (0, 0xFFFFFFFFu, 2), (0xFFFFFFFFu, 0, 2), (4, 0x80000006u, 4), (0xFFFFFFFEu, 2, 2), (6, 9, 10),
+            };
+            var got = cases.Select(c => SharedMemoryIO.EvenAbove(c.A, c.B)).ToArray();
+            Check("the SeqNo a program counts from takes 0 for no SeqNo, and the later of two across the wrap",
+                cases.Select(c => c.Want).SequenceEqual(got),
+                string.Join(" ", cases.Zip(got, (c, g) => $"({c.A:X},{c.B:X})={g:X}")));
+        }
 
         // Profile arguments.
         var args = ParseProfileArgs(new[] { "switch-pro@010000014040000140400330", "dualsense-bt" }, "selftest");

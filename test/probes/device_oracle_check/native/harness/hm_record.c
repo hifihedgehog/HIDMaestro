@@ -287,10 +287,11 @@ uint32_t PlanDword(PlanProfile *p, const char *name, uint32_t fallback)
 #define SIGNAL_SIZE    256u
 
 /* SharedMemoryIO.EvenAbove: the later of two SeqNos as numbers that count
- * up, an odd one taken up to the even one it becomes, stepping over 0. */
+ * up, an odd one taken up to the even one it becomes, stepping over 0. 0 is
+ * no SeqNo and never the later one. */
 static uint32_t EvenAbove(uint32_t a, uint32_t b)
 {
-    uint32_t m = (int32_t)(b - a) > 0 ? b : a;
+    uint32_t m = a == 0 ? b : b == 0 ? a : (int32_t)(b - a) > 0 ? b : a;
     if ((m & 1) == 0) return m;
     return m + 1 == 0 ? 2u : m + 1;
 }

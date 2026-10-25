@@ -675,11 +675,13 @@ internal static partial class SharedMemoryIO
 
     /// <summary>The larger of two SeqNos as numbers that count up from the
     /// first, an odd one (a write in progress) taken up to the even one it
-    /// becomes, which steps over 0 as WriteInputFrame does. 0 only when both
-    /// are 0, a section no frame was written to.</summary>
-    static uint EvenAbove(uint a, uint b)
+    /// becomes, which steps over 0 as WriteInputFrame does. 0 is no SeqNo (a
+    /// section no frame was written to, or no read) and never the larger:
+    /// as a serial number it would be above any SeqNo from 0x80000000 on.
+    /// 0 only when both are 0.</summary>
+    internal static uint EvenAbove(uint a, uint b)
     {
-        uint m = (int)(b - a) > 0 ? b : a;
+        uint m = a == 0 ? b : b == 0 ? a : (int)(b - a) > 0 ? b : a;
         return (m & 1) == 0 ? m : NextEvenSeq(m);
     }
 
