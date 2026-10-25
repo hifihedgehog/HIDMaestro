@@ -34,12 +34,18 @@ internal static class Program
         // rule <frames> <index>: one rule taken away, under the aligned check.
         if (args.Length >= 3 && args[0] == "rule")
         {
-            var rules = DeliveryModel.Broken[int.Parse(args[2])];
+            var rules = int.Parse(args[2]) < 0 ? DeliveryModel.This : DeliveryModel.Broken[int.Parse(args[2])];
             string? found = null;
             foreach (var sc in DeliveryModel.Scenarios().Where(x => args.Length < 4 || x.Name == args[3]))
             {
-                var a = DeliveryModel.ExploreAligned(sc, rules, int.Parse(args[1]));
-                if (a.Worse.Count > 0 || a.ZeroSent) { found = $"{sc.Name}: [{a.Example}]{(a.ZeroSent ? ", a zeroed section sent" : "")}"; break; }
+                var a = DeliveryModel.ExploreAligned(sc, rules, int.Parse(args[1]), args.Length >= 4);
+                if (a.Worse.Count > 0 || a.ZeroSent)
+                {
+                    found = $"{sc.Name}: [{a.Example}]{(a.ZeroSent ? ", a zeroed section sent" : "")}";
+                    if (a.Path != null)
+                        foreach (var st in a.Path) Console.WriteLine(st);
+                    break;
+                }
             }
             Console.WriteLine($"[{(found != null ? "PASS" : "FAIL")}] aligned delivery with {rules.Name}: {(found ?? "no scenario breaks it")}");
             return found != null ? 0 : 1;

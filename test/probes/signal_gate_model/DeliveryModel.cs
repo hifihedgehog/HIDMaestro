@@ -148,7 +148,15 @@ internal static class DeliveryModel
     // (S_FRAMEDONE).
     static bool SharedPc(int pc) => pc is S_CLAIM or S_START or S_WRITE or S_FRAMEDONE or S_EXIT or S_NEXT;
     // The recycle and the device's going are shared too: the idle time and the PnP removal behind them come from outside the driver.
-    static bool IsShared(State s, State n) => SharedPc(s.SdkPc) && (n.SdkPc != s.SdkPc || n.P != s.P) || n.RecycleUsed != s.RecycleUsed || n.ReAddUsed != s.ReAddUsed;
+    // The worker's Phase 1 map is shared as well, so v2.0.3's worker keeps pace
+    // with this driver's: neither can map later than the other to miss a frame.
+    static int Label(State s, State n) =>
+        SharedPc(s.SdkPc) && (n.SdkPc != s.SdkPc || n.P != s.P) ? 1
+        : n.RecycleUsed != s.RecycleUsed ? 2
+        : n.ReAddUsed != s.ReAddUsed ? 3
+        : s.Pc == W_P1 && n.Pc == W_TOP && n.Mapped && !s.Mapped ? 4
+        : 0;
+    static bool IsShared(State s, State n) => Label(s, n) != 0;
     const int W_P1 = 0, W_TOP = 1, W_LOOK = 2, W_POLL = 3, W_BLOCK = 4, W_READ = 5, W_OWNER = 6, W_GONE = 7, W_COUNT = 8;
 
     // A frame's identity is its program and its place, 1 to 5, packed into
@@ -306,6 +314,7 @@ internal static class DeliveryModel
         public readonly HashSet<ulong> Worse = new();
         public bool ZeroSent;
         public string? Example;
+        public List<State>? Path;
     }
 
     // The order-aligned check. Each state of this driver's is paired with the
@@ -313,7 +322,7 @@ internal static class DeliveryModel
     // each driver taking any steps of its own in between. At a final state of
     // this driver's, some final state in that set must deliver every frame
     // this one does not lose and send twice every frame this one sends twice.
-    internal static AlignedResult ExploreAligned(Scenario sc, Rules r, int framesArg)
+    internal static AlignedResult ExploreAligned(Scenario sc, Rules r, int framesArg, bool trace = false)
     {
         int frames = sc.Frames ?? framesArg;
         var res = new AlignedResult();
@@ -351,6 +360,7 @@ internal static class DeliveryModel
         var t0 = Start();
         var v0 = Close(Intern(new HashSet<State> { Start() }));
         var seen = new HashSet<(State, StateSet)> { (t0, v0) };
+        var parent = trace ? new Dictionary<(State, StateSet), (State, StateSet)>() : null;
         var stack = new Stack<(State, StateSet)>();
         stack.Push((t0, v0));
         var vn = new List<State>();
@@ -372,7 +382,17 @@ internal static class DeliveryModel
                     Steps(v, sc, Driver.V203, This, frames, vn);
                     if (vn.Count == 0 && NoWorse(mine, v.Delivered & FrameMask)) { matched = true; break; }
                 }
-                if (!matched && res.Worse.Add(mine)) res.Example ??= Show(mine);
+                if (!matched && res.Worse.Add(mine) && res.Example == null)
+                {
+                    res.Example = Show(mine);
+                    if (parent != null)
+                    {
+                        res.Path = new List<State>();
+                        var k = (t, V);
+                        while (true) { res.Path.Add(k.Item1); if (!parent.TryGetValue(k, out var pk)) break; k = pk; }
+                        res.Path.Reverse();
+                    }
+                }
                 continue;
             }
             foreach (var n in buf)
@@ -386,12 +406,12 @@ internal static class DeliveryModel
                         vn.Clear();
                         Steps(v, sc, Driver.V203, This, frames, vn);
                         foreach (var m in vn)
-                            if (IsShared(v, m) && m.SdkPc == n.SdkPc && m.P == n.P && m.Done == n.Done && m.RecycleUsed == n.RecycleUsed && m.ReAddUsed == n.ReAddUsed) h.Add(m);
+                            if (Label(v, m) == Label(t, n) && m.SdkPc == n.SdkPc && m.P == n.P && m.Done == n.Done && m.RecycleUsed == n.RecycleUsed && m.ReAddUsed == n.ReAddUsed) h.Add(m);
                     }
                     if (h.Count == 0) { res.Unaligned++; continue; }
                     V2 = Close(Intern(h));
                 }
-                if (seen.Add((n, V2))) stack.Push((n, V2));
+                if (seen.Add((n, V2))) { parent?.Add((n, V2), (t, V)); stack.Push((n, V2)); }
             }
         }
         return res;
