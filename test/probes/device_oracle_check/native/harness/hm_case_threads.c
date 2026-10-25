@@ -292,11 +292,10 @@ static void StreamNextProgramInOwnerGone(PlanProfile *p, int legacy, int parked)
 /* The next program starts the moment the worker's wait answers the last
  * program's pipe close, before OwnerGone runs, with no read parked or one
  * parked all along. Under 2.1.0 the worker has left its counted wait by
- * then, so the first frame is handed over with no signal, and OwnerGone's
- * take finds it, beside the acknowledgement the next program zeroed: it
- * is owed. A program before 2.1.0 signals it. v2.0.3 reads that signal
- * after OwnerGone and serves it to the read, from the cache when it comes
- * late. */
+ * then, so the first frame is handed over final with no signal. OwnerGone
+ * leaves the handoff alone, and the take at the loop top after it reads the
+ * frame. A program before 2.1.0 signals it. v2.0.3 reads that signal after
+ * OwnerGone and serves it to the read, from the cache when it comes late. */
 static int NextAtOwnerAnswer(HmThread *t, DWORD result)
 {
     Ctl *c = g_nextCtl;
@@ -732,11 +731,10 @@ static void StreamTakeSentThenNewer(PlanProfile *p, int kill)
 }
 
 /* OwnerGone's release-bit rule. Program A (2.1.0) is killed with frame X in
- * the handoff, its exchange done and no SetEvent. The next program B starts
- * inside OwnerGone: on this driver between the take and the read of the
- * release bit (the first SRW lock a driver thread takes after the wait
- * answers the pipe's close), on a driver without that lock at the pipe
- * client's close, whichever comes first. B zeroes the input section and the
+ * the handoff, provisional, its exchange done and no SetEvent. The next
+ * program B starts inside OwnerGone: at the first SRW lock a driver thread
+ * takes after the wait answers the pipe's close, or at the pipe client's
+ * close, whichever comes first. B zeroes the input section and the
  * acknowledgement, and under 2.1.0 clears the handoff, then writes B1,
  * handed or signaled. sameseq: X is A's first frame, SeqNo 2, which a B1
  * before 2.1.0 repeats. The record x6.bstart says where B started: 1 at
@@ -1043,12 +1041,12 @@ static void StreamX7Recycle(PlanProfile *p)
 
 /* A frame left in the handoff by a program killed between its exchange and
  * its compare-exchange, with the worker counted, then taken at a loop top
- * (here after a timeout) before the pipe's close is seen. Between that take
- * and its read the program's pipe closes and the next program B starts and
- * stores B1 (on 533ca4a4, after its timeout wake, before its next wait's
- * answer). B1's SetEvent comes after OwnerGone. sent: X was read before
- * its exchange. v111: the next program is a v1.11.0 one, with no owner
- * pipe and no acknowledgement. */
+ * (here after a timeout) before the pipe's close is seen. The take drops
+ * the provisional SeqNo. The program's pipe then closes and the next
+ * program B starts and stores B1 (on 533ca4a4, after its timeout wake,
+ * before its next wait's answer). B1's SetEvent comes after OwnerGone.
+ * sent: X was read before its exchange. v111: the next program is a
+ * v1.11.0 one, with no owner pipe and no acknowledgement. */
 static void StreamX7KillStuck(PlanProfile *p, int sent, int legacy)
 {
     Ctl c;
@@ -1087,9 +1085,9 @@ static void StreamX7KillStuck(PlanProfile *p, int sent, int legacy)
 
 /* x7-kill-stuck-unsent-alone-at-take: as x7-kill-stuck-unsent-*, with no
  * next program. The frame a program left in the handoff as it died is
- * taken at a loop top before the pipe's close is seen, and read. v2.0.3,
- * whose program died before its SetEvent in the same order, never sends
- * it. */
+ * taken at a loop top before the pipe's close is seen. The take drops the
+ * provisional SeqNo, so the frame is never sent, as on v2.0.3, whose
+ * program died before its SetEvent in the same order. */
 static void StreamX7KillStuckAlone(PlanProfile *p)
 {
     Ctl c;
@@ -1228,7 +1226,8 @@ static void StreamX8(PlanProfile *p, int mode, int probe)
  * (SharedMemoryIO.ForgetDriverLocked), and this device context lives on
  * with its watch connected. AnnounceGate sets the gate's capability again
  * at the 256th frame, the release bit stays clear. Then a frame handed over
- * while the worker completes a read, and nothing after it. */
+ * while the worker completes a parked read, and nothing after it: the take
+ * at the next loop top reads it for the read that follows. */
 static void X8HandY(void)
 {
     uint8_t data[64];
@@ -1258,11 +1257,12 @@ static void StreamX8Forgotten(PlanProfile *p)
     memcpy(&caps, c.sdk.ack->buf + 4, 4);
     RecOut("x8.ackcaps", &caps, 4);
     HidRead(&c, len);
+    HidRead(&c, len);
     g_x8Ctl = &c;
     g_completeHook = X8HandY;
     for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0xA0 + i);
     Frame(&c, data, 63, NULL, NULL, 0);
-    g_completeHook = NULL;
+    if (g_completeHook) HmFail("x8: the completion hook never ran");
     HidRead(&c, len);
     for (int i = 0; i < 3; i++) ThreadResume(CtlThread(&c, 0));
     CtlStop(&c);
@@ -1271,8 +1271,9 @@ static void StreamX8Forgotten(PlanProfile *p)
 /* Issue #67 with a frame left provisional. A keyboard-style program
  * holds a key, its release frame queued. It is killed between X's exchange
  * (key down) and its recheck, with the worker counted. The worker reaches
- * its take before it sees the pipe close (a timeout here), reads and sends
- * X, then handles the close. The release frame must still be last. */
+ * its take before it sees the pipe close (a timeout here) and drops the
+ * provisional SeqNo, so X is never sent, as on 533ca4a4, where the program
+ * died before its SetEvent. The release frame goes out last. */
 static void StreamX8StuckAloneRelease(PlanProfile *p)
 {
     Ctl c;
@@ -1339,8 +1340,8 @@ static void StreamX8NextHandedAtTake(PlanProfile *p)
 
 /* x9: the first atomic step of a frame's handoff, then the program dies.
  * With a final SeqNo still waiting for its take, that step is the one
- * compare-exchange that puts this frame's final SeqNo in its place;
- * otherwise it is the exchange of the provisional SeqNo. On a driver
+ * compare-exchange that puts this frame's final SeqNo in its place.
+ * Otherwise it is the exchange of the provisional SeqNo. On a driver
  * without the capability nothing is written: the program died before its
  * SetEvent. */
 static void X9FirstStep(Sdk *s)
@@ -1410,6 +1411,117 @@ static void StreamX9FirstStepKill(PlanProfile *p, int idle)
     ThreadResume(CtlThread(&c, 0));
     CtlStop(&c);
 }
+/* x10-idle-window-next-late-read: A ends and OwnerGone runs. B starts
+ * inside the idle window, before any recycle, so the worker keeps the
+ * input event it holds and maps nothing. B1 is read with no read parked,
+ * then B ends and a read comes. The watch is retried at a map or every
+ * 256th frame, as on 533ca4a4, so B is not watched, no OwnerGone resets the
+ * delivered gate, and the read takes B1 from the cache. */
+static void StreamX10IdleWindowNext(PlanProfile *p, int legacy)
+{
+    Ctl c;
+    StreamBegin("threads/%s/x10-idle-window-next-late-read%s", p->id, legacy ? "-legacy" : "");
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    uint8_t data[64];
+    Probe(&c, 0, 1);
+    PipeServerClose(c.sdk.pipe);
+    ThreadResume(CtlThread(&c, 0));
+    MapNextProgram(&c, legacy);
+    Hold(&c.sdk.pipe->o);
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x70 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    PipeServerClose(c.sdk.pipe);
+    ThreadResume(CtlThread(&c, 0));
+    ThreadResume(CtlThread(&c, 0));
+    HidRead(&c, len);
+    HidGetInput(&c, 0x01, len);
+    CtlStop(&c);
+}
+
+/* x10-take-owner-at-teardown: while the worker completes a read, A's frame
+ * X is handed over final and A's pipe closes. The worker takes X, and its
+ * device's teardown has set TearingDown, with the stop event still to come,
+ * when it polls: the poll answers the pipe's close. The queues are purged by
+ * then, so the worker signals X back instead of reading it, and the device
+ * added again reads X for its read. 533ca4a4's worker, still before its
+ * wait, leaves X's signal set for the next device the same way. */
+static void X10TearAtPoll(void)
+{
+    Ctl *c = g_x9Ctl;
+    *(volatile LONG *)((uint8_t *)c->dev->context + HmTearingDownOffset) = 1;
+}
+static void X10HandAndClose(void)
+{
+    Ctl *c = g_x9Ctl;
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x30 + i);
+    SdkWriteFrame(&c->sdk, data, 63, NULL, NULL, 0);
+    PipeServerClose(c->sdk.pipe);
+    g_pollHook = X10TearAtPoll;
+}
+static void StreamX10TakeOwnerTeardown(PlanProfile *p)
+{
+    Ctl c;
+    StreamBegin("threads/%s/x10-take-owner-at-teardown", p->id);
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    uint8_t data[64];
+    Probe(&c, 0, 1);
+    HidRead(&c, len);
+    g_x9Ctl = &c;
+    g_completeHook = X10HandAndClose;
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x20 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    if (g_completeHook) HmFail("x10: the completion hook never ran");
+    g_pollHook = NULL;
+    DeviceRemove(c.dev);
+    ConfigWrite(p, 0);
+    c.dev = DeviceAdd(0);
+    if (!c.dev) HmFail("x10: re-add failed");
+    HidRead(&c, len);
+    RunWorker(&c);
+    RunWorker(&c);
+    HidRead(&c, len);
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x90 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    CtlStop(&c);
+}
+
+/* x10-next-handed-at-take-stop: x8-next-handed-at-take-before-ownergone
+ * with a foreign stop set beside the pipe's close. The worker takes B1,
+ * its poll answers the stop, and it signals B1 back and recycles: Phase 1
+ * runs OwnerGone, then reads B1 once. */
+static void X10SwitchStop(void)
+{
+    Ctl *c = g_x8Ctl;
+    X8SwitchHook();
+    HmObj *o = ObjFromHandle(c->dev->threads[0]->waitHandles[0]);
+    if (!o || o->kind != HK_EVENT || !((HmEvent *)o)->manual) HmFail("x10: no stop event");
+    EventSet((HmEvent *)o);
+}
+static void StreamX10NextHandedStop(PlanProfile *p)
+{
+    Ctl c;
+    StreamBegin("threads/%s/x10-next-handed-at-take-stop", p->id);
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    Probe(&c, 0, 1);
+    HidRead(&c, len);
+    g_x8Ctl = &c;
+    g_completeHook = X10SwitchStop;
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x30 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    if (g_completeHook) HmFail("x10: the switch hook never ran");
+    HidRead(&c, len);
+    for (int i = 0; i < 3; i++) ThreadResume(CtlThread(&c, 0));
+    HidRead(&c, len);
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x90 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    HidRead(&c, len);
+    CtlStop(&c);
+}
 void CaseThreads(void)
 {
     PlanProfile *sw = PlanFind("switch", NULL);
@@ -1469,4 +1581,8 @@ void CaseThreads(void)
     StreamX8NextHandedAtTake(ds);
     StreamX9FirstStepKill(ds, 0);
     StreamX9FirstStepKill(ds, 1);
+    StreamX10IdleWindowNext(ds, 0);
+    StreamX10IdleWindowNext(ds, 1);
+    StreamX10TakeOwnerTeardown(ds);
+    StreamX10NextHandedStop(ds);
 }
