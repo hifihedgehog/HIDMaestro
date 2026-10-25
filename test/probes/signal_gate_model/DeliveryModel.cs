@@ -489,6 +489,7 @@ internal static class DeliveryModel
         public bool ZeroSent;
         public string? Example;
         public List<State>? Path;
+        public readonly Dictionary<ulong, List<State>> Paths = new();
         public List<State>? UnalignedPath;
         public List<string>? PairedSide;
     }
@@ -852,7 +853,8 @@ internal static class DeliveryModel
                     res.ExtraExample = Show(mine);
                     if (parent != null) res.ExtraPath = PathTo(parent, (tk, V));
                 }
-                if (!matched && res.Worse.Add(mine) && res.Example == null)
+                if (!matched && res.Worse.Add(mine) && parent != null) res.Paths[mine] = PathTo(parent, (tk, V));
+                if (!matched && res.Example == null)
                 {
                     res.Example = Show(mine) + (V == None ? " (after a step v2.0.3 could not take)" : "");
                     if (parent != null) res.Path = PathTo(parent, (tk, V));

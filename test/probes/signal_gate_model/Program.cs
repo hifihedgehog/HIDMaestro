@@ -17,8 +17,19 @@
 // The variants without a fence on one side must fail. That they do shows the
 // check finds a lost wakeup when there is one.
 //
-// Usage: SignalGateModel [frames]   (3 unless given). Exit 0 when every
-// variant gives the expected verdict, 1 otherwise.
+// Usage:
+//   SignalGateModel [frames]   the fence and companion variants at frames
+//     (3 unless given), then the delivery check at one frame a program:
+//     this driver's rules, then each rule taken away. Exit 0 when every
+//     verdict is the expected one.
+//   SignalGateModel check <frames> <rule> [--shard k/n] [-j N] [--index i]
+//     [--quiet] [--progress] [--max-states n]   the delivery check alone.
+//     Rule -1 is this driver, an index takes that rule away (Broken), c<i>
+//     runs a candidate change (Candidates). Shards split the scenarios by
+//     index modulo n, so separate processes can run them.
+//   SignalGateModel scenarios   each scenario's index and name.
+//   SignalGateModel outcomes <frames> <scenario> [v203]   one driver's
+//     outcomes in a scenario, unpaired.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -93,7 +104,8 @@ internal static class Program
         // The delivery check at one frame a program, in this process: this
         // driver's rules must pass, and each rule taken away must fail. The
         // larger runs shard it across processes (check).
-        int jobs = Math.Max(1, Environment.ProcessorCount / 2);
+        // One scenario at a time: a paired scenario can take gigabytes.
+        int jobs = 1;
         if (RunCheck(1, -1, 0, 1, jobs, null, false) != 0) bad++;
         for (int i = 0; i < DeliveryModel.Broken.Length; i++)
             if (RunCheck(1, i, 0, 1, jobs, null, false) != 0) bad++;
@@ -150,13 +162,20 @@ internal static class Program
                                                  rule >= 0 ? () => k > Volatile.Read(ref best) : null, s_maxStates);
             if (s_progress)
                 Console.Error.WriteLine($"{mine[k].i}	{a.States}	{a.Sets}	{a.SetItems}	{a.V203States}	{(a.TooLarge ? "TOO LARGE" : "")}	{sw.Elapsed.TotalSeconds:F1}s	{mine[k].sc.Name}	subsumed {a.Subsumed}	worse {a.Worse.Count}	extra {a.Extra.Count}");
-            // A rule taken away breaks the check only in a scenario this
-            // driver's own rules pass.
+            // A rule taken away breaks the check where it gives a failing
+            // outcome this driver's own rules do not give in that scenario.
             if (rule >= 0 && !a.Canceled && (a.Worse.Count > 0 || a.ZeroSent))
             {
                 var own = DeliveryModel.ExploreAligned(mine[k].sc, DeliveryModel.This, frames, false,
-                                                       () => k > Volatile.Read(ref best));
-                if (own.Canceled || own.Worse.Count > 0 || own.ZeroSent) { a.OwnFails = !own.Canceled; a.Worse.Clear(); a.ZeroSent = false; }
+                                                       () => k > Volatile.Read(ref best), s_maxStates);
+                if (own.Canceled) { a.Worse.Clear(); a.ZeroSent = false; }
+                else
+                {
+                    a.OwnFails = own.Worse.Count > 0 || own.ZeroSent;
+                    a.Worse.ExceptWith(own.Worse);
+                    if (own.ZeroSent) a.ZeroSent = false;
+                    if (a.Worse.Count > 0) a.Example = DeliveryModel.Show(a.Worse.First()) + " (an outcome this driver's own rules do not give)";
+                }
             }
             results[k] = a;
             if (rule >= 0 && !a.Canceled && (a.Worse.Count > 0 || a.ZeroSent))
@@ -209,11 +228,11 @@ internal static class Program
             var a = results[k]!;
             Console.WriteLine($"[BREAKS] {rules.Name}, {where}: {mine[k].sc.Name} (scenario {mine[k].i}): [{a.Example}]" +
                               (a.ZeroSent ? ", a zeroed section sent" : ""));
-            if (witness) PrintWitness(mine[k].sc, rules, frames);
+            if (witness) PrintWitness(mine[k].sc, rules, frames, a.Worse.Count > 0 ? a.Worse.First() : null);
             return 0;
         }
-        Console.WriteLine($"[NO BREAK] {rules.Name}, {where}: no scenario breaks the check" +
-                          (ownFails > 0 ? $" ({ownFails} scenario(s) skipped where this driver's own rules fail)" : "") + $". {totals}");
+        Console.WriteLine($"[NO BREAK] {rules.Name}, {where}: no scenario gives a failing outcome this driver's own rules do not" +
+                          (ownFails > 0 ? $" ({ownFails} scenario(s) where this driver's own rules fail as well)" : "") + $". {totals}");
         return 1;
     }
 
@@ -226,10 +245,11 @@ internal static class Program
     }
 
     // The failing order, state by state, as the fields each step changed.
-    static void PrintWitness(DeliveryModel.Scenario sc, DeliveryModel.Rules rules, int frames)
+    static void PrintWitness(DeliveryModel.Scenario sc, DeliveryModel.Rules rules, int frames, ulong? want = null)
     {
         var a = DeliveryModel.ExploreAligned(sc, rules, frames, true);
-        var path = a.Path;
+        var path = want != null && a.Paths.TryGetValue(want.Value, out var p) ? p : a.Path;
+        if (want != null && path != a.Path) a.Example = DeliveryModel.Show(want.Value);
         if (path == null) { Console.WriteLine("    (no witness path)"); return; }
         Console.WriteLine($"    witness, {path.Count - 1} steps, this driver delivers [{a.Example}]:");
         for (int i = 1; i < path.Count; i++)
