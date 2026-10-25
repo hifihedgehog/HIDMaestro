@@ -93,6 +93,10 @@
 //   submit-repeat [runs] [calls]
 //                  offline: the same on the two budget profiles that repeat
 //                  their last frame, with the repeat running
+//   gate-offline [runs] [calls]
+//                  offline: the frame writer through the signal gate on
+//                  buffers of this process's own, kept and taken back, each
+//                  row's median ns per call (GateCost.cs)
 //   encode [runs] [calls]
 //                  offline: the codec's encode of the budget table's
 //                  codec-encoded input reports, each median ns per call
@@ -296,6 +300,8 @@ internal static partial class Program
             Load(runs);
             return 0;
         }
+        if (mode == "gate-offline")
+            return GateOffline(runs, args.Length > 2 && int.TryParse(args[2], out int gateCalls) ? gateCalls : 200_000);
         if (mode is "submit" or "submit-repeat")
         {
             SubmitCost.Run(runs, args.Length > 2 && int.TryParse(args[2], out int calls) ? calls : 100_000, mode == "submit-repeat");
