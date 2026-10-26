@@ -2474,9 +2474,6 @@ public static partial class DeviceManager
                          NeverSignaled, budgetMs, recheckMs: 10);
     }
 
-    /// <summary>Removes a prior life of an id about to be registered again,
-    /// as <see cref="RemoveDevice"/> with its fallbacks, and returns the
-    /// outcome of the parent's removal test for the registration gate.</summary>
     /// <summary>Asks Windows to remove a device and the devices below it the
     /// way Safely Remove Hardware asks, under the PnP lock
     /// (CM_Query_And_Remove_SubTreeW). Every program that watches the device
@@ -2516,6 +2513,9 @@ public static partial class DeviceManager
     [LibraryImport("cfgmgr32.dll")]
     private static partial int CM_Query_And_Remove_SubTreeW(uint dnAncestor, out uint pVetoType, IntPtr pszVetoName, uint ulNameLength, uint ulFlags);
 
+    /// <summary>Removes a prior life of an id about to be registered again,
+    /// as <see cref="RemoveDevice"/> with its fallbacks, and returns the
+    /// outcome of the parent's removal test for the registration gate.</summary>
     internal static RemovalOutcome RemovePriorLife(string instanceId, int timeoutMs)
     {
         if (CM_Locate_DevNodeW(out _, instanceId, 0) != CR_SUCCESS &&
