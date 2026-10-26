@@ -737,8 +737,18 @@ static WDFOBJECT WDFAPI HmWdfTimerGetParentObject(PWDF_DRIVER_GLOBALS g, WDFTIME
  * every implementation's signature against the kit's. */
 #define SET(name, pfn, fn) do { pfn p_ = fn; g_table[name##TableIndex] = (WDFFUNC)p_; } while (0)
 
+/* WdfDeviceSetFailed: recorded with its action, the driver's answer to a
+ * remove request (driver.c, the remove event). */
+static VOID WDFAPI HmWdfDeviceSetFailed(PWDF_DRIVER_GLOBALS g, WDFDEVICE Device, WDF_DEVICE_FAILED_ACTION FailedAction)
+{
+    (void)g; (void)Device;
+    uint32_t action = (uint32_t)FailedAction;
+    RecOut("device.setfailed", &action, 4);
+}
+
 void WdfInit(void)
 {
+    SET(WdfDeviceSetFailed, PFN_WDFDEVICESETFAILED, HmWdfDeviceSetFailed);
     SET(WdfDriverCreate, PFN_WDFDRIVERCREATE, HmWdfDriverCreate);
     SET(WdfFdoInitSetFilter, PFN_WDFFDOINITSETFILTER, HmWdfFdoInitSetFilter);
     SET(WdfFdoInitQueryPropertyEx, PFN_WDFFDOINITQUERYPROPERTYEX, HmWdfFdoInitQueryPropertyEx);

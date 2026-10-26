@@ -83,8 +83,8 @@ C_ASSERT(FIELD_OFFSET(HIDMAESTRO_VERSION_INFO, DriverConfigError) == 56);
  * decrement when the wait returns. InputHandoff holds a frame's even SeqNo
  * once final, the SeqNo with its low bit set while provisional, or 0. A
  * take that finds a final SeqNo reads the section without waiting and
- * sends whatever new frame it holds, the frame taken or a newer one, not
- * only a frame whose SeqNo is the one taken. When the poll after the take
+ * sends whatever new frame it holds: the frame taken, or a newer one its
+ * program stored since. When the poll after the take
  * returns the stop event, at a foreign stop or at teardown, the worker
  * signals the input event for that frame instead. At teardown with any
  * other result of the poll it leaves with the frame unread and signals
@@ -93,9 +93,10 @@ C_ASSERT(FIELD_OFFSET(HIDMAESTRO_VERSION_INFO, DriverConfigError) == 56);
  * SeqNo still there is a read the worker owes, which finds this frame too:
  * one compare-exchange puts this frame's final SeqNo in its place, and no
  * SetEvent runs. Otherwise it reads InputWaiters. With a worker counted it
- * calls SetEvent and leaves InputHandoff alone, after a full fence when the
- * frame rings the companion's doorbell too, since that branch has no
- * interlocked operation before the companion's count is read. With none it
+ * calls SetEvent and leaves InputHandoff alone. That branch has no
+ * interlocked operation, so for every frame with a companion event a full
+ * fence comes before the companion's count is read: a volatile read may
+ * pass an earlier volatile write, on x64 and on ARM64 with LRCPC. With none it
  * exchanges the provisional SeqNo in, then loads the capability again and
  * InputWaiters. With the capability still set and the count zero, a
  * compare-exchange makes the frame final for the worker's next take.

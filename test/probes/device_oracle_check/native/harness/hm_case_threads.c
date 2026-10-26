@@ -13,6 +13,17 @@ static void Timeout(Ctl *c, int thread, int times)
     for (int i = 0; i < times; i++) ThreadResume(CtlThread(c, thread));
 }
 
+/* The handoff word after a step-split helper, so the stream shows what the
+ * SDK left there: the provisional SeqNo (low bit set) of a frame whose
+ * program stopped inside its handoff. 0 on a driver without the gate. */
+static void RecordHandoffLeft(Sdk *s)
+{
+    int32_t h = 0;
+    if (s->signal) memcpy(&h, s->signal->buf + 68, 4);
+    RecOut("handoff.left", &h, 4);
+}
+
+
 /* One frame through a parked read, then the polled report: what the
  * worker serves once it holds the section again. */
 static void Probe(Ctl *c, int sw, int n)
@@ -424,10 +435,11 @@ static void StreamX5GateOff(PlanProfile *p)
     CtlStop(&c);
 }
 
-/* A program killed inside WriteInputFrame before it signaled frame X: after
- * its exchange put X in the handoff, or, with a worker counted, after it
- * found the count and left the handoff alone. A worker sits in its counted
- * wait, so nothing wakes it for X. Then the pipe closes.
+/* A program killed inside WriteInputFrame after its exchange put frame X
+ * in the handoff and before it read the count again and signaled. It read
+ * the count as zero before the worker's increment, so it took the
+ * provisional path. A worker sits in its counted wait, so nothing wakes it
+ * for X. Then the pipe closes.
  * With release frames (issue #67, a keyboard's key held) and without (a
  * gamepad). v2.0.3, killed after the store and before its SetEvent, never
  * reads X: the release frame, or the frame before X, is the last report. */
@@ -456,9 +468,8 @@ static void StreamX5Kill(PlanProfile *p, int release)
     for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0xA0 + i);
     SdkWriteFrame(&c.sdk, data, 63, NULL, NULL, 0);
     c.sdk.inputEv->signaled = FALSE;
-    int32_t waiters = 0;
-    if (c.sdk.signal) memcpy(&waiters, c.sdk.signal->buf + 64, 4);
-    if (c.sdk.signal && (caps & 1) && waiters == 0) { uint32_t prov = c.sdk.seq | 1; memcpy(c.sdk.signal->buf + 68, &prov, 4); }
+    if (c.sdk.signal && (caps & 1)) { uint32_t prov = c.sdk.seq | 1; memcpy(c.sdk.signal->buf + 68, &prov, 4); }
+    RecordHandoffLeft(&c.sdk);
     PipeServerClose(c.sdk.pipe);
     ThreadResume(CtlThread(&c, 0));
     Timeout(&c, 0, 1);
@@ -638,22 +649,18 @@ static void X6Signal(Sdk *s)
     if (SdkHandOver(s)) EventSet(s->inputEv);
 }
 
-/* The SDK's step that hands the frame over, and the program killed before
- * its recheck. With no worker counted that is the exchange: the frame sits
- * in the handoff, provisional (2.1.0 on a gated driver), with no SetEvent.
- * With a worker counted the SDK leaves the handoff alone for its SetEvent,
- * and the program dies before it: nothing is written, and X6Resume, the
- * program resuming instead, is that SetEvent. */
-static int g_x6Fast;
+/* The SDK's exchange of the provisional SeqNo, and the program stopped
+ * before its recheck: the frame sits in the handoff, provisional (2.1.0 on
+ * a gated driver), with no SetEvent. The SDK read the count as zero before
+ * the worker's increment, so it took the provisional path though the
+ * worker is counted by the exchange: the order in which a program still
+ * leaves a provisional SeqNo beside a counted worker. */
 static void X6ExchangeOnly(Sdk *s)
 {
-    int32_t caps = 0, waiters = 0;
-    g_x6Fast = 0;
-    if (s->signal) { memcpy(&caps, s->signal->buf + 4, 4); memcpy(&waiters, s->signal->buf + 64, 4); }
-    if (s->signal && (caps & 1)) {
-        if (waiters != 0) g_x6Fast = 1;
-        else { uint32_t prov = s->seq | 1; memcpy(s->signal->buf + 68, &prov, 4); }
-    }
+    int32_t caps = 0;
+    if (s->signal) memcpy(&caps, s->signal->buf + 4, 4);
+    if (s->signal && (caps & 1)) { uint32_t prov = s->seq | 1; memcpy(s->signal->buf + 68, &prov, 4); }
+    RecordHandoffLeft(s);
 }
 
 /* A take of a frame already sent. P is signaled. At the wait's answer,
@@ -1101,8 +1108,7 @@ static void StreamX7KillStuckAlone(PlanProfile *p)
 static void X6Resume(Sdk *s)
 {
     int input = 1;
-    if (g_x6Fast) g_x6Fast = 0;
-    else if (s->signal) {
+    if (s->signal) {
         int32_t caps, waiters, handoff, fin = (int32_t)s->seq, prov = fin | 1;
         memcpy(&caps, s->signal->buf + 4, 4);
         memcpy(&handoff, s->signal->buf + 68, 4);
@@ -1327,21 +1333,19 @@ static void StreamX8NextHandedAtTake(PlanProfile *p)
 /* x9: the first atomic step of a frame's handoff, then the program dies.
  * With a final SeqNo still waiting for its take, that step is the one
  * compare-exchange that puts this frame's final SeqNo in its place.
- * Otherwise, with no worker counted, it is the exchange of the provisional
- * SeqNo. With a worker counted, and on a driver without the capability,
+ * Otherwise it is the exchange of the provisional SeqNo, the count read as
+ * zero before the worker's increment. On a driver without the capability
  * nothing is written: the program died before its SetEvent. */
 static void X9FirstStep(Sdk *s)
 {
-    int32_t caps = 0, handoff, waiters;
-    if (!s->signal) return;
-    memcpy(&caps, s->signal->buf + 4, 4);
-    if (!(caps & 1)) return;
-    memcpy(&handoff, s->signal->buf + 68, 4);
-    memcpy(&waiters, s->signal->buf + 64, 4);
-    int owed = handoff != 0 && (handoff & 1) == 0;
-    if (!owed && waiters != 0) return;
-    uint32_t v = owed ? s->seq : (s->seq | 1);
-    memcpy(s->signal->buf + 68, &v, 4);
+    int32_t caps = 0, handoff;
+    if (s->signal) memcpy(&caps, s->signal->buf + 4, 4);
+    if (s->signal && (caps & 1)) {
+        memcpy(&handoff, s->signal->buf + 68, 4);
+        uint32_t v = handoff != 0 && (handoff & 1) == 0 ? s->seq : (s->seq | 1);
+        memcpy(s->signal->buf + 68, &v, 4);
+    }
+    RecordHandoffLeft(s);
 }
 
 /* x9-newer-first-step-then-kill: X is read before its handoff lands, and
@@ -2143,15 +2147,29 @@ static void StreamX13CompanionFence(PlanProfile *p)
  * gets a wake for X, and the next frame goes out on both. -stop: the stop
  * event is set too, the poll returns it, and the worker signals X back, as
  * 533ca4a4's wait returns the stop event first and leaves X's signal set:
- * the device added again sends X on both. */
-enum { X14_OWNER, X14_REMOVE, X14_TIMEOUT, X14_INPUT, X14_STOP };
+ * the device added again sends X on both. -late-final: a later frame G is
+ * handed over final after the take's decrement, then the poll times out:
+ * the worker leaves with X unread, and the device's going closes the gate,
+ * which signals G's final SeqNo, and the device added again sends G.
+ * 533ca4a4's wait returns X's signal and spends it, and G's SetEvent,
+ * after that answer, stays set for the device added again, which sends G. */
+enum { X14_OWNER, X14_REMOVE, X14_TIMEOUT, X14_INPUT, X14_STOP, X14_LATE_FINAL };
 static Ctl *g_x14Ctl;
 static int g_x14Mode, g_x14Torn;
 static HmEvent *g_x14Remove;
+/* G, written through the gate after the take's decrement: with no worker
+ * counted it is handed over final (signaled on 533ca4a4). */
+static void X14WriteG(Ctl *c)
+{
+    uint8_t g[64];
+    for (int i = 0; i < 64; i++) g[i] = (uint8_t)(0x60 + i);
+    SdkWriteFrame(&c->sdk, g, 63, NULL, NULL, 0);
+}
 static void X14Tear(void)
 {
     Ctl *c = g_x14Ctl;
     g_x14Torn = 1;
+    if (g_x14Mode == X14_LATE_FINAL && HmOnDriverThread()) X14WriteG(c);
     *(volatile LONG *)((uint8_t *)c->dev->context + HmTearingDownOffset) = 1;
     if (g_x14Mode == X14_INPUT) {
         X6Store(&c->sdk, 0x60);
@@ -2175,7 +2193,7 @@ static void X14Hand(void)
 }
 static void StreamX14TakeAtTeardown(PlanProfile *p, int mode)
 {
-    static const char *names[] = { "owner", "remove", "timeout", "input", "stop" };
+    static const char *names[] = { "owner", "remove", "timeout", "input", "stop", "late-final" };
     Ctl c;
     StreamBegin("threads/%s/x14-take-at-teardown-%s", p->id, names[mode]);
     g_x14Remove = NULL;
@@ -2206,6 +2224,8 @@ static void StreamX14TakeAtTeardown(PlanProfile *p, int mode)
     if (!g_x14Torn) {
         X14Tear();
         ThreadResume(CtlThread(&c, 0));
+        /* G after the wait's answer, as it comes after the take here. */
+        if (mode == X14_LATE_FINAL) X14WriteG(&c);
     }
     DeviceRemove(c.dev);
     /* The removal the SDK asked for is done with the device. */
@@ -2219,6 +2239,72 @@ static void StreamX14TakeAtTeardown(PlanProfile *p, int mode)
     HidRead(&c, len);
     for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x90 + i);
     Frame(&c, data, 63, NULL, NULL, 0);
+    CtlStop(&c);
+}
+
+/* x15-remove-at-poll-after-take: with no owner watch open the worker's wait
+ * is the stop event, the input event and the remove event, so the remove
+ * event has the index the owner read has while it is open. F0 is handed over
+ * final while the worker completes a read, and at the worker's next take
+ * the SDK's Dispose sets the remove event (RequestSurpriseRemoval). The poll
+ * after the take returns it: the worker reads F0, then handles the remove
+ * request and fails the device (device.setfailed) and signals the Removed
+ * event (x15.removed 1). 533ca4a4, which takes nothing, gets the remove
+ * event at the same point of its next wait, after F0's signal: it reads F0
+ * on that wait and handles the remove on the next. A poll result read as
+ * the owner read sent the worker back to wait with the auto-reset remove
+ * event spent, and the request went unanswered. The positive control
+ * after it: the remove event set again with the worker in its counted wait
+ * and no take pending. */
+static Ctl *g_x15Ctl;
+static int g_x15Done;
+static int X15RemoveAtTake(volatile LONG *target, LONG value)
+{
+    (void)value;
+    Sdk *s = &g_x15Ctl->sdk;
+    if (g_x15Done || !s->signal || (uint8_t *)target != s->signal->buf + 68) return 0;
+    g_x15Done = 1;
+    EventSet(s->removeEv);
+    return 1;
+}
+static void X15HandF0(void)
+{
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x30 + i);
+    SdkWriteFrame(&g_x15Ctl->sdk, data, 63, NULL, NULL, 0);
+    g_exchangeHook = X15RemoveAtTake;
+}
+static void StreamX15RemoveAtPoll(PlanProfile *p)
+{
+    Ctl c;
+    StreamBegin("threads/%s/x15-remove-at-poll-after-take", p->id);
+    if (!CtlStart(&c, p, 0, SDK_SECTIONS | SDK_OUTPUT | SDK_REMOVE, 0)) return;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    uint8_t data[64];
+    Probe(&c, 0, 1);
+    HidRead(&c, len);
+    HidRead(&c, len);
+    g_x15Ctl = &c;
+    g_x15Done = 0;
+    g_completeHook = X15HandF0;
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x20 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    if (g_completeHook) HmFail("x15: the completion hook never ran");
+    g_exchangeHook = NULL;
+    /* x15.at: 1 when the remove event was set at the worker's take, 2 when
+     * the driver made no take and the stream sets it at the same point of
+     * its next wait. */
+    uint32_t at = g_x15Done ? 1u : 2u;
+    RecOut("x15.at", &at, 4);
+    if (!g_x15Done) { g_x15Done = 1; EventSet(c.sdk.removeEv); }
+    for (int i = 0; i < 3; i++) ThreadResume(CtlThread(&c, 0));
+    uint32_t removed = c.sdk.removedEv->signaled ? 1u : 0u;
+    RecOut("x15.removed", &removed, 4);
+    c.sdk.removedEv->signaled = FALSE;
+    EventSet(c.sdk.removeEv);
+    for (int i = 0; i < 2; i++) ThreadResume(CtlThread(&c, 0));
+    removed = c.sdk.removedEv->signaled ? 1u : 0u;
+    RecOut("x15.control.removed", &removed, 4);
     CtlStop(&c);
 }
 
@@ -2301,5 +2387,6 @@ void CaseThreads(void)
     StreamX13BeforeDecrement(ds, 0);
     StreamX13BeforeDecrement(ds, 1);
     StreamX13CompanionFence(xusb);
-    for (int m = X14_OWNER; m <= X14_STOP; m++) StreamX14TakeAtTeardown(ds, m);
+    for (int m = X14_OWNER; m <= X14_LATE_FINAL; m++) StreamX14TakeAtTeardown(ds, m);
+    StreamX15RemoveAtPoll(ds);
 }

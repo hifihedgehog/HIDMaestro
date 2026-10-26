@@ -2025,13 +2025,17 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
 
         for (;;) {
             /* The owner watch (issue #67) joins the wait while it is open.
-             * After it fires it is closed and the wait is back to two. */
-            /* The remove event joins last, after the owner read while
-             * that is open, so the indices below stay as they were. */
-            HANDLE waits[4] = { ctx->StopEvent, ctx->InputDataEvent, ctx->OwnerReadEvent, ctx->RemoveEvent };
+             * After it fires it is closed and the wait is back to two. The
+             * remove event joins last. Each index past the input event is
+             * named, ownerAt and removeAt: with no watch open the remove
+             * event takes the index the owner read has while it is open. */
+            HANDLE waits[4] = { ctx->StopEvent, ctx->InputDataEvent, NULL, NULL };
             DWORD count = 2;
-            if (ctx->OwnerReadEvent != NULL) count = 3;
-            DWORD removeAt = MAXDWORD;
+            DWORD ownerAt = MAXDWORD, removeAt = MAXDWORD;
+            if (ctx->OwnerReadEvent != NULL) {
+                waits[count] = ctx->OwnerReadEvent;
+                ownerAt = count++;
+            }
             if (ctx->RemoveEvent != NULL) {
                 waits[count] = ctx->RemoveEvent;
                 removeAt = count++;
@@ -2089,7 +2093,10 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                 idleTimeouts = 0;
                 ProcessSharedInput(ctx);
                 pending = FALSE;
-                if (rc == WAIT_OBJECT_0 + 2) continue;
+                /* The owner read waits again. A remove request goes on to
+                 * its handler below: the poll spent the auto-reset event,
+                 * and a wait again would never see it. */
+                if (ownerAt != MAXDWORD && rc == WAIT_OBJECT_0 + ownerAt) continue;
             }
             /* 2.1.0: a frame taken and not read when the poll returns the
              * stop event, at teardown or at a foreign stop (a recycle), goes
@@ -2204,7 +2211,7 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                 continue;
             }
 
-            if (rc == WAIT_OBJECT_0 + 2) {
+            if (ownerAt != MAXDWORD && rc == WAIT_OBJECT_0 + ownerAt) {
                 /* The consumer's end of the owner pipe closed. */
                 OwnerGone(ctx);
                 continue;
