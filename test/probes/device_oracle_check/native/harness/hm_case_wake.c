@@ -607,11 +607,16 @@ static void LastFrameAtRecycle(PlanProfile *p, int idle)
  *   ownergone: the program has a pipe, and the next one starts and sends
  *   B before the worker handled the pipe's close. The worker reads B first,
  *   then runs OwnerGone, which forgot the SeqNo after B was skipped.
+ *   ownergone-release: as ownergone, with a release frame in the
+ *   acknowledgement, and a next program with no pipe (v1.11.0), which leaves
+ *   the acknowledgement as it found it. The read waiting carries the release
+ *   frame, and B goes behind it to the next read: B, the next program's,
+ *   must not go ahead of the last program's release frame.
  * The read after B waits, and a wakeup with no new frame sends nothing. */
-enum { RESTART_PARKED, RESTART_LATE, RESTART_ZERO_READ, RESTART_OWNERGONE };
+enum { RESTART_PARKED, RESTART_LATE, RESTART_ZERO_READ, RESTART_OWNERGONE, RESTART_OWNERGONE_RELEASE };
 static void RestartSameSeqNo(PlanProfile *p, int mode)
 {
-    static const char *names[] = { "parked", "late", "zero-read", "ownergone" };
+    static const char *names[] = { "parked", "late", "zero-read", "ownergone", "ownergone-release" };
     Ctl c;
     char label[160];
     int saved = g_sdkSignal;
@@ -619,14 +624,16 @@ static void RestartSameSeqNo(PlanProfile *p, int mode)
     snprintf(label, sizeof(label), "%s restart-same-seqno-%s", p->id, names[mode]);
     char name[64];
     snprintf(name, sizeof(name), "restart-same-seqno-%s", names[mode]);
-    int pipe = mode == RESTART_OWNERGONE;
+    int pipe = mode == RESTART_OWNERGONE || mode == RESTART_OWNERGONE_RELEASE;
+    int parked = mode == RESTART_PARKED || pipe;
     if (StartHidWith(&c, p, name, label, pipe ? SDK_ALL : SDK_SECTIONS | SDK_OUTPUT)) {
         uint32_t seqA;
         memcpy(&seqA, c.sdk.input->buf, 4);
         Check(label, "control: frame A carries SeqNo 2", seqA == 2);
-        if (mode == RESTART_PARKED || mode == RESTART_OWNERGONE) Read(&c);
+        if (parked) Read(&c);
+        if (mode == RESTART_OWNERGONE_RELEASE) QueueRelease(&c);
         if (pipe) PipeServerClose(c.sdk.pipe);
-        NextProgram(&c, 1, pipe);
+        NextProgram(&c, 1, mode == RESTART_OWNERGONE);
         if (mode == RESTART_ZERO_READ) StaleWake(&c);
         uint8_t d[64];
         for (int i = 0; i < 64; i++) d[i] = (uint8_t)(0x40 + i);
@@ -635,13 +642,101 @@ static void RestartSameSeqNo(PlanProfile *p, int mode)
         memcpy(&seqB, c.sdk.input->buf, 4);
         Check(label, "control: frame B carries SeqNo 2 again", seqB == 2);
         Settle(CtlThread(&c, 0));
-        HmRequest *r = mode == RESTART_PARKED || mode == RESTART_OWNERGONE ? g_reads[1] : Read(&c);
-        Check(label, mode == RESTART_PARKED || mode == RESTART_OWNERGONE ? "the read waiting when frame B came carries B"
-                                                                         : "the read that comes after frame B carries B",
-              Carries(&c, r, 0x40));
+        HmRequest *r = parked ? g_reads[1] : Read(&c);
+        if (mode == RESTART_OWNERGONE_RELEASE) {
+            Check(label, "the read waiting when frame B came carries the release frame", CarriesRelease(r));
+            r = Read(&c);
+            Check(label, "the read after the release frame carries B", Carries(&c, r, 0x40));
+        } else {
+            Check(label, parked ? "the read waiting when frame B came carries B" : "the read that comes after frame B carries B",
+                  Carries(&c, r, 0x40));
+        }
         HmRequest *next = Read(&c);
         StaleWake(&c);
         Check(label, "frame B goes to exactly one read, and the read after waits", CarriedBy(&c, 0x40) == 1 && !next->completed);
+        CtlStop(&c);
+    }
+    g_sdkSignal = saved;
+}
+
+/* kept-gives-way: frame A2, the last of a program with a pipe and no
+ * release frame, is cached with no read parked, and OwnerGone keeps it. A
+ * program before 2.1.0 starts next, counts from 0, and sends B1 and B2
+ * before the worker wakes, so the worker reads B2, SeqNo 4 as A2's, with
+ * other data. B2 replaces A2, as any frame replaces one no read carried, and
+ * as v2.0.3's OwnerGone, which dropped A2 and forgot its SeqNo, let B2 in:
+ * the read that comes carries B2, once. */
+static void KeptGivesWay(PlanProfile *p)
+{
+    Ctl c;
+    char label[160];
+    int saved = g_sdkSignal;
+    g_sdkSignal = 0;
+    snprintf(label, sizeof(label), "%s kept-gives-way", p->id);
+    if (StartHidWith(&c, p, "kept-gives-way", label, SDK_ALL)) {
+        Write(&c, 0x20);
+        RunWorker(&c);
+        uint32_t seqA;
+        memcpy(&seqA, c.sdk.input->buf, 4);
+        Check(label, "control: frame A2, SeqNo 4, waits in the cache with no read parked",
+              seqA == 4 && Parked(&c) == 0 && CarriedBy(&c, 0x20) == 0);
+        PipeServerClose(c.sdk.pipe);
+        Settle(CtlThread(&c, 0));
+        NextProgram(&c, 1, 0);
+        Write(&c, 0x40);
+        Write(&c, 0x50);
+        uint32_t seqB;
+        memcpy(&seqB, c.sdk.input->buf, 4);
+        Check(label, "control: frame B2 carries SeqNo 4", seqB == 4);
+        Settle(CtlThread(&c, 0));
+        HmRequest *r = Read(&c);
+        Check(label, "the read that comes after B2 carries it", Carries(&c, r, 0x50));
+        HmRequest *next = Read(&c);
+        StaleWake(&c);
+        Check(label, "B2 goes to exactly one read, A2 to none, and the read after waits",
+              CarriedBy(&c, 0x50) == 1 && CarriedBy(&c, 0x20) == 0 && !next->completed);
+        CtlStop(&c);
+    }
+    g_sdkSignal = saved;
+}
+
+static void HookReadAtRelease(void)
+{
+    g_wHooks++;
+    Read(g_w);
+}
+
+/* restart-gate-in-cache-write: a program before 2.1.0 with no pipe the
+ * driver watches sends A1, SeqNo 2, which a read carries, and A2, SeqNo 4,
+ * cached with no read parked. A next one starts, zeroes the section and
+ * sends B1, SeqNo 2 again, and a read comes as the worker leaves its first
+ * lock in B1's frame path. A restart reset of the delivered gate in a lock
+ * of its own before the cache write let that read take A2 between the two
+ * and move the gate back to 4, and the reads after it waited beside B1 for
+ * the next frame (the read path's model, WakeModel, found the order). At
+ * 533ca4a4 they waited beside B1 too, under the gate at 2. Reset in the
+ * cache write, the gate lets B1 go to that read. */
+static void RestartGateInCacheWrite(PlanProfile *p)
+{
+    Ctl c;
+    char label[160];
+    int saved = g_sdkSignal;
+    g_sdkSignal = 0;
+    snprintf(label, sizeof(label), "%s restart-gate-in-cache-write", p->id);
+    if (StartHidWith(&c, p, "restart-gate-in-cache-write", label, SDK_SECTIONS | SDK_OUTPUT)) {
+        Write(&c, 0x20);
+        RunWorker(&c);
+        Check(label, "control: frame A2 waits in the cache with no read parked", Parked(&c) == 0 && CarriedBy(&c, 0x20) == 0);
+        NextProgram(&c, 1, 0);
+        Write(&c, 0x40);
+        g_lockReleaseHook = HookReadAtRelease;
+        RunWorker(&c);
+        g_lockReleaseHook = NULL;
+        Check(label, "a read came as the worker left its first lock in B1's frame path", g_wHooks == 1);
+        HmRequest *next = Read(&c);
+        StaleWake(&c);
+        Check(label, "B1 goes to exactly one read, and the read after waits", CarriedBy(&c, 0x40) == 1 && !next->completed);
+        ControlFrame(&c, label, 0x70);
         CtlStop(&c);
     }
     g_sdkSignal = saved;
@@ -1310,7 +1405,9 @@ int CaseWake(void)
     LastFrameAtOwnerGone(ds, 1);
     LastFrameAtRecycle(ds, 0);
     LastFrameAtRecycle(ds, 1);
-    for (int m = RESTART_PARKED; m <= RESTART_OWNERGONE; m++) RestartSameSeqNo(ds, m);
+    for (int m = RESTART_PARKED; m <= RESTART_OWNERGONE_RELEASE; m++) RestartSameSeqNo(ds, m);
+    KeptGivesWay(ds);
+    RestartGateInCacheWrite(ds);
     for (int lg = 0; lg < 2; lg++)
         for (int sl = 0; sl < 2; sl++) NextFirstFrameOnce(ds, lg, sl);
     OlderAfterNewer(ds);
