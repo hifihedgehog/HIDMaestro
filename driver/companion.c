@@ -205,6 +205,16 @@ typedef struct _COMPANION_WAIT {
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(COMPANION_WAIT, GetCompanionWait)
 
+/* The context of every file object (WdfDeviceInitSetFileObjectConfig):
+ * whether a request through the handle carried a report or a GET_STATE
+ * through it answered one, and the packet number of the last. Zeroed for
+ * a handle that has seen none. Under ReportLock. */
+typedef struct _COMPANION_HANDLE {
+    BOOLEAN Seen;
+    ULONG LastPacket;
+} COMPANION_HANDLE, *PCOMPANION_HANDLE;
+WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(COMPANION_HANDLE, GetCompanionHandle)
+
 /* Odd: no finished frame carries it. The observation with no view. */
 #define COMPANION_NO_FRAME 1
 
@@ -758,7 +768,9 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
         WdfDeviceInitSetRequestAttributes(DeviceInit, &requestAttributes);
         WDF_FILEOBJECT_CONFIG_INIT(&fileConfig, WDF_NO_EVENT_CALLBACK, WDF_NO_EVENT_CALLBACK, WDF_NO_EVENT_CALLBACK);
         fileConfig.FileObjectClass = (WDF_FILEOBJECT_CLASS)(WdfFileObjectWdfCannotUseFsContexts | WdfFileObjectCanBeOptional);
-        WdfDeviceInitSetFileObjectConfig(DeviceInit, &fileConfig, WDF_NO_OBJECT_ATTRIBUTES);
+        WDF_OBJECT_ATTRIBUTES fileAttributes;
+        WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&fileAttributes, COMPANION_HANDLE);
+        WdfDeviceInitSetFileObjectConfig(DeviceInit, &fileConfig, &fileAttributes);
     }
 
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, COMPANION_CTX);
@@ -1071,6 +1083,31 @@ static VOID BuildXusbState(_In_ PCOMPANION_CTX ctx, _Out_writes_(29) UCHAR state
     *(SHORT UNALIGNED *)&state[0x15] = ctx->LastPad.ThumbRY;
 }
 
+/* The request's handle carries the last report now. Under ReportLock. */
+static VOID NoteHandleLocked(_In_ PCOMPANION_CTX ctx, _In_ WDFREQUEST req)
+{
+    WDFFILEOBJECT fo = WdfRequestGetFileObject(req);
+    if (fo == NULL) return;
+    PCOMPANION_HANDLE h = GetCompanionHandle(fo);
+    h->Seen = TRUE;
+    h->LastPacket = ctx->PacketCount;
+}
+
+/* Whether the request's handle has carried no report, or an older one than
+ * the last. A pad sends at most one report per poll of its interrupt
+ * endpoint, so a reader that sends its next wait as soon as one completes
+ * has it parked before the pad's next report. The SDK's frames come at any
+ * pace, and a frame written between a completion and the reader's next
+ * wait would leave that wait beside it until the state changed again.
+ * Under ReportLock. */
+static BOOLEAN HandleMissedReportLocked(_In_ PCOMPANION_CTX ctx, _In_ WDFREQUEST req)
+{
+    WDFFILEOBJECT fo = WdfRequestGetFileObject(req);
+    if (fo == NULL || !ctx->HaveReport) return FALSE;
+    PCOMPANION_HANDLE h = GetCompanionHandle(fo);
+    return !h->Seen || h->LastPacket != ctx->PacketCount;
+}
+
 /* 2.1.0: a turn of the companion. The pad xusb22 drives sends a report
  * when its state changes, and on each one xusb22 bumps the packet number
  * and completes every WAIT_FOR_INPUT parked through any handle whose
@@ -1135,6 +1172,7 @@ static VOID CompanionReportLocked(_In_ PCOMPANION_CTX ctx, BOOLEAN late)
             continue;
         }
         RtlCopyMemory(out, state, 29);
+        NoteHandleLocked(ctx, req);
         WdfRequestCompleteWithInformation(req, STATUS_SUCCESS, 29);
     }
     /* Back at the head of the queue, the last one first, so they keep
@@ -1287,6 +1325,7 @@ void CompanionIoControl(
         AcquireSRWLockExclusive(&ctx->ReportLock);
         CompanionReportLocked(ctx, FALSE);
         BuildXusbState(ctx, state);
+        if (ctx->HaveReport) NoteHandleLocked(ctx, Request);
         ReleaseSRWLockExclusive(&ctx->ReportLock);
         CopyToRequest(Request, state, 29);
         break;
@@ -1387,10 +1426,25 @@ void CompanionIoControl(
             CopyToRequest(Request, resumed, 29);
             break;
         }
-        /* Parked until a report completes it (CompanionReportLocked). The
-         * request observes the section before it enters the queue, where a
-         * turn can complete it at once, and is not touched after. */
+        /* A turn first, then the handle's catch-up, then the first look,
+         * all under ReportLock, so no turn reports a frame between the
+         * catch-up's test and the look that the request would then wait
+         * beside. Otherwise parked until a report completes it
+         * (CompanionReportLocked). The request observes the section before
+         * it enters the queue, where a turn can complete it at once, and is
+         * not touched after. */
+        AcquireSRWLockExclusive(&ctx->ReportLock);
+        CompanionReportLocked(ctx, FALSE);
+        if (HandleMissedReportLocked(ctx, Request)) {
+            UCHAR state[29];
+            BuildXusbState(ctx, state);
+            NoteHandleLocked(ctx, Request);
+            CopyToRequest(Request, state, 29);
+            ReleaseSRWLockExclusive(&ctx->ReportLock);
+            break;
+        }
         ULONGLONG parkGen = ObserveSection(ctx);
+        ReleaseSRWLockExclusive(&ctx->ReportLock);
         GetCompanionWait(Request)->ParkGen = parkGen;
         NTSTATUS s = WdfRequestForwardToIoQueue(Request, ctx->WaitForInputQueue);
         if (!NT_SUCCESS(s)) {
