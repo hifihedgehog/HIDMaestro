@@ -86,6 +86,8 @@ internal static class LockCoverage
         ("RestartDevice(", "SetupControllerCore", "RestartDevice's CM_Disable_DevNode and CM_Enable_DevNode"),
         // The driver package removal.
         ("/uninstall /force", "DeletePackage", "/uninstall /force"),
+        // A retry's removal query, under its group's claims.
+        ("CM_Query_And_Remove_SubTreeW(", "QueryRemoveSubtreeOutsideLock", "retry's removal query"),
         // The usbip-win2 host controller's repair.
         ("CM_Query_And_Remove_SubTreeW(", "RestartHostControllerDevnode", "CM_Query_And_Remove_SubTreeW"),
         ("CM_Setup_DevNode(", "RestartHostControllerDevnode", "CM_Setup_DevNode"),

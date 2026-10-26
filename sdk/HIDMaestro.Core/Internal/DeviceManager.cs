@@ -1355,7 +1355,8 @@ public static partial class DeviceManager
     /// or SwDeviceCreate (the two software companions), and each removal
     /// and uninstall the SDK makes, from its call through its removal test:
     /// <see cref="RemoveDevice"/> (with its children, its fallbacks and
-    /// hmswd.exe's close), each orphan of <see cref="RemoveOrphanHidChildren"/>
+    /// hmswd.exe's close, and for a retry from after its query), each
+    /// orphan of <see cref="RemoveOrphanHidChildren"/>
     /// and each phantom of <see cref="RemoveAccumulatedHmPhantoms"/>. Also
     /// held by the usbip-win2 host controller's registration (its
     /// DIF_REGISTERDEVICE, and its DIF_REMOVE when its driver install
@@ -1416,6 +1417,14 @@ public static partial class DeviceManager
     /// (DeviceNodeCreator.InstallFromStoreInf). Its HID child is linked into
     /// the HIDClass list by Plug and Play after the hold, with no lock: the
     /// lock covers the parent's registration, not its children's.</item>
+    /// <item>A retry's removal query (QueryRemoveSubtreeOutsideLock) and its
+    /// request that the driver fail the device (OwnerSweep.RefusalRetry),
+    /// made under the index and identity claims of the device's group, so
+    /// no create of this release registers the device again meanwhile. A
+    /// holder that refuses keeps the query waiting about 5.4 s, and no
+    /// program waits for the lock through that. When nothing refuses,
+    /// Windows removes the device and its HID children outside the lock,
+    /// and their records go under it after.</item>
     /// <item>Any program built on HIDMaestro before v2.0.0.</item>
     /// </list>
     ///
@@ -2483,8 +2492,13 @@ public static partial class DeviceManager
             Locate(instanceId, CM_LOCATE_DEVNODE_PHANTOM) != CR_SUCCESS)
             return true;
 
+        // A retry asks before it takes the lock (AskOutsideLock), on the
+        // watch its removal then keeps.
+        using var asked = refusals is { AsksOutsideLock: true } ? new StepwiseRemoval(instanceId) : null;
+        if (asked != null && !AskOutsideLock(instanceId, asked, failDevice, refusals!)) return false;
+
         using var pnp = HoldPnpLock();
-        RemoveDeviceLocked(instanceId, timeoutMs, fast, forceFallbacks, out bool removed, failDevice, refusals);
+        RemoveDeviceLocked(instanceId, timeoutMs, fast, forceFallbacks, out bool removed, failDevice, refusals, asked);
         return removed;
     }
 
@@ -2512,6 +2526,10 @@ public static partial class DeviceManager
 
         /// <summary>The devnode and its record are gone.</summary>
         void Removed(string instanceId);
+
+        /// <summary>True for a retry's own removal, which asks outside the
+        /// PnP lock under its group's claims (<see cref="AskOutsideLock"/>).</summary>
+        bool AsksOutsideLock { get; }
     }
 
     /// <summary>The devnode's status, problem and the time this life of it
@@ -2540,6 +2558,69 @@ public static partial class DeviceManager
         t_removalsLeft++;
         removed = false;
         return parent.Wait(uninstalls: true, budgetMs: 0);
+    }
+
+    /// <summary>Step 0 of a removal (RemoveDeviceLocked) on a devnode in the
+    /// tree that is not down: asks it to go on the removal's watch
+    /// <paramref name="parent"/>, and when a program refuses, asks its driver
+    /// to fail it (<paramref name="failDevice"/>) and waits for it to go
+    /// down. True when it is down, so its records may go. False when it
+    /// stays with every record: <paramref name="refusals"/> leaves it, or a
+    /// program refused and its driver did not take it down. The query holds
+    /// the PnP lock, or, for a retry, is made outside it
+    /// (<paramref name="outsideLock"/>, <see cref="AskOutsideLock"/>).</summary>
+    static bool AskToGo(string instanceId, StepwiseRemoval parent, IReadOnlyList<string> childIds, Func<bool>? failDevice,
+                        IRefusalMemory? refusals, RemovalCalls? calls, bool outsideLock)
+    {
+        parent.Begin();
+        string? state = refusals != null ? DevnodeState(instanceId, calls) : null;
+        if (state != null && refusals!.Leaves(instanceId, state))
+        {
+            DeviceOrchestrator.LogDiag($"      {instanceId} stays with its records: a program refused its removal before, and the retry asks again on its schedule");
+            return false;
+        }
+        if (outsideLock)
+            DeviceOrchestrator.LogDiag($"      {instanceId}: the retry asks it to go outside the PnP lock, under its group's claims");
+        // A query that failed while the device went down anyway, as one
+        // that left between the locate and the call, refused nothing.
+        if (!QueryOut(instanceId, calls, out string veto, outsideLock) && !Down(instanceId, calls))
+        {
+            string why = veto.Length > 0 ? $" ({veto})" : "";
+            bool failed = failDevice?.Invoke() == true;
+            if (!failed || !WaitSurpriseRemoval(instanceId, childIds, SurpriseRemovalWaitMs))
+            {
+                DeviceOrchestrator.LogDiag($"      {instanceId} stays with its records: a program refused its removal{why}, " +
+                    (failDevice == null ? "and no driver can be asked to fail it here"
+                     : failed ? "and it was not down when the wait after its driver's answer ended" : "and its driver did not answer"));
+                refusals?.Refused(instanceId, DevnodeState(instanceId, calls));
+                return false;
+            }
+            DeviceOrchestrator.LogDiag($"      {instanceId}: a program refused its removal{why}, so its driver failed it, and it is down");
+        }
+        return true;
+    }
+
+    /// <summary>A retry's step 0, before the PnP lock
+    /// (<see cref="IRefusalMemory.AsksOutsideLock"/>): the query and the
+    /// request that the driver fail the device, made under the index and
+    /// identity claims of the device's group, which the retry holds, so no
+    /// create of this release registers the device again meanwhile. A holder
+    /// that refuses keeps the query waiting, about 5.4 s against one that
+    /// never reads, and a driver that does not answer adds 2 s, and no
+    /// program's registration or removal waits for the lock through that.
+    /// When nothing refuses, Windows removes the device and its HID children
+    /// outside the lock, and the records go under it after, on the same
+    /// watch <paramref name="asked"/>. True when the devnode is down or out
+    /// of the tree. False when it stays with every record, counted as
+    /// left.</summary>
+    static bool AskOutsideLock(string instanceId, StepwiseRemoval asked, Func<bool>? failDevice, IRefusalMemory refusals)
+    {
+        var calls = RemovalCallsHook;
+        if (instanceId.StartsWith(@"SWD\", StringComparison.OrdinalIgnoreCase) || Down(instanceId, calls)) return true;
+        IReadOnlyList<string> childIds = calls?.Children(instanceId) ?? ChildIdsOf(instanceId);
+        if (AskToGo(instanceId, asked, childIds, failDevice, refusals, calls, outsideLock: true)) return true;
+        KeepLeft(asked, out _);
+        return false;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -2616,6 +2697,30 @@ public static partial class DeviceManager
     [LibraryImport("cfgmgr32.dll")]
     private static partial int CM_Query_And_Remove_SubTreeW(uint dnAncestor, out uint pVetoType, IntPtr pszVetoName, uint ulNameLength, uint ulFlags);
 
+    /// <summary><see cref="QueryRemoveSubtree"/> without the PnP lock: a
+    /// retry's removal query (<see cref="AskOutsideLock"/>), made under the
+    /// index and identity claims of the device's group. A refusal changes
+    /// nothing. When nothing refuses, Windows removes the device and the
+    /// devices below it outside the lock, which <see cref="AcquirePnpLock"/>
+    /// lists among the exposure the lock does not cover.</summary>
+    internal static bool QueryRemoveSubtreeOutsideLock(string instanceId, out string veto)
+    {
+        veto = "";
+        if (CM_Locate_DevNodeW(out uint devInst, instanceId, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS)
+            return true;
+        IntPtr name = Marshal.AllocHGlobal(VetoNameChars * sizeof(char));
+        try
+        {
+            Marshal.Copy(new byte[VetoNameChars * sizeof(char)], 0, name, VetoNameChars * sizeof(char));
+            int cr = CM_Query_And_Remove_SubTreeW(devInst, out uint vetoType, name, VetoNameChars,
+                CM_REMOVE_UI_NOT_OK | CM_REMOVE_NO_RESTART);
+            if (cr == 0) return true;
+            veto = $"CR {cr}, veto type {vetoType}, {Marshal.PtrToStringUni(name)}";
+            return false;
+        }
+        finally { Marshal.FreeHGlobal(name); }
+    }
+
     /// <summary>Removes a prior life of an id about to be registered again,
     /// as <see cref="RemoveDevice"/> with its fallbacks, and returns the
     /// outcome of the parent's removal test for the registration gate.</summary>
@@ -2636,7 +2741,8 @@ public static partial class DeviceManager
         fast ? Math.Min(timeoutMs, QuickRemovalMs) : timeoutMs;
 
     static RemovalOutcome RemoveDeviceLocked(string instanceId, int timeoutMs, bool fast, bool forceFallbacks, out bool removed,
-                                             Func<bool>? failDevice = null, IRefusalMemory? refusals = null)
+                                             Func<bool>? failDevice = null, IRefusalMemory? refusals = null,
+                                             StepwiseRemoval? asked = null)
     {
         removed = true;
         // With the hook set every locate goes through LocateHook, and the
@@ -2677,7 +2783,8 @@ public static partial class DeviceManager
         // own registration. One registration at most is open at a time on
         // every path.
         int parentBudget = ParentRemovalBudget(fast, timeoutMs);
-        using var parent = new StepwiseRemoval(instanceId);
+        // A retry's removal keeps the watch it began before its query.
+        using var parent = asked ?? new StepwiseRemoval(instanceId);
         var parentOutcome = RemovalOutcome.Pending;
         var closeOutcome = RemovalOutcome.Removed;
 
@@ -2724,32 +2831,9 @@ public static partial class DeviceManager
         // record 18 ms after Windows refused its disable, with the holder
         // still holding it. A software device's close is its surprise
         // removal (SwDeviceClose on Learn), which no handle refuses.
-        if (!isSwdParent && !Down(instanceId, calls))
-        {
-            parent.Begin();
-            string? state = refusals != null ? DevnodeState(instanceId, calls) : null;
-            if (state != null && refusals!.Leaves(instanceId, state))
-            {
-                DeviceOrchestrator.LogDiag($"      {instanceId} stays with its records: a program refused its removal before, and the retry asks again on its schedule");
-                return KeepLeft(parent, out removed);
-            }
-            // A query that failed while the device went down anyway, as one
-            // that left between the locate and the call, refused nothing.
-            if (!QueryOut(instanceId, calls, out string veto) && !Down(instanceId, calls))
-            {
-                string why = veto.Length > 0 ? $" ({veto})" : "";
-                bool failed = failDevice?.Invoke() == true;
-                if (!failed || !WaitSurpriseRemoval(instanceId, childIds, SurpriseRemovalWaitMs))
-                {
-                    DeviceOrchestrator.LogDiag($"      {instanceId} stays with its records: a program refused its removal{why}, " +
-                        (failDevice == null ? "and no driver can be asked to fail it here"
-                         : failed ? "and it was not down when the wait after its driver's answer ended" : "and its driver did not answer"));
-                    refusals?.Refused(instanceId, DevnodeState(instanceId, calls));
-                    return KeepLeft(parent, out removed);
-                }
-                DeviceOrchestrator.LogDiag($"      {instanceId}: a program refused its removal{why}, so its driver failed it, and it is down");
-            }
-        }
+        if (!isSwdParent && !Down(instanceId, calls)
+            && !AskToGo(instanceId, parent, childIds, failDevice, refusals, calls, outsideLock: false))
+            return KeepLeft(parent, out removed);
 
         // For SWD parents that are PHANTOM-only (registry residue, no live
         // devnode), skip the hmswd.exe roundtrip: there's no live device
@@ -3170,11 +3254,11 @@ public static partial class DeviceManager
     /// <summary>The removal query (<see cref="QueryRemoveSubtree"/>), through
     /// the removal hook when one is set. True when the devnode left the tree
     /// with the devnodes below it.</summary>
-    static bool QueryOut(string instanceId, RemovalCalls? calls, out string veto)
+    static bool QueryOut(string instanceId, RemovalCalls? calls, out string veto, bool outsideLock = false)
     {
         veto = "";
         if (calls != null) return calls.Query?.Invoke(instanceId) ?? true;
-        return QueryRemoveSubtree(instanceId, out veto);
+        return outsideLock ? QueryRemoveSubtreeOutsideLock(instanceId, out veto) : QueryRemoveSubtree(instanceId, out veto);
     }
 
     /// <summary>Runs <paramref name="delete"/>, a call that deletes a

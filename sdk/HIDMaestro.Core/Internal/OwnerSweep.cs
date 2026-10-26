@@ -903,12 +903,12 @@ internal static class OwnerSweep
     /// group it removed once no other present group needs it. A devnode no
     /// longer present, or no longer a dead owner's, is dropped. The
     /// thread takes no <see cref="CreateGate"/>, and a sweep on a caller's
-    /// thread leaves a group the retry holds, and its record, to it. Each
-    /// removal it makes holds the PnP lock, as every removal does, so a
-    /// registration or removal of any program that needs the lock meanwhile
-    /// waits for that one removal: about 5.4 s against a holder that never
-    /// reads, and up to 2 s more while a driver that does not answer is
-    /// asked. The exit handler stops it before its own removals
+    /// thread leaves a group the retry holds, and its record, to it. Its
+    /// query, and the request that the driver fail the device, run outside
+    /// the PnP lock under the group's claims (DeviceManager.AskOutsideLock),
+    /// so no program's registration or removal waits for a holder that
+    /// refuses, and the records go under the lock once the device is down.
+    /// The exit handler stops it before its own removals
     /// (<see cref="Stop"/>, <see cref="Join"/>).</para></summary>
     internal sealed class RefusalRetry : DeviceManager.IRefusalMemory
     {
@@ -983,6 +983,10 @@ internal static class OwnerSweep
             lock (_lock)
                 if (_held.Remove(instanceId)) Monitor.PulseAll(_lock);
         }
+
+        /// <summary>A removal on this retry's own pass asks outside the PnP
+        /// lock, under the claims the pass holds.</summary>
+        public bool AsksOutsideLock => t_pass == this;
 
         /// <summary>The exit's stop: no pass starts after it, and a removal
         /// asks every device again.</summary>
