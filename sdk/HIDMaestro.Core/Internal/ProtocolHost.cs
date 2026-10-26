@@ -33,10 +33,12 @@ internal interface IHostChannel
 /// decision (b)). The output reader hands each output report to the engine
 /// before it raises OutputReceived. Replies go to the driver ahead of
 /// reports, each held until the driver has delivered the message before it,
-/// so no reply is overwritten. The device clock sends the layouts that go
-/// out on a period, and SubmitState those that go out on submit, with the
-/// live feature report on the data lane. Every send runs under the
-/// controller's submit lock, the input section's one writer.</summary>
+/// so no reply is overwritten. A reply waits the same way for a report of a
+/// layout that goes out once, on change or on submit, which the engine counts
+/// sent as it builds it. The device clock sends the layouts that go out on a
+/// period, and SubmitState those that go out on submit, with the live feature
+/// report on the data lane. Every send runs under the controller's submit
+/// lock, the input section's one writer.</summary>
 internal sealed unsafe class ProtocolHost : IDisposable
 {
     /// <summary>How long a message waits for the one before it to be
@@ -61,6 +63,14 @@ internal sealed unsafe class ProtocolHost : IDisposable
     // The last reply written, whose delivery the next message waits for.
     private uint _replySeq;
     private bool _replyPending;
+    // The last report of a layout that goes out once, on change or on submit,
+    // whose delivery the next reply waits for. A reply takes the input
+    // section's one frame, so without the wait a change the report carried
+    // would not reach the host before the next change. A report on the clock
+    // carries the state again on its next tick, and a reply does not wait
+    // for it.
+    private uint _reportSeq;
+    private bool _reportPending;
     private int _misses;
 
     private DeviceClock<HostTick>? _clock;
@@ -93,8 +103,10 @@ internal sealed unsafe class ProtocolHost : IDisposable
         public int FeatureId = -1;
         public byte[] Feature = Array.Empty<byte>();
         public int FeatureLength;
+        // The layout a tick's report was built in, chosen with the build.
+        public int Layout = -1;
         public int Visit<TSet>(ref TSet set) where TSet : struct, IReportSet =>
-            Submit ? Engine.Submit(ref set, Block, Buffer, FeatureId, Feature, out FeatureLength) : Engine.BuildNext(ref set, Buffer);
+            Submit ? Engine.Submit(ref set, Block, Buffer, FeatureId, Feature, out FeatureLength) : Engine.BuildNext(ref set, Buffer, out Layout);
     }
 
     public ProtocolHost(ControllerProfile profile, CompiledProtocol protocol, int index, IHostChannel channel, object sendLock)
@@ -172,7 +184,14 @@ internal sealed unsafe class ProtocolHost : IDisposable
             // A report never overwrites a reply the driver has not
             // delivered. One that cannot wait is not sent.
             if (!AwaitReplyLocked(waitMs)) return;
-            _channel.Write(_feature, 0, _clockBuilder.Buffer, n);
+            uint seq = _channel.Write(_feature, 0, _clockBuilder.Buffer, n);
+            // A layout on change sends its bytes once, so the next reply
+            // waits for this report. A layout on the clock sends again on
+            // the next tick. The rule is the report's own layout's, chosen
+            // as it was built: OnOutput runs commands outside _sendLock, and
+            // one can select another layout before this line.
+            int layout = _clockBuilder.Layout;
+            if (layout >= 0 && Protocol.Model.Layouts[layout].Send == SendRule.Change) NoteReportLocked(seq);
         }
     }
 
@@ -196,8 +215,9 @@ internal sealed unsafe class ProtocolHost : IDisposable
         return n;
     }
 
-    /// <summary>Sends the replies that wait, each once the message before it
-    /// is delivered or <paramref name="waitMs"/> has passed.</summary>
+    /// <summary>Sends the replies that wait, each once the reply before it,
+    /// and a report before it that goes out once, are delivered or
+    /// <paramref name="waitMs"/> has passed.</summary>
     public void Pump(int waitMs)
     {
         lock (_sendLock) PumpLocked(waitMs);
@@ -207,7 +227,7 @@ internal sealed unsafe class ProtocolHost : IDisposable
     {
         while (Engine.ReplyWaiting)
         {
-            if (!AwaitReplyLocked(waitMs)) return;
+            if (!AwaitReplyLocked(waitMs) || !AwaitReportLocked(waitMs)) return;
             int n = Engine.TakeReply(_reply.Length, _reply);
             if (n <= 0) return;
             _replySeq = _channel.Write(_feature, 0, _reply, n);
@@ -216,23 +236,40 @@ internal sealed unsafe class ProtocolHost : IDisposable
     }
 
     /// <summary>True once the last reply is delivered, or when the caller
-    /// may send past it. A wait that times out counts a miss, and the next
-    /// message goes out: Windows is not reading the device. After three
-    /// misses in a row the host stops waiting, as the keyboard path does,
-    /// until an acknowledgement shows up again. A caller that does not wait
-    /// (<paramref name="waitMs"/> 0) gets false while the reply is out.</summary>
-    private bool AwaitReplyLocked(int waitMs)
+    /// may send past it.</summary>
+    private bool AwaitReplyLocked(int waitMs) => AwaitLocked(ref _replyPending, _replySeq, waitMs);
+
+    /// <summary>True once the last report that goes out once is delivered,
+    /// or when the caller may send past it.</summary>
+    private bool AwaitReportLocked(int waitMs) => AwaitLocked(ref _reportPending, _reportSeq, waitMs);
+
+    /// <summary>A report that goes out once was written with
+    /// <paramref name="seq"/>.</summary>
+    private void NoteReportLocked(uint seq)
     {
-        if (!_replyPending) return true;
-        if (_channel.Delivered(_replySeq, _misses >= 3 ? 0 : waitMs))
+        _reportSeq = seq;
+        _reportPending = _channel.AcknowledgesDelivery;
+    }
+
+    /// <summary>True once the message written with <paramref name="seq"/>
+    /// is delivered, or when the caller may send past it. A wait that times
+    /// out counts a miss, and the next message goes out: Windows is not
+    /// reading the device. After three misses in a row the host stops
+    /// waiting, as the keyboard path does, until an acknowledgement shows up
+    /// again. A caller that does not wait (<paramref name="waitMs"/> 0) gets
+    /// false while the message is out.</summary>
+    private bool AwaitLocked(ref bool pending, uint seq, int waitMs)
+    {
+        if (!pending) return true;
+        if (_channel.Delivered(seq, _misses >= 3 ? 0 : waitMs))
         {
             _misses = 0;
-            _replyPending = false;
+            pending = false;
             return true;
         }
         if (waitMs == 0) return false;
         _misses++;
-        _replyPending = false;
+        pending = false;
         return true;
     }
 
@@ -280,17 +317,23 @@ internal sealed unsafe class ProtocolHost : IDisposable
             }
             if (n <= 0 && f <= 0) return;
             if (!AwaitReplyLocked(DeliveryTimeoutMs)) return;
-            _channel.Write(_feature, Math.Max(0, f), _submitBuilder.Buffer, Math.Max(0, n));
+            uint seq = _channel.Write(_feature, Math.Max(0, f), _submitBuilder.Buffer, Math.Max(0, n));
+            // A layout on submit goes out once.
+            if (n > 0) NoteReportLocked(seq);
         }
     }
 
     public void Dispose() => _clock?.Stop(2000);
 
-    /// <summary>The device is gone: a reply it never delivered is not
-    /// waited for by the next send.</summary>
+    /// <summary>The device is gone: a reply or a report it never delivered
+    /// is not waited for by the next send.</summary>
     public void DeviceRemoved()
     {
-        lock (_sendLock) _replyPending = false;
+        lock (_sendLock)
+        {
+            _replyPending = false;
+            _reportPending = false;
+        }
     }
 
     /// <summary>The clock's thread, or null before a start that needed one.</summary>

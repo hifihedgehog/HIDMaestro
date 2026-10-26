@@ -189,6 +189,24 @@ internal sealed unsafe class ProtocolEngine
 
     public CompiledProtocol Protocol => _p;
 
+    /// <summary>Called after a command or a reset changed the registers, on
+    /// the thread that ran it, once this engine's lock is released, so a
+    /// clock that reads them looks again: the idle repeat of a stream whose
+    /// condition or period reads a register (HMController). A bulk OUT
+    /// command runs it under the USB/IP device's report lock
+    /// (UsbipEmulatedDevice.HandleBulkCommand holds _streamSendLock), so a
+    /// handler takes no lock that is ever held while that one is taken.
+    /// HMController's takes only the idle clock's own lock, a leaf
+    /// (DeviceClock.Wake). Null while nothing reads them that way. Set on
+    /// the controller's thread and read on the threads that run commands,
+    /// which share no lock with it.</summary>
+    internal Action? RegistersChanged
+    {
+        get => System.Threading.Volatile.Read(ref _registersChanged);
+        set => System.Threading.Volatile.Write(ref _registersChanged, value);
+    }
+    private Action? _registersChanged;
+
     private void InitialRegistersLocked(bool portReset = false)
     {
         var table = _m.Registers;
@@ -257,6 +275,7 @@ internal sealed unsafe class ProtocolEngine
             _clockOrigin = Stopwatch.GetTimestamp();
             _resets++;
         }
+        RegistersChanged?.Invoke();
     }
 
     /// <summary>Counts attaches and port resets.</summary>
@@ -397,6 +416,14 @@ internal sealed unsafe class ProtocolEngine
     {
         if (DeviceOrchestrator.DiagEnabled)
             DeviceOrchestrator.LogDiag($"protocol command {_p.ProfileId}: {Convert.ToHexString(command)}");
+        var result = ApplyCommand(command, timestamp);
+        if ((result.Effect & Effect.StateChanged) != 0) RegistersChanged?.Invoke();
+        return result;
+    }
+
+    /// <summary>HandleCommand's work, under the engine's lock.</summary>
+    private CommandResult ApplyCommand(ReadOnlySpan<byte> command, long timestamp)
+    {
         lock (_sync)
         {
             LogLocked(command, timestamp);
@@ -761,7 +788,7 @@ internal sealed unsafe class ProtocolEngine
         lock (_sync)
         {
             if (block.Length == _m.StateSize) block.CopyTo(_state);
-            int n = BuildLocked(ref set, dst, SendRule.Submit, commit: true);
+            int n = BuildLocked(ref set, dst, SendRule.Submit, commit: true, out _);
             featureLength = featureId >= 0 ? LiveFeatureLocked((byte)featureId, feature) : -1;
             return n;
         }
@@ -796,7 +823,17 @@ internal sealed unsafe class ProtocolEngine
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public int BuildNext<TSet>(ref TSet set, Span<byte> dst) where TSet : struct, IReportSet
     {
-        lock (_sync) return BuildLocked(ref set, dst, SendRule.Clock, commit: true);
+        lock (_sync) return BuildLocked(ref set, dst, SendRule.Clock, commit: true, out _);
+    }
+
+    /// <summary>The same, with the layout the report was built in, or -1,
+    /// chosen under the same hold of the lock: a command on another thread
+    /// can select another layout the moment the lock is free, and the send
+    /// rule that applies to the report is its own layout's.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    public int BuildNext<TSet>(ref TSet set, Span<byte> dst, out int layout) where TSet : struct, IReportSet
+    {
+        lock (_sync) return BuildLocked(ref set, dst, SendRule.Clock, commit: true, out layout);
     }
 
     /// <summary>Whether a tick now would send a report, for a tick that finds
@@ -804,7 +841,7 @@ internal sealed unsafe class ProtocolEngine
     /// Counts nothing.</summary>
     public bool TickWouldSend<TSet>(ref TSet set) where TSet : struct, IReportSet
     {
-        lock (_sync) return BuildLocked(ref set, _peek, SendRule.Clock, commit: false) > 0;
+        lock (_sync) return BuildLocked(ref set, _peek, SendRule.Clock, commit: false, out _) > 0;
     }
 
     /// <summary>The report a SubmitState sends, built and counted, when the
@@ -812,7 +849,7 @@ internal sealed unsafe class ProtocolEngine
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public int BuildOnSubmit<TSet>(ref TSet set, Span<byte> dst) where TSet : struct, IReportSet
     {
-        lock (_sync) return BuildLocked(ref set, dst, SendRule.Submit, commit: true);
+        lock (_sync) return BuildLocked(ref set, dst, SendRule.Submit, commit: true, out _);
     }
 
     /// <summary>Whether the selected layout goes out on submit.</summary>
@@ -832,11 +869,12 @@ internal sealed unsafe class ProtocolEngine
     /// goes out on <paramref name="occasion"/>: a tick sends a clock layout,
     /// and a change layout whose bytes differ from the ones it last sent, and
     /// a submit sends a submit layout. With <paramref name="commit"/> the
-    /// report counts as sent. Returns its length, or 0.</summary>
+    /// report counts as sent. Returns its length, or 0, and the selected
+    /// layout, or -1, in <paramref name="layout"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private int BuildLocked<TSet>(ref TSet set, Span<byte> dst, SendRule occasion, bool commit) where TSet : struct, IReportSet
+    private int BuildLocked<TSet>(ref TSet set, Span<byte> dst, SendRule occasion, bool commit, out int layout) where TSet : struct, IReportSet
     {
-        int layout = SelectLocked();
+        layout = SelectLocked();
         if (layout < 0) return 0;
         var form = _m.Layouts[layout];
         var send = form.Send;

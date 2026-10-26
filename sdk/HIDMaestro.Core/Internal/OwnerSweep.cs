@@ -199,6 +199,7 @@ internal static class OwnerSweep
         long budget = TimeoutScale.Apply(ExitWaitMs);
         int Remaining() => (int)Math.Max(0, budget - clock.ElapsedMilliseconds);
         s_exiting = true;
+        Refusals.Stop();
         DeviceManager.KeepUnsettledClaims = true;
         // The cleanup holds the gate for writing while it runs, so the wait
         // for a create below would otherwise spend the budget on it. The
@@ -211,6 +212,12 @@ internal static class OwnerSweep
         // compiled before exit began, starts the thread that ends with the
         // process (StartPhantomCleanupOnce).
         if (!JoinPhantomCleanup(Remaining())) return;
+        // A retry of a refused removal starts no pass once stopped, and one
+        // in flight gets what is left of the bound to end. It holds no gate
+        // this handler takes. Past the bound its removal holds the PnP lock,
+        // which the removals below take within what is left.
+        if (!Refusals.Join(Remaining()))
+            DeviceOrchestrator.LogDiag("    exit: a retry of a refused removal is still running at the end of the exit's budget");
         bool gated;
         // TryEnterWriteLock throws LockRecursionException on a thread that
         // holds the read lock: under NativeAOT, an exit started inside a
@@ -299,7 +306,7 @@ internal static class OwnerSweep
                 bool settled = false;
                 try
                 {
-                    settled = RemoveGroup(g);
+                    settled = RemoveGroup(g, refusals: null);
                     if (settled && g.ControllerIndex >= 0) DeviceOrchestrator.DeleteInstanceConfig(g.ControllerIndex);
                 }
                 finally { if (!settled) unsettled++; }
@@ -387,11 +394,7 @@ internal static class OwnerSweep
         var keepRecords = new HashSet<string>(StringComparer.Ordinal);
         try
         {
-            foreach (var group in candidates)
-            {
-                if (claims.TryHold(group)) targets.Add(group);
-                else DeviceOrchestrator.LogDiag($"    reclaim skipped {group.Key} index {group.ControllerIndex}: a running program holds it now");
-            }
+            targets.AddRange(ChooseTargets(candidates, Refusals, claims, keepRecords));
             BeforeReclaimActs?.Invoke(targets.Count);
             if (targets.Count > 0)
             {
@@ -400,7 +403,7 @@ internal static class OwnerSweep
                 RemoveGroups(targets, group =>
                 {
                     bool settled = false;
-                    try { settled = ReclaimGroup(group, liveIndices); }
+                    try { settled = ReclaimGroup(group, liveIndices, Refusals); }
                     finally
                     {
                         if (!settled)
@@ -439,14 +442,49 @@ internal static class OwnerSweep
             try { RegistryLedger.PruneDead(); } catch { }
     }
 
+    /// <summary>The groups of <paramref name="candidates"/>, dead owners'
+    /// devices, that a sweep removes now, each with its index and identity
+    /// claims taken in <paramref name="claims"/>. A group whose refused
+    /// removal <paramref name="retry"/> holds is the retry's to ask again:
+    /// the sweep leaves it, and its record stays
+    /// (<paramref name="keepRecords"/>). A group whose claims a running
+    /// program holds now is skipped, and its record stays too: that
+    /// program's create may be refused the device, which then has to stay a
+    /// dead owner's to the next sweep: without it the device reads as no
+    /// one's, which no sweep removes. pnp_notify_check's part 13 runs it on
+    /// groups and claims of its own.</summary>
+    private static List<OwnerCensus.DeviceGroup> ChooseTargets(List<OwnerCensus.DeviceGroup> candidates, RefusalRetry retry,
+        GroupClaims claims, HashSet<string> keepRecords)
+    {
+        var targets = new List<OwnerCensus.DeviceGroup>();
+        foreach (var group in candidates)
+        {
+            if (retry.LooksAfter(group))
+            {
+                DeviceOrchestrator.LogDiag($"    reclaim left {group.Key} index {group.ControllerIndex} to the retry of its refused removal");
+                if (group.Record != null) keepRecords.Add(group.Record.OwnerId);
+                continue;
+            }
+            if (claims.TryHold(group))
+            {
+                targets.Add(group);
+                continue;
+            }
+            DeviceOrchestrator.LogDiag($"    reclaim skipped {group.Key} index {group.ControllerIndex}: a running program holds it now");
+            if (group.Record != null) keepRecords.Add(group.Record.OwnerId);
+        }
+        return targets;
+    }
+
     /// <summary>A dead owner's group, under its claims: its devices, then
     /// its index's configuration when they are out of the device tree and no
     /// other present device and no live record uses the index. A v1.12.0
     /// program that started on the index since the claims were taken holds
     /// its owner pipe, and keeps both. The check before the removal only
     /// reads that pipe (WaitNamedPipe), so it can skip a removal and never
-    /// starts one. Returns false when a removal was not confirmed.</summary>
-    private static bool ReclaimGroup(OwnerCensus.DeviceGroup group, HashSet<int> liveIndices)
+    /// starts one. Returns false when a removal was not confirmed. A refusal
+    /// goes to <paramref name="refusals"/>.</summary>
+    private static bool ReclaimGroup(OwnerCensus.DeviceGroup group, HashSet<int> liveIndices, DeviceManager.IRefusalMemory refusals)
     {
         int index = group.ControllerIndex;
         if (OwnerCensus.LegacyOwnerRuns(index, group.InstanceIds))
@@ -455,7 +493,7 @@ internal static class OwnerSweep
             return true;
         }
         DeviceOrchestrator.LogDiag($"    reclaim {group.Owner} {group.Key} index {index}: {string.Join(", ", group.InstanceIds)}");
-        if (!RemoveGroup(group)) return false;
+        if (!RemoveGroup(group, refusals)) return false;
         if (index >= 0 && !liveIndices.Contains(index) && !OwnerCensus.LegacyOwnerRuns(index, group.InstanceIds))
             DeviceOrchestrator.DeleteInstanceConfig(index);
         return true;
@@ -548,17 +586,31 @@ internal static class OwnerSweep
     /// <summary>One controller's devnodes, the main node first so its
     /// children cascade, then whatever companion is left. Returns true once
     /// none of them and none of the children they had is in the device
-    /// tree.</summary>
-    private static bool RemoveGroup(OwnerCensus.DeviceGroup group)
+    /// tree.
+    ///
+    /// <para>A program that refuses the main node's removal query, as one
+    /// that keeps its HID child open without watching it does, has the
+    /// device failed by its driver through the index's remove event
+    /// (DeviceManager.RemoveDevice). The index is this removal's to fail:
+    /// a sweep holds its claim, and the exit handler removes its own
+    /// controllers. A refusal that leaves the device goes to
+    /// <paramref name="refusals"/>: a sweep's, which the retry asks again
+    /// (<see cref="RefusalRetry"/>), or the exit's, null.</para></summary>
+    private static bool RemoveGroup(OwnerCensus.DeviceGroup group, DeviceManager.IRefusalMemory? refusals)
     {
         var removed = new List<string>();
+        int index = group.ControllerIndex;
+        long left = DeviceManager.RemovalsLeftHere;
         foreach (string id in group.InstanceIds.OrderBy(id => id.StartsWith(@"ROOT\", StringComparison.OrdinalIgnoreCase) ? 0 : 1))
         {
             removed.Add(id);
             try
             {
                 removed.AddRange(DeviceManager.ChildIdsOf(id));
-                DeviceManager.RemoveDevice(id, timeoutMs: 120_000, forceFallbacks: true);
+                bool root = id.StartsWith(@"ROOT\", StringComparison.OrdinalIgnoreCase);
+                DeviceManager.RemoveDevice(id, timeoutMs: 120_000, fast: false, forceFallbacks: true,
+                    failDevice: root && index >= 0 ? () => SharedMemoryIO.RequestSurpriseRemovalOfIndex(index, TimeoutScale.Apply(2000)) : null,
+                    refusals: refusals);
             }
             catch (DeviceManager.PnpLockBusyException)
             {
@@ -570,6 +622,10 @@ internal static class OwnerSweep
             }
             catch (Exception ex) { DeviceOrchestrator.LogDiag($"    reclaim RemoveDevice({id}) threw {ex.GetType().Name}: {ex.Message}"); }
         }
+        // A removal that left its device in place kept every record of it,
+        // so the group is not gone, and the test would wait 2 s an id for
+        // nothing.
+        if (DeviceManager.RemovalsLeftHere != left) return false;
         return AllGone(removed);
     }
 
@@ -819,6 +875,324 @@ internal static class OwnerSweep
             Unsettled++;
             DeviceOrchestrator.LogDiag($"    {instanceId} is still known after its uninstall, and the cleanup's {_budget} ms of waiting are spent");
             return false;
+        }
+    }
+
+    /// <summary>The retry of this process's sweeps.</summary>
+    internal static readonly RefusalRetry Refusals = new(new RetryCalls());
+
+    /// <summary>What the retry does on the machine and the clock it keeps:
+    /// the system's, or pnp_notify_check's stand-ins, with which its offline
+    /// part runs the loop on a thread of its own and moves the clock
+    /// itself.</summary>
+    internal sealed class RetryCalls
+    {
+        /// <summary>Now, in milliseconds.</summary>
+        public Func<long> Now = () => Environment.TickCount64;
+        /// <summary>The loop's wait of up to the milliseconds given, called
+        /// under the retry's lock. Null: Monitor.Wait on that lock, which a
+        /// new refusal and the exit's stop end early.</summary>
+        public Action<int>? Wait;
+        /// <summary>Starts the loop. Null: a background thread of its
+        /// own.</summary>
+        public Action<ThreadStart>? Start;
+        /// <summary>The census each pass takes.</summary>
+        public Func<OwnerCensus> Census = OwnerCensus.Take;
+        /// <summary>Deletes a dead owner's record.</summary>
+        public Action<string> DeleteRecord = MachineClaims.DeleteRecord;
+    }
+
+    /// <summary>A sweep's refused removals, asked again from a background
+    /// thread: 5 s after the refusal, 30 s after that retry, 2 min after the
+    /// next, then every 10 min (<see cref="ScheduleMs"/>), until the device
+    /// is gone, its owner runs again or the process exits. A holder letting
+    /// go changes nothing Windows reports, so only a new query tells. A
+    /// device whose holder lets go leaves at the next retry, within 10 min
+    /// once the first three have passed, and a holder that never lets go
+    /// costs one query per retry on that thread, and one request to the
+    /// driver where one can be asked. The thread reads each device's state
+    /// (DeviceManager.DevnodeState) every 5 s, and a state other than the
+    /// one the last refusal left starts the schedule over.
+    ///
+    /// <para>It runs as the phantom cleanup runs
+    /// (<see cref="StartPhantomCleanupOnce"/>): a background thread below
+    /// normal priority, started by the call that first needs it, which does
+    /// not wait for it. It runs while a refusal is held and ends when none
+    /// is. Each pass takes a census and runs the sweeps' own removal of each
+    /// group that holds a devnode due (<see cref="ReclaimGroup"/>), under
+    /// the group's index and identity claims, so no create of this release
+    /// lands on it meanwhile, then deletes the dead record that named a
+    /// group it removed once no other present group needs it. A devnode no
+    /// longer present, or no longer a dead owner's, is dropped. The
+    /// thread takes no <see cref="CreateGate"/>, and a sweep on a caller's
+    /// thread leaves a group the retry holds, and its record, to it. Its
+    /// query, and the request that the driver fail the device, run outside
+    /// the PnP lock under the group's claims (DeviceManager.AskOutsideLock),
+    /// so no program's registration or removal waits for a holder that
+    /// refuses, and the records go under the lock once the device is down.
+    /// The exit handler stops it before its own removals
+    /// (<see cref="Stop"/>, <see cref="Join"/>).</para></summary>
+    internal sealed class RefusalRetry : DeviceManager.IRefusalMemory
+    {
+        /// <summary>The wait from a refusal to its first retry, and between
+        /// the retries after it. The last repeats.</summary>
+        internal static readonly int[] ScheduleMs = { 5_000, 30_000, 120_000, 600_000 };
+
+        private sealed class Refusal
+        {
+            public string State = "";
+            public int Step;
+            public long Due;
+        }
+
+        private readonly RetryCalls _calls;
+        private readonly object _lock = new();
+        private readonly Dictionary<string, Refusal> _held = new(StringComparer.OrdinalIgnoreCase);
+        // The devnodes the pass in flight asks again.
+        private readonly HashSet<string> _asking = new(StringComparer.OrdinalIgnoreCase);
+        private Thread? _thread;
+        private bool _running, _stopped;
+        private long _nextRead;
+
+        /// <summary>The retry whose pass runs on this thread.</summary>
+        [ThreadStatic] private static RefusalRetry? t_pass;
+
+        internal RefusalRetry(RetryCalls calls) => _calls = calls;
+
+        /// <summary>How many devnodes' refusals it holds.</summary>
+        internal int Held
+        {
+            get { lock (_lock) return _held.Count; }
+        }
+
+        /// <summary>True while it runs and holds the refusal of one of the
+        /// group's devnodes.</summary>
+        internal bool LooksAfter(OwnerCensus.DeviceGroup group)
+        {
+            lock (_lock) return _running && !_stopped && group.InstanceIds.Any(_held.ContainsKey);
+        }
+
+        public bool Leaves(string instanceId, string state)
+        {
+            lock (_lock)
+            {
+                if (!_running || _stopped || !_held.TryGetValue(instanceId, out var r)) return false;
+                if (t_pass == this && _asking.Contains(instanceId)) return false;
+                if (r.State != state) StartOver(r, state);
+                return true;
+            }
+        }
+
+        public void Refused(string instanceId, string? state)
+        {
+            if (state == null) return;
+            bool start;
+            lock (_lock)
+            {
+                if (!_held.TryGetValue(instanceId, out var r)) _held[instanceId] = r = new Refusal();
+                // A retry refused in the state it was asked in keeps the step
+                // its pass moved it to.
+                if (r.State != state) StartOver(r, state);
+                start = !_running && !_stopped && !ProcessExitSignal.Raised;
+                if (start) _running = true;
+                else Monitor.PulseAll(_lock);
+            }
+            if (start) Begin();
+        }
+
+        public void Removed(string instanceId)
+        {
+            lock (_lock)
+                if (_held.Remove(instanceId)) Monitor.PulseAll(_lock);
+        }
+
+        /// <summary>A removal on this retry's own pass asks outside the PnP
+        /// lock, under the claims the pass holds.</summary>
+        public bool AsksOutsideLock => t_pass == this;
+
+        /// <summary>The exit's stop: no pass starts after it, and a removal
+        /// asks every device again.</summary>
+        internal void Stop()
+        {
+            lock (_lock)
+            {
+                _stopped = true;
+                Monitor.PulseAll(_lock);
+            }
+        }
+
+        /// <summary>Waits up to <paramref name="timeoutMs"/> for a pass in
+        /// flight to end. False when one is still running then.</summary>
+        internal bool Join(int timeoutMs)
+        {
+            Thread? t;
+            lock (_lock) t = _thread;
+            return t == null || t == Thread.CurrentThread || t.Join(timeoutMs);
+        }
+
+        private void StartOver(Refusal r, string state)
+        {
+            r.State = state;
+            r.Step = 0;
+            r.Due = _calls.Now() + ScheduleMs[0];
+        }
+
+        private void Begin()
+        {
+            try
+            {
+                if (_calls.Start is { } start)
+                {
+                    start(Run);
+                    return;
+                }
+                var t = new Thread(Run)
+                { IsBackground = true, Name = "HIDMaestro refusal retry", Priority = ThreadPriority.BelowNormal };
+                // Published once started: Join throws on a thread not yet started.
+                t.Start();
+                lock (_lock) _thread = t;
+            }
+            catch (Exception e)
+            {
+                lock (_lock) _running = false;
+                DeviceOrchestrator.LogDiag($"    the retry of refused removals did not start: {e.GetType().Name}: {e.Message}");
+            }
+        }
+
+        /// <summary>The loop. Nothing it throws leaves the thread: it ends,
+        /// and the next refusal starts another.</summary>
+        private void Run()
+        {
+            try { Loop(); }
+            catch (Exception e)
+            {
+                lock (_lock) _running = false;
+                DeviceOrchestrator.LogDiag($"    the retry of refused removals stopped: {e.GetType().Name}: {e.Message}");
+            }
+        }
+
+        /// <summary>Waits for the next retry or state read, reads the states,
+        /// then asks again each devnode whose time has come, until no refusal
+        /// is held or the exit stops it.</summary>
+        private void Loop()
+        {
+            lock (_lock) _nextRead = _calls.Now() + ScheduleMs[0];
+            while (true)
+            {
+                var due = new List<string>();
+                lock (_lock)
+                {
+                    if (_stopped || ProcessExitSignal.Raised || _held.Count == 0)
+                    {
+                        _running = false;
+                        return;
+                    }
+                    long now = _calls.Now();
+                    long wake = Math.Min(_nextRead, _held.Values.Min(r => r.Due));
+                    if (wake > now)
+                    {
+                        int ms = (int)Math.Min(wake - now, int.MaxValue);
+                        if (_calls.Wait is { } wait) wait(ms);
+                        else Monitor.Wait(_lock, ms);
+                        continue;
+                    }
+                    if (now >= _nextRead)
+                    {
+                        ReadStates();
+                        _nextRead = now + ScheduleMs[0];
+                    }
+                    foreach (var (id, r) in _held)
+                    {
+                        if (r.Due > now) continue;
+                        r.Step = Math.Min(r.Step + 1, ScheduleMs.Length - 1);
+                        r.Due = now + ScheduleMs[r.Step];
+                        due.Add(id);
+                    }
+                    _asking.UnionWith(due);
+                }
+                if (due.Count == 0) continue;
+                try { Pass(due); }
+                catch (Exception e) { DeviceOrchestrator.LogDiag($"    the retry of {string.Join(", ", due)} threw {e.GetType().Name}: {e.Message}"); }
+                finally
+                {
+                    lock (_lock) _asking.Clear();
+                }
+            }
+        }
+
+        /// <summary>Under the lock: drops a devnode out of the tree, and
+        /// starts the schedule over for one whose state changed.</summary>
+        private void ReadStates()
+        {
+            foreach (var (id, r) in _held.ToList())
+            {
+                string? state = DeviceManager.DevnodeState(id);
+                if (state == null) _held.Remove(id);
+                else if (state != r.State) StartOver(r, state);
+            }
+        }
+
+        /// <summary>One retry of the devnodes in <paramref name="due"/>.</summary>
+        private void Pass(List<string> due)
+        {
+            DeviceOrchestrator.LogDiag($"    retry of refused removals: {string.Join(", ", due)}");
+            var census = _calls.Census();
+            var groups = census.Devices
+                .Where(g => g.Owner is OwnerCensus.Owner.Dead or OwnerCensus.Owner.DeadLegacy
+                            && g.InstanceIds.Any(id => due.Contains(id, StringComparer.OrdinalIgnoreCase)))
+                .ToList();
+            lock (_lock)
+                foreach (string id in due)
+                    if (!groups.Any(g => g.InstanceIds.Contains(id, StringComparer.OrdinalIgnoreCase)))
+                        _held.Remove(id);
+            if (groups.Count == 0) return;
+
+            // As in Reclaim: an index another present device or a live
+            // record uses keeps its configuration.
+            var liveIndices = new HashSet<int>(census.Devices
+                .Where(d => !groups.Contains(d) && d.ControllerIndex >= 0).Select(d => d.ControllerIndex));
+            foreach (var r in census.Records)
+                if (r.Live)
+                    foreach (var c in r.Controllers) liveIndices.Add(c.TransportIndex);
+
+            var claims = new GroupClaims();
+            var settled = new List<OwnerCensus.DeviceGroup>();
+            t_pass = this;
+            try
+            {
+                var targets = new List<OwnerCensus.DeviceGroup>();
+                foreach (var g in groups)
+                {
+                    if (claims.TryHold(g)) targets.Add(g);
+                    else DeviceOrchestrator.LogDiag($"    retry skipped {g.Key} index {g.ControllerIndex}: a running program holds it now");
+                }
+                if (targets.Count == 0) return;
+                DeviceOrchestrator.SignalStopEvents(targets.Where(t => t.ControllerIndex >= 0).Select(t => t.ControllerIndex).ToHashSet());
+                RemoveGroups(targets, g =>
+                {
+                    if (ReclaimGroup(g, liveIndices, this)) settled.Add(g);
+                });
+            }
+            finally
+            {
+                t_pass = null;
+                claims.ReleaseAll();
+            }
+
+            // A dead record that named a group this pass settled goes once no
+            // other present group is its, as Reclaim deletes one, its USB/IP
+            // imports detached first.
+            var usbip = new Usbip.UsbipBackend.SweepView();
+            foreach (var rec in census.DeadRecords)
+            {
+                bool named = settled.Any(g => g.Record?.OwnerId == rec.OwnerId);
+                if (!named || census.Devices.Any(g => g.Record?.OwnerId == rec.OwnerId && !settled.Contains(g))) continue;
+                bool detached = true;
+                foreach (var c in rec.Controllers)
+                    if (string.Equals(c.Backend, "usbip", StringComparison.OrdinalIgnoreCase))
+                        detached &= Usbip.UsbipBackend.DetachDeadImport(rec.UsbipPort, c.TransportIndex, usbip);
+                if (detached) _calls.DeleteRecord(rec.OwnerId);
+            }
         }
     }
 }

@@ -40,11 +40,12 @@ internal static partial class DeviceOrchestrator
 
     // ════════════════════════════════════════════════════════════════════
     //  Diagnostic log, gated by env var HIDMAESTRO_DIAG=1. Appends to
-    //  %TEMP%\HIDMaestro\teardown_diag.log, opened once as the user
-    //  (OpenUserLog) and kept open. Each LogDiag call, from any part of the
-    //  SDK, writes one line with its time and thread id. Off by default, so
-    //  a production run writes no file. Set the env var to reproduce a
-    //  device left behind after teardown.
+    //  %TEMP%\HIDMaestro\teardown_diag.log through a UserLog, opened once
+    //  as the user and kept open. Each LogDiag call, from any part of the
+    //  SDK, writes one line with its time and thread id, whole and after
+    //  every line another program wrote before it. Off by default, so a
+    //  production run writes no file. Set the env var to reproduce a device
+    //  left behind after teardown.
     // ════════════════════════════════════════════════════════════════════
     private static readonly bool s_diagEnabled =
         Environment.GetEnvironmentVariable("HIDMAESTRO_DIAG") == "1";
@@ -52,23 +53,7 @@ internal static partial class DeviceOrchestrator
     /// <summary>True when HIDMAESTRO_DIAG=1, so a caller can skip building
     /// a line nobody will read.</summary>
     internal static bool DiagEnabled => s_diagEnabled;
-    private static StreamWriter? s_diagWriter;
-
-    /// <summary>Open a diagnostic log under the user's %TEMP% for appending,
-    /// creating its folder, with the user's own rights
-    /// (<see cref="OpenVrPathRegistry.RunAsUser{T}"/>). The SDK usually runs
-    /// elevated, and %TEMP% is a folder any of the user's programs can
-    /// change, so the folder and file are opened as the user: whatever that
-    /// folder resolves to, the open reaches nothing the user could not write
-    /// already. The handle keeps working after the impersonation
-    /// ends.</summary>
-    internal static FileStream OpenUserLog(string dir, string path) =>
-        OpenVrPathRegistry.RunAsUser(() =>
-        {
-            Directory.CreateDirectory(dir);
-            return new FileStream(path, FileMode.Append, FileAccess.Write,
-                FileShare.ReadWrite | FileShare.Delete, bufferSize: 4096);
-        });
+    private static UserLog? s_diagLog;
 
     /// <summary>Sees every diag line, whether or not HIDMAESTRO_DIAG is set.
     /// pnp_notify_check's offline part sets it to read the lines a removal
@@ -83,33 +68,8 @@ internal static partial class DeviceOrchestrator
         {
             try
             {
-                if (s_diagWriter == null)
-                {
-                    string dir = Path.Combine(Path.GetTempPath(), "HIDMaestro");
-                    string diagPath = Path.Combine(dir, "teardown_diag.log");
-                    // T32-2: keep the StreamWriter open across LogDiag calls
-                    // and flush per write. Was File.AppendAllText (open/write/
-                    // close per call); during HIDMAESTRO_DIAG=1 battery runs
-                    // that's ~3-4K file ops adding 10-40 s to the wall time.
-                    // FileShare.ReadWrite | Delete so external tools can tail
-                    // the file AND the harness's per-run Remove-Item can clear
-                    // it even if a prior HIDMaestroTest writer didn't drain
-                    // its ProcessExit cleanly.
-                    var fs = OpenUserLog(dir, diagPath);
-                    s_diagWriter = new StreamWriter(fs) { AutoFlush = true };
-                    AppDomain.CurrentDomain.ProcessExit += (_, _) =>
-                    {
-                        try { lock (s_diagLock) { s_diagWriter?.Dispose(); s_diagWriter = null; } }
-                        catch { }
-                    };
-                }
-                s_diagWriter.Write('[');
-                s_diagWriter.Write(DateTime.Now.ToString("HH:mm:ss.fff"));
-                s_diagWriter.Write("] tid=");
-                s_diagWriter.Write(Environment.CurrentManagedThreadId.ToString().PadRight(3));
-                s_diagWriter.Write(' ');
-                s_diagWriter.Write(message);
-                s_diagWriter.Write('\n');
+                s_diagLog ??= new UserLog(Path.Combine(Path.GetTempPath(), "HIDMaestro", "teardown_diag.log"));
+                s_diagLog.Write($"[{DateTime.Now:HH:mm:ss.fff}] tid={Environment.CurrentManagedThreadId.ToString().PadRight(3)} {message}\n");
             }
             catch { }
         }
@@ -118,14 +78,14 @@ internal static partial class DeviceOrchestrator
     // ════════════════════════════════════════════════════════════════════
     //  Timing instrumentation: gated by env var HIDMAESTRO_TIMING=1.
     //  When enabled, each SetupController step's duration is appended to
-    //  %TEMP%\HIDMaestro\setup_timing.log, opened once as the user
-    //  (OpenUserLog), so we can pin regressions across runs without
-    //  polluting stdout. Zero-overhead when disabled.
+    //  %TEMP%\HIDMaestro\setup_timing.log through a UserLog, opened once as
+    //  the user, so we can pin regressions across runs without polluting
+    //  stdout. Zero-overhead when disabled.
     // ════════════════════════════════════════════════════════════════════
     private static readonly bool s_timingEnabled =
         Environment.GetEnvironmentVariable("HIDMAESTRO_TIMING") == "1";
     private static readonly object s_timingLock = new();
-    private static StreamWriter? s_timingWriter;
+    private static UserLog? s_timingLog;
 
     private static void LogTiming(int ctrlIdx, string profileId, string step, long elapsedMs)
     {
@@ -134,20 +94,9 @@ internal static partial class DeviceOrchestrator
         {
             try
             {
-                if (s_timingWriter == null)
-                {
-                    string dir = Path.Combine(Path.GetTempPath(), "HIDMaestro");
-                    string timingPath = Path.Combine(dir, "setup_timing.log");
-                    var fs = OpenUserLog(dir, timingPath);
-                    s_timingWriter = new StreamWriter(fs) { AutoFlush = true };
-                    AppDomain.CurrentDomain.ProcessExit += (_, _) =>
-                    {
-                        try { lock (s_timingLock) { s_timingWriter?.Dispose(); s_timingWriter = null; } }
-                        catch { }
-                    };
-                }
-                s_timingWriter.WriteLine(
-                    $"[{DateTime.Now:HH:mm:ss.fff}] ctrl={ctrlIdx} profile={profileId,-24} step={step,-36} {elapsedMs,6}ms");
+                s_timingLog ??= new UserLog(Path.Combine(Path.GetTempPath(), "HIDMaestro", "setup_timing.log"));
+                s_timingLog.Write(
+                    $"[{DateTime.Now:HH:mm:ss.fff}] ctrl={ctrlIdx} profile={profileId,-24} step={step,-36} {elapsedMs,6}ms{Environment.NewLine}");
             }
             catch { }
         }
@@ -2206,8 +2155,14 @@ internal static partial class DeviceOrchestrator
         // create of the same identity in that gap got the old devnode back
         // and failed (S70: Logitech mice, held by Logitech's lighting
         // service). The removals below then remove the device and the
-        // records. A driver before protocol 5 does not answer the request,
-        // and the removals query Windows as before.
+        // records once it is down. The driver answers as soon as it has
+        // failed its device, and Windows takes the device down after it: on
+        // the development laptop on 2026-10-25 a keyboard's first HID child
+        // was still in the tree at its SetupDiRemoveDevice 9 ms after the
+        // answer. So the removals wait for it (DeviceManager.WaitSurpriseRemoval).
+        // A driver before protocol 5 does not answer the request, and the
+        // device and its records then stay, as for any removal a program
+        // refuses (DeviceManager.RemoveDevice).
         if (instanceId != null && instanceId.StartsWith(@"ROOT\", StringComparison.OrdinalIgnoreCase))
         {
             var querySw = Stopwatch.StartNew();
@@ -2221,6 +2176,11 @@ internal static partial class DeviceOrchestrator
                 var failSw = Stopwatch.StartNew();
                 bool failed = SharedMemoryIO.RequestSurpriseRemoval(controllerIndex, TimeoutScale.Apply(2000));
                 LogDiag($"    surprise removal requested of {instanceId}: {(failed ? "the driver failed its device" : "no answer")} in {failSw.ElapsedMilliseconds}ms");
+                if (failed)
+                {
+                    bool down = DeviceManager.WaitSurpriseRemoval(instanceId, preCapturedHidChildren, DeviceManager.SurpriseRemovalWaitMs);
+                    LogDiag($"    surprise removal of {instanceId}: {(down ? "down" : "still up")} after {failSw.ElapsedMilliseconds}ms");
+                }
             }
         }
 
@@ -2822,8 +2782,8 @@ internal static partial class DeviceOrchestrator
     /// which delete the packages without <c>/uninstall</c> or <c>/force</c>.
     /// It differs from the preserving sweep in two ways. It always waits for
     /// the driver hosts to exit and drains the ones left, since the packages
-    /// go next. And it removes present <c>ROOT\HMCOMPANION*</c> devnodes,
-    /// the April 2026 companion form, which only the phantom pass reaches
+    /// go next. And it removes present <c>HMCOMPANION*</c> devnodes, the
+    /// April 2026 companion form, which only the phantom pass reaches
     /// otherwise. The caller holds <see cref="OwnerSweep.CreateGate"/> for
     /// writing.</summary>
     internal static void RemoveEverythingForUninstall()
@@ -2832,6 +2792,92 @@ internal static partial class DeviceOrchestrator
         try { RemoveEverythingGated(preserveInstall: true, forUninstall: true); }
         finally { OwnerSweep.CreateGate.ExitWriteLock(); }
     }
+
+    /// <summary>The full removal's request that a device's driver fail it
+    /// when a program refuses its removal query (DeviceManager.RemoveDevice):
+    /// the remove event of the index the devnode's Device Parameters name.
+    /// The full removal removes every device, so whatever device is on that
+    /// index is its to fail. Null for a software device, whose close is
+    /// already a surprise removal, and for a devnode with no index.</summary>
+    private static Func<bool>? FailOnIndex(string enumRoot, string instanceId)
+    {
+        if (enumRoot != "ROOT") return null;
+        int index = OwnerCensus.ReadControllerIndex(instanceId);
+        return index < 0 ? null : () => SharedMemoryIO.RequestSurpriseRemovalOfIndex(index, TimeoutScale.Apply(2000));
+    }
+
+    /// <summary>What the full removal's walk left in the device tree, read
+    /// from the census taken after it, and what the removal's end keeps for
+    /// it. RemoveDevice leaves a device whose removal a program refuses, and
+    /// its records, when its driver cannot be asked to fail it or does not
+    /// answer, so that once the program lets go a later sweep can find it by
+    /// the index its Device Parameters name and the record of its
+    /// owner.</summary>
+    internal sealed class LeftInPlace
+    {
+        private readonly HashSet<string> _devnodes = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _records = new(StringComparer.OrdinalIgnoreCase);
+
+        internal LeftInPlace(OwnerCensus after)
+        {
+            foreach (var g in after.Devices)
+            {
+                _devnodes.UnionWith(g.InstanceIds);
+                // The census ties a device to the record of its owner, and a
+                // dead owner's record is what a later sweep removes it by.
+                if (g.Record is { Live: false } r) _records.Add(r.OwnerId);
+            }
+        }
+
+        /// <summary>The HIDMaestro devnodes still in the tree.</summary>
+        internal IReadOnlyCollection<string> Devnodes => _devnodes;
+
+        /// <summary>A present devnode keeps its Device Parameters: its
+        /// ControllerIndex is how the census places it and keeps its index
+        /// from a new lease (OwnerCensus.IndicesInUse), and the index is
+        /// what a later sweep asks its driver to fail it through.</summary>
+        internal bool KeepsDeviceParameters(string instanceId) => _devnodes.Contains(instanceId);
+
+        /// <summary>A live program's record stays, as before, and so does a
+        /// dead program's record that names a present devnode. Without it the
+        /// device reads as Unknown, which no sweep removes.</summary>
+        internal bool KeepsRecord(MachineClaims.OwnerRecord record) => record.Live || _records.Contains(record.OwnerId);
+
+        /// <summary>The interface class entries of present devnodes stay
+        /// (DeviceOrchestrator.RemoveOwnedInterfaceEntries' phantomOnly).
+        /// With nothing left in the tree, phantomOnly reaches every entry
+        /// the full removal reached before.</summary>
+        internal bool KeepsPresentInterfaceEntries => true;
+
+        /// <summary>No driver host is waited for or stopped while a
+        /// HIDMaestro devnode is in the tree. Nothing maps a UMDF host to the
+        /// device it serves (the driver publishes no process id), and the
+        /// host of a device left in place keeps serving it until the holder
+        /// lets go: a wait for it ends only at its bound, and a stop fails
+        /// the device. The wait and the drain protect a package removal,
+        /// which waits for the same (<see cref="KeepsPackages"/>).</summary>
+        internal bool LeavesDriverHosts => _devnodes.Count > 0;
+
+        /// <summary>No driver package goes while a HIDMaestro devnode is in
+        /// the tree. The full removal deletes the packages with pnputil's
+        /// /delete-driver /uninstall /force, which takes the driver from a
+        /// present device and leaves it in Code 14 until a restart. A later
+        /// full removal or the uninstaller removes them once the device is
+        /// gone, and the uninstaller never forces one.</summary>
+        internal bool KeepsPackages => _devnodes.Count > 0;
+    }
+
+    /// <summary>A device id under <paramref name="enumRoot"/> whose every
+    /// instance the full removal's walk removes without a HardwareID proof:
+    /// HIDMAESTRO*, and for the uninstaller the April 2026 companion form
+    /// HMCOMPANION*, which the census counts as HIDMaestro's alone under
+    /// ROOT and SWD (OwnerCensus.IsExclusiveEnumerator) and the phantom pass
+    /// reaches otherwise. So nothing the census counts is left in the tree
+    /// by the uninstaller's walk alone, to keep its driver hosts from the
+    /// drain.</summary>
+    internal static bool WalkOwnsAlone(string enumRoot, string sub, bool forUninstall) =>
+        sub.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase)
+        || (forUninstall && sub.StartsWith("HMCOMPANION", StringComparison.OrdinalIgnoreCase));
 
     private static void RemoveEverythingGated(bool preserveInstall, bool forUninstall = false)
     {
@@ -2878,9 +2924,7 @@ internal static partial class DeviceOrchestrator
                 // we own exclusively. VID_*, XnaComposite, HID_IG_00,
                 // HIDCLASS, SYSTEM are all shared with third-party drivers
                 //: require IsHidMaestroOwned on every instance under those.
-                bool exclusivelyOurs = sub.Equals("HIDMAESTRO", StringComparison.OrdinalIgnoreCase)
-                    || sub.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase)
-                    || (forUninstall && enumRoot == "ROOT" && sub.StartsWith("HMCOMPANION", StringComparison.OrdinalIgnoreCase));
+                bool exclusivelyOurs = WalkOwnsAlone(enumRoot, sub, forUninstall);
 
                 bool shared = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)
                     || sub.Equals("XnaComposite", StringComparison.OrdinalIgnoreCase)
@@ -2903,13 +2947,15 @@ internal static partial class DeviceOrchestrator
                     {
                         if (exclusivelyOurs)
                         {
-                            DeviceManager.RemoveDevice(instId, timeoutMs: 5000, fast: true, forceFallbacks: true);
+                            DeviceManager.RemoveDevice(instId, timeoutMs: 5000, fast: true, forceFallbacks: true,
+                                                       failDevice: FailOnIndex(enumRoot, instId));
                             continue;
                         }
 
                         // Shared: only remove if hardware ID contains "HIDMaestro"
                         if (DeviceManager.IsHidMaestroOwned(instId))
-                            DeviceManager.RemoveDevice(instId, timeoutMs: 3000, fast: true, forceFallbacks: true);
+                            DeviceManager.RemoveDevice(instId, timeoutMs: 3000, fast: true, forceFallbacks: true,
+                                                       failDevice: FailOnIndex(enumRoot, instId));
                     }
                     catch (Exception ex) when (ex is not DeviceManager.PnpLockBusyException)
                     {
@@ -3000,52 +3046,42 @@ internal static partial class DeviceOrchestrator
 
         Phase("hid-orphans");
 
+        EndEverything(preserveInstall, forUninstall, EverythingEndCalls.Machine, Phase);
+        LogDiag($"<<< SWEEP EXIT total={sweepSw.ElapsedMilliseconds}ms");
+    }
+
+    /// <summary>The full removal's end, after its walk and the HID orphans:
+    /// what the walk left in the tree (<see cref="LeftInPlace"/>, from the
+    /// census <paramref name="calls"/> takes), then the Device Parameters,
+    /// the interface entries, the shared keys, the wait for the driver
+    /// hosts, the packages, this process's sections, the records and the
+    /// drain of driver hosts, each through <paramref name="calls"/>.
+    /// pnp_notify_check's part 10 runs it on a census and records of its
+    /// own.</summary>
+    internal static void EndEverything(bool preserveInstall, bool forUninstall, EverythingEndCalls calls, Action<string> phase)
+    {
+        // What the walk left in the tree, read once before anything below.
+        var left = new LeftInPlace(calls.Census());
+        if (left.Devnodes.Count > 0)
+            LogDiag($"    left in the tree: {string.Join(", ", left.Devnodes)}");
+
         // Clean Device Parameters under our enumerators via reg.exe (PnP ACLs
         // prevent direct writes). Leaves the PnP instance keys themselves intact.
-        // Sweeps both ROOT\ and SWD\ subtrees. HIDMAESTRO* is ours alone. The
-        // other enumerators are shared with third-party root devices, so an
-        // instance there needs the HardwareID proof first (#28, #1138).
-        {
-            foreach (var enumRootName in new[] { "ROOT", "SWD" })
-            try
-            {
-                using var enumRoot = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{enumRootName}");
-                if (enumRoot == null) continue;
-                foreach (var sub in enumRoot.GetSubKeyNames())
-                {
-                    if (!SweepsDeviceParameters(sub, out bool exclusivelyOurs)) continue;
-                    using var subKey = enumRoot.OpenSubKey(sub);
-                    if (subKey == null) continue;
-                    foreach (var inst in subKey.GetSubKeyNames())
-                    {
-                        if (!exclusivelyOurs && !DeviceManager.IsHidMaestroOwned($@"{enumRootName}\{sub}\{inst}"))
-                            continue;
-                        string dpPath = $@"SYSTEM\CurrentControlSet\Enum\{enumRootName}\{sub}\{inst}\Device Parameters";
-                        RunProcess("reg.exe", $"delete \"HKLM\\{dpPath}\" /f", timeoutMs: 3000);
-                    }
-                }
-            }
-            catch { }
-        }
+        foreach (string id in calls.DeviceParameterOwners())
+            if (!left.KeepsDeviceParameters(id)) calls.DeleteDeviceParameters(id);
 
-        Phase("device-params");
+        phase("device-params");
 
         // Clean interface registries (XUSB + WinExInput), with the same
         // ownership proof the once-per-session cleanup uses.
-        RemoveOwnedInterfaceEntries(phantomOnly: false);
+        calls.RemoveInterfaceEntries(left.KeepsPresentInterfaceEntries);
 
-        Phase("interface-classes");
+        phase("interface-classes");
 
         // Shared joy.cpl and GameInput keys (foundation-sunshine #1138).
-        // Every virtual is gone by now, so every key the ledger holds goes
-        // back to its prior state, and tables older builds left behind go.
-        // Nothing else under those roots is touched: a vendor prefix is not
-        // ownership.
-        RegistryLedger.ReleaseAll();
-        int legacyTables = RegistryLedger.RemoveLegacyTables();
-        LogDiag($"    removed {legacyTables} legacy GameInput table(s)");
+        calls.ReleaseSharedKeys();
 
-        Phase("shared-keys");
+        phase("shared-keys");
 
         // The WUDFHost release-wait and the orphan drain below exist to
         // protect DriverStore FILE REPLACEMENT: a host that still has the
@@ -3058,11 +3094,11 @@ internal static partial class DeviceOrchestrator
         // the wait removes the ~1.7 s the recovery path spent watching
         // orphaned hosts exit gracefully (2026-07-21 perf audit). Any
         // version change or full-nuke cleanup keeps the full discipline.
-        bool skipWudfSteps = !forUninstall && preserveInstall && DriverBuilder.WillTakeFastPath();
+        bool skipWudfSteps = !forUninstall && preserveInstall && calls.FastPath();
 
         // Wait for WUDFHost processes to release our DLLs.
-        if (!skipWudfSteps)
-            WaitForDriverHostsToExit();
+        if (!skipWudfSteps && !left.LeavesDriverHosts)
+            calls.WaitForHosts();
 
         // Remove driver packages from store. Strict, retry-aware, verifies
         // afterward (see PnputilHelper). Catch the verification throw here
@@ -3076,35 +3112,24 @@ internal static partial class DeviceOrchestrator
         // so FullDeploy's same-version fast path survives. See the
         // preserving overload's doc for the measured cost of nuking these
         // every launch.
-        Phase("wudf-release-wait");
+        phase("wudf-release-wait");
 
         if (!preserveInstall)
         {
-            // Under the deploy lock, so no other program's deploy is between
-            // its check and its install while the packages go.
-            using var deploy = DriverDeploy.Acquire();
-            try
-            {
-                try { PnputilHelper.RemoveAllHidMaestroPackages(); } catch { }
-                // The WinUSB binding packages that no devnode uses. A devnode
-                // still on one keeps its driver and the package stays.
-                try { WinUsbBinding.RemovePackage(); } catch { }
-
-                // Clear registry config
-                try { Registry.LocalMachine.DeleteSubKeyTree(@"SOFTWARE\HIDMaestro", false); } catch { }
-            }
-            finally { deploy.ReleaseMutex(); }
+            if (left.KeepsPackages)
+                LogDiag("    the driver packages stay: a HIDMaestro device is still in the tree, and their removal would force the driver off it");
+            else calls.RemovePackages();
         }
-        Phase("package-removal");
+        phase("package-removal");
 
         // Release shared-memory mappings
-        try { SharedMemoryIO.Cleanup(); } catch { }
+        calls.ReleaseSections();
 
         // Records of programs that have exited describe nothing now. A
         // running program's record stays: it still holds its claims, and
         // its own dispose removes its entries.
-        foreach (var rec in MachineClaims.ReadAll())
-            if (!rec.Live) MachineClaims.DeleteRecord(rec.OwnerId);
+        foreach (var rec in calls.Records())
+            if (!left.KeepsRecord(rec)) calls.DeleteRecord(rec.OwnerId);
 
         // Drain orphaned WUDFHost processes that STILL have our stale
         // HIDMaestro.dll memory-mapped from a since-deleted DriverStore
@@ -3125,10 +3150,117 @@ internal static partial class DeviceOrchestrator
         // microsoft.bluetooth.profiles.hidovergatt.dll for a real BT Xbox
         // controller) is skipped entirely: that's what the NEVER-kill-
         // WUDFHost rule in feedback-never-kill-wudfhost.md is about.
-        if (!skipWudfSteps)
-            DrainOrphanedWudfHosts();
-        Phase("wudf-drain");
-        LogDiag($"<<< SWEEP EXIT total={sweepSw.ElapsedMilliseconds}ms");
+        if (!skipWudfSteps && !left.LeavesDriverHosts)
+            calls.DrainHosts();
+        phase("wudf-drain");
+    }
+
+    /// <summary>What the full removal's end does on the machine
+    /// (<see cref="EndEverything"/>): the machine's own work, or
+    /// pnp_notify_check's stand-ins, with which its offline part runs the
+    /// end on a census and records of its own.</summary>
+    internal sealed class EverythingEndCalls
+    {
+        /// <summary>The machine's own work.</summary>
+        internal static readonly EverythingEndCalls Machine = new();
+
+        /// <summary>The census taken after the walk.</summary>
+        public Func<OwnerCensus> Census = OwnerCensus.Take;
+        /// <summary>The instances whose Device Parameters the end may
+        /// delete (<see cref="OwnedDeviceParameterInstances"/>).</summary>
+        public Func<List<string>> DeviceParameterOwners = OwnedDeviceParameterInstances;
+        /// <summary>Deletes one instance's Device Parameters.</summary>
+        public Action<string> DeleteDeviceParameters = DeleteDeviceParametersOf;
+        /// <summary>The interface class entries, of phantoms alone when
+        /// true (<see cref="RemoveOwnedInterfaceEntries"/>).</summary>
+        public Action<bool> RemoveInterfaceEntries = phantomOnly => RemoveOwnedInterfaceEntries(phantomOnly);
+        /// <summary>The shared joy.cpl and GameInput keys.</summary>
+        public Action ReleaseSharedKeys = ReleaseSharedKeysForEverything;
+        /// <summary>Whether FullDeploy will take its same-version fast
+        /// path (DriverBuilder.WillTakeFastPath).</summary>
+        public Func<bool> FastPath = DriverBuilder.WillTakeFastPath;
+        /// <summary>The wait for the driver hosts to let go of the
+        /// DLLs.</summary>
+        public Action WaitForHosts = WaitForDriverHostsToExit;
+        /// <summary>The driver packages and SOFTWARE\HIDMaestro.</summary>
+        public Action RemovePackages = RemovePackagesForEverything;
+        /// <summary>This process's shared-memory mappings.</summary>
+        public Action ReleaseSections = () => { try { SharedMemoryIO.Cleanup(); } catch { } };
+        /// <summary>The owner records.</summary>
+        public Func<List<MachineClaims.OwnerRecord>> Records = MachineClaims.ReadAll;
+        /// <summary>Deletes one owner record.</summary>
+        public Action<string> DeleteRecord = MachineClaims.DeleteRecord;
+        /// <summary>The drain of driver hosts that map nothing but
+        /// HIDMaestro's DLLs (<see cref="DrainOrphanedWudfHosts"/>).</summary>
+        public Action DrainHosts = DrainOrphanedWudfHosts;
+    }
+
+    /// <summary>The ROOT and SWD instances whose Device Parameters the full
+    /// removal may delete. HIDMAESTRO* is ours alone. The other enumerators
+    /// are shared with third-party root devices, so an instance there needs
+    /// the HardwareID proof first (#28, #1138).</summary>
+    private static List<string> OwnedDeviceParameterInstances()
+    {
+        var ids = new List<string>();
+        foreach (var enumRootName in new[] { "ROOT", "SWD" })
+        try
+        {
+            using var enumRoot = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{enumRootName}");
+            if (enumRoot == null) continue;
+            foreach (var sub in enumRoot.GetSubKeyNames())
+            {
+                if (!SweepsDeviceParameters(sub, out bool exclusivelyOurs)) continue;
+                using var subKey = enumRoot.OpenSubKey(sub);
+                if (subKey == null) continue;
+                foreach (var inst in subKey.GetSubKeyNames())
+                {
+                    string id = $@"{enumRootName}\{sub}\{inst}";
+                    if (exclusivelyOurs || DeviceManager.IsHidMaestroOwned(id)) ids.Add(id);
+                }
+            }
+        }
+        catch { }
+        return ids;
+    }
+
+    /// <summary>Deletes one instance's Device Parameters through reg.exe,
+    /// since PnP's ACLs refuse direct writes there. The instance key
+    /// itself stays.</summary>
+    private static void DeleteDeviceParametersOf(string instanceId)
+    {
+        string dpPath = $@"SYSTEM\CurrentControlSet\Enum\{instanceId}\Device Parameters";
+        RunProcess("reg.exe", $"delete \"HKLM\\{dpPath}\" /f", timeoutMs: 3000);
+    }
+
+    /// <summary>Shared joy.cpl and GameInput keys (foundation-sunshine
+    /// #1138). Every virtual is gone by now, so every key the ledger holds
+    /// goes back to its prior state, and tables older builds left behind
+    /// go. Nothing else under those roots is touched: a vendor prefix is not
+    /// ownership.</summary>
+    private static void ReleaseSharedKeysForEverything()
+    {
+        RegistryLedger.ReleaseAll();
+        int legacyTables = RegistryLedger.RemoveLegacyTables();
+        LogDiag($"    removed {legacyTables} legacy GameInput table(s)");
+    }
+
+    /// <summary>The full removal's package step, under the deploy lock, so
+    /// no other program's deploy is between its check and its install while
+    /// the packages go.</summary>
+    private static void RemovePackagesForEverything()
+    {
+        using var deploy = DriverDeploy.Acquire();
+        try
+        {
+            try { PnputilHelper.RemoveAllHidMaestroPackages(); } catch { }
+            // The WinUSB binding packages that no devnode uses. A devnode
+            // still on one keeps its driver and the package stays.
+            try { WinUsbBinding.RemovePackage(); } catch { }
+
+            // Clear registry config
+            try { Registry.LocalMachine.DeleteSubKeyTree(@"SOFTWARE\HIDMaestro", false); } catch { }
+        }
+        finally { deploy.ReleaseMutex(); }
     }
 
     /// <summary>Before a package replacement with no HIDMaestro device

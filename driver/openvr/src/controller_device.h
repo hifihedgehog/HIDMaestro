@@ -11,6 +11,7 @@
 
 #include <array>
 #include <atomic>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -73,12 +74,13 @@ private:
     std::atomic<bool> is_active_{ false };
     std::atomic<bool> connected_{ true };
 
-    // Latest consumer pose override, published by UpdateFromState and
-    // consumed by the pose thread. Guarded by pose_valid_'s release/acquire
-    // ordering: writer stores the payload, then flags; reader checks the
-    // flag, then loads. A torn read here costs one 5 ms frame of pose lag,
-    // which is below SteamVR's own prediction noise.
-    std::atomic<uint32_t> pose_override_valid_{ 0 };
+    // Latest consumer pose override, written by UpdateFromState on the
+    // RunFrame thread and read by the pose thread under pose_mutex_. The
+    // writer rewrites the floats in place every frame while the flag stays
+    // set, so a reader that only checks the flag can copy a position or a
+    // quaternion mixed from two frames.
+    std::mutex pose_mutex_;
+    bool pose_override_valid_ = false;
     float override_position_[3] = { 0, 0, 0 };
     float override_orientation_[4] = { 1, 0, 0, 0 };
 

@@ -48,10 +48,16 @@ internal sealed partial class UsbAudioEngine : IDisposable
         public int FrameAtCompletion;   // virtual frame counter value to report
         public byte InterfaceNumber;    // the streaming interface the endpoint belongs to
         public byte AltSetting;         // the alternate setting that declares the endpoint
+        public UsbipServer.Connection? Import; // the connection the URB came on, which its answer goes to
+        public bool Unlinked;           // an unlink came while the pump completed it
+        public uint UnlinkSeqnum;       // that unlink's seqnum
     }
 
     private readonly object _lock = new();
     private readonly List<PendingIso> _pending = new();
+    // URBs the pump has taken from _pending and not yet answered, which an
+    // unlink finds here (TryUnlink). Guarded by _lock.
+    private readonly List<PendingIso> _completing = new(8);
     private readonly Thread _thread;
     private readonly AutoResetEvent _wake = new(false);
     private readonly IntPtr _timer;
@@ -75,7 +81,14 @@ internal sealed partial class UsbAudioEngine : IDisposable
     /// is the pump's own buffer, valid for the call.</summary>
     internal delegate void IsoCompletion(PendingIso urb, ReadOnlySpan<byte> inData, int perPacketActual);
 
+    /// <summary>Answers, with status 0, an unlink that came while the pump
+    /// completed a URB, once the URB's RET_SUBMIT is on the wire: on
+    /// <paramref name="import"/>, the connection the URB came on. Called on
+    /// the pump thread.</summary>
+    internal delegate void IsoUnlinkAnswer(UsbipServer.Connection? import, uint unlinkSeqnum);
+
     private readonly IsoCompletion _complete;
+    private readonly IsoUnlinkAnswer? _unlinkAnswer;
 
     // Spent URBs, handed out again by RentUrb, and the pump's microphone
     // buffer, so a transfer allocates nothing once they have grown to the
@@ -201,9 +214,12 @@ internal sealed partial class UsbAudioEngine : IDisposable
     // to the last one is not raised again. The event thread's alone.
     private readonly Dictionary<byte, byte> _altRaised = new();
 
-    public UsbAudioEngine(ControllerProfile profile, IsoCompletion complete)
+    public UsbAudioEngine(ControllerProfile profile, IsoCompletion complete) : this(profile, complete, null) { }
+
+    public UsbAudioEngine(ControllerProfile profile, IsoCompletion complete, IsoUnlinkAnswer? unlinkAnswer)
     {
         _complete = complete;
+        _unlinkAnswer = unlinkAnswer;
 
         var cfg = profile.UsbConfiguration!;
         int micBytes = 0;
@@ -280,6 +296,8 @@ internal sealed partial class UsbAudioEngine : IDisposable
         if (urb.OutPayload.Length < outLength) urb.OutPayload = new byte[outLength];
         urb.PacketCount = packets;
         urb.OutLength = outLength;
+        urb.Import = null;
+        urb.Unlinked = false;
         return urb;
     }
 
@@ -329,24 +347,49 @@ internal sealed partial class UsbAudioEngine : IDisposable
         }
     }
 
-    /// <summary>Remove a pending URB by seqnum (CMD_UNLINK). Returns true
-    /// if it was still queued (reply -ECONNRESET), false if already
-    /// completed (reply 0).</summary>
-    public bool TryUnlink(uint seqnum)
+    /// <summary>What a CMD_UNLINK found.</summary>
+    internal enum UnlinkResult : byte
+    {
+        /// <summary>No URB of the import's with that seqnum waits or
+        /// completes here.</summary>
+        NotFound,
+        /// <summary>The URB was waiting for its tick and is gone: the
+        /// unlink's answer is -ECONNRESET.</summary>
+        Removed,
+        /// <summary>The pump has taken the URB to complete. It sends the
+        /// URB's RET_SUBMIT, then answers the unlink with status 0.</summary>
+        Completing,
+    }
+
+    /// <summary>A CMD_UNLINK of <paramref name="seqnum"/> on
+    /// <paramref name="import"/>, with seqnum <paramref name="unlinkSeqnum"/>.
+    /// A RET_UNLINK with status 0 says the URB's RET_SUBMIT went out before
+    /// it (usbip_protocol.rst, USBIP_RET_UNLINK), so the answer to a URB the
+    /// pump is completing, a consumer's handler perhaps still running, waits
+    /// for the pump: as Linux's stub sends a completed URB's RET_SUBMIT ahead
+    /// of every RET_UNLINK (stub_tx.c stub_tx_loop).</summary>
+    public UnlinkResult TryUnlink(uint seqnum, uint unlinkSeqnum, UsbipServer.Connection? import)
     {
         lock (_lock)
         {
             for (int i = 0; i < _pending.Count; i++)
             {
-                if (_pending[i].Seqnum == seqnum)
+                if (_pending[i].Seqnum == seqnum && _pending[i].Import == import)
                 {
                     ReturnUrbLocked(_pending[i]);
                     _pending.RemoveAt(i);
-                    return true;
+                    return UnlinkResult.Removed;
                 }
             }
+            foreach (var urb in _completing)
+            {
+                if (urb.Seqnum != seqnum || urb.Import != import || urb.Unlinked) continue;
+                urb.Unlinked = true;
+                urb.UnlinkSeqnum = unlinkSeqnum;
+                return UnlinkResult.Completing;
+            }
         }
-        return false;
+        return UnlinkResult.NotFound;
     }
 
     /// <summary>Drop every pending URB (device detach). No replies are
@@ -703,6 +746,7 @@ internal sealed partial class UsbAudioEngine : IDisposable
                     {
                         p.FrameAtCompletion = (int)((p.DueTick - _epoch) / TicksPerMs);
                         completedThisTick.Add(p);
+                        _completing.Add(p);
                         _pending.RemoveAt(i);
                     }
                     else if (p.DueTick < nextDue)
@@ -788,8 +832,20 @@ internal sealed partial class UsbAudioEngine : IDisposable
                 OutFrames?.Invoke(new ReadOnlyMemory<byte>(p.OutPayload, 0, p.OutLength));
             _complete(p, ReadOnlySpan<byte>.Empty, 0);
         }
-        // Sent, and no list holds it: the URB goes back for the next submit.
-        lock (_lock) ReturnUrbLocked(p);
+        // Sent, and no list holds it: the URB goes back for the next submit,
+        // and an unlink that came meanwhile is answered after it.
+        bool unlinked;
+        uint unlinkSeqnum;
+        UsbipServer.Connection? import;
+        lock (_lock)
+        {
+            _completing.Remove(p);
+            unlinked = p.Unlinked;
+            unlinkSeqnum = p.UnlinkSeqnum;
+            import = p.Import;
+            ReturnUrbLocked(p);
+        }
+        if (unlinked) _unlinkAnswer?.Invoke(import, unlinkSeqnum);
     }
 
     /// <summary>Stops the pump and the event thread. Each closes its own

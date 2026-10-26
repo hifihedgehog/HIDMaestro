@@ -168,16 +168,27 @@ vr::DriverPose_t HmVrControllerDevice::GetPose()
     pose.qWorldFromDriverRotation.w = 1.f;
     pose.qDriverFromHeadRotation.w = 1.f;
 
-    if ( pose_override_valid_.load( std::memory_order_acquire ) != 0 )
+    // One frame's override, copied whole under the lock.
+    bool overridden;
+    float override_pos[ 3 ];
+    float override_rot[ 4 ];
+    {
+        std::lock_guard<std::mutex> lock( pose_mutex_ );
+        overridden = pose_override_valid_;
+        for ( int i = 0; i < 3; i++ ) override_pos[ i ] = override_position_[ i ];
+        for ( int i = 0; i < 4; i++ ) override_rot[ i ] = override_orientation_[ i ];
+    }
+
+    if ( overridden )
     {
         // Consumer-supplied pose (PadForge stick/gyro-driven hands).
-        pose.qRotation.w = override_orientation_[ 0 ];
-        pose.qRotation.x = override_orientation_[ 1 ];
-        pose.qRotation.y = override_orientation_[ 2 ];
-        pose.qRotation.z = override_orientation_[ 3 ];
-        pose.vecPosition[ 0 ] = override_position_[ 0 ];
-        pose.vecPosition[ 1 ] = override_position_[ 1 ];
-        pose.vecPosition[ 2 ] = override_position_[ 2 ];
+        pose.qRotation.w = override_rot[ 0 ];
+        pose.qRotation.x = override_rot[ 1 ];
+        pose.qRotation.y = override_rot[ 2 ];
+        pose.qRotation.z = override_rot[ 3 ];
+        pose.vecPosition[ 0 ] = override_pos[ 0 ];
+        pose.vecPosition[ 1 ] = override_pos[ 1 ];
+        pose.vecPosition[ 2 ] = override_pos[ 2 ];
     }
     else
     {
@@ -244,20 +255,12 @@ void HmVrControllerDevice::UpdateFromState( const HMVR_ControllerState &state )
     in->UpdateScalarComponent( h[ HmVrComponent_joystick_x ],    state.scalars[ HMVR_SCALAR_STICK_X ], 0 );
     in->UpdateScalarComponent( h[ HmVrComponent_joystick_y ],    state.scalars[ HMVR_SCALAR_STICK_Y ], 0 );
 
-    if ( state.poseValid )
+    std::lock_guard<std::mutex> lock( pose_mutex_ );
+    pose_override_valid_ = state.poseValid != 0;
+    if ( pose_override_valid_ )
     {
-        override_orientation_[ 0 ] = state.orientation[ 0 ];
-        override_orientation_[ 1 ] = state.orientation[ 1 ];
-        override_orientation_[ 2 ] = state.orientation[ 2 ];
-        override_orientation_[ 3 ] = state.orientation[ 3 ];
-        override_position_[ 0 ] = state.position[ 0 ];
-        override_position_[ 1 ] = state.position[ 1 ];
-        override_position_[ 2 ] = state.position[ 2 ];
-        pose_override_valid_.store( 1, std::memory_order_release );
-    }
-    else
-    {
-        pose_override_valid_.store( 0, std::memory_order_release );
+        for ( int i = 0; i < 4; i++ ) override_orientation_[ i ] = state.orientation[ i ];
+        for ( int i = 0; i < 3; i++ ) override_position_[ i ] = state.position[ i ];
     }
 }
 
@@ -282,6 +285,15 @@ void HmVrControllerDevice::ProcessEvent( const vr::VREvent_t &vrevent, HMVR_Sect
     // then publish hapticHead, with barriers between the steps.
     const uint64_t seqNo = section->hapticHead + 1;
     HMVR_HapticReply &slot = section->haptic[ ( seqNo - 1 ) % HMVR_HAPTIC_SLOTS ];
+
+    // A consumer HMVR_HAPTIC_SLOTS replies behind reads the very slot this
+    // reply refills, checking its seqNo before and after the copy
+    // (VrSharedMemory.TryReadHaptic). Left in place through the refill,
+    // the old seqNo passes both checks for a copy mixed from two replies.
+    // Zero, the never-written value, goes in first, with a barrier before
+    // the fields, so a copy that saw any new field sees the seqNo changed.
+    slot.seqNo = 0;
+    MemoryBarrier();
 
     slot.hand = ( role_ == vr::TrackedControllerRole_LeftHand ) ? 0u : 1u;
     slot.durationSeconds = vrevent.data.hapticVibration.fDurationSeconds;

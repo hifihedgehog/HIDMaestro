@@ -114,6 +114,7 @@ internal static partial class PnputilHelper
         };
         ProtectedStaging.ConfineChildTemp(psi);
 
+        ToolStartForProbe?.Invoke(path);
         using var p = Process.Start(psi)!;
         // Drain streams concurrently: ReadToEnd blocks until EOF, which only
         // happens at process exit: so a synchronous read here would hang past
@@ -133,6 +134,12 @@ internal static partial class PnputilHelper
         try { exitCode = p.ExitCode; } catch { exitCode = -1; }
         return (exitCode, stdout + stderr, stopped);
     }
+
+    /// <summary>Called with the program's path right before
+    /// <see cref="RunTool"/> starts it, on the thread that runs it.
+    /// Coexistence probe section Z sets it through reflection to count the
+    /// programs a teardown's sweep runs. Null outside the probe.</summary>
+    internal static Action<string>? ToolStartForProbe;
 
     /// <summary>The driver store's published packages whose original INF
     /// name <paramref name="originalName"/> accepts, with their providers

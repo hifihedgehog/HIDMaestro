@@ -1713,7 +1713,7 @@ function Scenario-Usbip-Server-Protocol {
     } catch { $failed += $_.Exception.Message }
     try {
         Invoke-Probe -Dir 'usbip_server_check' -Exe 'UsbipServerCheck.exe' `
-                     -Message 'the USB/IP wire contract regressed (descriptors, HID both directions, isochronous pacing, unlink, a teardown racing Dispose, the import handshake, or a Dispose slower than 250 ms at p95), see probe stdout'
+                     -Message 'the USB/IP wire contract regressed (descriptors, HID both directions, isochronous pacing, unlink, a teardown racing Dispose, the import handshake, or a Dispose that does not wake the input pump), see probe stdout'
     } catch { $failed += $_.Exception.Message }
     if ($failed.Count -gt 0) { throw ($failed -join ' AND ') }
 }

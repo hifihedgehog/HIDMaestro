@@ -687,7 +687,7 @@ internal sealed partial class OwnerCensus
     private static readonly string[] EnumRoots = { "ROOT", "SWD" };
 
     /// <summary>A device id only HIDMaestro uses.</summary>
-    private static bool IsExclusiveEnumerator(string device) =>
+    internal static bool IsExclusiveEnumerator(string device) =>
         device.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase)
         || device.StartsWith("HMCOMPANION", StringComparison.OrdinalIgnoreCase);
 

@@ -305,7 +305,10 @@ public sealed class HMContext : IDisposable
     /// it and whether or not that program still runs, which is what an
     /// uninstall, a test harness or a support tool wants. With
     /// <paramref name="preserveInstall"/> false it also removes the driver
-    /// packages and <c>HKLM\SOFTWARE\HIDMaestro</c>.
+    /// packages and <c>HKLM\SOFTWARE\HIDMaestro</c>, once no HIDMaestro
+    /// device is left in the tree: a device a program holds against its
+    /// removal keeps them, since their removal would force the driver off
+    /// it.
     ///
     /// <para>A controller the calling program still holds stays a usable
     /// object with no device behind it. Its submits and PID calls return
@@ -756,11 +759,19 @@ public sealed class HMContext : IDisposable
                 // Best-effort cleanup of any partial state, then rethrow.
                 // The devices go before the lease below gives their index
                 // and identity back to the machine.
+                long left = Internal.DeviceManager.RemovalsLeftHere;
                 try { TeardownDevices(lease.TransportIndex, instanceId); } catch { }
                 // A create cut short by the exit's bound on the PnP lock keeps
                 // its lease, as a dispose does, so the record names what it
-                // made for the next sweep.
-                if (Internal.DeviceManager.LockTakesRefusedHere != refused) keepLease = true;
+                // made for the next sweep. So does one whose own device another
+                // program kept by refusing the teardown's removal. A prior life
+                // or a rival that another program kept, which refused the
+                // create before it registered a devnode (instanceId null), is
+                // not this create's device: the lease goes back, or every later
+                // create of the key in this process would be refused as in use
+                // by this process until it exits.
+                if (Internal.DeviceManager.LockTakesRefusedHere != refused
+                    || (instanceId != null && Internal.DeviceManager.RemovalsLeftHere != left)) keepLease = true;
                 throw;
             }
         }
@@ -954,6 +965,7 @@ public sealed class HMContext : IDisposable
             }
 
             long refused = Internal.DeviceManager.LockTakesRefusedHere;
+            long left = Internal.DeviceManager.RemovalsLeftHere;
             try
             {
                 Internal.DeviceOrchestrator.TeardownController(
@@ -965,7 +977,10 @@ public sealed class HMContext : IDisposable
                 // hold of the PnP lock cut short left devices present. The
                 // lease, and so the record's entry for them, stays until the
                 // process ends, and the next sweep removes them through it.
-                if (Internal.DeviceManager.LockTakesRefusedHere != refused)
+                // So does a teardown whose device another program kept by
+                // refusing its removal when the driver did not take it down.
+                if (Internal.DeviceManager.LockTakesRefusedHere != refused
+                    || Internal.DeviceManager.RemovalsLeftHere != left)
                     keepLease = true;
             }
         }

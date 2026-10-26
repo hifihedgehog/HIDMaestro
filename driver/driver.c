@@ -1624,10 +1624,10 @@ PublishOutput(_In_ PDEVICE_CONTEXT ctx,
     /* v1.1.40 ring buffer: SeqNo=0 reserved for "never written"; first
      * write is SeqNo=1. Slot index is (SeqNo - 1) % N. Writer:
      *   1) compute new SeqNo (Head + 1)
-     *   2) write slot fields including Data[]
-     *   3) MemoryBarrier
-     *   4) write slot.SeqNo = new SeqNo (publishes the slot)
-     *   5) MemoryBarrier + write Head = new SeqNo (publishes the ring head)
+     *   2) write slot.SeqNo = 0, then MemoryBarrier
+     *   3) write slot fields including Data[]
+     *   4) MemoryBarrier
+     *   5) write slot.SeqNo = new SeqNo (publishes the slot)
      *
      * Reader scans slots from LastSeen+1 to Head, validates each by
      * checking slot.SeqNo == expected, copies, re-checks SeqNo for
@@ -1649,6 +1649,15 @@ PublishOutput(_In_ PDEVICE_CONTEXT ctx,
     ULONG newSeq = (ULONG)InterlockedIncrement((volatile LONG *)&dst->Head);
     ULONG slotIdx = (newSeq - 1) % HIDMAESTRO_OUTPUT_RING_SLOTS;
     volatile HIDMAESTRO_OUTPUT_SLOT *slot = &dst->Slots[slotIdx];
+
+    /* A reader HIDMAESTRO_OUTPUT_RING_SLOTS packets behind reads the very
+     * slot this packet refills, checking its SeqNo before and after the copy
+     * (SharedMemoryIO.TryReadOutputFrame). Left in place through the refill,
+     * the old SeqNo passes both checks for a copy mixed from two packets.
+     * Zero, the never-written value, goes in first, with a barrier before
+     * the fields, so a copy that saw any new field reads the SeqNo changed. */
+    slot->SeqNo = 0;
+    MemoryBarrier();
 
     slot->Source = Source;
     slot->ReportId = ReportId;

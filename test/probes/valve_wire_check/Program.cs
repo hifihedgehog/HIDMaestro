@@ -96,7 +96,7 @@ static class Program
     /// <summary>The first frame that carries <paramref name="state"/>, read
     /// while a pump submits it. Frames of the previous state can come first:
     /// idle streaming re-published it while the probe was quiet, and the
-    /// device holds up to eight frames for a host that polls slower than the
+    /// device holds its newest frame for a host that polls slower than the
     /// pump. So the reader skips frames until <paramref name="arrived"/>
     /// accepts one. When none does within StateDeadlineMs, the last frame
     /// read comes back, and it carries the new state by then, so the checks
@@ -722,11 +722,10 @@ static class Program
                         catch (ObjectDisposedException) { }
                     }) { IsBackground = true };
                     feeder.Start();
-                    // The window starts eight frames, the depth of the
-                    // device's queue, after the consumer's first frame
-                    // reaches the wire, so it holds the consumer's stream
-                    // and not the switch from the SDK's own state, however
-                    // late load makes that first frame.
+                    // The window starts eight frames after the consumer's
+                    // first frame reaches the wire, so it holds the
+                    // consumer's stream and not the switch from the SDK's
+                    // own state, however late load makes that first frame.
                     int Steady(List<(double T, byte[] F)> l)
                     {
                         int first = l.FindIndex(r => Ours(r.F));
