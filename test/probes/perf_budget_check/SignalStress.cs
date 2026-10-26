@@ -15,34 +15,81 @@
 //
 // The gate's capability words in Global\HIDMaestroSignal<N> tell the SDK
 // it may skip a signal, and the driver hosts count whatever they say. So
-// each pass switches the gate itself by writing those words, in blocks of
-// 1 s, so a load spike on the machine lands on every mode alike: on and off for the DualShock 4's input event, and for the Xbox 360
-// pad also each of its two parts alone (the input event, the companion
-// doorbell), in order and then backward, so every mode meets the same
-// stretch of the pass. A mode with a gate on fails when it has more frames
-// over 4 ms than twice those of the gate off, plus five: a missed signal
-// that the worker's timeout or the companion's 8 ms timer recovers shows
-// as just such a late frame. --gate-off keeps the gate off for the whole
-// pass. The HID driver sets its capability again every 256 frames, so a
-// mode with the input event's gate off clears it before every submit, and a
-// submit that finds it set again afterward is counted apart from its mode
-// and left out of the comparison. Against an SDK that makes no section it
-// says so and runs as is.
+// each pass switches the gate itself by writing those words: on and off for
+// the DualShock 4's input event, and for the Xbox 360 pad also each of its
+// two parts alone (the input event, the companion doorbell). A missed signal
+// that the companion's 8 ms timer or the worker's 500 ms timeout recovers
+// is only late, so each mode with a gate on is also held against the gate
+// off by its frames over 4 ms.
+//
+// That comparison must not move with the machine's load. Summed over a pass
+// of 1 s blocks, a build running beside the probe gave the Xbox 360 pad 993
+// and 1,188 frames over 4 ms with a gate on against 489 with it off
+// (SIG-stress-13), where a quiet machine gave 417 and 580 against 888
+// (SIG-stress-12). So a pass runs in pairs of blocks of 500 submits, one
+// block with the gate off and one with a gate-on mode, the modes taking the
+// pairs in turn, and a coin drawn anew each run picks which block of each
+// pair comes first. Both blocks of a pair carry the same number of frames,
+// and a pair lasts about a second, so the two meet nearly the same load. A
+// pair goes against the mode when the mode's block has more frames over
+// 4 ms than the gate-off block, and for it when it has fewer. The mode fails
+// when the pairs against it are more than a fair coin gives among the pairs
+// that differ, by the exact one-sided sign test (the probability of that
+// many or more in a binomial with p 1/2) at 1/4,000 or less, and its blocks
+// have more than five frames over 4 ms beyond the gate-off blocks'. The
+// five is the old rule's: a handful of late frames never fails a mode.
+//   With a gate that has no effect on when frames are read, which block of a
+// pair reads more frames late is the same whichever block ran the gate, and
+// the coin alone decided that. Each pair that differs then goes against the
+// mode with probability one half, independently of the other pairs and of
+// whatever the load did, so such a mode fails at most once in 4,000 runs,
+// and a run's four modes together at most once in 1,000. A gate that does
+// change when frames are read, by a missed signal or anything else, fails
+// once it is worse in enough of the pairs, whatever the load.
+//
+// --gate-off keeps the gate off for the whole pass. The HID driver sets its
+// capability again every 256 frames, so a mode with the input event's gate
+// off clears it before every submit, and a submit that finds it set again
+// afterward is reported apart from its mode. It counts in its block like any
+// other submit. Against an SDK that makes no section it says so and runs as
+// is.
 // --any-driver runs on whatever driver is installed, so a v2.0.3 build of
 // this probe can stress the newer driver. Builds against v2.0.3's SDK as it
 // is.
-// --late-detail, never part of a default run, prints where each DualShock 4
-// frame over 4 ms waited: the ReadFile readings that completed between its
-// submit and the first reading that carries it, the time since the reading
-// before that one, the submits after it in its burst, the later submits
-// that came before its reading, and whether the SDK's idle repeat, a write
-// of the last frame 4 ms after it (the profile's stream period), was due
-// before its reading. A frame whose wakeup was missed waits with the reader
-// idle for the next write, the idle repeat when nothing follows. A frame
-// queued behind a burst's other reports waits while the reader reads them.
-// --input-buffers=<n>, also never in a default run, gives the reader's
-// handle n input buffers (HidD_SetNumInputBuffers) in place of HID class's
-// default, which caps how many reports can queue ahead of a frame.
+//
+// Four more flags are never part of a default run.
+// --miss-doorbell=<N> is the comparison's positive control for the doorbell.
+// In a mode with the doorbell gate on, one submit in N starts a hold of
+// 16 ms, two periods of the companion's timer. Before each submit of the
+// hold the probe moves CompanionParked, the count of parked WAIT_FOR_INPUT
+// requests that the SDK reads to decide the doorbell, out of the section,
+// and it adds the count back once the hold ends. The SDK then skips the
+// doorbell a parked request waits for, and the request waits for the
+// companion's 8 ms timer: a missed doorbell that is only late. The two
+// doorbell modes must fail the comparison, and the input gate's must pass.
+// --miss-input=<N> is the same for the input event. In a mode with the
+// input gate on, before one submit in N the probe writes a final SeqNo into
+// InputHandoff, which the SDK takes for a read the worker still owes, so it
+// puts its own frame there in place of a SetEvent. After the submit the
+// probe takes the handoff back, so no take reads the frame either, and it
+// waits for the next write: the next submit, or the SDK's idle repeat 4 ms
+// on when none follows. That is a missed wakeup that is only late. One left
+// in the handoff waits for the worker's 500 ms timeout instead, every frame
+// after it waits with it, and the 250 ms bound fails it. The DualShock 4's
+// input gate must fail the comparison. The Xbox 360 pad's readings come
+// from the companion, so its modes must pass.
+// --late-detail prints where each DualShock 4 frame over 4 ms waited: the
+// ReadFile readings that completed between its submit and the first reading
+// that carries it, the time since the reading before that one, the submits
+// after it in its burst, the later submits that came before its reading,
+// and whether the SDK's idle repeat, a write of the last frame 4 ms after it
+// (the profile's stream period), was due before its reading. A frame whose
+// wakeup was missed waits with the reader idle for the next write, the idle
+// repeat when nothing follows. A frame queued behind a burst's other reports
+// waits while the reader reads them.
+// --input-buffers=<n> gives the DualShock 4 reader's handle n input buffers
+// (HidD_SetNumInputBuffers) in place of HID class's default, which caps how
+// many reports can queue ahead of a frame.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -55,6 +102,15 @@ using Windows.Gaming.Input;
 internal static partial class Program
 {
     const double StressBoundMs = 250;
+    // The paired comparison (header): submits in a block, the frames over
+    // 4 ms past the gate-off blocks' that a mode needs before it can fail,
+    // and the sign test's level for each mode.
+    const int StressBlock = 500;
+    const int StressFloor = 5;
+    const double StressLevel = 1.0 / 4000;
+    // The positive control's hold, two periods of the companion's 8 ms
+    // timer (companion.c, WDF_TIMER_CONFIG_INIT_PERIODIC).
+    const double MissHoldMs = 16;
 
     static int SignalStress(string[] args)
     {
@@ -64,6 +120,18 @@ internal static partial class Program
         bool gateOff = args.Contains("--gate-off");
         bool anyDriver = args.Contains("--any-driver");
         bool lateDetail = args.Contains("--late-detail");
+        int missEvery = 0, missInputEvery = 0;
+        foreach (var (flag, set) in new (string, Action<int>)[] { ("--miss-doorbell=", v => missEvery = v), ("--miss-input=", v => missInputEvery = v) })
+        {
+            string? miss = args.FirstOrDefault(a => a.StartsWith(flag, StringComparison.Ordinal));
+            if (miss == null) continue;
+            if (!int.TryParse(miss[flag.Length..], out int every) || every < 1)
+            {
+                Console.WriteLine($"signal-stress: {miss} needs a whole number of submits, 1 or more");
+                return 1;
+            }
+            set(every);
+        }
         uint inputBuffers = 0;
         string? buffers = args.FirstOrDefault(a => a.StartsWith("--input-buffers=", StringComparison.Ordinal));
         if (buffers != null && (!uint.TryParse(buffers["--input-buffers=".Length..], out inputBuffers) || inputBuffers < 2 || inputBuffers > 512))
@@ -79,7 +147,7 @@ internal static partial class Program
         using (var c = ctx.CreateController(ctx.GetProfile(Ds4)!, s_key))
         {
             if (!anyDriver && !OnEmbeddedDriver(c, Ds4)) return 5;
-            StressHid(c, seconds, SignalView(c), gateOff, lateDetail, inputBuffers);
+            StressHid(c, seconds, SignalView(c), gateOff, lateDetail, inputBuffers, missInputEvery);
         }
 
         var before = new HashSet<Gamepad>(Gamepad.Gamepads);
@@ -94,7 +162,7 @@ internal static partial class Program
                 if (pad == null) Thread.Sleep(100);
             }
             if (pad == null) Check($"{Xbox360}: a Windows.Gaming.Input gamepad the create added", false, "none in 20 s");
-            else StressWgi(c, pad, seconds, SignalView(c), gateOff);
+            else StressWgi(c, pad, seconds, SignalView(c), gateOff, missEvery, missInputEvery);
         }
         return s_failures == 0 ? 0 : 1;
     }
@@ -154,100 +222,351 @@ internal static partial class Program
     static unsafe bool InputGateSet(IntPtr view) =>
         view != IntPtr.Zero && (Volatile.Read(ref *(int*)((byte*)view + 4)) & GateInput) != 0;
 
+    /// <summary>The positive control (header): CompanionParked, at 128,
+    /// taken out of the section, so the SDK finds no request parked and
+    /// skips the doorbell. Returns what was there, for
+    /// <see cref="PutParked"/>. The companion counts on from zero
+    /// meanwhile, so the true count stays the word plus what the probe
+    /// holds.</summary>
+    static unsafe int TakeParked(IntPtr view) =>
+        Interlocked.Exchange(ref *(int*)((byte*)view + 128), 0);
+
+    /// <summary>Adds back the count <see cref="TakeParked"/> took.</summary>
+    static unsafe void PutParked(IntPtr view, int count) =>
+        Interlocked.Add(ref *(int*)((byte*)view + 128), count);
+
+    /// <summary>The input event's positive control (header): a final SeqNo,
+    /// 2, written into InputHandoff at 68, which the SDK takes for a read
+    /// the worker still owes and replaces with its own frame's, with no
+    /// SetEvent.</summary>
+    static unsafe void OweHandoff(IntPtr view) =>
+        Interlocked.Exchange(ref *(int*)((byte*)view + 68), 2);
+
+    /// <summary>Takes InputHandoff back after the submit, so no take of the
+    /// worker reads the frame the SDK left there.</summary>
+    static unsafe void TakeHandoffBack(IntPtr view) =>
+        Interlocked.Exchange(ref *(int*)((byte*)view + 68), 0);
+
     /// <summary>The submit schedule: a pause of 0 to 2 ms, a burst, or a
-    /// pause past the worker's 500 ms wait, until the time is up, in blocks
-    /// of 1 s that take the modes in order, then backward, and again. Calls
+    /// pause past the worker's 500 ms wait, until the time is up. The
+    /// submits run in pairs of blocks of <see cref="StressBlock"/>, one
+    /// block with the gate off and one with the next of the gate-on modes
+    /// in <paramref name="modes"/>, in the order a coin picks. Calls
     /// <paramref name="submit"/> with the count and returns each submit's
-    /// count, Stopwatch time and mode. In a mode with the input event's gate
-    /// off, the HID driver's capability is cleared before each submit, and
-    /// a submit after which it is set again carries the Announced bit.
+    /// count, Stopwatch time, mode and block. In a mode with the input
+    /// event's gate off, the HID driver's capability is cleared before each
+    /// submit, and a submit after which it is set again carries the
+    /// Announced bit. With <paramref name="missEvery"/> or
+    /// <paramref name="missInputEvery"/> above zero, the positive controls
+    /// hold the doorbell's count at zero or take a frame's wakeup (header).
     /// <paramref name="burstOf"/>, when given, gets each submit's burst size,
     /// 1 for a submit alone, and the submits after it in its burst.</summary>
-    static List<(int Count, long Time, int Mode)> StressSchedule(double seconds, Action<int> submit, int[] modes, IntPtr signal,
-        List<(int Size, int After)>? burstOf = null)
+    static List<(int Count, long Time, int Mode, int Block)> StressSchedule(double seconds, Action<int> submit, int[] modes, IntPtr signal,
+        int missEvery, int missInputEvery, List<(int Size, int After)>? burstOf = null)
     {
         var rng = new Random(2101);
-        var sent = new List<(int, long, int)>(1 << 20);
+        // The pair order, apart from the schedule's draws, from a seed of
+        // its own each run, which the pass prints.
+        int seed = Random.Shared.Next();
+        var coin = new Random(seed);
+        int[] gated = modes.Where(m => m != 0).ToArray();
+        var sent = new List<(int, long, int, int)>(1 << 20);
         long start = Stopwatch.GetTimestamp();
         long end = start + (long)(seconds * Stopwatch.Frequency);
-        long block = Stopwatch.Frequency;
-        int n = 0, bursts = 0, gaps = 0, announced = 0, mode = -1;
+        long missTicks = (long)(MissHoldMs * Stopwatch.Frequency / 1000);
+        int n = 0, bursts = 0, gaps = 0, announced = 0, mode = -1, block = -1, pairMode = 0;
+        bool gateFirst = false;
+        int doorbellSubmits = 0, misses = 0, missed = 0, parkedOut = 0, inputSubmits = 0, inputMisses = 0;
+        long missUntil = long.MinValue;
         void Send(int size, int after)
         {
             n++;
+            int b = (n - 1) / StressBlock;
+            if (b != block)
+            {
+                block = b;
+                int want = 0;
+                if (gated.Length > 0)
+                {
+                    if (b % 2 == 0)
+                    {
+                        pairMode = gated[b / 2 % gated.Length];
+                        gateFirst = coin.Next(2) == 0;
+                    }
+                    if ((b % 2 == 0) == gateFirst) want = pairMode;
+                }
+                if (want != mode) { mode = want; SetGate(signal, mode); }
+            }
+            if (missEvery > 0 && signal != IntPtr.Zero)
+            {
+                long now = Stopwatch.GetTimestamp();
+                bool doorbell = (mode & GateCompanion) != 0;
+                if (doorbell && ++doorbellSubmits % missEvery == 0)
+                {
+                    if (now >= missUntil) misses++;
+                    missUntil = now + missTicks;
+                }
+                if (doorbell && now < missUntil) { parkedOut += TakeParked(signal); missed++; }
+                else if (parkedOut != 0) { PutParked(signal, parkedOut); parkedOut = 0; }
+            }
             bool hold = (mode & GateInput) == 0 && signal != IntPtr.Zero;
             if (hold) HoldInputGateOff(signal);
+            bool owe = missInputEvery > 0 && !hold && signal != IntPtr.Zero && ++inputSubmits % missInputEvery == 0;
+            if (owe) { OweHandoff(signal); inputMisses++; }
             long t = Stopwatch.GetTimestamp();
             submit(n);
+            if (owe) TakeHandoffBack(signal);
             int m = mode;
             if (hold && InputGateSet(signal)) { m |= Announced; announced++; }
-            sent.Add((n, t, m));
+            sent.Add((n, t, m, block));
             burstOf?.Add((size, after));
         }
-        while (Stopwatch.GetTimestamp() < end)
+        try
         {
-            long b = (Stopwatch.GetTimestamp() - start) / block;
-            int lap = (int)(b / modes.Length), at = (int)(b % modes.Length);
-            int want = modes[lap % 2 == 0 ? at : modes.Length - 1 - at];
-            if (want != mode) { mode = want; SetGate(signal, mode); }
-            int roll = rng.Next(1000);
-            if (roll < 3)
+            while (Stopwatch.GetTimestamp() < end)
             {
-                Thread.Sleep(rng.Next(600, 1201));
-                gaps++;
-                continue;
+                int roll = rng.Next(1000);
+                if (roll < 3)
+                {
+                    Thread.Sleep(rng.Next(600, 1201));
+                    gaps++;
+                    continue;
+                }
+                if (roll < 23)
+                {
+                    int k = rng.Next(50, 201);
+                    for (int i = 0; i < k; i++) Send(k, k - 1 - i);
+                    bursts++;
+                    continue;
+                }
+                Spin(rng.Next(0, 2001));
+                Send(1, 0);
             }
-            if (roll < 23)
-            {
-                int k = rng.Next(50, 201);
-                for (int i = 0; i < k; i++) Send(k, k - 1 - i);
-                bursts++;
-                continue;
-            }
-            Spin(rng.Next(0, 2001));
-            Send(1, 0);
         }
-        SetGate(signal, 0);
+        finally
+        {
+            // A count held out of the section would leave the SDK skipping
+            // the doorbell for this index until its devices go.
+            if (parkedOut != 0) PutParked(signal, parkedOut);
+            SetGate(signal, 0);
+        }
         Console.WriteLine($"    {sent.Count} submits, {bursts} bursts, {gaps} pauses past 500 ms, {announced} with the input capability set again during the submit");
+        if (gated.Length > 0)
+            Console.WriteLine($"    {n / StressBlock / 2} pairs of blocks of {StressBlock} submits, gate off in one block and on in the other, the order a coin's (seed {seed})");
+        if (missEvery > 0 && gated.Any(g => (g & GateCompanion) != 0))
+            Console.WriteLine($"    positive control: {misses} holds of {MissHoldMs} ms, one per {missEvery} submits with the doorbell gate on, {missed} submits with the companion's parked count held at zero");
+        if (missInputEvery > 0 && gated.Any(g => (g & GateInput) != 0))
+            Console.WriteLine($"    positive control: {inputMisses} submits, one per {missInputEvery} with the input gate on, with their wakeup taken");
         return sent;
     }
 
     /// <summary>Each submit's time to the first reading of its count or a
-    /// later one, checked against the bound, and the late frames of each
-    /// mode against the gate-off mode's.</summary>
-    static void StressVerdict(string name, List<(int Count, long Time, int Mode)> sent, List<(int Count, long Time)> seen)
+    /// later one, checked against the bound, and each gate-on mode's frames
+    /// over 4 ms against the gate-off block of its pair (header).</summary>
+    static void StressVerdict(string name, List<(int Count, long Time, int Mode, int Block)> sent, List<(int Count, long Time)> seen)
     {
         var late = new SortedDictionary<int, List<double>>();
+        // Each block's mode without the Announced bit, its submits and its
+        // frames over 4 ms, a frame never read among them.
+        var blocks = new List<(int Mode, int Submits, int Over4)>();
         int j = 0, missing = 0, over = 0;
         double worst = 0;
-        foreach (var (count, t0, mode) in sent)
+        foreach (var (count, t0, mode, block) in sent)
         {
+            while (blocks.Count <= block) blocks.Add((mode & ~Announced, 0, 0));
+            var bk = blocks[block];
+            bk.Submits++;
             while (j < seen.Count && (seen[j].Count < count || seen[j].Time < t0)) j++;
-            if (j == seen.Count) { missing++; continue; }
+            if (j == seen.Count) { missing++; bk.Over4++; blocks[block] = bk; continue; }
             double ms = (seen[j].Time - t0) * 1000.0 / Stopwatch.Frequency;
             if (!late.TryGetValue(mode, out var list)) late[mode] = list = new List<double>();
             list.Add(ms * 1000);
             worst = Math.Max(worst, ms);
             if (ms > StressBoundMs) over++;
+            if (ms > 4) bk.Over4++;
+            blocks[block] = bk;
         }
         // The last submit of a pass can still be in flight when it ends.
         int tail = Math.Min(missing, 1);
         Check($"{name}: every submit read within {StressBoundMs} ms",
             over == 0 && missing - tail == 0,
             FormattableString.Invariant($"{sent.Count} submits, {seen.Count} readings, {over} over the bound, {missing} never read, worst {worst:F1} ms"));
-        int offLate = late.TryGetValue(0, out var off) ? off.Count(x => x > 4000) : -1;
         foreach (var (mode, list) in late)
         {
             int over2 = list.Count(x => x > 2000), over4 = list.Count(x => x > 4000);
             Report($"{name}, {ModeName(mode)}: submit to the first reading that carries it, microseconds", list, 1,
                 FormattableString.Invariant($", {over2} over 2 ms, {over4} over 4 ms"));
-            if (mode != 0 && (mode & Announced) == 0 && offLate >= 0)
-                Check($"{name}, {ModeName(mode)}: frames over 4 ms at most twice the gate-off mode's plus five",
-                    over4 <= 2 * offLate + 5, $"{over4} against {offLate} with the gate off");
+        }
+        var pairs = BlockPairs(blocks);
+        foreach (int mode in blocks.Select(x => x.Mode).Where(m => m != 0).Distinct().OrderBy(m => m))
+        {
+            var list = pairs.TryGetValue(mode, out var got) ? got : new List<(int On, int Off)>();
+            var v = PairVerdict(list);
+            Check($"{name}, {ModeName(mode)}: frames over 4 ms against the gate-off block of each pair, worse in no more pairs than a sign test allows at 1/4,000, or by {StressFloor} frames or fewer",
+                !v.Fails,
+                FormattableString.Invariant($"worse in {v.Against} of {list.Count} pairs, better in {v.For}, even in {list.Count - v.Against - v.For}, one-sided p {v.P:G3}; {list.Sum(x => x.On)} frames over 4 ms in its blocks, {list.Sum(x => x.Off)} in the gate-off blocks"));
         }
     }
 
-    static void StressHid(HMController c, double seconds, IntPtr signal, bool gateOff, bool lateDetail, uint inputBuffers)
+    /// <summary>A pass's pairs, by gate-on mode, as frames over 4 ms in the
+    /// mode's block and in the gate-off block: blocks 0 and 1, 2 and 3, and
+    /// so on, as <see cref="StressSchedule"/> runs them. A pair needs both
+    /// blocks full and the gate off in one of them, so the last block of a
+    /// pass, cut short, leaves its pair out.</summary>
+    static SortedDictionary<int, List<(int On, int Off)>> BlockPairs(List<(int Mode, int Submits, int Over4)> blocks)
+    {
+        var pairs = new SortedDictionary<int, List<(int On, int Off)>>();
+        for (int b = 0; b + 1 < blocks.Count; b += 2)
+        {
+            var (x, y) = (blocks[b], blocks[b + 1]);
+            if (x.Submits != StressBlock || y.Submits != StressBlock || (x.Mode == 0) == (y.Mode == 0)) continue;
+            var (gate, off) = x.Mode != 0 ? (x, y) : (y, x);
+            if (!pairs.TryGetValue(gate.Mode, out var list)) pairs[gate.Mode] = list = new List<(int, int)>();
+            list.Add((gate.Over4, off.Over4));
+        }
+        return pairs;
+    }
+
+    /// <summary>The paired comparison of a gate-on mode (header): the pairs
+    /// worse with the gate on, the pairs better, the one-sided sign test's p
+    /// for the worse ones among the pairs that differ, the mode's frames over
+    /// 4 ms beyond the gate-off blocks', and whether the mode fails.</summary>
+    internal static (int Against, int For, double P, int Excess, bool Fails) PairVerdict(IEnumerable<(int On, int Off)> pairs)
+    {
+        int against = 0, forIt = 0, excess = 0;
+        foreach (var (on, off) in pairs)
+        {
+            if (on > off) against++;
+            else if (off > on) forIt++;
+            excess += on - off;
+        }
+        double p = SignTail(against, against + forIt);
+        return (against, forIt, p, excess, p <= StressLevel && excess > StressFloor);
+    }
+
+    /// <summary>The probability of <paramref name="k"/> or more successes in
+    /// <paramref name="n"/> trials of a fair coin, summed term by term from
+    /// logarithms, exact to rounding for the few hundred pairs a pass
+    /// has.</summary>
+    internal static double SignTail(int k, int n)
+    {
+        if (k <= 0) return 1;
+        if (k > n) return 0;
+        double logN = LogFactorial(n), half = n * Math.Log(0.5), sum = 0;
+        for (int i = k; i <= n; i++)
+            sum += Math.Exp(logN - LogFactorial(i) - LogFactorial(n - i) + half);
+        return Math.Min(1, sum);
+    }
+
+    static double LogFactorial(int m)
+    {
+        double s = 0;
+        for (int i = 2; i <= m; i++) s += Math.Log(i);
+        return s;
+    }
+
+    /// <summary>Offline checks of the paired comparison for the selftest:
+    /// the sign test's tail against exact fractions, the fewest pairs that
+    /// fail a mode, the pairing of blocks, the rule on pairs placed on each
+    /// side of it, and the rule on simulated modes, with no effect and with
+    /// one, under a load that drifts from block to block, jumps tenfold at
+    /// random and rises across every pair.</summary>
+    internal static IEnumerable<(string Name, bool Ok, string Detail)> StressSelfTest()
+    {
+        static bool Near(double a, double b) => Math.Abs(a - b) <= 1e-15 + 1e-9 * Math.Abs(b);
+        yield return ("signal-stress: the sign test's tail matches 11/1024, 1/4096 and 13/4096",
+            Near(SignTail(9, 10), 11.0 / 1024) && Near(SignTail(12, 12), 1.0 / 4096) && Near(SignTail(11, 12), 13.0 / 4096)
+            && SignTail(0, 0) == 1 && SignTail(5, 4) == 0,
+            FormattableString.Invariant($"{SignTail(9, 10):R} {SignTail(12, 12):R} {SignTail(11, 12):R}"));
+
+        // Exact values (binomial sums in integers): the fewest pairs against
+        // a mode that fail it at 1/4,000, out of those that differ. None of
+        // 11 can: 11 of 11 has the chance 1/2048.
+        var fewest = new (int Counted, int Against)[] { (11, 0), (12, 12), (20, 18), (40, 32), (120, 80) };
+        int Fewest(int counted)
+        {
+            for (int k = 1; k <= counted; k++)
+                if (SignTail(k, counted) <= StressLevel) return k;
+            return 0;
+        }
+        yield return ("signal-stress: the fewest pairs against a mode that fail it: none of 11, 12 of 12, 18 of 20, 32 of 40, 80 of 120",
+            fewest.All(f => Fewest(f.Counted) == f.Against),
+            string.Join(" ", fewest.Select(f => $"{f.Counted}:{Fewest(f.Counted)}")));
+
+        // Blocks as a pass leaves them: gate off first or second in a pair,
+        // and a last pair cut short, or with both blocks off, left out.
+        var blocks = new List<(int Mode, int Submits, int Over4)>
+        {
+            (0, StressBlock, 3), (GateInput, StressBlock, 30), (GateCompanion, StressBlock, 40), (0, StressBlock, 4),
+            (0, StressBlock, 5), (0, StressBlock, 6), (GateInput | GateCompanion, StressBlock, 50), (0, StressBlock, 7),
+            (0, StressBlock, 8), (GateInput, StressBlock - 1, 9),
+        };
+        var grouped = BlockPairs(blocks);
+        string Shown(int m) => grouped.TryGetValue(m, out var l) ? string.Join(" ", l.Select(x => $"{x.On}/{x.Off}")) : "none";
+        yield return ("signal-stress: blocks pair as the schedule runs them, the gate's block on either side, a pair cut short or all off left out",
+            grouped.Count == 3 && Shown(GateInput) == "30/3" && Shown(GateCompanion) == "40/4" && Shown(GateInput | GateCompanion) == "50/7",
+            $"input {Shown(GateInput)}, doorbell {Shown(GateCompanion)}, both {Shown(GateInput | GateCompanion)}");
+
+        static List<(int On, int Off)> Same(int pairs, int on, int off) => Enumerable.Repeat((on, off), pairs).ToList();
+        static bool Fails(List<(int On, int Off)> p) => PairVerdict(p).Fails;
+        var split = Same(20, 60, 10).Concat(Same(20, 10, 60)).ToList();
+        var offset = Same(20, 1, 0).Concat(Same(1, 0, 16)).ToList();
+        yield return ("signal-stress: 40 pairs at 60 against 10 fail, 12 at 11 against 10 fail and 11 pass, 40 even pairs and 20 each way pass",
+            Fails(Same(40, 60, 10)) && Fails(Same(12, 11, 10)) && !Fails(Same(11, 11, 10)) && !Fails(Same(40, 3, 3)) && !Fails(split),
+            FormattableString.Invariant($"p {PairVerdict(Same(40, 60, 10)).P:G3}, {PairVerdict(Same(12, 11, 10)).P:G3}, {PairVerdict(Same(11, 11, 10)).P:G3}, {PairVerdict(split).P:G3}"));
+        yield return ("signal-stress: 20 pairs at 1 against 0 fail, and pass once one pair at 0 against 16 leaves the mode 4 frames over, the floor",
+            Fails(Same(20, 1, 0)) && !Fails(offset) && PairVerdict(offset).P <= StressLevel && PairVerdict(offset).Excess == 4,
+            FormattableString.Invariant($"p {PairVerdict(Same(20, 1, 0)).P:G3} and {PairVerdict(offset).P:G3}, frames over {PairVerdict(Same(20, 1, 0)).Excess} and {PairVerdict(offset).Excess}"));
+
+        // Simulated modes of 40 pairs, a pass's share of each Xbox 360 mode.
+        // A block's frames over 4 ms scatter as far as their mean (an
+        // exponential draw), and one block in 20 has ten times as many. The
+        // load's mean drifts by up to 65% from pair to pair, and the second
+        // block of every pair has half again the first one's.
+        const int trials = 20000;
+        var r = new Random(4000);
+        static int Late(Random r, double mean)
+        {
+            int c = (int)(mean * -Math.Log(1 - r.NextDouble()));
+            return r.NextDouble() < 0.05 ? c * 10 : c;
+        }
+        int coined = 0, fixedOrder = 0, caught = 0, caughtFew = 0;
+        var a = new List<(int On, int Off)>(40);
+        var f2 = new List<(int On, int Off)>(40);
+        var e = new List<(int On, int Off)>(40);
+        var e2 = new List<(int On, int Off)>(40);
+        for (int s = 0; s < trials; s++)
+        {
+            a.Clear(); f2.Clear(); e.Clear(); e2.Clear();
+            double load = 10;
+            for (int p = 0; p < 40; p++)
+            {
+                double first = load, second = load * 1.5;
+                bool gateFirst = r.Next(2) == 0;
+                double gate = gateFirst ? first : second, off = gateFirst ? second : first;
+                a.Add((Late(r, gate), Late(r, off)));
+                f2.Add((Late(r, second), Late(r, first)));
+                e.Add((Late(r, gate * 8), Late(r, off)));
+                // A twentieth of the load: half a late frame per block.
+                e2.Add((Late(r, gate * 8 / 20), Late(r, off / 20)));
+                load = Math.Clamp(load * Math.Exp(r.NextDouble() - 0.5), 2, 200);
+            }
+            if (Fails(a)) coined++;
+            if (Fails(f2)) fixedOrder++;
+            if (Fails(e)) caught++;
+            if (Fails(e2)) caughtFew++;
+        }
+        // At the level 5 of 20,000 would fail. A bound of three times that
+        // fails for a test at the level about once in 14,500 seeds.
+        yield return ("signal-stress: with no effect and the coin, at most 15 of 20,000 simulated modes fail, where the level gives 5",
+            coined <= 15,
+            $"{coined} of {trials} failed, {fixedOrder} with the gate always in the second block instead");
+        yield return ("signal-stress: a mode with eight times the frames over 4 ms fails 9 simulated modes in 10 or more, at the load above and at a twentieth of it",
+            caught * 10 >= trials * 9 && caughtFew * 10 >= trials * 9,
+            $"{caught} and {caughtFew} of {trials} failed");
+    }
+
+    static void StressHid(HMController c, double seconds, IntPtr signal, bool gateOff, bool lateDetail, uint inputBuffers, int missInputEvery)
     {
         using var dev = OpenStateInterface(c, out string why);
         if (dev == null) { Check($"{Ds4}: a HID interface with input reports", false, why); return; }
@@ -292,7 +611,7 @@ internal static partial class Program
         {
             BitConverter.TryWriteBytes(report.AsSpan(40), n);
             c.SubmitRawReport(report);
-        }, modes, signal, burstOf);
+        }, modes, signal, 0, missInputEvery, burstOf);
         Thread.Sleep((int)StressBoundMs * 2);
         Volatile.Write(ref stop, true);
         CancelIoEx(dev.Handle, IntPtr.Zero);
@@ -313,7 +632,7 @@ internal static partial class Program
     /// readings that carried one of a burst's counts, and the wait of its
     /// last frame. Times run from the submit's Stopwatch stamp, readings from
     /// ReadFile's return.</summary>
-    static void LateDetail(string name, List<(int Count, long Time, int Mode)> sent, List<(int Size, int After)> burstOf,
+    static void LateDetail(string name, List<(int Count, long Time, int Mode, int Block)> sent, List<(int Size, int After)> burstOf,
         List<(int Count, long Time)> seen, List<(int Count, long Time)> reads)
     {
         // The profile's stream period: the SDK writes the last frame again
@@ -333,7 +652,7 @@ internal static partial class Program
             }
             return lo;
         }
-        static int SubmitAtOrAfter(List<(int Count, long Time, int Mode)> list, long t)
+        static int SubmitAtOrAfter(List<(int Count, long Time, int Mode, int Block)> list, long t)
         {
             int lo = 0, hi = list.Count;
             while (lo < hi)
@@ -351,7 +670,7 @@ internal static partial class Program
         int j = 0;
         for (int i = 0; i < sent.Count; i++)
         {
-            var (count, t0, mode) = sent[i];
+            var (count, t0, mode, _) = sent[i];
             while (j < seen.Count && (seen[j].Count < count || seen[j].Time < t0)) j++;
             if (j == seen.Count) break;
             long tc = seen[j].Time;
@@ -379,7 +698,7 @@ internal static partial class Program
         Console.WriteLine($"  before its reading, ms to the next submit, its burst's size (1 alone), the submits after it in the burst, whether the idle repeat");
         Console.WriteLine($"  ({IdleRepeatMs} ms after the last submit) was due before its reading, and how far past its count the reading's count is.");
         Console.WriteLine("      count mode       ms between gap_ms later next_ms burst after idle  ahead");
-        foreach (string r in rows) Console.WriteLine(r);
+        foreach (string row in rows) Console.WriteLine(row);
         if (total > rows.Count) Console.WriteLine($"    {total - rows.Count} more not shown");
         foreach (var (mode, list) in late)
         {
@@ -388,8 +707,8 @@ internal static partial class Program
             Console.WriteLine(FormattableString.Invariant(
                 $"  {name}, {ModeName(mode)}: {list.Count} frames over 4 ms. Readings between submit and reading: none {b.Count(x => x == 0)}, 1 to 7 {b.Count(x => x is >= 1 and <= 7)}, 8 to 31 {b.Count(x => x is >= 8 and <= 31)}, 32 or more {b.Count(x => x >= 32)}, median {b[b.Count / 2]}. In a burst of 50 or more {inBurst}, its last submit {list.Count(x => x.Size >= 50 && x.After == 0)}, within 8 of its end {list.Count(x => x.Size >= 50 && x.After < 8)}. A later submit before the reading {list.Count(x => x.Later > 0)}. The idle repeat due before the reading {list.Count(x => x.Idle)}."));
         }
-        // Each burst of 50 or more: the readings whose count is one of its
-        // own, and its last submit's wait, by mode.
+        // Each burst of 50 or more inside one block: the readings whose count
+        // is one of its own, and its last submit's wait, by mode.
         var bursts = new SortedDictionary<int, List<(int Readings, double LastMs)>>();
         int s = 0, k2 = 0;
         for (int i = 0; i < sent.Count;)
@@ -400,12 +719,15 @@ internal static partial class Program
             while (s < seen.Count && seen[s].Count < a) s++;
             int e = s;
             while (e < seen.Count && seen[e].Count <= z) e++;
-            var (lastCount, lastTime, _) = sent[i + size - 1];
+            var (lastCount, lastTime, _, lastBlock) = sent[i + size - 1];
             while (k2 < seen.Count && (seen[k2].Count < lastCount || seen[k2].Time < lastTime)) k2++;
             double lastMs = k2 < seen.Count ? (seen[k2].Time - lastTime) * tickMs : double.NaN;
-            int key = sent[i].Mode & ~Announced;
-            if (!bursts.TryGetValue(key, out var list)) bursts[key] = list = new();
-            list.Add((e - s, lastMs));
+            if (sent[i].Block == lastBlock)
+            {
+                int key = sent[i].Mode & ~Announced;
+                if (!bursts.TryGetValue(key, out var list)) bursts[key] = list = new();
+                list.Add((e - s, lastMs));
+            }
             i += size;
         }
         foreach (var (mode, list) in bursts)
@@ -418,15 +740,7 @@ internal static partial class Program
         }
     }
 
-    [DllImport("hid.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.U1)]
-    static extern bool HidD_SetNumInputBuffers(Microsoft.Win32.SafeHandles.SafeFileHandle h, uint count);
-
-    [DllImport("hid.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.U1)]
-    static extern bool HidD_GetNumInputBuffers(Microsoft.Win32.SafeHandles.SafeFileHandle h, out uint count);
-
-    static void StressWgi(HMController c, Gamepad pad, double seconds, IntPtr signal, bool gateOff)
+    static void StressWgi(HMController c, Gamepad pad, double seconds, IntPtr signal, bool gateOff, int missEvery, int missInputEvery)
     {
         // A count in the two sticks' X axes (HMAxis.X and HMAxis.Z on this
         // profile), 200 steps each, apart by more than the 16-bit
@@ -468,10 +782,18 @@ internal static partial class Program
             state.Axes[HMAxis.X] = Axis(code % 200);
             state.Axes[HMAxis.Z] = Axis(code / 200);
             c.SubmitState(state);
-        }, modes, signal);
+        }, modes, signal, missEvery, missInputEvery);
         Thread.Sleep((int)StressBoundMs * 2);
         Volatile.Write(ref stop, true);
         poller.Join(2000);
         StressVerdict($"{Xbox360} Windows.Gaming.Input", sent, seen);
     }
+
+    [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    static extern bool HidD_SetNumInputBuffers(Microsoft.Win32.SafeHandles.SafeFileHandle h, uint count);
+
+    [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    static extern bool HidD_GetNumInputBuffers(Microsoft.Win32.SafeHandles.SafeFileHandle h, out uint count);
 }
