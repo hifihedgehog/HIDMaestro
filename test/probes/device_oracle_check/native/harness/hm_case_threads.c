@@ -2152,8 +2152,13 @@ static void StreamX13CompanionFence(PlanProfile *p)
  * the worker leaves with X unread, and the device's going closes the gate,
  * which signals G's final SeqNo, and the device added again sends G.
  * 533ca4a4's wait returns X's signal and spends it, and G's SetEvent,
- * after that answer, stays set for the device added again, which sends G. */
-enum { X14_OWNER, X14_REMOVE, X14_TIMEOUT, X14_INPUT, X14_STOP, X14_LATE_FINAL };
+ * after that answer, stays set for the device added again, which sends G.
+ * A gate's close that stopped signaling a final frame would lose G here.
+ * -g-before-answer: the same here, with G written before 533ca4a4's wait
+ * answers, so its wait returns X's and G's signals folded and spends both
+ * at TearingDown, and its device added again never sends G. This driver
+ * sends G once through the gate's close: a better outcome. */
+enum { X14_OWNER, X14_REMOVE, X14_TIMEOUT, X14_INPUT, X14_STOP, X14_LATE_FINAL, X14_G_BEFORE_ANSWER };
 static Ctl *g_x14Ctl;
 static int g_x14Mode, g_x14Torn;
 static HmEvent *g_x14Remove;
@@ -2169,7 +2174,7 @@ static void X14Tear(void)
 {
     Ctl *c = g_x14Ctl;
     g_x14Torn = 1;
-    if (g_x14Mode == X14_LATE_FINAL && HmOnDriverThread()) X14WriteG(c);
+    if ((g_x14Mode == X14_LATE_FINAL && HmOnDriverThread()) || g_x14Mode == X14_G_BEFORE_ANSWER) X14WriteG(c);
     *(volatile LONG *)((uint8_t *)c->dev->context + HmTearingDownOffset) = 1;
     if (g_x14Mode == X14_INPUT) {
         X6Store(&c->sdk, 0x60);
@@ -2193,7 +2198,7 @@ static void X14Hand(void)
 }
 static void StreamX14TakeAtTeardown(PlanProfile *p, int mode)
 {
-    static const char *names[] = { "owner", "remove", "timeout", "input", "stop", "late-final" };
+    static const char *names[] = { "owner", "remove", "timeout", "input", "stop", "late-final", "g-before-answer" };
     Ctl c;
     StreamBegin("threads/%s/x14-take-at-teardown-%s", p->id, names[mode]);
     g_x14Remove = NULL;
@@ -2255,7 +2260,10 @@ static void StreamX14TakeAtTeardown(PlanProfile *p, int mode)
  * the owner read sent the worker back to wait with the auto-reset remove
  * event spent, and the request went unanswered. The positive control
  * after it: the remove event set again with the worker in its counted wait
- * and no take pending. */
+ * and no take pending. Both drivers close the remove event after its one
+ * request, so once the first is handled the control finds nobody waiting
+ * and records 0 (x15.control.removed). With the first request lost the
+ * event is still open, and the control records 1. */
 static Ctl *g_x15Ctl;
 static int g_x15Done;
 static int X15RemoveAtTake(volatile LONG *target, LONG value)
@@ -2305,6 +2313,65 @@ static void StreamX15RemoveAtPoll(PlanProfile *p)
     for (int i = 0; i < 2; i++) ThreadResume(CtlThread(&c, 0));
     removed = c.sdk.removedEv->signaled ? 1u : 0u;
     RecOut("x15.control.removed", &removed, 4);
+    CtlStop(&c);
+}
+
+/* x15-remove-owner-open-*: x15-remove-at-poll-after-take with the owner
+ * watch open, so the wait is the stop event, the input event, the owner
+ * read and the remove event, at the index after the owner read. -alone:
+ * the remove event alone answers the poll after the take. -with-pipe-close:
+ * the remove event and the pipe's close together, so the poll returns the
+ * owner read first: the worker reads F0, waits again, runs OwnerGone on the
+ * owner read, which stays set, and its next wait returns the remove event,
+ * by then at the index the closed watch had. 533ca4a4, which takes nothing,
+ * gets both at the same point of its next wait. Both drivers read F0 and
+ * fail the device. */
+static int g_x15PipeToo;
+static int X15RemoveOwnerAtTake(volatile LONG *target, LONG value)
+{
+    (void)value;
+    Sdk *s = &g_x15Ctl->sdk;
+    if (g_x15Done || !s->signal || (uint8_t *)target != s->signal->buf + 68) return 0;
+    g_x15Done = 1;
+    EventSet(s->removeEv);
+    if (g_x15PipeToo) PipeServerClose(s->pipe);
+    return 1;
+}
+static void X15HandF0Owner(void)
+{
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x30 + i);
+    SdkWriteFrame(&g_x15Ctl->sdk, data, 63, NULL, NULL, 0);
+    g_exchangeHook = X15RemoveOwnerAtTake;
+}
+static void StreamX15RemoveOwnerOpen(PlanProfile *p, int pipeToo)
+{
+    Ctl c;
+    StreamBegin("threads/%s/x15-remove-owner-open-%s", p->id, pipeToo ? "with-pipe-close" : "alone");
+    if (!CtlStart(&c, p, 0, SDK_ALL | SDK_REMOVE, 0)) return;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    uint8_t data[64];
+    Probe(&c, 0, 1);
+    HidRead(&c, len);
+    HidRead(&c, len);
+    g_x15Ctl = &c;
+    g_x15Done = 0;
+    g_x15PipeToo = pipeToo;
+    g_completeHook = X15HandF0Owner;
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x20 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    if (g_completeHook) HmFail("x15: the completion hook never ran");
+    g_exchangeHook = NULL;
+    uint32_t at = g_x15Done ? 1u : 2u;
+    RecOut("x15.at", &at, 4);
+    if (!g_x15Done) {
+        g_x15Done = 1;
+        EventSet(c.sdk.removeEv);
+        if (pipeToo) PipeServerClose(c.sdk.pipe);
+    }
+    for (int i = 0; i < 4; i++) ThreadResume(CtlThread(&c, 0));
+    uint32_t removed = c.sdk.removedEv->signaled ? 1u : 0u;
+    RecOut("x15.removed", &removed, 4);
     CtlStop(&c);
 }
 
@@ -2387,6 +2454,8 @@ void CaseThreads(void)
     StreamX13BeforeDecrement(ds, 0);
     StreamX13BeforeDecrement(ds, 1);
     StreamX13CompanionFence(xusb);
-    for (int m = X14_OWNER; m <= X14_LATE_FINAL; m++) StreamX14TakeAtTeardown(ds, m);
+    for (int m = X14_OWNER; m <= X14_G_BEFORE_ANSWER; m++) StreamX14TakeAtTeardown(ds, m);
     StreamX15RemoveAtPoll(ds);
+    StreamX15RemoveOwnerOpen(ds, 0);
+    StreamX15RemoveOwnerOpen(ds, 1);
 }
