@@ -238,7 +238,7 @@ A relative field whose range excludes zero, such as the relative X and Y of `cor
 
 RAWMOUSE carries five buttons. A mouse that needs more adds a second, vendor-page collection with `VendorButtons`, and `SubmitMouse` sends buttons six and up there. Raw Input lists that collection as a HID device of its own. An absolute mouse reaches Raw Input flagged `MOUSE_MOVE_ABSOLUTE`, on Windows' 0 to 65535 scale.
 
-The input section holds one report, the newest. That suits a gamepad, whose state replaces the last, and loses data for a mouse, whose movement adds up, and for a keyboard, whose make and break must both arrive. For keyboards and mice the driver acknowledges delivery. When HID class sends its next read after one completed with a report, the driver writes that report's sequence number to `Global\HIDMaestroInputAck<N>` and signals `Global\HIDMaestroInputAckEvent<N>`. HID class sends that next read only after its completion routine has put the report in its buffer, so the report after it cannot overtake it. Acknowledging when the read completed let that happen on a machine with every core busy: with four mice each sending 500 reports at 1,000 a second, adjacent reports of one mouse swapped in 24 of 800 runs, which on a keyboard can leave a key down. Acknowledged on the next read, none of 800 swapped and none lost a report. The driver records the acknowledgement it owes before it completes the read, because HID class can send the next read the moment the first completes. Recorded after, that read can arrive first and find nothing to acknowledge, and the submit call then waits out its full 200 ms. On a busy machine that happened in nearly every run. The SDK creates both objects, since the driver runs as LocalService and cannot create a Global object, and the driver opens them when its worker starts. Before writing a report, each submit method waits for the previous report's acknowledgement and keeps reports at least 1 ms apart, the interval of a full-speed USB device polled every frame. HID class keeps a short queue for each reader. Without the spacing, a burst of 600 one-count moves went out at 27,000 reports a second and Windows dropped counts. With it, the burst takes 601 ms and every count arrives, and four threads driving four mice at 250 Hz lose nothing. A wait gives up after 200 ms. After three misses in a row the controller stops waiting until an acknowledgement arrives again, so a device Windows has stopped reading does not hold up the caller. `DeliversEveryReport` is false on a gamepad and on a driver older than v1.12.0. Windows merges consecutive mouse moves into one WM_INPUT message (RAWMOUSE has `MOUSE_MOVE_NOCOALESCE` for that reason), so the checks compare the sum of movement, not the number of messages.
+The input section holds one report, the newest. That suits a gamepad, whose state replaces the last, and loses data for a mouse, whose movement adds up, and for a keyboard, whose make and break must both arrive. For keyboards and mice the driver acknowledges delivery. When HID class sends its next read after one completed with a report, the driver writes that report's sequence number to `Global\HIDMaestroInputAck<N>` and signals `Global\HIDMaestroInputAckEvent<N>`. HID class sends that next read only after its completion routine has put the report in its buffer, so the report after it cannot overtake it. Acknowledging when the read completed let that happen on a machine with every core busy: with four mice each sending 500 reports at 1,000 a second, adjacent reports of one mouse swapped in 24 of 800 runs, which on a keyboard can leave a key down. Acknowledged on the next read, none of 800 swapped and none lost a report. The driver records the acknowledgement it owes before it completes the read, because HID class can send the next read the moment the first completes. Recorded after, that read can arrive first and find nothing to acknowledge, and the submit call then waits out its full 200 ms. On a busy machine that happened in nearly every run. The SDK creates both objects, since the driver runs as LocalService and cannot create a Global object, and the driver opens them when its worker starts. From 2.1.0 the SDK writes `AckSignal` under `Controller<N>`: 0 when no thread of the controller waits on the acknowledgement, a gamepad's case unless a protocol host waits on it, and the driver then stores the sequence number without the SetEvent. A program before 2.1.0 writes no value, and the driver signals every delivered report as before. Before writing a report, each submit method waits for the previous report's acknowledgement and keeps reports at least 1 ms apart, the interval of a full-speed USB device polled every frame. HID class keeps a short queue for each reader. Without the spacing, a burst of 600 one-count moves went out at 27,000 reports a second and Windows dropped counts. With it, the burst takes 601 ms and every count arrives, and four threads driving four mice at 250 Hz lose nothing. A wait gives up after 200 ms. After three misses in a row the controller stops waiting until an acknowledgement arrives again, so a device Windows has stopped reading does not hold up the caller. `DeliversEveryReport` is false on a gamepad and on a driver older than v1.12.0. Windows merges consecutive mouse moves into one WM_INPUT message (RAWMOUSE has `MOUSE_MOVE_NOCOALESCE` for that reason), so the checks compare the sum of movement, not the number of messages.
 
 Windows sends a keyboard its LED state as an output report when the keyboard arrives and on every change, and resends it to the keyboards already present when another one arrives. `KeyboardLedsChanged` raises the decoded state and `KeyboardLeds` keeps the last one. The arrival report comes while `CreateController` is still running, before a handler can be attached. Through v1.11.0 the output reader started at the ring position it found when the controller object was built, after the device had started, so the arrival report went unread, and so did anything else a host sent during creation, such as the feature reads a Sony Bluetooth host makes on arrival, which arm the extended report. Each controller's setup now records the ring position before the device exists, and the reader starts there.
 
@@ -599,7 +599,9 @@ User-Mode Test App
   │       ExtendedReportSize(4) + ExtendedReportData[80] = 362 bytes
   │     Data[256] carries HID input reports up to 256 bytes (DualSense BT
   │       report 0x31 = 78 bytes, Switch Pro motion-IMU reports, etc.).
-  │     Event-driven: SDK signals InputDataEvent on each write.
+  │     Event-driven: the SDK signals InputDataEvent after a write. From
+  │       2.1.0 it signals only while the driver's worker waits (signal
+  │       section below).
   │
   ├──► Input acknowledgement (per-controller, used by keyboards and mice)
   │     DeliveredSeqNo(4) + Capabilities(4) + ReleaseSeq(4) +
@@ -617,6 +619,23 @@ User-Mode Test App
   │     Layout version, protocol range and SDK version written by the
   │       SDK. Driver protocol, version and capabilities (the constant
   │       0x3) written by the driver each time it opens the input section.
+  │
+  ├──► Signal section Global\HIDMaestroSignal<N> (per-controller, 256 bytes)
+  │     Created by a 2.1.0 or later SDK as it maps the index, mapped by the
+  │       HID driver and the XUSB companion. It holds each driver's
+  │       capability word, the HID driver workers inside a counted wait on
+  │       the input event (InputWaiters), a frame the SDK hands to a worker
+  │       instead of signaling it (InputHandoff: the frame's even SeqNo once
+  │       final, with the low bit set while provisional) and the companion's
+  │       parked WAIT_FOR_INPUT requests (CompanionParked). InputHandoff
+  │       shares InputWaiters's cache line, and CompanionParked has its own.
+  │       While a worker waits, a 2.1.0 SDK signals the frame. While none
+  │       waits, it hands the frame over, provisional until a second look at
+  │       the count and then final, and the worker takes the handoff before
+  │       each wait. It drops a provisional SeqNo and reads the section at
+  │       once for a final one. The companion doorbell rings only while a
+  │       request is parked. Without a driver's capability the SDK signals
+  │       every frame. See docs/design/signal-gate.md.
   │
   ├──► Owner pipe \\.\pipe\HIDMaestroOwner<N> (per-controller)
   │     Server end held by the SDK, never written, two instances, the
