@@ -90,9 +90,16 @@ internal static class HeldRemoval
         /// <summary>The removal queries the holder has refused.</summary>
         public int Refusals;
         /// <summary>The clock each removal query is timed on, and each
-        /// query's time and thread.</summary>
+        /// query's time, its thread and whether that thread held the PnP
+        /// lock's in-process gate, which every take of the lock enters.</summary>
         public Func<long>? Clock;
-        public readonly List<(long At, int Thread)> Queries = new();
+        public readonly List<(long At, int Thread, bool Locked)> Queries = new();
+        /// <summary>Each call that deleted a record: its thread and whether
+        /// that thread held the gate.</summary>
+        public readonly List<(int Thread, bool Locked)> Deletes = new();
+        /// <summary>Runs inside each removal query, before its answer, and
+        /// inside each call that deletes a record, before it does.</summary>
+        public Action? DuringQuery, DuringDelete;
         readonly Dictionary<string, List<Action>> _removed = new(StringComparer.OrdinalIgnoreCase);
         // A driver's failure can come from another thread (Fail).
         readonly object _gate = new();
@@ -168,7 +175,8 @@ internal static class HeldRemoval
         public bool Query(string id)
         {
             Calls.Add($"query {id}");
-            Queries.Add((Clock?.Invoke() ?? 0, Environment.CurrentManagedThreadId));
+            Queries.Add((Clock?.Invoke() ?? 0, Environment.CurrentManagedThreadId, DeviceManager.PnpGateHeldHere));
+            DuringQuery?.Invoke();
             var subtree = Below(id).Append(id).ToList();
             if (OutsideQuery)
             {
@@ -192,6 +200,8 @@ internal static class HeldRemoval
         public bool Delete(string kind, string id)
         {
             Calls.Add($"{kind} {id}");
+            Deletes.Add((Environment.CurrentManagedThreadId, DeviceManager.PnpGateHeldHere));
+            DuringDelete?.Invoke();
             if (!Nodes.TryGetValue(id, out var n)) return true;
             if (!IsDown(id)) Violations.Add($"{kind} {id} while it was in the tree and not down ({n})");
             Leave(id);
@@ -576,6 +586,14 @@ internal static class HeldRemoval
     /// work.</summary>
     static int LoopHangMs => TimeoutScale.Apply(600_000);
 
+    /// <summary>How long a create of another identity, on a thread of its
+    /// own, may take to get its claim and the PnP lock while a retry's query
+    /// waits: free, it takes microseconds.</summary>
+    static int CreateHangMs => TimeoutScale.Apply(30_000);
+
+    /// <summary>Another identity than the retry checks' group's.</summary>
+    const string OtherToken = "HM_FE0000000000C001";
+
     /// <summary>Runs the retry's loop on a check thread of its own, with every
     /// PnP call answered by <paramref name="m"/> and the claims by stand-ins,
     /// until it ends. False when no loop was started or it did not end within
@@ -748,6 +766,51 @@ internal static class HeldRemoval
               endedH && runH.Times.SequenceEqual(new long[] { 0, 5_000 }) && Gone(h) && runH.Deleted.Count == 0,
               Show(h, runH));
         cancels += h.CancelLocates;
+
+        // The retry asks outside the PnP lock, under its group's claims. While
+        // its query waits on the holder, as Windows waits about 5.4 s for one
+        // that never reads, a create of another identity takes its claim and
+        // the lock, and no create of this identity can take its claim until
+        // the records are gone.
+        var l = new Machine(holder: true) { LetGoAfter = 2 };
+        var runL = new RetryRun(l);
+        bool otherWaited = false, ownClaimFree = false;
+        void ProbeOwnClaim()
+        {
+            using var own = MachineClaims.TryClaim(MachineClaims.IdentityPipeName(Token));
+            if (own != null) ownClaimFree = true;
+        }
+        l.DuringQuery = () =>
+        {
+            if (Environment.CurrentManagedThreadId == caller) return;
+            bool claimed = false, locked = false;
+            var create = Offline.Critical(() =>
+            {
+                using var claim = MachineClaims.TryClaim(MachineClaims.IdentityPipeName(OtherToken));
+                claimed = claim != null;
+                if (!claimed) return;
+                using var hold = DeviceManager.HoldPnpLock();
+                locked = true;
+            });
+            create.Start();
+            if (!create.Join(CreateHangMs) || !claimed || !locked) otherWaited = true;
+            ProbeOwnClaim();
+        };
+        l.DuringDelete = () =>
+        {
+            if (Environment.CurrentManagedThreadId != caller) ProbeOwnClaim();
+        };
+        SweepGroup(l, runL.Retry);
+        bool endedL = RunLoop(l, runL);
+        var retryQueries = l.Queries.Where(q => q.Thread != caller).ToList();
+        var retryDeletes = l.Deletes.Where(x => x.Thread != caller).ToList();
+        check("the retry asks outside the PnP lock, under its group's claims -> its queries hold neither the in-process gate nor the lock, a create of another identity takes its claim and the lock while a query waits on the holder, no create of this identity can take its claim before the records are gone, and the records go under the lock",
+              endedL && retryQueries.Count == 2 && retryQueries.All(q => !q.Locked) && !otherWaited && !ownClaimFree
+              && retryDeletes.Count > 0 && retryDeletes.All(x => x.Locked) && Gone(l),
+              $"{Show(l, runL)}, retry queries under the lock [{string.Join(", ", retryQueries.Select(q => q.Locked))}], " +
+              $"a create of another identity waited {otherWaited}, this identity's claim free {ownClaimFree}, " +
+              $"record deletions under the lock [{string.Join(", ", retryDeletes.Select(x => x.Locked))}]");
+        cancels += l.CancelLocates;
 
         check("no CM_LOCATE_DEVNODE_CANCELREMOVE locate in the retries", cancels == 0, $"{cancels}");
     }
