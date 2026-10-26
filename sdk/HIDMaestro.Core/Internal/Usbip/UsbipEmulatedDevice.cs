@@ -412,14 +412,23 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
 
     private void InputPump()
     {
+        var failures = new LoopFailures();
         while (!_stop)
         {
+            failures.NextPass();
             try
             {
                 if (_inputWaitEvent != IntPtr.Zero)
-                    WaitForSingleObject(_inputWaitEvent, 500);
+                {
+                    // A wait that fails returns at once, and with no new
+                    // frame the pass would go round again at once. The pump
+                    // sleeps instead, 1 ms doubling up to the poll it runs
+                    // with no event, then reads the section all the same.
+                    if (WaitForSingleObject(_inputWaitEvent, 500) == WAIT_FAILED)
+                        Thread.Sleep(failures.WaitFailed(Marshal.GetLastPInvokeError(), PollMs));
+                }
                 else
-                    Thread.Sleep(4);
+                    Thread.Sleep(PollMs);
                 if (_stop) break;
 
                 if (DiagPath != null)
@@ -517,14 +526,24 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 }
                 SendRetSubmitSpan(seq, 0, length, report);
             }
-            catch
+            catch (Exception e)
             {
-                // Same containment contract as HMController.OutputPollLoop:
-                // a transient failure must not kill the pump. The SDK's
+                // A pass that throws does not end the pump. The SDK's
                 // per-frame SetEvent redelivers within one frame interval.
+                // The pump sleeps before the next pass, 1 ms doubling up to
+                // the poll, so a pass that throws on every frame settles at
+                // one a poll.
+                Thread.Sleep(failures.Threw(e, PollMs));
             }
         }
     }
+
+    /// <summary>The pump's poll without an event, in milliseconds, and the
+    /// longest wait after a pass that failed. Dispose cannot wake a sleep,
+    /// so it is short.</summary>
+    private const int PollMs = 4;
+
+    private const uint WAIT_FAILED = 0xFFFFFFFF;
 
     /// <summary>Seqlock read of the shared input section plus the wire
     /// report build, mirroring driver.c ReadSharedInput + the report
@@ -1212,8 +1231,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     /// <summary>Stop every thread this device started and close what it
     /// opened. Dispose ends here, and so does a constructor that throws
     /// partway, so every field may still be unset. Each loop checks
-    /// <c>_stop</c> after a wait of at most 500 ms, and each wait is woken
-    /// here, so Dispose waits for none of them to time out.
+    /// <c>_stop</c> after a wait of at most 500 ms, and each wait on an event
+    /// is woken here, so Dispose waits for none of them to time out. The
+    /// input pump sleeps instead, at most <see cref="PollMs"/>, when it has
+    /// no event and after a pass that failed.
     ///
     /// <para>The controller unmaps the sections once Dispose returns, so
     /// nothing here waits on the connection, and no thread reads or writes
