@@ -1119,40 +1119,48 @@ TakeReportLocked(_In_ PDEVICE_CONTEXT ctx,
  * request took). That is a park too: while this thread held the read the
  * worker may have cached a frame and found the queue empty, so the loop
  * looks again after the requeue, for anything published since it found
- * nothing. Each read completes after the lock, so the worker never
- * waits on the framework's buffer calls, and only once its frame is noted:
- * HID class can send its next READ_REPORT the moment this one completes,
- * and that read has to find AckPending set. Completing first let it
- * arrive first, find nothing to acknowledge and park, so the
- * acknowledgement waited for a read that only the SDK's next frame would
- * bring: the SDK sat out its full delivery timeout, most often on a busy
- * machine. Worker thread, or a READ_REPORT after its second look. */
+ * nothing.
+ *
+ * Each read completes under InputLock, so reads complete in the order
+ * their reports were taken. HID class's completion routine runs on the
+ * completing thread: a read completed after the lock, as through 2.0.3,
+ * could reach HID class after a newer frame that another thread took later
+ * and completed first, and a reader on a test machine got frame 99,670 and
+ * then 99,669. Completing calls back into none of this driver's code: in
+ * UMDF the IRP goes to the host on this thread (Windows-Driver-Frameworks
+ * shared/core/um/fxirpum.cpp, FxIrp::CompleteRequest), and the request's
+ * queue then runs only its own events (fxioqueue.hpp,
+ * RequestCompletedCallback), for which neither queue here registers a
+ * callback. HID class's next READ_REPORT arrives on another thread and
+ * waits for InputLock no longer than this one completion. Completing
+ * inside the take also keeps every acknowledgement after the completion
+ * of the frame it names. Worker thread, or a READ_REPORT after its second
+ * look. */
 static VOID
 DeliverParked(_In_ PDEVICE_CONTEXT ctx, _In_ BOOLEAN waiting)
 {
     while (waiting) {
         UCHAR report[HIDMAESTRO_MAX_REPORT_SIZE];
         ULONG size, published;
-        BOOLEAN have;
         WDFREQUEST read;
 
         if (!NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &read)))
             return;
         AcquireSRWLockExclusive(&ctx->InputLock);
-        have = TakeReportLocked(ctx, report, &size);
-        waiting = have && ReportWaitingLocked(ctx);
-        published = ctx->InputPublishCount;
-        ReleaseSRWLockExclusive(&ctx->InputLock);
-        if (!have) {
-            WdfRequestRequeue(read);
-            AcquireSRWLockExclusive(&ctx->InputLock);
-            waiting = ctx->ReleaseNext < ctx->ReleaseCount
-                || (ctx->InputReportPending && ctx->InputPublishCount != published);
+        if (TakeReportLocked(ctx, report, &size)) {
+            NTSTATUS cs = RequestCopyFromBuffer(read, report, size);
+            WdfRequestComplete(read, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
+            waiting = ReportWaitingLocked(ctx);
             ReleaseSRWLockExclusive(&ctx->InputLock);
             continue;
         }
-        NTSTATUS cs = RequestCopyFromBuffer(read, report, size);
-        WdfRequestComplete(read, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
+        published = ctx->InputPublishCount;
+        ReleaseSRWLockExclusive(&ctx->InputLock);
+        WdfRequestRequeue(read);
+        AcquireSRWLockExclusive(&ctx->InputLock);
+        waiting = ctx->ReleaseNext < ctx->ReleaseCount
+            || (ctx->InputReportPending && ctx->InputPublishCount != published);
+        ReleaseSRWLockExclusive(&ctx->InputLock);
     }
 }
 
@@ -2907,9 +2915,9 @@ EvtIoDeviceControl(
          * GET_INPUT_REPORT (a different IOCTL, polled diagnostic path) is
          * unaffected: it still reads the cache directly.
          *
-         * The report to send is copied out under InputLock and into the
-         * request after it, so the worker, which takes the lock for every
-         * frame, never waits on the framework's buffer calls.
+         * 2.1.0: a report taken here completes under InputLock, as
+         * DeliverParked completes its reads, so it reaches HID class before
+         * any frame another thread takes after it.
          */
         UCHAR served[HIDMAESTRO_MAX_REPORT_SIZE];
         ULONG servedSize = 0;
@@ -2937,12 +2945,15 @@ EvtIoDeviceControl(
         if (ctx->ReleaseNext < ctx->ReleaseCount
             || (ctx->InputReportPending && ctx->SharedMemSeqNo > ctx->LastDeliveredInputSeqNo))
             serve = TakeReportLocked(ctx, served, &servedSize);
+        if (serve) {
+            status = RequestCopyFromBuffer(Request, served, servedSize);
+            WdfRequestComplete(Request, status);
+            completeRequest = FALSE;
+        }
         published = ctx->InputPublishCount;
         ReleaseSRWLockExclusive(&ctx->InputLock);
 
-        if (serve) {
-            status = RequestCopyFromBuffer(Request, served, servedSize);
-        } else {
+        if (!serve) {
             status = WdfRequestForwardToIoQueue(Request, ctx->ManualQueue);
             if (NT_SUCCESS(status)) {
                 BOOLEAN waiting;
