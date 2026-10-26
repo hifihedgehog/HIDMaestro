@@ -344,7 +344,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             _outputEvent = SharedMemoryIO.EnsureOutputEvent(index);
             _inputWaitEvent = SharedMemoryIO.OpenInputEventForWait(index);
 
-            Audio = new UsbAudioEngine(profile, CompleteIsoOnWire);
+            Audio = new UsbAudioEngine(profile, CompleteIsoOnWire, AnswerIsoUnlink);
 
             var input = new Thread(InputPumpLoop)
             {
@@ -818,6 +818,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             // reader's reused buffers and the URB waits for its due tick.
             var urb = Audio.RentUrb(isoPackets.Length, cmd.IsIn ? 0 : outPayload.Length);
             urb.Seqnum = cmd.Seqnum;
+            // The import that sent it, which holds the device while its
+            // reader runs this: the answer goes there, whatever imports the
+            // device by the time the URB's tick comes.
+            urb.Import = Volatile.Read(ref _connection);
             urb.IsIn = cmd.IsIn;
             urb.TransferBufferLength = cmd.TransferBufferLength;
             urb.InterfaceNumber = ep.InterfaceNumber;
@@ -909,7 +913,11 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     public void HandleUnlink(uint seqnum, uint victimSeqnum)
     {
         if (_stop) return;
-        bool removed = Audio.TryUnlink(victimSeqnum);
+        var audio = Audio.TryUnlink(victimSeqnum, seqnum, Volatile.Read(ref _connection));
+        // An isochronous URB the audio pump is completing: the pump answers
+        // the unlink once the URB's RET_SUBMIT is on the wire.
+        if (audio == UsbAudioEngine.UnlinkResult.Completing) return;
+        bool removed = audio == UsbAudioEngine.UnlinkResult.Removed;
         // Reads a host-polled protocol holds park in its own list. Every
         // other read, a device that builds its reports included, parks by
         // endpoint below.
@@ -1369,12 +1377,25 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     }
 
     /// <summary>Completion callback from the audio engine's pacing thread.
-    /// Builds the isochronous RET_SUBMIT per the 0.9.7.5 receive rules.</summary>
+    /// Builds the isochronous RET_SUBMIT per the 0.9.7.5 receive rules, on
+    /// the connection the URB came on. After a drop that connection is
+    /// closing, and a new import counts its seqnums from its own start
+    /// (usbip-win2 context.cpp next_seqnum, a counter per device context), so
+    /// the answer never goes to the device's connection of the moment.</summary>
     private void CompleteIsoOnWire(UsbAudioEngine.PendingIso p, ReadOnlySpan<byte> inCompacted, int perPacketActual)
     {
-        var c = _connection;
-        if (c == null) return;
+        var c = p.Import;
+        if (c == null || _stop) return;
         try { c.SendRetSubmitIso(p, inCompacted, perPacketActual); } catch { }
+    }
+
+    /// <summary>The audio engine's answer to an unlink that came while it
+    /// completed the URB, after the URB's RET_SUBMIT
+    /// (<see cref="UsbAudioEngine.TryUnlink"/>).</summary>
+    private void AnswerIsoUnlink(UsbipServer.Connection? import, uint unlinkSeqnum)
+    {
+        if (import == null || _stop) return;
+        try { import.SendRetUnlink(unlinkSeqnum, 0); } catch { }
     }
 
     public void Dispose() => StopAndRelease(600);

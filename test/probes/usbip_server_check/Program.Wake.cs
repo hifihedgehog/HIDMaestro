@@ -32,6 +32,9 @@
 //     in order, as the HID path's acknowledgement delivers every report
 //   - a reader the output ring has lapped, reading the slot the device
 //     refills next, never takes a slot mixed from two packets
+//   - an isochronous URB the audio pump is completing is answered before an
+//     unlink of it, and on the import it came on when a new import holds the
+//     device by then
 //
 // Each scenario ends on a frame or a read that tells a correct device from
 // one that lost the handoff at once, and a wait that only a correct device
@@ -75,6 +78,8 @@ internal static partial class Program
         Contained("frames no read took", () => NewestFrameWaits(ds));
         Contained("a keyboard's frames no read took", KeyboardKeepsEveryFrame);
         Contained("a lapped output reader", () => LappedOutputReader(ds));
+        Contained("an isochronous URB unlinked while it completes", () => AudioAnswerBeforeUnlink(ds));
+        Contained("an isochronous URB whose import drops while it completes", () => AudioAnswerToItsImport(ds));
         Contained("a bulk command on a poll clock", BulkCommandWakesPollClock);
         Contained("bulk replies to other command paths", RepliesReachParkedBulkRead);
     }
@@ -431,6 +436,60 @@ internal static partial class Program
               $"{Packets} packets, {taken} slots taken, {mixed} mixed{(firstMixed != null ? ", the first " + firstMixed : "")}");
     }
 
+    /// <summary>An isochronous URB unlinked while the audio pump completes
+    /// it: the pump has taken it from the URBs that wait for their tick and
+    /// runs the consumer's handler, held here, before it answers. A RET_UNLINK
+    /// with status 0 says the URB was answered, so it follows the URB's
+    /// RET_SUBMIT on the wire (usbip_protocol.rst, USBIP_RET_UNLINK). Linux's
+    /// stub sends a completed URB's RET_SUBMIT before any RET_UNLINK
+    /// (stub_tx.c stub_tx_loop), and Linux's vhci gives the URB back on the
+    /// RET_UNLINK and fails the connection on a RET_SUBMIT after it
+    /// (vhci_rx.c vhci_recv_ret_unlink, vhci_recv_ret_submit).</summary>
+    static void AudioAnswerBeforeUnlink(ControllerProfile ds)
+    {
+        using var rig = new HandoffRig(ds, HandoffIndex + 16);
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        rig.Device.Audio.OutFrames += _ => { entered.Set(); release.Wait(Hang); };
+        uint urb = rig.SubmitIsoOut(0x01, 10, 392);
+        bool inHandler = entered.Wait(Hang);
+        uint u = rig.NextSeq();
+        rig.SendUnlink(u, urb);
+        release.Set();
+        var first = rig.Next();
+        var second = rig.Next();
+        Check("an isochronous URB unlinked while the audio pump completes it is answered before the unlink",
+              inHandler && first.Kind == UsbipProtocol.RetSubmit && first.Seq == urb && first.Status == 0
+              && second.Kind == UsbipProtocol.RetUnlink && second.Seq == u && second.Status == 0,
+              $"in the handler {inHandler}, then {first}, then {second}");
+    }
+
+    /// <summary>An isochronous URB whose import drops while the audio pump
+    /// completes it, and a new import that claims the device meanwhile. The
+    /// URB's RET_SUBMIT goes to the connection the URB came on. A new import
+    /// counts its seqnums from its own start (usbip-win2 context.cpp
+    /// next_seqnum), so an answer it never asked for can carry the seqnum of
+    /// a URB it did.</summary>
+    static void AudioAnswerToItsImport(ControllerProfile ds)
+    {
+        using var rig = new HandoffRig(ds, HandoffIndex + 17);
+        using var next = new HandoffRig.Wire($"hm-s43-handoff-{Environment.ProcessId}-{HandoffIndex + 17}-next.sock");
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        rig.Device.Audio.OutFrames += _ => { entered.Set(); release.Wait(Hang); };
+        uint urb = rig.SubmitIsoOut(0x01, 10, 392);
+        bool inHandler = entered.Wait(Hang);
+        rig.Device.DetachConnection(rig.Connection);
+        bool claimed = rig.Device.TryClaimConnection(next.Connection);
+        release.Set();
+        bool answered = WaitUntil(() => rig.Available > 0 || next.Available > 0, Hang);
+        var got = rig.Available > 0 ? rig.Next() : default;
+        bool newQuiet = !WaitUntil(() => next.Available > 0, 300);
+        Check("an isochronous URB answered after its import dropped is answered to that import, and the new import gets nothing",
+              inHandler && claimed && answered && got.Kind == UsbipProtocol.RetSubmit && got.Seq == urb && newQuiet,
+              $"in the handler {inHandler}, new import claimed {claimed}, the old import got {got}, the new one nothing {newQuiet}");
+    }
+
     /// <summary>A copy of the Switch 2 Pro composite whose input endpoint
     /// sends the SDK's report on the host's poll clock, with replies on that
     /// endpoint and commands on its bulk OUT endpoint, which the protocol
@@ -738,6 +797,28 @@ internal static partial class Program
             return cmd.Seqnum;
         }
 
+        /// <summary>An isochronous OUT transfer of <paramref name="packets"/>
+        /// packets of <paramref name="packetBytes"/> bytes of silence.</summary>
+        public uint SubmitIsoOut(byte endpoint, int packets, int packetBytes)
+        {
+            var cmd = Command(endpoint, false, packets * packetBytes);
+            cmd.NumberOfPackets = packets;
+            var iso = new (uint Offset, uint Length)[packets];
+            for (int i = 0; i < packets; i++) iso[i] = ((uint)(i * packetBytes), (uint)packetBytes);
+            Device.HandleSubmit(cmd, new byte[packets * packetBytes], iso);
+            return cmd.Seqnum;
+        }
+
+        /// <summary>The next seqnum, for a command another thread sends.</summary>
+        public uint NextSeq() => ++_seq;
+
+        /// <summary>A CMD_UNLINK of <paramref name="victim"/> with seqnum
+        /// <paramref name="seq"/>. Nothing is read back.</summary>
+        public void SendUnlink(uint seq, uint victim) => Device.HandleUnlink(seq, victim);
+
+        /// <summary>Bytes waiting on the host's end.</summary>
+        public int Available => _client.Available;
+
         /// <summary>A CMD_UNLINK and its RET_UNLINK's status.</summary>
         public int Unlink(uint victim) => Unlink(victim, out _);
 
@@ -784,9 +865,12 @@ internal static partial class Program
             uint seq = BinaryPrimitives.ReadUInt32BigEndian(_header.AsSpan(4));
             int status = BinaryPrimitives.ReadInt32BigEndian(_header.AsSpan(20));
             int actual = BinaryPrimitives.ReadInt32BigEndian(_header.AsSpan(24));
+            int packets = BinaryPrimitives.ReadInt32BigEndian(_header.AsSpan(32));
             // An OUT transfer's RET_SUBMIT carries its length and no data.
             var data = new byte[kind == UsbipProtocol.RetSubmit && _in.Contains(seq) ? actual : 0];
             ReadExactly(data);
+            // An isochronous one ends with a descriptor per packet.
+            if (kind == UsbipProtocol.RetSubmit && packets > 0) ReadExactly(new byte[packets * UsbipProtocol.IsoDescriptorSize]);
             return new Message(kind, seq, status, kind == UsbipProtocol.RetSubmit && !_in.Contains(seq) ? actual : data.Length, data);
         }
 
