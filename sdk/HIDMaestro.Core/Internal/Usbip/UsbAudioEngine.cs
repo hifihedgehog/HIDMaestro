@@ -56,6 +56,7 @@ internal sealed partial class UsbAudioEngine : IDisposable
     private readonly Thread _thread;
     private readonly AutoResetEvent _wake = new(false);
     private readonly IntPtr _timer;
+    private bool _noTimerLogged;
     private readonly IntPtr[] _waitPair = new IntPtr[2];
     private volatile bool _stop;
 
@@ -769,7 +770,20 @@ internal sealed partial class UsbAudioEngine : IDisposable
             {
                 // Land ~200 µs early on the timer, close the rest spinning.
                 long timerTicks = remaining - (long)(200 * TicksPerUs);
-                if (timerTicks > 0 && _timer != IntPtr.Zero)
+                if (timerTicks > 0 && _timer == IntPtr.Zero)
+                {
+                    // Neither timer could be created: the pump sleeps on its
+                    // wake event to the next due time (a whole millisecond
+                    // or more), so it never spins the wait out.
+                    if (!_noTimerLogged)
+                    {
+                        _noTimerLogged = true;
+                        LoopFailures.Note("no waitable timer could be created, so the pump waits by sleeping");
+                    }
+                    long ms = timerTicks / TicksPerMs;
+                    if (ms >= 1) _wake.WaitOne((int)Math.Min(ms, 250));
+                }
+                else if (timerTicks > 0)
                 {
                     long due = -(timerTicks * 10_000_000L / Stopwatch.Frequency); // relative 100 ns units
                     if (SetWaitableTimer(_timer, ref due, 0, IntPtr.Zero, IntPtr.Zero, false))

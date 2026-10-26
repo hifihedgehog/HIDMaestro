@@ -130,6 +130,33 @@ internal static class Usbip
         finally { engine.Dispose(); }
     }
 
+    /// <summary>The audio pump with no timer (both creates failed): it
+    /// slept to the next due time and spun nothing. An URB waits for a due
+    /// time 8 s away.</summary>
+    public static void AudioPumpNoTimer()
+    {
+        var p = Profile(Catalog("dualsense-composite"));
+        int microphone = 0;
+        var engine = new UsbAudioEngine(p, (urb, _, _) => { if (urb.IsIn) Interlocked.Increment(ref microphone); });
+        try
+        {
+            var waitPair = (IntPtr[])typeof(UsbAudioEngine).GetField("_waitPair", Private)!.GetValue(engine)!;
+            var field = typeof(UsbAudioEngine).GetField("_timer", Private)!;
+            IntPtr timer = (IntPtr)field.GetValue(engine)!;
+            field.SetValue(engine, IntPtr.Zero);
+            waitPair[0] = IntPtr.Zero;
+            engine.SubmitIso(Urb(engine, 1, isIn: false, packets: 8000));
+            bool bounded = CheckBounded("an audio pump with no timer", Measure());
+            Diag.Logged("the missing timer is logged", "HMUsbipAudioPump", "no waitable timer could be created", wait: bounded);
+            engine.SubmitIso(Urb(engine, 2, isIn: true, packets: 1));
+            bool done = WaitUntil(() => Volatile.Read(ref microphone) >= 1);
+            Checks.Check("the pump still completes an URB with no timer", done, $"{Volatile.Read(ref microphone)} completion(s)");
+            field.SetValue(engine, timer);
+            waitPair[0] = timer;
+        }
+        finally { engine.Dispose(); }
+    }
+
     /// <summary>The audio pump on a completion that throws: the exception
     /// ended the pump's thread, and the process with it.</summary>
     public static void AudioPumpThrow()

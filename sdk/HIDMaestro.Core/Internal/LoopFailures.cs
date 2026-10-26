@@ -113,6 +113,10 @@ internal struct LoopFailures
         catch { }
     }
 
+    /// <summary>One line under the calling thread's name, for a loop that
+    /// runs on a fallback.</summary>
+    public static void Note(string what) => Log(what);
+
     private static void Log(string what)
     {
         try { DeviceOrchestrator.LogDiag($"{Thread.CurrentThread.Name ?? $"thread {Environment.CurrentManagedThreadId}"}: {what}"); }
