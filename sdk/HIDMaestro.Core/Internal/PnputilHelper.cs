@@ -64,7 +64,7 @@ internal static partial class PnputilHelper
         string ProviderName,
         string DriverVersion);
 
-    private static string PnputilPath => Path.Combine(
+    private static string PnputilPath => DriverBuilder.PnputilExeForTest ?? Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.System), "pnputil.exe");
 
     /// <summary>Run pnputil from System32, never a pnputil.exe found first
@@ -95,6 +95,14 @@ internal static partial class PnputilHelper
     /// with a program that hangs.</summary>
     internal static (int exitCode, string output) RunTool(string path, string args, int timeoutMs)
     {
+        var (exitCode, output, _) = RunToolBounded(path, args, timeoutMs);
+        return (exitCode, output);
+    }
+
+    /// <summary><see cref="RunTool"/>, and whether the program was stopped
+    /// at the timeout, which cut short whatever it was doing.</summary>
+    internal static (int exitCode, string output, bool stopped) RunToolBounded(string path, string args, int timeoutMs)
+    {
         var psi = new ProcessStartInfo
         {
             FileName = path,
@@ -114,15 +122,17 @@ internal static partial class PnputilHelper
         // us a real timeout we can act on.
         var stdoutTask = p.StandardOutput.ReadToEndAsync();
         var stderrTask = p.StandardError.ReadToEndAsync();
+        bool stopped = false;
         if (!p.WaitForExit(TimeoutScale.Apply(timeoutMs)))
         {
+            stopped = true;
             try { p.Kill(entireProcessTree: true); } catch { }
             p.WaitForExit(TimeoutScale.Apply(5_000));
         }
         var (stdout, stderr) = Drain(stdoutTask, stderrTask);
         int exitCode;
         try { exitCode = p.ExitCode; } catch { exitCode = -1; }
-        return (exitCode, stdout + stderr);
+        return (exitCode, stdout + stderr, stopped);
     }
 
     /// <summary>Called with the program's path right before
@@ -429,9 +439,11 @@ internal static partial class PnputilHelper
     }
 
     /// <summary>Add a package to the driver store without installing it on
-    /// any device.</summary>
-    public static (int exitCode, string output) AddDriver(string infPath)
-        => Run($"/add-driver \"{infPath}\"", timeoutMs: 60_000);
+    /// any device, waiting as long as Windows gives a device installation
+    /// task (<see cref="DriverBuilder.PnputilAddMs"/>). <c>stopped</c> is
+    /// true when pnputil was still running then and was ended.</summary>
+    public static (int exitCode, string output, bool stopped) AddDriver(string infPath)
+        => RunToolBounded(PnputilPath, $"/add-driver \"{infPath}\"", DriverBuilder.PnputilAddMs());
 
     /// <summary>The answer of a plain delete, /delete-driver with no
     /// /uninstall and no /force, so a package a devnode still uses, present

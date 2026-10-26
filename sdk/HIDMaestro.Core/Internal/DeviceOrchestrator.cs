@@ -901,16 +901,21 @@ internal static partial class DeviceOrchestrator
     /// as a main devnode that was not created does: a controller without it
     /// is one no game sees (an xinputhid controller has no other device, and
     /// an Xbox 360 controller gets no XInput). The failed create's cleanup
-    /// removes what the create made. <paramref name="hr"/> is null when the
-    /// registration gate refused.</summary>
-    private static InvalidOperationException CompanionNotCreated(string what, string instanceId, ControllerProfile profile,
-                                                                 int controllerIndex, int? hr) =>
-        new($"The {what} {instanceId} of profile '{profile.Id}' at index {controllerIndex} was not created: " + hr switch
-        {
-            null => "a prior life of it or a device with its ParentIdPrefix was still there after its removal.",
-            SwdDeviceFactory.StillInTreeHr => "the device a timed-out create attempt made was still in the device tree when its removal test ended.",
-            _ => $"hmswd.exe returned 0x{hr.Value:X8}.",
-        });
+    /// removes what the create made. <paramref name="failed"/> is the
+    /// helper's failed create, whose cause the message gives and whose
+    /// HRESULT the exception carries, or null when the registration gate
+    /// refused.</summary>
+    internal static InvalidOperationException CompanionNotCreated(string what, string instanceId, string profileId,
+                                                                  int controllerIndex, SwdDeviceFactory.Result? failed)
+    {
+        var e = new InvalidOperationException(
+            $"The {what} {instanceId} of profile '{profileId}' at index {controllerIndex} was not created: " +
+            (failed is { } f
+                ? f.Cause ?? $"hmswd.exe returned 0x{f.HResult:X8}."
+                : "a prior life of it or a device with its ParentIdPrefix was still there after its removal."));
+        if (failed is { } r) e.HResult = r.HResult;
+        return e;
+    }
 
     private static string? CreateGamepadCompanion(int controllerIndex, ControllerProfile profile,
                                                   PresentationPlan plan, DeviceIdentity identity)
@@ -998,7 +1003,7 @@ internal static partial class DeviceOrchestrator
                        out _))
             {
                 if (pnp == null)
-                    throw CompanionNotCreated("gamepad companion", gpSwdId, profile, controllerIndex, null);
+                    throw CompanionNotCreated("gamepad companion", gpSwdId, profile.Id, controllerIndex, null);
 
                 result = SwdDeviceFactory.Create(
                     instanceSuffix,
@@ -1006,7 +1011,6 @@ internal static partial class DeviceOrchestrator
                     compatIds,
                     identity.ContainerId,
                     companionDesc,
-                    driverRequired: true,
                     enumeratorName: gpSwdEnumerator);
             }
 
@@ -1033,7 +1037,7 @@ internal static partial class DeviceOrchestrator
                     k?.SetValue("LastSwdGamepadHResult", result.HResult, RegistryValueKind.DWord);
                 }
                 catch { }
-                throw CompanionNotCreated("gamepad companion", gpSwdId, profile, controllerIndex, result.HResult);
+                throw CompanionNotCreated("gamepad companion", gpSwdId, profile.Id, controllerIndex, result);
             }
         }
 
@@ -1132,7 +1136,7 @@ internal static partial class DeviceOrchestrator
                        clearRivals: null, out _))
             {
                 if (pnp == null)
-                    throw CompanionNotCreated("XUSB companion", xusbId, profile, controllerIndex, null);
+                    throw CompanionNotCreated("XUSB companion", xusbId, profile.Id, controllerIndex, null);
 
                 result = SwdDeviceFactory.Create(
                     instanceSuffix,
@@ -1140,7 +1144,6 @@ internal static partial class DeviceOrchestrator
                     compatIds,
                     identity.ContainerId,
                     companionDesc,
-                    driverRequired: true,
                     enumeratorName: "HIDMAESTRO");
             }
 
@@ -1181,7 +1184,7 @@ internal static partial class DeviceOrchestrator
                     k?.SetValue("LastSwdCompanionHResult", result.HResult, RegistryValueKind.DWord);
                 }
                 catch { }
-                throw CompanionNotCreated("XUSB companion", xusbId, profile, controllerIndex, result.HResult);
+                throw CompanionNotCreated("XUSB companion", xusbId, profile.Id, controllerIndex, result);
             }
         }
         else

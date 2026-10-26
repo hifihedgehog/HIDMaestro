@@ -524,35 +524,31 @@ internal static class Offline
 
     const int WaitTimeoutHr = unchecked((int)0x80070102);
 
-    /// <summary>SwdDeviceFactory's create attempts on one id, each answered
-    /// by the next of <paramref name="hrs"/> (0 for success). The sequence
-    /// begins as the first attempt returns: a device that attempt created,
-    /// and closed when it timed out, then leaves on the sequence's times.</summary>
-    static (bool Success, int HResult, int Attempts, long LastAt, long EndAt, int Registrations) Retries(Sequence s,
-        int[] backoffMs, params int[] hrs)
+    /// <summary>SwdDeviceFactory's one create of an id, answered by
+    /// <paramref name="hr"/> (0 for success). The sequence begins as the
+    /// create returns: a device the create made, and closed when it timed
+    /// out, then leaves on the sequence's times.</summary>
+    static (bool Success, int HResult, string? Cause, int Attempts, long EndAt, int Registrations) Once(Sequence s, int hr)
     {
         int attempts = 0;
-        long lastAt = -1;
         s.Hook();
         try
         {
-            var r = SwdDeviceFactory.CreateWithRetries(@"SWD\HIDMAESTRO\PNP_NOTIFY_CHECK", backoffMs, RetryRemovalTestMs, () =>
+            var r = SwdDeviceFactory.CreateOnce(@"SWD\HIDMAESTRO\PNP_NOTIFY_CHECK", CreateRemovalTestMs, () =>
             {
-                lastAt = s.Now;
-                int hr = hrs[attempts++];
-                if (attempts == 1) s.Begin();
-                return new SwdDeviceFactory.Result(hr == 0, hr == 0 ? @"SWD\HIDMAESTRO\PNP_NOTIFY_CHECK" : null, hr);
+                attempts++;
+                s.Begin();
+                return new SwdDeviceFactory.Result(hr == 0, hr == 0 ? @"SWD\HIDMAESTRO\PNP_NOTIFY_CHECK" : null, hr,
+                    hr == 0 ? null : "The stand-in create failed.");
             });
-            return (r.Success, r.HResult, attempts, lastAt, s.Now, s.Registrations);
+            return (r.Success, r.HResult, r.Cause, attempts, s.Now, s.Registrations);
         }
         finally { s.End(); }
     }
 
-    /// <summary>The removal test's budget after a timed-out attempt, here in
-    /// place of an attempt's 15 s.</summary>
-    const int RetryRemovalTestMs = 400;
-
-    static readonly int[] ThreeAttempts = { 0, 1, 1 };
+    /// <summary>The removal test's budget after a timed-out create, here in
+    /// place of the helper's 90 s.</summary>
+    const int CreateRemovalTestMs = 400;
 
     const string OrphanChild = @"HID\PNP_NOTIFY_CHECK\1&7e57&0&0000";
 
@@ -2251,32 +2247,39 @@ internal static class Offline
                   s_underLock == 0, $"{s_underLock}");
         }
 
-        // A create attempt that timed out can have made the device and closed
-        // it: the retry registers the id again only once it has left.
+        // A create that timed out can have made the device and closed it: the
+        // create ends once that device has left the tree, inside the hold,
+        // and is never run again. No check bounds how long after its event an
+        // end comes, since load can stretch any wait.
         if (Part(8))
         {
-            var n1 = Retries(new Sequence { LeavesTree = 100, RemovedAt = 150, RecordGoneAt = null }, ThreeAttempts, WaitTimeoutHr, 0);
-            // One registration when the device is in the tree at the retry's
-            // look, none when load brings the look past 100.
-            Check("create retry: the timed-out attempt's device out at 100, REMOVED at 150 -> the retry not before 150, and it succeeds",
-                  n1.Success && n1.Attempts == 2 && NotBefore(n1.LastAt, 150) && n1.Registrations <= 1,
-                  $"success {n1.Success}, {n1.Attempts} attempt(s), the last at {n1.LastAt} ms, {n1.Registrations} registration(s)");
-            var n2 = Retries(new Sequence { LeavesTree = null, RecordGoneAt = null }, ThreeAttempts, WaitTimeoutHr, 0, 0);
-            Check("create retry: the timed-out attempt's device still in the tree when its 400 ms test ends -> no retry, the create refused as still in the tree",
-                  !n2.Success && n2.Attempts == 1 && n2.HResult == SwdDeviceFactory.StillInTreeHr && NotBefore(n2.EndAt, RetryRemovalTestMs),
-                  $"success {n2.Success}, 0x{n2.HResult:X8}, {n2.Attempts} attempt(s), ended at {n2.EndAt} ms");
-            var n3 = Retries(new Sequence { AbsentBefore = true }, ThreeAttempts, WaitTimeoutHr, WaitTimeoutHr, 0);
-            Check("create retry: timed-out attempts that made nothing -> retried, with no REMOVED registration",
-                  n3.Success && n3.Attempts == 3 && n3.Registrations == 0,
-                  $"success {n3.Success}, {n3.Attempts} attempt(s), the last at {n3.LastAt} ms, {n3.Registrations} registration(s)");
-            var n4 = Retries(new Sequence { AbsentBefore = true }, ThreeAttempts, unchecked((int)0x80004005), 0);
-            Check("create retry: an attempt that failed other than by timing out -> no retry",
-                  !n4.Success && n4.Attempts == 1, $"success {n4.Success}, {n4.Attempts} attempt(s)");
-            // The last attempt's removal is tested too, before the hold ends.
-            var n5 = Retries(new Sequence { LeavesTree = 200, RemovedAt = 200, RecordGoneAt = null }, new[] { 0 }, WaitTimeoutHr);
-            Check("create retry: the last attempt timed out and its device leaves at 200 -> the create ends at 200, after its removal test",
-                  !n5.Success && n5.HResult == WaitTimeoutHr && n5.Attempts == 1 && NotBefore(n5.EndAt, 200) && n5.Registrations <= 1,
-                  $"success {n5.Success}, 0x{n5.HResult:X8}, ended at {n5.EndAt} ms, {n5.Registrations} registration(s)");
+            // One registration when the device is in the tree at the removal
+            // test's look, none when load brings the look past 100.
+            var n1 = Once(new Sequence { LeavesTree = 100, RemovedAt = 150, RecordGoneAt = null }, WaitTimeoutHr);
+            Check("create: timed out, its device out at 100 and REMOVED at 150 -> one attempt, ended after its removal test with WAIT_TIMEOUT",
+                  !n1.Success && n1.HResult == WaitTimeoutHr && n1.Attempts == 1 && n1.Registrations <= 1
+                  && NotBefore(n1.EndAt, n1.Registrations == 1 ? 150 : 100),
+                  $"success {n1.Success}, 0x{n1.HResult:X8}, {n1.Attempts} attempt(s), ended at {n1.EndAt} ms, {n1.Registrations} registration(s)");
+            var n2 = Once(new Sequence { LeavesTree = null, RecordGoneAt = null }, WaitTimeoutHr);
+            Check("create: timed out, its device still in the tree when its 400 ms test ends -> refused as still in the tree, with the timeout's cause",
+                  !n2.Success && n2.Attempts == 1 && n2.HResult == SwdDeviceFactory.StillInTreeHr && NotBefore(n2.EndAt, CreateRemovalTestMs)
+                  && n2.Cause != null && n2.Cause.StartsWith("The stand-in create failed. ", StringComparison.Ordinal)
+                  && n2.Cause.Contains("still in the device tree", StringComparison.Ordinal),
+                  $"success {n2.Success}, 0x{n2.HResult:X8}, {n2.Attempts} attempt(s), ended at {n2.EndAt} ms, cause \"{n2.Cause}\"");
+            var n3 = Once(new Sequence { AbsentBefore = true }, WaitTimeoutHr);
+            Check("create: timed out and made nothing -> one attempt, WAIT_TIMEOUT, no REMOVED registration",
+                  !n3.Success && n3.HResult == WaitTimeoutHr && n3.Attempts == 1 && n3.Registrations == 0,
+                  $"success {n3.Success}, 0x{n3.HResult:X8}, {n3.Attempts} attempt(s), {n3.Registrations} registration(s)");
+            // A device that never leaves would hold a removal test to its end
+            // and turn the answer into STILL_IN_TREE: neither happens.
+            var n4 = Once(new Sequence { LeavesTree = null, RecordGoneAt = null }, unchecked((int)0x80004005));
+            Check("create: failed other than by timing out, its device in the tree -> its own HRESULT, no removal test",
+                  !n4.Success && n4.HResult == unchecked((int)0x80004005) && n4.Attempts == 1 && n4.Registrations == 0,
+                  $"success {n4.Success}, 0x{n4.HResult:X8}, {n4.Attempts} attempt(s), {n4.Registrations} registration(s)");
+            var n5 = Once(new Sequence { LeavesTree = null, RecordGoneAt = null }, 0);
+            Check("create: succeeded -> no removal test",
+                  n5.Success && n5.Attempts == 1 && n5.Registrations == 0,
+                  $"success {n5.Success}, {n5.Attempts} attempt(s), {n5.Registrations} registration(s)");
 
             // The HID orphan sweep decides from the parent before it waits for
             // the lock. A registration of the same identity queued ahead of it

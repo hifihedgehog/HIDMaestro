@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Threading;
@@ -53,17 +54,84 @@ internal static class SwdDeviceFactory
     /// <c>HIDMaestro.Native.&lt;arch&gt;.hmswd.exe</c>.</summary>
     internal const string HelperFile = "hmswd.exe";
 
+    /// <summary>How long hmswd.exe waits for Plug and Play to report the
+    /// device enumerated, by its creation callback or, for a create, a
+    /// started devnode, before it closes the handle and exits with code 3:
+    /// 600 polls of 100 ms (driver\hmswd\hmswd.c, the wait loop create and
+    /// remove share). The helper reads no timeout scale.</summary>
+    internal const int HelperWaitMs = 60_000;
+
+    /// <summary>The SDK's bound on one run of hmswd.exe up to the start of
+    /// its close, its STEP CLOSING line, before scaling: the helper's own
+    /// wait and 30 s for its start and its SwDeviceCreate call.
+    /// SwDeviceCreate documents no bound of its own, and a slow Plug and Play
+    /// queue delays the helper's start and its callback alike, so the SDK
+    /// waits for the helper's answer and stops it only past this bound.
+    /// Nothing retries a run. A timeout scale below 1 brings the bound under
+    /// the helper's own wait.</summary>
+    internal const int HelperBoundMs = HelperWaitMs + 30_000;
+
+    /// <summary>How long the SDK waits for hmswd.exe's SwDeviceClose once
+    /// the helper has said it began it (STEP CLOSING), before scaling. The
+    /// device's outcome is settled by then: a created device's lifetime is
+    /// ParentPresent and a removed one's Handle, and stopping the helper
+    /// closes the handle as SwDeviceClose does. In issue #18 a remove's
+    /// helper ran past the old 30 s bound three times with its device already
+    /// gone, and v1.3.0 cut that bound to these 8 s for the whole run.</summary>
+    internal const int HelperCloseMs = 8_000;
+
+    /// <summary>HRESULT_FROM_WIN32(WAIT_TIMEOUT): the helper's wait or the
+    /// SDK's bound ran out.</summary>
+    internal const int WaitTimeoutHr = unchecked((int)0x80070102);
+
+    const int E_FAIL       = unchecked((int)0x80004005);
+    const int E_INVALIDARG = unchecked((int)0x80070057);
+
+    /// <summary>The program a create or a remove runs in place of hmswd.exe,
+    /// unstaged and unpinned. Probe swd_bound_check sets it to a stand-in
+    /// that answers as hmswd.exe does, at a pace of its choosing. Null
+    /// outside the probe.</summary>
+    internal static string? HelperPathForTest;
+
     public readonly struct Result
     {
         public readonly bool    Success;
         public readonly string? InstanceId;       // e.g. "SWD\\HIDMAESTRO\\HMC_0001"
         public readonly int     HResult;
+        /// <summary>What ended a failed create, in the words the create's
+        /// exception carries, or null on success.</summary>
+        internal readonly string? Cause;
 
-        public Result(bool success, string? instanceId, int hr)
+        public Result(bool success, string? instanceId, int hr) : this(success, instanceId, hr, null) { }
+
+        internal Result(bool success, string? instanceId, int hr, string? cause)
         {
-            Success = success; InstanceId = instanceId; HResult = hr;
+            Success = success; InstanceId = instanceId; HResult = hr; Cause = cause;
         }
     }
+
+    /// <summary>How a run of hmswd.exe ended.</summary>
+    internal enum HelperEnd
+    {
+        /// <summary>It exited on its own.</summary>
+        Exited,
+        /// <summary>It had not begun its close at the SDK's bound and was
+        /// stopped.</summary>
+        StoppedAtBound,
+        /// <summary>Its SwDeviceClose had not returned after
+        /// <see cref="HelperCloseMs"/> and it was stopped.</summary>
+        StoppedInClose,
+        /// <summary>It could not be started.</summary>
+        NotStarted,
+    }
+
+    /// <summary>One run of hmswd.exe as the SDK saw it: how it ended, its
+    /// exit code when it exited, what it printed, the last step it reached
+    /// (the text after "STEP "), and the exit code its STEP CLOSING line
+    /// announced. A run that did not start carries its HRESULT and the
+    /// reason.</summary>
+    internal readonly record struct HelperRun(HelperEnd End, int ExitCode, string Stdout, string Stderr,
+                                              string? LastStep, int? ClosingCode, int StartHr = 0, string? StartError = null);
 
     /// <summary>Build a per-controller deterministic ContainerId GUID.
     /// Shared between the main HID device and any companion devices for the
@@ -89,8 +157,10 @@ internal static class SwdDeviceFactory
     }
 
     /// <summary>Create an SWD-enumerated device with the given properties
-    /// via <c>hmswd.exe</c>. Blocks until the helper returns (device fully
-    /// enumerated) and returns its InstanceId.</summary>
+    /// via <c>hmswd.exe</c>, which asks for a driver (DriverRequired). Blocks
+    /// until the helper returns, the device enumerated and its driver bound,
+    /// or until the helper's bounds have passed (<see cref="Run"/>), and
+    /// returns its InstanceId or what failed.</summary>
     /// <param name="instanceIdSuffix">Appended after the enumerator
     /// becomes the full instance-id's last segment. Must be unique
     /// across live devices under this enumerator.</param>
@@ -106,14 +176,12 @@ internal static class SwdDeviceFactory
         string[] compatibleIds,
         Guid containerId,
         string deviceDescription,
-        bool driverRequired = true,
-        int callbackTimeoutMs = 35000,
         string? enumeratorName = null)
     {
-        // Held until the last attempt's helper has exited. A helper that
-        // cannot be staged or held throws, with the reason, out to the
-        // create (HMContext.CreateController).
-        using var pin = PinHelper(out string helperPath);
+        // Held until the helper has exited. A helper that cannot be staged
+        // or held throws, with the reason, out to the create
+        // (HMContext.CreateController).
+        using var pin = PinForRun(out string helperPath);
 
         // hmswd expects '|' as the list separator.
         string hwList     = string.Join('|', hardwareIds ?? Array.Empty<string>());
@@ -121,6 +189,26 @@ internal static class SwdDeviceFactory
         string guidStr    = containerId.ToString("B");
         string enumName   = enumeratorName ?? DefaultEnumeratorName;
 
+        var psi = HelperStartInfo(helperPath, "create", enumName, instanceIdSuffix, guidStr, hwList, compatList,
+                                  deviceDescription ?? "HIDMaestro Device");
+
+        // One run of the helper. With DriverRequired its callback waits for
+        // the driver's install, which a slow Plug and Play queue delays. In a
+        // run on 2026-10-26, driver installs and driver-host starts waited
+        // behind a machine-wide image-load lock for longer than the three
+        // 15 s attempts this replaced. Stopping the helper closes the device
+        // it made, and a second helper's create queues behind that removal
+        // (SwDeviceClose), so the create waits for the helper's own answer.
+        int boundMs = TimeoutScale.Apply(HelperBoundMs);
+        string device = $@"{enumName}\{instanceIdSuffix}";
+        return CreateOnce($@"SWD\{device}", boundMs, () => CreateAnswer(Run(psi, "create", device, boundMs), boundMs));
+    }
+
+    /// <summary>The helper's start: no window, its output read, and its
+    /// working directory, TEMP and TMP its own protected staging
+    /// directory, never one a non-administrator can write.</summary>
+    private static ProcessStartInfo HelperStartInfo(string helperPath, params string[] args)
+    {
         var psi = new ProcessStartInfo
         {
             FileName  = helperPath,
@@ -128,136 +216,258 @@ internal static class SwdDeviceFactory
             RedirectStandardOutput = true,
             RedirectStandardError  = true,
             CreateNoWindow         = true,
-            // The helper's own protected staging directory, never a
-            // directory a non-administrator can write.
             WorkingDirectory       = Path.GetDirectoryName(helperPath)!,
         };
         ProtectedStaging.ConfineChildTemp(psi, Path.GetDirectoryName(helperPath)!);
-        psi.ArgumentList.Add("create");
-        psi.ArgumentList.Add(enumName);
-        psi.ArgumentList.Add(instanceIdSuffix);
-        psi.ArgumentList.Add(guidStr);
-        psi.ArgumentList.Add(hwList);
-        psi.ArgumentList.Add(compatList);
-        psi.ArgumentList.Add(deviceDescription ?? "HIDMaestro Device");
-
-        // With DriverRequired set, SwDeviceCreate waits synchronously for
-        // driver bind. Under heavy PnP load (e.g., directly after
-        // pnputil /add-driver /install from DriverBuilder.FullDeploy), the
-        // bind callback can serialize and time out. Retry up to 3 times with
-        // a short backoff if the first attempt times out: most retries
-        // succeed because the parent process's PnP activity has quiesced.
-        Result RunOnce(int perAttemptTimeoutMs)
-        {
-            try
-            {
-                using var proc = Process.Start(psi);
-                if (proc == null)
-                    return new Result(false, null, unchecked((int)0x80070005)); // ACCESS_DENIED
-
-                // Read as the helper writes, so neither pipe fills, and
-                // bounded after its exit (PnputilHelper.Drain).
-                var stdoutRead = proc.StandardOutput.ReadToEndAsync();
-                var stderrRead = proc.StandardError.ReadToEndAsync();
-                if (!proc.WaitForExit(perAttemptTimeoutMs))
-                {
-                    try { proc.Kill(entireProcessTree: true); } catch { }
-                    return new Result(false, null, unchecked((int)0x80070102)); // WAIT_TIMEOUT
-                }
-
-                var (stdoutLocal, stderrLocal) = PnputilHelper.Drain(stdoutRead, stderrRead);
-
-                // The helper's output goes to the diagnostic log, which is
-                // written as the user (DeviceOrchestrator.LogDiag). Until
-                // v2.0.0 it went to its own file under %TEMP%\HIDMaestro,
-                // written elevated into a folder the user's programs can
-                // change.
-                DeviceOrchestrator.LogDiag(
-                    $"      hmswd create {enumName}\\{instanceIdSuffix}: exit={proc.ExitCode} " +
-                    $"stdout=[{stdoutLocal.Trim()}] stderr=[{stderrLocal.Trim()}]");
-
-                if (proc.ExitCode == 0)
-                {
-                    stdoutLocal = stdoutLocal.Trim();
-                    if (stdoutLocal.StartsWith("OK ", StringComparison.Ordinal))
-                        return new Result(true, stdoutLocal.Substring(3).Trim(), 0);
-                    return new Result(false, null, unchecked((int)0x80004005));
-                }
-
-                // Parse HRESULT from stderr if present
-                int hr = unchecked((int)0x80004005);
-                int hexIdx = stderrLocal.IndexOf("0x", StringComparison.OrdinalIgnoreCase);
-                if (hexIdx >= 0)
-                {
-                    var slice = stderrLocal.Substring(hexIdx + 2);
-                    int end = 0;
-                    while (end < slice.Length && IsHex(slice[end])) end++;
-                    if (end > 0 && int.TryParse(slice.Substring(0, end),
-                        System.Globalization.NumberStyles.HexNumber,
-                        System.Globalization.CultureInfo.InvariantCulture,
-                        out int parsed))
-                    {
-                        hr = parsed;
-                    }
-                }
-                // Exit code 3 from hmswd = callback timeout; propagate as WAIT_TIMEOUT
-                if (proc.ExitCode == 3) hr = unchecked((int)0x80070102);
-                return new Result(false, null, hr);
-            }
-            catch (Exception)
-            {
-                return new Result(false, null, unchecked((int)0x80004005));
-            }
-        }
-
-        int perAttempt = TimeoutScale.Apply(Math.Min(callbackTimeoutMs, 15000));
-        return CreateWithRetries($@"SWD\{enumName}\{instanceIdSuffix}", RetryBackoffMs, perAttempt, () => RunOnce(perAttempt));
+        foreach (string a in args) psi.ArgumentList.Add(a);
+        return psi;
     }
 
-    /// <summary>The wait before each create attempt, in ms before scaling.</summary>
-    private static readonly int[] RetryBackoffMs = { 0, 1500, 3000 };
+    /// <summary>Run hmswd.exe and wait for it as far as its steps allow: up
+    /// to <paramref name="boundMs"/> (already scaled) until it exits or
+    /// prints STEP CLOSING, then up to <see cref="HelperCloseMs"/> (scaled)
+    /// for the close it has begun. A helper still running at either end is
+    /// stopped with its process tree. Its lines go to the diagnostic log,
+    /// which is written as the user (DeviceOrchestrator.LogDiag). Until
+    /// v2.0.0 they went to a file of their own under %TEMP%\HIDMaestro,
+    /// written elevated into a folder the user's programs can change.</summary>
+    internal static HelperRun Run(ProcessStartInfo psi, string verb, string device, int boundMs)
+    {
+        Process? proc;
+        try { proc = Process.Start(psi); }
+        catch (Exception e)
+        {
+            int hr = e is System.ComponentModel.Win32Exception w
+                ? unchecked((int)(0x80070000u | ((uint)w.NativeErrorCode & 0xFFFFu)))
+                : e.HResult;
+            return new HelperRun(HelperEnd.NotStarted, 0, "", "", null, null, hr, e.Message);
+        }
+        if (proc == null) return new HelperRun(HelperEnd.NotStarted, 0, "", "", null, null, E_FAIL, "it did not start");
+        using (proc)
+        {
+            var stdout = new StringBuilder();
+            string? last = null;
+            int? closing = null;
+            using var closingSeen = new ManualResetEvent(false);
+            using var outputEnded = new ManualResetEvent(false);
+            // The reader's callbacks run on the thread pool, and one can come
+            // after this run has returned and disposed the events: it then
+            // signals nothing.
+            static void Signal(ManualResetEvent ev)
+            {
+                try { ev.Set(); } catch (ObjectDisposedException) { }
+            }
+            proc.OutputDataReceived += (_, e) =>
+            {
+                if (e.Data is not string line)
+                {
+                    Signal(outputEnded);
+                    return;
+                }
+                lock (stdout)
+                {
+                    stdout.AppendLine(line);
+                    if (!line.StartsWith("STEP ", StringComparison.Ordinal)) return;
+                    last = line.Substring(5).Trim();
+                    if (last.StartsWith("CLOSING ", StringComparison.Ordinal)
+                        && int.TryParse(last.AsSpan(8), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out int code))
+                    {
+                        closing = code;
+                        Signal(closingSeen);
+                    }
+                }
+            };
+            // Read as the helper writes, so neither pipe fills.
+            var stderrRead = proc.StandardError.ReadToEndAsync();
+            proc.BeginOutputReadLine();
+            using var exitedHandle = new ProcessExit(proc);
+            var end = HelperEnd.Exited;
+            int first = WaitHandle.WaitAny(new WaitHandle[] { exitedHandle, closingSeen }, boundMs);
+            if (first != 0 && closingSeen.WaitOne(0))
+            {
+                if (!exitedHandle.WaitOne(TimeoutScale.Apply(HelperCloseMs))) end = HelperEnd.StoppedInClose;
+            }
+            else if (first == WaitHandle.WaitTimeout)
+            {
+                end = HelperEnd.StoppedAtBound;
+            }
+            if (end != HelperEnd.Exited)
+            {
+                try { proc.Kill(entireProcessTree: true); } catch { }
+                exitedHandle.WaitOne(TimeoutScale.Apply(5_000));
+            }
+            // Bounded after the exit, as PnputilHelper.Drain bounds its reads.
+            outputEnded.WaitOne(TimeoutScale.Apply(5_000));
+            try { stderrRead.Wait(TimeoutScale.Apply(5_000)); } catch { }
+            string err = stderrRead.IsCompletedSuccessfully ? stderrRead.Result : "";
+            string output;
+            string? lastStep;
+            int? closingCode;
+            lock (stdout) { output = stdout.ToString(); lastStep = last; closingCode = closing; }
+            int exitCode = end == HelperEnd.Exited ? proc.ExitCode : 0;
+            DeviceOrchestrator.LogDiag(
+                $"      hmswd {verb} {device}: " +
+                (end == HelperEnd.Exited ? $"exit={exitCode}" : end == HelperEnd.StoppedAtBound
+                    ? $"stopped at the SDK's bound of {Seconds(boundMs)}"
+                    : $"stopped in its close after {Seconds(TimeoutScale.Apply(HelperCloseMs))}") +
+                $" stdout=[{OneLine(output)}] stderr=[{OneLine(err)}]");
+            return new HelperRun(end, exitCode, output, err, lastStep, closingCode);
+        }
+    }
+
+    /// <summary>A process's own handle as a wait handle, signaled at its
+    /// exit whatever its redirected output does. The process keeps the
+    /// handle.</summary>
+    private sealed class ProcessExit : WaitHandle
+    {
+        internal ProcessExit(Process process) =>
+            SafeWaitHandle = new Microsoft.Win32.SafeHandles.SafeWaitHandle(process.Handle, ownsHandle: false);
+    }
+
+    static string OneLine(string text) => text.Trim().Replace("\r", "").Replace("\n", " | ");
+
+    /// <summary>Where a run that had not begun its close stood, from the
+    /// last step it printed (driver\hmswd\hmswd.c, "Steps").</summary>
+    internal static string Where(string? lastStep) => lastStep switch
+    {
+        null => "before it reached SwDeviceCreate",
+        "STARTED" => "inside SwDeviceCreate",
+        "CREATED" => "waiting for Plug and Play to report the device enumerated",
+        "ENUMERATED" => "setting the device's lifetime",
+        "LIFETIME HANDLE" => "after setting the device's lifetime to Handle",
+        _ => $"after its step {lastStep}",
+    };
+
+    /// <summary>A create's answer from its run (<see cref="Run"/>). A run
+    /// stopped in its close is read by the exit code its STEP CLOSING line
+    /// announced: after "OK" the device's lifetime is ParentPresent, so the
+    /// create succeeded.</summary>
+    internal static Result CreateAnswer(HelperRun run, int boundMs)
+    {
+        switch (run.End)
+        {
+            case HelperEnd.NotStarted:
+                return new Result(false, null, run.StartHr, $"hmswd.exe could not be run: {run.StartError}");
+            case HelperEnd.StoppedAtBound:
+                return new Result(false, null, WaitTimeoutHr,
+                    $"hmswd.exe was still running, {Where(run.LastStep)}, when the SDK's bound of {Seconds(boundMs)} ran out, " +
+                    $"and was stopped (its own wait for Plug and Play is {Seconds(HelperWaitMs)}).");
+            case HelperEnd.StoppedInClose:
+                var answer = ReadAnswer(run.ClosingCode ?? E_FAIL, run.Stdout, run.Stderr);
+                return answer.Success ? answer : new Result(false, null, answer.HResult,
+                    $"{answer.Cause} Its SwDeviceClose had not returned after {Seconds(TimeoutScale.Apply(HelperCloseMs))}, and it was stopped.");
+            default:
+                return ReadAnswer(run.ExitCode, run.Stdout, run.Stderr);
+        }
+    }
+
+    /// <summary>What an hmswd.exe create's exit code and output say
+    /// (driver\hmswd\hmswd.c): exit 0 with "OK &lt;instance id&gt;", 1 for
+    /// arguments it refused, 2 when SwDeviceCreate failed, 3 when its own
+    /// wait for Plug and Play ran out, 4 when the creation callback reported
+    /// a failure, 5 when SwDeviceSetLifetime failed. Exits 2, 4 and 5 print
+    /// the HRESULT, which the result carries.</summary>
+    internal static Result ReadAnswer(int exitCode, string stdout, string stderr)
+    {
+        string err = stderr.Trim();
+        switch (exitCode)
+        {
+            case 0:
+                foreach (string line in stdout.Split('\n'))
+                {
+                    string l = line.Trim();
+                    if (l.StartsWith("OK ", StringComparison.Ordinal))
+                        return new Result(true, l.Substring(3).Trim(), 0);
+                }
+                return new Result(false, null, E_FAIL, $"hmswd.exe exited with code 0 but printed no instance id ({Shown(OneLine(stdout))}).");
+            case 1:
+                return new Result(false, null, E_INVALIDARG, $"hmswd.exe refused its arguments, exit code 1 ({Shown(err)}).");
+            case 2:
+                return ParsedHr(err) is int created
+                    ? new Result(false, null, created, $"SwDeviceCreate failed with 0x{created:X8} (hmswd.exe exit code 2).")
+                    : new Result(false, null, E_FAIL, $"SwDeviceCreate failed (hmswd.exe exit code 2, {Shown(err)}).");
+            case 3:
+                return new Result(false, null, WaitTimeoutHr,
+                    $"Plug and Play did not report the device enumerated within hmswd.exe's own wait of {Seconds(HelperWaitMs)}, " +
+                    "and hmswd.exe closed it (exit code 3).");
+            case 4:
+                return ParsedHr(err) is int callback
+                    ? new Result(false, null, callback, $"Plug and Play reported the device's creation failed with 0x{callback:X8} (hmswd.exe exit code 4).")
+                    : new Result(false, null, E_FAIL, $"Plug and Play reported the device's creation failed (hmswd.exe exit code 4, {Shown(err)}).");
+            case 5:
+                return ParsedHr(err) is int lifetime
+                    ? new Result(false, null, lifetime, $"SwDeviceSetLifetime failed with 0x{lifetime:X8}, and hmswd.exe closed the device (exit code 5).")
+                    : new Result(false, null, E_FAIL, $"SwDeviceSetLifetime failed, and hmswd.exe closed the device (exit code 5, {Shown(err)}).");
+            default:
+                return new Result(false, null, E_FAIL, $"hmswd.exe exited with code 0x{exitCode:X8} ({Shown(err)}).");
+        }
+    }
+
+    static string Shown(string text) => text.Length == 0 ? "no output" : $"\"{text}\"";
+
+    /// <summary>The first <c>0x</c> hex number in the helper's error output,
+    /// where hmswd.exe prints the HRESULT of exits 2, 4 and 5.</summary>
+    private static int? ParsedHr(string stderr)
+    {
+        int hexIdx = stderr.IndexOf("0x", StringComparison.OrdinalIgnoreCase);
+        if (hexIdx < 0) return null;
+        var slice = stderr.Substring(hexIdx + 2);
+        int end = 0;
+        while (end < slice.Length && IsHex(slice[end])) end++;
+        if (end > 0 && int.TryParse(slice.Substring(0, end),
+            NumberStyles.HexNumber,
+            CultureInfo.InvariantCulture,
+            out int parsed))
+        {
+            return parsed;
+        }
+        return null;
+    }
+
+    /// <summary>A time in milliseconds as a message gives it: 90 s,
+    /// 22.5 s.</summary>
+    internal static string Seconds(int ms) =>
+        (ms / 1000.0).ToString("0.###", CultureInfo.InvariantCulture) + " s";
 
     /// <summary>HRESULT_FROM_WIN32(ERROR_BUSY): the device a timed-out
-    /// attempt made was still in the device tree when its removal test
+    /// create made was still in the device tree when its removal test
     /// ended.</summary>
     internal const int StillInTreeHr = unchecked((int)0x800700AA);
 
-    /// <summary>Runs <paramref name="attempt"/> once per entry of
-    /// <paramref name="backoffMs"/>, after that entry's wait (scaled), and
-    /// again only when it ended in WAIT_TIMEOUT. A timed-out attempt can have
-    /// created the device and closed it again, hmswd.exe killed or giving up
-    /// on its own callback timeout, so Windows can still be removing
-    /// <paramref name="instanceId"/>. After every timed-out attempt, the last
-    /// one included, the removal test waits up to
-    /// <paramref name="removalTestMs"/> (scaled, an attempt's own bound) for
-    /// the device to leave the tree, inside the caller's hold of the PnP
-    /// lock, so no retry registers the id and no other program's
-    /// registration follows the hold while that removal runs. A device still
-    /// there ends the retries with <see cref="StillInTreeHr"/>, and the
-    /// caller refuses the create.</summary>
-    internal static Result CreateWithRetries(string instanceId, int[] backoffMs, int removalTestMs, Func<Result> attempt)
+    /// <summary>Runs <paramref name="attempt"/>, the one create of
+    /// <paramref name="instanceId"/>. A create that timed out, the helper
+    /// ending its own wait or stopped at the SDK's bound, can have made the
+    /// device and closed it, so Windows can still be removing
+    /// <paramref name="instanceId"/>. After a timed-out create the removal
+    /// test waits up to <paramref name="removalTestMs"/> (scaled, the
+    /// helper's bound) for the device to leave the tree, inside the caller's
+    /// hold of the PnP lock, so no other program's registration follows the
+    /// hold while that removal runs. A device still there ends the create
+    /// with <see cref="StillInTreeHr"/>, and the caller refuses the create
+    /// either way. Nothing retries it: a second helper would only queue
+    /// behind the removal of the first one's device.</summary>
+    internal static Result CreateOnce(string instanceId, int removalTestMs, Func<Result> attempt)
     {
-        Result last = default;
-        for (int i = 0; i < backoffMs.Length; i++)
+        Result result = attempt();
+        if (result.Success || result.HResult != WaitTimeoutHr) return result;
+        if (DeviceManager.WaitRemovalComplete(instanceId, uninstalls: false, removalTestMs)) return result;
+        DeviceOrchestrator.LogDiag($"      {instanceId} still in the device tree after a timed-out create");
+        string timedOut = result.Cause is string cause ? cause + " " : "";
+        return new Result(false, null, StillInTreeHr,
+            $"{timedOut}The device was still in the device tree when its removal test ended after {Seconds(removalTestMs)}.");
+    }
+
+    /// <summary>The pin a create or a remove runs the helper under, or none
+    /// when the probe's stand-in (<see cref="HelperPathForTest"/>) runs in
+    /// its place.</summary>
+    private static ProtectedStaging.Pinned? PinForRun(out string helperPath)
+    {
+        if (HelperPathForTest is string standIn)
         {
-            if (backoffMs[i] > 0)
-            {
-                // Let PnP quiesce: a prior pnputil /add-driver /install can
-                // still be draining bind notifications when we get here.
-                Thread.Sleep(TimeoutScale.Apply(backoffMs[i]));
-            }
-            last = attempt();
-            if (last.Success) return last;
-            // Retry ONLY for WAIT_TIMEOUT (0x80070102): other failures are
-            // structural (bad args, ACL, no matching INF) and won't fix with a retry.
-            if (unchecked((uint)last.HResult) != 0x80070102u) return last;
-            if (!DeviceManager.WaitRemovalComplete(instanceId, uninstalls: false, removalTestMs))
-            {
-                DeviceOrchestrator.LogDiag($"      {instanceId} still in the device tree after a timed-out create, no retry");
-                return new Result(false, null, StillInTreeHr);
-            }
+            helperPath = standIn;
+            return null;
         }
-        return last;
+        return PinHelper(out helperPath);
     }
 
     /// <summary>
@@ -274,6 +484,11 @@ internal static class SwdDeviceFactory
     /// DeviceDesc) are reconstructed from the registry hive entry at
     /// <c>HKLM\SYSTEM\CurrentControlSet\Enum\&lt;instanceId&gt;</c>. If
     /// the registry entry is missing, the device is already fully gone.
+    ///
+    /// <para>Returns 0 once the device's removal is under way or done, and
+    /// otherwise an HRESULT, with the reason in the diagnostic log
+    /// (<see cref="RemoveWith"/>). The caller's removal test decides the
+    /// outcome.</para>
     /// </summary>
     /// <exception cref="InvalidOperationException">hmswd.exe could not be
     /// staged or held (<see cref="PinHelper"/>), with the reason. Nothing
@@ -282,19 +497,19 @@ internal static class SwdDeviceFactory
     /// logs it and goes on.</exception>
     public static int Remove(string instanceId)
     {
-        if (instanceId == null) return unchecked((int)0x80070057); // E_INVALIDARG
+        if (instanceId == null) return E_INVALIDARG;
 
         // instanceId format: SWD\<enumerator>\<suffix>
         // Parse to extract enumerator + suffix.
         int firstSep = instanceId.IndexOf('\\');
         int lastSep = instanceId.LastIndexOf('\\');
-        if (firstSep < 0 || lastSep <= firstSep) return unchecked((int)0x80070057);
+        if (firstSep < 0 || lastSep <= firstSep) return E_INVALIDARG;
         string root       = instanceId.Substring(0, firstSep);
         string enumerator = instanceId.Substring(firstSep + 1, lastSep - firstSep - 1);
         string suffix     = instanceId.Substring(lastSep + 1);
 
         if (!root.Equals("SWD", StringComparison.OrdinalIgnoreCase))
-            return unchecked((int)0x80070057); // not a SWD instance
+            return E_INVALIDARG; // not a SWD instance
 
         // Read args back from the registry hive entry.
         string regPath = $@"SYSTEM\CurrentControlSet\Enum\{instanceId}";
@@ -317,60 +532,104 @@ internal static class SwdDeviceFactory
             if (string.IsNullOrWhiteSpace(description)) description = "HIDMaestro Device";
 
             if (cidStr == null || !Guid.TryParse(cidStr, out containerId))
-                return unchecked((int)0x80004005); // E_FAIL: no container, can't reconnect
+                return E_FAIL; // no container, can't reconnect
         }
 
-        // Held until the helper has exited. A helper that cannot be staged
-        // or held throws to the caller: no other step removes an SWD device
-        // whose lifetime is tied to its parent, so a fallback would only
-        // wait for a removal that never started.
-        using var pin = PinHelper(out string helperPath);
+        return RemoveWith(enumerator, suffix, containerId, hwIds, compatIds, description, out _);
+    }
 
-        var psi = new ProcessStartInfo
-        {
-            FileName  = helperPath,
-            UseShellExecute        = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError  = true,
-            CreateNoWindow         = true,
-            // The helper's own protected staging directory, never a
-            // directory a non-administrator can write.
-            WorkingDirectory       = Path.GetDirectoryName(helperPath)!,
-        };
-        ProtectedStaging.ConfineChildTemp(psi, Path.GetDirectoryName(helperPath)!);
-        psi.ArgumentList.Add("remove");
-        psi.ArgumentList.Add(enumerator);
-        psi.ArgumentList.Add(suffix);
-        psi.ArgumentList.Add(containerId.ToString("B"));
-        psi.ArgumentList.Add(string.Join('|', hwIds));
-        psi.ArgumentList.Add(string.Join('|', compatIds));
-        psi.ArgumentList.Add(description);
+    /// <summary>Run hmswd.exe's remove on the device the arguments name and
+    /// read its answer: 0 once the device's removal is under way or done,
+    /// otherwise an HRESULT, with <paramref name="cause"/> saying why.
+    ///
+    /// <para>The run gets <see cref="HelperCloseMs"/> (scaled) to reach its
+    /// close, STEP CLOSING, and as long again for the close, the step issue
+    /// #18 saw stuck behind a stale WUDFHost. A helper stuck before its close
+    /// is stopped at 8 s as it was until v2.1.0, and the device stays. Until
+    /// v2.1.0 the 8 s ran from the helper's start to its end, which also
+    /// stopped a close that began at 7 s. A helper stopped in its close after STEP LIFETIME HANDLE
+    /// counts as removed: the end of the process closes the handle, which
+    /// removes the device. A software device gets no pnputil or devcon
+    /// fallback: DeviceManager.RemoveDeviceLocked runs those for ROOT and
+    /// HID ids only.</para></summary>
+    /// <exception cref="InvalidOperationException">hmswd.exe could not be
+    /// staged or held (<see cref="PinHelper"/>), with the reason. A helper
+    /// that cannot be staged or held throws to the caller: no other step
+    /// removes an SWD device whose lifetime is tied to its parent, so a
+    /// fallback would only wait for a removal that never started.</exception>
+    internal static int RemoveWith(string enumerator, string suffix, Guid containerId, string[] hwIds, string[] compatIds,
+                                   string description, out string cause)
+    {
+        // Held until the helper has exited.
+        using var pin = PinForRun(out string helperPath);
+        var psi = HelperStartInfo(helperPath, "remove", enumerator, suffix, containerId.ToString("B"),
+                                  string.Join('|', hwIds), string.Join('|', compatIds), description);
+        // Issue #18: a helper stuck before its close (behind a stale WUDFHost)
+        // is stopped at the old 8 s bound. Only once it reports STEP CLOSING
+        // does the wait run longer, for the close.
+        int boundMs = TimeoutScale.Apply(HelperCloseMs);
+        string device = $@"{enumerator}\{suffix}";
+        int hr = RemoveAnswer(Run(psi, "remove", device, boundMs), boundMs, out cause);
+        if (hr != 0 || cause.Length > 0)
+            DeviceOrchestrator.LogDiag($"      hmswd remove {device}: 0x{hr:X8} {cause}");
+        return hr;
+    }
 
-        try
+    /// <summary>A remove's answer from its run: 0 once the device's removal
+    /// is under way or done, otherwise an HRESULT, with the reason in
+    /// <paramref name="cause"/> (empty for a remove that ran its course).
+    /// The exit codes are hmswd.c's: 1 refused arguments, 2 SwDeviceCreate's
+    /// HRESULT, 3 its own wait for the reconnect's callback, 5
+    /// SwDeviceSetLifetime's HRESULT. With 2, 3 and 5 the device's lifetime
+    /// is still ParentPresent, so it stays.</summary>
+    internal static int RemoveAnswer(HelperRun run, int boundMs, out string cause)
+    {
+        string closeNote = "";
+        int code;
+        switch (run.End)
         {
-            using var proc = Process.Start(psi);
-            if (proc == null) return unchecked((int)0x80070005);
-            // T36: 8 s base (was 30 s). Per github.com/hifihedgehog/HIDMaestro
-            // issue #18 (d3xMachina) consumers can hit the full 30 s timeout
-            // here when hmswd.exe gets stuck on SwDeviceClose because a stale
-            // WUDFHost still holds the device open. The OUTER DeviceManager.
-            // RemoveDevice path falls back to pnputil/devcon when this returns
-            // WAIT_TIMEOUT: those fallbacks do the actual cleanup work, so
-            // hanging here is wasted time. 8 s is generous for a healthy
-            // SwDeviceClose (typically completes in <100 ms) and still gives
-            // the kernel time to release on slow hardware (TimeoutScale.Apply
-            // multiplies for Atom-class). Caller's 120 s outer budget covers
-            // the fallback cascade.
-            if (!proc.WaitForExit(TimeoutScale.Apply(8_000)))
-            {
-                try { proc.Kill(entireProcessTree: true); } catch { }
-                return unchecked((int)0x80070102); // WAIT_TIMEOUT
-            }
-            return proc.ExitCode;
+            case HelperEnd.NotStarted:
+                cause = $"hmswd.exe could not be run: {run.StartError}";
+                return run.StartHr;
+            case HelperEnd.StoppedAtBound:
+                cause = $"hmswd.exe was still running, {Where(run.LastStep)}, when the SDK's bound of {Seconds(boundMs)} ran out, " +
+                        "and was stopped. The device's lifetime is still ParentPresent, so it stays.";
+                return WaitTimeoutHr;
+            case HelperEnd.StoppedInClose:
+                closeNote = $" Its SwDeviceClose had not returned after {Seconds(TimeoutScale.Apply(HelperCloseMs))}, and it was stopped.";
+                code = run.ClosingCode ?? E_FAIL;
+                if (code == 0)
+                {
+                    cause = closeNote.TrimStart() + " The device's lifetime is Handle, so the end of the helper's process closes the handle, which removes the device.";
+                    return 0;
+                }
+                break;
+            default:
+                code = run.ExitCode;
+                break;
         }
-        catch
+        string err = run.Stderr.Trim();
+        switch (code)
         {
-            return unchecked((int)0x80004005);
+            case 0:
+                cause = "";
+                return 0;
+            case 1:
+                cause = $"hmswd.exe refused its arguments, exit code 1 ({Shown(err)}).{closeNote}";
+                return E_INVALIDARG;
+            case 2:
+                cause = $"SwDeviceCreate could not reconnect to the device (hmswd.exe exit code 2, {Shown(err)}). It stays.{closeNote}";
+                return ParsedHr(err) ?? E_FAIL;
+            case 3:
+                cause = $"Plug and Play did not answer the reconnect within hmswd.exe's own wait of {Seconds(HelperWaitMs)} " +
+                        $"(exit code 3). The device's lifetime is still ParentPresent, so it stays.{closeNote}";
+                return WaitTimeoutHr;
+            case 5:
+                cause = $"SwDeviceSetLifetime failed (hmswd.exe exit code 5, {Shown(err)}). The device's lifetime is still ParentPresent, so it stays.{closeNote}";
+                return ParsedHr(err) ?? E_FAIL;
+            default:
+                cause = $"hmswd.exe exited with code 0x{code:X8} ({Shown(err)}).{closeNote}";
+                return E_FAIL;
         }
     }
 
