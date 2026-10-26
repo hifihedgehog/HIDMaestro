@@ -1,8 +1,9 @@
-// signal-stress [seconds] [--gate-off] [--any-driver]: live and elevated.
-// Frames that must all arrive, sent the way a stall would hide: after random
-// pauses of 0 to 2 ms, in bursts of 50 to 200 back to back, and after pauses
-// of 600 to 1,200 ms, past the driver worker's 500 ms wait. Two passes of
-// [seconds] each (120 unless given):
+// signal-stress [seconds] [--gate-off] [--any-driver] [--passes=<name,...>]:
+// live and elevated. Frames that must all arrive, sent the way a stall would
+// hide: after random pauses of 0 to 2 ms, in bursts of 50 to 200 back to
+// back, and after pauses of 600 to 1,200 ms, past the driver worker's 500 ms
+// wait. Two passes of [seconds] each (120 unless given), unless --passes=
+// names others:
 //   a dualshock-4-v2 written with SubmitRawReport, a count in report bytes
 //   40 to 43, read by a host's ReadFile on its HID interface.
 //   SubmitRawReport takes the data without the report ID, which the driver
@@ -17,7 +18,11 @@
 // then fails the pass too, so a count read in the wrong place fails rather
 // than matching. Until that check the DualShock 4's count went in at data
 // bytes 40 to 43, read back as 256 times itself, and every submit matched
-// the next new report of any frame. A reader that fails records the error,
+// the next new report of any frame. A reading whose count is below the one
+// read before it, a frame that came after a newer one, fails the pass as
+// well: the Xbox 360 pad's HID collection read count 99,670 and then
+// 99,669, 0.02 ms apart, each a whole frame (SIG-stress-rel3e-celeron).
+// Matching took no notice of it. A reader that fails records the error,
 // its Stopwatch time and the last count it read. It reads again after an
 // abort the probe did not ask for, reopens the controller's interface (or,
 // on the Xbox 360 pad, takes the pad that comes back) after anything else,
@@ -48,10 +53,14 @@
 // 4 ms than the gate-off block, and for it when it has fewer. The mode fails
 // when the pairs against it are more than a fair coin gives among the pairs
 // that differ, by the exact one-sided sign test (the probability of that
-// many or more in a binomial with p 1/2) at 1/4,000 or less, and its blocks
-// have more than five frames over 4 ms beyond the gate-off blocks'. The
-// five is the old rule's: a handful of late frames never fails a mode. Each
-// mode's check prints every pair, so a stall shows as the one pair it hit.
+// many or more in a binomial with p 1/2) at 1/4,000 or less. That takes at
+// least 12 pairs against it (11 of 11 has the chance 1/2,048), so a handful
+// of late frames never fails a mode. Until 2026-10-26 a mode also needed
+// more than five frames over 4 ms beyond the gate-off blocks', summed over
+// its pairs, and one stall in a gate-off block canceled that: the input
+// control on dualsense, worse in 17 pairs and better in 1 (p 7.25E-05),
+// passed on 19 frames against 140 (SIG-stress-rel3d-celeron). Each mode's
+// check prints every pair, so a stall shows as the one pair it hit.
 //   With a gate that has no effect on when frames are read, which block of a
 // pair reads more frames late is the same whichever block ran the gate, and
 // the coin alone decided that. Each pair that differs then goes against the
@@ -65,10 +74,11 @@
 // comes within 2 ms here. The frames a lost wakeup does delay are the ones
 // with nothing after them: a submit with no further submit for at least
 // 4 ms, a burst's last or a single one before a pause, or the pass's last if
-// it was read. On the DualShock 4 every such final submit must be read
-// within 2 ms. A lost wakeup leaves its frame for the next write, the SDK's
-// idle repeat 4 ms on (the profile's stream period), and a delivered one is
-// read within 0.4 ms on both bench machines. This check counts every final
+// it was read. On every pass but the Xbox 360 pad's Windows.Gaming.Input
+// one, every such final submit must be read within 2 ms. On the DualShock 4
+// a lost wakeup leaves its frame for the next write, the SDK's idle repeat
+// 4 ms on (the profile's stream period), and a delivered one is read within
+// 0.4 ms on both bench machines. This check counts every final
 // submit, in every mode, gated or not, so it also sees a lost wakeup the gate
 // does not cause, and a stall over a final submit fails it the same way. On
 // the Xbox 360 pad the same final submits are printed and not bounded:
@@ -87,6 +97,11 @@
 // --any-driver runs on whatever driver is installed, so a v2.0.3 build of
 // this probe can stress the newer driver. Builds against v2.0.3's SDK as it
 // is.
+//
+// --passes=<name,...> runs the passes named, in this order: ds4 and x360-wgi
+// (the two above), x360-xinput, x360-hid, dualsense, dualsense-bt, generic
+// and usbip (SignalStressPaths.cs, whose header gives each one's path), or
+// all of them with --passes=all.
 //
 // Four more flags are never part of a default run.
 // --miss-doorbell=<N> is the comparison's positive control for the doorbell.
@@ -107,8 +122,11 @@
 // on when none follows. That is a missed wakeup that is only late. One left
 // in the handoff waits for the worker's 500 ms timeout instead, every frame
 // after it waits with it, and the 250 ms bound fails it. The DualShock 4's
-// input gate must fail the comparison. The Xbox 360 pad's readings come
-// from the companion, so its modes must pass.
+// input gate must fail the comparison. The Xbox 360 pad's Windows.Gaming.Input
+// and XInput readings come from the companion, so their modes must pass. On
+// a pass with no idle repeat (x360-hid, generic) a final submit whose wakeup
+// is taken waits for the next submit, past the pause, and fails the 250 ms
+// bound.
 // --late-detail prints where each frame over 4 ms waited: the readings
 // between its submit and the first reading that carries it (every ReadFile
 // on the DualShock 4, every change Windows.Gaming.Input showed on the Xbox
@@ -139,11 +157,9 @@ using Windows.Gaming.Input;
 internal static partial class Program
 {
     const double StressBoundMs = 250;
-    // The paired comparison (header): submits in a block, the frames over
-    // 4 ms past the gate-off blocks' that a mode needs before it can fail,
-    // and the sign test's level for each mode.
+    // The paired comparison (header): submits in a block and the sign test's
+    // level for each mode.
     const int StressBlock = 500;
-    const int StressFloor = 5;
     const double StressLevel = 1.0 / 4000;
     // The positive control's hold, two periods of the companion's 8 ms
     // timer (companion.c, WDF_TIMER_CONFIG_INIT_PERIODIC).
@@ -180,30 +196,61 @@ internal static partial class Program
             Console.WriteLine($"signal-stress: {buffers} needs a count from 2 to 512, HID class's bounds");
             return 1;
         }
+        // --passes=<name,...> or all (SignalStressPaths.cs). Without it, the
+        // battery's two.
+        var passes = new List<string> { "ds4", "x360-wgi" };
+        string? named = args.FirstOrDefault(a => a.StartsWith("--passes=", StringComparison.Ordinal));
+        if (named != null)
+        {
+            var list = named["--passes=".Length..].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            passes = list.Length == 1 && list[0] == "all" ? StressPasses.Select(p => p.Name).ToList() : list.ToList();
+            string? unknown = passes.FirstOrDefault(p => !StressPasses.Any(s => s.Name == p));
+            if (unknown != null || passes.Count == 0)
+            {
+                Console.WriteLine($"signal-stress: {named} names {unknown ?? "no pass"}; the passes are {string.Join(", ", StressPasses.Select(p => p.Name))}, or all");
+                return 1;
+            }
+        }
         if (!Elevated("signal-stress")) return 3;
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
         ctx.InstallDriver();
 
-        using (var c = ctx.CreateController(ctx.GetProfile(Ds4)!, s_key))
+        foreach (var (pass, profile) in StressPasses.Where(p => passes.Contains(p.Name)))
         {
-            if (!anyDriver && !OnEmbeddedDriver(c, Ds4)) return 5;
-            StressHid(c, seconds, SignalView(c), gateOff, lateDetail, inputBuffers, missInputEvery);
-        }
-
-        var before = new HashSet<Gamepad>(Gamepad.Gamepads);
-        using (var c = ctx.CreateController(ctx.GetProfile(Xbox360)!, s_key))
-        {
-            if (!anyDriver && !OnEmbeddedDriver(c, Xbox360)) return 5;
-            Gamepad? pad = null;
-            var wait = Stopwatch.StartNew();
-            while (pad == null && wait.ElapsedMilliseconds < 20000)
+            var before = new HashSet<Gamepad>(Gamepad.Gamepads);
+            var slotsBefore = pass == "x360-xinput" ? XInputConnected() : new HashSet<int>();
+            var p = ctx.GetProfile(profile);
+            if (p == null) { Check($"{pass}: profile {profile} in the catalog", false, "not found"); continue; }
+            using var c = ctx.CreateController(p, s_key);
+            if (!anyDriver && !OnEmbeddedDriver(c, profile)) return 5;
+            switch (pass)
             {
-                pad = Gamepad.Gamepads.FirstOrDefault(g => !before.Contains(g));
-                if (pad == null) Thread.Sleep(100);
+                case "ds4":
+                    StressHid(c, seconds, SignalView(c), gateOff, lateDetail, inputBuffers, missInputEvery);
+                    break;
+                case "x360-wgi":
+                    Gamepad? pad = null;
+                    var wait = Stopwatch.StartNew();
+                    while (pad == null && wait.ElapsedMilliseconds < 20000)
+                    {
+                        pad = Gamepad.Gamepads.FirstOrDefault(g => !before.Contains(g));
+                        if (pad == null) Thread.Sleep(100);
+                    }
+                    if (pad == null) Check($"{Xbox360}: a Windows.Gaming.Input gamepad the create added", false, "none in 20 s");
+                    else StressWgi(c, pad, before, seconds, SignalView(c), gateOff, missEvery, missInputEvery, lateDetail);
+                    break;
+                case "x360-xinput":
+                    StressXInput(c, slotsBefore, seconds, SignalView(c), gateOff, lateDetail, missEvery, missInputEvery);
+                    break;
+                default:
+                    // A USB/IP controller has no HIDMaestro driver and no
+                    // signal section: its pass has one mode and no pairs.
+                    IntPtr signal = c.Profile.RequiresUsbipBackend ? IntPtr.Zero : SignalView(c);
+                    StressHidSticks(c, pass == "x360-hid" ? $"{Xbox360} HID" : profile, seconds, signal, gateOff, lateDetail, inputBuffers,
+                        missEvery, missInputEvery, companion: pass == "x360-hid");
+                    break;
             }
-            if (pad == null) Check($"{Xbox360}: a Windows.Gaming.Input gamepad the create added", false, "none in 20 s");
-            else StressWgi(c, pad, before, seconds, SignalView(c), gateOff, missEvery, missInputEvery, lateDetail);
         }
         return s_failures == 0 ? 0 : 1;
     }
@@ -449,7 +496,7 @@ internal static partial class Program
         {
             var list = pairs.TryGetValue(mode, out var got) ? got : new List<(int On, int Off)>();
             var v = PairVerdict(list);
-            Check($"{name}, {ModeName(mode)}: frames over 4 ms against the gate-off block of each pair, worse in no more pairs than a sign test allows at 1/4,000, or by {StressFloor} frames or fewer",
+            Check($"{name}, {ModeName(mode)}: frames over 4 ms against the gate-off block of each pair, worse in no more pairs than a sign test allows at 1/4,000",
                 !v.Fails,
                 FormattableString.Invariant($"worse in {v.Against} of {list.Count} pairs, better in {v.For}, even in {list.Count - v.Against - v.For}, one-sided p {v.P:G3}; {list.Sum(x => x.On)} frames over 4 ms in its blocks, {list.Sum(x => x.Off)} in the gate-off blocks"));
             // Every pair, so a stall shows as the one pair it landed in.
@@ -490,8 +537,19 @@ internal static partial class Program
         var overs = finals.Where(Over).ToList();
         var read = finals.Where(i => !double.IsNaN(wait[i])).ToList();
         string F(double v) => v.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+        // Each mode's waits of its final submits read, median, 90th
+        // percentile (nearest rank) and most, which show where an idle
+        // repeat delivers a frame whose wakeup was lost.
+        string Spread(IEnumerable<int> g)
+        {
+            var w = g.Where(i => !double.IsNaN(wait[i])).Select(i => wait[i]).OrderBy(x => x).ToList();
+            if (w.Count == 0) return "none read";
+            double median = w.Count % 2 == 1 ? w[w.Count / 2] : (w[w.Count / 2 - 1] + w[w.Count / 2]) / 2;
+            double p90 = w[(int)Math.Ceiling(0.9 * w.Count) - 1];
+            return $"median {F(median)}, 90th percentile {F(p90)}, most {F(w[^1])} ms";
+        }
         string byMode = string.Join(", ", finals.GroupBy(i => sent[i].Mode & ~Announced).OrderBy(g => g.Key)
-            .Select(g => $"{ShortMode(g.Key)} {g.Count()} ({g.Count(Over)} over)"));
+            .Select(g => $"{ShortMode(g.Key)} {g.Count()} ({g.Count(Over)} over, {Spread(g)})"));
         string listed = string.Join("; ", overs.Take(12).Select(i =>
             $"count {sent[i].Count} {ShortMode(sent[i].Mode)} {(double.IsNaN(wait[i]) ? "never read" : F(wait[i]) + " ms")}"));
         string detail = $"{finals.Count} final submits, {overs.Count} over {F(FinalBoundMs)} ms, worst {(read.Count == 0 ? "-" : F(read.Max(i => wait[i])))} ms; by mode {byMode}"
@@ -524,19 +582,18 @@ internal static partial class Program
 
     /// <summary>The paired comparison of a gate-on mode (header): the pairs
     /// worse with the gate on, the pairs better, the one-sided sign test's p
-    /// for the worse ones among the pairs that differ, the mode's frames over
-    /// 4 ms beyond the gate-off blocks', and whether the mode fails.</summary>
-    internal static (int Against, int For, double P, int Excess, bool Fails) PairVerdict(IEnumerable<(int On, int Off)> pairs)
+    /// for the worse ones among the pairs that differ, and whether the mode
+    /// fails.</summary>
+    internal static (int Against, int For, double P, bool Fails) PairVerdict(IEnumerable<(int On, int Off)> pairs)
     {
-        int against = 0, forIt = 0, excess = 0;
+        int against = 0, forIt = 0;
         foreach (var (on, off) in pairs)
         {
             if (on > off) against++;
             else if (off > on) forIt++;
-            excess += on - off;
         }
         double p = SignTail(against, against + forIt);
-        return (against, forIt, p, excess, p <= StressLevel && excess > StressFloor);
+        return (against, forIt, p, p <= StressLevel);
     }
 
     /// <summary>The probability of <paramref name="k"/> or more successes in
@@ -619,13 +676,15 @@ internal static partial class Program
         static List<(int On, int Off)> Same(int pairs, int on, int off) => Enumerable.Repeat((on, off), pairs).ToList();
         static bool Fails(List<(int On, int Off)> p) => PairVerdict(p).Fails;
         var split = Same(20, 60, 10).Concat(Same(20, 10, 60)).ToList();
-        var offset = Same(20, 1, 0).Concat(Same(1, 0, 16)).ToList();
+        // A stall of 16 frames in one gate-off block, beside 20 pairs one
+        // frame worse with the gate on.
+        var stall = Same(20, 1, 0).Concat(Same(1, 0, 16)).ToList();
         yield return ("signal-stress: 40 pairs at 60 against 10 fail, 12 at 11 against 10 fail and 11 pass, 40 even pairs and 20 each way pass",
             Fails(Same(40, 60, 10)) && Fails(Same(12, 11, 10)) && !Fails(Same(11, 11, 10)) && !Fails(Same(40, 3, 3)) && !Fails(split),
             FormattableString.Invariant($"p {PairVerdict(Same(40, 60, 10)).P:G3}, {PairVerdict(Same(12, 11, 10)).P:G3}, {PairVerdict(Same(11, 11, 10)).P:G3}, {PairVerdict(split).P:G3}"));
-        yield return ("signal-stress: 20 pairs at 1 against 0 fail, and pass once one pair at 0 against 16 leaves the mode 4 frames over, the floor",
-            Fails(Same(20, 1, 0)) && !Fails(offset) && PairVerdict(offset).P <= StressLevel && PairVerdict(offset).Excess == 4,
-            FormattableString.Invariant($"p {PairVerdict(Same(20, 1, 0)).P:G3} and {PairVerdict(offset).P:G3}, frames over {PairVerdict(Same(20, 1, 0)).Excess} and {PairVerdict(offset).Excess}"));
+        yield return ("signal-stress: 20 pairs at 1 against 0 fail, and still fail beside a stall of 16 frames in one more pair's gate-off block",
+            Fails(Same(20, 1, 0)) && Fails(stall),
+            FormattableString.Invariant($"p {PairVerdict(Same(20, 1, 0)).P:G3} and {PairVerdict(stall).P:G3}"));
 
         // Simulated modes of 40 pairs, a pass's share of each Xbox 360 mode.
         // A block's frames over 4 ms scatter as far as their mean (an
@@ -673,6 +732,7 @@ internal static partial class Program
         yield return ("signal-stress: a mode with eight times the frames over 4 ms fails 9 simulated modes in 10 or more, at the load above and at a twentieth of it",
             caught * 10 >= trials * 9 && caughtFew * 10 >= trials * 9,
             $"{caught} and {caughtFew} of {trials} failed");
+        foreach (var check in StressDecodeSelfTest()) yield return check;
     }
 
     static void StressHid(HMController c, double seconds, IntPtr signal, bool gateOff, bool lateDetail, uint inputBuffers, int missInputEvery)
@@ -705,6 +765,11 @@ internal static partial class Program
         // reading can only carry a count at or below it. A reading above it
         // is a misread, and fails the pass.
         int highest = 0, misread = 0, misreadValue = 0;
+        // A reading whose count is below the last one read is a frame that
+        // came after a newer one, and fails the pass. The first 8, with the
+        // count before them and both readings' times.
+        int older = 0;
+        var olderAt = new List<(long Time, int Count, int Last, long LastTime)>();
         byte[]? firstReport = null;
         bool stop = false;
         // A failed ReadFile is recorded with its error, its Stopwatch time and
@@ -720,6 +785,7 @@ internal static partial class Program
         {
             var buf = new byte[dev.InputLength];
             int last = -1, inARow = 0;
+            long lastAt = 0;
             while (!Volatile.Read(ref stop))
             {
                 if (!ReadFile(Volatile.Read(ref current).Handle, buf, buf.Length, out int read, IntPtr.Zero))
@@ -750,9 +816,15 @@ internal static partial class Program
                     if (misread++ == 0) misreadValue = count;
                     continue;
                 }
+                if (count < last)
+                {
+                    if (older++ < 8) lock (seen) olderAt.Add((t, count, last, lastAt));
+                    continue;
+                }
                 if (firstReport == null && count > 0) firstReport = buf.ToArray();
                 if (reads != null) lock (seen) reads.Add((count, t));
                 if (count != last) { lock (seen) seen.Add((count, t)); last = count; }
+                lastAt = t;
             }
         }) { IsBackground = true, Priority = ThreadPriority.Highest, Name = "stress reader" };
         reader.Start();
@@ -780,15 +852,26 @@ internal static partial class Program
         }
         long passStart = sent.Count > 0 ? sent[0].Time : 0;
         failures.Report($"{Ds4} ReadFile", passStart, reopened.Count, "reopens");
-        Check($"{Ds4} ReadFile: every reading carries a count the probe submitted, at report bytes 40 to 43",
-            misread == 0, misread == 0 ? $"{got.Count} counts read" : $"{misread} readings carried none, the first {misreadValue}");
+        List<(long Time, int Count, int Last, long LastTime)> early;
+        lock (seen) early = olderAt.ToList();
+        double Ms(long ticks) => ticks * 1000.0 / Stopwatch.Frequency;
+        Check($"{Ds4} ReadFile: every reading carries a count the probe submitted, at report bytes 40 to 43, none older than the reading before it",
+            misread == 0 && older == 0,
+            $"{got.Count} counts read" + (misread > 0 ? $", {misread} readings carried none, the first {misreadValue}" : "")
+            + (older > 0 ? FormattableString.Invariant($", {older} older than the reading before, the first count {early[0].Count} after {early[0].Last}, {Ms(early[0].Time - early[0].LastTime):F2} ms later") : ""));
+        foreach (var o in early)
+        {
+            var at = SubmitAt(sent, o.Time);
+            Console.WriteLine(FormattableString.Invariant(
+                $"  {Ds4} ReadFile, older frame at {Ms(o.Time - passStart):F2} ms into the pass, {ShortMode(at.Mode)} block {at.Block}: count {o.Count} after {o.Last}, {Ms(o.Time - o.LastTime):F2} ms later"));
+        }
         StressVerdict($"{Ds4} ReadFile", sent, got, boundFinals: true);
         if (all != null && burstOf != null)
         {
             if (firstReport != null)
                 Console.WriteLine($"  {Ds4} ReadFile, --late-detail: the first report with a count, bytes 0 to 7 {Convert.ToHexString(firstReport, 0, 8)}, " +
                     $"bytes 36 to 47 {Convert.ToHexString(firstReport, 36, 12)}, count at bytes 40 to 43 {BitConverter.ToInt32(firstReport, 40)}");
-            LateDetail($"{Ds4} ReadFile", sent, burstOf, got, all, wgi: false);
+            LateDetail($"{Ds4} ReadFile", sent, burstOf, got, all, wgi: false, streamMs: IdleRepeatMs(c));
         }
     }
 
@@ -800,14 +883,14 @@ internal static partial class Program
     /// from the poll that saw Windows.Gaming.Input's reading change, where
     /// <paramref name="reads"/> holds only the changes. There the last
     /// column says what most likely completed the WAIT_FOR_INPUT that
-    /// carried the frame (header).</summary>
+    /// carried the frame (header). <paramref name="streamMs"/> is the
+    /// profile's stream period, 0 for none: the SDK writes the last frame
+    /// again this long after it while no submit comes
+    /// (HMController.RepeatLastFrame).</summary>
     static void LateDetail(string name, List<(int Count, long Time, int Mode, int Block)> sent, List<(int Size, int After)> burstOf,
-        List<(int Count, long Time)> seen, List<(int Count, long Time)> reads, bool wgi)
+        List<(int Count, long Time)> seen, List<(int Count, long Time)> reads, bool wgi, double streamMs)
     {
-        // The DualShock 4 profile's stream period: the SDK writes the last
-        // frame again this long after it while no submit comes
-        // (HMController.RepeatLastFrame). The Xbox 360 profile has none.
-        const double IdleRepeatMs = 4;
+        double repeatMs = streamMs > 0 ? streamMs : double.PositiveInfinity;
         const int MaxRows = 600;
         double tickMs = 1000.0 / Stopwatch.Frequency;
         // The first index whose time is past t, or at or past it, in a list
@@ -864,7 +947,7 @@ internal static partial class Program
             double toNext = i + 1 < sent.Count ? (sent[i + 1].Time - t0) * tickMs : double.NaN;
             // From the last submit before the reading to the reading.
             double since = (tc - sent[Math.Max(i, next - 1)].Time) * tickMs;
-            string why = wgi ? Cause(since, gap, ms) : since > IdleRepeatMs ? "idle" : "-";
+            string why = wgi ? Cause(since, gap, ms) : since > repeatMs ? "idle" : "-";
             var (size, after) = burstOf[i];
             int key = mode & ~Announced;
             if (!late.TryGetValue(key, out var list)) late[key] = list = new();
@@ -879,7 +962,7 @@ internal static partial class Program
         Console.WriteLine("  before its reading to its reading, the later submits before its reading, ms to the next submit, its burst's size (1 alone), the");
         Console.WriteLine(wgi
             ? "  submits after it in the burst, what most likely completed its WAIT_FOR_INPUT (doorbell: a submit under 0.5 ms before; kick: under 0.5 ms"
-            : $"  submits after it in the burst, idle where the SDK's idle repeat ({IdleRepeatMs} ms after the last submit) was due before its reading,");
+            : streamMs > 0 ? $"  submits after it in the burst, idle where the SDK's idle repeat ({streamMs} ms after the last submit) was due before its reading," : "  submits after it in the burst, - for every row (no stream, so no idle repeat),");
         Console.WriteLine(wgi
             ? "  after the reading before; timer: a wait or a gap of 7.5 to 9 ms; other: none of those, a stall), and how far past its count the reading's is."
             : "  and how far past its count the reading's count is.");
@@ -1043,7 +1126,7 @@ internal static partial class Program
             misread == 0, misread == 0 ? $"{seen.Count} counts read" : $"{misread} readings carried none, the first {misreadValue}");
         Console.WriteLine($"  {Xbox360} Windows.Gaming.Input: the first reading with a count, {firstReading ?? "none"}");
         StressVerdict($"{Xbox360} Windows.Gaming.Input", sent, seen, boundFinals: false);
-        if (burstOf != null) LateDetail($"{Xbox360} Windows.Gaming.Input", sent, burstOf, seen, seen, wgi: true);
+        if (burstOf != null) LateDetail($"{Xbox360} Windows.Gaming.Input", sent, burstOf, seen, seen, wgi: true, streamMs: 0);
     }
 
     const int ERROR_OPERATION_ABORTED = 995;
