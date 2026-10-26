@@ -139,8 +139,10 @@ internal static class Program
         // One scenario at a time: a paired scenario can take gigabytes.
         int jobs = 1;
         if (RunCheck(1, -1, 0, 1, jobs, null, false) != 0) bad++;
+        // Each rule taken away must break the check, except those that
+        // change no outcome (DeliveryModel.NoBreak), which must not.
         for (int i = 0; i < DeliveryModel.Broken.Length; i++)
-            if (RunCheck(1, i, 0, 1, jobs, null, false) != 0) bad++;
+            if ((RunCheck(1, i, 0, 1, jobs, null, false) == 0) == DeliveryModel.NoBreak.Contains(i)) bad++;
         Console.WriteLine(bad == 0 ? "signal_gate_model: PASS" : $"signal_gate_model: FAIL ({bad})");
         return bad == 0 ? 0 : 1;
     }
