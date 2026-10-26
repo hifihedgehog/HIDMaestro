@@ -100,8 +100,16 @@ internal static class RepeatState
             if (repeated.AsSpan().SequenceEqual(submitted)) continue;
             if (mixed[shape]++ == 0) first[shape] = $", state {k} submitted {Checks.Hex(submitted)}, repeated {Checks.Hex(repeated)}";
         }
+        // The copy the repeat keeps is rewritten in place, so once it has
+        // held the state's axes a submit allocates nothing.
+        for (int i = 0; i < 2000; i++) { axes[HMAxis.X] = V(i); axes[HMAxis.Z] = V(i); d.C.SubmitState(in state); }
+        long b0 = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 10_000; i++) { axes[HMAxis.X] = V(i); axes[HMAxis.Z] = V(i); d.C.SubmitState(in state); }
+        long submitBytes = GC.GetAllocatedBytesForCurrentThread() - b0;
+
         string what = armed ? "dualsense-bt armed, report 0x31's sticks" : "dualsense-bt, its descriptor's report";
         Check($"{what}: each repeat a period after a submit sends a frame", skipped == 0, $"{skipped} of {States} sent nothing");
+        Check($"{what}: 10,000 SubmitState calls on a controller with its repeat allocate nothing", submitBytes == 0, $"{submitBytes} bytes");
         Check($"{what}: consecutive submits differ, so a repeat of another state shows", alike == 0, $"{alike} alike");
         Check($"{what}: a repeat of a state whose dictionary the consumer left alone is the frame submitted",
             mixed[4] == 0, $"{mixed[4]} of {States / 5} differ{first[4]}");
