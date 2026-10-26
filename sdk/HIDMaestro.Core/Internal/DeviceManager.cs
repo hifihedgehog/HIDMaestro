@@ -485,6 +485,15 @@ public static partial class DeviceManager
         public Func<string, int> Close = _ => 0;
         /// <summary>The pnputil and devcon runs.</summary>
         public Action<string> Fallbacks = _ => { };
+        /// <summary>The removal query (CM_Query_And_Remove_SubTreeW,
+        /// <see cref="QueryRemoveSubtree"/>): true when the devnode left the
+        /// tree with the devnodes below it. Null in the checks written before
+        /// it, whose devnodes leave at their own removal calls.</summary>
+        public Func<string, bool>? Query;
+        /// <summary>The devnode is in the tree and started (DN_STARTED). Null
+        /// beside a null <see cref="Query"/>, and a devnode then counts as
+        /// not started.</summary>
+        public Func<string, bool>? Started;
     }
 
     static uint Locate(string instanceId, uint flags)

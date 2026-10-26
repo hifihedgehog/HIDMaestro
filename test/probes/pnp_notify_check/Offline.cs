@@ -1273,7 +1273,7 @@ internal static class Offline
     static bool Part(int n) => s_part == 0 || s_part == n;
 
     /// <summary>Run's parts, each in a process of its own.</summary>
-    const int Parts = 10;
+    const int Parts = 11;
 
     /// <summary>The checks in parts that run at once, each in a process of
     /// its own: the sequences run on the wall clock, and the SDK's hooks
@@ -2274,6 +2274,11 @@ internal static class Offline
                   $"{bM.Removed} removed, {bM.Refused} refused, the threads took [{string.Join(", ", bM.Ms)}] ms");
         }
 
+        // Part 10: removals while another program holds a HID child open
+        // (HeldRemoval.cs), which locate through their own hook and count
+        // their own CANCELREMOVE locates.
+        if (Part(10)) HeldRemoval.Run(Check);
+
         int locates, cancels;
         lock (s_flags)
         {
@@ -2288,8 +2293,8 @@ internal static class Offline
             Check("no CM_LOCATE_DEVNODE_CANCELREMOVE locate was issued", cancels == 0, $"{cancels} of {locates}");
         }
 
-        // Part 10: the tool runs' read bound.
-        if (Part(10)) ChildOutputBound();
+        // Part 11: the tool runs' read bound.
+        if (Part(11)) ChildOutputBound();
 
         if (part != 0)
         {
