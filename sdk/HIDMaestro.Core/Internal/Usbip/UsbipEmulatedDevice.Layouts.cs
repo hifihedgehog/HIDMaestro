@@ -250,6 +250,16 @@ internal sealed partial class UsbipEmulatedDevice
         ProtocolApply(result.Effect);
     }
 
+    /// <summary>A reply a command on another path left for the bulk IN
+    /// endpoint goes to a bulk read already parked for it, after the
+    /// command's own answer, as HandleBulkCommand sends its reply. Only the
+    /// connection's reader thread calls this.</summary>
+    private void CompleteBulkReplies(ProtocolEngine.Effect effect)
+    {
+        if ((effect & ProtocolEngine.Effect.Reply) != 0 && _engine!.Protocol.Channel == ReplyChannel.BulkIn)
+            CompleteBulkIn();
+    }
+
     /// <summary>Hand waiting replies to parked bulk IN reads, oldest of each
     /// first. A read gets at most its buffer length of one reply and the rest
     /// stays at the head of the queue, so an 80-byte reply goes out as 64

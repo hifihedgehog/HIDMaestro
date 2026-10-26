@@ -21,6 +21,8 @@
 //   - a command on the bulk OUT endpoint that leaves a reply for the input
 //     endpoint wakes the host's poll clock, as a command on every other path
 //     does
+//   - a reply that a SET_REPORT or an interrupt OUT command leaves for the
+//     bulk IN endpoint goes to the bulk read already parked for it
 //
 // Each scenario ends on a frame or a read that tells a correct device from
 // one that lost the handoff at once, and a wait that only a correct device
@@ -61,6 +63,7 @@ internal static partial class Program
         Contained("an unlink of a parked read", () => UnlinkParkedRead(ds));
         Contained("a frame put back and a read through the queue", () => PutBackAheadOfQueue(ds));
         Contained("a bulk command on a poll clock", BulkCommandWakesPollClock);
+        Contained("bulk replies to other command paths", RepliesReachParkedBulkRead);
     }
 
     /// <summary>A scenario that throws fails its own check, and the run
@@ -316,6 +319,46 @@ internal static partial class Program
               ticked && reply.Is(read, 20) && reply.Data[0] == 0x10, $"ticked {ticked}, read {reply}");
     }
 
+    /// <summary>The bulk read a reply waits for, parked before the command:
+    /// it takes the reply after the command's own answer, before anything
+    /// else comes. A copy of the Switch 2 Pro composite as it ships, on its
+    /// bulk OUT endpoint, then copies whose commands come by SET_REPORT and
+    /// on the HID interface's interrupt OUT endpoint.</summary>
+    static void RepliesReachParkedBulkRead()
+    {
+        // 02/01 reads 64 bytes of the flash image from 0x13000: an 80-byte
+        // reply, 64 to the parked read and 16 to the next.
+        byte[] flashRead = Convert.FromHexString("02910001000000000000000000300100");
+        int index = HandoffIndex + 8;
+        foreach (var (name, path, patch) in new (string, string, Action<JsonObject>)[]
+        {
+            ("bulk-out", "a bulk OUT command", _ => { }),
+            ("set-report", "a SET_REPORT command", c => c["setReport"] = true),
+            ("interrupt-out", "an interrupt OUT command", c => c["endpoint"] = "0x01"),
+        })
+        {
+            var j = JsonNode.Parse(CatalogJson("switch2-pro-controller-composite"))!.AsObject();
+            j["id"] = "s43-bulk-replies-" + name;
+            patch(j["protocol"]!["commands"]!.AsObject());
+            var profile = ControllerProfile.Parse(Encoding.UTF8.GetBytes(j.ToJsonString()))!;
+            using var rig = new HandoffRig(profile, index++);
+            var p = rig.Device.Protocol!.Protocol;
+            uint parked = rig.SubmitIn(p.ReplyEndpoint, 64);
+            uint cmd = name switch
+            {
+                "set-report" => rig.ControlOut(0x21, 0x09, 0x0202, rig.Device.Descriptors.HidInterfaceNumber, flashRead),
+                _ => rig.SubmitOut(p.CommandEndpoint, flashRead),
+            };
+            var got = rig.UntilSentinel();
+            uint next = rig.SubmitIn(p.ReplyEndpoint, 64);
+            var rest = got.Count == 2 ? rig.Next() : default;
+            Check($"{path}'s reply goes to the bulk read parked before it, after the command's answer, and the rest to the next read",
+                  got.Count == 2 && got[0].Is(cmd, flashRead.Length) && got[1].Is(parked, 64) && got[1].Data[0] == 0x02
+                  && rest.Is(next, 16),
+                  $"commands {p.Source}{(p.CommandsFromSetReport ? " and SET_REPORT" : "")}: {Describe(got)}, then {rest}");
+        }
+    }
+
     static string Describe(List<HandoffRig.Message> messages) =>
         messages.Count == 0 ? "nothing" : string.Join(", ", messages.Select(m => m.ToString()));
 
@@ -487,6 +530,15 @@ internal static partial class Program
         public uint SubmitOut(byte endpoint, byte[] data)
         {
             var cmd = Command(endpoint, false, data.Length);
+            Device.HandleSubmit(cmd, data, ReadOnlySpan<(uint, uint)>.Empty);
+            return cmd.Seqnum;
+        }
+
+        public uint ControlOut(byte bmRequestType, byte bRequest, ushort wValue, ushort wIndex, byte[] data)
+        {
+            var cmd = Command(0, false, data.Length);
+            cmd.Setup = bmRequestType | ((ulong)bRequest << 8) | ((ulong)wValue << 16)
+                      | ((ulong)wIndex << 32) | ((ulong)(ushort)data.Length << 48);
             Device.HandleSubmit(cmd, data, ReadOnlySpan<(uint, uint)>.Empty);
             return cmd.Seqnum;
         }

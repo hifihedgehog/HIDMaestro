@@ -1217,8 +1217,9 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 // The protocol reads the data stage as one command, report
                 // ID first.
                 var payload = outPayload;
-                ProtocolHandleReport(payload, reportId);
+                var effect = ProtocolHandleReport(payload, reportId);
                 SendRetSubmit(cmd.Seqnum, 0, payload.Length, null);
+                CompleteBulkReplies(effect);
                 return;
             }
             case 0x0B when !deviceToHost && _engine is { Protocol.AckSetProtocol: true }: // SET_PROTOCOL
@@ -1252,6 +1253,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 // a change wakes the clocks.
                 if (command is { } applied) ProtocolApply(applied.Effect);
                 SendRetSubmit(cmd.Seqnum, 0, payload.Length, null);
+                if (command is { } done) CompleteBulkReplies(done.Effect);
                 return;
             }
             case 0x0A when !deviceToHost: // SET_IDLE
