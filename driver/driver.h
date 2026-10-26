@@ -208,12 +208,42 @@ typedef struct _DEVICE_CONTEXT {
     ULONG   PolledReportSize;
     BOOLEAN PolledReportReady;
 
-    /* The last shared-input SeqNo the worker sent, which a frame read must
-     * differ from to go out. Reset at the end of a program the owner watch
-     * saw, at every recycle and at add, as v2.0.3 reset it. A frame the
-     * driver does not send leaves SharedMemSeqNo and the cache as they
-     * were. */
+    /* The frame the worker read last, which a frame read must differ from
+     * to go out: its SeqNo, and from 2.1.0 its data, the data lane's and
+     * the extended lane's sizes as the frame path clamps them and their
+     * bytes (SameAsSeen). A next program before 2.1.0 counts from 0 and can
+     * repeat the SeqNo with other data, a frame v2.0.3 skipped. All zero is
+     * a zeroed section or none. Kept across OwnerGone and the recycle, where
+     * v2.0.3 forgot the SeqNo, unless they drop a frame no read carried, as
+     * v2.0.3 dropped it. A frame the driver does not send leaves
+     * SharedMemSeqNo and the cache as they were. Worker thread only. */
     ULONG   SeenSeqNo;
+    ULONG   SeenDataSize;
+    ULONG   SeenExtSize;
+    UCHAR   SeenData[256];
+    UCHAR   SeenExt[80];
+
+    /* 2.1.0: the worker has read a frame since the device context's add, so
+     * a frame read now was written after the context before it went
+     * (ProcessSharedInput). Worker thread only. */
+    BOOLEAN ReadAFrame;
+
+    /* 2.1.0: the frame read last was read since the last reset, OwnerGone
+     * or the recycle, where v2.0.3 forgot the SeqNo, so v2.0.3's SeqNo is
+     * the same. A frame that repeats it with other data is skipped as v2.0.3
+     * skipped it only then (ProcessSharedInput). Worker thread only. */
+    BOOLEAN SeenSinceReset;
+
+    /* 2.1.0: the frame path skipped a frame that repeats the SeqNo with
+     * other data once the watched program's pipe had closed, the next
+     * program's. OwnerGone clears it, and the worker reads the section
+     * after OwnerGone when it was set. Worker thread only. */
+    BOOLEAN SkippedAtEnd;
+
+    /* 2.1.0: the worker read a next program's start with no watch open
+     * (ProcessSharedInput), and the cache write that follows resets the
+     * delivered gate. Worker thread only. */
+    BOOLEAN RestartSeen;
 
     /* v2.0.0: LiveFeatureReport, read under the contract: one plus the
      * ID of the feature report whose answer is the device's state, or 0
