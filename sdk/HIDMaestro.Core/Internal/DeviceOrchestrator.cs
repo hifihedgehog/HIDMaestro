@@ -2813,25 +2813,47 @@ internal static partial class DeviceOrchestrator
     internal sealed class LeftInPlace
     {
         private readonly HashSet<string> _devnodes = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _records = new(StringComparer.OrdinalIgnoreCase);
 
         internal LeftInPlace(OwnerCensus after)
         {
-            foreach (var g in after.Devices) _devnodes.UnionWith(g.InstanceIds);
+            foreach (var g in after.Devices)
+            {
+                _devnodes.UnionWith(g.InstanceIds);
+                // The census ties a device to the record of its owner, and a
+                // dead owner's record is what a later sweep removes it by.
+                if (g.Record is { Live: false } r) _records.Add(r.OwnerId);
+            }
         }
 
         /// <summary>The HIDMaestro devnodes still in the tree.</summary>
         internal IReadOnlyCollection<string> Devnodes => _devnodes;
 
-        internal bool KeepsDeviceParameters(string instanceId) => false;
+        /// <summary>A present devnode keeps its Device Parameters: its
+        /// ControllerIndex is how the census places it and keeps its index
+        /// from a new lease (OwnerCensus.IndicesInUse), and the index is
+        /// what a later sweep asks its driver to fail it through.</summary>
+        internal bool KeepsDeviceParameters(string instanceId) => _devnodes.Contains(instanceId);
 
-        internal bool KeepsRecord(MachineClaims.OwnerRecord record) => record.Live;
+        /// <summary>A live program's record stays, as before, and so does a
+        /// dead program's record that names a present devnode. Without it the
+        /// device reads as Unknown, which no sweep removes.</summary>
+        internal bool KeepsRecord(MachineClaims.OwnerRecord record) => record.Live || _records.Contains(record.OwnerId);
 
         /// <summary>The interface class entries of present devnodes stay
-        /// (DeviceOrchestrator.RemoveOwnedInterfaceEntries' phantomOnly).</summary>
-        internal bool KeepsPresentInterfaceEntries => false;
+        /// (DeviceOrchestrator.RemoveOwnedInterfaceEntries' phantomOnly).
+        /// With nothing left in the tree, phantomOnly reaches every entry
+        /// the full removal reached before.</summary>
+        internal bool KeepsPresentInterfaceEntries => true;
 
-        /// <summary>No driver host is waited for or stopped.</summary>
-        internal bool LeavesDriverHosts => false;
+        /// <summary>No driver host is waited for or stopped while a
+        /// HIDMaestro devnode is in the tree. Nothing maps a UMDF host to the
+        /// device it serves (the driver publishes no process id), and the
+        /// host of a device left in place keeps serving it until the holder
+        /// lets go: a wait for it ends only at its bound, and a stop fails
+        /// the device. The wait and the drain protect a package replacement,
+        /// which a present device's package blocks anyway.</summary>
+        internal bool LeavesDriverHosts => _devnodes.Count > 0;
     }
 
     private static void RemoveEverythingGated(bool preserveInstall, bool forUninstall = false)
