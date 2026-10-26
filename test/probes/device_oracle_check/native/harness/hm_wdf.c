@@ -45,6 +45,7 @@ HmRegKey *g_nextHwKey;
 HmRegKey *g_nextHwSubKey;
 
 static HmRequest *g_allRequests;
+static void FileCloseAt(HmFile *f, int removal);
 static HmDevice *g_devices[16];
 static int g_deviceCount;
 static uint32_t g_serial;
@@ -216,9 +217,37 @@ static VOID WDFAPI HmWdfDeviceInitSetPnpPowerEventCallbacks(PWDF_DRIVER_GLOBALS 
     memcpy(&dev->pnp, callbacks, callbacks->Size < sizeof(dev->pnp) ? callbacks->Size : sizeof(dev->pnp));
 }
 
+/* The file object configuration the device keeps: the context every
+ * WDFFILEOBJECT gets and the close and cleanup callbacks. A create callback
+ * is not modeled: without one the framework completes the create itself
+ * (fxpkggeneral.cpp, OnCreate). A UMDF driver's file objects are of the
+ * class WdfFileObjectWdfCannotUseFsContexts (um/fxfileobjectum.cpp:48),
+ * which WDF_FILEOBJECT_CONFIG_INIT gives. */
+static VOID WDFAPI HmWdfDeviceInitSetFileObjectConfig(PWDF_DRIVER_GLOBALS g, PWDFDEVICE_INIT DeviceInit,
+                                                      PWDF_FILEOBJECT_CONFIG FileObjectConfig,
+                                                      PWDF_OBJECT_ATTRIBUTES FileObjectAttributes)
+{
+    (void)g;
+    Expect(DeviceInit, WK_INIT, "WdfDeviceInitSetFileObjectConfig");
+    HmDevice *dev = g_addingDevice;
+    if (!dev || dev->context) HmFail("WdfDeviceInitSetFileObjectConfig outside a device add, or after the create");
+    if (FileObjectConfig->EvtDeviceFileCreate) HmFail("an EvtDeviceFileCreate is not modeled");
+    if (FileObjectConfig->FileObjectClass != WdfFileObjectWdfCannotUseFsContexts)
+        HmFail("a UMDF file object class other than WdfFileObjectWdfCannotUseFsContexts");
+    dev->fileClose = FileObjectConfig->EvtFileClose;
+    dev->fileCleanup = FileObjectConfig->EvtFileCleanup;
+    dev->fileTypeInfo = FileObjectAttributes ? FileObjectAttributes->ContextTypeInfo : NULL;
+}
+
 static PVOID WDFAPI HmWdfObjectGetTypedContextWorker(PWDF_DRIVER_GLOBALS g, WDFOBJECT Handle, PCWDF_OBJECT_CONTEXT_TYPE_INFO TypeInfo)
 {
     (void)g;
+    if (Handle && *(int *)Handle == WK_FILE) {
+        HmFile *f = (HmFile *)Handle;
+        if (f->dev->fileTypeInfo != TypeInfo || !f->context)
+            HmFail("WdfObjectGetTypedContextWorker: the file object has no context of type %s", TypeInfo->ContextName);
+        return f->context;
+    }
     HmDevice *dev = (HmDevice *)Expect(Handle, WK_DEVICE, "WdfObjectGetTypedContextWorker");
     if (dev->typeInfo != TypeInfo) HmFail("WdfObjectGetTypedContextWorker: the device has no context of type %s", TypeInfo->ContextName);
     return dev->context;
@@ -468,6 +497,7 @@ static NTSTATUS WDFAPI HmWdfIoQueueCreate(PWDF_DRIVER_GLOBALS g, WDFDEVICE Devic
     q->dev = dev;
     q->type = Config->DispatchType;
     q->ioctl = Config->EvtIoDeviceControl;
+    q->canceledOnQueue = Config->EvtIoCanceledOnQueue;
     /* WdfUseDefault: power managed unless the device is a filter. */
     q->powerManaged = Config->PowerManaged == WdfTrue
         || (Config->PowerManaged == WdfUseDefault && !dev->filter);
@@ -537,6 +567,52 @@ static NTSTATUS WDFAPI HmWdfIoQueueRetrieveNextRequest(PWDF_DRIVER_GLOBALS g, WD
     r->inQueue = 0;
     *Out = (WDFREQUEST)r;
     return STATUS_SUCCESS;
+}
+
+/* Takes the oldest request in the queue that came through the file
+ * object, as FxIrpQueue::RemoveNextIrpFromQueue finds it under the queue's
+ * lock (core/fxirpqueue.cpp, PeekNextIrpFromQueue with the file object as
+ * the peek context). NULL when there is none. */
+static HmRequest *QueueTakeByFile(HmQueue *q, HmFile *f)
+{
+    HmRequest *prev = NULL;
+    for (HmRequest *r = q->head; r; prev = r, r = r->next) {
+        if (r->file != f) continue;
+        if (prev) prev->next = r->next; else q->head = r->next;
+        if (q->tail == r) q->tail = prev;
+        q->count--;
+        r->next = NULL;
+        r->inQueue = 0;
+        return r;
+    }
+    return NULL;
+}
+
+/* WdfIoQueueRetrieveRequestByFileObject: QueueTakeByFile, else
+ * STATUS_NO_MORE_ENTRIES. */
+static NTSTATUS WDFAPI HmWdfIoQueueRetrieveRequestByFileObject(PWDF_DRIVER_GLOBALS g, WDFQUEUE Queue,
+                                                              WDFFILEOBJECT FileObject, WDFREQUEST *Out)
+{
+    (void)g;
+    HmQueue *q = (HmQueue *)Expect(Queue, WK_QUEUE, "WdfIoQueueRetrieveRequestByFileObject");
+    HmFile *f = (HmFile *)Expect(FileObject, WK_FILE, "WdfIoQueueRetrieveRequestByFileObject");
+    if (q->type != WdfIoQueueDispatchManual) HmFail("retrieve from a queue that is not manual");
+    if (g_retrieveHook) { void (*hook)(void) = g_retrieveHook; g_retrieveHook = NULL; hook(); }
+    HmRequest *r = QueueTakeByFile(q, f);
+    *Out = (WDFREQUEST)r;
+    return r ? STATUS_SUCCESS : STATUS_NO_MORE_ENTRIES;
+}
+
+static WDFFILEOBJECT WDFAPI HmWdfRequestGetFileObject(PWDF_DRIVER_GLOBALS g, WDFREQUEST Request)
+{
+    (void)g;
+    return (WDFFILEOBJECT)((HmRequest *)Expect(Request, WK_REQUEST, "WdfRequestGetFileObject"))->file;
+}
+
+static WDFDEVICE WDFAPI HmWdfFileObjectGetDevice(PWDF_DRIVER_GLOBALS g, WDFFILEOBJECT FileObject)
+{
+    (void)g;
+    return (WDFDEVICE)((HmFile *)Expect(FileObject, WK_FILE, "WdfFileObjectGetDevice"))->dev;
 }
 
 /* Cancels what waits in the queue, which is the framework's work and not
@@ -652,6 +728,11 @@ static void Complete(HmRequest *r, NTSTATUS st)
     if (r->completed) HmFail("request %u completed twice", r->serial);
     if (r->inQueue) HmFail("request %u completed while still in a queue", r->serial);
     r->completed = 1;
+    r->status = st;
+    {
+        static uint32_t done;
+        r->doneNo = ++done;
+    }
     /* A script run (hm_script.c) records the whole output buffer: the
      * caller's buffer after the call, which a live recording holds. */
     size_t n = r->noAccess ? 0 : g_fullBuffers ? r->outLen : r->info < r->outLen ? (size_t)r->info : r->outLen;
@@ -716,6 +797,11 @@ static VOID WDFAPI HmWdfWaitLockRelease(PWDF_DRIVER_GLOBALS g, WDFWAITLOCK Lock)
     if (g_lockReleaseHook && HmOnDriverThread() && g_locksHeld == 0) {
         void (*hook)(void) = g_lockReleaseHook;
         g_lockReleaseHook = NULL;
+        hook();
+    }
+    if (g_dispatchReleaseHook && !HmOnDriverThread() && g_locksHeld == 0) {
+        void (*hook)(void) = g_dispatchReleaseHook;
+        g_dispatchReleaseHook = NULL;
         hook();
     }
 }
@@ -817,6 +903,10 @@ void WdfInit(void)
     SET(WdfTimerGetParentObject, PFN_WDFTIMERGETPARENTOBJECT, HmWdfTimerGetParentObject);
     SET(WdfDeviceInitSetPnpPowerEventCallbacks, PFN_WDFDEVICEINITSETPNPPOWEREVENTCALLBACKS, HmWdfDeviceInitSetPnpPowerEventCallbacks);
     SET(WdfIoQueuePurgeSynchronously, PFN_WDFIOQUEUEPURGESYNCHRONOUSLY, HmWdfIoQueuePurgeSynchronously);
+    SET(WdfDeviceInitSetFileObjectConfig, PFN_WDFDEVICEINITSETFILEOBJECTCONFIG, HmWdfDeviceInitSetFileObjectConfig);
+    SET(WdfIoQueueRetrieveRequestByFileObject, PFN_WDFIOQUEUERETRIEVEREQUESTBYFILEOBJECT, HmWdfIoQueueRetrieveRequestByFileObject);
+    SET(WdfRequestGetFileObject, PFN_WDFREQUESTGETFILEOBJECT, HmWdfRequestGetFileObject);
+    SET(WdfFileObjectGetDevice, PFN_WDFFILEOBJECTGETDEVICE, HmWdfFileObjectGetDevice);
 }
 
 /* ------------------------------------------------------------------ */
@@ -946,6 +1036,11 @@ void DeviceRemove(HmDevice *dev)
      * lifecycle scenarios. */
     PurgeQueues(dev, 0);
     if (!dev->started) PurgeQueues(dev, 1);
+    /* The PnP manager sends the removal once every handle is closed. A
+     * handle a scenario left open closes here, with nothing left in the
+     * purged queues to cancel. */
+    for (HmFile *f = dev->files; f; f = f->next)
+        if (!f->closed) FileCloseAt(f, 1);
     if (dev->smioStarted && dev->pnp.EvtDeviceSelfManagedIoCleanup)
         dev->pnp.EvtDeviceSelfManagedIoCleanup((WDFDEVICE)dev);
     if (dev->started)
@@ -982,14 +1077,69 @@ static uint8_t *NoAccessPage(void)
     return page;
 }
 
+HmFile *FileOpen(HmDevice *dev)
+{
+    HmFile *f = (HmFile *)WdfAlloc(sizeof(HmFile), WK_FILE);
+    f->dev = dev;
+    /* The framework zeroes a new context. */
+    if (dev->fileTypeInfo) {
+        f->context = calloc(1, dev->fileTypeInfo->ContextSize);
+        if (!f->context) HmFail("out of memory");
+    }
+    HmFile **tail = &dev->files;
+    while (*tail) tail = &(*tail)->next;
+    *tail = f;
+    return f;
+}
+
+static void FileCloseAt(HmFile *f, int removal)
+{
+    HmDevice *dev = f->dev;
+    if (f->closed) HmFail("a handle closed twice");
+    if (dev->fileCleanup) dev->fileCleanup((WDFFILEOBJECT)f);
+    for (int i = 0; i < dev->queueCount; i++) {
+        HmQueue *q = dev->queues[i];
+        HmRequest *r;
+        while ((r = QueueTakeByFile(q, f)) != NULL) {
+            /* A request the driver forwarded here was presented to it, so
+             * the queue's EvtIoCanceledOnQueue gets it. Without one the
+             * framework completes it, unrecorded. */
+            if (q->canceledOnQueue) q->canceledOnQueue((WDFQUEUE)q, (WDFREQUEST)r);
+            else r->completed = 1;
+        }
+    }
+    /* IRP_MJ_CLOSE comes once no request through the handle is left. A
+     * removal's close is the harness's own, after the purges, and does not
+     * check: a request a driver took and dropped is its own finding. */
+    if (!removal)
+        for (HmRequest *r = g_allRequests; r; r = r->nextAll)
+            if (r->file == f && !r->completed) HmFail("a handle closed with request %u still in flight", r->serial);
+    if (dev->fileClose) dev->fileClose((WDFFILEOBJECT)f);
+    f->closed = 1;
+    /* The framework frees the object and its context after the close. A
+     * driver that reaches the context afterward reads this. */
+    if (f->context) memset(f->context, 0xDD, dev->fileTypeInfo->ContextSize);
+}
+
+void FileClose(HmFile *f) { FileCloseAt(f, 0); }
+
 HmRequest *Ioctl(HmDevice *dev, const char *tag, ULONG code,
                  const void *in, size_t inLen, size_t outLen, const void *outInit, size_t outInitLen)
 {
+    if (!dev->defaultFile) dev->defaultFile = FileOpen(dev);
+    return IoctlFile(dev, dev->defaultFile, tag, code, in, inLen, outLen, outInit, outInitLen);
+}
+
+HmRequest *IoctlFile(HmDevice *dev, HmFile *f, const char *tag, ULONG code,
+                     const void *in, size_t inLen, size_t outLen, const void *outInit, size_t outInitLen)
+{
+    if (f->dev != dev) HmFail("a request through a handle of another device");
     if (IsWriteCode(code) && (outLen > 0xFF || outInit))
         HmFail("a write request carries its report id as OutputBufferLength and nothing else");
     HmRequest *r = (HmRequest *)calloc(1, sizeof(HmRequest));
     if (!r) HmFail("out of memory");
     r->kind = WK_REQUEST;
+    r->file = f;
     r->nextAll = g_allRequests;
     g_allRequests = r;
     r->code = code;
@@ -1013,6 +1163,7 @@ HmRequest *Ioctl(HmDevice *dev, const char *tag, ULONG code,
         r->completed = 1;
         return r;
     }
+    if (f->closed) HmFail("a request through a closed handle");
     q->ioctl((WDFQUEUE)q, (WDFREQUEST)r, outLen, inLen, code);
     return r;
 }
@@ -1028,7 +1179,10 @@ void WdfReset(void)
         free(g_allRequests);
         g_allRequests = n;
     }
-    for (int i = 0; i < g_deviceCount; i++) free(g_devices[i]->context);
+    for (int i = 0; i < g_deviceCount; i++) {
+        free(g_devices[i]->context);
+        for (HmFile *f = g_devices[i]->files; f; f = f->next) free(f->context);
+    }
     g_deviceCount = 0;
     while (g_allocs) { HmAlloc *n = g_allocs->next; free(g_allocs); g_allocs = n; }
     g_deviceAdd = NULL;

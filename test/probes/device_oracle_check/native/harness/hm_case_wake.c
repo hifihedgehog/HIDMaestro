@@ -17,11 +17,14 @@
  *   - the read waiting when a frame came carries it, or the newest frame
  *     cached when it was taken,
  *   - no frame goes to two reads, or to two WAIT_FOR_INPUT completions,
+ *   - no completion carries an older frame than one completed before it,
  *   - and, as the positive control in the same scenario, a read parked
  *     before a frame carries it, and the next frame reaches the read left
  *     waiting.
- * The companion's 8 ms timer never runs here: it serves whatever is
- * current to whatever is parked, by design, and would hide a lost doorbell.
+ * The companion's scenarios also run several readers, each a handle of its
+ * own, and check that each new frame reaches every reader once and that no
+ * reader gets a frame twice. The companion's 8 ms timer runs only where a
+ * scenario checks it: a tick before a check would hide a lost doorbell.
  * Exit 1 when a check fails, with every scenario run and the output file
  * complete, as --lifecycle does. */
 #include "hm_scenario.h"
@@ -416,6 +419,93 @@ static void WrapBeforePark(PlanProfile *p, int late)
     CtlStop(&c);
 }
 
+/* Completions reach HID class in the order the frames were taken: its
+ * completion routine runs on the completing thread, so a thread that took
+ * a frame and completes it later puts it in HID class's buffer after a
+ * newer one another thread completed meanwhile. */
+static HmRequest *g_other;
+static int g_releaseCountdown;
+
+/* Runs where the dispatching thread released InputLock with a frame taken:
+ * HID class's other read parks, frame C comes, and the worker serves C to
+ * that read. */
+static void HookNewerFirst(void)
+{
+    g_wHooks++;
+    g_other = Read(g_w);
+    Write(g_w, 0x70);
+    RunWorker(g_w);
+}
+
+/* older-after-newer: frame B is cached with no read parked, and a late
+ * READ_REPORT takes B. Before its handler completes it, HID class's other
+ * read parks and the worker serves it frame C. Through 81e1fe40, as in
+ * v2.0.3, the late read completed after its lock, so C reached HID class
+ * before B: 99,670 then 99,669 on the Celeron. */
+static void OlderAfterNewer(PlanProfile *p)
+{
+    Ctl c;
+    char label[160];
+    snprintf(label, sizeof(label), "%s older-after-newer", p->id);
+    if (!StartHid(&c, p, "older-after-newer", label)) return;
+    g_other = NULL;
+    Write(&c, 0x40);
+    RunWorker(&c);
+    g_dispatchReleaseHook = HookNewerFirst;
+    HmRequest *r = Read(&c);
+    g_dispatchReleaseHook = NULL;
+    Check(label, "frame C came while the late read's handler ran", g_wHooks == 1 && g_other != NULL);
+    Check(label, "control: the late read carries B", Carries(&c, r, 0x40));
+    Check(label, "control: HID class's other read carries C", g_other && Carries(&c, g_other, 0x70));
+    Check(label, "no completion carries an older frame than one completed before it",
+          g_other && r->completed && g_other->completed && r->doneNo < g_other->doneNo);
+    ControlFrame(&c, label, 0xA0);
+    CtlStop(&c);
+}
+
+/* The second release on the dispatching fiber after this arms it: the one
+ * in DeliverParked after its take. */
+static void HookNewerFirstAtSecond(void)
+{
+    if (--g_releaseCountdown > 0) {
+        g_dispatchReleaseHook = HookNewerFirstAtSecond;
+        return;
+    }
+    HookNewerFirst();
+}
+static void HookWriteBThenArmOrder(void)
+{
+    HookWriteB();
+    g_releaseCountdown = 2;
+    g_dispatchReleaseHook = HookNewerFirstAtSecond;
+}
+
+/* second-look-older-after-newer: frame B is cached between a read's look
+ * and its park, so the read's second look takes B from the queue itself
+ * (DeliverParked on the dispatching thread). Before that thread completes
+ * it, HID class's other read parks and the worker serves it frame C. */
+static void SecondLookOlderAfterNewer(PlanProfile *p)
+{
+    Ctl c;
+    char label[160];
+    snprintf(label, sizeof(label), "%s second-look-older-after-newer", p->id);
+    if (!StartHid(&c, p, "second-look-older-after-newer", label)) return;
+    g_other = NULL;
+    g_wBase = 0x40;
+    g_forwardHook = HookWriteBThenArmOrder;
+    HmRequest *r = Read(&c);
+    g_forwardHook = NULL;
+    g_dispatchReleaseHook = NULL;
+    Settle(CtlThread(&c, 0));
+    Check(label, "control: the read that parked beside B carries B", Carries(&c, r, 0x40));
+    Check(label, "frame C came while the dispatching thread held B", g_wHooks == 2 && g_other != NULL);
+    Check(label, "control: HID class's other read carries C", g_other && Carries(&c, g_other, 0x70));
+    Check(label, "no completion carries an older frame than one completed before it",
+          g_other && r->completed && g_other->completed && r->doneNo < g_other->doneNo);
+    ControlFrame(&c, label, 0xA0);
+    CtlStop(&c);
+}
+
 /* ------------------------------------------------------------------ */
 /*  The XUSB companion's WAIT_FOR_INPUT                                */
 /* ------------------------------------------------------------------ */
@@ -599,6 +689,298 @@ static void KickWithoutDoorbell(PlanProfile *p, int legacy)
     g_sdkSignal = saved;
 }
 
+/* ------------------------------------------------------------------ */
+/*  Several readers of the companion                                   */
+/* ------------------------------------------------------------------ */
+
+/* Each reader is a handle of its own, as Windows.Gaming.Input, explorer
+ * and GameInputSvc each open the XUSB interface and keep WAIT_FOR_INPUT
+ * requests parked. Each new frame reaches every reader once, through its
+ * oldest request parked, from the doorbell, a reader's kick or the 8 ms
+ * timer, and no reader gets a frame twice. */
+
+#define MAX_READERS 4
+static HmFile *g_rfile[MAX_READERS];
+static int g_rcount;
+static HmRequest *g_rw[64];
+static int g_rwReader[64];
+static int g_rwCount;
+static int g_hookCountdown;
+
+static HmRequest *WaitOn(Ctl *c, int reader)
+{
+    HmRequest *r = IoctlFile(c->dev, g_rfile[reader], "xusb.waitforinput", IOCTL_XUSB_WAIT_FOR_INPUT,
+                             NULL, 0, 29, NULL, 0);
+    if (g_rwCount < (int)ARRAYSIZE(g_rw)) {
+        g_rw[g_rwCount] = r;
+        g_rwReader[g_rwCount] = reader;
+        g_rwCount++;
+    }
+    return r;
+}
+
+static int ReaderServed(int reader, uint8_t low)
+{
+    int n = 0;
+    for (int i = 0; i < g_rwCount; i++)
+        if (g_rwReader[i] == reader) n += Served(g_rw[i], low);
+    return n;
+}
+
+static int ReaderParked(int reader)
+{
+    int n = 0;
+    for (int i = 0; i < g_rwCount; i++)
+        if (g_rwReader[i] == reader) n += g_rw[i]->inQueue;
+    return n;
+}
+
+/* Every reader parks a request when it has none waiting, as each keeps
+ * one outstanding. */
+static void ParkEach(Ctl *c)
+{
+    for (int r = 0; r < g_rcount; r++)
+        if (ReaderParked(r) == 0) WaitOn(c, r);
+}
+
+/* No reader got any of frames 0x01 to 0x08 twice. */
+static int NoReaderTwice(void)
+{
+    for (int r = 0; r < g_rcount; r++)
+        for (unsigned low = 0x01; low <= 0x08; low <<= 1)
+            if (ReaderServed(r, (uint8_t)low) > 1) return 0;
+    return 1;
+}
+
+static int StartReaders(Ctl *c, PlanProfile *p, const char *name, const char *label, int readers)
+{
+    StreamBegin("wake/%s/%s", p->id, name);
+    g_w = c;
+    g_wHooks = 0;
+    g_waitCount = 0;
+    g_rwCount = 0;
+    g_rcount = readers;
+    if (!CtlStart(c, p, 0, SDK_ALL, 1)) { Check(label, "the device add succeeds", 0); return 0; }
+    for (int r = 0; r < readers; r++) g_rfile[r] = FileOpen(c->dev);
+    return 1;
+}
+
+/* every-reader: three readers each park a WAIT_FOR_INPUT, then frame 1
+ * rings the doorbell, then each parks again for frame 2. Through d4103a21
+ * the doorbell served the oldest request alone, and the others waited for
+ * the timer, one a tick. */
+static void EveryReader(PlanProfile *p, int legacy)
+{
+    Ctl c;
+    char label[160];
+    int saved = g_sdkSignal;
+    if (legacy) g_sdkSignal = 0;
+    snprintf(label, sizeof(label), "%s every-reader%s", p->id, legacy ? "-legacy" : "");
+    if (StartReaders(&c, p, legacy ? "every-reader-legacy" : "every-reader", label, 3)) {
+        ParkEach(&c);
+        WriteGip(&c, 0x01);
+        Settle(CtlThread(&c, 0));
+        Check(label, "control: the first reader carries frame 1", ReaderServed(0, 0x01) == 1);
+        Check(label, "the second and third readers carry frame 1 from its doorbell",
+              ReaderServed(1, 0x01) == 1 && ReaderServed(2, 0x01) == 1);
+        ParkEach(&c);
+        WriteGip(&c, 0x02);
+        Settle(CtlThread(&c, 0));
+        Check(label, "every reader carries frame 2 from its doorbell",
+              ReaderServed(0, 0x02) == 1 && ReaderServed(1, 0x02) == 1 && ReaderServed(2, 0x02) == 1);
+        Check(label, "no reader gets a frame twice", NoReaderTwice());
+        CtlStop(&c);
+    }
+    g_sdkSignal = saved;
+}
+
+/* two-parked: reader A keeps two WAIT_FOR_INPUTs parked and reader B one.
+ * Frame 1 reaches each reader once, A through its older request, and three
+ * timer ticks give nobody frame 1 again. Then frame 2 reaches A's request
+ * left waiting. Through d4103a21 the doorbell served A's older request
+ * alone, and the ticks served A's second, then B's, each with frame 1. */
+static void TwoParked(PlanProfile *p)
+{
+    Ctl c;
+    char label[160];
+    snprintf(label, sizeof(label), "%s two-parked", p->id);
+    if (StartReaders(&c, p, "two-parked", label, 2)) {
+        WaitOn(&c, 0);
+        WaitOn(&c, 0);
+        WaitOn(&c, 1);
+        WriteGip(&c, 0x01);
+        Settle(CtlThread(&c, 0));
+        Check(label, "control: reader A's older WAIT_FOR_INPUT carries frame 1", Served(g_rw[0], 0x01));
+        Check(label, "reader B carries frame 1 from its doorbell", ReaderServed(1, 0x01) == 1);
+        Check(label, "reader A's second WAIT_FOR_INPUT waits for the next frame", ReaderParked(0) == 1);
+        TimerTick(&c);
+        TimerTick(&c);
+        TimerTick(&c);
+        Check(label, "the timer gives no reader frame 1 a second time",
+              ReaderServed(0, 0x01) == 1 && ReaderServed(1, 0x01) <= 1);
+        ParkEach(&c);
+        WriteGip(&c, 0x02);
+        Settle(CtlThread(&c, 0));
+        Check(label, "frame 2 reaches reader A's request left waiting, and reader B",
+              Served(g_rw[1], 0x02) && ReaderServed(1, 0x02) == 1);
+        Check(label, "no reader gets a frame twice", NoReaderTwice());
+        CtlStop(&c);
+    }
+}
+
+/* timer-every-reader: nothing holds the SDK's companion doorbell, so the
+ * pump never opens it, as under an SDK before the doorbell. Readers A and
+ * B park beside frame 1 and kick: both carry it. Frame 2 then rings no
+ * doorbell the pump waits on, and one tick of the 8 ms timer serves it to
+ * both, a second tick to nobody. Through d4103a21 the kicks served one
+ * request, and each tick one more. */
+static void TimerEveryReader(PlanProfile *p)
+{
+    Ctl c;
+    char label[160];
+    snprintf(label, sizeof(label), "%s timer-every-reader", p->id);
+    StreamBegin("wake/%s/timer-every-reader", p->id);
+    g_w = &c;
+    g_wHooks = 0;
+    g_waitCount = 0;
+    g_rwCount = 0;
+    g_rcount = 2;
+    memset(&c, 0, sizeof(c));
+    c.p = p;
+    c.companion = 1;
+    SdkCreate(&c.sdk, 0, SDK_ALL);
+    ObjRelease(&c.sdk.companionEv->o);
+    ConfigWrite(p, 0);
+    c.dev = DeviceAdd(1);
+    if (!c.dev) {
+        Check(label, "the device add succeeds", 0);
+        return;
+    }
+    for (int r = 0; r < 2; r++) g_rfile[r] = FileOpen(c.dev);
+    WriteGip(&c, 0x01);
+    ParkEach(&c);
+    Settle(CtlThread(&c, 0));
+    Check(label, "control: reader A carries frame 1 from its kick", ReaderServed(0, 0x01) == 1);
+    Check(label, "reader B carries frame 1 from its kick", ReaderServed(1, 0x01) == 1);
+    ParkEach(&c);
+    WriteGip(&c, 0x02);
+    Settle(CtlThread(&c, 0));
+    TimerTick(&c);
+    Check(label, "one timer tick serves frame 2 to both readers",
+          ReaderServed(0, 0x02) == 1 && ReaderServed(1, 0x02) == 1);
+    TimerTick(&c);
+    Check(label, "no reader gets a frame twice", NoReaderTwice());
+    CtlStop(&c);
+}
+
+/* kick-per-reader: reader A carries frame 1 from its doorbell. Then reader
+ * B parks: B has not had frame 1, so its look kicks the pump, whatever A
+ * had. Through d4103a21 the look compared frame 1 with the last completion,
+ * A's, and did not kick, and B waited for the timer. */
+static void KickPerReader(PlanProfile *p, int legacy)
+{
+    Ctl c;
+    char label[160];
+    int saved = g_sdkSignal;
+    if (legacy) g_sdkSignal = 0;
+    snprintf(label, sizeof(label), "%s kick-per-reader%s", p->id, legacy ? "-legacy" : "");
+    if (StartReaders(&c, p, legacy ? "kick-per-reader-legacy" : "kick-per-reader", label, 2)) {
+        WaitOn(&c, 0);
+        WriteGip(&c, 0x01);
+        Settle(CtlThread(&c, 0));
+        Check(label, "control: reader A carries frame 1 from its doorbell", ReaderServed(0, 0x01) == 1);
+        WaitOn(&c, 1);
+        Settle(CtlThread(&c, 0));
+        Check(label, "reader B, parked after frame 1's doorbell, carries frame 1 from its kick",
+              ReaderServed(1, 0x01) == 1);
+        ParkEach(&c);
+        WriteGip(&c, 0x02);
+        Settle(CtlThread(&c, 0));
+        Check(label, "frame 2 reaches both readers", ReaderServed(0, 0x02) == 1 && ReaderServed(1, 0x02) == 1);
+        Check(label, "no reader gets a frame twice", NoReaderTwice());
+        CtlStop(&c);
+    }
+    g_sdkSignal = saved;
+}
+
+/* Runs at the second take from the queue: reader B's next WAIT_FOR_INPUT
+ * parks then, on another thread. */
+static void HookParkReaderB(void)
+{
+    if (--g_hookCountdown > 0) {
+        g_retrieveHook = HookParkReaderB;
+        return;
+    }
+    g_wHooks++;
+    WaitOn(g_w, 0);
+}
+
+/* parks-during-pass: reader B, whose first request came first, carries
+ * frame 1, and reader A frame 2. A parks again and frame 3 rings the
+ * doorbell. The pump's turn looks for B's request, finds none, and while
+ * it takes A's, B's next WAIT_FOR_INPUT parks. The turn has passed B, so
+ * only B's own look can wake the pump, and B lacks frame 3, so it does. */
+static void ParksDuringPass(PlanProfile *p)
+{
+    Ctl c;
+    char label[160];
+    snprintf(label, sizeof(label), "%s parks-during-pass", p->id);
+    if (StartReaders(&c, p, "parks-during-pass", label, 2)) {
+        WaitOn(&c, 0);
+        WriteGip(&c, 0x01);
+        Settle(CtlThread(&c, 0));
+        WaitOn(&c, 1);
+        WriteGip(&c, 0x02);
+        Settle(CtlThread(&c, 0));
+        Check(label, "control: reader B carries frame 1 and reader A frame 2",
+              ReaderServed(0, 0x01) == 1 && ReaderServed(1, 0x02) == 1);
+        WaitOn(&c, 1);
+        WriteGip(&c, 0x04);
+        g_hookCountdown = 2;
+        g_retrieveHook = HookParkReaderB;
+        Settle(CtlThread(&c, 0));
+        g_retrieveHook = NULL;
+        Check(label, "reader B's WAIT_FOR_INPUT parked inside the pump's turn", g_wHooks == 1);
+        Check(label, "reader A carries frame 3 from its doorbell", ReaderServed(1, 0x04) == 1);
+        Check(label, "reader B carries frame 3 from its kick", ReaderServed(0, 0x04) == 1);
+        Check(label, "no reader gets a frame twice", NoReaderTwice());
+        CtlStop(&c);
+    }
+}
+
+/* close-reader: reader C closes its handle with two WAIT_FOR_INPUTs
+ * parked. The framework cancels both through EvtIoCanceledOnQueue, and the
+ * close takes C off the readers. Frame 1 then reaches readers A and B, and
+ * the pump's turn never reaches C's context, which the harness poisons
+ * once the handle is closed. */
+static void CloseReader(PlanProfile *p)
+{
+    Ctl c;
+    char label[160];
+    snprintf(label, sizeof(label), "%s close-reader", p->id);
+    if (StartReaders(&c, p, "close-reader", label, 3)) {
+        WaitOn(&c, 0);
+        WaitOn(&c, 1);
+        HmRequest *c1 = WaitOn(&c, 2);
+        HmRequest *c2 = WaitOn(&c, 2);
+        FileClose(g_rfile[2]);
+        g_rcount = 2;
+        Check(label, "control: the closed reader's two WAIT_FOR_INPUTs complete canceled",
+              c1->completed && c1->status == STATUS_CANCELLED && c2->completed && c2->status == STATUS_CANCELLED);
+        WriteGip(&c, 0x01);
+        Settle(CtlThread(&c, 0));
+        Check(label, "readers A and B carry frame 1 from its doorbell",
+              ReaderServed(0, 0x01) == 1 && ReaderServed(1, 0x01) == 1);
+        ParkEach(&c);
+        TimerTick(&c);
+        WriteGip(&c, 0x02);
+        Settle(CtlThread(&c, 0));
+        Check(label, "frame 2 reaches readers A and B", ReaderServed(0, 0x02) == 1 && ReaderServed(1, 0x02) == 1);
+        Check(label, "no reader gets a frame twice", NoReaderTwice());
+        CtlStop(&c);
+    }
+}
+
 int CaseWake(void)
 {
     PlanProfile *ds = NULL;
@@ -617,12 +999,22 @@ int CaseWake(void)
     TwoFramesBeforePark(ds);
     WrapBeforePark(ds, 0);
     WrapBeforePark(ds, 1);
+    OlderAfterNewer(ds);
+    SecondLookOlderAfterNewer(ds);
     DoorbellBeforePark(xusb, 1);
     DoorbellBeforePark(xusb, 0);
     DoorbellAndKick(xusb, 1);
     DoorbellAndKick(xusb, 0);
     KickWithoutDoorbell(xusb, 1);
     KickWithoutDoorbell(xusb, 0);
+    EveryReader(xusb, 1);
+    EveryReader(xusb, 0);
+    TwoParked(xusb);
+    TimerEveryReader(xusb);
+    KickPerReader(xusb, 1);
+    KickPerReader(xusb, 0);
+    ParksDuringPass(xusb);
+    CloseReader(xusb);
     printf("wake checks %d failed %d\n", g_checks, g_failed);
     return g_failed;
 }

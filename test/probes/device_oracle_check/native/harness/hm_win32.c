@@ -984,6 +984,7 @@ VOID WINAPI HmDeleteCriticalSection(LPCRITICAL_SECTION cs)
  * deadlock a real thread, and stops the run here. */
 void (*g_srwHook)(void);
 void (*g_lockReleaseHook)(void);
+void (*g_dispatchReleaseHook)(void);
 void (*g_pollHook)(void);
 int (*g_exchangeHook)(volatile LONG *target, LONG value);
 
@@ -1009,6 +1010,11 @@ VOID WINAPI HmReleaseSRWLockExclusive(PSRWLOCK l)
     if (g_lockReleaseHook && g_current && g_locksHeld == 0) {
         void (*hook)(void) = g_lockReleaseHook;
         g_lockReleaseHook = NULL;
+        hook();
+    }
+    if (g_dispatchReleaseHook && !g_current && g_locksHeld == 0) {
+        void (*hook)(void) = g_dispatchReleaseHook;
+        g_dispatchReleaseHook = NULL;
         hook();
     }
 }

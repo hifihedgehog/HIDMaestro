@@ -232,16 +232,30 @@ extern int g_locksHeld;
 /*  WDF objects                                                        */
 /* ------------------------------------------------------------------ */
 
-enum HmWdfKind { WK_DRIVER = 0x100, WK_DEVICE, WK_QUEUE, WK_REQUEST, WK_MEMORY, WK_LOCK, WK_KEY, WK_TIMER, WK_INIT };
+enum HmWdfKind { WK_DRIVER = 0x100, WK_DEVICE, WK_QUEUE, WK_REQUEST, WK_MEMORY, WK_LOCK, WK_KEY, WK_TIMER, WK_INIT, WK_FILE };
 
 typedef struct HmRequest HmRequest;
 typedef struct HmDevice HmDevice;
+
+/* A WDFFILEOBJECT: one handle a caller opened on the device. The framework
+ * makes one for every create, with the context the driver's
+ * WdfDeviceInitSetFileObjectConfig names, even without file callbacks
+ * (Windows-Driver-Frameworks irphandlers/general/fxpkggeneral.cpp,
+ * FxPkgGeneral::OnCreate, "to allow WdfRequestGetFileObject"). */
+typedef struct HmFile {
+    int        kind;
+    HmDevice  *dev;
+    void      *context;
+    int        closed;
+    struct HmFile *next;     /* the device's files */
+} HmFile;
 
 typedef struct HmQueue {
     int        kind;
     HmDevice  *dev;
     WDF_IO_QUEUE_DISPATCH_TYPE type;
     PFN_WDF_IO_QUEUE_IO_DEVICE_CONTROL ioctl;
+    PFN_WDF_IO_QUEUE_IO_CANCELED_ON_QUEUE canceledOnQueue;
     HmRequest *head, *tail;
     int        count;
     int        powerManaged;  /* as the framework decides it (fxioqueue.cpp:397-414) */
@@ -268,10 +282,13 @@ struct HmRequest {
     int        noAccess;     /* a write request: outLen is the report id, out a no-access page */
     ULONG_PTR  info;
     int        completed;
+    NTSTATUS   status;       /* the driver's completion status */
+    uint32_t   doneNo;       /* the order of its completion among all */
     int        refused;      /* a purged queue failed it before the driver saw it */
     uint32_t   serial;
     char       tag[24];
     HmMemory   outMem;
+    HmFile    *file;         /* the handle it came through */
 };
 
 typedef struct HmTimer {
@@ -361,6 +378,13 @@ struct HmDevice {
     int        stopped;       /* a rebalance stop, not yet restarted */
     int        surprised;     /* IRP_MN_SURPRISE_REMOVAL processed */
     int        smioStarted;   /* the self-managed I/O machine left Created */
+    /* WdfDeviceInitSetFileObjectConfig: the file objects' context type and
+     * the close and cleanup callbacks. */
+    PCWDF_OBJECT_CONTEXT_TYPE_INFO fileTypeInfo;
+    PFN_WDF_FILE_CLOSE   fileClose;
+    PFN_WDF_FILE_CLEANUP fileCleanup;
+    HmFile    *files;
+    HmFile    *defaultFile;   /* the handle Ioctl's requests come through */
 };
 
 void      WdfInit(void);
@@ -413,6 +437,18 @@ void      DeviceRemove(HmDevice *dev);
  * queue. The output buffer starts as outInit (outLen bytes) or zeros. */
 HmRequest *Ioctl(HmDevice *dev, const char *tag, ULONG code,
                  const void *in, size_t inLen, size_t outLen, const void *outInit, size_t outInitLen);
+/* A handle a caller opens on the device, and a request through it. Ioctl's
+ * requests all come through one handle of the device's, opened at its
+ * first request. FileClose is the handle's close: IRP_MJ_CLEANUP, which
+ * runs EvtFileCleanup and then cancels the handle's requests waiting in
+ * any queue, each through the queue's EvtIoCanceledOnQueue
+ * (fxpkggeneral.cpp OnCleanup, fxioqueue.cpp FlushByFileObject and
+ * CancelForQueue), then IRP_MJ_CLOSE, which runs EvtFileClose. A device's
+ * removal closes the handles still open after its queues are purged. */
+HmFile    *FileOpen(HmDevice *dev);
+void       FileClose(HmFile *f);
+HmRequest *IoctlFile(HmDevice *dev, HmFile *f, const char *tag, ULONG code,
+                     const void *in, size_t inLen, size_t outLen, const void *outInit, size_t outInitLen);
 int       QueueDepth(HmQueue *q);
 /* Set by a script run: completions record the whole output buffer rather
  * than its bytes up to the information. */
@@ -576,6 +612,10 @@ extern void (*g_lockHook)(void);
 /* Run once when a driver thread next releases an SRW lock or a wait lock
  * and holds no other, after the release (hm_win32.c, hm_wdf.c). */
 extern void (*g_lockReleaseHook)(void);
+/* The same on the scenario's fiber, in a request's dispatch: what another
+ * thread does while the dispatching one is between its lock and the rest
+ * of its handler. */
+extern void (*g_dispatchReleaseHook)(void);
 /* Run once at the next zero-timeout poll a driver thread makes, before it
  * is answered (hm_win32.c FiberWait). */
 extern void (*g_pollHook)(void);
@@ -588,9 +628,10 @@ extern int (*g_exchangeHook)(volatile LONG *target, LONG value);
  * companion's IOCTL thread does in that moment. */
 extern void (*g_sdkParkedHook)(void);
 /* Run once at the next WdfRequestForwardToIoQueue, before the request
- * enters its queue, and at the next WdfIoQueueRetrieveNextRequest, before
- * it takes a request, on whichever thread makes the call (hm_wdf.c): what
- * another thread does in that moment (hm_case_wake.c). */
+ * enters its queue, and at the next WdfIoQueueRetrieveNextRequest or
+ * WdfIoQueueRetrieveRequestByFileObject, before it takes a request, on
+ * whichever thread makes the call (hm_wdf.c): what another thread does in
+ * that moment (hm_case_wake.c). */
 extern void (*g_forwardHook)(void);
 extern void (*g_retrieveHook)(void);
 /* The same at the next WdfRequestRequeue, before the request goes back. */
