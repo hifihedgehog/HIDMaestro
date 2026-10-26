@@ -2406,8 +2406,12 @@ public static partial class DeviceManager
 
     /// <summary>
     /// Removes a device and all its children, waits for removal to complete.
-    /// Enumerates HID children first and removes them individually via DIF_REMOVE,
-    /// then removes the parent. This prevents ghost HID children from surviving.
+    /// A started ROOT or HID device is first asked to go with the devices
+    /// below it, as Safely Remove Hardware asks (QueryRemoveSubtree). When a
+    /// program refuses, the device and its records stay and the call
+    /// returns false. Otherwise it enumerates HID children first and removes
+    /// them individually via DIF_REMOVE, then removes the parent. This
+    /// prevents ghost HID children from surviving.
     /// </summary>
     /// <exception cref="InvalidOperationException">An SWD parent's removal
     /// needs hmswd.exe, and it could not be staged or held
@@ -2555,6 +2559,31 @@ public static partial class DeviceManager
         IReadOnlyList<string> childIds = calls?.Children(instanceId) ?? GetAllChildDeviceIds(devInst);
         bool goneAfterDif = false;
 
+        // Step 0: no record of a started device goes before the device does.
+        // A started ROOT or HID devnode is first asked to go as Safely Remove
+        // Hardware asks (QueryRemoveSubtree), on the parent's watch, so the
+        // REMOVED notification the query brings is seen. Every program that
+        // watches the device closes its handles, and a refusal changes
+        // nothing. Learn's order for CM_Uninstall_DevNode is the same: "If
+        // the device is present, call CM_Query_And_Remove_SubTree", then the
+        // uninstall. When a program refuses, as one that keeps a HID child
+        // open without watching it does, the device and every record stay.
+        // Until 2.1.0 the fast removal uninstalled it anyway: on the Celeron
+        // on 2026-10-25 CM_Uninstall_DevNode deleted a held child's record
+        // 18 ms after Windows refused its disable, with the holder still
+        // holding it. A software device's close is its surprise removal
+        // (SwDeviceClose on Learn), which no handle refuses.
+        if (!isSwdParent && Running(instanceId, calls))
+        {
+            parent.Begin();
+            if (!QueryOut(instanceId, calls, out string veto))
+            {
+                DeviceOrchestrator.LogDiag($"      {instanceId} stays with its records: a program refused its removal{(veto.Length > 0 ? $" ({veto})" : "")}");
+                removed = false;
+                return RemovalOutcome.NotGone;
+            }
+        }
+
         // For SWD parents that are PHANTOM-only (registry residue, no live
         // devnode), skip the hmswd.exe roundtrip: there's no live device
         // to terminate. Each helper spawn costs ~50-75 ms with no useful
@@ -2662,15 +2691,17 @@ public static partial class DeviceManager
                 // the UMDF host still holds handles after a force-kill. A
                 // keyboard refuses the disable and takes SetupDiRemoveDevice
                 // instead (DisableAndUninstall), before its parent is tried.
+                // A child still started is asked to go first
+                // (DeleteRecordOnceDown).
                 uint ci = 0;
                 if (calls != null
                     ? Find(childId, 0) == CR_SUCCESS || Find(childId, 1) == CR_SUCCESS
                     : CM_Locate_DevNodeW(out ci, childId, 0) == CR_SUCCESS || CM_Locate_DevNodeW(out ci, childId, 1) == CR_SUCCESS)
-                    subtree.Remove(childId, () => calls?.Uninstall(childId) ?? DisableAndUninstall(ci, childId));
+                    subtree.Remove(childId, () => DeleteRecordOnceDown(childId, () => calls?.Uninstall(childId) ?? DisableAndUninstall(ci, childId), calls));
             }
             else
             {
-                subtree.Remove(childId, () => calls?.Remove(childId) ?? DifRemoveDevice(childId));
+                subtree.Remove(childId, () => DeleteRecordOnceDown(childId, () => calls?.Remove(childId) ?? DifRemoveDevice(childId), calls));
             }
         }
 
@@ -2682,7 +2713,8 @@ public static partial class DeviceManager
         if (fast)
         {
             var waitSw = System.Diagnostics.Stopwatch.StartNew();
-            parentOutcome = Then(closeOutcome, parent.Step(() => calls?.Uninstall(instanceId) ?? DisableAndUninstall(devInst, instanceId),
+            parentOutcome = Then(closeOutcome, parent.Step(() => DeleteRecordOnceDown(instanceId,
+                                                               () => calls?.Uninstall(instanceId) ?? DisableAndUninstall(devInst, instanceId), calls),
                                                            uninstalls: !isSwdParent, parentBudget));
             goneAfterDif = parentOutcome != RemovalOutcome.NotGone;
             DeviceOrchestrator.LogDiag($"      fast removal of {instanceId}: {parentOutcome} after {waitSw.ElapsedMilliseconds}ms");
@@ -2701,7 +2733,8 @@ public static partial class DeviceManager
         else
         {
             var waitSw = System.Diagnostics.Stopwatch.StartNew();
-            parentOutcome = parent.Step(() => calls?.Remove(instanceId) ?? DifRemoveDevice(instanceId), uninstalls: true, parentBudget);
+            parentOutcome = parent.Step(() => DeleteRecordOnceDown(instanceId, () => calls?.Remove(instanceId) ?? DifRemoveDevice(instanceId), calls),
+                                        uninstalls: true, parentBudget);
             goneAfterDif = parentOutcome != RemovalOutcome.NotGone;
             DeviceOrchestrator.LogDiag($"      WaitForDeviceRemoval({instanceId}, {timeoutMs}ms): {parentOutcome} after {waitSw.ElapsedMilliseconds}ms");
         }
@@ -2723,7 +2756,15 @@ public static partial class DeviceManager
         // 2026-04-25 (24s wall time for 11 phantoms, 10 still present after).
         // Skipping the fallback for SWD\ entries cuts startup cleanup from
         // tens of seconds to milliseconds when prior-session phantoms exist.
-        if (fallbacks && !goneAfterDif)
+        // Both run DIF_REMOVE, whose SetupDiRemoveDevice "deletes the
+        // device's hardware and software registry keys" and, when "the device
+        // cannot be dynamically stopped", asks for a restart instead (Learn),
+        // so a parent still started gets neither: a program that refused its
+        // removal would keep it with its records gone.
+        bool stillStarted = fallbacks && !goneAfterDif && Running(instanceId, calls);
+        if (stillStarted)
+            DeviceOrchestrator.LogDiag($"      {instanceId} is still started, so no pnputil or devcon removal");
+        if (fallbacks && !goneAfterDif && !stillStarted)
         {
             // The parent's watch from step 2 goes on.
             parent.Begin();
@@ -2936,12 +2977,56 @@ public static partial class DeviceManager
     /// on its keyboard child succeeded, the root then reported disableable,
     /// and SetupDiRemoveDevice removed it. The two mice the same consumer
     /// held reported disableable throughout.
+    ///
+    /// A disable is a removal query, and one a program refused leaves the
+    /// device started. Its record then stays: until 2.1.0 the uninstall ran
+    /// anyway, and on the Celeron on 2026-10-25 it deleted a held child's
+    /// record 18 ms after the refusal (Kernel-PnP 225, then 420), with the
+    /// holder still holding the child. RemoveDevice asks a started devnode
+    /// to go before it calls this (DeleteRecordOnceDown).
     /// </summary>
     static bool DisableAndUninstall(uint devInst, string instanceId)
     {
-        if (CM_Disable_DevNode(devInst, 0) != CR_NOT_DISABLEABLE)
-            return CM_Uninstall_DevNode(devInst, 0) == CR_SUCCESS;
-        return DifRemoveDevice(instanceId);
+        uint cr = CM_Disable_DevNode(devInst, 0);
+        if (cr == CR_NOT_DISABLEABLE) return DifRemoveDevice(instanceId);
+        if (cr != CR_SUCCESS && IsStarted(instanceId)) return false;
+        return CM_Uninstall_DevNode(devInst, 0) == CR_SUCCESS;
+    }
+
+    /// <summary>The devnode is in the tree and started, through the removal
+    /// hook when one is set.</summary>
+    static bool Running(string instanceId, RemovalCalls? calls) =>
+        calls != null ? calls.Started?.Invoke(instanceId) ?? false : IsStarted(instanceId);
+
+    /// <summary>The removal query (<see cref="QueryRemoveSubtree"/>), through
+    /// the removal hook when one is set. True when the devnode left the tree
+    /// with the devnodes below it.</summary>
+    static bool QueryOut(string instanceId, RemovalCalls? calls, out string veto)
+    {
+        veto = "";
+        if (calls != null) return calls.Query?.Invoke(instanceId) ?? true;
+        return QueryRemoveSubtree(instanceId, out veto);
+    }
+
+    /// <summary>Runs <paramref name="delete"/>, a call that deletes a
+    /// devnode's record (SetupDiRemoveDevice, CM_Uninstall_DevNode), only
+    /// once the devnode is down: out of the tree, or in it and no longer
+    /// started, as a parent whose driver failed it is. A started devnode is
+    /// asked to go first (<see cref="QueryRemoveSubtree"/>), and a refusal
+    /// leaves the devnode and its record. SetupDiRemoveDevice "deletes the
+    /// device's hardware and software registry keys" and, when "the device
+    /// cannot be dynamically stopped", asks for a restart (Learn): on
+    /// 2026-10-19 a refused one left a held child's record without its
+    /// Driver and Service, and every later child of that identity stopped
+    /// with problem 19. False when the record was left.</summary>
+    static bool DeleteRecordOnceDown(string instanceId, Func<bool> delete, RemovalCalls? calls)
+    {
+        if (Running(instanceId, calls) && !QueryOut(instanceId, calls, out string veto))
+        {
+            DeviceOrchestrator.LogDiag($"      {instanceId} keeps its record: a program refused its removal{(veto.Length > 0 ? $" ({veto})" : "")}");
+            return false;
+        }
+        return delete();
     }
 
     /// <summary>
@@ -2953,6 +3038,9 @@ public static partial class DeviceManager
     /// </summary>
     static bool DifRemoveDevice(string instanceId)
     {
+        // A started device is asked to go first, and a refusal leaves it and
+        // its record (DeleteRecordOnceDown).
+        if (IsStarted(instanceId) && !QueryRemoveSubtree(instanceId, out _)) return false;
         uint devInst = 0;
         bool located = CM_Locate_DevNodeW(out devInst, instanceId, 0) == CR_SUCCESS
                     || CM_Locate_DevNodeW(out devInst, instanceId, 1) == CR_SUCCESS;
@@ -2971,7 +3059,9 @@ public static partial class DeviceManager
         if (dis == new IntPtr(-1))
         {
             if (!located) return false;
-            CM_Disable_DevNode(devInst, 0);
+            // A refused disable leaves the device and its record, as in
+            // DisableAndUninstall.
+            if (CM_Disable_DevNode(devInst, 0) != CR_SUCCESS && IsStarted(instanceId)) return false;
             return CM_Uninstall_DevNode(devInst, 0) == CR_SUCCESS;
         }
 
@@ -2987,7 +3077,7 @@ public static partial class DeviceManager
                 if (!SetupDiOpenDeviceInfoW(dis, instanceId, IntPtr.Zero, 0, devInfoHandle.AddrOfPinnedObject()))
                 {
                     if (!located) return false;
-                    CM_Disable_DevNode(devInst, 0);
+                    if (CM_Disable_DevNode(devInst, 0) != CR_SUCCESS && IsStarted(instanceId)) return false;
                     return CM_Uninstall_DevNode(devInst, 0) == CR_SUCCESS;
                 }
 
@@ -3235,7 +3325,9 @@ public static partial class DeviceManager
 
                     // Parent is gone: remove the orphan silently. Caller
                     // gets the count for whatever observability it wants.
-                    if (!RemoveOrphanHidChild(hidInstanceId, parentId, () => DifRemoveDevice(hidInstanceId)))
+                    // A child in the tree has a parent in it, so an orphan
+                    // is down already, and DeleteRecordOnceDown holds that.
+                    if (!RemoveOrphanHidChild(hidInstanceId, parentId, () => DeleteRecordOnceDown(hidInstanceId, () => DifRemoveDevice(hidInstanceId), RemovalCallsHook)))
                         continue;
                     removedIds?.Add(hidInstanceId);
                     removed++;
