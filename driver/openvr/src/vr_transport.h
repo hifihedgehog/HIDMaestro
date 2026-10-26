@@ -58,9 +58,15 @@ private:
     std::thread worker_;
     std::atomic<bool> running_{ false };
 
-    // Snapshot double-buffer: worker writes, RunFrame reads.
+    // Snapshot: the worker writes, RunFrame reads, under a seqlock in the
+    // shape of Boehm's ("Can Seqlocks Get Along with Programming Language
+    // Memory Models?", MSPC 2012). The frame is held as relaxed atomic
+    // words, so a read that overlaps a write is no data race, and a fence on
+    // each side orders the words against the sequence number.
+    static constexpr size_t kSnapWords = sizeof( HMVR_InputFrame ) / sizeof( uint64_t );
+    static_assert( sizeof( HMVR_InputFrame ) % sizeof( uint64_t ) == 0, "snapshot words" );
     std::atomic<uint32_t> snap_seq_{ 0 };  // odd = writing
-    HMVR_InputFrame snap_{};
+    std::atomic<uint64_t> snap_[ kSnapWords ] = {};
     std::atomic<bool> have_snapshot_{ false };
     std::atomic<uint64_t> last_frame_qpc_{ 0 };
 };
