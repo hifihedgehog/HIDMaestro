@@ -55,6 +55,9 @@ internal static class HeldRemoval
         public readonly List<string> Lines = new();
         public int CancelLocates;
         public bool Holder;
+        /// <summary>What the removal added to DeviceManager.RemovalsLeftHere,
+        /// the count a dispose keeps its lease on.</summary>
+        public long Left;
         readonly Dictionary<string, List<Action>> _removed = new(StringComparer.OrdinalIgnoreCase);
         // A driver's failure can come from another thread (Fail).
         readonly object _gate = new();
@@ -199,21 +202,26 @@ internal static class HeldRemoval
     static (bool Removed, long Ms) Remove(Machine m, string id, bool fast, Func<bool>? fail = null) =>
         Hooked(m, () =>
         {
+            long left = DeviceManager.RemovalsLeftHere;
             var sw = Stopwatch.StartNew();
             bool removed = DeviceManager.RemoveDevice(id, timeoutMs: 2000, fast: fast, forceFallbacks: true, failDevice: fail);
-            return (removed, sw.ElapsedMilliseconds);
+            long ms = sw.ElapsedMilliseconds;
+            m.Left = DeviceManager.RemovalsLeftHere - left;
+            return (removed, ms);
         });
 
     static string Describe(Machine m, (bool Removed, long Ms) r) =>
         $"calls [{string.Join(", ", m.Calls)}], " +
         (m.Violations.Count == 0 ? "no record deleted while started" : string.Join("; ", m.Violations)) +
-        $", removed {r.Removed} in {r.Ms} ms, child {m.Nodes[Child]}, parent {m.Nodes[Parent]}";
+        $", removed {r.Removed} in {r.Ms} ms, child {m.Nodes[Child]}, parent {m.Nodes[Parent]}, {m.Left} left";
 
     static bool Kept(Node n) => n.InTree && n.Started && n.Record;
 
     internal static void Run(Action<string, bool, string> check)
     {
         int cancels = 0;
+        // Each removal, and what it must add to RemovalsLeftHere.
+        var tally = new List<(string Name, Machine M, long Want)>();
         foreach (bool fast in new[] { true, false })
         {
             string kind = fast ? "fast removal (the full cleanup's)" : "SetupDiRemoveDevice removal (the sweeps' and a create's)";
@@ -227,6 +235,7 @@ internal static class HeldRemoval
                   held.Violations.Count == 0 && held.Calls.All(c => c.StartsWith("query ", StringComparison.Ordinal)) && !r1.Removed
                   && Kept(held.Nodes[Parent]) && Kept(held.Nodes[Child]),
                   Describe(held, r1));
+            tally.Add(($"{(fast ? "fast" : "SetupDiRemoveDevice")}, refused", held, 1));
 
             // No holder: the query takes the subtree out, and the records go
             // after it, child first.
@@ -237,6 +246,7 @@ internal static class HeldRemoval
                   && free.Calls.SequenceEqual(new[] { $"query {Parent}", $"{delete} {Child}", $"{delete} {Parent}" })
                   && !free.Nodes[Parent].Record && !free.Nodes[Child].Record,
                   Describe(free, r2));
+            tally.Add(($"{(fast ? "fast" : "SetupDiRemoveDevice")}, no holder", free, 0));
 
             // What a dispose leaves once its driver failed the device: the
             // child taken down by surprise removal and still held, the parent
@@ -251,6 +261,7 @@ internal static class HeldRemoval
                   failed.Violations.Count == 0 && r3.Removed
                   && failed.Calls.SequenceEqual(new[] { $"{delete} {Child}", $"{delete} {Parent}" }),
                   Describe(failed, r3));
+            tally.Add(($"{(fast ? "fast" : "SetupDiRemoveDevice")}, failed parent", failed, 0));
 
             cancels += held.CancelLocates + free.CancelLocates + failed.CancelLocates;
         }
@@ -263,6 +274,7 @@ internal static class HeldRemoval
               child.Violations.Count == 0 && child.Calls.SequenceEqual(new[] { $"query {Child}" }) && !r4.Removed && Kept(child.Nodes[Child]),
               Describe(child, r4));
         cancels += child.CancelLocates;
+        tally.Add(("HID child, refused", child, 1));
 
         // The holder refuses, and the caller can ask the driver to fail its
         // device, as the full cleanup and the sweeps can: the child goes by
@@ -280,6 +292,7 @@ internal static class HeldRemoval
                   && !m.Nodes[Parent].Record && !m.Nodes[Child].Record,
                   Describe(m, r));
             cancels += m.CancelLocates;
+            tally.Add(($"{(fast ? "fast" : "SetupDiRemoveDevice")}, failed on request", m, 0));
         }
 
         // The driver answers, and Windows leaves the device started.
@@ -299,6 +312,10 @@ internal static class HeldRemoval
               && r6.Ms < 1000 && Kept(silent.Nodes[Parent]) && Kept(silent.Nodes[Child]),
               Describe(silent, r6));
         cancels += stuck.CancelLocates + silent.CancelLocates;
+        tally.Add(("stays started after the answer", stuck, 1));
+        tally.Add(("no answer", silent, 1));
+        check("a removal that leaves a device counts once on RemovalsLeftHere, which a dispose keeps its lease on, and one that removes it counts nothing",
+              tally.TrueForAll(t => t.M.Left == t.Want), string.Join(", ", tally.Select(t => $"{t.Name} {t.M.Left}")));
 
         // The wait itself: done once every child is out of the tree and the
         // parent no longer started, and not before.

@@ -1730,6 +1730,16 @@ public static partial class DeviceManager
     /// <inheritdoc cref="t_lockTakesRefused"/>
     internal static long LockTakesRefusedHere => t_lockTakesRefused;
 
+    /// <summary>Removals this thread made that left a device in the tree,
+    /// with its records, because a program refused the removal query and no
+    /// surprise removal took the device down (RemoveDevice). A dispose
+    /// compares it before and after its teardown and keeps its lease, so the
+    /// record names the device for the next sweep.</summary>
+    [ThreadStatic] private static long t_removalsLeft;
+
+    /// <inheritdoc cref="t_removalsLeft"/>
+    internal static long RemovalsLeftHere => t_removalsLeft;
+
     private static LockWaitBudget? s_exitLockBudget;
 
     /// <summary>Once the process has begun to exit (<see cref="ProcessExitSignal"/>),
@@ -2622,6 +2632,7 @@ public static partial class DeviceManager
                     DeviceOrchestrator.LogDiag($"      {instanceId} stays with its records: a program refused its removal{why}, " +
                         (failDevice == null ? "and no driver can be asked to fail it here"
                          : failed ? "and it was not down when the wait after its driver's answer ended" : "and its driver did not answer"));
+                    t_removalsLeft++;
                     removed = false;
                     return RemovalOutcome.NotGone;
                 }

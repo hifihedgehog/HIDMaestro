@@ -2203,8 +2203,14 @@ internal static partial class DeviceOrchestrator
         // create of the same identity in that gap got the old devnode back
         // and failed (S70: Logitech mice, held by Logitech's lighting
         // service). The removals below then remove the device and the
-        // records. A driver before protocol 5 does not answer the request,
-        // and the removals query Windows as before.
+        // records once it is down. The driver answers as soon as it has
+        // failed its device, and Windows takes the device down after it: on
+        // the development laptop on 2026-10-25 a keyboard's first HID child
+        // was still in the tree at its SetupDiRemoveDevice 9 ms after the
+        // answer. So the removals wait for it (DeviceManager.WaitSurpriseRemoval).
+        // A driver before protocol 5 does not answer the request, and the
+        // device and its records then stay, as for any removal a program
+        // refuses (DeviceManager.RemoveDevice).
         if (instanceId != null && instanceId.StartsWith(@"ROOT\", StringComparison.OrdinalIgnoreCase))
         {
             var querySw = Stopwatch.StartNew();
@@ -2218,6 +2224,11 @@ internal static partial class DeviceOrchestrator
                 var failSw = Stopwatch.StartNew();
                 bool failed = SharedMemoryIO.RequestSurpriseRemoval(controllerIndex, TimeoutScale.Apply(2000));
                 LogDiag($"    surprise removal requested of {instanceId}: {(failed ? "the driver failed its device" : "no answer")} in {failSw.ElapsedMilliseconds}ms");
+                if (failed)
+                {
+                    bool down = DeviceManager.WaitSurpriseRemoval(instanceId, preCapturedHidChildren, DeviceManager.SurpriseRemovalWaitMs);
+                    LogDiag($"    surprise removal of {instanceId}: {(down ? "down" : "still up")} after {failSw.ElapsedMilliseconds}ms");
+                }
             }
         }
 

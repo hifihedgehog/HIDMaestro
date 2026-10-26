@@ -708,6 +708,7 @@ public sealed class HMContext : IDisposable
 
             string? instanceId = null;
             long refused = Internal.DeviceManager.LockTakesRefusedHere;
+            long left = Internal.DeviceManager.RemovalsLeftHere;
             // Set once SetupController returns. From then on the index's
             // devices and sections are this create's, and so is the
             // controller's hold once its constructor runs.
@@ -759,8 +760,10 @@ public sealed class HMContext : IDisposable
                 try { TeardownDevices(lease.TransportIndex, instanceId); } catch { }
                 // A create cut short by the exit's bound on the PnP lock keeps
                 // its lease, as a dispose does, so the record names what it
-                // made for the next sweep.
-                if (Internal.DeviceManager.LockTakesRefusedHere != refused) keepLease = true;
+                // made for the next sweep. So does one whose device another
+                // program kept by refusing its removal.
+                if (Internal.DeviceManager.LockTakesRefusedHere != refused
+                    || Internal.DeviceManager.RemovalsLeftHere != left) keepLease = true;
                 throw;
             }
         }
@@ -954,6 +957,7 @@ public sealed class HMContext : IDisposable
             }
 
             long refused = Internal.DeviceManager.LockTakesRefusedHere;
+            long left = Internal.DeviceManager.RemovalsLeftHere;
             try
             {
                 Internal.DeviceOrchestrator.TeardownController(
@@ -965,7 +969,10 @@ public sealed class HMContext : IDisposable
                 // hold of the PnP lock cut short left devices present. The
                 // lease, and so the record's entry for them, stays until the
                 // process ends, and the next sweep removes them through it.
-                if (Internal.DeviceManager.LockTakesRefusedHere != refused)
+                // So does a teardown whose device another program kept by
+                // refusing its removal when the driver did not take it down.
+                if (Internal.DeviceManager.LockTakesRefusedHere != refused
+                    || Internal.DeviceManager.RemovalsLeftHere != left)
                     keepLease = true;
             }
         }
