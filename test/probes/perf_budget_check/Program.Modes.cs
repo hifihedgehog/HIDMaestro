@@ -520,6 +520,10 @@ internal static partial class Program
         // The budgets' non-inferiority rule (Compare.cs).
         foreach (var (name, ok, detail) in BudgetCompare.SelfTest()) Check("compare: " + name, ok, detail);
 
+        // signal-stress's paired comparison of each gate mode against the
+        // gate off (SignalStress.cs).
+        foreach (var (name, ok, detail) in StressSelfTest()) Check(name, ok, detail);
+
         // The input section's SeqNo across its wrap, written to this
         // process's own memory as a submit writes the section: no frame
         // stores 0, which the driver's look before a wait takes for a

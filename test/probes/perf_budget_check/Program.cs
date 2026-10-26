@@ -141,7 +141,9 @@
 //                  layout, offline
 //   install        InstallDriver, then proof that the driver installed is
 //                  the one this SDK embeds (exit 4 when it is not)
-//   selftest       the parsing the modes above share, offline
+//   selftest       the parsing the modes above share, and the paired
+//                  comparison signal-stress decides each gate mode with,
+//                  offline
 //   compare <before> <after>
 //                  offline: the budgets' non-inferiority rule over two
 //                  sides' measurements, the offline modes' launch lines or a
