@@ -16,10 +16,12 @@
 // is parked before a frame when its first look at the section came before
 // the frame was written. Each step is one critical section: a turn's start
 // (ReportLock and its read of the section), one take from the queue, the
-// put back, a completion, or a dispatch's look at the section, its park in
-// the queue, or its count and its second look. A reader's send and its
-// first look are one step, since nothing of the companion's sees the
-// request before its park. The SDK's store and its read of the count, and a
+// put back, a completion, or a dispatch's park in the queue, or its count
+// and its second look. A dispatch's own turn, its handle's catch-up and its
+// first look hold ReportLock together: a reader's send starts that turn,
+// and its end either completes the request with the last report, when the
+// reader's handle has not carried it, or looks at the section. Nothing else
+// of the companion's sees the request before its park. The SDK's store and its read of the count, and a
 // dispatch's increment and its second look, face each other with a full
 // fence between: either the SDK finds the count or the second look finds
 // the frame, so the increment and the look are one step, and the model
@@ -40,12 +42,16 @@
 //      looked before the frame of the last report, and none looked before
 //      the newest frame while that frame's state differs from the last
 //      report's.
-//   b. A completion carries a report whose frame was written after the
-//      request first looked.
+//   b. A completion from the queue carries a report whose frame was written
+//      after the request first looked. A completion at the send carries the
+//      last report, one the reader's handle had not carried.
 //   c. No reader gets an older report after a newer one.
 //   d. A turn completes requests in the order they were parked.
 //   e. Two reports in a row differ, and two GET_STATE answers with one
 //      packet number carry one state.
+//   f. With the doorbell, in a final state every reader has the last
+//      report: a frame written while a reader had no request parked still
+//      reaches it.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -62,27 +68,31 @@ internal static class ReadersModel
     // completes inside ReportLock, else after it. ChangeOnly: a report is a
     // change of state, else every new frame. RequeueHead: a turn puts the
     // requests it keeps back at the head of the queue, else at its tail.
+    // CatchUp: a dispatch completes its request with the last report when
+    // its handle has not carried it, else every request looks and parks.
     internal sealed record Variant(string Name, bool Gated, bool Kick, bool LateDrain, bool ParkRule, bool InLock, bool ChangeOnly,
-                                   bool RequeueHead, string Expect);
+                                   bool RequeueHead, bool CatchUp, string Expect);
 
     internal static readonly Variant[] Variants =
     {
-        new("this driver: a report on each change of state completes every request that looked before its frame, in order, inside ReportLock; a kick's turn completes a request the report missed",
-            true, true, true, true, true, true, true, ""),
+        new("this driver: a report on each change of state completes every request that looked before its frame, in order, inside ReportLock; a kick's turn completes a request the report missed; a dispatch catches its handle up",
+            true, true, true, true, true, true, true, true, ""),
         new("this driver under an SDK before 2.1.0: a doorbell on every frame",
-            false, true, true, true, true, true, true, ""),
+            false, true, true, true, true, true, true, true, ""),
         new("this driver without the kick",
-            true, false, true, true, true, true, true, "a"),
+            true, false, true, true, true, true, true, true, "a"),
         new("this driver with a kick's turn that completes nothing without a new report",
-            true, true, false, true, true, true, true, "a"),
+            true, true, false, true, true, true, true, true, "a"),
         new("this driver completing every request parked when a report comes, whenever it looked",
-            true, true, true, false, true, true, true, "b"),
+            true, true, true, false, true, true, true, true, "b"),
         new("this driver completing after ReportLock",
-            true, true, true, true, false, true, true, "c"),
+            true, true, true, true, false, true, true, true, "c"),
         new("this driver putting the requests it keeps back at the tail of the queue",
-            true, true, true, true, true, true, false, "d"),
+            true, true, true, true, true, true, false, true, "d"),
         new("this driver with a report on every new frame, changed or not",
-            true, true, true, true, true, false, true, "e"),
+            true, true, true, true, true, false, true, true, "e"),
+        new("this driver without the catch-up: xusb22's rule alone",
+            true, true, true, true, true, true, true, false, "f"),
     };
 
     // Requests: each reader's requests. States: each frame's state, in the
@@ -110,13 +120,16 @@ internal static class ReadersModel
     // completed while the thread that parked it is still before its second
     // look is sent again on another thread, so there is one thread more
     // than requests.
-    const int D_FREE = 0, D_FWD = 2, D_LOOK2 = 4;
+    // D_TURN: the request waits on its dispatch's turn, which ends in the
+    // catch-up or the first look.
+    const int D_FREE = 0, D_TURN = 1, D_FWD = 2, D_LOOK2 = 4;
     // A turn's steps: ReportLock and the read, the takes, the put back,
     // then the completions after ReportLock.
     const int T_IDLE = 0, T_START = 1, T_DRAIN = 2, T_REQUEUE = 3, T_DONE = 4;
-    // The turns: the pump's, GET_STATE's and the timer's, as ReportLock's
-    // holder.
-    const int PUMP = 1, POLL = 2, TIMER = 3;
+    // The turns: the pump's, GET_STATE's, the timer's and a dispatch's, as
+    // ReportLock's holder. One dispatch turn at a time: dispatches meet at
+    // ReportLock.
+    const int PUMP = 1, POLL = 2, TIMER = 3, DISP = 4;
 
     sealed class Turn
     {
@@ -156,7 +169,8 @@ internal static class ReadersModel
         public bool HaveReport;
         public int LastState, ReportFrame, Reports;
         public int Lock;                           // ReportLock: 0 free, else the turn's PUMP, POLL or TIMER
-        public Turn Pump = new(), Poll = new(), Timer = new();
+        public Turn Pump = new(), Poll = new(), Timer = new(), Disp = new();
+        public int DispThread = -1;                // the dispatch thread whose turn Disp is
         public int PollsLeft, TicksLeft;
         // ParkNo: the order requests entered the queue, among those out.
         public int[] Q = Array.Empty<int>(), LookFrame = Array.Empty<int>(), ParkNo = Array.Empty<int>();
@@ -173,7 +187,7 @@ internal static class ReadersModel
         public St Clone()
         {
             var s = (St)MemberwiseClone();
-            s.Pump = Pump.Clone(); s.Poll = Poll.Clone(); s.Timer = Timer.Clone();
+            s.Pump = Pump.Clone(); s.Poll = Poll.Clone(); s.Timer = Timer.Clone(); s.Disp = Disp.Clone();
             s.Q = (int[])Q.Clone(); s.LookFrame = (int[])LookFrame.Clone(); s.ParkNo = (int[])ParkNo.Clone();
             s.Dpc = (int[])Dpc.Clone(); s.Dq = (int[])Dq.Clone(); s.DFrame = (int[])DFrame.Clone();
             s.Queue = new List<int>(Queue); s.Got = (int[])Got.Clone();
@@ -186,7 +200,8 @@ internal static class ReadersModel
             b.Append(Written).Append(SdkPc).Append(Doorbell ? 'd' : '-').Append(Kick ? 'k' : '-').Append(Count).Append(',')
              .Append(HaveReport ? 'r' : '-').Append(LastState).Append(',').Append(ReportFrame).Append(',').Append(Reports).Append(',')
              .Append(Lock).Append(',').Append(PollsLeft).Append(',').Append(TicksLeft).Append('|');
-            Pump.Key(b); b.Append('|'); Poll.Key(b); b.Append('|'); Timer.Key(b); b.Append('|');
+            Pump.Key(b); b.Append('|'); Poll.Key(b); b.Append('|'); Timer.Key(b); b.Append('|'); Disp.Key(b); b.Append('|');
+            b.Append(DispThread < 0 ? -1 : Dq[DispThread]).Append('|');
             // Only the order of the parks matters: their ranks.
             var parked = ParkNo.Where(x => x >= 0).OrderBy(x => x).ToList();
             b.Append(string.Join(".", Q)).Append('|').Append(string.Join(".", LookFrame)).Append('|')
@@ -277,6 +292,10 @@ internal static class ReadersModel
                 return;
             }
         if (!sc.Doorbell) return;
+        if (s.HaveReport)
+            for (int r = 0; r < s.Got.Length; r++)
+                if (s.Got[r] != s.Reports)
+                    res.Break("f", $"reader {r} has report {s.Got[r]}, not the last, report {s.Reports} of frame {s.ReportFrame}, after{s.Trace}");
         foreach (int q in s.Queue)
         {
             if (s.HaveReport && s.LookFrame[q] < s.ReportFrame)
@@ -286,11 +305,13 @@ internal static class ReadersModel
         }
     }
 
-    static void Deliver(St s, int q, int report, int frame, int[] owner, Result res)
+    static void Deliver(St s, int q, int report, int frame, int[] owner, Result res, bool atSend = false)
     {
         int r = owner[q];
-        if (s.LookFrame[q] >= frame)
-            res.Break("b", $"request {q} of reader {r} looked at frame {s.LookFrame[q]} and got report {report} of frame {frame}, after{s.Trace}");
+        if (atSend ? report <= s.Got[r] : s.LookFrame[q] >= frame)
+            res.Break("b", atSend
+                ? $"request {q} of reader {r} got report {report} at its send, which its handle carried, after{s.Trace}"
+                : $"request {q} of reader {r} looked at frame {s.LookFrame[q]} and got report {report} of frame {frame}, after{s.Trace}");
         if (report < s.Got[r])
             res.Break("c", $"reader {r} got report {report} after report {s.Got[r]}, after{s.Trace}");
         s.Got[r] = Math.Max(s.Got[r], report);
@@ -298,8 +319,8 @@ internal static class ReadersModel
         s.ParkNo[q] = -1;
     }
 
-    static Turn TurnOf(St s, int who) => who == PUMP ? s.Pump : who == POLL ? s.Poll : s.Timer;
-    static string NameOf(int who) => who == PUMP ? "pump" : who == POLL ? "get-state" : "timer";
+    static Turn TurnOf(St s, int who) => who == PUMP ? s.Pump : who == POLL ? s.Poll : who == TIMER ? s.Timer : s.Disp;
+    static string NameOf(int who) => who == PUMP ? "pump" : who == POLL ? "get-state" : who == TIMER ? "timer" : "dispatch";
 
     static void Steps(St s, Variant v, Scenario sc, int[] owner, List<St> next, Result res)
     {
@@ -319,19 +340,28 @@ internal static class ReadersModel
         }
 
         // Each request its reader sends again once it completed, on a free
-        // thread, which looks at the section.
+        // thread, which looks at the section, or with the catch-up starts
+        // its dispatch's turn.
         for (int q = 0; q < s.Q.Length; q++)
         {
             if (s.Q[q] != Q_IDLE) continue;
             int d = Array.IndexOf(s.Dpc, D_FREE);
             if (d < 0) break;
+            if (v.CatchUp)
+            {
+                if (s.Disp.Pc != T_IDLE) break;
+                n = s.Clone(); n.Q[q] = Q_OUT; n.Dq[d] = q; n.Dpc[d] = D_TURN; n.DispThread = d;
+                n.Disp.Pc = T_START; n.Disp.Late = false;
+                n.Add($" r{owner[q]}:send{q}(t{d})"); next.Add(n);
+                continue;
+            }
             n = s.Clone(); n.Q[q] = Q_OUT; n.Dq[d] = q; n.DFrame[d] = n.Written; n.LookFrame[q] = n.Written; n.Dpc[d] = D_FWD;
             n.Add($" r{owner[q]}:send{q}(t{d})-f{n.Written}"); next.Add(n);
         }
         // Each dispatch thread's next step.
         for (int d = 0; d < s.Dpc.Length; d++)
         {
-            if (s.Dpc[d] == D_FREE) continue;
+            if (s.Dpc[d] == D_FREE || s.Dpc[d] == D_TURN) continue;
             int q = s.Dq[d];
             n = s.Clone();
             switch (s.Dpc[d])
@@ -371,11 +401,31 @@ internal static class ReadersModel
             if (s.TicksLeft > 0) { n = s.Clone(); n.TicksLeft--; n.Timer.Pc = T_START; n.Timer.Late = false; n.Add(" timer:tick"); next.Add(n); }
         }
         else TurnStep(s, v, sc, owner, TIMER, next, res);
+        // A dispatch's turn, started by its send.
+        if (s.Disp.Pc != T_IDLE) TurnStep(s, v, sc, owner, DISP, next, res);
     }
 
-    // The end of a turn under ReportLock: GET_STATE answers the last report.
-    static void EndInLock(St n, Turn t, int who, Result res)
+    // The end of a turn under ReportLock: GET_STATE answers the last report,
+    // and a dispatch completes its request with the last report when its
+    // handle has not carried it, else looks at the section.
+    static void EndInLock(St n, Turn t, int who, int[] owner, Result res)
     {
+        if (who == DISP)
+        {
+            int d = n.DispThread, q = n.Dq[d];
+            n.DispThread = -1;
+            if (n.HaveReport && n.Got[owner[q]] != n.Reports)
+            {
+                n.Add($" dispatch:catch-up{q}-report{n.Reports}");
+                Deliver(n, q, n.Reports, n.ReportFrame, owner, res, atSend: true);
+                n.Dpc[d] = D_FREE; n.Dq[d] = -1; n.DFrame[d] = 0;
+            }
+            else
+            {
+                n.Add($" dispatch:look{q}-f{n.Written}");
+                n.LookFrame[q] = n.Written; n.DFrame[d] = n.Written; n.Dpc[d] = D_FWD;
+            }
+        }
         if (who == POLL)
         {
             int state = n.HaveReport ? n.LastState : 0;
@@ -414,7 +464,7 @@ internal static class ReadersModel
                 }
                 bool drain = n.HaveReport && (fresh || (t.Late && v.LateDrain));
                 n.Add($" {name}:read-f{n.Written}{(fresh ? $"-report{n.Reports}" : "")}");
-                if (!drain) EndInLock(n, t, who, res);
+                if (!drain) EndInLock(n, t, who, owner, res);
                 else t.Pc = T_DRAIN;
                 next.Add(n);
                 return;
@@ -445,7 +495,7 @@ internal static class ReadersModel
                 if (v.RequeueHead) n.Queue.InsertRange(0, t.Kept); else n.Queue.AddRange(t.Kept);
                 n.Add($" {name}:put-back[{string.Join(".", t.Kept)}]");
                 t.Kept.Clear();
-                EndInLock(n, t, who, res);
+                EndInLock(n, t, who, owner, res);
                 next.Add(n);
                 return;
             }
@@ -484,7 +534,7 @@ internal static class ReadersModel
             bool ok = v.Expect == "" ? broken.Count == 0 && capped == null : broken.ContainsKey(v.Expect);
             if (!ok) bad++;
             Console.WriteLine($"[{(ok ? "PASS" : "FAIL")}] readers, {v.Name}: {states} states, {finals} final, " +
-                (broken.Count == 0 ? (capped != null ? $"no verdict: {capped} passed the state cap" : "invariants a to e hold") : $"broken: {string.Join(", ", broken.Keys)}") +
+                (broken.Count == 0 ? (capped != null ? $"no verdict: {capped} passed the state cap" : "invariants a to f hold") : $"broken: {string.Join(", ", broken.Keys)}") +
                 (v.Expect == "" ? "" : $" (expected {v.Expect} broken)"));
             foreach (var (inv, why) in broken) Console.WriteLine($"         ({inv}) {why}");
         }
