@@ -24,7 +24,7 @@ internal static class SendClock
     const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;
     const BindingFlags Static = BindingFlags.Static | BindingFlags.NonPublic;
 
-    sealed class Offline : IDisposable
+    internal sealed class Offline : IDisposable
     {
         public readonly HMController C;
         public readonly IntPtr View;

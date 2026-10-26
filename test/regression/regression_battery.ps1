@@ -2414,8 +2414,9 @@ function Scenario-Program-Equivalence {
 # status replies, bulk replies in read-sized chunks, the three overflow
 # rules, GET_REPORT of the layout that would go out, a clock counter, no
 # allocation per command or report, the Triton's IMU register, the clock's
-# grid under each missed-tick rule with start, stop and restart, and the
-# idle repeat's period, condition and timestamps.
+# grid under each missed-tick rule with start, stop and restart, the idle
+# repeat's period, condition and timestamps, and a repeat that sends the
+# state as submitted while the consumer rewrites its dictionary.
 function Scenario-Protocol-Engine {
     Invoke-Probe -Dir 'protocol_engine_check' -Exe 'ProtocolEngineCheck.exe' `
                  -Message 'the protocol engine or the device clock no longer behaves as its profile states (see probe stdout)'
