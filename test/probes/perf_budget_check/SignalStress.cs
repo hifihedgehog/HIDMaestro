@@ -12,11 +12,13 @@
 //   X axes, read through Windows.Gaming.Input, whose reading comes from the
 //   XUSB companion's WAIT_FOR_INPUT completions
 // Each submit is matched to the first reading that carries its count or a
-// later one. A submit not read within 250 ms fails the pass: a wakeup the
-// signal gate lost (docs/design/signal-gate.md) waits for the worker's
-// 500 ms timeout. A reading whose count is above every count submitted by
-// then fails the pass too, so a count read in the wrong place fails rather
-// than matching. Until that check the DualShock 4's count went in at data
+// later one. A submit not read within 250 ms fails the pass: a frame whose
+// wakeup the signal gate lost (docs/design/signal-gate.md) waits for the
+// worker's 500 ms timeout when the SDK left it in the handoff, and for the
+// next signal, an idle repeat or the program's next submit, when it did
+// not (driver.c, the worker's wait). A reading whose count is above every
+// count submitted by then fails the pass too, so a count read in the wrong
+// place fails rather than matching. Until that check the DualShock 4's count went in at data
 // bytes 40 to 43, read back as 256 times itself, and every submit matched
 // the next new report of any frame. A reading whose count is below the one
 // read before it, a frame that came after a newer one, fails the pass as
