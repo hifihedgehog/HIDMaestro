@@ -138,6 +138,30 @@ C_ASSERT(sizeof(HM_FEATURE_ENTRY) == HM_FEATURE_ENTRY_SIZE);
 /*  Device context                                                     */
 /* ------------------------------------------------------------------ */
 
+/* Shared memory layout: written by user-mode, read by driver
+ * Contains BOTH native HID report data AND GIP data for XUSB GET_STATE.
+ * Total size: 4 + 4 + 256 + 14 = 278 bytes.
+ *
+ * Data[] is 256 bytes to cover every HID input report size in the profile
+ * database without truncation. DualSense BT report 0x31 is 78 bytes;
+ * Switch Pro standard input reports can run to ~64; gyro/accelerometer
+ * passthrough on these pads writes motion values LATE in the report, so
+ * the prior 64-byte pipe clipped exactly the motion fields consumers
+ * (Dolphin, Cemu, yuzu/Citron, RetroArch) need. 256 matches the mirror
+ * in SHARED_OUTPUT and gives headroom for custom profile descriptors. */
+#pragma pack(push, 1)
+typedef struct _HIDMAESTRO_SHARED_INPUT {
+    volatile ULONG  SeqNo;           /* Incremented each write */
+    ULONG           DataSize;        /* HID input report data size (excluding Report ID) */
+    UCHAR           Data[256];       /* HID input report data (native descriptor format) */
+    UCHAR           GipData[14];     /* GIP-format data for XUSB GET_STATE (always 14 bytes) */
+    /* v1.3.5: vendor-blob mode-switch path. Driver passes
+     * ExtendedReportData verbatim when ExtendedReportSize > 0. */
+    ULONG           ExtendedReportSize;
+    UCHAR           ExtendedReportData[80];
+} HIDMAESTRO_SHARED_INPUT, *PHIDMAESTRO_SHARED_INPUT;
+#pragma pack(pop)
+
 typedef struct _DEVICE_CONTEXT {
 
     WDFDEVICE   Device;
@@ -216,12 +240,15 @@ typedef struct _DEVICE_CONTEXT {
      * a zeroed section or none. Kept across OwnerGone and the recycle, where
      * v2.0.3 forgot the SeqNo, unless they drop a frame no read carried, as
      * v2.0.3 dropped it. A frame the driver does not send leaves
-     * SharedMemSeqNo and the cache as they were. Worker thread only. */
+     * SharedMemSeqNo and the cache as they were. The worker reads the
+     * section into Frames[SeenFrame ^ 1] and a frame it keeps flips
+     * SeenFrame, so the frame read last stays in Frames[SeenFrame] with no
+     * copy. Worker thread only. */
     ULONG   SeenSeqNo;
     ULONG   SeenDataSize;
     ULONG   SeenExtSize;
-    UCHAR   SeenData[256];
-    UCHAR   SeenExt[80];
+    ULONG   SeenFrame;
+    HIDMAESTRO_SHARED_INPUT Frames[2];
 
     /* 2.1.0: the worker has read a frame since the device context's add, so
      * a frame read now was written after the context before it went
@@ -467,30 +494,6 @@ typedef struct _DEVICE_CONTEXT {
     WCHAR   PidStateMappingName[64]; /* e.g. L"Global\\HIDMaestroPidState0" */
 
 } DEVICE_CONTEXT, *PDEVICE_CONTEXT;
-
-/* Shared memory layout: written by user-mode, read by driver
- * Contains BOTH native HID report data AND GIP data for XUSB GET_STATE.
- * Total size: 4 + 4 + 256 + 14 = 278 bytes.
- *
- * Data[] is 256 bytes to cover every HID input report size in the profile
- * database without truncation. DualSense BT report 0x31 is 78 bytes;
- * Switch Pro standard input reports can run to ~64; gyro/accelerometer
- * passthrough on these pads writes motion values LATE in the report, so
- * the prior 64-byte pipe clipped exactly the motion fields consumers
- * (Dolphin, Cemu, yuzu/Citron, RetroArch) need. 256 matches the mirror
- * in SHARED_OUTPUT and gives headroom for custom profile descriptors. */
-#pragma pack(push, 1)
-typedef struct _HIDMAESTRO_SHARED_INPUT {
-    volatile ULONG  SeqNo;           /* Incremented each write */
-    ULONG           DataSize;        /* HID input report data size (excluding Report ID) */
-    UCHAR           Data[256];       /* HID input report data (native descriptor format) */
-    UCHAR           GipData[14];     /* GIP-format data for XUSB GET_STATE (always 14 bytes) */
-    /* v1.3.5: vendor-blob mode-switch path. Driver passes
-     * ExtendedReportData verbatim when ExtendedReportSize > 0. */
-    ULONG           ExtendedReportSize;
-    UCHAR           ExtendedReportData[80];
-} HIDMAESTRO_SHARED_INPUT, *PHIDMAESTRO_SHARED_INPUT;
-#pragma pack(pop)
 
 /* Delivery acknowledgement, Global\HIDMaestroInputAck<N> (issue #67). A
  * separate section, so no existing layout changes: readers of the input,

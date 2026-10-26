@@ -1835,9 +1835,8 @@ KeepLiveFeatureLocked(_In_ PDEVICE_CONTEXT ctx, _In_ const HIDMAESTRO_SHARED_INP
 }
 
 /* 2.1.0: the frame read last (SeenSeqNo): the data lane's and the extended
- * lane's sizes, clamped as the frame path clamps them, and their bytes. */
-C_ASSERT(sizeof(((PDEVICE_CONTEXT)0)->SeenData) == sizeof(((PHIDMAESTRO_SHARED_INPUT)0)->Data));
-C_ASSERT(sizeof(((PDEVICE_CONTEXT)0)->SeenExt) == sizeof(((PHIDMAESTRO_SHARED_INPUT)0)->ExtendedReportData));
+ * lane's sizes, clamped as the frame path clamps them. Its bytes are
+ * Frames[SeenFrame], the buffer the read before this one filled. */
 static ULONG
 SeenLength(_In_ ULONG size, _In_ ULONG cap)
 {
@@ -1857,11 +1856,15 @@ SameAsSeen(_In_ PDEVICE_CONTEXT ctx, _In_ const HIDMAESTRO_SHARED_INPUT *s)
 {
     ULONG n = SeenLength(s->DataSize, sizeof(s->Data));
     ULONG x = SeenLength(s->ExtendedReportSize, sizeof(s->ExtendedReportData));
+    const HIDMAESTRO_SHARED_INPUT *seen = &ctx->Frames[ctx->SeenFrame];
     return s->SeqNo == ctx->SeenSeqNo && n == ctx->SeenDataSize && x == ctx->SeenExtSize
-        && RtlEqualMemory(s->Data, ctx->SeenData, n)
-        && RtlEqualMemory(s->ExtendedReportData, ctx->SeenExt, x);
+        && RtlEqualMemory(s->Data, seen->Data, n)
+        && RtlEqualMemory(s->ExtendedReportData, seen->ExtendedReportData, x);
 }
 
+/* The frame just read, in Frames[SeenFrame ^ 1], becomes the frame read
+ * last by flipping SeenFrame. No copy: the next read fills the other
+ * buffer. */
 static VOID
 KeepSeen(_In_ PDEVICE_CONTEXT ctx, _In_ const HIDMAESTRO_SHARED_INPUT *s)
 {
@@ -1869,8 +1872,7 @@ KeepSeen(_In_ PDEVICE_CONTEXT ctx, _In_ const HIDMAESTRO_SHARED_INPUT *s)
     ctx->SeenSeqNo = s->SeqNo;
     ctx->SeenDataSize = SeenLength(s->DataSize, sizeof(s->Data));
     ctx->SeenExtSize = SeenLength(s->ExtendedReportSize, sizeof(s->ExtendedReportData));
-    RtlCopyMemory(ctx->SeenData, s->Data, ctx->SeenDataSize);
-    RtlCopyMemory(ctx->SeenExt, s->ExtendedReportData, ctx->SeenExtSize);
+    ctx->SeenFrame ^= 1;
 }
 
 /* 2.1.0: OwnerGone and the recycle keep the frame read last, so a wakeup
@@ -1914,10 +1916,12 @@ OwnerEnded(_In_ PDEVICE_CONTEXT ctx)
 static void
 ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
 {
-    HIDMAESTRO_SHARED_INPUT shared;
-    if (!ReadSharedInput(ctx, &shared)) return;
+    /* The section's one copy per frame goes into the buffer that does not
+     * hold the frame read last (KeepSeen). */
+    HIDMAESTRO_SHARED_INPUT *frame = &ctx->Frames[ctx->SeenFrame ^ 1];
+    if (!ReadSharedInput(ctx, frame)) return;
 
-    ULONG seqNo = shared.SeqNo;
+    ULONG seqNo = frame->SeqNo;
     /* A frame is new when it is not the last one read, whether a signal or
      * a handed-over frame woke this read (TakeHandoff). 2.1.0: the SeqNo and
      * the data (SameAsSeen). One that repeats the SeqNo with other data,
@@ -1931,7 +1935,7 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
      * frame, and so does this driver: a frame kept across the reset gives
      * way to it. The next wakeup that finds the other data reads a frame
      * skipped. */
-    if (SameAsSeen(ctx, &shared)) return; /* No new data */
+    if (SameAsSeen(ctx, frame)) return; /* No new data */
     /* 2.1.0: a device context's first read takes a frame on SeqNo 0, which
      * a program before 2.1.0 stores at its wrap, for no news, as v2.0.3's
      * SeenSeqNo, 0 from the add, took it: the context before this one may
@@ -1956,7 +1960,7 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
      * caller no longer sees that program's last report, but no READ_REPORT
      * completes with the all-zero one. A program before 2.1.0 stores 0 with
      * its frame at every 2^31st frame, and that frame goes on. */
-    BOOLEAN zeroed = seqNo == 0 && shared.DataSize == 0 && shared.ExtendedReportSize == 0;
+    BOOLEAN zeroed = seqNo == 0 && frame->DataSize == 0 && frame->ExtendedReportSize == 0;
     /* 2.1.0: a next program counting from 0 started since the last read
      * when, after a frame, the worker reads a zeroed section, a frame that
      * repeats that frame's SeqNo with other data, or one whose SeqNo comes
@@ -1976,7 +1980,7 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
     if (!zeroed) ctx->ReadAFrame = TRUE;
     /* v2.0.0: the worker's stale-wakeup count reads SeenSeqNo, since a
      * frame the driver does not send leaves SharedMemSeqNo alone. */
-    KeepSeen(ctx, &shared);
+    KeepSeen(ctx, frame);
     if (restart && ctx->OwnerPipe == NULL) ctx->RestartSeen = TRUE;
     /* NOTE: SharedMemSeqNo is advanced LATER, under InputLock, together
      * with the InputReport cache write (see the completion block below).
@@ -1988,9 +1992,9 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
     /* v2.0.0: with LiveFeatureReport the data lane is the answer to that
      * feature report, never an input report. A frame that carries nothing
      * else only replaces the answer. */
-    if (ctx->LiveFeatureReport != 0 && shared.ExtendedReportSize == 0) {
+    if (ctx->LiveFeatureReport != 0 && frame->ExtendedReportSize == 0) {
         AcquireSRWLockExclusive(&ctx->InputLock);
-        KeepLiveFeatureLocked(ctx, &shared);
+        KeepLiveFeatureLocked(ctx, frame);
         ReleaseSRWLockExclusive(&ctx->InputLock);
         return;
     }
@@ -2004,7 +2008,7 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
      * Sony BT Report 0x31 with CRC32). Pass through verbatim. */
     UCHAR inputReport[HIDMAESTRO_MAX_REPORT_SIZE];
 
-    ULONG dataLen = shared.DataSize;
+    ULONG dataLen = frame->DataSize;
     BOOLEAN hasReportId = (ctx->FirstInputReportId != 0);
     ULONG expectedSize = ctx->InputReportByteLength > 0 ? ctx->InputReportByteLength : 17;
     /* Only the bytes that go out: every path below sends at most
@@ -2018,22 +2022,22 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
         maxData = expectedSize;
     }
     if (dataLen > maxData) dataLen = maxData;
-    if (dataLen > sizeof(shared.Data)) dataLen = sizeof(shared.Data);
+    if (dataLen > sizeof(frame->Data)) dataLen = sizeof(frame->Data);
 
     ULONG inputSize;
     if (hasReportId) {
         inputReport[0] = ctx->FirstInputReportId;
-        RtlCopyMemory(inputReport + 1, shared.Data, dataLen);
+        RtlCopyMemory(inputReport + 1, frame->Data, dataLen);
         inputSize = expectedSize; /* Always send full expected length */
     } else {
-        RtlCopyMemory(inputReport, shared.Data, dataLen);
+        RtlCopyMemory(inputReport, frame->Data, dataLen);
         inputSize = expectedSize; /* Always send full expected length */
     }
 
     /* v1.3.5: vendor-blob mode-switch path. When the SDK arms extended
      * emission (Sony BT post-handshake, ExtendedReportSize > 0), it has
      * already written the FULL RID-included extended report (e.g. 78-byte
-     * Sony BT Report 0x31 with CRC32) into shared.ExtendedReportData.
+     * Sony BT Report 0x31 with CRC32) into frame->ExtendedReportData.
      * Overwrite the legacy-encoded inputReport/inputSize with the
      * pass-through bytes: the legacy encode above is harmless work for
      * the few-microsecond window before the overwrite, which keeps the
@@ -2045,17 +2049,17 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
      * taken: see issue #21). For the common case (ExtendedReportSize=0)
      * this is one cmp + jz; on modern x86 with branch prediction it's
      * effectively free. */
-    if (shared.ExtendedReportSize > 0
-        && shared.ExtendedReportSize <= sizeof(shared.ExtendedReportData)
-        && shared.ExtendedReportSize <= sizeof(inputReport))
+    if (frame->ExtendedReportSize > 0
+        && frame->ExtendedReportSize <= sizeof(frame->ExtendedReportData)
+        && frame->ExtendedReportSize <= sizeof(inputReport))
     {
         /* v2.0.0: only at its report's declared length. Any other frame
          * is not sent, and the last sent report stands. */
-        if (!ExtendedFrameDeclared(ctx, shared.ExtendedReportData, shared.ExtendedReportSize))
+        if (!ExtendedFrameDeclared(ctx, frame->ExtendedReportData, frame->ExtendedReportSize))
             return;
         RtlZeroMemory(inputReport, inputSize);
-        RtlCopyMemory(inputReport, shared.ExtendedReportData, shared.ExtendedReportSize);
-        inputSize = shared.ExtendedReportSize;
+        RtlCopyMemory(inputReport, frame->ExtendedReportData, frame->ExtendedReportSize);
+        inputSize = frame->ExtendedReportSize;
     }
 
     /* Complete exactly ONE pending READ_REPORT per shared-memory state
@@ -2096,7 +2100,7 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
             ctx->PolledReportReady = TRUE;
         }
         if (ctx->LiveFeatureReport != 0)
-            KeepLiveFeatureLocked(ctx, &shared);
+            KeepLiveFeatureLocked(ctx, frame);
         /* Publish the seqno LAST, under the same lock IOCTL_HID_READ_REPORT
          * takes, so a concurrent read sees either the old seqno (and parks)
          * or the new seqno paired with the freshly-written InputReport.
