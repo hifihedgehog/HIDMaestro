@@ -23,13 +23,19 @@ internal static class ReplyOverReport
     {
         public readonly List<byte[]> Read = new();
         public int Waits;
+        /// <summary>Runs once, inside the next write, on the writing thread.</summary>
+        public Action? OnWrite;
         byte[]? _frame;
         uint _seq, _delivered;
 
         public uint Write(byte[] data, int dataLen, byte[] extended, int extendedLen)
         {
             _frame = extended[..extendedLen];
-            return ++_seq;
+            uint seq = ++_seq;
+            var during = OnWrite;
+            OnWrite = null;
+            during?.Invoke();
+            return seq;
         }
 
         /// <summary>The driver reads the frame the section holds.</summary>
@@ -77,6 +83,7 @@ internal static class ReplyOverReport
         Console.WriteLine("-- a reply and the report before it, on the input section's one frame");
         ChangeReport();
         ClockReport();
+        ModeSwitchInsideTick();
     }
 
     static void ChangeReport()
@@ -101,6 +108,36 @@ internal static class ReplyOverReport
             var replies = ch.Read.Count(f => f.Length > 0 && f[0] == 0x21);
             Check("in mode 0x3F a reply waits for the simple report before it, so the host reads the change",
                   simple.Count == 2 && simple[1][1] != simple[0][1] && replies == 2,
+                  $"read {string.Join(" ", ch.Read.Select(f => $"{f[0]:X2}:{Convert.ToHexString(f.AsSpan(1, Math.Min(2, f.Length - 1)))}"))}");
+        }
+    }
+
+    /// <summary>A subcommand that leaves mode 0x3F runs on the output thread
+    /// while a tick of the device clock sends a 0x3F report, between the
+    /// report's build and the tick's look at its send rule, the moment its
+    /// write to the section stands for here. The report was built on
+    /// change, so the subcommand's reply waits for the driver to read it.
+    /// Read as the rule of the layout selected after the switch, on the
+    /// clock, the report went unheld and the reply took its frame.</summary>
+    static void ModeSwitchInsideTick()
+    {
+        var (host, ch) = Make(7975);
+        using (host)
+        {
+            host.OnOutput(Subcommand(0x03, 0x3F), 49, ProtocolHost.DeliveryTimeoutMs);
+            ch.DriverReads();
+            host.Tick(0);
+            ch.DriverReads();
+            var block = host.Engine.CopyStateBlock();
+            block[2] |= 0x08;
+            host.OnState(block);
+            ch.OnWrite = () => host.Engine.HandleCommand(Subcommand(0x03, 0x30), System.Diagnostics.Stopwatch.GetTimestamp());
+            host.Tick(0);
+            host.Pump(ProtocolHost.DeliveryTimeoutMs);
+            ch.DriverReads();
+            var simple = ch.Read.Where(f => f.Length > 0 && f[0] == 0x3F).ToList();
+            Check("a 0x3F report built before a subcommand leaves mode 0x3F holds the subcommand's reply until the host reads it",
+                  simple.Count == 2 && simple[1][1] != simple[0][1] && ch.Read[^1][0] == 0x21,
                   $"read {string.Join(" ", ch.Read.Select(f => $"{f[0]:X2}:{Convert.ToHexString(f.AsSpan(1, Math.Min(2, f.Length - 1)))}"))}");
         }
     }

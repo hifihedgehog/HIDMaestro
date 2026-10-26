@@ -103,8 +103,10 @@ internal sealed unsafe class ProtocolHost : IDisposable
         public int FeatureId = -1;
         public byte[] Feature = Array.Empty<byte>();
         public int FeatureLength;
+        // The layout a tick's report was built in, chosen with the build.
+        public int Layout = -1;
         public int Visit<TSet>(ref TSet set) where TSet : struct, IReportSet =>
-            Submit ? Engine.Submit(ref set, Block, Buffer, FeatureId, Feature, out FeatureLength) : Engine.BuildNext(ref set, Buffer);
+            Submit ? Engine.Submit(ref set, Block, Buffer, FeatureId, Feature, out FeatureLength) : Engine.BuildNext(ref set, Buffer, out Layout);
     }
 
     public ProtocolHost(ControllerProfile profile, CompiledProtocol protocol, int index, IHostChannel channel, object sendLock)
@@ -185,8 +187,10 @@ internal sealed unsafe class ProtocolHost : IDisposable
             uint seq = _channel.Write(_feature, 0, _clockBuilder.Buffer, n);
             // A layout on change sends its bytes once, so the next reply
             // waits for this report. A layout on the clock sends again on
-            // the next tick.
-            int layout = Engine.SelectedLayout;
+            // the next tick. The rule is the report's own layout's, chosen
+            // as it was built: OnOutput runs commands outside _sendLock, and
+            // one can select another layout before this line.
+            int layout = _clockBuilder.Layout;
             if (layout >= 0 && Protocol.Model.Layouts[layout].Send == SendRule.Change) NoteReportLocked(seq);
         }
     }

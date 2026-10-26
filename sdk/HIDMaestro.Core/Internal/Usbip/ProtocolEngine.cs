@@ -783,7 +783,7 @@ internal sealed unsafe class ProtocolEngine
         lock (_sync)
         {
             if (block.Length == _m.StateSize) block.CopyTo(_state);
-            int n = BuildLocked(ref set, dst, SendRule.Submit, commit: true);
+            int n = BuildLocked(ref set, dst, SendRule.Submit, commit: true, out _);
             featureLength = featureId >= 0 ? LiveFeatureLocked((byte)featureId, feature) : -1;
             return n;
         }
@@ -818,7 +818,17 @@ internal sealed unsafe class ProtocolEngine
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public int BuildNext<TSet>(ref TSet set, Span<byte> dst) where TSet : struct, IReportSet
     {
-        lock (_sync) return BuildLocked(ref set, dst, SendRule.Clock, commit: true);
+        lock (_sync) return BuildLocked(ref set, dst, SendRule.Clock, commit: true, out _);
+    }
+
+    /// <summary>The same, with the layout the report was built in, or -1,
+    /// chosen under the same hold of the lock: a command on another thread
+    /// can select another layout the moment the lock is free, and the send
+    /// rule that applies to the report is its own layout's.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    public int BuildNext<TSet>(ref TSet set, Span<byte> dst, out int layout) where TSet : struct, IReportSet
+    {
+        lock (_sync) return BuildLocked(ref set, dst, SendRule.Clock, commit: true, out layout);
     }
 
     /// <summary>Whether a tick now would send a report, for a tick that finds
@@ -826,7 +836,7 @@ internal sealed unsafe class ProtocolEngine
     /// Counts nothing.</summary>
     public bool TickWouldSend<TSet>(ref TSet set) where TSet : struct, IReportSet
     {
-        lock (_sync) return BuildLocked(ref set, _peek, SendRule.Clock, commit: false) > 0;
+        lock (_sync) return BuildLocked(ref set, _peek, SendRule.Clock, commit: false, out _) > 0;
     }
 
     /// <summary>The report a SubmitState sends, built and counted, when the
@@ -834,7 +844,7 @@ internal sealed unsafe class ProtocolEngine
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public int BuildOnSubmit<TSet>(ref TSet set, Span<byte> dst) where TSet : struct, IReportSet
     {
-        lock (_sync) return BuildLocked(ref set, dst, SendRule.Submit, commit: true);
+        lock (_sync) return BuildLocked(ref set, dst, SendRule.Submit, commit: true, out _);
     }
 
     /// <summary>Whether the selected layout goes out on submit.</summary>
@@ -854,11 +864,12 @@ internal sealed unsafe class ProtocolEngine
     /// goes out on <paramref name="occasion"/>: a tick sends a clock layout,
     /// and a change layout whose bytes differ from the ones it last sent, and
     /// a submit sends a submit layout. With <paramref name="commit"/> the
-    /// report counts as sent. Returns its length, or 0.</summary>
+    /// report counts as sent. Returns its length, or 0, and the selected
+    /// layout, or -1, in <paramref name="layout"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private int BuildLocked<TSet>(ref TSet set, Span<byte> dst, SendRule occasion, bool commit) where TSet : struct, IReportSet
+    private int BuildLocked<TSet>(ref TSet set, Span<byte> dst, SendRule occasion, bool commit, out int layout) where TSet : struct, IReportSet
     {
-        int layout = SelectLocked();
+        layout = SelectLocked();
         if (layout < 0) return 0;
         var form = _m.Layouts[layout];
         var send = form.Send;
