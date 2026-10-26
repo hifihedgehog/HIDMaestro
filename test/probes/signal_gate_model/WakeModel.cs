@@ -32,9 +32,15 @@
 //      a frame past the SeqNo wrap.
 //   b. No frame and no release frame goes to two reads.
 //   c. Each frame a read takes is the one cached at that moment.
-// Counted for the record, not checked: completions that land in another
-// order than their takes, and acknowledgements a READ_REPORT makes for a
-// frame whose completion has not happened yet.
+//   d. No completion carries an older report than one completed before it:
+//      reads complete in the order their reports were taken. HID class's
+//      completion routine runs on the completing thread, so a completion
+//      out of that order puts an older frame in HID class's buffer after a
+//      newer one.
+//   e. No READ_REPORT acknowledges a frame before the read that carries it
+//      completed: AckPending is the frame HID class has (issue #67).
+// Through 81e1fe40 a read completed after InputLock, which breaks d and e.
+// This driver completes it inside the critical section of its take.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -47,8 +53,10 @@ internal static class WakeModel
     // cache again. ByCount: that look takes a frame cached since its first
     // look (InputPublishCount), else only one above the last delivered.
     // RequeueLook: a thread that put a read back looks again for anything
-    // cached since it found nothing to take.
-    internal sealed record Variant(string Name, bool PublishFirst, bool LookAgain, bool ByCount, bool ExpectBroken, bool RequeueLook = true);
+    // cached since it found nothing to take. CompleteInLock: a read
+    // completes in the same critical section of InputLock as its take.
+    internal sealed record Variant(string Name, bool PublishFirst, bool LookAgain, bool ByCount, bool ExpectBroken, bool RequeueLook = true,
+                                   bool CompleteInLock = false);
 
     internal static readonly Variant[] Variants =
     {
@@ -57,7 +65,8 @@ internal static class WakeModel
         new("the worker takes a read, then caches; a read parks and looks again", false, true, true, true),
         new("the worker caches, then takes a read; a read looks again under the greater-than test alone", true, true, false, true),
         new("the worker caches, then takes a read; a read parks and looks again for a frame cached since, and a read put back does not", true, true, true, true, false),
-        new("this driver: the worker caches, then takes a read; a read parks, or is put back, and looks again for a frame cached since", true, true, true, false),
+        new("81e1fe40: the worker caches, then takes a read; a read parks, or is put back, and looks again for a frame cached since; a read completes after InputLock", true, true, true, true),
+        new("this driver: the worker caches, then takes a read; a read parks, or is put back, and looks again for a frame cached since; a read completes under InputLock", true, true, true, false, CompleteInLock: true),
     };
 
     // Seqs: each frame's SeqNo in the order the SDK writes them (a smaller
@@ -292,6 +301,8 @@ internal static class WakeModel
         if (s.TakeNo[item] < s.LastDoneTake)
         {
             if (r.Inversions++ == 0) r.InversionTrace = s.Trace;
+            if (r.Broken == null)
+                r.Broken = $"(d) {Item(sc, item)} completed after a report taken later, after{s.Trace}";
         }
         else s.LastDoneTake = s.TakeNo[item];
         s.R[read] = R_IDLE;
@@ -336,13 +347,24 @@ internal static class WakeModel
                 n = s.Clone();
                 if (n.AckPending != 0)
                 {
-                    if (n.Count[n.AckPending] == 0 && r.EarlyAcks++ == 0) r.EarlyAckTrace = s.Trace + $" t{d}:ack";
+                    if (n.Count[n.AckPending] == 0)
+                    {
+                        if (r.EarlyAcks++ == 0) r.EarlyAckTrace = s.Trace + $" t{d}:ack";
+                        if (r.Broken == null)
+                            r.Broken = $"(e) a READ_REPORT acknowledged {Item(sc, n.AckPending)} before the read carrying it completed, after{s.Trace} t{d}:ack";
+                    }
                     n.AckPending = 0;
                 }
                 int item = 0;
                 if (n.RelNext < n.RelCount) item = Taken(n, Release(sc, n.RelNext++));
                 else if (n.Cache != 0 && n.Pending && n.SharedSeq > n.LastDel) item = TakeFrame(n, r);
-                if (item != 0) { n.Ditem[d] = item; n.Dpc[d] = D_SELF; n.Trace += $" t{d}:check-takes-{Item(sc, item).Replace(' ', '-')}"; }
+                if (item != 0 && v.CompleteInLock)
+                {
+                    n.Trace += $" t{d}:check-takes-and-completes-{Item(sc, item).Replace(' ', '-')}";
+                    Complete(n, sc, read, item, r);
+                    n.Dpc[d] = D_FREE; n.Dread[d] = -1;
+                }
+                else if (item != 0) { n.Ditem[d] = item; n.Dpc[d] = D_SELF; n.Trace += $" t{d}:check-takes-{Item(sc, item).Replace(' ', '-')}"; }
                 else { n.Dpub[d] = n.PubCount; n.Dpc[d] = D_PARK; n.Trace += $" t{d}:check-none"; }
                 next.Add(n);
                 break;
@@ -370,6 +392,14 @@ internal static class WakeModel
                 n = s.Clone();
                 int item = Take(n, sc, r);
                 if (item == 0) { n.Dtp[d] = n.PubCount; n.Dpc[d] = D_REQ; n.Trace += $" t{d}:take-none"; }
+                else if (v.CompleteInLock)
+                {
+                    int taken = n.Dret[d];
+                    n.Trace += $" t{d}:take-and-complete-{Item(sc, item).Replace(' ', '-')}";
+                    Complete(n, sc, taken, item, r);
+                    n.Dret[d] = -1;
+                    n.Dpc[d] = Deliverable(n) ? D_RET : D_FREE; if (n.Dpc[d] == D_FREE) n.Dread[d] = -1;
+                }
                 else { n.Ditem[d] = item; n.Dcont[d] = Deliverable(n); n.Dpc[d] = D_DONE; n.Trace += $" t{d}:take-{Item(sc, item).Replace(' ', '-')}"; }
                 next.Add(n);
                 break;
@@ -436,6 +466,13 @@ internal static class WakeModel
                 n = s.Clone();
                 int item = Take(n, sc, r);
                 if (item == 0) { n.Wtp = n.PubCount; n.Wpc = W_REQ; n.Trace += " w:take-none"; }
+                else if (v.CompleteInLock)
+                {
+                    n.Trace += $" w:take-and-complete-{Item(sc, item).Replace(' ', '-')}";
+                    Complete(n, sc, n.Wret, item, r);
+                    n.Wret = -1;
+                    n.Wpc = Deliverable(n) ? W_RET : W_IDLE;
+                }
                 else { n.Witem = item; n.Wcont = Deliverable(n); n.Wpc = W_DONE; n.Trace += $" w:take-{Item(sc, item).Replace(' ', '-')}"; }
                 next.Add(n);
                 break;
@@ -542,17 +579,18 @@ internal static class WakeModel
             bool ok = capped == null && (broke != null) == v.ExpectBroken;
             if (!ok) bad++;
             Console.WriteLine($"[{(ok ? "PASS" : "FAIL")}] wake, {v.Name}: {states} states, {finals} final, " +
-                              (capped != null ? $"no verdict: {capped} passed the state cap" : broke != null ? "an invariant broken" : "invariants a, b and c hold") +
+                              (capped != null ? $"no verdict: {capped} passed the state cap" : broke != null ? "an invariant broken" : "invariants a to e hold") +
                               (v.ExpectBroken ? " (expected broken)" : ""));
             if (broke != null) Console.WriteLine($"         {broke}");
             Console.WriteLine($"         for the record: {inversions} completion(s) after a later take, {earlyAcks} acknowledgement(s) before the frame's completion");
             if (!v.ExpectBroken && invTrace != null) Console.WriteLine($"         first inversion after{invTrace}");
             if (!v.ExpectBroken && ackTrace != null) Console.WriteLine($"         first early acknowledgement after{ackTrace}");
         }
-        // The same counts for b0fb7dc9's read path over every scenario, its
-        // broken invariant aside: whether those orders predate this lane.
+        // The same counts over every scenario and every order, the broken
+        // invariant aside, for b0fb7dc9's read path, which v2.0.3 shares, and
+        // for 81e1fe40's: whether the orders d and e forbid predate the lane.
+        foreach (var v in new[] { Variants[0], Variants[Variants.Length - 2] })
         {
-            var v = Variants[0];
             int inversions = 0, earlyAcks = 0;
             string? invTrace = null, ackTrace = null;
             foreach (var sc in Scenarios)

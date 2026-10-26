@@ -19,8 +19,9 @@
 //
 // Usage:
 //   SignalGateModel [frames]   the fence and companion variants at frames
-//     (3 unless given), the read path's parks (WakeModel), then the
-//     delivery check at one frame a program:
+//     (3 unless given), the read path's parks (WakeModel), the companion's
+//     readers (ReadersModel), then the delivery check at one frame a
+//     program:
 //     this driver's rules, then each rule taken away. Exit 0 when every
 //     verdict is the expected one.
 //   SignalGateModel check <frames> <rule> [--shard k/n] [-j N] [--index i]
@@ -37,9 +38,11 @@
 //   SignalGateModel fences [frames]   round 6's SDK write with a store
 //     buffer, against the worker and the companion (Round6FenceModel).
 //   SignalGateModel wake [frames]   the companion's pump against
-//     WAIT_FOR_INPUT (CompanionModel), then the HID read path: a
-//     READ_REPORT that parks while the worker caches a frame or OwnerGone
-//     queues a release frame (WakeModel).
+//     WAIT_FOR_INPUT (CompanionModel), the HID read path: a READ_REPORT
+//     that parks while the worker caches a frame or OwnerGone queues a
+//     release frame (WakeModel), then the companion's readers, each a
+//     handle with its own requests (ReadersModel).
+//   SignalGateModel readers   the companion's readers alone (ReadersModel).
 //   SignalGateModel outcomes <frames> <scenario> [v203]   one driver's
 //     outcomes in a scenario, unpaired.
 using System;
@@ -72,10 +75,14 @@ internal static class Program
         // companion, with the SDK's stores in a store buffer.
         if (args.Length >= 1 && args[0] == "fences")
             return RunFences(args.Length > 1 ? int.Parse(args[1]) : 3) == 0 ? 0 : 1;
-        // wake [frames]: the read path's parks (WakeModel) and the
-        // companion's pump against WAIT_FOR_INPUT (CompanionModel).
+        // wake [frames]: the read path's parks (WakeModel), the companion's
+        // pump against WAIT_FOR_INPUT (CompanionModel) and its readers
+        // (ReadersModel).
+        // readers: the companion's readers alone (ReadersModel).
+        if (args.Length >= 1 && args[0] == "readers")
+            return ReadersModel.Run() == 0 ? 0 : 1;
         if (args.Length >= 1 && args[0] == "wake")
-            return RunCompanion(args.Length > 1 ? int.Parse(args[1]) : 3) + WakeModel.Run() == 0 ? 0 : 1;
+            return RunCompanion(args.Length > 1 ? int.Parse(args[1]) : 3) + WakeModel.Run() + ReadersModel.Run() == 0 ? 0 : 1;
         // x14 <frames> <rule|c<i>> <scenario index>: the review's order
         // x14-take-at-teardown-rev-late-g in one scenario, paired.
         if (args.Length >= 4 && args[0] == "x14")
@@ -133,6 +140,7 @@ internal static class Program
         bad += RunFences(frames);
         bad += RunCompanion(frames);
         bad += WakeModel.Run();
+        bad += ReadersModel.Run();
         // The delivery check at one frame a program, in this process: this
         // driver's rules must pass, and each rule taken away must fail. The
         // larger runs shard it across processes (check).
