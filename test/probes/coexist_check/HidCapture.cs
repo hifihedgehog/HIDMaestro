@@ -101,8 +101,14 @@ internal sealed class HidCapture : IDisposable
         return s[Math.Min(s.Length - 1, (int)Math.Floor(p * s.Length))];
     }
 
+    bool _disposed;
+
+    /// <summary>Stops the reader and closes the handle. A second call does
+    /// nothing, so a check can let a device go before its scope ends.</summary>
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true;
         _stop = true;
         Native.CancelIoEx(_h, IntPtr.Zero);
         _thread.Join(1000);

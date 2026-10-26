@@ -19,9 +19,13 @@
 //    W5. A running v1.12.0 program with a controller, and a program on this
 //        SDK that creates two beside it. The v1.12.0 program creates twice
 //        more on the lowest indices free among its own controllers. None of
-//        them lands on the new program's, the new program's devices stay,
-//        and its exit removes its own devices and none of the v1.12.0
-//        program's. A create with the key index:1, which names the identity
+//        them lands on the new program's, and the new program's devices
+//        stay. The probe holds both open as the new program exits without
+//        disposing: its exit handler's removal is refused, so their driver
+//        fails them and the probe's reads end, and their records stay while
+//        the probe holds them. Once the probe lets go, the next sweep
+//        removes them and none of the v1.12.0 program's. A create with the
+//        key index:1, which names the identity
 //        the v1.12.0 program gives its next controller, takes that identity
 //        on an index from 64, as asked (decision (c), the newer release
 //        takes precedence), and is disposed before the v1.12.0 program's
@@ -239,7 +243,18 @@ internal static partial class Program
 
         string q = nu.Send("quit");
         Check("W5: the new program exits without disposing", q == "OK quit" && nu.WaitExit(120_000), q);
-        Check("W5: its exit handler removes its devices", newInst.All(i => WaitFor(() => !Native.IsPresent(i), 15_000)));
+        // The probe still holds both devices, so the exit handler's removal
+        // is refused. Their driver fails them, which ends the probe's reads,
+        // and their records stay while a handle is open
+        // (DeviceManager.AskToGo): deleting the records of a held device is
+        // what left driverless records before 2.1.0.
+        Check("W5: its exit handler has the devices the probe holds failed, so the probe's reads end",
+              WaitFor(() => capA.Broken && capB.Broken, 15_000), $"read errors {capA.ReadError}/{capB.ReadError}");
+        capA.Dispose();
+        capB.Dispose();
+        using var sweeper = PeerProcess.Start("W5-sweeper");
+        sweeper.Send("sweep");
+        Check("W5: once the probe lets go, the next sweep removes them", newInst.All(i => WaitFor(() => !Native.IsPresent(i), 15_000)));
         Check("W5: and leaves the v1.12.0 program's three", oldInst.All(Native.IsStarted),
               string.Join(", ", oldInst.Select(i => $"{i} {(Native.IsStarted(i) ? "started" : "gone")}")));
     }
