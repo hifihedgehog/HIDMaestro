@@ -105,10 +105,10 @@ static void StreamPump(PlanProfile *p)
     Timeout(&c, 0, 1);
     Timeout(&c, 0, 2);
     uint8_t gip[14] = { 0xFF, 0x7F, 0xFF, 0x7F, 0xFF, 0x7F, 0xFF, 0x7F, 0, 0, 0, 0, 0x01, 0 };
-    Ioctl(c.dev, "xusb.waitforinput", 0x8000E3AC, NULL, 0, 29, NULL, 0);
+    XusbWait(c.dev, NULL, "xusb.waitforinput", 29);
     Frame(&c, NULL, 0, gip, NULL, 0);
     ThreadResume(CtlThread(&c, 0));
-    Ioctl(c.dev, "xusb.waitforinput", 0x8000E3AC, NULL, 0, 29, NULL, 0);
+    XusbWait(c.dev, NULL, "xusb.waitforinput", 29);
     Timeout(&c, 0, 1);
     gip[12] = 0x02;
     Frame(&c, NULL, 0, gip, NULL, 0);
@@ -2079,19 +2079,21 @@ static void StreamX13BeforeDecrement(PlanProfile *p, int signaled)
 
 /* x13-companion-doorbell-at-fast-path: an Xbox 360 pad's companion, with
  * a HID worker of the index counted in its wait (the stream sets the HID
- * driver's capability and the count), so a frame takes the fast path. A
- * WAIT_FOR_INPUT comes in right after the SDK has read the companion's
- * count as zero: the SDK rings no doorbell, and the IOCTL thread, its count
- * incremented, reads the section's SeqNo. The SDK's fence before its count
- * read makes the frame's SeqNo visible there, so the IOCTL thread kicks the
- * pump and the request completes at once, before the pump's next 8 ms
- * tick. Without that fence the store could still sit in the SDK's store
- * buffer: the IOCTL thread reads the last SeqNo and parks, and the frame
- * waits for the tick. 533ca4a4's companion counts nothing, and the SDK
- * rings its doorbell for every frame. */
+ * driver's capability and the count), so a frame takes the fast path.
+ * Frame 1 goes to a WAIT_FOR_INPUT parked before it, and no request is left
+ * counted. A WAIT_FOR_INPUT comes in right after the SDK has read the
+ * companion's count as zero for frame 2: the SDK rings no doorbell, and the
+ * IOCTL thread looks at the section, increments the count and looks again.
+ * The SDK's fence before its count read makes frame 2's SeqNo visible to
+ * the first look, so the request came after frame 2, as a wait xusb22
+ * parks after a report, and frame 3 reaches it and the request sent after
+ * it, with no kick and no 8 ms tick. Without that fence the store could
+ * still sit in the SDK's store buffer through both looks: the request is
+ * owed frame 2, and nothing rings or kicks for it. 533ca4a4's companion
+ * counts nothing, and the SDK rings its doorbell for every frame. */
 static void X13WaitAtParkedRead(void)
 {
-    Ioctl(g_x13Ctl->dev, "xusb.waitforinput", 0x8000E3AC, NULL, 0, 29, NULL, 0);
+    XusbWait(g_x13Ctl->dev, NULL, "xusb.waitforinput", 29);
 }
 static void X13TimerTick(Ctl *c)
 {
@@ -2112,11 +2114,12 @@ static void StreamX13CompanionFence(PlanProfile *p)
     caps |= 1;
     memcpy(c.sdk.signal->buf + 4, &caps, 4);
     memcpy(c.sdk.signal->buf + 64, &one, 4);
-    /* The first frame with no request parked, then the request, which
-     * kicks the pump for it: no doorbell or kick is left set. */
+    /* The first frame through a request parked before it, which its
+     * doorbell completes: no request is left counted, and no doorbell or
+     * kick is left set. */
     uint8_t gip[14] = { 0xFF, 0x7F, 0xFF, 0x7F, 0xFF, 0x7F, 0xFF, 0x7F, 0, 0, 0, 0, 0x01, 0 };
+    XusbWait(c.dev, NULL, "xusb.waitforinput", 29);
     Frame(&c, NULL, 0, gip, NULL, 0);
-    Ioctl(c.dev, "xusb.waitforinput", 0x8000E3AC, NULL, 0, 29, NULL, 0);
     ThreadResume(CtlThread(&c, 0));
     g_x13Ctl = &c;
     g_sdkParkedHook = X13WaitAtParkedRead;
@@ -2125,7 +2128,7 @@ static void StreamX13CompanionFence(PlanProfile *p)
     if (g_sdkParkedHook) HmFail("x13: the SDK never read the companion's count");
     ThreadResume(CtlThread(&c, 0));
     X13TimerTick(&c);
-    Ioctl(c.dev, "xusb.waitforinput", 0x8000E3AC, NULL, 0, 29, NULL, 0);
+    XusbWait(c.dev, NULL, "xusb.waitforinput", 29);
     gip[12] = 0x03;
     Frame(&c, NULL, 0, gip, NULL, 0);
     ThreadResume(CtlThread(&c, 0));

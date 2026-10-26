@@ -61,9 +61,12 @@
 //
 // Replay runs the wake mode the same way (hm_case_wake.c), which checks as
 // well: a READ_REPORT that parks while the worker caches a frame or queues
-// a release frame, and a WAIT_FOR_INPUT that parks after its frame's
-// doorbell, each at the orders the harness's hooks place, must carry that
-// frame, and no frame may go to two of them.
+// a release frame, at each order the harness's hooks place, must carry
+// that frame, and no frame may go to two reads. The XUSB companion's
+// WAIT_FOR_INPUT must follow xusb22's rule through several handles: a
+// report is a change of the XInput state, it completes every request
+// parked before it, in order, with the same bytes, and a request parked
+// after it waits for the next.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
