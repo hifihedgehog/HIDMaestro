@@ -23,6 +23,8 @@
 //     does
 //   - a reply that a SET_REPORT or an interrupt OUT command leaves for the
 //     bulk IN endpoint goes to the bulk read already parked for it
+//   - a read a new import parks survives the old import's detach, which
+//     clears its own reads before it lets the device go
 //
 // Each scenario ends on a frame or a read that tells a correct device from
 // one that lost the handoff at once, and a wait that only a correct device
@@ -62,6 +64,7 @@ internal static partial class Program
         Contained("an unlink after a newer frame", () => UnlinkAfterNewerFrame(ds));
         Contained("an unlink of a parked read", () => UnlinkParkedRead(ds));
         Contained("a frame put back and a read through the queue", () => PutBackAheadOfQueue(ds));
+        Contained("a new import beside the old one's detach", () => NewImportBesideDetach(ds));
         Contained("a bulk command on a poll clock", BulkCommandWakesPollClock);
         Contained("bulk replies to other command paths", RepliesReachParkedBulkRead);
     }
@@ -278,6 +281,43 @@ internal static partial class Program
               $"first read {ra}, unlink {ua}, parked read taken {taken}, then {first}, then {second}, then {Describe(after)}");
     }
 
+    /// <summary>The old import's connection ends while a new one claims the
+    /// device. Its detach clears the reads, the queued frames and the
+    /// protocol state it leaves, and lets the device go. This thread holds
+    /// the device's HID lock, which the clear takes, so the detach stops
+    /// there, and claims the device for a new connection and parks a read on
+    /// it meanwhile. A detach that let the device go before its clear wiped
+    /// the new import's read, and a frame after it waited in the queue
+    /// instead. One that clears first still holds the device: the claim
+    /// waits for it, as a new import's ST_DEV_BUSY makes the host controller
+    /// try again.</summary>
+    static void NewImportBesideDetach(ControllerProfile ds)
+    {
+        using var rig = new HandoffRig(ds, HandoffIndex + 12);
+        using var next = new HandoffRig.Wire($"hm-s43-handoff-{Environment.ProcessId}-{HandoffIndex + 12}-next.sock");
+        byte ep = rig.PrimaryIn;
+        var detach = new Thread(() => rig.Device.DetachConnection(rig.Connection)) { IsBackground = true, Name = "S43 old import's detach" };
+        bool stopped, claimedDuring;
+        uint read = 0;
+        lock (rig.HidLock)
+        {
+            detach.Start();
+            stopped = WaitUntil(() => (detach.ThreadState & ThreadState.WaitSleepJoin) != 0, Hang);
+            claimedDuring = rig.Device.TryClaimConnection(next.Connection);
+            if (claimedDuring) read = next.SubmitIn(rig.Device, ep, 64);
+        }
+        bool ended = detach.Join(Hang);
+        bool claimedAfter = !claimedDuring && rig.Device.TryClaimConnection(next.Connection);
+        if (claimedAfter) read = next.SubmitIn(rig.Device, ep, 64);
+        rig.Frame(16);
+        // The frame goes to the read, or into the queue when the read is gone.
+        bool handled = WaitUntil(() => next.Available > 0 || rig.QueuedFrames > 0, Hang);
+        var got = next.Available > 0 ? next.Next() : default;
+        Check("a read a new import parks beside the old import's detach takes the next frame",
+              stopped && ended && (claimedDuring || claimedAfter) && handled && got.IsFrame(read, 16),
+              $"detach stopped at the clear {stopped}, claimed during it {claimedDuring}, after it {claimedAfter}, read {got}, frames queued {rig.QueuedFrames}");
+    }
+
     /// <summary>A copy of the Switch 2 Pro composite whose input endpoint
     /// sends the SDK's report on the host's poll clock, with replies on that
     /// endpoint and commands on its bulk OUT endpoint, which the protocol
@@ -457,6 +497,13 @@ internal static partial class Program
         /// thread, which may take it again, still sends.</summary>
         public object SendLock => typeof(UsbipServer.Connection).GetField("_sendLock", Private)!.GetValue(_connection)!;
 
+        /// <summary>The connection the device was claimed for.</summary>
+        public UsbipServer.Connection Connection => _connection;
+
+        /// <summary>The device's HID lock, which guards its parked reads and
+        /// queued frames.</summary>
+        public object HidLock => typeof(UsbipEmulatedDevice).GetField("_hidLock", Private)!.GetValue(Device)!;
+
         /// <summary>Reads parked on the primary endpoint.</summary>
         public int ParkedReads
         {
@@ -619,6 +666,85 @@ internal static partial class Program
             Marshal.FreeHGlobal(_view);
             Marshal.FreeHGlobal(_ring);
             _outputEvent.Dispose();
+        }
+
+        /// <summary>A second connection over a socket pair of its own, built
+        /// as the rig builds its first, for a device another import claims.</summary>
+        public sealed class Wire : IDisposable
+        {
+            readonly string _path;
+            readonly Socket _listener, _client, _server;
+            readonly byte[] _header = new byte[UsbipProtocol.HeaderSize];
+            uint _seq = 0x8000;
+            public readonly UsbipServer.Connection Connection;
+
+            public Wire(string name)
+            {
+                _path = Path.Combine(Path.GetTempPath(), name);
+                if (File.Exists(_path)) File.Delete(_path);
+                _listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+                _listener.Bind(new UnixDomainSocketEndPoint(_path));
+                _listener.Listen(1);
+                _client = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+                _client.Connect(new UnixDomainSocketEndPoint(_path));
+                _server = _listener.Accept();
+                _client.ReceiveTimeout = Hang;
+                var t = typeof(UsbipServer.Connection);
+                Connection = (UsbipServer.Connection)RuntimeHelpers.GetUninitializedObject(t);
+                t.GetField("_socket", Private)!.SetValue(Connection, _server);
+                t.GetField("_sendLock", Private)!.SetValue(Connection, new object());
+                t.GetField("_tx", Private)!.SetValue(Connection, new byte[UsbipProtocol.HeaderSize + 4096]);
+            }
+
+            /// <summary>Bytes waiting on the host's end.</summary>
+            public int Available => _client.Available;
+
+            /// <summary>An interrupt IN CMD_SUBMIT on <paramref name="dev"/>.</summary>
+            public uint SubmitIn(UsbipEmulatedDevice dev, byte endpoint, int length)
+            {
+                var cmd = new UsbipProtocol.CommandHeader
+                {
+                    Command = UsbipProtocol.CmdSubmit,
+                    Seqnum = ++_seq,
+                    Direction = 1,
+                    Ep = (uint)(endpoint & 0x0F),
+                    TransferBufferLength = length,
+                    NumberOfPackets = UsbipProtocol.NumberOfPacketsNonIsoch,
+                };
+                dev.HandleSubmit(cmd, ReadOnlySpan<byte>.Empty, ReadOnlySpan<(uint, uint)>.Empty);
+                return cmd.Seqnum;
+            }
+
+            /// <summary>The next RET_SUBMIT, of an IN transfer.</summary>
+            public Message Next()
+            {
+                Receive(_header);
+                uint kind = BinaryPrimitives.ReadUInt32BigEndian(_header);
+                uint seq = BinaryPrimitives.ReadUInt32BigEndian(_header.AsSpan(4));
+                int status = BinaryPrimitives.ReadInt32BigEndian(_header.AsSpan(20));
+                int actual = BinaryPrimitives.ReadInt32BigEndian(_header.AsSpan(24));
+                var data = new byte[kind == UsbipProtocol.RetSubmit ? actual : 0];
+                Receive(data);
+                return new Message(kind, seq, status, data.Length, data);
+            }
+
+            void Receive(Span<byte> dst)
+            {
+                for (int got = 0; got < dst.Length;)
+                {
+                    int n = _client.Receive(dst[got..], SocketFlags.None);
+                    if (n <= 0) throw new EndOfStreamException("the device's end of the connection closed");
+                    got += n;
+                }
+            }
+
+            public void Dispose()
+            {
+                try { _client.Dispose(); } catch { }
+                try { _server.Dispose(); } catch { }
+                try { _listener.Dispose(); } catch { }
+                try { File.Delete(_path); } catch { }
+            }
         }
 
         public readonly struct Message

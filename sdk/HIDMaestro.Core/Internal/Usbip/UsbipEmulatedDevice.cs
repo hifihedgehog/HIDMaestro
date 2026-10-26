@@ -393,16 +393,12 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     public void DetachConnection(UsbipServer.Connection connection)
     {
         if (_stop) return; // Dispose released the device already
-        // The import is gone with its connection. Cleared and released
-        // under one lock, so neither the next import's port nor this one's
-        // is ever overwritten by the other.
-        lock (_portLock)
-        {
-            if (Volatile.Read(ref _connection) != connection)
-                return; // a different connection owns the device
-            SetVhciPortLocked(0);
-            Interlocked.Exchange(ref _connection, null);
-        }
+        if (Volatile.Read(ref _connection) != connection)
+            return; // a different connection owns the device
+        // The import is gone with its connection. Its reads, the frames
+        // queued for them and the protocol state go while the connection
+        // still holds the device: a new import claims it only once it is
+        // let go, so nothing the new import parks is cleared here.
         Audio.Clear();
         lock (_hidLock)
         {
@@ -411,6 +407,14 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         }
         ResetLayoutState();
         ResetProtocolState();
+        // Cleared and released under one lock, so neither the next
+        // import's port nor this one's is ever overwritten by the other.
+        lock (_portLock)
+        {
+            if (Volatile.Read(ref _connection) != connection) return;
+            SetVhciPortLocked(0);
+            Interlocked.Exchange(ref _connection, null);
+        }
     }
 
     // ── Input pump: shared section → interrupt IN ────────────────────────
