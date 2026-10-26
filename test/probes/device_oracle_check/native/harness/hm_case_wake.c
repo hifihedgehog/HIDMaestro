@@ -647,6 +647,83 @@ static void RestartSameSeqNo(PlanProfile *p, int mode)
     g_sdkSignal = saved;
 }
 
+/* SdkWriteFrame in two parts, as a program preempted between them: the
+ * frame's store, and its gate step (SharedMemoryIO.WriteInputFrame). */
+static void StoreFrame(Sdk *s, uint8_t base)
+{
+    uint8_t *b = s->input->buf;
+    uint32_t pending = s->seq + 1, len = 63, zero = 0;
+    memcpy(b, &pending, 4);
+    memcpy(b + 4, &len, 4);
+    for (uint32_t i = 0; i < len; i++) b[8 + i] = (uint8_t)(base + i);
+    memcpy(b + 278, &zero, 4);
+    s->seq = pending + 1;
+    if (s->signal && s->seq == 0) s->seq = 2;
+    memcpy(b, &s->seq, 4);
+}
+
+static void PublishStored(Sdk *s)
+{
+    if (SdkHandOver(s)) EventSet(s->inputEv);
+}
+
+static void HookReadNextFirst(void)
+{
+    g_wHooks++;
+    RunWorker(g_w);
+}
+
+/* next-first-frame-once: the program's frame A2 is read and carried, and
+ * a signal of its program is left set, as when two of its frames came
+ * before the worker woke. The program ends, and the next one starts before
+ * the worker handled the pipe's close: it zeroes the section and stores its
+ * first frame B1, its signal still to come. The worker reads B1 on the
+ * left signal, before OwnerGone, and a read carries it: a read parked, by
+ * the worker, or one whose look came before B1 was cached and whose second
+ * look after its park finds it (-second-look). Through e9a6e92d, as at
+ * 533ca4a4, OwnerGone forgot the SeqNo, and B1's own signal read B1 again
+ * as new and sent it to the next read. Under a 2.1.0 SDK, and under one
+ * before it, whose B1 counts from 0. The read after B1 waits for B2. */
+static void NextFirstFrameOnce(PlanProfile *p, int legacy, int secondLook)
+{
+    Ctl c;
+    char label[160], name[64];
+    int saved = g_sdkSignal;
+    if (legacy) g_sdkSignal = 0;
+    snprintf(name, sizeof(name), "next-first-frame-once%s%s", legacy ? "-legacy" : "", secondLook ? "-second-look" : "");
+    snprintf(label, sizeof(label), "%s %s", p->id, name);
+    if (StartHidWith(&c, p, name, label, SDK_ALL)) {
+        Read(&c);
+        Write(&c, 0x20);
+        RunWorker(&c);
+        Check(label, "control: frame A2, the program's last, goes to the read parked for it", Carries(&c, g_reads[1], 0x20));
+        EventSet(c.sdk.inputEv);
+        PipeServerClose(c.sdk.pipe);
+        NextProgram(&c, legacy, 1);
+        StoreFrame(&c.sdk, 0x40);
+        HmRequest *r;
+        if (secondLook) {
+            g_forwardHook = HookReadNextFirst;
+            r = Read(&c);
+            g_forwardHook = NULL;
+            Check(label, "the worker read B1 between the read's look and its park", g_wHooks == 1);
+            Check(label, "the read that parked as B1 was cached carries it, from its second look", Carries(&c, r, 0x40));
+        } else {
+            r = Read(&c);
+            RunWorker(&c);
+            Check(label, "control: the read parked before the worker read B1 on the left signal carries it", Carries(&c, r, 0x40));
+        }
+        Settle(CtlThread(&c, 0));
+        HmRequest *next = Read(&c);
+        PublishStored(&c.sdk);
+        Settle(CtlThread(&c, 0));
+        Check(label, "B1's own signal after OwnerGone sends it no second time", CarriedBy(&c, 0x40) == 1 && !next->completed);
+        ControlFrame(&c, label, 0x70);
+        CtlStop(&c);
+    }
+    g_sdkSignal = saved;
+}
+
 /* Completions reach HID class in the order the frames were taken: its
  * completion routine runs on the completing thread, so a thread that took
  * a frame and completes it later puts it in HID class's buffer after a
@@ -1234,6 +1311,8 @@ int CaseWake(void)
     LastFrameAtRecycle(ds, 0);
     LastFrameAtRecycle(ds, 1);
     for (int m = RESTART_PARKED; m <= RESTART_OWNERGONE; m++) RestartSameSeqNo(ds, m);
+    for (int lg = 0; lg < 2; lg++)
+        for (int sl = 0; sl < 2; sl++) NextFirstFrameOnce(ds, lg, sl);
     OlderAfterNewer(ds);
     SecondLookOlderAfterNewer(ds);
     DoorbellBeforePark(xusb, 1);
