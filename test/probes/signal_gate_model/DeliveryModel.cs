@@ -11,10 +11,12 @@
 // input section, its event and, for a 2.1.0 program, the signal section
 // from its start: it zeroes the input section and the acknowledgement
 // there (v1.11.0 has no acknowledgement). A 2.1.0 program counts its frames
-// from above the SeqNo it found, steps over 0 at the wrap, clears the
-// handoff at its start, and with the capability set hands each frame over
-// instead of signaling it, signaling only when a worker is counted or the
-// gate closed and it takes the frame back. A v2.0.x program counts from 0,
+// from above the SeqNo it found, steps over 0 at the wrap, leaves the
+// handoff as it found it at its start (c5b207a3, SharedMemoryIO.cs 532;
+// the clear 10ddf75e made is the rule ClearAtStart, off in this driver),
+// and with the capability set hands each frame over instead of signaling
+// it, provisional and then final, signaling only when a worker is counted
+// or the gate closed and it takes the frame back. A v2.0.x program counts from 0,
 // stores 0 at its wrap and signals every frame. A program's end closes its
 // pipe after its last SetEvent. A kill ends it inside a frame's
 // publication: after the store, after the exchange, after the take-back
@@ -45,14 +47,19 @@
 // the section when the take finds a frame, and skips a zeroed section.
 //
 // Each run records how often each frame (program, place in it) and each
-// release frame reached HID class, and for each program whether one of its
-// frames reached HID class after the release frames its end queued. The
-// check pairs the runs (ExploreAligned): every final state of this driver
+// release frame reached HID class, up to three times, for each program
+// whether one of its frames reached HID class after the release frames
+// its end queued, whether a frame went out after a later one of its
+// program, and whether a frame or release frame went out after one of a
+// later program. The check pairs the runs (ExploreAligned): both workers
+// take their wait events together, and every final state of this driver
 // must be matched or bettered by a final state v2.0.3 reaches through the
-// same outside events, losing no frame or release frame that run delivers,
-// sending twice only what that run sends twice, and sending a program's
-// frame after its release frames only where that run does. A zeroed
-// section must never go out.
+// same outside events and wait events, losing no frame or release frame
+// that run delivers, sending a frame more often than once only where that
+// run sends it as often, and sending out of order only where that run
+// does. Better is an extra frame of a program that is no keyboard, and
+// nothing after a step v2.0.3 could not take passes. A zeroed section
+// must never go out.
 //
 // Usage: the frames argument of SignalGateModel sets each program's frames
 // (the wrap scenarios write two that straddle it, the three-program ones
@@ -105,7 +112,7 @@ internal static class DeliveryModel
         public bool Reclaim { get; init; } = true;        // the SDK signals only after taking the frame back
         public bool TakeBeforeWait { get; init; } = true; // the worker takes the handoff before each wait
         public bool CountFirst { get; init; } = true;     // ... after it counted itself
-        public bool ClearAtStart { get; init; } = true;   // a 2.1.0 start clears the handoff
+        public bool ClearAtStart { get; init; } = true;   // a 2.1.0 start clears the handoff (10ddf75e; off in this driver, which leaves it as found)
         public bool SkipZero { get; init; } = true;       // a zeroed section is no frame
         public bool SdkSkipsZero { get; init; } = true;   // a 2.1.0 SDK steps over 0 at the wrap
         public bool ForgetAtRecycle { get; init; } = true;// the recycle forgets the last SeqNo, as v2.0.3's
@@ -118,6 +125,9 @@ internal static class DeliveryModel
         public bool DropSentAtTake { get; init; }        // taken away: a take of the frame last sent wakes no read
         public bool WaitAgainAfterOwner { get; init; } = true; // a taken frame read on the pipe's close waits again before OwnerGone
         public bool SignalTakenOnExit { get; init; } = true;   // a frame taken and not read when the worker leaves its loop is signaled
+        public bool SignalTakenAtTear { get; init; } = true;   // ... at teardown too (driver.c 2084, 2117), not only at a foreign stop (2122)
+        public bool BackOnlyOnStop { get; init; }          // candidate: at teardown only when the poll returned the stop event
+        public bool BackOnlyUndelivered { get; init; }     // candidate: and only while the section holds a SeqNo other than the last one delivered
         public bool OwedOnlyNextProgram { get; init; } = true; // OwnerGone signals only the next program's frame, not the ended one's
         public bool RetryAfterOwnerGone { get; init; } = true; // the watch is tried again after the first frame read after OwnerGone
         public bool ZeroForgets { get; init; } = true;     // a zeroed section forgets SeenSeqNo and SharedMemSeqNo and sends nothing
@@ -138,6 +148,11 @@ internal static class DeliveryModel
         public bool Round6TakeProvisional { get; init; }   // taken away: a take reads on a provisional SeqNo too
         public bool Round6NoReplace { get; init; }         // taken away: a pending final is not replaced, the next frame goes provisional
         public bool Round6ExactTake { get; init; }         // the summary's reading: a take's read sends only the SeqNo taken
+        // The fast branch (a candidate): after the pending-final branch the
+        // SDK reads InputWaiters, and with it nonzero signals and leaves
+        // InputHandoff alone. With it zero, the provisional path as before.
+        public bool FastSignal { get; init; }
+        public bool FastSkipsSignal { get; init; }         // taken away: the fast branch does not signal
         // T1: a take the owner pipe answered at teardown signals the frame
         // back before its read.
         public bool TearCheckedRead { get; init; }
@@ -217,15 +232,22 @@ internal static class DeliveryModel
         This with { Name = "the watch tried again after OwnerGone (W1)", RetryAfterOwnerGone = true },
         This with { Name = "OwnerGone takes the handoff as b17050c1 did", TakeAtOwnerGone = true },
         This with { Name = "a take's read at teardown signaled back after it (R6-1, 10ddf75e)", TearPostRead = true },
+        This with { Name = "a taken frame dropped as the worker leaves at teardown (B1, teardown half)", SignalTakenAtTear = false },
+        This with { Name = "the fast branch skips its SetEvent (run on c2)", FastSkipsSignal = true },
     };
 
     // Candidate changes (the model section of docs/design/signal-gate.md),
     // each run in place of this driver's rules by the check command's rule
-    // c0 or c1.
+    // c0 to c6.
     internal static readonly Rules[] Candidates =
     {
         This with { Name = "round 6 with the summary's exact-SeqNo take", Round6ExactTake = true },
         This with { Name = "round 6 with the post-read teardown check asking whether the frame went out", TearPostRead = true, TearCheckDelivered = true },
+        This with { Name = "c5b207a3 with the fast branch", FastSignal = true },
+        This with { Name = "c5b207a3 signaling a taken frame back at teardown only on the stop event", BackOnlyOnStop = true },
+        This with { Name = "c3 with the fast branch", BackOnlyOnStop = true, FastSignal = true },
+        This with { Name = "c3 signaling back only a section not yet delivered", BackOnlyOnStop = true, BackOnlyUndelivered = true },
+        This with { Name = "c5 with the fast branch", BackOnlyOnStop = true, BackOnlyUndelivered = true, FastSignal = true },
     };
 
     internal static IEnumerable<Scenario> Scenarios()
@@ -271,17 +293,21 @@ internal static class DeliveryModel
     static string Name(Prog a, Prog b, bool early, int rc, int ra, string hold) =>
         $"{a} then {b}{(early ? ", early" : "")}{(rc > 0 ? $", recycle under program {rc}" : "")}{(ra > 0 ? $", re-add under program {ra}" : "")}{hold}";
 
-    const int S_CLAIM = 0, S_START = 1, S_WRITE = 2, S_CHECK = 3, S_RECLAIM = 4, S_SIGNAL = 5, S_EXIT = 6, S_NEXT = 7, S_DONE = 8, S_FRAMEDONE = 9;
+    const int S_CLAIM = 0, S_START = 1, S_WRITE = 2, S_CHECK = 3, S_RECLAIM = 4, S_SIGNAL = 5, S_EXIT = 6, S_NEXT = 7, S_DONE = 8, S_FRAMEDONE = 9,
+              S_FAST = 10, S_XCHG = 11;
     const int W_P1 = 0, W_TOP = 1, W_LOOK = 2, W_POLL = 3, W_BLOCK = 4, W_READ = 5, W_OWNER = 6, W_GONE = 7, W_COUNT = 8,
               W_WOKE = 9, W_OG_TAKE = 10, W_OG_LOOK = 11, W_OG_END = 12, W_OG_ACK = 13, W_OG_SIG = 14, W_EXITED = 15, W_RCHK = 16;
 
     // A frame's identity is its program and its place, 1 to 5, packed into
-    // the bits of the delivery counts: two bits a frame, saturating at 2.
-    // Frame 0 of a program is the zeroed section. Slots 18 to 20 count the
-    // release frame each program left, and bits 42 to 44 say a program's
-    // frame went out after the release frames its end queued.
+    // the bits of the delivery counts: two bits a frame, saturating at 3,
+    // three or more. Frame 0 of a program is the zeroed section. Slots 18
+    // to 20 count the release frame each program left, and bits 42 to 44
+    // say a program's frame went out after the release frames its end
+    // queued. OrderBit: a program's frame went out after a later frame of
+    // its program. CrossBit: a program's frame or release frame went out
+    // after a frame or release frame of a later program.
     static int Slot(int prog, int idx) => (prog - 1) * 6 + idx;
-    const int RelSlot = 18, LateBit = 42, OrderBit = 45, TookShift = 46;
+    const int RelSlot = 18, LateBit = 42, OrderBit = 45, CrossBit = 46, TookShift = 56;
 
     // InSec, Ev, Sig: the input section, its event and the signal section
     // exist. Seq, Prog, Idx: the frame the input section holds (Prog 0: a
@@ -316,6 +342,9 @@ internal static class DeliveryModel
         public bool AckBit, AckEnded, Replaced, RetryNext, NoRetry, HandFinal, Served;
         public int Took;
         public ulong Delivered;
+        // v2.0.3 only: its wait returned the input event at this driver's
+        // take, and the poll after that take has not come yet.
+        public bool Early;
     }
 
     // A state packed into three words, for the visited sets.
@@ -359,9 +388,9 @@ internal static class DeliveryModel
         b.Put(s.Tear, 2);
         b.Put(s.Ack, 2); b.Put(s.WatchP, 2); b.Put(s.RelQ, 2); b.Put(s.RelFor, 2); b.Put(s.RelDone, 3); b.Put(s.Handed, 8);
         b.Put(s.AckBit); b.Put(s.AckEnded); b.Put(s.Replaced); b.Put(s.RetryNext); b.Put(s.NoRetry); b.Put(s.HandFinal && s.Hand != 0);
-        b.Put(s.Parked); b.Put(s.Served);
-        // The delivery counts and the late and order bits take 46 bits of the
-        // third word, Took the 8 above.
+        b.Put(s.Parked); b.Put(s.Served); b.Put(s.Early);
+        // The delivery counts and the late, order and cross bits take 47 bits
+        // of the third word, Took the top 8.
         if ((uint)s.Took >= 256) throw new InvalidOperationException("Took out of range");
         return new Key(a.W, b.W, s.Delivered | (ulong)(uint)s.Took << TookShift);
     }
@@ -382,7 +411,7 @@ internal static class DeliveryModel
         s.Tear = b.Get(2);
         s.Ack = b.Get(2); s.WatchP = b.Get(2); s.RelQ = b.Get(2); s.RelFor = b.Get(2); s.RelDone = b.Get(3); s.Handed = b.Get(8);
         s.AckBit = b.Bit(); s.AckEnded = b.Bit(); s.Replaced = b.Bit(); s.RetryNext = b.Bit(); s.NoRetry = b.Bit(); s.HandFinal = b.Bit();
-        s.Parked = b.Bit(); s.Served = b.Bit();
+        s.Parked = b.Bit(); s.Served = b.Bit(); s.Early = b.Bit();
         s.Delivered = k.C & ((1UL << TookShift) - 1);
         s.Took = (int)(k.C >> TookShift);
         return s;
@@ -404,7 +433,11 @@ internal static class DeliveryModel
     // never makes, for a frame a take already found), so its reads are its
     // own steps as well.
     static bool SharedPc(int pc) => pc is S_CLAIM or S_START or S_WRITE or S_FRAMEDONE or S_EXIT or S_NEXT;
-    const int L_PROG = 1, L_RECYCLE = 2, L_GOES = 3, L_MAP = 4, L_STOP = 5, L_ADD = 6, L_KILL = 7, L_HID = 8, L_READ = 9, L_READ0 = 10;
+    const int L_PROG = 1, L_RECYCLE = 2, L_GOES = 3, L_MAP = 4, L_STOP = 5, L_ADD = 6, L_KILL = 7, L_HID = 8, L_READ = 9, L_READ0 = 10,
+              L_WAIT = 11, L_TEAR = 12;
+    // What a worker's wait did (WaitKind): it blocked, or it returned the
+    // stop event, the input event, the owner pipe, or a timeout.
+    const int K_BLOCK = 1, K_STOP = 2, K_INPUT = 3, K_OWNER = 4, K_TIMEOUT = 5, K_TAKE = 6, K_POLL = 7;
 
     static int Label(in State s, in State n)
     {
@@ -415,12 +448,63 @@ internal static class DeliveryModel
         if (s.Pc == W_P1 && n.Pc == W_TOP && n.Mapped && !s.Mapped) return L_MAP;
         if (n.StopUsed != s.StopUsed) return L_STOP;
         if (s.Pc == W_GONE && n.Pc != W_GONE) return L_ADD;
+        if (s.Tear == 1 && n.Tear == 2) return L_TEAR;
+        if (WaitKind(s, n) != 0) return L_WAIT;
         if (NeedsRead(s) && s.Pc == n.Pc && s.SdkPc == n.SdkPc && s.Tear == n.Tear && (n.Parked || n.Delivered != s.Delivered)) return L_HID;
         if (s.Pc == W_READ && n.Pc != W_READ && s.Tear == 0)
             return n.Delivered == s.Delivered && n.Parked == s.Parked ? L_READ0 : L_READ;
         return 0;
     }
 
+
+    // The worker's wait events, shared by both drivers (review SIG6, M6-1):
+    // each driver's worker blocks in its wait, and returns from it, at the
+    // same step as the other's, and the wait returns the same object. The
+    // object is the first one set in the wait's order: the stop event, the
+    // input event, the owner pipe. A blocked wait returns the stop event,
+    // the owner pipe or a timeout, or the input event once a SetEvent ended
+    // it (W_WOKE). This driver's wait after a take is two steps, the take
+    // that finds a final SeqNo (K_TAKE) and the zero-timeout poll right
+    // after it (K_POLL, or K_STOP when it returns the stop event), where
+    // v2.0.3's is one. v2.0.3's wait returns the input event at either:
+    // at the take (Early until the poll) or at the poll. A poll that
+    // returns the stop event pairs with v2.0.3's wait returning it, after
+    // its read when it returned at the take. The 500 ms timeout is a
+    // time-driven step both workers take together. 0: the step is no wait
+    // event.
+    static int WaitKind(in State s, in State n)
+    {
+        if (n.SdkPc != s.SdkPc || n.P != s.P) return 0;
+        switch (s.Pc)
+        {
+            case W_LOOK:
+                return n.Pc == W_POLL && !s.StopSig ? K_TAKE : 0;
+            case W_POLL:
+                return n.Pc == s.Pc ? 0 : s.StopSig ? K_STOP : K_POLL;
+            case W_WOKE:
+                return n.Pc == s.Pc ? 0 : K_INPUT;
+            case W_BLOCK when !s.Blocked:
+                if (n.Pc == W_BLOCK) return n.Blocked ? K_BLOCK : 0;
+                return s.StopSig ? K_STOP : s.Event ? K_INPUT : s.OwnerSig ? K_OWNER : 0;
+            case W_BLOCK:
+                if (n.Pc == W_BLOCK) return 0;
+                if (n.Pc == W_EXITED) return s.StopSig ? K_STOP : s.OwnerSig ? K_OWNER : K_TIMEOUT;
+                return n.Pc == W_P1 ? K_STOP : n.Pc is W_OG_TAKE or W_OG_LOOK ? K_OWNER : n.Pc == W_TOP ? K_TIMEOUT : 0;
+            case W_P1:
+                // Phase 1's 200 ms wait: the owner pipe, a timeout at
+                // teardown, or a foreign stop it absorbs. The map is L_MAP.
+                if (n.Pc is W_OG_TAKE or W_OG_LOOK) return K_OWNER;
+                if (n.Pc == W_EXITED) return K_TIMEOUT;
+                if (n.Pc == W_P1 && s.StopSig && !n.StopSig) return K_STOP;
+                return 0;
+            default:
+                return 0;
+        }
+    }
+
+    // The match of a step: MatchKey, and for a wait event what it did.
+    static int Match(int label, in State s, in State n) =>
+        MatchKey(label, n) | (label == L_WAIT ? WaitKind(s, n) << 15 : 0);
 
     // HID class has no READ_REPORT at the driver and the device is up: the
     // next one is HID class's to send.
@@ -446,7 +530,7 @@ internal static class DeliveryModel
     // before the recheck is always a kill before the wake.
     static int KillPhase(in State s, bool round6 = false) => s.SdkPc switch
     {
-        S_CHECK or S_SIGNAL => 1,
+        S_CHECK or S_FAST or S_XCHG or S_SIGNAL => 1,
         S_RECLAIM => round6 || s.Hand == s.SdkSeq ? 1 : 2,
         S_FRAMEDONE => 2,
         _ => 0,
@@ -462,12 +546,14 @@ internal static class DeliveryModel
 
     // The delivery counts and the late bits, without the zeroed sections.
     static readonly ulong OutMask = Enumerable.Range(0, 21).Where(x => x >= RelSlot || x % 6 != 0)
-                                              .Aggregate(0UL, (m, x) => m | (3UL << (2 * x))) | (7UL << LateBit) | (1UL << OrderBit);
+                                              .Aggregate(0UL, (m, x) => m | (3UL << (2 * x))) | (7UL << LateBit) | (1UL << OrderBit) | (1UL << CrossBit);
 
     // An outcome of this driver no worse than one of v2.0.3's: every frame
     // and release frame that one delivers this one delivers, every one this
-    // one sends twice that one sends twice, and a program's frame goes out
-    // after its release frames only where that one sends it so.
+    // one sends two or three times or more that one sends as often, and a
+    // program's frame goes out after its release frames, after a later
+    // frame of its program, and a program's frame or release frame after a
+    // later program's, only where that one sends it so.
     internal static bool NoWorse(ulong mine, ulong theirs)
     {
         for (int slot = 0; slot < 21; slot++)
@@ -475,11 +561,82 @@ internal static class DeliveryModel
             if (slot < RelSlot && slot % 6 == 0) continue;
             int m = Count(mine, slot), t = Count(theirs, slot);
             if (t >= 1 && m == 0) return false;
-            if (m == 2 && t < 2) return false;
+            if (m >= 2 && t < m) return false;
         }
         ulong late = (mine & ~theirs) >> LateBit & 7;
         ulong order = (mine & ~theirs) >> OrderBit & 1;
-        return late == 0 && order == 0;
+        ulong cross = (mine & ~theirs) >> CrossBit & 1;
+        return late == 0 && order == 0 && cross == 0;
+    }
+
+    // 2: an outcome of theirs matches mine with no frame mine sends that it
+    // does not, 1: one matches only with such an extra frame, of a program
+    // that is no keyboard, 0: none.
+    static int Classify(ulong mine, IEnumerable<ulong> theirs, int keyboards)
+    {
+        int cls = 0;
+        foreach (var t in theirs)
+        {
+            if (!NoWorse(mine, t)) continue;
+            int extra = ExtraPrograms(mine, t);
+            if (extra == 0) return 2;
+            if ((extra & keyboards) == 0) cls = 1;
+        }
+        return cls;
+    }
+
+    // The outcome checks on hand-built outcomes: the order across programs,
+    // counts past two, and an extra keyboard frame.
+    internal static List<(string Name, bool Ok)> SelfTest()
+    {
+        var t = new List<(string, bool)>();
+        var none = new State();
+        // Program 1's frame, program 2's frame, then program 1's release
+        // frame: out of order across programs.
+        var a = DeliverFrame(none, Slot(1, 1));
+        a = DeliverFrame(a, Slot(2, 1));
+        var cross = DeliverRelease(a with { RelQ = 1, RelFor = 1 });
+        var inOrder = DeliverFrame(DeliverRelease(DeliverFrame(none, Slot(1, 1)) with { RelQ = 1, RelFor = 1 }), Slot(2, 1));
+        t.Add(("a release frame of program 1 after program 2's frame sets the cross bit", (cross.Delivered >> CrossBit & 1) == 1));
+        t.Add(("that outcome fails against one in order", !NoWorse(cross.Delivered & OutMask, inOrder.Delivered & OutMask)));
+        t.Add(("the in-order outcome passes against itself", NoWorse(inOrder.Delivered & OutMask, inOrder.Delivered & OutMask)));
+        var late = DeliverFrame(DeliverFrame(none, Slot(2, 1)), Slot(1, 1));
+        t.Add(("program 1's frame after program 2's sets the cross bit", (late.Delivered >> CrossBit & 1) == 1));
+        // Counts: three sends against two.
+        var two = DeliverFrame(DeliverFrame(none, Slot(1, 1)), Slot(1, 1));
+        var three = DeliverFrame(two, Slot(1, 1));
+        var four = DeliverFrame(three, Slot(1, 1));
+        t.Add(("a frame sent three times counts 3", Count(three.Delivered, Slot(1, 1)) == 3));
+        t.Add(("a fourth send stays at 3, three or more", Count(four.Delivered, Slot(1, 1)) == 3));
+        t.Add(("three sends fail against two", !NoWorse(three.Delivered & OutMask, two.Delivered & OutMask)));
+        t.Add(("two sends pass against three", NoWorse(two.Delivered & OutMask, three.Delivered & OutMask)));
+        // An extra frame: better for a program that is no keyboard, a
+        // failure for a keyboard.
+        var one = DeliverFrame(none, Slot(1, 1));
+        var extra = DeliverFrame(one, Slot(1, 2));
+        ulong[] theirs = { one.Delivered & OutMask };
+        t.Add(("an extra frame of a program that is no keyboard is better", Classify(extra.Delivered & OutMask, theirs, 0) == 1));
+        t.Add(("an extra keyboard frame fails", Classify(extra.Delivered & OutMask, theirs, 1) == 0));
+        t.Add(("an equal outcome is equal", Classify(one.Delivered & OutMask, theirs, 1) == 2));
+        return t;
+    }
+
+    // The programs (a bit each) with a frame this outcome sends and that one
+    // does not.
+    static int ExtraPrograms(ulong mine, ulong theirs)
+    {
+        int m = 0;
+        for (int slot = 0; slot < RelSlot; slot++)
+            if (slot % 6 != 0 && Count(mine, slot) >= 1 && Count(theirs, slot) == 0) m |= 1 << (slot / 6);
+        return m;
+    }
+
+    // The programs (a bit each) that leave a release frame: keyboards.
+    static int KeyboardPrograms(Scenario sc)
+    {
+        int m = 0;
+        for (int i = 0; i < sc.Programs.Length; i++) if (sc.Programs[i].Rel) m |= 1 << i;
+        return m;
     }
 
     // Every frame and release frame this outcome sends, that one sends.
@@ -500,13 +657,14 @@ internal static class DeliveryModel
         for (int q = 1; q <= 3; q++) if (Count(v, RelSlot + q - 1) > 0) parts.Add($"release{q}x{Count(v, RelSlot + q - 1)}");
         for (int p = 1; p <= 3; p++) if ((v >> (LateBit + p - 1) & 1) != 0) parts.Add($"{p}:after-its-release");
         if ((v >> OrderBit & 1) != 0) parts.Add("out-of-order");
+        if ((v >> CrossBit & 1) != 0) parts.Add("before-a-later-program");
         return string.Join(" ", parts);
     }
 
     static int Count(ulong delivered, int slot) => (int)((delivered >> (2 * slot)) & 3);
 
     static ulong Deliver(ulong delivered, int slot) =>
-        Count(delivered, slot) == 2 ? delivered : delivered + (1UL << (2 * slot));
+        Count(delivered, slot) == 3 ? delivered : delivered + (1UL << (2 * slot));
 
     // Every outcome one driver reaches in a scenario, unpaired: for the
     // outcomes listing.
@@ -525,7 +683,8 @@ internal static class DeliveryModel
             res.States++;
             next.Clear();
             Steps(s, sc, d, r, frames, next);
-            if (next.Count == 0)
+            // v2.0.3's timeout back to its wait changes nothing.
+            if (next.All(n => Label(s, n) == L_WAIT && WaitKind(s, n) == K_TIMEOUT && d == Driver.V203))
             {
                 res.Finals++;
                 res.Outcomes.Add(s.Delivered & OutMask);
@@ -555,6 +714,9 @@ internal static class DeliveryModel
         public bool ZeroSent;
         public string? Example;
         public List<State>? Path;
+        // With the witness: the paired v2.0.3 set at each of its states, as
+        // one line a state of the set (--sets).
+        public List<List<string>>? PathSets;
         public readonly Dictionary<ulong, List<State>> Paths = new();
         public List<State>? UnalignedPath;
         public List<string>? PairedSide;
@@ -566,6 +728,10 @@ internal static class DeliveryModel
     // slow on both. When only one side waits, that side takes it before any
     // other step of its own.
     const int M_READ = 1, M_MAP = 2;
+    // Not a wait: this driver's worker has left its loop (W_EXITED, W_GONE),
+    // so the wait events of v2.0.3's worker are its own until the device is
+    // added again. Passed beside the waits.
+    const int M_FREE = 4;
 
     static bool MapReady(in State s, Scenario sc, Driver d, Rules r, int frames, List<State> scratch)
     {
@@ -610,7 +776,13 @@ internal static class DeliveryModel
         // Waits: the time-driven steps the state waits for (M_READ, M_MAP).
         // Pending: a wake waits to be read (the input event set, or a wait
         // the input event ended).
-        sealed record Info(Succ[] S, int Waits, bool Pending);
+        // Final: no step but v2.0.3's timeout back to its wait, which
+        // changes nothing.
+        // Waiting: the worker is at its wait, blocked in it or about to be,
+        // with no input event set.
+        // AtWait: the worker is at its wait, blocked or not.
+        // Exited: the worker has left its loop.
+        sealed record Info(Succ[] S, int Waits, bool Pending, bool Final, bool Waiting, bool Blocked, bool AtWait, bool Exited);
 
         int Id(Key k)
         {
@@ -637,9 +809,10 @@ internal static class DeliveryModel
                 int l = Label(v, states[i]);
                 if (l == L_READ0) l = L_READ;
                 if (l == L_MAP) w |= M_MAP;
-                s[i] = new Succ(Id(Pack(states[i])), l, MatchKey(l, states[i]), KillPhase(v));
+                s[i] = new Succ(Id(Pack(states[i])), l, Match(l, v, states[i]), KillPhase(v));
             }
-            a = new Info(s, w, v.Event || v.Pc is W_WOKE or W_READ);
+            a = new Info(s, w, v.Event || v.Pc is W_WOKE or W_READ, s.All(y => y.Label == L_WAIT && y.Match >> 15 == K_TIMEOUT),
+                         v.Pc == W_BLOCK && !v.Event, v.Pc == W_BLOCK && v.Blocked, v.Pc == W_BLOCK, v.Pc is W_EXITED or W_GONE);
             info[id] = a;
             return a;
         }
@@ -648,13 +821,14 @@ internal static class DeliveryModel
 
         // The steps a v2.0.3 state takes as its own while this driver's side
         // waits for thisWaits: what it alone waits for, or else its worker's,
-        // its program's private ones and its reads.
+        // its program's private ones and its reads, and its wait events once
+        // this driver's worker has left its loop.
         static bool Own(Info x, Succ y, int thisWaits)
         {
             int alone = x.Waits & ~thisWaits;
             if (alone != 0)
                 return ((alone & M_READ) != 0 && y.Label == L_HID) || ((alone & M_MAP) != 0 && y.Label == L_MAP);
-            return y.Label is 0 or L_READ;
+            return y.Label is 0 or L_READ || (y.Label == L_WAIT && (thisWaits & M_FREE) != 0);
         }
 
         int CloseScratch(int thisWaits)
@@ -713,6 +887,21 @@ internal static class DeliveryModel
             return w;
         }
 
+        // State id with its Early flag set or cleared.
+        int WithEarly(int id, bool early)
+        {
+            var u = Unpack(keyOf[id]);
+            if (u.Early == early) return id;
+            u.Early = early;
+            return Id(Pack(u));
+        }
+
+        // Each state of set V in one line, for --sets.
+        public List<string> Brief(int v) =>
+            store.Fill(v, new List<int>()).Select(x => Unpack(keyOf[x])).Select(x =>
+                $"{PcName(x.Pc)}{(x.Blocked ? "(blocked)" : "")} sdk {SdkName(x.SdkPc)} p{x.P} ev {(x.Event ? 1 : 0)} stop {(x.StopSig ? 1 : 0)} owner {(x.OwnerSig ? 1 : 0)} " +
+                $"tear {x.Tear} seq {x.Seq} seen {x.Seen} parked {(x.Parked ? 1 : 0)}{(x.Early ? " early" : "")} [{Show(x.Delivered & OutMask)}]").ToList();
+
         // Measures of the set store and the caches over it.
         public string Stats() =>
             $"sets {store.Sets} members {store.Members} nodes {store.Nodes} store-bytes {store.Bytes} " +
@@ -731,29 +920,89 @@ internal static class DeliveryModel
         // after it stands for it here. A read of this driver's pairs with a
         // read of every v2.0.3 run that has a wake to read on. A run with
         // none goes on without reading when this driver's read completed no
-        // READ_REPORT (it can change no outcome by itself), or once the
-        // program was killed: this driver then read on a wake v2.0.3 never
-        // had (a frame the dying program left in the handoff, or a frame
-        // signaled back at a stop or teardown).
+        // READ_REPORT (it can change no outcome by itself), once the program
+        // was killed, or while the run's worker waits with nothing set: this
+        // driver then read on a wake v2.0.3 never had (a frame the dying
+        // program left in the handoff, or a frame signaled back at a stop or
+        // teardown). A wait of this driver's that returns on such a wake,
+        // and the block after its read, leave that run's worker in its wait.
+        // Every other wait event pairs with the same one of the run's.
         public int Follow(int v, int label, int match, int phase, int waitsBefore, int waitsAfter)
         {
             var key = (v, label, match, phase, waitsBefore, waitsAfter);
             if (follow.TryGetValue(key, out int r)) return r;
             scratch.Clear();
             int want = label == L_READ0 ? L_READ : label;
+            int kind = label == L_WAIT ? match >> 15 : 0;
             foreach (var xi in store.Fill(v, items))
             {
                 var x = Of(xi);
                 if ((x.Waits & ~waitsBefore) != 0) continue;
+                if (kind == K_TAKE)
+                {
+                    // v2.0.3's wait returns the input event here, or at the
+                    // poll that follows.
+                    scratch.Add(xi);
+                    foreach (var y in x.S)
+                        if (y.Label == L_WAIT && y.Match >> 15 == K_INPUT && (y.Match & 0x7FFF) == (match & 0x7FFF)) scratch.Add(WithEarly(y.M, true));
+                    continue;
+                }
+                if (kind == K_POLL)
+                {
+                    if (Unpack(keyOf[xi]).Early) { scratch.Add(WithEarly(xi, false)); continue; }
+                    bool any = false;
+                    foreach (var y in x.S)
+                        if (y.Label == L_WAIT && y.Match >> 15 == K_INPUT && (y.Match & 0x7FFF) == (match & 0x7FFF)) { scratch.Add(y.M); any = true; }
+                    if (!any && (x.Waiting || x.Exited))
+                    {
+                        // A wake this driver has and the run does not.
+                        bool blocks = false;
+                        if (x.Waiting && !x.Blocked)
+                            foreach (var y in x.S)
+                                if (y.Label == L_WAIT && y.Match >> 15 == K_BLOCK) { scratch.Add(y.M); blocks = true; }
+                        if (!blocks) scratch.Add(xi);
+                    }
+                    continue;
+                }
                 bool took = false;
+                bool early = kind == K_STOP && Unpack(keyOf[xi]).Early;
                 foreach (var y in x.S)
                     if (y.Label == want && y.Match == match && (label != L_KILL || (y.Phase & phase) != 0))
                     {
-                        scratch.Add(y.M);
+                        scratch.Add(early ? WithEarly(y.M, false) : y.M);
                         took = true;
                     }
                 if (!took && label is L_HID or L_MAP) scratch.Add(xi);
-                if (!took && !x.Pending && (label == L_READ0 || (label == L_READ && (match & 1 << 6) != 0))) scratch.Add(xi);
+                // A wake this driver has and the run does not (a frame
+                // signaled back at teardown that v2.0.3's wait consumed as
+                // its worker left): the run's worker waits on, or blocks,
+                // through this driver's return on it, and through the block
+                // that follows that read.
+                if (!took && label == L_WAIT && match >> 15 == K_INPUT && x.Waiting)
+                {
+                    bool blocks = false;
+                    if (!x.Blocked)
+                        foreach (var y in x.S)
+                            if (y.Label == L_WAIT && y.Match >> 15 == K_BLOCK) { scratch.Add(y.M); blocks = true; }
+                    if (!blocks) scratch.Add(xi);
+                }
+                if (!took && label == L_WAIT && match >> 15 == K_BLOCK && x.Waiting && x.Blocked) scratch.Add(xi);
+                // The run's worker left its loop first: this driver's wait
+                // events have no partner left.
+                if (!took && label == L_WAIT && x.Exited) scratch.Add(xi);
+                // A wake the run has and this driver does not (a SetEvent
+                // that came after its worker read the frame, which this
+                // driver's take had already answered): where this driver's
+                // worker blocks, the run's wait returns it, and the run reads
+                // and comes back to its wait. Where this driver's worker then
+                // times out, the run's blocks and times out with it.
+                if (!took && label == L_WAIT && match >> 15 == K_BLOCK && x.AtWait && !x.Waiting && !x.Blocked)
+                    foreach (var y in x.S) if (y.Label == L_WAIT && y.Match >> 15 == K_INPUT) scratch.Add(y.M);
+                if (!took && label == L_WAIT && match >> 15 == K_TIMEOUT && x.Waiting && !x.Blocked)
+                    foreach (var y in x.S)
+                        if (y.Label == L_WAIT && y.Match >> 15 == K_BLOCK)
+                            foreach (var z in Of(y.M).S) if (z.Label == L_WAIT && z.Match >> 15 == K_TIMEOUT) scratch.Add(z.M);
+                if (!took && !x.Pending && (label == L_READ0 || (label == L_READ && ((match & 1 << 6) != 0 || x.Waiting)))) scratch.Add(xi);
                 if (!took && label == L_RECYCLE)
                 {
                     var u = Unpack(keyOf[xi]);
@@ -773,10 +1022,10 @@ internal static class DeliveryModel
         {
             var lines = new List<string>();
             var members = store.Fill(v, new List<int>());
-            var finalsOut = members.Where(x => Of(x).S.Length == 0).Select(x => Show(keyOf[x].C & OutMask)).Distinct().ToList();
+            var finalsOut = members.Where(x => Of(x).Final).Select(x => Show(keyOf[x].C & OutMask)).Distinct().ToList();
             lines.Add($"paired v2.0.3 set: {members.Count} states, {finalsOut.Count} final outcome(s): " +
                       (finalsOut.Count == 0 ? "none" : string.Join(" | ", finalsOut.Select(o => "[" + o + "]"))));
-            foreach (var xi in members.Where(x => Of(x).S.Length > 0 && Of(x).S.All(y => y.Label is not (0 or L_READ))).Take(4))
+            foreach (var xi in members.Where(x => !Of(x).Final && Of(x).S.All(y => y.Label is not (0 or L_READ))).Take(4))
             {
                 var x = Unpack(keyOf[xi]);
                 lines.Add($"  waits: worker {PcName(x.Pc)}, sdk {SdkName(x.SdkPc)}, parked {x.Parked}, event {x.Event}, seen {x.Seen}, seq {x.Seq}, " +
@@ -784,21 +1033,17 @@ internal static class DeliveryModel
                           string.Join(", ", Of(xi).S.Select(y => y.Label switch
                           {
                               L_PROG => "program", L_RECYCLE => "recycle", L_GOES => "goes", L_MAP => "map", L_STOP => "stop", L_ADD => "add",
-                              L_KILL => "kill", L_HID => "READ_REPORT", L_READ => "read", _ => "own",
+                              L_KILL => "kill", L_HID => "READ_REPORT", L_READ => "read", L_WAIT => "wait", L_TEAR => "teardown's stop", _ => "own",
                           })));
             }
             return lines;
         }
 
         // 2: some final state of V matches with no frame this one sends that
-        // it does not, 1: only with such an extra frame, 0: none matches.
-        public int MatchClass(int v, ulong mine)
-        {
-            if (!Matches(v, mine)) return 0;
-            foreach (var t in finals[v])
-                if (NoWorse(mine, t) && NoExtra(mine, t)) return 2;
-            return 1;
-        }
+        // it does not, 1: only with such an extra frame, 0: none matches. An
+        // extra frame of a keyboard, a press and release v2.0.3 never shows,
+        // is no better outcome (keyboards: a bit per program).
+        public int MatchClass(int v, ulong mine, int keyboards) => Matches(v, mine) ? Classify(mine, finals[v], keyboards) : 0;
 
         public bool Matches(int v, ulong mine)
         {
@@ -806,7 +1051,7 @@ internal static class DeliveryModel
             {
                 var o = new HashSet<ulong>();
                 foreach (var x in store.Fill(v, items))
-                    if (Of(x).S.Length == 0) o.Add(keyOf[x].C & OutMask);
+                    if (Of(x).Final) o.Add(keyOf[x].C & OutMask);
                 outs = o.ToArray();
                 finals[v] = outs;
             }
@@ -846,7 +1091,8 @@ internal static class DeliveryModel
         var scratch = new List<State>();
         const int None = -1;
 
-        int TWaits(in State t) => (NeedsRead(t) ? M_READ : 0) | (MapReady(t, sc, Driver.This, r, frames, scratch) ? M_MAP : 0);
+        int TWaits(in State t) => (NeedsRead(t) ? M_READ : 0) | (MapReady(t, sc, Driver.This, r, frames, scratch) ? M_MAP : 0)
+                                  | (t.Pc is W_EXITED or W_GONE ? M_FREE : 0);
 
         // A set number at or above 0 is paired; -2 - n is set n after a step
         // its runs could not follow.
@@ -891,7 +1137,7 @@ internal static class DeliveryModel
             // What this driver's side alone waits for, it takes first.
             int Vset = SetOf(V);
             bool div = V < 0;
-            int alone = tw & ~v203.Waits(Vset);
+            int alone = tw & ~v203.Waits(Vset) & (M_READ | M_MAP);
             if (alone != 0)
                 buf.RemoveAll(n => Label(t, n) is var l && !(((alone & M_READ) != 0 && l == L_HID) || ((alone & M_MAP) != 0 && l == L_MAP)));
             if (buf.Count == 0)
@@ -901,9 +1147,9 @@ internal static class DeliveryModel
                 for (int pr = 1; pr <= 3; pr++) if (Count(t.Delivered, Slot(pr, 0)) > 0) res.ZeroSent = true;
                 // 2: equal to a paired run's, 1: better (an extra frame, nothing
                 // worse), 0: no paired run's. After a step the runs could not
-                // follow, only a better outcome passes.
-                int cls = v203.MatchClass(Vset, mine);
-                if (div && cls == 2) cls = 0;
+                // follow, nothing passes.
+                int cls = v203.MatchClass(Vset, mine, KeyboardPrograms(sc));
+                if (div) cls = 0;
                 bool matched = cls != 0;
                 if (cls == 2) res.Equal.Add(mine);
                 if (cls == 1 && res.Extra.Add(mine) && res.ExtraExample == null)
@@ -916,6 +1162,7 @@ internal static class DeliveryModel
                 {
                     res.Example = Show(mine) + (div ? " (after a step v2.0.3 could not take)" : "");
                     if (parent != null) res.Path = PathTo(parent, (tk, V));
+                    if (parent != null && DumpSets) res.PathSets = PathSetsTo(parent, (tk, V), v203);
                     if (parent != null) res.PairedSide = v203.Describe(Vset);
                 }
                 continue;
@@ -931,12 +1178,12 @@ internal static class DeliveryModel
                 // READ_REPORT or the Phase 1 map it waits for wait longer,
                 // only the v2.0.3 runs that wait for it too stay paired: a
                 // run that has its read takes no part in the delay.
-                int delayed = tw & ~((label == L_HID ? M_READ : 0) | (label == L_MAP ? M_MAP : 0));
+                int delayed = tw & (M_READ | M_MAP) & ~((label == L_HID ? M_READ : 0) | (label == L_MAP ? M_MAP : 0));
                 int Vs = delayed == 0 ? Vset : v203.Restrict(Vset, delayed, tw);
                 if (Vs == None) continue;
                 int V2 = Vs;
                 if (label != 0)
-                    V2 = v203.Follow(Vs, label, MatchKey(label, n), label == L_KILL ? KillPhase(t, r.Round6 && !r.Round6TakeProvisional) : 0, tw, nw);
+                    V2 = v203.Follow(Vs, label, Match(label, t, n), label == L_KILL ? KillPhase(t, r.Round6 && !r.Round6TakeProvisional) : 0, tw, nw);
                 else if (nw != tw)
                     V2 = v203.Close(Vs, nw);
                 if (V2 == None)
@@ -964,6 +1211,22 @@ internal static class DeliveryModel
         return res;
     }
 
+    internal static bool DumpSets;
+
+    static List<List<string>> PathSetsTo(Dictionary<(Key, int), (Key, int)> parent, (Key, int) k, V203Side v203)
+    {
+        var sets = new List<List<string>>();
+        while (true)
+        {
+            int v = k.Item2 >= 0 ? k.Item2 : -2 - k.Item2;
+            sets.Add(v203.Brief(v));
+            if (!parent.TryGetValue(k, out var pk)) break;
+            k = pk;
+        }
+        sets.Reverse();
+        return sets;
+    }
+
     static List<State> PathTo(Dictionary<(Key, int), (Key, int)> parent, (Key, int) k)
     {
         var path = new List<State>();
@@ -986,8 +1249,15 @@ internal static class DeliveryModel
             sb.Append(f.Name).Append(' ').Append(Fmt(x)).Append("->").Append(Fmt(y));
         }
         int l = Label(a, b);
-        return (l == 0 ? "" : l == L_READ ? "[read, paired] " : l == L_READ0 ? "[read of nothing new, paired] " : l == L_HID ? "[READ_REPORT arrives] " : "[shared] ") + sb;
+        return (l == 0 ? "" : l == L_READ ? "[read, paired] " : l == L_READ0 ? "[read of nothing new, paired] " : l == L_HID ? "[READ_REPORT arrives] "
+                : l == L_WAIT ? $"[wait {KindName(WaitKind(a, b))}, paired] " : l == L_TEAR ? "[stop event at teardown, shared] " : "[shared] ") + sb;
     }
+
+    static string KindName(int k) => k switch
+    {
+        K_BLOCK => "blocks", K_STOP => "returns the stop event", K_INPUT => "returns the input event", K_OWNER => "returns the owner pipe",
+        K_TIMEOUT => "times out", K_TAKE => "takes a final SeqNo", K_POLL => "polls after the take", _ => k.ToString(),
+    };
 
     static string PcName(int pc) => pc switch
     {
@@ -999,7 +1269,8 @@ internal static class DeliveryModel
     static string SdkName(int pc) => pc switch
     {
         S_CLAIM => "claim", S_START => "start", S_WRITE => "store", S_CHECK => "check", S_RECLAIM => "take-back", S_SIGNAL => "SetEvent",
-        S_EXIT => "exit", S_NEXT => "next", S_DONE => "done", S_FRAMEDONE => "frame-done", _ => pc.ToString(),
+        S_EXIT => "exit", S_NEXT => "next", S_DONE => "done", S_FRAMEDONE => "frame-done", S_FAST => "count-read", S_XCHG => "exchange",
+        _ => pc.ToString(),
     };
 
     static void Steps(in State s, Scenario sc, Driver d, Rules r, int frames, List<State> next)
@@ -1044,9 +1315,21 @@ internal static class DeliveryModel
                     // A pending final value becomes the new frame's, in one
                     // compare-exchange: its wake carries this frame.
                     next.Add(AfterFrame(s with { Hand = s.SdkSeq, HandFinal = true }));
+                else if (r.Round6 && r.FastSignal && prog.Is21 && s.Cap)
+                    next.Add(s with { SdkPc = S_FAST });
                 else
                     next.Add(prog.Is21 && s.Cap ? s with { Hand = s.SdkSeq, HandFinal = false, Replaced = r.NoTakeBackOverUntaken && s.Hand != 0, SdkPc = S_RECLAIM }
                                                 : s with { SdkPc = S_SIGNAL });
+                break;
+            case S_FAST:
+                // The fast branch: with a worker counted the SDK signals and
+                // leaves the handoff as it is. With none, the provisional
+                // path follows.
+                if (s.Waiters != 0) next.Add(r.FastSkipsSignal ? AfterFrame(s) : s with { SdkPc = S_SIGNAL });
+                else next.Add(s with { SdkPc = S_XCHG });
+                break;
+            case S_XCHG:
+                next.Add(s with { Hand = s.SdkSeq, HandFinal = false, SdkPc = S_RECLAIM });
                 break;
             case S_RECLAIM:
                 if (r.Round6)
@@ -1098,7 +1381,7 @@ internal static class DeliveryModel
 
         // A kill inside a frame's publication: its threads go, then its
         // handles, the pipe among them.
-        if (sc.Kill == s.P && !s.KillUsed && s.SdkPc is S_CHECK or S_RECLAIM or S_SIGNAL or S_FRAMEDONE)
+        if (sc.Kill == s.P && !s.KillUsed && s.SdkPc is S_CHECK or S_FAST or S_XCHG or S_RECLAIM or S_SIGNAL or S_FRAMEDONE)
             next.Add(Collect(Ended(s, sc) with { Done = s.Idx, KillUsed = true }, sc, prog));
 
         // A foreign stop: another program's sweep sets the index's stop event.
@@ -1179,15 +1462,21 @@ internal static class DeliveryModel
                 // only while no next program has started (b17050c1), and
                 // always when the poll consumed the input event.
                 bool alone = !r.BackOnlyAlone || !NextStarted(s) || (r.TakeReadSendsTaken && s.Seq == s.Took);
-                var back = r.SignalTakenOnExit && alone ? s with { Event = true, Took = 0 } : s with { Took = 0 };
-                if (s.StopSig) next.Add(StopReturned(back, sc, d, r, prog));
+                var back = r.SignalTakenOnExit && alone && (!r.BackOnlyUndelivered || s.Seq != s.LastDel) ? s with { Event = true, Took = 0 } : s with { Took = 0 };
+                var backTear = r.SignalTakenAtTear ? back : s with { Took = 0 };
+                // A candidate: at teardown the frame goes back only when the
+                // poll returned the stop event, as v2.0.3's wait left its
+                // signal only then. Before the stop event its wait returned
+                // the input event, and the worker left with it consumed.
+                var tearNoStop = r.BackOnlyOnStop ? s with { Took = 0 } : backTear;
+                if (s.StopSig) next.Add(s.Tear != 0 ? backTear with { Pc = W_EXITED } : StopReturned(back, sc, d, r, prog));
                 else if (s.Event)
-                    next.Add(s.Tear != 0 ? (r.SignalTakenOnExit ? s : s with { Event = false }) with { Took = 0, Pc = W_EXITED }
+                    next.Add(s.Tear != 0 ? (r.SignalTakenOnExit && r.SignalTakenAtTear && !r.BackOnlyOnStop ? s : s with { Event = false }) with { Took = 0, Pc = W_EXITED }
                                          : s with { Event = false, Took = r.TearCheckedRead ? s.Took : 0, Pc = W_READ, AfterOwner = false });
                 else if (s.OwnerSig && !r.WaitAgainAfterOwner) next.Add(s with { OwnerSig = false, Pc = W_READ, AfterOwner = true, NoRetry = true });
-                else if (s.OwnerSig && r.TearCheckedRead && s.Tear != 0) next.Add(back with { Pc = W_EXITED });
+                else if (s.OwnerSig && r.TearCheckedRead && s.Tear != 0) next.Add(tearNoStop with { Pc = W_EXITED });
                 else if (s.OwnerSig) next.Add(s with { Pc = W_READ, AfterOwner = false, NoRetry = true });
-                else next.Add(s.Tear != 0 ? back with { Pc = W_EXITED } : s with { Pc = W_READ, AfterOwner = false });
+                else next.Add(s.Tear != 0 ? tearNoStop with { Pc = W_EXITED } : s with { Pc = W_READ, AfterOwner = false });
                 break;
             }
             case W_BLOCK:
@@ -1217,6 +1506,10 @@ internal static class DeliveryModel
                         // program died between its exchange and its
                         // take-back.
                         else if (gating && s.Hand != 0 && s.Hand != s.Seen) next.Add(u with { Pc = W_TOP });
+                        // v2.0.3's worker times out and waits again. It
+                        // changes nothing, and is taken only beside this
+                        // driver's timeout (L_WAIT).
+                        else if (d == Driver.V203) next.Add(u with { Pc = W_TOP });
                     }
                 }
                 break;
@@ -1364,15 +1657,34 @@ internal static class DeliveryModel
         ulong delivered = Deliver(s.Delivered, slot);
         int p = slot / 6 + 1;
         if (slot % 6 != 0 && (s.RelDone >> (p - 1) & 1) != 0) delivered |= 1UL << (LateBit + p - 1);
-        // A program's frame after a later one of the same program.
+        // A program's frame after a later one of the same program, or after
+        // a later program's.
         if (slot % 6 != 0)
+        {
             for (int j = slot % 6 + 1; j <= 5; j++)
                 if (Count(s.Delivered, Slot(p, j)) > 0) delivered |= 1UL << OrderBit;
+            if (LaterSent(s.Delivered, p)) delivered |= 1UL << CrossBit;
+        }
         return s with { Delivered = delivered };
     }
 
-    static State DeliverRelease(in State s) =>
-        s with { Delivered = Deliver(s.Delivered, RelSlot + s.RelQ - 1), RelDone = s.RelFor > 0 ? s.RelDone | 1 << (s.RelFor - 1) : s.RelDone, RelQ = 0, RelFor = 0 };
+    static State DeliverRelease(in State s)
+    {
+        ulong delivered = Deliver(s.Delivered, RelSlot + s.RelQ - 1);
+        if (LaterSent(s.Delivered, s.RelQ)) delivered |= 1UL << CrossBit;
+        return s with { Delivered = delivered, RelDone = s.RelFor > 0 ? s.RelDone | 1 << (s.RelFor - 1) : s.RelDone, RelQ = 0, RelFor = 0 };
+    }
+
+    // A frame or release frame of a program after p went out.
+    static bool LaterSent(ulong delivered, int p)
+    {
+        for (int q = p + 1; q <= 3; q++)
+        {
+            if (Count(delivered, RelSlot + q - 1) > 0) return true;
+            for (int j = 1; j <= 5; j++) if (Count(delivered, Slot(q, j)) > 0) return true;
+        }
+        return false;
+    }
 
     // OwnerGone starts: this driver takes the handoff first, while it holds
     // the input event.

@@ -30,6 +30,7 @@
 //     Shards split the scenarios by index modulo n, so separate processes
 //     can run them. --set-stats prints each scenario's set store size.
 //   SignalGateModel scenarios   each scenario's index and name.
+//   SignalGateModel selftest   the outcome checks on hand-built outcomes.
 //   SignalGateModel outcomes <frames> <scenario> [v203]   one driver's
 //     outcomes in a scenario, unpaired.
 using System;
@@ -52,6 +53,12 @@ internal static class Program
         if (args.Length >= 3 && (args[0] == "check" || args[0] == "rule"))
             return Check(args);
         // scenarios: each scenario's index and name.
+        if (args.Length >= 1 && args[0] == "selftest")
+        {
+            var results = DeliveryModel.SelfTest();
+            foreach (var (name, ok) in results) Console.WriteLine($"[{(ok ? "OK" : "FAIL")}] {name}");
+            return results.All(x => x.Ok) ? 0 : 1;
+        }
         if (args.Length >= 1 && args[0] == "scenarios")
         {
             int i = 0;
@@ -138,6 +145,7 @@ internal static class Program
             else if (args[i] == "--quiet") quiet = true;
             else if (args[i] == "--progress") s_progress = true;
             else if (args[i] == "--set-stats") DeliveryModel.SetStats = true;
+            else if (args[i] == "--sets") DeliveryModel.DumpSets = true;
             else if (args[i] == "--index") s_index = int.Parse(args[++i]);
             else if (args[i] == "--outcomes") s_outcomes = true;
             else if (args[i] == "--base") s_base = args[++i];
@@ -286,7 +294,11 @@ internal static class Program
         if (path == null) { Console.WriteLine("    (no witness path)"); return; }
         Console.WriteLine($"    witness, {path.Count - 1} steps, this driver delivers [{a.Example}]:");
         for (int i = 1; i < path.Count; i++)
+        {
             Console.WriteLine($"    {i,3}. {DeliveryModel.Describe(path[i - 1], path[i])}");
+            if (a.PathSets != null && path == a.Path && i < a.PathSets.Count)
+                foreach (var l in a.PathSets[i]) Console.WriteLine($"           | {l}");
+        }
         if (a.PairedSide != null)
             foreach (var l in a.PairedSide) Console.WriteLine($"    {l}");
         PrintExtra(a);
