@@ -1040,7 +1040,47 @@ internal static partial class SharedMemoryIO
             long left = deadline - Environment.TickCount64;
             if (left <= 0) return false;
             if (ev == IntPtr.Zero) { Thread.Sleep(1); continue; }
-            WaitForSingleObject(ev, (uint)Math.Min(left, 50));
+            // A wait that fails returns at once, and the loop would spin to
+            // its timeout. The rest of this wait sleeps as it does with no
+            // event.
+            if (WaitForSingleObject(ev, (uint)Math.Min(left, 50)) == WAIT_FAILED)
+            {
+                AckWaitFailed(controllerIndex, Marshal.GetLastPInvokeError());
+                ev = IntPtr.Zero;
+            }
+            else if (s_ackWaitFailing)
+            {
+                AckWaitWorked();
+            }
+        }
+    }
+
+    // The failures of the waits on every controller's acknowledgement
+    // event, under s_ackWaitLock, and whether an episode of them is open.
+    // One record for the process: a handle that fails stays failed, and
+    // each wait on it fails at once, so the episode lasts while any
+    // controller's does.
+    private static readonly object s_ackWaitLock = new();
+    private static LoopFailures s_ackWaitFailures;
+    private static volatile bool s_ackWaitFailing;
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void AckWaitFailed(int controllerIndex, int error)
+    {
+        lock (s_ackWaitLock)
+        {
+            s_ackWaitFailures.WaitFailed(error, wait: $"the wait for controller {controllerIndex}'s frame delivery");
+            s_ackWaitFailing = true;
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void AckWaitWorked()
+    {
+        lock (s_ackWaitLock)
+        {
+            s_ackWaitFailures.NextPass();
+            s_ackWaitFailing = s_ackWaitFailures.Failing;
         }
     }
 
@@ -1808,4 +1848,6 @@ internal static partial class SharedMemoryIO
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     private static partial uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+
+    private const uint WAIT_FAILED = 0xFFFFFFFF;
 }
