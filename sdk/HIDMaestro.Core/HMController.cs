@@ -2389,7 +2389,11 @@ public sealed partial class HMController : IDisposable
 
     /// <summary>A command or a reset changed the protocol's registers: the
     /// idle repeat's clock looks at its stream's condition and period again.
-    /// Runs on the thread that ran the command, with no lock held.</summary>
+    /// Runs on the thread that ran the command, outside the engine's lock,
+    /// and for a USB/IP device's bulk OUT command under the device's report
+    /// lock (UsbipEmulatedDevice.HandleBulkCommand). It takes only the
+    /// clock's own lock, which nothing else is taken under
+    /// (DeviceClock.Wake).</summary>
     private void WakeIdleClock() => _idleClock?.Wake();
 
     /// <summary>Stops the idle repeat, a protocol host's clock and the

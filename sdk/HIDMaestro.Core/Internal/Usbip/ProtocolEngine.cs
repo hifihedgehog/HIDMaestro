@@ -190,11 +190,16 @@ internal sealed unsafe class ProtocolEngine
     public CompiledProtocol Protocol => _p;
 
     /// <summary>Called after a command or a reset changed the registers, on
-    /// the thread that ran it, with no lock held, so a clock that reads them
-    /// looks again: the idle repeat of a stream whose condition or period
-    /// reads a register (HMController). Null while nothing reads them that
-    /// way. Set on the controller's thread and read on the threads that run
-    /// commands, which share no lock with it.</summary>
+    /// the thread that ran it, once this engine's lock is released, so a
+    /// clock that reads them looks again: the idle repeat of a stream whose
+    /// condition or period reads a register (HMController). A bulk OUT
+    /// command runs it under the USB/IP device's report lock
+    /// (UsbipEmulatedDevice.HandleBulkCommand holds _streamSendLock), so a
+    /// handler takes no lock that is ever held while that one is taken.
+    /// HMController's takes only the idle clock's own lock, a leaf
+    /// (DeviceClock.Wake). Null while nothing reads them that way. Set on
+    /// the controller's thread and read on the threads that run commands,
+    /// which share no lock with it.</summary>
     internal Action? RegistersChanged
     {
         get => System.Threading.Volatile.Read(ref _registersChanged);
