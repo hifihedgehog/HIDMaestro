@@ -3,15 +3,21 @@
 // pauses of 0 to 2 ms, in bursts of 50 to 200 back to back, and after pauses
 // of 600 to 1,200 ms, past the driver worker's 500 ms wait. Two passes of
 // [seconds] each (120 unless given):
-//   a dualshock-4-v2 written with SubmitRawReport, a count in bytes 40 to
-//   43, read by a host's ReadFile on its HID interface
+//   a dualshock-4-v2 written with SubmitRawReport, a count in report bytes
+//   40 to 43, read by a host's ReadFile on its HID interface.
+//   SubmitRawReport takes the data without the report ID, which the driver
+//   puts in front, so the count goes in at data bytes 39 to 42
 //   an xbox-360-wired written with SubmitState, a count in the two sticks'
 //   X axes, read through Windows.Gaming.Input, whose reading comes from the
 //   XUSB companion's WAIT_FOR_INPUT completions
 // Each submit is matched to the first reading that carries its count or a
 // later one. A submit not read within 250 ms fails the pass: a wakeup the
 // signal gate lost (docs/design/signal-gate.md) waits for the worker's
-// 500 ms timeout.
+// 500 ms timeout. A reading whose count is above every count submitted by
+// then fails the pass too, so a count read in the wrong place fails rather
+// than matching. Until that check the DualShock 4's count went in at data
+// bytes 40 to 43, read back as 256 times itself, and every submit matched
+// the next new report of any frame.
 //
 // The gate's capability words in Global\HIDMaestroSignal<N> tell the SDK
 // it may skip a signal, and the driver hosts count whatever they say. So
@@ -37,7 +43,8 @@
 // that differ, by the exact one-sided sign test (the probability of that
 // many or more in a binomial with p 1/2) at 1/4,000 or less, and its blocks
 // have more than five frames over 4 ms beyond the gate-off blocks'. The
-// five is the old rule's: a handful of late frames never fails a mode.
+// five is the old rule's: a handful of late frames never fails a mode. Each
+// mode's check prints every pair, so a stall shows as the one pair it hit.
 //   With a gate that has no effect on when frames are read, which block of a
 // pair reads more frames late is the same whichever block ran the gate, and
 // the coin alone decided that. Each pair that differs then goes against the
@@ -78,15 +85,21 @@
 // after it waits with it, and the 250 ms bound fails it. The DualShock 4's
 // input gate must fail the comparison. The Xbox 360 pad's readings come
 // from the companion, so its modes must pass.
-// --late-detail prints where each DualShock 4 frame over 4 ms waited: the
-// ReadFile readings that completed between its submit and the first reading
-// that carries it, the time since the reading before that one, the submits
-// after it in its burst, the later submits that came before its reading,
-// and whether the SDK's idle repeat, a write of the last frame 4 ms after it
-// (the profile's stream period), was due before its reading. A frame whose
-// wakeup was missed waits with the reader idle for the next write, the idle
-// repeat when nothing follows. A frame queued behind a burst's other reports
-// waits while the reader reads them.
+// --late-detail prints where each frame over 4 ms waited: the readings
+// between its submit and the first reading that carries it (every ReadFile
+// on the DualShock 4, every change Windows.Gaming.Input showed on the Xbox
+// 360 pad), the time since the reading before that one and since the last
+// submit before it, the later submits that came before its reading, and its
+// place in its burst. On the DualShock 4 it adds whether the SDK's idle
+// repeat, a write of the last frame 4 ms after it (the profile's stream
+// period), was due before its reading, and the bytes of the first report
+// with a count. On the Xbox 360 pad it names what most likely completed the
+// WAIT_FOR_INPUT that carried the frame: a doorbell (a submit under 0.5 ms
+// before the reading), the kick of the next request (under 0.5 ms after the
+// reading before), the companion's 8 ms timer (a wait or a gap of 7.5 to
+// 9 ms), or none of those, a stall. A frame whose wakeup was missed waits
+// with the reader idle for the next write. A frame queued behind a burst's
+// other reports waits while the reader reads them.
 // --input-buffers=<n> gives the DualShock 4 reader's handle n input buffers
 // (HidD_SetNumInputBuffers) in place of HID class's default, which caps how
 // many reports can queue ahead of a frame.
@@ -162,7 +175,7 @@ internal static partial class Program
                 if (pad == null) Thread.Sleep(100);
             }
             if (pad == null) Check($"{Xbox360}: a Windows.Gaming.Input gamepad the create added", false, "none in 20 s");
-            else StressWgi(c, pad, seconds, SignalView(c), gateOff, missEvery, missInputEvery);
+            else StressWgi(c, pad, seconds, SignalView(c), gateOff, missEvery, missInputEvery, lateDetail);
         }
         return s_failures == 0 ? 0 : 1;
     }
@@ -405,6 +418,9 @@ internal static partial class Program
             Check($"{name}, {ModeName(mode)}: frames over 4 ms against the gate-off block of each pair, worse in no more pairs than a sign test allows at 1/4,000, or by {StressFloor} frames or fewer",
                 !v.Fails,
                 FormattableString.Invariant($"worse in {v.Against} of {list.Count} pairs, better in {v.For}, even in {list.Count - v.Against - v.For}, one-sided p {v.P:G3}; {list.Sum(x => x.On)} frames over 4 ms in its blocks, {list.Sum(x => x.Off)} in the gate-off blocks"));
+            // Every pair, so a stall shows as the one pair it landed in.
+            Console.WriteLine("    its pairs in order, frames over 4 ms in its block/in the gate-off block, . where even: " +
+                (list.Count == 0 ? "none" : string.Join(" ", list.Select(x => x.On == x.Off ? "." : $"{x.On}/{x.Off}"))));
         }
     }
 
@@ -583,10 +599,20 @@ internal static partial class Program
         // --late-detail: every reading, a count read again included.
         var reads = lateDetail ? new List<(int, long)>(1 << 20) : null;
         var burstOf = lateDetail ? new List<(int Size, int After)>(1 << 20) : null;
-        var report = new byte[64];
-        report[0] = 0x01;
-        report[1] = report[2] = report[3] = report[4] = 0x80;
-        report[5] = 0x08;
+        // SubmitRawReport takes a report's data without its ID, and the
+        // driver puts report ID 0x01 in front of it (HMController
+        // SubmitRawReportCore, driver.c ProcessSharedInput), so data byte i
+        // goes out as report byte i + 1. The count the reader takes from
+        // report bytes 40 to 43 goes in at data bytes 39 to 42. Sticks
+        // centered, hat neutral.
+        var data = new byte[63];
+        data[0] = data[1] = data[2] = data[3] = 0x80;
+        data[4] = 0x08;
+        // The highest count submitted so far, set before its submit, so a
+        // reading can only carry a count at or below it. A reading above it
+        // is a misread, and fails the pass.
+        int highest = 0, misread = 0, misreadValue = 0;
+        byte[]? firstReport = null;
         bool stop = false;
         var reader = new Thread(() =>
         {
@@ -598,19 +624,26 @@ internal static partial class Program
                 long t = Stopwatch.GetTimestamp();
                 if (read < 44 || buf[0] != 0x01) continue;
                 int count = BitConverter.ToInt32(buf, 40);
+                if (count < 0 || count > Volatile.Read(ref highest))
+                {
+                    if (misread++ == 0) misreadValue = count;
+                    continue;
+                }
+                if (firstReport == null && count > 0) firstReport = buf.ToArray();
                 if (reads != null) lock (seen) reads.Add((count, t));
                 if (count != last) { lock (seen) seen.Add((count, t)); last = count; }
             }
         }) { IsBackground = true, Priority = ThreadPriority.Highest, Name = "stress reader" };
         reader.Start();
-        c.SubmitRawReport(report);
+        c.SubmitRawReport(data);
         Thread.Sleep(300);
         Console.WriteLine($"  {Ds4}, SubmitRawReport to ReadFile:");
         var modes = signal == IntPtr.Zero || gateOff ? new[] { 0 } : new[] { 0, GateInput };
         var sent = StressSchedule(seconds, n =>
         {
-            BitConverter.TryWriteBytes(report.AsSpan(40), n);
-            c.SubmitRawReport(report);
+            BitConverter.TryWriteBytes(data.AsSpan(39), n);
+            Volatile.Write(ref highest, n);
+            c.SubmitRawReport(data);
         }, modes, signal, 0, missInputEvery, burstOf);
         Thread.Sleep((int)StressBoundMs * 2);
         Volatile.Write(ref stop, true);
@@ -623,20 +656,33 @@ internal static partial class Program
             got = seen.ToList();
             all = reads?.ToList();
         }
+        Check($"{Ds4} ReadFile: every reading carries a count the probe submitted, at report bytes 40 to 43",
+            misread == 0, misread == 0 ? $"{got.Count} counts read" : $"{misread} readings carried none, the first {misreadValue}");
         StressVerdict($"{Ds4} ReadFile", sent, got);
-        if (all != null && burstOf != null) LateDetail($"{Ds4} ReadFile", sent, burstOf, got, all);
+        if (all != null && burstOf != null)
+        {
+            if (firstReport != null)
+                Console.WriteLine($"  {Ds4} ReadFile, --late-detail: the first report with a count, bytes 0 to 7 {Convert.ToHexString(firstReport, 0, 8)}, " +
+                    $"bytes 36 to 47 {Convert.ToHexString(firstReport, 36, 12)}, count at bytes 40 to 43 {BitConverter.ToInt32(firstReport, 40)}");
+            LateDetail($"{Ds4} ReadFile", sent, burstOf, got, all, wgi: false);
+        }
     }
 
     /// <summary>--late-detail (header): each frame over 4 ms, where it
     /// waited, a summary by mode, and each mode's bursts of 50 or more: the
     /// readings that carried one of a burst's counts, and the wait of its
     /// last frame. Times run from the submit's Stopwatch stamp, readings from
-    /// ReadFile's return.</summary>
+    /// ReadFile's return, or on the Xbox 360 pad (<paramref name="wgi"/>)
+    /// from the poll that saw Windows.Gaming.Input's reading change, where
+    /// <paramref name="reads"/> holds only the changes. There the last
+    /// column says what most likely completed the WAIT_FOR_INPUT that
+    /// carried the frame (header).</summary>
     static void LateDetail(string name, List<(int Count, long Time, int Mode, int Block)> sent, List<(int Size, int After)> burstOf,
-        List<(int Count, long Time)> seen, List<(int Count, long Time)> reads)
+        List<(int Count, long Time)> seen, List<(int Count, long Time)> reads, bool wgi)
     {
-        // The profile's stream period: the SDK writes the last frame again
-        // this long after it while no submit comes (HMController.RepeatLastFrame).
+        // The DualShock 4 profile's stream period: the SDK writes the last
+        // frame again this long after it while no submit comes
+        // (HMController.RepeatLastFrame). The Xbox 360 profile has none.
         const double IdleRepeatMs = 4;
         const int MaxRows = 600;
         double tickMs = 1000.0 / Stopwatch.Frequency;
@@ -663,9 +709,18 @@ internal static partial class Program
             return lo;
         }
         string F(double v) => double.IsNaN(v) ? "-" : v.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
-        string Short(int mode) => ((mode & ~Announced) == 0 ? "off" : "input") + ((mode & Announced) != 0 ? "*" : "");
+        string Short(int mode) => ((mode & ~Announced) switch { 0 => "off", GateInput => "input", GateCompanion => "door", _ => "both" })
+            + ((mode & Announced) != 0 ? "*" : "");
+        // What completed the request that carried a late Xbox 360 frame, as
+        // well as the probe can tell. A submit just before the reading: its
+        // doorbell. The reading just after the one before it: the kick of the
+        // next WAIT_FOR_INPUT, which comes back at once with a newer frame. A
+        // wait or a gap of 7.5 to 9 ms: the companion's 8 ms timer, which is
+        // what a missed doorbell waits for. Anything else: a stall.
+        static string Cause(double since, double gap, double wait) =>
+            since < 0.5 ? "doorbell" : gap < 0.5 ? "kick" : (gap >= 7.5 && gap <= 9) || (wait >= 7.5 && wait <= 9) ? "timer" : "other";
 
-        var late = new SortedDictionary<int, List<(int Between, int Size, int After, int Later, bool Idle)>>();
+        var late = new SortedDictionary<int, List<(int Between, int Size, int After, int Later, string Why)>>();
         var rows = new List<string>();
         int j = 0;
         for (int i = 0; i < sent.Count; i++)
@@ -683,29 +738,37 @@ internal static partial class Program
             int next = SubmitAtOrAfter(sent, tc);
             int later = Math.Max(0, next - (i + 1));
             double toNext = i + 1 < sent.Count ? (sent[i + 1].Time - t0) * tickMs : double.NaN;
-            bool idle = (tc - sent[Math.Max(i, next - 1)].Time) * tickMs > IdleRepeatMs;
+            // From the last submit before the reading to the reading.
+            double since = (tc - sent[Math.Max(i, next - 1)].Time) * tickMs;
+            string why = wgi ? Cause(since, gap, ms) : since > IdleRepeatMs ? "idle" : "-";
             var (size, after) = burstOf[i];
             int key = mode & ~Announced;
             if (!late.TryGetValue(key, out var list)) late[key] = list = new();
-            list.Add((between, size, after, later, idle));
+            list.Add((between, size, after, later, why));
             if (rows.Count < MaxRows)
                 rows.Add(string.Create(System.Globalization.CultureInfo.InvariantCulture,
-                    $"    {count,7} {Short(mode),-6} {ms,6:F2} {between,7} {F(gap),7} {later,6} {F(toNext),7} {size,5} {after,5} {(idle ? "yes" : "no"),4} {seen[j].Count - count,6}"));
+                    $"    {count,7} {Short(mode),-6} {ms,6:F2} {between,7} {F(gap),7} {F(since),8} {later,6} {F(toNext),7} {size,5} {after,5} {why,-8} {seen[j].Count - count,6}"));
         }
         int total = late.Values.Sum(l => l.Count);
         Console.WriteLine($"  {name}, --late-detail: {total} frames over 4 ms. Columns: the frame's count, its mode (* the input capability set again during the submit),");
-        Console.WriteLine("  its wait in ms, the readings between its submit and its reading, ms from the reading before to its reading, the later submits");
-        Console.WriteLine($"  before its reading, ms to the next submit, its burst's size (1 alone), the submits after it in the burst, whether the idle repeat");
-        Console.WriteLine($"  ({IdleRepeatMs} ms after the last submit) was due before its reading, and how far past its count the reading's count is.");
-        Console.WriteLine("      count mode       ms between gap_ms later next_ms burst after idle  ahead");
+        Console.WriteLine("  its wait in ms, the readings between its submit and its reading, ms from the reading before to its reading, ms from the last submit");
+        Console.WriteLine("  before its reading to its reading, the later submits before its reading, ms to the next submit, its burst's size (1 alone), the");
+        Console.WriteLine(wgi
+            ? "  submits after it in the burst, what most likely completed its WAIT_FOR_INPUT (doorbell: a submit under 0.5 ms before; kick: under 0.5 ms"
+            : $"  submits after it in the burst, idle where the SDK's idle repeat ({IdleRepeatMs} ms after the last submit) was due before its reading,");
+        Console.WriteLine(wgi
+            ? "  after the reading before; timer: a wait or a gap of 7.5 to 9 ms; other: none of those, a stall), and how far past its count the reading's is."
+            : "  and how far past its count the reading's count is.");
+        Console.WriteLine("      count mode       ms between  gap_ms since_ms later next_ms burst after why       ahead");
         foreach (string row in rows) Console.WriteLine(row);
         if (total > rows.Count) Console.WriteLine($"    {total - rows.Count} more not shown");
         foreach (var (mode, list) in late)
         {
             var b = list.Select(x => x.Between).OrderBy(x => x).ToList();
             int inBurst = list.Count(x => x.Size >= 50);
+            string why = string.Join(", ", list.GroupBy(x => x.Why).OrderBy(g => g.Key, StringComparer.Ordinal).Select(g => $"{g.Key} {g.Count()}"));
             Console.WriteLine(FormattableString.Invariant(
-                $"  {name}, {ModeName(mode)}: {list.Count} frames over 4 ms. Readings between submit and reading: none {b.Count(x => x == 0)}, 1 to 7 {b.Count(x => x is >= 1 and <= 7)}, 8 to 31 {b.Count(x => x is >= 8 and <= 31)}, 32 or more {b.Count(x => x >= 32)}, median {b[b.Count / 2]}. In a burst of 50 or more {inBurst}, its last submit {list.Count(x => x.Size >= 50 && x.After == 0)}, within 8 of its end {list.Count(x => x.Size >= 50 && x.After < 8)}. A later submit before the reading {list.Count(x => x.Later > 0)}. The idle repeat due before the reading {list.Count(x => x.Idle)}."));
+                $"  {name}, {ModeName(mode)}: {list.Count} frames over 4 ms. Readings between submit and reading: none {b.Count(x => x == 0)}, 1 to 7 {b.Count(x => x is >= 1 and <= 7)}, 8 to 31 {b.Count(x => x is >= 8 and <= 31)}, 32 or more {b.Count(x => x >= 32)}, median {b[b.Count / 2]}. In a burst of 50 or more {inBurst}, its last submit {list.Count(x => x.Size >= 50 && x.After == 0)}, within 8 of its end {list.Count(x => x.Size >= 50 && x.After < 8)}. A later submit before the reading {list.Count(x => x.Later > 0)}. Last column: {why}."));
         }
         // Each burst of 50 or more inside one block: the readings whose count
         // is one of its own, and its last submit's wait, by mode.
@@ -740,7 +803,7 @@ internal static partial class Program
         }
     }
 
-    static void StressWgi(HMController c, Gamepad pad, double seconds, IntPtr signal, bool gateOff, int missEvery, int missInputEvery)
+    static void StressWgi(HMController c, Gamepad pad, double seconds, IntPtr signal, bool gateOff, int missEvery, int missInputEvery, bool lateDetail)
     {
         // A count in the two sticks' X axes (HMAxis.X and HMAxis.Z on this
         // profile), 200 steps each, apart by more than the 16-bit
@@ -748,11 +811,15 @@ internal static partial class Program
         static float Axis(int digit) => 0.05f + digit * 0.0045f;
         static int Digit(double wgi) => (int)Math.Round(((wgi + 1) / 2 - 0.05) / 0.0045);
         var seen = new List<(int, long)>(1 << 20);
+        var burstOf = lateDetail ? new List<(int Size, int After)>(1 << 20) : null;
         bool stop = false;
+        // As on the DualShock 4: a count above the highest submitted is a
+        // misread, and fails the pass.
+        int highest = 0, misread = 0, misreadValue = 0;
         var state = new HMGamepadState { Axes = new Dictionary<HMAxis, float>() };
         var poller = new Thread(() =>
         {
-            int last = -1, unwrapped = 0, prev = 0;
+            int last = -1, unwrapped = 0, prev = 0, lastBad = -1;
             while (!Volatile.Read(ref stop))
             {
                 var r = pad.GetCurrentReading();
@@ -760,10 +827,19 @@ internal static partial class Program
                 int x = Digit(r.LeftThumbstickX), y = Digit(r.RightThumbstickX);
                 if (x < 0 || x > 199 || y < 0 || y > 199) continue;
                 int code = y * 200 + x;
-                if (code == last) continue;
+                // Until the probe's first frame, count 0, shows, the reading
+                // is the pad's own state.
+                if (code == last || (last < 0 && code != 0)) continue;
                 // Counts go up, 40,000 codes a lap.
                 int delta = ((code - prev) % 40000 + 40000) % 40000;
-                if (last >= 0) unwrapped += delta; else unwrapped = code;
+                int count = last >= 0 ? unwrapped + delta : code;
+                if (count > Volatile.Read(ref highest))
+                {
+                    if (code != lastBad && misread++ == 0) misreadValue = count;
+                    lastBad = code;
+                    continue;
+                }
+                unwrapped = count;
                 prev = code;
                 last = code;
                 seen.Add((unwrapped, t));
@@ -781,12 +857,16 @@ internal static partial class Program
             int code = n % 40000;
             state.Axes[HMAxis.X] = Axis(code % 200);
             state.Axes[HMAxis.Z] = Axis(code / 200);
+            Volatile.Write(ref highest, n);
             c.SubmitState(state);
-        }, modes, signal, missEvery, missInputEvery);
+        }, modes, signal, missEvery, missInputEvery, burstOf);
         Thread.Sleep((int)StressBoundMs * 2);
         Volatile.Write(ref stop, true);
         poller.Join(2000);
+        Check($"{Xbox360} Windows.Gaming.Input: every reading carries a count the probe submitted, in the sticks' X axes",
+            misread == 0, misread == 0 ? $"{seen.Count} counts read" : $"{misread} readings carried none, the first {misreadValue}");
         StressVerdict($"{Xbox360} Windows.Gaming.Input", sent, seen);
+        if (burstOf != null) LateDetail($"{Xbox360} Windows.Gaming.Input", sent, burstOf, seen, seen, wgi: true);
     }
 
     [DllImport("hid.dll", SetLastError = true)]
