@@ -225,7 +225,7 @@ typedef struct _DEVICE_CONTEXT {
 
     /* 2.1.0: the worker has read a frame since the device context's add, so
      * a frame read now was written after the context before it went
-     * (ProcessSharedInput). Worker thread only. */
+     * (ProcessSharedInput, InputReportFirstRead). Worker thread only. */
     BOOLEAN ReadAFrame;
 
     /* 2.1.0: the frame read last was read since the last reset, OwnerGone
@@ -307,14 +307,22 @@ typedef struct _DEVICE_CONTEXT {
     /* 2.1.0: the cached report is a frame no READ_REPORT has carried yet.
      * The worker sets it as it caches a frame it sends, before it looks for
      * a read parked, and whichever read carries the frame clears it, so a
-     * frame goes out once. OwnerGone, the recycle and a zeroed section clear
-     * it with the delivered gate. Under InputLock. */
+     * frame goes out once. A zeroed section clears it. The recycle keeps it,
+     * and OwnerGone keeps it with no release frames and puts it ahead of
+     * them otherwise, unless it is InputReportFirstRead, or
+     * InputReportAfterEnd at the recycle or beside release frames. Under
+     * InputLock. */
     BOOLEAN InputReportPending;
 
-    /* 2.1.0: InputReportAfterEnd, the pending frame was read once the
-     * watched program's pipe had closed, so it can be the next program's: a
-     * late READ_REPORT takes it under v2.0.3's greater-than test. Holds only
-     * while InputReportPending does. Under InputLock. */
+    /* 2.1.0: InputReportFirstRead, the pending frame is the first frame
+     * this device context read, which a context before it may have sent
+     * (the device added again): OwnerGone and the recycle drop it as v2.0.3
+     * dropped it. InputReportAfterEnd, it was read once the watched
+     * program's pipe had closed, so it can be the next program's: a late
+     * READ_REPORT takes it under v2.0.3's greater-than test, and the recycle
+     * drops it, and OwnerGone beside release frames. Each holds only while
+     * InputReportPending does. Under InputLock. */
+    BOOLEAN InputReportFirstRead;
     BOOLEAN InputReportAfterEnd;
 
     /* 2.1.0: frames the worker has cached. A READ_REPORT that parks looks
@@ -415,9 +423,11 @@ typedef struct _DEVICE_CONTEXT {
      * TRUE otherwise, a program before 2.1.0 included. Set at add. */
     BOOLEAN AckSignal;
 
-    /* Release frames waiting for a READ_REPORT, under InputLock. */
-    UCHAR   ReleaseFrames[HIDMAESTRO_RELEASE_SLOTS][HIDMAESTRO_RELEASE_FRAME_CAP];
-    ULONG   ReleaseSizes[HIDMAESTRO_RELEASE_SLOTS];
+    /* Release frames waiting for a READ_REPORT, under InputLock. 2.1.0: one
+     * slot more, for the program's last frame no read carried, which
+     * OwnerGone puts ahead of them. */
+    UCHAR   ReleaseFrames[HIDMAESTRO_RELEASE_SLOTS + 1][HIDMAESTRO_RELEASE_FRAME_CAP];
+    ULONG   ReleaseSizes[HIDMAESTRO_RELEASE_SLOTS + 1];
     ULONG   ReleaseCount;
     ULONG   ReleaseNext;
 

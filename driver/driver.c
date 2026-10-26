@@ -1433,25 +1433,50 @@ OwnerGone(_In_ PDEVICE_CONTEXT ctx)
     ctx->ReleaseNext = 0;
     /* The delivered gate goes with the SeqNo: kept, it parked a read the
      * next program's first frame in the cache could serve, until that
-     * program's SeqNo passed this one's last. A frame no read has carried
-     * goes with it, as it went with v2.0.3's reset: sent now, it would
-     * follow the release frames. The frame read last is forgotten with it,
-     * so a wakeup that reads that frame again sends it once, as v2.0.3's
-     * does. */
-    dropped = ctx->InputReportPending;
-    ctx->SharedMemSeqNo = 0;
+     * program's SeqNo passed this one's last. 2.1.0: the frame no read has
+     * carried stays, where v2.0.3's reset dropped it and readers kept the
+     * state before it, a button it let go of held, until a next program
+     * sent. With no release frames it stays the frame a read takes next,
+     * and the next program's frames replace it as they replace any frame
+     * no read carried (SeenSinceReset). With them it goes ahead of them,
+     * out of the cache, its program's last report before they let go of
+     * everything, when it was read while the program ran. One read once
+     * the pipe closed can be the next program's, which the release frames
+     * must not follow: it goes as at v2.0.3. So does the first frame this
+     * device context read, which a context before it may have sent, and a
+     * frame wider than a release slot. */
+    BOOLEAN pending = ctx->InputReportPending;
+    BOOLEAN keep = pending && !ctx->InputReportFirstRead
+        && (count == 0 || (!ctx->InputReportAfterEnd && ctx->InputReportSize <= HIDMAESTRO_RELEASE_FRAME_CAP));
+    ULONG first = 0;
+    if (keep && count > 0) {
+        RtlMoveMemory(ctx->ReleaseFrames[1], ctx->ReleaseFrames[0], count * sizeof(ctx->ReleaseFrames[0]));
+        RtlMoveMemory(&ctx->ReleaseSizes[1], &ctx->ReleaseSizes[0], count * sizeof(ctx->ReleaseSizes[0]));
+        RtlCopyMemory(ctx->ReleaseFrames[0], ctx->InputReport, ctx->InputReportSize);
+        ctx->ReleaseSizes[0] = ctx->InputReportSize;
+        ctx->ReleaseCount = count + 1;
+        ctx->InputReportPending = FALSE;
+        first = 1;
+    }
+    if (!keep) ctx->InputReportPending = FALSE;
+    if (!ctx->InputReportPending) ctx->SharedMemSeqNo = 0;
     ctx->LastDeliveredInputSeqNo = 0;
-    ctx->InputReportPending = FALSE;
+    /* A frame that stays pending is published again: a READ_REPORT whose
+     * look this reset passed parks beside it, and its second look takes it
+     * as it takes a frame cached since. */
+    if (ctx->InputReportPending) ctx->InputPublishCount++;
+    dropped = pending && !keep;
     /* Polled reads (IOCTL_UMDF_HID_GET_INPUT_REPORT) see the released
-     * state too: the frame for the cached report's ID replaces it. */
-    for (ULONG i = 0; i < count; i++) {
+     * state too: the release frame for the cached report's ID replaces it,
+     * a frame put ahead of them aside. */
+    for (ULONG i = first; i < ctx->ReleaseCount; i++) {
         if (ctx->ReleaseSizes[i] == ctx->InputReportSize
             && (ctx->FirstInputReportId == 0 || ctx->ReleaseFrames[i][0] == ctx->InputReport[0])) {
             RtlCopyMemory(ctx->InputReport, ctx->ReleaseFrames[i], ctx->ReleaseSizes[i]);
             break;
         }
     }
-    for (ULONG i = 0; i < count && ctx->CachedInputIdCount > 0 && ctx->PolledReportReady; i++) {
+    for (ULONG i = first; i < ctx->ReleaseCount && ctx->CachedInputIdCount > 0 && ctx->PolledReportReady; i++) {
         if (ctx->ReleaseSizes[i] == ctx->PolledReportSize
             && (ctx->FirstInputReportId == 0 || ctx->ReleaseFrames[i][0] == ctx->PolledReport[0])) {
             RtlCopyMemory(ctx->PolledReport, ctx->ReleaseFrames[i], ctx->ReleaseSizes[i]);
@@ -1940,8 +1965,10 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
      * v2.0.3: the restart resets the gate itself, in the cache write that
      * follows (RestartSeen). Reset any earlier, a read that took the last
      * frame cached before that write moved the gate back to the last
-     * program's SeqNo. The frame read notes whether the watched program's
-     * pipe had closed (CachedAfterDeliveredLocked). */
+     * program's SeqNo. The frame read notes whether it is this device
+     * context's first and whether the watched program's pipe had closed
+     * (CachedAfterDeliveredLocked, OwnerGone, the recycle). */
+    BOOLEAN firstRead = !zeroed && !ctx->ReadAFrame;
     BOOLEAN restart = SeenAFrame(ctx) && (zeroed || seqNo == ctx->SeenSeqNo || (LONG)(seqNo - ctx->SeenSeqNo) < 0);
     BOOLEAN afterEnd = OwnerEnded(ctx);
     if (!zeroed) ctx->ReadAFrame = TRUE;
@@ -2076,6 +2103,7 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
         ctx->SharedMemSeqNo = seqNo;
         /* A zeroed section is no frame, and no read carries it. */
         ctx->InputReportPending = !zeroed;
+        ctx->InputReportFirstRead = firstRead;
         ctx->InputReportAfterEnd = afterEnd;
         if (ctx->RestartSeen) {
             ctx->LastDeliveredInputSeqNo = 0;
@@ -2469,22 +2497,30 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
              * section. */
             /* Reset the delivered gate under the lock READ_REPORT reads it
              * under, as OwnerGone resets it: a program that starts again on
-             * the index may count its frames from the start. A frame no read
-             * carried goes with it, as it went with v2.0.3's reset, and the
-             * frame read last is forgotten with that frame. Otherwise the
-             * recycle keeps the frame read last, where v2.0.3's forgot the
-             * SeqNo and read the frame again on the signal the gate's closing
-             * gave back: the program that held the index may have ended
-             * unseen, and the next one's frame that repeats the last SeqNo has
-             * other data (SameAsSeen). */
+             * the index may count its frames from the start. 2.1.0: a frame
+             * no read carried stays, where v2.0.3's reset dropped it, for the
+             * next READ_REPORT. A read parked beside it would have taken it,
+             * as it comes after the last frame delivered. One read once the
+             * watched pipe closed goes as at v2.0.3, since the OwnerGone that
+             * Phase 1 runs may queue release frames it must not precede, and
+             * so does the first frame this device context read, and the frame
+             * read last is forgotten with either. Otherwise the recycle keeps
+             * the frame read last, where v2.0.3's forgot the SeqNo and read
+             * the frame again on the signal the gate's closing gave back:
+             * the program that held the index may have ended unseen, and the
+             * next one's frame that repeats the last SeqNo has other data
+             * (SameAsSeen). */
             AcquireSRWLockExclusive(&ctx->InputLock);
             BOOLEAN pending = ctx->InputReportPending;
-            ctx->SharedMemSeqNo = 0;
+            BOOLEAN keep = pending && !ctx->InputReportFirstRead && !ctx->InputReportAfterEnd;
+            if (!keep) {
+                ctx->SharedMemSeqNo = 0;
+                ctx->InputReportPending = FALSE;
+            }
             ctx->LastDeliveredInputSeqNo = 0;
-            ctx->InputReportPending = FALSE;
             ReleaseSRWLockExclusive(&ctx->InputLock);
             ctx->SeenSinceReset = FALSE;
-            if (pending) ForgetSeen(ctx);
+            if (pending && !keep) ForgetSeen(ctx);
         }
     }
 }
@@ -3090,9 +3126,10 @@ EvtIoDeviceControl(
         }
 
         /* Release frames the consumer's exit left queued (issue #67) go
-         * first, one per read. Then the cached frame no read has carried,
-         * when it comes after the last one delivered, the frame past the
-         * SeqNo wrap included (CachedAfterDeliveredLocked). */
+         * first, one per read, behind the program's last frame when
+         * OwnerGone put it ahead of them. Then the cached frame no read has
+         * carried, when it comes after the last one delivered, the frame
+         * past the SeqNo wrap included (CachedAfterDeliveredLocked). */
         if (ctx->ReleaseNext < ctx->ReleaseCount
             || (ctx->InputReportPending && CachedAfterDeliveredLocked(ctx)))
             serve = TakeReportLocked(ctx, served, &servedSize);
