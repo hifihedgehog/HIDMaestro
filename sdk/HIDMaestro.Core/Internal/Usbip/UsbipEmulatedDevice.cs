@@ -135,11 +135,13 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
 
     private readonly object _hidLock = new();
     // Reports waiting for a read, each in a buffer of _reportCapacity bytes
-    // the device keeps. A buffer goes back to _spareFrames once its read is
-    // answered or the queue drops it, so a frame allocates nothing: at most
-    // MaxFrameQueue + 1 buffers ever exist, the queue's and one the
-    // connection's reader, or the input pump with a frame put back, is
-    // sending from. Guarded by _hidLock.
+    // the device keeps: the newest frame alone, or for a keyboard or mouse
+    // (_deliverEvery) every frame in order, up to MaxFrameQueue. A buffer
+    // goes back to _spareFrames once its read is answered or the queue drops
+    // it, so a frame allocates nothing: one buffer for each frame held and
+    // one the connection's reader, or the input pump with a frame put back,
+    // is sending from, two in all for a device that holds one frame and
+    // MaxFrameQueue + 1 at most. Guarded by _hidLock.
     private readonly Queue<QueuedFrame> _frameQueue = new();
     private readonly Stack<byte[]> _spareFrames = new();
     // Parked interrupt-IN URBs, keyed by endpoint address (issue #56). A
@@ -187,6 +189,14 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     private volatile byte _configurationValue;
 
     private const int MaxFrameQueue = 8;
+
+    // A keyboard or mouse gets every report in order, as the HID path's
+    // acknowledgement delivers it (ControllerProfile.DeliversEveryReport):
+    // a press and its release are two reports, and relative motion adds up.
+    // Any other device holds one frame for the read to come, its newest: an
+    // endpoint carries the firmware's current report, and the HID path's
+    // driver keeps one frame for a read (driver.c ProcessSharedInput).
+    private readonly bool _deliverEvery;
 
     /// <summary>The interrupt-IN endpoint on the primary HID interface: the
     /// one the input pump feeds. Any other interrupt-IN endpoint belongs to
@@ -296,6 +306,8 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         Devid = (1u << 16) | (uint)(index + 1);
 
         _builder = profile.GetOrBuildReportBuilder();
+        // As DeviceOrchestrator.WaitsOnDelivery decides it for the HID path.
+        _deliverEvery = profile.HasDescriptor && profile.DeliversEveryReport(profile.GetOrBuildKeyboardMousePacker());
         int expectedSize = _builder.InputReportByteSize > 0 ? _builder.InputReportByteSize : 17;
         _reportCapacity = Math.Max(expectedSize, SharedMemoryIO.EXTENDED_DATA_CAPACITY);
         _pumpReport = new byte[_reportCapacity];
@@ -546,9 +558,11 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                         }
                         else
                         {
-                            // A full queue drops its oldest report and takes
-                            // over that report's buffer.
-                            byte[] buffer = _frameQueue.Count >= MaxFrameQueue ? _frameQueue.Dequeue().Buffer
+                            // No read parked. The frame takes over the buffer
+                            // of the frame no read took, which it replaces,
+                            // or for a keyboard or mouse the buffer of the
+                            // oldest frame a full queue drops.
+                            byte[] buffer = _frameQueue.Count >= (_deliverEvery ? MaxFrameQueue : 1) ? _frameQueue.Dequeue().Buffer
                                 : _spareFrames.Count > 0 ? _spareFrames.Pop()
                                 : new byte[_reportCapacity];
                             report.CopyTo(buffer);

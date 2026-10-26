@@ -25,6 +25,11 @@
 //     bulk IN endpoint goes to the bulk read already parked for it
 //   - a read a new import parks survives the old import's detach, which
 //     clears its own reads before it lets the device go
+//   - frames the input pump takes while no read is parked give way to the
+//     newest, which the next read takes, as an endpoint carries the
+//     firmware's current report and the HID path's driver keeps one frame
+//     (driver.c ProcessSharedInput). A keyboard or mouse keeps every frame
+//     in order, as the HID path's acknowledgement delivers every report
 //
 // Each scenario ends on a frame or a read that tells a correct device from
 // one that lost the handoff at once, and a wait that only a correct device
@@ -65,6 +70,8 @@ internal static partial class Program
         Contained("an unlink of a parked read", () => UnlinkParkedRead(ds));
         Contained("a frame put back and a read through the queue", () => PutBackAheadOfQueue(ds));
         Contained("a new import beside the old one's detach", () => NewImportBesideDetach(ds));
+        Contained("frames no read took", () => NewestFrameWaits(ds));
+        Contained("a keyboard's frames no read took", KeyboardKeepsEveryFrame);
         Contained("a bulk command on a poll clock", BulkCommandWakesPollClock);
         Contained("bulk replies to other command paths", RepliesReachParkedBulkRead);
     }
@@ -318,6 +325,59 @@ internal static partial class Program
               $"detach stopped at the clear {stopped}, claimed during it {claimedDuring}, after it {claimedAfter}, read {got}, frames queued {rig.QueuedFrames}");
     }
 
+    /// <summary>Frames the input pump takes while no read is parked: the
+    /// device holds one for the read to come, the newest, as an endpoint
+    /// carries the firmware's current report and the HID path's driver keeps
+    /// one frame. The next read takes it, and the read after it waits for the
+    /// frame to come.</summary>
+    static void NewestFrameWaits(ControllerProfile ds)
+    {
+        using var rig = new HandoffRig(ds, HandoffIndex + 13);
+        byte ep = rig.PrimaryIn;
+        bool queued = true;
+        for (byte mark = 21; mark <= 25; mark++) queued &= rig.FrameQueued(mark);
+        int held = rig.QueuedFrames;
+        uint a = rig.SubmitIn(ep, 64);
+        var ra = rig.Next();
+        uint b = rig.SubmitIn(ep, 64);
+        rig.Frame(26);
+        var rb = ra.IsFrame(a, 25) ? rig.Next() : default;
+        rig.SubmitIn(ep, 64);
+        var after = rb.IsFrame(b, 26) ? rig.UntilSentinel() : new();
+        Check("frames no read took give way to the newest, which the next read takes, and the read after it waits for the next frame",
+              queued && held == 1 && ra.IsFrame(a, 25) && rb.IsFrame(b, 26) && after.Count == 0,
+              $"each frame taken up {queued}, frames held {held}, first read {ra}, next read {rb}, then {Describe(after)}");
+    }
+
+    /// <summary>A keyboard or mouse gets every report in order, as the HID
+    /// path's acknowledgement gives it: a copy of the DualSense composite
+    /// typed as a keyboard keeps each frame no read took, and the reads take
+    /// them oldest first.</summary>
+    static void KeyboardKeepsEveryFrame()
+    {
+        var j = JsonNode.Parse(CatalogJson("dualsense-composite"))!.AsObject();
+        j["id"] = "s43-dualsense-composite-as-keyboard";
+        j["type"] = "keyboard";
+        var profile = ControllerProfile.Parse(Encoding.UTF8.GetBytes(j.ToJsonString()))!;
+        using var rig = new HandoffRig(profile, HandoffIndex + 14);
+        byte ep = rig.PrimaryIn;
+        bool queued = true;
+        for (byte mark = 31; mark <= 33; mark++) queued &= rig.FrameQueued(mark);
+        int held = rig.QueuedFrames;
+        var got = new List<HandoffRig.Message>();
+        var reads = new List<uint>();
+        for (int i = 0; i < 3; i++)
+        {
+            reads.Add(rig.SubmitIn(ep, 64));
+            got.Add(rig.Next());
+        }
+        rig.SubmitIn(ep, 64);
+        var after = rig.UntilSentinel();
+        Check("a keyboard keeps every frame no read took, and the reads take them oldest first",
+              queued && held == 3 && got[0].IsFrame(reads[0], 31) && got[1].IsFrame(reads[1], 32) && got[2].IsFrame(reads[2], 33) && after.Count == 0,
+              $"each frame taken up {queued}, frames held {held}, reads {Describe(got)}, then {Describe(after)}");
+    }
+
     /// <summary>A copy of the Switch 2 Pro composite whose input endpoint
     /// sends the SDK's report on the host's poll clock, with replies on that
     /// endpoint and commands on its bulk OUT endpoint, which the protocol
@@ -533,6 +593,31 @@ internal static partial class Program
             var data = new byte[63];
             data[0] = mark;
             SharedMemoryIO.WriteInputFrame(_view, _inputEvent, ref _frameSeq, data, data.Length, null);
+        }
+
+        /// <summary>One frame while no read is parked, then a wait until the
+        /// input pump has taken it up into the frames the device holds.
+        /// False when it has not within the hang bound.</summary>
+        public bool FrameQueued(byte mark)
+        {
+            Frame(mark);
+            return WaitUntil(() => NewestHeldMark == mark, Hang);
+        }
+
+        /// <summary>The mark of the newest frame the device holds for a read,
+        /// null for none.</summary>
+        public byte? NewestHeldMark
+        {
+            get
+            {
+                var t = typeof(UsbipEmulatedDevice);
+                lock (HidLock)
+                {
+                    object? newest = null;
+                    foreach (var f in (System.Collections.IEnumerable)t.GetField("_frameQueue", Private)!.GetValue(Device)!) newest = f;
+                    return newest == null ? null : ((byte[])newest.GetType().GetField("Buffer")!.GetValue(newest)!)[1];
+                }
+            }
         }
 
         /// <summary>The device's poll clock, stopped and replaced with an
