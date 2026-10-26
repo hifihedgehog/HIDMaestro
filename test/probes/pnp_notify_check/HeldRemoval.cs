@@ -38,18 +38,21 @@ internal static class HeldRemoval
     const uint CR_SUCCESS = 0x00, CR_NO_SUCH_DEVINST = 0x0D;
     const uint CM_LOCATE_DEVNODE_NORMAL = 0x0, CM_LOCATE_DEVNODE_CANCELREMOVE = 0x2;
 
-    /// <summary>A devnode as the checks see it.</summary>
+    /// <summary>A devnode as the checks see it. Failed: in the tree while
+    /// Windows removes it after its driver failed it, as a parent whose
+    /// children a holder keeps stays (DN_WILL_BE_REMOVED).</summary>
     sealed class Node
     {
-        public bool InTree = true, Started = true, Record = true;
+        public bool InTree = true, Started = true, Record = true, Failed;
         public override string ToString() =>
-            (InTree ? Started ? "started" : "in the tree, not started" : "out of the tree") + (Record ? ", record kept" : ", record gone");
+            (InTree ? Failed ? "failed by its driver" : Started ? "started" : "in the tree, not started" : "out of the tree")
+            + (Record ? ", record kept" : ", record gone");
     }
 
     /// <summary>A ROOT parent and its HID child, and a holder that may keep
     /// the child open with no device notification, as Steam keeps a Sony
     /// pad's. Each hooked call is logged in order, and so is every record
-    /// deletion made on a started devnode.</summary>
+    /// deletion made on a devnode in the tree that is not down.</summary>
     sealed class Machine
     {
         public readonly Dictionary<string, Node> Nodes = new(StringComparer.OrdinalIgnoreCase)
@@ -68,6 +71,13 @@ internal static class HeldRemoval
         /// <summary>What the removal added to DeviceManager.RemovalsLeftHere,
         /// the count a dispose keeps its lease on.</summary>
         public long Left;
+        /// <summary>Another program's removal query of the parent's subtree is
+        /// under way, as Device Manager's disable makes one: DN_STARTED is
+        /// clear on every devnode it covers while it runs (ReactOS
+        /// PiIsDevNodeStarted counts DeviceNodeQueryRemoved as not started).
+        /// The holder refuses it, so the devnodes come back started, and a
+        /// query of the removal's own made meanwhile is refused too.</summary>
+        public bool OutsideQuery;
         readonly Dictionary<string, List<Action>> _removed = new(StringComparer.OrdinalIgnoreCase);
         // A driver's failure can come from another thread (Fail).
         readonly object _gate = new();
@@ -80,6 +90,13 @@ internal static class HeldRemoval
         public bool IsStarted(string id)
         {
             lock (_gate) return Nodes.TryGetValue(id, out var n) && n.InTree && n.Started;
+        }
+
+        /// <summary>Out of the tree, or in it while Windows removes it after
+        /// its driver failed it.</summary>
+        public bool IsDown(string id)
+        {
+            lock (_gate) return !Nodes.TryGetValue(id, out var n) || !n.InTree || n.Failed;
         }
 
         public uint Locate(string id, uint flags)
@@ -129,21 +146,27 @@ internal static class HeldRemoval
         {
             Calls.Add($"query {id}");
             var subtree = Below(id).Append(id).ToList();
+            if (OutsideQuery)
+            {
+                OutsideQuery = false;
+                foreach (string x in subtree) Nodes[x].Started = Nodes[x].InTree;
+                return false;
+            }
             if (Holder && subtree.Exists(x => string.Equals(x, Child, StringComparison.OrdinalIgnoreCase)) && IsStarted(Child))
                 return false;
             foreach (string x in subtree) Leave(x);
             return !QueryFailsAnyway;
         }
 
-        /// <summary>SetupDiRemoveDevice or CM_Uninstall_DevNode. A started
-        /// devnode is a breach of the rule, and it leaves the tree with its
-        /// record gone, as the Celeron's CM_Uninstall_DevNode left the
-        /// child.</summary>
+        /// <summary>SetupDiRemoveDevice or CM_Uninstall_DevNode. A devnode in
+        /// the tree that is not down is a breach of the rule, and it leaves the
+        /// tree with its record gone, as the Celeron's CM_Uninstall_DevNode
+        /// left the child.</summary>
         public bool Delete(string kind, string id)
         {
             Calls.Add($"{kind} {id}");
             if (!Nodes.TryGetValue(id, out var n)) return true;
-            if (IsStarted(id)) Violations.Add($"{kind} {id} while it was started");
+            if (!IsDown(id)) Violations.Add($"{kind} {id} while it was in the tree and not down ({n})");
             Leave(id);
             n.Record = false;
             return true;
@@ -152,13 +175,13 @@ internal static class HeldRemoval
         public void Fallbacks(string id)
         {
             Calls.Add($"fallbacks {id}");
-            if (IsStarted(id)) Violations.Add($"pnputil and devcon on {id} while it was started");
+            if (!IsDown(id)) Violations.Add($"pnputil and devcon on {id} while it was in the tree and not down");
         }
 
         /// <summary>The driver fails its device on request: Windows takes
         /// the children out of the tree by surprise removal, held or not, and
-        /// the parent stays in it, no longer started (DN_WILL_BE_REMOVED),
-        /// until the last handle closes.</summary>
+        /// the parent stays in it, failed and no longer started
+        /// (DN_WILL_BE_REMOVED), until the last handle closes.</summary>
         public bool Fail(string id)
         {
             lock (_gate)
@@ -166,6 +189,7 @@ internal static class HeldRemoval
                 Calls.Add($"fail {id}");
                 foreach (string x in Below(id)) Leave(x);
                 Nodes[id].Started = false;
+                Nodes[id].Failed = true;
                 return true;
             }
         }
@@ -222,7 +246,7 @@ internal static class HeldRemoval
 
     static string Describe(Machine m, (bool Removed, long Ms) r) =>
         $"calls [{string.Join(", ", m.Calls)}], " +
-        (m.Violations.Count == 0 ? "no record deleted while started" : string.Join("; ", m.Violations)) +
+        (m.Violations.Count == 0 ? "no record deleted while in the tree and not down" : string.Join("; ", m.Violations)) +
         $", removed {r.Removed} in {r.Ms} ms, child {m.Nodes[Child]}, parent {m.Nodes[Parent]}, {m.Left} left";
 
     static bool Kept(Node n) => n.InTree && n.Started && n.Record;
@@ -266,12 +290,28 @@ internal static class HeldRemoval
             failed.Nodes[Child].InTree = false;
             failed.Nodes[Child].Started = false;
             failed.Nodes[Parent].Started = false;
+            failed.Nodes[Parent].Failed = true;
             var r3 = Remove(failed, Parent, fast);
             check($"{kind}: a parent whose driver failed it, its child taken down by surprise removal and still held -> no query, the child's record and the parent's go, removed",
                   failed.Violations.Count == 0 && r3.Removed
                   && failed.Calls.SequenceEqual(new[] { $"{delete} {Child}", $"{delete} {Parent}" }),
                   Describe(failed, r3));
             tally.Add(($"{(fast ? "fast" : "SetupDiRemoveDevice")}, failed parent", failed, 0));
+
+            // Another program's removal query of the subtree is in flight, and
+            // the holder will refuse it. Neither devnode is started while it
+            // runs, and neither is down: the removal asks its own query, which
+            // is refused as well, and every record stays.
+            var outside = new Machine(holder: true) { OutsideQuery = true };
+            outside.Nodes[Parent].Started = false;
+            outside.Nodes[Child].Started = false;
+            var rq = Remove(outside, Parent, fast);
+            check($"{kind}: another program's removal query in flight, which the holder refuses, has cleared DN_STARTED -> the removal makes its own query, no record deleted, the device and both records left, RemoveDevice false",
+                  outside.Violations.Count == 0 && outside.Calls.SequenceEqual(new[] { $"query {Parent}" }) && !rq.Removed
+                  && Kept(outside.Nodes[Parent]) && Kept(outside.Nodes[Child]),
+                  Describe(outside, rq));
+            tally.Add(($"{(fast ? "fast" : "SetupDiRemoveDevice")}, a query in flight", outside, 1));
+            cancels += outside.CancelLocates;
 
             cancels += held.CancelLocates + free.CancelLocates + failed.CancelLocates;
         }
