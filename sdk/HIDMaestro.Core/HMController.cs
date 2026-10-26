@@ -1978,10 +1978,12 @@ public sealed partial class HMController : IDisposable
             doorbell.SafeWaitHandle = new Microsoft.Win32.SafeHandles.SafeWaitHandle(rawEvt, ownsHandle: true);
             waitPair = new WaitHandle[] { ct.WaitHandle, doorbell };
         }
+        var failures = new LoopFailures();
         try
         {
         while (!ct.IsCancellationRequested)
         {
+            failures.NextPass();
             bool drainedAny = false;
             try
             {
@@ -2122,13 +2124,16 @@ public sealed partial class HMController : IDisposable
                     if (ct.IsCancellationRequested) break;
                 }
             }
-            catch
+            catch (Exception e)
             {
-                // Swallow polling errors so a transient kernel-side failure
-                // doesn't kill the reader thread. An aborted drain may have
-                // consumed a coalesced signal that covered a packet it never
-                // reached, so the next wait must be short (see below).
+                // A drain that throws does not end the reader. An aborted
+                // drain may have consumed a coalesced signal that covered a
+                // packet it never reached, so the next wait must be short
+                // (see below). The packet that threw is behind the reader,
+                // so a drain throws at most once a packet and needs no
+                // longer wait.
                 drainFaulted = true;
+                failures.Threw(e);
             }
 
             // Missed-signal evidence (audit of #34): data discovered by a
@@ -2177,7 +2182,14 @@ public sealed partial class HMController : IDisposable
                     }
                 }
             }
-            catch { break; }
+            catch (Exception e)
+            {
+                // A wait that throws would throw again at once on the same
+                // handles. The reader ends, with a line in the diagnostic
+                // log, and raises no more output.
+                LoopFailures.Ended(e);
+                break;
+            }
         }
         }
         finally
