@@ -665,8 +665,8 @@ internal static class Clock
         var plain = ControllerProfile.Parse(Encoding.UTF8.GetBytes(o.ToJsonString()))!;
         var ps = StreamClock.Compile(plain, plain.GetOrCompileModel().Registers)!;
         Check("a stream without timestamps holds them, as the idle repeat before v2.0.0 did", !ps.AdvanceTimestamps);
-        Check("a stream with a condition or a period register keeps the clock's capped wait", s.ReadsRegisters);
-        Check("a stream that reads no register waits for its next repeat in one wait", !ps.ReadsRegisters);
+        Check("a stream with a condition or a period register reads the registers, whose changes wake its clock", s.ReadsRegisters);
+        Check("a stream with neither reads no register", !ps.ReadsRegisters);
 
         // The catalog's idle repeats: cadence.json's recommended interval for
         // each profile whose real device streams at rest. dualshock-4-v2-bt

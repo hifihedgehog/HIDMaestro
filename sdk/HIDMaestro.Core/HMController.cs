@@ -765,10 +765,17 @@ public sealed partial class HMController : IDisposable
                 _lastSubmitted = new HMGamepadState();
             var tick = new StreamTick(_stream, _protocolEngine?.RegisterWords, RepeatLastFrameFromClock,
                 () => Volatile.Read(ref _lastSubmitTimestamp));
+            // Every change the tick reads wakes the clock or only moves its
+            // next repeat later: a consumer's frame moves the timer
+            // (FrameSent), and a command or a reset that changes the
+            // registers a stream's condition or period reads wakes it
+            // through the engine.
             var clock = new DeviceClock<StreamTick>(tick, MissedTick.Drop, $"HMIdleFrames_{index}",
-                everyChangeWakes: !_stream.ReadsRegisters);
+                everyChangeWakes: true);
             _idleClock = clock;
             _idleThread = clock.Thread;
+            if (_stream.ReadsRegisters && _protocolEngine != null)
+                _protocolEngine.RegistersChanged = WakeIdleClock;
             clock.Start();
         }
 
@@ -2379,6 +2386,11 @@ public sealed partial class HMController : IDisposable
         StopWorkers();
         _host?.DeviceRemoved();
     }
+
+    /// <summary>A command or a reset changed the protocol's registers: the
+    /// idle repeat's clock looks at its stream's condition and period again.
+    /// Runs on the thread that ran the command, with no lock held.</summary>
+    private void WakeIdleClock() => _idleClock?.Wake();
 
     /// <summary>Stops the idle repeat, a protocol host's clock and the
     /// output reader. Runs again harmlessly: Dispose after a sweep runs it a

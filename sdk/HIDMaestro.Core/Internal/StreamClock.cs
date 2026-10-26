@@ -17,11 +17,11 @@ internal sealed class StreamClock
     public bool AdvanceTimestamps { get; }
 
     /// <summary>Whether the stream reads the protocol's registers, through
-    /// its condition or its period register. Nothing wakes the idle clock
-    /// when a register changes, so such a stream keeps the clock's capped
-    /// wait. A stream that reads none waits for its next repeat in one
-    /// wait: a consumer's frame only moves the repeat later, which the
-    /// clock sees when it wakes for the earlier one.</summary>
+    /// its condition or its period register. A command or a reset that
+    /// changes them wakes the idle clock (ProtocolEngine.RegistersChanged),
+    /// so every stream waits for its next repeat in one wait: a consumer's
+    /// frame only moves the repeat later, which the clock sees when it
+    /// wakes for the earlier one.</summary>
     public bool ReadsRegisters => While != null || PeriodRegister >= 0;
 
     private StreamClock(long period, int register, double unit, Condition? when, bool advance)

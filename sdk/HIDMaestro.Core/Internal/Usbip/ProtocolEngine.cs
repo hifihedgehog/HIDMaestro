@@ -189,6 +189,19 @@ internal sealed unsafe class ProtocolEngine
 
     public CompiledProtocol Protocol => _p;
 
+    /// <summary>Called after a command or a reset changed the registers, on
+    /// the thread that ran it, with no lock held, so a clock that reads them
+    /// looks again: the idle repeat of a stream whose condition or period
+    /// reads a register (HMController). Null while nothing reads them that
+    /// way. Set on the controller's thread and read on the threads that run
+    /// commands, which share no lock with it.</summary>
+    internal Action? RegistersChanged
+    {
+        get => System.Threading.Volatile.Read(ref _registersChanged);
+        set => System.Threading.Volatile.Write(ref _registersChanged, value);
+    }
+    private Action? _registersChanged;
+
     private void InitialRegistersLocked(bool portReset = false)
     {
         var table = _m.Registers;
@@ -257,6 +270,7 @@ internal sealed unsafe class ProtocolEngine
             _clockOrigin = Stopwatch.GetTimestamp();
             _resets++;
         }
+        RegistersChanged?.Invoke();
     }
 
     /// <summary>Counts attaches and port resets.</summary>
@@ -397,6 +411,14 @@ internal sealed unsafe class ProtocolEngine
     {
         if (DeviceOrchestrator.DiagEnabled)
             DeviceOrchestrator.LogDiag($"protocol command {_p.ProfileId}: {Convert.ToHexString(command)}");
+        var result = ApplyCommand(command, timestamp);
+        if ((result.Effect & Effect.StateChanged) != 0) RegistersChanged?.Invoke();
+        return result;
+    }
+
+    /// <summary>HandleCommand's work, under the engine's lock.</summary>
+    private CommandResult ApplyCommand(ReadOnlySpan<byte> command, long timestamp)
+    {
         lock (_sync)
         {
             LogLocked(command, timestamp);
