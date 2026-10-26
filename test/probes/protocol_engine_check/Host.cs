@@ -156,8 +156,8 @@ internal static class Host
         Check("the constructor starts no clock: a controller on process memory runs none", host != null && Clock() == null, host == null ? "no host" : "");
         typeof(HMController).GetMethod("StartProtocol", Instance)?.Invoke(dev.C, null);
         var clock = Clock();
-        Check("StartProtocol, which the create calls, starts the clock above normal priority",
-            clock is { IsAlive: true, Priority: ThreadPriority.AboveNormal }, clock == null ? "no clock" : $"{clock.Name} {clock.Priority}");
+        Check("StartProtocol, which the create calls, starts the clock at highest priority",
+            clock is { IsAlive: true, Priority: ThreadPriority.Highest }, clock == null ? "no clock" : $"{clock.Name} {clock.Priority}");
     }
 
     static void SubmitAndLiveFeature()
