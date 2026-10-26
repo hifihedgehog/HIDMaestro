@@ -231,6 +231,9 @@ internal static partial class Uninstaller
                     Step(told, "WUDF service keys", () => ActWudf(told));
                     Step(told, "registry keys", () => ActRegistryRoots(told));
                     Step(told, "certificate", () => ActCertificate(told));
+                    // This process's logs live in a folder the next step
+                    // deletes, so they close first and take no more lines.
+                    DeviceOrchestrator.CloseLogs();
                     Step(told, "files", () => ActFiles(told));
                 }
             }

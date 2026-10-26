@@ -60,12 +60,30 @@ internal static partial class DeviceOrchestrator
     /// writes. Null outside it.</summary>
     internal static Action<string>? DiagTap;
 
+    // Set by CloseLogs: the diag and timing logs of this process drop every
+    // line from then on.
+    private static bool s_logsClosed;
+
+    /// <summary>Closes this process's diag and timing logs and drops every
+    /// later line. A removal of HIDMaestro calls it before it deletes
+    /// %TEMP%\HIDMaestro, where both logs live. An open log keeps its deleted
+    /// file pending and so the folder, and a line written after the delete
+    /// makes both again: on 2026-10-26 the removal's own timing line put the
+    /// folder back, and it reported the folder as left behind.</summary>
+    internal static void CloseLogs()
+    {
+        Volatile.Write(ref s_logsClosed, true);
+        lock (s_diagLock) { s_diagLog?.Dispose(); s_diagLog = null; }
+        lock (s_timingLock) { s_timingLog?.Dispose(); s_timingLog = null; }
+    }
+
     internal static void LogDiag(string message)
     {
         DiagTap?.Invoke(message);
         if (!s_diagEnabled) return;
         lock (s_diagLock)
         {
+            if (Volatile.Read(ref s_logsClosed)) return;
             try
             {
                 s_diagLog ??= new UserLog(Path.Combine(Path.GetTempPath(), "HIDMaestro", "teardown_diag.log"));
@@ -92,6 +110,7 @@ internal static partial class DeviceOrchestrator
         if (!s_timingEnabled) return;
         lock (s_timingLock)
         {
+            if (Volatile.Read(ref s_logsClosed)) return;
             try
             {
                 s_timingLog ??= new UserLog(Path.Combine(Path.GetTempPath(), "HIDMaestro", "setup_timing.log"));
