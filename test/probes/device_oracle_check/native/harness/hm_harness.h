@@ -497,6 +497,7 @@ uint32_t     PlanDword(PlanProfile *p, const char *name, uint32_t fallback);
 typedef struct Sdk {
     int         index;
     HmSection  *input, *ack, *version, *output, *pid;
+    HmSection  *signal;   /* 2.1.0's signal gate, under "sdk 3" (SdkWritesSignal) */
     HmEvent    *inputEv, *ackEv, *companionEv;
     HmPipeServer *pipe;
     uint32_t    seq;
@@ -549,16 +550,64 @@ int VersionTagged(int param);
  * for a parameter runs as the tree's SDK. The plan a recording kept, from
  * 9bd6279's SDK, does not. */
 extern int g_sdkV2;
+/* The plan's "sdk 3": this tree's SDK from 2.1.0, which also makes the
+ * signal gate's section (SharedMemoryIO.EnsureInputMapping), counts its
+ * frames from above the SeqNo a driver worker last read, and skips the
+ * input event and the companion doorbell when the gate says nobody waits
+ * (SharedMemoryIO.WriteInputFrame). Replay's plans carry it. */
+extern int g_sdkSignal;
+/* Run once when the driver closes an owner pipe client handle: a stream
+ * starts the next program at that moment. */
+extern void (*g_pipeClientCloseHook)(void);
+/* Run once at the next completion a driver thread makes, before it is
+ * recorded (hm_wdf.c). */
+extern void (*g_completeHook)(void);
+/* Run at each blocking wait's answer, after the answer is chosen and
+ * recorded and before the thread runs on, until it returns nonzero. */
+extern int (*g_waitAnswerHook)(HmThread *t, DWORD result);
+/* Run once at the next SRW lock a driver thread takes, before it is taken
+ * (hm_win32.c). */
+extern void (*g_srwHook)(void);
+/* Run once when a driver thread next releases an SRW lock or a wait lock
+ * and holds no other, after the release (hm_win32.c, hm_wdf.c). */
+extern void (*g_lockReleaseHook)(void);
+/* Run once at the next zero-timeout poll a driver thread makes, before it
+ * is answered (hm_win32.c FiberWait). */
+extern void (*g_pollHook)(void);
+/* Run at each InterlockedExchange a driver thread makes, before it, until
+ * it returns nonzero (hm_win32.c): the worker's take of the handoff comes
+ * after its count's increment, so a stream acts between the two there. */
+extern int (*g_exchangeHook)(volatile LONG *target, LONG value);
+/* Run once when SdkWriteFrame has read the companion's count for a frame
+ * with a GIP slice, before it decides on the doorbell: what the
+ * companion's IOCTL thread does in that moment. */
+extern void (*g_sdkParkedHook)(void);
+/* The code runs on a driver thread, not on the scenario's fiber. */
+int HmOnDriverThread(void);
+/* FIELD_OFFSET(DEVICE_CONTEXT, TearingDown) in the flavor's driver.h
+ * (build.ps1's driver_tag.c). */
+extern unsigned HmTearingDownOffset;
 /* This stream's SDK writes the version contract: a tagged parameter, or
  * the default one under "sdk 2". */
 int SdkWritesContract(void);
+/* This stream's SDK makes the signal section: the default parameter under
+ * "sdk 3". */
+int SdkWritesSignal(void);
 /* Under a parameter: the section's bytes, then the clear or the close. */
 void SdkVersionMidRun(Sdk *s);
 /* SharedMemoryIO.WriteInputFrame: odd SeqNo, DataSize and Data, the GIP
  * slice when one is given, the extended lane or its size cleared, even
- * SeqNo, then the input event and, with a GIP slice, the companion's. */
+ * SeqNo, then the input event and, with a GIP slice, the companion's, each
+ * skipped under the signal gate when its capability is set and its count
+ * is zero. */
 void SdkWriteFrame(Sdk *s, const uint8_t *data, uint32_t dataLen, const uint8_t *gip,
                    const uint8_t *ext, uint32_t extLen);
+/* The input event's part of the gate for the frame whose even SeqNo
+ * s->seq the SDK has just stored (SharedMemoryIO.WriteInputFrame, step 5):
+ * 0 when it leaves the frame final with no SetEvent, 1 when it signals
+ * with no capability or after the provisional exchange, 2 when it signals
+ * because a worker is counted, the handoff untouched. */
+int SdkHandOver(Sdk *s);
 /* HMController.EnsurePidStateViewLocked and PublishPidPool. */
 void SdkPidCreate(Sdk *s, const uint8_t rids[6]);
 void SdkPidPool(Sdk *s, uint16_t ramPoolSize, uint8_t maxSim, uint8_t memMgmt);

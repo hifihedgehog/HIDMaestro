@@ -188,7 +188,7 @@ typedef struct _DEVICE_CONTEXT {
      * to HM_FEATURE_MAX_DATA bytes, from the report ID for a descriptor
      * with IDs and from the first data byte for one without, and each
      * entry's next page. FeatureLock guards the kept data and the pages. */
-    WDFWAITLOCK FeatureLock;
+    SRWLOCK FeatureLock;
     ULONG   FeatureCount;
     ULONG   FeatureOnReportCount;
     UCHAR   FeatureOnReports[HM_FEATURE_MAX_ONREPORTS];
@@ -208,8 +208,10 @@ typedef struct _DEVICE_CONTEXT {
     ULONG   PolledReportSize;
     BOOLEAN PolledReportReady;
 
-    /* The last shared-input SeqNo the worker read, sent or not. A frame
-     * the driver does not send leaves SharedMemSeqNo and the cache as they
+    /* The last shared-input SeqNo the worker sent, which a frame read must
+     * differ from to go out. Reset at the end of a program the owner watch
+     * saw, at every recycle and at add, as v2.0.3 reset it. A frame the
+     * driver does not send leaves SharedMemSeqNo and the cache as they
      * were. */
     ULONG   SeenSeqNo;
 
@@ -244,9 +246,14 @@ typedef struct _DEVICE_CONTEXT {
     WDFQUEUE    DefaultQueue;        /* Parallel: HID IOCTLs + our custom IOCTLs */
     WDFQUEUE    ManualQueue;         /* Manual: pending IOCTL_HID_READ_REPORT */
 
-    /* Synchronization */
-    WDFWAITLOCK InputLock;
-    WDFWAITLOCK OutputLock;
+    /* Synchronization. Slim reader/writer locks, taken exclusive only:
+     * an uncontended acquire and release stay in this process. UMDF's wait
+     * lock is an auto-reset event, a WaitForSingleObjectEx to acquire and a
+     * SetEvent to release, two system calls on every frame that takes it
+     * (WDF's mxeventum.h, MxEvent::WaitFor and MxEvent::Set). Zeroed with
+     * the context, which is SRWLOCK_INIT, and nothing to free. */
+    SRWLOCK InputLock;
+    SRWLOCK OutputLock;
 
     /* Shared memory data injection (bypasses upper filter drivers) */
     HANDLE  SharedMemHandle;     /* CreateFileMapping handle */
@@ -255,7 +262,7 @@ typedef struct _DEVICE_CONTEXT {
 
     /* Sequence-number gate for IOCTL_HID_READ_REPORT. The READ_REPORT
      * handler returns a cached input report immediately ONLY when there's
-     * new data since the last delivery (SharedMemSeqNo > LastDeliveredSeqNo).
+     * new data since the last delivery (SharedMemSeqNo != LastDeliveredInputSeqNo).
      * Otherwise the request is parked in ManualQueue and the worker thread
      * completes it on the next ProcessSharedInput tick. Without this gate,
      * HIDClass hammers READ_REPORT in a tight loop because every call
@@ -334,6 +341,24 @@ typedef struct _DEVICE_CONTEXT {
      * time it opens the input section, then lets go of the section. An SDK
      * that predates it creates no section, and the open fails quietly. */
     WCHAR   VersionMappingName[64];       /* e.g. L"Global\\HIDMaestroVersion0" */
+
+    /* 2.1.0: the signal gate (hm_contract.h, HIDMAESTRO_SIGNAL). The worker
+     * maps the section with the input section, sets
+     * HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS, counts itself in InputWaiters
+     * across each wait on the input event and takes InputHandoff before
+     * it. Kept mapped until the device goes, as the acknowledgement is.
+     * NULL against an SDK that makes no such section, and the SDK signals
+     * every frame. */
+    WCHAR   SignalMappingName[64];        /* e.g. L"Global\\HIDMaestroSignal0" */
+    HANDLE  SignalMemHandle;
+    struct _HIDMAESTRO_SIGNAL *SignalPtr;  /* hm_contract.h, included below */
+    BOOLEAN SignalBroken;                  /* the count was found below zero: never announce again */
+
+    /* 2.1.0: AckSignal under the contract. FALSE when the controller's SDK
+     * said no thread waits on the acknowledgement's event: DeliveredSeqNo
+     * is still stored on every delivery, and only the SetEvent is skipped.
+     * TRUE otherwise, a program before 2.1.0 included. Set at add. */
+    BOOLEAN AckSignal;
 
     /* Release frames waiting for a READ_REPORT, under InputLock. */
     UCHAR   ReleaseFrames[HIDMAESTRO_RELEASE_SLOTS][HIDMAESTRO_RELEASE_FRAME_CAP];

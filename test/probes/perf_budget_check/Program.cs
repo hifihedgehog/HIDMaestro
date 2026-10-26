@@ -46,7 +46,8 @@
 //                  live: on a DualShock 4 and an Xbox 360 pad, SetEvent on
 //                  the input event and the companion's doorbell alone, and a
 //                  frame written to the section without and with its signal,
-//                  and to this process's own memory (SignalLive.cs). It
+//                  and to this process's own memory, and the submit's write
+//                  and the signaled write at 1 kHz (SignalLive.cs). It
 //                  builds against b4d29d9 as is
 //   rate [runs] [seconds] [profile ...] [--key=<identity>]
 //                  sustained throughput: SubmitState every millisecond and
@@ -103,6 +104,10 @@
 //   submit-repeat [runs] [calls]
 //                  offline: the same on the two budget profiles that repeat
 //                  their last frame, with the repeat running
+//   gate-offline [runs] [calls]
+//                  offline: the frame writer through the signal gate on
+//                  buffers of this process's own, kept and taken back, each
+//                  row's median ns per call (GateCost.cs)
 //   encode [runs] [calls]
 //                  offline: the codec's encode of the budget table's
 //                  codec-encoded input reports, each median ns per call
@@ -333,6 +338,8 @@ internal static partial class Program
             Catalog(runs);
             return 0;
         }
+        if (mode == "gate-offline")
+            return GateOffline(runs, args.Length > 2 && int.TryParse(args[2], out int gateCalls) ? gateCalls : 200_000);
         if (mode is "submit" or "submit-repeat")
         {
             SubmitCost.Run(runs, args.Length > 2 && int.TryParse(args[2], out int calls) ? calls : 100_000, mode == "submit-repeat");
@@ -388,6 +395,8 @@ internal static partial class Program
                 int output = Output(runs, args.Skip(2).ToArray());
                 if (output != 0) return output;
                 break;
+            case "signal-stress":
+                return SignalStress(args.Skip(1).ToArray());
             case "signal":
                 int signal = Signal(runs);
                 if (signal != 0) return signal;
@@ -727,13 +736,17 @@ internal static partial class Program
 
     /// <summary>Whether the controller's devnode runs this SDK's driver,
     /// printed. A measurement on another driver would be filed under the
-    /// wrong tree, so the mode stops and exits 5.</summary>
+    /// wrong tree, so the mode stops and exits 5. With
+    /// HIDMAESTRO_PROBE_DRIVER=any it goes on, for a session that times one
+    /// SDK on two drivers (an older SDK on this tree's driver), and prints
+    /// the driver it runs on.</summary>
     static bool OnEmbeddedDriver(HMController c, string label)
     {
         bool ok = RunsEmbeddedDriver(c, out string detail);
-        Console.WriteLine($"  {label}: {(ok ? "" : "[WRONG DRIVER] ")}{detail}");
-        if (!ok) s_wrongDriver = true;
-        return ok;
+        bool any = Environment.GetEnvironmentVariable("HIDMAESTRO_PROBE_DRIVER") == "any";
+        Console.WriteLine($"  {label}: {(ok ? "" : any ? "[OTHER DRIVER, allowed] " : "[WRONG DRIVER] ")}{detail}");
+        if (!ok && !any) s_wrongDriver = true;
+        return ok || any;
     }
 
     /// <summary>frame --settle=&lt;ms&gt;: each measurement waits this long

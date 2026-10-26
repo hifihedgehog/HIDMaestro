@@ -58,7 +58,11 @@
 #define EnterCriticalSection                                HmEnterCriticalSection
 #define LeaveCriticalSection                                HmLeaveCriticalSection
 #define DeleteCriticalSection                               HmDeleteCriticalSection
+#define AcquireSRWLockExclusive                             HmAcquireSRWLockExclusive
+#define ReleaseSRWLockExclusive                             HmReleaseSRWLockExclusive
 #define GetTickCount64                                      HmGetTickCount64
 #define GetSystemTimeAsFileTime                             HmGetSystemTimeAsFileTime
 #define RtlInitUnicodeString                                HmRtlInitUnicodeString
 #define RtlCompareMemory                                    HmRtlCompareMemory
+#undef InterlockedExchange
+#define InterlockedExchange                                 HmInterlockedExchange

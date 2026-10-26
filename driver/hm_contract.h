@@ -63,6 +63,79 @@ C_ASSERT(sizeof(HIDMAESTRO_VERSION_INFO) == 64);
 C_ASSERT(FIELD_OFFSET(HIDMAESTRO_VERSION_INFO, DriverProtocolMin) == 36);
 C_ASSERT(FIELD_OFFSET(HIDMAESTRO_VERSION_INFO, IdentityTag) == 48);
 C_ASSERT(FIELD_OFFSET(HIDMAESTRO_VERSION_INFO, DriverConfigError) == 56);
+
+/* 2.1.0: the signal gate (docs/design/signal-gate.md). Global\HIDMaestroSignal<N>,
+ * 256 bytes, created by an SDK of 2.1.0 or later as it maps the index,
+ * after the owner pipe and after it zeroes the input section. An SDK that
+ * finds the section already there leaves the counts and InputHandoff as
+ * they are. A driver host of a device on the index may be counting in
+ * them, and a final SeqNo the program before it left in InputHandoff is a
+ * read the worker still owes, which this program's first frame replaces.
+ * Outside its frames, the capability words are the one thing an SDK
+ * writes in a section it found: its sweep of a removed device on the index
+ * clears them (SharedMemoryIO.ForgetDriverLocked).
+ * Each driver host maps it once and keeps it until its device goes, and
+ * the XUSB companion holds it from its add to its release.
+ *
+ * The HID driver's worker counts itself in InputWaiters across every wait
+ * on the input event, with an interlocked increment and then an
+ * interlocked exchange that takes InputHandoff, and an interlocked
+ * decrement when the wait returns. InputHandoff holds a frame's even SeqNo
+ * once final, the SeqNo with its low bit set while provisional, or 0. A
+ * take that finds a final SeqNo reads the section without waiting and
+ * sends whatever new frame it holds, the frame taken or a newer one, not
+ * only a frame whose SeqNo is the one taken. When the worker leaves its
+ * loop first on the stop event or at teardown, it signals the input event
+ * for that frame instead. A take that finds a provisional SeqNo
+ * drops it. The SDK stores the frame's even SeqNo and, with
+ * HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS set, reads InputHandoff. A final
+ * SeqNo still there is a read the worker owes, which finds this frame too:
+ * one compare-exchange puts this frame's final SeqNo in its place, and no
+ * SetEvent runs. Otherwise it reads InputWaiters. With a worker counted it
+ * calls SetEvent and leaves InputHandoff alone, after a full fence when the
+ * frame rings the companion's doorbell too, since that branch has no
+ * interlocked operation before the companion's count is read. With none it
+ * exchanges the provisional SeqNo in, then loads the capability again and
+ * InputWaiters. With the capability still set and the count zero, a
+ * compare-exchange makes the frame final for the worker's next take.
+ * With any other count, or with the capability gone, a compare-exchange
+ * takes it back. It calls SetEvent unless it left the frame final: a
+ * compare-exchange that fails found the provisional SeqNo
+ * taken and dropped. So a frame gets a wakeup that reads the section after
+ * its store, the take or the signal. A frame left provisional by a program
+ * that died there gets none, as v2.0.3 never read a frame whose program
+ * died before its SetEvent. Without the capability it signals every frame.
+ *
+ * The XUSB companion counts the WAIT_FOR_INPUT requests in its manual queue
+ * in CompanionParked: up once the request is in the queue, then a look at
+ * the input section's SeqNo that kicks the pump itself when the section
+ * holds a frame the last completion did not carry, and down when the pump
+ * or the timer takes the request or the framework cancels it. The pump can
+ * take a request before its increment, so the count can be -1 for a moment.
+ * The SDK rings the companion doorbell when CompanionParked is not zero or
+ * CompanionCaps lacks HIDMAESTRO_SIGNAL_CAP_COMPANION_PARKED.
+ *
+ * Each counted word sits in a cache line of its own, since two processes
+ * write them. InputWaiters below zero is never right: a worker that finds
+ * it so clears its capability bit, and the SDK signals every frame again. */
+#define HIDMAESTRO_SIGNAL_LAYOUT                1
+#define HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS     0x00000001u   /* DriverCaps */
+#define HIDMAESTRO_SIGNAL_CAP_COMPANION_PARKED  0x00000001u   /* CompanionCaps */
+typedef struct _HIDMAESTRO_SIGNAL {
+    volatile LONG   LayoutVersion;       /* SDK: HIDMAESTRO_SIGNAL_LAYOUT, written when it creates the section */
+    volatile LONG   DriverCaps;          /* HID driver: HIDMAESTRO_SIGNAL_CAP_* it keeps */
+    volatile LONG   CompanionCaps;       /* companion: HIDMAESTRO_SIGNAL_CAP_* it keeps */
+    LONG            Reserved0[13];
+    volatile LONG   InputWaiters;        /* HID driver workers inside a counted wait */
+    volatile LONG   InputHandoff;        /* SDK: a frame's SeqNo handed to a worker, or 0. HID driver: takes it */
+    LONG            Reserved1[14];
+    volatile LONG   CompanionParked;     /* WAIT_FOR_INPUT requests the companion holds */
+    LONG            Reserved2[31];
+} HIDMAESTRO_SIGNAL, *PHIDMAESTRO_SIGNAL;
+C_ASSERT(sizeof(HIDMAESTRO_SIGNAL) == 256);
+C_ASSERT(FIELD_OFFSET(HIDMAESTRO_SIGNAL, InputWaiters) == 64);
+C_ASSERT(FIELD_OFFSET(HIDMAESTRO_SIGNAL, InputHandoff) == 68);
+C_ASSERT(FIELD_OFFSET(HIDMAESTRO_SIGNAL, CompanionParked) == 128);
 #pragma pack(pop)
 
 /* The identity tag (decision (c)): the 64-bit FNV-1a hash of the token's
@@ -131,4 +204,28 @@ HmReadIdentityIndex(_In_ const WCHAR *token, _Out_ ULONG *index)
     RegCloseKey(hKey);
     if (ok) *index = val;
     return ok;
+}
+
+/* 2.1.0: Controller<N>\AckSignal (REG_DWORD), read under the contract. 0
+ * when no thread of the controller's SDK waits on the delivery
+ * acknowledgement's event, so the driver stores DeliveredSeqNo and skips
+ * the SetEvent. Any other value, or none (a program before 2.1.0), and the
+ * driver signals every delivered frame. */
+#define HIDMAESTRO_ACK_SIGNAL_VALUE  L"AckSignal"
+
+/* The signal section of a controller's index, mapped read and write, or
+ * NULL when there is none or its layout is another. *handle is the
+ * section's handle, or NULL. */
+static __inline PHIDMAESTRO_SIGNAL
+HmMapSignal(_In_z_ const WCHAR *name, _Out_ HANDLE *handle)
+{
+    PHIDMAESTRO_SIGNAL view;
+    *handle = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, name);
+    if (*handle == NULL) return NULL;
+    view = (PHIDMAESTRO_SIGNAL)MapViewOfFile(*handle, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(HIDMAESTRO_SIGNAL));
+    if (view != NULL && view->LayoutVersion == HIDMAESTRO_SIGNAL_LAYOUT) return view;
+    if (view != NULL) UnmapViewOfFile(view);
+    CloseHandle(*handle);
+    *handle = NULL;
+    return NULL;
 }

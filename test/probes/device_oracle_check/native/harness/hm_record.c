@@ -232,7 +232,9 @@ void PlanLoad(const char *path)
         } else if (strcmp(word, "sdk") == 0 && !p) {
             /* The SDK the plan's default streams model: 2 for this tree's,
              * which writes the version contract (SdkWritesContract). */
-            g_sdkV2 = atoi(strtok_s(NULL, " ", &ctx)) == 2;
+            int sdk = atoi(strtok_s(NULL, " ", &ctx));
+            g_sdkV2 = sdk >= 2;
+            g_sdkSignal = sdk >= 3;
         } else if (strcmp(word, "body") == 0) {
             if (g_plan.bodyCount >= (int)ARRAYSIZE(g_plan.bodies)) HmFail("plan: too many bodies");
             PlanBody *b = &g_plan.bodies[g_plan.bodyCount++];
@@ -282,16 +284,29 @@ uint32_t PlanDword(PlanProfile *p, const char *name, uint32_t fallback)
 #define VERSION_SIZE   64u
 #define OUTPUT_SIZE    (8u + RING_SLOTS * RING_SLOT_SIZE)
 #define PID_SIZE       40u
+#define SIGNAL_SIZE    256u
+
+/* SharedMemoryIO.EvenAbove: the later of two SeqNos as numbers that count
+ * up, an odd one taken up to the even one it becomes, stepping over 0. 0 is
+ * no SeqNo and never the later one. */
+static uint32_t EvenAbove(uint32_t a, uint32_t b)
+{
+    uint32_t m = a == 0 ? b : b == 0 ? a : (int32_t)(b - a) > 0 ? b : a;
+    if ((m & 1) == 0) return m;
+    return m + 1 == 0 ? 2u : m + 1;
+}
 
 static void Name(WCHAR *dst, size_t cap, const WCHAR *prefix, int index)
 {
     swprintf_s(dst, cap, L"%s%d", prefix, index);
 }
 
-/* The objects SharedMemoryIO.EnsureInputMapping (SharedMemoryIO.cs:340-434)
- * makes, in its order: the owner pipe, the input section, the companion
- * input event, the acknowledgement and its event, the version section
- * with the SDK's half, and the input event last. Then the output ring
+/* The objects SharedMemoryIO.EnsureInputMapping makes: the owner pipe
+ * first, then the input section, the companion input event, the
+ * acknowledgement and its event, the version section with the SDK's half,
+ * the signal section of a 2.1.0 SDK, and the input event last. The SDK
+ * makes the signal section right after it zeroes the input section, and
+ * nothing the driver reads lies between. Then the output ring
  * (HMController's EnsureOutputMapping). All exist before the device node,
  * as DeviceOrchestrator creates them first. */
 void SdkCreate(Sdk *s, int index, int flags)
@@ -306,6 +321,11 @@ void SdkCreate(Sdk *s, int index, int flags)
     }
     if (flags & SDK_SECTIONS) {
         Name(n, ARRAYSIZE(n), L"Global\\HIDMaestroInput", index);
+        /* The SeqNo a section of this name that a driver host still holds
+         * carries, which a 2.1.0 SDK counts its frames from above. */
+        uint32_t seqLeft = 0;
+        HmObj *oldInput = ObjFindNamed(n);
+        if (oldInput && oldInput->kind == HK_SECTION) memcpy(&seqLeft, ((HmSection *)oldInput)->buf, 4);
         s->input = SectionNew(n, INPUT_SIZE); Hold(&s->input->o);
         Name(n, ARRAYSIZE(n), L"Global\\HIDMaestroCompanionInputEvent", index);
         s->companionEv = EventNew(n, FALSE, FALSE, OWN_ADMINS, TRUE); Hold(&s->companionEv->o);
@@ -349,6 +369,21 @@ void SdkCreate(Sdk *s, int index, int flags)
                 memcpy(s->version->buf + 48, &tag, 8);
             }
         }
+        if (SdkWritesSignal()) {
+            /* 2.1.0: the signal gate's section, opened when a driver host
+             * holds it and never zeroed then, layout 1 when made, its
+             * handoff left as found. The SDK counts its frames from above the
+             * SeqNo a section of the index left, with the acknowledgement
+             * starting there (SharedMemoryIO.EnsureInputMapping). */
+            Name(n, ARRAYSIZE(n), L"Global\\HIDMaestroSignal", index);
+            HmObj *held = ObjFindNamed(n);
+            s->signal = held && held->kind == HK_SECTION ? (HmSection *)held : SectionNew(n, SIGNAL_SIZE);
+            Hold(&s->signal->o);
+            int32_t layout = 1;
+            if (!held) memcpy(s->signal->buf, &layout, 4);
+            s->seq = EvenAbove(seqLeft, 0);
+            memcpy(s->ack->buf, &s->seq, 4);
+        }
         Name(n, ARRAYSIZE(n), L"Global\\HIDMaestroInputEvent", index);
         s->inputEv = EventNew(n, FALSE, FALSE, OWN_ADMINS, TRUE); Hold(&s->inputEv->o);
         g_ackSection = s->ack;
@@ -380,9 +415,61 @@ void SdkWriteFrame(Sdk *s, const uint8_t *data, uint32_t dataLen, const uint8_t 
         memcpy(b + 278, &zero, 4);
     }
     s->seq = pending + 1;
+    /* 2.1.0's SDK never stores SeqNo 0: at the wrap it steps to 2
+     * (SharedMemoryIO.NextEvenSeq). */
+    if (s->signal && s->seq == 0) s->seq = 2;
     memcpy(b, &s->seq, 4);
-    EventSet(s->inputEv);
-    if (gip) EventSet(s->companionEv);
+    int input = 1, companion = gip != NULL;
+    if (s->signal) {
+        /* 2.1.0: the gate (docs/design/signal-gate.md,
+         * SharedMemoryIO.WriteInputFrame), then the companion's count. Every
+         * path has a full fence between the even SeqNo's store and that
+         * count's read: a compare-exchange or the exchange, or
+         * Thread.MemoryBarrier() where a worker is counted or the HID
+         * driver has no capability. */
+        int32_t ccaps, parked;
+        memcpy(&ccaps, s->signal->buf + 8, 4);
+        input = SdkHandOver(s) != 0;
+        if (companion) {
+            memcpy(&parked, s->signal->buf + 128, 4);
+            if (g_sdkParkedHook) { void (*hook)(void) = g_sdkParkedHook; g_sdkParkedHook = NULL; hook(); }
+            if ((ccaps & 1) && parked == 0) companion = 0;
+        }
+    }
+    if (input) EventSet(s->inputEv);
+    if (companion) EventSet(s->companionEv);
+}
+
+void (*g_sdkParkedHook)(void);
+
+/* With the capability the frame is handed over: in place of a final SeqNo
+ * still waiting for its take, or, with a worker counted, signaled with the
+ * handoff untouched, or as a provisional SeqNo (low bit set) made final
+ * with the capability still set and no worker counted, or taken back. */
+int SdkHandOver(Sdk *s)
+{
+    int32_t caps, waiters, handoff;
+    if (!s->signal) return 1;
+    memcpy(&caps, s->signal->buf + 4, 4);
+    if (!(caps & 1)) return 1;
+    int32_t fin = (int32_t)s->seq, prov = fin | 1;
+    memcpy(&handoff, s->signal->buf + 68, 4);
+    if (handoff != 0 && (handoff & 1) == 0) {
+        memcpy(s->signal->buf + 68, &fin, 4);
+        return 0;
+    }
+    memcpy(&waiters, s->signal->buf + 64, 4);
+    if (waiters != 0) return 2;
+    memcpy(s->signal->buf + 68, &prov, 4);
+    memcpy(&caps, s->signal->buf + 4, 4);
+    memcpy(&waiters, s->signal->buf + 64, 4);
+    memcpy(&handoff, s->signal->buf + 68, 4);
+    if ((caps & 1) && waiters == 0) {
+        if (handoff == prov) { memcpy(s->signal->buf + 68, &fin, 4); return 0; }
+    } else if (handoff == prov) {
+        memset(s->signal->buf + 68, 0, 4);
+    }
+    return 1;
 }
 
 /* SharedMemoryIO.EnsurePidStateMapping (SharedMemoryIO.cs:588-622) and
@@ -478,6 +565,12 @@ void RecordSections(Sdk *s)
 
 int g_versionParam;
 int g_sdkV2;
+int g_sdkSignal;
+
+int SdkWritesSignal(void)
+{
+    return g_sdkSignal && g_versionParam == VERSION_SDK;
+}
 
 int SdkWritesContract(void)
 {

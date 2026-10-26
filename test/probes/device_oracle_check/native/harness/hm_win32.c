@@ -277,6 +277,8 @@ void PipeServerClose(HmPipeServer *s)
 
 static void *g_mainFiber;
 static HmThread *g_current;
+int HmOnDriverThread(void) { return g_current != NULL; }
+int (*g_waitAnswerHook)(HmThread *t, DWORD result);
 
 void FiberInit(void)
 {
@@ -323,6 +325,7 @@ void ThreadRun(HmThread *t, DWORD result)
                        (unsigned long long)(g_clockMs - t->waitStartMs), (unsigned long)t->waitTimeout);
         }
         RecordWait("wait.answer", t->index, result, (DWORD)(g_clockMs - t->waitStartMs), 0);
+        if (g_waitAnswerHook && g_waitAnswerHook(t, result)) g_waitAnswerHook = NULL;
     }
     t->result = result;
     t->started = 1;
@@ -377,9 +380,12 @@ static DWORD FiberWait(DWORD n, const HANDLE *hs, DWORD ms)
     t->waitTimeout = ms;
     t->waitStartMs = g_clockMs;
     RecordWait("wait", t->index, n, ms, 0);
+    if (ms == 0 && g_pollHook) { void (*hook)(void) = g_pollHook; g_pollHook = NULL; hook(); }
     if (ms == 0) {
         /* A zero timeout is a poll: it returns at once from the objects'
-         * states, and no other thread runs meanwhile. */
+         * states, and no other thread runs meanwhile. A stream can run
+         * g_pollHook once before it, as what another process did in the
+         * meantime. */
         DWORD r = ThreadAutoResult(t);
         RecordWait("wait.answer", t->index, r, 0, 0);
         t->waitCount = 0;
@@ -544,10 +550,17 @@ BOOL WINAPI HmCloseHandle(HANDLE hObject)
     int i = HandleSlot(hObject);
     if (i < 0 || !g_handles[i]) HmFail("CloseHandle on a handle that is not open");
     HmObj *o = g_handles[i];
+    int pipeClient = o->kind == HK_PIPE_CLIENT;
     g_handles[i] = NULL;
     ObjRelease(o);
+    if (pipeClient && g_pipeClientCloseHook) {
+        void (*hook)(void) = g_pipeClientCloseHook;
+        g_pipeClientCloseHook = NULL;
+        hook();
+    }
     return TRUE;
 }
+void (*g_pipeClientCloseHook)(void);
 
 /* ------------------------------------------------------------------ */
 /*  Sections                                                           */
@@ -963,6 +976,39 @@ VOID WINAPI HmDeleteCriticalSection(LPCRITICAL_SECTION cs)
     if (cs->SpinCount == HM_CS_DELETED) HmFail("DeleteCriticalSection twice");
     if (cs->RecursionCount != 0) HmFail("DeleteCriticalSection while held");
     cs->SpinCount = HM_CS_DELETED;
+}
+
+/* A slim reader/writer lock, taken exclusive, is a held mark in its own
+ * word. SRWLOCK_INIT is all zero, so a zeroed device context holds free
+ * ones, and an SRW lock is never deleted. Taking one already held would
+ * deadlock a real thread, and stops the run here. */
+void (*g_srwHook)(void);
+void (*g_lockReleaseHook)(void);
+void (*g_pollHook)(void);
+int (*g_exchangeHook)(volatile LONG *target, LONG value);
+
+LONG HmInterlockedExchange(LONG volatile *target, LONG value)
+{
+    if (g_exchangeHook && g_current && g_exchangeHook(target, value)) g_exchangeHook = NULL;
+    return InterlockedExchange(target, value);
+}
+VOID WINAPI HmAcquireSRWLockExclusive(PSRWLOCK l)
+{
+    if (g_srwHook && g_current) { void (*hook)(void) = g_srwHook; g_srwHook = NULL; hook(); }
+    if (l->Ptr != NULL) HmFail("AcquireSRWLockExclusive on a lock already held");
+    l->Ptr = (PVOID)1;
+    g_locksHeld++;
+}
+VOID WINAPI HmReleaseSRWLockExclusive(PSRWLOCK l)
+{
+    if (l->Ptr == NULL) HmFail("ReleaseSRWLockExclusive on a free lock");
+    l->Ptr = NULL;
+    g_locksHeld--;
+    if (g_lockReleaseHook && g_current && g_locksHeld == 0) {
+        void (*hook)(void) = g_lockReleaseHook;
+        g_lockReleaseHook = NULL;
+        hook();
+    }
 }
 
 ULONGLONG WINAPI HmGetTickCount64(VOID) { return g_clockMs; }

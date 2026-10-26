@@ -138,6 +138,12 @@ InitInstancePaths(
         RtlCopyMemory(ctx->VersionMappingName, prefix, sizeof(prefix));
         AppendUlongDecimal(ctx->VersionMappingName, index, cap);
     }
+    {
+        static const WCHAR prefix[] = L"Global\\HIDMaestroSignal";
+        SIZE_T cap = sizeof(ctx->SignalMappingName) / sizeof(WCHAR);
+        RtlCopyMemory(ctx->SignalMappingName, prefix, sizeof(prefix));
+        AppendUlongDecimal(ctx->SignalMappingName, index, cap);
+    }
 
     /* Per-instance serial number. Format: "HM-CTL-<index>" zero-padded to
      * at least 4 digits so it sorts naturally. SDL3 / HIDAPI use this string
@@ -353,6 +359,18 @@ LoadLiveFeature(_In_ PDEVICE_CONTEXT ctx, _In_ HKEY hKey)
     return TRUE;
 }
 
+/* 2.1.0: AckSignal into the context. Only a REG_DWORD of 0 turns the
+ * acknowledgement's SetEvent off. Absent or anything else and the driver
+ * signals, as every driver before 2.1.0 did, so a value it cannot read
+ * never fails the start. */
+static VOID
+LoadAckSignal(_In_ PDEVICE_CONTEXT ctx, _In_ HKEY hKey)
+{
+    DWORD value = 1, size = sizeof(value), type = 0;
+    LONG rc = RegQueryValueExW(hKey, HIDMAESTRO_ACK_SIGNAL_VALUE, NULL, &type, (LPBYTE)&value, &size);
+    ctx->AckSignal = !(rc == ERROR_SUCCESS && type == REG_DWORD && size == sizeof(value) && value == 0);
+}
+
 /* The controller's v2.0.0 values, read only under the contract. Returns
  * 0 or the HIDMAESTRO_CONFIG_ERROR_* of the value it could not read. */
 static LONG
@@ -365,6 +383,7 @@ LoadContractValues(_In_ PDEVICE_CONTEXT ctx)
                : !LoadCachedInputIds(ctx, hKey) ? HIDMAESTRO_CONFIG_ERROR_CACHED_INPUT_IDS
                : !LoadLiveFeature(ctx, hKey) ? HIDMAESTRO_CONFIG_ERROR_LIVE_FEATURE
                : 0;
+    LoadAckSignal(ctx, hKey);
     RegCloseKey(hKey);
     return error;
 }
@@ -542,13 +561,13 @@ KeepFeatureSet(_In_ PDEVICE_CONTEXT ctx, _In_reads_(size) const UCHAR *buf, _In_
         if (ctx->FeatureOnReports[slot] == rid) break;
     if (slot == ctx->FeatureOnReportCount) return;
     if (len > HM_FEATURE_MAX_DATA) len = HM_FEATURE_MAX_DATA;
-    WdfWaitLockAcquire(ctx->FeatureLock, NULL);
+    AcquireSRWLockExclusive(&ctx->FeatureLock);
     RtlCopyMemory(ctx->FeatureKept[slot], data, len);
     ctx->FeatureKeptLength[slot] = len;
     for (ULONG i = 0; i < ctx->FeatureCount; i++)
         if ((ctx->FeatureEntries[i].Flags & HM_FEATURE_FLAG_MESSAGE) && ctx->FeatureEntries[i].OnSlot == slot)
             ctx->FeaturePage[i] = 0;
-    WdfWaitLockRelease(ctx->FeatureLock);
+    ReleaseSRWLockExclusive(&ctx->FeatureLock);
 }
 
 /* The entry a GET on a report takes: a message entry whose message and
@@ -587,9 +606,9 @@ ServeFeature(_In_ PDEVICE_CONTEXT ctx, _In_ UCHAR requestId, _Out_writes_(outSiz
     *written = 0;
     *notify = FALSE;
     *status = STATUS_SUCCESS;
-    WdfWaitLockAcquire(ctx->FeatureLock, NULL);
+    AcquireSRWLockExclusive(&ctx->FeatureLock);
     LONG at = FindFeatureEntry(ctx, id);
-    if (at < 0) { WdfWaitLockRelease(ctx->FeatureLock); return FALSE; }
+    if (at < 0) { ReleaseSRWLockExclusive(&ctx->FeatureLock); return FALSE; }
     const HM_FEATURE_ENTRY *e = &ctx->FeatureEntries[at];
     const UCHAR *arena = ctx->FeatureArena + e->ArenaOffset;
     const UCHAR *sizes = arena + e->ValueLength;
@@ -601,7 +620,7 @@ ServeFeature(_In_ PDEVICE_CONTEXT ctx, _In_ UCHAR requestId, _Out_writes_(outSiz
         n = e->Size < outSize ? e->Size : outSize;
     }
     if (n == 0) {
-        WdfWaitLockRelease(ctx->FeatureLock);
+        ReleaseSRWLockExclusive(&ctx->FeatureLock);
         *status = STATUS_BUFFER_TOO_SMALL;
         return TRUE;
     }
@@ -619,7 +638,7 @@ ServeFeature(_In_ PDEVICE_CONTEXT ctx, _In_ UCHAR requestId, _Out_writes_(outSiz
     }
     if (e->Flags & HM_FEATURE_FLAG_REPLY_HEAD) full[0] = requestId;
     *notify = (e->Flags & HM_FEATURE_FLAG_NOTIFY) != 0;
-    WdfWaitLockRelease(ctx->FeatureLock);
+    ReleaseSRWLockExclusive(&ctx->FeatureLock);
     RtlCopyMemory(out, full, n);
     *written = n;
     return TRUE;
@@ -799,6 +818,8 @@ static VOID OwnerGone(_In_ PDEVICE_CONTEXT ctx);
 static VOID DeliverReleaseFrames(_In_ PDEVICE_CONTEXT ctx);
 static HANDLE CreateHostEvent(_In_ BOOL manualReset, _In_ BOOL takeOverNullDacl, _In_ LPCWSTR name);
 static VOID TryCreateDoorbell(_In_ PDEVICE_CONTEXT ctx);
+static VOID TryOpenSignal(_In_ PDEVICE_CONTEXT ctx);
+static void ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx);
 
 /* Create the output doorbell if there is none yet, and publish it for
  * PublishOutput. EvtDeviceAdd may have found the name unusable, held by an
@@ -816,6 +837,117 @@ TryCreateDoorbell(_In_ PDEVICE_CONTEXT ctx)
         InterlockedExchangePointer((PVOID volatile *)&ctx->OutputSignalEvent, ev);
 }
 
+/* 2.1.0: the signal section's view, loaded once. A release whose join of
+ * the worker timed out stores NULL while the worker may still run, and
+ * leaves the view mapped (ReleaseIndexObjects), so each use takes one load
+ * and keeps it. */
+static PHIDMAESTRO_SIGNAL
+SignalView(_In_ PDEVICE_CONTEXT ctx)
+{
+    return *(PHIDMAESTRO_SIGNAL volatile *)&ctx->SignalPtr;
+}
+
+/* 2.1.0: the gate (docs/design/signal-gate.md) runs while the signal
+ * section is mapped and the count has never been found broken: the view,
+ * or NULL. Its capability is set again at each map and every 256 frames,
+ * as the acknowledgement's bits are: an SDK sweep that removed a device
+ * clears it (SharedMemoryIO.ForgetDriverLocked), and so does another
+ * context on the index as its device goes. Worker thread only. */
+static PHIDMAESTRO_SIGNAL
+Gating(_In_ PDEVICE_CONTEXT ctx)
+{
+    return ctx->SignalBroken ? NULL : SignalView(ctx);
+}
+
+static VOID
+AnnounceGate(_In_ PDEVICE_CONTEXT ctx)
+{
+    PHIDMAESTRO_SIGNAL sig = Gating(ctx);
+    if (sig != NULL && !(sig->DriverCaps & HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS))
+        InterlockedOr(&sig->DriverCaps, (LONG)HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS);
+}
+
+/* 2.1.0: map the signal section once (hm_contract.h, HIDMAESTRO_SIGNAL) and
+ * announce the gate. Worker thread only. Mapped until the device goes, as
+ * the acknowledgement is: the name stays bound to this object while the
+ * driver holds it, so the next SDK on the index opens the same section and
+ * finds the count as it is. A section the SDK did not make, or none, and
+ * the worker counts nothing and the SDK signals every frame. */
+static VOID
+TryOpenSignal(_In_ PDEVICE_CONTEXT ctx)
+{
+    if (ctx->SignalPtr == NULL) {
+        HANDLE h;
+        PHIDMAESTRO_SIGNAL view = HmMapSignal(ctx->SignalMappingName, &h);
+        if (view == NULL) return;
+        ctx->SignalMemHandle = h;
+        ctx->SignalPtr = view;
+    }
+    AnnounceGate(ctx);
+}
+
+/* 2.1.0: the handoff's two kinds of value (hm_contract.h). The SDK hands a
+ * frame over in two steps: an exchange of its SeqNo with the low bit set
+ * (provisional), the recheck of the capability and the count, then a
+ * compare-exchange that makes it final (no worker waits) or takes it back
+ * and signals. A final SeqNo is a frame whose program finished its handoff,
+ * the counterpart of v2.0.3's SetEvent, and a take of it reads the section
+ * as v2.0.3's worker read on that signal. A provisional one is a frame
+ * whose program has not decided yet, or died before it did: a take drops
+ * it. While the program runs its compare-exchange then fails, and it calls
+ * SetEvent. A program that died there never called SetEvent on v2.0.3
+ * either, and nothing reads that frame. */
+static BOOLEAN
+HandoffFinal(_In_ ULONG handed)
+{
+    return handed != 0 && (handed & 1) == 0;
+}
+
+/* 2.1.0: take a frame the SDK handed over instead of signaling it
+ * (HandoffFinal). The exchange comes after the interlocked increment of
+ * InputWaiters, so the two full barriers face the SDK's exchange and its
+ * load of the count (docs/design/signal-gate.md). A final frame taken is
+ * read, or, when the worker leaves its loop first on the stop event or at
+ * teardown, signaled on the input event, where v2.0.3's program left its
+ * signal. The read takes whatever the section holds, as v2.0.3's read on
+ * the frame's signal did: the frame, or a newer one its program stored and
+ * died before handing over, whose wakeup this is, as the left signal of the
+ * frame before it was on v2.0.3. Returns TRUE for a final frame. Worker
+ * thread only. */
+static BOOLEAN
+TakeHandoff(_In_ PHIDMAESTRO_SIGNAL sig)
+{
+    return HandoffFinal((ULONG)InterlockedExchange(&sig->InputHandoff, 0));
+}
+
+/* 2.1.0: the gate closes as the worker lets go of the input event, at a
+ * recycle and as the device goes, so no handoff outlives a worker that
+ * holds the event: the capability goes, and a final frame handed over
+ * before that becomes a SetEvent on the program's own input event, which
+ * goes with the program, as v2.0.3's signal did. A provisional one is
+ * dropped: its program, rechecking the capability after its exchange,
+ * finds it gone or finds its frame taken, and signals it itself. This
+ * clear is a full barrier before the take. The capability comes back at
+ * the next map (TryOpenSignal). Worker thread, or the release after its
+ * join of the worker. */
+static VOID
+CloseGate(_In_ PDEVICE_CONTEXT ctx)
+{
+    PHIDMAESTRO_SIGNAL sig = SignalView(ctx);
+    if (sig == NULL) return;
+    InterlockedAnd(&sig->DriverCaps, ~(LONG)HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS);
+#if defined(_M_ARM64)
+    MemoryBarrier();
+#endif
+    if (!TakeHandoff(sig)) return;
+    if (ctx->InputDataEvent != NULL) {
+        SetEvent(ctx->InputDataEvent);
+    } else {
+        HANDLE ev = OpenEventW(EVENT_MODIFY_STATE, FALSE, ctx->InputEventName);
+        if (ev != NULL) { SetEvent(ev); CloseHandle(ev); }
+    }
+}
+
 /* Try to open and map the named section. Returns TRUE on success.
  * On failure, leaves SharedMemHandle/SharedMemPtr unchanged (NULL). */
 static BOOLEAN
@@ -829,6 +961,7 @@ TryOpenSharedMapping(_In_ PDEVICE_CONTEXT ctx)
 
     ctx->SharedMemHandle = h;
     ctx->SharedMemPtr = view;
+    TryOpenSignal(ctx);
     TryOpenInputAck(ctx);
     TryOpenOwnerWatch(ctx);
     AnnounceVersion(ctx);
@@ -878,7 +1011,7 @@ TryOpenInputAck(_In_ PDEVICE_CONTEXT ctx)
     if (view == NULL) { CloseHandle(h); return; }
     HANDLE ev = OpenEventW(EVENT_MODIFY_STATE, FALSE, ctx->InputAckEventName);
 
-    WdfWaitLockAcquire(ctx->InputLock, NULL);
+    AcquireSRWLockExclusive(&ctx->InputLock);
     CloseInputAckLocked(ctx);
     ctx->InputAckMemHandle = h;
     ctx->InputAckMemPtr = (volatile LONG *)view;
@@ -897,7 +1030,7 @@ TryOpenInputAck(_In_ PDEVICE_CONTEXT ctx)
                           | ((ULONG)old & HIDMAESTRO_INPUT_ACK_WATCH_ENDED));
         } while (InterlockedCompareExchange(caps, want, old) != old);
     }
-    WdfWaitLockRelease(ctx->InputLock);
+    ReleaseSRWLockExclusive(&ctx->InputLock);
 }
 
 /* Caller holds InputLock (or is the only thread left, at release). */
@@ -915,7 +1048,8 @@ AckInputDeliveredLocked(_In_ PDEVICE_CONTEXT ctx, _In_ ULONG seqNo)
 {
     if (ctx->InputAckMemPtr == NULL) return;
     InterlockedExchange(&((PHIDMAESTRO_INPUT_ACK)ctx->InputAckMemPtr)->DeliveredSeqNo, (LONG)seqNo);
-    if (ctx->InputAckEvent) SetEvent(ctx->InputAckEvent);
+    /* 2.1.0: only for a controller whose SDK waits on the event (AckSignal). */
+    if (ctx->InputAckEvent && ctx->AckSignal) SetEvent(ctx->InputAckEvent);
 }
 
 /* A READ_REPORT just completed with the frame with this SeqNo. Its
@@ -1048,11 +1182,11 @@ TryOpenOwnerWatch(_In_ PDEVICE_CONTEXT ctx)
      * refused) still watches the next program. */
     {
         BOOLEAN allowed;
-        WdfWaitLockAcquire(ctx->InputLock, NULL);
+        AcquireSRWLockExclusive(&ctx->InputLock);
         allowed = ctx->InputAckMemPtr != NULL
             && (((ULONG)((PHIDMAESTRO_INPUT_ACK)ctx->InputAckMemPtr)->Capabilities
                  & HIDMAESTRO_INPUT_ACK_WATCH_ENDED) == 0);
-        WdfWaitLockRelease(ctx->InputLock);
+        ReleaseSRWLockExclusive(&ctx->InputLock);
         if (!allowed) return;
     }
     HANDLE p = CreateFileW(ctx->OwnerPipeName, GENERIC_READ, 0, NULL,
@@ -1072,11 +1206,11 @@ TryOpenOwnerWatch(_In_ PDEVICE_CONTEXT ctx)
     }
     RecordOwnerConnected(ctx, p);
 
-    WdfWaitLockAcquire(ctx->InputLock, NULL);
+    AcquireSRWLockExclusive(&ctx->InputLock);
     if (ctx->InputAckMemPtr)
         InterlockedOr(&((PHIDMAESTRO_INPUT_ACK)ctx->InputAckMemPtr)->Capabilities,
                       (LONG)HIDMAESTRO_INPUT_ACK_CAP_RELEASE);
-    WdfWaitLockRelease(ctx->InputLock);
+    ReleaseSRWLockExclusive(&ctx->InputLock);
 }
 
 /* Cancel the pending read and wait for it to finish before the OVERLAPPED
@@ -1106,28 +1240,44 @@ CloseOwnerWatch(_In_ PDEVICE_CONTEXT ctx)
 static VOID
 OwnerGone(_In_ PDEVICE_CONTEXT ctx)
 {
+    /* 2.1.0: OwnerGone leaves the handoff alone. A provisional SeqNo there
+     * is the program's that ended, left as it died between its exchange and
+     * its compare-exchange, or the next program's, whose SDK signals it:
+     * the next take drops it, and v2.0.3, whose program died before its
+     * SetEvent, read nothing for it either. A final one is the next
+     * program's, which can make its pipe as soon as this program's end
+     * closed: a program's final frames come only while the worker is
+     * outside its counted wait, so the worker's take at its next loop top
+     * reads them before any wait that could return this pipe's close. The
+     * next take reads it after the reset below, as v2.0.3's read of that
+     * program's SetEvent came after OwnerGone, and it reaches the read cache
+     * after that reset. */
     CloseOwnerWatch(ctx);
 
-    /* The next program on this index zeroes the input section and counts
-     * its frames from 1 (SharedMemoryIO.EnsureInputMapping), and it can
-     * start inside the idle window, before any recycle. Forget the last
-     * SeqNo as the recycle does, so its frame whose SeqNo equals this
-     * program's last is read. SeenSeqNo is the worker's alone, and
-     * SharedMemSeqNo is reset under InputLock below. */
+    /* A program before 2.1.0 that starts next on this index zeroes the
+     * input section and counts its frames from 1, and it can start inside
+     * the idle window, before any recycle. SeenSeqNo is forgotten as v2.0.3
+     * forgot it here, so its frame equal to this program's last goes out.
+     * SharedMemSeqNo is reset under InputLock below. The watch is tried
+     * again at the next map or the 256th frame, as v2.0.3 tried it. Tried
+     * at the next frame, it watched a program that started inside the idle
+     * window, and that program's end ran an OwnerGone v2.0.3 did not, whose
+     * reset hid its last frame, cached with no read parked, from the read
+     * that came after. */
     ctx->SeenSeqNo = 0;
 
     /* The watch connects only beside the acknowledgement section, so it is
      * mapped here. Mark the watch ended in it (TryOpenOwnerWatch) before
      * the values say so: the census reads OwnerConnected 0 beside a clear
      * marker as a program that started since (OwnerCensus.LegacyPipeLive). */
-    WdfWaitLockAcquire(ctx->InputLock, NULL);
+    AcquireSRWLockExclusive(&ctx->InputLock);
     if (ctx->InputAckMemPtr != NULL)
         InterlockedOr(&((PHIDMAESTRO_INPUT_ACK)ctx->InputAckMemPtr)->Capabilities,
                       (LONG)HIDMAESTRO_INPUT_ACK_WATCH_ENDED);
-    WdfWaitLockRelease(ctx->InputLock);
+    ReleaseSRWLockExclusive(&ctx->InputLock);
     RecordOwnerGone(ctx);
 
-    WdfWaitLockAcquire(ctx->InputLock, NULL);
+    AcquireSRWLockExclusive(&ctx->InputLock);
     volatile HIDMAESTRO_INPUT_ACK *ack = (volatile HIDMAESTRO_INPUT_ACK *)ctx->InputAckMemPtr;
     ULONG count = 0;
     if (ack != NULL) {
@@ -1174,7 +1324,7 @@ OwnerGone(_In_ PDEVICE_CONTEXT ctx)
             break;
         }
     }
-    WdfWaitLockRelease(ctx->InputLock);
+    ReleaseSRWLockExclusive(&ctx->InputLock);
 
     DeliverReleaseFrames(ctx);
 }
@@ -1191,9 +1341,9 @@ DeliverReleaseFrames(_In_ PDEVICE_CONTEXT ctx)
         BOOLEAN more;
         WDFREQUEST pendingRead;
 
-        WdfWaitLockAcquire(ctx->InputLock, NULL);
+        AcquireSRWLockExclusive(&ctx->InputLock);
         more = ctx->ReleaseNext < ctx->ReleaseCount;
-        WdfWaitLockRelease(ctx->InputLock);
+        ReleaseSRWLockExclusive(&ctx->InputLock);
         if (!more) return;
 
         /* The queue is taken outside InputLock, as ProcessSharedInput
@@ -1201,16 +1351,16 @@ DeliverReleaseFrames(_In_ PDEVICE_CONTEXT ctx)
          * then the read goes back where it was. */
         if (!NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead)))
             return;
-        WdfWaitLockAcquire(ctx->InputLock, NULL);
+        AcquireSRWLockExclusive(&ctx->InputLock);
         if (ctx->ReleaseNext >= ctx->ReleaseCount) {
-            WdfWaitLockRelease(ctx->InputLock);
+            ReleaseSRWLockExclusive(&ctx->InputLock);
             WdfRequestRequeue(pendingRead);
             return;
         }
         size = ctx->ReleaseSizes[ctx->ReleaseNext];
         RtlCopyMemory(frame, ctx->ReleaseFrames[ctx->ReleaseNext], size);
         ctx->ReleaseNext++;
-        WdfWaitLockRelease(ctx->InputLock);
+        ReleaseSRWLockExclusive(&ctx->InputLock);
 
         NTSTATUS cs = RequestCopyFromBuffer(pendingRead, frame, size);
         WdfRequestComplete(pendingRead, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
@@ -1456,12 +1606,13 @@ PublishOutput(_In_ PDEVICE_CONTEXT ctx,
     /* Serialize writers (the queue dispatches IOCTLs in parallel, so two
      * threads can call PublishOutput concurrently). v1.1.40 ring buffer
      * uses per-slot seqlock for torn-write detection on the reader side;
-     * the WdfWaitLock here ensures only one writer increments Head and
-     * fills its slot at a time. */
-    WdfWaitLockAcquire(ctx->OutputLock, NULL);
+     * the lock here ensures only one writer increments Head and fills its
+     * slot at a time, and that no writer fills a slot while
+     * EnsureOutputMapping maps the section again. */
+    AcquireSRWLockExclusive(&ctx->OutputLock);
 
     if (!EnsureOutputMapping(ctx)) {
-        WdfWaitLockRelease(ctx->OutputLock);
+        ReleaseSRWLockExclusive(&ctx->OutputLock);
         return;
     }
 
@@ -1504,7 +1655,7 @@ PublishOutput(_In_ PDEVICE_CONTEXT ctx,
     MemoryBarrier();
     slot->SeqNo = newSeq;
 
-    WdfWaitLockRelease(ctx->OutputLock);
+    ReleaseSRWLockExclusive(&ctx->OutputLock);
 
     /* Doorbell LAST (issue #34): Head is already published, so a reader
      * woken by this signal always sees the new packet. Signaling outside
@@ -1561,8 +1712,9 @@ KeepLiveFeatureLocked(_In_ PDEVICE_CONTEXT ctx, _In_ const HIDMAESTRO_SHARED_INP
  * Called from the event-driven worker thread whenever the SDK signals
  * InputDataEvent (or the 50 ms safety tick fires). Doing all the HID
  * report-build + manual-queue drain here: no WDF timer, no IRQL games:
- * WdfRequestComplete / WdfWaitLock* are documented safe from a raw worker
- * thread in UMDF2. */
+ * WdfRequestComplete and the SRW locks are documented safe from a raw worker
+ * thread in UMDF2. 2.1.0: also when the worker took a frame the SDK
+ * handed over instead of signaling it (TakeHandoff). */
 static void
 ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
 {
@@ -1570,7 +1722,21 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
     if (!ReadSharedInput(ctx, &shared)) return;
 
     ULONG seqNo = shared.SeqNo;
+    /* A frame is new when it is not the last one sent, whether a signal or
+     * a handed-over frame woke this read (TakeHandoff). */
     if (seqNo == ctx->SeenSeqNo) return; /* No new data */
+    /* 2.1.0: SeqNo 0 with no data is a section an SDK zeroed as it mapped
+     * the index, and no frame. v2.0.3 read it as one: SeenSeqNo became 0,
+     * the cache took an all-zero report at SeqNo 0 (with LiveFeatureReport,
+     * an empty answer), and a read parked got that report. This driver
+     * does all of it but the read: the polled reports and the SeqNos are
+     * v2.0.3's, so a program before 2.1.0 that starts next, counting from
+     * 0, has its first frame go out, a read that comes late parks instead
+     * of taking the last program's frame from the cache, and a polling
+     * caller no longer sees that program's last report, but no READ_REPORT
+     * completes with the all-zero one. A program before 2.1.0 stores 0 with
+     * its frame at every 2^31st frame, and that frame goes on. */
+    BOOLEAN zeroed = seqNo == 0 && shared.DataSize == 0 && shared.ExtendedReportSize == 0;
     /* v2.0.0: the worker's stale-wakeup count reads SeenSeqNo, since a
      * frame the driver does not send leaves SharedMemSeqNo alone. */
     ctx->SeenSeqNo = seqNo;
@@ -1585,9 +1751,9 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
      * feature report, never an input report. A frame that carries nothing
      * else only replaces the answer. */
     if (ctx->LiveFeatureReport != 0 && shared.ExtendedReportSize == 0) {
-        WdfWaitLockAcquire(ctx->InputLock, NULL);
+        AcquireSRWLockExclusive(&ctx->InputLock);
         KeepLiveFeatureLocked(ctx, &shared);
-        WdfWaitLockRelease(ctx->InputLock);
+        ReleaseSRWLockExclusive(&ctx->InputLock);
         return;
     }
 
@@ -1675,7 +1841,7 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
         BOOLEAN servedOne = FALSE;
         NTSTATUS cs = STATUS_SUCCESS;
         WDFREQUEST pendingRead = NULL;
-        if (NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead))) {
+        if (!zeroed && NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead))) {
             servedOne = TRUE;
             cs = RequestCopyFromBuffer(pendingRead, inputReport, inputSize);
         }
@@ -1683,7 +1849,7 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
          * so the next IOCTL_HID_READ_REPORT for this seqno completes
          * directly (the parked one, if any, was taken above and completes
          * below). */
-        WdfWaitLockAcquire(ctx->InputLock, NULL);
+        AcquireSRWLockExclusive(&ctx->InputLock);
         RtlCopyMemory(ctx->InputReport, inputReport, inputSize);
         ctx->InputReportSize = inputSize;
         ctx->InputReportReady = TRUE;
@@ -1713,7 +1879,7 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
             ctx->LastDeliveredInputSeqNo = seqNo;
             NoteFrameCompletedLocked(ctx, seqNo);
         }
-        WdfWaitLockRelease(ctx->InputLock);
+        ReleaseSRWLockExclusive(&ctx->InputLock);
         /* Complete only now. HID class can send its next READ_REPORT the
          * moment this one completes, and that read has to find AckPending
          * set. Completing before the lock let it arrive first, find nothing
@@ -1868,7 +2034,72 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                 waits[count] = ctx->RemoveEvent;
                 removeAt = count++;
             }
-            DWORD rc = WaitForMultipleObjects(count, waits, FALSE, 500);
+            /* 2.1.0: the signal gate (docs/design/signal-gate.md). Counted
+             * in InputWaiters from before the take until the wait returns,
+             * so the SDK keeps a frame for the take only while no worker
+             * is counted. A taken frame is read without blocking: the wait
+             * polls the other events with a zero timeout, and its timeout
+             * stands for the input event. A count the increment finds below
+             * zero is wrong: clearing the capability sends the SDK back to
+             * a SetEvent every frame, and the take after it still finds a
+             * frame handed over before the clear. */
+            PHIDMAESTRO_SIGNAL sig = Gating(ctx);
+            volatile LONG *waiters = sig != NULL ? &sig->InputWaiters : NULL;
+            BOOLEAN pending = FALSE;
+            if (waiters != NULL) {
+                if (InterlockedIncrement(waiters) <= 0) {
+                    ctx->SignalBroken = TRUE;
+                    InterlockedAnd(&sig->DriverCaps, ~(LONG)HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS);
+                }
+#if defined(_M_ARM64)
+                /* On a core without the v8.1 atomics the compiler's helper
+                 * for the increment is an ldaxr/stlxr loop with no dmb
+                 * after it, which lets the SeqNo load below run ahead of
+                 * the count's store. The full fence closes that. */
+                MemoryBarrier();
+#endif
+                pending = TakeHandoff(sig);
+                if (pending) InterlockedDecrement(waiters);
+            }
+            DWORD rc = WaitForMultipleObjects(count, waits, FALSE, pending ? 0 : 500);
+            if (waiters != NULL && !pending) InterlockedDecrement(waiters);
+            if (pending && rc == WAIT_TIMEOUT) rc = WAIT_OBJECT_0 + 1;
+            /* 2.1.0: the input event comes before the owner pipe and the
+             * remove event in the wait, so a frame the SDK signaled is read
+             * before the program's end is handled. A frame taken without a
+             * signal is read first too: OwnerGone, which ends a program,
+             * would otherwise run before that program's last frame. After
+             * that read the worker waits again instead of running OwnerGone:
+             * the owner read's event is manual-reset and stays set, and an
+             * input event a program set meanwhile is taken first, as
+             * v2.0.3's wait took it before the pipe's close. */
+            else if (pending && rc != WAIT_OBJECT_0 && rc != WAIT_OBJECT_0 + 1) {
+                /* At teardown a taken frame goes back to the input event
+                 * unread, as at the stop event below, for the next device
+                 * context. A read that has begun is not undone: v2.0.3's
+                 * wait, which the take stands for, had returned the signal
+                 * by then and read it the same way, and a READ_REPORT that
+                 * comes late can still take the frame from the cache, so a
+                 * frame signaled back after its read would go out twice. */
+                if (ctx->TearingDown) {
+                    SetEvent(ctx->InputDataEvent);
+                    return 0;
+                }
+                idleTimeouts = 0;
+                ProcessSharedInput(ctx);
+                pending = FALSE;
+                if (rc == WAIT_OBJECT_0 + 2) continue;
+            }
+            /* 2.1.0: a frame taken and not read when the worker leaves the
+             * loop, at teardown or on the stop event (a recycle), goes back
+             * to the input event as a SetEvent below. v2.0.3's wait returned
+             * the stop event first too, and left the program's signal set,
+             * so the next device context or the recycled worker read the
+             * section. Dropped, the frame waited for the program's next one.
+             * The add and the recycle forget SeenSeqNo in both drivers, so
+             * a taken frame already sent goes out again there only where
+             * v2.0.3's left signal sent it again. A provisional take is no
+             * frame (HandoffFinal): its program signals it. */
 
             /* Issue #38: TearingDown is the authoritative exit
              * condition, checked on EVERY wake including timeouts. The
@@ -1883,10 +2114,13 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
              * GET_INPUT_REPORT cache: the S34 regression). Worst-case
              * exit latency is one 500 ms wait, inside cleanup's 2 s
              * join. */
-            if (ctx->TearingDown)
+            if (ctx->TearingDown) {
+                if (pending) SetEvent(ctx->InputDataEvent);
                 return 0;
+            }
 
             if (rc == WAIT_OBJECT_0) {
+                if (pending) SetEvent(ctx->InputDataEvent);
                 /* FOREIGN signal on the shared named event (another
                  * process's sweep, or a same-index orphan's late
                  * cleanup). Returning here left a healthy device frozen
@@ -1931,6 +2165,11 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                         TryCreateDoorbell(ctx);
                     if (ctx->OwnerPipe == NULL)
                         TryOpenOwnerWatch(ctx);
+                    /* 2.1.0: the gate's capability again, which another
+                     * context on the index clears as its device goes, and
+                     * which a streaming consumer's worker otherwise sets
+                     * only at a map or a connect. */
+                    AnnounceGate(ctx);
                 }
                 continue;
             }
@@ -1992,7 +2231,9 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
         if (recycle) {
             /* Close stale handles. Phase 1 will re-open fresh ones.
              * Unmapping the view first, then closing handles, keeps the
-             * sequence symmetric with TryOpenSharedMapping. */
+             * sequence symmetric with TryOpenSharedMapping. 2.1.0: the gate
+             * closes first, while the input event is still open. */
+            CloseGate(ctx);
             CloseHandle(ctx->InputDataEvent);
             ctx->InputDataEvent = NULL;
             if (ctx->RemoveEvent)  { CloseHandle(ctx->RemoveEvent);  ctx->RemoveEvent = NULL; }
@@ -2009,17 +2250,17 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
              * next SDK on this index opens the same section, and
              * TryOpenSharedMapping maps it again with the input
              * section. */
-            /* Also reset the cached SeqNos so the fresh mapping's first read
-             * (even if it happens to land on a SeqNo matching our previous
-             * cached value by chance) is treated as new data. SeenSeqNo is
-             * the one ReadSharedInput's gate reads, and a program that
-             * starts again on the index counts its frames from the start.
-             * The delivered gate goes with SharedMemSeqNo, under the lock
-             * READ_REPORT reads both under, as OwnerGone resets them. */
-            WdfWaitLockAcquire(ctx->InputLock, NULL);
+            /* Reset the delivered gate with SharedMemSeqNo, under the lock
+             * READ_REPORT reads both under, as OwnerGone resets them: a
+             * program that starts again on the index may count its frames
+             * from the start. */
+            AcquireSRWLockExclusive(&ctx->InputLock);
             ctx->SharedMemSeqNo = 0;
             ctx->LastDeliveredInputSeqNo = 0;
-            WdfWaitLockRelease(ctx->InputLock);
+            ReleaseSRWLockExclusive(&ctx->InputLock);
+            /* The program that held the index may have ended unseen and the
+             * next may count from 0, so the recycle forgets the last SeqNo,
+             * as v2.0.3's did. */
             ctx->SeenSeqNo = 0;
         }
     }
@@ -2038,13 +2279,19 @@ static VOID ReleaseIndexObjects(_In_ PDEVICE_CONTEXT ctx)
      * the flag is what tells OUR worker this wake is its real teardown.
      * SetEvent → 2-second join, which should be instant (the worker
      * wakes on the stop event and returns). */
+    BOOLEAN workerEnded = TRUE;
     InterlockedExchange((volatile LONG *)&ctx->TearingDown, 1);
     if (ctx->StopEvent) SetEvent(ctx->StopEvent);
     if (ctx->WorkerThread) {
-        WaitForSingleObject(ctx->WorkerThread, 2000);
+        workerEnded = WaitForSingleObject(ctx->WorkerThread, 2000) == WAIT_OBJECT_0;
         CloseHandle(ctx->WorkerThread);
         ctx->WorkerThread = NULL;
     }
+    /* 2.1.0: this context counts no more, so its capability goes, and a
+     * frame handed over before that is signaled on the input event, while
+     * it is still open (CloseGate). The SDK signals every frame until a
+     * worker on the index sets the capability again. */
+    CloseGate(ctx);
 
     if (ctx->InputDataEvent) { CloseHandle(ctx->InputDataEvent); ctx->InputDataEvent = NULL; }
     if (ctx->RemoveEvent)    { CloseHandle(ctx->RemoveEvent);    ctx->RemoveEvent = NULL; }
@@ -2058,6 +2305,15 @@ static VOID ReleaseIndexObjects(_In_ PDEVICE_CONTEXT ctx)
      * read path can be touching the acknowledgement any more. */
     CloseInputAckLocked(ctx);
     CloseOwnerWatch(ctx);
+    /* 2.1.0: a worker the join did not see end can still be at its count
+     * and its take, which run at every turn of its loop, so its view of the
+     * signal section stays mapped for the driver host's life. The worker
+     * finds SignalPtr NULL at its next turn and counts no more. */
+    if (ctx->SignalPtr) {
+        if (workerEnded) UnmapViewOfFile(ctx->SignalPtr);
+        ctx->SignalPtr = NULL;
+    }
+    if (ctx->SignalMemHandle) { CloseHandle(ctx->SignalMemHandle); ctx->SignalMemHandle = NULL; }
     if (ctx->OutputMemPtr) { UnmapViewOfFile(ctx->OutputMemPtr); ctx->OutputMemPtr = NULL; }
     if (ctx->OutputMemHandle) { CloseHandle(ctx->OutputMemHandle); ctx->OutputMemHandle = NULL; }
     if (ctx->PidStateMemPtr) { UnmapViewOfFile(ctx->PidStateMemPtr); ctx->PidStateMemPtr = NULL; }
@@ -2286,6 +2542,9 @@ EvtDeviceAdd(
     ctx = GetDeviceContext(device);
     RtlZeroMemory(ctx, sizeof(DEVICE_CONTEXT));
     ctx->Device = device;
+    /* Every delivery signals the acknowledgement's event unless the
+     * controller's SDK says no thread waits on it (AckSignal). */
+    ctx->AckSignal = TRUE;
 
     /* Initialize per-instance paths (registry key, shared file) from the
      * controller index */
@@ -2400,13 +2659,7 @@ EvtDeviceAdd(
      * standard-gamepad mapping heuristic based on VID:PID and descriptor
      * shape, not on WinExInput presence. */
 
-    /* Create locks */
-    status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->InputLock);
-    if (!NT_SUCCESS(status)) return status;
-    status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->OutputLock);
-    if (!NT_SUCCESS(status)) return status;
-    status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->FeatureLock);
-    if (!NT_SUCCESS(status)) return status;
+    /* The locks are the zeroed context's SRWLOCK_INIT (driver.h). */
 
     /* Default queue (parallel): HID IOCTLs from MsHidUmdf */
     WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queueConfig, WdfIoQueueDispatchParallel);
@@ -2594,8 +2847,15 @@ EvtIoDeviceControl(
          * burn a core per device hammering the kernel↔user mode bridge.
          * GET_INPUT_REPORT (a different IOCTL, polled diagnostic path) is
          * unaffected: it still reads the cache directly.
+         *
+         * The report to send is copied out under InputLock and into the
+         * request after it, so the worker, which takes the lock for every
+         * frame, never waits on the framework's buffer calls.
          */
-        WdfWaitLockAcquire(ctx->InputLock, NULL);
+        UCHAR served[HIDMAESTRO_MAX_REPORT_SIZE];
+        ULONG servedSize = 0;
+        BOOLEAN serve = FALSE;
+        AcquireSRWLockExclusive(&ctx->InputLock);
 
         /* HID class asks again only after its completion routine has put
          * the last completed frame in its buffer: acknowledge that frame
@@ -2609,19 +2869,27 @@ EvtIoDeviceControl(
          * first, one per read. */
         if (ctx->ReleaseNext < ctx->ReleaseCount) {
             ULONG i = ctx->ReleaseNext++;
-            status = RequestCopyFromBuffer(Request, ctx->ReleaseFrames[i], ctx->ReleaseSizes[i]);
-            WdfWaitLockRelease(ctx->InputLock);
-            break;
-        }
-
-        if (ctx->InputReportReady && ctx->SharedMemSeqNo > ctx->LastDeliveredInputSeqNo) {
-            status = RequestCopyFromBuffer(Request,
-                ctx->InputReport, ctx->InputReportSize);
+            servedSize = ctx->ReleaseSizes[i];
+            RtlCopyMemory(served, ctx->ReleaseFrames[i], servedSize);
+            serve = TRUE;
+        /* Greater-than, as v2.0.3 tested it. A frame after the SeqNo wrap
+         * waits for the next frame, as it did there. Before OwnerGone runs,
+         * the next program's first frame can carry a SeqNo below the last
+         * program's last one delivered, and that read parks too: served
+         * here, the frame went out again once OwnerGone forgot the SeqNo
+         * and the program's own signal read it again. */
+        } else if (ctx->InputReportReady && ctx->SharedMemSeqNo > ctx->LastDeliveredInputSeqNo) {
+            servedSize = ctx->InputReportSize;
+            RtlCopyMemory(served, ctx->InputReport, servedSize);
             ctx->LastDeliveredInputSeqNo = ctx->SharedMemSeqNo;
             NoteFrameCompletedLocked(ctx, ctx->SharedMemSeqNo);
-            WdfWaitLockRelease(ctx->InputLock);
+            serve = TRUE;
+        }
+        ReleaseSRWLockExclusive(&ctx->InputLock);
+
+        if (serve) {
+            status = RequestCopyFromBuffer(Request, served, servedSize);
         } else {
-            WdfWaitLockRelease(ctx->InputLock);
             status = WdfRequestForwardToIoQueue(Request, ctx->ManualQueue);
             if (NT_SUCCESS(status)) {
                 completeRequest = FALSE;
@@ -2827,10 +3095,10 @@ EvtIoDeviceControl(
         if (ctx->LiveFeatureReport != 0
             && (!ctx->UsesReportIds || reportId == (UCHAR)(ctx->LiveFeatureReport - 1))) {
             ULONG n;
-            WdfWaitLockAcquire(ctx->InputLock, NULL);
+            AcquireSRWLockExclusive(&ctx->InputLock);
             n = ctx->LiveFeatureSize < (ULONG)outSize ? ctx->LiveFeatureSize : (ULONG)outSize;
             RtlCopyMemory(outBuf, ctx->LiveFeature, n);
-            WdfWaitLockRelease(ctx->InputLock);
+            ReleaseSRWLockExclusive(&ctx->InputLock);
             WdfRequestSetInformation(Request, n);
             status = STATUS_SUCCESS;
             break;
@@ -3080,7 +3348,7 @@ EvtIoDeviceControl(
         /* Standard input report (Report ID 1 or no-RID descriptors): return
          * the latest cached input frame the SDK published. v2.0.0: with a
          * cached-ID list, the latest frame of a listed report. */
-        WdfWaitLockAcquire(ctx->InputLock, NULL);
+        AcquireSRWLockExclusive(&ctx->InputLock);
         {
             BOOLEAN listed = ctx->CachedInputIdCount > 0;
             BOOLEAN ready = listed ? ctx->PolledReportReady : ctx->InputReportReady;
@@ -3089,11 +3357,11 @@ EvtIoDeviceControl(
                 status = RequestCopyFromBuffer(Request,
                     listed ? ctx->PolledReport : ctx->InputReport,
                     listed ? ctx->PolledReportSize : ctx->InputReportSize);
-                WdfWaitLockRelease(ctx->InputLock);
+                ReleaseSRWLockExclusive(&ctx->InputLock);
                 break;
             }
         }
-        WdfWaitLockRelease(ctx->InputLock);
+        ReleaseSRWLockExclusive(&ctx->InputLock);
 
         /* Anything else: vJoy parity: STATUS_NOT_SUPPORTED. */
         status = STATUS_NOT_SUPPORTED;
