@@ -29,6 +29,8 @@
 //     (Candidates), and --base takes the rule away from a candidate.
 //     Shards split the scenarios by index modulo n, so separate processes
 //     can run them. --set-stats prints each scenario's set store size.
+//     --cut-diverged stops at a shared step v2.0.3 could not take: the
+//     scenario fails there, and the outcomes after it go uncounted.
 //   SignalGateModel scenarios   each scenario's index and name.
 //   SignalGateModel selftest   the outcome checks on hand-built outcomes.
 //   SignalGateModel outcomes <frames> <scenario> [v203]   one driver's
@@ -146,6 +148,7 @@ internal static class Program
             else if (args[i] == "--progress") s_progress = true;
             else if (args[i] == "--set-stats") DeliveryModel.SetStats = true;
             else if (args[i] == "--sets") DeliveryModel.DumpSets = true;
+            else if (args[i] == "--cut-diverged") DeliveryModel.CutDiverged = true;
             else if (args[i] == "--index") s_index = int.Parse(args[++i]);
             else if (args[i] == "--outcomes") s_outcomes = true;
             else if (args[i] == "--base") s_base = args[++i];
@@ -232,15 +235,15 @@ internal static class Program
             setItems += a.SetItems; subsumed += a.Subsumed; largestSets = Math.Max(largestSets, a.SetItems);
             if (a.Extra.Count > 0) extraScenarios++;
             outFail += a.Worse.Count; outBetter += a.Extra.Count; outEqual += a.Equal.Count;
-            if (a.Worse.Count > 0 || a.ZeroSent) scFail++;
+            if (a.Worse.Count > 0 || a.ZeroSent || a.CutFail) scFail++;
             else if (a.Extra.Count > 0) scBetter++;
             else scEqual++;
             if (a.States > largest) { largest = a.States; largestName = mine[k].sc.Name; }
-            if (a.Worse.Count > 0 || a.ZeroSent) failures.Add(k);
+            if (a.Worse.Count > 0 || a.ZeroSent || a.CutFail) failures.Add(k);
         }
         string where = $"{frames} frame(s) a program, shard {shard}/{shards}, {mine.Count} scenario(s)";
         string totals = $"scenarios: {scFail} fail, {scBetter} better, {scEqual} equal; outcomes: {outFail} fail, {outBetter} better, {outEqual} equal. " +
-                        $"{extraScenarios} scenario(s) with an extra frame, {states} paired states, {finals} final, {v203} v2.0.3 states, {unaligned} shared step(s) v2.0.3 could not take, " +
+                        $"{extraScenarios} scenario(s) with an extra frame, {states} paired states, {finals} final, {v203} v2.0.3 states, {unaligned} shared step(s) v2.0.3 could not take{(DeliveryModel.CutDiverged ? " (explored no further)" : "")}, " +
                         $"{subsumed} pair(s) subsumed, {setItems} v2.0.3 set members (largest scenario {largestSets}), " +
                         $"largest scenario {largest} paired states ({largestName}), {clock.Elapsed.TotalSeconds:F0} s";
         if (rule < 0)
@@ -249,7 +252,7 @@ internal static class Program
             {
                 var a = results[k]!;
                 Console.WriteLine($"[FAIL] {mine[k].sc.Name} (scenario {mine[k].i}): {a.Worse.Count} outcome(s) no paired v2.0.3 run matches, such as [{a.Example}]" +
-                                  (a.ZeroSent ? ", a zeroed section sent" : ""));
+                                  (a.ZeroSent ? ", a zeroed section sent" : "") + (a.CutFail ? ", and a step v2.0.3 could not take, where the exploration stopped" : ""));
                 if (witness) PrintWitness(mine[k].sc, rules, frames);
             }
             for (int k = 0; k < mine.Count; k++)

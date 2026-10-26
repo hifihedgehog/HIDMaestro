@@ -234,6 +234,9 @@ internal static class DeliveryModel
         This with { Name = "a take's read at teardown signaled back after it (R6-1, 10ddf75e)", TearPostRead = true },
         This with { Name = "a taken frame dropped as the worker leaves at teardown (B1, teardown half)", SignalTakenAtTear = false },
         This with { Name = "the fast branch skips its SetEvent (run on c2)", FastSkipsSignal = true },
+        This with { Name = "a take's read sends no frame of a next program that started (B4, b17050c1's NextProgramStarted)", TakeReadNoNext = true },
+        This with { Name = "a take's read sends only the frame taken or its program's next SeqNo (b17050c1's NextFrameSeq)", TakeReadNoNext = true, TakeReadNextSeq = true },
+        This with { Name = "a taken frame signaled back at a stop only with no next program (b17050c1)", BackOnlyAlone = true },
     };
 
     // Candidate changes (the model section of docs/design/signal-gate.md),
@@ -698,11 +701,15 @@ internal static class DeliveryModel
     }
 
     internal static bool SetStats;
+    internal static bool CutDiverged;
 
     internal sealed class AlignedResult
     {
         public long States, Finals, Unaligned, Sets, SetItems, V203States, Subsumed;
         public bool Canceled, OwnFails, TooLarge;
+        // With CutDiverged: a shared step v2.0.3 could not take, where the
+        // exploration stopped, since every final state after it fails.
+        public bool CutFail;
         public readonly HashSet<ulong> Worse = new();
         // Outcomes matched only by v2.0.3 runs that deliver fewer frames:
         // an extra frame, neither a loss nor a duplicate.
@@ -1225,6 +1232,9 @@ internal static class DeliveryModel
                         res.UnalignedPath = PathTo(parent, (tk, V));
                         res.UnalignedPath.Add(n);
                     }
+                    // Every final state after it fails. Cut there, the
+                    // scenario fails and its later outcomes go uncounted.
+                    if (CutDiverged) { res.CutFail = true; div = V < 0; continue; }
                     // The runs go on without that step.
                     V2 = nw != tw ? v203.Close(Vs, nw) : Vs;
                     div = true;
