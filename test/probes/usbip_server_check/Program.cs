@@ -1843,7 +1843,6 @@ internal static partial class Program
         Console.WriteLine("\n-- Teardown racing Dispose --");
         var gc = ctx.GetProfile("gamecube-adapter")!.Inner;
         var hidLockField = typeof(UsbipEmulatedDevice).GetField("_hidLock", Private)!;
-        var connectionField = typeof(UsbipEmulatedDevice).GetField("_connection", Private)!;
         // v2.0.0: the host poll clock is a DeviceClock, which owns its thread.
         var clockField = typeof(UsbipEmulatedDevice).GetField("_protocolClock", Private)!;
         var connections = (System.Collections.ICollection)typeof(UsbipServer).GetField("_connections", Private)!.GetValue(server)!;
@@ -2087,15 +2086,22 @@ internal static partial class Program
             NoConnections();
         }
 
-        // The reader thread's detach held between its claim on the device and
-        // its reset while Dispose runs on another thread, and the sections
-        // unmapped once Dispose returns, as the controller does.
+        // The reader thread's detach held at the HID lock, before it clears
+        // the import's reads and lets the device go, while Dispose runs on
+        // another thread, and the sections unmapped once Dispose returns, as
+        // the controller does. The detach keeps the device claimed until its
+        // clear is done, so the wait is for the reader to block on the lock.
         const int Held = 5;
         int heldOk = 0;
         string heldDetail = "";
         for (int i = 0; i < Held; i++)
         {
+            // The connection's reader thread, which runs the detach as it ends.
+            Thread? reader = null;
+            UsbipServer.BeforeImportReply = _ => Volatile.Write(ref reader, Thread.CurrentThread);
             var (device, cl) = Attach(server, gc);
+            UsbipServer.BeforeImportReply = null;
+            var conn = Volatile.Read(ref reader);
             object hidLock = hidLockField.GetValue(device)!;
             var disposer = new Thread(() => device.Dispose()) { IsBackground = true, Name = "probe-dispose" };
             bool detaching, disposed;
@@ -2103,7 +2109,8 @@ internal static partial class Program
             try
             {
                 cl.Dispose();   // the host closes the connection
-                detaching = WaitUntil(() => connectionField.GetValue(device) == null, Hang);
+                detaching = conn != null
+                    && WaitUntil(() => (conn.ThreadState & System.Threading.ThreadState.WaitSleepJoin) != 0, Hang);
                 server.Unregister(device);
                 disposer.Start();
                 disposed = disposer.Join(15_000);
