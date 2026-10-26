@@ -64,7 +64,7 @@ internal static partial class PnputilHelper
         string ProviderName,
         string DriverVersion);
 
-    private static string PnputilPath => Path.Combine(
+    private static string PnputilPath => DriverBuilder.PnputilExeForTest ?? Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.System), "pnputil.exe");
 
     /// <summary>Run pnputil from System32, never a pnputil.exe found first

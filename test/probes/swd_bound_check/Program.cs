@@ -24,8 +24,9 @@
 //      registration gate's refusal keeps its own message and HRESULT. A
 //      create whose helper printed OK and then hangs in its close succeeds
 //      once the close's bound has passed.
-//   B2. At scale 0.1: a remove whose helper never reaches its close fails
-//      with WAIT_TIMEOUT and says the device stays. A remove whose helper
+//   B2. At scale 0.1: a remove whose helper never reaches its close is
+//      stopped at the old 8 s (0.8 s), not the create's 90 s, fails with
+//      WAIT_TIMEOUT and says the device stays. A remove whose helper
 //      set the Handle lifetime and then hangs in its close, issue #18's
 //      case, counts as done once the close's bound has passed, and says so.
 //   C. hmswd.exe's exit codes as hmswd.c defines them, for a create (0 with
@@ -37,6 +38,11 @@
 //      says so, through DriverBuilder's runner and through PnputilHelper's,
 //      which the WinUSB package's add uses, and a stopped add is a failure
 //      that names the stop, the driver store's state and the next deploy.
+//   E. The three call sites of a bounded pnputil add (the deploy's add with
+//      /install, its add of a missing INF, the WinUSB package's add), each
+//      driven with a stand-in pnputil: one that outlasts the old 30 s and
+//      ends inside the bound is let finish, one that outruns the bound is
+//      stopped and the site throws.
 //
 // Usage: SwdBoundCheck [scale]
 //   scale  case A's timeout scale, 1 when not given (a 20 s helper)
@@ -73,6 +79,7 @@ internal static class Program
     {
         // The stand-in, run by SwdDeviceFactory in hmswd.exe's place.
         if (args.Length > 0 && (args[0] == "create" || args[0] == "remove")) return StandIn(args);
+        if (args.Length > 0 && args[0] == "/add-driver") return PnputilStandIn();
         if (args.Length == 2 && args[0] == "case") return Case(args[1]);
 
         double scale = 1;
@@ -83,7 +90,7 @@ internal static class Program
             Console.WriteLine("usage: SwdBoundCheck [scale], a scale from 0.1 to 100");
             return 1;
         }
-        var cases = new (string Name, double Scale)[] { ("A", scale), ("B1", 0.1), ("B2", 0.1), ("C", 1), ("D", 1) };
+        var cases = new (string Name, double Scale)[] { ("A", scale), ("B1", 0.1), ("B2", 0.1), ("C", 1), ("D", 1), ("E", 0.1) };
         var running = new List<(string Name, Process P, System.Threading.Tasks.Task<string> Out, System.Threading.Tasks.Task<string> Err)>();
         foreach (var (name, s) in cases)
         {
@@ -136,6 +143,7 @@ internal static class Program
             case "B2": CaseB2(); break;
             case "C": CaseC(); break;
             case "D": CaseD(); break;
+            case "E": CaseE(); break;
             default: Console.WriteLine($"  no case {name}"); return 1;
         }
         Console.Out.Flush();
@@ -171,10 +179,13 @@ internal static class Program
               c.Success && c.InstanceId == $@"SWD\{Enumerator}\SWDBOUND_A" && c.Cause == null && runs.Count == 1 && ms >= delay,
               $"success {c.Success}, id {c.InstanceId ?? "none"}, 0x{c.HResult:X8}, {runs.Count} helper run(s), {ms} ms, cause \"{c.Cause}\"");
 
+        // A remove is stopped at the old 8 s if its helper has not reached
+        // STEP CLOSING (issue #18), so its wait for the reconnect stays under it.
+        int rdelay = TimeoutScale.Apply(4_000);
         var (hr, cause, rms, rruns) = RemoveWith("SWDBOUND_AR",
-            Script(Started, Created, Sleep(delay), Enumerated, Handle, Closing(0), Removed, Exit(0)));
-        Check($"A: a remove whose helper waits {S(delay)} for the reconnect -> done, the helper run once, no sooner than its answer",
-              hr == 0 && cause.Length == 0 && rruns.Count == 1 && rms >= delay,
+            Script(Started, Created, Sleep(rdelay), Enumerated, Handle, Closing(0), Removed, Exit(0)));
+        Check($"A: a remove whose helper waits {S(rdelay)} for the reconnect, inside the old {S(oldRemove)} -> done, the helper run once, no sooner than its answer",
+              hr == 0 && cause.Length == 0 && rruns.Count == 1 && rms >= rdelay,
               $"0x{hr:X8}, {rruns.Count} helper run(s), {rms} ms, cause \"{cause}\"");
     }
 
@@ -213,10 +224,14 @@ internal static class Program
     {
         var (hr, cause, ms, runs) = RemoveWith("SWDBOUND_BR", Script(Started, Created, Sleep(120_000), Exit(0)));
         bool gone = runs.Count == 1 && Gone(runs[0]);
-        string expected = $"hmswd.exe was still running, waiting for Plug and Play to report the device enumerated, when the SDK's bound of {S(Bound)} ran out, " +
+        int oldRemoveBound = TimeoutScale.Apply(8_000);
+        string expected = $"hmswd.exe was still running, waiting for Plug and Play to report the device enumerated, when the SDK's bound of {S(oldRemoveBound)} ran out, " +
                           "and was stopped. The device's lifetime is still ParentPresent, so it stays.";
-        Check($"B2: a remove whose helper never begins its close -> stopped and gone no sooner than the {S(Bound)} bound, WAIT_TIMEOUT, the device stays",
-              hr == WaitTimeoutHr && cause == expected && ms >= Bound && runs.Count == 1 && gone,
+        // Issue #18: a helper stuck before STEP CLOSING ends the remove at the
+        // old 8 s (scaled), not at the create's 90 s.
+        Check($"B2: a remove whose helper never reaches STEP CLOSING -> stopped and gone within the old {S(oldRemoveBound)} bound (not the create's {S(Bound)}), WAIT_TIMEOUT, the device stays",
+              hr == WaitTimeoutHr && cause == expected && ms >= oldRemoveBound && ms < oldRemoveBound + TimeoutScale.Apply(5_000) + 3_000
+              && ms < Bound && runs.Count == 1 && gone,
               $"0x{hr:X8}, {ms} ms, {runs.Count} helper run(s), gone {gone}, cause \"{cause}\"");
 
         var (khr, kcause, kms, kruns) = RemoveWith("SWDBOUND_KR",
@@ -329,6 +344,71 @@ internal static class Program
               && m.Contains("This deploy removed HIDMaestro's earlier packages before its adds. ", StringComparison.Ordinal)
               && m.EndsWith("The install record still names the payload installed before, so the next InstallDriver deploys again.", StringComparison.Ordinal),
               m);
+    }
+
+    const string PnpSleepVar = "SWDBOUND_PNP_SLEEP";
+
+    /// <summary>pnputil's part for case E: sleeps the milliseconds in its
+    /// environment, then exits 0.</summary>
+    static int PnputilStandIn()
+    {
+        Thread.Sleep(int.Parse(Environment.GetEnvironmentVariable(PnpSleepVar) ?? "0", CultureInfo.InvariantCulture));
+        return 0;
+    }
+
+    /// <summary>The three call sites of a bounded pnputil add, each driven
+    /// with a stand-in pnputil: the deploy's add with /install
+    /// (AddWithInstall, which InstallDriversFrom calls under the PnP lock), the deploy's add of a missing INF
+    /// (AddMissingInf) and the WinUSB package's add (AddOrThrow). A stand-in
+    /// that runs past the 30 s the adds had until v2.1.0 and ends inside the
+    /// bound must not be stopped (a call site that bounds at 30 s stops it).
+    /// A stand-in that outruns the bound must be stopped and the site must
+    /// throw (a call site that drops the throw returns).</summary>
+    static void CaseE()
+    {
+        DriverBuilder.PnputilExeForTest = Environment.ProcessPath;
+        int bound = TimeoutScale.Apply(DriverBuilder.PnputilAddMs());
+        int old = TimeoutScale.Apply(30_000);
+        int slow = old + 3_000, hang = bound + 20_000;
+        Check("E: the stand-in's slow run is past the old 30 s bound and inside the new one",
+              slow > old && slow < bound, $"old {S(old)}, slow {S(slow)}, bound {S(bound)}");
+
+        string dir = Path.Combine(Path.GetTempPath(), $"swd_bound_check-E-{Environment.ProcessId}");
+        Directory.CreateDirectory(dir);
+        foreach (string inf in PnputilHelper.HidMaestroInfNames) File.WriteAllText(Path.Combine(dir, inf), "; stand-in");
+        string winusb = Path.Combine(dir, "winusb.inf");
+        File.WriteAllText(winusb, "; stand-in");
+        var sites = new (string Name, Action Call)[]
+        {
+            ("the deploy's add with /install", () => DriverBuilder.AddWithInstall(Path.Combine(dir, "hidmaestro.inf"), "hidmaestro.inf")),
+            ("the deploy's add of a missing INF", () => DriverBuilder.AddMissingInf(dir, "hidmaestro.inf")),
+            ("the WinUSB package's add", () => WinUsbBinding.AddOrThrow(winusb, "winusb.inf")),
+        };
+        foreach (var (name, call) in sites)
+        {
+            Environment.SetEnvironmentVariable(PnpSleepVar, slow.ToString(CultureInfo.InvariantCulture));
+            var sw = Stopwatch.StartNew();
+            string? slowEx = Thrown(call);
+            long slowMs = sw.ElapsedMilliseconds;
+            Check($"E: {name}, a pnputil that runs {S(slow)} -> let finish (not stopped)",
+                  slowMs >= slow && (slowEx == null || !slowEx.Contains("was stopped", StringComparison.Ordinal)),
+                  $"{slowMs} ms, thrown \"{slowEx}\"");
+
+            Environment.SetEnvironmentVariable(PnpSleepVar, hang.ToString(CultureInfo.InvariantCulture));
+            sw.Restart();
+            string? hangEx = Thrown(call);
+            long hangMs = sw.ElapsedMilliseconds;
+            Check($"E: {name}, a pnputil that outruns the {S(bound)} bound -> stopped no sooner than the bound, and the site throws \"was stopped\"",
+                  hangMs >= bound && hangMs < hang && hangEx != null && hangEx.Contains("was stopped after", StringComparison.Ordinal),
+                  $"{hangMs} ms, thrown \"{hangEx}\"");
+        }
+        try { Directory.Delete(dir, true); } catch { }
+    }
+
+    static string? Thrown(Action call)
+    {
+        try { call(); return null; }
+        catch (Exception e) { return (e.InnerException ?? e).Message; }
     }
 
     /// <summary>One create through the stand-in playing

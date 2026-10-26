@@ -652,9 +652,6 @@ public static class DriverBuilder
 
     private static void InstallDriversFrom(string dir)
     {
-        string pnputil = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.System), "pnputil.exe");
-
         // hidmaestro.inf is the main HID driver. hidmaestro_xusb.inf is the
         // XUSB companion (setup class System so Windows.Gaming.Input.dll does
         // not classify it as a second WGI Gamepad; xinput1_4 discovery scans
@@ -667,10 +664,9 @@ public static class DriverBuilder
         {
             string path = Path.Combine(dir, inf);
             if (!File.Exists(path)) continue;
-            (int rc, string output, bool stopped) run;
+            (int rc, string output) run;
             using (DeviceManager.HoldPnpLock())
-                run = RunBounded(pnputil, $"/add-driver \"{path}\" /install", timeoutMs: PnputilAddMs());
-            if (run.stopped) throw AddStopped($"/add-driver {inf} /install", inf, removedBefore: true);
+                run = AddWithInstall(path, inf);
             exits.Add($"{inf} exit {run.rc}");
             // pnputil /add-driver does not support /format, so its rc and output
             // are locale- and version-keyed and unreliable for success detection
@@ -823,17 +819,38 @@ public static class DriverBuilder
         using var pin = PinForUse(tools, package, driverPackage: true, signed);
         if (signed == null) SignDriversIn(tools, package, pin);
         GenerateCatalogsIn(tools, package, pin);
-        string pnputil = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "pnputil.exe");
-        foreach (string inf in infs)
-        {
-            var embedded = DriverDeploy.EmbeddedStamp(inf);
-            DeviceOrchestrator.LogDiag($"    deploy: adding the missing {inf} of {embedded}");
-            if (RunBounded(pnputil, $"/add-driver \"{Path.Combine(package, inf)}\"", timeoutMs: PnputilAddMs()).stopped)
-                throw AddStopped($"/add-driver {inf}", inf, removedBefore: false);
-            if (!DriverDeploy.InstalledStamps(inf).Any(s => s.CompareTo(embedded) == 0))
-                throw new InvalidOperationException($"pnputil /add-driver did not add {inf} {embedded} to the driver store.");
-        }
+        foreach (string inf in infs) AddMissingInf(package, inf);
         PnputilHelper.InvalidateInstalledCache();
+    }
+
+    /// <summary>One INF's add with /install, bounded by
+    /// <see cref="PnputilAddMs"/>. A stopped add throws. The caller holds the
+    /// PnP lock.</summary>
+    internal static (int rc, string output) AddWithInstall(string path, string inf)
+    {
+        var run = RunBounded(PnputilExe, $"/add-driver \"{path}\" /install", timeoutMs: PnputilAddMs());
+        if (run.stopped) throw AddStopped($"/add-driver {inf} /install", inf, removedBefore: true);
+        return (run.exitCode, run.output);
+    }
+
+    /// <summary>The program the deploy's adds run: pnputil.exe from System32.
+    /// Probe swd_bound_check sets <see cref="PnputilExeForTest"/> to a
+    /// stand-in. Null outside the probe.</summary>
+    internal static string? PnputilExeForTest;
+
+    static string PnputilExe => PnputilExeForTest ?? Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.System), "pnputil.exe");
+
+    /// <summary>One missing INF's add, bounded by <see cref="PnputilAddMs"/>.
+    /// A stopped add throws.</summary>
+    internal static void AddMissingInf(string package, string inf)
+    {
+        var embedded = DriverDeploy.EmbeddedStamp(inf);
+        DeviceOrchestrator.LogDiag($"    deploy: adding the missing {inf} of {embedded}");
+        if (RunBounded(PnputilExe, $"/add-driver \"{Path.Combine(package, inf)}\"", timeoutMs: PnputilAddMs()).stopped)
+            throw AddStopped($"/add-driver {inf}", inf, removedBefore: false);
+        if (!DriverDeploy.InstalledStamps(inf).Any(s => s.CompareTo(embedded) == 0))
+            throw new InvalidOperationException($"pnputil /add-driver did not add {inf} {embedded} to the driver store.");
     }
 
     /// <summary>Record the embedded payload's hash as the installed one,
