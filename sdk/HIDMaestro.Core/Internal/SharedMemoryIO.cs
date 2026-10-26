@@ -1163,16 +1163,20 @@ internal static partial class SharedMemoryIO
         //   finds this frame too, so one compare-exchange puts this frame's
         //   final SeqNo in its place, with no recheck and no SetEvent. As a
         //   full fence it orders the even SeqNo's store before it.
-        //   Otherwise a worker counted in InputWaiters is in its wait or on
-        //   its way to it, and its take finds nothing of this frame, so the
-        //   frame is signaled as v2.0.3 signaled every frame, InputHandoff
-        //   untouched. A count read early, before the even SeqNo's store is
-        //   visible, does no harm: a worker it saw wakes on the SetEvent, a
-        //   kernel call that orders the store before it, and a zero goes on
-        //   to the steps below, which fence. That branch has no interlocked
-        //   operation, so with a companion event Thread.MemoryBarrier()
-        //   orders the even SeqNo's store before the companion's count is
-        //   read below: x64 lets a load pass an earlier store.
+        //   Otherwise a worker counted in InputWaiters is in its wait, on
+        //   its way to it, or back from it before its decrement, and no take
+        //   of it finds this frame, so the frame is signaled as v2.0.3
+        //   signaled every frame, InputHandoff untouched. A count read early,
+        //   before the even SeqNo's store is visible, does no harm: a worker
+        //   it saw wakes on the SetEvent, a kernel call that orders the store
+        //   before it, and a zero goes on to the steps below, which fence.
+        //   That branch has no interlocked operation, so for every frame
+        //   with a companion event Thread.MemoryBarrier() runs before the
+        //   companion's count is read below, whether or not the doorbell
+        //   then rings. The .NET memory model does not order a volatile read
+        //   after an earlier volatile write: x64 lets the load pass the
+        //   store, and on ARM64 with LRCPC Volatile.Read is ldapr, which can
+        //   pass an earlier stlr.
         //   With no worker counted, the exchange puts the provisional SeqNo
         //   there, a full fence before the loads after it. A worker counts
         //   itself, then takes the handoff with an exchange of its own. With the

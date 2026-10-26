@@ -499,6 +499,7 @@ typedef struct Sdk {
     HmSection  *input, *ack, *version, *output, *pid;
     HmSection  *signal;   /* 2.1.0's signal gate, under "sdk 3" (SdkWritesSignal) */
     HmEvent    *inputEv, *ackEv, *companionEv;
+    HmEvent    *removeEv, *removedEv; /* under SDK_REMOVE */
     HmPipeServer *pipe;
     uint32_t    seq;
     uint32_t    pidSeq;
@@ -510,6 +511,7 @@ enum SdkFlags {
     SDK_PIPE      = 2,     /* the owner pipe */
     SDK_OUTPUT    = 4,     /* the output ring section */
     SDK_ALL       = 7,
+    SDK_REMOVE    = 8,     /* the remove events an SDK of v2.0.0 or later makes before the input event */
 };
 
 void SdkCreate(Sdk *s, int index, int flags);

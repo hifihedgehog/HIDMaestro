@@ -384,6 +384,15 @@ void SdkCreate(Sdk *s, int index, int flags)
             s->seq = EvenAbove(seqLeft, 0);
             memcpy(s->ack->buf, &s->seq, 4);
         }
+        if (flags & SDK_REMOVE) {
+            /* Before the input event, which the worker opens them with,
+             * auto-reset as CreateNamedEvent makes them (CreateEventExW
+             * with flags 0, SharedMemoryIO.EnsureInputMapping). */
+            Name(n, ARRAYSIZE(n), L"Global\\HIDMaestroRemoveEvent", index);
+            s->removeEv = EventNew(n, FALSE, FALSE, OWN_ADMINS, TRUE); Hold(&s->removeEv->o);
+            Name(n, ARRAYSIZE(n), L"Global\\HIDMaestroRemovedEvent", index);
+            s->removedEv = EventNew(n, FALSE, FALSE, OWN_ADMINS, TRUE); Hold(&s->removedEv->o);
+        }
         Name(n, ARRAYSIZE(n), L"Global\\HIDMaestroInputEvent", index);
         s->inputEv = EventNew(n, FALSE, FALSE, OWN_ADMINS, TRUE); Hold(&s->inputEv->o);
         g_ackSection = s->ack;
