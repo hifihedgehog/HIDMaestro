@@ -41,6 +41,10 @@
 //     endpoint and part of a bulk reply, each answered on a read the host
 //     then unlinks, go to the next reads: a keyboard's ahead of the frames
 //     queued after them, and both of a pair the host unlinks together
+//   - under a host that cancels reads as usbip-win2 does, a game pad's
+//     frames arrive in rising order with each burst's last, a keyboard's
+//     every frame once in order, and every RET_UNLINK with status 0 after
+//     its read's answer
 //
 // Each scenario ends on a frame or a read that tells a correct device from
 // one that lost the handoff at once, and a wait that only a correct device
@@ -88,6 +92,8 @@ internal static partial class Program
         Contained("a report on change the host never got", LayoutChangePutBack);
         Contained("a reply on the input endpoint the host never got", ProtocolPacketsPutBack);
         Contained("a bulk reply the host never got", BulkReplyPutBack);
+        Contained("a game pad's stress", () => Stress("a game pad", ds, HandoffIndex + 25, every: false, cancelOne: true, seed: 20261026));
+        Contained("a keyboard's stress", () => Stress("a keyboard", KeyboardCopy("s43-keyboard-stress"), HandoffIndex + 26, every: true, cancelOne: false, seed: 20261027));
         Contained("a lapped output reader", () => LappedOutputReader(ds));
         Contained("an isochronous URB unlinked while it completes", () => AudioAnswerBeforeUnlink(ds));
         Contained("an isochronous URB whose import drops while it completes", () => AudioAnswerToItsImport(ds));
@@ -534,6 +540,236 @@ internal static partial class Program
               $"{Describe(got)}, unlink {ua}, next reads {Describe(rest)}");
     }
 
+    // How long each stress runs, and the most frames it writes.
+    const int StressMs = 3_000, StressFrames = 60_000;
+
+    /// <summary>A device's handoffs under the cancels a host makes, for
+    /// StressMs. The host keeps two reads out, and a thread of its own takes
+    /// the answers, slowed at random. Another thread writes frames in bursts
+    /// of one to six, each numbered. A cancel follows usbip-win2: the read
+    /// completes at once, a CMD_UNLINK goes out, and an answer that comes
+    /// for the read after is dropped (request_list.cpp cancel and
+    /// find_sent_request). Each burst ends with a cancel of both reads a
+    /// moment after its last frame, and with <paramref name="cancelOne"/> a
+    /// read is canceled at random while the burst is written. A RET_UNLINK
+    /// with status 0 follows its read's RET_SUBMIT, and a read the device
+    /// unlinked parked gets no answer. A device that holds one frame delivers
+    /// frames in rising order and each burst's last frame. A keyboard
+    /// delivers every frame once, in order, so its writer waits for the
+    /// input pump to read each frame from the section, which holds one,
+    /// before it writes the next.</summary>
+    static void Stress(string what, ControllerProfile profile, int index, bool every, bool cancelOne, int seed)
+    {
+        var rig = new HandoffRig(profile, index);
+        Thread? receiver = null, writer = null;
+        bool stopping = false;
+        var go = new SemaphoreSlim(0);
+        int burst = 0;
+        try
+        {
+            byte ep = rig.PrimaryIn;
+            var rng = new Random(seed);
+            object host = new();
+            var outstanding = new HashSet<uint>();
+            var canceled = new HashSet<uint>();
+            var answered = new HashSet<uint>();
+            var unlinkOf = new Dictionary<uint, uint>();
+            var resetReads = new HashSet<uint>();
+            var delivered = new List<int>();
+            int dropped = 0, unknown = 0, afterReset = 0, early = 0, answeredUnlinks = 0, parkedUnlinks = 0;
+            Exception? receiveError = null;
+            receiver = new Thread(() =>
+            {
+                var r = new Random(seed + 2);
+                try
+                {
+                    while (true)
+                    {
+                        // A host takes a while to see each answer.
+                        if (r.Next(3) == 0) Spin(r.Next(0, 120));
+                        var m = rig.Next();
+                        lock (host)
+                        {
+                            if (m.Kind == UsbipProtocol.RetUnlink)
+                            {
+                                if (!unlinkOf.Remove(m.Seq, out uint v)) unknown++;
+                                else if (m.Status == 0)
+                                {
+                                    answeredUnlinks++;
+                                    // Status 0 says the read's RET_SUBMIT came first.
+                                    if (!answered.Contains(v)) early++;
+                                }
+                                else
+                                {
+                                    parkedUnlinks++;
+                                    resetReads.Add(v);
+                                    if (answered.Contains(v)) afterReset++;
+                                }
+                                Monitor.PulseAll(host);
+                                continue;
+                            }
+                            answered.Add(m.Seq);
+                            if (resetReads.Contains(m.Seq)) afterReset++;
+                            if (canceled.Remove(m.Seq)) dropped++;
+                            else if (outstanding.Remove(m.Seq) && m.Data.Length == 64) delivered.Add(m.Data[1] | m.Data[2] << 8);
+                            else unknown++;
+                            Monitor.PulseAll(host);
+                        }
+                    }
+                }
+                catch (Exception) when (Volatile.Read(ref stopping)) { }
+                catch (Exception e) { receiveError = e; }
+            }) { IsBackground = true, Name = $"S43 stress receiver, {what}" };
+            receiver.Start();
+
+            var burstDone = new SemaphoreSlim(0);
+            int written = 0;
+            bool taken = true;
+            writer = new Thread(() =>
+            {
+                var r = new Random(seed + 1);
+                while (true)
+                {
+                    go.Wait();
+                    int k = Volatile.Read(ref burst);
+                    if (k < 0) return;
+                    for (int i = 0; i < k; i++)
+                    {
+                        int m = written + 1;
+                        rig.FrameMarked((ushort)m);
+                        Volatile.Write(ref written, m);
+                        if (every && !rig.WaitTaken()) Volatile.Write(ref taken, false);
+                        if (r.Next(2) == 0) Spin(r.Next(0, 150));
+                    }
+                    burstDone.Release();
+                }
+            }) { IsBackground = true, Name = $"S43 stress writer, {what}" };
+            writer.Start();
+
+            void EnsureTwo()
+            {
+                while (true)
+                {
+                    uint s;
+                    lock (host)
+                    {
+                        if (outstanding.Count >= 2) return;
+                        s = rig.NextSeq();
+                        outstanding.Add(s);
+                    }
+                    rig.SubmitIn(s, ep, 64);
+                }
+            }
+            void Cancel(bool all)
+            {
+                var victims = new List<(uint U, uint V)>();
+                lock (host)
+                {
+                    var list = outstanding.ToList();
+                    if (list.Count == 0) return;
+                    if (!all) list = new List<uint> { list[rng.Next(list.Count)] };
+                    foreach (var v in list)
+                    {
+                        outstanding.Remove(v);
+                        canceled.Add(v);
+                        uint u = rig.NextSeq();
+                        unlinkOf[u] = v;
+                        victims.Add((u, v));
+                    }
+                }
+                foreach (var (u, v) in victims) rig.SendUnlink(u, v);
+            }
+            // The newest frame delivered is the burst's last: a keyboard's
+            // frames come in order, so the burst's others came before it.
+            bool Arrived(int last) => delivered.Count > 0 && delivered[^1] == last;
+
+            int bursts = 0, lost = 0, stuck = 0;
+            var lostAt = new List<int>();
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            while (clock.ElapsedMilliseconds < StressMs && Volatile.Read(ref written) < StressFrames && receiveError == null)
+            {
+                bursts++;
+                EnsureTwo();
+                Volatile.Write(ref burst, rng.Next(1, 7));
+                go.Release();
+                while (!burstDone.Wait(0))
+                {
+                    if (cancelOne && rng.Next(5) == 0) Cancel(all: false);
+                    EnsureTwo();
+                    Spin(rng.Next(0, 80));
+                }
+                int last = Volatile.Read(ref written);
+                // A host that stops reading: both reads canceled a moment
+                // after the last frame, then two new reads.
+                Spin(rng.Next(0, 60));
+                Cancel(all: true);
+                EnsureTwo();
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                bool arrived = false, idle = false;
+                while (sw.ElapsedMilliseconds < Hang)
+                {
+                    EnsureTwo();
+                    lock (host)
+                        if (Arrived(last)) { arrived = true; break; }
+                    // Both of the host's reads parked: every answer to a read
+                    // it did not cancel has reached it, since it sends a new
+                    // read only once it has an answer or has canceled one,
+                    // and a frame the pump read has gone to a read.
+                    if (rig.IdleWithParked(2, last))
+                    {
+                        lock (host) arrived = Arrived(last);
+                        idle = !arrived;
+                        break;
+                    }
+                    lock (host) Monitor.Wait(host, 1);
+                }
+                if (arrived) continue;
+                if (idle)
+                {
+                    lost++;
+                    if (lostAt.Count < 5) lostAt.Add(last);
+                }
+                else stuck++;
+            }
+            // The writer ends at its next burst, and has written its last
+            // frame once it has.
+            Volatile.Write(ref burst, -1);
+            go.Release();
+            writer.Join(Hang);
+
+            int n = Volatile.Read(ref written), breakAt = -1;
+            bool inOrder;
+            lock (host)
+            {
+                for (int i = 1; i < delivered.Count && breakAt < 0; i++)
+                    if (every ? delivered[i] != delivered[i - 1] + 1 : delivered[i] <= delivered[i - 1]) breakAt = i;
+                inOrder = breakAt < 0 && (!every || delivered.Count == n && (n == 0 || delivered[0] == 1));
+                Console.WriteLine($"  info: {what}: {bursts} bursts in {clock.ElapsedMilliseconds} ms, {n} frames written, {delivered.Count} delivered, " +
+                                  $"{dropped} answers dropped for canceled reads, {answeredUnlinks} unlinks of answered reads, {parkedUnlinks} of parked reads");
+                string where = breakAt < 0 ? "" : $", first break at {breakAt}: {delivered[breakAt - 1]} then {delivered[breakAt]}";
+                Check(every ? $"{what}: every frame reaches the host once, in order, under the host's cancels"
+                            : $"{what}: frames reach the host in rising order, none twice, under the host's cancels",
+                      inOrder && Volatile.Read(ref taken), $"{delivered.Count} of {n} delivered{where}{(Volatile.Read(ref taken) ? "" : ", a frame the pump did not read in time")}");
+                Check($"{what}: the last frame of every burst reaches the host", lost == 0 && stuck == 0,
+                      $"{lost} of {bursts} bursts lost their last frame{(lostAt.Count > 0 ? ", the first at " + string.Join(", ", lostAt) : "")}, {stuck} left the device busy");
+                Check($"{what}: a RET_UNLINK with status 0 follows its read's answer, and a read unlinked while parked gets none",
+                      early == 0 && afterReset == 0 && unknown == 0 && receiveError == null,
+                      $"unlinks ahead of the answer {early}, answers to a read unlinked while parked {afterReset}, unknown {unknown}{(receiveError != null ? ", " + receiveError.Message : "")}");
+            }
+        }
+        finally
+        {
+            // No frame is written to the section once the rig frees it, and
+            // the receiver's read of the closed connection ends it.
+            Volatile.Write(ref burst, -1);
+            go.Release();
+            writer?.Join(Hang);
+            Volatile.Write(ref stopping, true);
+            rig.Dispose();
+            receiver?.Join(Hang);
+        }
+    }
+
     /// <summary>The output ring's writer against a reader it has lapped. The
     /// reader starts each read from a cursor far behind, so it reads the
     /// oldest slot, the one the device refills next, while the device
@@ -816,7 +1052,8 @@ internal static partial class Program
         readonly EventWaitHandle _outputEvent = new(false, EventResetMode.AutoReset);
         readonly string _path;
         readonly Socket _listener, _client, _server;
-        readonly HashSet<uint> _in = new();
+        // The IN transfers' seqnums, which a stress reads on a thread of its own.
+        readonly System.Collections.Concurrent.ConcurrentDictionary<uint, bool> _in = new();
         readonly byte[] _header = new byte[UsbipProtocol.HeaderSize];
         uint _seq = 0x100, _frameSeq;
         IDeviceClock? _heldClock;
@@ -958,6 +1195,52 @@ internal static partial class Program
             }
         }
 
+        /// <summary>A frame numbered <paramref name="mark"/> in its first two
+        /// bytes, low byte first. One thread writes the frames.</summary>
+        public void FrameMarked(ushort mark)
+        {
+            var data = new byte[63];
+            data[0] = (byte)mark;
+            data[1] = (byte)(mark >> 8);
+            SharedMemoryIO.WriteInputFrame(_view, _inputEvent, ref _frameSeq, data, data.Length, null);
+        }
+
+        /// <summary>Waits until the input pump has read the frame written
+        /// last from the section, which holds one frame. False when it has
+        /// not within the hang bound.</summary>
+        public bool WaitTaken()
+        {
+            var field = typeof(UsbipEmulatedDevice).GetField("_lastSharedSeqNo", Private)!;
+            uint want = _frameSeq;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var spin = new SpinWait();
+            while ((uint)field.GetValue(Device)! != want)
+            {
+                if (sw.ElapsedMilliseconds > Hang) return false;
+                spin.SpinOnce(-1);
+            }
+            return true;
+        }
+
+        /// <summary>True when the device has <paramref name="reads"/> reads
+        /// parked on the primary endpoint, no frame queued or put back, and
+        /// the frame numbered <paramref name="last"/> in its input report
+        /// slot. The pump writes the slot and answers or queues the frame in
+        /// one hold of the HID lock, so that frame has gone to a read.</summary>
+        public bool IdleWithParked(int reads, int last)
+        {
+            var t = typeof(UsbipEmulatedDevice);
+            object Field(string name) => t.GetField(name, Private)!.GetValue(Device)!;
+            lock (HidLock)
+            {
+                if (((System.Collections.ICollection)Field("_frameQueue")).Count != 0) return false;
+                if (((System.Collections.ICollection)Field("_primaryPending")).Count != reads) return false;
+                if ((bool)Field("_resend")) return false;
+                var slot = ((byte[][])Field("_inputReports"))[((int[])Field("_inputSlot"))[0x01]];
+                return (slot[1] | slot[2] << 8) == (last & 0xFFFF);
+            }
+        }
+
         /// <summary>The device's poll clock, stopped and replaced with an
         /// unstarted one of the same tick, so this thread sees its wake event
         /// and runs its ticks. Returns the clock and its wake event.</summary>
@@ -1001,7 +1284,7 @@ internal static partial class Program
         /// transfer another thread sends.</summary>
         public void SubmitIn(uint seq, byte endpoint, int length)
         {
-            _in.Add(seq);
+            _in[seq] = true;
             Device.HandleSubmit(Command(seq, endpoint, true, length), ReadOnlySpan<byte>.Empty, ReadOnlySpan<(uint, uint)>.Empty);
         }
 
@@ -1113,7 +1396,7 @@ internal static partial class Program
         {
             var cmd = Command(0, true, 2);
             cmd.Setup = 0x80 | (2UL << 48);
-            _in.Add(cmd.Seqnum);
+            _in[cmd.Seqnum] = true;
             Device.HandleSubmit(cmd, ReadOnlySpan<byte>.Empty, ReadOnlySpan<(uint, uint)>.Empty);
             var got = new List<Message>();
             while (got.Count < 8)
@@ -1173,11 +1456,11 @@ internal static partial class Program
             int actual = BinaryPrimitives.ReadInt32BigEndian(_header.AsSpan(24));
             int packets = BinaryPrimitives.ReadInt32BigEndian(_header.AsSpan(32));
             // An OUT transfer's RET_SUBMIT carries its length and no data.
-            var data = new byte[kind == UsbipProtocol.RetSubmit && _in.Contains(seq) ? actual : 0];
+            var data = new byte[kind == UsbipProtocol.RetSubmit && _in.ContainsKey(seq) ? actual : 0];
             ReadExactly(data);
             // An isochronous one ends with a descriptor per packet.
             if (kind == UsbipProtocol.RetSubmit && packets > 0) ReadExactly(new byte[packets * UsbipProtocol.IsoDescriptorSize]);
-            return new Message(kind, seq, status, kind == UsbipProtocol.RetSubmit && !_in.Contains(seq) ? actual : data.Length, data);
+            return new Message(kind, seq, status, kind == UsbipProtocol.RetSubmit && !_in.ContainsKey(seq) ? actual : data.Length, data);
         }
 
         void ReadExactly(Span<byte> dst)
