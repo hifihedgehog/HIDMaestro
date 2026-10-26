@@ -243,7 +243,11 @@ internal sealed partial class UsbipEmulatedDevice
         PublishCommand(result, command);
         SendRetSubmit(seqnum, 0, command.Length, null);
         CompleteBulkIn();
-        if (result.Effect != ProtocolEngine.Effect.None) WakeLayoutClock();
+        // What the command did, as on the protocol's other command paths: a
+        // halt fails the parked reads, and a change wakes the clocks. The
+        // host's poll clock is among them: a reply this command left for the
+        // input endpoint, or reports it let flow, wait for its next tick.
+        ProtocolApply(result.Effect);
     }
 
     /// <summary>Hand waiting replies to parked bulk IN reads, oldest of each

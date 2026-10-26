@@ -1,5 +1,5 @@
-// "--offline": the device's handoff from a frame to the read that waits
-// for it. Each device is built by its own constructor on process
+// "--offline": the device's handoffs from a frame or a reply to the read
+// that waits for it. Each device is built by its own constructor on process
 // memory, its sections handed in through SharedMemoryIO's view caches as
 // protocol_engine_check's DeviceLifetime builds one, and its connection is
 // the server's own type over a local socket pair, as device_oracle_check's
@@ -18,6 +18,9 @@
 //     a newer one, a newer frame queued before the unlink goes in its place,
 //     a read unlinked while it is parked changes nothing, and no frame goes
 //     out twice
+//   - a command on the bulk OUT endpoint that leaves a reply for the input
+//     endpoint wakes the host's poll clock, as a command on every other path
+//     does
 //
 // Each scenario ends on a frame or a read that tells a correct device from
 // one that lost the handoff at once, and a wait that only a correct device
@@ -47,7 +50,7 @@ internal static partial class Program
 
     static void HandoffOffline()
     {
-        Console.WriteLine("\n-- A frame goes to the read that waits for it --");
+        Console.WriteLine("\n-- A frame or a reply goes to the read that waits for it --");
         var ds = ControllerProfile.Parse(Encoding.UTF8.GetBytes(CatalogJson("dualsense-composite")))!;
         Contained("an unlink with no read parked", () => UnlinkNoReadParked(ds));
         Contained("an unlink with a read parked, before a new frame", () => UnlinkReadParkedNewFrame(ds));
@@ -57,6 +60,7 @@ internal static partial class Program
         Contained("an unlink after a newer frame", () => UnlinkAfterNewerFrame(ds));
         Contained("an unlink of a parked read", () => UnlinkParkedRead(ds));
         Contained("a frame put back and a read through the queue", () => PutBackAheadOfQueue(ds));
+        Contained("a bulk command on a poll clock", BulkCommandWakesPollClock);
     }
 
     /// <summary>A scenario that throws fails its own check, and the run
@@ -271,6 +275,47 @@ internal static partial class Program
               $"first read {ra}, unlink {ua}, parked read taken {taken}, then {first}, then {second}, then {Describe(after)}");
     }
 
+    /// <summary>A copy of the Switch 2 Pro composite whose input endpoint
+    /// sends the SDK's report on the host's poll clock, with replies on that
+    /// endpoint and commands on its bulk OUT endpoint, which the protocol
+    /// compiler accepts.</summary>
+    static void BulkCommandWakesPollClock()
+    {
+        var j = JsonNode.Parse(CatalogJson("switch2-pro-controller-composite"))!.AsObject();
+        j["id"] = "s43-poll-clock-bulk-commands";
+        // The state block goes with the layouts, which only a device that
+        // builds its reports has.
+        j.Remove("inputReports");
+        j.Remove("stateBlock");
+        var protocol = j["protocol"]!.AsObject();
+        protocol["input"]!.AsObject().Remove("clock");
+        protocol.Remove("getReport");
+        protocol["replies"] = new JsonObject { ["channel"] = "input", ["pending"] = 64, ["overflow"] = "dropOldestUnstarted" };
+        var profile = ControllerProfile.Parse(Encoding.UTF8.GetBytes(j.ToJsonString()))!;
+        using var rig = new HandoffRig(profile, HandoffIndex + 7);
+        var p = rig.Device.Protocol!.Protocol;
+        Check("a copy of the Switch 2 Pro composite runs a poll clock on its input endpoint, with bulk OUT commands",
+              p is { BuildsReports: false, InputEndpoint: 0x81, Source: CommandSource.BulkOut, Channel: ReplyChannel.Input },
+              $"builds {p.BuildsReports}, input 0x{p.InputEndpoint:X2}, commands {p.Source}, replies {p.Channel}");
+        var (clock, wake) = rig.HoldPollClock();
+        uint read = rig.SubmitIn(p.InputEndpoint, 64);
+        bool readWoke = wake.WaitOne(0);
+        bool idle = !clock.TickNow();
+        Check("a read on the input endpoint wakes the poll clock, which has nothing to send before a command",
+              readWoke && idle, $"woken {readWoke}, idle {idle}");
+        // 10/01, which the copy answers with its rules' reply, from the
+        // stream device_oracle_check's case 8 sends.
+        uint cmd = rig.SubmitOut(p.CommandEndpoint, Convert.FromHexString("1091000100000000"));
+        var ack = rig.Next();
+        bool commandWoke = wake.WaitOne(0);
+        Check("a bulk OUT command that leaves a reply on the input endpoint wakes the poll clock",
+              ack.Is(cmd, 8) && commandWoke, $"command answered {ack}, clock woken {commandWoke}");
+        bool ticked = clock.TickNow();
+        var reply = ticked ? rig.Next() : default;
+        Check("the poll clock's next tick hands the reply to the parked read",
+              ticked && reply.Is(read, 20) && reply.Data[0] == 0x10, $"ticked {ticked}, read {reply}");
+    }
+
     static string Describe(List<HandoffRig.Message> messages) =>
         messages.Count == 0 ? "nothing" : string.Join(", ", messages.Select(m => m.ToString()));
 
@@ -303,6 +348,7 @@ internal static partial class Program
         readonly HashSet<uint> _in = new();
         readonly byte[] _header = new byte[UsbipProtocol.HeaderSize];
         uint _seq = 0x100, _frameSeq;
+        IDeviceClock? _heldClock;
         readonly UsbipServer.Connection _connection;
 
         public HandoffRig(ControllerProfile profile, int index)
@@ -399,6 +445,25 @@ internal static partial class Program
             SharedMemoryIO.WriteInputFrame(_view, _inputEvent, ref _frameSeq, data, data.Length, null);
         }
 
+        /// <summary>The device's poll clock, stopped and replaced with an
+        /// unstarted one of the same tick, so this thread sees its wake event
+        /// and runs its ticks. Returns the clock and its wake event.</summary>
+        public (IDeviceClock Clock, AutoResetEvent Wake) HoldPollClock()
+        {
+            var t = typeof(UsbipEmulatedDevice);
+            var field = t.GetField("_protocolClock", Private)!;
+            ((IDeviceClock)field.GetValue(Device)!).Stop(Hang);
+            var tickType = t.GetNestedType("HostPollTick", BindingFlags.NonPublic)!;
+            object tick = Activator.CreateInstance(tickType, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                null, new object[] { Device }, null)!;
+            var clockType = typeof(DeviceClock<>).MakeGenericType(tickType);
+            var clock = (IDeviceClock)Activator.CreateInstance(clockType, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                null, new object[] { tick, MissedTick.NextPoll, "S43 held poll clock", false }, null)!;
+            field.SetValue(Device, clock);
+            _heldClock = clock;
+            return (clock, (AutoResetEvent)clockType.GetField("_wake", Private)!.GetValue(clock)!);
+        }
+
         UsbipProtocol.CommandHeader Command(byte endpoint, bool isIn, int length) => new()
         {
             Command = UsbipProtocol.CmdSubmit,
@@ -415,6 +480,14 @@ internal static partial class Program
             var cmd = Command(endpoint, true, length);
             _in.Add(cmd.Seqnum);
             Device.HandleSubmit(cmd, ReadOnlySpan<byte>.Empty, ReadOnlySpan<(uint, uint)>.Empty);
+            return cmd.Seqnum;
+        }
+
+        /// <summary>An OUT transfer, interrupt or bulk as the endpoint is.</summary>
+        public uint SubmitOut(byte endpoint, byte[] data)
+        {
+            var cmd = Command(endpoint, false, data.Length);
+            Device.HandleSubmit(cmd, data, ReadOnlySpan<(uint, uint)>.Empty);
             return cmd.Seqnum;
         }
 
@@ -482,6 +555,7 @@ internal static partial class Program
 
         public void Dispose()
         {
+            _heldClock?.Stop(Hang);
             Device.Dispose();
             try { _client.Dispose(); } catch { }
             try { _server.Dispose(); } catch { }
