@@ -542,14 +542,12 @@ internal static class SwdDeviceFactory
     /// read its answer: 0 once the device's removal is under way or done,
     /// otherwise an HRESULT, with <paramref name="cause"/> saying why.
     ///
-    /// <para>The run gets the create's bounds (<see cref="Run"/>): up to
-    /// <see cref="HelperBoundMs"/> (scaled) to reach its close, which a slow
-    /// Plug and Play queue delays in the reconnect's callback, and
-    /// <see cref="HelperCloseMs"/> (scaled) for the close, the step issue #18
-    /// saw stuck behind a stale WUDFHost. Until v2.1.0 the SDK stopped the
-    /// helper at 8 s wherever it stood, which in a slow queue ended a remove
-    /// before it had set the device's lifetime to Handle, and the device
-    /// stayed. A helper stopped in its close after STEP LIFETIME HANDLE
+    /// <para>The run gets <see cref="HelperCloseMs"/> (scaled) to reach its
+    /// close, STEP CLOSING, and as long again for the close, the step issue
+    /// #18 saw stuck behind a stale WUDFHost. A helper stuck before its close
+    /// is stopped at 8 s as it was until v2.1.0, and the device stays. Until
+    /// v2.1.0 the 8 s ran from the helper's start to its end, which also
+    /// stopped a close that began at 7 s. A helper stopped in its close after STEP LIFETIME HANDLE
     /// counts as removed: the end of the process closes the handle, which
     /// removes the device. A software device gets no pnputil or devcon
     /// fallback: DeviceManager.RemoveDeviceLocked runs those for ROOT and
@@ -566,7 +564,10 @@ internal static class SwdDeviceFactory
         using var pin = PinForRun(out string helperPath);
         var psi = HelperStartInfo(helperPath, "remove", enumerator, suffix, containerId.ToString("B"),
                                   string.Join('|', hwIds), string.Join('|', compatIds), description);
-        int boundMs = TimeoutScale.Apply(HelperBoundMs);
+        // Issue #18: a helper stuck before its close (behind a stale WUDFHost)
+        // is stopped at the old 8 s bound. Only once it reports STEP CLOSING
+        // does the wait run longer, for the close.
+        int boundMs = TimeoutScale.Apply(HelperCloseMs);
         string device = $@"{enumerator}\{suffix}";
         int hr = RemoveAnswer(Run(psi, "remove", device, boundMs), boundMs, out cause);
         if (hr != 0 || cause.Length > 0)
