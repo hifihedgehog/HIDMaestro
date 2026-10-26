@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -61,6 +62,7 @@ internal sealed partial class UsbAudioEngine : IDisposable
     private readonly Thread _thread;
     private readonly AutoResetEvent _wake = new(false);
     private readonly IntPtr _timer;
+    private bool _noTimerLogged;
     private readonly IntPtr[] _waitPair = new IntPtr[2];
     private volatile bool _stop;
 
@@ -510,34 +512,47 @@ internal sealed partial class UsbAudioEngine : IDisposable
     /// ends at Dispose once the queue is empty.</summary>
     private void EventLoop()
     {
+        var failures = new LoopFailures();
         try
         {
             while (true)
             {
-                AudioEvent e;
-                bool any;
-                lock (_lock)
+                failures.NextPass();
+                try
                 {
-                    // Each change the host made before Dispose is raised,
-                    // then the thread ends.
-                    any = _events.Count > 0;
-                    e = any ? _events[0] : default;
-                    if (any) _events.RemoveAt(0);
-                    else if (_stop) return;
+                    AudioEvent e;
+                    bool any;
+                    lock (_lock)
+                    {
+                        // Each change the host made before Dispose is raised,
+                        // then the thread ends.
+                        any = _events.Count > 0;
+                        e = any ? _events[0] : default;
+                        if (any) _events.RemoveAt(0);
+                        else if (_stop) return;
+                    }
+                    if (!any)
+                    {
+                        _eventWake.WaitOne(250);
+                        continue;
+                    }
+                    if (e.IsControl)
+                    {
+                        ControlChanged?.Invoke(e.A, e.B, e.C, e.Value);
+                    }
+                    else if (!_altRaised.TryGetValue(e.A, out var last) || last != e.B)
+                    {
+                        _altRaised[e.A] = e.B;
+                        AltSettingChanged?.Invoke(e.A, e.B);
+                    }
                 }
-                if (!any)
+                catch (Exception ex)
                 {
-                    _eventWake.WaitOne(250);
-                    continue;
-                }
-                if (e.IsControl)
-                {
-                    ControlChanged?.Invoke(e.A, e.B, e.C, e.Value);
-                }
-                else if (!_altRaised.TryGetValue(e.A, out var last) || last != e.B)
-                {
-                    _altRaised[e.A] = e.B;
-                    AltSettingChanged?.Invoke(e.A, e.B);
+                    // A raise that throws does not end the thread. Its
+                    // change is dropped, and the next is raised once the
+                    // wait has passed, or once another change or Dispose
+                    // sets the event.
+                    _eventWake.WaitOne(failures.Threw(ex));
                 }
             }
         }
@@ -725,8 +740,34 @@ internal sealed partial class UsbAudioEngine : IDisposable
     private void Pump()
     {
         var completedThisTick = new List<PendingIso>(8);
+        var failures = new LoopFailures();
         while (!_stop)
         {
+            try
+            {
+                PumpPasses(completedThisTick, ref failures);
+            }
+            catch (Exception e)
+            {
+                // A pass that throws, a completion among them, does not end
+                // the pump. The URBs that pass took off the queue and had
+                // not completed get no reply. Dispose sets the wake event,
+                // which ends the wait.
+                _wake.WaitOne(failures.Threw(e));
+            }
+        }
+    }
+
+    /// <summary>The pump's passes, until Dispose or a pass that throws. A
+    /// method apart from the catch in <see cref="Pump"/>, since the JIT
+    /// inlines no P/Invoke inside a try that has a catch
+    /// (impCanPInvokeInlineCallSite), and each pass makes several.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void PumpPasses(List<PendingIso> completedThisTick, ref LoopFailures failures)
+    {
+        while (!_stop)
+        {
+            failures.NextPass();
             long nextDue = long.MaxValue;
             completedThisTick.Clear();
             long now = Stopwatch.GetTimestamp();
@@ -773,12 +814,31 @@ internal sealed partial class UsbAudioEngine : IDisposable
             {
                 // Land ~200 µs early on the timer, close the rest spinning.
                 long timerTicks = remaining - (long)(200 * TicksPerUs);
-                if (timerTicks > 0 && _timer != IntPtr.Zero)
+                if (timerTicks > 0 && _timer == IntPtr.Zero)
+                {
+                    // Neither timer could be created: the pump sleeps on its
+                    // wake event to the next due time (a whole millisecond
+                    // or more), so it never spins the wait out.
+                    if (!_noTimerLogged)
+                    {
+                        _noTimerLogged = true;
+                        LoopFailures.Note("no waitable timer could be created, so the pump waits by sleeping");
+                    }
+                    long ms = timerTicks / TicksPerMs;
+                    if (ms >= 1) _wake.WaitOne((int)Math.Min(ms, 250));
+                }
+                else if (timerTicks > 0)
                 {
                     long due = -(timerTicks * 10_000_000L / Stopwatch.Frequency); // relative 100 ns units
                     if (SetWaitableTimer(_timer, ref due, 0, IntPtr.Zero, IntPtr.Zero, false))
                     {
-                        WaitForMultipleObjects(2, _waitPair, false, 250);
+                        // A wait that fails returns at once, and the pass
+                        // would go round again at once until the URB is due.
+                        // The pump waits on its wake event instead, no later
+                        // than the timer would have fired.
+                        if (WaitForMultipleObjects(2, _waitPair, false, 250) == WAIT_FAILED)
+                            _wake.WaitOne((int)Math.Clamp(timerTicks / TicksPerMs, 1,
+                                                          failures.WaitFailed(Marshal.GetLastPInvokeError())));
                     }
                     else
                     {
@@ -797,6 +857,8 @@ internal sealed partial class UsbAudioEngine : IDisposable
             }
         }
     }
+
+    private const uint WAIT_FAILED = 0xFFFFFFFF;
 
     private void CompleteIso(PendingIso p)
     {

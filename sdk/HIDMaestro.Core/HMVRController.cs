@@ -293,26 +293,39 @@ public sealed class HMVRController : IDisposable
             SafeWaitHandle = new Microsoft.Win32.SafeHandles.SafeWaitHandle(_channel.HapticEvent, ownsHandle: false),
         };
         var waits = new WaitHandle[] { token.WaitHandle, hapticSignal };
+        var failures = new LoopFailures();
         while (!token.IsCancellationRequested)
         {
-            // Checked before each read too: a handler can return after
-            // Dispose.
-            while (!token.IsCancellationRequested
-                   && VrSharedMemory.TryReadHaptic(_channel, ref _hapticCursor,
-                       out uint hand, out float dur, out float freq, out float amp, out ulong ts))
+            failures.NextPass();
+            try
             {
-                var handler = HapticReceived;
-                if (handler == null) continue;
-                EventRaise.Each(handler, this, new HMVRHapticEventArgs
+                // Checked before each read too: a handler can return after
+                // Dispose.
+                while (!token.IsCancellationRequested
+                       && VrSharedMemory.TryReadHaptic(_channel, ref _hapticCursor,
+                           out uint hand, out float dur, out float freq, out float amp, out ulong ts))
                 {
-                    Hand = hand == 0 ? HMVRHand.Left : HMVRHand.Right,
-                    DurationSeconds = dur,
-                    Frequency = freq,
-                    Amplitude = amp,
-                    TimestampQpc = (long)ts,
-                }, nameof(HapticReceived));
+                    var handler = HapticReceived;
+                    if (handler == null) continue;
+                    EventRaise.Each(handler, this, new HMVRHapticEventArgs
+                    {
+                        Hand = hand == 0 ? HMVRHand.Left : HMVRHand.Right,
+                        DurationSeconds = dur,
+                        Frequency = freq,
+                        Amplitude = amp,
+                        TimestampQpc = (long)ts,
+                    }, nameof(HapticReceived));
+                }
+                WaitHandle.WaitAny(waits, 250);
             }
-            WaitHandle.WaitAny(waits, 250);
+            catch (Exception e)
+            {
+                // A pass that throws, a wait on the haptic event that fails
+                // among them, does not end the reader. The next pass reads
+                // the ring once the wait has passed, or ends at Dispose,
+                // which cancels the source.
+                token.WaitHandle.WaitOne(failures.Threw(e));
+            }
         }
     }
 

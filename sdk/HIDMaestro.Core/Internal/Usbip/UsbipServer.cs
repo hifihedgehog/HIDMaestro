@@ -165,31 +165,65 @@ internal sealed class UsbipServer : IDisposable
 
     private void AcceptLoop()
     {
+        var failures = new LoopFailures();
         while (!_stop)
         {
-            Socket client;
-            try { client = _listener.AcceptSocket(); }
-            catch { break; }
-            client.NoDelay = true;
-            // Any local program can connect. Each connection holds a thread
-            // only until its handshake deadline, and past MaxHandshakes in
-            // their handshake at once a new one is closed here, without a
-            // thread, unless the host controller opened it. The driver
-            // connects once per attach it runs, and runs them one at a time
-            // (vhci_ioctl.cpp, the sequential default queue), so a flood
-            // from user mode never turns an import away.
-            if (Interlocked.Increment(ref _handshakes) > MaxHandshakes && !IsHostController(client))
+            failures.NextPass();
+            Socket? client = null;
+            bool counted = false;
+            Connection? conn = null;
+            try
             {
-                Interlocked.Decrement(ref _handshakes);
-                try { client.Close(); } catch { }
-                continue;
+                client = _listener.AcceptSocket();
+                client.NoDelay = true;
+                // Any local program can connect. Each connection holds a
+                // thread only until its handshake deadline, and past
+                // MaxHandshakes in their handshake at once a new one is
+                // closed here, without a thread, unless the host controller
+                // opened it. The driver connects once per attach it runs,
+                // and runs them one at a time (vhci_ioctl.cpp, the
+                // sequential default queue), so a flood from user mode never
+                // turns an import away.
+                counted = true;
+                if (Interlocked.Increment(ref _handshakes) > MaxHandshakes && !IsHostController(client))
+                {
+                    Interlocked.Decrement(ref _handshakes);
+                    counted = false;
+                    try { client.Close(); } catch { }
+                    continue;
+                }
+                // The connection holds the count and the socket from here.
+                conn = new Connection(this, client);
+                counted = false;
+                lock (_connections) _connections.Add(conn);
+                var t = new Thread(conn.Run) { IsBackground = true, Name = "HMUsbipConn" };
+                t.Start();
             }
-            var conn = new Connection(this, client);
-            lock (_connections) _connections.Add(conn);
-            var t = new Thread(conn.Run) { IsBackground = true, Name = "HMUsbipConn" };
-            t.Start();
+            catch (Exception e)
+            {
+                // Dispose stops the listener, which ends the accept that
+                // waits. Any other failure leaves the loop running: it is
+                // still the process's server, and with no accept loop every
+                // later import would fail. What the pass took goes back,
+                // and the next accept comes once the wait has passed, or
+                // the loop ends at Dispose.
+                if (conn != null) conn.End();
+                else
+                {
+                    if (counted) Interlocked.Decrement(ref _handshakes);
+                    try { client?.Close(); } catch { }
+                }
+                if (_stop) break;
+                int ms = failures.Threw(e);
+                lock (_stopGate)
+                    if (!_stop) Monitor.Wait(_stopGate, ms);
+            }
         }
     }
+
+    // Dispose pulses it under the lock as it sets _stop, which ends the
+    // accept loop's wait after a failure.
+    private readonly object _stopGate = new();
 
     /// <summary>How long a connection has to finish its handshake, the
     /// device list it asks for or the import reply it waits for, before the
@@ -254,7 +288,11 @@ internal sealed class UsbipServer : IDisposable
 
     public void Dispose()
     {
-        _stop = true;
+        lock (_stopGate)
+        {
+            _stop = true;
+            Monitor.PulseAll(_stopGate);
+        }
         try { _listener.Stop(); } catch { }
         List<Connection> conns;
         lock (_connections) conns = new List<Connection>(_connections);
@@ -381,18 +419,31 @@ internal sealed class UsbipServer : IDisposable
                 TrackVhciPort(device);
                 CommandLoop(device);
             }
-            catch
+            catch (Exception e)
             {
-                // Socket torn down; the vhci side detaches on its own.
+                // A socket the host, the deadline or Dispose closed ends the
+                // connection, and the vhci side detaches on its own.
+                // Anything else ends it as well, with a line in the
+                // diagnostic log.
+                if (e is not (SocketException or ObjectDisposedException)) LoopFailures.Ended(e);
             }
             finally
             {
-                _deadline.Dispose();
-                Uncount();
-                _device?.DetachConnection(this);
-                _server.OnConnectionClosed(this);
-                Close();
+                End();
             }
+        }
+
+        /// <summary>Releases what the connection holds: its count among the
+        /// handshakes, its deadline, its device, its place in the server's
+        /// list and its socket. Run ends here, and so does a connection
+        /// whose thread did not start.</summary>
+        internal void End()
+        {
+            _deadline.Dispose();
+            Uncount();
+            _device?.DetachConnection(this);
+            _server.OnConnectionClosed(this);
+            Close();
         }
 
         /// <summary>Find the vhci port the driver plugs this import into and
