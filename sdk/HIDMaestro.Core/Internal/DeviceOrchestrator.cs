@@ -40,11 +40,12 @@ internal static partial class DeviceOrchestrator
 
     // ════════════════════════════════════════════════════════════════════
     //  Diagnostic log, gated by env var HIDMAESTRO_DIAG=1. Appends to
-    //  %TEMP%\HIDMaestro\teardown_diag.log, opened once as the user
-    //  (OpenUserLog) and kept open. Each LogDiag call, from any part of the
-    //  SDK, writes one line with its time and thread id. Off by default, so
-    //  a production run writes no file. Set the env var to reproduce a
-    //  device left behind after teardown.
+    //  %TEMP%\HIDMaestro\teardown_diag.log through a UserLog, opened once
+    //  as the user and kept open. Each LogDiag call, from any part of the
+    //  SDK, writes one line with its time and thread id, whole and after
+    //  every line another program wrote before it. Off by default, so a
+    //  production run writes no file. Set the env var to reproduce a device
+    //  left behind after teardown.
     // ════════════════════════════════════════════════════════════════════
     private static readonly bool s_diagEnabled =
         Environment.GetEnvironmentVariable("HIDMAESTRO_DIAG") == "1";
@@ -52,23 +53,7 @@ internal static partial class DeviceOrchestrator
     /// <summary>True when HIDMAESTRO_DIAG=1, so a caller can skip building
     /// a line nobody will read.</summary>
     internal static bool DiagEnabled => s_diagEnabled;
-    private static StreamWriter? s_diagWriter;
-
-    /// <summary>Open a diagnostic log under the user's %TEMP% for appending,
-    /// creating its folder, with the user's own rights
-    /// (<see cref="OpenVrPathRegistry.RunAsUser{T}"/>). The SDK usually runs
-    /// elevated, and %TEMP% is a folder any of the user's programs can
-    /// change, so the folder and file are opened as the user: whatever that
-    /// folder resolves to, the open reaches nothing the user could not write
-    /// already. The handle keeps working after the impersonation
-    /// ends.</summary>
-    internal static FileStream OpenUserLog(string dir, string path) =>
-        OpenVrPathRegistry.RunAsUser(() =>
-        {
-            Directory.CreateDirectory(dir);
-            return new FileStream(path, FileMode.Append, FileAccess.Write,
-                FileShare.ReadWrite | FileShare.Delete, bufferSize: 4096);
-        });
+    private static UserLog? s_diagLog;
 
     /// <summary>Sees every diag line, whether or not HIDMAESTRO_DIAG is set.
     /// pnp_notify_check's offline part sets it to read the lines a removal
@@ -83,33 +68,8 @@ internal static partial class DeviceOrchestrator
         {
             try
             {
-                if (s_diagWriter == null)
-                {
-                    string dir = Path.Combine(Path.GetTempPath(), "HIDMaestro");
-                    string diagPath = Path.Combine(dir, "teardown_diag.log");
-                    // T32-2: keep the StreamWriter open across LogDiag calls
-                    // and flush per write. Was File.AppendAllText (open/write/
-                    // close per call); during HIDMAESTRO_DIAG=1 battery runs
-                    // that's ~3-4K file ops adding 10-40 s to the wall time.
-                    // FileShare.ReadWrite | Delete so external tools can tail
-                    // the file AND the harness's per-run Remove-Item can clear
-                    // it even if a prior HIDMaestroTest writer didn't drain
-                    // its ProcessExit cleanly.
-                    var fs = OpenUserLog(dir, diagPath);
-                    s_diagWriter = new StreamWriter(fs) { AutoFlush = true };
-                    AppDomain.CurrentDomain.ProcessExit += (_, _) =>
-                    {
-                        try { lock (s_diagLock) { s_diagWriter?.Dispose(); s_diagWriter = null; } }
-                        catch { }
-                    };
-                }
-                s_diagWriter.Write('[');
-                s_diagWriter.Write(DateTime.Now.ToString("HH:mm:ss.fff"));
-                s_diagWriter.Write("] tid=");
-                s_diagWriter.Write(Environment.CurrentManagedThreadId.ToString().PadRight(3));
-                s_diagWriter.Write(' ');
-                s_diagWriter.Write(message);
-                s_diagWriter.Write('\n');
+                s_diagLog ??= new UserLog(Path.Combine(Path.GetTempPath(), "HIDMaestro", "teardown_diag.log"));
+                s_diagLog.Write($"[{DateTime.Now:HH:mm:ss.fff}] tid={Environment.CurrentManagedThreadId.ToString().PadRight(3)} {message}\n");
             }
             catch { }
         }
@@ -118,14 +78,14 @@ internal static partial class DeviceOrchestrator
     // ════════════════════════════════════════════════════════════════════
     //  Timing instrumentation: gated by env var HIDMAESTRO_TIMING=1.
     //  When enabled, each SetupController step's duration is appended to
-    //  %TEMP%\HIDMaestro\setup_timing.log, opened once as the user
-    //  (OpenUserLog), so we can pin regressions across runs without
-    //  polluting stdout. Zero-overhead when disabled.
+    //  %TEMP%\HIDMaestro\setup_timing.log through a UserLog, opened once as
+    //  the user, so we can pin regressions across runs without polluting
+    //  stdout. Zero-overhead when disabled.
     // ════════════════════════════════════════════════════════════════════
     private static readonly bool s_timingEnabled =
         Environment.GetEnvironmentVariable("HIDMAESTRO_TIMING") == "1";
     private static readonly object s_timingLock = new();
-    private static StreamWriter? s_timingWriter;
+    private static UserLog? s_timingLog;
 
     private static void LogTiming(int ctrlIdx, string profileId, string step, long elapsedMs)
     {
@@ -134,20 +94,9 @@ internal static partial class DeviceOrchestrator
         {
             try
             {
-                if (s_timingWriter == null)
-                {
-                    string dir = Path.Combine(Path.GetTempPath(), "HIDMaestro");
-                    string timingPath = Path.Combine(dir, "setup_timing.log");
-                    var fs = OpenUserLog(dir, timingPath);
-                    s_timingWriter = new StreamWriter(fs) { AutoFlush = true };
-                    AppDomain.CurrentDomain.ProcessExit += (_, _) =>
-                    {
-                        try { lock (s_timingLock) { s_timingWriter?.Dispose(); s_timingWriter = null; } }
-                        catch { }
-                    };
-                }
-                s_timingWriter.WriteLine(
-                    $"[{DateTime.Now:HH:mm:ss.fff}] ctrl={ctrlIdx} profile={profileId,-24} step={step,-36} {elapsedMs,6}ms");
+                s_timingLog ??= new UserLog(Path.Combine(Path.GetTempPath(), "HIDMaestro", "setup_timing.log"));
+                s_timingLog.Write(
+                    $"[{DateTime.Now:HH:mm:ss.fff}] ctrl={ctrlIdx} profile={profileId,-24} step={step,-36} {elapsedMs,6}ms{Environment.NewLine}");
             }
             catch { }
         }

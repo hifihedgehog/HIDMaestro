@@ -55,8 +55,8 @@
 //        info (BuildForceDriverStartInfo) points TEMP and TMP at its helper's
 //        staging folder (ProtectedStaging.ConfineChildTemp), not the user's
 //        %TEMP%. A diagnostic log the SDK
-//        opens (DeviceOrchestrator.OpenUserLog) is created with its folder
-//        and is appendable. Its owner is the user only when the process is
+//        appends to (UserLog.Append) is created with its folder and takes
+//        the lines appended to it. Its owner is the user only when the process is
 //        elevated (RunAsUser is a no-op otherwise), so that part is a live
 //        check, not one this offline run can fail.
 //   OF8  The squat. Staging lives under %ProgramFiles%\HIDMaestro, and a
@@ -528,10 +528,11 @@ internal static partial class Program
     {
         var asm = typeof(HIDMaestro.HMContext).Assembly;
         var build = asm.GetType("HIDMaestro.Internal.Usbip.UsbipDriverInstaller")?.GetMethod("BuildForceDriverStartInfo", BindingFlags.NonPublic | BindingFlags.Static);
-        var open = asm.GetType("HIDMaestro.Internal.DeviceOrchestrator")?.GetMethod("OpenUserLog", BindingFlags.NonPublic | BindingFlags.Static);
-        if (build == null || open == null)
+        var append = asm.GetType("HIDMaestro.Internal.UserLog")?.GetMethod("Append", BindingFlags.NonPublic | BindingFlags.Static,
+            null, new[] { typeof(string), typeof(string) }, null);
+        if (build == null || append == null)
         {
-            Check("OF10: UsbipDriverInstaller.BuildForceDriverStartInfo and DeviceOrchestrator.OpenUserLog exist", false);
+            Check("OF10: UsbipDriverInstaller.BuildForceDriverStartInfo and UserLog.Append exist", false);
             return;
         }
         // The host controller's driver install's ProcessStartInfo, built the
@@ -632,21 +633,22 @@ internal static partial class Program
             Check("OF10: and keeps a folder whose name is not <pid>-<ticks>", !Del("1234") && !Del("abc-1"));
         }
 
-        // OpenUserLog creates the folder and the log and returns a usable
-        // handle. Its point, impersonating the user, only runs when the
-        // process is elevated (RunAsUser is a no-op otherwise), which this
-        // offline run is not, so whether the file ends up owned by the user
-        // rather than by an elevated token is a live check (S72, elevated),
-        // not one this can fail. Here it confirms the log is created and
-        // written, with its own folder made.
+        // UserLog.Append creates the folder and the log and appends to it.
+        // Its point, impersonating the user, only runs when the process is
+        // elevated (RunAsUser is a no-op otherwise), which this offline run
+        // is not, so whether the file ends up owned by the user rather than
+        // by an elevated token is a live check (S72, elevated), not one this
+        // can fail. Here it confirms the log is created and takes both lines
+        // appended to it, in order, with its own folder made.
         string dir = Path.Combine(Path.GetTempPath(), "hmof10log" + Guid.NewGuid().ToString("N")[..8]);
         string log = Path.Combine(dir, "x.log");
         try
         {
-            using (var fs = Call<FileStream>(open, new object[] { dir, log }))
-            using (var w = new StreamWriter(fs)) w.WriteLine("x");
-            Check("OF10: OpenUserLog creates its folder and an appendable log",
-                  Directory.Exists(dir) && File.Exists(log) && new FileInfo(log).Length > 0, log);
+            Call<object?>(append, new object[] { log, "x\n" });
+            Call<object?>(append, new object[] { log, "y\n" });
+            string text = File.Exists(log) ? File.ReadAllText(log) : "";
+            Check("OF10: UserLog.Append creates its folder and a log that takes each line appended to it",
+                  Directory.Exists(dir) && text == "x\ny\n", log);
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
     }
