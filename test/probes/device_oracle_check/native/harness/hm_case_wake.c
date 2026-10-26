@@ -1341,6 +1341,65 @@ static void SeqNoAgain(PlanProfile *p)
     g_sdkSignal = saved;
 }
 
+/* final-frame-before-repark: a request parked before frame 1 carries it.
+ * Frame 2, a new state, is written while no request is parked, and the
+ * reader then sends its next request. The doorbell, the timer and
+ * GET_STATE run. A pad sends at most one report per poll of its interrupt
+ * endpoint, so a reader that sends its next wait as soon as one completes
+ * has it parked before the pad's next report. The SDK's frames come at
+ * any pace. v2.0.3's timer served frame 2 to that request, and e9a6e92d
+ * served it at the request's look. first-frame-before-park: frame 1 is
+ * written before the reader's first request. */
+static void FinalFrameBeforeRepark(PlanProfile *p, int legacy)
+{
+    Ctl c;
+    char label[160];
+    int saved = g_sdkSignal;
+    if (legacy) g_sdkSignal = 0;
+    snprintf(label, sizeof(label), "%s final-frame-before-repark%s", p->id, legacy ? "-legacy" : "");
+    if (StartPad(&c, p, legacy ? "final-frame-before-repark-legacy" : "final-frame-before-repark", label, 1)) {
+        HmRequest *w1 = WaitOn(&c, 0);
+        WriteGip(&c, 0x01);
+        Settle(CtlThread(&c, 0));
+        Check(label, "control: the request parked before frame 1 carries it", Served(w1, 0x01));
+        WriteGip(&c, 0x02);
+        Settle(CtlThread(&c, 0));
+        HmRequest *w2 = WaitOn(&c, 0);
+        Settle(CtlThread(&c, 0));
+        TimerTick(&c);
+        Settle(CtlThread(&c, 0));
+        HmRequest *g = GetState(&c);
+        Settle(CtlThread(&c, 0));
+        Check(label, "control: GET_STATE reads frame 2", g->completed && g->out[12] == 0x20);
+        Check(label, "the reader's next request carries frame 2, the newest state", Served(w2, 0x02));
+        CtlStop(&c);
+    }
+    g_sdkSignal = saved;
+}
+
+static void FirstFrameBeforePark(PlanProfile *p, int legacy)
+{
+    Ctl c;
+    char label[160];
+    int saved = g_sdkSignal;
+    if (legacy) g_sdkSignal = 0;
+    snprintf(label, sizeof(label), "%s first-frame-before-park%s", p->id, legacy ? "-legacy" : "");
+    if (StartPad(&c, p, legacy ? "first-frame-before-park-legacy" : "first-frame-before-park", label, 1)) {
+        WriteGip(&c, 0x01);
+        Settle(CtlThread(&c, 0));
+        HmRequest *w1 = WaitOn(&c, 0);
+        Settle(CtlThread(&c, 0));
+        TimerTick(&c);
+        Settle(CtlThread(&c, 0));
+        HmRequest *g = GetState(&c);
+        Settle(CtlThread(&c, 0));
+        Check(label, "control: GET_STATE reads frame 1", g->completed && g->out[12] == 0x10);
+        Check(label, "the reader's first request carries frame 1, the state there is", Served(w1, 0x01));
+        CtlStop(&c);
+    }
+    g_sdkSignal = saved;
+}
+
 int CaseWake(void)
 {
     PlanProfile *ds = NULL;
@@ -1385,6 +1444,10 @@ int CaseWake(void)
     OutputRemap(xusb, 0);
     OutputRemap(xusb, 1);
     OutputRingLap(xusb);
+    FinalFrameBeforeRepark(xusb, 0);
+    FinalFrameBeforeRepark(xusb, 1);
+    FirstFrameBeforePark(xusb, 0);
+    FirstFrameBeforePark(xusb, 1);
     printf("wake checks %d failed %d\n", g_checks, g_failed);
     return g_failed;
 }
