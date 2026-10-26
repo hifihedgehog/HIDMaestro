@@ -10,11 +10,7 @@
  * calls SwDeviceCreate with SWDeviceLifetimeParentPresent so the device
  * persists past process exit, prints the resulting instance-id to stdout,
  * and exits. The SDK invokes it via Process.Start and records the instance
- * ID for later DIF_REMOVE teardown.
- *
- * Device removal uses standard PnP (DIF_REMOVE / devcon / pnputil): no
- * special "destroy" command is needed because SWDeviceLifetimeParentPresent
- * keeps the device alive until reboot or explicit removal.
+ * ID. The device stays until `remove` below takes it away.
  *
  * Usage:
  *   hmswd.exe create <enumerator> <instance-id-suffix> <container-guid>
@@ -36,12 +32,30 @@
  *   pnputil /remove-device /force and DIF_REMOVE both silently no-op on
  *   FAILEDINSTALL-state SWD phantoms, which is why this helper exists.
  *
+ * Steps: create and remove print each step they reach to stdout, one
+ * line each, flushed at once, so the SDK can tell how far a run it waits
+ * for has got. "STEP STARTED" comes before SwDeviceCreate, "STEP CREATED"
+ * once it returns S_OK, "STEP ENUMERATED" once the callback has fired or
+ * the devnode is found started, and "STEP CLOSING <code>" right before
+ * every SwDeviceClose, with the exit code the helper returns after it. A
+ * create prints "OK <full-instance-id>" once the device's lifetime is
+ * ParentPresent, so the device outlives the handle. A remove prints "STEP
+ * LIFETIME HANDLE" once the lifetime is Handle: from then on the handle's
+ * close removes the device, whether SwDeviceClose closes it or the end of
+ * the process does. SwDeviceClose "returns before this removal is
+ * complete" (Learn), so after CLOSING only the close is left. One that
+ * does not return (issue #18, a stale WUDFHost holding the device) can be
+ * ended by stopping the process, which closes the handle the same way.
+ *
  * Exit codes:
  *   0   success (stdout: "OK <full-instance-id>" for create, "OK REMOVED" for remove)
  *   1   usage error
- *   2   SwDeviceCreate HRESULT (stderr: "ERR <hresult>")
- *   3   callback timeout
- *   4   callback returned non-zero HRESULT
+ *   2   SwDeviceCreate HRESULT (stderr: "ERR SwDeviceCreate: <hresult>")
+ *   3   callback timeout (stderr: "ERR callback timeout")
+ *   4   callback returned a failure HRESULT, create only
+ *       (stderr: "ERR callback hr=<hresult>")
+ *   5   SwDeviceSetLifetime HRESULT (stderr: "ERR SwDeviceSetLifetime: <hresult>"),
+ *       for a create only after its creation callback
  */
 #define INITGUID
 #include <windows.h>
@@ -84,6 +98,22 @@ static wchar_t *make_multi_sz(const wchar_t *pipe_list, size_t *outLen)
     buf[n + 1] = 0;
     *outLen = n + 2;
     return buf;
+}
+
+/* One step a create or remove has reached (see Steps above). */
+static void step(const wchar_t *what)
+{
+    wprintf(L"STEP %s\n", what);
+    fflush(stdout);
+}
+
+/* Close the handle, after saying so with the exit code that follows. */
+static int close_and_exit(HSWDEVICE hDev, int code)
+{
+    wprintf(L"STEP CLOSING %d\n", code);
+    fflush(stdout);
+    if (hDev) SwDeviceClose(hDev);
+    return code;
 }
 
 static int parse_guid(const wchar_t *s, GUID *out)
@@ -169,6 +199,7 @@ usage:
     g_done = CreateEventW(NULL, TRUE, FALSE, NULL);
     HSWDEVICE hDev = NULL;
 
+    step(L"STARTED");
     HRESULT hr = SwDeviceCreate(
         enumerator,
         L"HTREE\\ROOT\\0",
@@ -182,11 +213,13 @@ usage:
         free(compat_multi);
         return 2;
     }
+    step(L"CREATED");
 
     /* Poll BOTH the callback event AND CM_Locate_DevNodeW / CM_Get_DevNode_Status,
      * so a create whose device reaches the PnP tree started is seen even if
      * the callback never fires. */
     DWORD wait = WAIT_TIMEOUT;
+    int startedWithoutCallback = 0;
     wchar_t expectedInstId[512];
     swprintf_s(expectedInstId, 512, L"SWD\\%s\\%s", enumerator, suffix);
     for (int polled = 0; polled < 600; polled++) {     /* 60s upper bound */
@@ -215,6 +248,7 @@ usage:
          * on Atom under S08/S11's parallel teardown stress. */
         if (!isRemove && cr == CR_SUCCESS && (devStatus & 0x00000008 /*DN_STARTED*/) != 0) {
             wait = WAIT_OBJECT_0;
+            startedWithoutCallback = 1;
             g_cb_hr = S_OK;
             wcsncpy_s(g_inst_id, 256, expectedInstId, _TRUNCATE);
             break;
@@ -225,9 +259,9 @@ usage:
 
     if (wait != WAIT_OBJECT_0) {
         fwprintf(stderr, L"ERR callback timeout\n");
-        if (hDev) SwDeviceClose(hDev);
-        return 3;
+        return close_and_exit(hDev, 3);
     }
+    step(L"ENUMERATED");
 
     /* For create, a failed callback HR means install failed and we return
      * non-zero. For remove, we intentionally proceed even if the callback
@@ -236,17 +270,31 @@ usage:
      * does not prevent the lifetime downgrade from tearing the device down. */
     if (isCreate && FAILED(g_cb_hr)) {
         fwprintf(stderr, L"ERR callback hr=0x%08X\n", g_cb_hr);
-        if (hDev) SwDeviceClose(hDev);
-        return 4;
+        return close_and_exit(hDev, 4);
     }
 
     if (isCreate) {
-        /* Lifetime = ParentPresent. Device persists past our exit. */
-        SwDeviceSetLifetime(hDev, SWDeviceLifetimeParentPresent);
+        /* Lifetime = ParentPresent. Device persists past our exit. After the
+         * creation callback, a lifetime that did not take would leave the
+         * default Handle lifetime, and the close below would remove the
+         * device reported created, so the create fails instead. A devnode
+         * found started without a callback is the reuse fast path above:
+         * Learn allows SwDeviceSetLifetime only after the callback, and a
+         * device an earlier create marked ParentPresent keeps that lifetime
+         * when SwDeviceCreate reconnects to it, so a failure there is
+         * printed and changes nothing, as before. */
+        hr = SwDeviceSetLifetime(hDev, SWDeviceLifetimeParentPresent);
+        if (FAILED(hr) && !startedWithoutCallback) {
+            fwprintf(stderr, L"ERR SwDeviceSetLifetime: 0x%08X\n", hr);
+            return close_and_exit(hDev, 5);
+        }
+        if (FAILED(hr)) {
+            wprintf(L"STEP LIFETIME UNCHANGED 0x%08X\n", (unsigned)hr);
+            fflush(stdout);
+        }
         wprintf(L"OK %s\n", g_inst_id);
         fflush(stdout);
-        SwDeviceClose(hDev);
-        return 0;
+        return close_and_exit(hDev, 0);
     }
 
     /* remove: downgrade lifetime to Handle, then Close: PnP will remove the
@@ -256,10 +304,10 @@ usage:
     hr = SwDeviceSetLifetime(hDev, SWDeviceLifetimeHandle);
     if (FAILED(hr)) {
         fwprintf(stderr, L"ERR SwDeviceSetLifetime: 0x%08X\n", hr);
-        SwDeviceClose(hDev);
-        return 5;
+        return close_and_exit(hDev, 5);
     }
-    SwDeviceClose(hDev);
+    step(L"LIFETIME HANDLE");
+    close_and_exit(hDev, 0);
     wprintf(L"OK REMOVED\n");
     fflush(stdout);
     return 0;
