@@ -21,6 +21,8 @@ internal static class OracleProtocol
             (t.GetField(name, Instance) ?? throw new MissingFieldException(t.Name, name)).SetValue(dev, value);
         Field("_protocolReads", Activator.CreateInstance(t.GetField("_protocolReads", Instance)!.FieldType));
         Field("_spareReads", Activator.CreateInstance(t.GetField("_spareReads", Instance)!.FieldType));
+        int kept = (int)t.GetField("AnswersKept", BindingFlags.Static | BindingFlags.NonPublic)!.GetRawConstantValue()!;
+        Field("_protocolAnswers", Activator.CreateInstance(t.GetField("_protocolAnswers", Instance)!.FieldType, kept));
         var compiled = CompiledProtocol.Compile(profile, descriptors);
         if (compiled == null) return;
         if (compiled.BuildsReports || compiled.InputEndpoint != 0)

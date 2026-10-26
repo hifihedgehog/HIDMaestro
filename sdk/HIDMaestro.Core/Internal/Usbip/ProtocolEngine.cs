@@ -84,6 +84,13 @@ internal sealed unsafe class ProtocolEngine
     private readonly byte[] _message;
     private int _messageLength;
     private int _messageOffset;
+    // What reads on the input endpoint carried and the host never got, one
+    // entry per read, oldest first, sent again before anything else
+    // (PutBackPackets). _putBackOffset is how much of the first has gone out
+    // again. An unlink of an answered read is rare, so each entry is an
+    // array of its own.
+    private readonly List<byte[]> _putBack = new();
+    private int _putBackOffset;
     private long _lastReportTicks;
     private int _hostPollMicros;
     private uint _reportsSent;
@@ -260,6 +267,8 @@ internal sealed unsafe class ProtocolEngine
             _replyHead = _replyCount = _headOffset = 0;
             _messageLength = 0;
             _messageOffset = 0;
+            _putBack.Clear();
+            _putBackOffset = 0;
             _lastReportTicks = 0;
             _reportsSent = 0;
             for (int p = 0; p < _held.Length; p++)
@@ -294,14 +303,14 @@ internal sealed unsafe class ProtocolEngine
     /// tick, and TakeReply, under the lock, says whether one is there.</summary>
     public bool ReplyWaiting => System.Threading.Volatile.Read(ref _replyCount) > 0;
 
-    /// <summary>True while a poll can get something: a reply, a message
-    /// under way, or reports the registers allow.</summary>
+    /// <summary>True while a poll can get something: packets put back, a
+    /// reply, a message under way, or reports the registers allow.</summary>
     public bool CanSend
     {
         get
         {
             lock (_sync)
-                return !HaltedLocked() && (_replyCount > 0 || _messageLength > 0 || _inputOpen);
+                return !HaltedLocked() && (_putBack.Count > 0 || _replyCount > 0 || _messageLength > 0 || _inputOpen);
         }
     }
 
@@ -445,6 +454,8 @@ internal sealed unsafe class ProtocolEngine
                 _replyHead = _replyCount = _headOffset = 0;
                 _messageLength = 0;
                 _messageOffset = 0;
+                _putBack.Clear();
+                _putBackOffset = 0;
                 return new CommandResult(effect | Effect.Halted, ri, rule.Consume, rule.Emit, rule.Decode);
             }
             bool open = _p.InputWhile == null || _p.InputWhile.Holds(_regs);
@@ -709,6 +720,36 @@ internal sealed unsafe class ProtocolEngine
         }
     }
 
+    /// <summary>A part of a reply that a read took and the host never got,
+    /// back at the head of the replies as a reply of its own: the next read
+    /// gets those bytes again, and the reads after it the rest as before,
+    /// since two replies never share a read. Parts put back one after
+    /// another each go ahead of the last, so the caller puts back the newest
+    /// first. Returns false when the replies have no room, or the device is
+    /// halted, and the part is lost as a reply an overflow drops.</summary>
+    public bool PutBackReply(ReadOnlySpan<byte> part)
+    {
+        lock (_sync)
+        {
+            if (HaltedLocked() || _replyCount >= _replyBuf.Length || part.Length > _replyBuf[0].Length) return false;
+            if (_headOffset > 0)
+            {
+                // The rest of a reply part of which went out becomes a reply
+                // of its own, behind the part put back.
+                var head = _replyBuf[_replyHead];
+                int rest = _replyLen[_replyHead] - _headOffset;
+                head.AsSpan(_headOffset, rest).CopyTo(head);
+                _replyLen[_replyHead] = rest;
+                _headOffset = 0;
+            }
+            _replyHead = (_replyHead + _replyBuf.Length - 1) % _replyBuf.Length;
+            part.CopyTo(_replyBuf[_replyHead]);
+            _replyLen[_replyHead] = part.Length;
+            _replyCount++;
+            return true;
+        }
+    }
+
     // ── A device that builds its reports ─────────────────────────────────
 
     /// <summary>Replace the state the next report is built from. A block of
@@ -850,6 +891,13 @@ internal sealed unsafe class ProtocolEngine
     public int BuildOnSubmit<TSet>(ref TSet set, Span<byte> dst) where TSet : struct, IReportSet
     {
         lock (_sync) return BuildLocked(ref set, dst, SendRule.Submit, commit: true, out _);
+    }
+
+    /// <summary>A report the host never got: each layout sent on change sends
+    /// its next report whatever its bytes, as after an attach.</summary>
+    public void ForgetSent()
+    {
+        lock (_sync) Array.Clear(_sentOnce);
     }
 
     /// <summary>Whether the selected layout goes out on submit.</summary>
@@ -1057,13 +1105,34 @@ internal sealed unsafe class ProtocolEngine
 
     public enum PollResult { Nak, Packet, Babble }
 
+    /// <summary>What a read on the input endpoint carried and the host never
+    /// got, put back ahead of everything the endpoint has still to send: the
+    /// next polls send it again as the packets it went out in. Reads put back
+    /// one after another each go ahead of the last, so the caller puts back
+    /// the newest first. A halted device keeps nothing.</summary>
+    public void PutBackPackets(ReadOnlySpan<byte> read)
+    {
+        lock (_sync)
+        {
+            if (HaltedLocked()) return;
+            if (_putBackOffset > 0)
+            {
+                // The rest of a read part of which went out again becomes an
+                // entry of its own, behind this one.
+                _putBack[0] = _putBack[0].AsSpan(_putBackOffset).ToArray();
+                _putBackOffset = 0;
+            }
+            _putBack.Insert(0, read.ToArray());
+        }
+    }
+
     /// <summary>One host poll of the input endpoint at
     /// <paramref name="pollTicks"/>, for a device whose replies wait on the
-    /// input endpoint. A message under way sends its next packet. Otherwise a
-    /// waiting reply starts, else a report when the registers allow one and
-    /// the device has read its controllers since its last report, else the
-    /// poll gets a NAK. A packet longer than <paramref name="room"/> is
-    /// babble: it is lost and the read fails.</summary>
+    /// input endpoint. Packets put back go first. Then a message under way
+    /// sends its next packet. Otherwise a waiting reply starts, else a report
+    /// when the registers allow one and the device has read its controllers
+    /// since its last report, else the poll gets a NAK. A packet longer than
+    /// <paramref name="room"/> is babble: it is lost and the read fails.</summary>
     /// <param name="shortPacket">True when the packet is shorter than the
     /// endpoint's wMaxPacketSize, which ends the transfer.</param>
     public PollResult Poll(long pollTicks, long clockOriginTicks, Span<byte> room,
@@ -1074,6 +1143,23 @@ internal sealed unsafe class ProtocolEngine
         lock (_sync)
         {
             if (HaltedLocked()) return PollResult.Nak;
+            if (_putBack.Count > 0)
+            {
+                var read = _putBack[0];
+                int n = Math.Min(_p.InputPacketSize, read.Length - _putBackOffset);
+                var again = read.AsSpan(_putBackOffset, n);
+                _putBackOffset += n;
+                if (_putBackOffset >= read.Length)
+                {
+                    _putBack.RemoveAt(0);
+                    _putBackOffset = 0;
+                }
+                if (n > room.Length) return PollResult.Babble;
+                again.CopyTo(room);
+                written = n;
+                shortPacket = n < _p.InputPacketSize;
+                return PollResult.Packet;
+            }
             if (_messageLength == 0)
             {
                 if (_replyCount > 0)

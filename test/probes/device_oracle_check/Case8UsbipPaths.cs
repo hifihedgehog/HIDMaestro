@@ -826,6 +826,15 @@ internal sealed class Case8UsbipPaths : IOracleCase
             Set("_streamSendLock", new object());
             Set("_frameQueue", Activator.CreateInstance(t.GetField("_frameQueue", Instance)!.FieldType));
             Set("_spareFrames", new Stack<byte[]>());
+            // What an unlink puts back: the newest frame alone for a device
+            // that holds one frame, and the last AnswersKept bulk and poll
+            // clock answers (UsbipEmulatedDevice.cs, _frameAnswers, and the
+            // field initializers of _bulkAnswers and _protocolAnswers).
+            var answerLog = t.GetField("_frameAnswers", Instance)!.FieldType;
+            int kept = (int)t.GetField("AnswersKept", BindingFlags.Static | BindingFlags.NonPublic)!.GetRawConstantValue()!;
+            Set("_frameAnswers", Activator.CreateInstance(answerLog, 1));
+            Set("_bulkAnswers", Activator.CreateInstance(answerLog, kept));
+            Set("_protocolAnswers", Activator.CreateInstance(answerLog, kept));
             // The input pump's queue of parked reads, made and kept as the
             // constructor makes it (UsbipEmulatedDevice.cs, _primaryPending).
             var pending = new Dictionary<byte, Queue<uint>>();

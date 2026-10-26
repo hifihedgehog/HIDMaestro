@@ -37,6 +37,10 @@
 //     device by then
 //   - a read the input pump or the poll clock has answered, unlinked before
 //     the answer is on the wire, is answered before the RET_UNLINK
+//   - a keyboard's frames, a report on change, a reply on a protocol's input
+//     endpoint and part of a bulk reply, each answered on a read the host
+//     then unlinks, go to the next reads: a keyboard's ahead of the frames
+//     queued after them, and both of a pair the host unlinks together
 //
 // Each scenario ends on a frame or a read that tells a correct device from
 // one that lost the handoff at once, and a wait that only a correct device
@@ -79,6 +83,11 @@ internal static partial class Program
         Contained("a new import beside the old one's detach", () => NewImportBesideDetach(ds));
         Contained("frames no read took", () => NewestFrameWaits(ds));
         Contained("a keyboard's frames no read took", KeyboardKeepsEveryFrame);
+        Contained("a keyboard's frame put back ahead of its queue", KeyboardPutBackAheadOfQueue);
+        Contained("a keyboard's pair of reads unlinked", KeyboardPutBackPair);
+        Contained("a report on change the host never got", LayoutChangePutBack);
+        Contained("a reply on the input endpoint the host never got", ProtocolPacketsPutBack);
+        Contained("a bulk reply the host never got", BulkReplyPutBack);
         Contained("a lapped output reader", () => LappedOutputReader(ds));
         Contained("an isochronous URB unlinked while it completes", () => AudioAnswerBeforeUnlink(ds));
         Contained("an isochronous URB whose import drops while it completes", () => AudioAnswerToItsImport(ds));
@@ -369,11 +378,7 @@ internal static partial class Program
     /// them oldest first.</summary>
     static void KeyboardKeepsEveryFrame()
     {
-        var j = JsonNode.Parse(CatalogJson("dualsense-composite"))!.AsObject();
-        j["id"] = "s43-dualsense-composite-as-keyboard";
-        j["type"] = "keyboard";
-        var profile = ControllerProfile.Parse(Encoding.UTF8.GetBytes(j.ToJsonString()))!;
-        using var rig = new HandoffRig(profile, HandoffIndex + 14);
+        using var rig = new HandoffRig(KeyboardCopy("s43-dualsense-composite-as-keyboard"), HandoffIndex + 14);
         byte ep = rig.PrimaryIn;
         bool queued = true;
         for (byte mark = 31; mark <= 33; mark++) queued &= rig.FrameQueued(mark);
@@ -390,6 +395,143 @@ internal static partial class Program
         Check("a keyboard keeps every frame no read took, and the reads take them oldest first",
               queued && held == 3 && got[0].IsFrame(reads[0], 31) && got[1].IsFrame(reads[1], 32) && got[2].IsFrame(reads[2], 33) && after.Count == 0,
               $"each frame taken up {queued}, frames held {held}, reads {Describe(got)}, then {Describe(after)}");
+    }
+
+    /// <summary>A copy of the DualSense composite typed as a keyboard, which
+    /// gets every report in order (ControllerProfile.DeliversEveryReport).</summary>
+    static ControllerProfile KeyboardCopy(string id)
+    {
+        var j = JsonNode.Parse(CatalogJson("dualsense-composite"))!.AsObject();
+        j["id"] = id;
+        j["type"] = "keyboard";
+        return ControllerProfile.Parse(Encoding.UTF8.GetBytes(j.ToJsonString()))!;
+    }
+
+    /// <summary>A keyboard's frame answered on a read the host then unlinks,
+    /// with newer frames queued: the frame goes back ahead of them, since a
+    /// keyboard needs every report in order.</summary>
+    static void KeyboardPutBackAheadOfQueue()
+    {
+        using var rig = new HandoffRig(KeyboardCopy("s43-keyboard-put-back-ahead"), HandoffIndex + 20);
+        byte ep = rig.PrimaryIn;
+        uint a = rig.SubmitIn(ep, 64);
+        rig.Frame(41);
+        var ra = rig.Next();
+        bool queued = rig.FrameQueued(42) && rig.FrameQueued(43);
+        int ua = rig.Unlink(a);
+        var got = rig.ReadEach(ep, 3);
+        rig.SubmitIn(ep, 64);
+        var after = got.Count == 3 ? rig.UntilSentinel() : new();
+        Check("a keyboard's frame answered on a read the host then unlinks goes to the next read, ahead of the frames queued after it",
+              ra.IsFrame(a, 41) && queued && ua == 0 && got.Count == 3
+              && got[0].IsFrame(got[0].Seq, 41) && got[1].IsFrame(got[1].Seq, 42) && got[2].IsFrame(got[2].Seq, 43) && after.Count == 0,
+              $"first read {ra}, frames queued {queued}, unlink {ua}, reads {Describe(got)}, then {Describe(after)}");
+    }
+
+    /// <summary>Both reads of a keyboard's pair answered, then both unlinked,
+    /// as a host that cancels its reads does: both frames go back, in the
+    /// order they went out.</summary>
+    static void KeyboardPutBackPair()
+    {
+        using var rig = new HandoffRig(KeyboardCopy("s43-keyboard-put-back-pair"), HandoffIndex + 21);
+        byte ep = rig.PrimaryIn;
+        uint a = rig.SubmitIn(ep, 64);
+        uint b = rig.SubmitIn(ep, 64);
+        rig.Frame(51);
+        var ra = rig.Next();
+        rig.Frame(52);
+        var rb = rig.Next();
+        int ua = rig.Unlink(a);
+        int ub = rig.Unlink(b);
+        var got = rig.ReadEach(ep, 2);
+        rig.SubmitIn(ep, 64);
+        var after = got.Count == 2 ? rig.UntilSentinel() : new();
+        Check("both frames of a keyboard's pair of reads the host unlinks go to the next reads, in order",
+              ra.IsFrame(a, 51) && rb.IsFrame(b, 52) && ua == 0 && ub == 0 && got.Count == 2
+              && got[0].IsFrame(got[0].Seq, 51) && got[1].IsFrame(got[1].Seq, 52) && after.Count == 0,
+              $"reads {ra} and {rb}, unlinks {ua} and {ub}, next reads {Describe(got)}, then {Describe(after)}");
+    }
+
+    /// <summary>A copy of the Switch 2 Pro composite whose report 0x09 goes
+    /// out on change, without the report counter its program writes, so
+    /// unchanged state builds the same bytes.</summary>
+    static ControllerProfile ChangeLayoutCopy(string id)
+    {
+        var j = JsonNode.Parse(CatalogJson("switch2-pro-controller-composite"))!.AsObject();
+        j["id"] = id;
+        var layout = j["inputReports"]!.AsArray().Select(n => n!.AsObject()).First(l => (string?)l["reportId"] == "0x09");
+        layout["send"] = "change";
+        var program = layout["program"]!.AsArray();
+        program.Remove(program.First(op => op!.AsObject().ContainsKey("counter")));
+        return ControllerProfile.Parse(Encoding.UTF8.GetBytes(j.ToJsonString()))!;
+    }
+
+    /// <summary>A report on change answered on a read the host then unlinks:
+    /// the state has not changed, so no tick sends it again, and the next
+    /// read gets it once more, as a device whose report the host lost.</summary>
+    static void LayoutChangePutBack()
+    {
+        using var rig = new HandoffRig(ChangeLayoutCopy("s43-change-report-put-back"), HandoffIndex + 22);
+        var p = rig.Device.Protocol!.Protocol;
+        var clock = rig.HoldLayoutClock();
+        // 03/0D, which lets reports flow.
+        uint on = rig.SubmitOut(p.CommandEndpoint, Convert.FromHexString("0300000D00000000"));
+        var ack = rig.Next();
+        uint a = rig.SubmitIn(p.InputEndpoint, 64);
+        bool ticked = clock.TickNow();
+        var ra = ticked ? rig.NextWithin(Hang) : default;
+        int ua = rig.Unlink(a);
+        uint b = rig.SubmitIn(p.InputEndpoint, 64);
+        clock.TickNow();
+        var rb = rig.NextWithin(1000);
+        Check("a report on change the host never got goes to the next read, though the state has not changed",
+              ack.Is(on, 8) && ticked && ra.Is(a, 64) && ra.Data[0] == 0x09 && ua == 0
+              && rb.Is(b, 64) && rb.Data.AsSpan().SequenceEqual(ra.Data),
+              $"reports on {ack}, ticked {ticked}, first read {ra}, unlink {ua}, next read {rb}");
+    }
+
+    /// <summary>A reply the poll clock answered a read with, which the host
+    /// then unlinks: the next read gets the reply's packets again.</summary>
+    static void ProtocolPacketsPutBack()
+    {
+        using var rig = new HandoffRig(PollClockCopy("s43-poll-clock-put-back"), HandoffIndex + 23);
+        var p = rig.Device.Protocol!.Protocol;
+        var (clock, _) = rig.HoldPollClock();
+        uint a = rig.SubmitIn(p.InputEndpoint, 64);
+        uint cmd = rig.SubmitOut(p.CommandEndpoint, Convert.FromHexString("1091000100000000"));
+        var ack = rig.Next();
+        bool ticked = clock.TickNow();
+        var ra = ticked ? rig.Next() : default;
+        int ua = rig.Unlink(a);
+        uint b = rig.SubmitIn(p.InputEndpoint, 64);
+        bool again = clock.TickNow();
+        var rb = again ? rig.NextWithin(1000) : default;
+        Check("a reply on the input endpoint answered on a read the host then unlinks goes to the next read",
+              ack.Is(cmd, 8) && ticked && ra.Is(a, 20) && ra.Data[0] == 0x10 && ua == 0
+              && again && rb.Is(b, 20) && rb.Data.AsSpan().SequenceEqual(ra.Data),
+              $"command answered {ack}, first read {ra}, unlink {ua}, ticked again {again}, next read {rb}");
+    }
+
+    /// <summary>The first 64 bytes of an 80-byte bulk reply, answered on a
+    /// read the host then unlinks: the next read gets those 64 bytes again
+    /// and the one after it the last 16.</summary>
+    static void BulkReplyPutBack()
+    {
+        var j = JsonNode.Parse(CatalogJson("switch2-pro-controller-composite"))!.AsObject();
+        j["id"] = "s43-bulk-reply-put-back";
+        using var rig = new HandoffRig(ControllerProfile.Parse(Encoding.UTF8.GetBytes(j.ToJsonString()))!, HandoffIndex + 24);
+        var p = rig.Device.Protocol!.Protocol;
+        uint a = rig.SubmitIn(p.ReplyEndpoint, 64);
+        // 02/01 reads 64 bytes of the flash image from 0x13000.
+        byte[] flashRead = Convert.FromHexString("02910001000000000000000000300100");
+        uint cmd = rig.SubmitOut(p.CommandEndpoint, flashRead);
+        var got = rig.UntilSentinel();
+        int ua = rig.Unlink(a);
+        var rest = rig.ReadEach(p.ReplyEndpoint, 2);
+        Check("the part of a bulk reply answered on a read the host then unlinks goes to the next read, and the rest after it",
+              got.Count == 2 && got[0].Is(cmd, flashRead.Length) && got[1].Is(a, 64) && ua == 0
+              && rest.Count == 2 && rest[0].Length == 64 && rest[0].Data.AsSpan().SequenceEqual(got[1].Data) && rest[1].Length == 16,
+              $"{Describe(got)}, unlink {ua}, next reads {Describe(rest)}");
     }
 
     /// <summary>The output ring's writer against a reader it has lapped. The
@@ -981,6 +1123,44 @@ internal static partial class Program
                 got.Add(m);
             }
             return got;
+        }
+
+        /// <summary>The next RET_SUBMIT or RET_UNLINK on the wire, or nothing
+        /// when none starts within <paramref name="ms"/>.</summary>
+        public Message NextWithin(int ms) => WaitUntil(() => _client.Available > 0, ms) ? Next() : default;
+
+        /// <summary>Up to <paramref name="count"/> reads on
+        /// <paramref name="endpoint"/>, each sent once the one before it is
+        /// answered: the answers, until a read gets none within a second.</summary>
+        public List<Message> ReadEach(byte endpoint, int count)
+        {
+            var got = new List<Message>();
+            for (int i = 0; i < count; i++)
+            {
+                uint seq = SubmitIn(endpoint, 64);
+                var m = NextWithin(1000);
+                if (m.Data == null) break;
+                got.Add(m);
+                if (m.Seq != seq) break;
+            }
+            return got;
+        }
+
+        /// <summary>The device's layout clock, stopped and replaced with an
+        /// unstarted one of the same tick, so this thread runs its ticks.</summary>
+        public IDeviceClock HoldLayoutClock()
+        {
+            var field = typeof(UsbipEmulatedDevice).GetField("_layoutClock", Private)!;
+            var running = (IDeviceClock)field.GetValue(Device)!;
+            running.Stop(Hang);
+            var clockType = running.GetType();
+            object tick = clockType.GetField("_tick", Private)!.GetValue(running)!;
+            object missed = clockType.GetField("_missed", Private)!.GetValue(running)!;
+            var clock = (IDeviceClock)Activator.CreateInstance(clockType, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                null, new object[] { tick, missed, "S43 held layout clock", false }, null)!;
+            field.SetValue(Device, clock);
+            _heldClock = clock;
+            return clock;
         }
 
         /// <summary>The next RET_SUBMIT or RET_UNLINK on the wire.</summary>
