@@ -163,8 +163,8 @@ internal static class DeliveryModel
         public bool NoTakeBackOverUntaken { get; init; }   // the SDK skips the take-back when its exchange replaced a frame not taken
     }
 
-    // This driver as of c5b207a3, rule by rule (driver/driver.c and
-    // sdk/HIDMaestro.Core/Internal/SharedMemoryIO.cs at that commit):
+    // c5b207a3's rules, kept for the record, rule by rule (driver/driver.c
+    // and sdk/HIDMaestro.Core/Internal/SharedMemoryIO.cs at that commit):
     //   Round6: the SDK reads InputHandoff and replaces a final SeqNo there
     //     with its frame's final one by one compare-exchange, with no
     //     SetEvent (SharedMemoryIO.cs 1186). Otherwise it exchanges the
@@ -203,11 +203,26 @@ internal static class DeliveryModel
     //     and drops a provisional one (driver.c 934, 942). It runs at a
     //     recycle (2236) and as the device goes (ClearCapAtGo, 2294).
     //   ForgetAtRecycle: the recycle forgets SeenSeqNo (driver.c 2264).
-    internal static readonly Rules This = new Rules("this driver") with
+    internal static readonly Rules C5b207a3 = new Rules("c5b207a3") with
     {
         Round6 = true, TearCheckedRead = true, CloseSignalsSent = true, TakeAtOwnerGone = false, RetryAfterOwnerGone = false,
         TakeReadNoNext = false, TakeReadNextSeq = false, BackOnlyAlone = false, ClearAtStart = false,
     };
+
+    // This driver, as the 2.1.0 release ships it (a2256457): c5b207a3's
+    // rules and two more.
+    //   FastSignal: after the owed-final branch the SDK reads InputWaiters,
+    //     and with a worker counted it signals and leaves InputHandoff
+    //     alone (SharedMemoryIO.cs 1202).
+    //   BackOnlyOnStop: at teardown a taken frame goes back to the input
+    //     event only when the poll after the take returned the stop event
+    //     (driver.c 2130). On the owner pipe at teardown the worker leaves
+    //     before the read with no SetEvent (2091), and on the input event
+    //     or a timeout too (2129).
+    // The line numbers above for c5b207a3 moved in a2256457: the increment
+    // is at driver.c 2056, the take at 2067, the owner path's read at 2094
+    // and the stop event's SetEvent at 2135.
+    internal static readonly Rules This = C5b207a3 with { Name = "this driver", BackOnlyOnStop = true, FastSignal = true };
 
     internal static readonly Rules[] Broken =
     {
@@ -233,24 +248,32 @@ internal static class DeliveryModel
         This with { Name = "OwnerGone takes the handoff as b17050c1 did", TakeAtOwnerGone = true },
         This with { Name = "a take's read at teardown signaled back after it (R6-1, 10ddf75e)", TearPostRead = true },
         This with { Name = "a taken frame dropped as the worker leaves at teardown (B1, teardown half)", SignalTakenAtTear = false },
-        This with { Name = "the fast branch skips its SetEvent (run on c2)", FastSkipsSignal = true },
+        This with { Name = "the fast branch skips its SetEvent", FastSkipsSignal = true },
         This with { Name = "a take's read sends no frame of a next program that started (B4, b17050c1's NextProgramStarted)", TakeReadNoNext = true },
         This with { Name = "a take's read sends only the frame taken or its program's next SeqNo (b17050c1's NextFrameSeq)", TakeReadNoNext = true, TakeReadNextSeq = true },
         This with { Name = "a taken frame signaled back at a stop only with no next program (b17050c1)", BackOnlyAlone = true },
+        This with { Name = "a taken frame signaled back at teardown before the stop event (c5b207a3)", BackOnlyOnStop = false },
     };
 
-    // Candidate changes (the model section of docs/design/signal-gate.md),
-    // each run in place of this driver's rules by the check command's rule
-    // c0 to c6.
+    // The removals that change no outcome at one or two frames a program:
+    // the take-back of a provisional SeqNo, which the next take drops anyway
+    // while the SDK signals either way.
+    internal static readonly HashSet<int> NoBreak = new() { 0 };
+
+    // Named rule sets and candidate changes (the model section of
+    // docs/design/signal-gate.md), each run in place of this driver's rules
+    // by the check command's rule c0 to c7. c4 is this driver's rules, c7
+    // c5b207a3's, and c2 c5b207a3's with the fast branch.
     internal static readonly Rules[] Candidates =
     {
-        This with { Name = "round 6 with the summary's exact-SeqNo take", Round6ExactTake = true },
-        This with { Name = "round 6 with the post-read teardown check asking whether the frame went out", TearPostRead = true, TearCheckDelivered = true },
-        This with { Name = "c5b207a3 with the fast branch", FastSignal = true },
-        This with { Name = "c5b207a3 signaling a taken frame back at teardown only on the stop event", BackOnlyOnStop = true },
-        This with { Name = "c3 with the fast branch", BackOnlyOnStop = true, FastSignal = true },
-        This with { Name = "c3 signaling back only a section not yet delivered", BackOnlyOnStop = true, BackOnlyUndelivered = true },
-        This with { Name = "c5 with the fast branch", BackOnlyOnStop = true, BackOnlyUndelivered = true, FastSignal = true },
+        C5b207a3 with { Name = "round 6 with the summary's exact-SeqNo take", Round6ExactTake = true },
+        C5b207a3 with { Name = "round 6 with the post-read teardown check asking whether the frame went out", TearPostRead = true, TearCheckDelivered = true },
+        C5b207a3 with { Name = "c5b207a3 with the fast branch", FastSignal = true },
+        C5b207a3 with { Name = "c5b207a3 signaling a taken frame back at teardown only on the stop event", BackOnlyOnStop = true },
+        C5b207a3 with { Name = "c3 with the fast branch", BackOnlyOnStop = true, FastSignal = true },
+        C5b207a3 with { Name = "c3 signaling back only a section not yet delivered", BackOnlyOnStop = true, BackOnlyUndelivered = true },
+        C5b207a3 with { Name = "c5 with the fast branch", BackOnlyOnStop = true, BackOnlyUndelivered = true, FastSignal = true },
+        C5b207a3,
     };
 
     internal static IEnumerable<Scenario> Scenarios()
