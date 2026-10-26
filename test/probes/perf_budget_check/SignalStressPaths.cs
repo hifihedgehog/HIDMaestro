@@ -34,6 +34,26 @@
 //                 signal section on the way (HMContext,
 //                 CreateUsbipController), so its pass has no gate modes and
 //                 no pairs.
+//   keyboard      microsoft-wired-keyboard-600 and microsoft-notebook-optical-
+//   mouse         mouse, only with --kbm=<the machine's name>, never in
+//                 --passes=all, and never on the development laptop: they
+//                 type and move the pointer on the machine's console. A keyboard taps F13 to F24, each
+//                 submit pressing the next key or releasing it, and a mouse
+//                 moves one count right, then one left. The SDK sends every
+//                 report of a keyboard or a mouse and holds each until the
+//                 driver acknowledges the one before, so a submit waits about
+//                 a millisecond, and up to 200 ms when that acknowledgement
+//                 never comes (HMController, AwaitPreviousDelivery). Windows
+//                 owns a keyboard's and a mouse's HID collections, and Raw
+//                 Input reaches no process in session 0, which is where an
+//                 SSH session runs and the only session on the Celeron while
+//                 no one is signed in. So these passes read delivery from the
+//                 acknowledgement: the driver writes the SeqNo of the frame
+//                 a READ_REPORT carried into Global\HIDMaestroInputAck<N>
+//                 when HID class sends its next READ_REPORT, which it does once
+//                 it has stored that report. Each submit's time is the SDK's
+//                 own record of the write, taken after the wait, and its
+//                 reading is the first acknowledgement at or past its SeqNo.
 // Each carries the count in the two sticks' X axes the profile lays out, as
 // the Windows.Gaming.Input pass does, the left stick's step plus the right
 // stick's times the steps an axis has. An axis has 200 steps, or fewer where
@@ -61,7 +81,12 @@ internal static partial class Program
     {
         ("ds4", Ds4), ("x360-wgi", Xbox360), ("x360-xinput", Xbox360), ("x360-hid", Xbox360),
         ("dualsense", "dualsense"), ("dualsense-bt", "dualsense-bt"), ("generic", "logitech-f310"), ("usbip", "dualsense-composite"),
+        ("keyboard", Keyboard), ("mouse", Mouse),
     };
+
+    /// <summary>The passes that type or move the pointer (header): run only
+    /// with --kbm, and left out of --passes=all.</summary>
+    static readonly string[] StressKbmPasses = { "keyboard", "mouse" };
 
     /// <summary>The SDK's idle repeat of a controller in ms, one period
     /// after the last frame (StreamClock): the profile's stream, or its
@@ -541,6 +566,145 @@ internal static partial class Program
         DecodeCheck(name, tracker, seen.Count, early, off, firstOff);
         StressVerdict(name, sent, seen, repeatMs: IdleRepeatMs(c), compareFinals: true);
         if (burstOf != null) LateDetail(name, sent, burstOf, seen, seen, wgi: false, streamMs: 0);
+    }
+
+    /// <summary>A keyboard or mouse pass (header): each frame's delivery as
+    /// the driver acknowledges it.</summary>
+    static void StressKbm(HMController c, string name, double seconds, IntPtr signal, bool gateOff, bool lateDetail, int missInputEvery, bool keyboard)
+    {
+        if (!c.DeliversEveryReport)
+        {
+            Check($"{name}: the SDK sends every report and the driver acknowledges each", false, "DeliversEveryReport is false");
+            return;
+        }
+        int index = (int)typeof(HMController).GetProperty("Index", Any)!.GetValue(c)!;
+        var seqField = typeof(HMController).GetField("_inputSeqNo", Any)!;
+        var wroteField = typeof(HMController).GetField("_lastFrameTicks", Any)!;
+        IntPtr map = OpenFileMappingW(FILE_MAP_READ, false, $@"Global\HIDMaestroInputAck{index}");
+        if (map == IntPtr.Zero) { Check($"{name}: the acknowledgement section", false, $"error {Marshal.GetLastWin32Error()}"); return; }
+        IntPtr view = MapViewOfFile(map, FILE_MAP_READ, 0, 0, UIntPtr.Zero);
+        if (view == IntPtr.Zero) { CloseHandle(map); Check($"{name}: the acknowledgement section mapped", false, $"error {Marshal.GetLastWin32Error()}"); return; }
+        try
+        {
+            // Each count's SeqNo and the SDK's record of its write, count 0
+            // the frame before the schedule.
+            const int Capacity = 1 << 20;
+            var seqs = new uint[Capacity];
+            var wrote = new long[Capacity];
+            var acks = new List<(uint Seq, long Time)>(1 << 20);
+            var burstOf = lateDetail ? new List<(int Size, int After)>(1 << 20) : null;
+            bool stop = false;
+            var keys = new HMKey[1];
+            int counted = 0;
+            void Send(int n)
+            {
+                if (keyboard)
+                {
+                    if (n % 2 == 1)
+                    {
+                        keys[0] = (HMKey)((byte)HMKey.F13 + n / 2 % 12);
+                        c.SubmitKeyboard(HMKeyModifiers.None, keys);
+                    }
+                    else c.SubmitKeyboard(HMKeyModifiers.None, ReadOnlySpan<HMKey>.Empty);
+                }
+                else c.SubmitMouse(new HMMouseState { X = n % 2 == 1 ? 1 : -1 });
+                if (n < Capacity)
+                {
+                    seqs[n] = (uint)seqField.GetValue(c)!;
+                    wrote[n] = (long)wroteField.GetValue(c)!;
+                    counted = n;
+                }
+            }
+            var reader = new Thread(() =>
+            {
+                uint last = (uint)Marshal.ReadInt32(view, 0);
+                while (!Volatile.Read(ref stop))
+                {
+                    uint d = (uint)Marshal.ReadInt32(view, 0);
+                    if (d == last) { Thread.SpinWait(16); continue; }
+                    long t = Stopwatch.GetTimestamp();
+                    lock (acks) acks.Add((d, t));
+                    last = d;
+                }
+            }) { IsBackground = true, Priority = ThreadPriority.Highest, Name = "stress acknowledgement" };
+            reader.Start();
+            Send(0);
+            Thread.Sleep(300);
+            Console.WriteLine($"  {name}, Submit{(keyboard ? "Keyboard, F13 to F24 each pressed and then released" : "Mouse, one count right and then one left")}, to the driver's acknowledgement:");
+            var modes = signal == IntPtr.Zero || gateOff ? new[] { 0 } : new[] { 0, GateInput };
+            var called = StressSchedule(seconds, Send, modes, signal, 0, missInputEvery, burstOf);
+            Thread.Sleep((int)StressBoundMs * 2);
+            Volatile.Write(ref stop, true);
+            reader.Join(2000);
+
+            // Each submit's time is its write, after the SDK's wait for the
+            // frame before. A wait of the full 200 ms is a frame before it that
+            // was never acknowledged.
+            var sent = new List<(int Count, long Time, int Mode, int Block)>(called.Count);
+            int timedOut = 0;
+            double longest = 0;
+            foreach (var x in called)
+            {
+                if (x.Count > counted) break;
+                double waited = (wrote[x.Count] - x.Time) * 1000.0 / Stopwatch.Frequency;
+                longest = Math.Max(longest, waited);
+                if (waited >= 200) timedOut++;
+                sent.Add((x.Count, wrote[x.Count], x.Mode, x.Block));
+            }
+            Console.WriteLine(FormattableString.Invariant(
+                $"  {name}: the longest wait inside a submit for the frame before {longest:F2} ms, {timedOut} waits of the full 200 ms"));
+
+            // Each acknowledgement as the count it names. One that names no
+            // SeqNo the probe wrote is a misread, and one below the count
+            // before it an older frame.
+            List<(uint Seq, long Time)> got;
+            lock (acks) got = acks.ToList();
+            int CountOf(uint seq)
+            {
+                int lo = 0, hi = counted;
+                while (lo <= hi)
+                {
+                    int mid = (lo + hi) / 2;
+                    int d = (int)(seqs[mid] - seq);
+                    if (d == 0) return mid;
+                    if (d < 0) lo = mid + 1; else hi = mid - 1;
+                }
+                return -1;
+            }
+            var seen = new List<(int, long)>(got.Count);
+            int lastCount = -1, misread = 0, older = 0, before = 0;
+            string? firstMisread = null, firstOlder = null;
+            foreach (var (seq, t) in got)
+            {
+                int k = CountOf(seq);
+                if (k < 0)
+                {
+                    if ((int)(seq - seqs[0]) < 0) before++;
+                    else if (misread++ == 0) firstMisread = $"SeqNo {seq}";
+                    continue;
+                }
+                if (k < lastCount)
+                {
+                    if (older++ == 0) firstOlder = $"count {k} after {lastCount}";
+                    continue;
+                }
+                if (k == lastCount) continue;
+                seen.Add((k, t));
+                lastCount = k;
+            }
+            Check($"{name}: every acknowledgement names a frame the probe wrote, none older than the one before it",
+                misread == 0 && older == 0,
+                $"{seen.Count} frames acknowledged, {before} acknowledgements before the first frame" +
+                (older > 0 ? $", {older} older than the one before, the first {firstOlder}" : "") +
+                (misread > 0 ? $", {misread} naming no frame written, the first {firstMisread}" : ""));
+            StressVerdict(name, sent, seen, repeatMs: 0, compareFinals: true);
+            if (burstOf != null) LateDetail(name, sent, burstOf, seen, seen, wgi: false, streamMs: 0);
+        }
+        finally
+        {
+            UnmapViewOfFile(view);
+            CloseHandle(map);
+        }
     }
 
     /// <summary>Offline checks of the passes' count encodings for the

@@ -96,15 +96,21 @@
 // the same mark in both blocks of a pair, and the coin decides which one the
 // gate ran in. The input control fails it in every pair on the DualShock 4
 // and the F310 (SIG-stress-rel3g-celeron).
-//   Each submit before a pause past the worker's 500 ms wait must be read
-// first at its own count, gated or not. A frame read first at a later count
-// never went out on its own and waited out the pause for the next submit:
-// a lost wakeup on a path with no idle repeat, or an idle repeat that never
-// came. Load leaves that mark only by holding the frame back past the
-// pause, at least 600 ms, which fails the 250 ms bound first. A lost wakeup
-// the gate does not cause shows in both blocks of every pair, and on a path
-// with an idle repeat it costs one stream period, which the machine's own
-// delays also reach. No check here can see that case.
+//   Each submit before a pause past the worker's 500 ms wait is printed
+// with whether it was read first at its own count, gated or not. A frame
+// read first at a later count never went out on its own and waited out the
+// pause for the next submit: a lost wakeup on a path with no idle repeat,
+// an idle repeat that never came, or a frame held past the pause. That line
+// is no check, since load leaves the same mark: on the development laptop
+// beside the host-priority lane's bursts at AboveNormal, frames waited up to
+// 732 ms, past the schedule's shortest pause of 600 ms
+// (SIG-stress-rel3g-laptop-burst-abovenormal). A lost wakeup on a path with
+// no idle repeat still fails a check: its frame waits 600 ms or more, past
+// the 250 ms bound, and a gated one fails the comparison of submits alone
+// as well. A lost wakeup the gate does not cause shows in both blocks of
+// every pair, and on a path with an idle repeat it costs one stream period,
+// which the machine's own delays also reach. No check here can see that
+// case.
 //   The final submits, with no further submit for 4 ms, are printed by mode
 // with their waits. On the Xbox 360 pad's Windows.Gaming.Input pass the
 // submits alone are printed and not compared: Windows.Gaming.Input reads the
@@ -232,11 +238,22 @@ internal static partial class Program
         if (named != null)
         {
             var list = named["--passes=".Length..].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            passes = list.Length == 1 && list[0] == "all" ? StressPasses.Select(p => p.Name).ToList() : list.ToList();
+            // all is every pass but the keyboard's and the mouse's.
+            passes = list.SelectMany(p => p == "all" ? StressPasses.Select(s => s.Name).Where(n => !StressKbmPasses.Contains(n)) : new[] { p })
+                .Distinct().ToList();
             string? unknown = passes.FirstOrDefault(p => !StressPasses.Any(s => s.Name == p));
             if (unknown != null || passes.Count == 0)
             {
-                Console.WriteLine($"signal-stress: {named} names {unknown ?? "no pass"}; the passes are {string.Join(", ", StressPasses.Select(p => p.Name))}, or all");
+                Console.WriteLine($"signal-stress: {named} names {unknown ?? "no pass"}. The passes are {string.Join(", ", StressPasses.Select(p => p.Name))}, or all");
+                return 1;
+            }
+            // The keys and the pointer land in whatever window has focus on
+            // this machine's console, so the caller names the machine they may
+            // type on, and a command copied to another machine refuses.
+            string? kbm = args.FirstOrDefault(x => x.StartsWith("--kbm=", StringComparison.Ordinal))?["--kbm=".Length..];
+            if (passes.Any(StressKbmPasses.Contains) && !string.Equals(kbm, Environment.MachineName, StringComparison.OrdinalIgnoreCase))
+            {
+                Console.WriteLine($"signal-stress: the keyboard and mouse passes type and move the pointer on this machine's console. They run only with --kbm=<this machine's name>, and never on the development laptop");
                 return 1;
             }
         }
@@ -271,6 +288,10 @@ internal static partial class Program
                     break;
                 case "x360-xinput":
                     StressXInput(c, slotsBefore, seconds, SignalView(c), gateOff, lateDetail, missEvery, missInputEvery);
+                    break;
+                case "keyboard":
+                case "mouse":
+                    StressKbm(c, profile, seconds, SignalView(c), gateOff, lateDetail, missInputEvery, keyboard: pass == "keyboard");
                     break;
                 default:
                     // A USB/IP controller has no HIDMaestro driver and no
@@ -573,14 +594,14 @@ internal static partial class Program
     internal static bool NotOnItsOwn(double wait, int ahead, double repeatMs) =>
         double.IsNaN(wait) || ahead != 0 || (repeatMs > 0 && wait >= repeatMs);
 
-    /// <summary>The submits a lost wakeup marks (header): the check that each
-    /// submit before a pause was first read at its own count, each mode's
-    /// final submits and submits alone on a line each, and with
+    /// <summary>The submits a lost wakeup marks (header): the submits before
+    /// a pause and whether each was first read at its own count, each mode's
+    /// final submits and submits alone, each on a line, and with
     /// <paramref name="compare"/> each gate-on mode's submits alone not read
     /// on their own against the gate-off block of each pair.
     /// <paramref name="ahead"/> is how far past its count each submit's first
     /// reading was, -1 for one never read. Returns the submits before a pause
-    /// not read at their own count.</summary>
+    /// not first read at their own count.</summary>
     internal static int FinalVerdict(string name, List<(int Count, long Time, int Mode, int Block)> sent, double[] wait, int[] ahead,
         List<(int Mode, int Submits, int Over4)> blocks, double repeatMs, bool compare)
     {
@@ -590,12 +611,13 @@ internal static partial class Program
 
         var pauses = SubmitsBefore(sent, wait, PauseGapMs);
         var missed = pauses.Where(i => ahead[i] != 0).ToList();
-        Check($"{name}: every submit before a pause past the worker's 500 ms wait first read at its own count",
-            missed.Count == 0,
-            $"{pauses.Count} such submits" + (missed.Count == 0 ? ", each read at its own count, the slowest " +
-                (pauses.Count == 0 ? "-" : F(pauses.Max(i => wait[i])) + " ms")
-                : $", {missed.Count} not: " + string.Join("; ", missed.Take(12).Select(i => $"count {sent[i].Count} {ShortMode(sent[i].Mode)} {Late(i)}"))
-                    + (missed.Count > 12 ? $"; {missed.Count - 12} more" : "")));
+        // Printed, not checked (header): load that holds a frame past the
+        // pause leaves the same mark as a lost wakeup.
+        var readOwn = pauses.Where(i => ahead[i] == 0).ToList();
+        Console.WriteLine($"  {name}: {pauses.Count} submits before a pause past the worker's 500 ms wait, {missed.Count} not first read at their own count" +
+            (readOwn.Count == 0 ? "" : $", the slowest of the others read {F(readOwn.Max(i => wait[i]))} ms on") +
+            (missed.Count == 0 ? "" : ": " + string.Join("; ", missed.Take(12).Select(i => $"count {sent[i].Count} {ShortMode(sent[i].Mode)} {Late(i)}"))
+                + (missed.Count > 12 ? $"; {missed.Count - 12} more" : "")));
 
         var finals = SubmitsBefore(sent, wait, FinalGapMs);
         bool Off(int i) => NotOnItsOwn(wait[i], ahead[i], repeatMs);
