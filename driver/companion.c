@@ -22,6 +22,7 @@ EVT_WDF_OBJECT_CONTEXT_CLEANUP CompanionDeviceCleanup;
 EVT_WDF_DEVICE_SELF_MANAGED_IO_FLUSH CompanionSelfManagedIoFlush;
 EVT_WDF_TIMER CompanionPumpTimer;
 EVT_WDF_IO_QUEUE_IO_CANCELED_ON_QUEUE CompanionWaitCanceled;
+EVT_WDF_FILE_CLOSE CompanionFileClose;
 static DWORD WINAPI CompanionInputPumpProc(LPVOID param);
 struct _COMPANION_CTX;
 static BOOLEAN ReadGipDataLocked(struct _COMPANION_CTX *ctx, UCHAR gipOut[14], ULONG *seqOut);
@@ -128,7 +129,7 @@ typedef struct _COMPANION_CTX {
     /* 2.1.0: the signal gate (hm_contract.h, HIDMAESTRO_SIGNAL), mapped at
      * add under the contract and kept until the device goes. Each
      * WAIT_FOR_INPUT in WaitForInputQueue is counted in CompanionParked:
-     * up once it is in the queue, down when CompanionPumpOnce takes it or
+     * up once it is in the queue, down when CompanionServeReaders takes it or
      * the framework cancels it (CompanionWaitCanceled). The SDK rings the
      * doorbell only while the count is not zero. NULL without a section,
      * and the SDK rings on every GIP frame. */
@@ -139,16 +140,39 @@ typedef struct _COMPANION_CTX {
      * nothing parked, or, with the gate, after the SDK last looked at the
      * count, gets no doorbell for that frame. Its IOCTL thread then sets
      * this unnamed auto-reset event, which the pump also waits on, when
-     * the section holds a frame newer than the last completion carried
-     * (WaitServedSeq). Made for every companion under the contract, which
-     * alone registers the XUSB interface. NULL when it could not be made or
-     * no pump runs, and such a request waits for the next frame or the
-     * 8 ms timer. */
+     * the section holds a frame its reader has not had. Made for every
+     * companion under the contract, which alone registers the XUSB
+     * interface. NULL when it could not be made or no pump runs, and such a
+     * request waits for the next frame or the 8 ms timer. */
     HANDLE ParkKick;
-    volatile LONG WaitServedSeq;
+    /* 2.1.0: the readers, in the order of their first WAIT_FOR_INPUT. Under
+     * ReadersLock, which also lets one turn of the pump run at a time, the
+     * doorbell thread's or the timer's (CompanionServeReaders). The zeroed
+     * context's SRWLOCK_INIT. */
+    SRWLOCK ReadersLock;
+    struct _COMPANION_READER *Readers;
 } COMPANION_CTX, *PCOMPANION_CTX;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(COMPANION_CTX, GetCompanionCtx)
+
+/* 2.1.0: a reader, one handle a caller opened on the XUSB interface and
+ * parks WAIT_FOR_INPUT through. Windows.Gaming.Input, explorer and
+ * GameInputSvc each keep their own parked on an Xbox 360 pad. The context
+ * of each WDFFILEOBJECT. */
+typedef struct _COMPANION_READER {
+    struct _COMPANION_READER *Next;   /* COMPANION_CTX.Readers, under ReadersLock */
+    WDFFILEOBJECT File;
+    volatile BOOLEAN Linked;          /* from its first WAIT_FOR_INPUT to its close */
+    /* The SeqNo of the frame the last completion to this reader carried, 0
+     * for the state with no frame, COMPANION_NO_FRAME before the first.
+     * Written under ReadersLock before that completion. */
+    volatile LONG ServedSeq;
+} COMPANION_READER, *PCOMPANION_READER;
+
+WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(COMPANION_READER, GetCompanionReader)
+
+/* Odd: no finished frame carries it. */
+#define COMPANION_NO_FRAME 1
 
 /* Append the decimal representation of a ULONG to a wide-string buffer.
  * Self-contained: companion doesn't link MSVCRT, no swprintf available.
@@ -628,6 +652,18 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
     HmReadInstanceToken(DeviceInit, token, ARRAYSIZE(token));
     haveIdentityIndex = HmReadIdentityIndex(token, &identityIndex);
 
+    /* 2.1.0: a reader context on every handle. With no create callback the
+     * framework completes each create itself, as before, and makes the
+     * file object all the same (Windows-Driver-Frameworks
+     * irphandlers/general/fxpkggeneral.cpp, FxPkgGeneral::OnCreate). */
+    {
+        WDF_FILEOBJECT_CONFIG fileConfig;
+        WDF_OBJECT_ATTRIBUTES fileAttributes;
+        WDF_FILEOBJECT_CONFIG_INIT(&fileConfig, WDF_NO_EVENT_CALLBACK, CompanionFileClose, WDF_NO_EVENT_CALLBACK);
+        WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&fileAttributes, COMPANION_READER);
+        WdfDeviceInitSetFileObjectConfig(DeviceInit, &fileConfig, &fileAttributes);
+    }
+
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, COMPANION_CTX);
     attributes.EvtCleanupCallback = CompanionDeviceCleanup;
     status = WdfDeviceCreate(&DeviceInit, &attributes, &device);
@@ -1004,63 +1040,101 @@ static VOID BuildXusbStateForWaitInput(PCOMPANION_CTX ctx, UCHAR state[29], ULON
     *(SHORT*)&state[21] = ry;
 }
 
-/* 2.1.0: whether the input section holds a frame newer than the last
- * WAIT_FOR_INPUT completion carried, or cannot say (no view yet). Under
- * GipLock, which keeps the view mapped. Any IOCTL thread, or the pump. */
-static BOOLEAN FrameNewerThanServed(_In_ PCOMPANION_CTX ctx)
+/* 2.1.0: whether the input section holds a frame the reader has not had,
+ * or cannot say (no view yet, or a write under way, which rings or kicks
+ * again once it ends). Under GipLock, which keeps the view mapped. An
+ * IOCTL thread after its park. */
+static BOOLEAN FrameNewForReader(_In_ PCOMPANION_CTX ctx, _In_ PCOMPANION_READER reader)
 {
     BOOLEAN newer = TRUE;
     EnterCriticalSection(&ctx->GipLock);
     if (ctx->SharedMemPtr != NULL) {
         ULONG seq = ((volatile SHARED_INPUT *)ctx->SharedMemPtr)->SeqNo;
-        newer = (seq & 1) == 0 && seq != (ULONG)ctx->WaitServedSeq;
+        newer = (seq & 1) == 0 && seq != (ULONG)reader->ServedSeq;
     }
     LeaveCriticalSection(&ctx->GipLock);
     return newer;
 }
 
-/* Periodic pump for pended IOCTL_XUSB_WAIT_FOR_INPUT requests. WGI
+/* 2.1.0: the SeqNo of the newest frame the section holds, as far as a look
+ * can tell without reading the frame. Odd when it cannot tell: a write is
+ * under way, or there is no view yet, which only the read of a frame maps
+ * (ReadGipDataLocked). Under GipLock. */
+static ULONG PeekSectionSeq(_In_ PCOMPANION_CTX ctx)
+{
+    ULONG seq = COMPANION_NO_FRAME;
+    EnterCriticalSection(&ctx->GipLock);
+    if (ctx->SharedMemPtr != NULL)
+        seq = ((volatile SHARED_INPUT *)ctx->SharedMemPtr)->SeqNo;
+    LeaveCriticalSection(&ctx->GipLock);
+    return seq;
+}
+
+/* The pump for parked IOCTL_XUSB_WAIT_FOR_INPUT requests. WGI
  * (Windows.Gaming.Input.dll XusbDevice::QueueInputBuffer @ 0x18006af0c)
  * issues this IOCTL async and waits on the OVERLAPPED. If we never complete
  * it, ProcessInput -> UpdateInputSinks -> OnInputResumed never fires, and
  * Gamepad::SendControllerVibrationCommand silently bails at the flag_0x184
  * gate (non-GIP dispatch requires flag_0x184 == 0, which only OnInputResumed
- * sets). Completing one pended request per tick with the current 29-byte
- * state mirrors a real xusb22 device's behavior.
+ * sets). Each reader's first request gets the state there is, a frame or
+ * none, which fires OnInputResumed.
  *
- * 8ms period roughly matches a wired Xbox 360's 125Hz USB polling cadence.
- * Only one pending request is completed per tick; if WGI's pump is deep
- * enough it'll re-queue immediately and the next tick picks it up. */
-/* Complete at most one parked WAIT_FOR_INPUT with the current state. The
- * manual queue's retrieve-next is the atomic claim, so the 8 ms timer and
- * the doorbell thread can both call this without double-completion.
- * 2.1.0: on a doorbell or a kick (newerOnly) only when the section holds a
- * frame newer than the last completion carried. One frame can set both:
- * its doorbell and the kick of a request that parked as it was written.
- * Serving each completed two requests with the one frame. A frame that
- * comes after this look rings or kicks again, and the 8 ms timer still
- * serves whatever is current. */
-static VOID CompanionPumpOnce(_In_ PCOMPANION_CTX ctx, _In_ BOOLEAN newerOnly)
+ * 2.1.0: one turn serves every reader that has not had the newest frame,
+ * through its oldest request parked (WdfIoQueueRetrieveRequestByFileObject,
+ * FIFO by file object: Windows-Driver-Frameworks core/fxirpqueue.cpp,
+ * RemoveNextIrpFromQueue). Through 2.0.3 a turn completed one request, so
+ * of the readers a trace found on an Xbox 360 pad, Windows.Gaming.Input,
+ * explorer and GameInputSvc, one got a frame at once and the others on the
+ * next 8 ms ticks, and a reader with two requests parked got one frame on
+ * both. xusb22 completes every wait parked through any handle on each
+ * report from the pad (XInputControllerDevice::ProcessWaitRequests in
+ * xusb22.sys 10.0.26100.9549), so a reader there gets a report once for
+ * each request it has parked. Here each new frame goes to each reader
+ * once, and nothing goes to a reader that has it, from the doorbell, a
+ * kick or the timer.
+ *
+ * The turn runs under ReadersLock, completions included, so turns run one
+ * at a time and each serves the newest frame: no reader gets a frame older
+ * than one it had. A reader's next request, parked after the completion,
+ * finds ServedSeq written. The count's decrement follows the read of the
+ * section: a frame the SDK writes after it and before the decrement rings
+ * the doorbell, and one after the decrement is found by the next
+ * request's own look. A reader that parks after the turn passed it kicks
+ * the pump itself (IOCTL_XUSB_WAIT_FOR_INPUT). The doorbell thread, a
+ * kick, or the 8 ms timer. */
+static VOID CompanionServeReaders(_In_ PCOMPANION_CTX ctx)
 {
     if (ctx->WaitForInputQueue == NULL) return;
-    if (newerOnly && !FrameNewerThanServed(ctx)) return;
-
-    WDFREQUEST req;
-    NTSTATUS s = WdfIoQueueRetrieveNextRequest(ctx->WaitForInputQueue, &req);
-    if (!NT_SUCCESS(s)) return;  /* nothing pended */
-    /* Out of the queue: no longer counted for the SDK's doorbell. The
-     * state goes in below, read after this, so a frame the SDK writes
-     * after it finds the count lower is in it or rings again. */
-    if (ctx->SignalPtr != NULL) InterlockedDecrement(&ctx->SignalPtr->CompanionParked);
-
-    UCHAR state[29];
-    ULONG seq = 0;
-    BuildXusbStateForWaitInput(ctx, state, &seq);
-    /* The frame this completion carries, for the WAIT_FOR_INPUT that comes
-     * next (FrameNewerThanServed), stored before the completion that makes
-     * the caller send it. */
-    InterlockedExchange(&ctx->WaitServedSeq, (LONG)seq);
-    CopyToRequest(req, state, 29);
+    AcquireSRWLockExclusive(&ctx->ReadersLock);
+    ULONG peek = PeekSectionSeq(ctx);
+    BOOLEAN lacking = FALSE;
+    for (PCOMPANION_READER r = ctx->Readers; r != NULL && !lacking; r = r->Next)
+        lacking = (peek & 1) != 0 || (ULONG)r->ServedSeq != peek;
+    if (lacking) {
+        UCHAR state[29];
+        ULONG seq = 0;
+        BuildXusbStateForWaitInput(ctx, state, &seq);
+        for (PCOMPANION_READER r = ctx->Readers; r != NULL; r = r->Next) {
+            WDFREQUEST req;
+            PVOID out;
+            size_t outLen;
+            if ((ULONG)r->ServedSeq == seq) continue;
+            if (!NT_SUCCESS(WdfIoQueueRetrieveRequestByFileObject(ctx->WaitForInputQueue, r->File, &req)))
+                continue;
+            /* Out of the queue: no longer counted for the SDK's doorbell. */
+            if (ctx->SignalPtr != NULL) InterlockedDecrement(&ctx->SignalPtr->CompanionParked);
+            /* The dispatch refused a buffer under 29 bytes. The reader has
+             * the frame once a completion carries it, and not before. */
+            if (!NT_SUCCESS(WdfRequestRetrieveOutputBuffer(req, 29, &out, &outLen))) {
+                WdfRequestComplete(req, STATUS_BUFFER_TOO_SMALL);
+                continue;
+            }
+            RtlCopyMemory(out, state, 29);
+            InterlockedExchange(&r->ServedSeq, (LONG)seq);
+            WdfRequestCompleteWithInformation(req, STATUS_SUCCESS, 29);
+        }
+    }
+    ReleaseSRWLockExclusive(&ctx->ReadersLock);
 }
 
 VOID CompanionWaitCanceled(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request)
@@ -1070,10 +1144,33 @@ VOID CompanionWaitCanceled(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request)
     WdfRequestComplete(Request, STATUS_CANCELLED);
 }
 
+/* The 8 ms timer: a turn for a reader whose frame no doorbell or kick
+ * brought, under an SDK with no doorbell, or while a recreated doorbell is
+ * not open yet. */
 VOID CompanionPumpTimer(_In_ WDFTIMER Timer)
 {
     WDFDEVICE device = (WDFDEVICE)WdfTimerGetParentObject(Timer);
-    CompanionPumpOnce(GetCompanionCtx(device), FALSE);
+    CompanionServeReaders(GetCompanionCtx(device));
+}
+
+/* 2.1.0: the reader leaves the readers when its handle's last reference
+ * goes. The I/O manager sends the close only after every request through
+ * the handle completed, and IRP_MJ_CLEANUP before it canceled those still
+ * parked (fxpkggeneral.cpp OnCleanup, fxioqueue.cpp FlushByFileObject), so
+ * no turn holds one of its requests. The turn reads a reader only under
+ * ReadersLock, and the framework frees the context after this returns. */
+VOID CompanionFileClose(_In_ WDFFILEOBJECT FileObject)
+{
+    PCOMPANION_CTX ctx = GetCompanionCtx(WdfFileObjectGetDevice(FileObject));
+    PCOMPANION_READER reader = GetCompanionReader(FileObject);
+    AcquireSRWLockExclusive(&ctx->ReadersLock);
+    if (reader->Linked) {
+        PCOMPANION_READER *at = &ctx->Readers;
+        while (*at != NULL && *at != reader) at = &(*at)->Next;
+        if (*at == reader) *at = reader->Next;
+        reader->Linked = FALSE;
+    }
+    ReleaseSRWLockExclusive(&ctx->ReadersLock);
 }
 
 /* Input-doorbell thread (perf audit 2026-07-21). The SDK signals
@@ -1104,7 +1201,7 @@ static DWORD WINAPI CompanionInputPumpProc(LPVOID param)
                 if (rb == WAIT_OBJECT_0)
                     return 0;
                 if (rb == WAIT_OBJECT_0 + 1)
-                    CompanionPumpOnce(ctx, TRUE);
+                    CompanionServeReaders(ctx);
                 continue;
             }
         }
@@ -1116,7 +1213,7 @@ static DWORD WINAPI CompanionInputPumpProc(LPVOID param)
         if (rc == WAIT_OBJECT_0 + 2) {
             /* A WAIT_FOR_INPUT came in after its frame's doorbell, or after
              * the SDK looked at the count. */
-            CompanionPumpOnce(ctx, TRUE);
+            CompanionServeReaders(ctx);
             continue;
         }
         /* A doorbell this device could not make, while a program held its
@@ -1125,7 +1222,7 @@ static DWORD WINAPI CompanionInputPumpProc(LPVOID param)
          * writes alone retry it only every 500 publishes. On a frame the
          * attempt runs after the frame, so it never adds to its latency. */
         if (rc == WAIT_OBJECT_0 + 1) {
-            CompanionPumpOnce(ctx, TRUE);
+            CompanionServeReaders(ctx);
             if (ctx->OutputSignalEvent == NULL && (++doorbellTick & 0xFF) == 0)
                 TryCreateDoorbell(ctx);
             continue;
@@ -1251,10 +1348,43 @@ void CompanionIoControl(
     }
 
     case IOCTL_XUSB_WAIT_FOR_INPUT: {
-        /* Pend the request; CompanionPumpTimer completes one per tick with
-         * the current 29-byte XUSB state. WGI's XusbDevice::ProcessInput
-         * expects exactly 0x1D bytes from the async read and re-queues after
-         * each completion. */
+        /* Park the request for the pump (CompanionServeReaders), which
+         * completes it with the 29-byte XUSB state of a frame its reader has
+         * not had. WGI's XusbDevice::ProcessInput expects exactly 0x1D bytes
+         * from the async read and re-queues after each completion.
+         * 2.1.0: its handle's reader joins the readers at its first
+         * request, before the request is in the queue, so a turn that finds
+         * the request finds the reader. Every request through a handle has
+         * the handle's file object (fxpkggeneral.cpp, OnCreate), so the
+         * failure below is for a caller the framework never presents. */
+        WDFFILEOBJECT file = WdfRequestGetFileObject(Request);
+        if (file == NULL) {
+            WdfRequestComplete(Request, STATUS_INVALID_DEVICE_REQUEST);
+            break;
+        }
+        /* A buffer too small for the state fails now, as CopyToRequest
+         * would fail it later: parked, it would count as served without
+         * the frame, and its reader's next request would wait for the
+         * frame after. xusb22 fails it at dispatch too
+         * (DispatchWaitForInput). */
+        if (OutputBufferLength < 29) {
+            WdfRequestComplete(Request, STATUS_BUFFER_TOO_SMALL);
+            break;
+        }
+        PCOMPANION_READER reader = GetCompanionReader(file);
+        if (!reader->Linked) {
+            AcquireSRWLockExclusive(&ctx->ReadersLock);
+            if (!reader->Linked) {
+                PCOMPANION_READER *at = &ctx->Readers;
+                while (*at != NULL) at = &(*at)->Next;
+                reader->File = file;
+                reader->ServedSeq = COMPANION_NO_FRAME;
+                reader->Next = NULL;
+                *at = reader;
+                reader->Linked = TRUE;
+            }
+            ReleaseSRWLockExclusive(&ctx->ReadersLock);
+        }
         NTSTATUS s = WdfRequestForwardToIoQueue(Request, ctx->WaitForInputQueue);
         if (!NT_SUCCESS(s)) {
             WdfRequestComplete(Request, s);
@@ -1264,10 +1394,10 @@ void CompanionIoControl(
          * increment, a full barrier, and then the section's SeqNo is read.
          * The SDK stores the SeqNo, fences and reads the count. So the SDK
          * either finds the count and rings, or this read finds its frame,
-         * and the pump is kicked when that frame is newer than the last
-         * completion carried (docs/design/signal-gate.md). The pump can take
-         * the request before the increment: the count is then -1 for a
-         * moment, and the SDK rings on any count but 0. */
+         * and the pump is kicked when the reader has not had that frame
+         * (docs/design/signal-gate.md). The pump can take the request
+         * before the increment: the count is then -1 for a moment, and the
+         * SDK rings on any count but 0. */
         if (ctx->SignalPtr != NULL) {
             InterlockedIncrement(&ctx->SignalPtr->CompanionParked);
 #if defined(_M_ARM64)
@@ -1282,8 +1412,9 @@ void CompanionIoControl(
          * SDK stores the SeqNo before its SetEvent, and the pump looks at
          * the queue after its wait returns that ring: either that look
          * found this request, parked before it, or this read, after the
-         * park, finds the frame. */
-        if (ctx->ParkKick != NULL && FrameNewerThanServed(ctx))
+         * park, finds the frame. Another reader's completion says nothing
+         * about this one's. */
+        if (ctx->ParkKick != NULL && FrameNewForReader(ctx, reader))
             SetEvent(ctx->ParkKick);
         break;
     }
