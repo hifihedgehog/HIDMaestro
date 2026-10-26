@@ -135,12 +135,15 @@ typedef struct _COMPANION_CTX {
     WCHAR SignalMappingName[64]; /* e.g. L"Global\HIDMaestroSignal0" */
     HANDLE SignalMemHandle;
     PHIDMAESTRO_SIGNAL SignalPtr;
-    /* With the gate, a WAIT_FOR_INPUT that comes in after the SDK last
-     * looked at the count gets no doorbell for that frame. Its IOCTL thread
-     * then sets this unnamed auto-reset event, which the pump also waits
-     * on, when the section holds a frame newer than the last completion
-     * carried (WaitServedSeq). NULL when it could not be made, and such a
-     * request waits for the next frame or the 8 ms timer. */
+    /* A WAIT_FOR_INPUT that comes in after its frame's doorbell, which found
+     * nothing parked, or, with the gate, after the SDK last looked at the
+     * count, gets no doorbell for that frame. Its IOCTL thread then sets
+     * this unnamed auto-reset event, which the pump also waits on, when
+     * the section holds a frame newer than the last completion carried
+     * (WaitServedSeq). Made for every companion under the contract, which
+     * alone registers the XUSB interface. NULL when it could not be made or
+     * no pump runs, and such a request waits for the next frame or the
+     * 8 ms timer. */
     HANDLE ParkKick;
     volatile LONG WaitServedSeq;
 } COMPANION_CTX, *PCOMPANION_CTX;
@@ -818,9 +821,13 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
 
         /* Input-doorbell thread (perf audit 2026-07-21): see
          * CompanionInputPumpProc. Non-fatal on failure; the 8 ms timer
-         * remains the pump. */
+         * remains the pump. 2.1.0: the kick for every companion that
+         * registers the XUSB interface, signal section or not. Without it a
+         * doorbell that came while no WAIT_FOR_INPUT was parked found the
+         * queue empty, and the request after it waited for the next frame
+         * or the timer, under every SDK before 2.1.0. */
         ctx->PumpStopEvent = CreateEventW(NULL, TRUE /* manual reset */, FALSE, NULL);
-        if (ctx->SignalPtr != NULL)
+        if (ctx->Contract)
             ctx->ParkKick = CreateEventW(NULL, FALSE /* auto reset */, FALSE, NULL);
         if (ctx->PumpStopEvent != NULL) {
             ctx->PumpThread = CreateThread(NULL, 0, CompanionInputPumpProc,
@@ -829,6 +836,11 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
                 CloseHandle(ctx->PumpStopEvent);
                 ctx->PumpStopEvent = NULL;
             }
+        }
+        /* No pump, nobody to kick. */
+        if (ctx->PumpThread == NULL && ctx->ParkKick != NULL) {
+            CloseHandle(ctx->ParkKick);
+            ctx->ParkKick = NULL;
         }
     }
 
@@ -992,6 +1004,21 @@ static VOID BuildXusbStateForWaitInput(PCOMPANION_CTX ctx, UCHAR state[29], ULON
     *(SHORT*)&state[21] = ry;
 }
 
+/* 2.1.0: whether the input section holds a frame newer than the last
+ * WAIT_FOR_INPUT completion carried, or cannot say (no view yet). Under
+ * GipLock, which keeps the view mapped. Any IOCTL thread, or the pump. */
+static BOOLEAN FrameNewerThanServed(_In_ PCOMPANION_CTX ctx)
+{
+    BOOLEAN newer = TRUE;
+    EnterCriticalSection(&ctx->GipLock);
+    if (ctx->SharedMemPtr != NULL) {
+        ULONG seq = ((volatile SHARED_INPUT *)ctx->SharedMemPtr)->SeqNo;
+        newer = (seq & 1) == 0 && seq != (ULONG)ctx->WaitServedSeq;
+    }
+    LeaveCriticalSection(&ctx->GipLock);
+    return newer;
+}
+
 /* Periodic pump for pended IOCTL_XUSB_WAIT_FOR_INPUT requests. WGI
  * (Windows.Gaming.Input.dll XusbDevice::QueueInputBuffer @ 0x18006af0c)
  * issues this IOCTL async and waits on the OVERLAPPED. If we never complete
@@ -1006,10 +1033,17 @@ static VOID BuildXusbStateForWaitInput(PCOMPANION_CTX ctx, UCHAR state[29], ULON
  * enough it'll re-queue immediately and the next tick picks it up. */
 /* Complete at most one parked WAIT_FOR_INPUT with the current state. The
  * manual queue's retrieve-next is the atomic claim, so the 8 ms timer and
- * the doorbell thread can both call this without double-completion. */
-static VOID CompanionPumpOnce(_In_ PCOMPANION_CTX ctx)
+ * the doorbell thread can both call this without double-completion.
+ * 2.1.0: on a doorbell or a kick (newerOnly) only when the section holds a
+ * frame newer than the last completion carried. One frame can set both:
+ * its doorbell and the kick of a request that parked as it was written.
+ * Serving each completed two requests with the one frame. A frame that
+ * comes after this look rings or kicks again, and the 8 ms timer still
+ * serves whatever is current. */
+static VOID CompanionPumpOnce(_In_ PCOMPANION_CTX ctx, _In_ BOOLEAN newerOnly)
 {
     if (ctx->WaitForInputQueue == NULL) return;
+    if (newerOnly && !FrameNewerThanServed(ctx)) return;
 
     WDFREQUEST req;
     NTSTATUS s = WdfIoQueueRetrieveNextRequest(ctx->WaitForInputQueue, &req);
@@ -1029,21 +1063,6 @@ static VOID CompanionPumpOnce(_In_ PCOMPANION_CTX ctx)
     CopyToRequest(req, state, 29);
 }
 
-/* 2.1.0: whether the input section holds a frame newer than the last
- * WAIT_FOR_INPUT completion carried, or cannot say (no view yet). Under
- * GipLock, which keeps the view mapped. Any IOCTL thread. */
-static BOOLEAN FrameNewerThanServed(_In_ PCOMPANION_CTX ctx)
-{
-    BOOLEAN newer = TRUE;
-    EnterCriticalSection(&ctx->GipLock);
-    if (ctx->SharedMemPtr != NULL) {
-        ULONG seq = ((volatile SHARED_INPUT *)ctx->SharedMemPtr)->SeqNo;
-        newer = (seq & 1) == 0 && seq != (ULONG)ctx->WaitServedSeq;
-    }
-    LeaveCriticalSection(&ctx->GipLock);
-    return newer;
-}
-
 VOID CompanionWaitCanceled(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request)
 {
     PCOMPANION_CTX ctx = GetCompanionCtx(WdfIoQueueGetDevice(Queue));
@@ -1054,7 +1073,7 @@ VOID CompanionWaitCanceled(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request)
 VOID CompanionPumpTimer(_In_ WDFTIMER Timer)
 {
     WDFDEVICE device = (WDFDEVICE)WdfTimerGetParentObject(Timer);
-    CompanionPumpOnce(GetCompanionCtx(device));
+    CompanionPumpOnce(GetCompanionCtx(device), FALSE);
 }
 
 /* Input-doorbell thread (perf audit 2026-07-21). The SDK signals
@@ -1078,8 +1097,14 @@ static DWORD WINAPI CompanionInputPumpProc(LPVOID param)
             ctx->CompanionInputEvent = OpenEventW(SYNCHRONIZE, FALSE,
                                                   ctx->CompanionInputEventName);
             if (ctx->CompanionInputEvent == NULL) {
-                if (WaitForSingleObject(ctx->PumpStopEvent, 500) == WAIT_OBJECT_0)
+                /* 2.1.0: a kick is answered here too, while the doorbell
+                 * is closed. */
+                HANDLE boot[2] = { ctx->PumpStopEvent, ctx->ParkKick };
+                DWORD rb = WaitForMultipleObjects(ctx->ParkKick != NULL ? 2 : 1, boot, FALSE, 500);
+                if (rb == WAIT_OBJECT_0)
                     return 0;
+                if (rb == WAIT_OBJECT_0 + 1)
+                    CompanionPumpOnce(ctx, TRUE);
                 continue;
             }
         }
@@ -1089,8 +1114,9 @@ static DWORD WINAPI CompanionInputPumpProc(LPVOID param)
         if (rc == WAIT_OBJECT_0)
             return 0;
         if (rc == WAIT_OBJECT_0 + 2) {
-            /* A WAIT_FOR_INPUT came in after the SDK looked at the count. */
-            CompanionPumpOnce(ctx);
+            /* A WAIT_FOR_INPUT came in after its frame's doorbell, or after
+             * the SDK looked at the count. */
+            CompanionPumpOnce(ctx, TRUE);
             continue;
         }
         /* A doorbell this device could not make, while a program held its
@@ -1099,7 +1125,7 @@ static DWORD WINAPI CompanionInputPumpProc(LPVOID param)
          * writes alone retry it only every 500 publishes. On a frame the
          * attempt runs after the frame, so it never adds to its latency. */
         if (rc == WAIT_OBJECT_0 + 1) {
-            CompanionPumpOnce(ctx);
+            CompanionPumpOnce(ctx, TRUE);
             if (ctx->OutputSignalEvent == NULL && (++doorbellTick & 0xFF) == 0)
                 TryCreateDoorbell(ctx);
             continue;
@@ -1250,9 +1276,15 @@ void CompanionIoControl(
              * SeqNo read below after the count's store. */
             MemoryBarrier();
 #endif
-            if (ctx->ParkKick != NULL && FrameNewerThanServed(ctx))
-                SetEvent(ctx->ParkKick);
         }
+        /* Without the section the SDK rings for every frame, and a ring
+         * that came while nothing was parked found the queue empty. The
+         * SDK stores the SeqNo before its SetEvent, and the pump looks at
+         * the queue after its wait returns that ring: either that look
+         * found this request, parked before it, or this read, after the
+         * park, finds the frame. */
+        if (ctx->ParkKick != NULL && FrameNewerThanServed(ctx))
+            SetEvent(ctx->ParkKick);
         break;
     }
 
