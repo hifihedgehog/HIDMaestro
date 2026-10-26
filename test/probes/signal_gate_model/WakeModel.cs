@@ -20,16 +20,16 @@
 // still in its second look is sent again on another thread, so the model
 // has one dispatch thread more than reads. A final state is one where no
 // step is possible: every read waits in the queue and every thread is idle.
+// The SeqNos are serial numbers modulo 16, and a scenario's frames after
+// its pipe closes are a next program's, which counts from 0.
 // Invariants:
 //   a. In a final state no read waits beside a report a read would take: a
-//      release frame queued; a cached frame no read carried whose SeqNo is
-//      above the last one delivered, which a READ_REPORT coming now takes;
-//      or a cached frame no read carried that came after a read now waiting
-//      looked at the cache. That read was waiting when the frame came, and a
-//      read that parked a moment earlier gets it from the worker in every
-//      driver. A read that looked after the frame came is a late read, and
-//      v2.0.3's greater-than test, which this driver keeps, parks it beside
-//      a frame past the SeqNo wrap.
+//      frame queued ahead of the release frames, a release frame queued, or
+//      a cached frame no read carried. Through e9a6e92d, as at v2.0.3, a
+//      late read took the cached frame only with its SeqNo above the last
+//      one delivered and waited beside the frame past the SeqNo wrap, and
+//      beside a next program's frame on a SeqNo below that one with no
+//      watch open (lane WAKE2).
 //   b. No frame and no release frame goes to two reads.
 //   c. Each frame a read takes is the one cached at that moment.
 //   d. No completion carries an older report than one completed before it:
@@ -39,6 +39,11 @@
 //      newer one.
 //   e. No READ_REPORT acknowledges a frame before the read that carries it
 //      completed: AckPending is the frame HID class has (issue #67).
+//   f. A frame its program sent, read while the program ran and carried by
+//      no read when the program's end is handled, goes out once, ahead of
+//      the release frames, unless a newer frame replaced it in the cache
+//      before a read came. Through e9a6e92d OwnerGone's reset dropped it
+//      (lane WAKE2).
 // Through 81e1fe40 a read completed after InputLock, which breaks d and e.
 // This driver completes it inside the critical section of its take.
 //
@@ -72,8 +77,21 @@ internal static class WakeModel
     // CompletionLock go. AckAfterComplete: with it, the frame a read
     // carried is noted for the acknowledgement after its completion, under
     // CompletionLock, where TakeReportLocked notes it at the take.
+    // Lane WAKE2 (driver.c CachedAfterDeliveredLocked, OwnerGone,
+    // ProcessSharedInput): Serial, a late read takes the cached frame when
+    // its SeqNo comes after the last one delivered in serial number
+    // arithmetic, or with none delivered since a reset, and a frame read
+    // once the pipe closed by greater-than; Keep, OwnerGone keeps a frame no
+    // read carried, queued ahead of the release frames when read while the
+    // program ran, and cached with none; Bump, a frame OwnerGone keeps
+    // cached is published again (InputPublishCount); Restart, a frame read
+    // on a SeqNo that repeats or goes back from the frame read last resets
+    // the delivered gate while no watch is open, in its cache write
+    // (RestartSeen), or with RestartApart in a critical section of its own
+    // before that write.
     internal sealed record Variant(string Name, bool PublishFirst, bool LookAgain, bool ByCount, bool ExpectBroken, bool RequeueLook = true,
-                                   bool CompleteInLock = false, bool CompletionLock = false, bool AckAfterComplete = false);
+                                   bool CompleteInLock = false, bool CompletionLock = false, bool AckAfterComplete = false,
+                                   bool Serial = false, bool Keep = false, bool Bump = false, bool Restart = false, bool RestartApart = false);
 
     internal static readonly Variant[] Variants =
     {
@@ -83,26 +101,49 @@ internal static class WakeModel
         new("the worker caches, then takes a read; a read looks again under the greater-than test alone", true, true, false, true),
         new("the worker caches, then takes a read; a read parks and looks again for a frame cached since, and a read put back does not", true, true, true, true, false),
         new("81e1fe40: the worker caches, then takes a read; a read parks, or is put back, and looks again for a frame cached since; a read completes after InputLock", true, true, true, true),
-        new("this driver: the worker caches, then takes a read; a read parks, or is put back, and looks again for a frame cached since; a read completes under InputLock", true, true, true, false, CompleteInLock: true),
-        new("candidate CompletionLock: a read completes after InputLock, under a lock its taker takes before it lets InputLock go; the frame noted for the acknowledgement at its take", true, true, true, true, CompletionLock: true),
-        new("candidate CompletionLock, the frame noted for the acknowledgement after its completion, under CompletionLock", true, true, true, false, CompletionLock: true, AckAfterComplete: true),
+        new("e9a6e92d: the worker caches, then takes a read; a read parks, or is put back, and looks again for a frame cached since; a read completes under InputLock; a late read by greater-than; OwnerGone drops a frame no read carried", true, true, true, true, CompleteInLock: true),
+        new("this driver: e9a6e92d's, a late read by serial number arithmetic, OwnerGone keeping a frame no read carried, published again when cached, and the restart reset", true, true, true, false, CompleteInLock: true,
+            Serial: true, Keep: true, Bump: true, Restart: true),
+        new("this driver with no publish of the frame OwnerGone keeps cached", true, true, true, true, CompleteInLock: true,
+            Serial: true, Keep: true, Bump: false, Restart: true),
+        new("this driver with no restart reset", true, true, true, true, CompleteInLock: true, Serial: true, Keep: true, Bump: true, Restart: false),
+        new("this driver with the restart reset before the cache write, under a lock of its own", true, true, true, true, CompleteInLock: true,
+            Serial: true, Keep: true, Bump: true, Restart: true, RestartApart: true),
+        new("candidate CompletionLock: this driver's, but a read completes after InputLock, under a lock its taker takes before it lets InputLock go; the frame noted for the acknowledgement at its take", true, true, true, true, CompletionLock: true,
+            Serial: true, Keep: true, Bump: true, Restart: true),
+        new("candidate CompletionLock on this driver's, the frame noted for the acknowledgement after its completion, under CompletionLock", true, true, true, false, CompletionLock: true, AckAfterComplete: true,
+            Serial: true, Keep: true, Bump: true, Restart: true),
     };
+
+    // The variants whose every order Run counts for the record: b0fb7dc9's
+    // and 81e1fe40's.
+    const int RecordB0fb = 0, Record81e1 = 5;
 
     // Seqs: each frame's SeqNo in the order the SDK writes them (a smaller
     // one after a larger is the wrap). Releases: the release frames a
-    // keyboard leaves, and its pipe closes after its last frame.
-    internal sealed record Scenario(string Name, int[] Seqs, int Reads, int Releases);
+    // keyboard leaves, and its pipe closes after its last frame. After: the
+    // last frames are a next program's, written once the pipe closed. Pipe:
+    // the program has a pipe the driver watches, which closes after its
+    // frames.
+    internal sealed record Scenario(string Name, int[] Seqs, int Reads, int Releases, int After = 0, bool Pipe = false)
+    {
+        public bool Watched => Pipe || Releases > 0 || After > 0;
+    }
 
     internal static readonly Scenario[] Scenarios =
     {
         new("two frames, one read", new[] { 2, 4 }, 1, 0),
         new("two frames, two reads", new[] { 2, 4 }, 2, 0),
-        new("the wrap, one read", new[] { 6, 2 }, 1, 0),
-        new("the wrap, two reads", new[] { 6, 2 }, 2, 0),
+        new("the wrap, one read", new[] { 14, 2 }, 1, 0),
+        new("the wrap, two reads", new[] { 14, 2 }, 2, 0),
         new("a keyboard's end, one read", new[] { 2 }, 1, 2),
         new("a keyboard's end, two reads", new[] { 2 }, 2, 2),
         new("two frames and the end, two reads", new[] { 2, 4 }, 2, 1),
         new("three frames, two reads", new[] { 2, 4, 6 }, 2, 0),
+        new("a gamepad's end, two reads", new[] { 2, 4 }, 2, 0, Pipe: true),
+        new("a next program's frame below the last delivered before OwnerGone, two reads", new[] { 4, 2 }, 2, 0, After: 1),
+        new("a next program's frame below the last delivered before OwnerGone, a release frame, two reads", new[] { 4, 2 }, 2, 1, After: 1),
+        new("a next program on the same SeqNo with no watch, two reads", new[] { 2, 2 }, 2, 0),
     };
 
     // Read states: HID class sends it next, its dispatch runs before the
@@ -117,7 +158,7 @@ internal static class WakeModel
     // DeliverReleaseFrames.
     const int W_IDLE = 0, W_PUB = 1, W_RET = 2, W_TAKE = 3, W_REQ = 4, W_DONE = 5, W_OG = 6,
               W_RET0 = 7, W_PUB0 = 8, W_DONE0 = 9, W_OG0 = 10, W_MORE = 11, W_RET1 = 12, W_TAKE1 = 13, W_REQ1 = 14, W_DONE1 = 15,
-              W_RQLOOK = 16, W_CWAIT = 17, W_COMP = 18;
+              W_RQLOOK = 16, W_RST = 17, W_CWAIT = 18, W_COMP = 19;
     // The worker's id as the holder of a lock, beside the dispatch threads'.
     const int WORKER = 100;
 
@@ -134,6 +175,13 @@ internal static class WakeModel
         // reads them. CachePub is the PubCount the cached frame came with.
         public int Cache, SharedSeq, LastDel, PubCount, CachePub, RelNext, RelCount, AckPending;
         public bool Pending;
+        // Lane WAKE2. CacheEnd: the cached frame was read once the pipe
+        // closed. Kept: the frame OwnerGone queued ahead of the release
+        // frames. EndPending: the frame read while the program ran and carried
+        // by no read when OwnerGone ran (invariant f). Wend: the frame the
+        // worker read came once the pipe closed.
+        public bool CacheEnd, Wend, Wrestart;
+        public int Kept, EndPending;
         public List<int> Queue = new();
         public int[] R = Array.Empty<int>(), RPub = Array.Empty<int>();
         public int[] Dpc = Array.Empty<int>(), Dread = Array.Empty<int>(), Dpub = Array.Empty<int>(),
@@ -174,7 +222,8 @@ internal static class WakeModel
             b.Append(Written).Append(Closed ? 'c' : '-').Append(Seen).Append(OwnerDone ? 'o' : '-').Append('|').Append(Wpc);
             switch (Wpc)
             {
-                case W_PUB: case W_RET0: b.Append(',').Append(Wframe); break;
+                case W_PUB: case W_RST: b.Append(',').Append(Wframe).Append(Wend ? 'e' : '-').Append(Wrestart ? 'r' : '-'); break;
+                case W_RET0: b.Append(',').Append(Wframe); break;
                 case W_PUB0: b.Append(',').Append(Wframe).Append(',').Append(Wret); break;
                 case W_TAKE: case W_TAKE1: case W_REQ1: b.Append(',').Append(Wret); break;
                 case W_REQ: b.Append(',').Append(Wret).Append(',').Append(Wtp); break;
@@ -184,7 +233,8 @@ internal static class WakeModel
             }
             b.Append('|').Append(Cache).Append(',').Append(SharedSeq).Append(',').Append(LastDel).Append(',').Append(PubCount)
              .Append(',').Append(CachePub).Append(',').Append(RelNext).Append(',').Append(RelCount)
-             .Append(Pending ? 'p' : '-').Append('|').Append(string.Join(".", Queue)).Append('|');
+             .Append(Pending ? 'p' : '-').Append(CacheEnd ? 'e' : '-').Append(',').Append(Kept).Append(',').Append(EndPending)
+             .Append('|').Append(string.Join(".", Queue)).Append('|');
             for (int i = 0; i < R.Length; i++)
             {
                 b.Append(R[i]);
@@ -290,32 +340,55 @@ internal static class WakeModel
         return r;
     }
 
-    // Invariant a, in a final state.
+    // Invariants a and f, in a final state.
     static string? Quiescent(St s, Scenario sc)
     {
         for (int i = 0; i < sc.Reads; i++)
             if (s.R[i] != R_PARKED) return $"a final state with read {i} not parked";
+        if (s.Kept != 0) return $"(a) frame {s.Kept} queued ahead of the release frames beside a parked read";
         if (s.RelNext < s.RelCount) return $"(a) release frame {s.RelNext + 1} queued beside a parked read";
         if (s.Pending && s.Cache != 0)
+            return $"(a) frame {s.Cache} (SeqNo {s.SharedSeq}, the last delivered {s.LastDel}), which no read carried, cached beside a parked read";
+        if (s.EndPending != 0)
         {
-            if (s.SharedSeq > s.LastDel)
-                return $"(a) frame {s.Cache} (SeqNo {s.SharedSeq}, above the last delivered {s.LastDel}) cached beside a parked read";
-            for (int i = 0; i < sc.Reads; i++)
-                if (s.RPub[i] < s.CachePub)
-                    return $"(a) read {i} parked beside frame {s.Cache}, which came after its look";
+            if (s.Count[s.EndPending] == 0)
+                return $"(f) frame {s.EndPending}, read while its program ran, never went out after its program's end";
+            for (int k = 0; k < sc.Releases; k++)
+                if (s.Count[Release(sc, k)] > 0 && s.TakeNo[Release(sc, k)] < s.TakeNo[s.EndPending])
+                    return $"(f) frame {s.EndPending}, read while its program ran, went out after release frame {k + 1}";
         }
         return null;
+    }
+
+    // Serial number arithmetic (RFC 1982) on SeqNos modulo 16: a comes after
+    // b when it is less than half the space ahead.
+    static bool SerialAfter(int a, int b)
+    {
+        int ahead = ((a - b) % 16 + 16) % 16;
+        return ahead > 0 && ahead < 8;
+    }
+
+    // The cached frame a READ_REPORT takes at its look (driver.c,
+    // IOCTL_HID_READ_REPORT and CachedAfterDeliveredLocked).
+    static bool Takeable(St s, Variant v)
+    {
+        if (!s.Pending || s.Cache == 0) return false;
+        if (!v.Serial) return s.SharedSeq > s.LastDel;
+        if (s.LastDel == 0) return true;
+        return s.CacheEnd ? s.SharedSeq > s.LastDel : SerialAfter(s.SharedSeq, s.LastDel);
     }
 
     static int Seq(Scenario sc, int frame) => sc.Seqs[frame - 1];
     static int Release(Scenario sc, int k) => sc.Seqs.Length + 1 + k;   // item of release frame k (0-based)
     static string Item(Scenario sc, int item) => item <= sc.Seqs.Length ? $"frame {item}" : $"release {item - sc.Seqs.Length}";
 
-    static bool Deliverable(St s) => s.RelNext < s.RelCount || s.Pending;
+    static bool Deliverable(St s) => s.Kept != 0 || s.RelNext < s.RelCount || s.Pending;
 
-    // TakeReportLocked: the next release frame, else the pending frame.
+    // TakeReportLocked: the frame OwnerGone queued ahead of the release
+    // frames, the next release frame, else the pending frame.
     static int Take(St s, Scenario sc, Result r, bool noteAck = true)
     {
+        if (s.Kept != 0) { int k = s.Kept; s.Kept = 0; return Taken(s, k); }
         if (s.RelNext < s.RelCount) return Taken(s, Release(sc, s.RelNext++));
         if (s.Pending) return TakeFrame(s, r, noteAck);
         return 0;
@@ -368,15 +441,19 @@ internal static class WakeModel
     {
         int frames = sc.Seqs.Length;
 
-        // The SDK: the next frame, and after the last one a keyboard
-        // program's end, which closes its pipe.
-        if (s.Written < frames)
+        // The SDK: the next frame, and after the program's last one its end,
+        // which closes its pipe, then a next program's frames.
+        if (s.Written < frames - sc.After)
         {
             var n = s.Clone(); n.Written++; n.Trace += $" sdk:write{n.Written}"; next.Add(n);
         }
-        else if (sc.Releases > 0 && !s.Closed)
+        else if (sc.Watched && !s.Closed)
         {
             var n = s.Clone(); n.Closed = true; n.Trace += " sdk:end"; next.Add(n);
+        }
+        else if (s.Written < frames)
+        {
+            var n = s.Clone(); n.Written++; n.Trace += $" next:write{n.Written}"; next.Add(n);
         }
 
         // HID class sends a read that is idle, on a free thread.
@@ -414,8 +491,9 @@ internal static class WakeModel
                     n.AckPending = 0;
                 }
                 int item = 0;
-                if (n.RelNext < n.RelCount) item = Taken(n, Release(sc, n.RelNext++));
-                else if (n.Cache != 0 && n.Pending && n.SharedSeq > n.LastDel) item = TakeFrame(n, r, !v.AckAfterComplete);
+                if (n.Kept != 0) { item = Taken(n, n.Kept); n.Kept = 0; }
+                else if (n.RelNext < n.RelCount) item = Taken(n, Release(sc, n.RelNext++));
+                else if (Takeable(n, v)) item = TakeFrame(n, r, !v.AckAfterComplete);
                 if (item != 0 && v.CompletionLock)
                 {
                     n.Ditem[d] = item; n.Dret[d] = read; n.Down[d] = true; n.Dcont[d] = false;
@@ -441,7 +519,7 @@ internal static class WakeModel
             case D_LOOK:
             {
                 if (!inputLockFree) break;
-                bool waiting = s.RelNext < s.RelCount
+                bool waiting = s.Kept != 0 || s.RelNext < s.RelCount
                     || (s.Pending && (v.ByCount ? s.PubCount != s.Dpub[d] : s.SharedSeq > s.LastDel));
                 n = s.Clone(); n.Dpc[d] = waiting ? D_RET : D_FREE; n.Trace += $" t{d}:look-{(waiting ? "waiting" : "none")}"; next.Add(n);
                 break;
@@ -484,7 +562,7 @@ internal static class WakeModel
             case D_RQLOOK:
             {
                 if (!inputLockFree) break;
-                bool waiting = s.RelNext < s.RelCount || (s.Pending && s.PubCount != s.Dtp[d]);
+                bool waiting = s.Kept != 0 || s.RelNext < s.RelCount || (s.Pending && s.PubCount != s.Dtp[d]);
                 n = s.Clone(); n.Dpc[d] = waiting ? D_RET : D_FREE; if (n.Dpc[d] == D_FREE) n.Dread[d] = -1;
                 n.Trace += $" t{d}:look-after-requeue-{(waiting ? "waiting" : "none")}"; next.Add(n);
                 break;
@@ -526,8 +604,15 @@ internal static class WakeModel
                 if (s.Written != s.Seen)
                 {
                     // The worker reads the section, which holds the latest
-                    // frame written, then caches it.
-                    n = s.Clone(); n.Wframe = n.Seen = n.Written; n.Wpc = v.PublishFirst ? W_PUB : W_RET0;
+                    // frame written, then caches it. Lane WAKE2: it notes
+                    // whether the pipe had closed, and a frame on a SeqNo
+                    // that repeats or goes back from the frame read last,
+                    // with no watch open, resets the delivered gate first.
+                    bool restart = v.Restart && s.Seen != 0 && !SerialAfter(Seq(sc, s.Written), Seq(sc, s.Seen))
+                                   && (!sc.Watched || s.OwnerDone);
+                    n = s.Clone(); n.Wframe = n.Seen = n.Written; n.Wend = s.Closed && !s.OwnerDone;
+                    n.Wrestart = restart && !v.RestartApart;
+                    n.Wpc = restart && v.RestartApart ? W_RST : v.PublishFirst ? W_PUB : W_RET0;
                     n.Trace += $" w:read{n.Wframe}"; next.Add(n);
                 }
                 else if (s.Closed && !s.OwnerDone)
@@ -537,6 +622,10 @@ internal static class WakeModel
                 break;
 
             // This driver's frame path and OwnerGone, then DeliverParked.
+            case W_RST:
+                if (!inputLockFree) break;
+                n = s.Clone(); n.LastDel = 0; n.Wpc = W_PUB; n.Trace += " w:restart-reset"; next.Add(n);
+                break;
             case W_PUB:
                 if (!inputLockFree) break;
                 n = s.Clone(); Cache(n, sc); n.Pending = true;
@@ -544,7 +633,7 @@ internal static class WakeModel
                 break;
             case W_OG:
                 if (!inputLockFree) break;
-                n = s.Clone(); OwnerGone(n, sc); n.Wpc = Deliverable(n) ? W_RET : W_IDLE; n.Trace += " w:ownergone"; next.Add(n);
+                n = s.Clone(); OwnerGone(n, sc, v); n.Wpc = Deliverable(n) ? W_RET : W_IDLE; n.Trace += " w:ownergone"; next.Add(n);
                 break;
             case W_RET:
                 n = s.Clone();
@@ -581,7 +670,7 @@ internal static class WakeModel
             case W_RQLOOK:
             {
                 if (!inputLockFree) break;
-                bool waiting = s.RelNext < s.RelCount || (s.Pending && s.PubCount != s.Wtp);
+                bool waiting = s.Kept != 0 || s.RelNext < s.RelCount || (s.Pending && s.PubCount != s.Wtp);
                 n = s.Clone(); n.Wpc = waiting ? W_RET : W_IDLE; n.Trace += $" w:look-after-requeue-{(waiting ? "waiting" : "none")}"; next.Add(n);
                 break;
             }
@@ -617,7 +706,7 @@ internal static class WakeModel
                 break;
             // b0fb7dc9's OwnerGone and DeliverReleaseFrames.
             case W_OG0:
-                n = s.Clone(); OwnerGone(n, sc); n.Wpc = W_MORE; n.Trace += " w:ownergone"; next.Add(n);
+                n = s.Clone(); OwnerGone(n, sc, v); n.Wpc = W_MORE; n.Trace += " w:ownergone"; next.Add(n);
                 break;
             case W_MORE:
                 n = s.Clone(); n.Wpc = n.RelNext < n.RelCount ? W_RET1 : W_IDLE; n.Trace += " w:more"; next.Add(n);
@@ -645,19 +734,33 @@ internal static class WakeModel
 
     static void Cache(St n, Scenario sc)
     {
+        // A frame OwnerGone kept cached that a newer frame replaces before a
+        // read came is gone as any frame a newer one replaces (invariant f).
+        if (n.Pending && n.Cache == n.EndPending) n.EndPending = 0;
+        if (n.Wrestart) { n.LastDel = 0; n.Wrestart = false; }
         n.Cache = n.Wframe;
         n.SharedSeq = Seq(sc, n.Wframe);
+        n.CacheEnd = n.Wend;
         n.PubCount++;
         n.CachePub = n.PubCount;
     }
 
-    static void OwnerGone(St n, Scenario sc)
+    // OwnerGone's reset. Lane WAKE2 (Keep): the frame no read carried stays,
+    // queued ahead of the release frames when read while the program ran,
+    // cached with no release frames, and published again (Bump); one read
+    // once the pipe closed goes beside release frames.
+    static void OwnerGone(St n, Scenario sc, Variant v)
     {
+        n.EndPending = n.Pending && !n.CacheEnd ? n.Cache : 0;
         n.RelCount = sc.Releases;
         n.RelNext = 0;
-        n.SharedSeq = 0;
+        n.Kept = 0;
+        bool keep = v.Keep && n.Pending && (sc.Releases == 0 || !n.CacheEnd);
+        if (keep && sc.Releases > 0) { n.Kept = n.Cache; n.Pending = false; }
+        if (!keep) n.Pending = false;
+        if (!n.Pending) n.SharedSeq = 0;
+        else if (v.Bump) n.PubCount++;
         n.LastDel = 0;
-        n.Pending = false;
         n.OwnerDone = true;
     }
 
@@ -686,7 +789,7 @@ internal static class WakeModel
             bool ok = capped == null && (broke != null) == v.ExpectBroken;
             if (!ok) bad++;
             Console.WriteLine($"[{(ok ? "PASS" : "FAIL")}] wake, {v.Name}: {states} states, {finals} final, " +
-                              (capped != null ? $"no verdict: {capped} passed the state cap" : broke != null ? "an invariant broken" : "invariants a to e hold") +
+                              (capped != null ? $"no verdict: {capped} passed the state cap" : broke != null ? "an invariant broken" : "invariants a to f hold") +
                               (v.ExpectBroken ? " (expected broken)" : ""));
             if (broke != null) Console.WriteLine($"         {broke}");
             Console.WriteLine($"         for the record: {inversions} completion(s) after a later take, {earlyAcks} acknowledgement(s) before the frame's completion");
@@ -698,7 +801,7 @@ internal static class WakeModel
         // The same counts over every scenario and every order, the broken
         // invariant aside, for b0fb7dc9's read path, which v2.0.3 shares, and
         // for 81e1fe40's: whether the orders d and e forbid predate the lane.
-        foreach (var v in new[] { Variants[0], Variants.First(x => x.Name.StartsWith("81e1fe40", StringComparison.Ordinal)) })
+        foreach (var v in new[] { Variants[RecordB0fb], Variants[Record81e1] })
         {
             int inversions = 0, earlyAcks = 0;
             string? invTrace = null, ackTrace = null;

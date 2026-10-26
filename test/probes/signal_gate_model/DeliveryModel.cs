@@ -42,9 +42,12 @@
 //
 // v2.0.3's worker reads only on a signal and forgets the last SeqNo it sent
 // at OwnerGone (which needs a watch), at every recycle and at a device's
-// add. This driver's worker does the same and, with the signal section
-// mapped, also counts itself and takes the handoff before each wait, reads
-// the section when the take finds a frame, and skips a zeroed section.
+// add. This driver's worker does the same through e9a6e92d and, with the
+// signal section mapped, also counts itself and takes the handoff before
+// each wait, reads the section when the take finds a frame, and skips a
+// zeroed section. Lane WAKE2's rules (Rules) keep the frame read last, its
+// SeqNo and data, and the frame no read carried across OwnerGone and the
+// recycle, and take a late read by serial number arithmetic.
 //
 // Each run records how often each frame (program, place in it) and each
 // release frame reached HID class, up to three times, for each program
@@ -57,9 +60,12 @@
 // same outside events and wait events, losing no frame or release frame
 // that run delivers, sending a frame more often than once only where that
 // run sends it as often, and sending out of order only where that run
-// does. Better is an extra frame of a program that is no keyboard, and
-// nothing after a step v2.0.3 could not take passes. A zeroed section
-// must never go out.
+// does. Better is an extra frame, one its program sent and that run lost
+// (Classify), and nothing after a step v2.0.3 could not take passes. A
+// zeroed section must never go out. A trade (TradeOk) passes too: an
+// outcome that lacks frames that run sent, each after a frame of its own
+// that run lost: HID class's next READ_REPORT came no sooner than in that
+// run, and the extra frame had taken the read before it.
 //
 // Usage: the frames argument of SignalGateModel sets each program's frames
 // (the wrap scenarios write two that straddle it, the three-program ones
@@ -161,6 +167,41 @@ internal static class DeliveryModel
         public bool TearPostRead { get; init; }
         public bool TearCheckDelivered { get; init; }      // candidate: that check asks whether the frame read was delivered by any read
         public bool NoTakeBackOverUntaken { get; init; }   // the SDK skips the take-back when its exchange replaced a frame not taken
+        // Lane WAKE2. e9a6e92d's rules are this driver's without them.
+        // FrameIdentity: the worker takes a frame for the last one it read
+        // only when the SeqNo and the data both match (a frame's program and
+        // place here), and OwnerGone and the recycle keep that frame, where
+        // they forgot the SeqNo. SerialRead: a late READ_REPORT takes the
+        // frame no read carried when its SeqNo comes after the last one
+        // delivered in serial number arithmetic, or when none was delivered
+        // since a reset. KeepAtReset: OwnerGone and the recycle keep that
+        // frame, OwnerGone's ahead of the release frame it queues.
+        // RestartReset: a frame read whose SeqNo repeats the last one or
+        // goes back, or a zeroed section after a frame, resets the delivered
+        // gate while no watch is open.
+        public bool FrameIdentity { get; init; }
+        public bool SerialRead { get; init; }
+        public bool KeepAtReset { get; init; }
+        public bool RestartReset { get; init; }
+        // Each taken away below: a frame read once its program's pipe closed
+        // goes under the greater-than test (AfterEndGreater), goes ahead of
+        // the release frame at OwnerGone only when read before the pipe
+        // closed (KeepOnlyAlive), and is forgotten when OwnerGone or the
+        // recycle drops it (ForgetDropped).
+        public bool AfterEndGreater { get; init; } = true;
+        public bool KeepOnlyAlive { get; init; } = true;
+        public bool ForgetDropped { get; init; } = true;
+        // And: a frame on the SeqNo last read with other data is skipped
+        // once the watched pipe closed, and read after OwnerGone (SkipAtEnd),
+        // and it is skipped, there and while a frame waits, only when the
+        // frame last read was read since the last reset, as v2.0.3's SeqNo
+        // was then the same (SinceReset).
+        public bool SkipAtEnd { get; init; } = true;
+        public bool SinceReset { get; init; } = true;
+        public bool Wake2 => FrameIdentity || SerialRead || KeepAtReset || RestartReset;
+        // Holds rules without lane WAKE2's to one of its invariants
+        // (Invariants), by kind, which then must catch them.
+        public string? HoldTo { get; init; }
     }
 
     // c5b207a3's rules, kept for the record, rule by rule (driver/driver.c
@@ -222,7 +263,14 @@ internal static class DeliveryModel
     // The line numbers above for c5b207a3 moved in a2256457: the increment
     // is at driver.c 2056, the take at 2067, the owner path's read at 2094
     // and the stop event's SetEvent at 2135.
-    internal static readonly Rules This = C5b207a3 with { Name = "this driver", BackOnlyOnStop = true, FastSignal = true };
+    internal static readonly Rules E9a6e92d = C5b207a3 with { Name = "e9a6e92d", BackOnlyOnStop = true, FastSignal = true };
+    // This driver: e9a6e92d's rules and lane WAKE2's four (driver.c
+    // ProcessSharedInput, SameAsSeen, CachedAfterDeliveredLocked, OwnerGone
+    // and the recycle).
+    internal static readonly Rules This = E9a6e92d with
+    {
+        Name = "this driver", FrameIdentity = true, SerialRead = true, KeepAtReset = true, RestartReset = true,
+    };
 
     internal static readonly Rules[] Broken =
     {
@@ -253,17 +301,33 @@ internal static class DeliveryModel
         This with { Name = "a take's read sends only the frame taken or its program's next SeqNo (b17050c1's NextFrameSeq)", TakeReadNoNext = true, TakeReadNextSeq = true },
         This with { Name = "a taken frame signaled back at a stop only with no next program (b17050c1)", BackOnlyAlone = true },
         This with { Name = "a taken frame signaled back at teardown before the stop event (c5b207a3)", BackOnlyOnStop = false },
+        This with { Name = "a frame taken for the last one read by its SeqNo alone (e9a6e92d), with the frame kept at a reset", FrameIdentity = false },
+        This with { Name = "a frame read after its program's pipe closed served by serial number arithmetic", AfterEndGreater = false },
+        This with { Name = "OwnerGone keeping any frame no read carried ahead of the release frame", KeepOnlyAlive = false },
+        This with { Name = "a frame OwnerGone or the recycle drops kept as the last one read", ForgetDropped = false },
+        This with { Name = "a next program's frame on the SeqNo last read sent before OwnerGone", SkipAtEnd = false },
+        This with { Name = "a frame on the SeqNo last read skipped whatever reset came since that read", SinceReset = false },
+        // e9a6e92d's rules pass the paired check (check 1 c4), since v2.0.3
+        // gives the same outcomes. The twice rule fails them (scenario 18,
+        // a frame of program 2 sent twice). At one frame a program the
+        // undelivered and order rules hold on them (NoBreak).
+        E9a6e92d with { Name = "e9a6e92d's rules held to the undelivered rule", HoldTo = "undelivered" },
+        E9a6e92d with { Name = "e9a6e92d's rules held to the twice rule", HoldTo = "twice" },
+        E9a6e92d with { Name = "e9a6e92d's rules held to the order rule", HoldTo = "older-after-newer" },
     };
 
     // The removals that change no outcome at one or two frames a program:
     // the take-back of a provisional SeqNo, which the next take drops anyway
-    // while the SDK signals either way.
-    internal static readonly HashSet<int> NoBreak = new() { 0 };
+    // while the SDK signals either way. And e9a6e92d's rules under the
+    // undelivered and order rules, which hold on them at one frame a
+    // program.
+    internal static readonly HashSet<int> NoBreak = new() { 0, 33, 35 };
 
     // Named rule sets and candidate changes (the model section of
     // docs/design/signal-gate.md), each run in place of this driver's rules
-    // by the check command's rule c0 to c7. c4 is this driver's rules, c7
-    // c5b207a3's, and c2 c5b207a3's with the fast branch.
+    // by the check command's rule c0 to c10. c4 is e9a6e92d's rules, c7
+    // c5b207a3's, and c2 c5b207a3's with the fast branch. c8 to c10 add one
+    // of lane WAKE2's rules to e9a6e92d's.
     internal static readonly Rules[] Candidates =
     {
         C5b207a3 with { Name = "round 6 with the summary's exact-SeqNo take", Round6ExactTake = true },
@@ -274,6 +338,9 @@ internal static class DeliveryModel
         C5b207a3 with { Name = "c3 signaling back only a section not yet delivered", BackOnlyOnStop = true, BackOnlyUndelivered = true },
         C5b207a3 with { Name = "c5 with the fast branch", BackOnlyOnStop = true, BackOnlyUndelivered = true, FastSignal = true },
         C5b207a3,
+        E9a6e92d with { Name = "e9a6e92d with the serial late read alone", SerialRead = true },
+        E9a6e92d with { Name = "e9a6e92d with the frame kept at a reset alone", KeepAtReset = true },
+        E9a6e92d with { Name = "e9a6e92d with frame identity alone", FrameIdentity = true },
     };
 
     internal static IEnumerable<Scenario> Scenarios()
@@ -314,6 +381,15 @@ internal static class DeliveryModel
             foreach (var b in after)
                 foreach (bool early in new[] { false, true })
                     yield return new Scenario(Name(a, b, early, 0, 0, ", program 1 killed inside a frame"), new[] { a, b }) { Early = early, Kill = 1, MinFrames = 2 };
+        // Lane WAKE2: two programs, the first across the wrap, keyboards
+        // among them. The next program's first frame can then come after the
+        // first program's last in serial number arithmetic, as the frame
+        // past the wrap does, or repeat its SeqNo.
+        var keyboards = new[] { new Prog(true, true, true), new Prog(false, true, true) };
+        foreach (var a in kinds.Concat(keyboards))
+            foreach (var b in kinds.Concat(keyboards))
+                foreach (bool early in new[] { false, true })
+                    yield return new Scenario(Name(a, b, early, 0, 0, ", the first across the wrap"), new[] { a, b }) { Early = early, Wrap = 16, Frames = 2 };
     }
 
     static string Name(Prog a, Prog b, bool early, int rc, int ra, string hold) =>
@@ -322,7 +398,8 @@ internal static class DeliveryModel
     const int S_CLAIM = 0, S_START = 1, S_WRITE = 2, S_CHECK = 3, S_RECLAIM = 4, S_SIGNAL = 5, S_EXIT = 6, S_NEXT = 7, S_DONE = 8, S_FRAMEDONE = 9,
               S_FAST = 10, S_XCHG = 11;
     const int W_P1 = 0, W_TOP = 1, W_LOOK = 2, W_POLL = 3, W_BLOCK = 4, W_READ = 5, W_OWNER = 6, W_GONE = 7, W_COUNT = 8,
-              W_WOKE = 9, W_OG_TAKE = 10, W_OG_LOOK = 11, W_OG_END = 12, W_OG_ACK = 13, W_OG_SIG = 14, W_EXITED = 15, W_RCHK = 16;
+              W_WOKE = 9, W_OG_TAKE = 10, W_OG_LOOK = 11, W_OG_END = 12, W_OG_ACK = 13, W_OG_SIG = 14, W_EXITED = 15, W_RCHK = 16,
+              W_OG_READ = 17;
 
     // A frame's identity is its program and its place, 1 to 5, packed into
     // the bits of the delivery counts: two bits a frame, saturating at 3,
@@ -333,7 +410,7 @@ internal static class DeliveryModel
     // its program. CrossBit: a program's frame or release frame went out
     // after a frame or release frame of a later program.
     static int Slot(int prog, int idx) => (prog - 1) * 6 + idx;
-    const int RelSlot = 18, LateBit = 42, OrderBit = 45, CrossBit = 46, TookShift = 56;
+    const int RelSlot = 18, LateBit = 42, OrderBit = 45, CrossBit = 46, FrameCrossBit = 47, TookShift = 56;
 
     // InSec, Ev, Sig: the input section, its event and the signal section
     // exist. Seq, Prog, Idx: the frame the input section holds (Prog 0: a
@@ -371,12 +448,30 @@ internal static class DeliveryModel
         // v2.0.3 only: its wait returned the input event at this driver's
         // take, and the poll after that take has not come yet.
         public bool Early;
+        // This driver under lane WAKE2's rules. Pend: InputReportPending,
+        // the cache holds a frame no read carried. SeenP and SeenI: the
+        // program and place of the frame last read, its data (Seen is its
+        // SeqNo), 0 for a zeroed section or none. AfterEnd: the frame no
+        // read carried was read once the watched program's pipe had closed.
+        // SeenSince: the frame last read was read since the last reset,
+        // OwnerGone or the recycle (SeenSinceReset), where v2.0.3 forgot the
+        // SeqNo. A frame still pending then was kept. FirstRead: it is the
+        // first frame this device context read, which a context before it
+        // may have sent (a device added again). KeptQ: the frame OwnerGone
+        // queued ahead of the release frame (slot + 1, 0 for none), out of
+        // the cache. ReadAny:
+        // the worker has read a frame since the device context's add
+        // (ReadAFrame). SkipEnd: it skipped a next program's frame on the
+        // SeqNo last read once the watched pipe had closed (SkippedAtEnd).
+        public bool Pend, AfterEnd, SeenSince, FirstRead, ReadAny, SkipEnd;
+        public int SeenP, SeenI, KeptQ;
     }
 
-    // A state packed into three words, for the visited sets.
-    internal readonly record struct Key(ulong A, ulong B, ulong C) : IComparable<Key>
+    // A state packed into four words, for the visited sets.
+    internal readonly record struct Key(ulong A, ulong B, ulong C, ulong D) : IComparable<Key>
     {
-        public int CompareTo(Key o) => A != o.A ? A.CompareTo(o.A) : B != o.B ? B.CompareTo(o.B) : C.CompareTo(o.C);
+        public int CompareTo(Key o) =>
+            A != o.A ? A.CompareTo(o.A) : B != o.B ? B.CompareTo(o.B) : C != o.C ? C.CompareTo(o.C) : D.CompareTo(o.D);
     }
 
     struct Writer
@@ -416,9 +511,13 @@ internal static class DeliveryModel
         b.Put(s.AckBit); b.Put(s.AckEnded); b.Put(s.Replaced); b.Put(s.RetryNext); b.Put(s.NoRetry); b.Put(s.HandFinal && s.Hand != 0);
         b.Put(s.Parked); b.Put(s.Served); b.Put(s.Early);
         // The delivery counts and the late, order and cross bits take 47 bits
-        // of the third word, Took the top 8.
+        // of the third word, Took the top 8. Lane WAKE2's fields take the
+        // fourth.
         if ((uint)s.Took >= 256) throw new InvalidOperationException("Took out of range");
-        return new Key(a.W, b.W, s.Delivered | (ulong)(uint)s.Took << TookShift);
+        var d = new Writer();
+        d.Put(s.Pend); d.Put(s.AfterEnd); d.Put(s.SeenSince); d.Put(s.FirstRead); d.Put(s.SeenP, 2); d.Put(s.SeenI, 3); d.Put(s.KeptQ, 5);
+        d.Put(s.ReadAny); d.Put(s.SkipEnd);
+        return new Key(a.W, b.W, s.Delivered | (ulong)(uint)s.Took << TookShift, d.W);
     }
 
     internal static State Unpack(Key k)
@@ -440,6 +539,9 @@ internal static class DeliveryModel
         s.Parked = b.Bit(); s.Served = b.Bit(); s.Early = b.Bit();
         s.Delivered = k.C & ((1UL << TookShift) - 1);
         s.Took = (int)(k.C >> TookShift);
+        var d = new Reader(k.D);
+        s.Pend = d.Bit(); s.AfterEnd = d.Bit(); s.SeenSince = d.Bit(); s.FirstRead = d.Bit(); s.SeenP = d.Get(2); s.SeenI = d.Get(3); s.KeptQ = d.Get(5);
+        s.ReadAny = d.Bit(); s.SkipEnd = d.Bit();
         return s;
     }
 
@@ -580,6 +682,39 @@ internal static class DeliveryModel
     // program's frame goes out after its release frames, after a later
     // frame of its program, and a program's frame or release frame after a
     // later program's, only where that one sends it so.
+    // A trade (lane WAKE2): mine lacks frames theirs sent, each after a
+    // frame of its own that mine sent and theirs lost, one for each. With
+    // one READ_REPORT at the driver at a time, the extra frame took the read
+    // theirs gave a frame after it, which then waited in the cache or the
+    // section until a newer frame replaced it or a reset dropped it, as
+    // theirs drops a frame no read carried. Frames go in program order, a
+    // program's by their place: a frame of an earlier program, or an earlier
+    // one of the same program, comes before. A release frame is never
+    // traded, and the counts past one, the late, order and cross bits stay
+    // as NoWorse has them. Off with --no-trade.
+    internal static bool Trades = true;
+    internal static bool TradeOk(ulong mine, ulong theirs)
+    {
+        int lost = 0, ahead = 0;
+        for (int slot = 0; slot < 21; slot++)
+        {
+            if (slot < RelSlot && slot % 6 == 0) continue;
+            int m = Count(mine, slot), t = Count(theirs, slot);
+            if (m >= 2 && t < m) return false;
+            if (t >= 1 && m == 0)
+            {
+                if (slot >= RelSlot) return false;
+                // Each frame lacked takes an extra frame before it.
+                if (ahead == 0) return false;
+                ahead--;
+                lost++;
+            }
+            if (m >= 1 && t == 0 && slot < RelSlot) ahead++;
+        }
+        if (lost == 0) return false;
+        return ((mine & ~theirs) >> LateBit & 7) == 0 && ((mine & ~theirs) >> OrderBit & 1) == 0 && ((mine & ~theirs) >> CrossBit & 1) == 0;
+    }
+
     internal static bool NoWorse(ulong mine, ulong theirs)
     {
         for (int slot = 0; slot < 21; slot++)
@@ -596,17 +731,31 @@ internal static class DeliveryModel
     }
 
     // 2: an outcome of theirs matches mine with no frame mine sends that it
-    // does not, 1: one matches only with such an extra frame, of a program
-    // that is no keyboard, 0: none.
+    // does not, 1: one matches only with such an extra frame, 0: none. An
+    // extra frame is one its program sent and v2.0.3 lost, and NoWorse
+    // has already failed every one sent twice, after its program's release
+    // frame, after a later frame of its program or after a later program's.
+    // Through e9a6e92d an extra keyboard frame failed too, a press and
+    // release v2.0.3 never shows (KeyboardExtraFails, --keyboard-extra-fails).
+    // Lane WAKE2 sends a keyboard's last frame, read while its program ran,
+    // ahead of its release frame where v2.0.3 lost it at OwnerGone, and a
+    // keyboard's frame past the wrap to the read that comes after it: what
+    // the program sent, in its order, before the release frame.
+    // 3: one matches only by a trade (TradeOk).
+    internal static bool KeyboardExtraFails;
     static int Classify(ulong mine, IEnumerable<ulong> theirs, int keyboards)
     {
         int cls = 0;
         foreach (var t in theirs)
         {
-            if (!NoWorse(mine, t)) continue;
+            if (!NoWorse(mine, t))
+            {
+                if (cls == 0 && Trades && TradeOk(mine, t)) cls = 3;
+                continue;
+            }
             int extra = ExtraPrograms(mine, t);
             if (extra == 0) return 2;
-            if ((extra & keyboards) == 0) cls = 1;
+            if (!KeyboardExtraFails || (extra & keyboards) == 0) cls = 1;
         }
         return cls;
     }
@@ -636,14 +785,56 @@ internal static class DeliveryModel
         t.Add(("a fourth send stays at 3, three or more", Count(four.Delivered, Slot(1, 1)) == 3));
         t.Add(("three sends fail against two", !NoWorse(three.Delivered & OutMask, two.Delivered & OutMask)));
         t.Add(("two sends pass against three", NoWorse(two.Delivered & OutMask, three.Delivered & OutMask)));
-        // An extra frame: better for a program that is no keyboard, a
-        // failure for a keyboard.
+        // An extra frame: better, for a keyboard too, and with
+        // KeyboardExtraFails a failure for a keyboard.
         var one = DeliverFrame(none, Slot(1, 1));
         var extra = DeliverFrame(one, Slot(1, 2));
         ulong[] theirs = { one.Delivered & OutMask };
+        bool strict = KeyboardExtraFails;
+        KeyboardExtraFails = false;
         t.Add(("an extra frame of a program that is no keyboard is better", Classify(extra.Delivered & OutMask, theirs, 0) == 1));
-        t.Add(("an extra keyboard frame fails", Classify(extra.Delivered & OutMask, theirs, 1) == 0));
+        t.Add(("an extra keyboard frame is better", Classify(extra.Delivered & OutMask, theirs, 1) == 1));
+        KeyboardExtraFails = true;
+        t.Add(("with KeyboardExtraFails an extra keyboard frame fails", Classify(extra.Delivered & OutMask, theirs, 1) == 0));
+        KeyboardExtraFails = strict;
         t.Add(("an equal outcome is equal", Classify(one.Delivered & OutMask, theirs, 1) == 2));
+        // A keyboard's last frame ahead of its release frame, and after it.
+        var ahead = DeliverRelease(DeliverFrame(none, Slot(1, 1)) with { RelQ = 1, RelFor = 1 });
+        var behind = DeliverFrame(DeliverRelease(none with { RelQ = 1, RelFor = 1 }), Slot(1, 1));
+        t.Add(("a frame after its program's release frame sets its late bit", (behind.Delivered >> LateBit & 1) == 1));
+        t.Add(("that outcome fails against the frame ahead of the release frame", !NoWorse(behind.Delivered & OutMask, ahead.Delivered & OutMask)));
+        // Trades. Theirs: 1:1, the release frame, 2:1, 2:2. Mine: 1:1, 1:2
+        // kept ahead of the release frame, then 2:2, which replaced 2:1.
+        var v203 = DeliverFrame(DeliverFrame(DeliverRelease(DeliverFrame(none, Slot(1, 1)) with { RelQ = 1, RelFor = 1 }), Slot(2, 1)), Slot(2, 2));
+        var kept = DeliverFrame(DeliverRelease(DeliverFrame(DeliverFrame(none, Slot(1, 1)), Slot(1, 2)) with { RelQ = 1, RelFor = 1 }), Slot(2, 2));
+        ulong mv = v203.Delivered & OutMask, mk = kept.Delivered & OutMask;
+        t.Add(("a frame a later frame of its program replaced, for an extra frame, is a trade", !NoWorse(mk, mv) && TradeOk(mk, mv)));
+        t.Add(("a trade classes as 3", Classify(mk, new[] { mv }, 1) == 3));
+        var withA2 = DeliverFrame(DeliverFrame(none, Slot(1, 1)), Slot(1, 2));
+        var withB1 = DeliverFrame(DeliverFrame(none, Slot(1, 1)), Slot(2, 1));
+        t.Add(("a lost frame after an extra frame is a trade", TradeOk(withA2.Delivered & OutMask, withB1.Delivered & OutMask)));
+        t.Add(("a lost frame before the extra frame is no trade", !TradeOk(withB1.Delivered & OutMask, withA2.Delivered & OutMask)));
+        var relLost = DeliverFrame(DeliverFrame(DeliverFrame(none, Slot(1, 1)), Slot(1, 2)), Slot(2, 2));
+        t.Add(("a lost release frame is no trade", !TradeOk(relLost.Delivered & OutMask, mv)));
+        var lostTwo = DeliverFrame(DeliverFrame(DeliverFrame(none, Slot(1, 1)), Slot(1, 3)), Slot(2, 3));
+        var theirsTwo = DeliverFrame(DeliverFrame(DeliverFrame(DeliverFrame(none, Slot(1, 1)), Slot(2, 1)), Slot(2, 2)), Slot(2, 3));
+        t.Add(("two frames lost for one extra frame is no trade", !TradeOk(lostTwo.Delivered & OutMask, theirsTwo.Delivered & OutMask)));
+        // The absolute rules (Invariants) on hand-built final states.
+        var scW = new Scenario("selftest", new[] { new Prog(true, true), new Prog(true, true) });
+        var w2 = This;
+        var twice = DeliverFrame(DeliverFrame(none, Slot(1, 1)), Slot(1, 1));
+        t.Add(("a frame sent twice breaks the twice rule", Invariants(twice, scW, w2).Contains("twice")));
+        t.Add(("the same frame sent twice, a device added again between, is no copy", !Invariants(twice, scW with { ReAdd = 1 }, w2).Contains("twice")));
+        var orderBad = DeliverFrame(DeliverFrame(none, Slot(1, 2)), Slot(1, 1));
+        t.Add(("a frame behind a newer one of its program breaks the order rule", Invariants(orderBad, scW, w2).Contains("older-after-newer")));
+        var crossBad = DeliverFrame(DeliverFrame(none, Slot(2, 1)), Slot(1, 1));
+        t.Add(("a frame behind a later program's breaks the order rule", Invariants(crossBad, scW, w2).Contains("older-after-newer")));
+        var relBehind = DeliverRelease(DeliverFrame(none, Slot(2, 1)) with { RelQ = 1, RelFor = 1 });
+        t.Add(("a release frame behind a later program's frame is v2.0.3's order, no break", !Invariants(relBehind, scW, w2).Contains("older-after-newer")));
+        var left = new State { Pend = true, Cache = Slot(1, 1) + 1, CacheSeq = 5, LastDel = 3 };
+        t.Add(("a frame after the last delivered, left in the cache, breaks the undelivered rule", Invariants(left, scW, w2).Contains("undelivered")));
+        t.Add(("a frame older than the last delivered, left in the cache, is no break", !Invariants(left with { CacheSeq = 2 }, scW, w2).Contains("undelivered")));
+        t.Add(("a release frame left queued breaks the undelivered rule", Invariants(new State { RelQ = 1 }, scW, w2).Contains("undelivered")));
         return t;
     }
 
@@ -725,6 +916,45 @@ internal static class DeliveryModel
 
     internal static bool SetStats;
     internal static bool CutDiverged;
+    // V203Side.Restrict: a run with its READ_REPORT parked stays paired
+    // through a late READ_REPORT of this driver's. Lane WAKE2; off through
+    // e9a6e92d, and with --strict-read-delay.
+    internal static bool KeepParkedOnReadDelay = true;
+
+    // Lane WAKE2's rules, checked on this driver alone at a final state, with
+    // no v2.0.3 run to match: no frame a read could take is left undelivered
+    // (a frame no read carried that comes after the last one delivered, a
+    // frame OwnerGone queued ahead of the release frame, a release frame
+    // left queued, with the device up), no frame goes out twice, and no
+    // frame goes out after a newer one of its program or a later program's.
+    // A frame in the cache that is older than the last one delivered stays,
+    // as v2.0.3 leaves it. Returns the kinds broken, none when it holds.
+    internal static List<string> Invariants(in State s, Scenario sc, Rules r)
+    {
+        var bad = new List<string>();
+        if (!r.Wake2 && r.HoldTo == null) return bad;
+        bool deviceUp = s.Pc != W_GONE && s.Tear == 0;
+        if (deviceUp)
+        {
+            bool takeable = s.Pend && s.Cache != 0 && (s.LastDel == 0 || s.CacheSeq == s.LastDel || SerialAfter(s.CacheSeq, s.LastDel, sc.Wrap));
+            if (takeable || s.KeptQ != 0 || s.RelQ != 0) bad.Add("undelivered");
+        }
+        // A device added again is a new device context that sends the section's
+        // frame again, as v2.0.3's add does, to its own reads: no copy.
+        if (sc.ReAdd == 0)
+            for (int slot = 0; slot < 21; slot++)
+            {
+                if (slot < RelSlot && slot % 6 == 0) continue;
+                if (Count(s.Delivered, slot) >= 2) { bad.Add("twice"); break; }
+            }
+        // A release frame behind a later program's frame is v2.0.3's order,
+        // which the lane keeps for a frame read once the pipe closed (it
+        // must not go behind the release frames), and no frame: the check
+        // counts the frames (FrameCrossBit, a bit outside OutMask).
+        if ((s.Delivered >> OrderBit & 1) != 0 || (s.Delivered >> FrameCrossBit & 1) != 0) bad.Add("older-after-newer");
+        if (!r.Wake2) bad.RemoveAll(k => k != r.HoldTo);
+        return bad;
+    }
 
     internal sealed class AlignedResult
     {
@@ -739,9 +969,19 @@ internal static class DeliveryModel
         public readonly HashSet<ulong> Extra = new();
         // Outcomes equal to a paired v2.0.3 run's.
         public readonly HashSet<ulong> Equal = new();
+        // Outcomes matched only by a trade (TradeOk).
+        public readonly HashSet<ulong> Traded = new();
+        public string? TradeExample;
+        public List<State>? TradePath;
         public string? ExtraExample;
         public List<State>? ExtraPath;
         public bool ZeroSent;
+        // Lane WAKE2's absolute rules on this driver's final states
+        // (Invariants): InvFail, the kinds broken, an example and its path.
+        public bool InvFail;
+        public readonly HashSet<string> InvKinds = new();
+        public string? InvExample;
+        public List<State>? InvPath;
         public string? Example;
         public List<State>? Path;
         // With the witness: the paired v2.0.3 set at each of its states, as
@@ -791,6 +1031,17 @@ internal static class DeliveryModel
         readonly List<int> items = new();
         readonly Dictionary<(int, int), int> closed = new();
         readonly Dictionary<(int, int, int, int, int, int), int> follow = new();
+        // The memo tables above and restricted below hold what a call
+        // computes again from the sets alone. Past this many entries one is
+        // cleared rather than grown: a table's doubling needs its old and
+        // new arrays at once, which the largest scenarios cannot afford
+        // under the heap limit.
+        const int MemoCap = 1 << 22;
+        static void Memo<TKey>(Dictionary<TKey, int> d, TKey k, int v) where TKey : notnull
+        {
+            if (d.Count >= MemoCap && !d.ContainsKey(k)) d.Clear();
+            d[k] = v;
+        }
         readonly Dictionary<int, ulong[]> finals = new();
         readonly Dictionary<int, int> waits = new();
         readonly List<State> buf = new();
@@ -812,7 +1063,7 @@ internal static class DeliveryModel
         // with no input event set.
         // AtWait: the worker is at its wait, blocked or not.
         // Exited: the worker has left its loop.
-        sealed record Info(Succ[] S, int Waits, bool Pending, bool Final, bool Waiting, bool Blocked, bool AtWait, bool Exited);
+        sealed record Info(Succ[] S, int Waits, bool Pending, bool Final, bool Waiting, bool Blocked, bool AtWait, bool Exited, bool HasRead);
 
         int Id(Key k)
         {
@@ -842,7 +1093,8 @@ internal static class DeliveryModel
                 s[i] = new Succ(Id(Pack(states[i])), l, Match(l, v, states[i]), KillPhase(v));
             }
             a = new Info(s, w, v.Event || v.Pc is W_WOKE or W_READ, s.All(y => y.Label == L_WAIT && y.Match >> 15 == K_TIMEOUT),
-                         v.Pc == W_BLOCK && !v.Event, v.Pc == W_BLOCK && v.Blocked, v.Pc == W_BLOCK, v.Pc is W_EXITED or W_GONE);
+                         v.Pc == W_BLOCK && !v.Event, v.Pc == W_BLOCK && v.Blocked, v.Pc == W_BLOCK, v.Pc is W_EXITED or W_GONE,
+                         v.Parked && v.Pc != W_GONE && v.Tear == 0);
             info[id] = a;
             return a;
         }
@@ -872,7 +1124,7 @@ internal static class DeliveryModel
                     if (Own(x, y, thisWaits) && scratch.Add(y.M)) work.Push(y.M);
             }
             int c = Intern(scratch);
-            closed[(c, thisWaits)] = c;
+            Memo(closed, (c, thisWaits), c);
             return c;
         }
 
@@ -882,7 +1134,7 @@ internal static class DeliveryModel
             scratch.Clear();
             foreach (var x in store.Fill(v, items)) scratch.Add(x);
             c = CloseScratch(thisWaits);
-            closed[(v, thisWaits)] = c;
+            Memo(closed, (v, thisWaits), c);
             return c;
         }
 
@@ -895,15 +1147,30 @@ internal static class DeliveryModel
 
         // The states of set V that wait for every step in bits, closed under
         // the given waits: the runs that, like this driver's side, still
-        // wait when that side lets a step it waits for wait longer.
+        // wait when that side lets a step it waits for wait longer. With
+        // KeepParkedOnReadDelay a run whose READ_REPORT is parked stays
+        // through a late READ_REPORT of this driver's too: its read waits at
+        // the driver whatever HID class does next. HID class sends its next
+        // READ_REPORT when one completes, so this driver needs one where the
+        // run does not only after a read carried a frame the run's did not,
+        // an extra frame (lane WAKE2: a frame OwnerGone or a recycle kept,
+        // the frame past the wrap, a next program's frame on a repeated
+        // SeqNo). Dropping that run left only runs whose read carried
+        // another frame at that step, which a READ_REPORT late on both sides
+        // alike never makes of the run.
         readonly Dictionary<(int, int, int), int> restricted = new();
         public int Restrict(int v, int bits, int thisWaits)
         {
             if (restricted.TryGetValue((v, bits, thisWaits), out int r)) return r;
             scratch.Clear();
-            foreach (var x in store.Fill(v, items)) if ((Of(x).Waits & bits) == bits) scratch.Add(x);
+            foreach (var x in store.Fill(v, items))
+            {
+                var o = Of(x);
+                int need = KeepParkedOnReadDelay && o.HasRead ? bits & ~M_READ : bits;
+                if ((o.Waits & need) == need) scratch.Add(x);
+            }
             r = scratch.Count == 0 ? -1 : CloseScratch(thisWaits);
-            restricted[(v, bits, thisWaits)] = r;
+            Memo(restricted, (v, bits, thisWaits), r);
             return r;
         }
 
@@ -1069,7 +1336,7 @@ internal static class DeliveryModel
                 }
             }
             r = scratch.Count == 0 ? -1 : CloseScratch(waitsAfter);
-            follow[key] = r;
+            Memo(follow, key, r);
             return r;
         }
 
@@ -1098,9 +1365,9 @@ internal static class DeliveryModel
         }
 
         // 2: some final state of V matches with no frame this one sends that
-        // it does not, 1: only with such an extra frame, 0: none matches. An
-        // extra frame of a keyboard, a press and release v2.0.3 never shows,
-        // is no better outcome (keyboards: a bit per program).
+        // it does not, 1: only with such an extra frame, 3: only by a trade,
+        // 0: none matches (Classify; keyboards: a bit per program, for
+        // KeyboardExtraFails).
         public int MatchClass(int v, ulong mine, int keyboards) => Matches(v, mine) ? Classify(mine, finals[v], keyboards) : 0;
 
         public bool Matches(int v, ulong mine)
@@ -1114,7 +1381,7 @@ internal static class DeliveryModel
                 finals[v] = outs;
             }
             foreach (var t in outs)
-                if (NoWorse(mine, t)) return true;
+                if (NoWorse(mine, t) || (Trades && TradeOk(mine, t))) return true;
             return false;
         }
     }
@@ -1158,16 +1425,33 @@ internal static class DeliveryModel
         static int Diverged(int v) => v >= 0 ? -2 - v : v;
 
         // The explored pairs: by this driver's state, the waits of the set
-        // and divergence, the sets explored with it that no other holds.
-        var covers = new Dictionary<(Key, int, bool), List<int>>();
+        // and divergence, the sets explored with it that no other holds. Most
+        // keys hold one set, kept in one; a key with more holds -1 there and
+        // its list in many.
+        var one = new Dictionary<(Key, int, bool), int>();
+        var many = new Dictionary<(Key, int, bool), List<int>>();
         bool Visit(Key k, int v, int tw)
         {
             int set = SetOf(v);
             var key = (k, v203.Waits(set) & tw, v < 0);
-            if (!covers.TryGetValue(key, out var lst)) { covers[key] = new List<int> { set }; return true; }
-            // A diverged pair passes only with a better outcome, which a
-            // larger set can turn into an equal one, so those are kept
-            // exactly.
+            if (!one.TryGetValue(key, out int only)) { one[key] = set; return true; }
+            List<int> lst;
+            if (only >= 0)
+            {
+                // A diverged pair passes only with a better outcome, which a
+                // larger set can turn into an equal one, so those are kept
+                // exactly.
+                if (v < 0) { if (only == set) return false; }
+                else
+                {
+                    if (v203.Subset(only, set)) { res.Subsumed++; return false; }
+                    if (v203.Subset(set, only)) { one[key] = set; return true; }
+                }
+                many[key] = new List<int> { only, set };
+                one[key] = -1;
+                return true;
+            }
+            lst = many[key];
             if (v < 0) { if (lst.Contains(set)) return false; lst.Add(set); return true; }
             foreach (var v1 in lst) if (v203.Subset(v1, set)) { res.Subsumed++; return false; }
             lst.RemoveAll(v1 => v203.Subset(set, v1));
@@ -1203,6 +1487,17 @@ internal static class DeliveryModel
                 res.Finals++;
                 ulong mine = t.Delivered & OutMask;
                 for (int pr = 1; pr <= 3; pr++) if (Count(t.Delivered, Slot(pr, 0)) > 0) res.ZeroSent = true;
+                var inv = Invariants(t, sc, r);
+                if (inv.Count > 0)
+                {
+                    res.InvFail = true;
+                    foreach (var k in inv) res.InvKinds.Add(k);
+                    if (res.InvExample == null)
+                    {
+                        res.InvExample = $"{string.Join("+", inv)} [{Show(mine)}]";
+                        if (parent != null) res.InvPath = PathTo(parent, (tk, V));
+                    }
+                }
                 // 2: equal to a paired run's, 1: better (an extra frame, nothing
                 // worse), 0: no paired run's. After a step the runs could not
                 // follow, nothing passes.
@@ -1213,6 +1508,11 @@ internal static class DeliveryModel
                 if (div) cls = 0;
                 bool matched = cls != 0;
                 if (cls == 2) res.Equal.Add(mine);
+                if (cls == 3 && res.Traded.Add(mine) && res.TradeExample == null)
+                {
+                    res.TradeExample = Show(mine);
+                    if (parent != null) res.TradePath = PathTo(parent, (tk, V));
+                }
                 if (cls == 1 && res.Extra.Add(mine) && res.ExtraExample == null)
                 {
                     res.ExtraExample = Show(mine);
@@ -1237,8 +1537,9 @@ internal static class DeliveryModel
                 // through the reflector to the driver host, so it may arrive
                 // late on both sides alike. When this driver's side lets a
                 // READ_REPORT or the Phase 1 map it waits for wait longer,
-                // only the v2.0.3 runs that wait for it too stay paired: a
-                // run that has its read takes no part in the delay.
+                // only the v2.0.3 runs that wait for it too stay paired, and
+                // through a late READ_REPORT the runs with theirs parked
+                // (Restrict).
                 int delayed = tw & (M_READ | M_MAP) & ~((label == L_HID ? M_READ : 0) | (label == L_MAP ? M_MAP : 0));
                 int Vs = delayed == 0 ? Vset : v203.Restrict(Vset, delayed, tw);
                 if (Vs == None) continue;
@@ -1268,7 +1569,7 @@ internal static class DeliveryModel
                 if (Visit(nk, V2, nw)) { parent?.TryAdd((nk, V2), (tk, V)); stack.Push((nk, V2)); }
             }
         }
-        if (SetStats) Console.Error.WriteLine($"{sc.Name}: " + v203.Stats() + $" covers {covers.Count} listed {covers.Values.Sum(l => (long)l.Count)} explored {res.States}");
+        if (SetStats) Console.Error.WriteLine($"{sc.Name}: " + v203.Stats() + $" covers {one.Count} listed {one.Count - many.Count + many.Values.Sum(l => (long)l.Count)} explored {res.States}");
         res.Sets = v203.SetCount;
         res.SetItems = v203.SetItems;
         res.V203States = v203.StateCount;
@@ -1365,7 +1666,7 @@ internal static class DeliveryModel
         ulong mine = last.Delivered & OutMask;
         int Vfin = v203.Close(V, TWaits(last) | M_FREE);
         int cls = div ? 0 : v203.MatchClass(Vfin, mine, KeyboardPrograms(sc));
-        lines.Add($"this driver delivers [{Show(mine)}]: {(cls == 2 ? "equal" : cls == 1 ? "better" : "fails")}");
+        lines.Add($"this driver delivers [{Show(mine)}]: {(cls == 2 ? "equal" : cls == 1 ? "better" : cls == 3 ? "a trade" : "fails")}");
         lines.AddRange(v203.Describe(Vfin));
         return lines;
     }
@@ -1422,7 +1723,7 @@ internal static class DeliveryModel
     {
         W_P1 => "P1", W_TOP => "TOP", W_LOOK => "TAKE", W_POLL => "POLL", W_BLOCK => "WAIT", W_READ => "READ", W_OWNER => "OWNER",
         W_GONE => "GONE", W_COUNT => "COUNT", W_WOKE => "WOKE", W_OG_TAKE => "OG-TAKE", W_OG_LOOK => "OG-LOOK", W_OG_END => "OG-END",
-        W_OG_ACK => "OG-ACK", W_OG_SIG => "OG-SIGNAL", W_EXITED => "EXITED", W_RCHK => "READ-CHECK", _ => pc.ToString(),
+        W_OG_ACK => "OG-ACK", W_OG_SIG => "OG-SIGNAL", W_EXITED => "EXITED", W_RCHK => "READ-CHECK", W_OG_READ => "OG-READ", _ => pc.ToString(),
     };
 
     static string SdkName(int pc) => pc switch
@@ -1456,7 +1757,9 @@ internal static class DeliveryModel
                     if (!s.Sig) n = n with { Sig = true, Cap = false, Waiters = 0, Hand = 0 };
                     if (r.ClearAtStart) n = n with { Hand = 0 };
                 }
-                int startSeq = sc.Wrap > 0 ? sc.Wrap - 4 : prog.Is21 ? EvenAbove(left) : 0;
+                // The first program of a wrap scenario starts near the top;
+                // the next counts as its kind does.
+                int startSeq = sc.Wrap > 0 && s.P == 1 ? sc.Wrap - 4 : prog.Is21 ? EvenAbove(left) : 0;
                 next.Add(Collect(n with { SdkSeq = startSeq }, sc, prog));
                 break;
             }
@@ -1556,13 +1859,25 @@ internal static class DeliveryModel
 
         // HID class: a READ_REPORT when none is at the driver. A release frame
         // goes first, then the cached frame when it is newer than the last
-        // delivered: by inequality in this driver (driver.c, IOCTL_HID_READ_
-        // REPORT), by greater-than in v2.0.3 (533ca4a4 driver.c:2605).
+        // delivered, by greater-than in v2.0.3 (533ca4a4 driver.c:2605) and
+        // e9a6e92d. Under lane WAKE2's rules the frame no read carried goes
+        // when it comes after the last one delivered in serial number
+        // arithmetic, or none was delivered since a reset, and a frame read
+        // once its program's pipe closed by greater-than; a frame OwnerGone
+        // queued ahead of the release frame goes first, and moves no gate
+        // (driver.c, IOCTL_HID_READ_REPORT, TakeReportLocked and
+        // CachedAfterDeliveredLocked).
         if (deviceUp && !s.Parked)
         {
             bool newer = d == Driver.This && r.LateReadNotEqual ? s.CacheSeq != s.LastDel : s.CacheSeq > s.LastDel;
-            if (s.RelQ != 0) next.Add(DeliverRelease(s));
-            else if (s.Cache != 0 && newer) next.Add(DeliverFrame(s, s.Cache - 1) with { LastDel = s.CacheSeq });
+            if (d == Driver.This && r.Wake2)
+                newer = s.Pend && (r.LateReadNotEqual ? s.CacheSeq != s.LastDel
+                    : r.SerialRead
+                    ? s.LastDel == 0 || (s.AfterEnd && r.AfterEndGreater ? s.CacheSeq > s.LastDel : SerialAfter(s.CacheSeq, s.LastDel, sc.Wrap))
+                    : s.CacheSeq > s.LastDel);
+            if (s.KeptQ != 0) next.Add(DeliverKept(s));
+            else if (s.RelQ != 0) next.Add(DeliverRelease(s));
+            else if (s.Cache != 0 && newer) next.Add(TakeFrame(s));
             else next.Add(s with { Parked = true });
         }
 
@@ -1726,7 +2041,10 @@ internal static class DeliveryModel
                 // closes and the last SeqNo goes.
                 bool owed = s.Handed != 0 && (s.Handed != s.Seen || !r.DropSent) && (s.Mapped || !r.OwedOnlyMapped) && s.Ev
                             && (!s.AckBit || !r.OwedOnlyNextProgram) && (s.Seq == s.Handed || !r.OwedOnlyHeld);
-                next.Add(s with { Owed = owed, Handed = 0, Watch = false, Seen = 0, RetryNext = d == Driver.This && r.RetryAfterOwnerGone, Pc = W_OG_END });
+                // Lane WAKE2 keeps the frame last read across OwnerGone
+                // (driver.c OwnerGone), where e9a6e92d forgot the SeqNo.
+                int seen = d == Driver.This && r.FrameIdentity ? s.Seen : 0;
+                next.Add(s with { Owed = owed, Handed = 0, Watch = false, Seen = seen, SeenSince = false, RetryNext = d == Driver.This && r.RetryAfterOwnerGone, Pc = W_OG_END });
                 break;
             }
             case W_OG_END:
@@ -1737,14 +2055,44 @@ internal static class DeliveryModel
             {
                 // The release frames the acknowledgement holds are queued
                 // and the delivered gate is reset, under InputLock, then a
-                // parked read takes a release frame.
-                var n = s with { RelQ = s.Ack, RelFor = s.Ack != 0 ? s.WatchP : 0, CacheSeq = 0, LastDel = 0, Pc = W_OG_SIG };
-                if (n.RelQ != 0 && n.Parked) n = DeliverRelease(n) with { Parked = false };
+                // parked read takes a release frame. Under lane WAKE2's rules
+                // a frame no read carried stays: queued ahead of the release
+                // frame, out of the cache, when it was read before its
+                // program's pipe closed, and pending with no release frame
+                // queued whenever it was read. One read once the pipe closed,
+                // which can be the next program's, goes as in v2.0.3 beside a
+                // release frame, and so does the first frame the device
+                // context read, which a context before it may have sent. The
+                // frame last read is forgotten with a frame dropped
+                // (DropPending).
+                var n = s with { RelQ = s.Ack, RelFor = s.Ack != 0 ? s.WatchP : 0, KeptQ = 0, LastDel = 0, Pc = W_OG_SIG };
+                bool keep = d == Driver.This && r.KeepAtReset && s.Pend && !s.FirstRead
+                            && (n.RelQ == 0 || !s.AfterEnd || !r.KeepOnlyAlive);
+                if (keep && n.RelQ != 0) n = n with { KeptQ = s.Cache, CacheSeq = 0, Pend = false, AfterEnd = false, FirstRead = false };
+                else if (keep) { }
+                else if (d == Driver.This && r.FrameIdentity && r.ForgetDropped && s.Pend) n = DropPending(n);
+                else n = n with { CacheSeq = 0, Pend = false, AfterEnd = false, FirstRead = false };
+                if (n.Parked && n.KeptQ != 0) n = DeliverKept(n) with { Parked = false };
+                else if (n.Parked && n.RelQ != 0) n = DeliverRelease(n) with { Parked = false };
+                else if (n.Parked && keep) n = TakeFrame(n) with { Parked = false };
                 next.Add(n);
                 break;
             }
             case W_OG_SIG:
-                next.Add(s with { Event = s.Event || s.Owed, Owed = false, EndSeen = true, WatchP = 0, Pc = s.Mapped ? W_TOP : W_P1 });
+            {
+                // Lane WAKE2: with the input event open, the worker reads the
+                // section once after OwnerGone when the frame path skipped a
+                // next program's frame while the pipe's close waited
+                // (driver.c, SkippedAtEnd at the owner pipe's wait).
+                bool readAfter = d == Driver.This && s.SkipEnd && s.Mapped;
+                next.Add(s with { Event = s.Event || s.Owed, Owed = false, EndSeen = true, WatchP = 0, SkipEnd = false,
+                                  Pc = readAfter ? W_OG_READ : s.Mapped ? W_TOP : W_P1 });
+                break;
+            }
+            case W_OG_READ:
+                // A read on no wake, which v2.0.3 never makes: this driver's
+                // own step, paired with nothing.
+                next.Add(Read(s with { Pc = W_TOP }, d, r, out _, 0, NextStarted(s), sc.Wrap));
                 break;
             case W_EXITED:
                 // ReleaseIndexObjects after the join: the stop event is set by
@@ -1754,7 +2102,8 @@ internal static class DeliveryModel
             case W_GONE:
                 // EvtDeviceAdd: a context with nothing read, nothing cached,
                 // and the stop event reset at its start.
-                next.Add(s with { Pc = W_P1, Seen = 0, Cache = 0, CacheSeq = 0, LastDel = 0, Parked = false, StopSig = false, Tear = 0, RetryNext = false });
+                next.Add(s with { Pc = W_P1, Seen = 0, Cache = 0, CacheSeq = 0, LastDel = 0, Parked = false, StopSig = false, Tear = 0, RetryNext = false,
+                                  SeenP = 0, SeenI = 0, SeenSince = false, ReadAny = false, SkipEnd = false });
                 break;
         }
     }
@@ -1782,7 +2131,33 @@ internal static class DeliveryModel
     static State Read(State s, Driver d, Rules r, out bool fresh, int taken = 0, bool nextStarted = false, int wrap = 0)
     {
         fresh = false;
-        if (s.Seq == s.Seen) return s;
+        // Lane WAKE2: the frame last read is its SeqNo and its data, here
+        // its program and place, so a next program's frame that repeats the
+        // SeqNo is new (driver.c SameAsSeen).
+        bool ident = d == Driver.This && r.FrameIdentity;
+        bool wake2 = d == Driver.This && r.Wake2;
+        // A frame that repeats the SeqNo with other data, the frame last
+        // read having been read since the last reset (SeenSince), when
+        // v2.0.3's SeqNo is the same, is skipped as v2.0.3 skipped it: while
+        // a frame waits for a read, which stays and goes out as there, and
+        // while the watched program's pipe has closed, as the next
+        // program's, which must not go ahead of the release frames OwnerGone
+        // queues. The worker's read after OwnerGone finds it (W_OG_READ).
+        // After a reset v2.0.3 forgot the SeqNo and read such a frame, and
+        // so does this driver: a frame kept across the reset gives way.
+        if (s.Seq == s.Seen && (!ident || (s.Prog == s.SeenP && s.Idx == s.SeenI))) return s;
+        // A device context's first read takes a frame on SeqNo 0, which a
+        // program before 2.1.0 stores at its wrap, for no news, as v2.0.3's
+        // SeenSeqNo, 0 from the add, took it: the context before it may have
+        // sent that frame.
+        if (ident && s.Seq == 0 && s.Prog != 0 && !s.ReadAny && s.SeenP == 0) return s;
+        if (s.Seq == s.Seen && (s.SeenSince || !r.SinceReset) && (s.Pend || (s.OwnerSig && r.SkipAtEnd)))
+            return s.OwnerSig && r.SkipAtEnd ? s with { SkipEnd = true } : s;
+        // A restart: the worker reads a zeroed section or a frame whose SeqNo
+        // repeats or goes back from the frame it read last. With no watch
+        // open, no OwnerGone resets the delivered gate for the next program.
+        bool restart = d == Driver.This && r.RestartReset && s.SeenP != 0 && !s.Watch
+                       && (s.Prog == 0 || s.Seq == s.Seen || SerialAfter(s.Seen, s.Seq, wrap));
         if (s.Prog == 0 && d == Driver.This && r.SkipZero)
         {
             // A zeroed section is SeqNo 0: no news when SeenSeqNo is 0.
@@ -1790,9 +2165,11 @@ internal static class DeliveryModel
             // report at SeqNo 0, as v2.0.3's read of it did, and no
             // READ_REPORT completes with it (161d29db). Taken away (D1), the
             // read returns before either changes (60bf16b0).
-            if (!r.ZeroForgets || s.Seen == 0) return s;
+            if (!r.ZeroForgets || (!ident && s.Seen == 0)) return s;
             fresh = true;
-            return s with { Seen = 0, Cache = Slot(s.P, 0) + 1, CacheSeq = 0 };
+            var z = s with { Seen = 0, Cache = Slot(s.P, 0) + 1, CacheSeq = 0 };
+            if (wake2) z = z with { SeenP = 0, SeenI = 0, Pend = false, AfterEnd = false, SeenSince = true, FirstRead = false };
+            return restart ? z with { LastDel = 0 } : z;
         }
         // A read a take alone woke sends only the frame taken or its
         // program's next one, and nothing once a next program started
@@ -1803,12 +2180,42 @@ internal static class DeliveryModel
                 || (r.TakeReadNextSeq && s.Seq != taken && s.Seq != NextFrameSeq(taken, wrap))))
             return s;
         int slot = s.Prog == 0 ? Slot(s.P, 0) : Slot(s.Prog, s.Idx);
-        fresh = s.Seq != s.Seen;
+        fresh = s.Seq != s.Seen || (ident && (s.Prog != s.SeenP || s.Idx != s.SeenI));
         if (!fresh) return s;
         // The frame goes in the cache with its SeqNo, and a parked read
-        // completes with it at once.
+        // completes with it at once. Under lane WAKE2's rules it is pending
+        // until a read carries it, and notes whether its program's pipe had
+        // closed when it was read.
         var n = s with { Seen = s.Seq, Cache = slot + 1, CacheSeq = s.Seq };
-        return n.Parked ? DeliverFrame(n, slot) with { LastDel = s.Seq, Parked = false } : n;
+        if (wake2)
+            n = n with { SeenP = s.Prog, SeenI = s.Idx, Pend = true, AfterEnd = s.OwnerSig, SeenSince = true, FirstRead = !s.ReadAny, ReadAny = true };
+        if (restart) n = n with { LastDel = 0 };
+        return n.Parked ? TakeFrame(n) with { Parked = false } : n;
+    }
+
+    // TakeReportLocked: the cached frame goes to a read and becomes the last
+    // one delivered.
+    static State TakeFrame(in State s) =>
+        DeliverFrame(s, s.Cache - 1) with { LastDel = s.CacheSeq, Pend = false, AfterEnd = false, FirstRead = false };
+
+    // TakeReportLocked: the frame OwnerGone queued ahead of the release frame
+    // goes to a read as a release frame does, and moves no gate.
+    static State DeliverKept(in State s) => DeliverFrame(s, s.KeptQ - 1) with { KeptQ = 0 };
+
+    // A reset drops the frame no read carried, as v2.0.3's, and forgets the
+    // frame last read with it, so a wakeup that reads it again sends it, as
+    // v2.0.3's does.
+    static State DropPending(in State s) =>
+        s with { CacheSeq = 0, Pend = false, AfterEnd = false, FirstRead = false, Seen = 0, SeenP = 0, SeenI = 0, SeenSince = false };
+
+    // Serial number arithmetic (RFC 1982) on the model's SeqNos: a comes
+    // after b when it is less than half the SeqNo space ahead, the space the
+    // wrap scenarios wrap at, else the 8 bits a SeqNo has here.
+    static bool SerialAfter(int a, int b, int wrap)
+    {
+        int m = wrap > 0 ? wrap : 256;
+        int ahead = ((a - b) % m + m) % m;
+        return ahead > 0 && ahead < m / 2;
     }
 
     static State DeliverFrame(in State s, int slot)
@@ -1822,7 +2229,7 @@ internal static class DeliveryModel
         {
             for (int j = slot % 6 + 1; j <= 5; j++)
                 if (Count(s.Delivered, Slot(p, j)) > 0) delivered |= 1UL << OrderBit;
-            if (LaterSent(s.Delivered, p)) delivered |= 1UL << CrossBit;
+            if (LaterSent(s.Delivered, p)) delivered |= 1UL << CrossBit | 1UL << FrameCrossBit;
         }
         return s with { Delivered = delivered };
     }
@@ -1880,9 +2287,22 @@ internal static class DeliveryModel
     static State Recycle(State n, Scenario sc, Driver d, Rules r, Prog prog, bool idle)
     {
         n = CloseGate(n, d, r);
-        n = n with { Mapped = false, Pc = W_P1, CacheSeq = 0, LastDel = 0, Took = 0, EndSeen = n.EndSeen || !n.Holds };
+        // Lane WAKE2: a frame no read carried stays, unless it was read once
+        // its program's pipe closed or is the device context's first, when
+        // it goes as in v2.0.3 and the frame last read is forgotten with it.
+        // The frame last read stays otherwise, read before this reset. No
+        // read is parked beside the frame kept: a read takes a frame that
+        // comes after the last one delivered.
+        bool keep = d == Driver.This && r.KeepAtReset && n.Pend && !n.FirstRead && !n.AfterEnd;
+        bool dropped = d == Driver.This && n.Pend && !keep;
+        n = n with { Mapped = false, Pc = W_P1, LastDel = 0, Took = 0, EndSeen = n.EndSeen || !n.Holds, SeenSince = false };
+        if (!keep) n = n with { CacheSeq = 0, Pend = false, AfterEnd = false, FirstRead = false };
         if (idle) n = n with { RecycleUsed = true };
-        if (d == Driver.V203 || r.ForgetAtRecycle) n = n with { Seen = 0 };
+        if (d == Driver.V203 || r.ForgetAtRecycle)
+        {
+            if (d == Driver.V203 || !r.FrameIdentity) n = n with { Seen = 0 };
+            else if (dropped && r.ForgetDropped) n = DropPending(n);
+        }
         return Collect(n, sc, prog);
     }
 
@@ -1892,7 +2312,8 @@ internal static class DeliveryModel
     {
         if (r.ClearCapAtGo) s = CloseGate(s, d, r);
         var n = s with { Pc = W_GONE, Mapped = false, SigMapped = false, Watch = false, OwnerSig = false, WatchP = 0, Counted = false, Blocked = false,
-                         Owed = false, Cache = 0, CacheSeq = 0, LastDel = 0, Parked = false, RelQ = 0, RelFor = 0, Took = 0, EndSeen = s.EndSeen || !s.Holds };
+                         Owed = false, Cache = 0, CacheSeq = 0, LastDel = 0, Parked = false, RelQ = 0, RelFor = 0, Took = 0, EndSeen = s.EndSeen || !s.Holds,
+                         Pend = false, AfterEnd = false, FirstRead = false, KeptQ = 0 };
         return Collect(n, sc, prog);
     }
 

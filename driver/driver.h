@@ -138,6 +138,30 @@ C_ASSERT(sizeof(HM_FEATURE_ENTRY) == HM_FEATURE_ENTRY_SIZE);
 /*  Device context                                                     */
 /* ------------------------------------------------------------------ */
 
+/* Shared memory layout: written by user-mode, read by driver
+ * Contains BOTH native HID report data AND GIP data for XUSB GET_STATE.
+ * Total size: 4 + 4 + 256 + 14 = 278 bytes.
+ *
+ * Data[] is 256 bytes to cover every HID input report size in the profile
+ * database without truncation. DualSense BT report 0x31 is 78 bytes;
+ * Switch Pro standard input reports can run to ~64; gyro/accelerometer
+ * passthrough on these pads writes motion values LATE in the report, so
+ * the prior 64-byte pipe clipped exactly the motion fields consumers
+ * (Dolphin, Cemu, yuzu/Citron, RetroArch) need. 256 matches the mirror
+ * in SHARED_OUTPUT and gives headroom for custom profile descriptors. */
+#pragma pack(push, 1)
+typedef struct _HIDMAESTRO_SHARED_INPUT {
+    volatile ULONG  SeqNo;           /* Incremented each write */
+    ULONG           DataSize;        /* HID input report data size (excluding Report ID) */
+    UCHAR           Data[256];       /* HID input report data (native descriptor format) */
+    UCHAR           GipData[14];     /* GIP-format data for XUSB GET_STATE (always 14 bytes) */
+    /* v1.3.5: vendor-blob mode-switch path. Driver passes
+     * ExtendedReportData verbatim when ExtendedReportSize > 0. */
+    ULONG           ExtendedReportSize;
+    UCHAR           ExtendedReportData[80];
+} HIDMAESTRO_SHARED_INPUT, *PHIDMAESTRO_SHARED_INPUT;
+#pragma pack(pop)
+
 typedef struct _DEVICE_CONTEXT {
 
     WDFDEVICE   Device;
@@ -208,12 +232,45 @@ typedef struct _DEVICE_CONTEXT {
     ULONG   PolledReportSize;
     BOOLEAN PolledReportReady;
 
-    /* The last shared-input SeqNo the worker sent, which a frame read must
-     * differ from to go out. Reset at the end of a program the owner watch
-     * saw, at every recycle and at add, as v2.0.3 reset it. A frame the
-     * driver does not send leaves SharedMemSeqNo and the cache as they
-     * were. */
+    /* The frame the worker read last, which a frame read must differ from
+     * to go out: its SeqNo, and from 2.1.0 its data, the data lane's and
+     * the extended lane's sizes as the frame path clamps them and their
+     * bytes (SameAsSeen). A next program before 2.1.0 counts from 0 and can
+     * repeat the SeqNo with other data, a frame v2.0.3 skipped. All zero is
+     * a zeroed section or none. Kept across OwnerGone and the recycle, where
+     * v2.0.3 forgot the SeqNo, unless they drop a frame no read carried, as
+     * v2.0.3 dropped it. A frame the driver does not send leaves
+     * SharedMemSeqNo and the cache as they were. The worker reads the
+     * section into Frames[SeenFrame ^ 1] and a frame it keeps flips
+     * SeenFrame, so the frame read last stays in Frames[SeenFrame] with no
+     * copy. Worker thread only. */
     ULONG   SeenSeqNo;
+    ULONG   SeenDataSize;
+    ULONG   SeenExtSize;
+    ULONG   SeenFrame;
+    HIDMAESTRO_SHARED_INPUT Frames[2];
+
+    /* 2.1.0: the worker has read a frame since the device context's add, so
+     * a frame read now was written after the context before it went
+     * (ProcessSharedInput, InputReportFirstRead). Worker thread only. */
+    BOOLEAN ReadAFrame;
+
+    /* 2.1.0: the frame read last was read since the last reset, OwnerGone
+     * or the recycle, where v2.0.3 forgot the SeqNo, so v2.0.3's SeqNo is
+     * the same. A frame that repeats it with other data is skipped as v2.0.3
+     * skipped it only then (ProcessSharedInput). Worker thread only. */
+    BOOLEAN SeenSinceReset;
+
+    /* 2.1.0: the frame path skipped a frame that repeats the SeqNo with
+     * other data once the watched program's pipe had closed, the next
+     * program's. OwnerGone clears it, and the worker reads the section
+     * after OwnerGone when it was set. Worker thread only. */
+    BOOLEAN SkippedAtEnd;
+
+    /* 2.1.0: the worker read a next program's start with no watch open
+     * (ProcessSharedInput), and the cache write that follows resets the
+     * delivered gate. Worker thread only. */
+    BOOLEAN RestartSeen;
 
     /* v2.0.0: LiveFeatureReport, read under the contract: one plus the
      * ID of the feature report whose answer is the device's state, or 0
@@ -262,8 +319,10 @@ typedef struct _DEVICE_CONTEXT {
 
     /* Sequence-number gate for IOCTL_HID_READ_REPORT. The READ_REPORT
      * handler returns a cached input report immediately ONLY when there's
-     * new data since the last delivery (SharedMemSeqNo > LastDeliveredInputSeqNo).
-     * Otherwise the request is parked in ManualQueue and the worker thread
+     * new data since the last delivery: from 2.1.0 a pending frame whose
+     * SeqNo comes after LastDeliveredInputSeqNo (CachedAfterDeliveredLocked),
+     * 0 for none delivered since a reset. Otherwise the request is parked in
+     * ManualQueue and the worker thread
      * completes it on the next ProcessSharedInput tick, or the handler's
      * look after parking finds a frame the worker cached meanwhile
      * (DeliverParked). Without this gate,
@@ -275,16 +334,30 @@ typedef struct _DEVICE_CONTEXT {
     /* 2.1.0: the cached report is a frame no READ_REPORT has carried yet.
      * The worker sets it as it caches a frame it sends, before it looks for
      * a read parked, and whichever read carries the frame clears it, so a
-     * frame goes out once. OwnerGone, the recycle and a zeroed section clear
-     * it with the delivered gate. Under InputLock. */
+     * frame goes out once. A zeroed section clears it. The recycle keeps it,
+     * and OwnerGone keeps it with no release frames and puts it ahead of
+     * them otherwise, unless it is InputReportFirstRead, or
+     * InputReportAfterEnd at the recycle or beside release frames. Under
+     * InputLock. */
     BOOLEAN InputReportPending;
+
+    /* 2.1.0: InputReportFirstRead, the pending frame is the first frame
+     * this device context read, which a context before it may have sent
+     * (the device added again): OwnerGone and the recycle drop it as v2.0.3
+     * dropped it. InputReportAfterEnd, it was read once the watched
+     * program's pipe had closed, so it can be the next program's: a late
+     * READ_REPORT takes it under v2.0.3's greater-than test, and the recycle
+     * drops it, and OwnerGone beside release frames. Each holds only while
+     * InputReportPending does. Under InputLock. */
+    BOOLEAN InputReportFirstRead;
+    BOOLEAN InputReportAfterEnd;
 
     /* 2.1.0: frames the worker has cached. A READ_REPORT that parks looks
      * again once it is in the queue and takes the pending frame only when
      * one was cached since its first look: that frame came while the read
      * was waiting, and a read parked then gets it. A frame cached before
-     * the first look stays under v2.0.3's greater-than test. Under
-     * InputLock. */
+     * the first look stays under the test of a read that comes after a
+     * frame (CachedAfterDeliveredLocked). Under InputLock. */
     ULONG   InputPublishCount;
 
     /* Event-driven IPC: SDK signals InputDataEvent after every seqlock write,
@@ -377,9 +450,11 @@ typedef struct _DEVICE_CONTEXT {
      * TRUE otherwise, a program before 2.1.0 included. Set at add. */
     BOOLEAN AckSignal;
 
-    /* Release frames waiting for a READ_REPORT, under InputLock. */
-    UCHAR   ReleaseFrames[HIDMAESTRO_RELEASE_SLOTS][HIDMAESTRO_RELEASE_FRAME_CAP];
-    ULONG   ReleaseSizes[HIDMAESTRO_RELEASE_SLOTS];
+    /* Release frames waiting for a READ_REPORT, under InputLock. 2.1.0: one
+     * slot more, for the program's last frame no read carried, which
+     * OwnerGone puts ahead of them. */
+    UCHAR   ReleaseFrames[HIDMAESTRO_RELEASE_SLOTS + 1][HIDMAESTRO_RELEASE_FRAME_CAP];
+    ULONG   ReleaseSizes[HIDMAESTRO_RELEASE_SLOTS + 1];
     ULONG   ReleaseCount;
     ULONG   ReleaseNext;
 
@@ -419,30 +494,6 @@ typedef struct _DEVICE_CONTEXT {
     WCHAR   PidStateMappingName[64]; /* e.g. L"Global\\HIDMaestroPidState0" */
 
 } DEVICE_CONTEXT, *PDEVICE_CONTEXT;
-
-/* Shared memory layout: written by user-mode, read by driver
- * Contains BOTH native HID report data AND GIP data for XUSB GET_STATE.
- * Total size: 4 + 4 + 256 + 14 = 278 bytes.
- *
- * Data[] is 256 bytes to cover every HID input report size in the profile
- * database without truncation. DualSense BT report 0x31 is 78 bytes;
- * Switch Pro standard input reports can run to ~64; gyro/accelerometer
- * passthrough on these pads writes motion values LATE in the report, so
- * the prior 64-byte pipe clipped exactly the motion fields consumers
- * (Dolphin, Cemu, yuzu/Citron, RetroArch) need. 256 matches the mirror
- * in SHARED_OUTPUT and gives headroom for custom profile descriptors. */
-#pragma pack(push, 1)
-typedef struct _HIDMAESTRO_SHARED_INPUT {
-    volatile ULONG  SeqNo;           /* Incremented each write */
-    ULONG           DataSize;        /* HID input report data size (excluding Report ID) */
-    UCHAR           Data[256];       /* HID input report data (native descriptor format) */
-    UCHAR           GipData[14];     /* GIP-format data for XUSB GET_STATE (always 14 bytes) */
-    /* v1.3.5: vendor-blob mode-switch path. Driver passes
-     * ExtendedReportData verbatim when ExtendedReportSize > 0. */
-    ULONG           ExtendedReportSize;
-    UCHAR           ExtendedReportData[80];
-} HIDMAESTRO_SHARED_INPUT, *PHIDMAESTRO_SHARED_INPUT;
-#pragma pack(pop)
 
 /* Delivery acknowledgement, Global\HIDMaestroInputAck<N> (issue #67). A
  * separate section, so no existing layout changes: readers of the input,

@@ -815,6 +815,7 @@ static VOID AckInputDeliveredLocked(_In_ PDEVICE_CONTEXT ctx, _In_ ULONG seqNo);
 static VOID TryOpenOwnerWatch(_In_ PDEVICE_CONTEXT ctx);
 static VOID CloseOwnerWatch(_In_ PDEVICE_CONTEXT ctx);
 static VOID OwnerGone(_In_ PDEVICE_CONTEXT ctx);
+static VOID ForgetSeen(_In_ PDEVICE_CONTEXT ctx);
 static HANDLE CreateHostEvent(_In_ BOOL manualReset, _In_ BOOL takeOverNullDacl, _In_ LPCWSTR name);
 static VOID TryCreateDoorbell(_In_ PDEVICE_CONTEXT ctx);
 static VOID TryOpenSignal(_In_ PDEVICE_CONTEXT ctx);
@@ -1070,6 +1071,25 @@ static BOOLEAN
 ReportWaitingLocked(_In_ PDEVICE_CONTEXT ctx)
 {
     return ctx->ReleaseNext < ctx->ReleaseCount || ctx->InputReportPending;
+}
+
+/* 2.1.0: the pending frame comes after the last one delivered, so a
+ * READ_REPORT that comes after it takes it: by serial number arithmetic on
+ * the SeqNos (RFC 1982), under which SeqNo 2, the frame past the wrap,
+ * comes after 0xFFFFFFFE, where v2.0.3's greater-than test parked that read
+ * until the next frame. 0 is none delivered since a reset (OwnerGone, the
+ * recycle, the add, a restart seen with no watch open), and every frame
+ * comes after it. A frame read once the watched program's pipe closed can
+ * be the next program's, which a READ_REPORT before OwnerGone must not
+ * take where v2.0.3 parked it, ahead of the release frames OwnerGone
+ * queues: it keeps the greater-than test. Caller holds InputLock. */
+static BOOLEAN
+CachedAfterDeliveredLocked(_In_ PDEVICE_CONTEXT ctx)
+{
+    ULONG last = ctx->LastDeliveredInputSeqNo;
+    if (last == 0) return TRUE;
+    if (ctx->InputReportAfterEnd) return ctx->SharedMemSeqNo > last;
+    return (LONG)(ctx->SharedMemSeqNo - last) > 0;
 }
 
 /* 2.1.0: take the report a read carries, the next release frame first (issue
@@ -1358,15 +1378,21 @@ OwnerGone(_In_ PDEVICE_CONTEXT ctx)
 
     /* A program before 2.1.0 that starts next on this index zeroes the
      * input section and counts its frames from 1, and it can start inside
-     * the idle window, before any recycle. SeenSeqNo is forgotten as v2.0.3
-     * forgot it here, so its frame equal to this program's last goes out.
+     * the idle window, before any recycle. 2.1.0: its frame that repeats
+     * this program's last SeqNo has other data, which SameAsSeen tells
+     * apart, so OwnerGone keeps the frame read last. v2.0.3 forgot the SeqNo
+     * here, and the next program's first frame, read before OwnerGone on
+     * this program's left signal and carried, went out again on its own
+     * signal. Forgotten below only with a frame OwnerGone drops.
      * SharedMemSeqNo is reset under InputLock below. The watch is tried
      * again at the next map or the 256th frame, as v2.0.3 tried it. Tried
      * at the next frame, it watched a program that started inside the idle
      * window, and that program's end ran an OwnerGone v2.0.3 did not, whose
      * reset hid its last frame, cached with no read parked, from the read
      * that came after. */
-    ctx->SeenSeqNo = 0;
+    BOOLEAN dropped;
+    ctx->SkippedAtEnd = FALSE;
+    ctx->SeenSinceReset = FALSE;
 
     /* The watch connects only beside the acknowledgement section, so it is
      * mapped here. Mark the watch ended in it (TryOpenOwnerWatch) before
@@ -1407,22 +1433,50 @@ OwnerGone(_In_ PDEVICE_CONTEXT ctx)
     ctx->ReleaseNext = 0;
     /* The delivered gate goes with the SeqNo: kept, it parked a read the
      * next program's first frame in the cache could serve, until that
-     * program's SeqNo passed this one's last. A frame no read has carried
-     * goes with it, as it went with v2.0.3's reset: sent now, it would
-     * follow the release frames. */
-    ctx->SharedMemSeqNo = 0;
+     * program's SeqNo passed this one's last. 2.1.0: the frame no read has
+     * carried stays, where v2.0.3's reset dropped it and readers kept the
+     * state before it, a button it let go of held, until a next program
+     * sent. With no release frames it stays the frame a read takes next,
+     * and the next program's frames replace it as they replace any frame
+     * no read carried (SeenSinceReset). With them it goes ahead of them,
+     * out of the cache, its program's last report before they let go of
+     * everything, when it was read while the program ran. One read once
+     * the pipe closed can be the next program's, which the release frames
+     * must not follow: it goes as at v2.0.3. So does the first frame this
+     * device context read, which a context before it may have sent, and a
+     * frame wider than a release slot. */
+    BOOLEAN pending = ctx->InputReportPending;
+    BOOLEAN keep = pending && !ctx->InputReportFirstRead
+        && (count == 0 || (!ctx->InputReportAfterEnd && ctx->InputReportSize <= HIDMAESTRO_RELEASE_FRAME_CAP));
+    ULONG first = 0;
+    if (keep && count > 0) {
+        RtlMoveMemory(ctx->ReleaseFrames[1], ctx->ReleaseFrames[0], count * sizeof(ctx->ReleaseFrames[0]));
+        RtlMoveMemory(&ctx->ReleaseSizes[1], &ctx->ReleaseSizes[0], count * sizeof(ctx->ReleaseSizes[0]));
+        RtlCopyMemory(ctx->ReleaseFrames[0], ctx->InputReport, ctx->InputReportSize);
+        ctx->ReleaseSizes[0] = ctx->InputReportSize;
+        ctx->ReleaseCount = count + 1;
+        ctx->InputReportPending = FALSE;
+        first = 1;
+    }
+    if (!keep) ctx->InputReportPending = FALSE;
+    if (!ctx->InputReportPending) ctx->SharedMemSeqNo = 0;
     ctx->LastDeliveredInputSeqNo = 0;
-    ctx->InputReportPending = FALSE;
+    /* A frame that stays pending is published again: a READ_REPORT whose
+     * look this reset passed parks beside it, and its second look takes it
+     * as it takes a frame cached since. */
+    if (ctx->InputReportPending) ctx->InputPublishCount++;
+    dropped = pending && !keep;
     /* Polled reads (IOCTL_UMDF_HID_GET_INPUT_REPORT) see the released
-     * state too: the frame for the cached report's ID replaces it. */
-    for (ULONG i = 0; i < count; i++) {
+     * state too: the release frame for the cached report's ID replaces it,
+     * a frame put ahead of them aside. */
+    for (ULONG i = first; i < ctx->ReleaseCount; i++) {
         if (ctx->ReleaseSizes[i] == ctx->InputReportSize
             && (ctx->FirstInputReportId == 0 || ctx->ReleaseFrames[i][0] == ctx->InputReport[0])) {
             RtlCopyMemory(ctx->InputReport, ctx->ReleaseFrames[i], ctx->ReleaseSizes[i]);
             break;
         }
     }
-    for (ULONG i = 0; i < count && ctx->CachedInputIdCount > 0 && ctx->PolledReportReady; i++) {
+    for (ULONG i = first; i < ctx->ReleaseCount && ctx->CachedInputIdCount > 0 && ctx->PolledReportReady; i++) {
         if (ctx->ReleaseSizes[i] == ctx->PolledReportSize
             && (ctx->FirstInputReportId == 0 || ctx->ReleaseFrames[i][0] == ctx->PolledReport[0])) {
             RtlCopyMemory(ctx->PolledReport, ctx->ReleaseFrames[i], ctx->ReleaseSizes[i]);
@@ -1431,6 +1485,7 @@ OwnerGone(_In_ PDEVICE_CONTEXT ctx)
     }
     BOOLEAN waiting = ReportWaitingLocked(ctx);
     ReleaseSRWLockExclusive(&ctx->InputLock);
+    if (dropped) ForgetSeen(ctx);
 
     /* The release frames go to the READ_REPORTs HID class has parked, one
      * frame per read, and those left over to the next READ_REPORTs as they
@@ -1788,6 +1843,78 @@ KeepLiveFeatureLocked(_In_ PDEVICE_CONTEXT ctx, _In_ const HIDMAESTRO_SHARED_INP
     ctx->LiveFeatureSize = n;
 }
 
+/* 2.1.0: the frame read last (SeenSeqNo): the data lane's and the extended
+ * lane's sizes, clamped as the frame path clamps them. Its bytes are
+ * Frames[SeenFrame], the buffer the read before this one filled. */
+static ULONG
+SeenLength(_In_ ULONG size, _In_ ULONG cap)
+{
+    return size > cap ? cap : size;
+}
+
+/* 2.1.0: the frame just read is the frame read last: the same SeqNo and the
+ * same data. A next program before 2.1.0 counts from 0 and can repeat the
+ * last SeqNo with other data, which is a new frame. Through e9a6e92d, as in
+ * v2.0.3, the SeqNo alone decided: the worker skipped that frame, for good
+ * when no OwnerGone would forget the SeqNo, and the next program's frame
+ * read before OwnerGone went out again on its own signal once OwnerGone
+ * forgot it. GipData is the companion's and no part of a HID report.
+ * Worker thread only. */
+static BOOLEAN
+SameAsSeen(_In_ PDEVICE_CONTEXT ctx, _In_ const HIDMAESTRO_SHARED_INPUT *s)
+{
+    ULONG n = SeenLength(s->DataSize, sizeof(s->Data));
+    ULONG x = SeenLength(s->ExtendedReportSize, sizeof(s->ExtendedReportData));
+    const HIDMAESTRO_SHARED_INPUT *seen = &ctx->Frames[ctx->SeenFrame];
+    return s->SeqNo == ctx->SeenSeqNo && n == ctx->SeenDataSize && x == ctx->SeenExtSize
+        && RtlEqualMemory(s->Data, seen->Data, n)
+        && RtlEqualMemory(s->ExtendedReportData, seen->ExtendedReportData, x);
+}
+
+/* The frame just read, in Frames[SeenFrame ^ 1], becomes the frame read
+ * last by flipping SeenFrame. No copy: the next read fills the other
+ * buffer. */
+static VOID
+KeepSeen(_In_ PDEVICE_CONTEXT ctx, _In_ const HIDMAESTRO_SHARED_INPUT *s)
+{
+    ctx->SeenSinceReset = TRUE;
+    ctx->SeenSeqNo = s->SeqNo;
+    ctx->SeenDataSize = SeenLength(s->DataSize, sizeof(s->Data));
+    ctx->SeenExtSize = SeenLength(s->ExtendedReportSize, sizeof(s->ExtendedReportData));
+    ctx->SeenFrame ^= 1;
+}
+
+/* 2.1.0: OwnerGone and the recycle keep the frame read last, so a wakeup
+ * that reads it again after them sends nothing. One that drops a frame no
+ * read carried forgets it, as v2.0.3 forgot the SeqNo, so a wakeup that
+ * reads that frame again sends it once. */
+static VOID
+ForgetSeen(_In_ PDEVICE_CONTEXT ctx)
+{
+    ctx->SeenSeqNo = 0;
+    ctx->SeenDataSize = 0;
+    ctx->SeenExtSize = 0;
+    ctx->SeenSinceReset = FALSE;
+}
+
+/* The frame read last is a frame: not a zeroed section, not none. */
+static BOOLEAN
+SeenAFrame(_In_ PDEVICE_CONTEXT ctx)
+{
+    return ctx->SeenSeqNo != 0 || ctx->SeenDataSize != 0 || ctx->SeenExtSize != 0;
+}
+
+/* 2.1.0: the watched program's pipe has closed and OwnerGone has yet to
+ * run: the read kept pending on it has completed (HasOverlappedIoCompleted,
+ * Learn). A next program starts after the last one ended, so a frame read
+ * while the read is pending is the watched program's own. Worker thread
+ * only, as the watch is. */
+static BOOLEAN
+OwnerEnded(_In_ PDEVICE_CONTEXT ctx)
+{
+    return ctx->OwnerPipe != NULL && HasOverlappedIoCompleted(&ctx->OwnerOverlapped);
+}
+
 /* Core per-frame work extracted from the old EvtSharedMemTimer.
  * Called from the event-driven worker thread whenever the SDK signals
  * InputDataEvent (or the 50 ms safety tick fires). Doing all the HID
@@ -1798,13 +1925,39 @@ KeepLiveFeatureLocked(_In_ PDEVICE_CONTEXT ctx, _In_ const HIDMAESTRO_SHARED_INP
 static void
 ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
 {
-    HIDMAESTRO_SHARED_INPUT shared;
-    if (!ReadSharedInput(ctx, &shared)) return;
+    /* The section's one copy per frame goes into the buffer that does not
+     * hold the frame read last (KeepSeen). */
+    HIDMAESTRO_SHARED_INPUT *frame = &ctx->Frames[ctx->SeenFrame ^ 1];
+    if (!ReadSharedInput(ctx, frame)) return;
 
-    ULONG seqNo = shared.SeqNo;
-    /* A frame is new when it is not the last one sent, whether a signal or
-     * a handed-over frame woke this read (TakeHandoff). */
-    if (seqNo == ctx->SeenSeqNo) return; /* No new data */
+    ULONG seqNo = frame->SeqNo;
+    /* A frame is new when it is not the last one read, whether a signal or
+     * a handed-over frame woke this read (TakeHandoff). 2.1.0: the SeqNo and
+     * the data (SameAsSeen). One that repeats the SeqNo with other data,
+     * with the frame read last read since the last reset (SeenSinceReset),
+     * so that v2.0.3's SeqNo is the same, is skipped as v2.0.3 skipped it
+     * while a frame no read carried waits, which stays and goes out as
+     * there, and while the watched program's pipe has closed: it is the
+     * next program's, which must not go ahead of the release frames
+     * OwnerGone queues, and the worker's read after OwnerGone finds it
+     * (SkippedAtEnd). After a reset v2.0.3 forgot the SeqNo and read such a
+     * frame, and so does this driver: a frame kept across the reset gives
+     * way to it. The next wakeup that finds the other data reads a frame
+     * skipped. */
+    if (SameAsSeen(ctx, frame)) return; /* No new data */
+    /* 2.1.0: a device context's first read takes a frame on SeqNo 0, which
+     * a program before 2.1.0 stores at its wrap, for no news, as v2.0.3's
+     * SeenSeqNo, 0 from the add, took it: the context before this one may
+     * have sent that frame. */
+    if (seqNo == 0 && !ctx->ReadAFrame && !SeenAFrame(ctx)) return;
+    if (seqNo == ctx->SeenSeqNo && ctx->SeenSinceReset) {
+        BOOLEAN waiting, ended = OwnerEnded(ctx);
+        AcquireSRWLockExclusive(&ctx->InputLock);
+        waiting = ctx->InputReportPending;
+        ReleaseSRWLockExclusive(&ctx->InputLock);
+        if (ended) ctx->SkippedAtEnd = TRUE;
+        if (waiting || ended) return;
+    }
     /* 2.1.0: SeqNo 0 with no data is a section an SDK zeroed as it mapped
      * the index, and no frame. v2.0.3 read it as one: SeenSeqNo became 0,
      * the cache took an all-zero report at SeqNo 0 (with LiveFeatureReport,
@@ -1816,10 +1969,28 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
      * caller no longer sees that program's last report, but no READ_REPORT
      * completes with the all-zero one. A program before 2.1.0 stores 0 with
      * its frame at every 2^31st frame, and that frame goes on. */
-    BOOLEAN zeroed = seqNo == 0 && shared.DataSize == 0 && shared.ExtendedReportSize == 0;
+    BOOLEAN zeroed = seqNo == 0 && frame->DataSize == 0 && frame->ExtendedReportSize == 0;
+    /* 2.1.0: a next program counting from 0 started since the last read
+     * when, after a frame, the worker reads a zeroed section, a frame that
+     * repeats that frame's SeqNo with other data, or one whose SeqNo comes
+     * before it. The SeqNo last delivered is the last program's then. With
+     * a watch open OwnerGone resets the delivered gate. With none, nothing
+     * did, and a read that came after the next program's frame parked
+     * beside it until that program's SeqNo passed the last one's, as at
+     * v2.0.3: the restart resets the gate itself, in the cache write that
+     * follows (RestartSeen). Reset any earlier, a read that took the last
+     * frame cached before that write moved the gate back to the last
+     * program's SeqNo. The frame read notes whether it is this device
+     * context's first and whether the watched program's pipe had closed
+     * (CachedAfterDeliveredLocked, OwnerGone, the recycle). */
+    BOOLEAN firstRead = !zeroed && !ctx->ReadAFrame;
+    BOOLEAN restart = SeenAFrame(ctx) && (zeroed || seqNo == ctx->SeenSeqNo || (LONG)(seqNo - ctx->SeenSeqNo) < 0);
+    BOOLEAN afterEnd = OwnerEnded(ctx);
+    if (!zeroed) ctx->ReadAFrame = TRUE;
     /* v2.0.0: the worker's stale-wakeup count reads SeenSeqNo, since a
      * frame the driver does not send leaves SharedMemSeqNo alone. */
-    ctx->SeenSeqNo = seqNo;
+    KeepSeen(ctx, frame);
+    if (restart && ctx->OwnerPipe == NULL) ctx->RestartSeen = TRUE;
     /* NOTE: SharedMemSeqNo is advanced LATER, under InputLock, together
      * with the InputReport cache write (see the completion block below).
      * Publishing it here would let a concurrent IOCTL_HID_READ_REPORT
@@ -1830,9 +2001,9 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
     /* v2.0.0: with LiveFeatureReport the data lane is the answer to that
      * feature report, never an input report. A frame that carries nothing
      * else only replaces the answer. */
-    if (ctx->LiveFeatureReport != 0 && shared.ExtendedReportSize == 0) {
+    if (ctx->LiveFeatureReport != 0 && frame->ExtendedReportSize == 0) {
         AcquireSRWLockExclusive(&ctx->InputLock);
-        KeepLiveFeatureLocked(ctx, &shared);
+        KeepLiveFeatureLocked(ctx, frame);
         ReleaseSRWLockExclusive(&ctx->InputLock);
         return;
     }
@@ -1846,7 +2017,7 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
      * Sony BT Report 0x31 with CRC32). Pass through verbatim. */
     UCHAR inputReport[HIDMAESTRO_MAX_REPORT_SIZE];
 
-    ULONG dataLen = shared.DataSize;
+    ULONG dataLen = frame->DataSize;
     BOOLEAN hasReportId = (ctx->FirstInputReportId != 0);
     ULONG expectedSize = ctx->InputReportByteLength > 0 ? ctx->InputReportByteLength : 17;
     /* Only the bytes that go out: every path below sends at most
@@ -1860,22 +2031,22 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
         maxData = expectedSize;
     }
     if (dataLen > maxData) dataLen = maxData;
-    if (dataLen > sizeof(shared.Data)) dataLen = sizeof(shared.Data);
+    if (dataLen > sizeof(frame->Data)) dataLen = sizeof(frame->Data);
 
     ULONG inputSize;
     if (hasReportId) {
         inputReport[0] = ctx->FirstInputReportId;
-        RtlCopyMemory(inputReport + 1, shared.Data, dataLen);
+        RtlCopyMemory(inputReport + 1, frame->Data, dataLen);
         inputSize = expectedSize; /* Always send full expected length */
     } else {
-        RtlCopyMemory(inputReport, shared.Data, dataLen);
+        RtlCopyMemory(inputReport, frame->Data, dataLen);
         inputSize = expectedSize; /* Always send full expected length */
     }
 
     /* v1.3.5: vendor-blob mode-switch path. When the SDK arms extended
      * emission (Sony BT post-handshake, ExtendedReportSize > 0), it has
      * already written the FULL RID-included extended report (e.g. 78-byte
-     * Sony BT Report 0x31 with CRC32) into shared.ExtendedReportData.
+     * Sony BT Report 0x31 with CRC32) into frame->ExtendedReportData.
      * Overwrite the legacy-encoded inputReport/inputSize with the
      * pass-through bytes: the legacy encode above is harmless work for
      * the few-microsecond window before the overwrite, which keeps the
@@ -1887,17 +2058,17 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
      * taken: see issue #21). For the common case (ExtendedReportSize=0)
      * this is one cmp + jz; on modern x86 with branch prediction it's
      * effectively free. */
-    if (shared.ExtendedReportSize > 0
-        && shared.ExtendedReportSize <= sizeof(shared.ExtendedReportData)
-        && shared.ExtendedReportSize <= sizeof(inputReport))
+    if (frame->ExtendedReportSize > 0
+        && frame->ExtendedReportSize <= sizeof(frame->ExtendedReportData)
+        && frame->ExtendedReportSize <= sizeof(inputReport))
     {
         /* v2.0.0: only at its report's declared length. Any other frame
          * is not sent, and the last sent report stands. */
-        if (!ExtendedFrameDeclared(ctx, shared.ExtendedReportData, shared.ExtendedReportSize))
+        if (!ExtendedFrameDeclared(ctx, frame->ExtendedReportData, frame->ExtendedReportSize))
             return;
         RtlZeroMemory(inputReport, inputSize);
-        RtlCopyMemory(inputReport, shared.ExtendedReportData, shared.ExtendedReportSize);
-        inputSize = shared.ExtendedReportSize;
+        RtlCopyMemory(inputReport, frame->ExtendedReportData, frame->ExtendedReportSize);
+        inputSize = frame->ExtendedReportSize;
     }
 
     /* Complete exactly ONE pending READ_REPORT per shared-memory state
@@ -1938,7 +2109,7 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
             ctx->PolledReportReady = TRUE;
         }
         if (ctx->LiveFeatureReport != 0)
-            KeepLiveFeatureLocked(ctx, &shared);
+            KeepLiveFeatureLocked(ctx, frame);
         /* Publish the seqno LAST, under the same lock IOCTL_HID_READ_REPORT
          * takes, so a concurrent read sees either the old seqno (and parks)
          * or the new seqno paired with the freshly-written InputReport.
@@ -1947,6 +2118,12 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
         ctx->SharedMemSeqNo = seqNo;
         /* A zeroed section is no frame, and no read carries it. */
         ctx->InputReportPending = !zeroed;
+        ctx->InputReportFirstRead = firstRead;
+        ctx->InputReportAfterEnd = afterEnd;
+        if (ctx->RestartSeen) {
+            ctx->LastDeliveredInputSeqNo = 0;
+            ctx->RestartSeen = FALSE;
+        }
         ctx->InputPublishCount++;
         waiting = ReportWaitingLocked(ctx);
         ReleaseSRWLockExclusive(&ctx->InputLock);
@@ -2169,11 +2346,12 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
              * worker leaves with the frame unread and signals nothing, as in
              * the owner path above: v2.0.3's wait returned the program's
              * signal there and spent it. Dropped at the stop event, the frame
-             * waited for the program's next one. The add and the recycle
-             * forget SeenSeqNo in both drivers, so
-             * a taken frame already sent goes out again there only where
-             * v2.0.3's left signal sent it again. A provisional take is no
-             * frame (HandoffFinal): its program signals it. */
+             * waited for the program's next one. The add forgets the frame
+             * read last in both drivers, and the recycle in v2.0.3, so a
+             * taken frame already sent goes out again at an add only where
+             * v2.0.3's left signal sent it again, and after a recycle, which
+             * keeps the frame read last from 2.1.0, never. A provisional
+             * take is no frame (HandoffFinal): its program signals it. */
 
             /* Issue #38: TearingDown is the authoritative exit
              * condition, checked on EVERY wake including timeouts. The
@@ -2274,8 +2452,16 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
             }
 
             if (ownerAt != MAXDWORD && rc == WAIT_OBJECT_0 + ownerAt) {
-                /* The consumer's end of the owner pipe closed. */
+                /* The consumer's end of the owner pipe closed. 2.1.0: then a
+                 * read of the section when the frame path skipped a next
+                 * program's frame once the pipe closed (SkippedAtEnd), which
+                 * now goes behind the release frames, and before that
+                 * program's next signal. Only then: a frame of the program
+                 * that ended, never signaled or dropped by OwnerGone, would
+                 * go behind them, where v2.0.3 never read it. */
+                BOOLEAN skipped = ctx->SkippedAtEnd;
                 OwnerGone(ctx);
+                if (skipped) ProcessSharedInput(ctx);
                 continue;
             }
 
@@ -2324,20 +2510,32 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
              * next SDK on this index opens the same section, and
              * TryOpenSharedMapping maps it again with the input
              * section. */
-            /* Reset the delivered gate with SharedMemSeqNo, under the lock
-             * READ_REPORT reads both under, as OwnerGone resets them: a
-             * program that starts again on the index may count its frames
-             * from the start. A frame no read carried goes with them, as
-             * it went with v2.0.3's reset. */
+            /* Reset the delivered gate under the lock READ_REPORT reads it
+             * under, as OwnerGone resets it: a program that starts again on
+             * the index may count its frames from the start. 2.1.0: a frame
+             * no read carried stays, where v2.0.3's reset dropped it, for the
+             * next READ_REPORT. A read parked beside it would have taken it,
+             * as it comes after the last frame delivered. One read once the
+             * watched pipe closed goes as at v2.0.3, since the OwnerGone that
+             * Phase 1 runs may queue release frames it must not precede, and
+             * so does the first frame this device context read, and the frame
+             * read last is forgotten with either. Otherwise the recycle keeps
+             * the frame read last, where v2.0.3's forgot the SeqNo and read
+             * the frame again on the signal the gate's closing gave back:
+             * the program that held the index may have ended unseen, and the
+             * next one's frame that repeats the last SeqNo has other data
+             * (SameAsSeen). */
             AcquireSRWLockExclusive(&ctx->InputLock);
-            ctx->SharedMemSeqNo = 0;
+            BOOLEAN pending = ctx->InputReportPending;
+            BOOLEAN keep = pending && !ctx->InputReportFirstRead && !ctx->InputReportAfterEnd;
+            if (!keep) {
+                ctx->SharedMemSeqNo = 0;
+                ctx->InputReportPending = FALSE;
+            }
             ctx->LastDeliveredInputSeqNo = 0;
-            ctx->InputReportPending = FALSE;
             ReleaseSRWLockExclusive(&ctx->InputLock);
-            /* The program that held the index may have ended unseen and the
-             * next may count from 0, so the recycle forgets the last SeqNo,
-             * as v2.0.3's did. */
-            ctx->SeenSeqNo = 0;
+            ctx->SeenSinceReset = FALSE;
+            if (pending && !keep) ForgetSeen(ctx);
         }
     }
 }
@@ -2943,16 +3141,12 @@ EvtIoDeviceControl(
         }
 
         /* Release frames the consumer's exit left queued (issue #67) go
-         * first, one per read. Then the cached frame no read has carried,
-         * when its SeqNo is greater than the last one delivered, as v2.0.3
-         * tested it. A frame after the SeqNo wrap waits for the next frame,
-         * as it did there. Before OwnerGone runs, the next program's first
-         * frame can carry a SeqNo below the last program's last one
-         * delivered, and that read parks too: served here, the frame went
-         * out again once OwnerGone forgot the SeqNo and the program's own
-         * signal read it again. */
+         * first, one per read, behind the program's last frame when
+         * OwnerGone put it ahead of them. Then the cached frame no read has
+         * carried, when it comes after the last one delivered, the frame
+         * past the SeqNo wrap included (CachedAfterDeliveredLocked). */
         if (ctx->ReleaseNext < ctx->ReleaseCount
-            || (ctx->InputReportPending && ctx->SharedMemSeqNo > ctx->LastDeliveredInputSeqNo))
+            || (ctx->InputReportPending && CachedAfterDeliveredLocked(ctx)))
             serve = TakeReportLocked(ctx, served, &servedSize);
         if (serve) {
             status = RequestCopyFromBuffer(Request, served, servedSize);
