@@ -2537,6 +2537,21 @@ function Scenario-Uninstall {
     }
 }
 
+# S102: each of the SDK's long-running loops outlives a pass that fails and
+# never spins on one that fails again and again, offline: the device clock on
+# a tick or a Running that throws and a protocol host on a write that throws,
+# the USB/IP input pump on a wait that fails at once and on a pass that
+# throws, the wait for a frame's delivery on a handle that fails, the audio
+# pump and audio event thread, the server's accept loop on a listener that
+# stops listening, a connection that ends on the server's own exception, the
+# VR haptic reader and the output reader. Each case runs in a child process.
+# Eight of them spin a thread on one core for 2 s, the yardstick a loop's
+# cycles are measured against.
+function Scenario-Loop-Containment {
+    Invoke-Probe -Dir 'loop_containment_check' -Exe 'LoopContainmentCheck.exe' -Arguments '' `
+                 -Message 'an SDK loop spins on a pass that fails, ends on one, or does not log it (see probe stdout)'
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -2641,7 +2656,8 @@ $scenarios = @(
     @{ Name = 'S98_Switch_Pro_Protocol';         Body = ${function:Scenario-Switch-Pro-Protocol} },
     @{ Name = 'S99_Switch_Descriptor_Idle';      Body = ${function:Scenario-Switch-Descriptor-Idle} },
     @{ Name = 'S100_Switch_Pro_Sdl3';            Body = ${function:Scenario-Switch-Pro-Sdl3} },
-    @{ Name = 'S101_Uninstall';                  Body = ${function:Scenario-Uninstall} }
+    @{ Name = 'S101_Uninstall';                  Body = ${function:Scenario-Uninstall} },
+    @{ Name = 'S102_Loop_Containment';           Body = ${function:Scenario-Loop-Containment} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

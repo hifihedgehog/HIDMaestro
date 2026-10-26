@@ -68,6 +68,7 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("CaptureFidelityCheck")]
 [assembly: InternalsVisibleTo("ProfileModelCheck")]
 [assembly: InternalsVisibleTo("ContractLiveCheck")]
+[assembly: InternalsVisibleTo("LoopContainmentCheck")]
 // The profile check tool in the release ZIP runs a profile's programs on the
 // interpreter to measure them (tools\HIDMaestroProfileCheck).
 [assembly: InternalsVisibleTo("HIDMaestroProfileCheck")]

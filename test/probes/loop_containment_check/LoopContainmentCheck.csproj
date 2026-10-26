@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- loop_containment_check (S102): each of the SDK's long-running loops
+       outlives a pass that fails and never spins on one that fails again
+       and again. Offline: no device is created and no elevation is needed.
+       It builds for either architecture the SDK ships for, since ARM64 runs
+       the same loops. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <PlatformTarget>$(HMTargetArchitecture)</PlatformTarget>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>LoopContainmentCheck</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
+  </ItemGroup>
+</Project>
