@@ -570,6 +570,9 @@ extern int (*g_waitAnswerHook)(HmThread *t, DWORD result);
 /* Run once at the next SRW lock a driver thread takes, before it is taken
  * (hm_win32.c). */
 extern void (*g_srwHook)(void);
+/* The same at the next lock of either kind, an SRW lock or a wait lock
+ * (hm_win32.c, hm_wdf.c): 533ca4a4 takes InputLock as a wait lock. */
+extern void (*g_lockHook)(void);
 /* Run once when a driver thread next releases an SRW lock or a wait lock
  * and holds no other, after the release (hm_win32.c, hm_wdf.c). */
 extern void (*g_lockReleaseHook)(void);
@@ -584,6 +587,14 @@ extern int (*g_exchangeHook)(volatile LONG *target, LONG value);
  * with a GIP slice, before it decides on the doorbell: what the
  * companion's IOCTL thread does in that moment. */
 extern void (*g_sdkParkedHook)(void);
+/* Run once at the next WdfRequestForwardToIoQueue, before the request
+ * enters its queue, and at the next WdfIoQueueRetrieveNextRequest, before
+ * it takes a request, on whichever thread makes the call (hm_wdf.c): what
+ * another thread does in that moment (hm_case_wake.c). */
+extern void (*g_forwardHook)(void);
+extern void (*g_retrieveHook)(void);
+/* The same at the next WdfRequestRequeue, before the request goes back. */
+extern void (*g_requeueHook)(void);
 /* The code runs on a driver thread, not on the scenario's fiber. */
 int HmOnDriverThread(void);
 /* FIELD_OFFSET(DEVICE_CONTEXT, TearingDown) in the flavor's driver.h
@@ -648,6 +659,11 @@ void CaseXusbVersion(void);
  * surprise removal, each checked against what the driver holds. Returns
  * the number of checks that failed. */
 int  CaseLifecycle(void);
+/* The --wake mode (hm_case_wake.c): a read or a WAIT_FOR_INPUT that parks
+ * while a frame is published beside it, at each order the hooks above can
+ * place, checked rather than recorded. Returns the number of checks that
+ * failed. */
+int  CaseWake(void);
 /* What the process holds, for the lifecycle checks: one entry per handle to
  * a named object (a pipe client by its server's name) and per mapped view
  * of a section, written to out. Returns the count. */

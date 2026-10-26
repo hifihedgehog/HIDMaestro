@@ -503,6 +503,10 @@ static void QueueAppend(HmQueue *q, HmRequest *r, int atHead)
     q->count++;
 }
 
+/* Run once at the next forward, on whichever thread forwards, before the
+ * request enters its queue: what another thread does between a READ_REPORT's
+ * look at the cache and its park (hm_case_wake.c). */
+void (*g_forwardHook)(void);
 static NTSTATUS WDFAPI HmWdfRequestForwardToIoQueue(PWDF_DRIVER_GLOBALS g, WDFREQUEST Request, WDFQUEUE Dest)
 {
     (void)g;
@@ -510,15 +514,20 @@ static NTSTATUS WDFAPI HmWdfRequestForwardToIoQueue(PWDF_DRIVER_GLOBALS g, WDFRE
     HmQueue *q = (HmQueue *)Expect(Dest, WK_QUEUE, "WdfRequestForwardToIoQueue");
     if (r->completed) HmFail("forward of a completed request");
     if (q->purged) HmFail("a forward to a purged queue is not modeled");
+    if (g_forwardHook) { void (*hook)(void) = g_forwardHook; g_forwardHook = NULL; hook(); }
     QueueAppend(q, r, 0);
     return STATUS_SUCCESS;
 }
 
+/* Run once at the next retrieve from a manual queue, on whichever thread
+ * retrieves, before it takes a request. */
+void (*g_retrieveHook)(void);
 static NTSTATUS WDFAPI HmWdfIoQueueRetrieveNextRequest(PWDF_DRIVER_GLOBALS g, WDFQUEUE Queue, WDFREQUEST *Out)
 {
     (void)g;
     HmQueue *q = (HmQueue *)Expect(Queue, WK_QUEUE, "WdfIoQueueRetrieveNextRequest");
     if (q->type != WdfIoQueueDispatchManual) HmFail("retrieve from a queue that is not manual");
+    if (g_retrieveHook) { void (*hook)(void) = g_retrieveHook; g_retrieveHook = NULL; hook(); }
     HmRequest *r = q->head;
     if (!r) { *Out = NULL; return STATUS_NO_MORE_ENTRIES; }
     q->head = r->next;
@@ -553,11 +562,14 @@ static VOID WDFAPI HmWdfIoQueuePurgeSynchronously(PWDF_DRIVER_GLOBALS g, WDFQUEU
     q->purged = 1;
 }
 
+/* Run once at the next requeue, before the request goes back. */
+void (*g_requeueHook)(void);
 static NTSTATUS WDFAPI HmWdfRequestRequeue(PWDF_DRIVER_GLOBALS g, WDFREQUEST Request)
 {
     (void)g;
     HmRequest *r = (HmRequest *)Expect(Request, WK_REQUEST, "WdfRequestRequeue");
     if (!r->queue || r->queue->type != WdfIoQueueDispatchManual) HmFail("requeue of a request that came from no manual queue");
+    if (g_requeueHook) { void (*hook)(void) = g_requeueHook; g_requeueHook = NULL; hook(); }
     QueueAppend(r->queue, r, 1);
     return STATUS_SUCCESS;
 }
@@ -687,6 +699,7 @@ static NTSTATUS WDFAPI HmWdfWaitLockAcquire(PWDF_DRIVER_GLOBALS g, WDFWAITLOCK L
 {
     (void)g; (void)Timeout;
     HmLock *l = (HmLock *)Expect(Lock, WK_LOCK, "WdfWaitLockAcquire");
+    if (g_lockHook && HmOnDriverThread()) { void (*hook)(void) = g_lockHook; g_lockHook = NULL; hook(); }
     if (l->held) HmFail("a wait lock acquired while held");
     l->held = 1;
     g_locksHeld++;

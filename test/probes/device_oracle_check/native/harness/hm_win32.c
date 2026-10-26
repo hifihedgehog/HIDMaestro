@@ -992,9 +992,11 @@ LONG HmInterlockedExchange(LONG volatile *target, LONG value)
     if (g_exchangeHook && g_current && g_exchangeHook(target, value)) g_exchangeHook = NULL;
     return InterlockedExchange(target, value);
 }
+void (*g_lockHook)(void);
 VOID WINAPI HmAcquireSRWLockExclusive(PSRWLOCK l)
 {
     if (g_srwHook && g_current) { void (*hook)(void) = g_srwHook; g_srwHook = NULL; hook(); }
+    if (g_lockHook && g_current) { void (*hook)(void) = g_lockHook; g_lockHook = NULL; hook(); }
     if (l->Ptr != NULL) HmFail("AcquireSRWLockExclusive on a lock already held");
     l->Ptr = (PVOID)1;
     g_locksHeld++;

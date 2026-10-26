@@ -58,6 +58,12 @@
 // view is unmapped while a thread or timer that reads it runs, and nothing
 // is closed twice. Record
 // does not run it: 9bd6279's drivers keep everything until the removal.
+//
+// Replay runs the wake mode the same way (hm_case_wake.c), which checks as
+// well: a READ_REPORT that parks while the worker caches a frame or queues
+// a release frame, and a WAIT_FOR_INPUT that parks after its frame's
+// doorbell, each at the orders the harness's hooks place, must carry that
+// frame, and no frame may go to two of them.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -199,7 +205,10 @@ internal sealed class Case5Driver : IOracleCase
         NativeStreamReader.ReadInto(output, golden);
         RunStale(golden, options, work, exe);
         if (options.Replay)
+        {
             RunHarness(exe, plan, Path.Combine(work, "lifecycle.bin"), options.Seed, "--lifecycle", lastLineOnly: true);
+            RunHarness(exe, plan, Path.Combine(work, "wake.bin"), options.Seed, "--wake", lastLineOnly: true);
+        }
     }
 
     void RunStale(GoldenCase golden, Options options, string work, string exe)
