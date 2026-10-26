@@ -150,8 +150,8 @@ internal static partial class Program
 
     static void FeatureUmdf(HMContext ctx, HMProfile profile, ProfileArg p, int runs)
     {
-        using var c = ctx.CreateController(profile, s_key);
-        if (!OnEmbeddedDriver(c, p.Text)) return;
+        using var c = TryCreate(ctx, profile, p.Text, s_key);
+        if (c == null || !OnEmbeddedDriver(c, p.Text)) return;
         using var dev = OpenOwnInterface(c, d => d.FeatureLength > 0, out string why);
         if (dev == null) { Check($"{p.Text}: a HID interface with feature reports", false, why); return; }
         var declared = DeclaredReports(profile.GetDescriptorBytes()!, ReportKind.Feature);

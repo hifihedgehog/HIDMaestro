@@ -371,7 +371,7 @@ internal static partial class Program
         {
             IdleLive.Run(runs, args.Length > 2 ? double.Parse(args[2], System.Globalization.CultureInfo.InvariantCulture) : 10,
                 args.Length > 3 ? args[3] : null);
-            return 0;
+            return s_failures == 0 ? 0 : 1;
         }
 
         var sdk = typeof(HMContext).Assembly;
@@ -474,7 +474,8 @@ internal static partial class Program
         var a = new HMGamepadState { Buttons = HMButton.A, Axes = new Dictionary<HMAxis, float> { [HMAxis.X] = 0.25f, [HMAxis.Y] = 0.75f } };
         var b = new HMGamepadState { Buttons = HMButton.B, Axes = new Dictionary<HMAxis, float> { [HMAxis.X] = 0.75f, [HMAxis.Y] = 0.25f } };
 
-        using (var ds4 = ctx.CreateController(ctx.GetProfile(Ds4)!, s_key))
+        using (var ds4 = TryCreate(ctx, ctx.GetProfile(Ds4)!, Ds4, s_key))
+        if (ds4 != null)
         {
             if (!gate && !OnEmbeddedDriver(ds4, Ds4)) return;
             bool flip = false;
@@ -482,7 +483,8 @@ internal static partial class Program
             var raw = new byte[63];
             Measure("SubmitRawReport, dualshock-4-v2", runs, 20_000, () => { raw[0]++; ds4.SubmitRawReport(raw); }, gate);
         }
-        using (var x360 = ctx.CreateController(ctx.GetProfile(Xbox360)!, s_key))
+        using (var x360 = TryCreate(ctx, ctx.GetProfile(Xbox360)!, Xbox360, s_key))
+        if (x360 != null)
         {
             bool flip = false;
             Measure("SubmitState, xbox-360-wired", runs, 20_000, () => { x360.SubmitState(flip ? a : b); flip = !flip; }, gate);
@@ -535,7 +537,8 @@ internal static partial class Program
         // using the machine. The frame mode measures them only when its
         // arguments name kbm.
         if (keyboardAndMouse)
-        using (var kb = ctx.CreateController(ctx.GetProfile(Keyboard)!, s_key))
+        using (var kb = TryCreate(ctx, ctx.GetProfile(Keyboard)!, Keyboard, s_key))
+        if (kb != null)
         {
             var down = new[] { HMKey.A };
             bool flip = false;
@@ -546,7 +549,8 @@ internal static partial class Program
             }, gate);
         }
         if (keyboardAndMouse)
-        using (var mouse = ctx.CreateController(ctx.GetProfile(Mouse)!, s_key))
+        using (var mouse = TryCreate(ctx, ctx.GetProfile(Mouse)!, Mouse, s_key))
+        if (mouse != null)
         {
             var move = new HMMouseState { X = 1 };
             Measure("SubmitMouse, " + Mouse, runs, paced, () => mouse.SubmitMouse(in move), gate);
@@ -563,7 +567,8 @@ internal static partial class Program
             }
 #endif
         }
-        using (var ds3 = ctx.CreateController(ctx.GetProfile(Ds3)!, s_key))
+        using (var ds3 = TryCreate(ctx, ctx.GetProfile(Ds3)!, Ds3, s_key))
+        if (ds3 != null)
         {
             bool flip = false;
             Measure("SubmitState, " + Ds3 + " (the report codec)", runs, 20_000, () => { ds3.SubmitState(flip ? a : b); flip = !flip; }, gate);
@@ -590,12 +595,14 @@ internal static partial class Program
                 // steam-controller-2 declares a keyboard and a mouse (its
                 // lizard mode), so it waits for kbm as the keyboards do.
                 if (!keyboardAndMouse && id == "steam-controller-2") continue;
-                using var c = ctx.CreateController(ctx.GetProfile(id)!, s_key);
+                using var c = TryCreate(ctx, ctx.GetProfile(id)!, id, s_key);
+                if (c == null) continue;
                 bool flip = false;
                 Measure($"SubmitState, {id}", runs, 20_000, () => { c.SubmitState(flip ? a : b); flip = !flip; }, gate);
             }
         if (keyboardAndMouse)
-        using (var mk = ctx.CreateController(ctx.GetProfile(MagicKeyboard)!, s_key))
+        using (var mk = TryCreate(ctx, ctx.GetProfile(MagicKeyboard)!, MagicKeyboard, s_key))
+        if (mk != null)
         {
             var playPause = new ushort[] { 0x00CD };
             bool flip = false;
@@ -619,7 +626,8 @@ internal static partial class Program
             .Type("mouse").Connection("usb")
             .FromDescriptorBuilder(new HidDescriptorBuilder().Mouse(absolute: true, wheel: false, pan: false)).Build();
         if (keyboardAndMouse)
-        using (var abs = ctx.CreateController(absolute, "perf-absolute-pointer"))
+        using (var abs = TryCreate(ctx, absolute, "perf-absolute-pointer", "perf-absolute-pointer"))
+        if (abs != null)
         {
             int x = 0;
             Measure("SubmitMouse, an absolute pointer", runs, paced, () =>
@@ -629,7 +637,8 @@ internal static partial class Program
             }, gate);
         }
 #if !HM_BASE
-        using (var gc = ctx.CreateController(ctx.GetProfile(GameCube)!, s_key))
+        using (var gc = TryCreate(ctx, ctx.GetProfile(GameCube)!, GameCube, s_key))
+        if (gc != null)
         {
             bool flip = false;
             var port = gc.Ports[0];
@@ -653,8 +662,8 @@ internal static partial class Program
     /// it on. Outside the gate.</summary>
     static void FrameSwitchPro(HMContext ctx, int runs, HMGamepadState a, HMGamepadState b)
     {
-        using var sw = ctx.CreateController(ctx.GetProfile("switch-pro")!, s_key);
-        if (!OnEmbeddedDriver(sw, "switch-pro")) return;
+        using var sw = TryCreate(ctx, ctx.GetProfile("switch-pro")!, "switch-pro", s_key);
+        if (sw == null || !OnEmbeddedDriver(sw, "switch-pro")) return;
         bool flip = false;
         Measure("SubmitState, switch-pro", runs, 20_000, () => { sw.SubmitState(flip ? a : b); flip = !flip; }, gate: false);
 #if !HM_BASE
@@ -687,7 +696,8 @@ internal static partial class Program
     /// (a)). Outside the gate, so S84 is unchanged.</summary>
     static void FrameConversionProfiles(HMContext ctx, int runs, HMGamepadState a, HMGamepadState b, bool keyboardAndMouse)
     {
-        using (var ds = ctx.CreateController(ctx.GetProfile("dualsense-bt")!, s_key))
+        using (var ds = TryCreate(ctx, ctx.GetProfile("dualsense-bt")!, "dualsense-bt", s_key))
+        if (ds != null)
         {
             if (!OnEmbeddedDriver(ds, "dualsense-bt")) return;
             string armed = ArmByFeatureReads(ds, a, b);
@@ -697,7 +707,8 @@ internal static partial class Program
         foreach (string id in new[] { "steam-controller-2", "switch2-pro-controller-composite", "amazon-luna-usb", "amazon-luna-ble" })
         {
             if (!keyboardAndMouse && id == "steam-controller-2") continue;
-            using var c = ctx.CreateController(ctx.GetProfile(id)!, s_key);
+            using var c = TryCreate(ctx, ctx.GetProfile(id)!, id, s_key);
+            if (c == null) continue;
             if (!OnEmbeddedDriver(c, id)) return;
             bool flip = false;
             Measure("SubmitState, " + id, runs, 20_000, () => { c.SubmitState(flip ? a : b); flip = !flip; }, gate: false);
@@ -798,7 +809,7 @@ internal static partial class Program
         foreach (var p in list)
         {
             var xinputBefore = XInputConnected();
-            using var c = TryCreate(ctx, ctx.GetProfile(p.Id)!, p.Text);
+            using var c = TryCreate(ctx, ctx.GetProfile(p.Id)!, p.Text, s_key);
             if (c == null) continue;
             if (named.Count > 0 && !OnEmbeddedDriver(c, p.Text)) return 5;
             AckPass(c, p.Text, runs);
@@ -1086,7 +1097,8 @@ internal static partial class Program
         foreach (var p in named)
         {
             var xinputBefore = XInputConnected();
-            using var c = ctx.CreateController(ctx.GetProfile(p.Id)!, s_key);
+            using var c = TryCreate(ctx, ctx.GetProfile(p.Id)!, p.Text, s_key);
+            if (c == null) continue;
             if (!OnEmbeddedDriver(c, p.Text)) return 5;
             if (viaXInput.Contains(p)) XInputOutputOne(c, p.Text, runs, xinputBefore);
             else OutputOne(c, p, runs);
@@ -1262,8 +1274,11 @@ internal static partial class Program
             var profile = ctx.GetProfile(id)!;
             // One create and dispose first, so a cold first create (driver
             // binding, the USB/IP server's first start) is not a sample.
-            using (var first = ctx.CreateController(profile, key))
+            using (var first = TryCreate(ctx, profile, id + " (the untimed first create)", key))
+            {
+                if (first == null) continue;
                 if (!OnEmbeddedDriver(first, id)) return 5;
+            }
             if (gapMs > 0) Thread.Sleep(gapMs);
             long logStart = new FileInfo(log).Exists ? new FileInfo(log).Length : 0;
             var create = new List<double>(runs);
@@ -1271,8 +1286,10 @@ internal static partial class Program
             for (int run = 0; run < runs; run++)
             {
                 long t0 = Stopwatch.GetTimestamp();
-                var c = ctx.CreateController(profile, key);
+                var c = TryCreate(ctx, profile, $"{id} (run {run})", key);
                 long t1 = Stopwatch.GetTimestamp();
+                // A create that threw is a failed check and no sample.
+                if (c == null) continue;
                 if (settleMs > 0) Thread.Sleep(settleMs);
                 long t2 = Stopwatch.GetTimestamp();
                 if (s_trace) Console.WriteLine($"    [{DateTime.Now:HH:mm:ss.fff}] dispose begins");
@@ -1380,7 +1397,7 @@ internal static partial class Program
             if (run < 0) continue;
             var lines = output.Split('\n');
             var line = lines.FirstOrDefault(l => l.StartsWith("ready ", StringComparison.Ordinal));
-            if (line == null) { Console.WriteLine($"start: run {run} gave no time: {output.Trim()}"); continue; }
+            if (line == null) { Check($"start: run {run} gave a time", false, output.Trim()); continue; }
             ready.Add(double.Parse(line[6..].Trim(), System.Globalization.CultureInfo.InvariantCulture));
             foreach (string l in lines)
             {
@@ -1426,8 +1443,9 @@ internal static partial class Program
         long t3 = Stopwatch.GetTimestamp();
         double jitProfiles = System.Runtime.JitInfo.GetCompilationTime(currentThread: false).TotalMilliseconds;
         // Disposed below, and by the context's Dispose when anything before
-        // that throws.
-        var c = ctx.CreateController(ctx.GetProfile(Ds4)!);
+        // that throws. The parent counts a run with no time as failed.
+        var c = TryCreate(ctx, ctx.GetProfile(Ds4)!, Ds4, null);
+        if (c == null) return 1;
         long t4 = Stopwatch.GetTimestamp();
         double ms = main + Stopwatch.GetElapsedTime(t0, t4).TotalMilliseconds;
         // The JIT's share: its time on every thread of the process, and the
@@ -2377,11 +2395,11 @@ internal static partial class Program
     /// <summary>A create that throws is a failed check named by
     /// <paramref name="name"/>, with the exception's type, HRESULT and
     /// message, and returns null, so the mode goes on with its next profile
-    /// and ends with the failure counted instead of on an unhandled
-    /// exception.</summary>
-    static HMController? TryCreate(HMContext ctx, HMProfile profile, string name)
+    /// or ends, with the failure counted, instead of ending on an unhandled
+    /// exception. Every create of every mode goes through here.</summary>
+    internal static HMController? TryCreate(HMContext ctx, HMProfile profile, string name, string? key)
     {
-        try { return ctx.CreateController(profile, s_key); }
+        try { return ctx.CreateController(profile, key); }
         catch (Exception e)
         {
             Check($"{name}: CreateController", false, $"{e.GetType().Name} 0x{e.HResult:X8}: {e.Message}");

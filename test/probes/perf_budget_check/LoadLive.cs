@@ -63,7 +63,10 @@ internal static partial class Program
                 var profile = ctx.GetProfile(id);
                 if (profile == null) { Check($"load: {id} a catalog profile", false, "no such id"); return 1; }
                 // One create at a time: never two in parallel in one process.
-                var c = ctx.CreateController(profile, s_key == null ? null : $"{s_key}-{n}");
+                // A create that throws ends the mode, its pads and readers
+                // closed below.
+                var c = TryCreate(ctx, profile, $"load: {id}", s_key == null ? null : $"{s_key}-{n}");
+                if (c == null) return 1;
                 pads.Add(c);
                 if (!OnEmbeddedDriver(c, id)) return 5;
                 string? path = OwnInputInterface(c);

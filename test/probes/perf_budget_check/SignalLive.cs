@@ -59,7 +59,8 @@ internal static partial class Program
         var b = new HMGamepadState { Buttons = HMButton.B };
         foreach (string id in new[] { Ds4, Xbox360 })
         {
-            using var c = ctx.CreateController(ctx.GetProfile(id)!, s_key);
+            using var c = TryCreate(ctx, ctx.GetProfile(id)!, id, s_key);
+            if (c == null) continue;
             if (!OnEmbeddedDriver(c, id)) return 5;
             // A submit first, so the section holds this controller's frame.
             c.SubmitState(a);

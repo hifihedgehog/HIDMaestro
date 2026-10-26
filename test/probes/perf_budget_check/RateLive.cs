@@ -43,7 +43,7 @@ internal static partial class Program
         {
             var profile = ctx.GetProfile(id);
             if (profile == null) { Check($"{id}: a catalog profile", false, "no such id"); continue; }
-            using var c = TryCreate(ctx, profile, id);
+            using var c = TryCreate(ctx, profile, id, s_key);
             if (c == null) continue;
             if (!OnEmbeddedDriver(c, id)) return 5;
             string? path = OwnInputInterface(c);
