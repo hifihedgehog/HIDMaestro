@@ -113,6 +113,7 @@ internal sealed partial class UsbipEmulatedDevice
         {
             uint seq;
             int length;
+            UsbipServer.Connection? conn;
             lock (_hidLock)
             {
                 if (!engine.InputOpenSince(out long since) || since != run) return;
@@ -126,8 +127,9 @@ internal sealed partial class UsbipEmulatedDevice
                 if (length == 0) return;
                 seq = pending.Dequeue();
                 CountCompletion();
+                conn = HoldSendLocked();
             }
-            SendRetSubmitSpan(seq, 0, length, _layoutReport.AsSpan(0, length));
+            SendHeld(conn, seq, 0, length, _layoutReport.AsSpan(0, length));
         }
     }
 
@@ -184,6 +186,7 @@ internal sealed partial class UsbipEmulatedDevice
         {
             uint seq;
             int length;
+            UsbipServer.Connection? conn;
             lock (_hidLock)
             {
                 if (!engine.InputOpenSince(out _)) return;
@@ -197,8 +200,9 @@ internal sealed partial class UsbipEmulatedDevice
                 if (length == 0) return;
                 seq = pending.Dequeue();
                 CountCompletion();
+                conn = HoldSendLocked();
             }
-            SendRetSubmitSpan(seq, 0, length, _layoutReport.AsSpan(0, length));
+            SendHeld(conn, seq, 0, length, _layoutReport.AsSpan(0, length));
         }
     }
 

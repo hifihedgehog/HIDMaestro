@@ -35,6 +35,8 @@
 //   - an isochronous URB the audio pump is completing is answered before an
 //     unlink of it, and on the import it came on when a new import holds the
 //     device by then
+//   - a read the input pump or the poll clock has answered, unlinked before
+//     the answer is on the wire, is answered before the RET_UNLINK
 //
 // Each scenario ends on a frame or a read that tells a correct device from
 // one that lost the handoff at once, and a wait that only a correct device
@@ -80,6 +82,8 @@ internal static partial class Program
         Contained("a lapped output reader", () => LappedOutputReader(ds));
         Contained("an isochronous URB unlinked while it completes", () => AudioAnswerBeforeUnlink(ds));
         Contained("an isochronous URB whose import drops while it completes", () => AudioAnswerToItsImport(ds));
+        Contained("a read the input pump answers, unlinked before the answer goes", () => PumpAnswerBeforeUnlink(ds));
+        Contained("a read the poll clock answers, unlinked before the answer goes", PollAnswerBeforeUnlink);
         Contained("a bulk command on a poll clock", BulkCommandWakesPollClock);
         Contained("bulk replies to other command paths", RepliesReachParkedBulkRead);
     }
@@ -263,9 +267,8 @@ internal static partial class Program
     /// <summary>A frame put back for a parked read, and a newer frame: the
     /// input pump has the parked read and waits to send it the frame, held
     /// on the connection's send lock, which this thread takes first. A read
-    /// that comes meanwhile finds nothing queued, since the newer frame is
-    /// taken up only once the frame put back is on the wire, and gets the
-    /// newer frame after it.</summary>
+    /// that comes meanwhile, as the connection's reader would send it, gets
+    /// the newer frame after the frame put back.</summary>
     static void PutBackAheadOfQueue(ControllerProfile ds)
     {
         using var rig = new HandoffRig(ds, HandoffIndex + 11);
@@ -275,8 +278,9 @@ internal static partial class Program
         rig.Frame(14);
         var ra = rig.Next();
         int ua;
-        uint d;
+        uint d = 0;
         bool taken;
+        Thread? reader;
         lock (rig.SendLock)
         {
             lock (rig.LifetimeLock)
@@ -284,9 +288,11 @@ internal static partial class Program
                 ua = rig.Unlink(a);
                 rig.Frame(15);
             }
-            taken = WaitUntil(() => rig.ParkedReads == 0, Hang);
-            d = rig.SubmitIn(ep, 64);
+            taken = WaitUntil(() => rig.WaitsToSend(rig.InputPump, () => rig.ParkedReads), Hang);
+            d = rig.NextSeq();
+            reader = rig.RunAsReader(() => rig.SubmitIn(d, ep, 64));
         }
+        taken &= reader?.Join(Hang) ?? true;
         var first = rig.Next();
         var second = first.IsFrame(b, 14) ? rig.Next() : default;
         rig.SubmitIn(ep, 64);
@@ -490,14 +496,78 @@ internal static partial class Program
               $"in the handler {inHandler}, new import claimed {claimed}, the old import got {got}, the new one nothing {newQuiet}");
     }
 
+    /// <summary>A read the input pump answers, unlinked before the answer is
+    /// on the wire: the pump waits for the connection's send lock, which this
+    /// thread holds, and the unlink comes as the connection's reader would
+    /// send it. The RET_UNLINK's status 0 says the read's RET_SUBMIT went
+    /// first, so it follows the pump's answer, and the frame goes back to the
+    /// next read as it does for any answered read the host unlinks.</summary>
+    static void PumpAnswerBeforeUnlink(ControllerProfile ds)
+    {
+        using var rig = new HandoffRig(ds, HandoffIndex + 18);
+        byte ep = rig.PrimaryIn;
+        uint a = rig.SubmitIn(ep, 64);
+        uint u = rig.NextSeq();
+        bool waiting;
+        Thread? reader;
+        lock (rig.SendLock)
+        {
+            rig.Frame(61);
+            waiting = WaitUntil(() => rig.WaitsToSend(rig.InputPump, () => rig.ParkedReads), Hang);
+            reader = rig.RunAsReader(() => rig.SendUnlink(u, a));
+        }
+        bool ended = reader?.Join(Hang) ?? true;
+        var first = rig.Next();
+        var second = rig.Next();
+        uint b = rig.SubmitIn(ep, 64);
+        var rb = rig.Next();
+        rig.SubmitIn(ep, 64);
+        var after = rig.UntilSentinel();
+        Check("a read the input pump answers, unlinked before the answer is on the wire, is answered before the unlink, and its frame goes to the next read",
+              waiting && ended && first.IsFrame(a, 61) && second.Kind == UsbipProtocol.RetUnlink && second.Seq == u && second.Status == 0
+              && rb.IsFrame(b, 61) && after.Count == 0,
+              $"pump waiting {waiting}, unlink ended {ended}, then {first}, then {second}, next read {rb}, then {Describe(after)}");
+    }
+
+    /// <summary>The same for a read the protocol's poll clock answers: the
+    /// clock's tick, run on a thread here, waits for the send lock with the
+    /// read it filled.</summary>
+    static void PollAnswerBeforeUnlink()
+    {
+        using var rig = new HandoffRig(PollClockCopy("s43-poll-clock-answer-order"), HandoffIndex + 19);
+        var p = rig.Device.Protocol!.Protocol;
+        var (clock, _) = rig.HoldPollClock();
+        uint read = rig.SubmitIn(p.InputEndpoint, 64);
+        // 10/01, which the copy answers with its rules' reply.
+        uint cmd = rig.SubmitOut(p.CommandEndpoint, Convert.FromHexString("1091000100000000"));
+        var ack = rig.Next();
+        uint u = rig.NextSeq();
+        var tick = new Thread(() => clock.TickNow()) { IsBackground = true, Name = "S43 poll clock tick" };
+        bool waiting;
+        Thread? reader;
+        lock (rig.SendLock)
+        {
+            tick.Start();
+            waiting = WaitUntil(() => rig.WaitsToSend(tick, () => rig.PolledReads), Hang);
+            reader = rig.RunAsReader(() => rig.SendUnlink(u, read));
+        }
+        bool ended = tick.Join(Hang) & (reader?.Join(Hang) ?? true);
+        var first = rig.Next();
+        var second = rig.Next();
+        Check("a read the poll clock answers, unlinked before the answer is on the wire, is answered before the unlink",
+              ack.Is(cmd, 8) && waiting && ended && first.Is(read, 20) && first.Data[0] == 0x10
+              && second.Kind == UsbipProtocol.RetUnlink && second.Seq == u && second.Status == 0,
+              $"command answered {ack}, tick waiting {waiting}, ended {ended}, then {first}, then {second}");
+    }
+
     /// <summary>A copy of the Switch 2 Pro composite whose input endpoint
     /// sends the SDK's report on the host's poll clock, with replies on that
     /// endpoint and commands on its bulk OUT endpoint, which the protocol
     /// compiler accepts.</summary>
-    static void BulkCommandWakesPollClock()
+    static ControllerProfile PollClockCopy(string id)
     {
         var j = JsonNode.Parse(CatalogJson("switch2-pro-controller-composite"))!.AsObject();
-        j["id"] = "s43-poll-clock-bulk-commands";
+        j["id"] = id;
         // The state block goes with the layouts, which only a device that
         // builds its reports has.
         j.Remove("inputReports");
@@ -506,8 +576,12 @@ internal static partial class Program
         protocol["input"]!.AsObject().Remove("clock");
         protocol.Remove("getReport");
         protocol["replies"] = new JsonObject { ["channel"] = "input", ["pending"] = 64, ["overflow"] = "dropOldestUnstarted" };
-        var profile = ControllerProfile.Parse(Encoding.UTF8.GetBytes(j.ToJsonString()))!;
-        using var rig = new HandoffRig(profile, HandoffIndex + 7);
+        return ControllerProfile.Parse(Encoding.UTF8.GetBytes(j.ToJsonString()))!;
+    }
+
+    static void BulkCommandWakesPollClock()
+    {
+        using var rig = new HandoffRig(PollClockCopy("s43-poll-clock-bulk-commands"), HandoffIndex + 7);
         var p = rig.Device.Protocol!.Protocol;
         Check("a copy of the Switch 2 Pro composite runs a poll clock on its input endpoint, with bulk OUT commands",
               p is { BuildsReports: false, InputEndpoint: 0x81, Source: CommandSource.BulkOut, Channel: ReplyChannel.Input },
@@ -761,10 +835,12 @@ internal static partial class Program
             return (clock, (AutoResetEvent)clockType.GetField("_wake", Private)!.GetValue(clock)!);
         }
 
-        UsbipProtocol.CommandHeader Command(byte endpoint, bool isIn, int length) => new()
+        UsbipProtocol.CommandHeader Command(byte endpoint, bool isIn, int length) => Command(++_seq, endpoint, isIn, length);
+
+        static UsbipProtocol.CommandHeader Command(uint seq, byte endpoint, bool isIn, int length) => new()
         {
             Command = UsbipProtocol.CmdSubmit,
-            Seqnum = ++_seq,
+            Seqnum = seq,
             Direction = isIn ? 1u : 0u,
             Ep = (uint)(endpoint & 0x0F),
             TransferBufferLength = length,
@@ -774,10 +850,60 @@ internal static partial class Program
         /// <summary>An IN transfer, interrupt or bulk as the endpoint is.</summary>
         public uint SubmitIn(byte endpoint, int length)
         {
-            var cmd = Command(endpoint, true, length);
-            _in.Add(cmd.Seqnum);
-            Device.HandleSubmit(cmd, ReadOnlySpan<byte>.Empty, ReadOnlySpan<(uint, uint)>.Empty);
-            return cmd.Seqnum;
+            uint seq = NextSeq();
+            SubmitIn(seq, endpoint, length);
+            return seq;
+        }
+
+        /// <summary>The same with seqnum <paramref name="seq"/>, for a
+        /// transfer another thread sends.</summary>
+        public void SubmitIn(uint seq, byte endpoint, int length)
+        {
+            _in.Add(seq);
+            Device.HandleSubmit(Command(seq, endpoint, true, length), ReadOnlySpan<byte>.Empty, ReadOnlySpan<(uint, uint)>.Empty);
+        }
+
+        /// <summary>The device's input pump.</summary>
+        public Thread InputPump => (Thread)typeof(UsbipEmulatedDevice).GetField("_inputThread", Private)!.GetValue(Device)!;
+
+        /// <summary>Reads parked for the protocol's poll clock.</summary>
+        public int PolledReads
+        {
+            get
+            {
+                lock (HidLock)
+                    return ((System.Collections.ICollection)typeof(UsbipEmulatedDevice).GetField("_protocolReads", Private)!.GetValue(Device)!).Count;
+            }
+        }
+
+        /// <summary>True once <paramref name="sender"/>, which took a read to
+        /// answer, waits for a lock, this thread holding the send lock: either
+        /// in the hold of the HID lock it took the read in, or after it, the
+        /// read gone from <paramref name="parked"/>, which counts under the
+        /// HID lock.</summary>
+        public bool WaitsToSend(Thread sender, Func<int> parked)
+        {
+            if ((sender.ThreadState & ThreadState.WaitSleepJoin) == 0) return false;
+            if (!Monitor.TryEnter(HidLock)) return true;
+            try { return parked() == 0; }
+            finally { Monitor.Exit(HidLock); }
+        }
+
+        /// <summary>Runs <paramref name="command"/> as the connection's reader
+        /// would run it now: on this thread while the HID lock is free, else
+        /// on a thread of its own, which waits for the lock behind its holder
+        /// while this one goes on. Returns that thread, or null.</summary>
+        public Thread? RunAsReader(Action command)
+        {
+            if (Monitor.TryEnter(HidLock))
+            {
+                try { command(); }
+                finally { Monitor.Exit(HidLock); }
+                return null;
+            }
+            var reader = new Thread(() => command()) { IsBackground = true, Name = "S43 reader behind the HID lock" };
+            reader.Start();
+            return reader;
         }
 
         /// <summary>An OUT transfer, interrupt or bulk as the endpoint is.</summary>

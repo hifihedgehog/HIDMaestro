@@ -243,17 +243,15 @@ internal sealed partial class UsbipEmulatedDevice
         }
     }
 
-    private bool TryUnlinkProtocolRead(uint victim)
+    /// <summary>Caller holds _hidLock.</summary>
+    private bool TryUnlinkProtocolReadLocked(uint victim)
     {
-        lock (_hidLock)
+        for (var node = _protocolReads.First; node != null; node = node.Next)
         {
-            for (var node = _protocolReads.First; node != null; node = node.Next)
-            {
-                if (node.Value.Seq != victim) continue;
-                _protocolReads.Remove(node);
-                RecycleRead(node);
-                return true;
-            }
+            if (node.Value.Seq != victim) continue;
+            _protocolReads.Remove(node);
+            RecycleRead(node);
+            return true;
         }
         return false;
     }
@@ -270,6 +268,7 @@ internal sealed partial class UsbipEmulatedDevice
         {
             LinkedListNode<ProtocolRead>? done = null;
             int status = 0;
+            UsbipServer.Connection? conn = null;
             lock (_hidLock)
             {
                 var node = _protocolReads.First;
@@ -297,10 +296,11 @@ internal sealed partial class UsbipEmulatedDevice
                         done = node;
                     }
                 }
+                if (done != null) conn = HoldSendLocked();
             }
             if (done == null) return;
             var r = done.Value;
-            SendRetSubmitSpan(r.Seq, status, r.Filled, r.Buffer.AsSpan(0, r.Filled));
+            SendHeld(conn, r.Seq, status, r.Filled, r.Buffer.AsSpan(0, r.Filled));
             lock (_hidLock) RecycleRead(done);
         }
     }

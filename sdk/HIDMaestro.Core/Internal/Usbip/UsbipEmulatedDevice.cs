@@ -531,6 +531,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
 
                 uint seq = 0;
                 bool answer = false;
+                UsbipServer.Connection? conn = null;
                 while (true)
                 {
                     // A frame put back for a parked read is on the wire
@@ -555,6 +556,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                             answer = true;
                             NoteAnsweredLocked(seq, slot);
                             CountPrimaryCompletionLocked();
+                            conn = HoldSendLocked();
                         }
                         else
                         {
@@ -571,7 +573,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     }
                     break;
                 }
-                if (answer) SendRetSubmitSpan(seq, 0, length, report);
+                if (answer) SendHeld(conn, seq, 0, length, report);
             }
             catch
             {
@@ -642,6 +644,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     {
         uint read;
         QueuedFrame frame;
+        UsbipServer.Connection? conn;
         lock (_hidLock)
         {
             if (!_resend) return;
@@ -655,8 +658,9 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             read = _primaryPending.Dequeue();
             NoteAnsweredLocked(read, _answeredSlot);
             CountPrimaryCompletionLocked();
+            conn = HoldSendLocked();
         }
-        SendRetSubmitSpan(read, 0, frame.Length, frame.Buffer.AsSpan(0, frame.Length));
+        SendHeld(conn, read, 0, frame.Length, frame.Buffer.AsSpan(0, frame.Length));
         lock (_hidLock) _spareFrames.Push(frame.Buffer);
     }
 
@@ -848,6 +852,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 }
 
                 QueuedFrame frame = default;
+                UsbipServer.Connection? conn = null;
                 lock (_hidLock)
                 {
                     // Only the primary HID interface's endpoint has frames.
@@ -861,6 +866,8 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     {
                         frame = _frameQueue.Dequeue();
                         NoteAnsweredLocked(cmd.Seqnum, _inputSlot[_inputReportIds && frame.Length > 0 ? frame.Buffer[0] : 0]);
+                        // In order with the frames the input pump answers.
+                        conn = HoldSendLocked();
                     }
                     else
                         PendingFor(epAddr).Enqueue(cmd.Seqnum);
@@ -868,7 +875,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 if (frame.Buffer != null)
                 {
                     // The buffer is this thread's until it goes back.
-                    SendRetSubmitSpan(cmd.Seqnum, 0, frame.Length, frame.Buffer.AsSpan(0, frame.Length));
+                    SendHeld(conn, cmd.Seqnum, 0, frame.Length, frame.Buffer.AsSpan(0, frame.Length));
                     lock (_hidLock) _spareFrames.Push(frame.Buffer);
                 }
                 return;
@@ -918,17 +925,19 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         // the unlink once the URB's RET_SUBMIT is on the wire.
         if (audio == UsbAudioEngine.UnlinkResult.Completing) return;
         bool removed = audio == UsbAudioEngine.UnlinkResult.Removed;
-        // Reads a host-polled protocol holds park in its own list. Every
-        // other read, a device that builds its reports included, parks by
-        // endpoint below.
-        if (!removed && _engine is { Protocol.BuildsReports: false, Protocol.InputEndpoint: > 0 })
-            removed = TryUnlinkProtocolRead(victimSeqnum);
         var putBack = PutBack.None;
-        if (!removed)
+        UsbipServer.Connection? conn;
+        lock (_hidLock)
         {
-            lock (_hidLock)
+            // Reads a host-polled protocol holds park in its own list. Every
+            // other read, a device that builds its reports included, parks by
+            // endpoint.
+            if (!removed && _engine is { Protocol.BuildsReports: false, Protocol.InputEndpoint: > 0 })
+                removed = TryUnlinkProtocolReadLocked(victimSeqnum);
+            if (!removed)
             {
-                // Queue<T> has no random removal; rebuild without the victim.
+                // Queue<T> has no random removal, so the queue is rebuilt
+                // without the victim.
                 Queue<uint>? holder = null;
                 foreach (var q in _pendingInterruptIn.Values)
                     if (q.Contains(victimSeqnum)) { holder = q; break; }
@@ -949,14 +958,18 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 if (!removed && _answered && victimSeqnum == _answeredRead)
                     putBack = PutBackLocked();
             }
+            // Whoever answered the read took the send lock in its own hold of
+            // this lock, before this one, so the RET_UNLINK follows the read's
+            // RET_SUBMIT (HoldSendLocked).
+            conn = HoldSendLocked();
         }
         // Protocol rule (usbip-win2 wsk_receive.cpp cites usbip_protocol.rst):
         // -ECONNRESET when the URB was still queued, 0 when already answered.
+        try { conn?.SendRetUnlink(seqnum, removed ? -UsbipProtocol.EConnReset : 0); }
+        catch { }
+        finally { conn?.ExitSend(); }
         if (DeviceOrchestrator.DiagEnabled)
             DeviceOrchestrator.LogDiag($"usbip unlink {BusId}: {victimSeqnum} {(removed ? "was parked" : putBack != PutBack.None ? "had been answered, and its frame goes to the next read" : "had already been answered")}");
-        var conn = _connection;
-        if (conn == null) return;
-        try { conn.SendRetUnlink(seqnum, removed ? -UsbipProtocol.EConnReset : 0); } catch { }
         // After the RET_UNLINK, so the frame's answer follows it on the wire.
         if (putBack == PutBack.ToPump) WakeInputPump();
     }
@@ -1359,6 +1372,39 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
 
     private void SendError(uint seqnum, int status)
         => SendRetSubmit(seqnum, status, 0, null);
+
+    /// <summary>The connection that holds the device, its send lock taken,
+    /// or null, for an answer to a read the caller dequeues in this hold of
+    /// <see cref="_hidLock"/>. The answer's place on the wire is fixed here:
+    /// answers leave in the order their reads were dequeued, whichever thread
+    /// sends them, and a RET_UNLINK of the read, which HandleUnlink sends
+    /// only after a hold of its own, follows the read's RET_SUBMIT, as its
+    /// status 0 says it does (usbip_protocol.rst, USBIP_RET_UNLINK). A
+    /// completed URB's RET_SUBMIT goes ahead of the RET_UNLINK in Linux's
+    /// stub too (stub_tx.c stub_tx_loop), and Linux's vhci gives the URB
+    /// back on the RET_UNLINK and drops the connection on a RET_SUBMIT that
+    /// follows it (vhci_rx.c). The answer also goes to the import that sent
+    /// the read: DetachConnection clears an import's reads in a hold of
+    /// this lock before it lets the device go, so a read still parked here
+    /// is the current import's. The caller sends with
+    /// <see cref="SendHeld"/>, which releases the send lock, and takes no
+    /// lock in between. Caller holds <see cref="_hidLock"/>.</summary>
+    private UsbipServer.Connection? HoldSendLocked()
+    {
+        var c = Volatile.Read(ref _connection);
+        c?.EnterSend();
+        return c;
+    }
+
+    /// <summary>A RET_SUBMIT on a connection <see cref="HoldSendLocked"/>
+    /// returned, then its send lock released.</summary>
+    private static void SendHeld(UsbipServer.Connection? c, uint seqnum, int status, int actualLength, ReadOnlySpan<byte> inPayload)
+    {
+        if (c == null) return;
+        try { c.SendRetSubmitNonIso(seqnum, status, actualLength, inPayload); }
+        catch { }
+        finally { c.ExitSend(); }
+    }
 
     private void SendRetSubmit(uint seqnum, int status, int actualLength, byte[]? inPayload)
     {
