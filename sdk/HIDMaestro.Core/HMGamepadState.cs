@@ -323,8 +323,8 @@ public static class HMGamepadStateHelpers
         // (issue #66).
         if (triggers.Count == 0)
         {
-            axes[HMController.ResolveCanonicalAxis(profile.AxisMap, "lefttrigger", HMAxis.Z)]  = leftTrigger;
-            axes[HMController.ResolveCanonicalAxis(profile.AxisMap, "righttrigger", HMAxis.Rz)] = rightTrigger;
+            axes[HMController.ResolveCanonicalAxis(profile.Inner.AxisMap, "lefttrigger", HMAxis.Z)]  = leftTrigger;
+            axes[HMController.ResolveCanonicalAxis(profile.Inner.AxisMap, "righttrigger", HMAxis.Rz)] = rightTrigger;
         }
         return axes;
     }

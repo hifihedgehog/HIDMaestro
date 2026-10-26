@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Text.Json;
 using HIDMaestro.Internal;
 
 namespace HIDMaestro;
@@ -207,14 +208,21 @@ public sealed class HMProfile
 
     /// <summary>Button remapping table. Maps HMButton bit positions (index) to
     /// descriptor button indices (value). Null means identity mapping (Xbox layout).
-    /// Sony profiles remap so HMButton.A → Cross, HMButton.X → Square, etc.</summary>
-    public int[]? ButtonMap => Inner.ButtonMap;
+    /// Sony profiles remap so HMButton.A → Cross, HMButton.X → Square, etc.
+    /// Each read returns a new copy, so changing it changes no profile.
+    /// <see cref="HMProfileBuilder.ButtonMap"/> takes a changed table into a
+    /// new one.</summary>
+    public int[]? ButtonMap => (int[]?)Inner.ButtonMap?.Clone();
 
     /// <summary>Axis semantic override map. Keys are hex HID usage codes (e.g.
     /// "0x32" for Z), values are semantic names (leftStickX, rightStickY,
     /// leftTrigger, etc.). Sony profiles override Z/Rz→rightStick and
-    /// Rx/Ry→triggers. Null means default heuristic mapping.</summary>
-    public Dictionary<string, string>? AxisMap => Inner.AxisMap;
+    /// Rx/Ry→triggers. Null means default heuristic mapping. Each read
+    /// returns a new copy with the profile's key comparer, so changing it
+    /// changes no profile. <see cref="HMProfileBuilder.AxisMap"/> takes a
+    /// changed map into a new one.</summary>
+    public Dictionary<string, string>? AxisMap =>
+        Inner.AxisMap is { } map ? new Dictionary<string, string>(map, map.Comparer) : null;
 
     /// <summary>SDL gamepad mapping body for this profile, or null when SDL
     /// already knows the device.
@@ -247,15 +255,19 @@ public sealed class HMProfile
     /// <summary>v1.3.5: vendor-blob input-report spec, or null. When set,
     /// HMController.SubmitState emits this report ID via the data-driven
     /// codec instead of the descriptor-based encoder. Profile-level metadata
-    /// exposed for inspection by consumers and regression probes; field-level
-    /// access goes through <c>Fields</c> on the spec.</summary>
-    public ExtendedReportSpec? ExtendedReport => Inner.ExtendedReport;
+    /// exposed for inspection by consumers and regression probes, with
+    /// field-level access through <c>Fields</c> on the spec. Each read returns
+    /// a new copy of the spec, its fields included, so changing it changes no
+    /// profile, and allocates that copy: a program that needs the spec per
+    /// report reads it once and keeps it.</summary>
+    public ExtendedReportSpec? ExtendedReport => Inner.ExtendedReport?.Clone();
 
     /// <summary>v1.3.5: vendor-blob output-report spec, or null. When set,
     /// <see cref="HMController.OutputDecoded"/> surfaces parsed-field events
     /// for matching inbound report IDs and <see cref="HMOutputEncoder.Encode"/>
-    /// can produce wire-format bytes from parsed-field dictionaries.</summary>
-    public ExtendedReportSpec? ExtendedOutputReport => Inner.ExtendedOutputReport;
+    /// can produce wire-format bytes from parsed-field dictionaries. Each read
+    /// returns a new copy, as <see cref="ExtendedReport"/> does.</summary>
+    public ExtendedReportSpec? ExtendedOutputReport => Inner.ExtendedOutputReport?.Clone();
 
     /// <summary>True if the profile declares a vendor-blob input report
     /// (e.g. Sony BT Report 0x31).</summary>
@@ -279,8 +291,19 @@ public sealed class HMProfile
     ///
     /// <para>Use the <c>As*</c> accessors below for typed access:
     /// <c>profile.AsWheel()</c>, <c>profile.AsHotas()</c>,
-    /// <c>profile.AsJoystick()</c>, etc.</para></summary>
-    public HMLayout? Layout => Inner.Layout;
+    /// <c>profile.AsJoystick()</c>, etc.</para>
+    ///
+    /// <para>Each read, and each <c>As*</c> call, returns a new copy, its
+    /// lists included, so changing one changes no profile. The copy is read
+    /// again from the layout's JSON, so a program that reads the layout
+    /// often keeps the one it has.</para></summary>
+    public HMLayout? Layout => Inner.Layout is { } layout ? CopyOf(layout) : null;
+
+    /// <summary>A layout read again from its own JSON, as the profile's
+    /// copy (ControllerProfile.Clone) reads it.</summary>
+    private static HMLayout CopyOf(HMLayout layout) =>
+        JsonSerializer.Deserialize(JsonSerializer.SerializeToUtf8Bytes(layout, HMJsonContext.Default.HMLayout),
+            HMJsonContext.Default.HMLayout)!;
 
     public HMGamepadLayout?             AsGamepad()              => Layout as HMGamepadLayout;
     public HMJoystickLayout?            AsJoystick()             => Layout as HMJoystickLayout;

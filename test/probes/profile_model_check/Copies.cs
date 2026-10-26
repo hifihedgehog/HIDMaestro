@@ -3,11 +3,15 @@
 // encodes with the profile's own objects, so a program that writes into
 // what one of these reads returned must change no later read, no report a
 // controller of the profile builds and no program it compiles. Each check
-// takes a profile of a load of its own, so a write that reaches the profile
-// spoils no other check.
+// that writes takes a profile of a load of its own, so a write that reaches
+// the profile spoils no other check. The Clone check fills a spec of its
+// own with every key, so a key a copy drops or shares shows. The last
+// writes nothing: it compares every catalog profile's copies with the
+// profile's own objects.
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Text.Json;
 using HIDMaestro;
 using HIDMaestro.Internal;
@@ -105,7 +109,155 @@ internal static class Copies
             return (own && faithful && reads, $"own layout {own}, equal to the profile's {faithful}, a list written {wrote}, later reads unchanged {reads}");
         });
 
+        c.Run("ExtendedReportSpec.Clone: a spec with every key of every type under it filled copies each value and shares no list or object", () =>
+        {
+            int n = 0, keys = 0;
+            var spec = (ExtendedReportSpec)Fill(typeof(ExtendedReportSpec), ref n, 0);
+            var wrong = new List<string>();
+            Walk(spec.Clone(), spec, "spec", wrong, ref keys);
+            return (wrong.Count == 0 && keys > 100,
+                $"{keys} values compared, {wrong.Count} wrong{(wrong.Count == 0 ? "" : ": " + string.Join(", ", wrong.Take(5)))}");
+        });
+
+        c.Run("every catalog profile: each copy's public members equal the profile's own, down to every value", () =>
+        {
+            int copies = 0;
+            var diffs = new List<string>();
+            foreach (var inner in ProfileDatabase.LoadEmbedded().All)
+            {
+                var p = new HMProfile(inner);
+                void One(object? copy, object? own, string name)
+                {
+                    if (own == null) return;
+                    copies++;
+                    if (ReferenceEquals(copy, own)) diffs.Add($"{inner.Id} {name}: the profile's own object");
+                    else Compare(copy, own, $"{inner.Id} {name}", diffs, 0);
+                }
+                One(p.ButtonMap, inner.ButtonMap, "buttonMap");
+                One(p.AxisMap, inner.AxisMap, "axisMap");
+                One(p.ExtendedReport, inner.ExtendedReport, "extendedReport");
+                One(p.ExtendedOutputReport, inner.ExtendedOutputReport, "extendedOutputReport");
+                One(p.Layout, inner.Layout, "layout");
+            }
+            return (diffs.Count == 0 && copies > 0,
+                $"{copies} copies, {diffs.Count} differ{(diffs.Count == 0 ? "" : ": " + string.Join(", ", diffs.Take(5)))}");
+        });
+
         return c.Failures;
+    }
+
+    /// <summary>The JSON keys of <paramref name="t"/>: its contract's
+    /// properties, or, for a type its own converter reads (ScaleSpec), its
+    /// public settable properties.</summary>
+    static IEnumerable<(string Name, Type Type, Func<object, object?> Get, Action<object, object?> Set)> Keys(Type t)
+    {
+        var info = HMJsonContext.Default.GetTypeInfo(t);
+        if (info?.Kind == System.Text.Json.Serialization.Metadata.JsonTypeInfoKind.Object)
+            return info.Properties.Where(p => p.Get != null && p.Set != null).Select(p => (p.Name, p.PropertyType, p.Get!, p.Set!));
+        return t.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(p => p.CanWrite && p.GetIndexParameters().Length == 0)
+            .Select(p => (p.Name, p.PropertyType, (Func<object, object?>)p.GetValue, (Action<object, object?>)p.SetValue));
+    }
+
+    /// <summary>An instance of <paramref name="t"/> with every key set to a
+    /// value no other key holds and no default equals, each list holding one
+    /// element filled the same way.</summary>
+    static object Fill(Type t, ref int n, int depth)
+    {
+        n++;
+        t = Nullable.GetUnderlyingType(t) ?? t;
+        if (t == typeof(string)) return $"s{n}";
+        if (t == typeof(int)) return n;
+        if (t == typeof(byte)) return (byte)n;
+        if (t == typeof(double)) return n + 0.5;
+        if (t == typeof(bool)) return true;
+        if (depth > 8) throw new InvalidOperationException($"{t.Name} nests deeper than 8");
+        if (t.IsGenericType && t.GetGenericTypeDefinition() == typeof(List<>))
+        {
+            var list = (System.Collections.IList)Activator.CreateInstance(t)!;
+            list.Add(Fill(t.GetGenericArguments()[0], ref n, depth + 1));
+            return list;
+        }
+        var o = Activator.CreateInstance(t)!;
+        foreach (var (_, type, _, set) in Keys(t)) set(o, Fill(type, ref n, depth + 1));
+        return o;
+    }
+
+    /// <summary>A copy beside its original, key by key: every value equal,
+    /// and no list or object of the original reused.</summary>
+    static void Walk(object? copy, object? own, string path, List<string> wrong, ref int keys)
+    {
+        keys++;
+        if (copy == null || own == null)
+        {
+            if (copy != null || own != null) wrong.Add($"{path}: one side null");
+            return;
+        }
+        var t = own.GetType();
+        if (t.IsValueType || t == typeof(string))
+        {
+            if (!own.Equals(copy)) wrong.Add($"{path}: {copy} for {own}");
+            return;
+        }
+        if (ReferenceEquals(copy, own)) { wrong.Add($"{path}: shared"); return; }
+        if (own is System.Collections.IList ol)
+        {
+            var cl = (System.Collections.IList)copy;
+            if (cl.Count != ol.Count) { wrong.Add($"{path}: {cl.Count} elements for {ol.Count}"); return; }
+            for (int i = 0; i < ol.Count; i++) Walk(cl[i], ol[i], $"{path}[{i}]", wrong, ref keys);
+            return;
+        }
+        foreach (var (name, _, get, _) in Keys(t)) Walk(get(copy), get(own), $"{path}.{name}", wrong, ref keys);
+    }
+
+    /// <summary>Two objects' public properties and fields, compared down to
+    /// values: lists element by element, dictionaries key by key. Adds the
+    /// path of each difference to <paramref name="diffs"/>.</summary>
+    static void Compare(object? a, object? b, string path, List<string> diffs, int depth)
+    {
+        if (a == null || b == null)
+        {
+            if (a != null || b != null) diffs.Add(path);
+            return;
+        }
+        var t = a.GetType();
+        if (t != b.GetType()) { diffs.Add($"{path}: {t.Name} against {b.GetType().Name}"); return; }
+        if (depth > 16) { diffs.Add($"{path}: deeper than 16"); return; }
+        if (t.IsPrimitive || t.IsEnum || a is string or decimal)
+        {
+            if (!a.Equals(b)) diffs.Add(path);
+            return;
+        }
+        if (a is System.Collections.IDictionary da)
+        {
+            var db = (System.Collections.IDictionary)b;
+            if (da.Count != db.Count) { diffs.Add($"{path}.Count"); return; }
+            foreach (System.Collections.DictionaryEntry e in da)
+            {
+                if (!db.Contains(e.Key)) diffs.Add($"{path}[{e.Key}]");
+                else Compare(e.Value, db[e.Key], $"{path}[{e.Key}]", diffs, depth + 1);
+            }
+            return;
+        }
+        if (a is System.Collections.IEnumerable ea)
+        {
+            var la = ea.Cast<object?>().ToList();
+            var lb = ((System.Collections.IEnumerable)b).Cast<object?>().ToList();
+            if (la.Count != lb.Count) { diffs.Add($"{path}.Count"); return; }
+            for (int i = 0; i < la.Count; i++) Compare(la[i], lb[i], $"{path}[{i}]", diffs, depth + 1);
+            return;
+        }
+        const BindingFlags Public = BindingFlags.Public | BindingFlags.Instance;
+        foreach (var prop in t.GetProperties(Public))
+        {
+            if (prop.GetIndexParameters().Length != 0) continue;
+            object? va, vb;
+            try { va = prop.GetValue(a); vb = prop.GetValue(b); }
+            catch (TargetInvocationException e) { diffs.Add($"{path}.{prop.Name}: {e.InnerException?.GetType().Name}"); continue; }
+            Compare(va, vb, $"{path}.{prop.Name}", diffs, depth + 1);
+        }
+        foreach (var field in t.GetFields(Public))
+            Compare(field.GetValue(a), field.GetValue(b), $"{path}.{field.Name}", diffs, depth + 1);
     }
 
     /// <summary>A profile of a load of its own, under a user id, as Edits

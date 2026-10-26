@@ -1088,7 +1088,10 @@ public sealed class ControllerProfile
 /// compiled program for the spec's lifetime, matching
 /// <see cref="HMProfile"/>'s documented immutable-identity contract.
 /// Mutating fields after a controller has used the spec has no effect on
-/// the wire. Build a new profile (HMProfileBuilder or a fresh JSON load)
+/// the wire, and <see cref="HMProfile.ExtendedReport"/> and
+/// <see cref="HMProfile.ExtendedOutputReport"/> hand out copies
+/// (<see cref="Clone"/>), so a change a program makes to one reaches no
+/// profile. Build a new profile (HMProfileBuilder or a fresh JSON load)
 /// to change layouts.</para></summary>
 public sealed class ExtendedReportSpec
 {
@@ -1101,6 +1104,25 @@ public sealed class ExtendedReportSpec
     /// <summary>The compiled <see cref="PortLayout"/> of <see cref="Ports"/>,
     /// built on first use. Not serialized.</summary>
     internal object? PortLayoutCache;
+
+    /// <summary>A copy of every JSON key of the spec, its triggers, fields
+    /// and ports copied in turn, as XInputSpec.Clone copies its own. The
+    /// compiled caches stay with this spec. A key added here or to a type
+    /// under the spec belongs in that type's Clone too: profile_model_check's
+    /// copies mode fills every key of each and fails on one a copy leaves
+    /// out or shares.</summary>
+    internal ExtendedReportSpec Clone() => new()
+    {
+        ReportId = ReportId,
+        Size = Size,
+        ArmOn = SpecLists.Copy(ArmOn, t => t.Clone()),
+        AlwaysArmed = AlwaysArmed,
+        IdleFrameIntervalMs = IdleFrameIntervalMs,
+        Send = Send,
+        Fields = SpecLists.Copy(Fields, f => f.Clone())!,
+        Ports = Ports?.Clone(),
+        Comment = Comment,
+    };
 
     /// <summary>Hex string for the report ID, e.g. "0x31".</summary>
     [JsonPropertyName("reportId")]
@@ -1549,6 +1571,9 @@ public sealed class ArmTrigger
 
     [JsonIgnore]
     public byte ReportIdByte => ReportIds.Parse(ReportId);
+
+    /// <summary>A copy of every JSON key, for ExtendedReportSpec.Clone.</summary>
+    internal ArmTrigger Clone() => new() { Type = Type, ReportId = ReportId };
 }
 
 /// <summary>v1.3.5: single-field descriptor inside an ExtendedReportSpec.
@@ -1723,6 +1748,20 @@ public sealed class FieldSpec
     /// and at 1.</summary>
     [JsonPropertyName("triggerThreshold")]
     public TriggerThresholdSpec? TriggerThreshold { get; set; }
+
+    /// <summary>A copy of every JSON key, for ExtendedReportSpec.Clone.</summary>
+    internal FieldSpec Clone() => new()
+    {
+        Byte = Byte, Bytes = Bytes, Bits = Bits, Type = Type, Semantic = Semantic,
+        Buttons = SpecLists.Copy(Buttons),
+        Center = Center, NeutralValue = NeutralValue, Scope = Scope?.Clone(),
+        Initial = Initial, Stride = Stride, Divisor = Divisor, FullValue = FullValue,
+        Resolution = Resolution, SourceResolution = SourceResolution, Invert = Invert,
+        Min = Min, Max = Max, Scale = Scale?.Clone(), Negate = Negate,
+        Repeat = SpecLists.Copy(Repeat), Dpad = Dpad, Levels = SpecLists.Copy(Levels),
+        ChargingValue = ChargingValue, Parts = SpecLists.Copy(Parts, p => p.Clone()),
+        Clock = Clock, HoldWhile = HoldWhile, TriggerThreshold = TriggerThreshold?.Clone(),
+    };
 }
 
 /// <summary>v2.0.2: where a trigger's digital bit sets
@@ -1739,6 +1778,9 @@ public sealed class TriggerThresholdSpec
     /// <summary>The count at which the bit sets, 1 to <see cref="Max"/>.</summary>
     [JsonPropertyName("at")]
     public int? At { get; set; }
+
+    /// <summary>A copy of every JSON key, for ExtendedReportSpec.Clone.</summary>
+    internal TriggerThresholdSpec Clone() => new() { Max = Max, At = At };
 }
 
 /// <summary>v1.3.5: CRC32 scope spec for a crc32-le field. The CRC is
@@ -1754,6 +1796,24 @@ public sealed class CrcScope
 
     [JsonPropertyName("to")]
     public int To { get; set; }
+
+    /// <summary>A copy of every JSON key, for ExtendedReportSpec.Clone.</summary>
+    internal CrcScope Clone() => new() { Prefix = SpecLists.Copy(Prefix)!, From = From, To = To };
+}
+
+/// <summary>New lists for the specs' Clone methods: the same elements, or
+/// each element's own copy, and null for null.</summary>
+internal static class SpecLists
+{
+    internal static List<T>? Copy<T>(List<T>? list) => list == null ? null : new List<T>(list);
+
+    internal static List<T>? Copy<T>(List<T>? list, Func<T, T> copy) where T : class
+    {
+        if (list == null) return null;
+        var to = new List<T>(list.Count);
+        foreach (var x in list) to.Add(x == null ? x! : copy(x));
+        return to;
+    }
 }
 
 /// <summary>

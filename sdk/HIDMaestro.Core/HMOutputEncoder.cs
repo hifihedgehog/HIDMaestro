@@ -35,7 +35,7 @@ public static class HMOutputEncoder
         if (profile == null) throw new ArgumentNullException(nameof(profile));
         if (fields == null) throw new ArgumentNullException(nameof(fields));
 
-        var spec = profile.ExtendedOutputReport;
+        var spec = profile.Inner.ExtendedOutputReport;
         if (spec == null)
             throw new InvalidOperationException(
                 $"Profile '{profile.Id}' has no extendedOutputReport spec: nothing to encode against.");

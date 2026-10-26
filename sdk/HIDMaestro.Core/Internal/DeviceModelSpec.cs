@@ -59,6 +59,13 @@ public sealed class PortsSpec
     /// in the extendedReport field vocabulary.</summary>
     [JsonPropertyName("fields")]
     public List<FieldSpec> Fields { get; set; } = new();
+
+    /// <summary>A copy of every JSON key, for ExtendedReportSpec.Clone.</summary>
+    internal PortsSpec Clone() => new()
+    {
+        Count = Count, Offset = Offset, Stride = Stride, Status = Status?.Clone(), Data = Data,
+        Snapshots = SpecLists.Copy(Snapshots, s => s.Clone()), Fields = SpecLists.Copy(Fields, f => f.Clone())!,
+    };
 }
 
 /// <summary>A port block's status byte.</summary>
@@ -77,6 +84,13 @@ public sealed class PortStatusSpec
     /// carries while they are on.</summary>
     [JsonPropertyName("flags")]
     public List<PortFlagSpec>? Flags { get; set; }
+
+    /// <summary>A copy of every JSON key, for ExtendedReportSpec.Clone.</summary>
+    internal PortStatusSpec Clone() => new()
+    {
+        Byte = Byte, Connections = SpecLists.Copy(Connections, c => c.Clone())!,
+        Flags = SpecLists.Copy(Flags, f => f.Clone()),
+    };
 }
 
 /// <summary>One kind of connection a port can hold.</summary>
@@ -88,6 +102,9 @@ public sealed class PortConnectionSpec
     /// <summary>The status bits, hex.</summary>
     [JsonPropertyName("value")]
     public string Value { get; set; } = "0x00";
+
+    /// <summary>A copy of every JSON key, for ExtendedReportSpec.Clone.</summary>
+    internal PortConnectionSpec Clone() => new() { Name = Name, Value = Value };
 }
 
 /// <summary>A device-wide switch shown in every port's status byte.</summary>
@@ -102,6 +119,9 @@ public sealed class PortFlagSpec
 
     [JsonPropertyName("default")]
     public bool Default { get; set; }
+
+    /// <summary>A copy of every JSON key, for ExtendedReportSpec.Clone.</summary>
+    internal PortFlagSpec Clone() => new() { Name = Name, Value = Value, Default = Default };
 }
 
 /// <summary>A copy of a port's block the device keeps.</summary>
@@ -115,6 +135,9 @@ public sealed class PortSnapshotSpec
     /// connection.</summary>
     [JsonPropertyName("on")]
     public string On { get; set; } = "connect";
+
+    /// <summary>A copy of every JSON key, for ExtendedReportSpec.Clone.</summary>
+    internal PortSnapshotSpec Clone() => new() { Name = Name, On = On };
 }
 
 /// <summary>A USB/IP persona libusb hosts open, whose real device Windows

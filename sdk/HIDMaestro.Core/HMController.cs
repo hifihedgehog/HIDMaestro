@@ -667,14 +667,14 @@ public sealed partial class HMController : IDisposable
         // vendor blob, so the legacy fallback path has no buttons or axes
         // to fill and every consumer would read a live device that never
         // moves.
-        bool alwaysArmed = profile.ExtendedReport?.AlwaysArmed == true;
-        _rawVerbatimReportId = profile.ExtendedReport?.ReportIdByte ?? 0;
+        bool alwaysArmed = profile.Inner.ExtendedReport?.AlwaysArmed == true;
+        _rawVerbatimReportId = profile.Inner.ExtendedReport?.ReportIdByte ?? 0;
         _rawEmitsVerbatim = alwaysArmed && _rawVerbatimReportId != 0;
-        bool armOnDeclared = profile.ExtendedReport?.ArmOn != null
-                          && profile.ExtendedReport.ArmOn.Count > 0;
-        if (profile.ExtendedReport != null && (armOnDeclared || alwaysArmed))
+        bool armOnDeclared = profile.Inner.ExtendedReport?.ArmOn != null
+                          && profile.Inner.ExtendedReport.ArmOn.Count > 0;
+        if (profile.Inner.ExtendedReport != null && (armOnDeclared || alwaysArmed))
         {
-            _extendedReportBuffer = new byte[profile.ExtendedReport.Size];
+            _extendedReportBuffer = new byte[profile.Inner.ExtendedReport.Size];
             _extEncoderState = new VendorBlobCodec.EncoderState();
             _extendedModeArmed = alwaysArmed;
         }
@@ -709,8 +709,8 @@ public sealed partial class HMController : IDisposable
         }
         // A sensor timestamp that holds while a register's condition does, as
         // a Triton's holds while its IMU is off.
-        if (_extEncoderState != null && profile.ExtendedReport != null
-            && VendorBlobProgram.Get(profile.ExtendedReport).HoldWhile is { } hold)
+        if (_extEncoderState != null && profile.Inner.ExtendedReport != null
+            && VendorBlobProgram.Get(profile.Inner.ExtendedReport).HoldWhile is { } hold)
         {
             _extEncoderState.Hold = ConditionParser.Parse(hold, model.Registers, "$.extendedReport.fields[].holdWhile");
             _extEncoderState.HoldRegisters = _protocolEngine?.RegisterWords ?? model.Registers.Initial;
@@ -968,7 +968,7 @@ public sealed partial class HMController : IDisposable
         // at one field.
         bool useExtended = _extendedReportBuffer != null
                         && _extEncoderState != null
-                        && Profile.ExtendedReport != null
+                        && Profile.Inner.ExtendedReport != null
                         && _extendedModeArmed;
 
         // The six simple slots feed the ports, the state block, the codec
@@ -1049,7 +1049,7 @@ public sealed partial class HMController : IDisposable
         // regression. useExtended is read at the top of this method.
         if (useExtended)
         {
-            // Profile.ExtendedReport's field list drives byte placement.
+            // Profile.Inner.ExtendedReport's field list drives byte placement.
             // Sticks / triggers / buttons / hat encode through
             // VendorBlobCodec; CRC32 (if declared) is computed last. For
             // Sony BT, the buffer is full 78 bytes including byte[0] = RID
@@ -1057,7 +1057,7 @@ public sealed partial class HMController : IDisposable
             // The driver-side WriteToInputReport recognizes the extended
             // path via the SHARED_INPUT.ExtendedReportSize > 0 hint set
             // alongside the legacy bytes below.
-            VendorBlobCodec.EncodeInput(Profile.ExtendedReport!, in state,
+            VendorBlobCodec.EncodeInput(Profile.Inner.ExtendedReport!, in state,
                 (float)mlx, (float)mly, (float)mrx, (float)mry, (float)mlt, (float)mrt,
                 _extendedReportBuffer!, _extEncoderState!);
             report = _extendedReportBuffer!;
@@ -1132,7 +1132,7 @@ public sealed partial class HMController : IDisposable
         // profiles so WriteInputFrame skips the 14-byte Marshal.Copy.
         if (useExtended)
         {
-            int extLen = Profile.ExtendedReport!.Size;
+            int extLen = Profile.Inner.ExtendedReport!.Size;
             SharedMemoryIO.WriteInputFrame(
                 _inputView, _inputEvent, ref _inputSeqNo,
                 Array.Empty<byte>(), 0,
@@ -1807,7 +1807,7 @@ public sealed partial class HMController : IDisposable
     /// path so both conventions land on the same wire bytes.</summary>
     private void EmitExtendedFrame(byte[] buffer, int length)
     {
-        int declaredSize = Profile.ExtendedReport!.Size;
+        int declaredSize = Profile.Inner.ExtendedReport!.Size;
         byte rid = _rawVerbatimReportId;
         int emitLen = length;
 
@@ -1849,7 +1849,7 @@ public sealed partial class HMController : IDisposable
         ThrowIfDisposed();
         if (fields == null) throw new ArgumentNullException(nameof(fields));
 
-        var spec = Profile.ExtendedOutputReport;
+        var spec = Profile.Inner.ExtendedOutputReport;
         if (spec == null)
             throw new InvalidOperationException(
                 $"Profile '{Profile.Id}' has no extendedOutputReport spec: nothing to encode against.");
@@ -2056,7 +2056,7 @@ public sealed partial class HMController : IDisposable
                     // dictionary and surface as OutputDecoded. Consumers
                     // get named values (rumble amplitudes, lightbar RGB,
                     // adaptive-trigger blocks) instead of raw bytes.
-                    var extOut = Profile.ExtendedOutputReport;
+                    var extOut = Profile.Inner.ExtendedOutputReport;
                     if (extOut != null && reportId == extOut.ReportIdByte
                         && OutputDecoded != null)
                     {
@@ -2116,7 +2116,7 @@ public sealed partial class HMController : IDisposable
                     // outputWrite trigger types stay supported for
                     // future profiles that arm on writes (e.g. Switch
                     // Pro init handshake).
-                    var extIn = Profile.ExtendedReport;
+                    var extIn = Profile.Inner.ExtendedReport;
                     if (extIn?.ArmOn != null && !_extendedModeArmed)
                     {
                         bool isFeature     = source == (byte)HMOutputSource.HidFeature;
