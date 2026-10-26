@@ -84,6 +84,15 @@ internal static class HeldRemoval
         /// The holder refuses it, so the devnodes come back started, and a
         /// query of the removal's own made meanwhile is refused too.</summary>
         public bool OutsideQuery;
+        /// <summary>The holder lets go once it has refused this many removal
+        /// queries, 0 for never.</summary>
+        public int LetGoAfter;
+        /// <summary>The removal queries the holder has refused.</summary>
+        public int Refusals;
+        /// <summary>The clock each removal query is timed on, and each
+        /// query's time and thread.</summary>
+        public Func<long>? Clock;
+        public readonly List<(long At, int Thread)> Queries = new();
         readonly Dictionary<string, List<Action>> _removed = new(StringComparer.OrdinalIgnoreCase);
         // A driver's failure can come from another thread (Fail).
         readonly object _gate = new();
@@ -159,6 +168,7 @@ internal static class HeldRemoval
         public bool Query(string id)
         {
             Calls.Add($"query {id}");
+            Queries.Add((Clock?.Invoke() ?? 0, Environment.CurrentManagedThreadId));
             var subtree = Below(id).Append(id).ToList();
             if (OutsideQuery)
             {
@@ -167,7 +177,10 @@ internal static class HeldRemoval
                 return false;
             }
             if (Holder && subtree.Exists(x => string.Equals(x, Child, StringComparison.OrdinalIgnoreCase)) && IsStarted(Child))
+            {
+                if (++Refusals == LetGoAfter) Holder = false;
                 return false;
+            }
             foreach (string x in subtree) Leave(x);
             return !QueryFailsAnyway;
         }
@@ -396,8 +409,6 @@ internal static class HeldRemoval
         check("a removal that leaves a device ends its parent's removal test not gone, once, which S77 counts (RemovalsNotGone), and one that removes it ends none so",
               tally.TrueForAll(t => t.M.NotGone == t.Want), string.Join(", ", tally.Select(t => $"{t.Name} {t.M.NotGone}")));
 
-        SweepChecks(check);
-
         // The wait itself: done once every child is out of the tree and the
         // parent no longer started, and not before.
         var late = new Machine(holder: true);
@@ -472,71 +483,273 @@ internal static class HeldRemoval
         new(owner, Pid: 0, Image: null, StartTime: 0, SdkVersion: null, UsbipPort: 0, Live: live, Self: false,
             Controllers: new[] { new MachineClaims.ControllerEntry(token, -1, "umdf", "dualshock-4-v2", null) });
 
-    // ── A sweep's removal of a device that refused one before ──
+    // ── The retry of a sweep's refused removal ──
+
+    /// <summary>The identity token of the dead owner's group the retry
+    /// checks make of the machine's parent.</summary>
+    const string Token = "HM_FE0000000000B001";
+
+    /// <summary>The machine's parent as a dead owner's group with no index,
+    /// so no driver can be asked to fail it.</summary>
+    static OwnerCensus.DeviceGroup Group(MachineClaims.OwnerRecord? record = null) =>
+        new(Token, -1, new List<string> { Parent }, OwnerCensus.Owner.Dead, record);
 
     /// <summary>OwnerSweep.RemoveGroup, the sweeps' removal of one controller
-    /// of a program that has exited, on the machine's parent, with no index
-    /// to ask the driver through. Adds what it left to
+    /// of a program that has exited, on the machine's parent, handing a
+    /// refusal to <paramref name="retry"/>. Adds what it left to
     /// <see cref="Machine.Left"/>.</summary>
-    static bool SweepGroup(Machine m)
+    static bool SweepGroup(Machine m, OwnerSweep.RefusalRetry retry)
     {
         var remove = typeof(OwnerSweep).GetMethod("RemoveGroup", AnyStatic)
             ?? throw new MissingMethodException("OwnerSweep.RemoveGroup");
-        var group = new OwnerCensus.DeviceGroup("#index:-1", -1, new List<string> { Parent }, OwnerCensus.Owner.Dead, null);
         return Hooked(m, () =>
         {
             long left = DeviceManager.RemovalsLeftHere;
-            bool gone = (bool)remove.Invoke(null, new object[] { group })!;
+            bool gone = (bool)remove.Invoke(null, new object?[] { Group(), retry })!;
             m.Left += DeviceManager.RemovalsLeftHere - left;
             return gone;
         });
     }
 
+    /// <summary>A retry of the checks' own (OwnerSweep.RefusalRetry) on a
+    /// clock its loop moves: each wait moves the clock to the time the loop
+    /// waits for, then calls <see cref="At"/> with the time since the first
+    /// refusal. Its census has the machine's parent, while it is in the
+    /// tree, as a group of the dead owner <see cref="Record"/> names, and
+    /// <see cref="Others"/>. The records it deletes are listed, and its loop
+    /// is kept for <see cref="RunLoop"/>.</summary>
+    sealed class RetryRun
+    {
+        public long Now = 1_000_000;
+        public readonly long T0;
+        public ThreadStart? Loop;
+        public int Starts;
+        public Action<long>? At;
+        public readonly List<string> Deleted = new();
+        public readonly List<OwnerCensus.DeviceGroup> Others = new();
+        public readonly MachineClaims.OwnerRecord Record = OwnerRecord("pnc-retry-dead", live: false, Token);
+        /// <summary>Stand-ins for the claims' one-instance pipes, which only
+        /// an elevated process can create.</summary>
+        public readonly Dictionary<string, SafeFileHandle> Pipes = new(StringComparer.OrdinalIgnoreCase);
+        public readonly OwnerSweep.RefusalRetry Retry;
+        readonly Machine _m;
+
+        public RetryRun(Machine m)
+        {
+            _m = m;
+            T0 = Now;
+            m.Clock = () => Now;
+            Retry = new OwnerSweep.RefusalRetry(new OwnerSweep.RetryCalls
+            {
+                Now = () => Now,
+                Wait = ms =>
+                {
+                    Now += ms;
+                    At?.Invoke(Now - T0);
+                },
+                Start = loop =>
+                {
+                    Starts++;
+                    Loop = loop;
+                },
+                Census = Census,
+                DeleteRecord = Deleted.Add,
+            });
+        }
+
+        OwnerCensus Census()
+        {
+            var census = new OwnerCensus();
+            census.Records.Add(Record);
+            if (_m.Nodes[Parent].InTree) census.Devices.Add(Group(Record));
+            census.Devices.AddRange(Others);
+            return census;
+        }
+
+        /// <summary>Each removal query's time since the first refusal.</summary>
+        public long[] Times => _m.Queries.Select(q => q.At - T0).ToArray();
+    }
+
+    /// <summary>How long a retry loop on the checks' clock may run before
+    /// the check calls it hung. Its waits take no time, and the machine
+    /// answers every removal call at once, so a loop ends in milliseconds of
+    /// work.</summary>
+    static int LoopHangMs => TimeoutScale.Apply(600_000);
+
+    /// <summary>Runs the retry's loop on a check thread of its own, with every
+    /// PnP call answered by <paramref name="m"/> and the claims by stand-ins,
+    /// until it ends. False when no loop was started or it did not end within
+    /// <see cref="LoopHangMs"/>.</summary>
+    static bool RunLoop(Machine m, RetryRun run)
+    {
+        if (run.Loop is not { } loop) return false;
+        MachineClaims.CreateClaimHook = name =>
+        {
+            lock (run.Pipes)
+            {
+                if (run.Pipes.TryGetValue(name, out var open) && !open.IsClosed) return null;
+                var made = new SafeFileHandle(new IntPtr(1), ownsHandle: false);
+                run.Pipes[name] = made;
+                return made;
+            }
+        };
+        try
+        {
+            return Hooked(m, () =>
+            {
+                var t = Offline.Critical(loop);
+                t.Start();
+                return t.Join(LoopHangMs);
+            });
+        }
+        finally { MachineClaims.CreateClaimHook = null; }
+    }
+
     /// <summary>Against a holder that never reads, each removal query took
     /// about 5.4 s before Windows refused it, and a request to a driver that
-    /// does not answer 2 s more, every sweep. A sweep remembers a refusal for
-    /// the device's present life, and a later sweep in the process leaves
-    /// the device and its records without asking again while its state is
-    /// the same, still counting it left.</summary>
-    static void SweepChecks(Action<string, bool, string> check)
+    /// does not answer 2 s more. A sweep's refusal goes to the retry, which
+    /// asks again from a thread of its own 5 s after the refusal, then 30 s,
+    /// 2 min and 10 min after each retry, the last repeating, and starts the
+    /// schedule over when the devnode's state changes. A sweep on a caller's
+    /// thread leaves the device to it without asking.</summary>
+    internal static void RunRetries(Action<string, bool, string> check)
     {
-        var m = new Machine(holder: true);
-        bool first = SweepGroup(m);
-        bool second = SweepGroup(m);
-        check("two sweeps of a held device whose driver cannot be asked: the first asks and is refused, the second leaves it without asking -> one removal query, both left, every record kept",
-              !first && !second && m.Calls.SequenceEqual(new[] { $"query {Parent}" }) && m.Left == 2 && m.Violations.Count == 0
-              && Kept(m.Nodes[Parent]) && Kept(m.Nodes[Child]),
-              $"{Describe(m, (first || second, 0))}");
+        int caller = Environment.CurrentManagedThreadId;
+        int cancels = 0;
+        string Show(Machine m, RetryRun run) =>
+            $"queries at [{string.Join(", ", run.Times)}] ms, {m.Queries.Count(q => q.Thread == caller)} on the caller's thread, " +
+            (m.Violations.Count == 0 ? "no record deleted while in the tree and not down" : string.Join("; ", m.Violations)) +
+            $", child {m.Nodes[Child]}, parent {m.Nodes[Parent]}, dead records deleted [{string.Join(", ", run.Deleted)}], " +
+            $"{run.Retry.Held} refusal(s) held, {run.Starts} loop start(s), {m.Left} left by sweeps";
+        static bool Gone(Machine m) =>
+            !m.Nodes[Parent].InTree && !m.Nodes[Parent].Record && !m.Nodes[Child].Record && m.Violations.Count == 0;
 
-        // A dispose or a create's removal of a prior life always asks, the
-        // refusal remembered or not.
-        var dispose = Remove(m, Parent, fast: false);
-        check("a dispose's removal of that device, its refusal remembered by a sweep -> asks again",
-              !dispose.Removed && m.Calls.Count(c => c == $"query {Parent}") == 2 && m.Left == 1,
-              Describe(m, dispose));
+        // The holder refuses the sweep's query and the first retry's, then
+        // lets go.
+        var a = new Machine(holder: true) { LetGoAfter = 2 };
+        var runA = new RetryRun(a);
+        bool first = SweepGroup(a, runA.Retry);
+        bool looked = runA.Retry.LooksAfter(Group());
+        runA.Now += 1_000;
+        bool second = SweepGroup(a, runA.Retry);
+        bool endedA = RunLoop(a, runA);
+        check("a sweep's removal refused by a holder that refuses twice, then lets go -> a later sweep on the caller's thread leaves the device without asking, the retry asks again on a thread of its own 5 s after the refusal and is refused, asks 30 s after that, and the device, both records and the dead owner's record go",
+              !first && !second && looked && endedA && runA.Starts == 1 && a.Left == 2
+              && runA.Times.SequenceEqual(new long[] { 0, 5_000, 35_000 })
+              && a.Queries[0].Thread == caller && a.Queries.Skip(1).All(q => q.Thread != caller)
+              && Gone(a) && runA.Deleted.SequenceEqual(new[] { runA.Record.OwnerId })
+              && runA.Retry.Held == 0 && !runA.Retry.LooksAfter(Group()),
+              Show(a, runA));
+        cancels += a.CancelLocates;
 
-        // A new life of the devnode is another device: the next sweep asks.
-        m.Life++;
-        m.Left = 0;
-        bool third = SweepGroup(m);
-        check("a sweep after the devnode's state changed, as a new life of it -> asks again",
-              !third && m.Calls.Count(c => c == $"query {Parent}") == 3 && m.Left == 1,
-              Describe(m, (third, 0)));
+        // A holder that keeps the device for 1,400 s.
+        var b = new Machine(holder: true);
+        var runB = new RetryRun(b);
+        runB.At = t => { if (t >= 1_400_000) b.Holder = false; };
+        bool sweptB = SweepGroup(b, runB.Retry);
+        bool endedB = RunLoop(b, runB);
+        check("a holder that keeps the device for 1,400 s -> one query per retry, each on the retry's thread, 5 s, 30 s and 2 min apart, then 10 min apart twice, and the device goes at the first retry after the holder lets go",
+              !sweptB && endedB
+              && runB.Times.SequenceEqual(new long[] { 0, 5_000, 35_000, 155_000, 755_000, 1_355_000, 1_955_000 })
+              && b.Queries.Skip(1).All(q => q.Thread != caller) && Gone(b) && runB.Retry.Held == 0,
+              Show(b, runB));
+        cancels += b.CancelLocates;
 
-        // A holder letting go changes nothing Windows reports. Once the
-        // device's state changes and a sweep removes it, nothing about it is
-        // remembered: a device under the same id later is asked again.
-        m.Holder = false;
-        m.Life++;
-        bool fourth = SweepGroup(m);
-        m.Nodes[Parent] = new Node();
-        m.Nodes[Child] = new Node();
-        m.Holder = true;
-        m.Left = 0;
-        bool fifth = SweepGroup(m);
-        check("the holder gone and the devnode's state changed, a sweep removes the device, then a device under the same id is held -> the next sweep asks it",
-              fourth && !fifth && m.Calls.Count(c => c == $"query {Parent}") == 5 && m.Left == 1,
-              Describe(m, (fifth, 0)));
+        // The devnode's state changes between two retries.
+        var c = new Machine(holder: true);
+        var runC = new RetryRun(c);
+        bool changed = false;
+        runC.At = t =>
+        {
+            if (t >= 20_000 && !changed)
+            {
+                changed = true;
+                c.Life++;
+            }
+            if (t >= 30_000) c.Holder = false;
+        };
+        SweepGroup(c, runC.Retry);
+        bool endedC = RunLoop(c, runC);
+        check("the devnode's state changes 20 s after the refusal -> the retry reads the change within 5 s and starts its schedule over: it asks 5 s after the change, is refused, and asks 30 s after that instead of 35 s after the refusal",
+              endedC && runC.Times.SequenceEqual(new long[] { 0, 5_000, 25_000, 55_000 }) && Gone(c) && runC.Retry.Held == 0,
+              Show(c, runC));
+        cancels += c.CancelLocates;
+
+        // A sweep on the caller's thread meets the device in a new state.
+        var d = new Machine(holder: true);
+        var runD = new RetryRun(d);
+        SweepGroup(d, runD.Retry);
+        runD.Now += 2_000;
+        d.Life++;
+        bool sweptD = SweepGroup(d, runD.Retry);
+        d.Holder = false;
+        bool endedD = RunLoop(d, runD);
+        check("a sweep on the caller's thread 2 s after the refusal, the devnode's state changed since -> it leaves the device without asking, and the retry's schedule starts over from it: asked 5 s after that sweep",
+              !sweptD && endedD && d.Left == 2 && runD.Times.SequenceEqual(new long[] { 0, 7_000 }) && Gone(d),
+              Show(d, runD));
+        cancels += d.CancelLocates;
+
+        // A running program holds the identity's claim at the first retry.
+        var e = new Machine(holder: true) { LetGoAfter = 1 };
+        var runE = new RetryRun(e);
+        var foreign = new SafeFileHandle(new IntPtr(1), ownsHandle: false);
+        runE.Pipes[MachineClaims.IdentityPipeName(Token)] = foreign;
+        runE.At = t => { if (t >= 10_000) foreign.Dispose(); };
+        SweepGroup(e, runE.Retry);
+        bool endedE = RunLoop(e, runE);
+        bool letGo = runE.Pipes.Values.All(h => h.IsClosed);
+        check("a running program holds the identity's claim at the first retry -> that retry leaves the device without a query, the next, 30 s later, takes the claim, removes the device and lets the claim go",
+              endedE && runE.Times.SequenceEqual(new long[] { 0, 35_000 }) && Gone(e) && letGo,
+              $"{Show(e, runE)}, every claim let go {letGo}");
+        cancels += e.CancelLocates;
+
+        // A dispose asks whatever the retry holds, and another program
+        // removes the device before the first retry.
+        var f = new Machine(holder: true);
+        var runF = new RetryRun(f);
+        SweepGroup(f, runF.Retry);
+        runF.Now += 1_000;
+        var disposed = Remove(f, Parent, fast: false);
+        foreach (var n in f.Nodes.Values)
+        {
+            n.InTree = false;
+            n.Started = false;
+            n.Record = false;
+        }
+        bool endedF = RunLoop(f, runF);
+        check("a dispose's removal of the device after the sweep's refusal asks again, and another program then removes the device -> the retry asks nothing more, drops the device, deletes no record and ends",
+              !disposed.Removed && endedF && runF.Times.SequenceEqual(new long[] { 0, 1_000 }) && runF.Retry.Held == 0 && runF.Deleted.Count == 0,
+              Show(f, runF));
+        cancels += f.CancelLocates;
+
+        // The exit stops the retry between two retries.
+        var g = new Machine(holder: true);
+        var runG = new RetryRun(g);
+        runG.At = t => { if (t >= 20_000) runG.Retry.Stop(); };
+        SweepGroup(g, runG.Retry);
+        bool endedG = RunLoop(g, runG);
+        bool lookedG = runG.Retry.LooksAfter(Group());
+        bool sweptG = SweepGroup(g, runG.Retry);
+        bool joined = runG.Retry.Join(0);
+        check("the exit stops the retry 20 s after the refusal -> the retry at 5 s ran, the one due at 35 s does not, no loop starts again, and a sweep after the stop asks itself",
+              endedG && !lookedG && !sweptG && joined && runG.Starts == 1
+              && runG.Times.SequenceEqual(new long[] { 0, 5_000, 20_000 }) && runG.Deleted.Count == 0,
+              Show(g, runG));
+        cancels += g.CancelLocates;
+
+        // The dead owner's record names another present device too.
+        var h = new Machine(holder: true) { LetGoAfter = 1 };
+        var runH = new RetryRun(h);
+        runH.Others.Add(new OwnerCensus.DeviceGroup("HM_FE0000000000B002", -1,
+            new List<string> { @"ROOT\HIDCLASS\HM_FE0000000000B002" }, OwnerCensus.Owner.Dead, runH.Record));
+        SweepGroup(h, runH.Retry);
+        bool endedH = RunLoop(h, runH);
+        check("the dead owner's record also names a present device whose refusal the retry does not hold -> the retry removes its own device at 5 s and keeps the record",
+              endedH && runH.Times.SequenceEqual(new long[] { 0, 5_000 }) && Gone(h) && runH.Deleted.Count == 0,
+              Show(h, runH));
+        cancels += h.CancelLocates;
+
+        check("no CM_LOCATE_DEVNODE_CANCELREMOVE locate in the retries", cancels == 0, $"{cancels}");
     }
 
     // ── The lease of a create that meets a refused removal ──

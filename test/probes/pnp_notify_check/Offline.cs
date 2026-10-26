@@ -1357,7 +1357,7 @@ internal static class Offline
     static bool Part(int n) => s_part == 0 || s_part == n;
 
     /// <summary>Run's parts, each in a process of its own.</summary>
-    const int Parts = 12;
+    const int Parts = 13;
 
     /// <summary>The checks in parts that run at once, each in a process of
     /// its own: the sequences run on the wall clock, and the SDK's hooks
@@ -2430,6 +2430,10 @@ internal static class Offline
         // Part 12: the diagnostic logs with several processes appending at
         // once (DiagLogAppend.cs).
         if (Part(12)) DiagLogAppend.Run(Check);
+
+        // Part 13: the retry of a sweep's refused removal on a clock of its
+        // own (HeldRemoval.cs).
+        if (Part(13)) HeldRemoval.RunRetries(Check);
 
         if (part != 0)
         {
