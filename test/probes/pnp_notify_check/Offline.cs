@@ -814,13 +814,19 @@ internal static class Offline
     /// up to <paramref name="otherHoldMs"/>, let go once the removals end (0:
     /// no other program). Returns the removals, the refusals and how long
     /// each thread took.</summary>
-    static (int Removed, int Refused, long[] Ms) ConcurrentInExit(int threads, int exitBudgetMs, int workMs, int otherHoldMs)
+    static (int Removed, int Refused, long[] Ms, List<int> Bounds) ConcurrentInExit(int threads, int exitBudgetMs, int workMs, int otherHoldMs)
     {
         var raised = typeof(ProcessExitSignal).GetField("s_raised", BindingFlags.NonPublic | BindingFlags.Static)!;
         var budget = typeof(DeviceManager).GetField("s_exitLockBudget", BindingFlags.NonPublic | BindingFlags.Static)!;
         using var standIn = new SemaphoreSlim(1, 1);
+        // The bound each take hands the machine-wide lock's wait, in order.
+        var bounds = new List<int>();
         DeviceManager.PnpLockHook = () => { standIn.Wait(); return new Released(() => standIn.Release()); };
-        DeviceManager.PnpLockTryHook = ms => standIn.Wait(ms) ? new Released(() => standIn.Release()) : null;
+        DeviceManager.PnpLockTryHook = ms =>
+        {
+            lock (bounds) bounds.Add(ms);
+            return standIn.Wait(ms) ? new Released(() => standIn.Release()) : null;
+        };
         string[] kids = Enumerable.Range(0, threads).Select(i => $@"HID\PNP_NOTIFY_CHECK\1&7e57&0&{20 + i:D4}").ToArray();
         var records = new HashSet<string>(kids);
         DeviceManager.LocateHook = (id, flags) =>
@@ -881,7 +887,7 @@ internal static class Offline
             DeviceManager.PnpLockTryHook = null;
             DeviceManager.LocateHook = null;
         }
-        return (removed, refused, ms);
+        lock (bounds) return (removed, refused, ms, new List<int>(bounds));
     }
 
     /// <summary>An orphan removal inside the exit handler's own bound of
@@ -1326,19 +1332,35 @@ internal static class Offline
         var run = typeof(DeviceOrchestrator).GetMethod("RunProcess", BindingFlags.Static | BindingFlags.NonPublic);
         if (run == null) { Check("DeviceOrchestrator.RunProcess exists", false); return; }
         var started = DateTime.Now.AddSeconds(-1);
-        var sw = Stopwatch.StartNew();
+        // cmd.exe and ping.exe start at normal priority: a child takes this
+        // process's idle or below-normal class (CreateProcess), and under load
+        // an idle-class cmd.exe could wait out RunProcess's 30 s before it
+        // started ping, whose tree the timeout then kills.
+        var self = Process.GetCurrentProcess();
+        var priorBefore = self.PriorityClass;
+        self.PriorityClass = ProcessPriorityClass.Normal;
         try
         {
-            // The ping holds the pipe 120 s. RunProcess's read bound is 5 s, so
-            // 60 s is a hang bound some 12 times its cost that an unbounded
-            // read still fails.
+            // ping holds the pipe 121 s. RunProcess waits at most 30 s for
+            // cmd.exe and 5 s for the pipe after it, so a read to the pipe's
+            // end returns only once ping has ended, and a bounded one while it
+            // still runs. The hang detector counts from ping's start, so the
+            // unbounded time a loaded machine takes to start the processes is
+            // left out, and only RunProcess's own bounded waits are in it.
             var result = run.Invoke(null, new object[] { "cmd.exe", "/c start \"\" /b ping.exe -n 121 127.0.0.191", 30_000 });
-            long ms = sw.ElapsedMilliseconds;
-            Check("RunProcess returns within its read bound when the tool leaves a process holding its pipe",
-                  ms < 60_000, $"{ms} ms, {result}");
+            var returned = DateTime.Now;
+            var pings = Process.GetProcessesByName("PING").Where(p => { try { return p.StartTime >= started; } catch { return false; } }).ToList();
+            bool running = pings.Any(p => { try { return !p.HasExited; } catch { return false; } });
+            double sinceStart = pings.Count > 0 ? (returned - pings.Min(p => p.StartTime)).TotalMilliseconds : double.NaN;
+            int hangMs = TimeoutScale.Apply(60_000);
+            foreach (var p in pings) p.Dispose();
+            Check("RunProcess returns within its read bound when the tool leaves a process holding its pipe: ping, which holds it, still runs when RunProcess has returned, and a hang detector timed from ping's start does not fire",
+                  pings.Count > 0 && running && sinceStart < hangMs,
+                  $"{pings.Count} ping started by the run, running at the return {running}, returned {sinceStart:F0} ms after ping started (hang detector {hangMs} ms), {result}");
         }
         finally
         {
+            self.PriorityClass = priorBefore;
             foreach (var p in Process.GetProcessesByName("PING"))
             {
                 using (p)
@@ -2343,10 +2365,15 @@ internal static class Offline
             // waits, never with the 600 s of a take with no bound, and its
             // uninstalls under the lock are not charged.
             int cleanupBudget = TimeoutScale.Apply(OwnerSweep.UninstallWaitBudgetMs);
+            // The second take's bound is the budget less what the first
+            // take and the first phantom's removal test waited. Charged, the
+            // 400 ms of uninstall under the lock would take at least that much
+            // off it, Thread.Sleep being a floor. Load only slows the waits,
+            // which on this time-critical thread take microseconds.
             var b7 = PhantomCleanupInExit(workMs: 400);
             Check($"exit signal: the phantom cleanup on the calling thread takes the PnP lock for each phantom within its {cleanupBudget} ms of waiting, 400 ms of uninstall under the lock not charged",
                   b7.Removed == 2 && b7.Takes.Count == 2 && b7.Takes.All(ms => ms >= 0 && ms <= cleanupBudget)
-                  && b7.Takes[1] >= cleanupBudget - 100,
+                  && b7.Takes[0] - b7.Takes[1] < 400,
                   $"{b7.Removed} removed, takes bounded at [{string.Join(", ", b7.Takes.Select(ms => ms < 0 ? "none" : ms + " ms"))}]");
             // A bound counts only the waits for another program's hold: b9, b12 and
             // the two-take check after them show a wait behind this process's own
@@ -2368,13 +2395,16 @@ internal static class Offline
             Check("a spent bound outside the exit, another thread of this process holding the lock 300 ms for its removal -> gets the lock free at its turn and removes",
                   b12.Thrown == null && b12.Bounded && b12.InFront,
                   $"{b12.Thrown?.GetType().Name ?? "nothing thrown"} after {b12.Ms} ms, removed {b12.Bounded}, the one in front {b12.InFront}");
-            // One after another, the second and third would each wait the
-            // whole budget past the one before: all three ending before twice
-            // the budget shows they spent it together.
+            // One after another, the second and third would each be handed
+            // the whole budget for their wait on the machine-wide lock. Spent
+            // together, the first is handed it and the others what is left of
+            // it once that wait is charged, nothing: the bounds the stand-in
+            // lock is handed sum to the budget once, whatever the load.
             var b10 = ConcurrentInExit(threads: 3, exitBudgetMs: 300, workMs: 0, otherHoldMs: Timeout.Infinite);
-            Check("exit signal: another program holds the lock until the removals have returned, three removals of this process at once, a 300 ms exit budget -> all three refused once it is spent, not one after another",
-                  b10.Removed == 0 && b10.Refused == 3 && b10.Ms.All(ms => ms >= 300 - TimerSlack && ms < 2 * 300),
-                  $"{b10.Removed} removed, {b10.Refused} refused, after [{string.Join(", ", b10.Ms)}] ms");
+            Check("exit signal: another program holds the lock until the removals have returned, three removals of this process at once, a 300 ms exit budget -> all three refused once it is spent, the budget handed out once, not once a removal",
+                  b10.Removed == 0 && b10.Refused == 3 && b10.Ms.All(ms => ms >= 300 - TimerSlack)
+                  && b10.Bounds.Count > 0 && b10.Bounds.Sum() <= 300 + b10.Bounds.Count,
+                  $"{b10.Removed} removed, {b10.Refused} refused, after [{string.Join(", ", b10.Ms)}] ms, wait bounds handed out [{string.Join(", ", b10.Bounds)}] ms");
             var b11 = BoundBehindOwnThread(boundMs: 300, ownWorkMs: 0, otherHoldMs: Timeout.Infinite);
             Check("a 300 ms bound, behind a thread of this process that waits for another program's hold until the bounded removal has returned -> refused once the bound is spent, that wait counted",
                   b11.Thrown is DeviceManager.PnpLockBusyException && !b11.Bounded && b11.InFront && b11.Ms >= 300 - TimerSlack,
