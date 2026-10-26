@@ -2421,15 +2421,47 @@ public static partial class DeviceManager
     /// <exception cref="PnpLockBusyException">Another program held the PnP
     /// lock past this take's bound (<see cref="HoldPnpLock"/>). Nothing was
     /// removed.</exception>
-    public static bool RemoveDevice(string instanceId, int timeoutMs = 5000, bool fast = false, bool forceFallbacks = false)
+    /// <param name="failDevice">When a program refuses the query, asks the
+    /// device's driver to fail it (<see cref="SharedMemoryIO.RequestSurpriseRemovalOfIndex"/>)
+    /// and says whether it answered. Windows then removes the device and its
+    /// HID children by surprise removal, which no handle refuses, and the
+    /// records go once that is done (<see cref="WaitSurpriseRemoval"/>). Null
+    /// where the caller cannot know the device's index is its own to
+    /// fail.</param>
+    public static bool RemoveDevice(string instanceId, int timeoutMs = 5000, bool fast = false, bool forceFallbacks = false,
+                                    Func<bool>? failDevice = null)
     {
         if (Locate(instanceId, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS &&
             Locate(instanceId, CM_LOCATE_DEVNODE_PHANTOM) != CR_SUCCESS)
             return true;
 
         using var pnp = HoldPnpLock();
-        RemoveDeviceLocked(instanceId, timeoutMs, fast, forceFallbacks, out bool removed);
+        RemoveDeviceLocked(instanceId, timeoutMs, fast, forceFallbacks, out bool removed, failDevice);
         return removed;
+    }
+
+    /// <summary>How long a removal waits, once a driver has failed its device
+    /// on request, for Windows' surprise removal to take the device down.
+    /// Measured: the device and its HID child left the tree within 70 ms on
+    /// the bench on 2026-10-19 while another program held the child. On the
+    /// development laptop on 2026-10-25 a keyboard's HID children were out of
+    /// the tree at removal calls 38 to 129 ms after the driver's answer, the
+    /// held one among them, and the first, called 9 ms after it, was still
+    /// in the tree. Scaled.</summary>
+    internal const int SurpriseRemovalWaitMs = 5000;
+
+    /// <summary>Waits until a device whose driver failed it is down: every
+    /// devnode in <paramref name="childIds"/> out of the tree, and
+    /// <paramref name="parentId"/> no longer started. A failed device's
+    /// parent can stay in the tree, not started and flagged
+    /// DN_WILL_BE_REMOVED, until the last handle to its children closes, and
+    /// the records of both may go then (DeleteRecordOnceDown). False when
+    /// <paramref name="budgetMs"/> (scaled) runs out first.</summary>
+    internal static bool WaitSurpriseRemoval(string parentId, IReadOnlyList<string> childIds, int budgetMs)
+    {
+        var calls = RemovalCallsHook;
+        return WaitUntil(() => !Running(parentId, calls) && childIds.All(c => Locate(c, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS),
+                         NeverSignaled, budgetMs, recheckMs: 10);
     }
 
     /// <summary>Removes a prior life of an id about to be registered again,
@@ -2490,7 +2522,8 @@ public static partial class DeviceManager
     internal static int ParentRemovalBudget(bool fast, int timeoutMs) =>
         fast ? Math.Min(timeoutMs, QuickRemovalMs) : timeoutMs;
 
-    static RemovalOutcome RemoveDeviceLocked(string instanceId, int timeoutMs, bool fast, bool forceFallbacks, out bool removed)
+    static RemovalOutcome RemoveDeviceLocked(string instanceId, int timeoutMs, bool fast, bool forceFallbacks, out bool removed,
+                                             Func<bool>? failDevice = null)
     {
         removed = true;
         // With the hook set every locate goes through LocateHook, and the
@@ -2567,20 +2600,32 @@ public static partial class DeviceManager
         // nothing. Learn's order for CM_Uninstall_DevNode is the same: "If
         // the device is present, call CM_Query_And_Remove_SubTree", then the
         // uninstall. When a program refuses, as one that keeps a HID child
-        // open without watching it does, the device and every record stay.
-        // Until 2.1.0 the fast removal uninstalled it anyway: on the Celeron
-        // on 2026-10-25 CM_Uninstall_DevNode deleted a held child's record
-        // 18 ms after Windows refused its disable, with the holder still
-        // holding it. A software device's close is its surprise removal
-        // (SwDeviceClose on Learn), which no handle refuses.
+        // open without watching it does, the caller's failDevice asks the
+        // driver to fail the device, as a dispose does, and Windows removes
+        // it and its HID children by surprise removal, which no handle
+        // refuses. The records go once it is down (WaitSurpriseRemoval).
+        // With no answer, or no request to make, the device and every record
+        // stay. Until 2.1.0 the fast removal uninstalled it anyway: on the
+        // Celeron on 2026-10-25 CM_Uninstall_DevNode deleted a held child's
+        // record 18 ms after Windows refused its disable, with the holder
+        // still holding it. A software device's close is its surprise
+        // removal (SwDeviceClose on Learn), which no handle refuses.
         if (!isSwdParent && Running(instanceId, calls))
         {
             parent.Begin();
             if (!QueryOut(instanceId, calls, out string veto))
             {
-                DeviceOrchestrator.LogDiag($"      {instanceId} stays with its records: a program refused its removal{(veto.Length > 0 ? $" ({veto})" : "")}");
-                removed = false;
-                return RemovalOutcome.NotGone;
+                string why = veto.Length > 0 ? $" ({veto})" : "";
+                bool failed = failDevice?.Invoke() == true;
+                if (!failed || !WaitSurpriseRemoval(instanceId, childIds, SurpriseRemovalWaitMs))
+                {
+                    DeviceOrchestrator.LogDiag($"      {instanceId} stays with its records: a program refused its removal{why}, " +
+                        (failDevice == null ? "and no driver can be asked to fail it here"
+                         : failed ? "and it was not down when the wait after its driver's answer ended" : "and its driver did not answer"));
+                    removed = false;
+                    return RemovalOutcome.NotGone;
+                }
+                DeviceOrchestrator.LogDiag($"      {instanceId}: a program refused its removal{why}, so its driver failed it, and it is down");
             }
         }
 

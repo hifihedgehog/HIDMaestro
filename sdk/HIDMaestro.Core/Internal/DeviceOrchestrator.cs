@@ -2830,6 +2830,19 @@ internal static partial class DeviceOrchestrator
         finally { OwnerSweep.CreateGate.ExitWriteLock(); }
     }
 
+    /// <summary>The full removal's request that a device's driver fail it
+    /// when a program refuses its removal query (DeviceManager.RemoveDevice):
+    /// the remove event of the index the devnode's Device Parameters name.
+    /// The full removal removes every device, so whatever device is on that
+    /// index is its to fail. Null for a software device, whose close is
+    /// already a surprise removal, and for a devnode with no index.</summary>
+    private static Func<bool>? FailOnIndex(string enumRoot, string instanceId)
+    {
+        if (enumRoot != "ROOT") return null;
+        int index = OwnerCensus.ReadControllerIndex(instanceId);
+        return index < 0 ? null : () => SharedMemoryIO.RequestSurpriseRemovalOfIndex(index, TimeoutScale.Apply(2000));
+    }
+
     private static void RemoveEverythingGated(bool preserveInstall, bool forUninstall = false)
     {
         var sweepSw = System.Diagnostics.Stopwatch.StartNew();
@@ -2900,13 +2913,15 @@ internal static partial class DeviceOrchestrator
                     {
                         if (exclusivelyOurs)
                         {
-                            DeviceManager.RemoveDevice(instId, timeoutMs: 5000, fast: true, forceFallbacks: true);
+                            DeviceManager.RemoveDevice(instId, timeoutMs: 5000, fast: true, forceFallbacks: true,
+                                                       failDevice: FailOnIndex(enumRoot, instId));
                             continue;
                         }
 
                         // Shared: only remove if hardware ID contains "HIDMaestro"
                         if (DeviceManager.IsHidMaestroOwned(instId))
-                            DeviceManager.RemoveDevice(instId, timeoutMs: 3000, fast: true, forceFallbacks: true);
+                            DeviceManager.RemoveDevice(instId, timeoutMs: 3000, fast: true, forceFallbacks: true,
+                                                       failDevice: FailOnIndex(enumRoot, instId));
                     }
                     catch (Exception ex) when (ex is not DeviceManager.PnpLockBusyException)
                     {

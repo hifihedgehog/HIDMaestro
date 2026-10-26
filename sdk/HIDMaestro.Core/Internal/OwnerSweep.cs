@@ -548,17 +548,27 @@ internal static class OwnerSweep
     /// <summary>One controller's devnodes, the main node first so its
     /// children cascade, then whatever companion is left. Returns true once
     /// none of them and none of the children they had is in the device
-    /// tree.</summary>
+    /// tree.
+    ///
+    /// <para>A program that refuses the main node's removal query, as one
+    /// that keeps its HID child open without watching it does, has the
+    /// device failed by its driver through the index's remove event
+    /// (DeviceManager.RemoveDevice). The index is this removal's to fail:
+    /// a sweep holds its claim, and the exit handler removes its own
+    /// controllers.</para></summary>
     private static bool RemoveGroup(OwnerCensus.DeviceGroup group)
     {
         var removed = new List<string>();
+        int index = group.ControllerIndex;
         foreach (string id in group.InstanceIds.OrderBy(id => id.StartsWith(@"ROOT\", StringComparison.OrdinalIgnoreCase) ? 0 : 1))
         {
             removed.Add(id);
             try
             {
                 removed.AddRange(DeviceManager.ChildIdsOf(id));
-                DeviceManager.RemoveDevice(id, timeoutMs: 120_000, forceFallbacks: true);
+                bool root = id.StartsWith(@"ROOT\", StringComparison.OrdinalIgnoreCase);
+                DeviceManager.RemoveDevice(id, timeoutMs: 120_000, forceFallbacks: true,
+                    failDevice: root && index >= 0 ? () => SharedMemoryIO.RequestSurpriseRemovalOfIndex(index, TimeoutScale.Apply(2000)) : null);
             }
             catch (DeviceManager.PnpLockBusyException)
             {

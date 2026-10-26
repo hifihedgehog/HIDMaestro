@@ -260,6 +260,91 @@ internal static partial class SharedMemoryIO
         return WaitForSingleObject(answer, (uint)Math.Max(0, timeoutMs)) == 0;
     }
 
+    /// <summary>Asks the driver of the device on transport index
+    /// <paramref name="controllerIndex"/> to fail it, as
+    /// <see cref="RequestSurpriseRemoval"/> asks for a controller of this
+    /// process, for a device another program made, running or ended. The
+    /// remove events are opened by name, or made with this release's security
+    /// when no program holds them any more, and the index's input event with
+    /// them: a driver worker with no program on its index looks for that
+    /// event every 200 ms and opens the remove events beside it (driver.c),
+    /// the order <see cref="EnsureInputMapping"/> makes them in. A worker
+    /// that has not answered by half the bound is sent the index's stop
+    /// event, which it absorbs by opening its events again, so one holding
+    /// an input event made before the remove events opens them too. A
+    /// request no worker took is withdrawn. Only a caller that may fail
+    /// whatever device is on the index asks: the full cleanup, which removes
+    /// them all, and a sweep that holds the index's claim or its own
+    /// lease. False when no answer came within
+    /// <paramref name="timeoutMs"/>.</summary>
+    internal static bool RequestSurpriseRemovalOfIndex(int controllerIndex, int timeoutMs) =>
+        RequestFailure(@"Global\HIDMaestro", controllerIndex, timeoutMs);
+
+    /// <summary><see cref="RequestSurpriseRemovalOfIndex"/> on the events
+    /// named <paramref name="prefix"/>, then the kind, then the index.
+    /// pnp_notify_check's offline part passes a Local\ prefix and plays the
+    /// driver.</summary>
+    internal static bool RequestFailure(string prefix, int controllerIndex, int timeoutMs)
+    {
+        IntPtr request = OpenOrCreateIndexEvent($"{prefix}RemoveEvent{controllerIndex}");
+        IntPtr answer = OpenOrCreateIndexEvent($"{prefix}RemovedEvent{controllerIndex}");
+        IntPtr input = OpenOrCreateIndexEvent($"{prefix}InputEvent{controllerIndex}");
+        try
+        {
+            if (request == IntPtr.Zero || answer == IntPtr.Zero || input == IntPtr.Zero) return false;
+            // A stale answer is not this request's.
+            ResetEvent(answer);
+            if (!SetEvent(request)) return false;
+            int bound = Math.Max(0, timeoutMs), half = bound / 2;
+            if (WaitForSingleObject(answer, (uint)half) == 0) return true;
+            IntPtr stop = OpenEventW(EVENT_MODIFY_STATE, false, $"{prefix}StopEvent{controllerIndex}");
+            if (stop != IntPtr.Zero)
+            {
+                SetEvent(stop);
+                CloseHandle(stop);
+            }
+            if (WaitForSingleObject(answer, (uint)(bound - half)) == 0) return true;
+            // Withdrawn, so a worker that opens the event later fails no
+            // device on the index. One that took it meanwhile answers now.
+            ResetEvent(request);
+            return WaitForSingleObject(answer, 0) == 0;
+        }
+        finally
+        {
+            foreach (IntPtr h in new[] { request, answer, input })
+                if (h != IntPtr.Zero) CloseHandle(h);
+        }
+    }
+
+    /// <summary>An index's named event, opened, or made as
+    /// <see cref="CreateNamedEvent"/> makes it, auto-reset and not set, with
+    /// this release's security (<see cref="Sddl"/>), when none exists. Zero
+    /// when neither works, as for an event whose security refuses this
+    /// process.</summary>
+    private static IntPtr OpenOrCreateIndexEvent(string name)
+    {
+        IntPtr ev = OpenEventW(EVENT_MODIFY_STATE | SYNCHRONIZE, false, name);
+        if (ev != IntPtr.Zero) return ev;
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(Sddl, 1, out IntPtr sd, IntPtr.Zero)) return IntPtr.Zero;
+        SECURITY_ATTRIBUTES sa = new()
+        {
+            nLength = (uint)Marshal.SizeOf<SECURITY_ATTRIBUTES>(),
+            lpSecurityDescriptor = sd,
+            bInheritHandle = 0,
+        };
+        IntPtr saPtr = Marshal.AllocHGlobal(Marshal.SizeOf<SECURITY_ATTRIBUTES>());
+        try
+        {
+            Marshal.StructureToPtr(sa, saPtr, false);
+            return CreateEventExW(saPtr, name, 0, EVENT_MODIFY_STATE | SYNCHRONIZE);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(saPtr);
+            LocalFree(sd);
+        }
+    }
+
     /// <summary>v2.0.0: the driver's half of the version section: the
     /// protocols it serves, from <c>DriverProtocolMin</c> to
     /// <c>DriverProtocol</c>, its version, and its error word, which names

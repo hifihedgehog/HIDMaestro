@@ -21,6 +21,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Threading;
 using HIDMaestro.Internal;
 
 internal static class HeldRemoval
@@ -55,20 +56,28 @@ internal static class HeldRemoval
         public int CancelLocates;
         public bool Holder;
         readonly Dictionary<string, List<Action>> _removed = new(StringComparer.OrdinalIgnoreCase);
+        // A driver's failure can come from another thread (Fail).
+        readonly object _gate = new();
 
         public Machine(bool holder) => Holder = holder;
 
         public IReadOnlyList<string> ChildrenOf(string id) =>
             string.Equals(id, Parent, StringComparison.OrdinalIgnoreCase) ? new[] { Child } : Array.Empty<string>();
 
-        public bool IsStarted(string id) => Nodes.TryGetValue(id, out var n) && n.InTree && n.Started;
+        public bool IsStarted(string id)
+        {
+            lock (_gate) return Nodes.TryGetValue(id, out var n) && n.InTree && n.Started;
+        }
 
         public uint Locate(string id, uint flags)
         {
-            if ((flags & CM_LOCATE_DEVNODE_CANCELREMOVE) != 0) CancelLocates++;
-            if (!Nodes.TryGetValue(id, out var n)) return CR_NO_SUCH_DEVINST;
-            bool found = flags == CM_LOCATE_DEVNODE_NORMAL ? n.InTree : n.InTree || n.Record;
-            return found ? CR_SUCCESS : CR_NO_SUCH_DEVINST;
+            lock (_gate)
+            {
+                if ((flags & CM_LOCATE_DEVNODE_CANCELREMOVE) != 0) CancelLocates++;
+                if (!Nodes.TryGetValue(id, out var n)) return CR_NO_SUCH_DEVINST;
+                bool found = flags == CM_LOCATE_DEVNODE_NORMAL ? n.InTree : n.InTree || n.Record;
+                return found ? CR_SUCCESS : CR_NO_SUCH_DEVINST;
+            }
         }
 
         /// <summary>A REMOVED registration, delivered when the devnode leaves
@@ -132,6 +141,21 @@ internal static class HeldRemoval
             Calls.Add($"fallbacks {id}");
             if (IsStarted(id)) Violations.Add($"pnputil and devcon on {id} while it was started");
         }
+
+        /// <summary>The driver fails its device on request: Windows takes
+        /// the children out of the tree by surprise removal, held or not, and
+        /// the parent stays in it, no longer started (DN_WILL_BE_REMOVED),
+        /// until the last handle closes.</summary>
+        public bool Fail(string id)
+        {
+            lock (_gate)
+            {
+                Calls.Add($"fail {id}");
+                foreach (string x in Below(id)) Leave(x);
+                Nodes[id].Started = false;
+                return true;
+            }
+        }
     }
 
     sealed class StandInLock : IDisposable
@@ -139,10 +163,9 @@ internal static class HeldRemoval
         public void Dispose() { }
     }
 
-    /// <summary>DeviceManager.RemoveDevice on <paramref name="id"/> with
-    /// the fallbacks forced, as the full cleanup and the sweeps call it,
-    /// every PnP call answered by <paramref name="m"/>.</summary>
-    static (bool Removed, long Ms) Remove(Machine m, string id, bool fast)
+    /// <summary>Runs <paramref name="act"/> with every PnP call the SDK
+    /// makes answered by <paramref name="m"/>.</summary>
+    static T Hooked<T>(Machine m, Func<T> act)
     {
         DeviceManager.LocateHook = m.Locate;
         DeviceManager.RemovedHook = m.Register;
@@ -158,12 +181,7 @@ internal static class HeldRemoval
             Query = m.Query,
             Started = m.IsStarted,
         };
-        try
-        {
-            var sw = Stopwatch.StartNew();
-            bool removed = DeviceManager.RemoveDevice(id, timeoutMs: 2000, fast: fast, forceFallbacks: true);
-            return (removed, sw.ElapsedMilliseconds);
-        }
+        try { return act(); }
         finally
         {
             DeviceManager.RemovalCallsHook = null;
@@ -173,6 +191,18 @@ internal static class HeldRemoval
             DeviceOrchestrator.DiagTap = null;
         }
     }
+
+    /// <summary>DeviceManager.RemoveDevice on <paramref name="id"/> with
+    /// the fallbacks forced, as the full cleanup and the sweeps call it, and
+    /// <paramref name="fail"/> standing for the request that the driver fail
+    /// its device.</summary>
+    static (bool Removed, long Ms) Remove(Machine m, string id, bool fast, Func<bool>? fail = null) =>
+        Hooked(m, () =>
+        {
+            var sw = Stopwatch.StartNew();
+            bool removed = DeviceManager.RemoveDevice(id, timeoutMs: 2000, fast: fast, forceFallbacks: true, failDevice: fail);
+            return (removed, sw.ElapsedMilliseconds);
+        });
 
     static string Describe(Machine m, (bool Removed, long Ms) r) =>
         $"calls [{string.Join(", ", m.Calls)}], " +
@@ -234,6 +264,157 @@ internal static class HeldRemoval
               Describe(child, r4));
         cancels += child.CancelLocates;
 
+        // The holder refuses, and the caller can ask the driver to fail its
+        // device, as the full cleanup and the sweeps can: the child goes by
+        // surprise removal, the parent stays in the tree no longer started,
+        // and the records go after that.
+        foreach (bool fast in new[] { true, false })
+        {
+            string kind = fast ? "fast removal (the full cleanup's)" : "SetupDiRemoveDevice removal (the sweeps')";
+            string delete = fast ? "uninstall" : "remove";
+            var m = new Machine(holder: true);
+            var r = Remove(m, Parent, fast, () => m.Fail(Parent));
+            check($"{kind}: the holder refuses the query and the driver fails its device on request -> the child goes by surprise removal, then its record and the parent's, none while started, removed",
+                  m.Violations.Count == 0 && r.Removed
+                  && m.Calls.SequenceEqual(new[] { $"query {Parent}", $"fail {Parent}", $"{delete} {Child}", $"{delete} {Parent}" })
+                  && !m.Nodes[Parent].Record && !m.Nodes[Child].Record,
+                  Describe(m, r));
+            cancels += m.CancelLocates;
+        }
+
+        // The driver answers, and Windows leaves the device started.
+        var stuck = new Machine(holder: true);
+        var r5 = Remove(stuck, Parent, fast: true, () => { stuck.Calls.Add($"fail {Parent}"); return true; });
+        int bound = DeviceManager.SurpriseRemovalWaitMs;
+        check($"the driver answers but the device stays started -> no record deleted, the device and its records left when the {bound} ms wait ends, RemoveDevice false",
+              stuck.Violations.Count == 0 && !r5.Removed && stuck.Calls.SequenceEqual(new[] { $"query {Parent}", $"fail {Parent}" })
+              && r5.Ms >= bound - TimerSlack && r5.Ms < bound + 2000 && Kept(stuck.Nodes[Parent]) && Kept(stuck.Nodes[Child]),
+              Describe(stuck, r5));
+
+        // No answer: a driver before protocol 5, or no worker listening.
+        var silent = new Machine(holder: true);
+        var r6 = Remove(silent, Parent, fast: true, () => { silent.Calls.Add($"fail {Parent}"); return false; });
+        check("the driver does not answer -> no record deleted, the device and its records left at once, RemoveDevice false",
+              silent.Violations.Count == 0 && !r6.Removed && silent.Calls.SequenceEqual(new[] { $"query {Parent}", $"fail {Parent}" })
+              && r6.Ms < 1000 && Kept(silent.Nodes[Parent]) && Kept(silent.Nodes[Child]),
+              Describe(silent, r6));
+        cancels += stuck.CancelLocates + silent.CancelLocates;
+
+        // The wait itself: done once every child is out of the tree and the
+        // parent no longer started, and not before.
+        var late = new Machine(holder: true);
+        var lateWait = Hooked(late, () =>
+        {
+            using var timer = new Timer(_ => late.Fail(Parent), null, 150, Timeout.Infinite);
+            var sw = Stopwatch.StartNew();
+            bool down = DeviceManager.WaitSurpriseRemoval(Parent, new[] { Child }, 2000);
+            return (down, sw.ElapsedMilliseconds);
+        });
+        var never = new Machine(holder: true);
+        var neverWait = Hooked(never, () =>
+        {
+            var sw = Stopwatch.StartNew();
+            bool down = DeviceManager.WaitSurpriseRemoval(Parent, new[] { Child }, 300);
+            return (down, sw.ElapsedMilliseconds);
+        });
+        check("WaitSurpriseRemoval: the device taken down at 150 ms -> done then, not at once; a device that stays -> not done when its 300 ms bound ends",
+              lateWait.down && lateWait.Item2 >= 150 - TimerSlack && lateWait.Item2 < 1000
+              && !neverWait.down && neverWait.Item2 >= 300 - TimerSlack && neverWait.Item2 < 1300,
+              $"down {lateWait.down} at {lateWait.Item2} ms; {neverWait.down} at {neverWait.Item2} ms");
+
         check("no CM_LOCATE_DEVNODE_CANCELREMOVE locate in the held removals", cancels == 0, $"{cancels}");
+
+        RequestChecks(check);
+    }
+
+    // A timed wait can end a timer tick before its time on the Stopwatch.
+    const long TimerSlack = 20;
+
+    /// <summary>SharedMemoryIO.RequestFailure, the request a removal makes
+    /// of a device another program made, on events of this run's own under
+    /// a Local\ prefix, with a thread playing the driver's input worker. The
+    /// events exist before each request, as a running program's do, so no
+    /// check needs the elevation that making them with this release's
+    /// security takes.</summary>
+    static void RequestChecks(Action<string, bool, string> check)
+    {
+        string prefix = $@"Local\pnp-notify-check-{Environment.ProcessId}-";
+        int index = 0;
+        (EventWaitHandle Request, EventWaitHandle Answer, EventWaitHandle Input, EventWaitHandle Stop) Index(int i) =>
+            (new EventWaitHandle(false, EventResetMode.AutoReset, $"{prefix}RemoveEvent{i}"),
+             new EventWaitHandle(false, EventResetMode.AutoReset, $"{prefix}RemovedEvent{i}"),
+             new EventWaitHandle(false, EventResetMode.AutoReset, $"{prefix}InputEvent{i}"),
+             new EventWaitHandle(false, EventResetMode.ManualReset, $"{prefix}StopEvent{i}"));
+        static void Close((EventWaitHandle, EventWaitHandle, EventWaitHandle, EventWaitHandle) e)
+        {
+            e.Item1.Dispose();
+            e.Item2.Dispose();
+            e.Item3.Dispose();
+            e.Item4.Dispose();
+        }
+
+        // A worker waiting on the remove event fails its device and answers.
+        var e1 = Index(++index);
+        var w1 = new Thread(() => { if (e1.Request.WaitOne(5000)) e1.Answer.Set(); }) { IsBackground = true };
+        w1.Start();
+        var sw = Stopwatch.StartNew();
+        bool a1 = SharedMemoryIO.RequestFailure(prefix, index, 2000);
+        long t1 = sw.ElapsedMilliseconds;
+        w1.Join(5000);
+        Close(e1);
+        check("the request: a worker waiting on the remove event answers -> true at once", a1 && t1 < 1000, $"{a1} in {t1} ms");
+
+        // No worker: false at the bound, the stop event set at half of it,
+        // and the request withdrawn.
+        var e2 = Index(++index);
+        sw.Restart();
+        bool a2 = SharedMemoryIO.RequestFailure(prefix, index, 400);
+        long t2 = sw.ElapsedMilliseconds;
+        bool left = e2.Request.WaitOne(0), stopped = e2.Stop.WaitOne(0);
+        Close(e2);
+        check("the request: no worker -> false when its 400 ms bound ends, the stop event set, and the request withdrawn, not left set for a worker that opens it later",
+              !a2 && t2 >= 400 - TimerSlack && t2 < 1400 && stopped && !left, $"{a2} in {t2} ms, stop set {stopped}, request left set {left}");
+
+        // An answer left from an earlier request is not this one's.
+        var e3 = Index(++index);
+        e3.Answer.Set();
+        bool a3 = SharedMemoryIO.RequestFailure(prefix, index, 300);
+        Close(e3);
+        check("the request: an answer left from before it, and no worker -> false", !a3, $"{a3}");
+
+        // A worker that holds an input event made before the remove events
+        // takes the request only after the stop event makes it open its
+        // events again.
+        var e4 = Index(++index);
+        var w4 = new Thread(() =>
+        {
+            if (!e4.Stop.WaitOne(5000)) return;
+            e4.Stop.Reset();
+            if (e4.Request.WaitOne(1000)) e4.Answer.Set();
+        }) { IsBackground = true };
+        w4.Start();
+        sw.Restart();
+        bool a4 = SharedMemoryIO.RequestFailure(prefix, index, 2000);
+        long t4 = sw.ElapsedMilliseconds;
+        w4.Join(5000);
+        Close(e4);
+        check("the request: a worker that opens the remove event only once the stop event is set -> true after half the 2 s bound, before its end",
+              a4 && t4 >= 1000 - TimerSlack && t4 < 2000, $"{a4} in {t4} ms");
+
+        // A worker that looks only 200 ms after the request, as one with no
+        // program on its index looks for the input event every 200 ms.
+        var e5 = Index(++index);
+        var w5 = new Thread(() =>
+        {
+            Thread.Sleep(200);
+            if (e5.Request.WaitOne(0)) e5.Answer.Set();
+        }) { IsBackground = true };
+        w5.Start();
+        sw.Restart();
+        bool a5 = SharedMemoryIO.RequestFailure(prefix, index, 2000);
+        long t5 = sw.ElapsedMilliseconds;
+        w5.Join(5000);
+        Close(e5);
+        check("the request: a worker that looks 200 ms after it was made finds it still set -> true", a5 && t5 < 1000, $"{a5} in {t5} ms");
     }
 }
