@@ -135,10 +135,13 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
 
     private readonly object _hidLock = new();
     // Reports waiting for a read, each in a buffer of _reportCapacity bytes
-    // the device keeps. A buffer goes back to _spareFrames once its read is
-    // answered or the queue drops it, so a frame allocates nothing: at most
-    // MaxFrameQueue + 1 buffers ever exist, the queue's and one the
-    // connection's reader is sending from. Guarded by _hidLock.
+    // the device keeps: the newest frame alone, or for a keyboard or mouse
+    // (_deliverEvery) every frame in order, up to MaxFrameQueue. A buffer
+    // goes back to _spareFrames once its read is answered or the queue drops
+    // it, so a frame allocates nothing: one buffer for each frame held and
+    // one the connection's reader is sending from, two in all for a device
+    // that holds one frame and MaxFrameQueue + 1 at most. Guarded by
+    // _hidLock.
     private readonly Queue<QueuedFrame> _frameQueue = new();
     private readonly Stack<byte[]> _spareFrames = new();
     // Parked interrupt-IN URBs, keyed by endpoint address (issue #56). A
@@ -186,6 +189,14 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     private volatile byte _configurationValue;
 
     private const int MaxFrameQueue = 8;
+
+    // A keyboard or mouse gets every report in order, as the HID path's
+    // acknowledgement delivers it (ControllerProfile.DeliversEveryReport):
+    // a press and its release are two reports, and relative motion adds up.
+    // Any other device holds one frame for the read to come, its newest: an
+    // endpoint carries the firmware's current report, and the HID path's
+    // driver keeps one frame for a read (driver.c ProcessSharedInput).
+    private readonly bool _deliverEvery;
 
     /// <summary>The interrupt-IN endpoint on the primary HID interface: the
     /// one the input pump feeds. Any other interrupt-IN endpoint belongs to
@@ -277,6 +288,8 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         Devid = (1u << 16) | (uint)(index + 1);
 
         _builder = profile.GetOrBuildReportBuilder();
+        // As DeviceOrchestrator.WaitsOnDelivery decides it for the HID path.
+        _deliverEvery = profile.HasDescriptor && profile.DeliversEveryReport(profile.GetOrBuildKeyboardMousePacker());
         int expectedSize = _builder.InputReportByteSize > 0 ? _builder.InputReportByteSize : 17;
         _reportCapacity = Math.Max(expectedSize, SharedMemoryIO.EXTENDED_DATA_CAPACITY);
         _pumpReport = new byte[_reportCapacity];
@@ -313,7 +326,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             _outputEvent = SharedMemoryIO.EnsureOutputEvent(index);
             _inputWaitEvent = SharedMemoryIO.OpenInputEventForWait(index);
 
-            Audio = new UsbAudioEngine(profile, CompleteIsoOnWire);
+            Audio = new UsbAudioEngine(profile, CompleteIsoOnWire, AnswerIsoUnlink);
 
             var input = new Thread(InputPumpLoop)
             {
@@ -374,16 +387,12 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     public void DetachConnection(UsbipServer.Connection connection)
     {
         if (_stop) return; // Dispose released the device already
-        // The import is gone with its connection. Cleared and released
-        // under one lock, so neither the next import's port nor this one's
-        // is ever overwritten by the other.
-        lock (_portLock)
-        {
-            if (Volatile.Read(ref _connection) != connection)
-                return; // a different connection owns the device
-            SetVhciPortLocked(0);
-            Interlocked.Exchange(ref _connection, null);
-        }
+        if (Volatile.Read(ref _connection) != connection)
+            return; // a different connection owns the device
+        // The import is gone with its connection. Its reads, the frames
+        // queued for them and the protocol state go while the connection
+        // still holds the device: a new import claims it only once it is
+        // let go, so nothing the new import parks is cleared here.
         Audio.Clear();
         lock (_hidLock)
         {
@@ -392,6 +401,14 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         }
         ResetLayoutState();
         ResetProtocolState();
+        // Cleared and released under one lock, so neither the next
+        // import's port nor this one's is ever overwritten by the other.
+        lock (_portLock)
+        {
+            if (Volatile.Read(ref _connection) != connection) return;
+            SetVhciPortLocked(0);
+            Interlocked.Exchange(ref _connection, null);
+        }
     }
 
     // ── Input pump: shared section → interrupt IN ────────────────────────
@@ -417,7 +434,11 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             try
             {
                 if (_inputWaitEvent != IntPtr.Zero)
-                    WaitForSingleObject(_inputWaitEvent, 500);
+                {
+                    BeforeInputWait?.Invoke(this);
+                    uint woke = WaitForSingleObject(_inputWaitEvent, 500);
+                    AfterInputWait?.Invoke(this, woke);
+                }
                 else
                     Thread.Sleep(4);
                 if (_stop) break;
@@ -459,11 +480,13 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     }
                 }
                 int length;
+                bool fresh;
                 lock (_lifetimeLock)
                 {
                     if (_stop) break;
-                    if (!TryReadInputFrame(_pumpReport, out length)) continue;
+                    fresh = TryReadInputFrame(_pumpReport, out length);
                 }
+                if (!fresh) continue;
                 var report = new ReadOnlySpan<byte>(_pumpReport, 0, length);
 
                 // A device that builds its reports sends nothing from here.
@@ -486,7 +509,9 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     continue;
                 }
 
-                uint seq;
+                uint seq = 0;
+                bool answer = false;
+                UsbipServer.Connection? conn = null;
                 lock (_hidLock)
                 {
                     int slot = _inputSlot[_inputReportIds && length > 0 ? report[0] : 0];
@@ -499,23 +524,24 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     if (pending.Count > 0)
                     {
                         seq = pending.Dequeue();
-                        if (DiagPath != null)
-                            _completionsPerEp[_primaryInEndpoint] =
-                                _completionsPerEp.TryGetValue(_primaryInEndpoint, out var cc) ? cc + 1 : 1;
+                        answer = true;
+                        CountPrimaryCompletionLocked();
+                        conn = HoldSendLocked();
                     }
                     else
                     {
-                        // A full queue drops its oldest report and takes
-                        // over that report's buffer.
-                        byte[] buffer = _frameQueue.Count >= MaxFrameQueue ? _frameQueue.Dequeue().Buffer
+                        // No read parked. The frame takes over the buffer of
+                        // the frame no read took, which it replaces, or for a
+                        // keyboard or mouse the buffer of the oldest frame a
+                        // full queue drops.
+                        byte[] buffer = _frameQueue.Count >= (_deliverEvery ? MaxFrameQueue : 1) ? _frameQueue.Dequeue().Buffer
                             : _spareFrames.Count > 0 ? _spareFrames.Pop()
                             : new byte[_reportCapacity];
                         report.CopyTo(buffer);
                         _frameQueue.Enqueue(new QueuedFrame(buffer, length));
-                        continue;
                     }
                 }
-                SendRetSubmitSpan(seq, 0, length, report);
+                if (answer) SendHeld(conn, seq, 0, length, report);
             }
             catch
             {
@@ -524,6 +550,14 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 // per-frame SetEvent redelivers within one frame interval.
             }
         }
+    }
+
+    /// <summary>Caller holds <see cref="_hidLock"/>.</summary>
+    private void CountPrimaryCompletionLocked()
+    {
+        if (DiagPath != null)
+            _completionsPerEp[_primaryInEndpoint] =
+                _completionsPerEp.TryGetValue(_primaryInEndpoint, out var cc) ? cc + 1 : 1;
     }
 
     /// <summary>Seqlock read of the shared input section plus the wire
@@ -608,6 +642,16 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             unsafe { newSeq = (uint)Interlocked.Increment(ref *(int*)view); }
             int slotIdx = (int)((newSeq - 1) % SharedMemoryIO.OUTPUT_RING_SLOTS);
             int slotBase = SharedMemoryIO.OUTPUT_HEADER_SIZE + slotIdx * SharedMemoryIO.OUTPUT_SLOT_SIZE;
+            // A reader OUTPUT_RING_SLOTS packets behind reads the very slot
+            // this packet refills, checking its SeqNo before and after the
+            // copy (SharedMemoryIO.TryReadOutputFrame). Left in place through
+            // the refill, the old SeqNo passes both checks for a copy mixed
+            // from two packets. Zero, the never-written value, goes in first.
+            // Volatile.WriteBarrier keeps every store of the fields behind it,
+            // as WriteInputFrame's odd number is kept: no instruction on x64,
+            // whose stores stay in order, and dmb ish on ARM64.
+            unsafe { Volatile.Write(ref *(int*)((byte*)view + slotBase + SharedMemoryIO.OUTPUT_SLOT_OFFSET_SEQNO), 0); }
+            Volatile.WriteBarrier();
             Marshal.WriteByte(view, slotBase + SharedMemoryIO.OUTPUT_SLOT_OFFSET_SOURCE, source);
             Marshal.WriteByte(view, slotBase + SharedMemoryIO.OUTPUT_SLOT_OFFSET_REPORT_ID, reportId);
             Marshal.WriteInt16(view, slotBase + SharedMemoryIO.OUTPUT_SLOT_OFFSET_SIZE, (short)size);
@@ -620,8 +664,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                             SharedMemoryIO.DATA_CAPACITY, size);
                 }
             }
-            Thread.MemoryBarrier();
-            Marshal.WriteInt32(view, slotBase + SharedMemoryIO.OUTPUT_SLOT_OFFSET_SEQNO, (int)newSeq);
+            // A release store: the fields are visible before the number
+            // (docs/design/specs/Memory-model.md, "Volatile writes"). stlr on
+            // ARM64, a plain store on x64.
+            unsafe { Volatile.Write(ref *(int*)((byte*)view + slotBase + SharedMemoryIO.OUTPUT_SLOT_OFFSET_SEQNO), (int)newSeq); }
             // Under the lock too: the controller closes the event with the
             // section.
             if (_outputEvent != IntPtr.Zero) SetEvent(_outputEvent);
@@ -663,6 +709,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             // reader's reused buffers and the URB waits for its due tick.
             var urb = Audio.RentUrb(isoPackets.Length, cmd.IsIn ? 0 : outPayload.Length);
             urb.Seqnum = cmd.Seqnum;
+            // The import that sent it, which holds the device while its
+            // reader runs this: the answer goes there, whatever imports the
+            // device by the time the URB's tick comes.
+            urb.Import = Volatile.Read(ref _connection);
             urb.IsIn = cmd.IsIn;
             urb.TransferBufferLength = cmd.TransferBufferLength;
             urb.InterfaceNumber = ep.InterfaceNumber;
@@ -689,6 +739,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 }
 
                 QueuedFrame frame = default;
+                UsbipServer.Connection? conn = null;
                 lock (_hidLock)
                 {
                     // Only the primary HID interface's endpoint has frames.
@@ -699,14 +750,18 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     if (DiagPath != null)
                         _readsPerEp[epAddr] = _readsPerEp.TryGetValue(epAddr, out var rc) ? rc + 1 : 1;
                     if (epAddr == _primaryInEndpoint && _frameQueue.Count > 0)
+                    {
                         frame = _frameQueue.Dequeue();
+                        // In order with the frames the input pump answers.
+                        conn = HoldSendLocked();
+                    }
                     else
                         PendingFor(epAddr).Enqueue(cmd.Seqnum);
                 }
                 if (frame.Buffer != null)
                 {
                     // The buffer is this thread's until it goes back.
-                    SendRetSubmitSpan(cmd.Seqnum, 0, frame.Length, frame.Buffer.AsSpan(0, frame.Length));
+                    SendHeld(conn, cmd.Seqnum, 0, frame.Length, frame.Buffer.AsSpan(0, frame.Length));
                     lock (_hidLock) _spareFrames.Push(frame.Buffer);
                 }
                 return;
@@ -748,20 +803,38 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         SendError(cmd.Seqnum, -UsbipProtocol.EPipe);
     }
 
+    /// <summary>A CMD_UNLINK. A read still parked is removed, and the answer
+    /// is -ECONNRESET. A read the device has answered gets status 0 and
+    /// nothing more: usbip-win2 drops a RET_SUBMIT that comes for a read it
+    /// canceled (request_list.cpp cancel and find_sent_request), so that
+    /// answer is lost. A real device served by Linux's usbip-host loses it
+    /// the same way. The stub sends a completed URB's RET_SUBMIT and answers
+    /// an unlink of it with status 0 (stub_rx.c stub_recv_cmd_unlink,
+    /// stub_tx.c stub_tx_loop), and the device has handed its data over and
+    /// never sends it again. Neither does this device. A device that reports
+    /// on a period, as every catalog USB/IP persona does through its stream,
+    /// its idle frames or its own clock, sends its current state again
+    /// within that period, as the real one does.</summary>
     public void HandleUnlink(uint seqnum, uint victimSeqnum)
     {
         if (_stop) return;
-        bool removed = Audio.TryUnlink(victimSeqnum);
-        // Reads a host-polled protocol holds park in its own list. Every
-        // other read, a device that builds its reports included, parks by
-        // endpoint below.
-        if (!removed && _engine is { Protocol.BuildsReports: false, Protocol.InputEndpoint: > 0 })
-            removed = TryUnlinkProtocolRead(victimSeqnum);
-        if (!removed)
+        var audio = Audio.TryUnlink(victimSeqnum, seqnum, Volatile.Read(ref _connection));
+        // An isochronous URB the audio pump is completing: the pump answers
+        // the unlink once the URB's RET_SUBMIT is on the wire.
+        if (audio == UsbAudioEngine.UnlinkResult.Completing) return;
+        bool removed = audio == UsbAudioEngine.UnlinkResult.Removed;
+        UsbipServer.Connection? conn;
+        lock (_hidLock)
         {
-            lock (_hidLock)
+            // Reads a host-polled protocol holds park in its own list. Every
+            // other read, a device that builds its reports included, parks by
+            // endpoint.
+            if (!removed && _engine is { Protocol.BuildsReports: false, Protocol.InputEndpoint: > 0 })
+                removed = TryUnlinkProtocolReadLocked(victimSeqnum);
+            if (!removed)
             {
-                // Queue<T> has no random removal; rebuild without the victim.
+                // Queue<T> has no random removal, so the queue is rebuilt
+                // without the victim.
                 Queue<uint>? holder = null;
                 foreach (var q in _pendingInterruptIn.Values)
                     if (q.Contains(victimSeqnum)) { holder = q; break; }
@@ -778,14 +851,18 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 }
                 if (_parkedBulkLength.Remove(victimSeqnum)) _bulkReadsCanceled++;
             }
+            // Whoever answered the read took the send lock in its own hold of
+            // this lock, before this one, so the RET_UNLINK follows the read's
+            // RET_SUBMIT (HoldSendLocked).
+            conn = HoldSendLocked();
         }
         // Protocol rule (usbip-win2 wsk_receive.cpp cites usbip_protocol.rst):
         // -ECONNRESET when the URB was still queued, 0 when already answered.
+        try { conn?.SendRetUnlink(seqnum, removed ? -UsbipProtocol.EConnReset : 0); }
+        catch { }
+        finally { conn?.ExitSend(); }
         if (DeviceOrchestrator.DiagEnabled)
             DeviceOrchestrator.LogDiag($"usbip unlink {BusId}: {victimSeqnum} {(removed ? "was parked" : "had already been answered")}");
-        var conn = _connection;
-        if (conn == null) return;
-        try { conn.SendRetUnlink(seqnum, removed ? -UsbipProtocol.EConnReset : 0); } catch { }
     }
 
     // ── Control transfers ────────────────────────────────────────────────
@@ -1082,8 +1159,9 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 // The protocol reads the data stage as one command, report
                 // ID first.
                 var payload = outPayload;
-                ProtocolHandleReport(payload, reportId);
+                var effect = ProtocolHandleReport(payload, reportId);
                 SendRetSubmit(cmd.Seqnum, 0, payload.Length, null);
+                CompleteBulkReplies(effect);
                 return;
             }
             case 0x0B when !deviceToHost && _engine is { Protocol.AckSetProtocol: true }: // SET_PROTOCOL
@@ -1117,6 +1195,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 // a change wakes the clocks.
                 if (command is { } applied) ProtocolApply(applied.Effect);
                 SendRetSubmit(cmd.Seqnum, 0, payload.Length, null);
+                if (command is { } done) CompleteBulkReplies(done.Effect);
                 return;
             }
             case 0x0A when !deviceToHost: // SET_IDLE
@@ -1155,8 +1234,9 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         ResetProtocolState(portReset: true);
     }
 
-    /// <summary>Drop the queued reports and keep their buffers. Caller
-    /// holds <see cref="_hidLock"/>.</summary>
+    /// <summary>Drop the queued reports and keep their buffers: the reads
+    /// went with the import or the port reset. Caller holds
+    /// <see cref="_hidLock"/>.</summary>
     private void ClearFrameQueue()
     {
         while (_frameQueue.Count > 0) _spareFrames.Push(_frameQueue.Dequeue().Buffer);
@@ -1182,6 +1262,39 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     private void SendError(uint seqnum, int status)
         => SendRetSubmit(seqnum, status, 0, null);
 
+    /// <summary>The connection that holds the device, its send lock taken,
+    /// or null, for an answer to a read the caller dequeues in this hold of
+    /// <see cref="_hidLock"/>. The answer's place on the wire is fixed here:
+    /// answers leave in the order their reads were dequeued, whichever thread
+    /// sends them, and a RET_UNLINK of the read, which HandleUnlink sends
+    /// only after a hold of its own, follows the read's RET_SUBMIT, as its
+    /// status 0 says it does (usbip_protocol.rst, USBIP_RET_UNLINK). A
+    /// completed URB's RET_SUBMIT goes ahead of the RET_UNLINK in Linux's
+    /// stub too (stub_tx.c stub_tx_loop), and Linux's vhci gives the URB
+    /// back on the RET_UNLINK and drops the connection on a RET_SUBMIT that
+    /// follows it (vhci_rx.c). The answer also goes to the import that sent
+    /// the read: DetachConnection clears an import's reads in a hold of
+    /// this lock before it lets the device go, so a read still parked here
+    /// is the current import's. The caller sends with
+    /// <see cref="SendHeld"/>, which releases the send lock, and takes no
+    /// lock in between. Caller holds <see cref="_hidLock"/>.</summary>
+    private UsbipServer.Connection? HoldSendLocked()
+    {
+        var c = Volatile.Read(ref _connection);
+        c?.EnterSend();
+        return c;
+    }
+
+    /// <summary>A RET_SUBMIT on a connection <see cref="HoldSendLocked"/>
+    /// returned, then its send lock released.</summary>
+    private static void SendHeld(UsbipServer.Connection? c, uint seqnum, int status, int actualLength, ReadOnlySpan<byte> inPayload)
+    {
+        if (c == null) return;
+        try { c.SendRetSubmitNonIso(seqnum, status, actualLength, inPayload); }
+        catch { }
+        finally { c.ExitSend(); }
+    }
+
     private void SendRetSubmit(uint seqnum, int status, int actualLength, byte[]? inPayload)
     {
         var c = _connection;
@@ -1199,12 +1312,25 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     }
 
     /// <summary>Completion callback from the audio engine's pacing thread.
-    /// Builds the isochronous RET_SUBMIT per the 0.9.7.5 receive rules.</summary>
+    /// Builds the isochronous RET_SUBMIT per the 0.9.7.5 receive rules, on
+    /// the connection the URB came on. After a drop that connection is
+    /// closing, and a new import counts its seqnums from its own start
+    /// (usbip-win2 context.cpp next_seqnum, a counter per device context), so
+    /// the answer never goes to the device's connection of the moment.</summary>
     private void CompleteIsoOnWire(UsbAudioEngine.PendingIso p, ReadOnlySpan<byte> inCompacted, int perPacketActual)
     {
-        var c = _connection;
-        if (c == null) return;
+        var c = p.Import;
+        if (c == null || _stop) return;
         try { c.SendRetSubmitIso(p, inCompacted, perPacketActual); } catch { }
+    }
+
+    /// <summary>The audio engine's answer to an unlink that came while it
+    /// completed the URB, after the URB's RET_SUBMIT
+    /// (<see cref="UsbAudioEngine.TryUnlink"/>).</summary>
+    private void AnswerIsoUnlink(UsbipServer.Connection? import, uint unlinkSeqnum)
+    {
+        if (import == null || _stop) return;
+        try { import.SendRetUnlink(unlinkSeqnum, 0); } catch { }
     }
 
     public void Dispose() => StopAndRelease(600);
@@ -1256,6 +1382,20 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     /// caused safely, since thread and event creation fail only when the
     /// process runs out of resources. Null outside the probe.</summary>
     internal static Action<int>? AfterInputPumpStart;
+
+    /// <summary>Called on the input pump right before each wait for a frame.
+    /// usbip_server_check (S43) sets it to hold a pump there while Dispose
+    /// runs, and lets the pump go once Dispose has signaled, so the wait
+    /// that follows shows whether Dispose's signal ends it: on a loaded
+    /// machine no clock tells the signal from the wait's 500 ms timeout.
+    /// Null outside the probe.</summary>
+    internal static Action<UsbipEmulatedDevice>? BeforeInputWait;
+
+    /// <summary>Called on the input pump right after each wait for a frame,
+    /// with the wait's result: WAIT_OBJECT_0 when the input event ended it,
+    /// WAIT_TIMEOUT when its 500 ms ran out (<see cref="BeforeInputWait"/>).
+    /// Null outside the probe.</summary>
+    internal static Action<UsbipEmulatedDevice, uint>? AfterInputWait;
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     private static partial uint WaitForSingleObject(IntPtr handle, uint ms);

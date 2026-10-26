@@ -88,7 +88,8 @@ typedef struct HMVR_Config
 
 typedef struct HMVR_HapticReply
 {
-    uint64_t seqNo;            /* 0 = slot never written; first write = 1 */
+    uint64_t seqNo;            /* 0 = slot never written or being refilled;
+                                  first write = 1 */
     uint32_t hand;             /* 0 = left, 1 = right */
     float    durationSeconds;
     float    frequency;

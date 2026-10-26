@@ -12,6 +12,11 @@
 //     signal alone is a trustworthy exit condition.
 //   * 4-retry seqlock read with the odd/torn frame skipped: driver.c
 //     ReadSharedInput.
+//   * The snapshot seqlock between this worker and RunFrame: Boehm, "Can
+//     Seqlocks Get Along with Programming Language Memory Models?" (MSPC
+//     2012), the version with fences: relaxed atomic data, a release
+//     fence after the writer's odd number, an acquire fence before the
+//     reader's second load.
 //   * The 500 ms recycle timeout is kept from driver.c; the stale-seqno
 //     recycle counter is dropped because this section has exactly one
 //     consumer generation per handshake (consumerPid CAS) rather than
@@ -164,10 +169,22 @@ void HmVrTransport::WorkerProc()
 
                 if ( seq1 == seq2 && !( seq1 & 1 ) )
                 {
-                    // Publish under our private seqlock for RunFrame.
-                    snap_seq_.fetch_add( 1, std::memory_order_acq_rel );  // odd
-                    snap_ = frame;
-                    snap_seq_.fetch_add( 1, std::memory_order_acq_rel );  // even
+                    // Publish under our private seqlock for RunFrame, as
+                    // Boehm's writer does: the odd number, a release fence,
+                    // the words, the even number as a release store. The
+                    // fence keeps every word's store from being seen ahead
+                    // of the odd number, which a release on the odd number
+                    // itself does not: a release orders the stores before
+                    // it, never the ones after. This thread is the only
+                    // writer.
+                    const uint32_t s = snap_seq_.load( std::memory_order_relaxed );
+                    snap_seq_.store( s + 1, std::memory_order_relaxed );  // odd
+                    std::atomic_thread_fence( std::memory_order_release );
+                    uint64_t words[ kSnapWords ];
+                    memcpy( words, &frame, sizeof( frame ) );
+                    for ( size_t i = 0; i < kSnapWords; i++ )
+                        snap_[ i ].store( words[ i ], std::memory_order_relaxed );
+                    snap_seq_.store( s + 2, std::memory_order_release );  // even
                     last_frame_qpc_.store( frame.timestampQpc, std::memory_order_relaxed );
                     have_snapshot_.store( true, std::memory_order_release );
                 }
@@ -224,15 +241,27 @@ bool HmVrTransport::TryGetSnapshot( HMVR_InputFrame &out )
     if ( !have_snapshot_.load( std::memory_order_acquire ) )
         return false;
 
+    // Boehm's reader. The acquire on the first number keeps the word loads
+    // after it. An acquire load keeps later accesses after it but lets
+    // earlier ones move past it, so an acquire on the second number would
+    // leave the word loads free to run after it, where they can see a
+    // write the two equal numbers do not show. The acquire fence keeps
+    // them ahead of the second load.
+    uint64_t words[ kSnapWords ];
     uint32_t s1, s2;
     int retries = 4;
     do
     {
         s1 = snap_seq_.load( std::memory_order_acquire );
-        out = snap_;
-        s2 = snap_seq_.load( std::memory_order_acquire );
+        for ( size_t i = 0; i < kSnapWords; i++ )
+            words[ i ] = snap_[ i ].load( std::memory_order_relaxed );
+        std::atomic_thread_fence( std::memory_order_acquire );
+        s2 = snap_seq_.load( std::memory_order_relaxed );
     } while ( ( s1 != s2 || ( s1 & 1 ) ) && --retries > 0 );
-    return s1 == s2 && !( s1 & 1 );
+    if ( s1 != s2 || ( s1 & 1 ) )
+        return false;
+    memcpy( &out, words, sizeof( out ) );
+    return true;
 }
 
 HMVR_Config HmVrTransport::GetConfig()

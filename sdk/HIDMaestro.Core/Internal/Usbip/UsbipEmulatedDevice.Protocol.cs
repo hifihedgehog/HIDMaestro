@@ -143,8 +143,9 @@ internal sealed partial class UsbipEmulatedDevice
 
     /// <summary>Command bytes from the OUT endpoint. They reach the device
     /// as packets of the endpoint's wMaxPacketSize, each one a command, and
-    /// each goes to the output ring as the host sent it.</summary>
-    private void ProtocolHandleCommands(ReadOnlySpan<byte> payload)
+    /// each goes to the output ring as the host sent it. Returns what the
+    /// commands did.</summary>
+    private ProtocolEngine.Effect ProtocolHandleCommands(ReadOnlySpan<byte> payload)
     {
         var engine = _engine!;
         int size = engine.Protocol.CommandPacketSize;
@@ -159,6 +160,7 @@ internal sealed partial class UsbipEmulatedDevice
             if ((effect & ProtocolEngine.Effect.Halted) != 0) break;
         }
         ProtocolApply(effect);
+        return effect;
     }
 
     /// <summary>A SET_REPORT(Output) the protocol reads as a command. Its
@@ -169,15 +171,17 @@ internal sealed partial class UsbipEmulatedDevice
     /// that starts with <paramref name="reportId"/>, wValue's ID, loses
     /// that byte first, as tinyusb drops it before loopj's handler reads
     /// the first byte as the command (src/gcca.c:248-252). The command goes
-    /// to the output ring once, as the device read it.</summary>
-    private void ProtocolHandleReport(ReadOnlySpan<byte> report, byte reportId)
+    /// to the output ring once, as the device read it. Returns what the
+    /// command did.</summary>
+    private ProtocolEngine.Effect ProtocolHandleReport(ReadOnlySpan<byte> report, byte reportId)
     {
         if (_engine!.Protocol.SetReportStripsId && reportId != 0 && report.Length > 1 && report[0] == reportId)
             report = report[1..];
-        if (report.Length == 0) return;
+        if (report.Length == 0) return ProtocolEngine.Effect.None;
         var result = _engine!.HandleCommand(report, Stopwatch.GetTimestamp());
         PublishCommand(result, report);
         ProtocolApply(result.Effect);
+        return result.Effect;
     }
 
     /// <summary>A command to the output ring: as the host sent it, as the
@@ -213,8 +217,9 @@ internal sealed partial class UsbipEmulatedDevice
 
     private void ProtocolSubmitOut(uint seqnum, ReadOnlySpan<byte> payload)
     {
-        ProtocolHandleCommands(payload);
+        var effect = ProtocolHandleCommands(payload);
         SendRetSubmit(seqnum, 0, payload.Length, null);
+        CompleteBulkReplies(effect);
     }
 
     /// <summary>Every parked read fails once the device stops answering.</summary>
@@ -238,17 +243,15 @@ internal sealed partial class UsbipEmulatedDevice
         }
     }
 
-    private bool TryUnlinkProtocolRead(uint victim)
+    /// <summary>Caller holds _hidLock.</summary>
+    private bool TryUnlinkProtocolReadLocked(uint victim)
     {
-        lock (_hidLock)
+        for (var node = _protocolReads.First; node != null; node = node.Next)
         {
-            for (var node = _protocolReads.First; node != null; node = node.Next)
-            {
-                if (node.Value.Seq != victim) continue;
-                _protocolReads.Remove(node);
-                RecycleRead(node);
-                return true;
-            }
+            if (node.Value.Seq != victim) continue;
+            _protocolReads.Remove(node);
+            RecycleRead(node);
+            return true;
         }
         return false;
     }
@@ -265,6 +268,7 @@ internal sealed partial class UsbipEmulatedDevice
         {
             LinkedListNode<ProtocolRead>? done = null;
             int status = 0;
+            UsbipServer.Connection? conn = null;
             lock (_hidLock)
             {
                 var node = _protocolReads.First;
@@ -292,10 +296,11 @@ internal sealed partial class UsbipEmulatedDevice
                         done = node;
                     }
                 }
+                if (done != null) conn = HoldSendLocked();
             }
             if (done == null) return;
             var r = done.Value;
-            SendRetSubmitSpan(r.Seq, status, r.Filled, r.Buffer.AsSpan(0, r.Filled));
+            SendHeld(conn, r.Seq, status, r.Filled, r.Buffer.AsSpan(0, r.Filled));
             lock (_hidLock) RecycleRead(done);
         }
     }

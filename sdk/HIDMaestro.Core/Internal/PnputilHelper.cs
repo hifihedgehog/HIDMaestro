@@ -73,11 +73,6 @@ internal static partial class PnputilHelper
     internal static (int exitCode, string output) Run(string args, int timeoutMs = 30_000) =>
         RunTool(PnputilPath, args, timeoutMs);
 
-    /// <summary>Run a program by its full path and return its exit code and
-    /// its output, within the timeout however the program behaves. Its
-    /// output is read as it comes, and a program that outlives the timeout
-    /// is ended. Coexistence probe section Z calls this through reflection
-    /// with a program that hangs.</summary>
     /// <summary>The text a child's two redirected streams gave once the
     /// child has ended or been killed, both waited for at most 5 s (scaled)
     /// together, and "" for a stream not ended by then. A stream ends when
@@ -93,6 +88,11 @@ internal static partial class PnputilHelper
         static string Ended(System.Threading.Tasks.Task<string> t) => t.IsCompletedSuccessfully ? t.Result : "";
     }
 
+    /// <summary>Run a program by its full path and return its exit code and
+    /// its output, within the timeout however the program behaves. Its
+    /// output is read as it comes, and a program that outlives the timeout
+    /// is ended. Coexistence probe section Z calls this through reflection
+    /// with a program that hangs.</summary>
     internal static (int exitCode, string output) RunTool(string path, string args, int timeoutMs)
     {
         var psi = new ProcessStartInfo
@@ -106,6 +106,7 @@ internal static partial class PnputilHelper
         };
         ProtectedStaging.ConfineChildTemp(psi);
 
+        ToolStartForProbe?.Invoke(path);
         using var p = Process.Start(psi)!;
         // Drain streams concurrently: ReadToEnd blocks until EOF, which only
         // happens at process exit: so a synchronous read here would hang past
@@ -123,6 +124,12 @@ internal static partial class PnputilHelper
         try { exitCode = p.ExitCode; } catch { exitCode = -1; }
         return (exitCode, stdout + stderr);
     }
+
+    /// <summary>Called with the program's path right before
+    /// <see cref="RunTool"/> starts it, on the thread that runs it.
+    /// Coexistence probe section Z sets it through reflection to count the
+    /// programs a teardown's sweep runs. Null outside the probe.</summary>
+    internal static Action<string>? ToolStartForProbe;
 
     /// <summary>The driver store's published packages whose original INF
     /// name <paramref name="originalName"/> accepts, with their providers

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -116,6 +117,7 @@ internal static class Host
         Console.WriteLine("-- the SDK's controller hosts a UMDF2 device's protocol");
         Subcommands();
         SubmitAndLiveFeature();
+        StreamOnRegister();
     }
 
     static void Subcommands()
@@ -184,5 +186,59 @@ internal static class Host
         Check("a command whose rule emits a report raises that report in its place",
             got.Data != null && got.Data.Length == 48 && got.Data[0] == 2 && got.Data[44] == 46,
             got.Data == null ? "none" : $"0x{got.Id:X2} {Checks.Hex(got.Data)}");
+    }
+
+    /// <summary>A stream whose condition reads a register the first
+    /// subcommand sets. The engine says when a command or a reset changed
+    /// its registers, and the controller wakes the stream's clock then:
+    /// before, nothing woke it, and a clock whose condition failed looked
+    /// again only after its 500 ms wait. The subcommand comes through the
+    /// output ring as the driver hands it on. The controller's clock is
+    /// stopped and an unstarted one of the same kind takes its place, so this
+    /// thread sees the wake event and runs the ticks.</summary>
+    static void StreamOnRegister()
+    {
+        string json = Umdf2.Profile(o => o["stream"] = JsonNode.Parse("""{ "periodMs": 8, "while": "seen" }"""));
+        var cmd = new byte[48];
+        cmd[9] = 0x48;
+        var subcommand = new byte[49];
+        subcommand[0] = 0x01;
+        cmd.CopyTo(subcommand, 1);
+
+        var p = ControllerProfile.Parse(Encoding.UTF8.GetBytes(json))!;
+        p.ValidateDeviceModel();
+        var engine = new ProtocolEngine(CompiledProtocol.Compile(p, null)!);
+        var calls = new List<int>();
+        int n = 0;
+        var notify = typeof(ProtocolEngine).GetProperty("RegistersChanged", Instance | BindingFlags.Public);
+        notify?.SetValue(engine, (Action)(() => n++));
+        engine.HandleCommand(subcommand, Stopwatch.GetTimestamp());
+        calls.Add(n);
+        engine.HandleCommand(subcommand, Stopwatch.GetTimestamp());
+        calls.Add(n);
+        engine.HandleCommand(new byte[] { 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, Stopwatch.GetTimestamp());
+        calls.Add(n);
+        engine.Reset();
+        calls.Add(n);
+        Check("the engine says when a command or a reset changed its registers, and not after a command that changed none",
+            notify != null && string.Join(",", calls) == "1,1,1,2", notify == null ? "no RegistersChanged" : string.Join(",", calls));
+
+        using var dev = new Offline(json, 7962);
+        var field = typeof(HMController).GetField("_idleClock", Instance)!;
+        ((IDeviceClock)field.GetValue(dev.C)!).Stop(5000);
+        var stream = (StreamClock)typeof(HMController).GetField("_stream", Instance)!.GetValue(dev.C)!;
+        var hosted = (ProtocolEngine)typeof(HMController).GetField("_protocolEngine", Instance)!.GetValue(dev.C)!;
+        var held = new DeviceClock<StreamTick>(new StreamTick(stream, hosted.RegisterWords, () => { }, () => 0),
+            MissedTick.Drop, "probe held stream clock", everyChangeWakes: true);
+        field.SetValue(dev.C, held);
+        var wake = (AutoResetEvent)typeof(DeviceClock<StreamTick>).GetField("_wake", Instance)!.GetValue(held)!;
+        wake.WaitOne(0);
+        bool idle = !held.TickNow();
+        dev.Output(0x01, cmd);
+        bool woke = wake.WaitOne(0);
+        bool runs = held.TickNow();
+        held.Stop(5000);
+        Check("the subcommand that sets the register a stream's condition reads wakes the stream's clock, which then runs",
+            idle && woke && runs, $"idle before {idle}, woken {woke}, runs {runs}");
     }
 }

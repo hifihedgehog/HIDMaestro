@@ -49,13 +49,17 @@
 //         it. The other program's adapter, which never asked for WinUSB,
 //         keeps WinUSB while it is present, since a restore installs nothing
 //         on a present devnode, and the entry waits. Meanwhile a third
-//         program's teardown sweep, 30 times, pays no wait for that entry and
-//         starts no follow-up of its own. Then the first program exits,
-//         which ends the follow-up it started, and a fourth program, which
-//         starts none, sweeps 30 times with the WinUSB lock free and 30 times
-//         with the probe holding it: no wait, and no pnputil for the present
-//         devnode. Once the other adapter is disposed and gone, the instance
-//         gets the reinstall flag and the entry goes.
+//         program's teardown sweep, 30 times, leaves that entry to the
+//         follow-up watching it, with no lock and no wait, and starts no
+//         follow-up of its own. Then the first program exits, which ends the
+//         follow-up it started, and a fourth program, which starts none,
+//         sweeps 30 times with the WinUSB lock free and 30 times with the
+//         probe holding it: it takes the lock only when it is free, never
+//         waits for it or for the devnode, and runs no pnputil for the
+//         present devnode. The SDK's probe hooks report each step a sweep
+//         takes for the entry, so no check reads a clock. Once the other
+//         adapter is disposed and gone, the instance gets the reinstall flag
+//         and the entry goes.
 //      a. A bind that claims a WinUSB entry between a sweep's queue and its
 //         restore keeps its hold, for a sweep and for the full cleanup, and a
 //         fresh claim under a holder name the full cleanup saw keeps it too.
@@ -572,6 +576,19 @@ internal static partial class Program
         return (port, bus, vhci);
     }
 
+    /// <summary>Whether a zreleasecost reply shows that every sweep came to
+    /// the entry once and took <paramref name="step"/> for it once, and
+    /// nothing else: no other try of the devnode lock, no wait for it or for
+    /// the devnode to leave, and no program run.</summary>
+    static bool ZOnlyStep(string reply, string step)
+    {
+        long sweeps = LongField(reply, "sweeps");
+        if (!Ok(reply) || sweeps <= 0 || LongField(reply, "entries") != sweeps) return false;
+        foreach (string k in new[] { "followed", "lockwait", "locktaken", "lockbusy", "waitgone", "runs" })
+            if (LongField(reply, k) != (k == step ? sweeps : 0)) return false;
+        return true;
+    }
+
     /// <summary>Part 9. <paramref name="inWait"/> runs while it waits for the
     /// host controller's re-import.</summary>
     static void ZRebindAfterReimport(Action? inWait)
@@ -645,18 +662,14 @@ internal static partial class Program
 
                 // What the lingering entry costs any other controller's
                 // teardown: a third program releases a controller index it
-                // holds nothing for, 30 times, the sweep every teardown runs.
+                // holds nothing for, 30 times, the sweep every teardown runs,
+                // and reports each step a sweep took for the entry.
                 using (var c = PeerProcess.Start("Z9-teardown"))
                 {
-                    string cost = c.Send("zreleasecost 30", 300_000);
+                    string cost = c.Send($"zreleasecost 30 {devB}", 300_000);
                     Console.WriteLine($"    Z9: a teardown's sweep beside the lingering entry, 30 runs: {cost}");
-                    // A wait or a pnputil run costs every teardown, so the
-                    // median shows it, and a run that other work on the
-                    // machine holds up does not move the median.
-                    double p50 = double.TryParse(PeerProcess.Field(cost, "p50"), System.Globalization.NumberStyles.Float,
-                        System.Globalization.CultureInfo.InvariantCulture, out double v) ? v : double.NaN;
-                    Check("Z9: the lingering entry costs another controller's teardown no wait (median under 100 ms)",
-                          Ok(cost) && p50 < 100, cost);
+                    Check("Z9: another controller's teardown leaves the lingering entry to the follow-up watching it, with no devnode lock, no wait and no pnputil",
+                          ZOnlyStep(cost, "followed"), cost);
                     string t = c.Send("threads HMWinUsbFollowUp");
                     Check("Z9: and starts no follow-up of its own there, since one already watches the entry",
                           PeerProcess.Field(t, "n") == "0", t);
@@ -670,24 +683,21 @@ internal static partial class Program
                 Check("Z9: the first program exits, disposing its adapter", Ok(ea) && WaitFor(() => a.Exited, 20_000), ea);
                 using (var c = PeerProcess.Start("Z9-unfollowed"))
                 {
-                    c.Send("zreleasecost 1 nofollow", 300_000);
-                    string free = c.Send("zreleasecost 30 nofollow", 300_000);
+                    string free = c.Send($"zreleasecost 30 {devB} nofollow", 300_000);
                     Console.WriteLine($"    Z9: a teardown's sweep beside the entry with no follow-up, the WinUSB lock free, 30 runs: {free}");
                     var devnodes = Native.AdminMutex("WinUsb");
                     string held;
                     try
                     {
                         try { devnodes.WaitOne(); } catch (AbandonedMutexException) { }
-                        held = c.Send("zreleasecost 30 nofollow", 300_000);
+                        held = c.Send($"zreleasecost 30 {devB} nofollow", 300_000);
                     }
                     finally { devnodes.ReleaseMutex(); devnodes.Dispose(); }
                     Console.WriteLine($"    Z9: the same with the probe holding the WinUSB lock, 30 runs: {held}");
-                    static double P50(string r) => double.TryParse(PeerProcess.Field(r, "p50"), System.Globalization.NumberStyles.Float,
-                        System.Globalization.CultureInfo.InvariantCulture, out double v) ? v : double.NaN;
-                    Check("Z9: with no follow-up and the WinUSB lock free, the entry costs a teardown no wait and no pnputil (median under 100 ms)",
-                          Ok(free) && P50(free) < 100, free);
-                    Check("Z9: with no follow-up and the WinUSB lock held elsewhere, the teardown does not wait for it (median under 100 ms)",
-                          Ok(held) && P50(held) < 100, held);
+                    Check("Z9: with no follow-up and the WinUSB lock free, a teardown takes the lock with no wait and reads the present devnode's driver with no pnputil",
+                          ZOnlyStep(free, "locktaken"), free);
+                    Check("Z9: with no follow-up and the WinUSB lock held elsewhere, a teardown finds it held and does not wait for it",
+                          ZOnlyStep(held, "lockbusy"), held);
                     Check("Z9: and the entry stays while the devnode is present",
                           Native.IsPresent(devB) && WinUsbEntryExists(devB) && ((ConfigFlags(devB) ?? 0) & 0x20) == 0,
                           $"present {Native.IsPresent(devB)}, entry {WinUsbEntryExists(devB)}, ConfigFlags 0x{ConfigFlags(devB) ?? 0:X}");
@@ -1241,10 +1251,11 @@ internal static partial class Program
 ///   zarrival &lt;id&gt;         WinUsbBinding.ArrivalOf on a devnode
 ///   zbindasync            the last controller's BindWinUsb on a thread
 ///   zbindwait &lt;ms&gt;        that bind's outcome
-///   zreleasecost &lt;n&gt; [nofollow]  RegistryLedger.Release of an index this
-///                         program holds nothing for, n times: p50, p95, max
-///                         ms. With nofollow the program starts no follow-up
-///                         from then on</summary>
+///   zreleasecost &lt;n&gt; &lt;id&gt; [nofollow]  RegistryLedger.Release of an index
+///                         this program holds nothing for, n times, and the
+///                         steps the sweeps took for the WinUSB entry of
+///                         devnode &lt;id&gt; (ReleaseSteps). With nofollow the
+///                         program starts no follow-up from then on</summary>
 internal static class PeerZ
 {
     static Assembly Sdk => typeof(HMContext).Assembly;
@@ -1383,31 +1394,71 @@ internal static class PeerZ
             }
             case "zreleasecost":
             {
-                // A controller index this program holds nothing for, so each
-                // call is a teardown's sweep of the other entries only.
                 // "nofollow": this program starts no follow-up, so every
                 // sweep takes the path an unfollowed entry takes.
-                if (a.Length > 2 && a[2] == "nofollow")
+                if (a.Length > 3 && a[3] == "nofollow")
                     (Sdk.GetType(Ledger)?.GetField("NoFollowUpForProbe", Any)
                         ?? throw new MissingFieldException(Ledger, "NoFollowUpForProbe")).SetValue(null, true);
-                // Release(int), not Release(IEnumerable<int>).
-                var release = Exact(Ledger, "Release", typeof(int));
-                var ms = new List<double>();
-                for (int i = 0; i < int.Parse(a[1]); i++)
-                {
-                    var sw = Stopwatch.StartNew();
-                    release.Invoke(null, new object[] { 9999 });
-                    ms.Add(sw.Elapsed.TotalMilliseconds);
-                }
-                ms.Sort();
-                return FormattableString.Invariant(
-                    $"OK zreleasecost p50={ms[ms.Count / 2]:F1} p95={ms[(int)Math.Ceiling(ms.Count * 0.95) - 1]:F1} max={ms[^1]:F1}");
+                return ReleaseSteps(int.Parse(a[1]), a[2]);
             }
             case "zbindwait":
                 return s_bind != null && s_bind.Join(int.Parse(a[1])) ? $"OK zbindwait {s_bindResult}" : "ERR zbindwait still binding";
             default:
                 return null;
         }
+    }
+
+    /// <summary>A teardown's sweep, <paramref name="sweeps"/> times: the
+    /// release of a controller index this program holds nothing for, so
+    /// each sweeps the other programs' entries only. The SDK's probe hooks
+    /// report each step a sweep takes on this thread, and a step counts for
+    /// the WinUSB entry of <paramref name="instanceId"/> when the sweep last
+    /// started on that entry. The reply counts the sweeps that came to it
+    /// and, for it: an entry left to the follow-up watching it, the devnode
+    /// lock waited for, taken with no wait or found held, a wait for the
+    /// devnode to leave and each program run. "other" counts the steps for
+    /// any other entry.</summary>
+    static string ReleaseSteps(int sweeps, string instanceId)
+    {
+        var steps = Sdk.GetType("HIDMaestro.Internal.WinUsbBinding")?.GetField("StepForProbe", Any)
+                    ?? throw new MissingFieldException("WinUsbBinding", "StepForProbe");
+        var runs = Sdk.GetType("HIDMaestro.Internal.PnputilHelper")?.GetField("ToolStartForProbe", Any)
+                   ?? throw new MissingFieldException("PnputilHelper", "ToolStartForProbe");
+        // Release(int), not Release(IEnumerable<int>).
+        var release = Exact(Ledger, "Release", typeof(int));
+        int self = Environment.CurrentManagedThreadId;
+        bool ours = false;
+        var n = new Dictionary<string, int>();
+        void Step(string s)
+        {
+            if (Environment.CurrentManagedThreadId != self) return;
+            if (s.StartsWith("entry ", StringComparison.Ordinal))
+            {
+                ours = string.Equals(s["entry ".Length..], instanceId, StringComparison.OrdinalIgnoreCase);
+                if (!ours) return;
+                s = "entries";
+            }
+            string key = ours ? s : "other";
+            n[key] = n.GetValueOrDefault(key) + 1;
+        }
+        steps.SetValue(null, (Action<string>)Step);
+        runs.SetValue(null, (Action<string>)(_ => Step("runs")));
+        try
+        {
+            for (int i = 0; i < sweeps; i++)
+            {
+                ours = false;
+                release.Invoke(null, new object[] { 9999 });
+            }
+        }
+        finally
+        {
+            steps.SetValue(null, null);
+            runs.SetValue(null, null);
+        }
+        int N(string k) => n.GetValueOrDefault(k);
+        return $"OK zreleasecost sweeps={sweeps} entries={N("entries")} followed={N("followed")} lockwait={N("lock wait")} "
+               + $"locktaken={N("lock taken")} lockbusy={N("lock busy")} waitgone={N("wait gone")} runs={N("runs")} other={N("other")}";
     }
 
     static string RunWork(int holdMs, string mode)

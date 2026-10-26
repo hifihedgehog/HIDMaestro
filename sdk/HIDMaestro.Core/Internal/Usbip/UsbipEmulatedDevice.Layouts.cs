@@ -113,6 +113,7 @@ internal sealed partial class UsbipEmulatedDevice
         {
             uint seq;
             int length;
+            UsbipServer.Connection? conn;
             lock (_hidLock)
             {
                 if (!engine.InputOpenSince(out long since) || since != run) return;
@@ -126,8 +127,9 @@ internal sealed partial class UsbipEmulatedDevice
                 if (length == 0) return;
                 seq = pending.Dequeue();
                 CountCompletion();
+                conn = HoldSendLocked();
             }
-            SendRetSubmitSpan(seq, 0, length, _layoutReport.AsSpan(0, length));
+            SendHeld(conn, seq, 0, length, _layoutReport.AsSpan(0, length));
         }
     }
 
@@ -184,6 +186,7 @@ internal sealed partial class UsbipEmulatedDevice
         {
             uint seq;
             int length;
+            UsbipServer.Connection? conn;
             lock (_hidLock)
             {
                 if (!engine.InputOpenSince(out _)) return;
@@ -197,8 +200,9 @@ internal sealed partial class UsbipEmulatedDevice
                 if (length == 0) return;
                 seq = pending.Dequeue();
                 CountCompletion();
+                conn = HoldSendLocked();
             }
-            SendRetSubmitSpan(seq, 0, length, _layoutReport.AsSpan(0, length));
+            SendHeld(conn, seq, 0, length, _layoutReport.AsSpan(0, length));
         }
     }
 
@@ -243,7 +247,21 @@ internal sealed partial class UsbipEmulatedDevice
         PublishCommand(result, command);
         SendRetSubmit(seqnum, 0, command.Length, null);
         CompleteBulkIn();
-        if (result.Effect != ProtocolEngine.Effect.None) WakeLayoutClock();
+        // What the command did, as on the protocol's other command paths: a
+        // halt fails the parked reads, and a change wakes the clocks. The
+        // host's poll clock is among them: a reply this command left for the
+        // input endpoint, or reports it let flow, wait for its next tick.
+        ProtocolApply(result.Effect);
+    }
+
+    /// <summary>A reply a command on another path left for the bulk IN
+    /// endpoint goes to a bulk read already parked for it, after the
+    /// command's own answer, as HandleBulkCommand sends its reply. Only the
+    /// connection's reader thread calls this.</summary>
+    private void CompleteBulkReplies(ProtocolEngine.Effect effect)
+    {
+        if ((effect & ProtocolEngine.Effect.Reply) != 0 && _engine!.Protocol.Channel == ReplyChannel.BulkIn)
+            CompleteBulkIn();
     }
 
     /// <summary>Hand waiting replies to parked bulk IN reads, oldest of each

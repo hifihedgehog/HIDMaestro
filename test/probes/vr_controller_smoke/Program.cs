@@ -94,11 +94,14 @@ internal static class Program
     static unsafe void Write<T>(IntPtr view, int offset, T value) where T : unmanaged => *(T*)(view + offset) = value;
 
     /// <summary>Produce one haptic slot exactly as controller_device.cpp
-    /// ProcessEvent does: fill, barrier, seqNo, barrier, head.</summary>
+    /// ProcessEvent does: seqNo zero, barrier, fill, barrier, seqNo,
+    /// barrier, head.</summary>
     static void PublishHaptic(IntPtr view, uint hand, float amplitude)
     {
         ulong seqNo = Read<ulong>(view, VrSharedMemory.HapticHeadOffset) + 1;
         int slot = VrSharedMemory.HapticRingOffset + (int)((seqNo - 1) % VrSharedMemory.HapticSlots) * VrSharedMemory.HapticReplySize;
+        Write<ulong>(view, slot, 0);
+        Thread.MemoryBarrier();
         Write<uint>(view, slot + 8, hand);        // 0 left, 1 right
         Write<float>(view, slot + 12, 0.25f);     // duration
         Write<float>(view, slot + 16, 160f);      // frequency
@@ -378,7 +381,8 @@ internal static class Program
             Check("right pose stays invalid when not set", Read<uint>(view, R + VrSharedMemory.StatePoseValidOffset) == 0);
 
             // Haptic ring: produce one slot exactly as controller_device.cpp
-            // ProcessEvent does (fill, barrier, seqNo, barrier, head).
+            // ProcessEvent does (seqNo zero, barrier, fill, barrier, seqNo,
+            // barrier, head).
             var got = new ManualResetEventSlim(false);
             HMVRHapticEventArgs? received = null;
             vr.HapticReceived += (_, e) => { received = e; got.Set(); };

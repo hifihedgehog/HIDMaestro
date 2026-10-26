@@ -714,6 +714,18 @@ internal sealed class UsbipServer : IDisposable
             }
         }
 
+        /// <summary>Take the send lock for replies whose place on the wire
+        /// the caller fixes under a lock of its own: the device takes it in
+        /// the hold of its HID lock that dequeues a read, so answers leave in
+        /// the order the reads were answered, and a RET_UNLINK the device
+        /// decides in a later hold follows the read's RET_SUBMIT. The lock is
+        /// reentrant, so the caller's sends on this thread go out under it
+        /// until <see cref="ExitSend"/>.</summary>
+        internal void EnterSend() => Monitor.Enter(_sendLock);
+
+        /// <summary>Release the send lock <see cref="EnterSend"/> took.</summary>
+        internal void ExitSend() => Monitor.Exit(_sendLock);
+
         public void SendRetUnlink(uint seqnum, int status)
         {
             Span<byte> buf = stackalloc byte[UsbipProtocol.HeaderSize];

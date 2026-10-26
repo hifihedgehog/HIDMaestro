@@ -31,13 +31,13 @@
 //     control while a handler blocks, every handle closed and nothing
 //     thrown to the connection when a thread does not start, a change
 //     queued then raised at Dispose, its event thread known as its own),
-//     the device's input pump woken at Dispose, timed over 30 runs, and
+//     the device's input pump woken by Dispose's signal, and
 //     the connection owner lookup and location match of Program.Lookup.cs
 //   - teardown: the connection's detach racing the device's Dispose, and a
 //     transfer that arrives after Dispose, neither touching a disposed
 //     object or ending the process ("teardown" runs these alone)
-//   - Dispose time with the input pump waiting for a frame, p50 and p95
-//     over 30 devices ("dispose-timing" runs it alone)
+//   - Dispose with the input pump waiting for a frame, which Dispose's
+//     signal must wake, over 5 devices ("dispose-wake" runs it alone)
 //
 // Bridges to the SDK's shared-memory contract are exercised end to end:
 // the probe writes input frames exactly as HMController.SubmitState does
@@ -107,10 +107,10 @@ internal static partial class Program
         ctx.LoadDefaultProfiles();
         var server = UsbipServer.GetOrStart();
 
-        // "dispose-timing" runs the dispose timing alone.
-        if (args.Contains("dispose-timing"))
+        // "dispose-wake" runs the Dispose wake check alone.
+        if (args.Contains("dispose-wake"))
         {
-            DisposeTiming(ctx);
+            DisposeWakesPump(ctx);
             Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
             return s_failures == 0 ? 0 : 1;
         }
@@ -147,47 +147,47 @@ internal static partial class Program
         if (!args.Contains("teardown")) ProtocolInputGetReport(ctx, server);
         if (!args.Contains("teardown")) LongIsoUrbs(ctx, server);
         Teardown(ctx, server);
-        if (!args.Contains("teardown")) DisposeTiming(ctx);
+        if (!args.Contains("teardown")) DisposeWakesPump(ctx);
 
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
     }
 
-    /// <summary>Dispose time of a device whose input pump sits in its wait
-    /// for a frame, over 30 devices, each disposed at a random point of
-    /// that 500 ms wait. Until Dispose woke the pump, each Dispose waited
-    /// out the rest of the wait, 0 to 500 ms.</summary>
-    static void DisposeTiming(HMContext ctx)
+    /// <summary>A USB/IP device's Dispose with its input pump waiting for a
+    /// frame, each device built by its own constructor on the named input
+    /// event, which it opens with SYNCHRONIZE and EVENT_MODIFY_STATE.
+    /// PumpHold holds each pump before its first wait while Dispose runs,
+    /// and the wait must end on Dispose's signal.</summary>
+    static void DisposeWakesPump(HMContext ctx)
     {
-        Console.WriteLine("-- Dispose time with the input pump waiting for a frame (30 devices)");
-        // One index per device, since the 30 run at once.
-        const int TimingIndex = Index + 2;
+        Console.WriteLine("-- Dispose with the input pump waiting for a frame (5 devices)");
+        const int Devices = 5, WakeIndex = Index + 2;
         var profile = ctx.GetProfile("dualsense-composite")!.Inner;
-        var devices = new UsbipEmulatedDevice?[30];
-        double[] ms;
-        try
+        int woken = 0, ended = 0;
+        string detail = "";
+        for (int i = 0; i < Devices; i++)
         {
-            ms = DisposeTogether(30, new Random(43), 50, 500, i => devices[i] = new UsbipEmulatedDevice(profile, TimingIndex + i));
-        }
-        finally
-        {
-            for (int i = 0; i < devices.Length; i++)
+            string busId = UsbipEmulatedDevice.BusIdFor(WakeIndex + i);
+            UsbipEmulatedDevice? dev = null;
+            try
             {
-                if (devices[i] == null) continue;
-                devices[i]!.Dispose();
-                SharedMemoryIO.DestroyController(TimingIndex + i);
+                using var hold = new PumpHold(d => d.BusId == busId);
+                dev = new UsbipEmulatedDevice(profile, WakeIndex + i);
+                var pump = (Thread)typeof(UsbipEmulatedDevice).GetField("_inputThread", Private)!.GetValue(dev)!;
+                var r = hold.DisposeHeld(dev, pump);
+                if (r.Woke == PumpHold.WaitObject0) woken++;
+                if (r.Ended) ended++;
+                if ((r.Woke != PumpHold.WaitObject0 || !r.Ended) && detail.Length == 0)
+                    detail = $"device {i}: the wait after Dispose returned 0x{r.Woke:X}, Dispose returned and the pump ended {r.Ended}";
+            }
+            finally
+            {
+                dev?.Dispose();
+                SharedMemoryIO.DestroyController(WakeIndex + i);
             }
         }
-        int lost = Array.FindAll(ms, double.IsNaN).Length;
-        Array.Sort(ms);
-        // Nearest rank: the 15th and the 29th of 30. A pump that waits out
-        // its wait costs 0 to 450 ms at random, a median near 225 ms, and a
-        // woken one under a millisecond. The median tells them apart, and
-        // load that slows a few Disposes does not move it.
-        double p50 = ms[14], p95 = ms[28], max = ms[29];
-        Check("a USB/IP device's Dispose does not wait out its input pump's 500 ms wait (median under 100 ms over 30)",
-              p50 < 100 && lost == 0,
-              $"p50 {p50:F1} ms, p95 {p95:F1} ms, max {max:F1} ms" + (lost > 0 ? $", {lost} Dispose(s) threw or hung" : ""));
+        Check($"a USB/IP device's Dispose signals its input pump's event, which ends the pump's wait for a frame ({Devices} devices)",
+              woken == Devices && ended == Devices, detail.Length > 0 ? detail : $"{woken} woken by the signal, {ended} ended");
     }
 
     static void RunAll(UsbipServer server, UsbipEmulatedDevice device, ControllerProfile profile,
@@ -1220,6 +1220,10 @@ internal static partial class Program
         Console.WriteLine("\n-- the protocol GET_REPORT section's copy of gamecube-adapter --");
         ProtocolInputOffline(ctx);
 
+        // The device's handoffs from a frame or a reply to a waiting read
+        // (Program.Wake.cs).
+        HandoffOffline();
+
         // The server's connection owner lookup and the location match the
         // sweeps detach by, which need no device either (Program.Lookup.cs).
         OwnerLookup();
@@ -1233,108 +1237,126 @@ internal static partial class Program
     /// device object built without its constructor, holding only the locks
     /// and an unnamed auto-reset event in place of the named input event,
     /// and its own input pump on that event. No frame ever arrives, so the
-    /// pump sits in its 500 ms wait, as it does between frames. Dispose
-    /// comes 20 to 320 ms into the wait, before the pump's first timeout,
-    /// so the pump never reaches a section read. Dispose's time is the
-    /// input pump's part of every USB/IP Dispose: until Dispose woke the
-    /// pump, the rest of the wait.
+    /// pump waits for one, as it does between frames. PumpHold holds it
+    /// before its wait while Dispose runs, and the wait must end on Dispose's
+    /// signal. The pump closes its event as it ends.
     ///
     /// <para>Two things it cannot reach. The unnamed event has full access,
     /// while the device opens the named one with SYNCHRONIZE and
     /// EVENT_MODIFY_STATE, so a change to that access mask passes here and
-    /// fails only the live dispose timing. And the pump can close its event
-    /// only after _stop, which Dispose sets in the same locked block as the
-    /// wake, so the _inputWakeClosed guard against setting a closed handle
-    /// never decides anything here: the check passes with it removed.</para></summary>
+    /// fails only the live check (DisposeWakesPump). And the pump can close
+    /// its event only after _stop, which Dispose sets in the same locked
+    /// block as the wake, so the _inputWakeClosed guard against setting a
+    /// closed handle never decides anything here: the check passes with it
+    /// removed.</para></summary>
     static void InputPumpWakeOffline()
     {
+        const int Devices = 10;
         var t = typeof(UsbipEmulatedDevice);
-        var pumps = new Thread[30];
-        var events = new IntPtr[30];
-        // A second handle to each event, kept by the probe. Once the pump
-        // closes its own, Windows can give that value to the next handle any
-        // thread here creates, and on a slow machine the loop below is still
-        // creating events and threads when the first Disposes run, so the
-        // value alone cannot tell a closed handle from a reused one.
-        var dups = new IntPtr[30];
-        var ended = new bool[30];
-        double[] ms = DisposeTogether(30, new Random(43), 20, 300, i =>
+        int woken = 0, ended = 0;
+        string detail = "";
+        for (int i = 0; i < Devices; i++)
         {
             var dev = (UsbipEmulatedDevice)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(t);
             t.GetField("_lifetimeLock", Private)!.SetValue(dev, new object());
             t.GetField("_publishLock", Private)!.SetValue(dev, new object());
             IntPtr ev = CreateEventW(IntPtr.Zero, false, false, null);
-            DuplicateHandle(GetCurrentProcess(), ev, GetCurrentProcess(), out dups[i], 0, false, DuplicateSameAccess);
+            // A second handle to the event, kept by the probe. Once the pump
+            // closes its own, Windows can give that value to the next handle
+            // any thread here creates, so the value alone cannot tell a
+            // closed handle from a reused one.
+            DuplicateHandle(GetCurrentProcess(), ev, GetCurrentProcess(), out IntPtr dup, 0, false, DuplicateSameAccess);
             t.GetField("_inputWaitEvent", Private)!.SetValue(dev, ev);
             var loop = (ThreadStart)Delegate.CreateDelegate(typeof(ThreadStart), dev, t.GetMethod("InputPumpLoop", Private)!);
             var pump = new Thread(loop) { IsBackground = true, Name = "S43 offline input pump" };
             t.GetField("_inputThread", Private)!.SetValue(dev, pump);
-            pumps[i] = pump;
-            events[i] = ev;
-            pump.Start();
-            return dev;
-        },
-        // The pump closes the event as it ends. The join bounds a pump that
-        // never ends. The pump's handle is still open only when its value
-        // still names the same event as the kept one.
-        i =>
-        {
-            pumps[i].Join(Hang);
-            ended[i] = dups[i] != IntPtr.Zero && !pumps[i].IsAlive
-                       && !(GetHandleInformation(events[i], out _) && CompareObjectHandles(events[i], dups[i]));
-            if (dups[i] != IntPtr.Zero) CloseHandle(dups[i]);
-        });
-        bool closed = Array.TrueForAll(ended, e => e);
-        int lost = Array.FindAll(ms, double.IsNaN).Length;
-        Array.Sort(ms);
-        // Nearest rank: the 15th and the 29th of 30. A woken pump ends in
-        // about a millisecond, and one that waits out its 500 ms wait from
-        // 20 to 320 ms in takes 180 ms or more at every sample. The median
-        // tells them apart, and load that slows a few Disposes does not
-        // move it.
-        double p50 = ms[14], p95 = ms[28], max = ms[29];
-        Check("Dispose wakes the input pump instead of waiting out its 500 ms wait (median under 100 ms over 30)",
-              p50 < 100 && closed && lost == 0,
-              $"p50 {p50:F1} ms, p95 {p95:F1} ms, max {max:F1} ms, pump ended and event closed {closed}" + (lost > 0 ? $", {lost} Dispose(s) threw or hung" : ""));
+            (uint Woke, bool Ended) r;
+            using (var hold = new PumpHold(d => ReferenceEquals(d, dev)))
+            {
+                pump.Start();
+                r = hold.DisposeHeld(dev, pump);
+            }
+            // The pump's handle is open only while its value still names the
+            // same event as the kept one.
+            bool closed = dup != IntPtr.Zero && !pump.IsAlive
+                          && !(GetHandleInformation(ev, out _) && CompareObjectHandles(ev, dup));
+            if (dup != IntPtr.Zero) CloseHandle(dup);
+            if (r.Woke == PumpHold.WaitObject0) woken++;
+            if (r.Ended && closed) ended++;
+            if ((r.Woke != PumpHold.WaitObject0 || !r.Ended || !closed) && detail.Length == 0)
+                detail = $"device {i}: the wait after Dispose returned 0x{r.Woke:X}, Dispose returned and the pump ended {r.Ended}, event closed {closed}";
+        }
+        Check($"Dispose's signal ends the input pump's wait for a frame, and the pump ends and closes its event ({Devices} devices, each held before its wait until Dispose signaled)",
+              woken == Devices && ended == Devices, detail.Length > 0 ? detail : $"{woken} woken by the signal, {ended} ended");
     }
 
-    /// <summary>Dispose times of <paramref name="count"/> devices that run at
-    /// once. This thread makes each in turn with <paramref name="make"/> and
-    /// starts a thread of its own for it, which sleeps
-    /// <paramref name="fromMs"/> plus a random part of
-    /// <paramref name="spanMs"/> from that moment, times the device's
-    /// Dispose, and then runs <paramref name="after"/>. The devices share no
-    /// lock, event or section, so each Dispose waits for its own input pump
-    /// alone, as when the devices ran one after another, and the whole run
-    /// takes one offset instead of the sum of them. NaN for a Dispose that
-    /// threw or did not return within the hang bound.</summary>
-    static double[] DisposeTogether(int count, Random rnd, int fromMs, int spanMs, Func<int, IDisposable> make, Action<int>? after = null)
+    /// <summary>Holds the input pump of the device <paramref name="mine"/>
+    /// picks right before its first wait for a frame, through the device's
+    /// test hooks, while Dispose runs. Dispose sets _stop and signals the
+    /// pump's event in one hold of the lifetime lock, so once this thread has
+    /// seen _stop and taken that lock the signal is out, and the pump is let
+    /// go into its wait. A Dispose that signals ends that wait at once
+    /// (WAIT_OBJECT_0), and one that does not leaves it to run out its 500
+    /// ms (WAIT_TIMEOUT). The order is fixed, so no machine load moves the
+    /// outcome, and no clock is read.</summary>
+    sealed class PumpHold : IDisposable
     {
-        var ms = new double[count];
-        Array.Fill(ms, double.NaN);
-        var threads = new Thread[count];
-        for (int i = 0; i < count; i++)
+        public const uint WaitObject0 = 0, NoWait = uint.MaxValue;
+        readonly ManualResetEventSlim _atWait = new(), _go = new();
+        int _held;
+        uint _woke = NoWait;
+
+        public PumpHold(Func<UsbipEmulatedDevice, bool> mine)
         {
-            int n = i;
-            var dev = make(n);
-            int offset = fromMs + rnd.Next(spanMs);
-            var start = Stopwatch.StartNew();
-            threads[n] = new Thread(() =>
+            UsbipEmulatedDevice.BeforeInputWait = d =>
             {
-                int left = offset - (int)start.ElapsedMilliseconds;
-                if (left > 0) Thread.Sleep(left);
-                var sw = Stopwatch.StartNew();
-                try { dev.Dispose(); ms[n] = sw.Elapsed.TotalMilliseconds; }
-                catch (Exception) { }
-                after?.Invoke(n);
-            }) { IsBackground = true, Name = "S43 dispose " + n };
-            threads[n].Start();
+                if (!mine(d) || Interlocked.Exchange(ref _held, 1) != 0) return;
+                _atWait.Set();
+                _go.Wait(Hang);
+            };
+            UsbipEmulatedDevice.AfterInputWait = (d, result) =>
+            {
+                if (mine(d) && Volatile.Read(ref _held) == 1) Interlocked.CompareExchange(ref _woke, result, NoWait);
+            };
         }
-        foreach (var th in threads) th.Join(Hang);
-        // A copy, so a Dispose that returns after its bound cannot change
-        // what the caller sorts.
-        return (double[])ms.Clone();
+
+        /// <summary>Disposes <paramref name="dev"/> once its pump is held,
+        /// and lets the pump go once Dispose has signaled. Returns the result
+        /// of the pump's next wait, and whether the pump was held, Dispose
+        /// returned without throwing and the pump ended, each within the hang
+        /// bound.</summary>
+        public (uint Woke, bool Ended) DisposeHeld(UsbipEmulatedDevice dev, Thread pump)
+        {
+            bool held = _atWait.Wait(Hang);
+            // A signal left on the event from before would end the wait as
+            // Dispose's does. The event resets when a wait takes the signal,
+            // so a wait that finds it set clears it.
+            WaitForSingleObject((IntPtr)typeof(UsbipEmulatedDevice).GetField("_inputWaitEvent", Private)!.GetValue(dev)!, 0);
+            bool threw = false;
+            var disposer = new Thread(() => { try { dev.Dispose(); } catch (Exception) { threw = true; } })
+            {
+                IsBackground = true,
+                Name = "S43 Dispose at the pump's wait",
+            };
+            disposer.Start();
+            bool stopped = WaitUntil(() => dev.IsDisposed, Hang);
+            lock (typeof(UsbipEmulatedDevice).GetField("_lifetimeLock", Private)!.GetValue(dev)!) { }
+            _go.Set();
+            bool ended = held & stopped & disposer.Join(Hang) & pump.Join(Hang);
+            return (Volatile.Read(ref _woke), ended && !threw);
+        }
+
+        /// <summary>Clears the hooks and lets a held pump go.</summary>
+        public void Dispose()
+        {
+            UsbipEmulatedDevice.BeforeInputWait = null;
+            UsbipEmulatedDevice.AfterInputWait = null;
+            _go.Set();
+        }
     }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
     static extern IntPtr CreateEventW(IntPtr attributes, bool manualReset, bool initialState, string? name);
@@ -1839,7 +1861,6 @@ internal static partial class Program
         Console.WriteLine("\n-- Teardown racing Dispose --");
         var gc = ctx.GetProfile("gamecube-adapter")!.Inner;
         var hidLockField = typeof(UsbipEmulatedDevice).GetField("_hidLock", Private)!;
-        var connectionField = typeof(UsbipEmulatedDevice).GetField("_connection", Private)!;
         // v2.0.0: the host poll clock is a DeviceClock, which owns its thread.
         var clockField = typeof(UsbipEmulatedDevice).GetField("_protocolClock", Private)!;
         var connections = (System.Collections.ICollection)typeof(UsbipServer).GetField("_connections", Private)!.GetValue(server)!;
@@ -2083,15 +2104,22 @@ internal static partial class Program
             NoConnections();
         }
 
-        // The reader thread's detach held between its claim on the device and
-        // its reset while Dispose runs on another thread, and the sections
-        // unmapped once Dispose returns, as the controller does.
+        // The reader thread's detach held at the HID lock, before it clears
+        // the import's reads and lets the device go, while Dispose runs on
+        // another thread, and the sections unmapped once Dispose returns, as
+        // the controller does. The detach keeps the device claimed until its
+        // clear is done, so the wait is for the reader to block on the lock.
         const int Held = 5;
         int heldOk = 0;
         string heldDetail = "";
         for (int i = 0; i < Held; i++)
         {
+            // The connection's reader thread, which runs the detach as it ends.
+            Thread? reader = null;
+            UsbipServer.BeforeImportReply = _ => Volatile.Write(ref reader, Thread.CurrentThread);
             var (device, cl) = Attach(server, gc);
+            UsbipServer.BeforeImportReply = null;
+            var conn = Volatile.Read(ref reader);
             object hidLock = hidLockField.GetValue(device)!;
             var disposer = new Thread(() => device.Dispose()) { IsBackground = true, Name = "probe-dispose" };
             bool detaching, disposed;
@@ -2099,7 +2127,8 @@ internal static partial class Program
             try
             {
                 cl.Dispose();   // the host closes the connection
-                detaching = WaitUntil(() => connectionField.GetValue(device) == null, Hang);
+                detaching = conn != null
+                    && WaitUntil(() => (conn.ThreadState & System.Threading.ThreadState.WaitSleepJoin) != 0, Hang);
                 server.Unregister(device);
                 disposer.Start();
                 disposed = disposer.Join(15_000);
