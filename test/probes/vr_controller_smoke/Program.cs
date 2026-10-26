@@ -1,8 +1,15 @@
 // Virtual VR controller smoke test (issue #32).
 //
-// Two phases:
+// Three phases:
 //
-//   HEADLESS PROTOCOL (always runs, no VR software needed): creates the
+//   OFFLINE (always runs first, and alone with --offline, with no
+//   elevation): HMVRController on channels of this process's own memory.
+//   Submits from several threads at once never write a frame mixed from
+//   two, submits racing Dispose return or are refused with
+//   ObjectDisposedException and never write once Dispose has returned, and
+//   nothing reads the channel Dispose released (Offline.cs).
+//
+//   HEADLESS PROTOCOL (no VR software needed): creates the
 //   HMVRController consumer channel, then plays the DRIVER's role against
 //   it by opening the section/events by name exactly as
 //   driver/openvr/src/vr_transport.cpp does: validates magic/abi/pid CAS,
@@ -41,8 +48,8 @@
 // steamvr_room_setup never launches as a focus-stealing scene app, and
 // the dashboard disabled for the same reason.
 //
-// Requires admin (Global\ section creation + HKLM). Exit 0 PASS/SKIP,
-// 1 FAIL.
+// The phases after the offline one require admin (Global\ section
+// creation + HKLM). Exit 0 PASS/SKIP, 1 FAIL.
 
 using System;
 using System.Diagnostics;
@@ -61,7 +68,7 @@ internal static class Program
 {
     static int s_total, s_failures;
 
-    static void Check(string name, bool cond, string detail = "")
+    internal static void Check(string name, bool cond, string detail = "")
     {
         s_total++;
         if (!cond) s_failures++;
@@ -310,13 +317,22 @@ internal static class Program
 
         Console.WriteLine("=== Virtual VR controller smoke (issue #32) ===");
 
+        // Offline first, on channels of this process's own memory, with or
+        // without elevation.
+        Offline.Run();
+        if (args.Length >= 1 && args[0] == "--offline")
+        {
+            Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed (offline) ===");
+            return s_failures == 0 ? 0 : 1;
+        }
+
         using (var identity = System.Security.Principal.WindowsIdentity.GetCurrent())
         {
             var principal = new System.Security.Principal.WindowsPrincipal(identity);
             if (!principal.IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator))
             {
-                Console.WriteLine("  [SKIP] all phases (requires elevation)");
-                return 0;
+                Console.WriteLine("  [SKIP] the section and live phases (require elevation)");
+                return s_failures == 0 ? 0 : 1;
             }
         }
 

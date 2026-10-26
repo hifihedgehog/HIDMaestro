@@ -1758,6 +1758,10 @@ function Scenario-Switch2-Pro {
 # sentinel that stopped HMButton.Share aliasing onto PS. Offline, no
 # device.
 # S50: the virtual VR controller subsystem (issues #32, #51, #55).
+# An offline phase runs first, on channels of the probe's own memory:
+# submits from several threads never write a mixed frame, submits racing
+# Dispose return or are refused with ObjectDisposedException, and nothing
+# reads the channel Dispose released.
 # Phase 1 always runs and pins the C# and C++ halves of the HIDMaestroVR
 # IPC protocol to each other byte-for-byte, with the probe playing the
 # driver's role, holds a HapticReceived handler past Dispose's join of the
