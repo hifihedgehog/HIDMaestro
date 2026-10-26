@@ -21,6 +21,10 @@
  *   - and, as the positive control in the same scenario, a read parked
  *     before a frame carries it, and the next frame reaches the read left
  *     waiting.
+ * A frame cached with no read parked must reach the read that comes after
+ * it across the SeqNo wrap, a program's end (OwnerGone, before the release
+ * frames it queues) and a recycle, and a next program's frame must go out
+ * when it repeats the SeqNo of the last frame the worker read, each once.
  * The companion's scenarios also run several readers, each a handle of its
  * own, and check that each new frame reaches every reader once and that no
  * reader gets a frame twice. The companion's 8 ms timer runs only where a
@@ -379,21 +383,26 @@ static void TwoFramesBeforePark(PlanProfile *p)
 
 /* wrap-before-park: frame A carries SeqNo 0xFFFFFFFE, and B, the frame
  * past the wrap, is cached between the read's look and its park. B's SeqNo
- * is not above A's, so v2.0.3's greater-than test, which a read coming
- * after a frame keeps, would not give it to this read. This read was
- * waiting when B came, as a read parked a moment earlier was, and that
- * read gets B from the worker in every driver. -late is the control: the
- * read comes after B, and parks until the next frame, as at 533ca4a4. */
-static void WrapBeforePark(PlanProfile *p, int late)
+ * is not above A's, so v2.0.3's greater-than test would not give it to
+ * this read. This read was waiting when B came, as a read parked a moment
+ * earlier was, and that read gets B from the worker in every driver.
+ * wrap-late-read: the read comes after B. B comes after A in serial number
+ * arithmetic (RFC 1982), and the read takes it from the cache. Through
+ * e9a6e92d, as at 533ca4a4, the greater-than test parked it until the next
+ * frame, for as long as the program paused. -legacy: a program before
+ * 2.1.0, whose frame after 0xFFFFFFFE is SeqNo 0. */
+static void WrapBeforePark(PlanProfile *p, int late, int legacy)
 {
     Ctl c;
     char label[160];
-    snprintf(label, sizeof(label), "%s wrap-%s", p->id, late ? "late-read" : "before-park");
-    StreamBegin("wake/%s/wrap-%s", p->id, late ? "late-read" : "before-park");
+    int saved = g_sdkSignal;
+    if (legacy) g_sdkSignal = 0;
+    snprintf(label, sizeof(label), "%s wrap-%s%s", p->id, late ? "late-read" : "before-park", legacy ? "-legacy" : "");
+    StreamBegin("wake/%s/wrap-%s%s", p->id, late ? "late-read" : "before-park", legacy ? "-legacy" : "");
     g_w = &c;
     g_wHooks = 0;
     g_readCount = 0;
-    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) { Check(label, "the device add succeeds", 0); return; }
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) { Check(label, "the device add succeeds", 0); g_sdkSignal = saved; return; }
     c.sdk.seq = 0xFFFFFFFCu;
     Read(&c);
     Write(&c, 0x10);
@@ -405,7 +414,10 @@ static void WrapBeforePark(PlanProfile *p, int late)
         RunWorker(&c);
         r = Read(&c);
         Settle(CtlThread(&c, 0));
-        Check(label, "the read that comes after frame B, past the wrap, waits for the next frame", !r->completed && Parked(&c) == 1);
+        Check(label, legacy ? "the read that comes after frame B, SeqNo 0 past the wrap, carries B"
+                            : "the read that comes after frame B, past the wrap, carries B",
+              Carries(&c, r, 0x40));
+        Check(label, "frame B goes to exactly one read", CarriedBy(&c, 0x40) == 1);
     } else {
         g_wBase = 0x40;
         g_forwardHook = HookWriteB;
@@ -417,6 +429,222 @@ static void WrapBeforePark(PlanProfile *p, int late)
     }
     ControlFrame(&c, label, 0x70);
     CtlStop(&c);
+    g_sdkSignal = saved;
+}
+
+/* ------------------------------------------------------------------ */
+/*  A program's end and a program's start                              */
+/* ------------------------------------------------------------------ */
+
+/* As StartHid, with the SDK's objects of flags: SDK_SECTIONS | SDK_OUTPUT
+ * is a program without an owner pipe the driver can watch. */
+static int StartHidWith(Ctl *c, PlanProfile *p, const char *name, const char *label, int flags)
+{
+    StreamBegin("wake/%s/%s", p->id, name);
+    g_w = c;
+    g_wHooks = 0;
+    g_readCount = 0;
+    if (!CtlStart(c, p, 0, flags, 0)) { Check(label, "the device add succeeds", 0); return 0; }
+    Read(c);
+    Write(c, 0x10);
+    RunWorker(c);
+    Check(label, "control: a read parked before frame A carries A", Carries(c, g_reads[0], 0x10));
+    return 1;
+}
+
+/* The next program's start on the index, up to its first frame
+ * (SharedMemoryIO.EnsureInputMapping): it zeroes the input section, and
+ * with a pipe it makes its pipe and zeroes the acknowledgement. A program
+ * before 2.1.0 counts from 0, a 2.1.0 one from above the SeqNo left. */
+static void NextProgram(Ctl *c, int legacy, int pipe)
+{
+    WCHAR n[96];
+    uint32_t left;
+    memcpy(&left, c->sdk.input->buf, 4);
+    memset(c->sdk.input->buf, 0, c->sdk.input->size);
+    if (pipe) {
+        memset(c->sdk.ack->buf, 0, c->sdk.ack->size);
+        swprintf_s(n, ARRAYSIZE(n), L"\\\\.\\pipe\\HIDMaestroOwner%d", c->index);
+        c->sdk.pipe = PipeServerNew(n, 0x2F44);
+    }
+    if (legacy) {
+        c->sdk.signal = NULL;
+        c->sdk.seq = 0;
+    } else {
+        c->sdk.seq = (left & 1) ? left + 1 : left;
+    }
+}
+
+/* The worker's Phase 2 wait puts the stop event first: a foreign stop
+ * (another program's sweep) sets it with TearingDown clear, and the worker
+ * recycles its handles. */
+static void ForeignStop(Ctl *c)
+{
+    HmObj *o = ObjFromHandle(CtlThread(c, 0)->waitHandles[0]);
+    if (!o || o->kind != HK_EVENT || !((HmEvent *)o)->manual) HmFail("wake: no stop event");
+    EventSet((HmEvent *)o);
+}
+
+/* A wakeup with no new frame: the input event set again, as a signal left
+ * over from a frame the worker read already. */
+static void StaleWake(Ctl *c)
+{
+    EventSet(c->sdk.inputEv);
+    Settle(CtlThread(c, 0));
+}
+
+/* wrap-after-ownergone: the frames of a program reach 0x80000002, past
+ * half the SeqNo range, and its pipe closes. The next program, 2.1.0,
+ * counts from above it, and its first frame, 0x80000004, is cached with no
+ * read parked. OwnerGone forgot the SeqNo last delivered, so a read that
+ * comes takes that frame: nothing delivered since the reset is no SeqNo,
+ * and no SeqNo comes after it. The control for the serial test's reset
+ * points: a frame compared with 0 as a serial number would wait for the
+ * next frame from 0x80000000 on. */
+static void WrapAfterOwnerGone(PlanProfile *p)
+{
+    Ctl c;
+    char label[160];
+    snprintf(label, sizeof(label), "%s wrap-after-ownergone", p->id);
+    StreamBegin("wake/%s/wrap-after-ownergone", p->id);
+    g_w = &c;
+    g_wHooks = 0;
+    g_readCount = 0;
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) { Check(label, "the device add succeeds", 0); return; }
+    c.sdk.seq = 0x80000000u;
+    Read(&c);
+    Write(&c, 0x10);
+    RunWorker(&c);
+    Check(label, "control: a read parked before frame A carries A", Carries(&c, g_reads[0], 0x10));
+    PipeServerClose(c.sdk.pipe);
+    Settle(CtlThread(&c, 0));
+    NextProgram(&c, 0, 1);
+    Write(&c, 0x40);
+    RunWorker(&c);
+    HmRequest *r = Read(&c);
+    Settle(CtlThread(&c, 0));
+    Check(label, "the read that comes after the next program's first frame, 0x80000004, carries it", Carries(&c, r, 0x40));
+    Check(label, "that frame goes to exactly one read", CarriedBy(&c, 0x40) == 1);
+    ControlFrame(&c, label, 0x70);
+    CtlStop(&c);
+}
+
+/* last-frame-at-ownergone: frame B, the program's last, is cached with no
+ * read parked, as when HID class is between two READ_REPORTs, and the
+ * program's pipe closes before the next READ_REPORT. OwnerGone ran its
+ * reset over B through e9a6e92d, as at 533ca4a4: B never went out, and
+ * readers kept A's state, a button B let go of held, until a next program
+ * sent. B is the program's own frame, read while its pipe was open, and the
+ * read that comes after OwnerGone carries it. -release: a keyboard's
+ * release frame waits in the acknowledgement, and goes after B, the last
+ * report. The next read parks, and a wakeup with no new frame sends
+ * nothing again. */
+static void LastFrameAtOwnerGone(PlanProfile *p, int release)
+{
+    Ctl c;
+    char label[160];
+    snprintf(label, sizeof(label), "%s last-frame-at-ownergone%s", p->id, release ? "-release" : "");
+    if (!StartHidWith(&c, p, release ? "last-frame-at-ownergone-release" : "last-frame-at-ownergone", label, SDK_ALL)) return;
+    Write(&c, 0x40);
+    RunWorker(&c);
+    Check(label, "control: frame B waits in the cache with no read parked", Parked(&c) == 0 && CarriedBy(&c, 0x40) == 0);
+    if (release) QueueRelease(&c);
+    PipeServerClose(c.sdk.pipe);
+    Settle(CtlThread(&c, 0));
+    HmRequest *r = Read(&c);
+    Check(label, "the read that comes after OwnerGone carries B, the program's last frame", Carries(&c, r, 0x40));
+    if (release) {
+        HmRequest *rel = Read(&c);
+        Check(label, "the release frame goes after B", CarriesRelease(rel));
+    }
+    HmRequest *next = Read(&c);
+    StaleWake(&c);
+    Check(label, "frame B goes to exactly one read, and the read after waits", CarriedBy(&c, 0x40) == 1 && !next->completed);
+    CtlStop(&c);
+}
+
+/* last-frame-at-recycle: frame B is cached with no read parked, and the
+ * worker recycles its handles: after a foreign stop, or after eight idle
+ * timeouts (-idle). The recycle reset the delivered gate over B through
+ * e9a6e92d, as at 533ca4a4, and a read that came after it waited for the
+ * next frame. The read after the recycle carries B, and the wakeup the
+ * recycled worker reads on sends B no second time. */
+static void LastFrameAtRecycle(PlanProfile *p, int idle)
+{
+    Ctl c;
+    char label[160];
+    snprintf(label, sizeof(label), "%s last-frame-at-recycle%s", p->id, idle ? "-idle" : "");
+    if (!StartHidWith(&c, p, idle ? "last-frame-at-recycle-idle" : "last-frame-at-recycle", label, SDK_ALL)) return;
+    Write(&c, 0x40);
+    RunWorker(&c);
+    Check(label, "control: frame B waits in the cache with no read parked", Parked(&c) == 0 && CarriedBy(&c, 0x40) == 0);
+    if (idle) {
+        for (int i = 0; i < 8; i++) ThreadResume(CtlThread(&c, 0));
+    } else {
+        ForeignStop(&c);
+        Settle(CtlThread(&c, 0));
+    }
+    HmRequest *r = Read(&c);
+    Check(label, "the read that comes after the recycle carries B", Carries(&c, r, 0x40));
+    HmRequest *next = Read(&c);
+    StaleWake(&c);
+    Check(label, "frame B goes to exactly one read, and the read after waits", CarriedBy(&c, 0x40) == 1 && !next->completed);
+    ControlFrame(&c, label, 0x70);
+    CtlStop(&c);
+}
+
+/* restart-same-seqno: a program before 2.1.0 with no pipe the driver
+ * watches sends frame A, SeqNo 2, which a read carries. It ends and a next
+ * one starts, zeroes the section and sends its first frame B, SeqNo 2
+ * again, with other data. Through e9a6e92d, as at 533ca4a4, the worker took
+ * B for A, the last frame it read, and sent nothing.
+ *   parked: a read waits when B comes.
+ *   late: no read waits, and one comes after B. With the SeqNo last
+ *   delivered 2, the delivered gate parked it as well.
+ *   zero-read: the worker reads the zeroed section on a wakeup before B,
+ *   and forgets the SeqNo as 533ca4a4 did, so B is read, and a read that
+ *   comes after B parked beside it under the delivered gate.
+ *   ownergone: the program has a pipe, and the next one starts and sends
+ *   B before the worker handled the pipe's close. The worker reads B first,
+ *   then runs OwnerGone, which forgot the SeqNo after B was skipped.
+ * The read after B waits, and a wakeup with no new frame sends nothing. */
+enum { RESTART_PARKED, RESTART_LATE, RESTART_ZERO_READ, RESTART_OWNERGONE };
+static void RestartSameSeqNo(PlanProfile *p, int mode)
+{
+    static const char *names[] = { "parked", "late", "zero-read", "ownergone" };
+    Ctl c;
+    char label[160];
+    int saved = g_sdkSignal;
+    g_sdkSignal = 0;
+    snprintf(label, sizeof(label), "%s restart-same-seqno-%s", p->id, names[mode]);
+    char name[64];
+    snprintf(name, sizeof(name), "restart-same-seqno-%s", names[mode]);
+    int pipe = mode == RESTART_OWNERGONE;
+    if (StartHidWith(&c, p, name, label, pipe ? SDK_ALL : SDK_SECTIONS | SDK_OUTPUT)) {
+        uint32_t seqA;
+        memcpy(&seqA, c.sdk.input->buf, 4);
+        Check(label, "control: frame A carries SeqNo 2", seqA == 2);
+        if (mode == RESTART_PARKED || mode == RESTART_OWNERGONE) Read(&c);
+        if (pipe) PipeServerClose(c.sdk.pipe);
+        NextProgram(&c, 1, pipe);
+        if (mode == RESTART_ZERO_READ) StaleWake(&c);
+        uint8_t d[64];
+        for (int i = 0; i < 64; i++) d[i] = (uint8_t)(0x40 + i);
+        SdkWriteFrame(&c.sdk, d, 63, NULL, NULL, 0);
+        uint32_t seqB;
+        memcpy(&seqB, c.sdk.input->buf, 4);
+        Check(label, "control: frame B carries SeqNo 2 again", seqB == 2);
+        Settle(CtlThread(&c, 0));
+        HmRequest *r = mode == RESTART_PARKED || mode == RESTART_OWNERGONE ? g_reads[1] : Read(&c);
+        Check(label, mode == RESTART_PARKED || mode == RESTART_OWNERGONE ? "the read waiting when frame B came carries B"
+                                                                         : "the read that comes after frame B carries B",
+              Carries(&c, r, 0x40));
+        HmRequest *next = Read(&c);
+        StaleWake(&c);
+        Check(label, "frame B goes to exactly one read, and the read after waits", CarriedBy(&c, 0x40) == 1 && !next->completed);
+        CtlStop(&c);
+    }
+    g_sdkSignal = saved;
 }
 
 /* Completions reach HID class in the order the frames were taken: its
@@ -997,8 +1225,15 @@ int CaseWake(void)
     ParkedReadLosesToLateRead(ds);
     ReadPutBackBesideFrame(ds);
     TwoFramesBeforePark(ds);
-    WrapBeforePark(ds, 0);
-    WrapBeforePark(ds, 1);
+    WrapBeforePark(ds, 0, 0);
+    WrapBeforePark(ds, 1, 0);
+    WrapBeforePark(ds, 1, 1);
+    WrapAfterOwnerGone(ds);
+    LastFrameAtOwnerGone(ds, 0);
+    LastFrameAtOwnerGone(ds, 1);
+    LastFrameAtRecycle(ds, 0);
+    LastFrameAtRecycle(ds, 1);
+    for (int m = RESTART_PARKED; m <= RESTART_OWNERGONE; m++) RestartSameSeqNo(ds, m);
     OlderAfterNewer(ds);
     SecondLookOlderAfterNewer(ds);
     DoorbellBeforePark(xusb, 1);
