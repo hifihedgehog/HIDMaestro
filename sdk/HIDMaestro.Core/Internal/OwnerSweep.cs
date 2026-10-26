@@ -448,7 +448,10 @@ internal static class OwnerSweep
     /// removal <paramref name="retry"/> holds is the retry's to ask again:
     /// the sweep leaves it, and its record stays
     /// (<paramref name="keepRecords"/>). A group whose claims a running
-    /// program holds now is skipped. pnp_notify_check's part 13 runs it on
+    /// program holds now is skipped, and its record stays too: that
+    /// program's create may be refused the device, which then has to stay a
+    /// dead owner's to the next sweep: without it the device reads as no
+    /// one's, which no sweep removes. pnp_notify_check's part 13 runs it on
     /// groups and claims of its own.</summary>
     private static List<OwnerCensus.DeviceGroup> ChooseTargets(List<OwnerCensus.DeviceGroup> candidates, RefusalRetry retry,
         GroupClaims claims, HashSet<string> keepRecords)
@@ -462,8 +465,13 @@ internal static class OwnerSweep
                 if (group.Record != null) keepRecords.Add(group.Record.OwnerId);
                 continue;
             }
-            if (claims.TryHold(group)) targets.Add(group);
-            else DeviceOrchestrator.LogDiag($"    reclaim skipped {group.Key} index {group.ControllerIndex}: a running program holds it now");
+            if (claims.TryHold(group))
+            {
+                targets.Add(group);
+                continue;
+            }
+            DeviceOrchestrator.LogDiag($"    reclaim skipped {group.Key} index {group.ControllerIndex}: a running program holds it now");
+            if (group.Record != null) keepRecords.Add(group.Record.OwnerId);
         }
         return targets;
     }
