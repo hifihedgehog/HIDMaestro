@@ -76,6 +76,7 @@ internal static class Program
             ("builder", Builder.Run),
             ("mutate", Mutate.Run),
             ("edits", Edits.Run),
+            ("copies", Copies.Run),
             ("tool", ProfileCheckTool.Run),
         };
         int fail = 0;
