@@ -232,16 +232,30 @@ extern int g_locksHeld;
 /*  WDF objects                                                        */
 /* ------------------------------------------------------------------ */
 
-enum HmWdfKind { WK_DRIVER = 0x100, WK_DEVICE, WK_QUEUE, WK_REQUEST, WK_MEMORY, WK_LOCK, WK_KEY, WK_TIMER, WK_INIT };
+enum HmWdfKind { WK_DRIVER = 0x100, WK_DEVICE, WK_QUEUE, WK_REQUEST, WK_MEMORY, WK_LOCK, WK_KEY, WK_TIMER, WK_INIT, WK_FILE };
 
 typedef struct HmRequest HmRequest;
 typedef struct HmDevice HmDevice;
+
+/* A WDFFILEOBJECT: one handle a caller opened on the device. The framework
+ * makes one for every create, with the context the driver's
+ * WdfDeviceInitSetFileObjectConfig names, even without file callbacks
+ * (Windows-Driver-Frameworks irphandlers/general/fxpkggeneral.cpp,
+ * FxPkgGeneral::OnCreate, "to allow WdfRequestGetFileObject"). */
+typedef struct HmFile {
+    int        kind;
+    HmDevice  *dev;
+    void      *context;
+    int        closed;
+    struct HmFile *next;     /* the device's files */
+} HmFile;
 
 typedef struct HmQueue {
     int        kind;
     HmDevice  *dev;
     WDF_IO_QUEUE_DISPATCH_TYPE type;
     PFN_WDF_IO_QUEUE_IO_DEVICE_CONTROL ioctl;
+    PFN_WDF_IO_QUEUE_IO_CANCELED_ON_QUEUE canceledOnQueue;
     HmRequest *head, *tail;
     int        count;
     int        powerManaged;  /* as the framework decides it (fxioqueue.cpp:397-414) */
@@ -268,10 +282,15 @@ struct HmRequest {
     int        noAccess;     /* a write request: outLen is the report id, out a no-access page */
     ULONG_PTR  info;
     int        completed;
+    NTSTATUS   status;       /* the driver's completion status */
+    uint32_t   doneNo;       /* the order of its completion among all */
     int        refused;      /* a purged queue failed it before the driver saw it */
     uint32_t   serial;
     char       tag[24];
     HmMemory   outMem;
+    HmFile    *file;         /* the handle it came through, NULL for none */
+    HmDevice  *dev;          /* the device it was sent to */
+    void      *context;      /* WdfDeviceInitSetRequestAttributes' context */
 };
 
 typedef struct HmTimer {
@@ -361,6 +380,18 @@ struct HmDevice {
     int        stopped;       /* a rebalance stop, not yet restarted */
     int        surprised;     /* IRP_MN_SURPRISE_REMOVAL processed */
     int        smioStarted;   /* the self-managed I/O machine left Created */
+    /* WdfDeviceInitSetFileObjectConfig: the file objects' context type and
+     * the close and cleanup callbacks. */
+    PCWDF_OBJECT_CONTEXT_TYPE_INFO fileTypeInfo;
+    /* WdfDeviceInitSetRequestAttributes: every request's context type. */
+    PCWDF_OBJECT_CONTEXT_TYPE_INFO requestTypeInfo;
+    /* WdfFileObjectCanBeOptional in the device's file object class: it
+     * takes requests that come with no file object. */
+    int        fileOptional;
+    PFN_WDF_FILE_CLOSE   fileClose;
+    PFN_WDF_FILE_CLEANUP fileCleanup;
+    HmFile    *files;
+    HmFile    *defaultFile;   /* the handle Ioctl's requests come through */
 };
 
 void      WdfInit(void);
@@ -413,6 +444,30 @@ void      DeviceRemove(HmDevice *dev);
  * queue. The output buffer starts as outInit (outLen bytes) or zeros. */
 HmRequest *Ioctl(HmDevice *dev, const char *tag, ULONG code,
                  const void *in, size_t inLen, size_t outLen, const void *outInit, size_t outInitLen);
+/* A handle a caller opens on the device, and a request through it. Ioctl's
+ * requests all come through one handle of the device's, opened at its
+ * first request. FileClose is the handle's close: IRP_MJ_CLEANUP, which
+ * runs EvtFileCleanup and then cancels the handle's requests waiting in
+ * any queue, each through the queue's EvtIoCanceledOnQueue
+ * (fxpkggeneral.cpp OnCleanup, fxioqueue.cpp FlushByFileObject and
+ * CancelForQueue), then IRP_MJ_CLOSE, which runs EvtFileClose. A device's
+ * removal closes the handles still open after its queues are purged. */
+HmFile    *FileOpen(HmDevice *dev);
+/* IOCTL_XUSB_WAIT_FOR_INPUT as a reader sends it: a WaitRequest0102 of four
+ * bytes (version 0x0102, user index 0, flags 0), which xusb22 requires
+ * (DispatchWaitForInput), and a 29-byte output buffer unless outLen says
+ * otherwise. f NULL is Ioctl's handle. */
+HmRequest *XusbWait(HmDevice *dev, HmFile *f, const char *tag, size_t outLen);
+void       FileClose(HmFile *f);
+HmRequest *IoctlFile(HmDevice *dev, HmFile *f, const char *tag, ULONG code,
+                     const void *in, size_t inLen, size_t outLen, const void *outInit, size_t outInitLen);
+/* A request with no file object, as a kernel-mode client's comes under
+ * UmdfKernelModeClientPolicy and UmdfFileObjectPolicy =
+ * AllowNullAndUnknownFileObjects (hidmaestro_xusb.inf): the framework
+ * presents it, and WdfRequestGetFileObject gives NULL (fxrequest.cpp,
+ * GetFileObject). No handle's close cancels it. */
+HmRequest *IoctlNoFile(HmDevice *dev, const char *tag, ULONG code,
+                       const void *in, size_t inLen, size_t outLen);
 int       QueueDepth(HmQueue *q);
 /* Set by a script run: completions record the whole output buffer rather
  * than its bytes up to the information. */
@@ -570,9 +625,33 @@ extern int (*g_waitAnswerHook)(HmThread *t, DWORD result);
 /* Run once at the next SRW lock a driver thread takes, before it is taken
  * (hm_win32.c). */
 extern void (*g_srwHook)(void);
+/* The same at the next lock of either kind, an SRW lock or a wait lock
+ * (hm_win32.c, hm_wdf.c): 533ca4a4 takes InputLock as a wait lock. */
+extern void (*g_lockHook)(void);
 /* Run once when a driver thread next releases an SRW lock or a wait lock
  * and holds no other, after the release (hm_win32.c, hm_wdf.c). */
 extern void (*g_lockReleaseHook)(void);
+/* Run once right after the next LeaveCriticalSection that frees its
+ * section, on any thread (hm_win32.c). */
+extern void (*g_csLeaveHook)(void);
+/* Run once at the next MapViewOfFile, before it maps (hm_win32.c). */
+extern void (*g_mapHook)(void);
+/* Run once right after the next MemoryBarrier a driver makes (hm_fi.h,
+ * hm_win32.c HmMemoryBarrier). */
+extern void (*g_barrierHook)(void);
+/* Runs fn at once as another thread, beside the one running: a request
+ * another thread sends while this one is inside the driver. Where it finds
+ * an SRW lock or a critical section the running thread holds, it waits, as
+ * a real thread would, and the running thread goes on. The release of that
+ * lock resumes it. One at a time, and none may still wait at a stream's
+ * end (hm_win32.c). */
+void RunBeside(void (*fn)(void));
+/* The thread beside started and has not ended. */
+int  BesideWaiting(void);
+/* The same on the scenario's fiber, in a request's dispatch: what another
+ * thread does while the dispatching one is between its lock and the rest
+ * of its handler. */
+extern void (*g_dispatchReleaseHook)(void);
 /* Run once at the next zero-timeout poll a driver thread makes, before it
  * is answered (hm_win32.c FiberWait). */
 extern void (*g_pollHook)(void);
@@ -584,6 +663,15 @@ extern int (*g_exchangeHook)(volatile LONG *target, LONG value);
  * with a GIP slice, before it decides on the doorbell: what the
  * companion's IOCTL thread does in that moment. */
 extern void (*g_sdkParkedHook)(void);
+/* Run once at the next WdfRequestForwardToIoQueue, before the request
+ * enters its queue, and at the next WdfIoQueueRetrieveNextRequest or
+ * WdfIoQueueRetrieveRequestByFileObject, before it takes a request, on
+ * whichever thread makes the call (hm_wdf.c): what another thread does in
+ * that moment (hm_case_wake.c). */
+extern void (*g_forwardHook)(void);
+extern void (*g_retrieveHook)(void);
+/* The same at the next WdfRequestRequeue, before the request goes back. */
+extern void (*g_requeueHook)(void);
 /* The code runs on a driver thread, not on the scenario's fiber. */
 int HmOnDriverThread(void);
 /* FIELD_OFFSET(DEVICE_CONTEXT, TearingDown) in the flavor's driver.h
@@ -648,6 +736,11 @@ void CaseXusbVersion(void);
  * surprise removal, each checked against what the driver holds. Returns
  * the number of checks that failed. */
 int  CaseLifecycle(void);
+/* The --wake mode (hm_case_wake.c): a read or a WAIT_FOR_INPUT that parks
+ * while a frame is published beside it, at each order the hooks above can
+ * place, checked rather than recorded. Returns the number of checks that
+ * failed. */
+int  CaseWake(void);
 /* What the process holds, for the lifecycle checks: one entry per handle to
  * a named object (a pipe client by its server's name) and per mapped view
  * of a section, written to out. Returns the count. */

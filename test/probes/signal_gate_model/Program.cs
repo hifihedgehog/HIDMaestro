@@ -19,7 +19,9 @@
 //
 // Usage:
 //   SignalGateModel [frames]   the fence and companion variants at frames
-//     (3 unless given), then the delivery check at one frame a program:
+//     (3 unless given), the read path's parks (WakeModel), the companion's
+//     readers (ReadersModel), then the delivery check at one frame a
+//     program:
 //     this driver's rules, then each rule taken away. Exit 0 when every
 //     verdict is the expected one.
 //   SignalGateModel check <frames> <rule> [--shard k/n] [-j N] [--index i]
@@ -35,6 +37,13 @@
 //   SignalGateModel selftest   the outcome checks on hand-built outcomes.
 //   SignalGateModel fences [frames]   round 6's SDK write with a store
 //     buffer, against the worker and the companion (Round6FenceModel).
+//   SignalGateModel wake [frames]   the companion's pump against
+//     WAIT_FOR_INPUT (CompanionModel), the HID read path: a READ_REPORT
+//     that parks while the worker caches a frame or OwnerGone queues a
+//     release frame (WakeModel), then the companion's readers, each a
+//     handle with its own requests (ReadersModel).
+//   SignalGateModel readers   the companion's readers alone (ReadersModel).
+//   SignalGateModel parks   the HID read path's parks alone (WakeModel).
 //   SignalGateModel outcomes <frames> <scenario> [v203]   one driver's
 //     outcomes in a scenario, unpaired.
 using System;
@@ -67,6 +76,17 @@ internal static class Program
         // companion, with the SDK's stores in a store buffer.
         if (args.Length >= 1 && args[0] == "fences")
             return RunFences(args.Length > 1 ? int.Parse(args[1]) : 3) == 0 ? 0 : 1;
+        // wake [frames]: the read path's parks (WakeModel), the companion's
+        // pump against WAIT_FOR_INPUT (CompanionModel) and its readers
+        // (ReadersModel).
+        // readers: the companion's readers alone (ReadersModel).
+        if (args.Length >= 1 && args[0] == "readers")
+            return ReadersModel.Run() == 0 ? 0 : 1;
+        // parks: the HID read path's parks alone (WakeModel).
+        if (args.Length >= 1 && args[0] == "parks")
+            return WakeModel.Run() == 0 ? 0 : 1;
+        if (args.Length >= 1 && args[0] == "wake")
+            return RunCompanion(args.Length > 1 ? int.Parse(args[1]) : 3) + WakeModel.Run() + ReadersModel.Run() == 0 ? 0 : 1;
         // x14 <frames> <rule|c<i>> <scenario index>: the review's order
         // x14-take-at-teardown-rev-late-g in one scenario, paired.
         if (args.Length >= 4 && args[0] == "x14")
@@ -122,17 +142,9 @@ internal static class Program
             if (r.InvariantBroken != null) Console.WriteLine($"         count invariant broken: {r.InvariantBroken}");
         }
         bad += RunFences(frames);
-        foreach (var v in CompanionModel.Variants)
-        {
-            var r = CompanionModel.Explore(v, frames);
-            bool lost = r.Lost != null;
-            bool ok = lost == v.ExpectLost && r.InvariantBroken == null;
-            if (!ok) bad++;
-            Console.WriteLine($"[{(ok ? "PASS" : "FAIL")}] {v.Name}: {r.States} states, {r.Finals} final, " +
-                (lost ? "the last frame left unserved" : "the last frame served") + (v.ExpectLost ? " (expected)" : ""));
-            if (r.Lost != null) Console.WriteLine($"         {r.Lost}");
-            if (r.InvariantBroken != null) Console.WriteLine($"         count invariant broken: {r.InvariantBroken}");
-        }
+        bad += RunCompanion(frames);
+        bad += WakeModel.Run();
+        bad += ReadersModel.Run();
         // The delivery check at one frame a program, in this process: this
         // driver's rules must pass, and each rule taken away must fail. The
         // larger runs shard it across processes (check).
@@ -301,6 +313,27 @@ internal static class Program
         Console.WriteLine($"[NO BREAK] {rules.Name}, {where}: no scenario gives a failing outcome this driver's own rules do not" +
                           (ownFails > 0 ? $" ({ownFails} scenario(s) where this driver's own rules fail as well)" : "") + $". {totals}");
         return 1;
+    }
+
+    // CompanionModel's variants: the last frame served or not, and a frame
+    // served twice or not, each as expected.
+    static int RunCompanion(int frames)
+    {
+        int bad = 0;
+        foreach (var v in CompanionModel.Variants)
+        {
+            var r = CompanionModel.Explore(v, frames);
+            bool lost = r.Lost != null, twice = r.Twice != null;
+            bool ok = lost == v.ExpectLost && twice == v.ExpectTwice && r.InvariantBroken == null;
+            if (!ok) bad++;
+            Console.WriteLine($"[{(ok ? "PASS" : "FAIL")}] {v.Name}: {r.States} states, {r.Finals} final, " +
+                (lost ? "the last frame left unserved" : "the last frame served") + (v.ExpectLost ? " (expected)" : "") + ", " +
+                (twice ? "a frame served twice" : "no frame served twice") + (v.ExpectTwice ? " (expected)" : ""));
+            if (r.Lost != null) Console.WriteLine($"         {r.Lost}");
+            if (r.Twice != null && !v.ExpectTwice) Console.WriteLine($"         {r.Twice}");
+            if (r.InvariantBroken != null) Console.WriteLine($"         count invariant broken: {r.InvariantBroken}");
+        }
+        return bad;
     }
 
     // Round6FenceModel's variants: the expected verdicts, and how often the

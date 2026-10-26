@@ -66,3 +66,7 @@
 #define RtlCompareMemory                                    HmRtlCompareMemory
 #undef InterlockedExchange
 #define InterlockedExchange                                 HmInterlockedExchange
+/* A full barrier, then the harness's hook: a point between a driver's
+ * stores where a stream can act (hm_case_wake.c, output-ring-lap). */
+#undef MemoryBarrier
+#define MemoryBarrier                                       HmMemoryBarrier

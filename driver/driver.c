@@ -815,7 +815,6 @@ static VOID AckInputDeliveredLocked(_In_ PDEVICE_CONTEXT ctx, _In_ ULONG seqNo);
 static VOID TryOpenOwnerWatch(_In_ PDEVICE_CONTEXT ctx);
 static VOID CloseOwnerWatch(_In_ PDEVICE_CONTEXT ctx);
 static VOID OwnerGone(_In_ PDEVICE_CONTEXT ctx);
-static VOID DeliverReleaseFrames(_In_ PDEVICE_CONTEXT ctx);
 static HANDLE CreateHostEvent(_In_ BOOL manualReset, _In_ BOOL takeOverNullDacl, _In_ LPCWSTR name);
 static VOID TryCreateDoorbell(_In_ PDEVICE_CONTEXT ctx);
 static VOID TryOpenSignal(_In_ PDEVICE_CONTEXT ctx);
@@ -1064,6 +1063,107 @@ NoteFrameCompletedLocked(_In_ PDEVICE_CONTEXT ctx, _In_ ULONG seqNo)
     ctx->AckPendingSeqNo = seqNo;
 }
 
+/* 2.1.0: a read parked now would get a report: a release frame queued, or
+ * a frame the worker cached that no read has carried. Caller holds
+ * InputLock. */
+static BOOLEAN
+ReportWaitingLocked(_In_ PDEVICE_CONTEXT ctx)
+{
+    return ctx->ReleaseNext < ctx->ReleaseCount || ctx->InputReportPending;
+}
+
+/* 2.1.0: take the report a read carries, the next release frame first (issue
+ * #67), then the pending frame, into report. A frame taken is no longer
+ * pending, moves the delivered gate to its SeqNo and is noted for the
+ * acknowledgement before any completion, so HID class's next READ_REPORT
+ * finds it. The gate moves only when a read takes the frame: moved for
+ * every frame read (perf audit 2026-07-21, I5), it parked a READ_REPORT
+ * that came after a frame no read had taken. FALSE when there is nothing.
+ * Caller holds InputLock. */
+static BOOLEAN
+TakeReportLocked(_In_ PDEVICE_CONTEXT ctx,
+                 _Out_writes_bytes_to_(HIDMAESTRO_MAX_REPORT_SIZE, *size) UCHAR *report,
+                 _Out_ ULONG *size)
+{
+    if (ctx->ReleaseNext < ctx->ReleaseCount) {
+        ULONG i = ctx->ReleaseNext++;
+        *size = ctx->ReleaseSizes[i];
+        RtlCopyMemory(report, ctx->ReleaseFrames[i], *size);
+        return TRUE;
+    }
+    if (ctx->InputReportPending) {
+        *size = ctx->InputReportSize;
+        RtlCopyMemory(report, ctx->InputReport, *size);
+        ctx->InputReportPending = FALSE;
+        ctx->LastDeliveredInputSeqNo = ctx->SharedMemSeqNo;
+        NoteFrameCompletedLocked(ctx, ctx->SharedMemSeqNo);
+        return TRUE;
+    }
+    *size = 0;
+    return FALSE;
+}
+
+/* 2.1.0: hand the reads parked in the manual queue what waits for them, one
+ * report a read, until nothing is left or no read waits. One frame goes to
+ * one read (issue #8). waiting is ReportWaitingLocked as the caller left
+ * InputLock. Each producer publishes under InputLock before it calls this,
+ * and a READ_REPORT that parks looks again after it is in the queue: the
+ * two face each other across the queue's lock and InputLock, so either the
+ * retrieve here finds that read or its second look finds what was
+ * published. Retrieving before publishing, as v2.0.3 did, let a read that
+ * looked before the publish and parked after the retrieve wait beside the
+ * frame until the next one. The queue is taken outside InputLock, and a
+ * READ_REPORT can take the report meanwhile: the read taken then goes back
+ * to the head of the queue (WdfRequestRequeue, as WinUHid's
+ * DispatchAsyncOperation puts back a GET_NEXT_EVENT whose event another
+ * request took). That is a park too: while this thread held the read the
+ * worker may have cached a frame and found the queue empty, so the loop
+ * looks again after the requeue, for anything published since it found
+ * nothing.
+ *
+ * Each read completes under InputLock, so reads complete in the order
+ * their reports were taken. HID class's completion routine runs on the
+ * completing thread: a read completed after the lock, as through 2.0.3,
+ * could reach HID class after a newer frame that another thread took later
+ * and completed first, and a reader on a test machine got frame 99,670 and
+ * then 99,669. Completing calls back into none of this driver's code: in
+ * UMDF the IRP goes to the host on this thread (Windows-Driver-Frameworks
+ * shared/core/um/fxirpum.cpp, FxIrp::CompleteRequest), and the request's
+ * queue then runs only its own events (fxioqueue.hpp,
+ * RequestCompletedCallback), for which neither queue here registers a
+ * callback. HID class's next READ_REPORT arrives on another thread and
+ * waits for InputLock no longer than this one completion. Completing
+ * inside the take also keeps every acknowledgement after the completion
+ * of the frame it names. Worker thread, or a READ_REPORT after its second
+ * look. */
+static VOID
+DeliverParked(_In_ PDEVICE_CONTEXT ctx, _In_ BOOLEAN waiting)
+{
+    while (waiting) {
+        UCHAR report[HIDMAESTRO_MAX_REPORT_SIZE];
+        ULONG size, published;
+        WDFREQUEST read;
+
+        if (!NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &read)))
+            return;
+        AcquireSRWLockExclusive(&ctx->InputLock);
+        if (TakeReportLocked(ctx, report, &size)) {
+            NTSTATUS cs = RequestCopyFromBuffer(read, report, size);
+            WdfRequestComplete(read, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
+            waiting = ReportWaitingLocked(ctx);
+            ReleaseSRWLockExclusive(&ctx->InputLock);
+            continue;
+        }
+        published = ctx->InputPublishCount;
+        ReleaseSRWLockExclusive(&ctx->InputLock);
+        WdfRequestRequeue(read);
+        AcquireSRWLockExclusive(&ctx->InputLock);
+        waiting = ctx->ReleaseNext < ctx->ReleaseCount
+            || (ctx->InputReportPending && ctx->InputPublishCount != published);
+        ReleaseSRWLockExclusive(&ctx->InputLock);
+    }
+}
+
 /* v2.0.0: the owner watch's state, for the SDK's census of who owns each
  * device (sdk OwnerCensus.cs). Any program can create the v1.12.0 owner
  * pipe's name, \\.\pipe\HIDMaestroOwner<N>, so the name alone does not show
@@ -1307,9 +1407,12 @@ OwnerGone(_In_ PDEVICE_CONTEXT ctx)
     ctx->ReleaseNext = 0;
     /* The delivered gate goes with the SeqNo: kept, it parked a read the
      * next program's first frame in the cache could serve, until that
-     * program's SeqNo passed this one's last. */
+     * program's SeqNo passed this one's last. A frame no read has carried
+     * goes with it, as it went with v2.0.3's reset: sent now, it would
+     * follow the release frames. */
     ctx->SharedMemSeqNo = 0;
     ctx->LastDeliveredInputSeqNo = 0;
+    ctx->InputReportPending = FALSE;
     /* Polled reads (IOCTL_UMDF_HID_GET_INPUT_REPORT) see the released
      * state too: the frame for the cached report's ID replaces it. */
     for (ULONG i = 0; i < count; i++) {
@@ -1326,47 +1429,13 @@ OwnerGone(_In_ PDEVICE_CONTEXT ctx)
             break;
         }
     }
+    BOOLEAN waiting = ReportWaitingLocked(ctx);
     ReleaseSRWLockExclusive(&ctx->InputLock);
 
-    DeliverReleaseFrames(ctx);
-}
-
-/* Hand queued release frames to the READ_REPORTs HID class has parked, one
- * frame per read. Frames left over go to the next READ_REPORTs as they
- * arrive (IOCTL_HID_READ_REPORT). */
-static VOID
-DeliverReleaseFrames(_In_ PDEVICE_CONTEXT ctx)
-{
-    for (;;) {
-        UCHAR frame[HIDMAESTRO_RELEASE_FRAME_CAP];
-        ULONG size;
-        BOOLEAN more;
-        WDFREQUEST pendingRead;
-
-        AcquireSRWLockExclusive(&ctx->InputLock);
-        more = ctx->ReleaseNext < ctx->ReleaseCount;
-        ReleaseSRWLockExclusive(&ctx->InputLock);
-        if (!more) return;
-
-        /* The queue is taken outside InputLock, as ProcessSharedInput
-         * takes it. A READ_REPORT can take the last frame meanwhile, and
-         * then the read goes back where it was. */
-        if (!NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead)))
-            return;
-        AcquireSRWLockExclusive(&ctx->InputLock);
-        if (ctx->ReleaseNext >= ctx->ReleaseCount) {
-            ReleaseSRWLockExclusive(&ctx->InputLock);
-            WdfRequestRequeue(pendingRead);
-            return;
-        }
-        size = ctx->ReleaseSizes[ctx->ReleaseNext];
-        RtlCopyMemory(frame, ctx->ReleaseFrames[ctx->ReleaseNext], size);
-        ctx->ReleaseNext++;
-        ReleaseSRWLockExclusive(&ctx->InputLock);
-
-        NTSTATUS cs = RequestCopyFromBuffer(pendingRead, frame, size);
-        WdfRequestComplete(pendingRead, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
-    }
+    /* The release frames go to the READ_REPORTs HID class has parked, one
+     * frame per read, and those left over to the next READ_REPORTs as they
+     * arrive (IOCTL_HID_READ_REPORT), each of which takes them first. */
+    DeliverParked(ctx, waiting);
 }
 
 /* Open the OUTPUT section. The test app pre-creates the named section with
@@ -1847,19 +1916,17 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
      * a physical Xbox controller produces exactly one HID report per
      * actual input change, not N reports to satisfy N queued reads.
      * Subsequent queued READ_REPORTs stay parked until the SDK
-     * SubmitStates the next frame. */
+     * SubmitStates the next frame. TakeReportLocked hands the frame to one
+     * read and marks it carried. */
     {
-        BOOLEAN servedOne = FALSE;
-        NTSTATUS cs = STATUS_SUCCESS;
-        WDFREQUEST pendingRead = NULL;
-        if (!zeroed && NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead))) {
-            servedOne = TRUE;
-            cs = RequestCopyFromBuffer(pendingRead, inputReport, inputSize);
-        }
-        /* Store for polled GET_INPUT_REPORT, and bump the seqno gate
-         * so the next IOCTL_HID_READ_REPORT for this seqno completes
-         * directly (the parked one, if any, was taken above and completes
-         * below). */
+        BOOLEAN waiting;
+        /* Store for polled GET_INPUT_REPORT and for the reads, and mark the
+         * frame pending, before any read is taken from the queue
+         * (DeliverParked). A READ_REPORT that looked at the cache before
+         * this and parks after the worker's retrieve finds the frame on its
+         * own second look. Retrieving first left that read parked beside
+         * the frame until the next one, for every profile, and with no idle
+         * repeat for as long as the program paused. */
         AcquireSRWLockExclusive(&ctx->InputLock);
         RtlCopyMemory(ctx->InputReport, inputReport, inputSize);
         ctx->InputReportSize = inputSize;
@@ -1878,27 +1945,13 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
          * Advancing it in ProcessSharedInput's preamble (before this cache
          * write) was the stale-frame TOCTOU. */
         ctx->SharedMemSeqNo = seqNo;
-        /* Perf audit 2026-07-21 (I5): advance the delivered gate ONLY when
-         * a parked read was actually completed above. The unconditional
-         * advance contradicted this block's own header comment and
-         * disabled the late-read cache: a READ_REPORT arriving with no
-         * request parked saw SharedMemSeqNo == LastDelivered, parked, and
-         * waited a full frame interval for data already sitting in the
-         * cache. The spin-trap the gate exists for stays closed because
-         * the immediate-complete path advances LastDelivered itself. */
-        if (servedOne) {
-            ctx->LastDeliveredInputSeqNo = seqNo;
-            NoteFrameCompletedLocked(ctx, seqNo);
-        }
+        /* A zeroed section is no frame, and no read carries it. */
+        ctx->InputReportPending = !zeroed;
+        ctx->InputPublishCount++;
+        waiting = ReportWaitingLocked(ctx);
         ReleaseSRWLockExclusive(&ctx->InputLock);
-        /* Complete only now. HID class can send its next READ_REPORT the
-         * moment this one completes, and that read has to find AckPending
-         * set. Completing before the lock let it arrive first, find nothing
-         * to acknowledge and park, so the acknowledgement waited for a read
-         * that only the SDK's next frame would bring: the SDK sat out its
-         * full delivery timeout, most often on a busy machine. */
-        if (servedOne)
-            WdfRequestComplete(pendingRead, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
+        if (!zeroed)
+            DeliverParked(ctx, waiting);
     }
 }
 
@@ -2274,10 +2327,12 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
             /* Reset the delivered gate with SharedMemSeqNo, under the lock
              * READ_REPORT reads both under, as OwnerGone resets them: a
              * program that starts again on the index may count its frames
-             * from the start. */
+             * from the start. A frame no read carried goes with them, as
+             * it went with v2.0.3's reset. */
             AcquireSRWLockExclusive(&ctx->InputLock);
             ctx->SharedMemSeqNo = 0;
             ctx->LastDeliveredInputSeqNo = 0;
+            ctx->InputReportPending = FALSE;
             ReleaseSRWLockExclusive(&ctx->InputLock);
             /* The program that held the index may have ended unseen and the
              * next may count from 0, so the recycle forgets the last SeqNo,
@@ -2869,13 +2924,14 @@ EvtIoDeviceControl(
          * GET_INPUT_REPORT (a different IOCTL, polled diagnostic path) is
          * unaffected: it still reads the cache directly.
          *
-         * The report to send is copied out under InputLock and into the
-         * request after it, so the worker, which takes the lock for every
-         * frame, never waits on the framework's buffer calls.
+         * 2.1.0: a report taken here completes under InputLock, as
+         * DeliverParked completes its reads, so it reaches HID class before
+         * any frame another thread takes after it.
          */
         UCHAR served[HIDMAESTRO_MAX_REPORT_SIZE];
         ULONG servedSize = 0;
         BOOLEAN serve = FALSE;
+        ULONG published;
         AcquireSRWLockExclusive(&ctx->InputLock);
 
         /* HID class asks again only after its completion routine has put
@@ -2887,33 +2943,43 @@ EvtIoDeviceControl(
         }
 
         /* Release frames the consumer's exit left queued (issue #67) go
-         * first, one per read. */
-        if (ctx->ReleaseNext < ctx->ReleaseCount) {
-            ULONG i = ctx->ReleaseNext++;
-            servedSize = ctx->ReleaseSizes[i];
-            RtlCopyMemory(served, ctx->ReleaseFrames[i], servedSize);
-            serve = TRUE;
-        /* Greater-than, as v2.0.3 tested it. A frame after the SeqNo wrap
-         * waits for the next frame, as it did there. Before OwnerGone runs,
-         * the next program's first frame can carry a SeqNo below the last
-         * program's last one delivered, and that read parks too: served
-         * here, the frame went out again once OwnerGone forgot the SeqNo
-         * and the program's own signal read it again. */
-        } else if (ctx->InputReportReady && ctx->SharedMemSeqNo > ctx->LastDeliveredInputSeqNo) {
-            servedSize = ctx->InputReportSize;
-            RtlCopyMemory(served, ctx->InputReport, servedSize);
-            ctx->LastDeliveredInputSeqNo = ctx->SharedMemSeqNo;
-            NoteFrameCompletedLocked(ctx, ctx->SharedMemSeqNo);
-            serve = TRUE;
-        }
-        ReleaseSRWLockExclusive(&ctx->InputLock);
-
+         * first, one per read. Then the cached frame no read has carried,
+         * when its SeqNo is greater than the last one delivered, as v2.0.3
+         * tested it. A frame after the SeqNo wrap waits for the next frame,
+         * as it did there. Before OwnerGone runs, the next program's first
+         * frame can carry a SeqNo below the last program's last one
+         * delivered, and that read parks too: served here, the frame went
+         * out again once OwnerGone forgot the SeqNo and the program's own
+         * signal read it again. */
+        if (ctx->ReleaseNext < ctx->ReleaseCount
+            || (ctx->InputReportPending && ctx->SharedMemSeqNo > ctx->LastDeliveredInputSeqNo))
+            serve = TakeReportLocked(ctx, served, &servedSize);
         if (serve) {
             status = RequestCopyFromBuffer(Request, served, servedSize);
-        } else {
+            WdfRequestComplete(Request, status);
+            completeRequest = FALSE;
+        }
+        published = ctx->InputPublishCount;
+        ReleaseSRWLockExclusive(&ctx->InputLock);
+
+        if (!serve) {
             status = WdfRequestForwardToIoQueue(Request, ctx->ManualQueue);
             if (NT_SUCCESS(status)) {
+                BOOLEAN waiting;
                 completeRequest = FALSE;
+                /* 2.1.0: look again once parked. The worker caches a frame
+                 * under InputLock and then takes a read from the queue
+                 * (DeliverParked), so a frame cached since the look above
+                 * either finds this read in the queue or is found here.
+                 * Such a frame came while this read waited, and goes to a
+                 * parked read whatever its SeqNo, as the worker gives it to
+                 * the read it takes. So do release frames OwnerGone queued
+                 * meanwhile. */
+                AcquireSRWLockExclusive(&ctx->InputLock);
+                waiting = ctx->ReleaseNext < ctx->ReleaseCount
+                    || (ctx->InputReportPending && ctx->InputPublishCount != published);
+                ReleaseSRWLockExclusive(&ctx->InputLock);
+                DeliverParked(ctx, waiting);
             }
         }
         break;

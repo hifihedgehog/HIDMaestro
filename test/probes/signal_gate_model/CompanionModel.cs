@@ -22,13 +22,27 @@
 // A variant with the 8 ms timer reached no final state, since the caller
 // sends its next request whenever one completes, so it checked nothing
 // and is gone.
+//
+// Every completion is also checked against the one before it: a request
+// served with the frame the last completion carried got that frame a
+// second time. A pump that serves whatever is current on every doorbell
+// and kick does that whenever one frame wakes it twice: its doorbell and
+// the kick of a request that parked as it was written, or two doorbells
+// whose frames the first serve already read. NewerOnly is d4103a21's pump
+// with one reader: on a doorbell or a kick it looks first, and serves only
+// a frame newer than the reader's last completion. This driver completes
+// requests as xusb22 does, a report on each change of state to every
+// request parked before its frame, and a request parked after a frame
+// does not get that frame, so the last frame need not reach it: the fences
+// and the kick checked here stand, and ReadersModel checks the reports.
 using System;
 using System.Collections.Generic;
 using System.Linq;
 
 internal static class CompanionModel
 {
-    internal sealed record Variant(string Name, bool Gated, bool SdkFence, bool CountFirst, bool Kick, bool Timer, bool ExpectLost);
+    internal sealed record Variant(string Name, bool Gated, bool SdkFence, bool CountFirst, bool Kick, bool Timer, bool ExpectLost,
+                                   bool NewerOnly = false, bool ExpectTwice = true);
 
     internal static readonly Variant[] Variants =
     {
@@ -38,27 +52,30 @@ internal static class CompanionModel
         new("companion gate, count after the park, kick (companion.c's order)", true, true, false, true, false, false),
         new("companion gate, count before the park, no kick", true, true, true, false, false, true),
         new("companion gate, count before the park, kick, no fence in the SDK", true, false, true, true, false, true),
+        new("companion, a doorbell on every frame, no kick, the pump serving only a newer frame", false, true, true, false, false, true, true, false),
+        new("companion, a doorbell on every frame and the kick, the pump serving only a newer frame (an SDK before 2.1.0 on d4103a21, one reader)", false, true, true, true, false, false, true, false),
+        new("companion gate, count after the park, kick, the pump serving only a newer frame (d4103a21, one reader)", true, true, false, true, false, false, true, false),
     };
 
     // A dispatch's program counters: its request is outstanding from the
     // start, in the queue from PARK.
     const int D_IDLE = 0, D_INC = 1, D_PARK = 2, D_LOOK = 3, D_KICK = 4;
-    // Pump program counters.
-    const int P_WAIT = 0, P_TAKE = 1, P_DEC = 2, P_SERVE = 3;
+    // Pump program counters. P_LOOK: NewerOnly's look before the take.
+    const int P_WAIT = 0, P_TAKE = 1, P_DEC = 2, P_SERVE = 3, P_LOOK = 4;
     // SDK program counters.
     const int S_STORE = 0, S_FENCE = 1, S_LOAD = 2, S_RING = 3, S_DONE = 4;
 
     sealed record State(
         int MemSeq, int Parked, int Queue, int Served, int Doorbell, int KickFlag,
         int SdkPc, int SdkFrame, int SdkBuf,   // SdkBuf: a buffered SEQ store, 0 when empty
-        bool Outstanding, int D0, int D1, int PumpPc, bool PumpBlocked, string Trace)
+        bool Outstanding, int D0, int D1, int PumpPc, bool PumpBlocked, string Trace, bool Twice = false)
     {
-        public string Key => $"{MemSeq},{Parked},{Queue},{Served},{Doorbell},{KickFlag},{SdkPc},{SdkFrame},{SdkBuf},{Outstanding},{D0},{D1},{PumpPc},{PumpBlocked}";
+        public string Key => $"{MemSeq},{Parked},{Queue},{Served},{Doorbell},{KickFlag},{SdkPc},{SdkFrame},{SdkBuf},{Outstanding},{D0},{D1},{PumpPc},{PumpBlocked},{Twice}";
         public int D(int i) => i == 0 ? D0 : D1;
         public State WithD(int i, int pc) => i == 0 ? this with { D0 = pc } : this with { D1 = pc };
     }
 
-    internal sealed class Result { public int States, Finals; public string? Lost, InvariantBroken; }
+    internal sealed class Result { public int States, Finals; public string? Lost, InvariantBroken, Twice; }
 
     internal static Result Explore(Variant v, int frames)
     {
@@ -71,6 +88,7 @@ internal static class CompanionModel
         {
             var s = stack.Pop();
             r.States++;
+            if (s.Twice && r.Twice == null) r.Twice = $"a frame served twice after {s.Trace}";
             // Counting first, the count is never below the requests in the
             // queue: a ring is never skipped while one waits there.
             if (v.Gated && v.CountFirst && s.Parked < s.Queue && r.InvariantBroken == null)
@@ -116,7 +134,7 @@ internal static class CompanionModel
                 if (s.SdkBuf == 0)
                 {
                     var n = s with { Trace = s.Trace + " sdk:ring" };
-                    n = s.PumpBlocked ? n with { PumpBlocked = false, PumpPc = P_TAKE } : n with { Doorbell = 1 };
+                    n = s.PumpBlocked ? n with { PumpBlocked = false, PumpPc = v.NewerOnly ? P_LOOK : P_TAKE } : n with { Doorbell = 1 };
                     yield return Next(n, frames);
                 }
                 break;
@@ -159,7 +177,7 @@ internal static class CompanionModel
                 case D_KICK:
                 {
                     var n = s.WithD(i, D_IDLE) with { Trace = s.Trace + $" d{i}:kick" };
-                    yield return s.PumpBlocked ? n with { PumpBlocked = false, PumpPc = P_TAKE } : n with { KickFlag = 1 };
+                    yield return s.PumpBlocked ? n with { PumpBlocked = false, PumpPc = v.NewerOnly ? P_LOOK : P_TAKE } : n with { KickFlag = 1 };
                     break;
                 }
             }
@@ -168,12 +186,17 @@ internal static class CompanionModel
         // The pump.
         if (!s.PumpBlocked)
         {
+            int woken = v.NewerOnly ? P_LOOK : P_TAKE;
             switch (s.PumpPc)
             {
                 case P_WAIT:
-                    if (s.Doorbell == 1) yield return s with { Doorbell = 0, PumpPc = P_TAKE, Trace = s.Trace + " pump:doorbell" };
-                    if (s.KickFlag == 1) yield return s with { KickFlag = 0, PumpPc = P_TAKE, Trace = s.Trace + " pump:kick" };
+                    if (s.Doorbell == 1) yield return s with { Doorbell = 0, PumpPc = woken, Trace = s.Trace + " pump:doorbell" };
+                    if (s.KickFlag == 1) yield return s with { KickFlag = 0, PumpPc = woken, Trace = s.Trace + " pump:kick" };
                     if (s.Doorbell == 0 && s.KickFlag == 0) yield return s with { PumpBlocked = true, Trace = s.Trace + " pump:blocks" };
+                    break;
+                case P_LOOK:
+                    // FrameNewerThanServed, before the take.
+                    yield return s with { PumpPc = s.MemSeq != s.Served ? P_TAKE : P_WAIT, Trace = s.Trace + $" pump:look-seq={s.MemSeq}" };
                     break;
                 case P_TAKE:
                     if (s.Queue == 1)
@@ -187,7 +210,8 @@ internal static class CompanionModel
                 case P_SERVE:
                     // The completion carries the section's SeqNo now, and the
                     // caller may send its next request.
-                    yield return s with { Served = s.MemSeq, Outstanding = false, PumpPc = P_WAIT, Trace = s.Trace + $" pump:serve={s.MemSeq}" };
+                    yield return s with { Served = s.MemSeq, Outstanding = false, PumpPc = P_WAIT, Trace = s.Trace + $" pump:serve={s.MemSeq}",
+                                          Twice = s.Twice || s.MemSeq == s.Served };
                     break;
             }
         }

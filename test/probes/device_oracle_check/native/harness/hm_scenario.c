@@ -3,9 +3,11 @@
  * Usage: driver_harness_<oracle|tree>.exe <plan> <output> <seed>
  *        driver_harness_<oracle|tree>.exe --script <plan> <script> <output>
  *        driver_harness_<oracle|tree>.exe --lifecycle <plan> <output> <seed>
+ *        driver_harness_<oracle|tree>.exe --wake <plan> <output> <seed>
  * Exit 0 with a complete output file, 2 for bad arguments, 3 when a
- * scenario stopped (the message names the reason). --lifecycle exits 1
- * when a check failed (hm_case_lifecycle.c). */
+ * scenario stopped (the message names the reason). --lifecycle and --wake
+ * exit 1 when a check failed (hm_case_lifecycle.c, hm_case_wake.c), with
+ * the output file complete. */
 #include "hm_scenario.h"
 #include <stdarg.h>
 
@@ -217,13 +219,13 @@ int main(int argc, char **argv)
         fprintf(stdout, "streams %u outputs %llu\n", RecStreamCount(), (unsigned long long)RecOutputCount());
         return 0;
     }
-    if (argc == 5 && strcmp(argv[1], "--lifecycle") == 0) {
+    if (argc == 5 && (strcmp(argv[1], "--lifecycle") == 0 || strcmp(argv[1], "--wake") == 0)) {
         g_seed = _strtoui64(argv[4], NULL, 10);
         PlanLoad(argv[2]);
         FiberInit();
         WdfInit();
         RecOpen(argv[3]);
-        int failed = CaseLifecycle();
+        int failed = strcmp(argv[1], "--wake") == 0 ? CaseWake() : CaseLifecycle();
         WorldReset();
         RecEnd();
         return failed ? 1 : 0;
@@ -233,7 +235,8 @@ int main(int argc, char **argv)
               "       driver_harness --script <plan> <script> <output>\n"
               "       driver_harness --corpus <plan> <output> <seed>\n"
               "       driver_harness --stale <plan> <output> <seed>\n"
-              "       driver_harness --lifecycle <plan> <output> <seed>\n", stderr);
+              "       driver_harness --lifecycle <plan> <output> <seed>\n"
+              "       driver_harness --wake <plan> <output> <seed>\n", stderr);
         return 2;
     }
     g_seed = _strtoui64(argv[3], NULL, 10);

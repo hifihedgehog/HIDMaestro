@@ -278,6 +278,88 @@ void PipeServerClose(HmPipeServer *s)
 static void *g_mainFiber;
 static HmThread *g_current;
 int HmOnDriverThread(void) { return g_current != NULL; }
+
+/* The thread beside (RunBeside): a request another thread sends while the
+ * running one is inside the driver. It runs on a fiber of its own, with no
+ * driver thread current, as the scenario's requests run. A lock it finds
+ * held by the thread it runs beside makes it wait: the holder goes on, and
+ * the release of that lock resumes it, which then takes the lock. It may
+ * hold no other lock while it waits, since the holder could want that one
+ * next. Each lock records which of the two holds it. */
+#define HM_HELD_NORMAL ((PVOID)1)
+#define HM_HELD_BESIDE ((PVOID)2)
+static struct {
+    LPVOID fiber;
+    LPVOID back;             /* the fiber it returns to when it waits or ends */
+    void (*fn)(void);
+    void *waitingOn;         /* the lock it waits for */
+    int running;             /* started and not ended */
+    int held;                /* locks it holds */
+    HmThread *outer;         /* g_current of the fiber it returns to */
+} g_beside;
+static int g_besideActive;   /* the thread beside is the one running */
+
+static PVOID HeldMark(void) { return g_besideActive ? HM_HELD_BESIDE : HM_HELD_NORMAL; }
+
+static VOID CALLBACK BesideMain(LPVOID p)
+{
+    (void)p;
+    for (;;) {
+        g_beside.fn();
+        if (g_beside.held) HmFail("the thread beside ended holding a lock");
+        g_beside.running = 0;
+        g_besideActive = 0;
+        g_current = g_beside.outer;
+        SwitchToFiber(g_beside.back);
+    }
+}
+
+/* Hands the processor from the running fiber to the thread beside, which
+ * runs until it waits for a lock or ends. */
+static void BesideEnter(void)
+{
+    g_beside.back = GetCurrentFiber();
+    g_beside.outer = g_current;
+    g_current = NULL;
+    g_besideActive = 1;
+    SwitchToFiber(g_beside.fiber);
+}
+
+void RunBeside(void (*fn)(void))
+{
+    if (g_besideActive) HmFail("the thread beside starts another");
+    if (g_beside.running) HmFail("one thread beside at a time");
+    if (!g_beside.fiber) {
+        g_beside.fiber = CreateFiber(0, BesideMain, NULL);
+        if (!g_beside.fiber) HmFail("CreateFiber failed");
+    }
+    g_beside.fn = fn;
+    g_beside.running = 1;
+    g_beside.waitingOn = NULL;
+    BesideEnter();
+}
+
+int BesideWaiting(void) { return g_beside.running; }
+
+/* The thread beside found lock held: it waits, and the holder's fiber runs
+ * on. Returns once the release resumed it. */
+static void BesideWait(void *lock)
+{
+    if (g_beside.held) HmFail("the thread beside waits for a lock while it holds another");
+    g_beside.waitingOn = lock;
+    g_besideActive = 0;
+    g_current = g_beside.outer;
+    SwitchToFiber(g_beside.back);
+}
+
+/* A release: the thread beside, if it waits for this lock, takes it now. */
+static void BesideReleased(void *lock)
+{
+    if (g_beside.running && !g_besideActive && g_beside.waitingOn == lock) {
+        g_beside.waitingOn = NULL;
+        BesideEnter();
+    }
+}
 int (*g_waitAnswerHook)(HmThread *t, DWORD result);
 
 void FiberInit(void)
@@ -578,10 +660,12 @@ HANDLE WINAPI HmOpenFileMappingW(DWORD dwDesiredAccess, BOOL bInheritHandle, LPC
  * its own here: the scenario holds every section for the stream. The
  * section counts its views, so an unmap of a view no longer mapped stops
  * the run and HeldObjects lists a view still mapped. */
+void (*g_mapHook)(void);
 LPVOID WINAPI HmMapViewOfFile(HANDLE hFileMappingObject, DWORD dwDesiredAccess, DWORD dwFileOffsetHigh,
                               DWORD dwFileOffsetLow, SIZE_T dwNumberOfBytesToMap)
 {
     (void)dwDesiredAccess;
+    if (g_mapHook) { void (*hook)(void) = g_mapHook; g_mapHook = NULL; hook(); }
     HmObj *o = ObjFromHandle(hFileMappingObject);
     if (!o || o->kind != HK_SECTION) HmFail("MapViewOfFile on a handle that is no section");
     HmSection *s = (HmSection *)o;
@@ -962,14 +1046,29 @@ VOID WINAPI HmInitializeCriticalSection(LPCRITICAL_SECTION cs) { memset(cs, 0, s
 VOID WINAPI HmEnterCriticalSection(LPCRITICAL_SECTION cs)
 {
     if (cs->SpinCount == HM_CS_DELETED) HmFail("EnterCriticalSection after DeleteCriticalSection");
+    if (cs->RecursionCount > 0 && cs->OwningThread != (HANDLE)HeldMark()) {
+        if (!g_besideActive) HmFail("EnterCriticalSection on a section the thread beside holds");
+        BesideWait(cs);
+        if (cs->RecursionCount > 0) HmFail("the thread beside resumed with its section still held");
+    }
+    cs->OwningThread = (HANDLE)HeldMark();
     cs->RecursionCount++;
     g_locksHeld++;
+    if (g_besideActive) g_beside.held++;
 }
+void (*g_csLeaveHook)(void);
 VOID WINAPI HmLeaveCriticalSection(LPCRITICAL_SECTION cs)
 {
     if (cs->RecursionCount <= 0) HmFail("LeaveCriticalSection without Enter");
     cs->RecursionCount--;
     g_locksHeld--;
+    if (g_besideActive) g_beside.held--;
+    if (cs->RecursionCount > 0) return;
+    cs->OwningThread = NULL;
+    BesideReleased(cs);
+    /* What another thread does right after this one left a critical
+     * section (hm_case_wake.c, packet-race). */
+    if (g_csLeaveHook) { void (*hook)(void) = g_csLeaveHook; g_csLeaveHook = NULL; hook(); }
 }
 VOID WINAPI HmDeleteCriticalSection(LPCRITICAL_SECTION cs)
 {
@@ -984,6 +1083,7 @@ VOID WINAPI HmDeleteCriticalSection(LPCRITICAL_SECTION cs)
  * deadlock a real thread, and stops the run here. */
 void (*g_srwHook)(void);
 void (*g_lockReleaseHook)(void);
+void (*g_dispatchReleaseHook)(void);
 void (*g_pollHook)(void);
 int (*g_exchangeHook)(volatile LONG *target, LONG value);
 
@@ -992,21 +1092,46 @@ LONG HmInterlockedExchange(LONG volatile *target, LONG value)
     if (g_exchangeHook && g_current && g_exchangeHook(target, value)) g_exchangeHook = NULL;
     return InterlockedExchange(target, value);
 }
+/* MemoryBarrier in the drivers (hm_fi.h): the barrier itself, then the
+ * hook, once. */
+void (*g_barrierHook)(void);
+VOID HmMemoryBarrier(VOID)
+{
+    MemoryBarrier();
+    if (g_barrierHook) { void (*hook)(void) = g_barrierHook; g_barrierHook = NULL; hook(); }
+}
+
+void (*g_lockHook)(void);
 VOID WINAPI HmAcquireSRWLockExclusive(PSRWLOCK l)
 {
     if (g_srwHook && g_current) { void (*hook)(void) = g_srwHook; g_srwHook = NULL; hook(); }
-    if (l->Ptr != NULL) HmFail("AcquireSRWLockExclusive on a lock already held");
-    l->Ptr = (PVOID)1;
+    if (g_lockHook && g_current) { void (*hook)(void) = g_lockHook; g_lockHook = NULL; hook(); }
+    if (l->Ptr != NULL) {
+        /* Only the thread beside can wait: anywhere else a held lock would
+         * deadlock a real thread. */
+        if (!g_besideActive || l->Ptr == HM_HELD_BESIDE) HmFail("AcquireSRWLockExclusive on a lock already held");
+        BesideWait(l);
+        if (l->Ptr != NULL) HmFail("the thread beside resumed with its lock still held");
+    }
+    l->Ptr = HeldMark();
     g_locksHeld++;
+    if (g_besideActive) g_beside.held++;
 }
 VOID WINAPI HmReleaseSRWLockExclusive(PSRWLOCK l)
 {
     if (l->Ptr == NULL) HmFail("ReleaseSRWLockExclusive on a free lock");
     l->Ptr = NULL;
     g_locksHeld--;
+    if (g_besideActive) g_beside.held--;
+    BesideReleased(l);
     if (g_lockReleaseHook && g_current && g_locksHeld == 0) {
         void (*hook)(void) = g_lockReleaseHook;
         g_lockReleaseHook = NULL;
+        hook();
+    }
+    if (g_dispatchReleaseHook && !g_current && g_locksHeld == 0) {
+        void (*hook)(void) = g_dispatchReleaseHook;
+        g_dispatchReleaseHook = NULL;
         hook();
     }
 }
@@ -1045,6 +1170,7 @@ void WorldReset(void)
     static int sids;
     if (!sids) { SidsInit(); sids = 1; }
     if (g_current) HmFail("world reset inside a thread");
+    if (g_beside.running) HmFail("the thread beside still waits for a lock at the stream's end");
     WdfReset();
     g_releasingDevice = NULL;
     g_unmapNotes[0] = 0;

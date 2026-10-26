@@ -262,13 +262,30 @@ typedef struct _DEVICE_CONTEXT {
 
     /* Sequence-number gate for IOCTL_HID_READ_REPORT. The READ_REPORT
      * handler returns a cached input report immediately ONLY when there's
-     * new data since the last delivery (SharedMemSeqNo != LastDeliveredInputSeqNo).
+     * new data since the last delivery (SharedMemSeqNo > LastDeliveredInputSeqNo).
      * Otherwise the request is parked in ManualQueue and the worker thread
-     * completes it on the next ProcessSharedInput tick. Without this gate,
+     * completes it on the next ProcessSharedInput tick, or the handler's
+     * look after parking finds a frame the worker cached meanwhile
+     * (DeliverParked). Without this gate,
      * HIDClass hammers READ_REPORT in a tight loop because every call
      * returns instantly with stale data: the original CPU saturation
      * culprit. */
     ULONG   LastDeliveredInputSeqNo;
+
+    /* 2.1.0: the cached report is a frame no READ_REPORT has carried yet.
+     * The worker sets it as it caches a frame it sends, before it looks for
+     * a read parked, and whichever read carries the frame clears it, so a
+     * frame goes out once. OwnerGone, the recycle and a zeroed section clear
+     * it with the delivered gate. Under InputLock. */
+    BOOLEAN InputReportPending;
+
+    /* 2.1.0: frames the worker has cached. A READ_REPORT that parks looks
+     * again once it is in the queue and takes the pending frame only when
+     * one was cached since its first look: that frame came while the read
+     * was waiting, and a read parked then gets it. A frame cached before
+     * the first look stays under v2.0.3's greater-than test. Under
+     * InputLock. */
+    ULONG   InputPublishCount;
 
     /* Event-driven IPC: SDK signals InputDataEvent after every seqlock write,
      * the worker thread (WorkerThread) waits on (StopEvent, InputDataEvent)

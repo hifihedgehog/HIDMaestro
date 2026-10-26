@@ -93,7 +93,7 @@ static void StreamAnswers(PlanProfile *p, int index)
     X(&c, "xusb.state", IOCTL_XUSB_GET_STATE, in, sizeof(in), 29);
     X(&c, "xusb.capabilities", IOCTL_XUSB_GET_CAPABILITIES, in, sizeof(in), 36);
     for (int s = 0; s < (int)ARRAYSIZE(k_sizes); s++) {
-        X(&c, "xusb.waitforinput", IOCTL_XUSB_WAIT_FOR_INPUT, NULL, 0, k_sizes[s]);
+        XusbWait(c.dev, NULL, "xusb.waitforinput", k_sizes[s]);
         TimerTick(&c);
     }
     CtlStop(&c);
@@ -102,7 +102,7 @@ static void StreamAnswers(PlanProfile *p, int index)
 static void StateBoth(Ctl *c)
 {
     X(c, "xusb.state", IOCTL_XUSB_GET_STATE, NULL, 0, 29);
-    X(c, "xusb.waitforinput", IOCTL_XUSB_WAIT_FOR_INPUT, NULL, 0, 29);
+    XusbWait(c->dev, NULL, "xusb.waitforinput", 29);
     TimerTick(c);
 }
 
@@ -150,15 +150,15 @@ static void StreamStates(PlanProfile *p)
     /* The doorbell completes a parked WAIT_FOR_INPUT as the frame lands
      * (companion.c:780-819). */
     for (int i = 0; i < 6; i++) {
-        X(&c, "xusb.waitforinput", IOCTL_XUSB_WAIT_FOR_INPUT, NULL, 0, 29);
+        XusbWait(c.dev, NULL, "xusb.waitforinput", 29);
         Rest(g);
         g[12] = (uint8_t)(1 << i);
         Gip(&c, g);
         Doorbell(&c);
     }
     /* Two parked, one frame, then the timer. */
-    X(&c, "xusb.waitforinput", IOCTL_XUSB_WAIT_FOR_INPUT, NULL, 0, 29);
-    X(&c, "xusb.waitforinput", IOCTL_XUSB_WAIT_FOR_INPUT, NULL, 0, 29);
+    XusbWait(c.dev, NULL, "xusb.waitforinput", 29);
+    XusbWait(c.dev, NULL, "xusb.waitforinput", 29);
     Gip(&c, g);
     Doorbell(&c);
     TimerTick(&c);
@@ -193,7 +193,7 @@ static void StreamSeqlock(PlanProfile *p)
         memcpy(c.sdk.input->buf, &odd, 4);
         c.sdk.input->buf[264 + 12] = 0x80;
         X(&c, "xusb.state", IOCTL_XUSB_GET_STATE, NULL, 0, 29);
-        X(&c, "xusb.waitforinput", IOCTL_XUSB_WAIT_FOR_INPUT, NULL, 0, 29);
+        XusbWait(c.dev, NULL, "xusb.waitforinput", 29);
         TimerTick(&c);
         memcpy(c.sdk.input->buf, &c.sdk.seq, 4);
         c.sdk.input->buf[264 + 12] = 0x01;
@@ -221,7 +221,7 @@ static void StreamRandom(PlanProfile *p)
         } else if (r < 6) {
             X(&c, "xusb.state", IOCTL_XUSB_GET_STATE, NULL, 0, 29);
         } else if (r < 8) {
-            X(&c, "xusb.waitforinput", IOCTL_XUSB_WAIT_FOR_INPUT, NULL, 0, 29);
+            XusbWait(c.dev, NULL, "xusb.waitforinput", 29);
         } else {
             TimerTick(&c);
         }

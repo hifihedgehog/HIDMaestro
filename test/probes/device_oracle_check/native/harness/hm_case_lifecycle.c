@@ -293,17 +293,19 @@ static void Tick(Ctl *c)
     t->fn((WDFTIMER)t);
 }
 
-/* A GIP frame wakes the input pump, a parked WAIT_FOR_INPUT completes on
- * the timer's tick, which maps the input section (companion.c:177-189),
+/* A WAIT_FOR_INPUT parks, and its look maps the input section
+ * (companion.c, ObserveSection), a GIP frame with a new state wakes the
+ * input pump, whose report completes the wait (CompanionReportLocked),
  * and a rumble packet goes to the output ring, which maps the output
- * section and makes the doorbell (companion.c:362-401). Returns whether
- * the wait completed and the ring moved. */
+ * section and makes the doorbell (EnsureOutputMapping). The timer's tick,
+ * which reports nothing while the doorbell is open, follows as before.
+ * Returns whether the wait completed and the ring moved. */
 static int CompanionTraffic(Ctl *c, uint8_t button)
 {
     uint8_t gip[14] = { 0xFF, 0x7F, 0xFF, 0x7F, 0xFF, 0x7F, 0xFF, 0x7F, 0, 0, 0, 0, button, 0 };
+    HmRequest *w = XusbWait(c->dev, NULL, "xusb.waitforinput", 29);
     Frame(c, NULL, 0, gip, NULL, 0);
     ThreadResume(CtlThread(c, 0));
-    HmRequest *w = Ioctl(c->dev, "xusb.waitforinput", IOCTL_XUSB_WAIT_FOR_INPUT, NULL, 0, 29, NULL, 0);
     Tick(c);
     uint32_t before = RingHead(c);
     uint8_t rumble[5] = { 0, 8, 0x40, 0x80, 0 };

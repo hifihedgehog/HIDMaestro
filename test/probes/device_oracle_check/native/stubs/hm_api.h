@@ -50,6 +50,7 @@ HLOCAL WINAPI HmLocalFree(HLOCAL hMem);
 /* The interlocked exchange, so a stream can act at the worker's take of
  * the signal gate's handoff (g_exchangeHook). */
 LONG HmInterlockedExchange(LONG volatile *Target, LONG Value);
+VOID HmMemoryBarrier(VOID);
 
 /* Locks, clocks and the two Rtl helpers. */
 VOID WINAPI HmInitializeCriticalSection(LPCRITICAL_SECTION lpCriticalSection);
