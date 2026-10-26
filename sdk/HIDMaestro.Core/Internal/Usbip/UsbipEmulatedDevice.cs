@@ -434,7 +434,11 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             try
             {
                 if (_inputWaitEvent != IntPtr.Zero)
-                    WaitForSingleObject(_inputWaitEvent, 500);
+                {
+                    BeforeInputWait?.Invoke(this);
+                    uint woke = WaitForSingleObject(_inputWaitEvent, 500);
+                    AfterInputWait?.Invoke(this, woke);
+                }
                 else
                     Thread.Sleep(4);
                 if (_stop) break;
@@ -1378,6 +1382,20 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     /// caused safely, since thread and event creation fail only when the
     /// process runs out of resources. Null outside the probe.</summary>
     internal static Action<int>? AfterInputPumpStart;
+
+    /// <summary>Called on the input pump right before each wait for a frame.
+    /// usbip_server_check (S43) sets it to hold a pump there while Dispose
+    /// runs, and lets the pump go once Dispose has signaled, so the wait
+    /// that follows shows whether Dispose's signal ends it: on a loaded
+    /// machine no clock tells the signal from the wait's 500 ms timeout.
+    /// Null outside the probe.</summary>
+    internal static Action<UsbipEmulatedDevice>? BeforeInputWait;
+
+    /// <summary>Called on the input pump right after each wait for a frame,
+    /// with the wait's result: WAIT_OBJECT_0 when the input event ended it,
+    /// WAIT_TIMEOUT when its 500 ms ran out (<see cref="BeforeInputWait"/>).
+    /// Null outside the probe.</summary>
+    internal static Action<UsbipEmulatedDevice, uint>? AfterInputWait;
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     private static partial uint WaitForSingleObject(IntPtr handle, uint ms);
