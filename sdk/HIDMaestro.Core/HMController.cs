@@ -740,12 +740,12 @@ public sealed partial class HMController : IDisposable
             long origin;
             lock (_submitLock)
             {
-                // The clock's containment contract (RepeatLastFrameFromClock):
-                // a frame that fails to go out does not end the device.
+                // A frame that fails to go out does not end the device, as
+                // a tick that fails does not end the clock (DeviceClock.Loop).
                 try { SubmitStateCore(in _lastSubmitted); } catch { }
                 origin = System.Diagnostics.Stopwatch.GetTimestamp();
             }
-            var grid = new StreamGridTick(_stream.PeriodTicks, origin, RepeatLastFrameFromClock);
+            var grid = new StreamGridTick(_stream.PeriodTicks, origin, RepeatLastFrame);
             var clock = new DeviceClock<StreamGridTick>(grid, MissedTick.NextPoll, $"HMIdleFrames_{index}",
                 everyChangeWakes: true);
             _idleClock = clock;
@@ -763,7 +763,7 @@ public sealed partial class HMController : IDisposable
                 lock (_submitLock) Ports.RememberReportLocked();
             else
                 _lastSubmitted = new HMGamepadState();
-            var tick = new StreamTick(_stream, _protocolEngine?.RegisterWords, RepeatLastFrameFromClock,
+            var tick = new StreamTick(_stream, _protocolEngine?.RegisterWords, RepeatLastFrame,
                 () => Volatile.Read(ref _lastSubmitTimestamp));
             var clock = new DeviceClock<StreamTick>(tick, MissedTick.Drop, $"HMIdleFrames_{index}",
                 everyChangeWakes: !_stream.ReadsRegisters);
@@ -1863,25 +1863,17 @@ public sealed partial class HMController : IDisposable
     /// timestamps rule "advance", the repeat's sensor timestamp moves on by
     /// the time since the consumer's frame, as a real device stamps every
     /// report. A raw frame is the consumer's own bytes and is repeated as
-    /// they are.</summary>
-    private void RepeatLastFrameFromClock()
-    {
-        try { RepeatLastFrame(); }
-        catch
-        {
-            // Same containment contract as OutputPollLoop: a transient
-            // failure must not kill the pump, and disposal races here are
-            // ordinary rather than exceptional.
-        }
-    }
-
-    /// <summary>One idle repeat of the consumer's last frame, under the same
+    /// they are.
+    ///
+    /// <para>One idle repeat of the consumer's last frame, under the same
     /// lock every submit path takes. The clock read the last frame's time
     /// before this lock, so a frame the consumer sent since then is found
     /// here, and the repeat goes a period after that frame instead
     /// (<see cref="Internal.StreamTick.NotBefore"/>). On a profile that
     /// reports on its own clock this is every report: no submit sends one,
-    /// so none is skipped for a recent submit.</summary>
+    /// so none is skipped for a recent submit. A repeat that throws does not
+    /// end the clock, which logs it and waits before the next tick
+    /// (DeviceClock.Loop).</para></summary>
     private void RepeatLastFrame()
     {
         lock (_submitLock)
