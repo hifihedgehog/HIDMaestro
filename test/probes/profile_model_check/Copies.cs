@@ -1,8 +1,10 @@
 // HMProfile's ButtonMap, AxisMap, ExtendedReport, ExtendedOutputReport and
-// Layout hand out copies, as XInput does. Every controller of a profile
+// Layout hand out a snapshot, built on the first read and shared by every
+// later read of that profile instance. Every controller of a profile
 // encodes with the profile's own objects, so a program that writes into
-// what one of these reads returned must change no later read, no report a
-// controller of the profile builds and no program it compiles. Each check
+// the snapshot must change no report a controller of the profile builds,
+// no program it compiles and no object the SDK holds, and a second read
+// allocates nothing. Each check
 // that writes takes a profile of a load of its own, so a write that reaches
 // the profile spoils no other check. The Clone check fills a spec of its
 // own with every key, so a key a copy drops or shares shows. The last
@@ -22,44 +24,46 @@ internal static class Copies
     {
         var c = new Checks("copies");
 
-        c.Run("ButtonMap: each read is an array of its own, and a write into one changes no later read and no report", () =>
+        c.Run("ButtonMap: reads share one detached snapshot, and a write into it changes no encoding and allocates nothing on a second read", () =>
         {
             var inner = Fresh("dualsense-bt");
             var p = new HMProfile(inner);
             byte[] before = Report(inner);
             int[] first = p.ButtonMap!, second = p.ButtonMap!;
-            int[] was = (int[])second.Clone();
+            int[] was = (int[])inner.ButtonMap!.Clone();
+            bool shared = ReferenceEquals(first, second), detached = !ReferenceEquals(first, inner.ButtonMap);
             first[0] = 13;
             first[1] = 13;
             byte[] after = Report(inner);
-            bool own = !ReferenceEquals(first, second);
-            bool reads = p.ButtonMap!.SequenceEqual(was) && inner.ButtonMap!.SequenceEqual(was);
+            bool reads = inner.ButtonMap!.SequenceEqual(was);
             bool report = after.SequenceEqual(before);
-            return (own && reads && report, $"own array {own}, later reads unchanged {reads}, report unchanged {report}");
+            bool alloc = AllocatesNothing(() => p.ButtonMap);
+            return (shared && detached && reads && report && alloc, $"one shared snapshot {shared}, detached {detached}, SDK's map unchanged {reads}, report unchanged {report}, second read allocates nothing {alloc}");
         });
 
-        c.Run("AxisMap: each read is a dictionary of its own with the profile's comparer, and a write into one changes no later read and no report", () =>
+        c.Run("AxisMap: reads share one detached dictionary with the profile's comparer, and a write into it changes no encoding and allocates nothing on a second read", () =>
         {
             var inner = Fresh("dualsense-bt");
             var p = new HMProfile(inner);
             var control = Fresh("dualsense-bt");
             var first = p.AxisMap!;
             var second = p.AxisMap!;
-            var was = second.ToDictionary(kv => kv.Key, kv => kv.Value);
+            var was = inner.AxisMap!.ToDictionary(kv => kv.Key, kv => kv.Value);
             first.Clear();
             first["0x30"] = "leftTrigger";
             // The builder reads the map when it is first built, after the write.
             byte[] built = Report(inner), expected = Report(control);
-            bool own = !ReferenceEquals(first, second) && Equals(second.Comparer, inner.AxisMap!.Comparer);
-            bool reads = Same(p.AxisMap!, was) && Same(inner.AxisMap!, was);
+            bool own = ReferenceEquals(first, second) && !ReferenceEquals(first, inner.AxisMap) && Equals(second.Comparer, inner.AxisMap!.Comparer);
+            bool reads = Same(inner.AxisMap!, was);
             bool report = built.SequenceEqual(expected);
-            return (own && reads && report, $"own dictionary {own}, later reads unchanged {reads}, report unchanged {report}");
+            bool alloc = AllocatesNothing(() => p.AxisMap);
+            return (own && reads && report && alloc, $"shared detached dictionary {own}, SDK's map unchanged {reads}, report unchanged {report}, second read allocates nothing {alloc}");
         });
 
         foreach (bool output in new[] { false, true })
         {
             string name = output ? "ExtendedOutputReport" : "ExtendedReport";
-            c.Run($"{name}: each read is a spec of its own, equal to the profile's as JSON, and a write into one changes no later read", () =>
+            c.Run($"{name}: reads share one detached spec, equal to the profile's as JSON, and a write into it leaves the SDK's spec unchanged", () =>
             {
                 var inner = Fresh("dualsense-bt");
                 var p = new HMProfile(inner);
@@ -73,13 +77,14 @@ internal static class Copies
                 first.Fields.Clear();
                 first.ArmOn?.Clear();
                 first.IdleFrameIntervalMs = 77;
-                bool own = !ReferenceEquals(first, second);
-                bool reads = Json(Read()) == json && Json(Own()) == json && Json(second) == json;
-                return (own && faithful && reads, $"own spec {own}, equal to the profile's {faithful}, later reads unchanged {reads}");
+                bool own = ReferenceEquals(first, second) && !ReferenceEquals(first, Own());
+                bool reads = Json(Own()) == json;
+                bool alloc = AllocatesNothing(() => Read());
+                return (own && faithful && reads && alloc, $"shared detached spec {own}, equal to the profile's {faithful}, SDK's spec unchanged {reads}, second read allocates nothing {alloc}");
             });
         }
 
-        c.Run("ExtendedReport: a write into a read changes no program a controller of the profile compiles", () =>
+        c.Run("ExtendedReport: a write into the snapshot changes no program a controller of the profile compiles", () =>
         {
             var inner = Fresh("steam-controller-2");
             var p = new HMProfile(inner);
@@ -90,7 +95,7 @@ internal static class Copies
             return (prog.NominalTicks != 0 && prog.Fields.Length > 0, $"NominalTicks {prog.NominalTicks}, {prog.Fields.Length} fields");
         });
 
-        c.Run("Layout: each read is a layout of its own, equal to the profile's as JSON, and a write into one of its lists changes no later read", () =>
+        c.Run("Layout: reads share one detached layout, equal to the profile's as JSON, and a write into one of its lists leaves the SDK's layout unchanged", () =>
         {
             var inner = Fresh("dualsense-bt");
             var p = new HMProfile(inner);
@@ -104,9 +109,10 @@ internal static class Copies
                 sticks[0] = sticks[0] with { XAxis = HMAxis.Dial };
                 wrote = true;
             }
-            bool own = !ReferenceEquals(first, second) && !ReferenceEquals(first.Sticks, second.Sticks);
-            bool reads = Json(p.Layout!) == json && Json(inner.Layout!) == json && Json(second) == json;
-            return (own && faithful && reads, $"own layout {own}, equal to the profile's {faithful}, a list written {wrote}, later reads unchanged {reads}");
+            bool own = ReferenceEquals(first, second) && !ReferenceEquals(first, inner.Layout) && !ReferenceEquals(first.Sticks, ((HMGamepadLayout)inner.Layout!).Sticks);
+            bool reads = Json(inner.Layout!) == json;
+            bool alloc = AllocatesNothing(() => p.Layout);
+            return (own && faithful && reads && alloc, $"shared detached layout {own}, equal to the profile's {faithful}, a list written {wrote}, SDK's layout unchanged {reads}, second read allocates nothing {alloc}");
         });
 
         c.Run("ExtendedReportSpec.Clone: a spec with every key of every type under it filled copies each value and shares no list or object", () =>
@@ -281,6 +287,16 @@ internal static class Copies
             [HMAxis.X] = 0.2f, [HMAxis.Y] = 0.3f, [HMAxis.Z] = 0.7f, [HMAxis.Rz] = 0.9f, [HMAxis.Rx] = 0.4f, [HMAxis.Ry] = 0.6f,
         };
         return p.GetOrBuildReportBuilder().BuildReport(axes, 0, (uint)(HMButton.A | HMButton.B));
+    }
+
+    /// <summary>True when 1000 calls of <paramref name="read"/>, after one
+    /// warm-up call, allocate no byte on this thread.</summary>
+    static bool AllocatesNothing(Func<object?> read)
+    {
+        read();
+        long b0 = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 1000; i++) read();
+        return GC.GetAllocatedBytesForCurrentThread() == b0;
     }
 
     static bool Same(Dictionary<string, string> a, Dictionary<string, string> b) =>
