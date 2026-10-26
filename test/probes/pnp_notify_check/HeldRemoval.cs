@@ -363,8 +363,53 @@ internal static class HeldRemoval
         check("no CM_LOCATE_DEVNODE_CANCELREMOVE locate in the held removals", cancels == 0, $"{cancels}");
 
         LeaseChecks(check);
+        LeftInPlaceChecks(check);
         RequestChecks(check);
     }
+
+    // ── What the full removal keeps of devices its walk left ──
+
+    /// <summary>The full removal's end (DeviceOrchestrator.LeftInPlace) on a
+    /// census taken after its walk, here built from devnodes and records of
+    /// the check's own (OwnerCensus.Build, as coexist_check's OF13 builds
+    /// one). A device left in place must stay findable by a later sweep once
+    /// its holder lets go: its Device Parameters name its index, its dead
+    /// owner's record names the device, and its driver host keeps serving
+    /// it.</summary>
+    static void LeftInPlaceChecks(Action<string, bool, string> check)
+    {
+        const string Left1 = @"ROOT\HIDCLASS\HM_FE0000000000A001";
+        const string Left2 = @"ROOT\HIDCLASS\HM_FE0000000000A002";
+        const string Removed = @"ROOT\HIDCLASS\HM_FE0000000000A003";
+        var deadNaming = OwnerRecord("pnc-dead-a", live: false, "HM_FE0000000000A001");
+        var deadOther = OwnerRecord("pnc-dead-b", live: false, "HM_FE0000000000A003");
+        var live = OwnerRecord("pnc-live-c", live: true, "HM_FE0000000000A004");
+        var records = new[] { deadNaming, deadOther, live };
+        var left = new DeviceOrchestrator.LeftInPlace(Census(new[] { Left1, Left2 }, records));
+        check("full removal, two devnodes its walk left in the tree (a dead program's, and one no record names) -> their Device Parameters stay, a removed devnode's go",
+              left.KeepsDeviceParameters(Left1) && left.KeepsDeviceParameters(Left2) && !left.KeepsDeviceParameters(Removed),
+              $"left {string.Join(", ", left.Devnodes)}; keeps {left.KeepsDeviceParameters(Left1)}, {left.KeepsDeviceParameters(Left2)}, removed one {left.KeepsDeviceParameters(Removed)}");
+        check("full removal, devnodes left -> the dead record that names one stays, a dead record that names nothing present goes, a live record stays",
+              left.KeepsRecord(deadNaming) && !left.KeepsRecord(deadOther) && left.KeepsRecord(live),
+              $"{left.KeepsRecord(deadNaming)}, {left.KeepsRecord(deadOther)}, {left.KeepsRecord(live)}");
+        check("full removal, devnodes left -> no driver host is waited for or stopped, and the interface entries of present devnodes stay",
+              left.LeavesDriverHosts && left.KeepsPresentInterfaceEntries,
+              $"hosts left {left.LeavesDriverHosts}, interface entries kept {left.KeepsPresentInterfaceEntries}");
+        var none = new DeviceOrchestrator.LeftInPlace(Census(Array.Empty<string>(), records));
+        check("full removal, nothing left -> every dead record goes, a live one stays, and the driver hosts are waited for and drained",
+              !none.KeepsRecord(deadNaming) && !none.KeepsRecord(deadOther) && none.KeepsRecord(live) && !none.LeavesDriverHosts,
+              $"{none.KeepsRecord(deadNaming)}, {none.KeepsRecord(deadOther)}, {none.KeepsRecord(live)}, hosts left {none.LeavesDriverHosts}");
+    }
+
+    /// <summary>A census of <paramref name="present"/> devnodes, none with
+    /// Device Parameters, and <paramref name="records"/>, with no v1.12.0
+    /// program and no ledger holder.</summary>
+    static OwnerCensus Census(string[] present, MachineClaims.OwnerRecord[] records) =>
+        OwnerCensus.Build(present, _ => null, records, _ => false, () => Array.Empty<(int Pid, int Index)>(), () => records);
+
+    static MachineClaims.OwnerRecord OwnerRecord(string owner, bool live, string token) =>
+        new(owner, Pid: 0, Image: null, StartTime: 0, SdkVersion: null, UsbipPort: 0, Live: live, Self: false,
+            Controllers: new[] { new MachineClaims.ControllerEntry(token, -1, "umdf", "dualshock-4-v2", null) });
 
     // ── The lease of a create that meets a refused removal ──
 

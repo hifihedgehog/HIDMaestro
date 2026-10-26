@@ -2803,6 +2803,37 @@ internal static partial class DeviceOrchestrator
         return index < 0 ? null : () => SharedMemoryIO.RequestSurpriseRemovalOfIndex(index, TimeoutScale.Apply(2000));
     }
 
+    /// <summary>What the full removal's walk left in the device tree, read
+    /// from the census taken after it, and what the removal's end keeps for
+    /// it. RemoveDevice leaves a device whose removal a program refuses, and
+    /// its records, when its driver cannot be asked to fail it or does not
+    /// answer, so that once the program lets go a later sweep can find it by
+    /// the index its Device Parameters name and the record of its
+    /// owner.</summary>
+    internal sealed class LeftInPlace
+    {
+        private readonly HashSet<string> _devnodes = new(StringComparer.OrdinalIgnoreCase);
+
+        internal LeftInPlace(OwnerCensus after)
+        {
+            foreach (var g in after.Devices) _devnodes.UnionWith(g.InstanceIds);
+        }
+
+        /// <summary>The HIDMaestro devnodes still in the tree.</summary>
+        internal IReadOnlyCollection<string> Devnodes => _devnodes;
+
+        internal bool KeepsDeviceParameters(string instanceId) => false;
+
+        internal bool KeepsRecord(MachineClaims.OwnerRecord record) => record.Live;
+
+        /// <summary>The interface class entries of present devnodes stay
+        /// (DeviceOrchestrator.RemoveOwnedInterfaceEntries' phantomOnly).</summary>
+        internal bool KeepsPresentInterfaceEntries => false;
+
+        /// <summary>No driver host is waited for or stopped.</summary>
+        internal bool LeavesDriverHosts => false;
+    }
+
     private static void RemoveEverythingGated(bool preserveInstall, bool forUninstall = false)
     {
         var sweepSw = System.Diagnostics.Stopwatch.StartNew();
@@ -2972,6 +3003,11 @@ internal static partial class DeviceOrchestrator
 
         Phase("hid-orphans");
 
+        // What the walk left in the tree, read once before anything below.
+        var left = new LeftInPlace(OwnerCensus.Take());
+        if (left.Devnodes.Count > 0)
+            LogDiag($"    left in the tree: {string.Join(", ", left.Devnodes)}");
+
         // Clean Device Parameters under our enumerators via reg.exe (PnP ACLs
         // prevent direct writes). Leaves the PnP instance keys themselves intact.
         // Sweeps both ROOT\ and SWD\ subtrees. HIDMAESTRO* is ours alone. The
@@ -2992,6 +3028,7 @@ internal static partial class DeviceOrchestrator
                     {
                         if (!exclusivelyOurs && !DeviceManager.IsHidMaestroOwned($@"{enumRootName}\{sub}\{inst}"))
                             continue;
+                        if (left.KeepsDeviceParameters($@"{enumRootName}\{sub}\{inst}")) continue;
                         string dpPath = $@"SYSTEM\CurrentControlSet\Enum\{enumRootName}\{sub}\{inst}\Device Parameters";
                         RunProcess("reg.exe", $"delete \"HKLM\\{dpPath}\" /f", timeoutMs: 3000);
                     }
@@ -3004,7 +3041,7 @@ internal static partial class DeviceOrchestrator
 
         // Clean interface registries (XUSB + WinExInput), with the same
         // ownership proof the once-per-session cleanup uses.
-        RemoveOwnedInterfaceEntries(phantomOnly: false);
+        RemoveOwnedInterfaceEntries(phantomOnly: left.KeepsPresentInterfaceEntries);
 
         Phase("interface-classes");
 
@@ -3033,7 +3070,7 @@ internal static partial class DeviceOrchestrator
         bool skipWudfSteps = !forUninstall && preserveInstall && DriverBuilder.WillTakeFastPath();
 
         // Wait for WUDFHost processes to release our DLLs.
-        if (!skipWudfSteps)
+        if (!skipWudfSteps && !left.LeavesDriverHosts)
             WaitForDriverHostsToExit();
 
         // Remove driver packages from store. Strict, retry-aware, verifies
@@ -3076,7 +3113,7 @@ internal static partial class DeviceOrchestrator
         // running program's record stays: it still holds its claims, and
         // its own dispose removes its entries.
         foreach (var rec in MachineClaims.ReadAll())
-            if (!rec.Live) MachineClaims.DeleteRecord(rec.OwnerId);
+            if (!left.KeepsRecord(rec)) MachineClaims.DeleteRecord(rec.OwnerId);
 
         // Drain orphaned WUDFHost processes that STILL have our stale
         // HIDMaestro.dll memory-mapped from a since-deleted DriverStore
@@ -3097,7 +3134,7 @@ internal static partial class DeviceOrchestrator
         // microsoft.bluetooth.profiles.hidovergatt.dll for a real BT Xbox
         // controller) is skipped entirely: that's what the NEVER-kill-
         // WUDFHost rule in feedback-never-kill-wudfhost.md is about.
-        if (!skipWudfSteps)
+        if (!skipWudfSteps && !left.LeavesDriverHosts)
             DrainOrphanedWudfHosts();
         Phase("wudf-drain");
         LogDiag($"<<< SWEEP EXIT total={sweepSw.ElapsedMilliseconds}ms");
