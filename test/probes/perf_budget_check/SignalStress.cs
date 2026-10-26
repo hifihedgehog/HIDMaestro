@@ -805,17 +805,23 @@ internal static partial class Program
 
     static void StressWgi(HMController c, Gamepad pad, double seconds, IntPtr signal, bool gateOff, int missEvery, int missInputEvery, bool lateDetail)
     {
-        // A count in the two sticks' X axes (HMAxis.X and HMAxis.Z on this
-        // profile), 200 steps each, apart by more than the 16-bit
-        // quantization on the way to Windows.Gaming.Input.
+        // A count in the two sticks' X axes, 200 steps each, apart by more
+        // than the 16-bit quantization on the way to Windows.Gaming.Input.
+        // The axes come from the profile's layout: on xbox-360-wired the
+        // right stick's X is Rx, and Z is the combined trigger, where the
+        // count's high digit never reached RightThumbstickX.
         static float Axis(int digit) => 0.05f + digit * 0.0045f;
         static int Digit(double wgi) => (int)Math.Round(((wgi + 1) / 2 - 0.05) / 0.0045);
+        var sticks = c.Profile.Sticks;
+        if (sticks.Count < 2) { Check($"{Xbox360}: a profile with two sticks", false, $"{sticks.Count} sticks"); return; }
+        HMAxis leftX = sticks[0].XAxis, rightX = sticks[1].XAxis;
         var seen = new List<(int, long)>(1 << 20);
         var burstOf = lateDetail ? new List<(int Size, int After)>(1 << 20) : null;
         bool stop = false;
         // As on the DualShock 4: a count above the highest submitted is a
         // misread, and fails the pass.
         int highest = 0, misread = 0, misreadValue = 0;
+        string? firstReading = null;
         var state = new HMGamepadState { Axes = new Dictionary<HMAxis, float>() };
         var poller = new Thread(() =>
         {
@@ -843,20 +849,23 @@ internal static partial class Program
                 prev = code;
                 last = code;
                 seen.Add((unwrapped, t));
+                if (firstReading == null && count > 0)
+                    firstReading = FormattableString.Invariant(
+                        $"LeftThumbstickX {r.LeftThumbstickX:F5}, RightThumbstickX {r.RightThumbstickX:F5}, digits {x} and {y}, count {count}");
             }
         }) { IsBackground = true, Priority = ThreadPriority.Highest, Name = "stress wgi" };
-        state.Axes[HMAxis.X] = Axis(0);
-        state.Axes[HMAxis.Z] = Axis(0);
+        state.Axes[leftX] = Axis(0);
+        state.Axes[rightX] = Axis(0);
         c.SubmitState(state);
         Thread.Sleep(500);
         poller.Start();
-        Console.WriteLine($"  {Xbox360}, SubmitState to Windows.Gaming.Input:");
+        Console.WriteLine($"  {Xbox360}, SubmitState to Windows.Gaming.Input, the count in {leftX} and {rightX}:");
         var modes = signal == IntPtr.Zero || gateOff ? new[] { 0 } : new[] { 0, GateInput, GateCompanion, GateInput | GateCompanion };
         var sent = StressSchedule(seconds, n =>
         {
             int code = n % 40000;
-            state.Axes[HMAxis.X] = Axis(code % 200);
-            state.Axes[HMAxis.Z] = Axis(code / 200);
+            state.Axes[leftX] = Axis(code % 200);
+            state.Axes[rightX] = Axis(code / 200);
             Volatile.Write(ref highest, n);
             c.SubmitState(state);
         }, modes, signal, missEvery, missInputEvery, burstOf);
@@ -865,6 +874,7 @@ internal static partial class Program
         poller.Join(2000);
         Check($"{Xbox360} Windows.Gaming.Input: every reading carries a count the probe submitted, in the sticks' X axes",
             misread == 0, misread == 0 ? $"{seen.Count} counts read" : $"{misread} readings carried none, the first {misreadValue}");
+        Console.WriteLine($"  {Xbox360} Windows.Gaming.Input: the first reading with a count, {firstReading ?? "none"}");
         StressVerdict($"{Xbox360} Windows.Gaming.Input", sent, seen);
         if (burstOf != null) LateDetail($"{Xbox360} Windows.Gaming.Input", sent, burstOf, seen, seen, wgi: true);
     }
