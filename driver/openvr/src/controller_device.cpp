@@ -283,6 +283,15 @@ void HmVrControllerDevice::ProcessEvent( const vr::VREvent_t &vrevent, HMVR_Sect
     const uint64_t seqNo = section->hapticHead + 1;
     HMVR_HapticReply &slot = section->haptic[ ( seqNo - 1 ) % HMVR_HAPTIC_SLOTS ];
 
+    // A consumer HMVR_HAPTIC_SLOTS replies behind reads the very slot this
+    // reply refills, checking its seqNo before and after the copy
+    // (VrSharedMemory.TryReadHaptic). Left in place through the refill,
+    // the old seqNo passes both checks for a copy mixed from two replies.
+    // Zero, the never-written value, goes in first, with a barrier before
+    // the fields, so a copy that saw any new field sees the seqNo changed.
+    slot.seqNo = 0;
+    MemoryBarrier();
+
     slot.hand = ( role_ == vr::TrackedControllerRole_LeftHand ) ? 0u : 1u;
     slot.durationSeconds = vrevent.data.hapticVibration.fDurationSeconds;
     slot.frequency = vrevent.data.hapticVibration.fFrequency;
