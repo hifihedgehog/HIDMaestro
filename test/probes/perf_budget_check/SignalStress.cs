@@ -17,7 +17,14 @@
 // then fails the pass too, so a count read in the wrong place fails rather
 // than matching. Until that check the DualShock 4's count went in at data
 // bytes 40 to 43, read back as 256 times itself, and every submit matched
-// the next new report of any frame.
+// the next new report of any frame. A reader that fails records the error,
+// its Stopwatch time and the last count it read. It reads again after an
+// abort the probe did not ask for, reopens the controller's interface (or,
+// on the Xbox 360 pad, takes the pad that comes back) after anything else,
+// and when it cannot go on, a check of its own fails the pass with the error
+// and the count. Until then one failed ReadFile ended the DualShock 4's
+// reading for the rest of the pass with nothing recorded, and every later
+// frame counted as never read.
 //
 // The gate's capability words in Global\HIDMaestroSignal<N> tell the SDK
 // it may skip a signal, and the driver hosts count whatever they say. So
@@ -175,7 +182,7 @@ internal static partial class Program
                 if (pad == null) Thread.Sleep(100);
             }
             if (pad == null) Check($"{Xbox360}: a Windows.Gaming.Input gamepad the create added", false, "none in 20 s");
-            else StressWgi(c, pad, seconds, SignalView(c), gateOff, missEvery, missInputEvery, lateDetail);
+            else StressWgi(c, pad, before, seconds, SignalView(c), gateOff, missEvery, missInputEvery, lateDetail);
         }
         return s_failures == 0 ? 0 : 1;
     }
@@ -614,13 +621,41 @@ internal static partial class Program
         int highest = 0, misread = 0, misreadValue = 0;
         byte[]? firstReport = null;
         bool stop = false;
+        // A failed ReadFile is recorded with its error, its Stopwatch time and
+        // the last count read before it. An abort the probe did not ask for
+        // reads again. Any other error reopens the controller's interface,
+        // which a device that went and came back offers again. A reader that
+        // cannot go on records why and stops, and the pass fails on it, so a
+        // dead reader never passes as late frames.
+        var failures = new ReaderFailures();
+        HidDevice current = dev;
+        var reopened = new List<HidDevice>();
         var reader = new Thread(() =>
         {
             var buf = new byte[dev.InputLength];
-            int last = -1;
+            int last = -1, inARow = 0;
             while (!Volatile.Read(ref stop))
             {
-                if (!ReadFile(dev.Handle, buf, buf.Length, out int read, IntPtr.Zero)) return;
+                if (!ReadFile(Volatile.Read(ref current).Handle, buf, buf.Length, out int read, IntPtr.Zero))
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    long at = Stopwatch.GetTimestamp();
+                    // The probe's own CancelIoEx, as the pass ends.
+                    if (Volatile.Read(ref stop)) break;
+                    failures.Add(error, at, last);
+                    if (++inARow > 20) { failures.Stop(error, at, last, "20 failed reads in a row"); return; }
+                    if (error == ERROR_OPERATION_ABORTED) continue;
+                    HidDevice? again;
+                    string lost;
+                    try { again = OpenStateInterface(c, out lost); }
+                    catch (Exception ex) { again = null; lost = ex.GetType().Name + ": " + ex.Message; }
+                    if (again == null) { failures.Stop(error, at, last, "no interface to reopen: " + lost); return; }
+                    if (inputBuffers > 0) HidD_SetNumInputBuffers(again.Handle, inputBuffers);
+                    lock (reopened) reopened.Add(again);
+                    Volatile.Write(ref current, again);
+                    continue;
+                }
+                inARow = 0;
                 long t = Stopwatch.GetTimestamp();
                 if (read < 44 || buf[0] != 0x01) continue;
                 int count = BitConverter.ToInt32(buf, 40);
@@ -647,8 +682,9 @@ internal static partial class Program
         }, modes, signal, 0, missInputEvery, burstOf);
         Thread.Sleep((int)StressBoundMs * 2);
         Volatile.Write(ref stop, true);
-        CancelIoEx(dev.Handle, IntPtr.Zero);
-        reader.Join(2000);
+        CancelIoEx(Volatile.Read(ref current).Handle, IntPtr.Zero);
+        if (!reader.Join(2000)) { CancelIoEx(Volatile.Read(ref current).Handle, IntPtr.Zero); reader.Join(2000); }
+        lock (reopened) foreach (var h in reopened) h.Dispose();
         List<(int, long)> got;
         List<(int, long)>? all = null;
         lock (seen)
@@ -656,6 +692,8 @@ internal static partial class Program
             got = seen.ToList();
             all = reads?.ToList();
         }
+        long passStart = sent.Count > 0 ? sent[0].Time : 0;
+        failures.Report($"{Ds4} ReadFile", passStart, reopened.Count, "reopens");
         Check($"{Ds4} ReadFile: every reading carries a count the probe submitted, at report bytes 40 to 43",
             misread == 0, misread == 0 ? $"{got.Count} counts read" : $"{misread} readings carried none, the first {misreadValue}");
         StressVerdict($"{Ds4} ReadFile", sent, got);
@@ -803,7 +841,7 @@ internal static partial class Program
         }
     }
 
-    static void StressWgi(HMController c, Gamepad pad, double seconds, IntPtr signal, bool gateOff, int missEvery, int missInputEvery, bool lateDetail)
+    static void StressWgi(HMController c, Gamepad pad, HashSet<Gamepad> before, double seconds, IntPtr signal, bool gateOff, int missEvery, int missInputEvery, bool lateDetail)
     {
         // A count in the two sticks' X axes, 200 steps each, apart by more
         // than the 16-bit quantization on the way to Windows.Gaming.Input.
@@ -823,13 +861,55 @@ internal static partial class Program
         int highest = 0, misread = 0, misreadValue = 0;
         string? firstReading = null;
         var state = new HMGamepadState { Axes = new Dictionary<HMAxis, float>() };
+        // As on the DualShock 4, the poller's failures are recorded: a
+        // reading that throws, with its HRESULT, and the pad leaving
+        // Windows.Gaming.Input's list. It reads again after a throw, and after
+        // a removal it takes the pad that comes back within 5 s. A poller that
+        // cannot go on records why and stops, and the pass fails on it.
+        var failures = new ReaderFailures();
+        int rebound = 0;
+        Gamepad current = pad;
         var poller = new Thread(() =>
         {
-            int last = -1, unwrapped = 0, prev = 0, lastBad = -1;
+            int last = -1, unwrapped = 0, prev = 0, lastBad = -1, inARow = 0;
+            long nextLook = Stopwatch.GetTimestamp() + Stopwatch.Frequency / 10;
             while (!Volatile.Read(ref stop))
             {
-                var r = pad.GetCurrentReading();
+                GamepadReading r;
+                try { r = current.GetCurrentReading(); }
+                catch (Exception ex)
+                {
+                    long at = Stopwatch.GetTimestamp();
+                    failures.Add(ex.HResult, at, unwrapped, ex.GetType().Name);
+                    if (++inARow > 20) { failures.Stop(ex.HResult, at, unwrapped, "20 failed readings in a row"); return; }
+                    Thread.Sleep(1);
+                    continue;
+                }
+                inARow = 0;
                 long t = Stopwatch.GetTimestamp();
+                bool listed = true;
+                if (t >= nextLook)
+                {
+                    nextLook = t + Stopwatch.Frequency / 10;
+                    try { listed = Gamepad.Gamepads.Contains(current); }
+                    catch (Exception ex) { failures.Add(ex.HResult, t, unwrapped, "Gamepad.Gamepads threw " + ex.GetType().Name); }
+                    if (!listed)
+                    {
+                        failures.Add(0, t, unwrapped, "the pad left Gamepad.Gamepads");
+                        Gamepad? back = null;
+                        var wait = Stopwatch.StartNew();
+                        while (back == null && !Volatile.Read(ref stop) && wait.ElapsedMilliseconds < 5000)
+                        {
+                            try { back = Gamepad.Gamepads.FirstOrDefault(g => !before.Contains(g) && !ReferenceEquals(g, current)); }
+                            catch (Exception) { back = null; }
+                            if (back == null) Thread.Sleep(50);
+                        }
+                        if (back == null) { failures.Stop(0, t, unwrapped, "the pad left Gamepad.Gamepads and none came back in 5 s"); return; }
+                        current = back;
+                        rebound++;
+                        continue;
+                    }
+                }
                 int x = Digit(r.LeftThumbstickX), y = Digit(r.RightThumbstickX);
                 if (x < 0 || x > 199 || y < 0 || y > 199) continue;
                 int code = y * 200 + x;
@@ -872,11 +952,70 @@ internal static partial class Program
         Thread.Sleep((int)StressBoundMs * 2);
         Volatile.Write(ref stop, true);
         poller.Join(2000);
+        failures.Report($"{Xbox360} Windows.Gaming.Input", sent.Count > 0 ? sent[0].Time : 0, rebound, "rebinds to a pad that came back");
         Check($"{Xbox360} Windows.Gaming.Input: every reading carries a count the probe submitted, in the sticks' X axes",
             misread == 0, misread == 0 ? $"{seen.Count} counts read" : $"{misread} readings carried none, the first {misreadValue}");
         Console.WriteLine($"  {Xbox360} Windows.Gaming.Input: the first reading with a count, {firstReading ?? "none"}");
         StressVerdict($"{Xbox360} Windows.Gaming.Input", sent, seen);
         if (burstOf != null) LateDetail($"{Xbox360} Windows.Gaming.Input", sent, burstOf, seen, seen, wgi: true);
+    }
+
+    const int ERROR_OPERATION_ABORTED = 995;
+
+    static string ErrorName(int e) => e switch
+    {
+        0 => "no error code",
+        2 => "ERROR_FILE_NOT_FOUND",
+        6 => "ERROR_INVALID_HANDLE",
+        21 => "ERROR_NOT_READY",
+        22 => "ERROR_BAD_COMMAND",
+        31 => "ERROR_GEN_FAILURE",
+        995 => "ERROR_OPERATION_ABORTED",
+        1167 => "ERROR_DEVICE_NOT_CONNECTED",
+        1784 => "ERROR_INVALID_USER_BUFFER",
+        < 0 => FormattableString.Invariant($"HRESULT 0x{e:X8}"),
+        _ => new System.ComponentModel.Win32Exception(e).Message,
+    };
+
+    /// <summary>A signal-stress reader's failures: each one's error, its
+    /// Stopwatch time and the last count read before it, and why the reader
+    /// stopped, if it did. The report is a check that fails on a reader that
+    /// stopped before the pass ended, naming the error and the count.</summary>
+    sealed class ReaderFailures
+    {
+        readonly object _lock = new();
+        readonly List<(int Error, long Time, int LastCount, string What)> _first = new();
+        int _count;
+        (int Error, long Time, int LastCount, string Why)? _stopped;
+
+        public void Add(int error, long time, int lastCount, string what = "")
+        {
+            lock (_lock)
+            {
+                _count++;
+                if (_first.Count < 16) _first.Add((error, time, lastCount, what));
+            }
+        }
+
+        public void Stop(int error, long time, int lastCount, string why)
+        {
+            lock (_lock) _stopped = (error, time, lastCount, why);
+        }
+
+        public void Report(string name, long passStart, int recoveries, string recovered)
+        {
+            double Into(long t) => passStart == 0 ? double.NaN : (t - passStart) / (double)Stopwatch.Frequency;
+            lock (_lock)
+            {
+                Check($"{name}: the reader read until the pass ended", _stopped == null,
+                    _stopped is { } s
+                        ? FormattableString.Invariant($"it stopped after count {s.LastCount}: error {s.Error} ({ErrorName(s.Error)}) at QPC {s.Time}, {Into(s.Time):F3} s into the pass, {s.Why}")
+                        : FormattableString.Invariant($"{_count} failures, {recoveries} {recovered}"));
+                if (_count > 0)
+                    Console.WriteLine($"  {name}: {_count} failures, {recoveries} {recovered}: " + string.Join("; ", _first.Select(f =>
+                        FormattableString.Invariant($"{(f.What.Length > 0 ? f.What + ", " : "")}error {f.Error} ({ErrorName(f.Error)}) at QPC {f.Time}, {Into(f.Time):F3} s in, after count {f.LastCount}"))));
+            }
+        }
     }
 
     [DllImport("hid.dll", SetLastError = true)]
