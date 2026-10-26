@@ -907,9 +907,11 @@ HandoffFinal(_In_ ULONG handed)
  * (HandoffFinal). The exchange comes after the interlocked increment of
  * InputWaiters, so the two full barriers face the SDK's exchange and its
  * load of the count (docs/design/signal-gate.md). A final frame taken is
- * read, or, when the worker leaves its loop first on the stop event or at
- * teardown, signaled on the input event, where v2.0.3's program left its
- * signal. The read takes whatever the section holds, as v2.0.3's read on
+ * read, or, when the poll after the take returns the stop event, at a
+ * foreign stop or at teardown, signaled on the input event, where v2.0.3's
+ * wait left the program's signal set. At teardown with any other result of
+ * the poll the worker leaves with it unread, as v2.0.3's worker left with
+ * the program's signal spent. The read takes whatever the section holds, as v2.0.3's read on
  * the frame's signal did: the frame, or a newer one its program stored and
  * died before handing over, whose wakeup this is, as the left signal of the
  * frame before it was on v2.0.3. Returns TRUE for a final frame. Worker
@@ -2074,29 +2076,32 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
              * input event a program set meanwhile is taken first, as
              * v2.0.3's wait took it before the pipe's close. */
             else if (pending && rc != WAIT_OBJECT_0 && rc != WAIT_OBJECT_0 + 1) {
-                /* At teardown a taken frame goes back to the input event
-                 * unread, as at the stop event below, for the next device
-                 * context. A read that has begun is not undone: v2.0.3's
-                 * wait, which the take stands for, had returned the signal
-                 * by then and read it the same way, and a READ_REPORT that
-                 * comes late can still take the frame from the cache, so a
-                 * frame signaled back after its read would go out twice. */
-                if (ctx->TearingDown) {
-                    SetEvent(ctx->InputDataEvent);
+                /* At teardown the worker leaves with the taken frame
+                 * unread and signals nothing: the poll came back before the
+                 * stop event, where v2.0.3's wait, which the take stands for,
+                 * returned the program's signal, and its worker left with
+                 * that wake spent. A signal back would give the next device
+                 * context a wake v2.0.3's never had, which sends a frame
+                 * again or, with SeenSeqNo then left at its SeqNo, loses a
+                 * later one. */
+                if (ctx->TearingDown)
                     return 0;
-                }
                 idleTimeouts = 0;
                 ProcessSharedInput(ctx);
                 pending = FALSE;
                 if (rc == WAIT_OBJECT_0 + 2) continue;
             }
-            /* 2.1.0: a frame taken and not read when the worker leaves the
-             * loop, at teardown or on the stop event (a recycle), goes back
-             * to the input event as a SetEvent below. v2.0.3's wait returned
-             * the stop event first too, and left the program's signal set,
-             * so the next device context or the recycled worker read the
-             * section. Dropped, the frame waited for the program's next one.
-             * The add and the recycle forget SeenSeqNo in both drivers, so
+            /* 2.1.0: a frame taken and not read when the poll returns the
+             * stop event, at teardown or at a foreign stop (a recycle), goes
+             * back to the input event as a SetEvent below. v2.0.3's wait
+             * returned the stop event first too, and left the program's
+             * signal set, so the next device context or the recycled worker
+             * read the section. At teardown with any other result the
+             * worker leaves with the frame unread and signals nothing, as in
+             * the owner path above: v2.0.3's wait returned the program's
+             * signal there and spent it. Dropped at the stop event, the frame
+             * waited for the program's next one. The add and the recycle
+             * forget SeenSeqNo in both drivers, so
              * a taken frame already sent goes out again there only where
              * v2.0.3's left signal sent it again. A provisional take is no
              * frame (HandoffFinal): its program signals it. */
@@ -2115,7 +2120,7 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
              * exit latency is one 500 ms wait, inside cleanup's 2 s
              * join. */
             if (ctx->TearingDown) {
-                if (pending) SetEvent(ctx->InputDataEvent);
+                if (pending && rc == WAIT_OBJECT_0) SetEvent(ctx->InputDataEvent);
                 return 0;
             }
 

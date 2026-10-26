@@ -1431,10 +1431,13 @@ static void StreamX10IdleWindowNext(PlanProfile *p, int legacy)
 /* x10-take-owner-at-teardown: while the worker completes a read, A's frame
  * X is handed over final and A's pipe closes. The worker takes X, and its
  * device's teardown has set TearingDown, with the stop event still to come,
- * when it polls: the poll answers the pipe's close. The queues are purged by
- * then, so the worker signals X back instead of reading it, and the device
- * added again reads X for its read. 533ca4a4's worker, still before its
- * wait, leaves X's signal set for the next device the same way. */
+ * when it polls: the poll answers the pipe's close, and the worker leaves
+ * with X unread and signals nothing. The harness answers 533ca4a4's wait
+ * only after the device's removal set the stop event, which comes first,
+ * so its worker leaves X's signal set and the device added again sends X.
+ * In the order this driver's poll takes, before the stop event, 533ca4a4's
+ * wait returns X's signal and its worker leaves with it spent:
+ * x14-take-at-teardown-owner puts both drivers in that order. */
 static void X10TearAtPoll(void)
 {
     Ctl *c = g_x9Ctl;
@@ -2125,6 +2128,100 @@ static void StreamX13CompanionFence(PlanProfile *p)
     CtlStop(&c);
 }
 
+/* x14-take-at-teardown-*: while the worker completes a read, X is handed
+ * over final (signaled on a driver without the gate). The worker takes X,
+ * and its device's teardown sets TearingDown before the worker's poll,
+ * with the stop event still to come. The poll returns, before the stop
+ * event, the owner pipe (A's pipe closed), the remove event (the SDK's
+ * Dispose asked the device to go), a timeout, or the input event (a later
+ * frame Y signaled by an SDK that read the count before the worker's
+ * decrement). The worker leaves with X unread and signals nothing. In the
+ * same order 533ca4a4's wait returns X's signal first, ahead of the owner
+ * pipe and the remove event, and its worker leaves at TearingDown with that
+ * wake spent: on a driver that does not poll, the stream sets TearingDown
+ * at the same point, before the wait's answer. Neither device added again
+ * gets a wake for X, and the next frame goes out on both. -stop: the stop
+ * event is set too, the poll returns it, and the worker signals X back, as
+ * 533ca4a4's wait returns the stop event first and leaves X's signal set:
+ * the device added again sends X on both. */
+enum { X14_OWNER, X14_REMOVE, X14_TIMEOUT, X14_INPUT, X14_STOP };
+static Ctl *g_x14Ctl;
+static int g_x14Mode, g_x14Torn;
+static HmEvent *g_x14Remove;
+static void X14Tear(void)
+{
+    Ctl *c = g_x14Ctl;
+    g_x14Torn = 1;
+    *(volatile LONG *)((uint8_t *)c->dev->context + HmTearingDownOffset) = 1;
+    if (g_x14Mode == X14_INPUT) {
+        X6Store(&c->sdk, 0x60);
+        EventSet(c->sdk.inputEv);
+    }
+    if (g_x14Mode == X14_STOP) {
+        HmObj *o = ObjFromHandle(c->dev->threads[0]->waitHandles[0]);
+        if (!o || o->kind != HK_EVENT || !((HmEvent *)o)->manual) HmFail("x14: no stop event");
+        EventSet((HmEvent *)o);
+    }
+}
+static void X14Hand(void)
+{
+    Ctl *c = g_x14Ctl;
+    uint8_t data[64];
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x30 + i);
+    SdkWriteFrame(&c->sdk, data, 63, NULL, NULL, 0);
+    if (g_x14Mode == X14_OWNER) PipeServerClose(c->sdk.pipe);
+    if (g_x14Mode == X14_REMOVE) EventSet(g_x14Remove);
+    g_pollHook = X14Tear;
+}
+static void StreamX14TakeAtTeardown(PlanProfile *p, int mode)
+{
+    static const char *names[] = { "owner", "remove", "timeout", "input", "stop" };
+    Ctl c;
+    StreamBegin("threads/%s/x14-take-at-teardown-%s", p->id, names[mode]);
+    g_x14Remove = NULL;
+    if (mode == X14_REMOVE) {
+        /* The SDK makes the remove event with the input event, and the
+         * worker opens it at its map. */
+        g_x14Remove = EventNew(L"Global\\HIDMaestroRemoveEvent0", FALSE, FALSE, OWN_ADMINS, TRUE);
+        Hold(&g_x14Remove->o);
+    }
+    if (!CtlStart(&c, p, 0, SDK_ALL, 0)) return;
+    uint32_t len = c.p->readLength ? c.p->readLength : 64;
+    uint8_t data[64];
+    Probe(&c, 0, 1);
+    HidRead(&c, len);
+    g_x14Ctl = &c;
+    g_x14Mode = mode;
+    g_x14Torn = 0;
+    g_completeHook = X14Hand;
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x20 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    if (g_completeHook) HmFail("x14: the completion hook never ran");
+    g_pollHook = NULL;
+    /* x14.at: 1 when TearingDown was set at the worker's poll after its
+     * take, 2 when the driver made no take and the stream sets it before
+     * the wait's answer. */
+    uint32_t at = g_x14Torn ? 1u : 2u;
+    RecOut("x14.at", &at, 4);
+    if (!g_x14Torn) {
+        X14Tear();
+        ThreadResume(CtlThread(&c, 0));
+    }
+    DeviceRemove(c.dev);
+    /* The removal the SDK asked for is done with the device. */
+    if (g_x14Remove) g_x14Remove->signaled = FALSE;
+    ConfigWrite(p, 0);
+    c.dev = DeviceAdd(0);
+    if (!c.dev) HmFail("x14: re-add failed");
+    HidRead(&c, len);
+    RunWorker(&c);
+    RunWorker(&c);
+    HidRead(&c, len);
+    for (int i = 0; i < 64; i++) data[i] = (uint8_t)(0x90 + i);
+    Frame(&c, data, 63, NULL, NULL, 0);
+    CtlStop(&c);
+}
+
 void CaseThreads(void)
 {
     PlanProfile *sw = PlanFind("switch", NULL);
@@ -2204,4 +2301,5 @@ void CaseThreads(void)
     StreamX13BeforeDecrement(ds, 0);
     StreamX13BeforeDecrement(ds, 1);
     StreamX13CompanionFence(xusb);
+    for (int m = X14_OWNER; m <= X14_STOP; m++) StreamX14TakeAtTeardown(ds, m);
 }
