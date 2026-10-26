@@ -40,7 +40,51 @@ internal static class RepeatState
         string json = Device.Catalog("dualsense-bt");
         Interleaved(json, armed: false, 7960);
         Interleaved(json, armed: true, 7961);
+        KeySets(json, 7964);
         Concurrent(json, 7962, 7963);
+    }
+
+    /// <summary>The kept copy follows the keys of each state submitted. A
+    /// key the consumer dropped since the last submit reads at rest in the
+    /// repeat and a key it added reads as given, and a state in another
+    /// dictionary or with none repeats as submitted.</summary>
+    static void KeySets(string json, int index)
+    {
+        using var d = new SendClock.Offline(json, index);
+        d.Clock?.Stop(1000);
+        long period = ((StreamClock)typeof(HMController).GetField("_stream", Instance)!.GetValue(d.C)!).PeriodTicks;
+        var axes = new Dictionary<HMAxis, float>();
+        var states = new (string Name, HMGamepadState State)[]
+        {
+            ("X and Z", new HMGamepadState { Axes = axes }),
+            ("X alone, Z dropped", new HMGamepadState { Axes = axes }),
+            ("X, Y and Z, Y added", new HMGamepadState { Axes = axes }),
+            ("Z alone in another dictionary", new HMGamepadState { Axes = new Dictionary<HMAxis, float> { [HMAxis.Z] = V(40) } }),
+            ("X and Z again in the first", new HMGamepadState { Axes = axes }),
+            ("no dictionary", new HMGamepadState()),
+        };
+        var wrong = new List<string>();
+        for (int i = 0; i < states.Length; i++)
+        {
+            switch (i)
+            {
+                case 0: axes[HMAxis.X] = V(10); axes[HMAxis.Z] = V(10); break;
+                case 1: axes.Remove(HMAxis.Z); axes[HMAxis.X] = V(20); break;
+                case 2: axes[HMAxis.X] = V(30); axes[HMAxis.Y] = V(30); axes[HMAxis.Z] = V(30); break;
+                case 4: axes.Remove(HMAxis.Y); axes[HMAxis.X] = V(50); axes[HMAxis.Z] = V(50); break;
+            }
+            d.C.SubmitState(in states[i].State);
+            long sent = Stopwatch.GetTimestamp();
+            byte[] submitted = Data(d.View);
+            while (Stopwatch.GetTimestamp() - sent < period) Thread.SpinWait(20);
+            uint seq = d.Seq;
+            d.Tick();
+            byte[] repeated = Data(d.View);
+            if (d.Seq == seq || !repeated.AsSpan().SequenceEqual(submitted))
+                wrong.Add($"{states[i].Name}: submitted {Checks.Hex(submitted)}, repeated {(d.Seq == seq ? "nothing" : Checks.Hex(repeated))}");
+        }
+        Check("dualsense-bt: the repeat follows each submit's keys, dropped, added, in another dictionary or none",
+            wrong.Count == 0, wrong.Count == 0 ? $"{states.Length} states" : string.Join("; ", wrong));
     }
 
     /// <summary>The repeat called a period after each submit, once the
