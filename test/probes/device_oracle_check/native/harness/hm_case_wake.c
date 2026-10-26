@@ -708,10 +708,12 @@ static void ReportEveryRequest(PlanProfile *p, int legacy)
 }
 
 /* parked-after-report: handle A's request carries frame 1. Handle B's
- * request comes after frame 1's report and waits for the next one, as a
- * wait xusb22 parks after a report does, and frame 2 reaches it beside
- * handle A's next request. Through e9a6e92d B's look kicked the pump, and
- * B got frame 1. */
+ * first request comes after frame 1's report, which B's handle has not
+ * carried, so it carries frame 1 at once. B's next request waits for the
+ * next report, and frame 2 reaches it beside handle A's next request.
+ * Through 1e074b44 B's first request waited for frame 2, as a wait xusb22
+ * parks after a report does. The catch-up serves it, as e9a6e92d's kick
+ * did. */
 static void ParkedAfterReport(PlanProfile *p, int legacy)
 {
     Ctl c;
@@ -724,9 +726,12 @@ static void ParkedAfterReport(PlanProfile *p, int legacy)
         WriteGip(&c, 0x01);
         Settle(CtlThread(&c, 0));
         Check(label, "control: handle A's request carries frame 1", HandleServed(0, 0x01) == 1);
+        HmRequest *b1 = WaitOn(&c, 1);
+        Settle(CtlThread(&c, 0));
+        Check(label, "handle B's first request, sent after frame 1's report, carries frame 1 at once", Served(b1, 0x01));
         HmRequest *b = WaitOn(&c, 1);
         Settle(CtlThread(&c, 0));
-        Check(label, "handle B's request, sent after frame 1's report, waits for the next report", b->inQueue && !b->completed);
+        Check(label, "handle B's next request waits for the next report", b->inQueue && !b->completed);
         WaitOn(&c, 0);
         WriteGip(&c, 0x02);
         Settle(CtlThread(&c, 0));
@@ -875,11 +880,13 @@ static void HookParkHandleB(void)
 
 /* parks-during-report: handle A's request carries frame 1. A's next
  * request waits, and frame 2 rings. While the pump's turn takes the
- * requests to report frame 2, handle B's request parks. B looked at the
- * section after frame 2 was written, so the report puts it back, and B
- * waits for frame 3, which reaches it beside A's next request. Through
- * e9a6e92d B's request, sent beside the turn, waited for ReadersLock to
- * join its reader, and its look then kicked the pump for frame 2. */
+ * requests to report frame 2, handle B's first request is sent. Its
+ * dispatch waits for ReportLock, and B's handle has not carried frame 2,
+ * so the request carries it at once. B's next request waits for frame 3,
+ * which reaches it beside A's next request. Through 1e074b44 B's first
+ * request parked beside frame 2 and waited for frame 3. Through e9a6e92d
+ * it waited for ReadersLock to join its reader, and its look then kicked
+ * the pump for frame 2. */
 static void ParksDuringReport(PlanProfile *p)
 {
     Ctl c;
@@ -897,7 +904,10 @@ static void ParksDuringReport(PlanProfile *p)
         g_retrieveHook = NULL;
         Check(label, "handle B's request was sent inside the report's turn", g_wHooks == 1 && !BesideWaiting());
         Check(label, "control: handle A's next request carries frame 2", HandleServed(0, 0x02) == 1);
-        Check(label, "handle B's request, parked after frame 2, waits", HandleParked(1) == 1 && HandleServed(1, 0x02) == 0);
+        Check(label, "handle B's first request carries frame 2, the report its handle had not carried", HandleParked(1) == 0 && HandleServed(1, 0x02) == 1);
+        WaitOn(&c, 1);
+        Settle(CtlThread(&c, 0));
+        Check(label, "handle B's next request waits", HandleParked(1) == 1);
         WaitOn(&c, 0);
         WriteGip(&c, 0x04);
         Settle(CtlThread(&c, 0));
@@ -981,10 +991,12 @@ static void DoorbellAndKick(PlanProfile *p, int legacy)
 }
 
 /* kick-without-doorbell: an SDK that makes no doorbell. Frame 1 is in the
- * section before a request parks, so the request waits for the next
- * report: its look kicks nothing, and the timer's report of frame 1 puts
- * it back. The tick after frame 2 reports to it, after the request parked
- * before frame 2 alone. Through e9a6e92d the look kicked the pump, which
+ * section before the first request, whose dispatch's turn reports it, and
+ * the handle has not carried it, so the request carries it at once. The
+ * next request waits for the next report: its look kicks nothing, and a
+ * tick puts it back. The tick after frame 2 reports to it, after the
+ * request parked before frame 2 alone. Through 1e074b44 the first request
+ * waited beside frame 1. Through e9a6e92d its look kicked the pump, which
  * served frame 1. */
 static void KickWithoutDoorbell(PlanProfile *p)
 {
@@ -993,10 +1005,13 @@ static void KickWithoutDoorbell(PlanProfile *p)
     snprintf(label, sizeof(label), "%s kick-without-doorbell", p->id);
     if (StartPadNoDoorbell(&c, p, "kick-without-doorbell", label, 1)) {
         WriteGip(&c, 0x01);
+        HmRequest *w1 = WaitOn(&c, 0);
+        Settle(CtlThread(&c, 0));
+        Check(label, "the first request carries frame 1 at once", Served(w1, 0x01));
         HmRequest *w = WaitOn(&c, 0);
         Settle(CtlThread(&c, 0));
         TimerTick(&c);
-        Check(label, "a request parked after frame 1 waits through its look and a tick", w->inQueue && !w->completed);
+        Check(label, "the next request waits through its look and a tick", w->inQueue && !w->completed);
         HmRequest *w2 = WaitOn(&c, 0);
         WriteGip(&c, 0x02);
         TimerTick(&c);
