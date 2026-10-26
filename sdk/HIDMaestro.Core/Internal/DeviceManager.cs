@@ -2623,7 +2623,9 @@ public static partial class DeviceManager
         if (!isSwdParent && Running(instanceId, calls))
         {
             parent.Begin();
-            if (!QueryOut(instanceId, calls, out string veto))
+            // A query that failed while the device stopped anyway, as one
+            // that left between the locate and the call, refused nothing.
+            if (!QueryOut(instanceId, calls, out string veto) && Running(instanceId, calls))
             {
                 string why = veto.Length > 0 ? $" ({veto})" : "";
                 bool failed = failDevice?.Invoke() == true;
@@ -3077,7 +3079,7 @@ public static partial class DeviceManager
     /// with problem 19. False when the record was left.</summary>
     static bool DeleteRecordOnceDown(string instanceId, Func<bool> delete, RemovalCalls? calls)
     {
-        if (Running(instanceId, calls) && !QueryOut(instanceId, calls, out string veto))
+        if (Running(instanceId, calls) && !QueryOut(instanceId, calls, out string veto) && Running(instanceId, calls))
         {
             DeviceOrchestrator.LogDiag($"      {instanceId} keeps its record: a program refused its removal{(veto.Length > 0 ? $" ({veto})" : "")}");
             return false;
@@ -3096,7 +3098,7 @@ public static partial class DeviceManager
     {
         // A started device is asked to go first, and a refusal leaves it and
         // its record (DeleteRecordOnceDown).
-        if (IsStarted(instanceId) && !QueryRemoveSubtree(instanceId, out _)) return false;
+        if (IsStarted(instanceId) && !QueryRemoveSubtree(instanceId, out _) && IsStarted(instanceId)) return false;
         uint devInst = 0;
         bool located = CM_Locate_DevNodeW(out devInst, instanceId, 0) == CR_SUCCESS
                     || CM_Locate_DevNodeW(out devInst, instanceId, 1) == CR_SUCCESS;

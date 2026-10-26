@@ -55,6 +55,9 @@ internal static class HeldRemoval
         public readonly List<string> Lines = new();
         public int CancelLocates;
         public bool Holder;
+        /// <summary>The query fails although the subtree leaves the tree, as
+        /// one whose devnode left between the locate and the call.</summary>
+        public bool QueryFailsAnyway;
         /// <summary>What the removal added to DeviceManager.RemovalsLeftHere,
         /// the count a dispose keeps its lease on.</summary>
         public long Left;
@@ -122,7 +125,7 @@ internal static class HeldRemoval
             if (Holder && subtree.Exists(x => string.Equals(x, Child, StringComparison.OrdinalIgnoreCase)) && IsStarted(Child))
                 return false;
             foreach (string x in subtree) Leave(x);
-            return true;
+            return !QueryFailsAnyway;
         }
 
         /// <summary>SetupDiRemoveDevice or CM_Uninstall_DevNode. A started
@@ -275,6 +278,17 @@ internal static class HeldRemoval
               Describe(child, r4));
         cancels += child.CancelLocates;
         tally.Add(("HID child, refused", child, 1));
+
+        // A query that fails although the device left anyway refused
+        // nothing: the records go.
+        var gone = new Machine(holder: false) { QueryFailsAnyway = true };
+        var r7 = Remove(gone, Parent, fast: true);
+        check("a removal query that fails while the device leaves anyway, as one whose devnode left between the locate and the call -> the records go, removed",
+              gone.Violations.Count == 0 && r7.Removed
+              && gone.Calls.SequenceEqual(new[] { $"query {Parent}", $"uninstall {Child}", $"uninstall {Parent}" }),
+              Describe(gone, r7));
+        cancels += gone.CancelLocates;
+        tally.Add(("query failed, device gone", gone, 0));
 
         // The holder refuses, and the caller can ask the driver to fail its
         // device, as the full cleanup and the sweeps can: the child goes by
