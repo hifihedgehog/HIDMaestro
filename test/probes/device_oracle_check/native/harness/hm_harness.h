@@ -571,6 +571,14 @@ extern void (*g_lockReleaseHook)(void);
 /* Run once at the next zero-timeout poll a driver thread makes, before it
  * is answered (hm_win32.c FiberWait). */
 extern void (*g_pollHook)(void);
+/* Run at each InterlockedExchange a driver thread makes, before it, until
+ * it returns nonzero (hm_win32.c): the worker's take of the handoff comes
+ * after its count's increment, so a stream acts between the two there. */
+extern int (*g_exchangeHook)(volatile LONG *target, LONG value);
+/* Run once when SdkWriteFrame has read the companion's count for a frame
+ * with a GIP slice, before it decides on the doorbell: what the
+ * companion's IOCTL thread does in that moment. */
+extern void (*g_sdkParkedHook)(void);
 /* The code runs on a driver thread, not on the scenario's fiber. */
 int HmOnDriverThread(void);
 /* FIELD_OFFSET(DEVICE_CONTEXT, TearingDown) in the flavor's driver.h
@@ -591,6 +599,12 @@ void SdkVersionMidRun(Sdk *s);
  * is zero. */
 void SdkWriteFrame(Sdk *s, const uint8_t *data, uint32_t dataLen, const uint8_t *gip,
                    const uint8_t *ext, uint32_t extLen);
+/* The input event's part of the gate for the frame whose even SeqNo
+ * s->seq the SDK has just stored (SharedMemoryIO.WriteInputFrame, step 5):
+ * 0 when it leaves the frame final with no SetEvent, 1 when it signals
+ * with no capability or after the provisional exchange, 2 when it signals
+ * because a worker is counted, the handoff untouched. */
+int SdkHandOver(Sdk *s);
 /* HMController.EnsurePidStateViewLocked and PublishPidPool. */
 void SdkPidCreate(Sdk *s, const uint8_t rids[6]);
 void SdkPidPool(Sdk *s, uint16_t ramPoolSize, uint8_t maxSim, uint8_t memMgmt);

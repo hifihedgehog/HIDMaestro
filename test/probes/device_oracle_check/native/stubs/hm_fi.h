@@ -64,3 +64,5 @@
 #define GetSystemTimeAsFileTime                             HmGetSystemTimeAsFileTime
 #define RtlInitUnicodeString                                HmRtlInitUnicodeString
 #define RtlCompareMemory                                    HmRtlCompareMemory
+#undef InterlockedExchange
+#define InterlockedExchange                                 HmInterlockedExchange

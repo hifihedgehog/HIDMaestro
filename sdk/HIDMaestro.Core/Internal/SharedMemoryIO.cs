@@ -1163,9 +1163,19 @@ internal static partial class SharedMemoryIO
         //   finds this frame too, so one compare-exchange puts this frame's
         //   final SeqNo in its place, with no recheck and no SetEvent. As a
         //   full fence it orders the even SeqNo's store before it.
-        //   Otherwise the exchange puts the provisional SeqNo there, a full
-        //   fence before the loads after it. A worker counts itself, then
-        //   takes the handoff with an exchange of its own. With the
+        //   Otherwise a worker counted in InputWaiters is in its wait or on
+        //   its way to it, and its take finds nothing of this frame, so the
+        //   frame is signaled as v2.0.3 signaled every frame, InputHandoff
+        //   untouched. A count read early, before the even SeqNo's store is
+        //   visible, does no harm: a worker it saw wakes on the SetEvent, a
+        //   kernel call that orders the store before it, and a zero goes on
+        //   to the steps below, which fence. That branch has no interlocked
+        //   operation, so with a companion event Thread.MemoryBarrier()
+        //   orders the even SeqNo's store before the companion's count is
+        //   read below: x64 lets a load pass an earlier store.
+        //   With no worker counted, the exchange puts the provisional SeqNo
+        //   there, a full fence before the loads after it. A worker counts
+        //   itself, then takes the handoff with an exchange of its own. With the
         //   capability still set and a count of zero, a compare-exchange
         //   makes the frame final for the next take. Otherwise a worker may
         //   be waiting, or the gate closed (the worker clears the
@@ -1185,6 +1195,11 @@ internal static partial class SharedMemoryIO
                 int final = (int)seqNo, owed = Volatile.Read(ref handoff);
                 if (owed != 0 && (owed & 1) == 0 && Interlocked.CompareExchange(ref handoff, final, owed) == owed)
                     eventHandle = IntPtr.Zero;
+                else if (Volatile.Read(ref *(int*)(s + SIGNAL_OFFSET_INPUT_WAITERS)) != 0)
+                {
+                    if (companion != IntPtr.Zero)
+                        Thread.MemoryBarrier();
+                }
                 else
                 {
                     int provisional = final | 1;

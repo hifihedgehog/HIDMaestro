@@ -91,12 +91,16 @@ C_ASSERT(FIELD_OFFSET(HIDMAESTRO_VERSION_INFO, DriverConfigError) == 56);
  * HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS set, reads InputHandoff. A final
  * SeqNo still there is a read the worker owes, which finds this frame too:
  * one compare-exchange puts this frame's final SeqNo in its place, and no
- * SetEvent runs. Otherwise it exchanges the provisional SeqNo in, then
- * loads the capability again and InputWaiters. With the capability still
- * set and the count zero, a compare-exchange makes the frame final for the
- * worker's next take. With any other count, or with the capability gone, a
- * compare-exchange takes it back. It calls SetEvent unless it left the
- * frame final: a compare-exchange that fails found the provisional SeqNo
+ * SetEvent runs. Otherwise it reads InputWaiters. With a worker counted it
+ * calls SetEvent and leaves InputHandoff alone, after a full fence when the
+ * frame rings the companion's doorbell too, since that branch has no
+ * interlocked operation before the companion's count is read. With none it
+ * exchanges the provisional SeqNo in, then loads the capability again and
+ * InputWaiters. With the capability still set and the count zero, a
+ * compare-exchange makes the frame final for the worker's next take.
+ * With any other count, or with the capability gone, a compare-exchange
+ * takes it back. It calls SetEvent unless it left the frame final: a
+ * compare-exchange that fails found the provisional SeqNo
  * taken and dropped. So a frame gets a wakeup that reads the section after
  * its store, the take or the signal. A frame left provisional by a program
  * that died there gets none, as v2.0.3 never read a frame whose program

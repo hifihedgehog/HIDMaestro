@@ -47,6 +47,10 @@ BOOL WINAPI HmIsWellKnownSid(PSID pSid, WELL_KNOWN_SID_TYPE WellKnownSidType);
 BOOL WINAPI HmGetSecurityDescriptorDacl(PSECURITY_DESCRIPTOR pSecurityDescriptor, LPBOOL lpbDaclPresent, PACL *pDacl, LPBOOL lpbDaclDefaulted);
 HLOCAL WINAPI HmLocalFree(HLOCAL hMem);
 
+/* The interlocked exchange, so a stream can act at the worker's take of
+ * the signal gate's handoff (g_exchangeHook). */
+LONG HmInterlockedExchange(LONG volatile *Target, LONG Value);
+
 /* Locks, clocks and the two Rtl helpers. */
 VOID WINAPI HmInitializeCriticalSection(LPCRITICAL_SECTION lpCriticalSection);
 VOID WINAPI HmEnterCriticalSection(LPCRITICAL_SECTION lpCriticalSection);

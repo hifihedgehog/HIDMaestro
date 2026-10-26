@@ -422,37 +422,54 @@ void SdkWriteFrame(Sdk *s, const uint8_t *data, uint32_t dataLen, const uint8_t 
     int input = 1, companion = gip != NULL;
     if (s->signal) {
         /* 2.1.0: the gate (docs/design/signal-gate.md,
-         * SharedMemoryIO.WriteInputFrame). With the capability the frame is
-         * handed over: in place of a final SeqNo still waiting for its take,
-         * or as a provisional one (low bit set) made final with the
-         * capability still set and no worker counted, or taken back. It
-         * signals unless it left the frame final. */
-        int32_t caps, waiters, ccaps, parked, handoff;
-        memcpy(&caps, s->signal->buf + 4, 4);
+         * SharedMemoryIO.WriteInputFrame), then the companion's count. Every
+         * path has a full fence between the even SeqNo's store and that
+         * count's read: a compare-exchange or the exchange, or
+         * Thread.MemoryBarrier() where a worker is counted or the HID
+         * driver has no capability. */
+        int32_t ccaps, parked;
         memcpy(&ccaps, s->signal->buf + 8, 4);
-        if (caps & 1) {
-            int32_t fin = (int32_t)s->seq, prov = fin | 1;
-            memcpy(&handoff, s->signal->buf + 68, 4);
-            if (handoff != 0 && (handoff & 1) == 0) {
-                memcpy(s->signal->buf + 68, &fin, 4);
-                input = 0;
-            } else {
-                memcpy(s->signal->buf + 68, &prov, 4);
-                memcpy(&caps, s->signal->buf + 4, 4);
-                memcpy(&waiters, s->signal->buf + 64, 4);
-                memcpy(&handoff, s->signal->buf + 68, 4);
-                if ((caps & 1) && waiters == 0) {
-                    if (handoff == prov) { memcpy(s->signal->buf + 68, &fin, 4); input = 0; }
-                } else if (handoff == prov) {
-                    memset(s->signal->buf + 68, 0, 4);
-                }
-            }
+        input = SdkHandOver(s) != 0;
+        if (companion) {
+            memcpy(&parked, s->signal->buf + 128, 4);
+            if (g_sdkParkedHook) { void (*hook)(void) = g_sdkParkedHook; g_sdkParkedHook = NULL; hook(); }
+            if ((ccaps & 1) && parked == 0) companion = 0;
         }
-        memcpy(&parked, s->signal->buf + 128, 4);
-        if ((ccaps & 1) && parked == 0) companion = 0;
     }
     if (input) EventSet(s->inputEv);
     if (companion) EventSet(s->companionEv);
+}
+
+void (*g_sdkParkedHook)(void);
+
+/* With the capability the frame is handed over: in place of a final SeqNo
+ * still waiting for its take, or, with a worker counted, signaled with the
+ * handoff untouched, or as a provisional SeqNo (low bit set) made final
+ * with the capability still set and no worker counted, or taken back. */
+int SdkHandOver(Sdk *s)
+{
+    int32_t caps, waiters, handoff;
+    if (!s->signal) return 1;
+    memcpy(&caps, s->signal->buf + 4, 4);
+    if (!(caps & 1)) return 1;
+    int32_t fin = (int32_t)s->seq, prov = fin | 1;
+    memcpy(&handoff, s->signal->buf + 68, 4);
+    if (handoff != 0 && (handoff & 1) == 0) {
+        memcpy(s->signal->buf + 68, &fin, 4);
+        return 0;
+    }
+    memcpy(&waiters, s->signal->buf + 64, 4);
+    if (waiters != 0) return 2;
+    memcpy(s->signal->buf + 68, &prov, 4);
+    memcpy(&caps, s->signal->buf + 4, 4);
+    memcpy(&waiters, s->signal->buf + 64, 4);
+    memcpy(&handoff, s->signal->buf + 68, 4);
+    if ((caps & 1) && waiters == 0) {
+        if (handoff == prov) { memcpy(s->signal->buf + 68, &fin, 4); return 0; }
+    } else if (handoff == prov) {
+        memset(s->signal->buf + 68, 0, 4);
+    }
+    return 1;
 }
 
 /* SharedMemoryIO.EnsurePidStateMapping (SharedMemoryIO.cs:588-622) and

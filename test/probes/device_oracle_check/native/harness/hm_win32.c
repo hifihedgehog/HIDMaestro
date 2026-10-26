@@ -985,6 +985,13 @@ VOID WINAPI HmDeleteCriticalSection(LPCRITICAL_SECTION cs)
 void (*g_srwHook)(void);
 void (*g_lockReleaseHook)(void);
 void (*g_pollHook)(void);
+int (*g_exchangeHook)(volatile LONG *target, LONG value);
+
+LONG HmInterlockedExchange(LONG volatile *target, LONG value)
+{
+    if (g_exchangeHook && g_current && g_exchangeHook(target, value)) g_exchangeHook = NULL;
+    return InterlockedExchange(target, value);
+}
 VOID WINAPI HmAcquireSRWLockExclusive(PSRWLOCK l)
 {
     if (g_srwHook && g_current) { void (*hook)(void) = g_srwHook; g_srwHook = NULL; hook(); }

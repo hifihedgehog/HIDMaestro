@@ -10,8 +10,13 @@
 //   - kept, the last frame still pending: no worker counted and the last
 //     frame's final SeqNo still there, as when frames come faster than the
 //     worker takes them
-//   - taken back: a worker counted, so the writer takes the frame back and
-//     signals the event
+//   - a worker counted: the writer signals the event. From the waiter fast
+//     path it reads the count and signals with the handoff untouched. Before
+//     it, it exchanged the provisional SeqNo in, read the count again, took
+//     the frame back, then signaled
+//   - a worker counted, an Xbox 360 frame: the same with a GIP slice and the
+//     companion's doorbell, which the companion's count of zero skips, so
+//     the fast path's fence before that count's read is in the row
 // The rows run interleaved run by run, at high process priority. It builds
 // against an earlier 2.1.0 SDK with -p:HmSdkDll, which times the same calls
 // on that writer. An SDK without the gate prints that and runs nothing.
@@ -46,12 +51,17 @@ internal static partial class Program
         IntPtr view = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_INPUT_SIZE);
         IntPtr signal = Marshal.AllocHGlobal(256);
         IntPtr ev = GateCreateEvent(IntPtr.Zero, false, false, IntPtr.Zero);
+        IntPtr doorbell = GateCreateEvent(IntPtr.Zero, false, false, IntPtr.Zero);
         try
         {
             Marshal.Copy(new byte[SharedMemoryIO.SHARED_INPUT_SIZE], 0, view, SharedMemoryIO.SHARED_INPUT_SIZE);
             Marshal.Copy(new byte[256], 0, signal, 256);
             GateSet(signal, 0, 1);
             GateSet(signal, 4, 1);
+            // The companion counts its requests, and none is parked.
+            GateSet(signal, 8, 1);
+            GateSet(signal, 128, 0);
+            var gip = new byte[14];
             var frame = new byte[63];
             for (int i = 0; i < frame.Length; i++) frame[i] = (byte)i;
             uint seq = 0;
@@ -74,11 +84,17 @@ internal static partial class Program
                     GateSet(signal, 68, GateGet(signal, 68) & ~1);
                     gated(view, ev, ref seq, frame, frame.Length, null, 0, default, 0, IntPtr.Zero, signal);
                 }),
-                ("taken back", () =>
+                ("a worker counted", () =>
                 {
                     GateSet(signal, 64, 1);
                     GateSet(signal, 68, 0);
                     gated(view, ev, ref seq, frame, frame.Length, null, 0, default, 0, IntPtr.Zero, signal);
+                }),
+                ("a worker counted, an Xbox 360 frame", () =>
+                {
+                    GateSet(signal, 64, 1);
+                    GateSet(signal, 68, 0);
+                    gated(view, ev, ref seq, frame, frame.Length, gip, 0, default, 0, doorbell, signal);
                 }),
             };
             var perCall = new List<double>[rows.Length];
@@ -103,6 +119,7 @@ internal static partial class Program
         finally
         {
             if (ev != IntPtr.Zero) GateCloseHandle(ev);
+            if (doorbell != IntPtr.Zero) GateCloseHandle(doorbell);
             Marshal.FreeHGlobal(signal);
             Marshal.FreeHGlobal(view);
         }

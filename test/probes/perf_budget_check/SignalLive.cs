@@ -32,7 +32,8 @@
 //     driver's part from the gate's. On an SDK with the gate an untimed pass
 //     after them prints the share of paced writes that found InputWaiters
 //     nonzero just before the write, which shows the row times the gate's
-//     signaled branch
+//     signaled branch. After each 1 kHz row a plain line gives the shape
+//     of its writes: the median write and the count over 2 us and 10 us
 // The frames are the controller's own last report and continue its
 // sequence numbers, so the driver sends each as it sends a submit's. It
 // builds against b4d29d9 too, whose writer takes the same arguments, so the
@@ -161,12 +162,22 @@ internal static partial class Program
 
     /// <summary>A row in Measure's line format: a run is PacedWrites paced
     /// writes, its sample the mean of the writes alone, each between two
-    /// Stopwatch timestamps with the wait outside them.</summary>
+    /// Stopwatch timestamps with the wait outside them. Each write's ticks
+    /// go into a reused array after the second timestamp, and after the row
+    /// a plain line, which abba210.py skips, gives the shape of the writes:
+    /// the p50 over runs of each run's median write, and how many writes
+    /// took over 2 us and over 10 us. A woken worker that preempts the
+    /// writer on its core shows as a group of long writes, a core slow to
+    /// wake from its 1 ms idle as every write slower alike.</summary>
     static void PacedMeasure(string name, IntPtr timer, Action write)
     {
         for (int i = 0; i < PacedWarmup; i++) { PacedTick(timer); write(); }
         var perCall = new List<double>(PacedRuns);
-        long worstBytes = 0;
+        var medians = new List<double>(PacedRuns);
+        var each = new long[PacedWrites];
+        var sorted = new long[PacedWrites];
+        long over2 = 0, over10 = 0, worstBytes = 0;
+        long ticks2us = Stopwatch.Frequency * 2 / 1_000_000, ticks10us = Stopwatch.Frequency * 10 / 1_000_000;
         for (int run = 0; run < PacedRuns; run++)
         {
             long ticks = 0;
@@ -176,12 +187,25 @@ internal static partial class Program
                 PacedTick(timer);
                 long t0 = Stopwatch.GetTimestamp();
                 write();
-                ticks += Stopwatch.GetTimestamp() - t0;
+                long dt = Stopwatch.GetTimestamp() - t0;
+                each[i] = dt;
+                ticks += dt;
             }
             worstBytes = Math.Max(worstBytes, GC.GetAllocatedBytesForCurrentThread() - bytes0);
             perCall.Add(ticks * 1e9 / Stopwatch.Frequency / PacedWrites);
+            Array.Copy(each, sorted, PacedWrites);
+            Array.Sort(sorted);
+            medians.Add(sorted[PacedWrites / 2] * 1e9 / Stopwatch.Frequency);
+            for (int i = 0; i < PacedWrites; i++)
+            {
+                if (each[i] > ticks2us) over2++;
+                if (each[i] > ticks10us) over10++;
+            }
         }
         Report($"{name}: ns per call", perCall, PacedRuns, $", most bytes allocated in one run of {PacedWrites} calls {worstBytes}");
+        medians.Sort();
+        Console.WriteLine(FormattableString.Invariant(
+            $"  {name}: per-write median p50 {medians[medians.Count / 2]:F0} ns over runs, {over2} of {(long)PacedRuns * PacedWrites} writes over 2 us, {over10} over 10 us"));
     }
 
     /// <summary>Untimed: paced writes through the submit's writer, each
