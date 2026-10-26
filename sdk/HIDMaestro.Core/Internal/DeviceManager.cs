@@ -2431,6 +2431,11 @@ public static partial class DeviceManager
     /// <exception cref="PnpLockBusyException">Another program held the PnP
     /// lock past this take's bound (<see cref="HoldPnpLock"/>). Nothing was
     /// removed.</exception>
+    public static bool RemoveDevice(string instanceId, int timeoutMs = 5000, bool fast = false, bool forceFallbacks = false) =>
+        RemoveDevice(instanceId, timeoutMs, fast, forceFallbacks, failDevice: null);
+
+    /// <summary><see cref="RemoveDevice(string, int, bool, bool)"/>, with a
+    /// request for a refused removal.</summary>
     /// <param name="failDevice">When a program refuses the query, asks the
     /// device's driver to fail it (<see cref="SharedMemoryIO.RequestSurpriseRemovalOfIndex"/>)
     /// and says whether it answered. Windows then removes the device and its
@@ -2438,8 +2443,7 @@ public static partial class DeviceManager
     /// records go once that is done (<see cref="WaitSurpriseRemoval"/>). Null
     /// where the caller cannot know the device's index is its own to
     /// fail.</param>
-    public static bool RemoveDevice(string instanceId, int timeoutMs = 5000, bool fast = false, bool forceFallbacks = false,
-                                    Func<bool>? failDevice = null)
+    internal static bool RemoveDevice(string instanceId, int timeoutMs, bool fast, bool forceFallbacks, Func<bool>? failDevice)
     {
         if (Locate(instanceId, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS &&
             Locate(instanceId, CM_LOCATE_DEVNODE_PHANTOM) != CR_SUCCESS)

@@ -567,7 +567,7 @@ internal static class OwnerSweep
             {
                 removed.AddRange(DeviceManager.ChildIdsOf(id));
                 bool root = id.StartsWith(@"ROOT\", StringComparison.OrdinalIgnoreCase);
-                DeviceManager.RemoveDevice(id, timeoutMs: 120_000, forceFallbacks: true,
+                DeviceManager.RemoveDevice(id, timeoutMs: 120_000, fast: false, forceFallbacks: true,
                     failDevice: root && index >= 0 ? () => SharedMemoryIO.RequestSurpriseRemovalOfIndex(index, TimeoutScale.Apply(2000)) : null);
             }
             catch (DeviceManager.PnpLockBusyException)
