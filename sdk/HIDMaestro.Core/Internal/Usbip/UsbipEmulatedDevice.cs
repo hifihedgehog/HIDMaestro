@@ -454,8 +454,8 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                             // Build the line under the lock, which the counters
                             // need, then release it before the write. The write
                             // impersonates the user and touches the disk
-                            // (DeviceOrchestrator.OpenUserLog), neither of which
-                            // belongs under the lock the send path takes.
+                            // (UserLog.Append), neither of which belongs under
+                            // the lock the send path takes.
                             string line;
                             lock (_hidLock)
                             {
@@ -470,11 +470,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                                 line = sb.ToString();
                             }
                             // Written as the user: the path comes from the
-                            // environment, and the SDK runs elevated.
-                            using (var fs = DeviceOrchestrator.OpenUserLog(
-                                       System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(DiagPath))!, DiagPath))
-                            using (var w = new System.IO.StreamWriter(fs))
-                                w.WriteLine(line);
+                            // environment, and the SDK runs elevated. Every
+                            // device of every program appends its line whole
+                            // at the log's end.
+                            UserLog.Append(DiagPath, line + Environment.NewLine);
                         }
                         catch { }
                     }

@@ -653,28 +653,17 @@ partial class Program
     /// (vs Console) so we can see where the test process is during quit
     /// even if stdout has filled or the harness isn't draining. Path:
     /// %TEMP%\HIDMaestro\teardown_diag.log (same as SDK's LogDiag) so the
-    /// test-app and SDK timelines interleave.</summary>
-    static readonly object s_debugLogLock = new();
+    /// test-app and SDK timelines interleave. The SDK's UserLog appends each
+    /// line whole at the file's end, beside the lines this process's SDK and
+    /// every other program write there.</summary>
+    static UserLog? s_debugLog;
     static void TestDebugLog(string msg)
     {
         try
         {
-            var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "HIDMaestro");
-            System.IO.Directory.CreateDirectory(dir);
-            var line = $"[{DateTime.Now:HH:mm:ss.fff}] tid={Thread.CurrentThread.ManagedThreadId} TEST: {msg}\n";
-            lock (s_debugLogLock)
-            {
-                // Open with FileShare.ReadWrite so this coexists with the
-                // SDK's LogDiag StreamWriter (which holds the file open with
-                // FileShare.ReadWrite). Default File.AppendAllText uses
-                // FileShare.None and silently fails when the SDK has it open.
-                using var fs = new System.IO.FileStream(
-                    System.IO.Path.Combine(dir, "teardown_diag.log"),
-                    System.IO.FileMode.Append, System.IO.FileAccess.Write,
-                    System.IO.FileShare.ReadWrite);
-                using var sw = new System.IO.StreamWriter(fs);
-                sw.Write(line);
-            }
+            var log = LazyInitializer.EnsureInitialized(ref s_debugLog, () => new UserLog(
+                System.IO.Path.Combine(System.IO.Path.GetTempPath(), "HIDMaestro", "teardown_diag.log")));
+            log.Write($"[{DateTime.Now:HH:mm:ss.fff}] tid={Thread.CurrentThread.ManagedThreadId} TEST: {msg}\n");
         }
         catch { }
     }

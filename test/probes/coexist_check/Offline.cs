@@ -55,8 +55,8 @@
 //        info (BuildForceDriverStartInfo) points TEMP and TMP at its helper's
 //        staging folder (ProtectedStaging.ConfineChildTemp), not the user's
 //        %TEMP%. A diagnostic log the SDK
-//        opens (DeviceOrchestrator.OpenUserLog) is created with its folder
-//        and is appendable. Its owner is the user only when the process is
+//        appends to (UserLog.Append) is created with its folder and takes
+//        the lines appended to it. Its owner is the user only when the process is
 //        elevated (RunAsUser is a no-op otherwise), so that part is a live
 //        check, not one this offline run can fail.
 //   OF8  The squat. Staging lives under %ProgramFiles%\HIDMaestro, and a
@@ -295,7 +295,7 @@ internal static partial class Program
             {
                 using var p = System.Diagnostics.Process.Start(psi)!;
                 p.StandardOutput.ReadToEnd();
-                p.WaitForExit(30_000);
+                p.WaitForExit(ToolHangMs);
                 code = p.ExitCode;
             });
             Check("OF5: held, the file still runs", run == "done" && code == 0, $"{run}, exit {code}");
@@ -439,11 +439,20 @@ internal static partial class Program
             }
             Check("OF6: every file of the staging set is written and held", handles.Count > 0, $"{handles.Count} files");
             string os = Call<string>(catalogOs, new object[] { arch });
-            var r = Call<ValueTuple<int, string>>(run, new object?[] { Path.Combine(dir, "Inf2Cat.exe"), $"/driver:\"{dir}\" /os:{os}", dir, 60_000 });
+            // Inf2Cat and signtool take this process's priority class when it
+            // is idle or below normal (CreateProcess), and a probe run at idle
+            // priority under load shared the cores with every spinning
+            // thread: Inf2Cat passed the 60 s bound this check gave it in 2 of
+            // 2 runs under 128 idle-priority spinners. They start at normal
+            // priority, and each run's bound is a hang detector load alone
+            // does not reach (ToolHangMs).
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var r = AtNormalPriority(() => Call<ValueTuple<int, string>>(run, new object?[] { Path.Combine(dir, "Inf2Cat.exe"), $"/driver:\"{dir}\" /os:{os}", dir, ToolHangMs }));
+            long catalogMs = clock.ElapsedMilliseconds;
+            var s = AtNormalPriority(() => Call<ValueTuple<int, string>>(run, new object?[] { Path.Combine(dir, "signtool.exe"), "verify /pa \"" + Path.Combine(dir, "HIDMaestro.dll") + "\"", dir, ToolHangMs }));
             int infs = Directory.GetFiles(dir, "*.inf").Length, cats = Directory.GetFiles(dir, "*.cat").Length;
             Check("OF6: Inf2Cat run from held files catalogs the held INFs and binaries",
-                  r.Item1 == 0 && cats == infs && infs > 0, $"exit {r.Item1}, {infs} INFs, {cats} catalogs: {Last(r.Item2)}");
-            var s = Call<ValueTuple<int, string>>(run, new object?[] { Path.Combine(dir, "signtool.exe"), "verify /pa \"" + Path.Combine(dir, "HIDMaestro.dll") + "\"", dir, 60_000 });
+                  r.Item1 == 0 && cats == infs && infs > 0, $"exit {r.Item1} after {catalogMs} ms, {infs} INFs, {cats} catalogs: {Last(r.Item2)}");
             Check("OF6: signtool run from held files loads and reads a held binary (an unsigned one: no signature found)",
                   s.Item2.Contains("No signature found", StringComparison.Ordinal), $"exit {s.Item1}: {Last(s.Item2)}");
         }
@@ -452,6 +461,28 @@ internal static partial class Program
             foreach (var h in handles) h.Dispose();
             RemoveScratch(dir, "OF6");
         }
+    }
+
+    /// <summary>OF6's bound on each tool run, a hang detector. Unloaded,
+    /// Inf2Cat catalogs the staging set in about 2 s (1,992 ms on the
+    /// development laptop, 2026-10-26). At normal priority only threads of
+    /// its class or above share the cores with it, and ten minutes is 300
+    /// times that. Scaled by the SDK's run (TimeoutScale). OF5 and OF10 wait
+    /// as long for a process of their own to end.</summary>
+    const int ToolHangMs = 600_000;
+
+    /// <summary>Runs <paramref name="start"/>, which starts a process, with
+    /// this process at normal priority, so the child starts at normal
+    /// priority too. A child takes an idle or below-normal priority class
+    /// from its parent (CreateProcess), and the probe runs at idle priority
+    /// under capped.ps1.</summary>
+    static T AtNormalPriority<T>(Func<T> start)
+    {
+        using var self = System.Diagnostics.Process.GetCurrentProcess();
+        var before = self.PriorityClass;
+        self.PriorityClass = System.Diagnostics.ProcessPriorityClass.Normal;
+        try { return start(); }
+        finally { self.PriorityClass = before; }
     }
 
     static string Last(string output)
@@ -528,10 +559,11 @@ internal static partial class Program
     {
         var asm = typeof(HIDMaestro.HMContext).Assembly;
         var build = asm.GetType("HIDMaestro.Internal.Usbip.UsbipDriverInstaller")?.GetMethod("BuildForceDriverStartInfo", BindingFlags.NonPublic | BindingFlags.Static);
-        var open = asm.GetType("HIDMaestro.Internal.DeviceOrchestrator")?.GetMethod("OpenUserLog", BindingFlags.NonPublic | BindingFlags.Static);
-        if (build == null || open == null)
+        var append = asm.GetType("HIDMaestro.Internal.UserLog")?.GetMethod("Append", BindingFlags.NonPublic | BindingFlags.Static,
+            null, new[] { typeof(string), typeof(string) }, null);
+        if (build == null || append == null)
         {
-            Check("OF10: UsbipDriverInstaller.BuildForceDriverStartInfo and DeviceOrchestrator.OpenUserLog exist", false);
+            Check("OF10: UsbipDriverInstaller.BuildForceDriverStartInfo and UserLog.Append exist", false);
             return;
         }
         // The host controller's driver install's ProcessStartInfo, built the
@@ -619,34 +651,40 @@ internal static partial class Program
             using (var self = System.Diagnostics.Process.GetCurrentProcess()) started = self.StartTime;
             string own = Call<string>(nameOf, new object[] { Environment.ProcessId, started });
             string reused = Call<string>(nameOf, new object[] { Environment.ProcessId, started.AddSeconds(-1) });
-            var gone = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
-                Path.Combine(Environment.SystemDirectory, "cmd.exe"), "/c exit 0") { UseShellExecute = false, CreateNoWindow = true })!;
+            // Under 128 spinning idle-priority threads on the development
+            // laptop cmd.exe had not ended 10 s after its start, and the
+            // prune rightly kept the folder of a process still running. The
+            // wait is now a hang detector (ToolHangMs).
+            var gone = AtNormalPriority(() => System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+                Path.Combine(Environment.SystemDirectory, "cmd.exe"), "/c exit 0") { UseShellExecute = false, CreateNoWindow = true })!);
             int gonePid = gone.Id;
             DateTime goneStart = gone.StartTime;
-            gone.WaitForExit(10_000);
+            bool goneExited = gone.WaitForExit(ToolHangMs);
             gone.Dispose();
             string dead = Call<string>(nameOf, new object[] { gonePid, goneStart });
             Check("OF10: the prune keeps a running process's child-temp folder", !Del(own), own);
             Check("OF10: and deletes the folder of an earlier process given the same id", Del(reused), reused);
-            Check("OF10: and deletes the folder of a process that has exited", Del(dead), dead);
+            Check("OF10: and deletes the folder of a process that has exited", goneExited && Del(dead),
+                  goneExited ? dead : $"{dead}: cmd.exe had not exited when the {ToolHangMs} ms hang detector ended");
             Check("OF10: and keeps a folder whose name is not <pid>-<ticks>", !Del("1234") && !Del("abc-1"));
         }
 
-        // OpenUserLog creates the folder and the log and returns a usable
-        // handle. Its point, impersonating the user, only runs when the
-        // process is elevated (RunAsUser is a no-op otherwise), which this
-        // offline run is not, so whether the file ends up owned by the user
-        // rather than by an elevated token is a live check (S72, elevated),
-        // not one this can fail. Here it confirms the log is created and
-        // written, with its own folder made.
+        // UserLog.Append creates the folder and the log and appends to it.
+        // Its point, impersonating the user, only runs when the process is
+        // elevated (RunAsUser is a no-op otherwise), which this offline run
+        // is not, so whether the file ends up owned by the user rather than
+        // by an elevated token is a live check (S72, elevated), not one this
+        // can fail. Here it confirms the log is created and takes both lines
+        // appended to it, in order, with its own folder made.
         string dir = Path.Combine(Path.GetTempPath(), "hmof10log" + Guid.NewGuid().ToString("N")[..8]);
         string log = Path.Combine(dir, "x.log");
         try
         {
-            using (var fs = Call<FileStream>(open, new object[] { dir, log }))
-            using (var w = new StreamWriter(fs)) w.WriteLine("x");
-            Check("OF10: OpenUserLog creates its folder and an appendable log",
-                  Directory.Exists(dir) && File.Exists(log) && new FileInfo(log).Length > 0, log);
+            Call<object?>(append, new object[] { log, "x\n" });
+            Call<object?>(append, new object[] { log, "y\n" });
+            string text = File.Exists(log) ? File.ReadAllText(log) : "";
+            Check("OF10: UserLog.Append creates its folder and a log that takes each line appended to it",
+                  Directory.Exists(dir) && text == "x\ny\n", log);
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
     }

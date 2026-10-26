@@ -300,6 +300,9 @@ internal static class Program
     static int Main(string[] args)
     {
         string mode = args.Length > 0 ? args[0] : "";
+        // A writer process of offline part 12 (DiagLogAppend.cs), whose
+        // environment its parent sets.
+        if (mode == "diag-append") return DiagLogAppend.Child(args);
         // The offline modes touch no device. Their lines stay out of the
         // diag log a live run on this machine writes (HIDMAESTRO_DIAG=1),
         // which is read once, when DeviceOrchestrator first loads.
