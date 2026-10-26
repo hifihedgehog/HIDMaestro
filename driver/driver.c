@@ -1836,6 +1836,8 @@ KeepLiveFeatureLocked(_In_ PDEVICE_CONTEXT ctx, _In_ const HIDMAESTRO_SHARED_INP
 
 /* 2.1.0: the frame read last (SeenSeqNo): the data lane's and the extended
  * lane's sizes, clamped as the frame path clamps them, and their bytes. */
+C_ASSERT(sizeof(((PDEVICE_CONTEXT)0)->SeenData) == sizeof(((PHIDMAESTRO_SHARED_INPUT)0)->Data));
+C_ASSERT(sizeof(((PDEVICE_CONTEXT)0)->SeenExt) == sizeof(((PHIDMAESTRO_SHARED_INPUT)0)->ExtendedReportData));
 static ULONG
 SeenLength(_In_ ULONG size, _In_ ULONG cap)
 {
