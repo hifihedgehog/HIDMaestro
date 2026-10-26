@@ -2439,8 +2439,9 @@ public static partial class DeviceManager
 
     /// <summary>
     /// Removes a device and all its children, waits for removal to complete.
-    /// A started ROOT or HID device is first asked to go with the devices
-    /// below it, as Safely Remove Hardware asks (QueryRemoveSubtree). When a
+    /// A ROOT or HID device in the tree that is not down is first asked to go
+    /// with the devices below it, as Safely Remove Hardware asks
+    /// (QueryRemoveSubtree). When a
     /// program refuses, the device and its records stay and the call
     /// returns false. Otherwise it enumerates HID children first and removes
     /// them individually via DIF_REMOVE, then removes the parent. This
