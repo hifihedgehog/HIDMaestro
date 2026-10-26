@@ -216,7 +216,7 @@ internal static class HeldRemoval
             Close = _ => 0,
             Fallbacks = m.Fallbacks,
             Query = m.Query,
-            Started = m.IsStarted,
+            Down = m.IsDown,
         };
         try { return act(); }
         finally
