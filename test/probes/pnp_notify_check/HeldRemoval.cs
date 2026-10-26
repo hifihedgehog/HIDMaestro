@@ -521,6 +521,47 @@ internal static class HeldRemoval
         });
     }
 
+    /// <summary>OwnerSweep.ChooseTargets, a sweep's choice of the dead
+    /// owners' groups it removes now, on <paramref name="candidates"/>, with
+    /// <paramref name="pipes"/> standing for the claims' one-instance pipes:
+    /// the groups it took, the records it keeps and the claims it took. Its
+    /// claims go back before this returns.</summary>
+    static (List<OwnerCensus.DeviceGroup> Targets, HashSet<string> Keep, List<string> Claimed) Choose(
+        List<OwnerCensus.DeviceGroup> candidates, OwnerSweep.RefusalRetry retry, Dictionary<string, SafeFileHandle> pipes)
+    {
+        var sweep = typeof(OwnerSweep);
+        var choose = sweep.GetMethod("ChooseTargets", AnyStatic) ?? throw new MissingMethodException("OwnerSweep.ChooseTargets");
+        var claimsType = sweep.GetNestedType("GroupClaims", BindingFlags.NonPublic)
+            ?? throw new MissingMemberException("OwnerSweep.GroupClaims");
+        object claims = Activator.CreateInstance(claimsType, nonPublic: true)!;
+        var keep = new HashSet<string>(StringComparer.Ordinal);
+        var claimed = new List<string>();
+        MachineClaims.CreateClaimHook = name =>
+        {
+            lock (pipes)
+            {
+                if (pipes.TryGetValue(name, out var open) && !open.IsClosed) return null;
+                var made = new SafeFileHandle(new IntPtr(1), ownsHandle: false);
+                pipes[name] = made;
+                claimed.Add(name);
+                return made;
+            }
+        };
+        try
+        {
+            var targets = (List<OwnerCensus.DeviceGroup>)choose.Invoke(null, new object[] { candidates, retry, claims, keep })!;
+            return (targets, keep, claimed);
+        }
+        finally
+        {
+            claimsType.GetMethod("ReleaseAll")!.Invoke(claims, null);
+            MachineClaims.CreateClaimHook = null;
+        }
+    }
+
+    static string Chose((List<OwnerCensus.DeviceGroup> Targets, HashSet<string> Keep, List<string> Claimed) c) =>
+        $"took [{string.Join(", ", c.Targets.Select(t => t.Key))}], kept records [{string.Join(", ", c.Keep)}], claims taken [{string.Join(", ", c.Claimed)}]";
+
     /// <summary>A retry of the checks' own (OwnerSweep.RefusalRetry) on a
     /// clock its loop moves: each wait moves the clock to the time the loop
     /// waits for, then calls <see cref="At"/> with the time since the first
@@ -811,6 +852,33 @@ internal static class HeldRemoval
               $"a create of another identity waited {otherWaited}, this identity's claim free {ownClaimFree}, " +
               $"record deletions under the lock [{string.Join(", ", retryDeletes.Select(x => x.Locked))}]");
         cancels += l.CancelLocates;
+
+        // A sweep on a caller's thread meets a group whose refused removal
+        // the retry holds, and another dead owner's group.
+        var swept = new Machine(holder: true);
+        var runS = new RetryRun(swept);
+        SweepGroup(swept, runS.Retry);
+        var otherGroup = new OwnerCensus.DeviceGroup("HM_FE0000000000B003", -1, new List<string> { @"ROOT\HIDCLASS\HM_FE0000000000B003" },
+            OwnerCensus.Owner.Dead, OwnerRecord("pnc-sweep-other", live: false, "HM_FE0000000000B003"));
+        var c1 = Choose(new List<OwnerCensus.DeviceGroup> { Group(runS.Record), otherGroup }, runS.Retry, new(StringComparer.OrdinalIgnoreCase));
+        check("a sweep on a caller's thread meets a group whose refused removal the retry holds, and another dead owner's group -> it leaves the held group to the retry, takes none of its claims and keeps its record, and takes the other",
+              c1.Targets.Count == 1 && c1.Targets[0].Key == otherGroup.Key && c1.Keep.SetEquals(new[] { runS.Record.OwnerId })
+              && !c1.Claimed.Contains(MachineClaims.IdentityPipeName(Token), StringComparer.OrdinalIgnoreCase)
+              && c1.Claimed.Contains(MachineClaims.IdentityPipeName(otherGroup.Key), StringComparer.OrdinalIgnoreCase),
+              Chose(c1));
+
+        // A running program holds the claim of a dead owner's group: a
+        // create of its own on that identity is in flight, and Windows may
+        // refuse it the device.
+        var claimPipes = new Dictionary<string, SafeFileHandle>(StringComparer.OrdinalIgnoreCase);
+        var heldClaim = new SafeFileHandle(new IntPtr(1), ownsHandle: false);
+        claimPipes[MachineClaims.IdentityPipeName(Token)] = heldClaim;
+        var claimedRecord = OwnerRecord("pnc-sweep-claimed", live: false, Token);
+        var c2 = Choose(new List<OwnerCensus.DeviceGroup> { Group(claimedRecord) }, new OwnerSweep.RefusalRetry(new OwnerSweep.RetryCalls()), claimPipes);
+        heldClaim.Dispose();
+        check("a sweep meets a dead owner's group whose claim a running program holds -> it skips the group and keeps the dead record, so the device stays a dead owner's to the next sweep when that program's create is refused it",
+              c2.Targets.Count == 0 && c2.Keep.SetEquals(new[] { claimedRecord.OwnerId }),
+              Chose(c2));
 
         check("no CM_LOCATE_DEVNODE_CANCELREMOVE locate in the retries", cancels == 0, $"{cancels}");
     }

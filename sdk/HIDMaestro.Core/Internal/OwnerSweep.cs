@@ -394,19 +394,7 @@ internal static class OwnerSweep
         var keepRecords = new HashSet<string>(StringComparer.Ordinal);
         try
         {
-            foreach (var group in candidates)
-            {
-                // A group whose refused removal the retry holds is the
-                // retry's to ask again, and its record stays for it.
-                if (Refusals.LooksAfter(group))
-                {
-                    DeviceOrchestrator.LogDiag($"    reclaim left {group.Key} index {group.ControllerIndex} to the retry of its refused removal");
-                    if (group.Record != null) keepRecords.Add(group.Record.OwnerId);
-                    continue;
-                }
-                if (claims.TryHold(group)) targets.Add(group);
-                else DeviceOrchestrator.LogDiag($"    reclaim skipped {group.Key} index {group.ControllerIndex}: a running program holds it now");
-            }
+            targets.AddRange(ChooseTargets(candidates, Refusals, claims, keepRecords));
             BeforeReclaimActs?.Invoke(targets.Count);
             if (targets.Count > 0)
             {
@@ -452,6 +440,32 @@ internal static class OwnerSweep
 
         if (targets.Count > 0 || census.DeadRecords.Any())
             try { RegistryLedger.PruneDead(); } catch { }
+    }
+
+    /// <summary>The groups of <paramref name="candidates"/>, dead owners'
+    /// devices, that a sweep removes now, each with its index and identity
+    /// claims taken in <paramref name="claims"/>. A group whose refused
+    /// removal <paramref name="retry"/> holds is the retry's to ask again:
+    /// the sweep leaves it, and its record stays
+    /// (<paramref name="keepRecords"/>). A group whose claims a running
+    /// program holds now is skipped. pnp_notify_check's part 13 runs it on
+    /// groups and claims of its own.</summary>
+    private static List<OwnerCensus.DeviceGroup> ChooseTargets(List<OwnerCensus.DeviceGroup> candidates, RefusalRetry retry,
+        GroupClaims claims, HashSet<string> keepRecords)
+    {
+        var targets = new List<OwnerCensus.DeviceGroup>();
+        foreach (var group in candidates)
+        {
+            if (retry.LooksAfter(group))
+            {
+                DeviceOrchestrator.LogDiag($"    reclaim left {group.Key} index {group.ControllerIndex} to the retry of its refused removal");
+                if (group.Record != null) keepRecords.Add(group.Record.OwnerId);
+                continue;
+            }
+            if (claims.TryHold(group)) targets.Add(group);
+            else DeviceOrchestrator.LogDiag($"    reclaim skipped {group.Key} index {group.ControllerIndex}: a running program holds it now");
+        }
+        return targets;
     }
 
     /// <summary>A dead owner's group, under its claims: its devices, then
