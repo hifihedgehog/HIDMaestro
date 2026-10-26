@@ -6,6 +6,9 @@
 //   B. A burst of 600 one-count movements arrives whole: every report, in
 //      order, faster than Windows reads them.
 //   C. Four threads driving their own mouse at 250 Hz at once lose nothing.
+//      Each mouse moves by its own step, so a message that Windows merged
+//      from several mice still counts as each mouse's own reports. A run
+//      during which a relative mouse outside the test moved goes again.
 //   D. An absolute mouse reaches Raw Input as MOUSE_MOVE_ABSOLUTE.
 //   E. Buttons past five arrive through a second, vendor collection.
 //   F. Two keyboards, one without report IDs and one with Report ID 2. A
@@ -184,6 +187,181 @@ internal static class Program
         return IntPtr.Zero;
     }
 
+    /// <summary>Section C's steps: the first two mice move X by 1 and by
+    /// 64, the other two move Y by 1 and by 64. A message that Windows
+    /// merged from several mice splits back into each mouse's reports, as
+    /// long as fewer than <see cref="FourBase"/> reports of one mouse share
+    /// a message.</summary>
+    static readonly (int X, int Y)[] s_fourSteps = { (1, 0), (64, 0), (0, 1), (0, 64) };
+    const int FourBase = 64;
+    static bool s_noise, s_noiseAbs;
+
+    internal readonly record struct FourTally(int[] Out, int[] Back, int Misrouted, int Mixed, int Bad);
+
+    /// <summary>Section C's count of each mouse's reports, out and back,
+    /// read from the step sizes on whatever device Windows put a message.
+    /// Misrouted counts messages that carry no report of the mouse they
+    /// arrived on: Windows keeps one of the merged moves' devices on a
+    /// merged message, so only a frame that went to the wrong controller
+    /// makes one. Bad counts messages no mix of the steps makes. Messages of
+    /// other devices are left out.</summary>
+    internal static FourTally TallyFour(IEnumerable<(IntPtr Device, int X, int Y)> messages, IntPtr[] devs)
+    {
+        var outN = new int[4]; var backN = new int[4];
+        int misrouted = 0, mixed = 0, bad = 0;
+        foreach (var m in messages)
+        {
+            int dev = Array.IndexOf(devs, m.Device);
+            if (dev < 0) continue;
+            int sign = m.X != 0 ? Math.Sign(m.X) : Math.Sign(m.Y);
+            if (sign == 0 || (m.X != 0 && m.Y != 0 && Math.Sign(m.X) != Math.Sign(m.Y))) { bad++; continue; }
+            int ax = Math.Abs(m.X), ay = Math.Abs(m.Y);
+            int[] n = { ax % FourBase, ax / FourBase, ay % FourBase, ay / FourBase };
+            if (n[1] >= FourBase || n[3] >= FourBase) { bad++; continue; }
+            var counts = sign > 0 ? outN : backN;
+            int kinds = 0;
+            for (int i = 0; i < 4; i++)
+            {
+                counts[i] += n[i];
+                if (n[i] > 0) kinds++;
+            }
+            if (kinds > 1) mixed++;
+            if (n[dev] == 0) misrouted++;
+        }
+        return new FourTally(outN, backN, misrouted, mixed, bad);
+    }
+
+    /// <summary>Waits for the four mice's messages to stop arriving: 300 ms
+    /// after every report is counted, or 1500 ms of quiet when some are
+    /// missing, at most <paramref name="timeoutMs"/>.</summary>
+    static FourTally SettleFour(RawInputSink sink, IntPtr[] devs, int timeoutMs)
+    {
+        var sw = Stopwatch.StartNew();
+        int last = -1;
+        long quietSince = 0;
+        FourTally t;
+        while (true)
+        {
+            t = TallyFour(sink.Mice.Select(m => (m.Device, m.X, m.Y)), devs);
+            int n = sink.Mice.Count(m => devs.Contains(m.Device));
+            if (n != last) { last = n; quietSince = sw.ElapsedMilliseconds; }
+            bool complete = t.Out.All(c => c == 250) && t.Back.All(c => c == 250);
+            long quiet = sw.ElapsedMilliseconds - quietSince;
+            if ((complete && quiet > 300) || quiet > 1500 || sw.ElapsedMilliseconds > timeoutMs) return t;
+            Thread.Sleep(20);
+        }
+    }
+
+    /// <summary>Section C's four threads: each mouse sends 250 reports of
+    /// its own step at 250 Hz, all four pause once every one is out, then
+    /// each sends 250 back, so no merged message mixes the two ways.</summary>
+    static void RunFour(List<HMController> pads)
+    {
+        using var turn = new Barrier(4);
+        var threads = pads.Select((p, i) => new Thread(() =>
+        {
+            var (sx, sy) = s_fourSteps[i];
+            long step = Stopwatch.Frequency / 250;
+            var next = Stopwatch.GetTimestamp();
+            for (int n = 0; n < 500; n++)
+            {
+                if (n == 250)
+                {
+                    turn.SignalAndWait();
+                    Thread.Sleep(100);
+                    next = Stopwatch.GetTimestamp();
+                }
+                int d = n < 250 ? 1 : -1;
+                p.SubmitMouse(new HMMouseState { X = d * sx, Y = d * sy });
+                next += step;
+                while (Stopwatch.GetTimestamp() < next) Thread.Sleep(0);
+            }
+        })).ToList();
+        threads.ForEach(t => t.Start());
+        threads.ForEach(t => t.Join());
+    }
+
+    /// <summary>Relative moves in the sink from mice outside the test
+    /// (RAWMOUSE usFlags without MOUSE_MOVE_ABSOLUTE, 0x01).</summary>
+    static int ForeignRelativeMoves(RawInputSink sink, IntPtr[] devs) =>
+        sink.Mice.Count(m => !devs.Contains(m.Device) && (m.Flags & 0x01) == 0 && (m.X != 0 || m.Y != 0));
+
+    /// <summary>Waits until no relative mouse outside the test has moved for
+    /// <paramref name="stillMs"/>, at most <paramref name="timeoutMs"/>.</summary>
+    static void WaitStill(RawInputSink sink, IntPtr[] devs, int stillMs, int timeoutMs)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < timeoutMs)
+        {
+            sink.Clear();
+            Thread.Sleep(stillMs);
+            if (ForeignRelativeMoves(sink, devs) == 0) return;
+        }
+    }
+
+    /// <summary>Runs of equal (X, Y) pairs: "64,0x120 65,0x1".</summary>
+    static string Runs2(IEnumerable<(int X, int Y)> values)
+    {
+        var parts = new List<string>();
+        (int, int)? cur = null; int n = 0;
+        foreach (var v in values)
+        {
+            if (cur == v) { n++; continue; }
+            if (cur is (int cx, int cy)) parts.Add($"{cx},{cy}x{n}");
+            cur = v; n = 1;
+        }
+        if (cur is (int lx, int ly)) parts.Add($"{lx},{ly}x{n}");
+        return string.Join(" ", parts);
+    }
+
+    /// <summary>--tally-selftest: TallyFour on made-up messages, each with
+    /// the fault it must catch or the merge it must accept.</summary>
+    static int TallySelfTest()
+    {
+        var devs = new[] { (IntPtr)11, (IntPtr)12, (IntPtr)13, (IntPtr)14 };
+        List<(IntPtr, int, int)> Clean()
+        {
+            var l = new List<(IntPtr, int, int)>();
+            foreach (int d in new[] { 1, -1 })
+                for (int k = 0; k < 250; k++)
+                    for (int i = 0; i < 4; i++)
+                        l.Add((devs[i], d * s_fourSteps[i].X, d * s_fourSteps[i].Y));
+            return l;
+        }
+        bool Passes(FourTally t) => t.Out.All(c => c == 250) && t.Back.All(c => c == 250) && t.Misrouted == 0 && t.Bad == 0;
+        int failures = 0;
+        void Expect(string name, List<(IntPtr, int, int)> msgs, bool pass)
+        {
+            var t = TallyFour(msgs, devs);
+            bool ok = Passes(t) == pass;
+            if (!ok) failures++;
+            Console.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] {name}  out {string.Join(",", t.Out)} back {string.Join(",", t.Back)} misrouted {t.Misrouted} mixed {t.Mixed} bad {t.Bad}");
+        }
+        Expect("every report on its own device passes", Clean(), true);
+        var merged = Clean();
+        merged.RemoveAt(0); merged.RemoveAt(0); merged.RemoveAt(0);        // mice 1 to 3's first reports
+        merged.Insert(0, (devs[2], 1 + 64, 1));                              // as one message on mouse 3
+        Expect("a message Windows merged from three mice passes", merged, true);
+        var sameMouse = Clean();
+        sameMouse.RemoveAt(4); sameMouse.RemoveAt(0);                        // mouse 1's first two reports
+        sameMouse.Insert(0, (devs[0], 2, 0));
+        Expect("a message Windows merged from one mouse passes", sameMouse, true);
+        var lost = Clean();
+        lost.RemoveAt(2);
+        Expect("a lost report fails", lost, false);
+        var twice = Clean();
+        twice.Add((devs[3], 0, 64));
+        Expect("a report delivered twice fails", twice, false);
+        var wrong = Clean();
+        wrong[0] = (devs[2], 1, 0);                                          // mouse 1's report on mouse 3
+        Expect("a report on another mouse's device fails", wrong, false);
+        var foreign = Clean();
+        foreign[1] = (devs[1], 64 + 700, 0);                                 // another device's move inside
+        Expect("another device's move inside a test message fails", foreign, false);
+        Console.WriteLine($"\n=== tally selftest: {(failures == 0 ? "PASS" : $"FAIL ({failures})")} ===");
+        return failures == 0 ? 0 : 1;
+    }
+
     /// <summary>"2x120 4x31 -2x200": each run of equal values and its length.</summary>
     static string Runs(IEnumerable<int> values)
     {
@@ -237,6 +415,13 @@ internal static class Program
     static int Main()
     {
         Console.WriteLine("=== Keyboards and mice through Raw Input (issue #67) ===");
+        // --tally-selftest checks section C's count on made-up messages, with
+        // no device. --four-mice runs sections A to C alone, and --noise or
+        // --noise-abs moves a fifth mouse all through C.
+        if (Environment.GetCommandLineArgs().Contains("--tally-selftest")) return TallySelfTest();
+        s_noise = Environment.GetCommandLineArgs().Contains("--noise");
+        s_noiseAbs = Environment.GetCommandLineArgs().Contains("--noise-abs");
+        bool fourOnly = Environment.GetCommandLineArgs().Contains("--four-mice");
         // The --hold-diag child runs beside its own parent, which has the SDK
         // loaded.
         string? consumer = Environment.GetCommandLineArgs().Contains("--hold-child") ? null : FindLiveSdkConsumer();
@@ -435,13 +620,16 @@ internal static class Program
         try
         {
             FourMice(ctx, sink);
-            Absolute(ctx, sink);
-            ExtraButtons(ctx, sink);
-            Keyboard(ctx, sink);
-            Consumer(ctx, sink);
-            OutputSplit(ctx);
-            Catalog(ctx);
-            OwnerExit(ctx, sink);
+            if (!fourOnly)
+            {
+                Absolute(ctx, sink);
+                ExtraButtons(ctx, sink);
+                Keyboard(ctx, sink);
+                Consumer(ctx, sink);
+                OutputSplit(ctx);
+                Catalog(ctx);
+                OwnerExit(ctx, sink);
+            }
         }
         catch (Exception ex)
         {
@@ -496,33 +684,63 @@ internal static class Program
 
         Console.WriteLine("\n== C. Four threads, one mouse each, 250 Hz for a second each way ==");
         Thread.Sleep(200);
-        sink.Clear();
         var devs = keys.Select(k => mice.First(m => m.Name == pathByKey[k]).Handle).ToArray();
-        var threads = pads.Select((p, i) => new Thread(() =>
+        // --noise moves a fifth, relative mouse through C's first run, and
+        // --noise-abs an absolute one through every run, as another pointing
+        // device did on the gate run of October 26.
+        HMController? noise = !s_noise && !s_noiseAbs ? null
+            : ctx.CreateController(s_noiseAbs
+                ? Custom(0xF0B2, "HIDMaestro Live Noise Pointer", "mouse",
+                         new HidDescriptorBuilder().Mouse(absolute: true, wheel: false, pan: false))
+                : profile, "kbm-live-mouse-noise");
+        if (noise != null) Thread.Sleep(1000);
+        // Raw Input merges a run of relative moves from several mice into one
+        // message on one of their devices (seen October 26). Each test
+        // mouse's own step (s_fourSteps) splits such a message back into each
+        // mouse's reports. A relative mouse outside the test is another
+        // matter: its move can land in a test message and a test move in its
+        // message, and no count then recovers each mouse's reports. A run
+        // during which one moved goes again once it is still. An absolute
+        // pointer's moves never merge with relative ones.
+        const int CRuns = 5;
+        FourTally tally = default;
+        bool clean = false;
+        int foreign = 0;
+        for (int run = 1; run <= CRuns && !clean; run++)
         {
-            var next = Stopwatch.GetTimestamp();
-            long step = Stopwatch.Frequency / 250;
-            for (int n = 0; n < 500; n++)
+            WaitStill(sink, devs, 2000, 30000);
+            sink.Clear();
+            using var noiseStop = new ManualResetEventSlim();
+            var noiseThread = noise == null || (!s_noiseAbs && run > 1) ? null : new Thread(() =>
             {
-                p.SubmitMouse(new HMMouseState { X = n < 250 ? 2 : -2 });
-                next += step;
-                while (Stopwatch.GetTimestamp() < next) Thread.Sleep(0);
-            }
-        })).ToList();
-        threads.ForEach(t => t.Start());
-        threads.ForEach(t => t.Join());
-        for (int i = 0; i < 4; i++)
+                for (int n = 0; !noiseStop.IsSet; n++)
+                    noise!.SubmitMouse(s_noiseAbs
+                        ? new HMMouseState { X = 8000 + n % 64 * 200, Y = 8000 + n % 32 * 300 }
+                        : new HMMouseState { X = (n & 1) == 0 ? 7 : -7, Y = (n & 2) == 0 ? 5 : -5 });
+            });
+            noiseThread?.Start();
+            RunFour(pads);
+            tally = SettleFour(sink, devs, 6000);
+            noiseStop.Set();
+            noiseThread?.Join();
+            foreign = ForeignRelativeMoves(sink, devs);
+            clean = foreign == 0;
+            Console.WriteLine($"  run {run}: {sink.Mice.Count(m => devs.Contains(m.Device))} messages from the four mice, " +
+                              $"{tally.Mixed} of them merged by Windows from several mice; {foreign} relative moves of other mice" +
+                              (clean ? "" : ", so C runs again"));
+        }
+        noise?.Dispose();
+        Check("a run of C with no relative mouse outside the test moving", clean, $"{foreign} such moves in the last of {CRuns} runs");
+        if (clean)
         {
-            var (c, s, pk) = Settle(sink, devs[i], 500, 500, 6000);
-            Check($"mouse {i + 1}: every count arrived, 500 out and back", pk == 500 && s == 0, $"{c} messages, peak {pk}, sum {s}");
-            if (pk != 500 || s != 0)
-            {
-                // What arrived, as runs of equal deltas, and what any mouse
-                // outside the test did in the same window.
-                Console.WriteLine("    deltas: " + Runs(sink.Mice.Where(m => m.Device == devs[i]).Select(m => m.X)));
-                var others = sink.Mice.Where(m => !devs.Contains(m.Device) && (m.X != 0 || m.Y != 0)).ToList();
-                Console.WriteLine($"    other mice: {others.Count} moves, X sum {others.Sum(m => (long)m.X)}");
-            }
+            for (int i = 0; i < 4; i++)
+                Check($"mouse {i + 1}: every report arrived, 250 out and 250 back", tally.Out[i] == 250 && tally.Back[i] == 250,
+                      $"{tally.Out[i]} out, {tally.Back[i]} back");
+            Check("every message carries a report of the mouse it arrived on", tally.Misrouted == 0 && tally.Bad == 0,
+                  $"{tally.Misrouted} without one, {tally.Bad} that no step sizes make");
+            if (tally.Out.Any(n => n != 250) || tally.Back.Any(n => n != 250) || tally.Misrouted != 0 || tally.Bad != 0)
+                for (int i = 0; i < 4; i++)
+                    Console.WriteLine($"    mouse {i + 1} messages (X,Y): " + Runs2(sink.Mice.Where(m => m.Device == devs[i]).Select(m => (m.X, m.Y))));
         }
 
         Console.WriteLine("\n== A, again: the same keys in reverse order ==");
