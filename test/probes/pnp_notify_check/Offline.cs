@@ -1273,7 +1273,7 @@ internal static class Offline
     static bool Part(int n) => s_part == 0 || s_part == n;
 
     /// <summary>Run's parts, each in a process of its own.</summary>
-    const int Parts = 11;
+    const int Parts = 12;
 
     /// <summary>The checks in parts that run at once, each in a process of
     /// its own: the sequences run on the wall clock, and the SDK's hooks
@@ -1330,9 +1330,9 @@ internal static class Offline
             if (!finished || proc.ExitCode != 0)
                 Check($"part {n} of the offline checks ran to its end", false, $"exit {proc.ExitCode}");
             proc.Dispose();
-            // The locate checks come after the exit's removals, before the
-            // tool run, as in one process.
-            if (n == Parts - 1)
+            // The locate checks come where one process runs them, after
+            // part 10 and before the tool run.
+            if (n == 10)
             {
                 Check("the waits and the gate located through the hook", locates > 0, $"{locates} locates");
                 Check("no CM_LOCATE_DEVNODE_CANCELREMOVE locate was issued", cancels == 0, $"{cancels} of {locates}");
@@ -2295,6 +2295,10 @@ internal static class Offline
 
         // Part 11: the tool runs' read bound.
         if (Part(11)) ChildOutputBound();
+
+        // Part 12: the diagnostic logs with several processes appending at
+        // once (DiagLogAppend.cs).
+        if (Part(12)) DiagLogAppend.Run(Check);
 
         if (part != 0)
         {
