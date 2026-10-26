@@ -2196,10 +2196,15 @@ function Scenario-Json-Parity {
 # record's removal, and no locate cancels a removal. The live part then
 # requires every removal of three profiles' disposes to end with its devnode
 # gone, and each devnode in the tree when its removal test started to leave
-# on that notification.
+# on that notification. Between the two, with no device, a stand-in for
+# hmswd.exe (swd_bound_check) shows that a software device's create waits for
+# the helper's answer up to the SDK's bound, runs it once, and names why a
+# create failed, with the HRESULT. Its slow helper runs at scale 0.25, 5 s.
 function Scenario-Pnp-Notify {
     Invoke-Probe -Dir 'pnp_notify_check' -Exe 'PnpNotifyCheck.exe' -Arguments 'offline' -Tag 'offline' `
                  -Message 'the removal test or the registration gate answered before a removal was complete (see probe stdout)'
+    Invoke-Probe -Dir 'swd_bound_check' -Exe 'SwdBoundCheck.exe' -Arguments '0.25' `
+                 -Message 'a software device create stopped hmswd.exe before the SDK''s bound, ran it more than once, or misstated why it failed (see probe stdout)'
     Invoke-Probe -Dir 'pnp_notify_check' -Exe 'PnpNotifyCheck.exe' `
                  -Message 'PnP notifications stopped reaching the SDK''s waits (see probe stdout)' -SkipCodes 2
 }

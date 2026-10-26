@@ -1295,15 +1295,15 @@ public static partial class DeviceManager
     internal const string PnpMutexObject = "Pnp";
 
     /// <summary>How long a program waits for another to release the PnP
-    /// lock, as long as the deploy lock's wait. The longest hold is one
-    /// removal: the hmswd.exe close (up to 8 s), its parent's 120 s budget
-    /// and 2 s for its notification, 4 s per child, and the pnputil and
-    /// devcon fallbacks (up to 7 s each) with 4 s to test them, about 150 s
-    /// for a devnode with a few children, all scaled alike. A registration
-    /// holds it for its checks and its own calls, at most the three
-    /// hmswd.exe create attempts of up to 15 s each with 4.5 s between and
-    /// a removal test of up to 15 s after each that timed out. Neither
-    /// nests the other.</summary>
+    /// lock, as long as the deploy lock's wait. The longest hold is a
+    /// registration whose software device create timed out: the hmswd.exe
+    /// create of up to 90 s (SwdDeviceFactory.HelperBoundMs) and a removal
+    /// test of up to 90 s after it, 180 s. One removal holds it for the
+    /// hmswd.exe close (up to 8 s), its parent's 120 s budget and 2 s for
+    /// its notification, 4 s per child, and the pnputil and devcon
+    /// fallbacks (up to 7 s each) with 4 s to test them, about 150 s for a
+    /// devnode with a few children. All of these scale alike. Neither nests
+    /// the other.</summary>
     const int PnpLockWaitMs = 600_000;
 
     /// <summary>Wait up to <paramref name="timeoutMs"/> for the machine-wide

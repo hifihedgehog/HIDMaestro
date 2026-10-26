@@ -1,8 +1,6 @@
 ﻿using System;
 using System.Diagnostics;
 using System.IO;
-using System.Text;
-using System.Threading;
 
 namespace HIDMaestro.Internal;
 
@@ -53,15 +51,47 @@ internal static class SwdDeviceFactory
     /// <c>HIDMaestro.Native.&lt;arch&gt;.hmswd.exe</c>.</summary>
     internal const string HelperFile = "hmswd.exe";
 
+    /// <summary>How long hmswd.exe's create waits for Plug and Play to report
+    /// the device enumerated, by its creation callback or a started devnode,
+    /// before it closes the device and exits with code 3: 600 polls of
+    /// 100 ms (driver\hmswd\hmswd.c, the create's wait loop). The helper
+    /// reads no timeout scale.</summary>
+    internal const int HelperWaitMs = 60_000;
+
+    /// <summary>The SDK's bound on one hmswd.exe create, before scaling: the
+    /// helper's own wait and 30 s for its start, its SwDeviceCreate call, its
+    /// close and its exit. SwDeviceCreate documents no bound of its own, and
+    /// a slow Plug and Play queue delays the helper's start and its callback
+    /// alike, so the SDK waits for the helper's answer and stops it only
+    /// past this bound. Nothing retries the create. A timeout scale below 1
+    /// brings the bound under the helper's own wait.</summary>
+    internal const int HelperBoundMs = HelperWaitMs + 30_000;
+
+    /// <summary>HRESULT_FROM_WIN32(WAIT_TIMEOUT): the helper's wait or the
+    /// SDK's bound ran out.</summary>
+    internal const int WaitTimeoutHr = unchecked((int)0x80070102);
+
+    const int E_FAIL       = unchecked((int)0x80004005);
+    const int E_INVALIDARG = unchecked((int)0x80070057);
+
+    /// <summary>The program a create runs in place of hmswd.exe, unstaged
+    /// and unpinned. Probe swd_bound_check sets it to a stand-in that answers
+    /// as hmswd.exe does, after a delay of its choosing. Null outside the
+    /// probe.</summary>
+    internal static string? HelperPathForTest;
+
     public readonly struct Result
     {
         public readonly bool    Success;
         public readonly string? InstanceId;       // e.g. "SWD\\HIDMAESTRO\\HMC_0001"
         public readonly int     HResult;
+        /// <summary>What ended a failed create, in the words the create's
+        /// exception carries. Null on success.</summary>
+        public readonly string? Cause;
 
-        public Result(bool success, string? instanceId, int hr)
+        public Result(bool success, string? instanceId, int hr, string? cause = null)
         {
-            Success = success; InstanceId = instanceId; HResult = hr;
+            Success = success; InstanceId = instanceId; HResult = hr; Cause = cause;
         }
     }
 
@@ -89,8 +119,10 @@ internal static class SwdDeviceFactory
     }
 
     /// <summary>Create an SWD-enumerated device with the given properties
-    /// via <c>hmswd.exe</c>. Blocks until the helper returns (device fully
-    /// enumerated) and returns its InstanceId.</summary>
+    /// via <c>hmswd.exe</c>, which asks for a driver (DriverRequired). Blocks
+    /// until the helper returns, the device enumerated and its driver bound,
+    /// or until <see cref="HelperBoundMs"/> (scaled) has passed, and returns
+    /// its InstanceId or what failed.</summary>
     /// <param name="instanceIdSuffix">Appended after the enumerator
     /// becomes the full instance-id's last segment. Must be unique
     /// across live devices under this enumerator.</param>
@@ -106,14 +138,12 @@ internal static class SwdDeviceFactory
         string[] compatibleIds,
         Guid containerId,
         string deviceDescription,
-        bool driverRequired = true,
-        int callbackTimeoutMs = 35000,
         string? enumeratorName = null)
     {
-        // Held until the last attempt's helper has exited. A helper that
-        // cannot be staged or held throws, with the reason, out to the
-        // create (HMContext.CreateController).
-        using var pin = PinHelper(out string helperPath);
+        // Held until the helper has exited. A helper that cannot be staged
+        // or held throws, with the reason, out to the create
+        // (HMContext.CreateController).
+        using var pin = PinForCreate(out string helperPath);
 
         // hmswd expects '|' as the list separator.
         string hwList     = string.Join('|', hardwareIds ?? Array.Empty<string>());
@@ -141,123 +171,160 @@ internal static class SwdDeviceFactory
         psi.ArgumentList.Add(compatList);
         psi.ArgumentList.Add(deviceDescription ?? "HIDMaestro Device");
 
-        // With DriverRequired set, SwDeviceCreate waits synchronously for
-        // driver bind. Under heavy PnP load (e.g., directly after
-        // pnputil /add-driver /install from DriverBuilder.FullDeploy), the
-        // bind callback can serialize and time out. Retry up to 3 times with
-        // a short backoff if the first attempt times out: most retries
-        // succeed because the parent process's PnP activity has quiesced.
-        Result RunOnce(int perAttemptTimeoutMs)
-        {
-            try
-            {
-                using var proc = Process.Start(psi);
-                if (proc == null)
-                    return new Result(false, null, unchecked((int)0x80070005)); // ACCESS_DENIED
-
-                // Read as the helper writes, so neither pipe fills, and
-                // bounded after its exit (PnputilHelper.Drain).
-                var stdoutRead = proc.StandardOutput.ReadToEndAsync();
-                var stderrRead = proc.StandardError.ReadToEndAsync();
-                if (!proc.WaitForExit(perAttemptTimeoutMs))
-                {
-                    try { proc.Kill(entireProcessTree: true); } catch { }
-                    return new Result(false, null, unchecked((int)0x80070102)); // WAIT_TIMEOUT
-                }
-
-                var (stdoutLocal, stderrLocal) = PnputilHelper.Drain(stdoutRead, stderrRead);
-
-                // The helper's output goes to the diagnostic log, which is
-                // written as the user (DeviceOrchestrator.LogDiag). Until
-                // v2.0.0 it went to its own file under %TEMP%\HIDMaestro,
-                // written elevated into a folder the user's programs can
-                // change.
-                DeviceOrchestrator.LogDiag(
-                    $"      hmswd create {enumName}\\{instanceIdSuffix}: exit={proc.ExitCode} " +
-                    $"stdout=[{stdoutLocal.Trim()}] stderr=[{stderrLocal.Trim()}]");
-
-                if (proc.ExitCode == 0)
-                {
-                    stdoutLocal = stdoutLocal.Trim();
-                    if (stdoutLocal.StartsWith("OK ", StringComparison.Ordinal))
-                        return new Result(true, stdoutLocal.Substring(3).Trim(), 0);
-                    return new Result(false, null, unchecked((int)0x80004005));
-                }
-
-                // Parse HRESULT from stderr if present
-                int hr = unchecked((int)0x80004005);
-                int hexIdx = stderrLocal.IndexOf("0x", StringComparison.OrdinalIgnoreCase);
-                if (hexIdx >= 0)
-                {
-                    var slice = stderrLocal.Substring(hexIdx + 2);
-                    int end = 0;
-                    while (end < slice.Length && IsHex(slice[end])) end++;
-                    if (end > 0 && int.TryParse(slice.Substring(0, end),
-                        System.Globalization.NumberStyles.HexNumber,
-                        System.Globalization.CultureInfo.InvariantCulture,
-                        out int parsed))
-                    {
-                        hr = parsed;
-                    }
-                }
-                // Exit code 3 from hmswd = callback timeout; propagate as WAIT_TIMEOUT
-                if (proc.ExitCode == 3) hr = unchecked((int)0x80070102);
-                return new Result(false, null, hr);
-            }
-            catch (Exception)
-            {
-                return new Result(false, null, unchecked((int)0x80004005));
-            }
-        }
-
-        int perAttempt = TimeoutScale.Apply(Math.Min(callbackTimeoutMs, 15000));
-        return CreateWithRetries($@"SWD\{enumName}\{instanceIdSuffix}", RetryBackoffMs, perAttempt, () => RunOnce(perAttempt));
+        // One run of the helper. With DriverRequired its callback waits for
+        // the driver's install, which a slow Plug and Play queue delays. In a
+        // run on 2026-10-26, driver installs and driver-host starts waited
+        // behind a machine-wide image-load lock for longer than the three
+        // 15 s attempts this replaced. Stopping the helper closes the device
+        // it made, and a second helper's create queues behind that removal
+        // (SwDeviceClose), so the create waits for the helper's own answer.
+        int boundMs = TimeoutScale.Apply(HelperBoundMs);
+        return CreateOnce($@"SWD\{enumName}\{instanceIdSuffix}", boundMs, () => RunHelper(psi, $@"{enumName}\{instanceIdSuffix}", boundMs));
     }
 
-    /// <summary>The wait before each create attempt, in ms before scaling.</summary>
-    private static readonly int[] RetryBackoffMs = { 0, 1500, 3000 };
+    /// <summary>Run one hmswd.exe create and read its answer. The helper has
+    /// <paramref name="boundMs"/> to exit, and is stopped with its process
+    /// tree once that has passed.</summary>
+    private static Result RunHelper(ProcessStartInfo psi, string device, int boundMs)
+    {
+        try
+        {
+            using var proc = Process.Start(psi);
+            if (proc == null)
+                return new Result(false, null, E_FAIL, "hmswd.exe did not start.");
+
+            // Read as the helper writes, so neither pipe fills, and
+            // bounded after its exit (PnputilHelper.Drain).
+            var stdoutRead = proc.StandardOutput.ReadToEndAsync();
+            var stderrRead = proc.StandardError.ReadToEndAsync();
+            if (!proc.WaitForExit(boundMs))
+            {
+                try { proc.Kill(entireProcessTree: true); } catch { }
+                DeviceOrchestrator.LogDiag($"      hmswd create {device}: still running at the SDK's bound of {Seconds(boundMs)}, stopped");
+                return new Result(false, null, WaitTimeoutHr,
+                    $"hmswd.exe was still running when the SDK's bound of {Seconds(boundMs)} ran out, and was stopped " +
+                    $"(its own wait for Plug and Play is {Seconds(HelperWaitMs)}).");
+            }
+
+            var (stdoutLocal, stderrLocal) = PnputilHelper.Drain(stdoutRead, stderrRead);
+
+            // The helper's output goes to the diagnostic log, which is
+            // written as the user (DeviceOrchestrator.LogDiag). Until
+            // v2.0.0 it went to its own file under %TEMP%\HIDMaestro,
+            // written elevated into a folder the user's programs can
+            // change.
+            DeviceOrchestrator.LogDiag(
+                $"      hmswd create {device}: exit={proc.ExitCode} " +
+                $"stdout=[{stdoutLocal.Trim()}] stderr=[{stderrLocal.Trim()}]");
+            return ReadAnswer(proc.ExitCode, stdoutLocal, stderrLocal);
+        }
+        catch (Exception e)
+        {
+            int hr = e is System.ComponentModel.Win32Exception w ? unchecked((int)(0x80070000u | ((uint)w.NativeErrorCode & 0xFFFFu))) : e.HResult;
+            return new Result(false, null, hr, $"hmswd.exe could not be run: {e.Message}");
+        }
+    }
+
+    /// <summary>What an hmswd.exe create's exit code and output say
+    /// (driver\hmswd\hmswd.c): exit 0 with "OK &lt;instance id&gt;", 1 for
+    /// arguments it refused, 2 when SwDeviceCreate failed, 3 when its own
+    /// wait for Plug and Play ran out, 4 when the creation callback reported
+    /// a failure. Exits 2 and 4 print the HRESULT, which the result
+    /// carries.</summary>
+    internal static Result ReadAnswer(int exitCode, string stdout, string stderr)
+    {
+        string err = stderr.Trim();
+        switch (exitCode)
+        {
+            case 0:
+                string ok = stdout.Trim();
+                if (ok.StartsWith("OK ", StringComparison.Ordinal))
+                    return new Result(true, ok.Substring(3).Trim(), 0);
+                return new Result(false, null, E_FAIL, $"hmswd.exe exited with code 0 but printed no instance id ({Shown(ok)}).");
+            case 1:
+                return new Result(false, null, E_INVALIDARG, $"hmswd.exe refused its arguments, exit code 1 ({Shown(err)}).");
+            case 2:
+                return ParsedHr(err) is int created
+                    ? new Result(false, null, created, $"SwDeviceCreate failed with 0x{created:X8} (hmswd.exe exit code 2).")
+                    : new Result(false, null, E_FAIL, $"SwDeviceCreate failed (hmswd.exe exit code 2, {Shown(err)}).");
+            case 3:
+                return new Result(false, null, WaitTimeoutHr,
+                    $"Plug and Play did not report the device enumerated within hmswd.exe's own wait of {Seconds(HelperWaitMs)}, " +
+                    "and hmswd.exe closed it (exit code 3).");
+            case 4:
+                return ParsedHr(err) is int callback
+                    ? new Result(false, null, callback, $"Plug and Play reported the device's creation failed with 0x{callback:X8} (hmswd.exe exit code 4).")
+                    : new Result(false, null, E_FAIL, $"Plug and Play reported the device's creation failed (hmswd.exe exit code 4, {Shown(err)}).");
+            default:
+                return new Result(false, null, E_FAIL, $"hmswd.exe exited with code 0x{exitCode:X8} ({Shown(err)}).");
+        }
+
+        static string Shown(string text) => text.Length == 0 ? "no output" : $"\"{text}\"";
+    }
+
+    /// <summary>The first <c>0x</c> hex number in the helper's error output,
+    /// where hmswd.exe prints the HRESULT of exits 2 and 4.</summary>
+    private static int? ParsedHr(string stderr)
+    {
+        int hexIdx = stderr.IndexOf("0x", StringComparison.OrdinalIgnoreCase);
+        if (hexIdx < 0) return null;
+        var slice = stderr.Substring(hexIdx + 2);
+        int end = 0;
+        while (end < slice.Length && IsHex(slice[end])) end++;
+        if (end > 0 && int.TryParse(slice.Substring(0, end),
+            System.Globalization.NumberStyles.HexNumber,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out int parsed))
+        {
+            return parsed;
+        }
+        return null;
+    }
+
+    /// <summary>A time in milliseconds as a message gives it: 90 s,
+    /// 22.5 s.</summary>
+    internal static string Seconds(int ms) =>
+        (ms / 1000.0).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) + " s";
 
     /// <summary>HRESULT_FROM_WIN32(ERROR_BUSY): the device a timed-out
-    /// attempt made was still in the device tree when its removal test
+    /// create made was still in the device tree when its removal test
     /// ended.</summary>
     internal const int StillInTreeHr = unchecked((int)0x800700AA);
 
-    /// <summary>Runs <paramref name="attempt"/> once per entry of
-    /// <paramref name="backoffMs"/>, after that entry's wait (scaled), and
-    /// again only when it ended in WAIT_TIMEOUT. A timed-out attempt can have
-    /// created the device and closed it again, hmswd.exe killed or giving up
-    /// on its own callback timeout, so Windows can still be removing
-    /// <paramref name="instanceId"/>. After every timed-out attempt, the last
-    /// one included, the removal test waits up to
-    /// <paramref name="removalTestMs"/> (scaled, an attempt's own bound) for
-    /// the device to leave the tree, inside the caller's hold of the PnP
-    /// lock, so no retry registers the id and no other program's
-    /// registration follows the hold while that removal runs. A device still
-    /// there ends the retries with <see cref="StillInTreeHr"/>, and the
-    /// caller refuses the create.</summary>
-    internal static Result CreateWithRetries(string instanceId, int[] backoffMs, int removalTestMs, Func<Result> attempt)
+    /// <summary>Runs <paramref name="attempt"/>, the one create of
+    /// <paramref name="instanceId"/>. A create that timed out, the helper
+    /// ending its own wait or stopped at the SDK's bound, can have made the
+    /// device and closed it, so Windows can still be removing
+    /// <paramref name="instanceId"/>. After a timed-out create the removal
+    /// test waits up to <paramref name="removalTestMs"/> (scaled, the
+    /// helper's bound) for the device to leave the tree, inside the caller's
+    /// hold of the PnP lock, so no other program's registration follows the
+    /// hold while that removal runs. A device still there ends the create
+    /// with <see cref="StillInTreeHr"/>, and the caller refuses the create
+    /// either way. Nothing retries it: a second helper would only queue
+    /// behind the removal of the first one's device.</summary>
+    internal static Result CreateOnce(string instanceId, int removalTestMs, Func<Result> attempt)
     {
-        Result last = default;
-        for (int i = 0; i < backoffMs.Length; i++)
+        Result result = attempt();
+        if (result.Success || result.HResult != WaitTimeoutHr) return result;
+        if (DeviceManager.WaitRemovalComplete(instanceId, uninstalls: false, removalTestMs)) return result;
+        DeviceOrchestrator.LogDiag($"      {instanceId} still in the device tree after a timed-out create");
+        string timedOut = result.Cause is string cause ? cause + " " : "";
+        return new Result(false, null, StillInTreeHr,
+            $"{timedOut}The device was still in the device tree when its removal test ended after {Seconds(removalTestMs)}.");
+    }
+
+    /// <summary>The pin <see cref="Create"/> runs the helper under, or none
+    /// when the probe's stand-in (<see cref="HelperPathForTest"/>) runs in
+    /// its place.</summary>
+    private static ProtectedStaging.Pinned? PinForCreate(out string helperPath)
+    {
+        if (HelperPathForTest is string standIn)
         {
-            if (backoffMs[i] > 0)
-            {
-                // Let PnP quiesce: a prior pnputil /add-driver /install can
-                // still be draining bind notifications when we get here.
-                Thread.Sleep(TimeoutScale.Apply(backoffMs[i]));
-            }
-            last = attempt();
-            if (last.Success) return last;
-            // Retry ONLY for WAIT_TIMEOUT (0x80070102): other failures are
-            // structural (bad args, ACL, no matching INF) and won't fix with a retry.
-            if (unchecked((uint)last.HResult) != 0x80070102u) return last;
-            if (!DeviceManager.WaitRemovalComplete(instanceId, uninstalls: false, removalTestMs))
-            {
-                DeviceOrchestrator.LogDiag($"      {instanceId} still in the device tree after a timed-out create, no retry");
-                return new Result(false, null, StillInTreeHr);
-            }
+            helperPath = standIn;
+            return null;
         }
-        return last;
+        return PinHelper(out helperPath);
     }
 
     /// <summary>

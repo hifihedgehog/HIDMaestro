@@ -405,7 +405,7 @@ This section narrows the windows in which a program of this release registers a 
 - Each create's bus type stamp on the parent it made.
 - The ghost XUSB interface sweep and the interface-class cleanup, each per devnode.
 
-One hold is one removal or one registration, never both. Threads of one process take the lock through an in-process gate first, one at a time, so a wait bounded for another program's hold never counts this process's own holds. Another program waits up to ten minutes, then throws `InvalidOperationException`. The longest hold is one removal, about 150 s for a devnode with a few children: the SWD helper's close (up to 8 s), the parent's 120 s budget and 2 s for its notification, 4 s per child, and the pnputil and devcon fallbacks. A registration's longest is about 95 s: three SWD helper attempts of up to 15 s, 4.5 s between them, and a removal test of up to 15 s after each that timed out.
+One hold is one removal or one registration, never both. Threads of one process take the lock through an in-process gate first, one at a time, so a wait bounded for another program's hold never counts this process's own holds. Another program waits up to ten minutes, then throws `InvalidOperationException`. The longest hold is a software device's registration whose create timed out, 180 s: the SWD helper's create of up to 90 s and a removal test of up to 90 s after it. One removal holds the lock for about 150 s at most for a devnode with a few children: the SWD helper's close (up to 8 s), the parent's 120 s budget and 2 s for its notification, 4 s per child, and the pnputil and devcon fallbacks.
 
 These change devnodes outside the lock, and each is exposure the lock does not cover:
 
@@ -424,7 +424,7 @@ Everything that takes time happens before the lock. Rivals of the ParentIdPrefix
 
 The gate sees a removal of the id by any program through the id's locates. It cannot see a removal Windows has not finished after the devnode and its record have gone. A program of this release holds the lock until its removal test has an outcome. A program before v2.0.0 holds nothing.
 
-A software device's create that runs past its 15 s is retried after 1.5 s and then 3 s, on the same id and inside the same hold. After each attempt that timed out, the last one included, the removal test runs on the id within an attempt's 15 s, before the next attempt and before the hold ends, since an attempt that had made the device closes it when it is killed. A device still in the tree ends the attempts.
+A software device's create runs hmswd.exe once. The helper waits up to 60 s for Plug and Play to report the device enumerated, then closes the device and exits with code 3. The SDK gives it 90 s, the 60 s and 30 s for its start and exit, and stops it only then. Nothing retries the create: stopping the helper closes the device it made, and a second create of the id "will be queued until the previous removal processing completes" (`SwDeviceClose` on Learn). Until v2.1.0 the SDK stopped the helper at 15 s and ran it again twice, so a slow install queue lost each attempt's progress. After a create that timed out, the removal test runs on the id within the same 90 s, before the hold ends. A device still in the tree fails the create as still in the tree. The exception names what ended the create, the SDK's bound or hmswd.exe's exit code and its meaning, and carries the HRESULT: `0x80070102` for a timeout, `0x800700AA` for a device still in the tree, or the HRESULT `SwDeviceCreate` or its callback returned.
 
 ### The removal test
 

@@ -798,7 +798,8 @@ internal static partial class Program
         foreach (var p in list)
         {
             var xinputBefore = XInputConnected();
-            using var c = ctx.CreateController(ctx.GetProfile(p.Id)!, s_key);
+            using var c = TryCreate(ctx, ctx.GetProfile(p.Id)!, p.Text);
+            if (c == null) continue;
             if (named.Count > 0 && !OnEmbeddedDriver(c, p.Text)) return 5;
             AckPass(c, p.Text, runs);
             if (named.Count > 0)
@@ -2371,6 +2372,21 @@ internal static partial class Program
     {
         if (!ok) s_failures++;
         Console.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] {name}  {detail}");
+    }
+
+    /// <summary>A create that throws is a failed check named by
+    /// <paramref name="name"/>, with the exception's type, HRESULT and
+    /// message, and returns null, so the mode goes on with its next profile
+    /// and ends with the failure counted instead of on an unhandled
+    /// exception.</summary>
+    static HMController? TryCreate(HMContext ctx, HMProfile profile, string name)
+    {
+        try { return ctx.CreateController(profile, s_key); }
+        catch (Exception e)
+        {
+            Check($"{name}: CreateController", false, $"{e.GetType().Name} 0x{e.HResult:X8}: {e.Message}");
+            return null;
+        }
     }
 
     static void Spin(long micros)

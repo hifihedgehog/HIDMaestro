@@ -42,6 +42,7 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("ValveFirmwareCheck")]
 [assembly: InternalsVisibleTo("JsonParityCheck")]
 [assembly: InternalsVisibleTo("PnpNotifyCheck")]
+[assembly: InternalsVisibleTo("SwdBoundCheck")]
 [assembly: InternalsVisibleTo("Ds4ReportCheck")]
 [assembly: InternalsVisibleTo("Ds3SixaxisCheck")]
 [assembly: InternalsVisibleTo("Switch2CompositeCheck")]

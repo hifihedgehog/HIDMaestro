@@ -164,7 +164,7 @@ internal static class Program
         }
 
         var sw = Stopwatch.StartNew();
-        var r = SwdDeviceFactory.Create(suffix, hw, compat, container, $"Identity lab {v.Shape}", true, 35000, enumName);
+        var r = SwdDeviceFactory.Create(suffix, hw, compat, container, $"Identity lab {v.Shape}", enumName);
         if (!r.Success || r.InstanceId == null)
             return new Life(n, null, false, false, 0, null, Array.Empty<string>(), false, false, null, sw.ElapsedMilliseconds, 0, false, note + $"create FAILED hr=0x{r.HResult:X8}");
         string inst = r.InstanceId;
