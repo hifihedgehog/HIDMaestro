@@ -31,6 +31,18 @@
 // --any-driver runs on whatever driver is installed, so a v2.0.3 build of
 // this probe can stress the newer driver. Builds against v2.0.3's SDK as it
 // is.
+// --late-detail, never part of a default run, prints where each DualShock 4
+// frame over 4 ms waited: the ReadFile readings that completed between its
+// submit and the first reading that carries it, the time since the reading
+// before that one, the submits after it in its burst, the later submits
+// that came before its reading, and whether the SDK's idle repeat, a write
+// of the last frame 4 ms after it (the profile's stream period), was due
+// before its reading. A frame whose wakeup was missed waits with the reader
+// idle for the next write, the idle repeat when nothing follows. A frame
+// queued behind a burst's other reports waits while the reader reads them.
+// --input-buffers=<n>, also never in a default run, gives the reader's
+// handle n input buffers (HidD_SetNumInputBuffers) in place of HID class's
+// default, which caps how many reports can queue ahead of a frame.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -51,6 +63,14 @@ internal static partial class Program
             if (double.TryParse(a, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double s) && s > 0) seconds = s;
         bool gateOff = args.Contains("--gate-off");
         bool anyDriver = args.Contains("--any-driver");
+        bool lateDetail = args.Contains("--late-detail");
+        uint inputBuffers = 0;
+        string? buffers = args.FirstOrDefault(a => a.StartsWith("--input-buffers=", StringComparison.Ordinal));
+        if (buffers != null && (!uint.TryParse(buffers["--input-buffers=".Length..], out inputBuffers) || inputBuffers < 2 || inputBuffers > 512))
+        {
+            Console.WriteLine($"signal-stress: {buffers} needs a count from 2 to 512, HID class's bounds");
+            return 1;
+        }
         if (!Elevated("signal-stress")) return 3;
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
@@ -59,7 +79,7 @@ internal static partial class Program
         using (var c = ctx.CreateController(ctx.GetProfile(Ds4)!, s_key))
         {
             if (!anyDriver && !OnEmbeddedDriver(c, Ds4)) return 5;
-            StressHid(c, seconds, SignalView(c), gateOff);
+            StressHid(c, seconds, SignalView(c), gateOff, lateDetail, inputBuffers);
         }
 
         var before = new HashSet<Gamepad>(Gamepad.Gamepads);
@@ -140,8 +160,11 @@ internal static partial class Program
     /// <paramref name="submit"/> with the count and returns each submit's
     /// count, Stopwatch time and mode. In a mode with the input event's gate
     /// off, the HID driver's capability is cleared before each submit, and
-    /// a submit after which it is set again carries the Announced bit.</summary>
-    static List<(int Count, long Time, int Mode)> StressSchedule(double seconds, Action<int> submit, int[] modes, IntPtr signal)
+    /// a submit after which it is set again carries the Announced bit.
+    /// <paramref name="burstOf"/>, when given, gets each submit's burst size,
+    /// 1 for a submit alone, and the submits after it in its burst.</summary>
+    static List<(int Count, long Time, int Mode)> StressSchedule(double seconds, Action<int> submit, int[] modes, IntPtr signal,
+        List<(int Size, int After)>? burstOf = null)
     {
         var rng = new Random(2101);
         var sent = new List<(int, long, int)>(1 << 20);
@@ -149,7 +172,7 @@ internal static partial class Program
         long end = start + (long)(seconds * Stopwatch.Frequency);
         long block = Stopwatch.Frequency;
         int n = 0, bursts = 0, gaps = 0, announced = 0, mode = -1;
-        void Send()
+        void Send(int size, int after)
         {
             n++;
             bool hold = (mode & GateInput) == 0 && signal != IntPtr.Zero;
@@ -159,6 +182,7 @@ internal static partial class Program
             int m = mode;
             if (hold && InputGateSet(signal)) { m |= Announced; announced++; }
             sent.Add((n, t, m));
+            burstOf?.Add((size, after));
         }
         while (Stopwatch.GetTimestamp() < end)
         {
@@ -176,12 +200,12 @@ internal static partial class Program
             if (roll < 23)
             {
                 int k = rng.Next(50, 201);
-                for (int i = 0; i < k; i++) Send();
+                for (int i = 0; i < k; i++) Send(k, k - 1 - i);
                 bursts++;
                 continue;
             }
             Spin(rng.Next(0, 2001));
-            Send();
+            Send(1, 0);
         }
         SetGate(signal, 0);
         Console.WriteLine($"    {sent.Count} submits, {bursts} bursts, {gaps} pauses past 500 ms, {announced} with the input capability set again during the submit");
@@ -223,11 +247,23 @@ internal static partial class Program
         }
     }
 
-    static void StressHid(HMController c, double seconds, IntPtr signal, bool gateOff)
+    static void StressHid(HMController c, double seconds, IntPtr signal, bool gateOff, bool lateDetail, uint inputBuffers)
     {
         using var dev = OpenStateInterface(c, out string why);
         if (dev == null) { Check($"{Ds4}: a HID interface with input reports", false, why); return; }
+        if (lateDetail || inputBuffers > 0)
+        {
+            bool had = HidD_GetNumInputBuffers(dev.Handle, out uint before);
+            if (inputBuffers > 0 && !HidD_SetNumInputBuffers(dev.Handle, inputBuffers))
+                Check($"{Ds4}: the reader's handle takes {inputBuffers} input buffers", false, $"HidD_SetNumInputBuffers error {Marshal.GetLastWin32Error()}");
+            bool has = HidD_GetNumInputBuffers(dev.Handle, out uint now);
+            Console.WriteLine($"  {Ds4}: the reader's handle has {(has ? now.ToString() : "an unknown number of")} input buffers" +
+                (inputBuffers > 0 ? $", {(had ? before.ToString() : "an unknown number")} before --input-buffers" : ""));
+        }
         var seen = new List<(int, long)>(1 << 20);
+        // --late-detail: every reading, a count read again included.
+        var reads = lateDetail ? new List<(int, long)>(1 << 20) : null;
+        var burstOf = lateDetail ? new List<(int Size, int After)>(1 << 20) : null;
         var report = new byte[64];
         report[0] = 0x01;
         report[1] = report[2] = report[3] = report[4] = 0x80;
@@ -243,6 +279,7 @@ internal static partial class Program
                 long t = Stopwatch.GetTimestamp();
                 if (read < 44 || buf[0] != 0x01) continue;
                 int count = BitConverter.ToInt32(buf, 40);
+                if (reads != null) lock (seen) reads.Add((count, t));
                 if (count != last) { lock (seen) seen.Add((count, t)); last = count; }
             }
         }) { IsBackground = true, Priority = ThreadPriority.Highest, Name = "stress reader" };
@@ -255,15 +292,139 @@ internal static partial class Program
         {
             BitConverter.TryWriteBytes(report.AsSpan(40), n);
             c.SubmitRawReport(report);
-        }, modes, signal);
+        }, modes, signal, burstOf);
         Thread.Sleep((int)StressBoundMs * 2);
         Volatile.Write(ref stop, true);
         CancelIoEx(dev.Handle, IntPtr.Zero);
         reader.Join(2000);
         List<(int, long)> got;
-        lock (seen) got = seen.ToList();
+        List<(int, long)>? all = null;
+        lock (seen)
+        {
+            got = seen.ToList();
+            all = reads?.ToList();
+        }
         StressVerdict($"{Ds4} ReadFile", sent, got);
+        if (all != null && burstOf != null) LateDetail($"{Ds4} ReadFile", sent, burstOf, got, all);
     }
+
+    /// <summary>--late-detail (header): each frame over 4 ms, where it
+    /// waited, a summary by mode, and each mode's bursts of 50 or more: the
+    /// readings that carried one of a burst's counts, and the wait of its
+    /// last frame. Times run from the submit's Stopwatch stamp, readings from
+    /// ReadFile's return.</summary>
+    static void LateDetail(string name, List<(int Count, long Time, int Mode)> sent, List<(int Size, int After)> burstOf,
+        List<(int Count, long Time)> seen, List<(int Count, long Time)> reads)
+    {
+        // The profile's stream period: the SDK writes the last frame again
+        // this long after it while no submit comes (HMController.RepeatLastFrame).
+        const double IdleRepeatMs = 4;
+        const int MaxRows = 600;
+        double tickMs = 1000.0 / Stopwatch.Frequency;
+        // The first index whose time is past t, or at or past it, in a list
+        // in time order.
+        static int After(List<(int Count, long Time)> list, long t, bool orAt)
+        {
+            int lo = 0, hi = list.Count;
+            while (lo < hi)
+            {
+                int mid = (lo + hi) / 2;
+                if (list[mid].Time > t || (orAt && list[mid].Time == t)) hi = mid; else lo = mid + 1;
+            }
+            return lo;
+        }
+        static int SubmitAtOrAfter(List<(int Count, long Time, int Mode)> list, long t)
+        {
+            int lo = 0, hi = list.Count;
+            while (lo < hi)
+            {
+                int mid = (lo + hi) / 2;
+                if (list[mid].Time >= t) hi = mid; else lo = mid + 1;
+            }
+            return lo;
+        }
+        string F(double v) => double.IsNaN(v) ? "-" : v.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+        string Short(int mode) => ((mode & ~Announced) == 0 ? "off" : "input") + ((mode & Announced) != 0 ? "*" : "");
+
+        var late = new SortedDictionary<int, List<(int Between, int Size, int After, int Later, bool Idle)>>();
+        var rows = new List<string>();
+        int j = 0;
+        for (int i = 0; i < sent.Count; i++)
+        {
+            var (count, t0, mode) = sent[i];
+            while (j < seen.Count && (seen[j].Count < count || seen[j].Time < t0)) j++;
+            if (j == seen.Count) break;
+            long tc = seen[j].Time;
+            double ms = (tc - t0) * tickMs;
+            if (ms <= 4) continue;
+            int from = After(reads, t0, false), at = After(reads, tc, true);
+            int between = Math.Max(0, at - from);
+            // The reading before the carrying one, and how long before it.
+            double gap = at > 0 ? (tc - reads[at - 1].Time) * tickMs : double.NaN;
+            int next = SubmitAtOrAfter(sent, tc);
+            int later = Math.Max(0, next - (i + 1));
+            double toNext = i + 1 < sent.Count ? (sent[i + 1].Time - t0) * tickMs : double.NaN;
+            bool idle = (tc - sent[Math.Max(i, next - 1)].Time) * tickMs > IdleRepeatMs;
+            var (size, after) = burstOf[i];
+            int key = mode & ~Announced;
+            if (!late.TryGetValue(key, out var list)) late[key] = list = new();
+            list.Add((between, size, after, later, idle));
+            if (rows.Count < MaxRows)
+                rows.Add(string.Create(System.Globalization.CultureInfo.InvariantCulture,
+                    $"    {count,7} {Short(mode),-6} {ms,6:F2} {between,7} {F(gap),7} {later,6} {F(toNext),7} {size,5} {after,5} {(idle ? "yes" : "no"),4} {seen[j].Count - count,6}"));
+        }
+        int total = late.Values.Sum(l => l.Count);
+        Console.WriteLine($"  {name}, --late-detail: {total} frames over 4 ms. Columns: the frame's count, its mode (* the input capability set again during the submit),");
+        Console.WriteLine("  its wait in ms, the readings between its submit and its reading, ms from the reading before to its reading, the later submits");
+        Console.WriteLine($"  before its reading, ms to the next submit, its burst's size (1 alone), the submits after it in the burst, whether the idle repeat");
+        Console.WriteLine($"  ({IdleRepeatMs} ms after the last submit) was due before its reading, and how far past its count the reading's count is.");
+        Console.WriteLine("      count mode       ms between gap_ms later next_ms burst after idle  ahead");
+        foreach (string r in rows) Console.WriteLine(r);
+        if (total > rows.Count) Console.WriteLine($"    {total - rows.Count} more not shown");
+        foreach (var (mode, list) in late)
+        {
+            var b = list.Select(x => x.Between).OrderBy(x => x).ToList();
+            int inBurst = list.Count(x => x.Size >= 50);
+            Console.WriteLine(FormattableString.Invariant(
+                $"  {name}, {ModeName(mode)}: {list.Count} frames over 4 ms. Readings between submit and reading: none {b.Count(x => x == 0)}, 1 to 7 {b.Count(x => x is >= 1 and <= 7)}, 8 to 31 {b.Count(x => x is >= 8 and <= 31)}, 32 or more {b.Count(x => x >= 32)}, median {b[b.Count / 2]}. In a burst of 50 or more {inBurst}, its last submit {list.Count(x => x.Size >= 50 && x.After == 0)}, within 8 of its end {list.Count(x => x.Size >= 50 && x.After < 8)}. A later submit before the reading {list.Count(x => x.Later > 0)}. The idle repeat due before the reading {list.Count(x => x.Idle)}."));
+        }
+        // Each burst of 50 or more: the readings whose count is one of its
+        // own, and its last submit's wait, by mode.
+        var bursts = new SortedDictionary<int, List<(int Readings, double LastMs)>>();
+        int s = 0, k2 = 0;
+        for (int i = 0; i < sent.Count;)
+        {
+            var (size, after) = burstOf[i];
+            if (size < 50 || after != size - 1 || i + size > sent.Count) { i++; continue; }
+            int a = sent[i].Count, z = sent[i + size - 1].Count;
+            while (s < seen.Count && seen[s].Count < a) s++;
+            int e = s;
+            while (e < seen.Count && seen[e].Count <= z) e++;
+            var (lastCount, lastTime, _) = sent[i + size - 1];
+            while (k2 < seen.Count && (seen[k2].Count < lastCount || seen[k2].Time < lastTime)) k2++;
+            double lastMs = k2 < seen.Count ? (seen[k2].Time - lastTime) * tickMs : double.NaN;
+            int key = sent[i].Mode & ~Announced;
+            if (!bursts.TryGetValue(key, out var list)) bursts[key] = list = new();
+            list.Add((e - s, lastMs));
+            i += size;
+        }
+        foreach (var (mode, list) in bursts)
+        {
+            var r = list.Select(x => x.Readings).OrderBy(x => x).ToList();
+            var w = list.Select(x => x.LastMs).Where(x => !double.IsNaN(x)).OrderBy(x => x).ToList();
+            double P(List<double> v, double q) => v.Count == 0 ? double.NaN : v[Math.Clamp((int)Math.Ceiling(q * v.Count) - 1, 0, v.Count - 1)];
+            Console.WriteLine(FormattableString.Invariant(
+                $"  {name}, {ModeName(mode)}: {list.Count} bursts of 50 or more. Readings that carried one of a burst's counts: median {r[r.Count / 2]}, mean {r.Average():F1}, max {r[^1]}. The last submit's wait: median {F(P(w, 0.5))} ms, p95 {F(P(w, 0.95))} ms, max {F(w.Count > 0 ? w[^1] : double.NaN)} ms, {w.Count(x => x > 4)} over 4 ms."));
+        }
+    }
+
+    [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    static extern bool HidD_SetNumInputBuffers(Microsoft.Win32.SafeHandles.SafeFileHandle h, uint count);
+
+    [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    static extern bool HidD_GetNumInputBuffers(Microsoft.Win32.SafeHandles.SafeFileHandle h, out uint count);
 
     static void StressWgi(HMController c, Gamepad pad, double seconds, IntPtr signal, bool gateOff)
     {
