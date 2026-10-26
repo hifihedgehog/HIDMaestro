@@ -1758,6 +1758,10 @@ function Scenario-Switch2-Pro {
 # sentinel that stopped HMButton.Share aliasing onto PS. Offline, no
 # device.
 # S50: the virtual VR controller subsystem (issues #32, #51, #55).
+# An offline phase runs first, on channels of the probe's own memory:
+# submits from several threads never write a mixed frame, submits racing
+# Dispose return or are refused with ObjectDisposedException, and nothing
+# reads the channel Dispose released.
 # Phase 1 always runs and pins the C# and C++ halves of the HIDMaestroVR
 # IPC protocol to each other byte-for-byte, with the probe playing the
 # driver's role, holds a HapticReceived handler past Dispose's join of the
@@ -2414,8 +2418,9 @@ function Scenario-Program-Equivalence {
 # status replies, bulk replies in read-sized chunks, the three overflow
 # rules, GET_REPORT of the layout that would go out, a clock counter, no
 # allocation per command or report, the Triton's IMU register, the clock's
-# grid under each missed-tick rule with start, stop and restart, and the
-# idle repeat's period, condition and timestamps.
+# grid under each missed-tick rule with start, stop and restart, the idle
+# repeat's period, condition and timestamps, and a repeat that sends the
+# state as submitted while the consumer rewrites its dictionary.
 function Scenario-Protocol-Engine {
     Invoke-Probe -Dir 'protocol_engine_check' -Exe 'ProtocolEngineCheck.exe' `
                  -Message 'the protocol engine or the device clock no longer behaves as its profile states (see probe stdout)'
@@ -2461,8 +2466,10 @@ function Scenario-Arith-Roundtrip {
 # every earlier v1.x tag load but for the removed spellings. A feature
 # answer's per-controller bytes come from its value sources and patches,
 # each entry of an answer table matches by its own rule, the SDK writes
-# its half of the version contract, the deploy floor is 2.0.0, and
-# FromProfile copies the whole profile. Offline.
+# its half of the version contract, the deploy floor is 2.0.0,
+# FromProfile copies the whole profile, and HMProfile's maps, extended
+# reports and layout read as copies a program can change without changing
+# the profile. Offline.
 function Scenario-Profile-Model {
     Invoke-Probe -Dir 'profile_model_check' -Exe 'ProfileModelCheck.exe' -Arguments 'check' `
                  -Message 'a profile loads, resolves or answers otherwise than the data-driven design states (see probe stdout for the check)'

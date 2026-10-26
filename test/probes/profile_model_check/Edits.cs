@@ -4,12 +4,12 @@
 // The load checks compile what a profile declares, its extended reports'
 // programs, its report builder and its answers, to refuse a bad file at
 // load. They keep none of it: a program can edit a loaded profile through
-// its public objects (HMProfile.ExtendedReport, ButtonMap, AxisMap, and
-// ControllerProfile's setters) before its first create, as it could
-// before v2.0.0, and the first create compiles from what the profile then
-// holds. At 4d4199ce the load kept every compile on the profile, so the
-// device harness, which sets steam-controller-2's idle interval to 0 after
-// the catalog loads, met the load's program with the catalog's 4 ms
+// ControllerProfile's setters and objects before its first create, as it
+// could before v2.0.0, and the first create compiles from what the profile
+// then holds. HMProfile's accessors hand out copies since 2.1.0
+// (Copies.cs). At 4d4199ce the load kept every compile on the profile, so
+// the device harness, which sets steam-controller-2's idle interval to 0
+// after the catalog loads, met the load's program with the catalog's 4 ms
 // interval (NominalTicks 12000 where b22324e had 0). Each create also
 // resolves the device model again, so answers set after the load are the
 // ones a create serves.

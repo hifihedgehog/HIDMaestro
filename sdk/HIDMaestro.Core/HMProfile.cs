@@ -1,5 +1,7 @@
 ﻿using System;
+using System.Threading;
 using System.Collections.Generic;
+using System.Text.Json;
 using HIDMaestro.Internal;
 
 namespace HIDMaestro;
@@ -207,14 +209,31 @@ public sealed class HMProfile
 
     /// <summary>Button remapping table. Maps HMButton bit positions (index) to
     /// descriptor button indices (value). Null means identity mapping (Xbox layout).
-    /// Sony profiles remap so HMButton.A → Cross, HMButton.X → Square, etc.</summary>
-    public int[]? ButtonMap => Inner.ButtonMap;
+    /// Sony profiles remap so HMButton.A → Cross, HMButton.X → Square, etc.
+    /// Returns a snapshot detached from the encoder, built on the first read
+    /// and shared by every reader of this profile instance: changing it
+    /// changes no encoding and no other profile, but later reads of this
+    /// instance see the change.
+    /// <see cref="HMProfileBuilder.ButtonMap"/> takes a changed table into a
+    /// new one.</summary>
+    public int[]? ButtonMap => Volatile.Read(ref _buttonMap) ?? SnapshotButtonMap();
+    private int[]? _buttonMap;
+    private int[]? SnapshotButtonMap() =>
+        Inner.ButtonMap is { } src ? Publish(ref _buttonMap, (int[])src.Clone()) : null;
 
     /// <summary>Axis semantic override map. Keys are hex HID usage codes (e.g.
     /// "0x32" for Z), values are semantic names (leftStickX, rightStickY,
     /// leftTrigger, etc.). Sony profiles override Z/Rz→rightStick and
-    /// Rx/Ry→triggers. Null means default heuristic mapping.</summary>
-    public Dictionary<string, string>? AxisMap => Inner.AxisMap;
+    /// Rx/Ry→triggers. Null means default heuristic mapping. Returns a
+    /// snapshot with the profile's key comparer, detached from the encoder,
+    /// built on the first read and shared by every reader of this profile
+    /// instance: changing it changes no encoding, but later reads of this
+    /// instance see the change. <see cref="HMProfileBuilder.AxisMap"/> takes a
+    /// changed map into a new one.</summary>
+    public Dictionary<string, string>? AxisMap => Volatile.Read(ref _axisMap) ?? SnapshotAxisMap();
+    private Dictionary<string, string>? _axisMap;
+    private Dictionary<string, string>? SnapshotAxisMap() =>
+        Inner.AxisMap is { } src ? Publish(ref _axisMap, new Dictionary<string, string>(src, src.Comparer)) : null;
 
     /// <summary>SDL gamepad mapping body for this profile, or null when SDL
     /// already knows the device.
@@ -247,15 +266,29 @@ public sealed class HMProfile
     /// <summary>v1.3.5: vendor-blob input-report spec, or null. When set,
     /// HMController.SubmitState emits this report ID via the data-driven
     /// codec instead of the descriptor-based encoder. Profile-level metadata
-    /// exposed for inspection by consumers and regression probes; field-level
-    /// access goes through <c>Fields</c> on the spec.</summary>
-    public ExtendedReportSpec? ExtendedReport => Inner.ExtendedReport;
+    /// exposed for inspection by consumers and regression probes, with
+    /// field-level access through <c>Fields</c> on the spec. Returns a snapshot,
+    /// fields included, detached from the encoder, built on the first read and
+    /// shared by every reader of this profile instance: changing it changes
+    /// no encoding, but later reads of this instance see the change. Reads
+    /// after the first allocate nothing.</summary>
+    public ExtendedReportSpec? ExtendedReport => Volatile.Read(ref _extendedReport) ?? SnapshotExtendedReport();
+    private ExtendedReportSpec? _extendedReport;
+    private ExtendedReportSpec? SnapshotExtendedReport() =>
+        Inner.ExtendedReport is { } src ? Publish(ref _extendedReport, src.Clone()) : null;
 
     /// <summary>v1.3.5: vendor-blob output-report spec, or null. When set,
     /// <see cref="HMController.OutputDecoded"/> surfaces parsed-field events
     /// for matching inbound report IDs and <see cref="HMOutputEncoder.Encode"/>
-    /// can produce wire-format bytes from parsed-field dictionaries.</summary>
-    public ExtendedReportSpec? ExtendedOutputReport => Inner.ExtendedOutputReport;
+    /// can produce wire-format bytes from parsed-field dictionaries. Returns a
+    /// snapshot detached from the encoder, shared by readers of this profile
+    /// instance, as <see cref="ExtendedReport"/> does. Reads after the first
+    /// allocate nothing.</summary>
+    public ExtendedReportSpec? ExtendedOutputReport =>
+        Volatile.Read(ref _extendedOutputReport) ?? SnapshotExtendedOutputReport();
+    private ExtendedReportSpec? _extendedOutputReport;
+    private ExtendedReportSpec? SnapshotExtendedOutputReport() =>
+        Inner.ExtendedOutputReport is { } src ? Publish(ref _extendedOutputReport, src.Clone()) : null;
 
     /// <summary>True if the profile declares a vendor-blob input report
     /// (e.g. Sony BT Report 0x31).</summary>
@@ -279,8 +312,28 @@ public sealed class HMProfile
     ///
     /// <para>Use the <c>As*</c> accessors below for typed access:
     /// <c>profile.AsWheel()</c>, <c>profile.AsHotas()</c>,
-    /// <c>profile.AsJoystick()</c>, etc.</para></summary>
-    public HMLayout? Layout => Inner.Layout;
+    /// <c>profile.AsJoystick()</c>, etc.</para>
+    ///
+    /// <para>Returns a snapshot, its lists included, detached from the
+    /// encoder, built on the first read and shared by every reader of this
+    /// profile instance, <c>As*</c> calls too: changing it changes no
+    /// encoding, but later reads of this instance see the change.</para></summary>
+    public HMLayout? Layout => Volatile.Read(ref _layoutSnapshot) ?? SnapshotLayout();
+    private HMLayout? _layoutSnapshot;
+    private HMLayout? SnapshotLayout() =>
+        Inner.Layout is { } src ? Publish(ref _layoutSnapshot, CopyOf(src)) : null;
+
+    /// <summary>Stores <paramref name="copy"/> in <paramref name="slot"/> unless
+    /// another thread stored one first, and returns the one in the slot, so
+    /// every reader of the instance sees the same snapshot.</summary>
+    private static T Publish<T>(ref T? slot, T copy) where T : class =>
+        Interlocked.CompareExchange(ref slot, copy, null) ?? copy;
+
+    /// <summary>A layout read again from its own JSON, as the profile's
+    /// copy (ControllerProfile.Clone) reads it.</summary>
+    private static HMLayout CopyOf(HMLayout layout) =>
+        JsonSerializer.Deserialize(JsonSerializer.SerializeToUtf8Bytes(layout, HMJsonContext.Default.HMLayout),
+            HMJsonContext.Default.HMLayout)!;
 
     public HMGamepadLayout?             AsGamepad()              => Layout as HMGamepadLayout;
     public HMJoystickLayout?            AsJoystick()             => Layout as HMJoystickLayout;

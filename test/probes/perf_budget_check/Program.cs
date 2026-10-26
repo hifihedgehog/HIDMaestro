@@ -104,6 +104,15 @@
 //   submit-repeat [runs] [calls]
 //                  offline: the same on the two budget profiles that repeat
 //                  their last frame, with the repeat running
+//   vr-submit [runs] [calls]
+//                  offline: HMVRController.SubmitState on a channel of this
+//                  process's own memory, without and with poses, each
+//                  variant's median ns per call (VrCost.cs). It builds
+//                  against older trees as is
+//   profile-reads [runs] [calls]
+//                  offline: one read of HMProfile's ButtonMap, AxisMap,
+//                  ExtendedReport, ExtendedOutputReport and Layout, each
+//                  variant's median ns and bytes per read (ReadCost.cs)
 //   gate-offline [runs] [calls]
 //                  offline: the frame writer through the signal gate on
 //                  buffers of this process's own, kept and taken back, each
@@ -343,6 +352,16 @@ internal static partial class Program
         if (mode is "submit" or "submit-repeat")
         {
             SubmitCost.Run(runs, args.Length > 2 && int.TryParse(args[2], out int calls) ? calls : 100_000, mode == "submit-repeat");
+            return 0;
+        }
+        if (mode == "vr-submit")
+        {
+            VrCost.Submit(runs, args.Length > 2 && int.TryParse(args[2], out int calls) ? calls : 100_000);
+            return 0;
+        }
+        if (mode == "profile-reads")
+        {
+            ReadCost.Run(runs, args.Length > 2 && int.TryParse(args[2], out int calls) ? calls : 2_000);
             return 0;
         }
         if (mode == "ds3cost")

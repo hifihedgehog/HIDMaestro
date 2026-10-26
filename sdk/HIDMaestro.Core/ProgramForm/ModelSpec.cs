@@ -751,6 +751,19 @@ public sealed class PackedPartSpec
     /// ties to even.</summary>
     [JsonPropertyName("round")]
     public string? Round { get; set; }
+
+    /// <summary>A copy of every JSON key, for ExtendedReportSpec.Clone. The
+    /// kernel generator compiles this file without SpecLists, so the lists
+    /// are copied here.</summary>
+    internal PackedPartSpec Clone() => new()
+    {
+        Pieces = Pieces?.ConvertAll(p => p?.Clone()!)!,
+        Frames = Frames == null ? null : new List<int>(Frames),
+        Offset = Offset,
+        Range = Range == null ? null : new List<int>(Range),
+        Scale = Scale?.Clone(),
+        Round = Round,
+    };
 }
 
 /// <summary>v2.0.0: one bit group of a <see cref="PackedPartSpec"/>.</summary>
@@ -761,6 +774,9 @@ public sealed class PackedPieceSpec
 
     [JsonPropertyName("count")]
     public int Count { get; set; }
+
+    /// <summary>A copy of every JSON key, for ExtendedReportSpec.Clone.</summary>
+    internal PackedPieceSpec Clone() => new() { At = At, Count = Count };
 }
 
 /// <summary>v2.0.0: a <c>scale</c> as JSON writes it, a number or an exact
@@ -770,6 +786,9 @@ public sealed class ScaleSpec
 {
     public double Numerator { get; set; }
     public double Denominator { get; set; } = 1;
+
+    /// <summary>A copy of both terms, for ExtendedReportSpec.Clone.</summary>
+    internal ScaleSpec Clone() => new() { Numerator = Numerator, Denominator = Denominator };
 }
 
 /// <summary>Reads and writes <see cref="ScaleSpec"/> as a number or a

@@ -36,6 +36,7 @@ Console.WriteLine("=== protocol_engine_check: the protocol engine and the device
 Engine.Run();
 Clock.Run();
 SendClock.Run();
+RepeatState.Run();
 DeviceLifetime.Run();
 OutputOnce.Run();
 Umdf2.Run();

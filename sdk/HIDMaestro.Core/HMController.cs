@@ -299,11 +299,14 @@ public sealed partial class HMController : IDisposable
     private StreamClock? _stream;
     // Issue #72: extendedReport.send "clock". Every report goes out on the
     // device clock, one a period, carrying the consumer's latest frame, and
-    // a submit only stores that frame. _clockAxes is the controller's own
-    // copy of a submitted state's axes, which the clock reads after the
-    // consumer may have reused its dictionary. Guarded by _submitLock.
+    // a submit only stores that frame.
     private readonly bool _sendOnClock;
-    private readonly Dictionary<HMAxis, float>? _clockAxes;
+    // The controller's own copy of the kept state's axes. The clock encodes
+    // that state again after the submit that gave it has returned, as the
+    // next report of a profile that reports on its own clock or as an idle
+    // repeat, while the consumer may be rewriting its dictionary for its
+    // next frame. Guarded by _submitLock.
+    private readonly Dictionary<HMAxis, float> _clockAxes = new();
 
     // v2.0.0: a device that builds its own reports (design note, mechanism
     // 2). SubmitState encodes the profile's state block, and the device
@@ -664,14 +667,14 @@ public sealed partial class HMController : IDisposable
         // vendor blob, so the legacy fallback path has no buttons or axes
         // to fill and every consumer would read a live device that never
         // moves.
-        bool alwaysArmed = profile.ExtendedReport?.AlwaysArmed == true;
-        _rawVerbatimReportId = profile.ExtendedReport?.ReportIdByte ?? 0;
+        bool alwaysArmed = profile.Inner.ExtendedReport?.AlwaysArmed == true;
+        _rawVerbatimReportId = profile.Inner.ExtendedReport?.ReportIdByte ?? 0;
         _rawEmitsVerbatim = alwaysArmed && _rawVerbatimReportId != 0;
-        bool armOnDeclared = profile.ExtendedReport?.ArmOn != null
-                          && profile.ExtendedReport.ArmOn.Count > 0;
-        if (profile.ExtendedReport != null && (armOnDeclared || alwaysArmed))
+        bool armOnDeclared = profile.Inner.ExtendedReport?.ArmOn != null
+                          && profile.Inner.ExtendedReport.ArmOn.Count > 0;
+        if (profile.Inner.ExtendedReport != null && (armOnDeclared || alwaysArmed))
         {
-            _extendedReportBuffer = new byte[profile.ExtendedReport.Size];
+            _extendedReportBuffer = new byte[profile.Inner.ExtendedReport.Size];
             _extEncoderState = new VendorBlobCodec.EncoderState();
             _extendedModeArmed = alwaysArmed;
         }
@@ -706,8 +709,8 @@ public sealed partial class HMController : IDisposable
         }
         // A sensor timestamp that holds while a register's condition does, as
         // a Triton's holds while its IMU is off.
-        if (_extEncoderState != null && profile.ExtendedReport != null
-            && VendorBlobProgram.Get(profile.ExtendedReport).HoldWhile is { } hold)
+        if (_extEncoderState != null && profile.Inner.ExtendedReport != null
+            && VendorBlobProgram.Get(profile.Inner.ExtendedReport).HoldWhile is { } hold)
         {
             _extEncoderState.Hold = ConditionParser.Parse(hold, model.Registers, "$.extendedReport.fields[].holdWhile");
             _extEncoderState.HoldRegisters = _protocolEngine?.RegisterWords ?? model.Registers.Initial;
@@ -735,7 +738,6 @@ public sealed partial class HMController : IDisposable
             // moves the clock: its NotBefore is 0 and no submit path calls
             // FrameSent.
             _sendOnClock = true;
-            _clockAxes = new Dictionary<HMAxis, float>();
             _lastSubmitted = new HMGamepadState();
             long origin;
             lock (_submitLock)
@@ -873,7 +875,11 @@ public sealed partial class HMController : IDisposable
 
     /// <summary>Push the next input frame to the virtual controller.
     /// The SDK encodes <paramref name="state"/> into the active profile's
-    /// HID report layout and publishes it via shared memory.
+    /// HID report layout and publishes it via shared memory. The SDK copies
+    /// whatever it keeps of the state for a later report, an idle repeat or
+    /// the device clock's next report, <see cref="HMGamepadState.Axes"/>
+    /// included, so the dictionary may be rewritten for the next frame once
+    /// this returns.
     ///
     /// <para>A profile whose <c>extendedReport.send</c> is <c>"clock"</c>
     /// (the Steam Deck, the 2015 Steam Controller and the 2026 Steam
@@ -888,9 +894,7 @@ public sealed partial class HMController : IDisposable
     /// A state that a later call replaces before that report never goes
     /// out. The report rate is the device's whatever rate this is called
     /// at, and the state reaches the wire up to one period later, half a
-    /// period on average. The state's <see cref="HMGamepadState.Axes"/>
-    /// are copied, so the dictionary may be reused once this
-    /// returns.</para></summary>
+    /// period on average.</para></summary>
     public void SubmitState(in HMGamepadState state)
     {
         ThrowIfDisposed();
@@ -919,12 +923,11 @@ public sealed partial class HMController : IDisposable
             NoteFrameWritten();
             if (_idleThread != null)
             {
-                // Remembered for the idle pump, and the timestamp is what
-                // keeps the pump from competing with a live consumer. The
-                // pump's clock moves its timer past this frame, so it does
-                // not wake while frames keep coming.
-                _lastSubmitted = state;
-                _lastSubmitWasRaw = false;
+                // Remembered for the idle pump, its axes copied, and the
+                // timestamp is what keeps the pump from competing with a
+                // live consumer. The pump's clock moves its timer past this
+                // frame, so it does not wake while frames keep coming.
+                KeepStateForClock(in state);
                 long at = System.Diagnostics.Stopwatch.GetTimestamp();
                 Volatile.Write(ref _lastSubmitTimestamp, at);
                 _idleClock?.FrameSent(at);
@@ -935,16 +938,20 @@ public sealed partial class HMController : IDisposable
         if (latency != null) latency(micros);
     }
 
-    /// <summary>Keep a state for the device clock's next report (issue #72):
-    /// the state as given, with its axes copied into the controller's own
-    /// dictionary, whose entries are rewritten in place, so a call allocates
-    /// nothing. Caller holds _submitLock.</summary>
+    /// <summary>Keep a state for the device clock, which encodes it after
+    /// the submit returns: the next report of a profile that reports on its
+    /// own clock (issue #72), or the idle repeat. The state as given, with
+    /// its axes copied into the controller's own dictionary, whose entries
+    /// are rewritten in place, so a call allocates nothing once the
+    /// dictionary has held as many axes. A consumer that reuses its
+    /// dictionary may rewrite it as soon as the submit returns. Caller holds
+    /// _submitLock.</summary>
     private void KeepStateForClock(in HMGamepadState state)
     {
         Dictionary<HMAxis, float>? own = null;
         if (state.Axes is { } axes)
         {
-            own = _clockAxes!;
+            own = _clockAxes;
             own.Clear();
             foreach (var kv in axes) own[kv.Key] = kv.Value;
         }
@@ -968,7 +975,7 @@ public sealed partial class HMController : IDisposable
         // at one field.
         bool useExtended = _extendedReportBuffer != null
                         && _extEncoderState != null
-                        && Profile.ExtendedReport != null
+                        && Profile.Inner.ExtendedReport != null
                         && _extendedModeArmed;
 
         // The six simple slots feed the ports, the state block, the codec
@@ -1049,7 +1056,7 @@ public sealed partial class HMController : IDisposable
         // regression. useExtended is read at the top of this method.
         if (useExtended)
         {
-            // Profile.ExtendedReport's field list drives byte placement.
+            // Profile.Inner.ExtendedReport's field list drives byte placement.
             // Sticks / triggers / buttons / hat encode through
             // VendorBlobCodec; CRC32 (if declared) is computed last. For
             // Sony BT, the buffer is full 78 bytes including byte[0] = RID
@@ -1057,7 +1064,7 @@ public sealed partial class HMController : IDisposable
             // The driver-side WriteToInputReport recognizes the extended
             // path via the SHARED_INPUT.ExtendedReportSize > 0 hint set
             // alongside the legacy bytes below.
-            VendorBlobCodec.EncodeInput(Profile.ExtendedReport!, in state,
+            VendorBlobCodec.EncodeInput(Profile.Inner.ExtendedReport!, in state,
                 (float)mlx, (float)mly, (float)mrx, (float)mry, (float)mlt, (float)mrt,
                 _extendedReportBuffer!, _extEncoderState!);
             report = _extendedReportBuffer!;
@@ -1132,7 +1139,7 @@ public sealed partial class HMController : IDisposable
         // profiles so WriteInputFrame skips the 14-byte Marshal.Copy.
         if (useExtended)
         {
-            int extLen = Profile.ExtendedReport!.Size;
+            int extLen = Profile.Inner.ExtendedReport!.Size;
             SharedMemoryIO.WriteInputFrame(
                 _inputView, _inputEvent, ref _inputSeqNo,
                 Array.Empty<byte>(), 0,
@@ -1807,7 +1814,7 @@ public sealed partial class HMController : IDisposable
     /// path so both conventions land on the same wire bytes.</summary>
     private void EmitExtendedFrame(byte[] buffer, int length)
     {
-        int declaredSize = Profile.ExtendedReport!.Size;
+        int declaredSize = Profile.Inner.ExtendedReport!.Size;
         byte rid = _rawVerbatimReportId;
         int emitLen = length;
 
@@ -1849,7 +1856,7 @@ public sealed partial class HMController : IDisposable
         ThrowIfDisposed();
         if (fields == null) throw new ArgumentNullException(nameof(fields));
 
-        var spec = Profile.ExtendedOutputReport;
+        var spec = Profile.Inner.ExtendedOutputReport;
         if (spec == null)
             throw new InvalidOperationException(
                 $"Profile '{Profile.Id}' has no extendedOutputReport spec: nothing to encode against.");
@@ -2056,7 +2063,7 @@ public sealed partial class HMController : IDisposable
                     // dictionary and surface as OutputDecoded. Consumers
                     // get named values (rumble amplitudes, lightbar RGB,
                     // adaptive-trigger blocks) instead of raw bytes.
-                    var extOut = Profile.ExtendedOutputReport;
+                    var extOut = Profile.Inner.ExtendedOutputReport;
                     if (extOut != null && reportId == extOut.ReportIdByte
                         && OutputDecoded != null)
                     {
@@ -2116,7 +2123,7 @@ public sealed partial class HMController : IDisposable
                     // outputWrite trigger types stay supported for
                     // future profiles that arm on writes (e.g. Switch
                     // Pro init handshake).
-                    var extIn = Profile.ExtendedReport;
+                    var extIn = Profile.Inner.ExtendedReport;
                     if (extIn?.ArmOn != null && !_extendedModeArmed)
                     {
                         bool isFeature     = source == (byte)HMOutputSource.HidFeature;
