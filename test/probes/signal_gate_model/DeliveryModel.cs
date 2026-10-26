@@ -1252,6 +1252,99 @@ internal static class DeliveryModel
         return res;
     }
 
+    // The review's order x14-take-at-teardown-rev-late-g: the worker takes
+    // a frame X, frame G is handed over final after the take's decrement,
+    // TearingDown is set, and the poll after the take returns with no stop
+    // event, so the worker leaves with X dropped and G final in the
+    // handoff, which CloseGate signals. FindOrder searches this driver's
+    // runs alone for one that reaches that point and ends with G sent;
+    // ReplayOrder pairs that one run as ExploreAligned pairs every run and
+    // gives its class and the paired set's final outcomes.
+    internal static List<State>? FindOrder(Scenario sc, Rules r, int framesArg)
+    {
+        int frames = sc.FramesFor(framesArg);
+        var start = Start();
+        var parent = new Dictionary<(Key, int), (Key, int)>();
+        var seen = new HashSet<(Key, int)> { (Pack(start), 0) };
+        var queue = new Queue<(State, int)>();
+        queue.Enqueue((start, 0));
+        var next = new List<State>();
+        while (queue.Count > 0)
+        {
+            var (t, g) = queue.Dequeue();
+            next.Clear();
+            Steps(t, sc, Driver.This, r, frames, next);
+            if (next.Count == 0)
+            {
+                if (g >= 100 && Count(t.Delivered, g - 100) >= 1)
+                {
+                    var path = new List<State>();
+                    var k = (Pack(t), g);
+                    while (true) { path.Add(Unpack(k.Item1)); if (!parent.TryGetValue(k, out var pk)) break; k = pk; }
+                    path.Reverse();
+                    return path;
+                }
+                continue;
+            }
+            foreach (var n in next)
+            {
+                // The order, step by step: 1, the worker takes X before
+                // teardown; 2, then G is handed over final; 3, then
+                // TearingDown is set; 100 + G's slot, then the poll after
+                // the take returns with no stop event, G final in the
+                // handoff and not yet delivered.
+                int g2 = g;
+                if (g == 0 && t.Pc == W_LOOK && n.Pc == W_POLL && t.Tear == 0) g2 = 1;
+                else if (g == 1 && n.Pc == W_POLL && n.Tear == 0 && n.Hand != 0 && n.HandFinal && !(t.Hand == n.Hand && t.HandFinal)) g2 = 2;
+                else if (g == 2 && t.Tear == 0 && n.Tear == 1 && n.Pc == W_POLL) g2 = 3;
+                else if (g == 3 && t.Pc == W_POLL && n.Pc == W_EXITED && t.Tear == 1 && !t.StopSig && t.Hand != 0 && t.HandFinal
+                         && t.Seq == t.Hand && t.Prog != 0 && Count(t.Delivered, Slot(t.Prog, t.Idx)) == 0)
+                    g2 = Slot(t.Prog, t.Idx) + 100;
+                else if (g is 1 or 2 or 3 && n.Pc != W_POLL) g2 = 0;
+                var key = (Pack(n), g2);
+                if (seen.Add(key)) { parent[key] = (Pack(t), g); queue.Enqueue((n, g2)); }
+            }
+        }
+        return null;
+    }
+
+    internal static List<string> ReplayOrder(Scenario sc, Rules r, int framesArg, List<State> path)
+    {
+        int frames = sc.FramesFor(framesArg);
+        var v203 = new V203Side(sc, frames);
+        var scratch = new List<State>();
+        var lines = new List<string>();
+        int TWaits(in State t) => (NeedsRead(t) ? M_READ : 0) | (MapReady(t, sc, Driver.This, r, frames, scratch) ? M_MAP : 0)
+                                  | (t.Pc is W_EXITED or W_GONE ? M_FREE : 0);
+        int V = v203.Initial(TWaits(path[0]));
+        bool div = false;
+        for (int i = 1; i < path.Count; i++)
+        {
+            var t = path[i - 1]; var n = path[i];
+            int tw = TWaits(t), nw = TWaits(n);
+            int label = Label(t, n);
+            string tag = $"{i,3}. {Describe(t, n)}";
+            int alone = tw & ~v203.Waits(V) & (M_READ | M_MAP);
+            if (alone != 0 && !(((alone & M_READ) != 0 && label == L_HID) || ((alone & M_MAP) != 0 && label == L_MAP)))
+                tag += "   (a step this driver's side does not take while it alone waits)";
+            int delayed = tw & (M_READ | M_MAP) & ~((label == L_HID ? M_READ : 0) | (label == L_MAP ? M_MAP : 0));
+            int Vs = delayed == 0 ? V : v203.Restrict(V, delayed, tw);
+            if (Vs == -1) { lines.Add(tag); lines.Add("    no v2.0.3 run waits as long: the pairing drops this run"); return lines; }
+            int V2 = label != 0 ? v203.Follow(Vs, label, Match(label, t, n), label == L_KILL ? KillPhase(t, r.Round6 && !r.Round6TakeProvisional) : 0, tw, nw)
+                                : nw != tw ? v203.Close(Vs, nw) : Vs;
+            if (V2 == -1) { div = true; V2 = nw != tw ? v203.Close(Vs, nw) : Vs; tag += "   (v2.0.3 cannot follow)"; }
+            V = V2;
+            lines.Add(tag);
+        }
+        var last = path[^1];
+        ulong mine = last.Delivered & OutMask;
+        int Vfin = v203.Close(V, TWaits(last) | M_FREE);
+        int cls = div ? 0 : v203.MatchClass(Vfin, mine, KeyboardPrograms(sc));
+        lines.Add($"this driver delivers [{Show(mine)}]: {(cls == 2 ? "equal" : cls == 1 ? "better" : "fails")}");
+        lines.AddRange(v203.Describe(Vfin));
+        return lines;
+    }
+
     internal static bool DumpSets;
 
     static List<List<string>> PathSetsTo(Dictionary<(Key, int), (Key, int)> parent, (Key, int) k, V203Side v203)

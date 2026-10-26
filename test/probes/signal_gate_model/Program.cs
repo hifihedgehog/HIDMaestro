@@ -33,6 +33,8 @@
 //     scenario fails there, and the outcomes after it go uncounted.
 //   SignalGateModel scenarios   each scenario's index and name.
 //   SignalGateModel selftest   the outcome checks on hand-built outcomes.
+//   SignalGateModel fences [frames]   round 6's SDK write with a store
+//     buffer, against the worker and the companion (Round6FenceModel).
 //   SignalGateModel outcomes <frames> <scenario> [v203]   one driver's
 //     outcomes in a scenario, unpaired.
 using System;
@@ -60,6 +62,23 @@ internal static class Program
             var results = DeliveryModel.SelfTest();
             foreach (var (name, ok) in results) Console.WriteLine($"[{(ok ? "OK" : "FAIL")}] {name}");
             return results.All(x => x.Ok) ? 0 : 1;
+        }
+        // fences [frames]: round 6's SDK write against the worker and the
+        // companion, with the SDK's stores in a store buffer.
+        if (args.Length >= 1 && args[0] == "fences")
+            return RunFences(args.Length > 1 ? int.Parse(args[1]) : 3) == 0 ? 0 : 1;
+        // x14 <frames> <rule|c<i>> <scenario index>: the review's order
+        // x14-take-at-teardown-rev-late-g in one scenario, paired.
+        if (args.Length >= 4 && args[0] == "x14")
+        {
+            s_base = null;
+            var rules = args[2].StartsWith("c") ? DeliveryModel.Candidates[int.Parse(args[2].Substring(1))] : int.Parse(args[2]) < 0 ? DeliveryModel.This : DeliveryModel.Broken[int.Parse(args[2])];
+            var sc = DeliveryModel.Scenarios().ElementAt(int.Parse(args[3]));
+            var path = DeliveryModel.FindOrder(sc, rules, int.Parse(args[1]));
+            Console.WriteLine($"{sc.Name}, {rules.Name}, {args[1]} frame(s):");
+            if (path == null) { Console.WriteLine("    this driver never reaches the order"); return 1; }
+            foreach (var l in DeliveryModel.ReplayOrder(sc, rules, int.Parse(args[1]), path)) Console.WriteLine("    " + l);
+            return 0;
         }
         if (args.Length >= 1 && args[0] == "scenarios")
         {
@@ -101,6 +120,7 @@ internal static class Program
             if (r.Lost != null) Console.WriteLine($"         {r.Lost}");
             if (r.InvariantBroken != null) Console.WriteLine($"         count invariant broken: {r.InvariantBroken}");
         }
+        bad += RunFences(frames);
         foreach (var v in CompanionModel.Variants)
         {
             var r = CompanionModel.Explore(v, frames);
@@ -278,6 +298,35 @@ internal static class Program
         Console.WriteLine($"[NO BREAK] {rules.Name}, {where}: no scenario gives a failing outcome this driver's own rules do not" +
                           (ownFails > 0 ? $" ({ownFails} scenario(s) where this driver's own rules fail as well)" : "") + $". {totals}");
         return 1;
+    }
+
+    // Round6FenceModel's variants: the expected verdicts, and how often the
+    // fast branch's count read ran ahead of the SeqNo's store.
+    static int RunFences(int frames)
+    {
+        int bad = 0;
+        foreach (var v in Round6FenceModel.Variants)
+        {
+            var r = Round6FenceModel.Explore(v, frames);
+            bool inputLost = r.InputLost != null, compLost = r.CompanionLost != null;
+            bool ok = inputLost == v.ExpectInputLost && compLost == v.ExpectCompanionLost && r.Finals > 0;
+            if (!ok) bad++;
+            Console.WriteLine($"[{(ok ? "PASS" : "FAIL")}] {v.Name}, {v.Arch}, {frames} frames: {r.States} states, {r.Finals} final; " +
+                              $"input event: {(inputLost ? "a frame left unread" : "every frame read")}{(v.ExpectInputLost ? " (expected)" : "")}; " +
+                              $"companion: {(compLost ? "the last frame left unserved" : "the last frame served")}{(v.ExpectCompanionLost ? " (expected)" : "")}; " +
+                              $"count read before the SeqNo's store was visible: {r.EarlyCountNonzero} found a worker, {r.EarlyCountZero} found none");
+            if (r.InputLost != null) Console.WriteLine($"         {r.InputLost}");
+            if (r.CompanionLost != null) Console.WriteLine($"         {r.CompanionLost}");
+        }
+        // The companion's own variants, with their final-state counts: one
+        // with no final state checks nothing.
+        foreach (var v in CompanionModel.Variants)
+        {
+            var r = CompanionModel.Explore(v, frames);
+            Console.WriteLine($"[info] {v.Name}, {frames} frames: {r.States} states, {r.Finals} final, " +
+                              (r.Lost != null ? "the last frame left unserved" : "the last frame served") + (v.ExpectLost ? " (expected)" : ""));
+        }
+        return bad;
     }
 
     static void PrintExtra(DeliveryModel.AlignedResult a)

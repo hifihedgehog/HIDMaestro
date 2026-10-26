@@ -19,6 +19,9 @@
 // on any count but 0 and the late dispatch's look kicks the pump for a
 // frame newer than the last completion. Counting before the park passes
 // too. Taking away the kick or the SDK's fence fails.
+// A variant with the 8 ms timer reached no final state, since the caller
+// sends its next request whenever one completes, so it checked nothing
+// and is gone.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -32,7 +35,6 @@ internal static class CompanionModel
         new("companion before 2.1.0: a doorbell on every frame, no kick", false, true, true, false, false, true),
         new("companion, a doorbell on every frame and the kick (an older SDK on this driver)", false, true, true, true, false, false),
         new("companion gate, count before the park, kick, both fences", true, true, true, true, false, false),
-        new("companion gate, count before the park, kick, with the timer", true, true, true, true, true, false),
         new("companion gate, count after the park, kick (companion.c's order)", true, true, false, true, false, false),
         new("companion gate, count before the park, no kick", true, true, true, false, false, true),
         new("companion gate, count before the park, kick, no fence in the SDK", true, false, true, true, false, true),
