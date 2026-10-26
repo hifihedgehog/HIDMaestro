@@ -214,10 +214,12 @@ internal sealed class DeviceClock<TTick> : IDeviceClock where TTick : struct, IC
         long freq = Stopwatch.Frequency;
         bool running = false;
         long origin = 0, period = 0, due = 0;
+        var failures = new LoopFailures();
         try
         {
             while (!_stop)
             {
+                failures.NextPass();
                 try
                 {
                     if (!_tick.Running(out long o))
@@ -263,16 +265,35 @@ internal sealed class DeviceClock<TTick> : IDeviceClock where TTick : struct, IC
                     // failed wait: the plain wait, coarser but still running.
                     _wake.WaitOne((int)Math.Max(1, wait * 1000 / freq));
                 }
-                catch
+                catch (Exception e)
                 {
-                    // The input pump's containment contract: a transient
-                    // failure must not end the clock.
+                    // A pass that throws, in the tick or in what the clock
+                    // reads from it, does not end the clock. Its due time
+                    // has not moved, so the pass after it would run at once:
+                    // it runs once the wait LoopFailures gives has passed,
+                    // and then sends what a late wake sends.
+                    Pause(failures.Threw(e));
                 }
             }
         }
         finally
         {
             Close();
+        }
+    }
+
+    /// <summary>The wait after a pass that threw: <paramref name="ms"/>
+    /// milliseconds, or until Stop. A Wake meanwhile does not end it, so a
+    /// tick that throws on every wake still waits out the whole
+    /// time.</summary>
+    private void Pause(int ms)
+    {
+        long until = Stopwatch.GetTimestamp() + ms * Stopwatch.Frequency / 1000;
+        while (!_stop)
+        {
+            long left = until - Stopwatch.GetTimestamp();
+            if (left <= 0) return;
+            _wake.WaitOne((int)Math.Max(1, left * 1000 / Stopwatch.Frequency));
         }
     }
 
