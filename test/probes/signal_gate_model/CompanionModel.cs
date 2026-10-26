@@ -28,10 +28,13 @@
 // second time. A pump that serves whatever is current on every doorbell
 // and kick does that whenever one frame wakes it twice: its doorbell and
 // the kick of a request that parked as it was written, or two doorbells
-// whose frames the first serve already read. NewerOnly is the pump with one
-// reader (companion.c CompanionServeReaders): on a doorbell or a kick it
-// looks first, and serves only a frame newer than the reader's last
-// completion. ReadersModel checks several readers.
+// whose frames the first serve already read. NewerOnly is d4103a21's pump
+// with one reader: on a doorbell or a kick it looks first, and serves only
+// a frame newer than the reader's last completion. This driver completes
+// requests as xusb22 does, a report on each change of state to every
+// request parked before its frame, and a request parked after a frame
+// does not get that frame, so the last frame need not reach it: the fences
+// and the kick checked here stand, and ReadersModel checks the reports.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -50,8 +53,8 @@ internal static class CompanionModel
         new("companion gate, count before the park, no kick", true, true, true, false, false, true),
         new("companion gate, count before the park, kick, no fence in the SDK", true, false, true, true, false, true),
         new("companion, a doorbell on every frame, no kick, the pump serving only a newer frame", false, true, true, false, false, true, true, false),
-        new("companion, a doorbell on every frame and the kick, the pump serving only a newer frame (an SDK before 2.1.0 on this driver, one reader)", false, true, true, true, false, false, true, false),
-        new("companion gate, count after the park, kick, the pump serving only a newer frame (this driver, one reader)", true, true, false, true, false, false, true, false),
+        new("companion, a doorbell on every frame and the kick, the pump serving only a newer frame (an SDK before 2.1.0 on d4103a21, one reader)", false, true, true, true, false, false, true, false),
+        new("companion gate, count after the park, kick, the pump serving only a newer frame (d4103a21, one reader)", true, true, false, true, false, false, true, false),
     };
 
     // A dispatch's program counters: its request is outstanding from the

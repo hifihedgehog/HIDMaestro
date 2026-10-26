@@ -41,6 +41,18 @@
 //      completed: AckPending is the frame HID class has (issue #67).
 // Through 81e1fe40 a read completed after InputLock, which breaks d and e.
 // This driver completes it inside the critical section of its take.
+//
+// The candidate CompletionLock completes a read after InputLock under a
+// second lock, which the thread that took the report takes before it lets
+// InputLock go, so completions keep the order of their takes and the
+// worker's cache write and READ_REPORT's look need not wait for one. With
+// the frame noted for the acknowledgement at its take, as
+// TakeReportLocked notes it, a READ_REPORT acknowledges a frame whose
+// completion has not run, which breaks e. Noted after the completion,
+// under CompletionLock, a to e hold, and the model counts the states where
+// a completion is under way and another thread, having taken the next
+// report, holds InputLock while it waits for CompletionLock: every
+// InputLock taker then waits on that completion after all.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -55,8 +67,13 @@ internal static class WakeModel
     // RequeueLook: a thread that put a read back looks again for anything
     // cached since it found nothing to take. CompleteInLock: a read
     // completes in the same critical section of InputLock as its take.
+    // CompletionLock: the thread that took a report takes CompletionLock
+    // before it lets InputLock go, completes the read, then lets
+    // CompletionLock go. AckAfterComplete: with it, the frame a read
+    // carried is noted for the acknowledgement after its completion, under
+    // CompletionLock, where TakeReportLocked notes it at the take.
     internal sealed record Variant(string Name, bool PublishFirst, bool LookAgain, bool ByCount, bool ExpectBroken, bool RequeueLook = true,
-                                   bool CompleteInLock = false);
+                                   bool CompleteInLock = false, bool CompletionLock = false, bool AckAfterComplete = false);
 
     internal static readonly Variant[] Variants =
     {
@@ -67,6 +84,8 @@ internal static class WakeModel
         new("the worker caches, then takes a read; a read parks and looks again for a frame cached since, and a read put back does not", true, true, true, true, false),
         new("81e1fe40: the worker caches, then takes a read; a read parks, or is put back, and looks again for a frame cached since; a read completes after InputLock", true, true, true, true),
         new("this driver: the worker caches, then takes a read; a read parks, or is put back, and looks again for a frame cached since; a read completes under InputLock", true, true, true, false, CompleteInLock: true),
+        new("candidate CompletionLock: a read completes after InputLock, under a lock its taker takes before it lets InputLock go; the frame noted for the acknowledgement at its take", true, true, true, true, CompletionLock: true),
+        new("candidate CompletionLock, the frame noted for the acknowledgement after its completion, under CompletionLock", true, true, true, false, CompletionLock: true, AckAfterComplete: true),
     };
 
     // Seqs: each frame's SeqNo in the order the SDK writes them (a smaller
@@ -90,12 +109,17 @@ internal static class WakeModel
     // park, it waits in the queue, a thread took it from the queue.
     const int R_IDLE = 0, R_DISPATCH = 1, R_PARKED = 2, R_TAKEN = 3;
     // Dispatch thread program counters.
-    const int D_FREE = 0, D_CHECK = 1, D_PARK = 2, D_LOOK = 3, D_RET = 4, D_TAKE = 5, D_REQ = 6, D_DONE = 7, D_SELF = 8, D_RQLOOK = 9;
+    // D_CWAIT and D_COMP: CompletionLock's wait, holding InputLock, and the
+    // completion under it.
+    const int D_FREE = 0, D_CHECK = 1, D_PARK = 2, D_LOOK = 3, D_RET = 4, D_TAKE = 5, D_REQ = 6, D_DONE = 7, D_SELF = 8, D_RQLOOK = 9,
+              D_CWAIT = 10, D_COMP = 11;
     // Worker program counters. W_*0 and W_*1 are b0fb7dc9's frame path and
     // DeliverReleaseFrames.
     const int W_IDLE = 0, W_PUB = 1, W_RET = 2, W_TAKE = 3, W_REQ = 4, W_DONE = 5, W_OG = 6,
               W_RET0 = 7, W_PUB0 = 8, W_DONE0 = 9, W_OG0 = 10, W_MORE = 11, W_RET1 = 12, W_TAKE1 = 13, W_REQ1 = 14, W_DONE1 = 15,
-              W_RQLOOK = 16;
+              W_RQLOOK = 16, W_CWAIT = 17, W_COMP = 18;
+    // The worker's id as the holder of a lock, beside the dispatch threads'.
+    const int WORKER = 100;
 
     sealed class St
     {
@@ -118,6 +142,14 @@ internal static class WakeModel
         public int[] Count = Array.Empty<int>();      // completions by item
         public int[] TakeNo = Array.Empty<int>();     // the order each item was taken in
         public int Takes, LastDoneTake;
+        // CompletionLock's holder, and the thread that holds InputLock while
+        // it waits for CompletionLock, -1 for none. Down: a dispatch thread
+        // completes its own read, which its first look took.
+        public int CLock = -1, ILHolder = -1;
+        public bool[] Down = Array.Empty<bool>();
+        // The CompletionLock variants: AckPending is part of the state, since
+        // a frame noted before its completion is what invariant e finds.
+        public bool KeyAck;
         public string Trace = "";
 
         public St Clone()
@@ -127,7 +159,7 @@ internal static class WakeModel
             s.R = (int[])R.Clone(); s.RPub = (int[])RPub.Clone();
             s.Dpc = (int[])Dpc.Clone(); s.Dread = (int[])Dread.Clone(); s.Dpub = (int[])Dpub.Clone();
             s.Dret = (int[])Dret.Clone(); s.Ditem = (int[])Ditem.Clone(); s.Dtp = (int[])Dtp.Clone(); s.Dcont = (bool[])Dcont.Clone();
-            s.Count = (int[])Count.Clone(); s.TakeNo = (int[])TakeNo.Clone();
+            s.Count = (int[])Count.Clone(); s.TakeNo = (int[])TakeNo.Clone(); s.Down = (bool[])Down.Clone();
             return s;
         }
 
@@ -147,7 +179,7 @@ internal static class WakeModel
                 case W_TAKE: case W_TAKE1: case W_REQ1: b.Append(',').Append(Wret); break;
                 case W_REQ: b.Append(',').Append(Wret).Append(',').Append(Wtp); break;
                 case W_RQLOOK: b.Append(',').Append(Wtp); break;
-                case W_DONE: b.Append(',').Append(Wret).Append(',').Append(Witem).Append(Wcont ? 'k' : '-'); break;
+                case W_DONE: case W_CWAIT: case W_COMP: b.Append(',').Append(Wret).Append(',').Append(Witem).Append(Wcont ? 'k' : '-'); break;
                 case W_DONE0: case W_DONE1: b.Append(',').Append(Wret).Append(',').Append(Witem); break;
             }
             b.Append('|').Append(Cache).Append(',').Append(SharedSeq).Append(',').Append(LastDel).Append(',').Append(PubCount)
@@ -174,12 +206,16 @@ internal static class WakeModel
                     D_RQLOOK => $"K{Dtp[i]}",
                     D_DONE => $"D{Dret[i]}:{Ditem[i]}{(Dcont[i] ? 'k' : '-')}",
                     D_SELF => $"S{Dread[i]}:{Ditem[i]}",
+                    D_CWAIT => $"W{Dread[i]}:{Dret[i]}:{Ditem[i]}{(Down[i] ? 'o' : '-')}{(Dcont[i] ? 'k' : '-')}",
+                    D_COMP => $"M{Dread[i]}:{Dret[i]}:{Ditem[i]}{(Down[i] ? 'o' : '-')}{(Dcont[i] ? 'k' : '-')}",
                     _ => throw new InvalidOperationException($"dispatch pc {Dpc[i]}"),
                 };
                 slots.Add(t);
             }
             slots.Sort(StringComparer.Ordinal);
             b.Append('|').Append(string.Join(";", slots)).Append('|').Append(string.Join(",", Count));
+            b.Append('|').Append(CLock).Append(',').Append(ILHolder);
+            if (KeyAck) b.Append(',').Append(AckPending);
             return b.ToString();
         }
 
@@ -205,6 +241,11 @@ internal static class WakeModel
         public bool Capped;               // the exploration stopped at maxStates: no verdict
         public int Inversions, EarlyAcks; // states reached with one, for the record
         public string? InversionTrace, EarlyAckTrace;
+        // States with a completion under CompletionLock under way, and of
+        // them those where another thread holds InputLock while it waits
+        // for CompletionLock: every InputLock taker then waits on that
+        // completion, as on every completion under InputLock.
+        public int CompRunning, CompWithInputLock;
     }
 
     // recordOnly: explore every order without stopping at a broken
@@ -217,7 +258,7 @@ internal static class WakeModel
             R = new int[sc.Reads], RPub = new int[sc.Reads],
             Dpc = new int[slots], Dread = Enumerable.Repeat(-1, slots).ToArray(), Dpub = new int[slots],
             Dret = Enumerable.Repeat(-1, slots).ToArray(), Ditem = new int[slots], Dtp = new int[slots], Dcont = new bool[slots],
-            Count = new int[items], TakeNo = new int[items],
+            Count = new int[items], TakeNo = new int[items], Down = new bool[slots], KeyAck = v.CompletionLock,
         };
         var seen = new HashSet<(ulong, ulong)> { start.Hash() };
         var stack = new Stack<St>();
@@ -228,6 +269,11 @@ internal static class WakeModel
             var s = stack.Pop();
             r.States++;
             if (r.States > maxStates) { r.Capped = true; break; }
+            if (s.Wpc == W_COMP || Array.IndexOf(s.Dpc, D_COMP) >= 0)
+            {
+                r.CompRunning++;
+                if (s.ILHolder >= 0) r.CompWithInputLock++;
+            }
             var next = new List<St>();
             Steps(s, v, sc, next, r);
             if (r.Broken != null && !recordOnly) break;
@@ -268,14 +314,14 @@ internal static class WakeModel
     static bool Deliverable(St s) => s.RelNext < s.RelCount || s.Pending;
 
     // TakeReportLocked: the next release frame, else the pending frame.
-    static int Take(St s, Scenario sc, Result r)
+    static int Take(St s, Scenario sc, Result r, bool noteAck = true)
     {
         if (s.RelNext < s.RelCount) return Taken(s, Release(sc, s.RelNext++));
-        if (s.Pending) return TakeFrame(s, r);
+        if (s.Pending) return TakeFrame(s, r, noteAck);
         return 0;
     }
 
-    static int TakeFrame(St s, Result r)
+    static int TakeFrame(St s, Result r, bool noteAck = true)
     {
         // Invariant c: the frame taken is the one cached now, by construction
         // of the cache. It is checked so a change that takes another cannot
@@ -283,8 +329,18 @@ internal static class WakeModel
         int item = s.Cache;
         s.Pending = false;
         s.LastDel = s.SharedSeq;
-        s.AckPending = item;
+        if (noteAck) s.AckPending = item;
         return Taken(s, item);
+    }
+
+    // CompletionLock's completion: the read completes, the frame it carried
+    // is noted for the acknowledgement when the variant notes it there, and
+    // the lock goes.
+    static void CompleteUnderCompletionLock(St n, Variant v, Scenario sc, int read, int item, Result r)
+    {
+        Complete(n, sc, read, item, r);
+        if (v.AckAfterComplete && item <= sc.Seqs.Length) n.AckPending = item;
+        n.CLock = -1;
     }
 
     static int Taken(St s, int item)
@@ -340,10 +396,12 @@ internal static class WakeModel
     {
         int read = s.Dread[d];
         St n;
+        bool inputLockFree = s.ILHolder < 0;
         switch (s.Dpc[d])
         {
             case D_CHECK:
             {
+                if (!inputLockFree) break;
                 n = s.Clone();
                 if (n.AckPending != 0)
                 {
@@ -357,8 +415,14 @@ internal static class WakeModel
                 }
                 int item = 0;
                 if (n.RelNext < n.RelCount) item = Taken(n, Release(sc, n.RelNext++));
-                else if (n.Cache != 0 && n.Pending && n.SharedSeq > n.LastDel) item = TakeFrame(n, r);
-                if (item != 0 && v.CompleteInLock)
+                else if (n.Cache != 0 && n.Pending && n.SharedSeq > n.LastDel) item = TakeFrame(n, r, !v.AckAfterComplete);
+                if (item != 0 && v.CompletionLock)
+                {
+                    n.Ditem[d] = item; n.Dret[d] = read; n.Down[d] = true; n.Dcont[d] = false;
+                    n.ILHolder = d; n.Dpc[d] = D_CWAIT;
+                    n.Trace += $" t{d}:check-takes-{Item(sc, item).Replace(' ', '-')}";
+                }
+                else if (item != 0 && v.CompleteInLock)
                 {
                     n.Trace += $" t{d}:check-takes-and-completes-{Item(sc, item).Replace(' ', '-')}";
                     Complete(n, sc, read, item, r);
@@ -376,6 +440,7 @@ internal static class WakeModel
                 break;
             case D_LOOK:
             {
+                if (!inputLockFree) break;
                 bool waiting = s.RelNext < s.RelCount
                     || (s.Pending && (v.ByCount ? s.PubCount != s.Dpub[d] : s.SharedSeq > s.LastDel));
                 n = s.Clone(); n.Dpc[d] = waiting ? D_RET : D_FREE; n.Trace += $" t{d}:look-{(waiting ? "waiting" : "none")}"; next.Add(n);
@@ -389,9 +454,16 @@ internal static class WakeModel
                 break;
             case D_TAKE:
             {
+                if (!inputLockFree) break;
                 n = s.Clone();
-                int item = Take(n, sc, r);
+                int item = Take(n, sc, r, !v.AckAfterComplete);
                 if (item == 0) { n.Dtp[d] = n.PubCount; n.Dpc[d] = D_REQ; n.Trace += $" t{d}:take-none"; }
+                else if (v.CompletionLock)
+                {
+                    n.Ditem[d] = item; n.Down[d] = false; n.Dcont[d] = Deliverable(n);
+                    n.ILHolder = d; n.Dpc[d] = D_CWAIT;
+                    n.Trace += $" t{d}:take-{Item(sc, item).Replace(' ', '-')}";
+                }
                 else if (v.CompleteInLock)
                 {
                     int taken = n.Dret[d];
@@ -411,6 +483,7 @@ internal static class WakeModel
                 break;
             case D_RQLOOK:
             {
+                if (!inputLockFree) break;
                 bool waiting = s.RelNext < s.RelCount || (s.Pending && s.PubCount != s.Dtp[d]);
                 n = s.Clone(); n.Dpc[d] = waiting ? D_RET : D_FREE; if (n.Dpc[d] == D_FREE) n.Dread[d] = -1;
                 n.Trace += $" t{d}:look-after-requeue-{(waiting ? "waiting" : "none")}"; next.Add(n);
@@ -425,12 +498,28 @@ internal static class WakeModel
                 n = s.Clone(); Complete(n, sc, read, n.Ditem[d], r); n.Dpc[d] = D_FREE; n.Dread[d] = -1;
                 n.Trace += $" t{d}:complete-own{read}"; next.Add(n);
                 break;
+            case D_CWAIT:
+                // CompletionLock, still holding InputLock, then InputLock goes.
+                if (s.CLock >= 0) break;
+                n = s.Clone(); n.CLock = d; n.ILHolder = -1; n.Dpc[d] = D_COMP;
+                n.Trace += $" t{d}:completion-lock"; next.Add(n);
+                break;
+            case D_COMP:
+                n = s.Clone();
+                CompleteUnderCompletionLock(n, v, sc, n.Dret[d], n.Ditem[d], r);
+                n.Trace += $" t{d}:complete{(s.Down[d] ? "-own" : "")}{s.Dret[d]}";
+                if (s.Down[d] || !s.Dcont[d]) { n.Dpc[d] = D_FREE; n.Dread[d] = -1; }
+                else n.Dpc[d] = D_RET;
+                n.Dret[d] = -1; n.Down[d] = false;
+                next.Add(n);
+                break;
         }
     }
 
     static void Worker(St s, Variant v, Scenario sc, List<St> next, Result r)
     {
         St n;
+        bool inputLockFree = s.ILHolder < 0;
         switch (s.Wpc)
         {
             case W_IDLE:
@@ -449,10 +538,12 @@ internal static class WakeModel
 
             // This driver's frame path and OwnerGone, then DeliverParked.
             case W_PUB:
+                if (!inputLockFree) break;
                 n = s.Clone(); Cache(n, sc); n.Pending = true;
                 n.Wpc = Deliverable(n) ? W_RET : W_IDLE; n.Trace += $" w:cache{n.Wframe}"; next.Add(n);
                 break;
             case W_OG:
+                if (!inputLockFree) break;
                 n = s.Clone(); OwnerGone(n, sc); n.Wpc = Deliverable(n) ? W_RET : W_IDLE; n.Trace += " w:ownergone"; next.Add(n);
                 break;
             case W_RET:
@@ -463,9 +554,15 @@ internal static class WakeModel
                 break;
             case W_TAKE:
             {
+                if (!inputLockFree) break;
                 n = s.Clone();
-                int item = Take(n, sc, r);
+                int item = Take(n, sc, r, !v.AckAfterComplete);
                 if (item == 0) { n.Wtp = n.PubCount; n.Wpc = W_REQ; n.Trace += " w:take-none"; }
+                else if (v.CompletionLock)
+                {
+                    n.Witem = item; n.Wcont = Deliverable(n); n.ILHolder = WORKER; n.Wpc = W_CWAIT;
+                    n.Trace += $" w:take-{Item(sc, item).Replace(' ', '-')}";
+                }
                 else if (v.CompleteInLock)
                 {
                     n.Trace += $" w:take-and-complete-{Item(sc, item).Replace(' ', '-')}";
@@ -483,12 +580,21 @@ internal static class WakeModel
                 break;
             case W_RQLOOK:
             {
+                if (!inputLockFree) break;
                 bool waiting = s.RelNext < s.RelCount || (s.Pending && s.PubCount != s.Wtp);
                 n = s.Clone(); n.Wpc = waiting ? W_RET : W_IDLE; n.Trace += $" w:look-after-requeue-{(waiting ? "waiting" : "none")}"; next.Add(n);
                 break;
             }
             case W_DONE:
                 n = s.Clone(); Complete(n, sc, n.Wret, n.Witem, r); n.Trace += $" w:complete{s.Wret}"; n.Wret = -1;
+                n.Wpc = n.Wcont ? W_RET : W_IDLE; next.Add(n);
+                break;
+            case W_CWAIT:
+                if (s.CLock >= 0) break;
+                n = s.Clone(); n.CLock = WORKER; n.ILHolder = -1; n.Wpc = W_COMP; n.Trace += " w:completion-lock"; next.Add(n);
+                break;
+            case W_COMP:
+                n = s.Clone(); CompleteUnderCompletionLock(n, v, sc, n.Wret, n.Witem, r); n.Trace += $" w:complete{s.Wret}"; n.Wret = -1;
                 n.Wpc = n.Wcont ? W_RET : W_IDLE; next.Add(n);
                 break;
 
@@ -563,12 +669,13 @@ internal static class WakeModel
         foreach (var v in Variants)
         {
             string? broke = null, capped = null;
-            int states = 0, finals = 0, inversions = 0, earlyAcks = 0;
+            int states = 0, finals = 0, inversions = 0, earlyAcks = 0, compRunning = 0, compWithIL = 0;
             string? invTrace = null, ackTrace = null;
             foreach (var sc in Scenarios)
             {
                 var r = Explore(v, sc);
                 states += r.States; finals += r.Finals; inversions += r.Inversions; earlyAcks += r.EarlyAcks;
+                compRunning += r.CompRunning; compWithIL += r.CompWithInputLock;
                 invTrace ??= r.InversionTrace; ackTrace ??= r.EarlyAckTrace;
                 if (!v.ExpectBroken)
                     Console.WriteLine($"    {sc.Name}: {r.States} states, {r.Finals} final{(r.Broken != null ? ", BROKEN" : "")}{(r.Capped ? ", STOPPED AT THE STATE CAP" : "")}");
@@ -583,13 +690,15 @@ internal static class WakeModel
                               (v.ExpectBroken ? " (expected broken)" : ""));
             if (broke != null) Console.WriteLine($"         {broke}");
             Console.WriteLine($"         for the record: {inversions} completion(s) after a later take, {earlyAcks} acknowledgement(s) before the frame's completion");
+            if (v.CompletionLock)
+                Console.WriteLine($"         for the record: {compRunning} state(s) with a completion under CompletionLock under way, {compWithIL} of them with InputLock held by a thread that waits for CompletionLock");
             if (!v.ExpectBroken && invTrace != null) Console.WriteLine($"         first inversion after{invTrace}");
             if (!v.ExpectBroken && ackTrace != null) Console.WriteLine($"         first early acknowledgement after{ackTrace}");
         }
         // The same counts over every scenario and every order, the broken
         // invariant aside, for b0fb7dc9's read path, which v2.0.3 shares, and
         // for 81e1fe40's: whether the orders d and e forbid predate the lane.
-        foreach (var v in new[] { Variants[0], Variants[Variants.Length - 2] })
+        foreach (var v in new[] { Variants[0], Variants.First(x => x.Name.StartsWith("81e1fe40", StringComparison.Ordinal)) })
         {
             int inversions = 0, earlyAcks = 0;
             string? invTrace = null, ackTrace = null;

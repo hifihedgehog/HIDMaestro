@@ -1,27 +1,51 @@
-// The XUSB companion's readers (docs/design/signal-gate.md, "Every reader
-// once", and driver/companion.c, CompanionServeReaders): every interleaving of
-// the SDK's writer, the pump's turns on the doorbell and the kick, the 8 ms
-// timer's turns, and several readers, each a handle of its own that keeps
-// one or two WAIT_FOR_INPUT requests outstanding and sends one again the
-// moment it completes, each request's dispatch on a thread of its own.
+// The XUSB companion's WAIT_FOR_INPUT under xusb22's rule
+// (docs/design/signal-gate.md, "The companion's reports", and
+// driver/companion.c, CompanionReportLocked): every interleaving of the
+// SDK's writer, the pump's turns on the doorbell and the kick, GET_STATE's
+// turns or the 8 ms timer's, and several readers, each a handle of its own
+// that keeps one or two WAIT_FOR_INPUT requests outstanding and sends one
+// again the moment it completes, each request's dispatch on a thread of its
+// own.
 //
-// Each step is one critical section: of ReadersLock, of the queue's lock,
-// an interlocked operation, or a read or write of the section. The SDK's
-// store and its read of the count, and a dispatch's increment and its look,
-// each with a full fence between, face each other as on the input event, so
-// the model needs no store buffer (CompanionModel and Round6FenceModel check
-// the fences). Frame 0 is the state before any frame, which a reader's first
-// request gets.
+// xusb22.sys 10.0.26100.9549 completes, on each report from the pad, every
+// wait parked through any handle, in the order they were parked, all with
+// the same bytes, and the pad reports a change of its state
+// (XInputControllerDevice::HandleIncomingStateReport and
+// ProcessWaitRequests). Here a report is a frame whose state differs from
+// the last report's, found by the first turn that reads it, and a request
+// is parked before a frame when its first look at the section came before
+// the frame was written. Each step is one critical section: a turn's start
+// (ReportLock and its read of the section), one take from the queue, the
+// put back, a completion, or a dispatch's look at the section, its park in
+// the queue, or its count and its second look. A reader's send and its
+// first look are one step, since nothing of the companion's sees the
+// request before its park. The SDK's store and its read of the count, and a
+// dispatch's increment and its second look, face each other with a full
+// fence between: either the SDK finds the count or the second look finds
+// the frame, so the increment and the look are one step, and the model
+// needs no store buffer (CompanionModel and Round6FenceModel check the
+// fences). A frame's state is a small number,
+// and two frames may share one. The SDK here never starts again, so its
+// SeqNo only grows, and the frame a look finds stands for the observation
+// the companion counts (ObservedGen): of two looks the later one finds a
+// greater frame exactly when its observation is greater. A program before
+// 2.1.0 counts from SeqNo 0 again and can repeat the SeqNo of the last frame
+// read. The companion then tells the two frames apart by their GIP bytes
+// (companion.c, ObserveLocked), and a frame that repeats both carries no
+// new state. The wake harness places that order (hm_case_wake.c,
+// seqno-again).
 //
 // Invariants:
-//   a. With the timer off, in a final state every reader has the newest
-//      frame. A request in flight has a step left, so in a final state every
-//      request is parked, and the last completion to each reader must have
-//      carried the newest frame.
-//   b. No reader gets one frame twice.
-//   c. No reader gets a frame older than one it had.
-// d4103a21 and v2.0.3 serve one request a turn, and their timer serves the
-// frame there is whether its reader had it or not.
+//   a. With the doorbell and no timer, in a final state no parked request
+//      looked before the frame of the last report, and none looked before
+//      the newest frame while that frame's state differs from the last
+//      report's.
+//   b. A completion carries a report whose frame was written after the
+//      request first looked.
+//   c. No reader gets an older report after a newer one.
+//   d. A turn completes requests in the order they were parked.
+//   e. Two reports in a row differ, and two GET_STATE answers with one
+//      packet number carry one state.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -29,71 +53,82 @@ using System.Text;
 
 internal static class ReadersModel
 {
-    // PerReader: a turn serves every reader that lacks its frame, through
-    // the reader's oldest request (this driver). Without it a turn serves
-    // the oldest request in the queue, whoever's. NewerOnly: a turn on the
-    // doorbell or the kick serves only a frame newer than the last
-    // completion (d4103a21). Kick: a request's dispatch looks at the
-    // section after its park and kicks the pump. KickPerReader: that look
-    // compares with its reader's last frame, else with the last completion
-    // of any reader. InLock: a turn completes its requests inside
-    // ReadersLock, else after it. Gated: the SDK rings only while the count
-    // of parked requests is not zero.
-    internal sealed record Variant(string Name, bool PerReader, bool NewerOnly, bool Kick, bool KickPerReader, bool InLock, bool Gated,
-                                   string Expect);
+    // Gated: the SDK rings only while the count of requests held is not
+    // zero. Kick: a dispatch looks at the section again after its count
+    // and kicks the pump when it finds another SeqNo. LateDrain: a kick's
+    // turn completes, with the last report, a request that looked before
+    // that report's frame. ParkRule: a report completes only requests that
+    // looked before its frame, else every request parked. InLock: a turn
+    // completes inside ReportLock, else after it. ChangeOnly: a report is a
+    // change of state, else every new frame. RequeueHead: a turn puts the
+    // requests it keeps back at the head of the queue, else at its tail.
+    internal sealed record Variant(string Name, bool Gated, bool Kick, bool LateDrain, bool ParkRule, bool InLock, bool ChangeOnly,
+                                   bool RequeueHead, string Expect);
 
     internal static readonly Variant[] Variants =
     {
-        new("v2.0.3 and b0fb7dc9 under an SDK before 2.1.0: a turn serves the oldest request with the frame there is, a doorbell on every frame, no kick",
-            false, false, false, false, false, false, "broken"),
-        new("d4103a21: a turn serves the oldest request, with a frame newer than the last completion on a doorbell or a kick; the kick compares with the last completion",
-            false, true, true, false, false, true, "broken"),
-        new("this driver: a turn serves every reader that lacks the frame, its oldest request, under ReadersLock; the kick compares with the reader's last frame",
-            true, false, true, true, true, true, ""),
+        new("this driver: a report on each change of state completes every request that looked before its frame, in order, inside ReportLock; a kick's turn completes a request the report missed",
+            true, true, true, true, true, true, true, ""),
         new("this driver under an SDK before 2.1.0: a doorbell on every frame",
-            true, false, true, true, true, false, ""),
+            false, true, true, true, true, true, true, ""),
         new("this driver without the kick",
-            true, false, false, false, true, true, "a"),
-        new("this driver with the kick comparing the last completion of any reader",
-            true, false, true, false, true, true, "a"),
-        new("this driver completing after ReadersLock",
-            true, false, true, true, false, true, "c"),
+            true, false, true, true, true, true, true, "a"),
+        new("this driver with a kick's turn that completes nothing without a new report",
+            true, true, false, true, true, true, true, "a"),
+        new("this driver completing every request parked when a report comes, whenever it looked",
+            true, true, true, false, true, true, true, "b"),
+        new("this driver completing after ReportLock",
+            true, true, true, true, false, true, true, "c"),
+        new("this driver putting the requests it keeps back at the tail of the queue",
+            true, true, true, true, true, true, false, "d"),
+        new("this driver with a report on every new frame, changed or not",
+            true, true, true, true, true, false, true, "e"),
     };
 
-    // Ticks: the timer's turns in the run, 0 for no timer.
-    internal sealed record Scenario(string Name, int[] Requests, int Frames, int Ticks);
+    // Requests: each reader's requests. States: each frame's state, in the
+    // order the SDK writes them. Polls: GET_STATEs, each a turn of its own
+    // at any moment. Doorbell: the SDK makes one. Without it the 8 ms
+    // timer's Ticks turns report.
+    internal sealed record Scenario(string Name, int[] Requests, int[] States, int Polls, bool Doorbell, int Ticks);
 
     internal static readonly Scenario[] Scenarios =
     {
-        new("two readers, one request each, two frames, no timer", new[] { 1, 1 }, 2, 0),
-        new("two readers, one request each, three frames, no timer", new[] { 1, 1 }, 3, 0),
-        new("three readers, one request each, one frame, no timer", new[] { 1, 1, 1 }, 1, 0),
-        new("two readers, two requests and one, two frames, no timer", new[] { 2, 1 }, 2, 0),
-        new("two readers, one request each, two frames, two ticks", new[] { 1, 1 }, 2, 2),
-        new("two readers, two requests and one, one frame, one tick", new[] { 2, 1 }, 1, 1),
+        new("two readers, one request each, frames A B", new[] { 1, 1 }, new[] { 1, 2 }, 0, true, 0),
+        new("two readers, one request each, frames A B A", new[] { 1, 1 }, new[] { 1, 2, 1 }, 0, true, 0),
+        new("three readers, one request each, frame A", new[] { 1, 1, 1 }, new[] { 1 }, 0, true, 0),
+        new("two readers, two requests and one, frames A B", new[] { 2, 1 }, new[] { 1, 2 }, 0, true, 0),
+        new("two readers, one request each, frames A A B, one GET_STATE", new[] { 1, 1 }, new[] { 1, 1, 2 }, 1, true, 0),
+        new("one reader, two requests, frames A B, one GET_STATE", new[] { 2 }, new[] { 1, 2 }, 1, true, 0),
+        new("two readers, one request each, frames A B, no doorbell, two ticks", new[] { 1, 1 }, new[] { 1, 2 }, 0, false, 2),
     };
 
-    // A request is idle once completed, and its reader sends it next. It is
-    // out from its send while its dispatch runs and while it is parked, and
-    // taken while a turn holds it uncompleted.
+    // A request is idle once completed, and its reader sends it again. It
+    // is out from its send while its dispatch runs and while it is parked,
+    // and taken while a turn holds it for a completion after ReportLock.
     const int Q_IDLE = 0, Q_OUT = 1, Q_TAKEN = 2;
-    // A dispatch thread's steps. A request completed while the thread that
-    // parked it is still in its look is sent again on another thread, so
-    // there is one thread more than requests.
-    const int D_FREE = 0, D_LINK = 1, D_FWD = 2, D_INC = 3, D_LOOK = 4;
-    // A turn's steps, for the pump and the timer alike. T_SERVE walks the
-    // readers (PerReader) or takes the queue's head. T_DONE completes what
-    // the turn took after ReadersLock (InLock false).
-    const int T_IDLE = 0, T_START = 1, T_SERVE = 2, T_BUILD = 3, T_DONE = 4;
+    // A dispatch thread's steps after its send and first look. A request
+    // completed while the thread that parked it is still before its second
+    // look is sent again on another thread, so there is one thread more
+    // than requests.
+    const int D_FREE = 0, D_FWD = 2, D_LOOK2 = 4;
+    // A turn's steps: ReportLock and the read, the takes, the put back,
+    // then the completions after ReportLock.
+    const int T_IDLE = 0, T_START = 1, T_DRAIN = 2, T_REQUEUE = 3, T_DONE = 4;
+    // The turns: the pump's, GET_STATE's and the timer's, as ReportLock's
+    // holder.
+    const int PUMP = 1, POLL = 2, TIMER = 3;
 
     sealed class Turn
     {
-        public int Pc, Seq, Index;
-        public List<int> Taken = new();   // requests taken, completed at T_DONE
-        public Turn Clone() => new() { Pc = Pc, Seq = Seq, Index = Index, Taken = new List<int>(Taken) };
+        public int Pc;
+        public bool Late;
+        public List<int> Kept = new();
+        public List<(int Q, int Report, int Frame)> Taken = new();
+        public Turn Clone() => new() { Pc = Pc, Late = Late, Kept = new List<int>(Kept), Taken = new(Taken) };
         public void Key(StringBuilder b)
         {
-            b.Append(Pc).Append(',').Append(Seq).Append(',').Append(Index).Append('[').Append(string.Join(".", Taken)).Append(']');
+            b.Append(Pc).Append(Late ? 'l' : '-').Append('[').Append(string.Join(".", Kept)).Append(']');
+            foreach (var t in Taken) b.Append(t.Q).Append(':').Append(t.Report).Append(':').Append(t.Frame).Append(';');
         }
     }
 
@@ -115,17 +150,22 @@ internal static class ReadersModel
 
     sealed class St
     {
-        public int Written, SdkPc;                // SdkPc 0: write the next frame, 1: read the count
+        public int Written, SdkPc;                 // SdkPc 0: write the next frame, 1: read the count
         public bool Doorbell, Kick;
-        public int Count, Lock, LastServed = -1;  // Lock: 0 free, 1 the pump's turn, 2 the timer's
-        public int TimerLeft;
-        public Turn Pump = new(), Timer = new();
-        public int[] Q = Array.Empty<int>(), QFrame = Array.Empty<int>();
-        public int[] Dpc = Array.Empty<int>(), Dq = Array.Empty<int>();
+        public int Count;
+        public bool HaveReport;
+        public int LastState, ReportFrame, Reports;
+        public int Lock;                           // ReportLock: 0 free, else the turn's PUMP, POLL or TIMER
+        public Turn Pump = new(), Poll = new(), Timer = new();
+        public int PollsLeft, TicksLeft;
+        // ParkNo: the order requests entered the queue, among those out.
+        public int[] Q = Array.Empty<int>(), LookFrame = Array.Empty<int>(), ParkNo = Array.Empty<int>();
+        // DFrame: the frame a dispatch's first look found, its own copy.
+        public int[] Dpc = Array.Empty<int>(), Dq = Array.Empty<int>(), DFrame = Array.Empty<int>();
         public List<int> Queue = new();
-        public int[] Served = Array.Empty<int>(), Got = Array.Empty<int>();
-        public bool[] Linked = Array.Empty<bool>();
-        public List<int> Order = new();
+        public int NextParkNo;
+        public int[] Got = Array.Empty<int>();     // each reader's last report, 0 for none
+        public int LastPollReports = -1, LastPollState = -1;
         public Path? Steps;
         public string Trace => Steps?.ToString() ?? "";
         public void Add(string step) => Steps = new Path(Steps, step);
@@ -133,28 +173,30 @@ internal static class ReadersModel
         public St Clone()
         {
             var s = (St)MemberwiseClone();
-            s.Pump = Pump.Clone(); s.Timer = Timer.Clone();
-            s.Q = (int[])Q.Clone(); s.QFrame = (int[])QFrame.Clone();
-            s.Dpc = (int[])Dpc.Clone(); s.Dq = (int[])Dq.Clone();
-            s.Queue = new List<int>(Queue); s.Order = new List<int>(Order);
-            s.Served = (int[])Served.Clone(); s.Got = (int[])Got.Clone(); s.Linked = (bool[])Linked.Clone();
+            s.Pump = Pump.Clone(); s.Poll = Poll.Clone(); s.Timer = Timer.Clone();
+            s.Q = (int[])Q.Clone(); s.LookFrame = (int[])LookFrame.Clone(); s.ParkNo = (int[])ParkNo.Clone();
+            s.Dpc = (int[])Dpc.Clone(); s.Dq = (int[])Dq.Clone(); s.DFrame = (int[])DFrame.Clone();
+            s.Queue = new List<int>(Queue); s.Got = (int[])Got.Clone();
             return s;
         }
 
         public string Key()
         {
             var b = new StringBuilder();
-            b.Append(Written).Append(SdkPc).Append(Doorbell ? 'd' : '-').Append(Kick ? 'k' : '-')
-             .Append(Count).Append(',').Append(Lock).Append(',').Append(LastServed).Append(',').Append(TimerLeft).Append('|');
-            Pump.Key(b); b.Append('|'); Timer.Key(b); b.Append('|');
-            b.Append(string.Join(".", Q)).Append('|').Append(string.Join(".", QFrame)).Append('|').Append(string.Join(".", Queue)).Append('|');
+            b.Append(Written).Append(SdkPc).Append(Doorbell ? 'd' : '-').Append(Kick ? 'k' : '-').Append(Count).Append(',')
+             .Append(HaveReport ? 'r' : '-').Append(LastState).Append(',').Append(ReportFrame).Append(',').Append(Reports).Append(',')
+             .Append(Lock).Append(',').Append(PollsLeft).Append(',').Append(TicksLeft).Append('|');
+            Pump.Key(b); b.Append('|'); Poll.Key(b); b.Append('|'); Timer.Key(b); b.Append('|');
+            // Only the order of the parks matters: their ranks.
+            var parked = ParkNo.Where(x => x >= 0).OrderBy(x => x).ToList();
+            b.Append(string.Join(".", Q)).Append('|').Append(string.Join(".", LookFrame)).Append('|')
+             .Append(string.Join(".", ParkNo.Select(x => x < 0 ? -1 : parked.IndexOf(x)))).Append('|').Append(string.Join(".", Queue)).Append('|');
             // Any free thread takes the next send: the threads in sorted order.
             var slots = new List<string>();
-            for (int d = 0; d < Dpc.Length; d++) slots.Add(Dpc[d] == D_FREE ? "F" : $"{Dpc[d]}:{Dq[d]}");
+            for (int d = 0; d < Dpc.Length; d++) slots.Add(Dpc[d] == D_FREE ? "F" : $"{Dpc[d]}:{Dq[d]}:{DFrame[d]}");
             slots.Sort(StringComparer.Ordinal);
-            b.Append(string.Join(";", slots)).Append('|');
-            b.Append(string.Join(".", Served)).Append('|').Append(string.Join(".", Got)).Append('|');
-            b.Append(string.Concat(Linked.Select(l => l ? '1' : '0'))).Append('|').Append(string.Join(".", Order));
+            b.Append(string.Join(";", slots)).Append('|').Append(string.Join(".", Got)).Append('|')
+             .Append(LastPollReports).Append(',').Append(LastPollState);
             return b.ToString();
         }
 
@@ -172,7 +214,13 @@ internal static class ReadersModel
         }
     }
 
-    internal sealed class Result { public int States, Finals; public bool Capped; public string? Lost, Twice, Older; }
+    internal sealed class Result
+    {
+        public int States, Finals, Reports;
+        public bool Capped;
+        public readonly Dictionary<string, string> Broken = new();   // invariant letter: its first trace
+        public void Break(string inv, string why) { if (!Broken.ContainsKey(inv)) Broken[inv] = why; }
+    }
 
     // Reader of each request, from the scenario.
     static int[] Owners(Scenario sc)
@@ -183,17 +231,15 @@ internal static class ReadersModel
         return o.ToArray();
     }
 
-    internal static Result Explore(Variant v, Scenario sc, int maxStates = 6_000_000)
+    internal static Result Explore(Variant v, Scenario sc, int maxStates = 20_000_000)
     {
-        int ticks = sc.Ticks;
         int[] owner = Owners(sc);
-        int readers = sc.Requests.Length;
+        int requests = owner.Length;
         var start = new St
         {
-            Q = new int[owner.Length], QFrame = Enumerable.Repeat(-1, owner.Length).ToArray(),
-            Dpc = new int[owner.Length + 1], Dq = Enumerable.Repeat(-1, owner.Length + 1).ToArray(),
-            Served = Enumerable.Repeat(-2, readers).ToArray(), Got = Enumerable.Repeat(-1, readers).ToArray(),
-            Linked = new bool[readers], TimerLeft = ticks,
+            Q = new int[requests], LookFrame = new int[requests], ParkNo = Enumerable.Repeat(-1, requests).ToArray(),
+            Dpc = new int[requests + 1], Dq = Enumerable.Repeat(-1, requests + 1).ToArray(), DFrame = new int[requests + 1],
+            Got = new int[sc.Requests.Length], PollsLeft = sc.Polls, TicksLeft = sc.Doorbell ? 0 : sc.Ticks,
         };
         var seen = new HashSet<(ulong, ulong)> { start.Hash() };
         var stack = new Stack<St>();
@@ -204,20 +250,15 @@ internal static class ReadersModel
             var s = stack.Pop();
             res.States++;
             if (res.States > maxStates) { res.Capped = true; break; }
-            // A variant expected to break needs only its first breaks.
-            if (v.Expect != "" && res.Lost != null && res.Twice != null && res.Older != null) break;
+            // A variant expected to break needs only its first break.
+            if (v.Expect != "" && res.Broken.ContainsKey(v.Expect)) break;
             var next = new List<St>();
             Steps(s, v, sc, owner, next, res);
             if (next.Count == 0)
             {
                 res.Finals++;
-                if (ticks == 0 && res.Lost == null)
-                    for (int r = 0; r < readers; r++)
-                        if (s.Got[r] != s.Written)
-                        {
-                            res.Lost = $"reader {r} left with frame {s.Got[r]} while frame {s.Written} is the newest, after{s.Trace}";
-                            break;
-                        }
+                res.Reports = Math.Max(res.Reports, s.Reports);
+                Final(s, sc, owner, res);
                 continue;
             }
             foreach (var n in next)
@@ -226,23 +267,48 @@ internal static class ReadersModel
         return res;
     }
 
-    static void Deliver(St s, int q, int frame, int[] owner, Result res)
+    // Invariant a, in a final state, and that every request waits there.
+    static void Final(St s, Scenario sc, int[] owner, Result res)
+    {
+        for (int q = 0; q < owner.Length; q++)
+            if (s.Q[q] != Q_OUT || !s.Queue.Contains(q))
+            {
+                res.Break("a", $"a final state with request {q} not parked, after{s.Trace}");
+                return;
+            }
+        if (!sc.Doorbell) return;
+        foreach (int q in s.Queue)
+        {
+            if (s.HaveReport && s.LookFrame[q] < s.ReportFrame)
+                res.Break("a", $"request {q} of reader {owner[q]}, which looked at frame {s.LookFrame[q]}, waits beside report {s.Reports} of frame {s.ReportFrame}, after{s.Trace}");
+            if (s.Written >= 1 && s.LookFrame[q] < s.Written && (!s.HaveReport || sc.States[s.Written - 1] != s.LastState))
+                res.Break("a", $"request {q} of reader {owner[q]}, which looked at frame {s.LookFrame[q]}, waits while frame {s.Written}'s state {sc.States[s.Written - 1]} was never reported, after{s.Trace}");
+        }
+    }
+
+    static void Deliver(St s, int q, int report, int frame, int[] owner, Result res)
     {
         int r = owner[q];
-        if (frame == s.Got[r] && res.Twice == null) res.Twice = $"reader {r} got frame {frame} a second time, after{s.Trace}";
-        if (frame < s.Got[r] && res.Older == null) res.Older = $"reader {r} got frame {frame} after frame {s.Got[r]}, after{s.Trace}";
-        s.Got[r] = Math.Max(s.Got[r], frame);
+        if (s.LookFrame[q] >= frame)
+            res.Break("b", $"request {q} of reader {r} looked at frame {s.LookFrame[q]} and got report {report} of frame {frame}, after{s.Trace}");
+        if (report < s.Got[r])
+            res.Break("c", $"reader {r} got report {report} after report {s.Got[r]}, after{s.Trace}");
+        s.Got[r] = Math.Max(s.Got[r], report);
         s.Q[q] = Q_IDLE;
-        s.QFrame[q] = -1;
+        s.ParkNo[q] = -1;
     }
+
+    static Turn TurnOf(St s, int who) => who == PUMP ? s.Pump : who == POLL ? s.Poll : s.Timer;
+    static string NameOf(int who) => who == PUMP ? "pump" : who == POLL ? "get-state" : "timer";
 
     static void Steps(St s, Variant v, Scenario sc, int[] owner, List<St> next, Result res)
     {
         St n;
-        // The SDK: the frame's store, then its read of the count and the ring.
-        if (s.SdkPc == 0 && s.Written < sc.Frames)
+        // The SDK: the frame's store, then, with a doorbell, its read of the
+        // count and the ring.
+        if (s.SdkPc == 0 && s.Written < sc.States.Length)
         {
-            n = s.Clone(); n.Written++; n.SdkPc = 1; n.Add($" sdk:write{n.Written}"); next.Add(n);
+            n = s.Clone(); n.Written++; n.SdkPc = sc.Doorbell ? 1 : 0; n.Add($" sdk:write{n.Written}"); next.Add(n);
         }
         else if (s.SdkPc == 1)
         {
@@ -253,166 +319,145 @@ internal static class ReadersModel
         }
 
         // Each request its reader sends again once it completed, on a free
-        // thread.
+        // thread, which looks at the section.
         for (int q = 0; q < s.Q.Length; q++)
         {
             if (s.Q[q] != Q_IDLE) continue;
             int d = Array.IndexOf(s.Dpc, D_FREE);
             if (d < 0) break;
-            // A request whose reader needs no joining enters the queue in
-            // the step that sends it: nothing reads it in between.
-            n = s.Clone(); n.Q[q] = Q_OUT; n.Dq[d] = q;
-            if (v.PerReader && !n.Linked[owner[q]]) { n.Dpc[d] = D_LINK; n.Add($" r{owner[q]}:send{q}(t{d})"); }
-            else { n.Queue.Add(q); n.Dpc[d] = v.Gated ? D_INC : D_LOOK; n.Add($" r{owner[q]}:send-park{q}(t{d})"); }
-            next.Add(n);
+            n = s.Clone(); n.Q[q] = Q_OUT; n.Dq[d] = q; n.DFrame[d] = n.Written; n.LookFrame[q] = n.Written; n.Dpc[d] = D_FWD;
+            n.Add($" r{owner[q]}:send{q}(t{d})-f{n.Written}"); next.Add(n);
         }
         // Each dispatch thread's next step.
         for (int d = 0; d < s.Dpc.Length; d++)
         {
             if (s.Dpc[d] == D_FREE) continue;
-            int q = s.Dq[d], r = owner[q];
+            int q = s.Dq[d];
+            n = s.Clone();
             switch (s.Dpc[d])
             {
-                case D_LINK:
-                    // A reader's first request joins it to the readers under
-                    // ReadersLock, which a turn holds. Another request of the
-                    // reader may have joined it meanwhile.
-                    if (s.Linked[r]) { n = s.Clone(); n.Dpc[d] = D_FWD; n.Add($" t{d}:linked"); next.Add(n); }
-                    else if (s.Lock == 0)
-                    {
-                        n = s.Clone(); n.Linked[r] = true; n.Order.Add(r); n.Dpc[d] = D_FWD; n.Add($" t{d}:link{r}"); next.Add(n);
-                    }
-                    break;
                 case D_FWD:
-                    n = s.Clone(); n.Queue.Add(q); n.Dpc[d] = v.Gated ? D_INC : D_LOOK; n.Add($" t{d}:park{q}"); next.Add(n);
+                    n.Queue.Add(q); n.ParkNo[q] = n.NextParkNo++; n.Dpc[d] = D_LOOK2; n.Add($" t{d}:park{q}");
                     break;
-                case D_INC:
-                    n = s.Clone(); n.Count++; n.Dpc[d] = D_LOOK; n.Add($" t{d}:count"); next.Add(n);
-                    break;
-                case D_LOOK:
+                case D_LOOK2:
                 {
-                    // A turn may have served the request already: the look
-                    // then reads its reader's new frame.
-                    n = s.Clone();
-                    bool newer = v.KickPerReader ? n.Written != n.Served[r] : n.Written != n.LastServed;
-                    if (v.Kick && newer) n.Kick = true;
-                    n.Dpc[d] = D_FREE; n.Dq[d] = -1;
-                    n.Add($" t{d}:look{(v.Kick && newer ? "-kick" : "")}");
-                    next.Add(n);
+                    n.Count++;
+                    bool moved = n.Written != n.DFrame[d];
+                    if (v.Kick && moved) n.Kick = true;
+                    n.Dpc[d] = D_FREE; n.Dq[d] = -1; n.DFrame[d] = 0;
+                    n.Add($" t{d}:count-look-again{(v.Kick && moved ? "-kick" : "")}");
                     break;
                 }
             }
+            next.Add(n);
         }
 
         // The pump: a turn on the doorbell or the kick.
         if (s.Pump.Pc == T_IDLE)
         {
-            if (s.Doorbell) { n = s.Clone(); n.Doorbell = false; n.Pump.Pc = T_START; n.Add(" pump:doorbell"); next.Add(n); }
-            if (s.Kick) { n = s.Clone(); n.Kick = false; n.Pump.Pc = T_START; n.Add(" pump:kick"); next.Add(n); }
+            if (s.Doorbell) { n = s.Clone(); n.Doorbell = false; n.Pump.Pc = T_START; n.Pump.Late = false; n.Add(" pump:doorbell"); next.Add(n); }
+            if (s.Kick) { n = s.Clone(); n.Kick = false; n.Pump.Pc = T_START; n.Pump.Late = true; n.Add(" pump:kick"); next.Add(n); }
         }
-        else TurnStep(s, v, owner, true, next, res);
-
+        else TurnStep(s, v, sc, owner, PUMP, next, res);
+        // GET_STATE: a turn at any moment, while polls are left.
+        if (s.Poll.Pc == T_IDLE)
+        {
+            if (s.PollsLeft > 0) { n = s.Clone(); n.PollsLeft--; n.Poll.Pc = T_START; n.Poll.Late = false; n.Add(" get-state"); next.Add(n); }
+        }
+        else TurnStep(s, v, sc, owner, POLL, next, res);
         // The timer: a turn at any moment, while ticks are left.
         if (s.Timer.Pc == T_IDLE)
         {
-            if (s.TimerLeft > 0) { n = s.Clone(); n.TimerLeft--; n.Timer.Pc = T_START; n.Add(" timer:tick"); next.Add(n); }
+            if (s.TicksLeft > 0) { n = s.Clone(); n.TicksLeft--; n.Timer.Pc = T_START; n.Timer.Late = false; n.Add(" timer:tick"); next.Add(n); }
         }
-        else TurnStep(s, v, owner, false, next, res);
+        else TurnStep(s, v, sc, owner, TIMER, next, res);
     }
 
-    static void TurnStep(St s, Variant v, int[] owner, bool pump, List<St> next, Result res)
+    // The end of a turn under ReportLock: GET_STATE answers the last report.
+    static void EndInLock(St n, Turn t, int who, Result res)
     {
-        var t = pump ? s.Pump : s.Timer;
-        string who = pump ? "pump" : "timer";
-        int me = pump ? 1 : 2;
-        St n;
-        if (v.PerReader)
+        if (who == POLL)
         {
-            switch (t.Pc)
-            {
-                case T_START:
-                    if (s.Lock != 0) return;   // the other turn holds ReadersLock
-                    n = s.Clone(); n.Lock = me;
-                    var nt = pump ? n.Pump : n.Timer;
-                    nt.Seq = n.Written; nt.Index = 0; nt.Pc = T_SERVE;
-                    n.Add($" {who}:lock-seq{n.Written}"); next.Add(n);
-                    return;
-                case T_SERVE:
-                {
-                    n = s.Clone();
-                    var nt2 = pump ? n.Pump : n.Timer;
-                    if (nt2.Index >= n.Order.Count)
-                    {
-                        n.Lock = 0;
-                        nt2.Pc = nt2.Taken.Count > 0 ? T_DONE : T_IDLE;
-                        n.Add($" {who}:unlock"); next.Add(n);
-                        return;
-                    }
-                    int r = n.Order[nt2.Index++];
-                    int q = n.Served[r] == nt2.Seq ? -1 : n.Queue.FirstOrDefault(x => owner[x] == r, -1);
-                    if (q >= 0)
-                    {
-                        n.Queue.Remove(q);
-                        if (v.Gated) n.Count--;
-                        n.Served[r] = nt2.Seq;
-                        n.LastServed = nt2.Seq;
-                        n.Add($" {who}:serve{r}-q{q}-f{nt2.Seq}");
-                        if (v.InLock) Deliver(n, q, nt2.Seq, owner, res);
-                        else { n.Q[q] = Q_TAKEN; n.QFrame[q] = nt2.Seq; nt2.Taken.Add(q); }
-                    }
-                    else n.Add($" {who}:skip{r}");
-                    next.Add(n);
-                    return;
-                }
-                case T_DONE:
-                {
-                    n = s.Clone();
-                    var nt3 = pump ? n.Pump : n.Timer;
-                    int q = nt3.Taken[0];
-                    nt3.Taken.RemoveAt(0);
-                    n.Add($" {who}:complete-q{q}-f{n.QFrame[q]}");
-                    Deliver(n, q, n.QFrame[q], owner, res);
-                    if (nt3.Taken.Count == 0) nt3.Pc = T_IDLE;
-                    next.Add(n);
-                    return;
-                }
-            }
-            return;
+            int state = n.HaveReport ? n.LastState : 0;
+            if (n.LastPollReports == n.Reports && n.LastPollState != state)
+                res.Break("e", $"GET_STATE answered packet {n.Reports} with state {state} after state {n.LastPollState}, after{n.Trace}");
+            n.LastPollReports = n.Reports; n.LastPollState = state;
         }
-        // One request a turn, as through d4103a21: the queue's head, the
-        // state built after the take, then the completion. No lock.
-        switch (t.Pc)
+        n.Lock = 0;
+        t.Pc = t.Taken.Count > 0 ? T_DONE : T_IDLE;
+    }
+
+    static void TurnStep(St s, Variant v, Scenario sc, int[] owner, int who, List<St> next, Result res)
+    {
+        string name = NameOf(who);
+        St n;
+        Turn t;
+        switch (TurnOf(s, who).Pc)
         {
             case T_START:
             {
-                n = s.Clone();
-                var nt = pump ? n.Pump : n.Timer;
-                bool skip = pump && v.NewerOnly && n.Written == n.LastServed;
-                if (skip || n.Queue.Count == 0) { nt.Pc = T_IDLE; n.Add($" {who}:none"); next.Add(n); return; }
-                int q = n.Queue[0]; n.Queue.RemoveAt(0);
-                if (v.Gated) n.Count--;
-                n.Q[q] = Q_TAKEN; nt.Taken.Add(q); nt.Pc = T_BUILD;
-                n.Add($" {who}:take-q{q}"); next.Add(n);
+                if (s.Lock != 0) return;   // another turn holds ReportLock
+                n = s.Clone(); t = TurnOf(n, who);
+                n.Lock = who;
+                bool fresh = false;
+                if (n.Written >= 1)
+                {
+                    int state = sc.States[n.Written - 1];
+                    bool report = v.ChangeOnly ? !n.HaveReport || state != n.LastState : n.Written != n.ReportFrame;
+                    if (report)
+                    {
+                        if (n.HaveReport && state == n.LastState)
+                            res.Break("e", $"report {n.Reports + 1} of frame {n.Written} repeats state {state}, after{n.Trace} {name}:read");
+                        n.HaveReport = true; n.LastState = state; n.ReportFrame = n.Written; n.Reports++;
+                        fresh = true;
+                    }
+                }
+                bool drain = n.HaveReport && (fresh || (t.Late && v.LateDrain));
+                n.Add($" {name}:read-f{n.Written}{(fresh ? $"-report{n.Reports}" : "")}");
+                if (!drain) EndInLock(n, t, who, res);
+                else t.Pc = T_DRAIN;
+                next.Add(n);
                 return;
             }
-            case T_BUILD:
+            case T_DRAIN:
             {
-                n = s.Clone();
-                var nt = pump ? n.Pump : n.Timer;
-                int q = nt.Taken[0];
-                n.QFrame[q] = n.Written; n.LastServed = n.Written; nt.Pc = T_DONE;
-                n.Add($" {who}:build-f{n.Written}"); next.Add(n);
+                n = s.Clone(); t = TurnOf(n, who);
+                if (n.Queue.Count == 0) { t.Pc = T_REQUEUE; n.Add($" {name}:queue-empty"); next.Add(n); return; }
+                int q = n.Queue[0];
+                n.Queue.RemoveAt(0);
+                bool eligible = !v.ParkRule || n.LookFrame[q] < n.ReportFrame;
+                if (!eligible) { t.Kept.Add(q); n.Add($" {name}:keep{q}"); next.Add(n); return; }
+                n.Count--;
+                // The queue keeps the order of the parks: no request still in
+                // it was parked before the one completed.
+                foreach (int x in n.Queue)
+                    if (n.ParkNo[x] < n.ParkNo[q])
+                        res.Break("d", $"a turn completed request {q} ahead of request {x}, parked before it, after{n.Trace}");
+                n.Add($" {name}:take{q}");
+                if (v.InLock) Deliver(n, q, n.Reports, n.ReportFrame, owner, res);
+                else { n.Q[q] = Q_TAKEN; t.Taken.Add((q, n.Reports, n.ReportFrame)); }
+                next.Add(n);
+                return;
+            }
+            case T_REQUEUE:
+            {
+                n = s.Clone(); t = TurnOf(n, who);
+                if (v.RequeueHead) n.Queue.InsertRange(0, t.Kept); else n.Queue.AddRange(t.Kept);
+                n.Add($" {name}:put-back[{string.Join(".", t.Kept)}]");
+                t.Kept.Clear();
+                EndInLock(n, t, who, res);
+                next.Add(n);
                 return;
             }
             case T_DONE:
             {
-                n = s.Clone();
-                var nt = pump ? n.Pump : n.Timer;
-                int q = nt.Taken[0]; nt.Taken.Clear();
-                n.Add($" {who}:complete-q{q}-f{n.QFrame[q]}");
-                n.Served[owner[q]] = n.QFrame[q];
-                Deliver(n, q, n.QFrame[q], owner, res);
-                nt.Pc = T_IDLE; next.Add(n);
+                n = s.Clone(); t = TurnOf(n, who);
+                var (q, report, frame) = t.Taken[0];
+                t.Taken.RemoveAt(0);
+                n.Add($" {name}:complete{q}-report{report}");
+                Deliver(n, q, report, frame, owner, res);
+                if (t.Taken.Count == 0) t.Pc = T_IDLE;
+                next.Add(n);
                 return;
             }
         }
@@ -425,31 +470,23 @@ internal static class ReadersModel
         foreach (var v in Variants)
         {
             int states = 0, finals = 0;
-            string? lost = null, twice = null, older = null, capped = null;
+            string? capped = null;
+            var broken = new SortedDictionary<string, string>(StringComparer.Ordinal);
             foreach (var sc in Scenarios)
-                {
-                    var r = Explore(v, sc);
-                    states += r.States; finals += r.Finals;
-                    if (r.Capped) capped ??= sc.Name;
-                    string where = $"{sc.Name}: ";
-                    lost ??= r.Lost != null ? where + r.Lost : null;
-                    twice ??= r.Twice != null ? where + r.Twice : null;
-                    older ??= r.Older != null ? where + r.Older : null;
-                }
-            var brokenSet = new List<string>();
-            if (lost != null) brokenSet.Add("a");
-            if (twice != null) brokenSet.Add("b");
-            if (older != null) brokenSet.Add("c");
-            bool ok = v.Expect == "broken" ? brokenSet.Count > 0
-                    : v.Expect == "" ? brokenSet.Count == 0 && capped == null
-                    : brokenSet.Contains(v.Expect);
+            {
+                var r = Explore(v, sc);
+                states += r.States; finals += r.Finals;
+                if (r.Capped) capped ??= sc.Name;
+                foreach (var (inv, why) in r.Broken)
+                    if (!broken.ContainsKey(inv)) broken[inv] = $"{sc.Name}: {why}";
+                if (v.Expect != "" && broken.ContainsKey(v.Expect)) break;
+            }
+            bool ok = v.Expect == "" ? broken.Count == 0 && capped == null : broken.ContainsKey(v.Expect);
             if (!ok) bad++;
             Console.WriteLine($"[{(ok ? "PASS" : "FAIL")}] readers, {v.Name}: {states} states, {finals} final, " +
-                (brokenSet.Count == 0 ? (capped != null ? $"no verdict: {capped} passed the state cap" : "invariants a, b and c hold") : $"broken: {string.Join(", ", brokenSet)}") +
-                (v.Expect == "" ? "" : v.Expect == "broken" ? " (expected broken)" : $" (expected {v.Expect} broken)"));
-            if (lost != null) Console.WriteLine($"         (a) {lost}");
-            if (twice != null) Console.WriteLine($"         (b) {twice}");
-            if (older != null) Console.WriteLine($"         (c) {older}");
+                (broken.Count == 0 ? (capped != null ? $"no verdict: {capped} passed the state cap" : "invariants a to e hold") : $"broken: {string.Join(", ", broken.Keys)}") +
+                (v.Expect == "" ? "" : $" (expected {v.Expect} broken)"));
+            foreach (var (inv, why) in broken) Console.WriteLine($"         ({inv}) {why}");
         }
         return bad;
     }

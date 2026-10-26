@@ -43,6 +43,7 @@
 //     release frame (WakeModel), then the companion's readers, each a
 //     handle with its own requests (ReadersModel).
 //   SignalGateModel readers   the companion's readers alone (ReadersModel).
+//   SignalGateModel parks   the HID read path's parks alone (WakeModel).
 //   SignalGateModel outcomes <frames> <scenario> [v203]   one driver's
 //     outcomes in a scenario, unpaired.
 using System;
@@ -81,6 +82,9 @@ internal static class Program
         // readers: the companion's readers alone (ReadersModel).
         if (args.Length >= 1 && args[0] == "readers")
             return ReadersModel.Run() == 0 ? 0 : 1;
+        // parks: the HID read path's parks alone (WakeModel).
+        if (args.Length >= 1 && args[0] == "parks")
+            return WakeModel.Run() == 0 ? 0 : 1;
         if (args.Length >= 1 && args[0] == "wake")
             return RunCompanion(args.Length > 1 ? int.Parse(args[1]) : 3) + WakeModel.Run() + ReadersModel.Run() == 0 ? 0 : 1;
         // x14 <frames> <rule|c<i>> <scenario index>: the review's order
