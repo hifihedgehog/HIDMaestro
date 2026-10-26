@@ -71,6 +71,9 @@ internal static class HeldRemoval
         /// <summary>What the removal added to DeviceManager.RemovalsLeftHere,
         /// the count a dispose keeps its lease on.</summary>
         public long Left;
+        /// <summary>What it added to DeviceManager.RemovalsNotGone, the count
+        /// of removal tests that ended not gone, which S77 reads.</summary>
+        public long NotGone;
         /// <summary>Another program's removal query of the parent's subtree is
         /// under way, as Device Manager's disable makes one: DN_STARTED is
         /// clear on every devnode it covers while it runs (ReactOS
@@ -236,11 +239,12 @@ internal static class HeldRemoval
     static (bool Removed, long Ms) Remove(Machine m, string id, bool fast, Func<bool>? fail = null) =>
         Hooked(m, () =>
         {
-            long left = DeviceManager.RemovalsLeftHere;
+            long left = DeviceManager.RemovalsLeftHere, notGone = DeviceManager.RemovalsNotGone;
             var sw = Stopwatch.StartNew();
             bool removed = DeviceManager.RemoveDevice(id, timeoutMs: 2000, fast: fast, forceFallbacks: true, failDevice: fail);
             long ms = sw.ElapsedMilliseconds;
             m.Left = DeviceManager.RemovalsLeftHere - left;
+            m.NotGone = DeviceManager.RemovalsNotGone - notGone;
             return (removed, ms);
         });
 
@@ -377,6 +381,10 @@ internal static class HeldRemoval
         tally.Add(("no answer", silent, 1));
         check("a removal that leaves a device counts once on RemovalsLeftHere, which a dispose keeps its lease on, and one that removes it counts nothing",
               tally.TrueForAll(t => t.M.Left == t.Want), string.Join(", ", tally.Select(t => $"{t.Name} {t.M.Left}")));
+        check("a removal that leaves a device ends its parent's removal test not gone, once, which S77 counts (RemovalsNotGone), and one that removes it ends none so",
+              tally.TrueForAll(t => t.M.NotGone == t.Want), string.Join(", ", tally.Select(t => $"{t.Name} {t.M.NotGone}")));
+
+        SweepChecks(check);
 
         // The wait itself: done once every child is out of the tree and the
         // parent no longer started, and not before.
@@ -451,6 +459,43 @@ internal static class HeldRemoval
     static MachineClaims.OwnerRecord OwnerRecord(string owner, bool live, string token) =>
         new(owner, Pid: 0, Image: null, StartTime: 0, SdkVersion: null, UsbipPort: 0, Live: live, Self: false,
             Controllers: new[] { new MachineClaims.ControllerEntry(token, -1, "umdf", "dualshock-4-v2", null) });
+
+    // ── A sweep's removal of a device that refused one before ──
+
+    /// <summary>OwnerSweep.RemoveGroup, the sweeps' removal of one controller
+    /// of a program that has exited, on the machine's parent, with no index
+    /// to ask the driver through. Adds what it left to
+    /// <see cref="Machine.Left"/>.</summary>
+    static bool SweepGroup(Machine m)
+    {
+        var remove = typeof(OwnerSweep).GetMethod("RemoveGroup", AnyStatic)
+            ?? throw new MissingMethodException("OwnerSweep.RemoveGroup");
+        var group = new OwnerCensus.DeviceGroup("#index:-1", -1, new List<string> { Parent }, OwnerCensus.Owner.Dead, null);
+        return Hooked(m, () =>
+        {
+            long left = DeviceManager.RemovalsLeftHere;
+            bool gone = (bool)remove.Invoke(null, new object[] { group })!;
+            m.Left += DeviceManager.RemovalsLeftHere - left;
+            return gone;
+        });
+    }
+
+    /// <summary>Against a holder that never reads, each removal query took
+    /// about 5.4 s before Windows refused it, and a request to a driver that
+    /// does not answer 2 s more, every sweep. A sweep remembers a refusal for
+    /// the device's present life, and a later sweep in the process leaves
+    /// the device and its records without asking again while its state is
+    /// the same, still counting it left.</summary>
+    static void SweepChecks(Action<string, bool, string> check)
+    {
+        var m = new Machine(holder: true);
+        bool first = SweepGroup(m);
+        bool second = SweepGroup(m);
+        check("two sweeps of a held device whose driver cannot be asked: the first asks and is refused, the second leaves it without asking -> one removal query, both left, every record kept",
+              !first && !second && m.Calls.SequenceEqual(new[] { $"query {Parent}" }) && m.Left == 2 && m.Violations.Count == 0
+              && Kept(m.Nodes[Parent]) && Kept(m.Nodes[Child]),
+              $"{Describe(m, (first || second, 0))}");
+    }
 
     // ── The lease of a create that meets a refused removal ──
 
