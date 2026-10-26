@@ -708,7 +708,6 @@ public sealed class HMContext : IDisposable
 
             string? instanceId = null;
             long refused = Internal.DeviceManager.LockTakesRefusedHere;
-            long left = Internal.DeviceManager.RemovalsLeftHere;
             // Set once SetupController returns. From then on the index's
             // devices and sections are this create's, and so is the
             // controller's hold once its constructor runs.
@@ -757,13 +756,19 @@ public sealed class HMContext : IDisposable
                 // Best-effort cleanup of any partial state, then rethrow.
                 // The devices go before the lease below gives their index
                 // and identity back to the machine.
+                long left = Internal.DeviceManager.RemovalsLeftHere;
                 try { TeardownDevices(lease.TransportIndex, instanceId); } catch { }
                 // A create cut short by the exit's bound on the PnP lock keeps
                 // its lease, as a dispose does, so the record names what it
-                // made for the next sweep. So does one whose device another
-                // program kept by refusing its removal.
+                // made for the next sweep. So does one whose own device another
+                // program kept by refusing the teardown's removal. A prior life
+                // or a rival that another program kept, which refused the
+                // create before it registered a devnode (instanceId null), is
+                // not this create's device: the lease goes back, or every later
+                // create of the key in this process would be refused as in use
+                // by this process until it exits.
                 if (Internal.DeviceManager.LockTakesRefusedHere != refused
-                    || Internal.DeviceManager.RemovalsLeftHere != left) keepLease = true;
+                    || (instanceId != null && Internal.DeviceManager.RemovalsLeftHere != left)) keepLease = true;
                 throw;
             }
         }
