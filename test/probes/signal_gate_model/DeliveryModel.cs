@@ -887,6 +887,22 @@ internal static class DeliveryModel
             return w;
         }
 
+        // The states one state reaches by its own steps, wait events left
+        // out.
+        List<int> OwnClosure(int start, int thisWaits)
+        {
+            var seen = new HashSet<int> { start };
+            var stack = new Stack<int>();
+            stack.Push(start);
+            while (stack.Count > 0)
+            {
+                var x = Of(stack.Pop());
+                foreach (var y in x.S)
+                    if (y.Label != L_WAIT && Own(x, y, thisWaits & (M_READ | M_MAP)) && seen.Add(y.M)) stack.Push(y.M);
+            }
+            return seen.ToList();
+        }
+
         // State id with its Early flag set or cleared.
         int WithEarly(int id, bool early)
         {
@@ -993,11 +1009,23 @@ internal static class DeliveryModel
                 // A wake the run has and this driver does not (a SetEvent
                 // that came after its worker read the frame, which this
                 // driver's take had already answered): where this driver's
-                // worker blocks, the run's wait returns it, and the run reads
-                // and comes back to its wait. Where this driver's worker then
-                // times out, the run's blocks and times out with it.
-                if (!took && label == L_WAIT && match >> 15 == K_BLOCK && x.AtWait && !x.Waiting && !x.Blocked)
-                    foreach (var y in x.S) if (y.Label == L_WAIT && y.Match >> 15 == K_INPUT) scratch.Add(y.M);
+                // wait blocks or returns the owner pipe or a timeout, the
+                // run's returns that wake first, the run reads on it, and its
+                // next wait does what this driver's did.
+                if (!took && label == L_WAIT && kind is K_BLOCK or K_OWNER or K_TIMEOUT && x.AtWait && !x.Waiting && !x.Blocked)
+                    foreach (var y in x.S)
+                        if (y.Label == L_WAIT && y.Match >> 15 == K_INPUT && (y.Match & 0x7FFF) == (match & 0x7FFF))
+                            foreach (var z in OwnClosure(y.M, waitsBefore))
+                            {
+                                bool next = false;
+                                foreach (var w in Of(z).S)
+                                    if (w.Label == L_WAIT && w.Match == match) { scratch.Add(w.M); next = true; }
+                                if (!next && kind == K_TIMEOUT)
+                                    foreach (var w in Of(z).S)
+                                        if (w.Label == L_WAIT && w.Match >> 15 == K_BLOCK)
+                                            foreach (var u in Of(w.M).S) if (u.Label == L_WAIT && u.Match >> 15 == K_TIMEOUT) { scratch.Add(u.M); next = true; }
+                                if (!next && kind == K_BLOCK && Of(z).AtWait) scratch.Add(z);
+                            }
                 if (!took && label == L_WAIT && match >> 15 == K_TIMEOUT && x.Waiting && !x.Blocked)
                     foreach (var y in x.S)
                         if (y.Label == L_WAIT && y.Match >> 15 == K_BLOCK)
@@ -1148,7 +1176,10 @@ internal static class DeliveryModel
                 // 2: equal to a paired run's, 1: better (an extra frame, nothing
                 // worse), 0: no paired run's. After a step the runs could not
                 // follow, nothing passes.
-                int cls = v203.MatchClass(Vset, mine, KeyboardPrograms(sc));
+                // This driver's worker takes no wait event again, so the
+                // runs' workers finish theirs on their own: a wake only they
+                // have is read.
+                int cls = v203.MatchClass(v203.Close(Vset, tw | M_FREE), mine, KeyboardPrograms(sc));
                 if (div) cls = 0;
                 bool matched = cls != 0;
                 if (cls == 2) res.Equal.Add(mine);
@@ -1163,7 +1194,7 @@ internal static class DeliveryModel
                     res.Example = Show(mine) + (div ? " (after a step v2.0.3 could not take)" : "");
                     if (parent != null) res.Path = PathTo(parent, (tk, V));
                     if (parent != null && DumpSets) res.PathSets = PathSetsTo(parent, (tk, V), v203);
-                    if (parent != null) res.PairedSide = v203.Describe(Vset);
+                    if (parent != null) res.PairedSide = v203.Describe(v203.Close(Vset, tw | M_FREE));
                 }
                 continue;
             }
