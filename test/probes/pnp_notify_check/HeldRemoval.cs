@@ -20,9 +20,16 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Text;
+using System.Text.Json.Nodes;
 using System.Threading;
+using HIDMaestro;
 using HIDMaestro.Internal;
+using Microsoft.Win32.SafeHandles;
 
 internal static class HeldRemoval
 {
@@ -355,7 +362,133 @@ internal static class HeldRemoval
 
         check("no CM_LOCATE_DEVNODE_CANCELREMOVE locate in the held removals", cancels == 0, $"{cancels}");
 
+        LeaseChecks(check);
         RequestChecks(check);
+    }
+
+    // ── The lease of a create that meets a refused removal ──
+
+    const BindingFlags AnyStatic = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+    const BindingFlags AnyInstance = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+    /// <summary>A create keeps its lease only for a device it registered and
+    /// could not remove, so the record names that device for the next sweep.
+    /// A prior life or a rival another program keeps is not its device: the
+    /// create registered nothing, and a kept lease would refuse every later
+    /// create of the key in this process until it exits ("in use by a
+    /// controller of this process").</summary>
+    static void LeaseChecks(Action<string, bool, string> check)
+    {
+        // A prior life of the identity, held by another program, refuses its
+        // removal and stays, so the create refuses to register over it.
+        var prior = new Machine(holder: true);
+        string? tornDown = "";
+        var a = CreateLease(
+            created =>
+            {
+                Remove(prior, Parent, fast: false);
+                throw new InvalidOperationException($"{Parent} is still there after its removal; refusing to register it");
+            },
+            id => tornDown = id);
+        check("a create refused because another program keeps the identity's prior life (its removal refused) -> the create registered nothing, and its lease goes back",
+              a.Released && prior.Left == 1 && tornDown == null && a.Thrown is InvalidOperationException,
+              $"lease {(a.Released ? "given back" : "kept")}, the prior life's removal left {prior.Left}, teardown of {tornDown ?? "nothing"}, {a.Thrown?.GetType().Name}");
+
+        // The create registered its devnode, its start failed, and the
+        // teardown's removal is refused: the device is the create's.
+        var own = new Machine(holder: true);
+        var b = CreateLease(
+            created =>
+            {
+                created?.Invoke(Parent);
+                throw new InvalidOperationException($"The device {Parent} failed its start, problem code 10.");
+            },
+            id => { if (id != null) Remove(own, id, fast: false); });
+        check("a create whose own devnode another program keeps by refusing its teardown's removal -> the lease stays, so the record names the device",
+              !b.Released && own.Left == 1 && Kept(own.Nodes[Parent]),
+              $"lease {(b.Released ? "given back" : "kept")}, the teardown left {own.Left}, {Describe(own, (false, 0))}");
+
+        // The same create with no holder: the teardown removes the devnode.
+        var free = new Machine(holder: false);
+        var c = CreateLease(
+            created =>
+            {
+                created?.Invoke(Parent);
+                throw new InvalidOperationException($"The device {Parent} failed its start, problem code 10.");
+            },
+            id => { if (id != null) Remove(free, id, fast: false); });
+        check("a create whose own devnode its teardown removed -> its lease goes back",
+              c.Released && free.Left == 0 && !free.Nodes[Parent].Record,
+              $"lease {(c.Released ? "given back" : "kept")}, the teardown left {free.Left}");
+    }
+
+    /// <summary>HMContext.CreateUnderLease with its machine steps replaced,
+    /// as usbip_e2e_check's offline create case replaces them: a lease on a
+    /// probe index that holds no machine claim and wrote no record,
+    /// <paramref name="setup"/> for SetupController (given the callback that
+    /// reports the registered parent) and <paramref name="teardown"/> for
+    /// TeardownController. Says whether the create gave its lease back. A
+    /// lease the create kept is disposed after.</summary>
+    static (bool Released, Exception? Thrown) CreateLease(Func<Action<string>?, string?> setup, Action<string?> teardown)
+    {
+        var t = typeof(HMContext);
+        var acquire = t.GetField("AcquireLease", AnyStatic)!;
+        var setupField = t.GetField("SetupDevices", AnyStatic)!;
+        var teardownField = t.GetField("TeardownDevices", AnyStatic)!;
+        var create = t.GetMethod("CreateUnderLease", AnyInstance)!;
+        object?[] saved = { acquire.GetValue(null), setupField.GetValue(null), teardownField.GetValue(null) };
+        ControllerLease? lease = null;
+        Exception? thrown = null;
+        try
+        {
+            acquire.SetValue(null, (Func<int, string?, string, string, ControllerLease>)((slot, key, backend, id) => lease = OfflineLease(15)));
+            setupField.SetValue(null, (Func<int, ControllerProfile, DeviceIdentity?, Action<string>?, string?>)((i, p, identity, created) => setup(created)));
+            teardownField.SetValue(null, (Action<int, string?>)((i, instanceId) => teardown(instanceId)));
+            var context = (HMContext)RuntimeHelpers.GetUninitializedObject(typeof(HMContext));
+            try { create.Invoke(context, new object?[] { 0, Dualshock4(), null }); }
+            catch (TargetInvocationException e) { thrown = e.InnerException; }
+        }
+        finally
+        {
+            acquire.SetValue(null, saved[0]);
+            setupField.SetValue(null, saved[1]);
+            teardownField.SetValue(null, saved[2]);
+        }
+        bool released = lease != null && (int)typeof(ControllerLease).GetField("_released", AnyInstance)!.GetValue(lease)! != 0;
+        lease?.Dispose();
+        return (released, thrown);
+    }
+
+    /// <summary>A lease on <paramref name="index"/> that holds no machine
+    /// claim and wrote no record, so its Dispose gives nothing back.</summary>
+    static ControllerLease OfflineLease(int index)
+    {
+        var ctor = typeof(ControllerLease).GetConstructor(AnyInstance, new[]
+        {
+            typeof(int), typeof(DeviceIdentity), typeof(SafeFileHandle), typeof(SafeFileHandle),
+        }) ?? throw new MissingMethodException("ControllerLease's private constructor changed.");
+        return (ControllerLease)ctor.Invoke(new object[]
+        {
+            index, DeviceIdentity.ForIndex(index), new SafeFileHandle(IntPtr.Zero, false), new SafeFileHandle(IntPtr.Zero, false),
+        });
+    }
+
+    /// <summary>The catalog's dualshock-4-v2, a profile on the UMDF2
+    /// driver's path.</summary>
+    static HMProfile Dualshock4()
+    {
+        var asm = typeof(HMContext).Assembly;
+        foreach (string res in asm.GetManifestResourceNames().Where(n => n.StartsWith("HIDMaestro.Profiles.", StringComparison.Ordinal)))
+        {
+            using var st = asm.GetManifestResourceStream(res)!;
+            using var sr = new StreamReader(st, Encoding.UTF8);
+            string text = sr.ReadToEnd();
+            if (JsonNode.Parse(text) is not JsonObject o || (string?)o["id"] != "dualshock-4-v2") continue;
+            var p = ControllerProfile.Parse(Encoding.UTF8.GetBytes(text)) ?? throw new InvalidOperationException("dualshock-4-v2 did not parse");
+            p.ValidateDeviceModel();
+            return new HMProfile(p);
+        }
+        throw new InvalidOperationException("no catalog profile dualshock-4-v2");
     }
 
     // A timed wait can end a timer tick before its time on the Stopwatch.
