@@ -136,11 +136,12 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     private readonly object _hidLock = new();
     // Reports waiting for a read, each in a buffer of _reportCapacity bytes
     // the device keeps: the newest frame alone, or for a keyboard or mouse
-    // (_deliverEvery) every frame in order, up to MaxFrameQueue, with frames
-    // put back after an unlink ahead of them (PutBackLocked). A buffer goes
-    // back to _spareFrames once its read is answered or the queue drops it,
-    // so a frame allocates nothing: one buffer for each frame held and one
-    // for each frame on its way to the wire. Guarded by _hidLock.
+    // (_deliverEvery) every frame in order, up to MaxFrameQueue. A buffer
+    // goes back to _spareFrames once its read is answered or the queue drops
+    // it, so a frame allocates nothing: one buffer for each frame held and
+    // one the connection's reader is sending from, two in all for a device
+    // that holds one frame and MaxFrameQueue + 1 at most. Guarded by
+    // _hidLock.
     private readonly Queue<QueuedFrame> _frameQueue = new();
     private readonly Stack<byte[]> _spareFrames = new();
     // Parked interrupt-IN URBs, keyed by endpoint address (issue #56). A
@@ -184,76 +185,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         public QueuedFrame(byte[] buffer, int length) { Buffer = buffer; Length = length; }
     }
 
-    /// <summary>The reads one stream answered, oldest first, each with a copy
-    /// of what it carried, for an unlink that comes after the answer
-    /// (HandleUnlink). Holds the last few: a full log drops its oldest. The
-    /// copies' buffers are kept and grown to the longest answer, so an answer
-    /// allocates nothing once they have. Guarded by _hidLock.</summary>
-    private sealed class AnswerLog
-    {
-        private readonly uint[] _reads;
-        private readonly byte[][] _bytes;
-        private readonly int[] _lengths;
-        private int _first, _count;
-
-        public AnswerLog(int depth)
-        {
-            _reads = new uint[depth];
-            _bytes = new byte[depth][];
-            Array.Fill(_bytes, Array.Empty<byte>());
-            _lengths = new int[depth];
-        }
-
-        public int Count => _count;
-
-        /// <summary><paramref name="read"/> answered with
-        /// <paramref name="bytes"/>, the newest entry.</summary>
-        public void Add(uint read, ReadOnlySpan<byte> bytes)
-        {
-            if (_count == _reads.Length)
-            {
-                _first = (_first + 1) % _reads.Length;
-                _count--;
-            }
-            int i = (_first + _count) % _reads.Length;
-            _reads[i] = read;
-            if (_bytes[i].Length < bytes.Length) _bytes[i] = new byte[bytes.Length];
-            bytes.CopyTo(_bytes[i]);
-            _lengths[i] = bytes.Length;
-            _count++;
-        }
-
-        /// <summary>Where <paramref name="read"/> is, counting from the
-        /// oldest entry, or -1.</summary>
-        public int Find(uint read)
-        {
-            for (int k = 0; k < _count; k++)
-                if (_reads[(_first + k) % _reads.Length] == read) return k;
-            return -1;
-        }
-
-        /// <summary>What entry <paramref name="k"/> carried.</summary>
-        public ReadOnlySpan<byte> Bytes(int k)
-        {
-            int i = (_first + k) % _reads.Length;
-            return _bytes[i].AsSpan(0, _lengths[i]);
-        }
-
-        /// <summary>Drop entry <paramref name="k"/> and every newer one.</summary>
-        public void Truncate(int k) => _count = Math.Min(_count, k);
-
-        public void Clear() => _count = 0;
-    }
-
     // Device state.
     private volatile byte _configurationValue;
 
     private const int MaxFrameQueue = 8;
-
-    // The answers a stream keeps for an unlink that comes after them
-    // (AnswerLog): an unlink of a read answered before the last eight on its
-    // endpoint finds nothing to put back.
-    private const int AnswersKept = 8;
 
     // A keyboard or mouse gets every report in order, as the HID path's
     // acknowledgement delivers it (ControllerProfile.DeliversEveryReport):
@@ -272,21 +207,6 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     /// queue <see cref="_pendingInterruptIn"/> holds for it. Guarded by
     /// <see cref="_hidLock"/>.</summary>
     private readonly Queue<uint> _primaryPending;
-
-    // The reads the primary endpoint answered with a frame, newest last, each
-    // with its frame, for a cancel that comes after the answer. usbip-win2
-    // completes a canceled read at once, sends CMD_UNLINK, and drops a
-    // RET_SUBMIT that comes for the read after (device_ioctl.cpp
-    // send_cmd_unlink_and_complete, request_list.cpp cancel and
-    // find_sent_request), so that frame never reached the host. A device
-    // holds a report until a read takes it, so HandleUnlink puts the frame
-    // back (PutBackLocked). The newest alone for a device that holds one
-    // frame, the last MaxFrameQueue for a keyboard or mouse.
-    private readonly AnswerLog _frameAnswers;
-    // Frames put back while reads were parked wait at the head of the queue,
-    // and the input pump answers the oldest parked reads with them before it
-    // takes up a newer frame. Guarded by _hidLock.
-    private bool _resend;
 
     /// <summary>The answers the device gives on request (issue #56, design
     /// note mechanism 4), compiled for this controller: plain entries by
@@ -370,7 +290,6 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         _builder = profile.GetOrBuildReportBuilder();
         // As DeviceOrchestrator.WaitsOnDelivery decides it for the HID path.
         _deliverEvery = profile.HasDescriptor && profile.DeliversEveryReport(profile.GetOrBuildKeyboardMousePacker());
-        _frameAnswers = new AnswerLog(_deliverEvery ? MaxFrameQueue : 1);
         int expectedSize = _builder.InputReportByteSize > 0 ? _builder.InputReportByteSize : 17;
         _reportCapacity = Math.Max(expectedSize, SharedMemoryIO.EXTENDED_DATA_CAPACITY);
         _pumpReport = new byte[_reportCapacity];
@@ -563,13 +482,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     if (_stop) break;
                     fresh = TryReadInputFrame(_pumpReport, out length);
                 }
-                if (!fresh)
-                {
-                    // No new frame. A frame put back after a cancel may wait
-                    // for a parked read (HandleUnlink).
-                    if (Volatile.Read(ref _resend)) SendWaitingPutBack();
-                    continue;
-                }
+                if (!fresh) continue;
                 var report = new ReadOnlySpan<byte>(_pumpReport, 0, length);
 
                 // A device that builds its reports sends nothing from here.
@@ -595,45 +508,34 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 uint seq = 0;
                 bool answer = false;
                 UsbipServer.Connection? conn = null;
-                while (true)
+                lock (_hidLock)
                 {
-                    // Frames put back for parked reads go to them before this
-                    // one is answered or queued, so they reach the wire ahead
-                    // of it.
-                    if (Volatile.Read(ref _resend)) SendWaitingPutBack();
-                    lock (_hidLock)
+                    int slot = _inputSlot[_inputReportIds && length > 0 ? report[0] : 0];
+                    if (slot >= 0)
                     {
-                        // Put back since the look above: they go first.
-                        if (_resend) continue;
-                        int slot = _inputSlot[_inputReportIds && length > 0 ? report[0] : 0];
-                        if (slot >= 0)
-                        {
-                            report.CopyTo(_inputReports[slot]);
-                            _inputReportLength[slot] = length;
-                        }
-                        var pending = _primaryPending;
-                        if (pending.Count > 0)
-                        {
-                            seq = pending.Dequeue();
-                            answer = true;
-                            NoteAnsweredLocked(seq, report);
-                            CountPrimaryCompletionLocked();
-                            conn = HoldSendLocked();
-                        }
-                        else
-                        {
-                            // No read parked. The frame takes over the buffer
-                            // of the frame no read took, which it replaces,
-                            // or for a keyboard or mouse the buffer of the
-                            // oldest frame a full queue drops.
-                            byte[] buffer = _frameQueue.Count >= (_deliverEvery ? MaxFrameQueue : 1) ? _frameQueue.Dequeue().Buffer
-                                : _spareFrames.Count > 0 ? _spareFrames.Pop()
-                                : new byte[_reportCapacity];
-                            report.CopyTo(buffer);
-                            _frameQueue.Enqueue(new QueuedFrame(buffer, length));
-                        }
+                        report.CopyTo(_inputReports[slot]);
+                        _inputReportLength[slot] = length;
                     }
-                    break;
+                    var pending = _primaryPending;
+                    if (pending.Count > 0)
+                    {
+                        seq = pending.Dequeue();
+                        answer = true;
+                        CountPrimaryCompletionLocked();
+                        conn = HoldSendLocked();
+                    }
+                    else
+                    {
+                        // No read parked. The frame takes over the buffer of
+                        // the frame no read took, which it replaces, or for a
+                        // keyboard or mouse the buffer of the oldest frame a
+                        // full queue drops.
+                        byte[] buffer = _frameQueue.Count >= (_deliverEvery ? MaxFrameQueue : 1) ? _frameQueue.Dequeue().Buffer
+                            : _spareFrames.Count > 0 ? _spareFrames.Pop()
+                            : new byte[_reportCapacity];
+                        report.CopyTo(buffer);
+                        _frameQueue.Enqueue(new QueuedFrame(buffer, length));
+                    }
                 }
                 if (answer) SendHeld(conn, seq, 0, length, report);
             }
@@ -646,92 +548,12 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         }
     }
 
-    /// <summary>A read on the primary endpoint took
-    /// <paramref name="frame"/>. Caller holds <see cref="_hidLock"/>.</summary>
-    private void NoteAnsweredLocked(uint read, ReadOnlySpan<byte> frame) => _frameAnswers.Add(read, frame);
-
     /// <summary>Caller holds <see cref="_hidLock"/>.</summary>
     private void CountPrimaryCompletionLocked()
     {
         if (DiagPath != null)
             _completionsPerEp[_primaryInEndpoint] =
                 _completionsPerEp.TryGetValue(_primaryInEndpoint, out var cc) ? cc + 1 : 1;
-    }
-
-    private enum PutBack : byte { None, Queued, ToPump }
-
-    /// <summary>The host unlinked <paramref name="victim"/>, a read the
-    /// device had answered with a frame, so the frame never reached the host
-    /// (<see cref="_frameAnswers"/>). It goes back to the head of the queue,
-    /// and to the input pump while reads are parked, which answers the
-    /// oldest of them with it. A keyboard or mouse needs every report in
-    /// order, so every frame answered after it goes back behind it, ahead
-    /// of the frames queued since: a host that cancels all the reads it has
-    /// out lost those answers the same way. A host that cancels one read and
-    /// keeps the answers after it gets those again, and its newest state
-    /// still comes last. Any other device's frame is its state, and goes
-    /// back only while nothing newer went out or into the queue. Caller
-    /// holds <see cref="_hidLock"/>.</summary>
-    private PutBack PutBackLocked(uint victim)
-    {
-        var log = _frameAnswers;
-        int from = log.Find(victim);
-        if (from < 0 || !_deliverEvery && (from != log.Count - 1 || _frameQueue.Count > 0)) return PutBack.None;
-        int queued = _frameQueue.Count;
-        for (int k = from; k < log.Count; k++) _frameQueue.Enqueue(CopyFrameLocked(log.Bytes(k)));
-        for (int k = 0; k < queued; k++) _frameQueue.Enqueue(_frameQueue.Dequeue());
-        log.Truncate(from);
-        if (_primaryPending.Count == 0) return PutBack.Queued;
-        _resend = true;
-        return PutBack.ToPump;
-    }
-
-    /// <summary><paramref name="frame"/> in a buffer of the queue's. Caller
-    /// holds <see cref="_hidLock"/>.</summary>
-    private QueuedFrame CopyFrameLocked(ReadOnlySpan<byte> frame)
-    {
-        byte[] buffer = _spareFrames.Count > 0 ? _spareFrames.Pop() : new byte[_reportCapacity];
-        frame.CopyTo(buffer);
-        return new QueuedFrame(buffer, frame.Length);
-    }
-
-    /// <summary>The input pump's: the frames put back go to the parked
-    /// reads, oldest first, and stay queued for the reads to come once none
-    /// is parked. The pump comes here before it takes up a new frame, so the
-    /// frames put back reach the wire ahead of it.</summary>
-    private void SendWaitingPutBack()
-    {
-        while (true)
-        {
-            uint read;
-            QueuedFrame frame;
-            UsbipServer.Connection? conn;
-            lock (_hidLock)
-            {
-                if (!_resend) return;
-                if (_primaryPending.Count == 0 || _frameQueue.Count == 0)
-                {
-                    _resend = false;
-                    return;
-                }
-                read = _primaryPending.Dequeue();
-                frame = _frameQueue.Dequeue();
-                NoteAnsweredLocked(read, frame.Buffer.AsSpan(0, frame.Length));
-                CountPrimaryCompletionLocked();
-                conn = HoldSendLocked();
-            }
-            SendHeld(conn, read, 0, frame.Length, frame.Buffer.AsSpan(0, frame.Length));
-            lock (_hidLock) _spareFrames.Push(frame.Buffer);
-        }
-    }
-
-    /// <summary>Wake the input pump for a frame put back, unless the pump
-    /// has ended. Without its event the pump polls, and finds the frame at
-    /// its next look.</summary>
-    private void WakeInputPump()
-    {
-        lock (_lifetimeLock)
-            if (!_inputWakeClosed && _inputWaitEvent != IntPtr.Zero) SetEvent(_inputWaitEvent);
     }
 
     /// <summary>Seqlock read of the shared input section plus the wire
@@ -926,7 +748,6 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     if (epAddr == _primaryInEndpoint && _frameQueue.Count > 0)
                     {
                         frame = _frameQueue.Dequeue();
-                        NoteAnsweredLocked(cmd.Seqnum, frame.Buffer.AsSpan(0, frame.Length));
                         // In order with the frames the input pump answers.
                         conn = HoldSendLocked();
                     }
@@ -978,6 +799,18 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         SendError(cmd.Seqnum, -UsbipProtocol.EPipe);
     }
 
+    /// <summary>A CMD_UNLINK. A read still parked is removed, and the answer
+    /// is -ECONNRESET. A read the device has answered gets status 0 and
+    /// nothing more: usbip-win2 drops a RET_SUBMIT that comes for a read it
+    /// canceled (request_list.cpp cancel and find_sent_request), so that
+    /// answer is lost. A real device served by Linux's usbip-host loses it
+    /// the same way. The stub sends a completed URB's RET_SUBMIT and answers
+    /// an unlink of it with status 0 (stub_rx.c stub_recv_cmd_unlink,
+    /// stub_tx.c stub_tx_loop), and the device has handed its data over and
+    /// never sends it again. Neither does this device. A device that reports
+    /// on a period, as every catalog USB/IP persona does through its stream,
+    /// its idle frames or its own clock, sends its current state again
+    /// within that period, as the real one does.</summary>
     public void HandleUnlink(uint seqnum, uint victimSeqnum)
     {
         if (_stop) return;
@@ -986,29 +819,6 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         // the unlink once the URB's RET_SUBMIT is on the wire.
         if (audio == UsbAudioEngine.UnlinkResult.Completing) return;
         bool removed = audio == UsbAudioEngine.UnlinkResult.Removed;
-        // A device that builds its reports builds one the host never got
-        // under the lock its clock builds and sends under.
-        if (_engine is { Protocol.BuildsReports: true })
-            lock (_streamSendLock) Unlink(seqnum, victimSeqnum, removed);
-        else
-            Unlink(seqnum, victimSeqnum, removed);
-    }
-
-    /// <summary>HandleUnlink's work on the reads the device parks and
-    /// answers. The answer to a read it had answered never reached the host:
-    /// usbip-win2 completes a canceled read at once, sends CMD_UNLINK, and
-    /// drops a RET_SUBMIT that comes for it after (device_ioctl.cpp
-    /// send_cmd_unlink_and_complete, request_list.cpp cancel and
-    /// find_sent_request). What the read carried goes out again: a frame
-    /// (PutBackLocked), a report the device builds (PutBackReportLocked), and
-    /// the protocol's packets on its input endpoint or a part of a reply on
-    /// its bulk IN endpoint (PutBackPacketsLocked, PutBackRepliesLocked).</summary>
-    private void Unlink(uint seqnum, uint victimSeqnum, bool removed)
-    {
-        var putBack = PutBack.None;
-        bool report = false, packets = false, replies = false;
-        uint read = 0;
-        int length = 0;
         UsbipServer.Connection? conn;
         lock (_hidLock)
         {
@@ -1037,18 +847,6 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 }
                 if (_parkedBulkLength.Remove(victimSeqnum)) _bulkReadsCanceled++;
             }
-            if (!removed)
-            {
-                // An answered read, on whichever stream answered it.
-                putBack = PutBackLocked(victimSeqnum);
-                if (_reportAnswered && victimSeqnum == _reportAnsweredRead)
-                {
-                    report = true;
-                    length = PutBackReportLocked(out read);
-                }
-                packets = PutBackPacketsLocked(victimSeqnum);
-                replies = PutBackRepliesLocked(victimSeqnum);
-            }
             // Whoever answered the read took the send lock in its own hold of
             // this lock, before this one, so the RET_UNLINK follows the read's
             // RET_SUBMIT (HoldSendLocked).
@@ -1056,25 +854,11 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         }
         // Protocol rule (usbip-win2 wsk_receive.cpp cites usbip_protocol.rst):
         // -ECONNRESET when the URB was still queued, 0 when already answered.
-        try
-        {
-            conn?.SendRetUnlink(seqnum, removed ? -UsbipProtocol.EConnReset : 0);
-            // A report built again for a read that was parked, after the
-            // RET_UNLINK.
-            if (length > 0) conn?.SendRetSubmitNonIso(read, 0, length, _layoutReport.AsSpan(0, length));
-        }
+        try { conn?.SendRetUnlink(seqnum, removed ? -UsbipProtocol.EConnReset : 0); }
         catch { }
         finally { conn?.ExitSend(); }
         if (DeviceOrchestrator.DiagEnabled)
-        {
-            bool again = putBack != PutBack.None || report || packets || replies;
-            DeviceOrchestrator.LogDiag($"usbip unlink {BusId}: {victimSeqnum} {(removed ? "was parked" : again ? "had been answered, and what it carried goes to the next read" : "had already been answered")}");
-        }
-        // After the RET_UNLINK, so the answers of what went back follow it on
-        // the wire.
-        if (putBack == PutBack.ToPump) WakeInputPump();
-        if (packets) WakeProtocolClock();
-        if (replies) CompleteBulkIn();
+            DeviceOrchestrator.LogDiag($"usbip unlink {BusId}: {victimSeqnum} {(removed ? "was parked" : "had already been answered")}");
     }
 
     // ── Control transfers ────────────────────────────────────────────────
@@ -1446,14 +1230,12 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         ResetProtocolState(portReset: true);
     }
 
-    /// <summary>Drop the queued reports and keep their buffers, with the
-    /// frames an unlink would put back: the reads went with the import or the
-    /// port reset. Caller holds <see cref="_hidLock"/>.</summary>
+    /// <summary>Drop the queued reports and keep their buffers: the reads
+    /// went with the import or the port reset. Caller holds
+    /// <see cref="_hidLock"/>.</summary>
     private void ClearFrameQueue()
     {
         while (_frameQueue.Count > 0) _spareFrames.Push(_frameQueue.Dequeue().Buffer);
-        _frameAnswers.Clear();
-        _resend = false;
     }
 
     private void ResetAltSettings()

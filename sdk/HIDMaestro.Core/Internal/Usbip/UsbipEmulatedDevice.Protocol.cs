@@ -40,9 +40,6 @@ internal sealed partial class UsbipEmulatedDevice
     // Parked reads, oldest first, and spare nodes. Guarded by _hidLock.
     private readonly LinkedList<ProtocolRead> _protocolReads = new();
     private readonly Stack<LinkedListNode<ProtocolRead>> _spareReads = new();
-    // The reads the poll clock answered, with the bytes each carried, for an
-    // unlink that says the host never got one (PutBackPacketsLocked).
-    private readonly AnswerLog _protocolAnswers = new(AnswersKept);
 
     private DeviceClock<HostPollTick>? _protocolClock;
     // The host's poll grid starts at attach. A host controller polls an
@@ -98,7 +95,6 @@ internal sealed partial class UsbipEmulatedDevice
                 _protocolReads.RemoveFirst();
                 RecycleRead(node);
             }
-            _protocolAnswers.Clear();
         }
         Volatile.Write(ref _protocolClockOrigin, Stopwatch.GetTimestamp());
         // The ports' outputs go back to zero with the device's state.
@@ -247,23 +243,6 @@ internal sealed partial class UsbipEmulatedDevice
         }
     }
 
-    /// <summary>The host unlinked a read the poll clock answered, so the
-    /// packets it carried never reached it. They go back to the engine,
-    /// behind them those of every read answered after it, which a host that
-    /// cancels all the reads it has out lost the same way, ahead of
-    /// everything the input endpoint has still to send. Replies the host
-    /// waits for come back this way, and a report comes back one poll before
-    /// the next. Returns whether any went back. Caller holds _hidLock.</summary>
-    private bool PutBackPacketsLocked(uint victim)
-    {
-        int from = _protocolAnswers.Find(victim);
-        if (from < 0) return false;
-        // Each goes ahead of the last, so the newest goes back first.
-        for (int k = _protocolAnswers.Count - 1; k >= from; k--) _engine!.PutBackPackets(_protocolAnswers.Bytes(k));
-        _protocolAnswers.Truncate(from);
-        return true;
-    }
-
     /// <summary>Caller holds _hidLock.</summary>
     private bool TryUnlinkProtocolReadLocked(uint victim)
     {
@@ -315,7 +294,6 @@ internal sealed partial class UsbipEmulatedDevice
                     {
                         _protocolReads.RemoveFirst();
                         done = node;
-                        _protocolAnswers.Add(read.Seq, read.Buffer.AsSpan(0, read.Filled));
                     }
                 }
                 if (done != null) conn = HoldSendLocked();

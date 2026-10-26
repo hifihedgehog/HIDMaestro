@@ -26,17 +26,6 @@ internal sealed partial class UsbipEmulatedDevice
     // host polled late. Guarded by _hidLock.
     private bool _reportOwed;
 
-    // The read the device last answered with a report it built, for an
-    // unlink that says the host never got it (PutBackReportLocked). A report
-    // is the device's state, so only the newest matters. Guarded by _hidLock.
-    private bool _reportAnswered;
-    private uint _reportAnsweredRead;
-
-    // The bulk IN reads the device answered with part of a reply, with the
-    // part each took, for an unlink that says the host never got one
-    // (PutBackRepliesLocked).
-    private readonly AnswerLog _bulkAnswers = new(AnswersKept);
-
     // The report the clock builds and sends, under _streamSendLock, which is
     // held from building a report to sending it by the clock and by a late
     // read alike, so two reports never reach the wire out of order.
@@ -137,20 +126,11 @@ internal sealed partial class UsbipEmulatedDevice
                 length = engine.BuildNext(ref set, _layoutReport);
                 if (length == 0) return;
                 seq = pending.Dequeue();
-                NoteReportAnsweredLocked(seq);
+                CountCompletion();
                 conn = HoldSendLocked();
             }
             SendHeld(conn, seq, 0, length, _layoutReport.AsSpan(0, length));
         }
-    }
-
-    /// <summary>A read on the endpoint the device reports on took a report
-    /// it built. Caller holds _hidLock.</summary>
-    private void NoteReportAnsweredLocked(uint read)
-    {
-        _reportAnswered = true;
-        _reportAnsweredRead = read;
-        CountCompletion();
     }
 
     private void CountCompletion()
@@ -158,34 +138,6 @@ internal sealed partial class UsbipEmulatedDevice
         if (DiagPath != null)
             _completionsPerEp[_layoutInEndpoint] =
                 _completionsPerEp.TryGetValue(_layoutInEndpoint, out var cc) ? cc + 1 : 1;
-    }
-
-    /// <summary>The host unlinked the read the device last answered with a
-    /// report it built, so the report never reached it. A report sent on
-    /// change goes out again whatever its bytes, and a read gets a report at
-    /// once, as a read after a tick that found none parked does: the read
-    /// parked now, whose seqnum this returns with the report's length, built
-    /// into _layoutReport, or else the next read to come. The report is built
-    /// from the state as it stands, which is the report the device has to
-    /// send. Caller holds _streamSendLock and _hidLock.</summary>
-    private int PutBackReportLocked(out uint read)
-    {
-        read = 0;
-        _reportAnswered = false;
-        var engine = _engine!;
-        engine.ForgetSent();
-        if (!engine.InputOpenSince(out _)) return 0;
-        var pending = PendingFor(_layoutInEndpoint);
-        if (pending.Count == 0)
-        {
-            _reportOwed = true;
-            return 0;
-        }
-        int length = BuildOwedReport();
-        if (length == 0) return 0;
-        read = pending.Dequeue();
-        NoteReportAnsweredLocked(read);
-        return length;
     }
 
     /// <summary>An interrupt IN read on the endpoint the device reports on.
@@ -217,7 +169,7 @@ internal sealed partial class UsbipEmulatedDevice
                     PendingFor(_layoutInEndpoint).Enqueue(seqnum);
                     return;
                 }
-                NoteReportAnsweredLocked(seqnum);
+                CountCompletion();
             }
             SendRetSubmitSpan(seqnum, 0, length, _layoutReport.AsSpan(0, length));
         }
@@ -247,7 +199,7 @@ internal sealed partial class UsbipEmulatedDevice
                 length = _layoutRunner!.Visit(_submitReport!);
                 if (length == 0) return;
                 seq = pending.Dequeue();
-                NoteReportAnsweredLocked(seq);
+                CountCompletion();
                 conn = HoldSendLocked();
             }
             SendHeld(conn, seq, 0, length, _layoutReport.AsSpan(0, length));
@@ -334,28 +286,11 @@ internal sealed partial class UsbipEmulatedDevice
                 _parkedBulkLength.Remove(seq, out int capacity);
                 n = engine.TakeReply(Math.Min(capacity, chunk.Length), chunk);
                 if (n < 0) n = 0;
-                _bulkAnswers.Add(seq, chunk[..n]);
             }
             if (DeviceOrchestrator.DiagEnabled)
                 DeviceOrchestrator.LogDiag($"usbip bulk in {BusId}: read {seq} gets {n} bytes {Convert.ToHexString(chunk[..n])}");
             SendRetSubmitSpan(seq, 0, n, chunk[..n]);
         }
-    }
-
-    /// <summary>The host unlinked a bulk IN read the device answered with
-    /// part of a reply, so that part never reached it. It goes back to the
-    /// head of the replies, behind it every part answered after it, which a
-    /// host that cancels all the reads it has out lost the same way: the
-    /// next reads get them again, and the rest as before. Returns whether any
-    /// went back. Caller holds _hidLock.</summary>
-    private bool PutBackRepliesLocked(uint victim)
-    {
-        int from = _bulkAnswers.Find(victim);
-        if (from < 0) return false;
-        // Each goes ahead of the last, so the newest goes back first.
-        for (int k = _bulkAnswers.Count - 1; k >= from; k--) _engine!.PutBackReply(_bulkAnswers.Bytes(k));
-        _bulkAnswers.Truncate(from);
-        return true;
     }
 
     /// <summary>A bulk IN read on the reply endpoint. Parked first, then
@@ -374,8 +309,8 @@ internal sealed partial class UsbipEmulatedDevice
     }
 
     /// <summary>A device that builds its reports, as it is at attach and
-    /// after a port reset: no read owed or answered and no bulk read parked
-    /// or answered. The engine's own reset puts its registers back.</summary>
+    /// after a port reset: no read owed and no bulk read parked. The engine's
+    /// own reset puts its registers back.</summary>
     private void ResetLayoutState()
     {
         if (_engine is not { Protocol.BuildsReports: true } && _engine?.Protocol.Channel != ReplyChannel.BulkIn) return;
@@ -383,8 +318,6 @@ internal sealed partial class UsbipEmulatedDevice
         {
             _parkedBulkLength.Clear();
             _reportOwed = false;
-            _reportAnswered = false;
-            _bulkAnswers.Clear();
         }
     }
 }

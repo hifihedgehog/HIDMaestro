@@ -7,17 +7,17 @@
 // device each CMD_SUBMIT and CMD_UNLINK and reads back what the device sends.
 // No device is plugged in and nothing needs elevation.
 //
-//   - a frame the input pump answered a read with goes to the next read when
-//     the host unlinks the read it went to. usbip-win2 completes a read the
-//     moment it cancels it, sends CMD_UNLINK, and drops a RET_SUBMIT that
-//     comes for it after (device_ioctl.cpp send_cmd_unlink_and_complete,
-//     request_list.cpp cancel and find_sent_request), and a device keeps its
-//     report until a read takes it. With no read parked at the unlink, with
-//     one parked, with both reads of a pair unlinked, and with the read the
-//     frame went back to unlinked in turn. The frame reaches the wire before
-//     a newer one, a newer frame queued before the unlink goes in its place,
-//     a read unlinked while it is parked changes nothing, and no frame goes
-//     out twice
+//   - a frame, a report on change, a reply on a protocol's input endpoint
+//     and part of a bulk reply, each answered on a read the host then
+//     unlinks, are lost and never sent again, as a real device's are behind
+//     Linux's usbip-host. usbip-win2 completes a read the moment it cancels
+//     it, sends CMD_UNLINK, and drops a RET_SUBMIT that comes for it after
+//     (device_ioctl.cpp send_cmd_unlink_and_complete, request_list.cpp
+//     cancel and find_sent_request), and the stub answers an unlink of a
+//     completed URB with status 0 alone (stub_rx.c stub_recv_cmd_unlink).
+//     The next read takes what comes next. A read unlinked while it is
+//     parked changes nothing, and a host that cancels only the older of two
+//     answered reads gets neither again
 //   - a command on the bulk OUT endpoint that leaves a reply for the input
 //     endpoint wakes the host's poll clock, as a command on every other path
 //     does
@@ -37,13 +37,12 @@
 //     device by then
 //   - a read the input pump or the poll clock has answered, unlinked before
 //     the answer is on the wire, is answered before the RET_UNLINK
-//   - a keyboard's frames, a report on change, a reply on a protocol's input
-//     endpoint and part of a bulk reply, each answered on a read the host
-//     then unlinks, go to the next reads: a keyboard's ahead of the frames
-//     queued after them, and both of a pair the host unlinks together
-//   - under a host that cancels reads as usbip-win2 does, a game pad's
-//     frames arrive in rising order with each burst's last, a keyboard's
-//     every frame once in order, and every RET_UNLINK with status 0 after
+//   - under a host that cancels reads one at a time as usbip-win2 does, a
+//     game pad's, a keyboard's and a mouse's reports never reach it twice or
+//     older than one it has, a keyboard's and a mouse's every frame reaches
+//     it unless it canceled the read, a game pad's last state reaches it
+//     through its stream's repeat, a split bulk reply's every part goes on
+//     the wire once, in order, and every RET_UNLINK with status 0 follows
 //     its read's answer
 //
 // Each scenario ends on a frame or a read that tells a correct device from
@@ -76,24 +75,24 @@ internal static partial class Program
     {
         Console.WriteLine("\n-- A frame or a reply goes to the read that waits for it --");
         var ds = ControllerProfile.Parse(Encoding.UTF8.GetBytes(CatalogJson("dualsense-composite")))!;
-        Contained("an unlink with no read parked", () => UnlinkNoReadParked(ds));
-        Contained("an unlink with a read parked, before a new frame", () => UnlinkReadParkedNewFrame(ds));
-        Contained("an unlink with a read parked", () => UnlinkReadParked(ds));
-        Contained("the unlink of a pair", () => UnlinkPair(ds));
-        Contained("the unlink of the read a frame was put back to", () => UnlinkPutBackRead(ds));
+        Contained("an unlink of an answered read", () => UnlinkAnsweredRead(ds));
+        Contained("an unlink of an answered read with a read parked", () => UnlinkAnsweredReadParked(ds));
         Contained("an unlink after a newer frame", () => UnlinkAfterNewerFrame(ds));
         Contained("an unlink of a parked read", () => UnlinkParkedRead(ds));
-        Contained("a frame put back and a read through the queue", () => PutBackAheadOfQueue(ds));
         Contained("a new import beside the old one's detach", () => NewImportBesideDetach(ds));
         Contained("frames no read took", () => NewestFrameWaits(ds));
         Contained("a keyboard's frames no read took", KeyboardKeepsEveryFrame);
-        Contained("a keyboard's frame put back ahead of its queue", KeyboardPutBackAheadOfQueue);
-        Contained("a keyboard's pair of reads unlinked", KeyboardPutBackPair);
-        Contained("a report on change the host never got", LayoutChangePutBack);
-        Contained("a reply on the input endpoint the host never got", ProtocolPacketsPutBack);
-        Contained("a bulk reply the host never got", BulkReplyPutBack);
-        Contained("a game pad's stress", () => Stress("a game pad", ds, HandoffIndex + 25, every: false, cancelOne: true, seed: 20261026));
-        Contained("a keyboard's stress", () => Stress("a keyboard", KeyboardCopy("s43-keyboard-stress"), HandoffIndex + 26, every: true, cancelOne: false, seed: 20261027));
+        Contained("a keyboard's frame the host never got", KeyboardLostFrame);
+        Contained("a keyboard's single cancel", () => KeyboardSingleCancel("a keyboard", "keyboard", HandoffIndex + 29));
+        Contained("a mouse's single cancel", () => KeyboardSingleCancel("a mouse", "mouse", HandoffIndex + 30));
+        Contained("a report on change the host never got", LayoutChangeLost);
+        Contained("a reply on the input endpoint the host never got", ProtocolPacketsLost);
+        Contained("a bulk reply the host never got", BulkReplyLost);
+        Contained("a bulk reply's single cancel", BulkSingleCancel);
+        Contained("a game pad's stress", () => Stress("a game pad", ds, HandoffIndex + 25, every: false, seed: 20261026));
+        Contained("a keyboard's stress", () => Stress("a keyboard", KeyboardCopy("s43-keyboard-stress"), HandoffIndex + 26, every: true, seed: 20261027));
+        Contained("a mouse's stress", () => Stress("a mouse", KeyboardCopy("s43-mouse-stress", "mouse"), HandoffIndex + 27, every: true, seed: 20261028));
+        Contained("a split bulk reply's stress", () => BulkStress(HandoffIndex + 31, 20261029));
         Contained("a lapped output reader", () => LappedOutputReader(ds));
         Contained("an isochronous URB unlinked while it completes", () => AudioAnswerBeforeUnlink(ds));
         Contained("an isochronous URB whose import drops while it completes", () => AudioAnswerToItsImport(ds));
@@ -111,9 +110,12 @@ internal static partial class Program
         catch (Exception e) { Check($"{what} runs to its end", false, e.ToString()); }
     }
 
-    /// <summary>No read parked when the unlink comes: the next read takes
-    /// the frame from the queue, ahead of a newer one.</summary>
-    static void UnlinkNoReadParked(ControllerProfile ds)
+    /// <summary>A frame answered on a read the host then unlinks is lost, as
+    /// a real device's is behind Linux's usbip-host: the device has handed
+    /// it over, and the stub answers the unlink with status 0 and sends it
+    /// no more (stub_rx.c stub_recv_cmd_unlink). The next read takes the
+    /// next frame.</summary>
+    static void UnlinkAnsweredRead(ControllerProfile ds)
     {
         using var rig = new HandoffRig(ds, HandoffIndex);
         byte ep = rig.PrimaryIn;
@@ -123,120 +125,32 @@ internal static partial class Program
         int ua = rig.Unlink(a);
         uint b = rig.SubmitIn(ep, 64);
         rig.Frame(2);
-        var rb = rig.Next();
-        uint c = rig.SubmitIn(ep, 64);
-        var rc = rb.IsFrame(b, 1) ? rig.Next() : default;
+        var rb = rig.NextWithin(Hang);
         rig.SubmitIn(ep, 64);
-        var after = rc.IsFrame(c, 2) ? rig.UntilSentinel() : new();
-        Check("a frame answered on a read the host then unlinks goes to the next read, ahead of a newer frame",
-              ra.IsFrame(a, 1) && ua == 0 && rb.IsFrame(b, 1) && rc.IsFrame(c, 2) && after.Count == 0,
-              $"first read {ra}, unlink {ua}, next read {rb}, the one after {rc}, then {Describe(after)}");
+        var after = rb.IsFrame(b, 2) ? rig.UntilSentinel() : new();
+        Check("a frame answered on a read the host then unlinks is not sent again, and the next read takes the next frame",
+              ra.IsFrame(a, 1) && ua == 0 && rb.IsFrame(b, 2) && after.Count == 0,
+              $"first read {ra}, unlink {ua}, next read {rb}, then {Describe(after)}");
     }
 
-    /// <summary>A read parked when the unlink comes, and a new frame before
-    /// the input pump looks again: the pump hands the parked read the frame
-    /// put back, then queues the new one. The pump reads the section under
-    /// the device's lifetime lock, so holding it holds the pump until both
-    /// are in.</summary>
-    static void UnlinkReadParkedNewFrame(ControllerProfile ds)
+    /// <summary>The same with a read parked behind the answered one: that
+    /// read gets nothing until the next frame, which it takes.</summary>
+    static void UnlinkAnsweredReadParked(ControllerProfile ds)
     {
         using var rig = new HandoffRig(ds, HandoffIndex + 1);
-        byte ep = rig.PrimaryIn;
-        uint a = rig.SubmitIn(ep, 64);
-        uint b = rig.SubmitIn(ep, 64);
-        rig.Frame(3);
-        var ra = rig.Next();
-        int ua;
-        lock (rig.LifetimeLock)
-        {
-            ua = rig.Unlink(a);
-            rig.Frame(4);
-        }
-        var rb = rig.Next();
-        uint c = rig.SubmitIn(ep, 64);
-        var rc = rb.IsFrame(b, 3) ? rig.Next() : default;
-        rig.SubmitIn(ep, 64);
-        var after = rc.IsFrame(c, 4) ? rig.UntilSentinel() : new();
-        Check("a frame answered on a read the host then unlinks goes to the read parked behind it, ahead of a newer frame",
-              ra.IsFrame(a, 3) && ua == 0 && rb.IsFrame(b, 3) && rc.IsFrame(c, 4) && after.Count == 0,
-              $"first read {ra}, unlink {ua}, parked read {rb}, next read {rc}, then {Describe(after)}");
-    }
-
-    /// <summary>A read parked when the unlink comes, and no new frame: the
-    /// unlink wakes the input pump, which hands the parked read the frame
-    /// put back.</summary>
-    static void UnlinkReadParked(ControllerProfile ds)
-    {
-        using var rig = new HandoffRig(ds, HandoffIndex + 2);
         byte ep = rig.PrimaryIn;
         uint a = rig.SubmitIn(ep, 64);
         uint b = rig.SubmitIn(ep, 64);
         rig.Frame(10);
         var ra = rig.Next();
         int ua = rig.Unlink(a);
-        var rb = rig.Next();
         rig.Frame(11);
-        uint c = rig.SubmitIn(ep, 64);
-        var rc = rig.Next();
+        var rb = rig.NextWithin(Hang);
         rig.SubmitIn(ep, 64);
-        var after = rig.UntilSentinel();
-        Check("an unlink with a read parked behind the answered one wakes the input pump, which hands that read the frame",
-              ra.IsFrame(a, 10) && ua == 0 && rb.IsFrame(b, 10) && rc.IsFrame(c, 11) && after.Count == 0,
-              $"first read {ra}, unlink {ua}, parked read {rb}, next read {rc}, then {Describe(after)}");
-    }
-
-    /// <summary>Both reads of a pair unlinked before the input pump looks
-    /// again, as a host that cancels its reads does: the second is still
-    /// parked at its unlink, and the frame goes to the read after them.</summary>
-    static void UnlinkPair(ControllerProfile ds)
-    {
-        using var rig = new HandoffRig(ds, HandoffIndex + 3);
-        byte ep = rig.PrimaryIn;
-        uint a = rig.SubmitIn(ep, 64);
-        uint b = rig.SubmitIn(ep, 64);
-        rig.Frame(5);
-        var ra = rig.Next();
-        int ua, ub;
-        lock (rig.LifetimeLock)
-        {
-            ua = rig.Unlink(a);
-            ub = rig.Unlink(b);
-        }
-        uint c = rig.SubmitIn(ep, 64);
-        rig.Frame(6);
-        var rc = rig.Next();
-        uint d = rig.SubmitIn(ep, 64);
-        var rd = rc.IsFrame(c, 5) ? rig.Next() : default;
-        rig.SubmitIn(ep, 64);
-        var after = rd.IsFrame(d, 6) ? rig.UntilSentinel() : new();
-        Check("a frame answered on a read when the host unlinks both reads of a pair goes to the read after them",
-              ra.IsFrame(a, 5) && ua == 0 && ub == -UsbipProtocol.EConnReset && rc.IsFrame(c, 5) && rd.IsFrame(d, 6) && after.Count == 0,
-              $"first read {ra}, unlinks {ua} and {ub}, next {rc}, then {rd}, then {Describe(after)}");
-    }
-
-    /// <summary>The read a frame was put back to, unlinked after it took the
-    /// frame: the frame goes back again, to the read after it.</summary>
-    static void UnlinkPutBackRead(ControllerProfile ds)
-    {
-        using var rig = new HandoffRig(ds, HandoffIndex + 4);
-        byte ep = rig.PrimaryIn;
-        uint a = rig.SubmitIn(ep, 64);
-        uint b = rig.SubmitIn(ep, 64);
-        rig.Frame(12);
-        var ra = rig.Next();
-        int ua = rig.Unlink(a);
-        var rb = rig.Next();
-        int ub = rig.Unlink(b);
-        uint c = rig.SubmitIn(ep, 64);
-        rig.Frame(13);
-        var rc = rig.Next();
-        uint d = rig.SubmitIn(ep, 64);
-        var rd = rc.IsFrame(c, 12) ? rig.Next() : default;
-        rig.SubmitIn(ep, 64);
-        var after = rd.IsFrame(d, 13) ? rig.UntilSentinel() : new();
-        Check("the read a frame was put back to, unlinked after it took it, passes the frame to the read after it",
-              ra.IsFrame(a, 12) && ua == 0 && rb.IsFrame(b, 12) && ub == 0 && rc.IsFrame(c, 12) && rd.IsFrame(d, 13) && after.Count == 0,
-              $"first read {ra}, unlink {ua}, parked read {rb}, unlink {ub}, next {rc}, then {rd}, then {Describe(after)}");
+        var after = rb.IsFrame(b, 11) ? rig.UntilSentinel() : new();
+        Check("a frame answered on a read the host then unlinks does not go to the read parked behind it, which takes the next frame",
+              ra.IsFrame(a, 10) && ua == 0 && rb.IsFrame(b, 11) && after.Count == 0,
+              $"first read {ra}, unlink {ua}, parked read {rb}, then {Describe(after)}");
     }
 
     /// <summary>A newer frame queued before the unlink: it goes, and the
@@ -279,43 +193,6 @@ internal static partial class Program
               $"unlink {ua}, queued {queued}, next read {rb}, then {Describe(after)}");
     }
 
-    /// <summary>A frame put back for a parked read, and a newer frame: the
-    /// input pump has the parked read and waits to send it the frame, held
-    /// on the connection's send lock, which this thread takes first. A read
-    /// that comes meanwhile, as the connection's reader would send it, gets
-    /// the newer frame after the frame put back.</summary>
-    static void PutBackAheadOfQueue(ControllerProfile ds)
-    {
-        using var rig = new HandoffRig(ds, HandoffIndex + 11);
-        byte ep = rig.PrimaryIn;
-        uint a = rig.SubmitIn(ep, 64);
-        uint b = rig.SubmitIn(ep, 64);
-        rig.Frame(14);
-        var ra = rig.Next();
-        int ua;
-        uint d = 0;
-        bool taken;
-        Thread? reader;
-        lock (rig.SendLock)
-        {
-            lock (rig.LifetimeLock)
-            {
-                ua = rig.Unlink(a);
-                rig.Frame(15);
-            }
-            taken = WaitUntil(() => rig.WaitsToSend(rig.InputPump, () => rig.ParkedReads), Hang);
-            d = rig.NextSeq();
-            reader = rig.RunAsReader(() => rig.SubmitIn(d, ep, 64));
-        }
-        taken &= reader?.Join(Hang) ?? true;
-        var first = rig.Next();
-        var second = first.IsFrame(b, 14) ? rig.Next() : default;
-        rig.SubmitIn(ep, 64);
-        var after = second.IsFrame(d, 15) ? rig.UntilSentinel() : new();
-        Check("a frame put back for a parked read reaches the wire before a newer frame a read takes from the queue",
-              ra.IsFrame(a, 14) && ua == 0 && taken && first.IsFrame(b, 14) && second.IsFrame(d, 15) && after.Count == 0,
-              $"first read {ra}, unlink {ua}, parked read taken {taken}, then {first}, then {second}, then {Describe(after)}");
-    }
 
     /// <summary>The old import's connection ends while a new one claims the
     /// device. Its detach clears the reads, the queued frames and the
@@ -403,59 +280,91 @@ internal static partial class Program
               $"each frame taken up {queued}, frames held {held}, reads {Describe(got)}, then {Describe(after)}");
     }
 
-    /// <summary>A copy of the DualSense composite typed as a keyboard, which
-    /// gets every report in order (ControllerProfile.DeliversEveryReport).</summary>
-    static ControllerProfile KeyboardCopy(string id)
+    /// <summary>A copy of the DualSense composite typed as a keyboard, or as
+    /// <paramref name="type"/>, which gets every report in order
+    /// (ControllerProfile.DeliversEveryReport).</summary>
+    static ControllerProfile KeyboardCopy(string id, string type = "keyboard")
     {
         var j = JsonNode.Parse(CatalogJson("dualsense-composite"))!.AsObject();
         j["id"] = id;
-        j["type"] = "keyboard";
+        j["type"] = type;
         return ControllerProfile.Parse(Encoding.UTF8.GetBytes(j.ToJsonString()))!;
     }
 
     /// <summary>A keyboard's frame answered on a read the host then unlinks,
-    /// with newer frames queued: the frame goes back ahead of them, since a
-    /// keyboard needs every report in order.</summary>
-    static void KeyboardPutBackAheadOfQueue()
+    /// with newer frames queued: the frame is lost, and the frames queued
+    /// after it go to the next reads, in order.</summary>
+    static void KeyboardLostFrame()
     {
-        using var rig = new HandoffRig(KeyboardCopy("s43-keyboard-put-back-ahead"), HandoffIndex + 20);
+        using var rig = new HandoffRig(KeyboardCopy("s43-keyboard-lost-frame"), HandoffIndex + 20);
         byte ep = rig.PrimaryIn;
         uint a = rig.SubmitIn(ep, 64);
         rig.Frame(41);
         var ra = rig.Next();
         bool queued = rig.FrameQueued(42) && rig.FrameQueued(43);
         int ua = rig.Unlink(a);
-        var got = rig.ReadEach(ep, 3);
-        rig.SubmitIn(ep, 64);
-        var after = got.Count == 3 ? rig.UntilSentinel() : new();
-        Check("a keyboard's frame answered on a read the host then unlinks goes to the next read, ahead of the frames queued after it",
-              ra.IsFrame(a, 41) && queued && ua == 0 && got.Count == 3
-              && got[0].IsFrame(got[0].Seq, 41) && got[1].IsFrame(got[1].Seq, 42) && got[2].IsFrame(got[2].Seq, 43) && after.Count == 0,
-              $"first read {ra}, frames queued {queued}, unlink {ua}, reads {Describe(got)}, then {Describe(after)}");
-    }
-
-    /// <summary>Both reads of a keyboard's pair answered, then both unlinked,
-    /// as a host that cancels its reads does: both frames go back, in the
-    /// order they went out.</summary>
-    static void KeyboardPutBackPair()
-    {
-        using var rig = new HandoffRig(KeyboardCopy("s43-keyboard-put-back-pair"), HandoffIndex + 21);
-        byte ep = rig.PrimaryIn;
-        uint a = rig.SubmitIn(ep, 64);
-        uint b = rig.SubmitIn(ep, 64);
-        rig.Frame(51);
-        var ra = rig.Next();
-        rig.Frame(52);
-        var rb = rig.Next();
-        int ua = rig.Unlink(a);
-        int ub = rig.Unlink(b);
         var got = rig.ReadEach(ep, 2);
         rig.SubmitIn(ep, 64);
         var after = got.Count == 2 ? rig.UntilSentinel() : new();
-        Check("both frames of a keyboard's pair of reads the host unlinks go to the next reads, in order",
-              ra.IsFrame(a, 51) && rb.IsFrame(b, 52) && ua == 0 && ub == 0 && got.Count == 2
-              && got[0].IsFrame(got[0].Seq, 51) && got[1].IsFrame(got[1].Seq, 52) && after.Count == 0,
-              $"reads {ra} and {rb}, unlinks {ua} and {ub}, next reads {Describe(got)}, then {Describe(after)}");
+        Check("a keyboard's frame answered on a read the host then unlinks is not sent again, and the frames queued after it go out in order",
+              ra.IsFrame(a, 41) && queued && ua == 0 && got.Count == 2
+              && got[0].IsFrame(got[0].Seq, 42) && got[1].IsFrame(got[1].Seq, 43) && after.Count == 0,
+              $"first read {ra}, frames queued {queued}, unlink {ua}, reads {Describe(got)}, then {Describe(after)}");
+    }
+
+    /// <summary>A keyboard with two reads out, both answered, whose host
+    /// cancels only the older read. usbip-win2 drops the canceled read's
+    /// RET_SUBMIT and delivers the other (request_list.cpp cancel and
+    /// find_sent_request), so the host has the newer frame, and a real
+    /// device behind Linux's usbip-host sends neither frame again
+    /// (stub_rx.c stub_recv_cmd_unlink answers an unlink of a completed URB
+    /// with status 0 and nothing else). The review's single-cancel case.</summary>
+    static void KeyboardSingleCancel(string what, string type, int index)
+    {
+        using var rig = new HandoffRig(KeyboardCopy($"s43-{type}-single-cancel", type), index);
+        byte ep = rig.PrimaryIn;
+        uint a = rig.SubmitIn(ep, 64);
+        uint b = rig.SubmitIn(ep, 64);
+        rig.Frame(61);
+        var ra = rig.Next();
+        rig.Frame(62);
+        var rb = rig.Next();
+        int ua = rig.Unlink(a);
+        // The host has frame 62 and lost 61. Its next read takes the next
+        // frame, and nothing it already had or lost comes before it.
+        uint c = rig.SubmitIn(ep, 64);
+        rig.Frame(63);
+        var rc = rig.NextWithin(Hang);
+        rig.SubmitIn(ep, 64);
+        var after = rc.Data != null ? rig.UntilSentinel() : new();
+        Check($"{what} whose host cancels only the older of two answered reads gets no frame again, and the next read the next frame",
+              ra.IsFrame(a, 61) && rb.IsFrame(b, 62) && ua == 0 && rc.IsFrame(c, 63) && after.Count == 0,
+              $"reads {ra} and {rb}, unlink {ua}, next read {rc}, then {Describe(after)}");
+    }
+
+    /// <summary>An 80-byte bulk reply over two parked reads, 64 bytes and 16,
+    /// whose host cancels only the read with the first part and keeps the
+    /// second. The 64 bytes are lost, as a real device's would be, and no
+    /// part goes out again. The review's single-cancel case.</summary>
+    static void BulkSingleCancel()
+    {
+        var j = JsonNode.Parse(CatalogJson("switch2-pro-controller-composite"))!.AsObject();
+        j["id"] = "s43-bulk-single-cancel";
+        using var rig = new HandoffRig(ControllerProfile.Parse(Encoding.UTF8.GetBytes(j.ToJsonString()))!, HandoffIndex + 28);
+        var p = rig.Device.Protocol!.Protocol;
+        uint a = rig.SubmitIn(p.ReplyEndpoint, 64);
+        uint b = rig.SubmitIn(p.ReplyEndpoint, 64);
+        // 02/01 reads 64 bytes of the flash image from 0x13000: an 80-byte
+        // reply.
+        byte[] flashRead = Convert.FromHexString("02910001000000000000000000300100");
+        uint cmd = rig.SubmitOut(p.CommandEndpoint, flashRead);
+        var got = rig.UntilSentinel();
+        int ua = rig.Unlink(a);
+        uint c = rig.SubmitIn(p.ReplyEndpoint, 64);
+        var rc = rig.NextWithin(1000);
+        Check("a bulk reply whose host cancels only the read with its first part sends no part again",
+              got.Count == 3 && got[0].Is(cmd, flashRead.Length) && got[1].Is(a, 64) && got[2].Is(b, 16) && ua == 0 && rc.Data == null,
+              $"{Describe(got)}, unlink {ua}, the next read {(rc.Data == null ? "parked" : rc.ToString())}");
     }
 
     /// <summary>A copy of the Switch 2 Pro composite whose report 0x09 goes
@@ -472,12 +381,13 @@ internal static partial class Program
         return ControllerProfile.Parse(Encoding.UTF8.GetBytes(j.ToJsonString()))!;
     }
 
-    /// <summary>A report on change answered on a read the host then unlinks:
-    /// the state has not changed, so no tick sends it again, and the next
-    /// read gets it once more, as a device whose report the host lost.</summary>
-    static void LayoutChangePutBack()
+    /// <summary>A report on change answered on a read the host then unlinks
+    /// is lost: while the state holds no tick sends it again, as a real
+    /// device that reports on change sends nothing, and the next change goes
+    /// to the next read.</summary>
+    static void LayoutChangeLost()
     {
-        using var rig = new HandoffRig(ChangeLayoutCopy("s43-change-report-put-back"), HandoffIndex + 22);
+        using var rig = new HandoffRig(ChangeLayoutCopy("s43-change-report-lost"), HandoffIndex + 22);
         var p = rig.Device.Protocol!.Protocol;
         var clock = rig.HoldLayoutClock();
         // 03/0D, which lets reports flow.
@@ -488,19 +398,27 @@ internal static partial class Program
         var ra = ticked ? rig.NextWithin(Hang) : default;
         int ua = rig.Unlink(a);
         uint b = rig.SubmitIn(p.InputEndpoint, 64);
+        // The tick runs on this thread, and anything it sends is on the
+        // host's end of the connection when it returns.
         clock.TickNow();
-        var rb = rig.NextWithin(1000);
-        Check("a report on change the host never got goes to the next read, though the state has not changed",
-              ack.Is(on, 8) && ticked && ra.Is(a, 64) && ra.Data[0] == 0x09 && ua == 0
-              && rb.Is(b, 64) && rb.Data.AsSpan().SequenceEqual(ra.Data),
-              $"reports on {ack}, ticked {ticked}, first read {ra}, unlink {ua}, next read {rb}");
+        bool quiet = rig.Available == 0;
+        // Button B down: byte 0 of the state block.
+        var block = rig.Device.Protocol!.CopyStateBlock();
+        block[0] ^= 0x01;
+        rig.Device.Protocol!.SetStateBlock(block);
+        clock.TickNow();
+        var rb = rig.NextWithin(Hang);
+        Check("a report on change the host never got is not sent again while the state holds, and the next change goes to the next read",
+              ack.Is(on, 8) && ticked && ra.Is(a, 64) && ra.Data[0] == 0x09 && ua == 0 && quiet
+              && rb.Is(b, 64) && !rb.Data.AsSpan().SequenceEqual(ra.Data),
+              $"reports on {ack}, ticked {ticked}, first read {ra}, unlink {ua}, nothing sent while the state held {quiet}, next read {rb}");
     }
 
     /// <summary>A reply the poll clock answered a read with, which the host
-    /// then unlinks: the next read gets the reply's packets again.</summary>
-    static void ProtocolPacketsPutBack()
+    /// then unlinks, is lost: the next poll has nothing to send.</summary>
+    static void ProtocolPacketsLost()
     {
-        using var rig = new HandoffRig(PollClockCopy("s43-poll-clock-put-back"), HandoffIndex + 23);
+        using var rig = new HandoffRig(PollClockCopy("s43-poll-clock-lost"), HandoffIndex + 23);
         var p = rig.Device.Protocol!.Protocol;
         var (clock, _) = rig.HoldPollClock();
         uint a = rig.SubmitIn(p.InputEndpoint, 64);
@@ -509,22 +427,21 @@ internal static partial class Program
         bool ticked = clock.TickNow();
         var ra = ticked ? rig.Next() : default;
         int ua = rig.Unlink(a);
-        uint b = rig.SubmitIn(p.InputEndpoint, 64);
+        rig.SubmitIn(p.InputEndpoint, 64);
         bool again = clock.TickNow();
-        var rb = again ? rig.NextWithin(1000) : default;
-        Check("a reply on the input endpoint answered on a read the host then unlinks goes to the next read",
-              ack.Is(cmd, 8) && ticked && ra.Is(a, 20) && ra.Data[0] == 0x10 && ua == 0
-              && again && rb.Is(b, 20) && rb.Data.AsSpan().SequenceEqual(ra.Data),
-              $"command answered {ack}, first read {ra}, unlink {ua}, ticked again {again}, next read {rb}");
+        bool quiet = rig.Available == 0;
+        Check("a reply on the input endpoint answered on a read the host then unlinks is not sent again",
+              ack.Is(cmd, 8) && ticked && ra.Is(a, 20) && ra.Data[0] == 0x10 && ua == 0 && !again && quiet,
+              $"command answered {ack}, first read {ra}, unlink {ua}, ticked again {again}, nothing sent {quiet}");
     }
 
     /// <summary>The first 64 bytes of an 80-byte bulk reply, answered on a
-    /// read the host then unlinks: the next read gets those 64 bytes again
-    /// and the one after it the last 16.</summary>
-    static void BulkReplyPutBack()
+    /// read the host then unlinks, are lost, and the next read gets the last
+    /// 16.</summary>
+    static void BulkReplyLost()
     {
         var j = JsonNode.Parse(CatalogJson("switch2-pro-controller-composite"))!.AsObject();
-        j["id"] = "s43-bulk-reply-put-back";
+        j["id"] = "s43-bulk-reply-lost";
         using var rig = new HandoffRig(ControllerProfile.Parse(Encoding.UTF8.GetBytes(j.ToJsonString()))!, HandoffIndex + 24);
         var p = rig.Device.Protocol!.Protocol;
         uint a = rig.SubmitIn(p.ReplyEndpoint, 64);
@@ -534,51 +451,42 @@ internal static partial class Program
         var got = rig.UntilSentinel();
         int ua = rig.Unlink(a);
         var rest = rig.ReadEach(p.ReplyEndpoint, 2);
-        Check("the part of a bulk reply answered on a read the host then unlinks goes to the next read, and the rest after it",
+        Check("the part of a bulk reply answered on a read the host then unlinks is not sent again, and the next read gets the rest",
               got.Count == 2 && got[0].Is(cmd, flashRead.Length) && got[1].Is(a, 64) && ua == 0
-              && rest.Count == 2 && rest[0].Length == 64 && rest[0].Data.AsSpan().SequenceEqual(got[1].Data) && rest[1].Length == 16,
+              && rest.Count == 1 && rest[0].Length == 16,
               $"{Describe(got)}, unlink {ua}, next reads {Describe(rest)}");
     }
 
     // How long each stress runs, and the most frames it writes.
     const int StressMs = 3_000, StressFrames = 60_000;
 
-    /// <summary>A device's handoffs under the cancels a host makes, for
-    /// StressMs. The host keeps two reads out, and a thread of its own takes
-    /// the answers, slowed at random. Another thread writes frames in bursts
-    /// of one to six, each numbered. A cancel follows usbip-win2: the read
-    /// completes at once, a CMD_UNLINK goes out, and an answer that comes
+    /// <summary>The host's side of a stress: reads it keeps out, reads it
+    /// canceled, and every answer and unlink answer a thread of its own takes
+    /// from the connection, slowed at random. A cancel follows usbip-win2: the
+    /// read completes at once, a CMD_UNLINK goes out, and an answer that comes
     /// for the read after is dropped (request_list.cpp cancel and
-    /// find_sent_request). Each burst ends with a cancel of both reads a
-    /// moment after its last frame, and with <paramref name="cancelOne"/> a
-    /// read is canceled at random while the burst is written. A RET_UNLINK
-    /// with status 0 follows its read's RET_SUBMIT, and a read the device
-    /// unlinked parked gets no answer. A device that holds one frame delivers
-    /// frames in rising order and each burst's last frame. A keyboard
-    /// delivers every frame once, in order, so its writer waits for the
-    /// input pump to read each frame from the section, which holds one,
-    /// before it writes the next.</summary>
-    static void Stress(string what, ControllerProfile profile, int index, bool every, bool cancelOne, int seed)
+    /// find_sent_request). A RET_UNLINK with status 0 must follow its read's
+    /// answer, and a read the device unlinked while parked must get none.</summary>
+    sealed class StressHost
     {
-        var rig = new HandoffRig(profile, index);
-        Thread? receiver = null, writer = null;
-        bool stopping = false;
-        var go = new SemaphoreSlim(0);
-        int burst = 0;
-        try
+        public readonly object Lock = new();
+        public readonly HashSet<uint> Outstanding = new(), Canceled = new(), Answered = new(), ResetReads = new();
+        public readonly Dictionary<uint, uint> UnlinkOf = new();
+        public int Unknown, AfterReset, Early, AnsweredUnlinks, ParkedUnlinks;
+        public Exception? ReceiveError;
+        public bool Stopping;
+        readonly HandoffRig _rig;
+        readonly Random _rng;
+        readonly Thread _receiver;
+
+        /// <summary>Starts the receiver, which hands each answer to an
+        /// outstanding read to <paramref name="delivered"/> and each answer to a
+        /// canceled read to <paramref name="dropped"/>, under the lock.</summary>
+        public StressHost(HandoffRig rig, int seed, Action<HandoffRig.Message> delivered, Action<HandoffRig.Message> dropped)
         {
-            byte ep = rig.PrimaryIn;
-            var rng = new Random(seed);
-            object host = new();
-            var outstanding = new HashSet<uint>();
-            var canceled = new HashSet<uint>();
-            var answered = new HashSet<uint>();
-            var unlinkOf = new Dictionary<uint, uint>();
-            var resetReads = new HashSet<uint>();
-            var delivered = new List<int>();
-            int dropped = 0, unknown = 0, afterReset = 0, early = 0, answeredUnlinks = 0, parkedUnlinks = 0;
-            Exception? receiveError = null;
-            receiver = new Thread(() =>
+            _rig = rig;
+            _rng = new Random(seed);
+            _receiver = new Thread(() =>
             {
                 var r = new Random(seed + 2);
                 try
@@ -588,40 +496,146 @@ internal static partial class Program
                         // A host takes a while to see each answer.
                         if (r.Next(3) == 0) Spin(r.Next(0, 120));
                         var m = rig.Next();
-                        lock (host)
+                        lock (Lock)
                         {
                             if (m.Kind == UsbipProtocol.RetUnlink)
                             {
-                                if (!unlinkOf.Remove(m.Seq, out uint v)) unknown++;
+                                if (!UnlinkOf.Remove(m.Seq, out uint v)) Unknown++;
                                 else if (m.Status == 0)
                                 {
-                                    answeredUnlinks++;
+                                    AnsweredUnlinks++;
                                     // Status 0 says the read's RET_SUBMIT came first.
-                                    if (!answered.Contains(v)) early++;
+                                    if (!Answered.Contains(v)) Early++;
                                 }
                                 else
                                 {
-                                    parkedUnlinks++;
-                                    resetReads.Add(v);
-                                    if (answered.Contains(v)) afterReset++;
+                                    ParkedUnlinks++;
+                                    ResetReads.Add(v);
+                                    if (Answered.Contains(v)) AfterReset++;
                                 }
-                                Monitor.PulseAll(host);
-                                continue;
                             }
-                            answered.Add(m.Seq);
-                            if (resetReads.Contains(m.Seq)) afterReset++;
-                            if (canceled.Remove(m.Seq)) dropped++;
-                            else if (outstanding.Remove(m.Seq) && m.Data.Length == 64) delivered.Add(m.Data[1] | m.Data[2] << 8);
-                            else unknown++;
-                            Monitor.PulseAll(host);
+                            else if (Outstanding.Contains(m.Seq) || Canceled.Contains(m.Seq))
+                            {
+                                Answered.Add(m.Seq);
+                                if (ResetReads.Contains(m.Seq)) AfterReset++;
+                                if (Canceled.Remove(m.Seq)) dropped(m);
+                                else
+                                {
+                                    Outstanding.Remove(m.Seq);
+                                    delivered(m);
+                                }
+                            }
+                            else if (!Commands.Remove(m.Seq)) Unknown++;
+                            Monitor.PulseAll(Lock);
                         }
                     }
                 }
-                catch (Exception) when (Volatile.Read(ref stopping)) { }
-                catch (Exception e) { receiveError = e; }
-            }) { IsBackground = true, Name = $"S43 stress receiver, {what}" };
-            receiver.Start();
+                catch (Exception) when (Volatile.Read(ref Stopping)) { }
+                catch (Exception e) { ReceiveError = e; }
+            }) { IsBackground = true, Name = "S43 stress receiver" };
+            _receiver.Start();
+        }
 
+        /// <summary>OUT transfers whose answer the receiver takes and drops.</summary>
+        public readonly HashSet<uint> Commands = new();
+
+        /// <summary>Two reads out on <paramref name="endpoint"/>, as HID class
+        /// keeps its two ping-pong reads (IOCTL_HID_READ_REPORT remarks, Oney's
+        /// Programming the Microsoft Windows Driver Model, HIDCLASS
+        /// minidrivers).</summary>
+        public void EnsureTwo(byte endpoint)
+        {
+            while (true)
+            {
+                uint s;
+                lock (Lock)
+                {
+                    if (Outstanding.Count >= 2) return;
+                    s = _rig.NextSeq();
+                    Outstanding.Add(s);
+                }
+                _rig.SubmitIn(s, endpoint, 64);
+            }
+        }
+
+        /// <summary>Cancels one outstanding read at random, as a host with a
+        /// timeout per read does.</summary>
+        public void CancelOne()
+        {
+            uint u, v;
+            lock (Lock)
+            {
+                if (Outstanding.Count == 0) return;
+                v = Outstanding.ElementAt(_rng.Next(Outstanding.Count));
+                Outstanding.Remove(v);
+                Canceled.Add(v);
+                u = _rig.NextSeq();
+                UnlinkOf[u] = v;
+            }
+            _rig.SendUnlink(u, v);
+        }
+
+        /// <summary>Cancels every outstanding read, one at a time, as HID class
+        /// cancels its ping-pong reads before a power-down: each with its own
+        /// IoCancelIrp, which usbip-win2 turns into a CMD_UNLINK of that read
+        /// alone, while the receiver takes the answers on their way. A read
+        /// whose answer arrives first is no longer outstanding, and is not
+        /// canceled.</summary>
+        public void CancelEach()
+        {
+            while (true)
+            {
+                lock (Lock) if (Outstanding.Count == 0) return;
+                CancelOne();
+                if (_rng.Next(2) == 0) Spin(_rng.Next(0, 60));
+            }
+        }
+
+        public void Stop()
+        {
+            Volatile.Write(ref Stopping, true);
+        }
+
+        public void Join() => _receiver.Join(Hang);
+
+        public string Faults() => $"unlinks ahead of the answer {Early}, answers to a read unlinked while parked {AfterReset}, unknown {Unknown}"
+                                  + (ReceiveError != null ? ", " + ReceiveError.Message : "");
+
+        public bool Clean => Early == 0 && AfterReset == 0 && Unknown == 0 && ReceiveError == null;
+    }
+
+    /// <summary>A device's frames under the cancels a host makes, for
+    /// StressMs. The host keeps two reads out and cancels one at random while
+    /// a thread of its own writes frames in bursts of one to six, each with
+    /// its number. Each burst ends with every read canceled, one at a time,
+    /// a moment after its last frame, then two new reads. The host never
+    /// takes a frame again or out of order: an answer it lost to a cancel
+    /// stays lost, as a real device's does behind Linux's usbip-host
+    /// (stub_rx.c stub_recv_cmd_unlink). A keyboard or mouse delivers every
+    /// other frame, so its writer waits for the input pump to read each frame
+    /// from the section, which holds one, before it writes the next. A game
+    /// pad holds its newest frame, and its burst's last state reaches the
+    /// host through the idle repeat a stream sends (HMController's StreamTick,
+    /// every catalog USB/IP pad's stream, idle frames or clock), which the
+    /// stress writes once the device is idle.</summary>
+    static void Stress(string what, ControllerProfile profile, int index, bool every, int seed)
+    {
+        var rig = new HandoffRig(profile, index);
+        StressHost? host = null;
+        Thread? writer = null;
+        var go = new SemaphoreSlim(0);
+        int burst = 0;
+        try
+        {
+            byte ep = rig.PrimaryIn;
+            var rng = new Random(seed);
+            // Each report by its number and its repeat, in the order the host
+            // took them, and the numbers of those it lost to a cancel.
+            var delivered = new List<(int Mark, int Repeat)>();
+            var dropped = new List<int>();
+            static (int Mark, int Repeat) Mark(HandoffRig.Message m) =>
+                m.Data.Length == 64 ? (m.Data[1] | m.Data[2] << 8, m.Data[3]) : (-1, -1);
+            host = new StressHost(rig, seed, m => delivered.Add(Mark(m)), m => dropped.Add(Mark(m).Mark));
             var burstDone = new SemaphoreSlim(0);
             int written = 0;
             bool taken = true;
@@ -646,115 +660,76 @@ internal static partial class Program
             }) { IsBackground = true, Name = $"S43 stress writer, {what}" };
             writer.Start();
 
-            void EnsureTwo()
-            {
-                while (true)
-                {
-                    uint s;
-                    lock (host)
-                    {
-                        if (outstanding.Count >= 2) return;
-                        s = rig.NextSeq();
-                        outstanding.Add(s);
-                    }
-                    rig.SubmitIn(s, ep, 64);
-                }
-            }
-            void Cancel(bool all)
-            {
-                var victims = new List<(uint U, uint V)>();
-                lock (host)
-                {
-                    var list = outstanding.ToList();
-                    if (list.Count == 0) return;
-                    if (!all) list = new List<uint> { list[rng.Next(list.Count)] };
-                    foreach (var v in list)
-                    {
-                        outstanding.Remove(v);
-                        canceled.Add(v);
-                        uint u = rig.NextSeq();
-                        unlinkOf[u] = v;
-                        victims.Add((u, v));
-                    }
-                }
-                foreach (var (u, v) in victims) rig.SendUnlink(u, v);
-            }
-            // The newest frame delivered is the burst's last: a keyboard's
-            // frames come in order, so the burst's others came before it.
-            bool Arrived(int last) => delivered.Count > 0 && delivered[^1] == last;
-
-            int bursts = 0, lost = 0, stuck = 0;
-            var lostAt = new List<int>();
+            int bursts = 0, repeated = 0, stuck = 0;
             var clock = System.Diagnostics.Stopwatch.StartNew();
-            while (clock.ElapsedMilliseconds < StressMs && Volatile.Read(ref written) < StressFrames && receiveError == null)
+            while (clock.ElapsedMilliseconds < StressMs && Volatile.Read(ref written) < StressFrames && host.ReceiveError == null)
             {
                 bursts++;
-                EnsureTwo();
+                host.EnsureTwo(ep);
                 Volatile.Write(ref burst, rng.Next(1, 7));
                 go.Release();
                 while (!burstDone.Wait(0))
                 {
-                    if (cancelOne && rng.Next(5) == 0) Cancel(all: false);
-                    EnsureTwo();
+                    if (rng.Next(5) == 0) host.CancelOne();
+                    host.EnsureTwo(ep);
                     Spin(rng.Next(0, 80));
                 }
                 int last = Volatile.Read(ref written);
-                // A host that stops reading: both reads canceled a moment
-                // after the last frame, then two new reads.
+                // A host that stops reading: its reads canceled a moment after
+                // the last frame, then two new reads.
                 Spin(rng.Next(0, 60));
-                Cancel(all: true);
-                EnsureTwo();
+                host.CancelEach();
+                host.EnsureTwo(ep);
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                bool arrived = false, idle = false;
+                bool settled = false;
+                int repeat = 0;
                 while (sw.ElapsedMilliseconds < Hang)
                 {
-                    EnsureTwo();
-                    lock (host)
-                        if (Arrived(last)) { arrived = true; break; }
-                    // Both of the host's reads parked: every answer to a read
-                    // it did not cancel has reached it, since it sends a new
-                    // read only once it has an answer or has canceled one,
-                    // and a frame the pump read has gone to a read.
-                    if (rig.IdleWithParked(2, last))
+                    host.EnsureTwo(ep);
+                    lock (host.Lock)
                     {
-                        lock (host) arrived = Arrived(last);
-                        idle = !arrived;
-                        break;
+                        // A keyboard's or mouse's every frame went to the host or to
+                        // a read it canceled. A game pad's newest state reached it.
+                        settled = every ? delivered.Count + dropped.Count >= last
+                                        : delivered.Count > 0 && delivered[^1].Mark == last;
+                        if (settled) break;
                     }
-                    lock (host) Monitor.Wait(host, 1);
+                    // Both reads parked, nothing held, and the frame numbered last
+                    // read from the section: the game pad's last state was lost to
+                    // a cancel, and its stream sends it again.
+                    if (!every && rig.IdleWithParked(2, last))
+                    {
+                        if (repeat == 0) repeated++;
+                        rig.FrameMarked((ushort)last, (byte)++repeat);
+                    }
+                    lock (host.Lock) Monitor.Wait(host.Lock, 1);
                 }
-                if (arrived) continue;
-                if (idle)
-                {
-                    lost++;
-                    if (lostAt.Count < 5) lostAt.Add(last);
-                }
-                else stuck++;
+                if (!settled) stuck++;
             }
-            // The writer ends at its next burst, and has written its last
-            // frame once it has.
             Volatile.Write(ref burst, -1);
             go.Release();
             writer.Join(Hang);
 
             int n = Volatile.Read(ref written), breakAt = -1;
-            bool inOrder;
-            lock (host)
+            lock (host.Lock)
             {
+                // No report twice and none older than one before it.
                 for (int i = 1; i < delivered.Count && breakAt < 0; i++)
-                    if (every ? delivered[i] != delivered[i - 1] + 1 : delivered[i] <= delivered[i - 1]) breakAt = i;
-                inOrder = breakAt < 0 && (!every || delivered.Count == n && (n == 0 || delivered[0] == 1));
-                Console.WriteLine($"  info: {what}: {bursts} bursts in {clock.ElapsedMilliseconds} ms, {n} frames written, {delivered.Count} delivered, " +
-                                  $"{dropped} answers dropped for canceled reads, {answeredUnlinks} unlinks of answered reads, {parkedUnlinks} of parked reads");
+                    if (delivered[i].CompareTo(delivered[i - 1]) <= 0) breakAt = i;
+                // A keyboard's or mouse's every frame once: taken by the host or
+                // lost to a read it canceled.
+                bool whole = !every || delivered.Select(d => d.Mark).Concat(dropped).OrderBy(x => x).SequenceEqual(Enumerable.Range(1, n));
+                Console.WriteLine($"  info: {what}: {bursts} bursts in {clock.ElapsedMilliseconds} ms, {n} frames written, {delivered.Count} reports delivered, " +
+                                  $"{dropped.Count} lost to a canceled read, {host.AnsweredUnlinks} unlinks of answered reads, {host.ParkedUnlinks} of parked reads" +
+                                  (every ? "" : $", {repeated} last states sent again by the stream"));
                 string where = breakAt < 0 ? "" : $", first break at {breakAt}: {delivered[breakAt - 1]} then {delivered[breakAt]}";
-                Check(every ? $"{what}: every frame reaches the host once, in order, under the host's cancels"
-                            : $"{what}: frames reach the host in rising order, none twice, under the host's cancels",
-                      inOrder && Volatile.Read(ref taken), $"{delivered.Count} of {n} delivered{where}{(Volatile.Read(ref taken) ? "" : ", a frame the pump did not read in time")}");
-                Check($"{what}: the last frame of every burst reaches the host", lost == 0 && stuck == 0,
-                      $"{lost} of {bursts} bursts lost their last frame{(lostAt.Count > 0 ? ", the first at " + string.Join(", ", lostAt) : "")}, {stuck} left the device busy");
+                Check($"{what}: the host gets no report twice and no state older than one it has, under single and repeated cancels",
+                      breakAt < 0 && Volatile.Read(ref taken), $"{delivered.Count} delivered{where}{(Volatile.Read(ref taken) ? "" : ", a frame the pump did not read in time")}");
+                Check(every ? $"{what}: every frame reaches the host or is lost with a read the host canceled, and no other"
+                            : $"{what}: every burst's last state reaches the host, through the stream's repeat when a cancel lost it",
+                      whole && stuck == 0, $"{(every ? $"frames accounted for {whole}, " : "")}{stuck} of {bursts} bursts never settled");
                 Check($"{what}: a RET_UNLINK with status 0 follows its read's answer, and a read unlinked while parked gets none",
-                      early == 0 && afterReset == 0 && unknown == 0 && receiveError == null,
-                      $"unlinks ahead of the answer {early}, answers to a read unlinked while parked {afterReset}, unknown {unknown}{(receiveError != null ? ", " + receiveError.Message : "")}");
+                      host.Clean, host.Faults());
             }
         }
         finally
@@ -764,9 +739,92 @@ internal static partial class Program
             Volatile.Write(ref burst, -1);
             go.Release();
             writer?.Join(Hang);
-            Volatile.Write(ref stopping, true);
+            host?.Stop();
             rig.Dispose();
-            receiver?.Join(Hang);
+            host?.Join();
+        }
+    }
+
+    /// <summary>An 80-byte bulk reply, 64 bytes and 16, for each of a run of
+    /// flash reads, under single cancels of the two bulk reads the host keeps
+    /// out, for StressMs. A part answered on a read the host canceled is lost,
+    /// as a real device's is, and every part goes on the wire once, in order:
+    /// each 64-byte part echoes its command's address, which rises by 0x40
+    /// from one command to the next.</summary>
+    static void BulkStress(int index, int seed)
+    {
+        var j = JsonNode.Parse(CatalogJson("switch2-pro-controller-composite"))!.AsObject();
+        j["id"] = "s43-bulk-stress";
+        var rig = new HandoffRig(ControllerProfile.Parse(Encoding.UTF8.GetBytes(j.ToJsonString()))!, index);
+        StressHost? host = null;
+        try
+        {
+            var p = rig.Device.Protocol!.Protocol;
+            var rng = new Random(seed);
+            // Every part on the wire in order, delivered or dropped, with the
+            // parts the host kept.
+            var wire = new List<(int Length, uint Address)>();
+            int kept = 0;
+            static (int, uint) Part(HandoffRig.Message m) =>
+                (m.Length, m.Length == 64 ? BinaryPrimitives.ReadUInt32LittleEndian(m.Data.AsSpan(12)) : 0u);
+            host = new StressHost(rig, seed, m => { wire.Add(Part(m)); kept++; }, m => wire.Add(Part(m)));
+            // 02/01 reads 64 bytes of the flash image from the address in bytes
+            // 12 to 15.
+            byte[] flashRead = Convert.FromHexString("02910001000000000000000000300100");
+            int commands = 0, stuck = 0;
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            while (clock.ElapsedMilliseconds < StressMs && host.ReceiveError == null)
+            {
+                host.EnsureTwo(p.ReplyEndpoint);
+                BinaryPrimitives.WriteUInt32LittleEndian(flashRead.AsSpan(12), 0x13000u + 0x40u * (uint)commands);
+                uint cmd;
+                lock (host.Lock)
+                {
+                    cmd = rig.NextSeq();
+                    host.Commands.Add(cmd);
+                }
+                rig.SubmitOut(cmd, p.CommandEndpoint, flashRead);
+                commands++;
+                // Both parts on the wire before the next command, the host
+                // canceling one of its reads at random meanwhile.
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                bool both = false;
+                while (sw.ElapsedMilliseconds < Hang)
+                {
+                    // A part sent twice ends the wait too, and the check below
+                    // names it.
+                    lock (host.Lock) both = wire.Count >= 2 * commands;
+                    if (both) break;
+                    if (rng.Next(4) == 0) host.CancelOne();
+                    host.EnsureTwo(p.ReplyEndpoint);
+                    Spin(rng.Next(0, 80));
+                    lock (host.Lock) Monitor.Wait(host.Lock, 1);
+                }
+                if (!both) { stuck++; break; }
+            }
+            int breakAt = -1;
+            lock (host.Lock)
+            {
+                for (int i = 0; i < wire.Count && breakAt < 0; i++)
+                {
+                    var (length, address) = wire[i];
+                    bool first = i % 2 == 0;
+                    if (first ? length != 64 || address != 0x13000u + 0x40u * (uint)(i / 2) : length != 16) breakAt = i;
+                }
+                Console.WriteLine($"  info: a split bulk reply: {commands} commands in {clock.ElapsedMilliseconds} ms, {wire.Count} parts on the wire, {kept} kept by the host, " +
+                                  $"{host.AnsweredUnlinks} unlinks of answered reads, {host.ParkedUnlinks} of parked reads");
+                string where = breakAt < 0 ? "" : $", first break at part {breakAt}: {wire[breakAt]}";
+                Check("a split bulk reply: every part goes on the wire once, in order, and a part answered on a read the host canceled is not sent again",
+                      breakAt < 0 && wire.Count == 2 * commands && stuck == 0, $"{wire.Count} parts for {commands} commands{where}, {stuck} stuck");
+                Check("a split bulk reply: a RET_UNLINK with status 0 follows its read's answer, and a read unlinked while parked gets none",
+                      host.Clean, host.Faults());
+            }
+        }
+        finally
+        {
+            host?.Stop();
+            rig.Dispose();
+            host?.Join();
         }
     }
 
@@ -878,8 +936,8 @@ internal static partial class Program
     /// on the wire: the pump waits for the connection's send lock, which this
     /// thread holds, and the unlink comes as the connection's reader would
     /// send it. The RET_UNLINK's status 0 says the read's RET_SUBMIT went
-    /// first, so it follows the pump's answer, and the frame goes back to the
-    /// next read as it does for any answered read the host unlinks.</summary>
+    /// first, so it follows the pump's answer, and the frame is lost with it,
+    /// as for any answered read the host unlinks.</summary>
     static void PumpAnswerBeforeUnlink(ControllerProfile ds)
     {
         using var rig = new HandoffRig(ds, HandoffIndex + 18);
@@ -898,12 +956,13 @@ internal static partial class Program
         var first = rig.Next();
         var second = rig.Next();
         uint b = rig.SubmitIn(ep, 64);
-        var rb = rig.Next();
+        rig.Frame(62);
+        var rb = rig.NextWithin(Hang);
         rig.SubmitIn(ep, 64);
-        var after = rig.UntilSentinel();
-        Check("a read the input pump answers, unlinked before the answer is on the wire, is answered before the unlink, and its frame goes to the next read",
+        var after = rb.IsFrame(b, 62) ? rig.UntilSentinel() : new();
+        Check("a read the input pump answers, unlinked before the answer is on the wire, is answered before the unlink, and its frame is not sent again",
               waiting && ended && first.IsFrame(a, 61) && second.Kind == UsbipProtocol.RetUnlink && second.Seq == u && second.Status == 0
-              && rb.IsFrame(b, 61) && after.Count == 0,
+              && rb.IsFrame(b, 62) && after.Count == 0,
               $"pump waiting {waiting}, unlink ended {ended}, then {first}, then {second}, next read {rb}, then {Describe(after)}");
     }
 
@@ -1196,12 +1255,15 @@ internal static partial class Program
         }
 
         /// <summary>A frame numbered <paramref name="mark"/> in its first two
-        /// bytes, low byte first. One thread writes the frames.</summary>
-        public void FrameMarked(ushort mark)
+        /// bytes, low byte first, and <paramref name="repeat"/> in the third:
+        /// the same state sent again, as a stream's idle repeat sends it with
+        /// a newer timestamp. One thread writes the frames at a time.</summary>
+        public void FrameMarked(ushort mark, byte repeat = 0)
         {
             var data = new byte[63];
             data[0] = (byte)mark;
             data[1] = (byte)(mark >> 8);
+            data[2] = repeat;
             SharedMemoryIO.WriteInputFrame(_view, _inputEvent, ref _frameSeq, data, data.Length, null);
         }
 
@@ -1223,10 +1285,10 @@ internal static partial class Program
         }
 
         /// <summary>True when the device has <paramref name="reads"/> reads
-        /// parked on the primary endpoint, no frame queued or put back, and
-        /// the frame numbered <paramref name="last"/> in its input report
-        /// slot. The pump writes the slot and answers or queues the frame in
-        /// one hold of the HID lock, so that frame has gone to a read.</summary>
+        /// parked on the primary endpoint, no frame queued, and the frame
+        /// numbered <paramref name="last"/> in its input report slot. The pump
+        /// writes the slot and answers or queues the frame in one hold of the
+        /// HID lock, so that frame has gone to a read.</summary>
         public bool IdleWithParked(int reads, int last)
         {
             var t = typeof(UsbipEmulatedDevice);
@@ -1235,7 +1297,6 @@ internal static partial class Program
             {
                 if (((System.Collections.ICollection)Field("_frameQueue")).Count != 0) return false;
                 if (((System.Collections.ICollection)Field("_primaryPending")).Count != reads) return false;
-                if ((bool)Field("_resend")) return false;
                 var slot = ((byte[][])Field("_inputReports"))[((int[])Field("_inputSlot"))[0x01]];
                 return (slot[1] | slot[2] << 8) == (last & 0xFFFF);
             }
@@ -1338,6 +1399,11 @@ internal static partial class Program
             Device.HandleSubmit(cmd, data, ReadOnlySpan<(uint, uint)>.Empty);
             return cmd.Seqnum;
         }
+
+        /// <summary>The same with seqnum <paramref name="seq"/>, which a
+        /// receiver on another thread knows first.</summary>
+        public void SubmitOut(uint seq, byte endpoint, byte[] data) =>
+            Device.HandleSubmit(Command(seq, endpoint, false, data.Length), data, ReadOnlySpan<(uint, uint)>.Empty);
 
         public uint ControlOut(byte bmRequestType, byte bRequest, ushort wValue, ushort wIndex, byte[] data)
         {

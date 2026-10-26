@@ -368,9 +368,6 @@ internal sealed class Case6ValveInputPath : IOracleCase
             Set("_hidLock", new object());
             Set("_frameQueue", Activator.CreateInstance(t.GetField("_frameQueue", Instance)!.FieldType));
             Set("_spareFrames", new Stack<byte[]>());
-            // The frames an unlink puts back: the newest alone for a device
-            // that holds one frame (UsbipEmulatedDevice.cs, _frameAnswers).
-            Set("_frameAnswers", Activator.CreateInstance(t.GetField("_frameAnswers", Instance)!.FieldType, 1));
             // The input pump's queue of parked reads, made and kept as the
             // constructor makes it (UsbipEmulatedDevice.cs, _primaryPending).
             var pending = new Dictionary<byte, Queue<uint>>();
