@@ -288,7 +288,9 @@ struct HmRequest {
     uint32_t   serial;
     char       tag[24];
     HmMemory   outMem;
-    HmFile    *file;         /* the handle it came through */
+    HmFile    *file;         /* the handle it came through, NULL for none */
+    HmDevice  *dev;          /* the device it was sent to */
+    void      *context;      /* WdfDeviceInitSetRequestAttributes' context */
 };
 
 typedef struct HmTimer {
@@ -381,6 +383,11 @@ struct HmDevice {
     /* WdfDeviceInitSetFileObjectConfig: the file objects' context type and
      * the close and cleanup callbacks. */
     PCWDF_OBJECT_CONTEXT_TYPE_INFO fileTypeInfo;
+    /* WdfDeviceInitSetRequestAttributes: every request's context type. */
+    PCWDF_OBJECT_CONTEXT_TYPE_INFO requestTypeInfo;
+    /* WdfFileObjectCanBeOptional in the device's file object class: it
+     * takes requests that come with no file object. */
+    int        fileOptional;
     PFN_WDF_FILE_CLOSE   fileClose;
     PFN_WDF_FILE_CLEANUP fileCleanup;
     HmFile    *files;
@@ -446,9 +453,21 @@ HmRequest *Ioctl(HmDevice *dev, const char *tag, ULONG code,
  * CancelForQueue), then IRP_MJ_CLOSE, which runs EvtFileClose. A device's
  * removal closes the handles still open after its queues are purged. */
 HmFile    *FileOpen(HmDevice *dev);
+/* IOCTL_XUSB_WAIT_FOR_INPUT as a reader sends it: a WaitRequest0102 of four
+ * bytes (version 0x0102, user index 0, flags 0), which xusb22 requires
+ * (DispatchWaitForInput), and a 29-byte output buffer unless outLen says
+ * otherwise. f NULL is Ioctl's handle. */
+HmRequest *XusbWait(HmDevice *dev, HmFile *f, const char *tag, size_t outLen);
 void       FileClose(HmFile *f);
 HmRequest *IoctlFile(HmDevice *dev, HmFile *f, const char *tag, ULONG code,
                      const void *in, size_t inLen, size_t outLen, const void *outInit, size_t outInitLen);
+/* A request with no file object, as a kernel-mode client's comes under
+ * UmdfKernelModeClientPolicy and UmdfFileObjectPolicy =
+ * AllowNullAndUnknownFileObjects (hidmaestro_xusb.inf): the framework
+ * presents it, and WdfRequestGetFileObject gives NULL (fxrequest.cpp,
+ * GetFileObject). No handle's close cancels it. */
+HmRequest *IoctlNoFile(HmDevice *dev, const char *tag, ULONG code,
+                       const void *in, size_t inLen, size_t outLen);
 int       QueueDepth(HmQueue *q);
 /* Set by a script run: completions record the whole output buffer rather
  * than its bytes up to the information. */
@@ -612,6 +631,23 @@ extern void (*g_lockHook)(void);
 /* Run once when a driver thread next releases an SRW lock or a wait lock
  * and holds no other, after the release (hm_win32.c, hm_wdf.c). */
 extern void (*g_lockReleaseHook)(void);
+/* Run once right after the next LeaveCriticalSection that frees its
+ * section, on any thread (hm_win32.c). */
+extern void (*g_csLeaveHook)(void);
+/* Run once at the next MapViewOfFile, before it maps (hm_win32.c). */
+extern void (*g_mapHook)(void);
+/* Run once right after the next MemoryBarrier a driver makes (hm_fi.h,
+ * hm_win32.c HmMemoryBarrier). */
+extern void (*g_barrierHook)(void);
+/* Runs fn at once as another thread, beside the one running: a request
+ * another thread sends while this one is inside the driver. Where it finds
+ * an SRW lock or a critical section the running thread holds, it waits, as
+ * a real thread would, and the running thread goes on. The release of that
+ * lock resumes it. One at a time, and none may still wait at a stream's
+ * end (hm_win32.c). */
+void RunBeside(void (*fn)(void));
+/* The thread beside started and has not ended. */
+int  BesideWaiting(void);
 /* The same on the scenario's fiber, in a request's dispatch: what another
  * thread does while the dispatching one is between its lock and the rest
  * of its handler. */

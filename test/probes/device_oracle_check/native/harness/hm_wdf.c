@@ -232,16 +232,36 @@ static VOID WDFAPI HmWdfDeviceInitSetFileObjectConfig(PWDF_DRIVER_GLOBALS g, PWD
     HmDevice *dev = g_addingDevice;
     if (!dev || dev->context) HmFail("WdfDeviceInitSetFileObjectConfig outside a device add, or after the create");
     if (FileObjectConfig->EvtDeviceFileCreate) HmFail("an EvtDeviceFileCreate is not modeled");
-    if (FileObjectConfig->FileObjectClass != WdfFileObjectWdfCannotUseFsContexts)
+    if ((FileObjectConfig->FileObjectClass & ~WdfFileObjectCanBeOptional) != WdfFileObjectWdfCannotUseFsContexts)
         HmFail("a UMDF file object class other than WdfFileObjectWdfCannotUseFsContexts");
+    dev->fileOptional = (FileObjectConfig->FileObjectClass & WdfFileObjectCanBeOptional) != 0;
     dev->fileClose = FileObjectConfig->EvtFileClose;
     dev->fileCleanup = FileObjectConfig->EvtFileCleanup;
     dev->fileTypeInfo = FileObjectAttributes ? FileObjectAttributes->ContextTypeInfo : NULL;
 }
 
+/* The context every request of the device gets, zeroed, as the framework
+ * allocates it with the request object (fxpkggeneral.cpp and fxpkgio.cpp
+ * take the device's request attributes for each request they make). */
+static VOID WDFAPI HmWdfDeviceInitSetRequestAttributes(PWDF_DRIVER_GLOBALS g, PWDFDEVICE_INIT DeviceInit,
+                                                       PWDF_OBJECT_ATTRIBUTES RequestAttributes)
+{
+    (void)g;
+    Expect(DeviceInit, WK_INIT, "WdfDeviceInitSetRequestAttributes");
+    HmDevice *dev = g_addingDevice;
+    if (!dev || dev->context) HmFail("WdfDeviceInitSetRequestAttributes outside a device add, or after the create");
+    dev->requestTypeInfo = RequestAttributes ? RequestAttributes->ContextTypeInfo : NULL;
+}
+
 static PVOID WDFAPI HmWdfObjectGetTypedContextWorker(PWDF_DRIVER_GLOBALS g, WDFOBJECT Handle, PCWDF_OBJECT_CONTEXT_TYPE_INFO TypeInfo)
 {
     (void)g;
+    if (Handle && *(int *)Handle == WK_REQUEST) {
+        HmRequest *r = (HmRequest *)Handle;
+        if (!r->context || r->dev->requestTypeInfo != TypeInfo)
+            HmFail("WdfObjectGetTypedContextWorker: the request has no context of type %s", TypeInfo->ContextName);
+        return r->context;
+    }
     if (Handle && *(int *)Handle == WK_FILE) {
         HmFile *f = (HmFile *)Handle;
         if (f->dev->fileTypeInfo != TypeInfo || !f->context)
@@ -619,7 +639,9 @@ static WDFDEVICE WDFAPI HmWdfFileObjectGetDevice(PWDF_DRIVER_GLOBALS g, WDFFILEO
  * recorded. */
 static void QueueCancelAll(HmQueue *q)
 {
-    for (HmRequest *r = q->head; r; r = r->next) { r->inQueue = 0; r->completed = 1; }
+    /* The framework completes each with STATUS_CANCELLED (fxioqueue.cpp,
+     * CancelForQueue). */
+    for (HmRequest *r = q->head; r; r = r->next) { r->inQueue = 0; r->completed = 1; r->status = STATUS_CANCELLED; }
     q->head = q->tail = NULL;
     q->count = 0;
 }
@@ -907,6 +929,7 @@ void WdfInit(void)
     SET(WdfIoQueueRetrieveRequestByFileObject, PFN_WDFIOQUEUERETRIEVEREQUESTBYFILEOBJECT, HmWdfIoQueueRetrieveRequestByFileObject);
     SET(WdfRequestGetFileObject, PFN_WDFREQUESTGETFILEOBJECT, HmWdfRequestGetFileObject);
     SET(WdfFileObjectGetDevice, PFN_WDFFILEOBJECTGETDEVICE, HmWdfFileObjectGetDevice);
+    SET(WdfDeviceInitSetRequestAttributes, PFN_WDFDEVICEINITSETREQUESTATTRIBUTES, HmWdfDeviceInitSetRequestAttributes);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1105,7 +1128,7 @@ static void FileCloseAt(HmFile *f, int removal)
              * the queue's EvtIoCanceledOnQueue gets it. Without one the
              * framework completes it, unrecorded. */
             if (q->canceledOnQueue) q->canceledOnQueue((WDFQUEUE)q, (WDFREQUEST)r);
-            else r->completed = 1;
+            else { r->completed = 1; r->status = STATUS_CANCELLED; }
         }
     }
     /* IRP_MJ_CLOSE comes once no request through the handle is left. A
@@ -1130,16 +1153,36 @@ HmRequest *Ioctl(HmDevice *dev, const char *tag, ULONG code,
     return IoctlFile(dev, dev->defaultFile, tag, code, in, inLen, outLen, outInit, outInitLen);
 }
 
+static HmRequest *IoctlAt(HmDevice *dev, HmFile *f, const char *tag, ULONG code,
+                          const void *in, size_t inLen, size_t outLen, const void *outInit, size_t outInitLen);
+
 HmRequest *IoctlFile(HmDevice *dev, HmFile *f, const char *tag, ULONG code,
                      const void *in, size_t inLen, size_t outLen, const void *outInit, size_t outInitLen)
 {
     if (f->dev != dev) HmFail("a request through a handle of another device");
+    return IoctlAt(dev, f, tag, code, in, inLen, outLen, outInit, outInitLen);
+}
+
+HmRequest *IoctlNoFile(HmDevice *dev, const char *tag, ULONG code,
+                       const void *in, size_t inLen, size_t outLen)
+{
+    return IoctlAt(dev, NULL, tag, code, in, inLen, outLen, NULL, 0);
+}
+
+static HmRequest *IoctlAt(HmDevice *dev, HmFile *f, const char *tag, ULONG code,
+                          const void *in, size_t inLen, size_t outLen, const void *outInit, size_t outInitLen)
+{
     if (IsWriteCode(code) && (outLen > 0xFF || outInit))
         HmFail("a write request carries its report id as OutputBufferLength and nothing else");
     HmRequest *r = (HmRequest *)calloc(1, sizeof(HmRequest));
     if (!r) HmFail("out of memory");
     r->kind = WK_REQUEST;
     r->file = f;
+    r->dev = dev;
+    if (dev->requestTypeInfo) {
+        r->context = calloc(1, dev->requestTypeInfo->ContextSize);
+        if (!r->context) HmFail("out of memory");
+    }
     r->nextAll = g_allRequests;
     g_allRequests = r;
     r->code = code;
@@ -1163,9 +1206,19 @@ HmRequest *IoctlFile(HmDevice *dev, HmFile *f, const char *tag, ULONG code,
         r->completed = 1;
         return r;
     }
-    if (f->closed) HmFail("a request through a closed handle");
+    if (f && f->closed) HmFail("a request through a closed handle");
     q->ioctl((WDFQUEUE)q, (WDFREQUEST)r, outLen, inLen, code);
     return r;
+}
+
+HmRequest *XusbWait(HmDevice *dev, HmFile *f, const char *tag, size_t outLen)
+{
+    static const uint8_t k_waitRequest0102[4] = { 0x02, 0x01, 0x00, 0x00 };
+    if (!f) {
+        if (!dev->defaultFile) dev->defaultFile = FileOpen(dev);
+        f = dev->defaultFile;
+    }
+    return IoctlFile(dev, f, tag, 0x8000E3AC, k_waitRequest0102, sizeof(k_waitRequest0102), outLen, NULL, 0);
 }
 
 int QueueDepth(HmQueue *q) { return q ? q->count : 0; }
@@ -1174,6 +1227,7 @@ void WdfReset(void)
 {
     while (g_allRequests) {
         HmRequest *n = g_allRequests->nextAll;
+        free(g_allRequests->context);
         free(g_allRequests->in);
         if (!g_allRequests->noAccess) free(g_allRequests->out);
         free(g_allRequests);
