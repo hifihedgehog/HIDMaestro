@@ -117,19 +117,30 @@ internal static partial class Live
             var f24 = new byte[11];
             f24[1] = 0x73;
             var none = new byte[11];
+            // The keyboard's control, on its own device and path: F23 in a
+            // full frame, report ID first. F23 without F24 means the
+            // data-only frame went wrong. Neither means keyboard input did
+            // not reach this program: another program held it, as Mouse
+            // Without Borders does while it drives its other computer
+            // (October 26), or the desktop was locked. The keyboard's window
+            // then runs again.
+            var f23Full = new byte[12];
+            f23Full[0] = 0x01;
+            f23Full[2] = 0x72;
+            var noneFull = new byte[12];
+            noneFull[0] = 0x01;
             sink.Clear();
-            bool ds4Ok = false, nsoOk = false, keyOk = false;
+            bool ds4Ok = false, nsoOk = false, keyOk = false, ctlOk = false;
             int seen21 = 0;
             long nextKey = 0;
             var sw = Stopwatch.StartNew();
-            while (sw.ElapsedMilliseconds < 4000 && !(ds4Ok && nsoOk && (keyOk || !rawInput)))
+            while (sw.ElapsedMilliseconds < 4000 && !(ds4Ok && nsoOk && ((keyOk && ctlOk) || !rawInput)))
             {
                 ds4.SubmitState(ds4State);
                 nso.SubmitState(nsoState);
-                if (rawInput && !keyOk && sw.ElapsedMilliseconds >= nextKey)
+                if (rawInput && !(keyOk && ctlOk) && sw.ElapsedMilliseconds >= nextKey)
                 {
-                    kb.SubmitRawReport(f24);
-                    kb.SubmitRawReport(none);
+                    PressKeys(kb, f24, none, f23Full, noneFull);
                     nextKey = sw.ElapsedMilliseconds + 500;
                 }
                 for (int i = 0; i < 4; i++)
@@ -140,13 +151,33 @@ internal static partial class Live
                     if (r != null && r.Length > 0 && r[0] == 0x21) seen21++;
                     if (r != null && r.Length >= 3 && r[0] == 0x3F && (r[1] | r[2]) != 0) nsoOk = true;
                 }
-                if (rawInput) keyOk |= sink.Keys.Any(k => k.Device == keyboard && k.VKey == 0x87 && (k.Flags & 1) == 0);
+                if (rawInput) (keyOk, ctlOk) = (keyOk || KeyMade(sink, keyboard, 0x87), ctlOk || KeyMade(sink, keyboard, 0x86));
+            }
+            // Up to six more windows, 5 s apart, while nothing of the
+            // keyboard's arrives.
+            int windows = 1;
+            for (; rawInput && !keyOk && !ctlOk && windows < 7; windows++)
+            {
+                Thread.Sleep(5000);
+                sink.Clear();
+                var kw = Stopwatch.StartNew();
+                long next = 0;
+                while (kw.ElapsedMilliseconds < 4000 && !(keyOk && ctlOk))
+                {
+                    if (kw.ElapsedMilliseconds >= next) { PressKeys(kb, f24, none, f23Full, noneFull); next = kw.ElapsedMilliseconds + 500; }
+                    Thread.Sleep(20);
+                    (keyOk, ctlOk) = (keyOk || KeyMade(sink, keyboard, 0x87), ctlOk || KeyMade(sink, keyboard, 0x86));
+                }
             }
             Check("dualshock-4-v2, the control, in the same window: report 0x01 with left stick X 0xFF", ds4Ok);
             Check("genesis-nso: report 0x3F with the button pressed", nsoOk);
             Check("genesis-nso: no report 0x21 arrived, which the driver sent before InputReportId", seen21 == 0, $"{seen21} seen");
             if (rawInput)
+            {
+                Check("microsoft-designer-keyboard, its control: F23 in a full frame reaches this program", ctlOk,
+                      ctlOk ? $"window {windows}" : $"no key of the keyboard's in {windows} windows: keyboard input did not reach this program");
                 Check("microsoft-designer-keyboard: a data-only frame arrives as its keyboard report 0x01 (F24 pressed)", keyOk);
+            }
             else
                 Console.WriteLine($"  [SKIP] microsoft-designer-keyboard: the data-only frame as keyboard report 0x01, {noRawInput}.");
         }
@@ -164,6 +195,21 @@ internal static partial class Live
 
     /// <summary>Create a controller and open a reader on its new HID
     /// interface, or leave the reader null after a failed check.</summary>
+    /// <summary>One press and release of F24 as data-only frames, then of
+    /// F23, the control, as full frames.</summary>
+    static void PressKeys(HMController kb, byte[] f24, byte[] none, byte[] f23Full, byte[] noneFull)
+    {
+        kb.SubmitRawReport(f24);
+        kb.SubmitRawReport(none);
+        kb.SubmitRawReport(f23Full);
+        kb.SubmitRawReport(noneFull);
+    }
+
+    /// <summary>True when Raw Input brought a make of <paramref name="vkey"/>
+    /// from <paramref name="device"/>.</summary>
+    static bool KeyMade(RawInputSink sink, IntPtr device, ushort vkey) =>
+        sink.Keys.Any(k => k.Device == device && k.VKey == vkey && (k.Flags & 1) == 0);
+
     static HMController Open(HMContext ctx, HMProfile prof, out HidReader? reader)
     {
         reader = null;

@@ -646,7 +646,27 @@ internal static class Program
 
     // ── A, B and C ───────────────────────────────────────────────────────
 
+    /// <summary>A to C move the real cursor, C by up to 16,250 counts an
+    /// axis. A cursor that reaches a screen edge can hand the keyboard and
+    /// mouse to another computer (Mouse Without Borders) or open a hot
+    /// corner, so it stays in a square at the primary screen's center until
+    /// the sections end. Raw Input reports every count whatever the clip.</summary>
     static void FourMice(HMContext ctx, RawInputSink sink)
+    {
+        int cx = GetSystemMetrics(0) / 2, cy = GetSystemMetrics(1) / 2;
+        var square = new RECT { Left = cx - 100, Top = cy - 100, Right = cx + 100, Bottom = cy + 100 };
+        SetCursorPos(cx, cy);
+        ClipCursor(ref square);
+        try { FourMiceSections(ctx, sink); }
+        finally { ClipCursor(IntPtr.Zero); }
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool ClipCursor(ref RECT r);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool ClipCursor(IntPtr none);
+    struct RECT { public int Left, Top, Right, Bottom; }
+
+    static void FourMiceSections(HMContext ctx, RawInputSink sink)
     {
         Console.WriteLine("\n== A. Four mice, one VID and PID, four identity keys ==");
         var profile = Custom(0xF0B0, "HIDMaestro Live Mouse", "mouse", new HidDescriptorBuilder().Mouse());
