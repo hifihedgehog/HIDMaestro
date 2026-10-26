@@ -19,8 +19,7 @@
 //                 4 ms after it (the profile's stream), so a frame that
 //                 misses its wakeup waits 4 ms.
 //   dualsense-bt  dualsense-bt, ReadFile, a stream of 1.25 ms: a frame that
-//                 misses its wakeup waits 1.25 ms, under the 2 ms bound on
-//                 the final submits, which therefore cannot see it there.
+//                 misses its wakeup waits 1.25 ms at most.
 //                 Once a host reads feature 0x05, 0x09 or 0x20 the device
 //                 sends the vendor report 0x31, read at the bytes the
 //                 profile's extended report gives its sticks.
@@ -447,7 +446,7 @@ internal static partial class Program
         failures.Report($"{name} ReadFile", sent.Count > 0 ? sent[0].Time : 0, reopened.Count, "reopens");
         DecodeCheck($"{name} ReadFile", tracker, got.Count, before, off, firstOff);
         MisreadDetail($"{name} ReadFile", sent, wrong, code);
-        StressVerdict($"{name} ReadFile", sent, got, boundFinals: true);
+        StressVerdict($"{name} ReadFile", sent, got, repeatMs: period, compareFinals: true);
         if (all != null && burstOf != null) LateDetail($"{name} ReadFile", sent, burstOf, got, all, wgi: false, streamMs: period);
     }
 
@@ -540,7 +539,7 @@ internal static partial class Program
         poller.Join(2000);
         failures.Report(name, sent.Count > 0 ? sent[0].Time : 0, rebound, "rebinds to a slot that came back");
         DecodeCheck(name, tracker, seen.Count, early, off, firstOff);
-        StressVerdict(name, sent, seen, boundFinals: true);
+        StressVerdict(name, sent, seen, repeatMs: IdleRepeatMs(c), compareFinals: true);
         if (burstOf != null) LateDetail(name, sent, burstOf, seen, seen, wgi: false, streamMs: 0);
     }
 
