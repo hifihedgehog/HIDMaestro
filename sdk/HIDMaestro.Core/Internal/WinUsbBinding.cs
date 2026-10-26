@@ -1038,12 +1038,20 @@ DeviceName = ""{deviceName}""
         // is the one signed.
         int rc;
         string output;
+        bool stopped;
         string infPath = Path.Combine(dir, p.InfName);
         using (var pin = ProtectedStaging.PinFile(infPath, Sha256Hex(inf)))
         {
             DriverBuilder.CatalogAndSignPackage(dir, pin);
-            (rc, output) = PnputilHelper.AddDriver(infPath);
+            (rc, output, stopped) = PnputilHelper.AddDriver(infPath);
         }
+        // A stopped add may have been cut short in the middle of its import,
+        // so no listing after it reads as success. Nothing is recorded, and
+        // the next bind adds the package again.
+        if (stopped)
+            throw new InvalidOperationException(
+                $"pnputil /add-driver {p.InfName} was stopped after {TimeoutScale.Apply(DriverBuilder.PnputilAddMs()) / 1000} s, " +
+                "the time Windows gives a device installation task, before it finished. The next bind adds the package again.");
         string staged = Sha256Hex(inf);
         return RecordAdd(p.InfName, OurPackages(), rc, output, published => PublishedHash(published) == staged);
     }

@@ -73,11 +73,6 @@ internal static partial class PnputilHelper
     internal static (int exitCode, string output) Run(string args, int timeoutMs = 30_000) =>
         RunTool(PnputilPath, args, timeoutMs);
 
-    /// <summary>Run a program by its full path and return its exit code and
-    /// its output, within the timeout however the program behaves. Its
-    /// output is read as it comes, and a program that outlives the timeout
-    /// is ended. Coexistence probe section Z calls this through reflection
-    /// with a program that hangs.</summary>
     /// <summary>The text a child's two redirected streams gave once the
     /// child has ended or been killed, both waited for at most 5 s (scaled)
     /// together, and "" for a stream not ended by then. A stream ends when
@@ -93,7 +88,20 @@ internal static partial class PnputilHelper
         static string Ended(System.Threading.Tasks.Task<string> t) => t.IsCompletedSuccessfully ? t.Result : "";
     }
 
+    /// <summary>Run a program by its full path and return its exit code and
+    /// its output, within the timeout however the program behaves. Its
+    /// output is read as it comes, and a program that outlives the timeout
+    /// is ended. Coexistence probe section Z calls this through reflection
+    /// with a program that hangs.</summary>
     internal static (int exitCode, string output) RunTool(string path, string args, int timeoutMs)
+    {
+        var (exitCode, output, _) = RunToolBounded(path, args, timeoutMs);
+        return (exitCode, output);
+    }
+
+    /// <summary><see cref="RunTool"/>, and whether the program was stopped
+    /// at the timeout, which cut short whatever it was doing.</summary>
+    internal static (int exitCode, string output, bool stopped) RunToolBounded(string path, string args, int timeoutMs)
     {
         var psi = new ProcessStartInfo
         {
@@ -113,15 +121,17 @@ internal static partial class PnputilHelper
         // us a real timeout we can act on.
         var stdoutTask = p.StandardOutput.ReadToEndAsync();
         var stderrTask = p.StandardError.ReadToEndAsync();
+        bool stopped = false;
         if (!p.WaitForExit(TimeoutScale.Apply(timeoutMs)))
         {
+            stopped = true;
             try { p.Kill(entireProcessTree: true); } catch { }
             p.WaitForExit(TimeoutScale.Apply(5_000));
         }
         var (stdout, stderr) = Drain(stdoutTask, stderrTask);
         int exitCode;
         try { exitCode = p.ExitCode; } catch { exitCode = -1; }
-        return (exitCode, stdout + stderr);
+        return (exitCode, stdout + stderr, stopped);
     }
 
     /// <summary>The driver store's published packages whose original INF
@@ -422,9 +432,11 @@ internal static partial class PnputilHelper
     }
 
     /// <summary>Add a package to the driver store without installing it on
-    /// any device.</summary>
-    public static (int exitCode, string output) AddDriver(string infPath)
-        => Run($"/add-driver \"{infPath}\"", timeoutMs: 60_000);
+    /// any device, waiting as long as Windows gives a device installation
+    /// task (<see cref="DriverBuilder.PnputilAddMs"/>). <c>stopped</c> is
+    /// true when pnputil was still running then and was ended.</summary>
+    public static (int exitCode, string output, bool stopped) AddDriver(string infPath)
+        => RunToolBounded(PnputilPath, $"/add-driver \"{infPath}\"", DriverBuilder.PnputilAddMs());
 
     /// <summary>The answer of a plain delete, /delete-driver with no
     /// /uninstall and no /force, so a package a devnode still uses, present

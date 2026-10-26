@@ -46,6 +46,17 @@ public static class DriverBuilder
     static (int exitCode, string output) Run(string fileName, string arguments,
         string? workingDir = null, int timeoutMs = 60_000)
     {
+        var (exitCode, output, _) = RunBounded(fileName, arguments, workingDir, timeoutMs);
+        return (exitCode, output);
+    }
+
+    /// <summary><see cref="Run"/>, and whether the tool was stopped: still
+    /// running at <paramref name="timeoutMs"/> (scaled), it is ended with
+    /// its process tree. Whatever it was doing was cut short, so no caller
+    /// may read success into that run.</summary>
+    static (int exitCode, string output, bool stopped) RunBounded(string fileName, string arguments,
+        string? workingDir = null, int timeoutMs = 60_000)
+    {
         // Async-drain pattern: synchronous ReadToEnd before WaitForExit
         // deadlocks when the child fills stderr's 4 KB pipe buffer while
         // we're draining stdout (child blocks on stderr write, our reader
@@ -78,7 +89,7 @@ public static class DriverBuilder
         {
             try { proc.Kill(entireProcessTree: true); } catch { }
             try { proc.WaitForExit(TimeoutScale.Apply(2000)); } catch { }
-            lock (sb) return (-1, $"timeout after {scaledTimeout} ms (scale={TimeoutScale.Factor})\n{sb}");
+            lock (sb) return (-1, $"timeout after {scaledTimeout} ms (scale={TimeoutScale.Factor})\n{sb}", true);
         }
         // The timed wait returns at process exit, before the handlers have
         // seen the end of both streams, so the tool's last lines, its error
@@ -95,15 +106,70 @@ public static class DriverBuilder
             catch (OperationCanceledException)
             {
                 lock (sb) return (proc.ExitCode,
-                    $"{sb}(output still open {TimeoutScale.Apply(OutputDrainMs)} ms after the tool exited: a process it started holds it)\n");
+                    $"{sb}(output still open {TimeoutScale.Apply(OutputDrainMs)} ms after the tool exited: a process it started holds it)\n", false);
             }
         }
-        lock (sb) return (proc.ExitCode, sb.ToString());
+        lock (sb) return (proc.ExitCode, sb.ToString(), false);
     }
 
     /// <summary>How long a tool's output may stay open after the tool has
     /// exited before <see cref="Run"/> returns without its end.</summary>
     internal const int OutputDrainMs = 10_000;
+
+    /// <summary>How long a pnputil /add-driver run gets before the SDK stops
+    /// it, before scaling: as long as Windows waits for a device installation
+    /// task before it ends one. That is 240 s unless the "Configure device
+    /// installation time-out" policy sets more (InstallTimeout under
+    /// HKLM\Software\Policies\Microsoft\Windows\DeviceInstall\Settings,
+    /// at least 240 by DeviceInstallation.admx). The add copies the package
+    /// into the driver store, registers and publishes it, and with /install
+    /// updates the devices it matches (setupapi.dev.log's
+    /// DrvSetupInstallDriver section). The tools Microsoft ships as samples
+    /// wait for the same calls with no limit at all: devcon's update and
+    /// dp_add call UpdateDriverForPlugAndPlayDevices and SetupCopyOEMInf and
+    /// return when they do (Windows-driver-samples, setup\devcon\cmds.cpp,
+    /// cmdUpdate and cmdDPAdd). Until v2.1.0 the SDK stopped an add at
+    /// 30 s.</summary>
+    internal static int PnputilAddMs()
+    {
+        const int defaultSeconds = 240;
+        int seconds = defaultSeconds;
+        try
+        {
+            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                @"Software\Policies\Microsoft\Windows\DeviceInstall\Settings");
+            if (key?.GetValue("InstallTimeout") is int set && set > seconds) seconds = Math.Min(set, int.MaxValue / 1000);
+        }
+        catch (Exception e) when (e is System.Security.SecurityException or UnauthorizedAccessException or IOException) { }
+        return seconds * 1000;
+    }
+
+    /// <summary>The failure of an add <see cref="RunBounded"/> stopped, with the
+    /// state it left. A stop can come in the middle of the import, so the
+    /// driver store may or may not list the package, and an add with
+    /// /install may not have reached every device it matches. Neither is
+    /// success: the deploy fails, and since the install record still names
+    /// the payload before it, the next InstallDriver deploys again.</summary>
+    static InvalidOperationException AddStopped(string command, string inf, bool removedBefore)
+    {
+        var embedded = DriverDeploy.EmbeddedStamp(inf);
+        string store;
+        try
+        {
+            store = DriverDeploy.InstalledStamps(inf).Any(s => s.CompareTo(embedded) == 0)
+                ? $"The driver store lists {inf} {embedded}, but the add may not have reached every device the package matches. "
+                : $"The driver store does not list {inf} {embedded}: the import did not finish. ";
+        }
+        catch (Exception e)
+        {
+            store = $"The driver store could not be read after it ({e.Message.TrimEnd('.')}). ";
+        }
+        return new InvalidOperationException(
+            $"pnputil {command} was stopped after {TimeoutScale.Apply(PnputilAddMs()) / 1000} s, the time Windows gives a device installation task, before it finished. " +
+            store +
+            (removedBefore ? "This deploy removed HIDMaestro's earlier packages before its adds. " : "") +
+            "The install record still names the payload installed before, so the next InstallDriver deploys again.");
+    }
 
     // ── Extraction ──────────────────────────────────────────────────────────
 
@@ -596,12 +662,16 @@ public static class DriverBuilder
         // /install reinstalls every present devnode the package matches,
         // another program's controllers and their HID children included, so
         // it runs under the PnP lock, after the deploy lock the caller holds.
+        var exits = new List<string>(2);
         foreach (string inf in new[] { "hidmaestro.inf", "hidmaestro_xusb.inf" })
         {
             string path = Path.Combine(dir, inf);
             if (!File.Exists(path)) continue;
+            (int rc, string output, bool stopped) run;
             using (DeviceManager.HoldPnpLock())
-                Run(pnputil, $"/add-driver \"{path}\" /install", timeoutMs: 30_000);
+                run = RunBounded(pnputil, $"/add-driver \"{path}\" /install", timeoutMs: PnputilAddMs());
+            if (run.stopped) throw AddStopped($"/add-driver {inf} /install", inf, removedBefore: true);
+            exits.Add($"{inf} exit {run.rc}");
             // pnputil /add-driver does not support /format, so its rc and output
             // are locale- and version-keyed and unreliable for success detection
             // (see issue #17). The authoritative success signal is the post-
@@ -612,8 +682,8 @@ public static class DriverBuilder
 
         if (!PnputilHelper.IsHidMaestroDriverInstalled())
             throw new InvalidOperationException(
-                "pnputil /add-driver completed but driver store does not contain "
-              + "all required HIDMaestro packages. "
+                $"pnputil /add-driver ran to its end ({string.Join(", ", exits)}), but the driver store does not hold "
+              + "every HIDMaestro package. "
               + $"Required INFs: {string.Join(", ", PnputilHelper.HidMaestroInfNames)}.");
 
         // /scan-devices removed (Option 1). Our INFs are function INFs that bind via
@@ -758,7 +828,8 @@ public static class DriverBuilder
         {
             var embedded = DriverDeploy.EmbeddedStamp(inf);
             DeviceOrchestrator.LogDiag($"    deploy: adding the missing {inf} of {embedded}");
-            Run(pnputil, $"/add-driver \"{Path.Combine(package, inf)}\"", timeoutMs: 30_000);
+            if (RunBounded(pnputil, $"/add-driver \"{Path.Combine(package, inf)}\"", timeoutMs: PnputilAddMs()).stopped)
+                throw AddStopped($"/add-driver {inf}", inf, removedBefore: false);
             if (!DriverDeploy.InstalledStamps(inf).Any(s => s.CompareTo(embedded) == 0))
                 throw new InvalidOperationException($"pnputil /add-driver did not add {inf} {embedded} to the driver store.");
         }
