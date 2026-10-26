@@ -1220,6 +1220,10 @@ internal static partial class Program
         Console.WriteLine("\n-- the protocol GET_REPORT section's copy of gamecube-adapter --");
         ProtocolInputOffline(ctx);
 
+        // The device's handoffs from a frame or a reply to a waiting read
+        // (Program.Wake.cs).
+        HandoffOffline();
+
         // The server's connection owner lookup and the location match the
         // sweeps detach by, which need no device either (Program.Lookup.cs).
         OwnerLookup();
