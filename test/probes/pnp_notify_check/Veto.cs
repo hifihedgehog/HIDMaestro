@@ -13,9 +13,10 @@
 // Two holders are run, each at an identity of its own made for this run:
 //
 //   still  never reads and lets go only when told. A create at the same
-//          identity while it holds is refused at once with the reason:
-//          Windows keeps the previous life's devnodes until the last handle
-//          closes, and a create at that instance id gets them back.
+//          identity while it holds is refused with the reason at its start
+//          wait's first look: Windows keeps the previous life's devnodes
+//          until the last handle closes, and a create at that instance id
+//          gets them back.
 //   reads  reads its handle on a thread and closes it when a read fails, as
 //          SDL's HIDAPI drivers do ("Read error, device is disconnected",
 //          SDL_hidapi_luna.c, then HIDAPI_JoystickDisconnected).
@@ -31,6 +32,12 @@
 // default identity, HM_0000 on the bench machine, whose record a vetoed
 // removal of an older build broke on 2026-10-19. The persona is
 // amazon-luna-usb, a gamepad (Generic Desktop 01:05).
+//
+// No check holds a step to how long it takes on a quiet machine. Each wait
+// on Windows or the SDK is a hang detector past their own longest bounds
+// (DisposeHangMs, CreateHangMs, WindowsHangMs), the create refused while a
+// holder holds is judged by how its start wait ended, and the times are
+// printed, so a loaded machine slows the run and fails nothing.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -45,6 +52,28 @@ internal static class Veto
 {
     const string ProfileId = "amazon-luna-usb";
     const uint DN_STARTED = 0x8, DN_HAS_PROBLEM = 0x400;
+
+    /// <summary>A hang detector for one Dispose, past the sum of the SDK's
+    /// own bounds on its waits, under 200 s, while no other program holds
+    /// the PnP lock: the driver's 2 s answer, the 5 s wait for the surprise
+    /// removal, the parent's 120 s removal budget with the pnputil and devcon
+    /// fallbacks after it (7 s each), a child's 2 s with its own, and
+    /// Windows' wait of about 5.4 s on a holder that never reads. Load
+    /// slows the steps inside those bounds. Unloaded a Dispose takes 200 ms
+    /// with no holder and 7.5 s with one that never reads (the bench
+    /// machine, 2026-10-19).</summary>
+    static int DisposeHangMs => TimeoutScale.Apply(300_000);
+
+    /// <summary>A hang detector for one create, past its own bounds: the
+    /// previous life's removal (120 s), the wait for Windows' pending
+    /// installs (30 s), up to three rounds of the registration gate and the
+    /// start waits.</summary>
+    static int CreateHangMs => TimeoutScale.Apply(600_000);
+
+    /// <summary>A hang detector for a wait on Windows: a child that
+    /// starts, an interface that appears, a devnode that leaves, a read that
+    /// fails. Each takes milliseconds to seconds unloaded.</summary>
+    static int WindowsHangMs => TimeoutScale.Apply(300_000);
 
     static int s_total, s_failures;
 
@@ -73,11 +102,11 @@ internal static class Veto
             times.Add(sw.ElapsedMilliseconds);
         }
         // The time is a performance figure, printed. The check is a hang
-        // bound, some 25 times the bench machine's 200 ms, on the median of
-        // the three, so one Dispose held up by other work cannot fail it.
+        // detector past the SDK's own bounds on a Dispose (DisposeHangMs).
         times.Sort();
         Console.WriteLine($"  info: Disposes with no holder took {string.Join(", ", times)} ms");
-        Check("a Dispose with no holder ends, the median of three within 5 s", times[1] < 5_000, $"{string.Join(", ", times)} ms");
+        Check("three Disposes with no holder end, each inside the hang detector", times[2] < DisposeHangMs,
+              $"{string.Join(", ", times)} ms, hang detector {DisposeHangMs} ms");
 
         Hold(ctx, profile, run + "-still", reads: false);
         Hold(ctx, profile, run + "-reads", reads: true);
@@ -130,7 +159,7 @@ internal static class Veto
         long disposeMs = sw.ElapsedMilliseconds;
         if (reader != null)
         {
-            reader.Join(5000);
+            reader.Join(WindowsHangMs);
             Check("the reading holder's read failed and it closed its handle", closedAt >= 0,
                   closedAt >= 0 ? $"Win32 {readError}, {closedAt - disposeAt} ms after the Dispose began" : "still reading");
         }
@@ -138,31 +167,58 @@ internal static class Veto
         // after waiting for it, 5,376 ms on the bench machine on 2026-10-19, and
         // the surprise removal after it took 2,081 ms. A reading holder lets go
         // inside that wait. Before v2.0.0 this Dispose took 13 s and broke the
-        // child's record, which the record checks below catch. The bound is a
-        // hang bound, some 10 times the 7.5 s a still holder costs, since
-        // Windows's own wait for the holder stretches with other work.
-        const int disposeBoundMs = 75_000;
-        Check($"the Dispose removed the parent within {disposeBoundMs / 1000} s while the handle was open", !Present(parent) && disposeMs < disposeBoundMs,
-              $"{disposeMs} ms, parent {Describe(Status(parent))}, child record {Record(child)}");
+        // child's record, which the record checks below catch. The bound is
+        // the hang detector (DisposeHangMs): Windows' own wait for the holder
+        // stretches with other work.
+        Check("the Dispose removed the parent while the handle was open, inside the hang detector", !Present(parent) && disposeMs < DisposeHangMs,
+              $"{disposeMs} ms (hang detector {DisposeHangMs} ms), parent {Describe(Status(parent))}, child record {Record(child)}");
 
         if (!reads)
         {
-            const string refusal = "a create at the same identity while the holder still holds is refused within 3 s and says why";
+            // Refused at once means at the start wait's first look: every look
+            // the create takes at the identity's devnode finds the previous
+            // life still Windows' to remove (DN_WILL_BE_REMOVED,
+            // DeviceOrchestrator.RemovalPending), so its wait ends there
+            // rather than polling to its budget, and the refusal names the
+            // holder. Load slows each step and changes no look. The time is
+            // printed: 4.9 s on the Celeron on 2026-10-26, most of it the
+            // previous life's removal waiting for a REMOVED notification the
+            // held devnode does not send.
+            const string refusal = "a create at the same identity while the holder still holds is refused at its start wait's first look, which finds the previous life still Windows' to remove, and says why";
+            var looks = new List<bool>();
+            var pending = DeviceOrchestrator.RemovalPending;
+            DeviceOrchestrator.RemovalPending = id =>
+            {
+                bool p = pending(id);
+                if (string.Equals(id, parent, StringComparison.OrdinalIgnoreCase)) lock (looks) looks.Add(p);
+                return p;
+            };
+            Exception? thrown = null;
+            bool created = false;
             sw.Restart();
-            try
+            var creator = new System.Threading.Thread(() =>
             {
-                ctx.CreateController(profile, key).Dispose();
-                Check(refusal, false, $"the create succeeded in {sw.ElapsedMilliseconds} ms");
-            }
-            catch (Exception e)
-            {
-                long ms = sw.ElapsedMilliseconds;
-                Check(refusal, ms < 3000 && e.Message.Contains("holds its HID child open", StringComparison.Ordinal),
-                      $"{ms} ms, {e.GetType().Name}: {e.Message}");
-            }
+                try
+                {
+                    ctx.CreateController(profile, key).Dispose();
+                    created = true;
+                }
+                catch (Exception e) { thrown = e; }
+            }) { IsBackground = true };
+            creator.Start();
+            bool ended = creator.Join(CreateHangMs);
+            long ms = sw.ElapsedMilliseconds;
+            DeviceOrchestrator.RemovalPending = pending;
+            bool[] seen;
+            lock (looks) seen = looks.ToArray();
+            Check(refusal, ended && !created && thrown != null && seen.Length > 0 && seen.All(p => p)
+                           && thrown.Message.Contains("holds its HID child open", StringComparison.Ordinal),
+                  !ended ? $"the create had not ended when the {CreateHangMs} ms hang detector did"
+                  : created ? $"the create succeeded in {ms} ms"
+                  : $"{ms} ms, its looks at the previous life [{string.Join(", ", seen)}], {thrown!.GetType().Name}: {thrown.Message}");
             holder?.Dispose();
             var gone = Stopwatch.StartNew();
-            while (gone.ElapsedMilliseconds < 10_000 && DeviceOrchestrator.RemovalPending(parent))
+            while (gone.ElapsedMilliseconds < WindowsHangMs && DeviceOrchestrator.RemovalPending(parent))
                 System.Threading.Thread.Sleep(25);
             Console.WriteLine($"     the holder let go, and the previous life's devnode left {gone.ElapsedMilliseconds} ms later");
         }
@@ -188,7 +244,7 @@ internal static class Veto
         string? last = again != null ? Children(again.InstanceId!).FirstOrDefault() ?? child : child;
         again?.Dispose();
         var settle = Stopwatch.StartNew();
-        while (settle.ElapsedMilliseconds < 10_000 && (Present(parent) || (last != null && Present(last))))
+        while (settle.ElapsedMilliseconds < WindowsHangMs && (Present(parent) || (last != null && Present(last))))
             System.Threading.Thread.Sleep(100);
         Check("at the end the identity's devnodes are gone", !Present(parent) && (last == null || !Present(last)),
               $"parent {Describe(Status(parent))}, child {(last == null ? "none" : Describe(Status(last)))}");
@@ -224,7 +280,7 @@ internal static class Veto
 
     /// <summary>A create that must start its HID child with no problem code
     /// and leave no record without its driver, and a Dispose with no holder
-    /// that ends within 500 ms.</summary>
+    /// that ends inside the hang detector (DisposeHangMs).</summary>
     static void Starts(HMContext ctx, HMProfile profile, string? key, string what, string? notOn = null)
     {
         var sw = Stopwatch.StartNew();
@@ -241,9 +297,9 @@ internal static class Veto
         sw.Restart();
         c.Dispose();
         long disposeMs = sw.ElapsedMilliseconds;
-        // 5 s is a hang bound, some 25 times the bench machine's 200 ms.
-        Check($"{what}: its Dispose with no holder ends within 5 s and leaves no record without its driver",
-              disposeMs < 5_000 && (child == null || !BrokenRecord(child)), $"{disposeMs} ms, child record {Record(child)}");
+        Check($"{what}: its Dispose with no holder ends inside the hang detector and leaves no record without its driver",
+              disposeMs < DisposeHangMs && (child == null || !BrokenRecord(child)),
+              $"{disposeMs} ms (hang detector {DisposeHangMs} ms), child record {Record(child)}");
     }
 
     /// <summary>A record of a HIDMaestro HID child that is not in the tree
@@ -269,7 +325,7 @@ internal static class Veto
     {
         var guid = new Guid("4D1E55B2-F16F-11CF-88CB-001111000030");
         var sw = Stopwatch.StartNew();
-        while (sw.ElapsedMilliseconds < 5000)
+        while (sw.ElapsedMilliseconds < WindowsHangMs)
         {
             if (CM_Get_Device_Interface_List_SizeW(out uint len, ref guid, child, 0) == 0 && len > 1)
             {
@@ -287,8 +343,9 @@ internal static class Veto
         return null;
     }
 
-    /// <summary>Up to 30 s for the child to start, a hang bound: a start
-    /// waits for the driver host, which other work on the machine slows.</summary>
+    /// <summary>The child's start, within the hang detector
+    /// (WindowsHangMs): a start waits for the driver host, which other work
+    /// on the machine slows.</summary>
     static bool WaitStarted(string id)
     {
         var sw = Stopwatch.StartNew();
@@ -296,7 +353,7 @@ internal static class Veto
         {
             var st = Status(id);
             if (st.Present && (st.Status & DN_STARTED) != 0) return true;
-            if (sw.ElapsedMilliseconds > 30_000) return false;
+            if (sw.ElapsedMilliseconds > WindowsHangMs) return false;
             System.Threading.Thread.Sleep(50);
         }
     }
