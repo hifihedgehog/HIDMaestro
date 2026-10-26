@@ -84,10 +84,11 @@ C_ASSERT(FIELD_OFFSET(HIDMAESTRO_VERSION_INFO, DriverConfigError) == 56);
  * once final, the SeqNo with its low bit set while provisional, or 0. A
  * take that finds a final SeqNo reads the section without waiting and
  * sends whatever new frame it holds, the frame taken or a newer one, not
- * only a frame whose SeqNo is the one taken. When the worker leaves its
- * loop first on the stop event or at teardown, it signals the input event
- * for that frame instead. A take that finds a provisional SeqNo
- * drops it. The SDK stores the frame's even SeqNo and, with
+ * only a frame whose SeqNo is the one taken. When the poll after the take
+ * returns the stop event, at a foreign stop or at teardown, the worker
+ * signals the input event for that frame instead. At teardown with any
+ * other result of the poll it leaves with the frame unread and signals
+ * nothing. A take that finds a provisional SeqNo drops it. The SDK stores the frame's even SeqNo and, with
  * HIDMAESTRO_SIGNAL_CAP_INPUT_WAITERS set, reads InputHandoff. A final
  * SeqNo still there is a read the worker owes, which finds this frame too:
  * one compare-exchange puts this frame's final SeqNo in its place, and no
