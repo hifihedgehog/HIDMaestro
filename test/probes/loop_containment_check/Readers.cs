@@ -112,6 +112,7 @@ internal static class Haptic
         channel.SetValue(vr, ch);
         t.GetField("_cts", Private)!.SetValue(vr, new CancellationTokenSource());
         t.GetField("_lifetimeLock", Private)!.SetValue(vr, new object());
+        t.GetField("_submitLock", Private)!.SetValue(vr, new object());
         t.GetField("_frame", Private)!.SetValue(vr, new byte[VrSharedMemory.InputFrameSize]);
         int got = 0;
         vr.HapticReceived += (_, _) => Interlocked.Increment(ref got);
