@@ -33,6 +33,11 @@
 //     can run them. --set-stats prints each scenario's set store size.
 //     --cut-diverged stops at a shared step v2.0.3 could not take: the
 //     scenario fails there, and the outcomes after it go uncounted.
+//     --no-trade fails a trade (DeliveryModel.TradeOk), and
+//     --strict-read-delay drops a v2.0.3 run with its READ_REPORT parked
+//     through a late one of this driver's, as through e9a6e92d
+//     (V203Side.Restrict). --range a:b runs the scenarios from index a up
+//     to b.
 //   SignalGateModel scenarios   each scenario's index and name.
 //   SignalGateModel selftest   the outcome checks on hand-built outcomes.
 //   SignalGateModel fences [frames]   round 6's SDK write with a store
@@ -181,9 +186,14 @@ internal static class Program
             else if (args[i] == "--sets") DeliveryModel.DumpSets = true;
             else if (args[i] == "--cut-diverged") DeliveryModel.CutDiverged = true;
             else if (args[i] == "--index") s_index = int.Parse(args[++i]);
+            else if (args[i] == "--range") { var p = args[++i].Split(':'); s_from = int.Parse(p[0]); s_to = int.Parse(p[1]); }
             else if (args[i] == "--outcomes") s_outcomes = true;
             else if (args[i] == "--base") s_base = args[++i];
             else if (args[i] == "--max-states") s_maxStates = long.Parse(args[++i]);
+            else if (args[i] == "--keyboard-extra-fails") DeliveryModel.KeyboardExtraFails = true;
+            else if (args[i] == "--keep-parked-on-read-delay") DeliveryModel.KeepParkedOnReadDelay = true;
+            else if (args[i] == "--strict-read-delay") DeliveryModel.KeepParkedOnReadDelay = false;
+            else if (args[i] == "--no-trade") DeliveryModel.Trades = false;
             else only = args[i];
         }
         return RunCheck(frames, rule, shard, shards, jobs, only, !quiet);
@@ -191,6 +201,8 @@ internal static class Program
 
     static bool s_progress;
     static int s_index = -1;
+    // --range a:b: the scenarios from index a up to b, b left out.
+    static int s_from = 0, s_to = int.MaxValue;
     static bool s_outcomes;
     static string? s_base;
 
@@ -217,7 +229,8 @@ internal static class Program
     {
         var rules = rule <= -100 ? DeliveryModel.Candidates[-100 - rule] : rule < 0 ? Base() : Compose(DeliveryModel.Broken[rule]);
         var all = DeliveryModel.Scenarios().Select((sc, i) => (sc, i)).ToList();
-        var mine = all.Where(x => x.i % shards == shard && (only == null || x.sc.Name == only) && (s_index < 0 || x.i == s_index)).ToList();
+        var mine = all.Where(x => x.i % shards == shard && (only == null || x.sc.Name == only) && (s_index < 0 || x.i == s_index)
+                                  && x.i >= s_from && x.i < s_to).ToList();
         var results = new DeliveryModel.AlignedResult?[mine.Count];
         int best = int.MaxValue;
         var clock = System.Diagnostics.Stopwatch.StartNew();
@@ -247,6 +260,11 @@ internal static class Program
                 }
             }
             results[k] = a;
+            // A paired scenario can take gigabytes, much of it in large
+            // arrays: compact them before the next one, so a long run under
+            // a heap limit does not fail on a fragmented heap.
+            System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+            GC.Collect();
             if (rule >= 0 && !a.Canceled && (a.Worse.Count > 0 || a.ZeroSent))
             {
                 int seen;
@@ -254,7 +272,7 @@ internal static class Program
             }
         });
         long states = 0, finals = 0, unaligned = 0, v203 = 0, largest = 0, ownFails = 0, subsumed = 0, setItems = 0, largestSets = 0, extraScenarios = 0;
-        long scFail = 0, scBetter = 0, scEqual = 0, outFail = 0, outBetter = 0, outEqual = 0;
+        long scFail = 0, scBetter = 0, scEqual = 0, scTraded = 0, outFail = 0, outBetter = 0, outEqual = 0, outTraded = 0;
         string largestName = "";
         var failures = new List<int>();
         for (int k = 0; k < mine.Count; k++)
@@ -265,15 +283,17 @@ internal static class Program
             states += a.States; finals += a.Finals; unaligned += a.Unaligned; v203 += a.V203States; 
             setItems += a.SetItems; subsumed += a.Subsumed; largestSets = Math.Max(largestSets, a.SetItems);
             if (a.Extra.Count > 0) extraScenarios++;
-            outFail += a.Worse.Count; outBetter += a.Extra.Count; outEqual += a.Equal.Count;
-            if (a.Worse.Count > 0 || a.ZeroSent || a.CutFail) scFail++;
+            outFail += a.Worse.Count; outBetter += a.Extra.Count; outEqual += a.Equal.Count; outTraded += a.Traded.Count;
+            if (a.Worse.Count > 0 || a.ZeroSent || a.CutFail || a.InvFail) scFail++;
+            else if (a.Traded.Count > 0) scTraded++;
             else if (a.Extra.Count > 0) scBetter++;
             else scEqual++;
             if (a.States > largest) { largest = a.States; largestName = mine[k].sc.Name; }
-            if (a.Worse.Count > 0 || a.ZeroSent || a.CutFail) failures.Add(k);
+            if (a.Worse.Count > 0 || a.ZeroSent || a.CutFail || a.InvFail) failures.Add(k);
         }
         string where = $"{frames} frame(s) a program, shard {shard}/{shards}, {mine.Count} scenario(s)";
-        string totals = $"scenarios: {scFail} fail, {scBetter} better, {scEqual} equal; outcomes: {outFail} fail, {outBetter} better, {outEqual} equal. " +
+        string totals = $"scenarios: {scFail} fail, {scTraded} with a trade, {scBetter} better, {scEqual} equal; " +
+                        $"outcomes: {outFail} fail, {outTraded} traded, {outBetter} better, {outEqual} equal. " +
                         $"{extraScenarios} scenario(s) with an extra frame, {states} paired states, {finals} final, {v203} v2.0.3 states, {unaligned} shared step(s) v2.0.3 could not take{(DeliveryModel.CutDiverged ? " (explored no further)" : "")}, " +
                         $"{subsumed} pair(s) subsumed, {setItems} v2.0.3 set members (largest scenario {largestSets}), " +
                         $"largest scenario {largest} paired states ({largestName}), {clock.Elapsed.TotalSeconds:F0} s";
@@ -283,17 +303,21 @@ internal static class Program
             {
                 var a = results[k]!;
                 Console.WriteLine($"[FAIL] {mine[k].sc.Name} (scenario {mine[k].i}): {a.Worse.Count} outcome(s) no paired v2.0.3 run matches, such as [{a.Example}]" +
-                                  (a.ZeroSent ? ", a zeroed section sent" : "") + (a.CutFail ? ", and a step v2.0.3 could not take, where the exploration stopped" : ""));
+                                  (a.ZeroSent ? ", a zeroed section sent" : "") + (a.InvFail ? $", rule broken: {a.InvExample}" : "") + (a.CutFail ? ", and a step v2.0.3 could not take, where the exploration stopped" : ""));
                 if (witness) PrintWitness(mine[k].sc, rules, frames);
             }
             for (int k = 0; k < mine.Count; k++)
             {
                 var a = results[k];
-                if (a == null || a.Extra.Count == 0) continue;
-                Console.WriteLine($"[EXTRA] {mine[k].sc.Name} (scenario {mine[k].i}): {a.Extra.Count} outcome(s) send a frame no paired v2.0.3 run sends, such as [{a.ExtraExample}]");
+                if (a == null) continue;
+                if (a.Traded.Count > 0)
+                    Console.WriteLine($"[TRADE] {mine[k].sc.Name} (scenario {mine[k].i}): {a.Traded.Count} outcome(s) send a frame no paired v2.0.3 run sends " +
+                                      $"and lack one it sends that a later frame of its program replaced, such as [{a.TradeExample}]");
+                if (a.Extra.Count > 0)
+                    Console.WriteLine($"[EXTRA] {mine[k].sc.Name} (scenario {mine[k].i}): {a.Extra.Count} outcome(s) send a frame no paired v2.0.3 run sends, such as [{a.ExtraExample}]");
             }
             Console.WriteLine($"[{(failures.Count == 0 ? "PASS" : "FAIL")}] delivery with {rules.Name}, {where}: " +
-                              (failures.Count == 0 ? "every outcome matched or bettered by a paired v2.0.3 run" : $"{failures.Count} scenario(s) fail") +
+                              (failures.Count == 0 ? "every outcome matched, bettered or traded by a paired v2.0.3 run" : $"{failures.Count} scenario(s) fail") +
                               $". {totals}");
             return failures.Count == 0 ? 0 : 1;
         }
@@ -363,10 +387,18 @@ internal static class Program
 
     static void PrintExtra(DeliveryModel.AlignedResult a)
     {
-        if (a.ExtraPath == null) return;
-        Console.WriteLine($"    an extra frame, {a.ExtraPath.Count - 1} steps, this driver delivers [{a.ExtraExample}]:");
-        for (int i = 1; i < a.ExtraPath.Count; i++)
-            Console.WriteLine($"    {i,3}. {DeliveryModel.Describe(a.ExtraPath[i - 1], a.ExtraPath[i])}");
+        if (a.ExtraPath != null)
+        {
+            Console.WriteLine($"    an extra frame, {a.ExtraPath.Count - 1} steps, this driver delivers [{a.ExtraExample}]:");
+            for (int i = 1; i < a.ExtraPath.Count; i++)
+                Console.WriteLine($"    {i,3}. {DeliveryModel.Describe(a.ExtraPath[i - 1], a.ExtraPath[i])}");
+        }
+        if (a.TradePath != null)
+        {
+            Console.WriteLine($"    a trade, {a.TradePath.Count - 1} steps, this driver delivers [{a.TradeExample}]:");
+            for (int i = 1; i < a.TradePath.Count; i++)
+                Console.WriteLine($"    {i,3}. {DeliveryModel.Describe(a.TradePath[i - 1], a.TradePath[i])}");
+        }
     }
 
     // The failing order, state by state, as the fields each step changed.
@@ -375,6 +407,7 @@ internal static class Program
         var a = DeliveryModel.ExploreAligned(sc, rules, frames, true);
         var path = want != null && a.Paths.TryGetValue(want.Value, out var p) ? p : a.Path;
         if (want != null && path != a.Path) a.Example = DeliveryModel.Show(want.Value);
+        if (path == null && a.InvPath != null) { path = a.InvPath; a.Example = a.InvExample; }
         if (path == null) { Console.WriteLine("    (no witness path)"); return; }
         Console.WriteLine($"    witness, {path.Count - 1} steps, this driver delivers [{a.Example}]:");
         for (int i = 1; i < path.Count; i++)
