@@ -102,6 +102,14 @@ public sealed class HMVRController : IDisposable
 {
     private readonly VrSharedMemory.Channel _channel;
     private readonly byte[] _frame = new byte[VrSharedMemory.InputFrameSize];
+    // Guards _frame and every use of the channel but the haptic reader's.
+    // The input frame is a single-writer seqlock, so submits pack and write
+    // it one at a time. Dispose marks the controller disposed under this
+    // lock, and the haptic reader releases the channel under it, so a submit
+    // or a status read that passes its check inside the lock finds the
+    // channel mapped. Dispose takes it inside _lifetimeLock, and nothing
+    // takes _lifetimeLock inside it.
+    private readonly object _submitLock = new();
     private readonly Thread _hapticThread;
     private readonly CancellationTokenSource _cts = new();
     private ulong _hapticCursor;
@@ -120,12 +128,22 @@ public sealed class HMVRController : IDisposable
     /// is caught and dropped, and the next pulse is still read.</summary>
     public event EventHandler<HMVRHapticEventArgs>? HapticReceived;
 
+    /// <summary>Run by SubmitState between its first disposed check and its
+    /// lock. vr_controller_smoke's offline phase sets it through reflection
+    /// to hold a submit there while the controller is disposed, so the check
+    /// inside the lock is what refuses it. Null outside the probe.</summary>
+    internal static Action? BeforeSubmitLock;
+
     /// <summary>Creates the IPC channel and activates both hands. Throws
     /// <see cref="InvalidOperationException"/> when another consumer owns
     /// the channel, or when the section exists with a mismatched ABI.</summary>
-    public HMVRController()
+    public HMVRController() : this(VrSharedMemory.Create()) { }
+
+    /// <summary>The controller on a channel already created: the named
+    /// section's, or one on a probe's own memory.</summary>
+    internal HMVRController(VrSharedMemory.Channel channel)
     {
-        _channel = VrSharedMemory.Create();
+        _channel = channel;
         VrSharedMemory.WriteConfig(_channel,
             handsActive: 0x1 | 0x2 /* HMVR_HAND_LEFT_ACTIVE | RIGHT */);
 
@@ -139,35 +157,37 @@ public sealed class HMVRController : IDisposable
 
     /// <summary>True once the OpenVR driver inside vrserver has attached
     /// to the channel and reported itself active. False when SteamVR is
-    /// not running (yet).</summary>
+    /// not running (yet), and once this controller is disposed.</summary>
     public bool DriverConnected
     {
         get
         {
             var p = new float[3]; var q = new float[4];
-            return VrSharedMemory.TryReadStatus(_channel, out uint active, out _, out _, p, q, out ulong hb)
+            return TryReadStatus(out uint active, out _, out _, p, q, out ulong hb)
                    && active != 0 && QpcAgeSeconds(hb) < 5.0;
         }
     }
 
     /// <summary>True while both virtual controllers are registered and
-    /// connected inside SteamVR.</summary>
+    /// connected inside SteamVR. False once this controller is
+    /// disposed.</summary>
     public bool ControllersLive
     {
         get
         {
             var p = new float[3]; var q = new float[4];
-            return VrSharedMemory.TryReadStatus(_channel, out _, out uint live, out _, p, q, out _)
+            return TryReadStatus(out _, out uint live, out _, p, q, out _)
                    && live == 0x3;
         }
     }
 
     /// <summary>Latest real headset pose, or <c>Valid == false</c> when no
-    /// HMD is tracking (including the headless null-driver test rig).</summary>
+    /// HMD is tracking (including the headless null-driver test rig) and
+    /// once this controller is disposed.</summary>
     public HMVRHmdPose GetHmdPose()
     {
         var p = new float[3]; var q = new float[4];
-        if (!VrSharedMemory.TryReadStatus(_channel, out _, out _, out uint poseValid, p, q, out _))
+        if (!TryReadStatus(out _, out _, out uint poseValid, p, q, out _))
             return default;
         return new HMVRHmdPose
         {
@@ -178,16 +198,44 @@ public sealed class HMVRController : IDisposable
     }
 
     /// <summary>Submit one frame for both hands. Call at your input rate;
-    /// the driver consumes latest-wins at the SteamVR server tick.</summary>
+    /// the driver consumes latest-wins at the SteamVR server tick. Calls
+    /// from several threads go out one frame at a time.</summary>
+    /// <exception cref="ObjectDisposedException">The controller is disposed.
+    /// A call that <see cref="Dispose"/> overtakes throws it too, and writes
+    /// nothing.</exception>
     public void SubmitState(in HMVRState state)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        BeforeSubmitLock?.Invoke();
+        lock (_submitLock)
+        {
+            // Again under the lock: Dispose marks the controller disposed
+            // under it before the reader releases the channel.
+            ObjectDisposedException.ThrowIf(_disposed, this);
 
-        Span<byte> f = _frame;
-        BitConverter.TryWriteBytes(f, (ulong)Stopwatch.GetTimestamp());
-        PackHand(f.Slice(8, VrSharedMemory.ControllerStateSize), in state.Left);
-        PackHand(f.Slice(8 + VrSharedMemory.ControllerStateSize, VrSharedMemory.ControllerStateSize), in state.Right);
-        VrSharedMemory.WriteInputFrame(_channel, _frame);
+            Span<byte> f = _frame;
+            BitConverter.TryWriteBytes(f, (ulong)Stopwatch.GetTimestamp());
+            PackHand(f.Slice(8, VrSharedMemory.ControllerStateSize), in state.Left);
+            PackHand(f.Slice(8 + VrSharedMemory.ControllerStateSize, VrSharedMemory.ControllerStateSize), in state.Right);
+            VrSharedMemory.WriteInputFrame(_channel, _frame);
+        }
+    }
+
+    /// <summary>The driver's status block, read under the submit lock, so
+    /// the reader cannot release the channel mid-read. False, with every
+    /// value 0, once the controller is disposed.</summary>
+    private bool TryReadStatus(out uint active, out uint live, out uint poseValid,
+        float[] position, float[] orientation, out ulong heartbeat)
+    {
+        lock (_submitLock)
+        {
+            if (!_disposed)
+                return VrSharedMemory.TryReadStatus(_channel, out active, out live, out poseValid,
+                    position, orientation, out heartbeat);
+        }
+        active = live = poseValid = 0;
+        heartbeat = 0;
+        return false;
     }
 
     private static void PackHand(Span<byte> dst, in HMVRHandState h)
@@ -221,7 +269,15 @@ public sealed class HMVRController : IDisposable
         {
             lock (_lifetimeLock) _readerEnded = true;
             _cts.Dispose();
-            _channel.Dispose();
+            // Under the submit lock, after the controller is marked
+            // disposed: a submit or a status read either finished with the
+            // channel or will see the mark. Dispose has set it already,
+            // unless the reader ended by throwing.
+            lock (_submitLock)
+            {
+                _disposed = true;
+                _channel.Dispose();
+            }
         }
     }
 
@@ -270,13 +326,17 @@ public sealed class HMVRController : IDisposable
     /// it the consumer claim, as it ends: within the join below, or once a
     /// <see cref="HapticReceived"/> handler still running returns. Called
     /// from a HapticReceived handler, it returns at once, and the reader
-    /// ends when the handler returns.</summary>
+    /// ends when the handler returns. A submit in progress finishes first,
+    /// and every later one throws <see cref="ObjectDisposedException"/>.</summary>
     public void Dispose()
     {
         lock (_lifetimeLock)
         {
             if (_disposed) return;
-            _disposed = true;
+            // Under the submit lock, so a submit in progress has written
+            // its frame before Dispose goes on, and every later one is
+            // refused.
+            lock (_submitLock) _disposed = true;
             if (!_readerEnded) _cts.Cancel();
         }
         if (Thread.CurrentThread != _hapticThread) _hapticThread.Join(1000);
