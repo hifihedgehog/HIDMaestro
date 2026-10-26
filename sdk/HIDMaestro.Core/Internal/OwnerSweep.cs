@@ -555,7 +555,9 @@ internal static class OwnerSweep
     /// device failed by its driver through the index's remove event
     /// (DeviceManager.RemoveDevice). The index is this removal's to fail:
     /// a sweep holds its claim, and the exit handler removes its own
-    /// controllers.</para></summary>
+    /// controllers. A refusal that leaves the device is remembered for its
+    /// present life, and a later sweep of this process leaves it without
+    /// asking again while its state is the same.</para></summary>
     private static bool RemoveGroup(OwnerCensus.DeviceGroup group)
     {
         var removed = new List<string>();
@@ -568,7 +570,8 @@ internal static class OwnerSweep
                 removed.AddRange(DeviceManager.ChildIdsOf(id));
                 bool root = id.StartsWith(@"ROOT\", StringComparison.OrdinalIgnoreCase);
                 DeviceManager.RemoveDevice(id, timeoutMs: 120_000, fast: false, forceFallbacks: true,
-                    failDevice: root && index >= 0 ? () => SharedMemoryIO.RequestSurpriseRemovalOfIndex(index, TimeoutScale.Apply(2000)) : null);
+                    failDevice: root && index >= 0 ? () => SharedMemoryIO.RequestSurpriseRemovalOfIndex(index, TimeoutScale.Apply(2000)) : null,
+                    rememberRefusal: true);
             }
             catch (DeviceManager.PnpLockBusyException)
             {

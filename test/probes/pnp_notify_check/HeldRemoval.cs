@@ -74,6 +74,9 @@ internal static class HeldRemoval
         /// <summary>What it added to DeviceManager.RemovalsNotGone, the count
         /// of removal tests that ended not gone, which S77 reads.</summary>
         public long NotGone;
+        /// <summary>The parent's life: a new devnode under the same id, or a
+        /// change of its state, which a remembered refusal reads.</summary>
+        public int Life;
         /// <summary>Another program's removal query of the parent's subtree is
         /// under way, as Device Manager's disable makes one: DN_STARTED is
         /// clear on every devnode it covers while it runs (ReactOS
@@ -100,6 +103,14 @@ internal static class HeldRemoval
         public bool IsDown(string id)
         {
             lock (_gate) return !Nodes.TryGetValue(id, out var n) || !n.InTree || n.Failed;
+        }
+
+        /// <summary>The devnode's state as DevnodeState reads it, null out of
+        /// the tree.</summary>
+        public string? StateOf(string id)
+        {
+            lock (_gate)
+                return Nodes.TryGetValue(id, out var n) && n.InTree ? $"{n.Started}/{n.Failed}/{Life}" : null;
         }
 
         public uint Locate(string id, uint flags)
@@ -220,6 +231,7 @@ internal static class HeldRemoval
             Fallbacks = m.Fallbacks,
             Query = m.Query,
             Down = m.IsDown,
+            State = m.StateOf,
         };
         try { return act(); }
         finally
@@ -495,6 +507,36 @@ internal static class HeldRemoval
               !first && !second && m.Calls.SequenceEqual(new[] { $"query {Parent}" }) && m.Left == 2 && m.Violations.Count == 0
               && Kept(m.Nodes[Parent]) && Kept(m.Nodes[Child]),
               $"{Describe(m, (first || second, 0))}");
+
+        // A dispose or a create's removal of a prior life always asks, the
+        // refusal remembered or not.
+        var dispose = Remove(m, Parent, fast: false);
+        check("a dispose's removal of that device, its refusal remembered by a sweep -> asks again",
+              !dispose.Removed && m.Calls.Count(c => c == $"query {Parent}") == 2 && m.Left == 1,
+              Describe(m, dispose));
+
+        // A new life of the devnode is another device: the next sweep asks.
+        m.Life++;
+        m.Left = 0;
+        bool third = SweepGroup(m);
+        check("a sweep after the devnode's state changed, as a new life of it -> asks again",
+              !third && m.Calls.Count(c => c == $"query {Parent}") == 3 && m.Left == 1,
+              Describe(m, (third, 0)));
+
+        // A holder letting go changes nothing Windows reports. Once the
+        // device's state changes and a sweep removes it, nothing about it is
+        // remembered: a device under the same id later is asked again.
+        m.Holder = false;
+        m.Life++;
+        bool fourth = SweepGroup(m);
+        m.Nodes[Parent] = new Node();
+        m.Nodes[Child] = new Node();
+        m.Holder = true;
+        m.Left = 0;
+        bool fifth = SweepGroup(m);
+        check("the holder gone and the devnode's state changed, a sweep removes the device, then a device under the same id is held -> the next sweep asks it",
+              fourth && !fifth && m.Calls.Count(c => c == $"query {Parent}") == 5 && m.Left == 1,
+              Describe(m, (fifth, 0)));
     }
 
     // ── The lease of a create that meets a refused removal ──

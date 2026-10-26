@@ -517,6 +517,10 @@ public static partial class DeviceManager
         /// <summary>The devnode is down (<see cref="IsDown"/>). Null beside a
         /// null <see cref="Query"/>, and a devnode then counts as down.</summary>
         public Func<string, bool>? Down;
+        /// <summary>The devnode's state, by which a sweep remembers a refusal
+        /// (<see cref="DevnodeState"/>). Null in the checks written before
+        /// it, which then remember none.</summary>
+        public Func<string, string?>? State;
     }
 
     static uint Locate(string instanceId, uint flags)
@@ -2467,16 +2471,92 @@ public static partial class DeviceManager
     /// records go once that is done (<see cref="WaitSurpriseRemoval"/>). Null
     /// where the caller cannot know the device's index is its own to
     /// fail.</param>
-    internal static bool RemoveDevice(string instanceId, int timeoutMs, bool fast, bool forceFallbacks, Func<bool>? failDevice)
+    /// <param name="rememberRefusal">A sweep's removal: a refusal it meets is
+    /// remembered for the device's present life, and a device whose refusal
+    /// a sweep of this process remembers is left without a query while its
+    /// state is the same (<see cref="DevnodeState"/>).</param>
+    internal static bool RemoveDevice(string instanceId, int timeoutMs, bool fast, bool forceFallbacks, Func<bool>? failDevice,
+                                      bool rememberRefusal = false)
     {
         if (Locate(instanceId, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS &&
             Locate(instanceId, CM_LOCATE_DEVNODE_PHANTOM) != CR_SUCCESS)
             return true;
 
         using var pnp = HoldPnpLock();
-        RemoveDeviceLocked(instanceId, timeoutMs, fast, forceFallbacks, out bool removed, failDevice);
+        RemoveDeviceLocked(instanceId, timeoutMs, fast, forceFallbacks, out bool removed, failDevice, rememberRefusal);
         return removed;
     }
+
+    /// <summary>Refusals the sweeps met, by instance id, each with the
+    /// devnode's state then (<see cref="DevnodeState"/>). Against a holder
+    /// that never reads, each removal query took about 5.4 s before Windows
+    /// refused it, and a request to a driver that does not answer 2 s more,
+    /// in every sweep. A later sweep of this process leaves such a device,
+    /// and its records, without asking while the state is the same: a holder
+    /// letting go changes nothing Windows reports, so the device then goes
+    /// with another program's sweep, this one's after the process starts
+    /// again, or once its state changes. A dispose, a create's removal of a
+    /// prior life or rival and the full cleanup always ask.</summary>
+    private static readonly Dictionary<string, string> s_refusals = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The devnode's status, problem and the time this life of it
+    /// arrived (DEVPKEY_Device_LastArrivalDate), through the removal hook when
+    /// one is set. Null when it is not in the tree.</summary>
+    static string? DevnodeState(string instanceId, RemovalCalls? calls)
+    {
+        if (calls != null) return calls.State?.Invoke(instanceId);
+        if (CM_Locate_DevNodeW(out uint d, instanceId, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS) return null;
+        if (CM_Get_DevNode_Status(out uint status, out uint problem, d, 0) != CR_SUCCESS) return null;
+        var key = DEVPKEY_Device_LastArrivalDate;
+        uint size = 8;
+        var buf = new byte[8];
+        long arrived = CM_Get_DevNode_PropertyW(d, ref key, out uint type, buf, ref size, 0) == CR_SUCCESS && type == DEVPROP_TYPE_FILETIME
+            ? BitConverter.ToInt64(buf, 0) : 0;
+        return $"{status:X8}/{problem}/{arrived}";
+    }
+
+    static bool RefusedBefore(string instanceId, string state)
+    {
+        lock (s_refusals)
+        {
+            if (!s_refusals.TryGetValue(instanceId, out string? then)) return false;
+            if (then == state) return true;
+            s_refusals.Remove(instanceId);
+            return false;
+        }
+    }
+
+    static void RememberRefusal(string instanceId, string? state)
+    {
+        if (state == null) return;
+        lock (s_refusals) s_refusals[instanceId] = state;
+    }
+
+    static void ForgetRefusal(string instanceId)
+    {
+        lock (s_refusals) s_refusals.Remove(instanceId);
+    }
+
+    /// <summary>A removal that leaves the device in the tree: counted on
+    /// this thread (<see cref="RemovalsLeftHere"/>), and its parent's removal
+    /// test ended not gone, so the count S77 reads has it.</summary>
+    static RemovalOutcome KeepLeft(StepwiseRemoval parent, out bool removed)
+    {
+        t_removalsLeft++;
+        removed = false;
+        return parent.Wait(uninstalls: true, budgetMs: 0);
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct DEVPROPKEY { public Guid fmtid; public uint pid; }
+
+    private static readonly DEVPROPKEY DEVPKEY_Device_LastArrivalDate =
+        new() { fmtid = new Guid("83da6326-97a6-4088-9453-a1923f573b29"), pid = 102 };
+    private const uint DEVPROP_TYPE_FILETIME = 0x10;
+
+    [LibraryImport("cfgmgr32.dll")]
+    private static partial uint CM_Get_DevNode_PropertyW(uint dnDevInst, ref DEVPROPKEY propertyKey, out uint propertyType,
+        byte[] propertyBuffer, ref uint propertyBufferSize, uint ulFlags);
 
     /// <summary>How long a removal waits, once a driver has failed its device
     /// on request, for Windows' surprise removal to take the device down.
@@ -2561,7 +2641,7 @@ public static partial class DeviceManager
         fast ? Math.Min(timeoutMs, QuickRemovalMs) : timeoutMs;
 
     static RemovalOutcome RemoveDeviceLocked(string instanceId, int timeoutMs, bool fast, bool forceFallbacks, out bool removed,
-                                             Func<bool>? failDevice = null)
+                                             Func<bool>? failDevice = null, bool rememberRefusal = false)
     {
         removed = true;
         // With the hook set every locate goes through LocateHook, and the
@@ -2652,6 +2732,12 @@ public static partial class DeviceManager
         if (!isSwdParent && !Down(instanceId, calls))
         {
             parent.Begin();
+            string? state = rememberRefusal ? DevnodeState(instanceId, calls) : null;
+            if (state != null && RefusedBefore(instanceId, state))
+            {
+                DeviceOrchestrator.LogDiag($"      {instanceId} stays with its records: a program refused its removal in an earlier sweep, and its state has not changed since");
+                return KeepLeft(parent, out removed);
+            }
             // A query that failed while the device went down anyway, as one
             // that left between the locate and the call, refused nothing.
             if (!QueryOut(instanceId, calls, out string veto) && !Down(instanceId, calls))
@@ -2663,9 +2749,8 @@ public static partial class DeviceManager
                     DeviceOrchestrator.LogDiag($"      {instanceId} stays with its records: a program refused its removal{why}, " +
                         (failDevice == null ? "and no driver can be asked to fail it here"
                          : failed ? "and it was not down when the wait after its driver's answer ended" : "and its driver did not answer"));
-                    t_removalsLeft++;
-                    removed = false;
-                    return RemovalOutcome.NotGone;
+                    if (rememberRefusal) RememberRefusal(instanceId, DevnodeState(instanceId, calls));
+                    return KeepLeft(parent, out removed);
                 }
                 DeviceOrchestrator.LogDiag($"      {instanceId}: a program refused its removal{why}, so its driver failed it, and it is down");
             }
@@ -2963,6 +3048,7 @@ public static partial class DeviceManager
 
         // Step 4: Final check
         removed = Find(instanceId, 0) != CR_SUCCESS && Find(instanceId, 1) != CR_SUCCESS;
+        if (removed) ForgetRefusal(instanceId);
         return parentOutcome;
     }
 
