@@ -72,6 +72,7 @@ internal static class Program
         if (args.Length >= 4 && args[0] == "x14")
         {
             s_base = null;
+            DeliveryModel.DumpSets = args.Contains("--sets");
             var rules = args[2].StartsWith("c") ? DeliveryModel.Candidates[int.Parse(args[2].Substring(1))] : int.Parse(args[2]) < 0 ? DeliveryModel.This : DeliveryModel.Broken[int.Parse(args[2])];
             var sc = DeliveryModel.Scenarios().ElementAt(int.Parse(args[3]));
             var path = DeliveryModel.FindOrder(sc, rules, int.Parse(args[1]));

@@ -1289,12 +1289,13 @@ internal static class DeliveryModel
             foreach (var n in next)
             {
                 // The order, step by step: 1, the worker takes X before
-                // teardown; 2, then G is handed over final; 3, then
+                // teardown, with the section still holding X; 2, then G is
+                // stored and handed over final; 3, then
                 // TearingDown is set; 100 + G's slot, then the poll after
                 // the take returns with no stop event, G final in the
                 // handoff and not yet delivered.
                 int g2 = g;
-                if (g == 0 && t.Pc == W_LOOK && n.Pc == W_POLL && t.Tear == 0) g2 = 1;
+                if (g == 0 && t.Pc == W_LOOK && n.Pc == W_POLL && t.Tear == 0 && t.Seq == t.Hand) g2 = 1;
                 else if (g == 1 && n.Pc == W_POLL && n.Tear == 0 && n.Hand != 0 && n.HandFinal && !(t.Hand == n.Hand && t.HandFinal)) g2 = 2;
                 else if (g == 2 && t.Tear == 0 && n.Tear == 1 && n.Pc == W_POLL) g2 = 3;
                 else if (g == 3 && t.Pc == W_POLL && n.Pc == W_EXITED && t.Tear == 1 && !t.StopSig && t.Hand != 0 && t.HandFinal
@@ -1335,6 +1336,7 @@ internal static class DeliveryModel
             if (V2 == -1) { div = true; V2 = nw != tw ? v203.Close(Vs, nw) : Vs; tag += "   (v2.0.3 cannot follow)"; }
             V = V2;
             lines.Add(tag);
+            if (DumpSets) foreach (var l in v203.Brief(V)) lines.Add("       | " + l);
         }
         var last = path[^1];
         ulong mine = last.Delivered & OutMask;
