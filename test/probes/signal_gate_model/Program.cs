@@ -326,7 +326,7 @@ internal static class Program
             int k = failures.Min();
             var a = results[k]!;
             Console.WriteLine($"[BREAKS] {rules.Name}, {where}: {mine[k].sc.Name} (scenario {mine[k].i}): [{a.Example}]" +
-                              (a.ZeroSent ? ", a zeroed section sent" : ""));
+                              (a.ZeroSent ? ", a zeroed section sent" : "") + (a.InvFail ? $", rule broken: {a.InvExample}" : ""));
             if (witness) PrintWitness(mine[k].sc, rules, frames, a.Worse.Count > 0 ? a.Worse.First() : null);
             return 0;
         }

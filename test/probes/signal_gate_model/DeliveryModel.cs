@@ -199,6 +199,9 @@ internal static class DeliveryModel
         public bool SkipAtEnd { get; init; } = true;
         public bool SinceReset { get; init; } = true;
         public bool Wake2 => FrameIdentity || SerialRead || KeepAtReset || RestartReset;
+        // Holds rules without lane WAKE2's to one of its invariants
+        // (Invariants), by kind, which then must catch them.
+        public string? HoldTo { get; init; }
     }
 
     // c5b207a3's rules, kept for the record, rule by rule (driver/driver.c
@@ -304,12 +307,21 @@ internal static class DeliveryModel
         This with { Name = "a frame OwnerGone or the recycle drops kept as the last one read", ForgetDropped = false },
         This with { Name = "a next program's frame on the SeqNo last read sent before OwnerGone", SkipAtEnd = false },
         This with { Name = "a frame on the SeqNo last read skipped whatever reset came since that read", SinceReset = false },
+        // e9a6e92d's rules pass the paired check (check 1 c4), since v2.0.3
+        // gives the same outcomes. The twice rule fails them (scenario 18,
+        // a frame of program 2 sent twice). At one frame a program the
+        // undelivered and order rules hold on them (NoBreak).
+        E9a6e92d with { Name = "e9a6e92d's rules held to the undelivered rule", HoldTo = "undelivered" },
+        E9a6e92d with { Name = "e9a6e92d's rules held to the twice rule", HoldTo = "twice" },
+        E9a6e92d with { Name = "e9a6e92d's rules held to the order rule", HoldTo = "older-after-newer" },
     };
 
     // The removals that change no outcome at one or two frames a program:
     // the take-back of a provisional SeqNo, which the next take drops anyway
-    // while the SDK signals either way.
-    internal static readonly HashSet<int> NoBreak = new() { 0 };
+    // while the SDK signals either way. And e9a6e92d's rules under the
+    // undelivered and order rules, which hold on them at one frame a
+    // program.
+    internal static readonly HashSet<int> NoBreak = new() { 0, 33, 35 };
 
     // Named rule sets and candidate changes (the model section of
     // docs/design/signal-gate.md), each run in place of this driver's rules
@@ -920,7 +932,7 @@ internal static class DeliveryModel
     internal static List<string> Invariants(in State s, Scenario sc, Rules r)
     {
         var bad = new List<string>();
-        if (!r.Wake2) return bad;
+        if (!r.Wake2 && r.HoldTo == null) return bad;
         bool deviceUp = s.Pc != W_GONE && s.Tear == 0;
         if (deviceUp)
         {
@@ -940,6 +952,7 @@ internal static class DeliveryModel
         // must not go behind the release frames), and no frame: the check
         // counts the frames (FrameCrossBit, a bit outside OutMask).
         if ((s.Delivered >> OrderBit & 1) != 0 || (s.Delivered >> FrameCrossBit & 1) != 0) bad.Add("older-after-newer");
+        if (!r.Wake2) bad.RemoveAll(k => k != r.HoldTo);
         return bad;
     }
 
