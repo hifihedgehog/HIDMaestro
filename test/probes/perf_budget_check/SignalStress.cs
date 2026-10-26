@@ -60,6 +60,23 @@
 // and a run's four modes together at most once in 1,000. A gate that does
 // change when frames are read, by a missed signal or anything else, fails
 // once it is worse in enough of the pairs, whatever the load.
+//   Frames over 4 ms count bursts and stalls far more than lost wakeups,
+// since a frame whose wakeup is lost waits only until the next submit, which
+// comes within 2 ms here. The frames a lost wakeup does delay are the ones
+// with nothing after them: a submit with no further submit for at least
+// 4 ms, a burst's last or a single one before a pause, or the pass's last if
+// it was read. On the DualShock 4 every such final submit must be read
+// within 2 ms. A lost wakeup leaves its frame for the next write, the SDK's
+// idle repeat 4 ms on (the profile's stream period), and a delivered one is
+// read within 0.4 ms on both bench machines. This check counts every final
+// submit, in every mode, gated or not, so it also sees a lost wakeup the gate
+// does not cause, and a stall over a final submit fails it the same way. On
+// the Xbox 360 pad the same final submits are printed and not bounded:
+// Windows.Gaming.Input reads the frames before the schedule's pauses 5 to
+// 30 ms late on v2.0.3's pair as on 2.1.0's (SIG-ab-ds4-1), past the
+// companion's 8 ms timer that recovers a lost doorbell, so a bound there
+// would measure Windows.Gaming.Input's own pace. The comparison above, which
+// the doorbell control fails 40 pairs of 40, is that pad's guard.
 //
 // --gate-off keeps the gate off for the whole pass. The HID driver sets its
 // capability again every 256 frames, so a mode with the input event's gate
@@ -131,6 +148,10 @@ internal static partial class Program
     // The positive control's hold, two periods of the companion's 8 ms
     // timer (companion.c, WDF_TIMER_CONFIG_INIT_PERIODIC).
     const double MissHoldMs = 16;
+    // A final submit (header): no further submit for this long. On the
+    // DualShock 4 each must be read within FinalBoundMs.
+    const double FinalGapMs = 4;
+    const double FinalBoundMs = 2;
 
     static int SignalStress(string[] args)
     {
@@ -383,22 +404,27 @@ internal static partial class Program
     /// <summary>Each submit's time to the first reading of its count or a
     /// later one, checked against the bound, and each gate-on mode's frames
     /// over 4 ms against the gate-off block of its pair (header).</summary>
-    static void StressVerdict(string name, List<(int Count, long Time, int Mode, int Block)> sent, List<(int Count, long Time)> seen)
+    static void StressVerdict(string name, List<(int Count, long Time, int Mode, int Block)> sent, List<(int Count, long Time)> seen, bool boundFinals)
     {
         var late = new SortedDictionary<int, List<double>>();
         // Each block's mode without the Announced bit, its submits and its
         // frames over 4 ms, a frame never read among them.
         var blocks = new List<(int Mode, int Submits, int Over4)>();
-        int j = 0, missing = 0, over = 0;
+        // Each submit's wait in ms, NaN for one never read.
+        var wait = new double[sent.Count];
+        int j = 0, missing = 0, over = 0, at = -1;
         double worst = 0;
         foreach (var (count, t0, mode, block) in sent)
         {
+            at++;
+            wait[at] = double.NaN;
             while (blocks.Count <= block) blocks.Add((mode & ~Announced, 0, 0));
             var bk = blocks[block];
             bk.Submits++;
             while (j < seen.Count && (seen[j].Count < count || seen[j].Time < t0)) j++;
             if (j == seen.Count) { missing++; bk.Over4++; blocks[block] = bk; continue; }
             double ms = (seen[j].Time - t0) * 1000.0 / Stopwatch.Frequency;
+            wait[at] = ms;
             if (!late.TryGetValue(mode, out var list)) late[mode] = list = new List<double>();
             list.Add(ms * 1000);
             worst = Math.Max(worst, ms);
@@ -417,6 +443,7 @@ internal static partial class Program
             Report($"{name}, {ModeName(mode)}: submit to the first reading that carries it, microseconds", list, 1,
                 FormattableString.Invariant($", {over2} over 2 ms, {over4} over 4 ms"));
         }
+        FinalVerdict(name, sent, wait, boundFinals);
         var pairs = BlockPairs(blocks);
         foreach (int mode in blocks.Select(x => x.Mode).Where(m => m != 0).Distinct().OrderBy(m => m))
         {
@@ -429,6 +456,51 @@ internal static partial class Program
             Console.WriteLine("    its pairs in order, frames over 4 ms in its block/in the gate-off block, . where even: " +
                 (list.Count == 0 ? "none" : string.Join(" ", list.Select(x => x.On == x.Off ? "." : $"{x.On}/{x.Off}"))));
         }
+    }
+
+    static string ShortMode(int mode) =>
+        ((mode & ~Announced) switch { 0 => "off", GateInput => "input", GateCompanion => "door", _ => "both" })
+        + ((mode & Announced) != 0 ? "*" : "");
+
+    /// <summary>The final submits (header): each submit with no further
+    /// submit for <see cref="FinalGapMs"/>, and the pass's last one when it
+    /// was read. Indexes into <paramref name="sent"/>, whose waits in ms are
+    /// <paramref name="wait"/>, NaN for one never read.</summary>
+    internal static List<int> FinalSubmits(List<(int Count, long Time, int Mode, int Block)> sent, double[] wait)
+    {
+        long gap = (long)(FinalGapMs * Stopwatch.Frequency / 1000);
+        var finals = new List<int>();
+        for (int i = 0; i < sent.Count; i++)
+        {
+            bool last = i + 1 == sent.Count;
+            if (last ? !double.IsNaN(wait[i]) : sent[i + 1].Time - sent[i].Time >= gap) finals.Add(i);
+        }
+        return finals;
+    }
+
+    /// <summary>The final submits' waits (header). With
+    /// <paramref name="bound"/>, a check that each was read within
+    /// <see cref="FinalBoundMs"/>, a final submit never read counting as
+    /// over it. Without, the same figures on a line of their own. Returns the
+    /// final submits over the bound.</summary>
+    internal static int FinalVerdict(string name, List<(int Count, long Time, int Mode, int Block)> sent, double[] wait, bool bound)
+    {
+        var finals = FinalSubmits(sent, wait);
+        bool Over(int i) => double.IsNaN(wait[i]) || wait[i] > FinalBoundMs;
+        var overs = finals.Where(Over).ToList();
+        var read = finals.Where(i => !double.IsNaN(wait[i])).ToList();
+        string F(double v) => v.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+        string byMode = string.Join(", ", finals.GroupBy(i => sent[i].Mode & ~Announced).OrderBy(g => g.Key)
+            .Select(g => $"{ShortMode(g.Key)} {g.Count()} ({g.Count(Over)} over)"));
+        string listed = string.Join("; ", overs.Take(12).Select(i =>
+            $"count {sent[i].Count} {ShortMode(sent[i].Mode)} {(double.IsNaN(wait[i]) ? "never read" : F(wait[i]) + " ms")}"));
+        string detail = $"{finals.Count} final submits, {overs.Count} over {F(FinalBoundMs)} ms, worst {(read.Count == 0 ? "-" : F(read.Max(i => wait[i])))} ms; by mode {byMode}"
+            + (overs.Count > 0 ? "; over: " + listed + (overs.Count > 12 ? $"; {overs.Count - 12} more" : "") : "");
+        if (bound)
+            Check($"{name}: every submit with no further submit for {F(FinalGapMs)} ms read within {F(FinalBoundMs)} ms", overs.Count == 0, detail);
+        else
+            Console.WriteLine($"  {name}: submits with no further submit for {F(FinalGapMs)} ms, not bounded on this pad (header): {detail}");
+        return overs.Count;
     }
 
     /// <summary>A pass's pairs, by gate-on mode, as frames over 4 ms in the
@@ -529,6 +601,20 @@ internal static partial class Program
         yield return ("signal-stress: blocks pair as the schedule runs them, the gate's block on either side, a pair cut short or all off left out",
             grouped.Count == 3 && Shown(GateInput) == "30/3" && Shown(GateCompanion) == "40/4" && Shown(GateInput | GateCompanion) == "50/7",
             $"input {Shown(GateInput)}, doorbell {Shown(GateCompanion)}, both {Shown(GateInput | GateCompanion)}");
+
+        // Final submits: gaps of 1, 0.5, 8.5, 3.9 and 16.1 ms after submits
+        // 1 to 5, and submit 6 last and never read. Submits 3 and 5 are
+        // final; 4 is not (3.9 ms), and 6 is not, never read at the end.
+        static long T(double ms) => (long)(ms * Stopwatch.Frequency / 1000);
+        var fs = new List<(int Count, long Time, int Mode, int Block)>
+        {
+            (1, T(0), 0, 0), (2, T(1), 0, 0), (3, T(1.5), GateInput, 0), (4, T(10), 0, 0), (5, T(13.9), 0, 0), (6, T(30), 0, 0),
+        };
+        var fw = new[] { 0.05, 0.05, 4.2, 0.1, 0.06, double.NaN };
+        var finals = FinalSubmits(fs, fw);
+        yield return ("signal-stress: a final submit has no further submit for 4 ms, the last one counting only when read",
+            string.Join(" ", finals.Select(i => fs[i].Count)) == "3 5" && finals.Count(i => fw[i] > FinalBoundMs) == 1,
+            "final: " + string.Join(" ", finals.Select(i => fs[i].Count)));
 
         static List<(int On, int Off)> Same(int pairs, int on, int off) => Enumerable.Repeat((on, off), pairs).ToList();
         static bool Fails(List<(int On, int Off)> p) => PairVerdict(p).Fails;
@@ -696,7 +782,7 @@ internal static partial class Program
         failures.Report($"{Ds4} ReadFile", passStart, reopened.Count, "reopens");
         Check($"{Ds4} ReadFile: every reading carries a count the probe submitted, at report bytes 40 to 43",
             misread == 0, misread == 0 ? $"{got.Count} counts read" : $"{misread} readings carried none, the first {misreadValue}");
-        StressVerdict($"{Ds4} ReadFile", sent, got);
+        StressVerdict($"{Ds4} ReadFile", sent, got, boundFinals: true);
         if (all != null && burstOf != null)
         {
             if (firstReport != null)
@@ -956,7 +1042,7 @@ internal static partial class Program
         Check($"{Xbox360} Windows.Gaming.Input: every reading carries a count the probe submitted, in the sticks' X axes",
             misread == 0, misread == 0 ? $"{seen.Count} counts read" : $"{misread} readings carried none, the first {misreadValue}");
         Console.WriteLine($"  {Xbox360} Windows.Gaming.Input: the first reading with a count, {firstReading ?? "none"}");
-        StressVerdict($"{Xbox360} Windows.Gaming.Input", sent, seen);
+        StressVerdict($"{Xbox360} Windows.Gaming.Input", sent, seen, boundFinals: false);
         if (burstOf != null) LateDetail($"{Xbox360} Windows.Gaming.Input", sent, burstOf, seen, seen, wgi: true);
     }
 
