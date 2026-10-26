@@ -139,7 +139,7 @@ internal static class LockCoverage
         ("writable: true", "SetHidParentUpperFilterXinputhid", "UpperFilters"),
         (".SetValue(\"UpperFilters\"", "SetHidParentUpperFilterXinputhid", "UpperFilters"),
         // The Everything cleanup's Device Parameters deletes.
-        ("\"reg.exe\"", "RemoveEverythingGated", "Device Parameters"),
+        ("\"reg.exe\"", "DeleteDeviceParametersOf", "Device Parameters"),
         // The interface-class key the cleanup's deletes go through, each
         // delete under the lock.
         ("writable: true", "RemoveOwnedInterfaceEntries", null),
@@ -151,7 +151,6 @@ internal static class LockCoverage
         (".SetValue(\"LastSwdGamepadHResult\"", "CreateGamepadCompanion", null),
         ("CreateSubKey(RegPathForIndex(", "CreateXusbCompanion", null),
         (".SetValue(\"LastSwdCompanionHResult\"", "CreateXusbCompanion", null),
-        ("DeleteSubKeyTree(@\"SOFTWARE\\HIDMaestro\"", "RemoveEverythingGated", null),
     };
 
     /// <summary>A method that names a devnode key.</summary>

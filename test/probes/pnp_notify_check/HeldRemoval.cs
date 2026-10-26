@@ -446,6 +446,7 @@ internal static class HeldRemoval
 
         LeaseChecks(check);
         LeftInPlaceChecks(check);
+        FullRemovalEndChecks(check);
         RequestChecks(check);
     }
 
@@ -481,6 +482,110 @@ internal static class HeldRemoval
         check("full removal, nothing left -> every dead record goes, a live one stays, and the driver hosts are waited for and drained",
               !none.KeepsRecord(deadNaming) && !none.KeepsRecord(deadOther) && none.KeepsRecord(live) && !none.LeavesDriverHosts,
               $"{none.KeepsRecord(deadNaming)}, {none.KeepsRecord(deadOther)}, {none.KeepsRecord(live)}, hosts left {none.LeavesDriverHosts}");
+    }
+
+    /// <summary>DeviceOrchestrator.EndEverything, the full removal's end
+    /// after its walk, on a census of <paramref name="present"/> devnodes
+    /// and three records of the check's own: a dead program's that names a
+    /// devnode the walk may leave, a dead program's that names one it
+    /// removed, and a running program's. Returns each act in order: the
+    /// Device Parameters of two instances, the interface entries, the shared
+    /// keys, the wait for the driver hosts, the packages, the sections, the
+    /// records and the drain.</summary>
+    static List<string> EndOfFullRemoval(string[] present, bool preserveInstall, bool forUninstall, bool fastPath)
+    {
+        var records = new List<MachineClaims.OwnerRecord>
+        {
+            OwnerRecord("pnc-end-dead-a", live: false, "HM_FE0000000000A001"),
+            OwnerRecord("pnc-end-dead-b", live: false, "HM_FE0000000000A003"),
+            OwnerRecord("pnc-end-live-c", live: true, "HM_FE0000000000A004"),
+        };
+        var did = new List<string>();
+        var calls = new DeviceOrchestrator.EverythingEndCalls
+        {
+            Census = () => Census(present, records.ToArray()),
+            DeviceParameterOwners = () => new List<string> { @"ROOT\HIDCLASS\HM_FE0000000000A001", @"ROOT\HIDCLASS\HM_FE0000000000A003" },
+            DeleteDeviceParameters = id => did.Add("Device Parameters " + id.Substring(id.LastIndexOf('\\') + 1)),
+            RemoveInterfaceEntries = phantomOnly => did.Add(phantomOnly ? "phantoms' interface entries" : "every interface entry"),
+            ReleaseSharedKeys = () => did.Add("shared keys"),
+            FastPath = () => fastPath,
+            WaitForHosts = () => did.Add("wait for hosts"),
+            RemovePackages = () => did.Add("packages"),
+            ReleaseSections = () => did.Add("sections"),
+            Records = () => new List<MachineClaims.OwnerRecord>(records),
+            DeleteRecord = id => did.Add("record " + id),
+            DrainHosts = () => did.Add("drain hosts"),
+        };
+        DeviceOrchestrator.EndEverything(preserveInstall, forUninstall, calls, _ => { });
+        return did;
+    }
+
+    /// <summary>How the full removal's end uses what its walk left
+    /// (DeviceOrchestrator.LeftInPlace), and the uninstaller's: a device a
+    /// program kept keeps its Device Parameters, the dead record that names
+    /// it, its driver host and its driver package, since the package
+    /// removal is pnputil's /delete-driver /uninstall /force, which takes the
+    /// driver from a present device and leaves it in Code 14 until a
+    /// restart. With nothing left, the hosts are waited for before the
+    /// packages go and drained after.</summary>
+    static void FullRemovalEndChecks(Action<string, bool, string> check)
+    {
+        string[] none = Array.Empty<string>();
+        string[] heldOne = { @"ROOT\HIDCLASS\HM_FE0000000000A001" };
+        string Acts(List<string> did) => string.Join(", ", did);
+
+        var leftFull = EndOfFullRemoval(heldOne, preserveInstall: false, forUninstall: false, fastPath: false);
+        check("full removal with the packages, a device its walk left in the tree -> its Device Parameters and the dead record naming it stay, no driver host is waited for or drained, and the packages stay, since their removal would force the driver off that device",
+              leftFull.SequenceEqual(new[]
+              {
+                  "Device Parameters HM_FE0000000000A003", "phantoms' interface entries", "shared keys", "sections", "record pnc-end-dead-b",
+              }),
+              Acts(leftFull));
+
+        var noneFull = EndOfFullRemoval(none, preserveInstall: false, forUninstall: false, fastPath: false);
+        check("full removal with the packages, nothing left -> both Device Parameters and both dead records go, and the driver hosts are waited for before the packages go and drained after",
+              noneFull.SequenceEqual(new[]
+              {
+                  "Device Parameters HM_FE0000000000A001", "Device Parameters HM_FE0000000000A003", "phantoms' interface entries", "shared keys",
+                  "wait for hosts", "packages", "sections", "record pnc-end-dead-a", "record pnc-end-dead-b", "drain hosts",
+              }),
+              Acts(noneFull));
+
+        // The uninstaller's device step keeps the packages for its own later
+        // step, which removes them with no force, and drains the hosts
+        // first, whatever the fast path says.
+        var noneUninstall = EndOfFullRemoval(none, preserveInstall: true, forUninstall: true, fastPath: true);
+        check("the uninstaller's device step, nothing left -> the driver hosts are waited for and drained before it returns, ahead of the uninstaller's package step, and no package goes here",
+              noneUninstall.SequenceEqual(new[]
+              {
+                  "Device Parameters HM_FE0000000000A001", "Device Parameters HM_FE0000000000A003", "phantoms' interface entries", "shared keys",
+                  "wait for hosts", "sections", "record pnc-end-dead-a", "record pnc-end-dead-b", "drain hosts",
+              }),
+              Acts(noneUninstall));
+
+        var leftUninstall = EndOfFullRemoval(heldOne, preserveInstall: true, forUninstall: true, fastPath: false);
+        check("the uninstaller's device step, a device its walk left in the tree -> no driver host is waited for or drained, and its Device Parameters and the dead record naming it stay",
+              leftUninstall.SequenceEqual(new[]
+              {
+                  "Device Parameters HM_FE0000000000A003", "phantoms' interface entries", "shared keys", "sections", "record pnc-end-dead-b",
+              }),
+              Acts(leftUninstall));
+
+        var launch = EndOfFullRemoval(none, preserveInstall: true, forUninstall: false, fastPath: true);
+        check("a launch sweep that keeps the install, the deploy's fast path ahead -> no wait for the driver hosts and no drain, which only protect a package replacement",
+              !launch.Contains("wait for hosts") && !launch.Contains("drain hosts") && !launch.Contains("packages"),
+              Acts(launch));
+
+        // The uninstaller's walk removes every devnode the census counts as
+        // HIDMaestro's alone, so none is left for the census after it to keep
+        // the hosts from the drain.
+        var missed = new List<string>();
+        foreach (string root in new[] { "ROOT", "SWD" })
+            foreach (string device in new[] { "HIDMAESTRO", "HIDMAESTRO_VID_045E_PID_028E&IG_00", "HMCOMPANION", "HMCOMPANION0001" })
+                if (OwnerCensus.IsExclusiveEnumerator(device) && !DeviceOrchestrator.WalkOwnsAlone(root, device, forUninstall: true))
+                    missed.Add($@"{root}\{device}");
+        check("the uninstaller's walk removes every device id the census counts as HIDMaestro's alone, under ROOT and SWD",
+              missed.Count == 0, missed.Count == 0 ? "every one" : "not removed: " + string.Join(", ", missed));
     }
 
     /// <summary>A census of <paramref name="present"/> devnodes, none with
