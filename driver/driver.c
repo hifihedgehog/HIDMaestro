@@ -1072,6 +1072,25 @@ ReportWaitingLocked(_In_ PDEVICE_CONTEXT ctx)
     return ctx->ReleaseNext < ctx->ReleaseCount || ctx->InputReportPending;
 }
 
+/* 2.1.0: the pending frame comes after the last one delivered, so a
+ * READ_REPORT that comes after it takes it: by serial number arithmetic on
+ * the SeqNos (RFC 1982), under which SeqNo 2, the frame past the wrap,
+ * comes after 0xFFFFFFFE, where v2.0.3's greater-than test parked that read
+ * until the next frame. 0 is none delivered since a reset (OwnerGone, the
+ * recycle, the add), and every frame comes after it. A frame read once
+ * the watched program's pipe closed can be the next program's, which a
+ * READ_REPORT before OwnerGone must not take where v2.0.3 parked it,
+ * ahead of the release frames OwnerGone queues: it keeps the greater-than
+ * test. Caller holds InputLock. */
+static BOOLEAN
+CachedAfterDeliveredLocked(_In_ PDEVICE_CONTEXT ctx)
+{
+    ULONG last = ctx->LastDeliveredInputSeqNo;
+    if (last == 0) return TRUE;
+    if (ctx->InputReportAfterEnd) return ctx->SharedMemSeqNo > last;
+    return (LONG)(ctx->SharedMemSeqNo - last) > 0;
+}
+
 /* 2.1.0: take the report a read carries, the next release frame first (issue
  * #67), then the pending frame, into report. A frame taken is no longer
  * pending, moves the delivered gate to its SeqNo and is noted for the
@@ -1779,6 +1798,17 @@ KeepLiveFeatureLocked(_In_ PDEVICE_CONTEXT ctx, _In_ const HIDMAESTRO_SHARED_INP
     ctx->LiveFeatureSize = n;
 }
 
+/* 2.1.0: the watched program's pipe has closed and OwnerGone has yet to
+ * run: the read kept pending on it has completed (HasOverlappedIoCompleted,
+ * Learn). A next program starts after the last one ended, so a frame read
+ * while the read is pending is the watched program's own. Worker thread
+ * only, as the watch is. */
+static BOOLEAN
+OwnerEnded(_In_ PDEVICE_CONTEXT ctx)
+{
+    return ctx->OwnerPipe != NULL && HasOverlappedIoCompleted(&ctx->OwnerOverlapped);
+}
+
 /* Core per-frame work extracted from the old EvtSharedMemTimer.
  * Called from the event-driven worker thread whenever the SDK signals
  * InputDataEvent (or the 50 ms safety tick fires). Doing all the HID
@@ -1808,6 +1838,9 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
      * completes with the all-zero one. A program before 2.1.0 stores 0 with
      * its frame at every 2^31st frame, and that frame goes on. */
     BOOLEAN zeroed = seqNo == 0 && shared.DataSize == 0 && shared.ExtendedReportSize == 0;
+    /* 2.1.0: the frame read notes whether the watched program's pipe had
+     * closed (CachedAfterDeliveredLocked). */
+    BOOLEAN afterEnd = OwnerEnded(ctx);
     /* v2.0.0: the worker's stale-wakeup count reads SeenSeqNo, since a
      * frame the driver does not send leaves SharedMemSeqNo alone. */
     ctx->SeenSeqNo = seqNo;
@@ -1938,6 +1971,7 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
         ctx->SharedMemSeqNo = seqNo;
         /* A zeroed section is no frame, and no read carries it. */
         ctx->InputReportPending = !zeroed;
+        ctx->InputReportAfterEnd = afterEnd;
         ctx->InputPublishCount++;
         waiting = ReportWaitingLocked(ctx);
         ReleaseSRWLockExclusive(&ctx->InputLock);
@@ -2935,15 +2969,10 @@ EvtIoDeviceControl(
 
         /* Release frames the consumer's exit left queued (issue #67) go
          * first, one per read. Then the cached frame no read has carried,
-         * when its SeqNo is greater than the last one delivered, as v2.0.3
-         * tested it. A frame after the SeqNo wrap waits for the next frame,
-         * as it did there. Before OwnerGone runs, the next program's first
-         * frame can carry a SeqNo below the last program's last one
-         * delivered, and that read parks too: served here, the frame went
-         * out again once OwnerGone forgot the SeqNo and the program's own
-         * signal read it again. */
+         * when it comes after the last one delivered, the frame past the
+         * SeqNo wrap included (CachedAfterDeliveredLocked). */
         if (ctx->ReleaseNext < ctx->ReleaseCount
-            || (ctx->InputReportPending && ctx->SharedMemSeqNo > ctx->LastDeliveredInputSeqNo))
+            || (ctx->InputReportPending && CachedAfterDeliveredLocked(ctx)))
             serve = TakeReportLocked(ctx, served, &servedSize);
         if (serve) {
             status = RequestCopyFromBuffer(Request, served, servedSize);

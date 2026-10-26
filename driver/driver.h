@@ -262,8 +262,10 @@ typedef struct _DEVICE_CONTEXT {
 
     /* Sequence-number gate for IOCTL_HID_READ_REPORT. The READ_REPORT
      * handler returns a cached input report immediately ONLY when there's
-     * new data since the last delivery (SharedMemSeqNo > LastDeliveredInputSeqNo).
-     * Otherwise the request is parked in ManualQueue and the worker thread
+     * new data since the last delivery: from 2.1.0 a pending frame whose
+     * SeqNo comes after LastDeliveredInputSeqNo (CachedAfterDeliveredLocked),
+     * 0 for none delivered since a reset. Otherwise the request is parked in
+     * ManualQueue and the worker thread
      * completes it on the next ProcessSharedInput tick, or the handler's
      * look after parking finds a frame the worker cached meanwhile
      * (DeliverParked). Without this gate,
@@ -279,12 +281,18 @@ typedef struct _DEVICE_CONTEXT {
      * it with the delivered gate. Under InputLock. */
     BOOLEAN InputReportPending;
 
+    /* 2.1.0: InputReportAfterEnd, the pending frame was read once the
+     * watched program's pipe had closed, so it can be the next program's: a
+     * late READ_REPORT takes it under v2.0.3's greater-than test. Holds only
+     * while InputReportPending does. Under InputLock. */
+    BOOLEAN InputReportAfterEnd;
+
     /* 2.1.0: frames the worker has cached. A READ_REPORT that parks looks
      * again once it is in the queue and takes the pending frame only when
      * one was cached since its first look: that frame came while the read
      * was waiting, and a read parked then gets it. A frame cached before
-     * the first look stays under v2.0.3's greater-than test. Under
-     * InputLock. */
+     * the first look stays under the test of a read that comes after a
+     * frame (CachedAfterDeliveredLocked). Under InputLock. */
     ULONG   InputPublishCount;
 
     /* Event-driven IPC: SDK signals InputDataEvent after every seqlock write,
