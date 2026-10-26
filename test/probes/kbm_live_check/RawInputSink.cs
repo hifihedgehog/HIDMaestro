@@ -11,7 +11,9 @@ using System.Threading;
 internal sealed class RawInputSink : IDisposable
 {
     public sealed record Mouse(IntPtr Device, ushort Flags, ushort ButtonFlags, int X, int Y, short ButtonData = 0);
-    public sealed record Key(IntPtr Device, ushort VKey, ushort Flags, ushort MakeCode);
+    /// <summary>A keyboard message. <see cref="Ticks"/> is the Stopwatch
+    /// timestamp at which this window read it.</summary>
+    public sealed record Key(IntPtr Device, ushort VKey, ushort Flags, ushort MakeCode, long Ticks = 0);
     public sealed record Hid(IntPtr Device, byte[] Report);
 
     public readonly ConcurrentQueue<Mouse> Mice = new();
@@ -25,9 +27,22 @@ internal sealed class RawInputSink : IDisposable
     private readonly (ushort Page, ushort Usage)[] _usages;
     private WndProc? _proc;   // kept alive for the window's lifetime
 
-    public RawInputSink(params (ushort Page, ushort Usage)[] usages)
+    /// <summary>Every key a low-level keyboard hook of this program saw, with
+    /// the hook's flags (0x80 a break, 0x10 injected) and no device. Windows
+    /// calls the newest hook first, so this one sees a key before the hooks
+    /// other programs installed earlier, any of which can hold it from Raw
+    /// Input. Filled only by a sink made with hookKeyboard.</summary>
+    public readonly ConcurrentQueue<Key> HookKeys = new();
+    public bool HooksKeyboard { get; }
+    private IntPtr _hook;
+    private HookProcDelegate? _hookProc;   // kept alive for the hook's lifetime
+
+    public RawInputSink(params (ushort Page, ushort Usage)[] usages) : this(false, usages) { }
+
+    public RawInputSink(bool hookKeyboard, params (ushort Page, ushort Usage)[] usages)
     {
         _usages = usages;
+        HooksKeyboard = hookKeyboard;
         _thread = new Thread(Run) { IsBackground = true, Name = "RawInputSink" };
         _thread.Start();
         if (!_ready.Wait(5000) || _hwnd == IntPtr.Zero)
@@ -39,6 +54,7 @@ internal sealed class RawInputSink : IDisposable
         while (Mice.TryDequeue(out _)) { }
         while (Keys.TryDequeue(out _)) { }
         while (Reports.TryDequeue(out _)) { }
+        while (HookKeys.TryDequeue(out _)) { }
     }
 
     private void Run()
@@ -65,12 +81,29 @@ internal sealed class RawInputSink : IDisposable
                 hwndTarget = _hwnd,
             };
         RegisterRawInputDevices(devices, (uint)devices.Length, (uint)Marshal.SizeOf<RAWINPUTDEVICE>());
+        if (HooksKeyboard)
+        {
+            _hookProc = Hook;
+            _hook = SetWindowsHookEx(WH_KEYBOARD_LL, _hookProc, GetModuleHandle(null), 0);
+        }
         _ready.Set();
         while (GetMessage(out MSG msg, IntPtr.Zero, 0, 0) > 0)
         {
             TranslateMessage(ref msg);
             DispatchMessage(ref msg);
         }
+        if (_hook != IntPtr.Zero) UnhookWindowsHookEx(_hook);
+    }
+
+    private IntPtr Hook(int code, IntPtr wParam, IntPtr lParam)
+    {
+        if (code >= 0)
+        {
+            // KBDLLHOOKSTRUCT: vkCode, scanCode, flags, time, dwExtraInfo.
+            HookKeys.Enqueue(new Key(IntPtr.Zero, (ushort)Marshal.ReadInt32(lParam), (ushort)Marshal.ReadInt32(lParam, 8),
+                                     (ushort)Marshal.ReadInt32(lParam, 4), System.Diagnostics.Stopwatch.GetTimestamp()));
+        }
+        return CallNextHookEx(_hook, code, wParam, lParam);
     }
 
     private IntPtr Proc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam)
@@ -100,7 +133,8 @@ internal sealed class RawInputSink : IDisposable
                                            *(int*)(data + 12), *(int*)(data + 16), *(short*)(data + 6)));
                     break;
                 case RIM_TYPEKEYBOARD:
-                    Keys.Enqueue(new Key(h->hDevice, *(ushort*)(data + 6), *(ushort*)(data + 2), *(ushort*)data));
+                    Keys.Enqueue(new Key(h->hDevice, *(ushort*)(data + 6), *(ushort*)(data + 2), *(ushort*)data,
+                                         System.Diagnostics.Stopwatch.GetTimestamp()));
                     break;
                 case RIM_TYPEHID:
                     uint each = *(uint*)data, count = *(uint*)(data + 4);
@@ -209,6 +243,11 @@ internal sealed class RawInputSink : IDisposable
     // ── Interop ──────────────────────────────────────────────────────────
 
     private const uint WM_INPUT = 0x00FF, WM_QUIT = 0x0012, RID_INPUT = 0x10000003, RIDI_DEVICENAME = 0x20000007;
+    private const int WH_KEYBOARD_LL = 13;
+    private delegate IntPtr HookProcDelegate(int code, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr SetWindowsHookEx(int id, HookProcDelegate fn, IntPtr module, uint thread);
+    [DllImport("user32.dll")] private static extern bool UnhookWindowsHookEx(IntPtr hook);
+    [DllImport("user32.dll")] private static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr wParam, IntPtr lParam);
     private const uint RIDEV_INPUTSINK = 0x00000100;
     public const uint RIM_TYPEMOUSE = 0, RIM_TYPEKEYBOARD = 1, RIM_TYPEHID = 2;
 

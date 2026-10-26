@@ -417,7 +417,8 @@ internal static class Program
         Console.WriteLine("=== Keyboards and mice through Raw Input (issue #67) ===");
         // --tally-selftest checks section C's count on made-up messages, with
         // no device. --four-mice runs sections A to C alone, and --noise or
-        // --noise-abs moves a fifth mouse all through C.
+        // --noise-abs moves a fifth mouse all through C. --dispose-key N runs
+        // J's dispose case alone N times.
         if (Environment.GetCommandLineArgs().Contains("--tally-selftest")) return TallySelfTest();
         s_noise = Environment.GetCommandLineArgs().Contains("--noise");
         s_noiseAbs = Environment.GetCommandLineArgs().Contains("--noise-abs");
@@ -554,6 +555,58 @@ internal static class Program
         if (Environment.GetCommandLineArgs().Contains("--ready-timing"))
             return ReadyTiming(ctx);
 
+        int dk = Array.IndexOf(Environment.GetCommandLineArgs(), "--dispose-key");
+        int rk = Array.IndexOf(Environment.GetCommandLineArgs(), "--release-key");
+        if (dk > 0 || rk > 0)
+        {
+            // Section J's dispose case alone, N times (1 by default), each
+            // case's attempts printed. --release-key runs the same sequence
+            // with F24 released by a report and no removal.
+            string[] a = Environment.GetCommandLineArgs();
+            int at = dk > 0 ? dk : rk;
+            int cases = at + 1 < a.Length && int.TryParse(a[at + 1], out int n) ? n : 1;
+            using var dsink = new RawInputSink(true, (0x01, 0x06));
+            int passed = 0;
+            using (var control = ControlKeyboard(ctx, out IntPtr cd))
+            {
+                if (cd == IntPtr.Zero) { Console.WriteLine("  Raw Input did not list the control keyboard"); return 1; }
+                for (int i = 1; i <= cases; i++)
+                {
+                    var r = DisposeWithKeyHeld(ctx, dsink, control, cd, remove: dk > 0);
+                    if (r.Up && r.Control) passed++;
+                    Console.WriteLine($"  case {i}: {(r.Up && r.Control ? "PASS" : "FAIL")}, {r.Detail}");
+                }
+            }
+            WaitGone(Tag(0xBEEF, 0xF0BB), 10000);
+            Console.WriteLine($"=== {passed}/{cases} cases passed ===");
+            return passed == cases ? 0 : 1;
+        }
+
+        int ac = Array.IndexOf(Environment.GetCommandLineArgs(), "--after-catalog");
+        if (ac > 0)
+        {
+            // Section H and then J's dispose case, N times (1 by default): the
+            // order in which the case lost input on October 26.
+            string[] a = Environment.GetCommandLineArgs();
+            int cases = ac + 1 < a.Length && int.TryParse(a[ac + 1], out int n) ? n : 1;
+            using var hsink = new RawInputSink(true, (0x01, 0x06));
+            int clean = 0;
+            for (int i = 1; i <= cases; i++)
+            {
+                Catalog(ctx);
+                using (var control = ControlKeyboard(ctx, out IntPtr cd))
+                {
+                    if (cd == IntPtr.Zero) { Console.WriteLine("  Raw Input did not list the control keyboard"); return 1; }
+                    var r = DisposeWithKeyHeld(ctx, hsink, control, cd);
+                    if (r.Up && r.Control && r.Attempts == 1) clean++;
+                    Console.WriteLine($"  case {i}: {(r.Up && r.Control ? "PASS" : "FAIL")}, {r.Detail}");
+                }
+                WaitGone(Tag(0xBEEF, 0xF0BB), 10000);
+            }
+            Console.WriteLine($"=== {clean}/{cases} cases passed on their first attempt ===");
+            return 0;
+        }
+
         int kd = Array.IndexOf(Environment.GetCommandLineArgs(), "--key-diag");
         if (kd > 0 && kd + 1 < Environment.GetCommandLineArgs().Length)
         {
@@ -613,21 +666,40 @@ internal static class Program
             return 0;
         }
 
-        using var sink = new RawInputSink((0x01, 0x02), (0x01, 0x06), (0xFF00, 0x01), (0x0C, 0x01));
+        using var sink = new RawInputSink(true, (0x01, 0x02), (0x01, 0x06), (0xFF00, 0x01), (0x0C, 0x01));
 
-        // B and D move the real cursor. It goes back where it was.
+        // Every check below reads input through Raw Input, which a program
+        // that holds the keyboard and mouse keeps from this one. Mouse
+        // Without Borders holds both while it drives its other computer,
+        // and takes them when the cursor crosses a screen edge, so the
+        // cursor stays in a square at the primary screen's center for the
+        // whole run. Raw Input reports every count whatever the clip. Each
+        // input section starts once a key of the control keyboard reaches
+        // Raw Input. B to D move the real cursor, which goes back where it
+        // was at the end.
         bool haveCursor = GetCursorPos(out POINT cursor);
+        int cx = GetSystemMetrics(0) / 2, cy = GetSystemMetrics(1) / 2;
+        s_square = new RECT { Left = cx - 100, Top = cy - 100, Right = cx + 100, Bottom = cy + 100 };
+        SetCursorPos(cx, cy);
+        ClipCursor(ref s_square);
         try
         {
-            FourMice(ctx, sink);
+            s_control = ControlKeyboard(ctx, out s_controlDevice);
+            Check("Raw Input lists the control keyboard", s_controlDevice != IntPtr.Zero);
+            Reach(sink, "A to C");
+            FourMiceSections(ctx, sink);
             if (!fourOnly)
             {
+                Reach(sink, "D");
                 Absolute(ctx, sink);
+                Reach(sink, "E");
                 ExtraButtons(ctx, sink);
+                Reach(sink, "F");
                 Keyboard(ctx, sink);
                 Consumer(ctx, sink);
                 OutputSplit(ctx);
                 Catalog(ctx);
+                Reach(sink, "J");
                 OwnerExit(ctx, sink);
             }
         }
@@ -637,7 +709,12 @@ internal static class Program
         }
         finally
         {
+            ClipCursor(IntPtr.Zero);
             if (haveCursor) SetCursorPos(cursor.X, cursor.Y);
+            // J's cleanup has removed the control keyboard's device by now.
+            try { s_control?.Dispose(); }
+            catch (Exception ex) { Check("the control keyboard disposes", false, ex.Message); }
+            WaitGone(Tag(0xBEEF, 0xF0BB), 10000);
         }
 
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
@@ -646,19 +723,42 @@ internal static class Program
 
     // ── A, B and C ───────────────────────────────────────────────────────
 
-    /// <summary>A to C move the real cursor, C by up to 16,250 counts an
-    /// axis. A cursor that reaches a screen edge can hand the keyboard and
-    /// mouse to another computer (Mouse Without Borders) or open a hot
-    /// corner, so it stays in a square at the primary screen's center until
-    /// the sections end. Raw Input reports every count whatever the clip.</summary>
-    static void FourMice(HMContext ctx, RawInputSink sink)
+    /// <summary>The square the cursor stays in for the run, the control
+    /// keyboard, and its Raw Input handle (zero when Raw Input does not list
+    /// it).</summary>
+    static RECT s_square;
+    static HMController? s_control;
+    static IntPtr s_controlDevice;
+
+    /// <summary>Waits until keyboard input reaches this program before an
+    /// input section: the control keyboard presses F22 once a second until
+    /// Raw Input brings it, for up to five minutes. A program that holds the
+    /// keyboard, or a secure desktop, keeps it away until then. The cursor's
+    /// square is set again first, since Windows drops a clip on some desktop
+    /// changes.</summary>
+    static void Reach(RawInputSink sink, string section)
     {
-        int cx = GetSystemMetrics(0) / 2, cy = GetSystemMetrics(1) / 2;
-        var square = new RECT { Left = cx - 100, Top = cy - 100, Right = cx + 100, Bottom = cy + 100 };
-        SetCursorPos(cx, cy);
-        ClipCursor(ref square);
-        try { FourMiceSections(ctx, sink); }
-        finally { ClipCursor(IntPtr.Zero); }
+        ClipCursor(ref s_square);
+        if (s_control == null || s_controlDevice == IntPtr.Zero) return;
+        var sw = Stopwatch.StartNew();
+        while (true)
+        {
+            long t = Stopwatch.GetTimestamp();
+            Press(s_control, HMKey.F22);
+            var w = Stopwatch.StartNew();
+            bool arrived = false;
+            while (w.ElapsedMilliseconds < 1000 && !(arrived = sink.Keys.Any(k => k.Device == s_controlDevice && k.VKey == 0x85 && (k.Flags & 1) == 0 && k.Ticks >= t)))
+                Thread.Sleep(5);
+            if (arrived) break;
+            if (sw.Elapsed.TotalMinutes >= 5)
+            {
+                Check($"keyboard input reaches this program before section {section}", false,
+                      $"F22 of the control keyboard did not reach Raw Input in 5 min; this program's hook saw it {(sink.HookKeys.Any(k => k.VKey == 0x85 && k.Ticks >= t) ? "arrive" : "not arrive")}");
+                return;
+            }
+        }
+        if (sw.ElapsedMilliseconds >= 1000)
+            Console.WriteLine($"  [INFO] keyboard input reached this program after {sw.Elapsed.TotalSeconds:F0} s, and section {section} started then");
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
@@ -725,9 +825,10 @@ internal static class Program
         const int CRuns = 5;
         FourTally tally = default;
         bool clean = false;
-        int foreign = 0;
+        int foreign = 0, runs = 0;
         for (int run = 1; run <= CRuns && !clean; run++)
         {
+            runs = run;
             WaitStill(sink, devs, 2000, 30000);
             sink.Clear();
             using var noiseStop = new ManualResetEventSlim();
@@ -750,7 +851,7 @@ internal static class Program
                               (clean ? "" : ", so C runs again"));
         }
         noise?.Dispose();
-        Check("a run of C with no relative mouse outside the test moving", clean, $"{foreign} such moves in the last of {CRuns} runs");
+        Check("a run of C with no relative mouse outside the test moving", clean, $"{foreign} such moves in run {runs} of up to {CRuns}");
         if (clean)
         {
             for (int i = 0; i < 4; i++)
@@ -1084,35 +1185,122 @@ internal static class Program
 
     // ── J ────────────────────────────────────────────────────────────────
 
+    /// <summary>The dispose case's control: a keyboard of its own, listed by
+    /// Raw Input and holding the LED state Windows sends it, or a zero
+    /// handle when Raw Input does not list it.</summary>
+    static HMController ControlKeyboard(HMContext ctx, out IntPtr device)
+    {
+        var cp = Custom(0xF0BB, "HIDMaestro Live Control Keyboard", "keyboard", new HidDescriptorBuilder().Keyboard());
+        var before = Names();
+        var control = ctx.CreateController(cp, "kbm-live-control");
+        var cd = WaitNew(before, d => d.Type == RawInputSink.RIM_TYPEKEYBOARD && Is(d.Name, Tag(0xBEEF, 0xF0BB)), 1, 15000);
+        device = cd.Count == 1 ? cd[0].Handle : IntPtr.Zero;
+        if (device != IntPtr.Zero) Readable(control);
+        return control;
+    }
+
+    /// <summary>A keyboard with F24 down is disposed, and F24's break must
+    /// reach Windows' keyboard input. The witness is this program's own
+    /// low-level keyboard hook: Windows calls the newest hook first, so it
+    /// sees each key before a program that hooked earlier can hold it from
+    /// Raw Input, as Mouse Without Borders holds every key while it drives
+    /// its other computer. On October 26 the hook saw every key of seven
+    /// attempts over 45 s while Raw Input brought none. The control
+    /// keyboard presses F22 just before the Dispose and F23 once it
+    /// returns. When the hook sees neither, keyboard input went to another
+    /// desktop, such as a secure one, and the case runs again 5 s later, up
+    /// to seven times in all. Once the hook sees both, a missing break
+    /// fails. With <paramref name="remove"/> false the keyboard releases F24
+    /// by a report and stays until the wait ends, the same sequence with no
+    /// removal. Each attempt prints when each key reached the hook and Raw
+    /// Input, in ms from the F22 press.</summary>
+    static (bool Up, bool Control, int Attempts, string Detail) DisposeWithKeyHeld(HMContext ctx, RawInputSink sink,
+        HMController control, IntPtr controlDevice, bool remove = true)
+    {
+        if (!sink.HooksKeyboard) throw new ArgumentException("the dispose case reads the sink's keyboard hook");
+        var kp = Custom(0xF0B7, "HIDMaestro Live Dispose Keyboard", "keyboard", new HidDescriptorBuilder().Keyboard());
+        string ktag = Tag(0xBEEF, 0xF0B7);
+        bool up = false, ctlOk = false;
+        int attempt = 0;
+        var log = new List<string>();
+        while (!ctlOk && attempt < 7)
+        {
+            if (attempt++ > 0) Thread.Sleep(5000);
+            var before = Names();
+            var kb = ctx.CreateController(kp, "kbm-live-dispose");
+            var kd = WaitNew(before, d => d.Type == RawInputSink.RIM_TYPEKEYBOARD && Is(d.Name, ktag), 1, 15000);
+            if (kd.Count != 1)
+            {
+                kb.Dispose();
+                WaitGone(ktag, 10000);
+                log.Add($"attempt {attempt}: Raw Input did not list the keyboard");
+                return (false, false, attempt, string.Join("; ", log));
+            }
+            Readable(kb);
+            kb.SubmitKeyboard(HMKeyModifiers.None, new[] { HMKey.F24 });
+            Thread.Sleep(100);
+            sink.Clear();
+            long t0 = Stopwatch.GetTimestamp();
+            Press(control, HMKey.F22);
+            long tGo = Stopwatch.GetTimestamp();
+            if (remove) kb.Dispose();
+            else kb.SubmitKeyboard(HMKeyModifiers.None, ReadOnlySpan<HMKey>.Empty);
+            long tBack = Stopwatch.GetTimestamp();
+            Press(control, HMKey.F23);
+            // A press waits for the driver's acknowledgement of its make, up
+            // to 200 ms, so a press near 200 ms is a frame the driver did not
+            // deliver.
+            long tF23 = Stopwatch.GetTimestamp();
+            // A hook's key carries no device and flags 0x80 on a break. Only
+            // the disposed keyboard sends F24, and only the control F22 and F23.
+            bool HookUp(RawInputSink.Key k) => k.VKey == 0x87 && (k.Flags & 0x80) != 0;
+            bool HookBefore(RawInputSink.Key k) => k.VKey == 0x85 && (k.Flags & 0x80) == 0;
+            bool HookAfter(RawInputSink.Key k) => k.VKey == 0x86 && (k.Flags & 0x80) == 0;
+            bool Up() => sink.HookKeys.Any(HookUp);
+            bool Controls() => sink.HookKeys.Any(HookBefore) && sink.HookKeys.Any(HookAfter);
+            // 4 s for both controls, then the break has the hang bound.
+            var sw = Stopwatch.StartNew();
+            while (!(Up() && Controls()) && sw.ElapsedMilliseconds < (Controls() ? HangMs : 4000))
+                Thread.Sleep(20);
+            if (!remove) kb.Dispose();
+            (up, ctlOk) = (Up(), Controls());
+            // Raw Input's view, for the record: another program's hook can
+            // hold any of these from it.
+            bool RawUp(RawInputSink.Key k) => k.Device == kd[0].Handle && k.VKey == 0x87 && (k.Flags & 1) == 1;
+            bool RawBefore(RawInputSink.Key k) => k.Device == controlDevice && k.VKey == 0x85 && (k.Flags & 1) == 0;
+            bool RawAfter(RawInputSink.Key k) => k.Device == controlDevice && k.VKey == 0x86 && (k.Flags & 1) == 0;
+            string Ms(long ticks) => ((ticks - t0) * 1000.0 / Stopwatch.Frequency).ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+            string Hook(Func<RawInputSink.Key, bool> f) => sink.HookKeys.FirstOrDefault(f) is { } h ? Ms(h.Ticks) + ((h.Flags & 0x10) != 0 ? " injected" : "") : "-";
+            string Raw(Func<RawInputSink.Key, bool> f) => sink.Keys.FirstOrDefault(f) is { } k ? Ms(k.Ticks) : "-";
+            log.Add($"attempt {attempt}: the hook saw F24 up {YesNo(up)}, F22 {YesNo(sink.HookKeys.Any(HookBefore))}, F23 {YesNo(sink.HookKeys.Any(HookAfter))} " +
+                    $"(ms from F22: F22 pressed by {Ms(tGo)}, {(remove ? "Dispose" : "release")} to {Ms(tBack)}, F23 pressed by {Ms(tF23)}; " +
+                    $"hook F22 at {Hook(HookBefore)}, F24 up at {Hook(HookUp)}, F23 at {Hook(HookAfter)}; " +
+                    $"Raw Input F22 at {Raw(RawBefore)}, F24 up at {Raw(RawUp)}, F23 at {Raw(RawAfter)})");
+            WaitGone(ktag, 10000);
+        }
+        return (up, ctlOk, attempt, string.Join("; ", log));
+    }
+
+    static void Press(HMController keyboard, HMKey key)
+    {
+        keyboard.SubmitKeyboard(HMKeyModifiers.None, new[] { key });
+        keyboard.SubmitKeyboard(HMKeyModifiers.None, ReadOnlySpan<HMKey>.Empty);
+    }
+
+    static string YesNo(bool b) => b ? "yes" : "no";
+
     static void OwnerExit(HMContext ctx, RawInputSink sink)
     {
         Console.WriteLine("\n== J. A consumer that goes away with input held ==");
 
         // Dispose with a key down sends the key up first.
-        var kp = Custom(0xF0B7, "HIDMaestro Live Dispose Keyboard", "keyboard", new HidDescriptorBuilder().Keyboard());
-        string ktag = Tag(0xBEEF, 0xF0B7);
-        var before = Names();
-        var kb = ctx.CreateController(kp, "kbm-live-dispose");
-        var kd = WaitNew(before, d => d.Type == RawInputSink.RIM_TYPEKEYBOARD && Is(d.Name, ktag), 1, 15000);
-        if (kd.Count == 1)
+        if (s_control != null && s_controlDevice != IntPtr.Zero)
         {
-            Readable(kb);
-            kb.SubmitKeyboard(HMKeyModifiers.None, new[] { HMKey.F24 });
-            Thread.Sleep(100);
-            sink.Clear();
-            kb.Dispose();
-            var sw = Stopwatch.StartNew();
-            while (sw.ElapsedMilliseconds < HangMs && !sink.Keys.Any(k => k.Device == kd[0].Handle && k.VKey == 0x87 && (k.Flags & 1) == 1))
-                Thread.Sleep(20);
-            Check("Dispose with F24 held sends F24 up first",
-                  sink.Keys.Any(k => k.Device == kd[0].Handle && k.VKey == 0x87 && (k.Flags & 1) == 1));
+            var r = DisposeWithKeyHeld(ctx, sink, s_control, s_controlDevice);
+            Check("Dispose with F24 held, its control: this program's keyboard hook sees F22 before and F23 after", r.Control,
+                  r.Control ? $"attempt {r.Attempts}" : $"{r.Detail}: keyboard input did not reach this desktop");
+            Check("Dispose with F24 held sends F24 up first", r.Up, r.Detail);
         }
-        else
-        {
-            Check("Raw Input lists the keyboard", false);
-            kb.Dispose();
-        }
-        WaitGone(ktag, 10000);
 
         // A consumer killed with F24, button 6 and the pointer held.
         var child = Process.Start(new ProcessStartInfo(Environment.ProcessPath!, "--hold-child")

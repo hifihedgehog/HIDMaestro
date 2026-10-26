@@ -37,7 +37,7 @@ internal static partial class Live
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
         ctx.InstallDriver();
-        using var sink = new RawInputSink((0x01, 0x06));
+        using var sink = new RawInputSink(true, (0x01, 0x06));
         try
         {
             SameWindow(ctx, sink);
@@ -119,11 +119,12 @@ internal static partial class Live
             var none = new byte[11];
             // The keyboard's control, on its own device and path: F23 in a
             // full frame, report ID first. F23 without F24 means the
-            // data-only frame went wrong. Neither means keyboard input did
-            // not reach this program: another program held it, as Mouse
-            // Without Borders does while it drives its other computer
-            // (October 26), or the desktop was locked. The keyboard's window
-            // then runs again.
+            // data-only frame went wrong. Both are read at this program's
+            // keyboard hook, which sees each key before a program that hooked
+            // earlier can hold it from Raw Input, as Mouse Without Borders
+            // holds every key while it drives its other computer (October
+            // 26). Neither means keyboard input went to another desktop, a
+            // locked or secure one, and the keyboard's window runs again.
             var f23Full = new byte[12];
             f23Full[0] = 0x01;
             f23Full[2] = 0x72;
@@ -151,7 +152,7 @@ internal static partial class Live
                     if (r != null && r.Length > 0 && r[0] == 0x21) seen21++;
                     if (r != null && r.Length >= 3 && r[0] == 0x3F && (r[1] | r[2]) != 0) nsoOk = true;
                 }
-                if (rawInput) (keyOk, ctlOk) = (keyOk || KeyMade(sink, keyboard, 0x87), ctlOk || KeyMade(sink, keyboard, 0x86));
+                if (rawInput) (keyOk, ctlOk) = (keyOk || KeyMade(sink, 0x87), ctlOk || KeyMade(sink, 0x86));
             }
             // Up to six more windows, 5 s apart, while nothing of the
             // keyboard's arrives.
@@ -166,7 +167,7 @@ internal static partial class Live
                 {
                     if (kw.ElapsedMilliseconds >= next) { PressKeys(kb, f24, none, f23Full, noneFull); next = kw.ElapsedMilliseconds + 500; }
                     Thread.Sleep(20);
-                    (keyOk, ctlOk) = (keyOk || KeyMade(sink, keyboard, 0x87), ctlOk || KeyMade(sink, keyboard, 0x86));
+                    (keyOk, ctlOk) = (keyOk || KeyMade(sink, 0x87), ctlOk || KeyMade(sink, 0x86));
                 }
             }
             Check("dualshock-4-v2, the control, in the same window: report 0x01 with left stick X 0xFF", ds4Ok);
@@ -205,10 +206,11 @@ internal static partial class Live
         kb.SubmitRawReport(noneFull);
     }
 
-    /// <summary>True when Raw Input brought a make of <paramref name="vkey"/>
-    /// from <paramref name="device"/>.</summary>
-    static bool KeyMade(RawInputSink sink, IntPtr device, ushort vkey) =>
-        sink.Keys.Any(k => k.Device == device && k.VKey == vkey && (k.Flags & 1) == 0);
+    /// <summary>True when this program's keyboard hook saw a make of
+    /// <paramref name="vkey"/>. A hook's key carries no device, and only the
+    /// keyboard under test sends F23 and F24 here.</summary>
+    static bool KeyMade(RawInputSink sink, ushort vkey) =>
+        sink.HookKeys.Any(k => k.VKey == vkey && (k.Flags & 0x80) == 0);
 
     static HMController Open(HMContext ctx, HMProfile prof, out HidReader? reader)
     {
