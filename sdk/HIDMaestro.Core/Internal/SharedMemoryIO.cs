@@ -1284,8 +1284,13 @@ internal static partial class SharedMemoryIO
         // sequence via InterlockedIncrement on Head and publish the
         // slot's SeqNo last, so a mismatch here is either a slot whose
         // reserving producer hasn't finished writing (retry next wake;
-        // its doorbell signal follows the publish) or a 64-lap overwrite
-        // (handled by the skip-ahead above).
+        // its doorbell signal follows the publish) or a 64-lap overwrite.
+        // A reader the skip-ahead above put on the oldest slot reads the
+        // slot a producer refills next. UsbipEmulatedDevice.PublishOutput
+        // and driver.c PublishOutput zero a slot's SeqNo, then write its
+        // fields behind a barrier, so a copy that saw any field of their
+        // refill reads that zero or the new SeqNo the second time, and the
+        // full fence below keeps that second read after the copy.
         int retries = 4;
         uint slotSeqAfter = 0;
         do

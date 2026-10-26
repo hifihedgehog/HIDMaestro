@@ -751,6 +751,16 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             unsafe { newSeq = (uint)Interlocked.Increment(ref *(int*)view); }
             int slotIdx = (int)((newSeq - 1) % SharedMemoryIO.OUTPUT_RING_SLOTS);
             int slotBase = SharedMemoryIO.OUTPUT_HEADER_SIZE + slotIdx * SharedMemoryIO.OUTPUT_SLOT_SIZE;
+            // A reader OUTPUT_RING_SLOTS packets behind reads the very slot
+            // this packet refills, checking its SeqNo before and after the
+            // copy (SharedMemoryIO.TryReadOutputFrame). Left in place through
+            // the refill, the old SeqNo passes both checks for a copy mixed
+            // from two packets. Zero, the never-written value, goes in first.
+            // Volatile.WriteBarrier keeps every store of the fields behind it,
+            // as WriteInputFrame's odd number is kept: no instruction on x64,
+            // whose stores stay in order, and dmb ish on ARM64.
+            unsafe { Volatile.Write(ref *(int*)((byte*)view + slotBase + SharedMemoryIO.OUTPUT_SLOT_OFFSET_SEQNO), 0); }
+            Volatile.WriteBarrier();
             Marshal.WriteByte(view, slotBase + SharedMemoryIO.OUTPUT_SLOT_OFFSET_SOURCE, source);
             Marshal.WriteByte(view, slotBase + SharedMemoryIO.OUTPUT_SLOT_OFFSET_REPORT_ID, reportId);
             Marshal.WriteInt16(view, slotBase + SharedMemoryIO.OUTPUT_SLOT_OFFSET_SIZE, (short)size);
@@ -763,8 +773,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                             SharedMemoryIO.DATA_CAPACITY, size);
                 }
             }
-            Thread.MemoryBarrier();
-            Marshal.WriteInt32(view, slotBase + SharedMemoryIO.OUTPUT_SLOT_OFFSET_SEQNO, (int)newSeq);
+            // A release store: the fields are visible before the number
+            // (docs/design/specs/Memory-model.md, "Volatile writes"). stlr on
+            // ARM64, a plain store on x64.
+            unsafe { Volatile.Write(ref *(int*)((byte*)view + slotBase + SharedMemoryIO.OUTPUT_SLOT_OFFSET_SEQNO), (int)newSeq); }
             // Under the lock too: the controller closes the event with the
             // section.
             if (_outputEvent != IntPtr.Zero) SetEvent(_outputEvent);

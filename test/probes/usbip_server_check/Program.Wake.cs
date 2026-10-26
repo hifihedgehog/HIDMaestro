@@ -30,6 +30,8 @@
 //     firmware's current report and the HID path's driver keeps one frame
 //     (driver.c ProcessSharedInput). A keyboard or mouse keeps every frame
 //     in order, as the HID path's acknowledgement delivers every report
+//   - a reader the output ring has lapped, reading the slot the device
+//     refills next, never takes a slot mixed from two packets
 //
 // Each scenario ends on a frame or a read that tells a correct device from
 // one that lost the handoff at once, and a wait that only a correct device
@@ -72,6 +74,7 @@ internal static partial class Program
         Contained("a new import beside the old one's detach", () => NewImportBesideDetach(ds));
         Contained("frames no read took", () => NewestFrameWaits(ds));
         Contained("a keyboard's frames no read took", KeyboardKeepsEveryFrame);
+        Contained("a lapped output reader", () => LappedOutputReader(ds));
         Contained("a bulk command on a poll clock", BulkCommandWakesPollClock);
         Contained("bulk replies to other command paths", RepliesReachParkedBulkRead);
     }
@@ -378,6 +381,56 @@ internal static partial class Program
               $"each frame taken up {queued}, frames held {held}, reads {Describe(got)}, then {Describe(after)}");
     }
 
+    /// <summary>The output ring's writer against a reader it has lapped. The
+    /// reader starts each read from a cursor far behind, so it reads the
+    /// oldest slot, the one the device refills next, while the device
+    /// publishes packets whose report ID and bytes all carry the packet's own
+    /// number. A slot taken with bytes of two packets fails the check, and a
+    /// reader that took no slot at all proves nothing.</summary>
+    static void LappedOutputReader(ControllerProfile ds)
+    {
+        using var rig = new HandoffRig(ds, HandoffIndex + 15);
+        var publish = rig.PublishOutput;
+        IntPtr ring = rig.Ring;
+        var payload = new byte[SharedMemoryIO.DATA_CAPACITY];
+        const int Packets = 200_000;
+        int k = 0;
+        while (k <= SharedMemoryIO.OUTPUT_RING_SLOTS)
+        {
+            k++;
+            Array.Fill(payload, (byte)k);
+            publish(0, (byte)k, payload);
+        }
+        bool stop = false;
+        long taken = 0, mixed = 0;
+        string? firstMixed = null;
+        var reader = new Thread(() =>
+        {
+            var buf = new byte[SharedMemoryIO.DATA_CAPACITY];
+            while (!Volatile.Read(ref stop))
+            {
+                uint cursor = 0;
+                if (!SharedMemoryIO.TryReadOutputFrame(ring, ref cursor, out _, out byte id, out int size, buf)) continue;
+                taken++;
+                bool whole = size == buf.Length;
+                for (int i = 0; i < size && whole; i++) whole = buf[i] == id;
+                if (!whole && mixed++ == 0) firstMixed = $"report ID {id:X2}, size {size}, bytes {buf[0]:X2} to {buf[^1]:X2}";
+            }
+        }) { IsBackground = true, Name = "S43 lapped output reader" };
+        reader.Start();
+        while (k < Packets)
+        {
+            k++;
+            Array.Fill(payload, (byte)k);
+            publish(0, (byte)k, payload);
+        }
+        Volatile.Write(ref stop, true);
+        reader.Join();
+        Check("a reader the output ring has lapped takes no slot mixed from two packets",
+              taken > 0 && mixed == 0,
+              $"{Packets} packets, {taken} slots taken, {mixed} mixed{(firstMixed != null ? ", the first " + firstMixed : "")}");
+    }
+
     /// <summary>A copy of the Switch 2 Pro composite whose input endpoint
     /// sends the SDK's report on the host's poll clock, with replies on that
     /// endpoint and commands on its bulk OUT endpoint, which the protocol
@@ -559,6 +612,16 @@ internal static partial class Program
 
         /// <summary>The connection the device was claimed for.</summary>
         public UsbipServer.Connection Connection => _connection;
+
+        /// <summary>The device's output ring.</summary>
+        public IntPtr Ring => _ring;
+
+        /// <summary>The device's publish of one output packet into its ring,
+        /// which the connection's reader calls for an output report.</summary>
+        public delegate void Publish(byte source, byte reportId, ReadOnlySpan<byte> data);
+
+        public Publish PublishOutput =>
+            (Publish)Delegate.CreateDelegate(typeof(Publish), Device, typeof(UsbipEmulatedDevice).GetMethod("PublishOutput", Private)!);
 
         /// <summary>The device's HID lock, which guards its parked reads and
         /// queued frames.</summary>
