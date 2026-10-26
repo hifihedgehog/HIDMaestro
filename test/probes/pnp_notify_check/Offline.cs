@@ -1341,22 +1341,26 @@ internal static class Offline
         self.PriorityClass = ProcessPriorityClass.Normal;
         try
         {
-            // ping holds the pipe 121 s. RunProcess waits at most 30 s for
-            // cmd.exe and 5 s for the pipe after it, so a read to the pipe's
-            // end returns only once ping has ended, and a bounded one while it
-            // still runs. The hang detector counts from ping's start, so the
-            // unbounded time a loaded machine takes to start the processes is
-            // left out, and only RunProcess's own bounded waits are in it.
-            var result = run.Invoke(null, new object[] { "cmd.exe", "/c start \"\" /b ping.exe -n 121 127.0.0.191", 30_000 });
-            var returned = DateTime.Now;
+            // ping holds the pipe 121 s from its start. RunProcess reads 5 s
+            // past cmd.exe's exit, so a read to the pipe's end returns only
+            // once ping has ended, and a bounded one while it still runs. Its
+            // wait for cmd.exe is given 10 minutes: under 128 spinning
+            // idle-priority threads on the development laptop, cmd.exe at
+            // normal priority had not started ping when the 30 s it had ran
+            // out, and RunProcess killed it. The hang
+            // detector is past RunProcess's own longest wait, which no load
+            // lengthens.
+            object? result = null;
+            var caller = Critical(() => result = run.Invoke(null, new object[] { "cmd.exe", "/c start \"\" /b ping.exe -n 121 127.0.0.191", 600_000 }));
+            caller.Start();
+            int hangMs = TimeoutScale.Apply(600_000 + 5_000 + 5_000) + 60_000;
+            bool returnedInTime = caller.Join(hangMs);
             var pings = Process.GetProcessesByName("PING").Where(p => { try { return p.StartTime >= started; } catch { return false; } }).ToList();
             bool running = pings.Any(p => { try { return !p.HasExited; } catch { return false; } });
-            double sinceStart = pings.Count > 0 ? (returned - pings.Min(p => p.StartTime)).TotalMilliseconds : double.NaN;
-            int hangMs = TimeoutScale.Apply(60_000);
             foreach (var p in pings) p.Dispose();
-            Check("RunProcess returns within its read bound when the tool leaves a process holding its pipe: ping, which holds it, still runs when RunProcess has returned, and a hang detector timed from ping's start does not fire",
-                  pings.Count > 0 && running && sinceStart < hangMs,
-                  $"{pings.Count} ping started by the run, running at the return {running}, returned {sinceStart:F0} ms after ping started (hang detector {hangMs} ms), {result}");
+            Check("RunProcess returns within its read bound when the tool leaves a process holding its pipe: ping, which holds it, still runs when RunProcess has returned, and RunProcess returns inside a hang detector past its own bounds",
+                  returnedInTime && pings.Count > 0 && running,
+                  $"returned {(returnedInTime ? "inside" : "past")} the {hangMs} ms hang detector, {pings.Count} ping started by the run, running at the return {running}, {result}");
         }
         finally
         {
@@ -1380,6 +1384,13 @@ internal static class Offline
 
     /// <summary>Run's parts, each in a process of its own.</summary>
     const int Parts = 13;
+
+    /// <summary>How long the runner waits for a part, a hang detector. A part
+    /// takes 13 s at most on a quiet machine, and 330 s for all of them
+    /// under 128 spinning idle-priority threads on the development laptop
+    /// on 2026-10-26, where a process took over 60 s to start and part 12
+    /// starts sixteen.</summary>
+    const int PartHangMs = 3_600_000;
 
     /// <summary>The checks in parts that run at once, each in a process of
     /// its own: the sequences run on the wall clock, and the SDK's hooks
@@ -1414,7 +1425,7 @@ internal static class Offline
         for (int n = 1; n <= Parts; n++)
         {
             var (proc, output) = parts[n - 1];
-            if (!proc.WaitForExit(300_000))
+            if (!proc.WaitForExit(PartHangMs))
             {
                 try { proc.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
                 proc.WaitForExit();

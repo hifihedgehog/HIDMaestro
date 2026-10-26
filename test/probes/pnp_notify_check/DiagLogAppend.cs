@@ -16,7 +16,12 @@
 // has, so each holds the log open before any goes on. Then each writes the
 // rest of its first half at once with the others, and after the second
 // barrier its second half. Between the halves the parent can delete the log,
-// as the battery deletes teardown_diag.log at its start. Every line carries
+// as the battery deletes teardown_diag.log at its start. The barriers wait
+// with no bound of their own, the parent's for as long as every writer runs
+// and a writer's for as long as the parent does: under 128 spinning
+// idle-priority threads on the development laptop a writer took over 60 s
+// to start, and a bound on that wait failed the run with nothing wrong in
+// the logs. Every line carries
 // its writer, its number and a payload made from both, so a line written over
 // or cut is seen. Each line must arrive whole, exactly once, and in its
 // writer's order.
@@ -55,11 +60,13 @@ internal static class DiagLogAppend
         s_sdk.GetType("HIDMaestro.Internal.UserLog")?.GetMethod("Append", BindingFlags.NonPublic | BindingFlags.Static, null,
             new[] { typeof(string), typeof(string) }, null);
 
-    /// <summary>A writer process: diag-append kind writer log name.</summary>
+    /// <summary>A writer process: diag-append kind writer log name
+    /// parent.</summary>
     internal static int Child(string[] args)
     {
         string kind = args[1], log = args[3], name = args[4];
         int writer = int.Parse(args[2]);
+        using var parent = Process.GetProcessById(int.Parse(args[5]));
         Action<int>? write = null;
         switch (kind)
         {
@@ -87,12 +94,22 @@ internal static class DiagLogAppend
         using var go2 = EventWaitHandle.OpenExisting(name + "-go2");
         write(0);
         ready.Release();
-        if (!go.WaitOne(60_000)) return 5;
+        if (!AwaitParent(go, parent)) return 5;
         for (int seq = 1; seq < Half; seq++) write(seq);
         half.Release();
-        if (!go2.WaitOne(60_000)) return 5;
+        if (!AwaitParent(go2, parent)) return 5;
         for (int seq = Half; seq < Lines; seq++) write(seq);
         return 0;
+    }
+
+    /// <summary>A writer's wait at a barrier: for as long as the parent
+    /// runs, however long the others take to start. False once the parent
+    /// has ended.</summary>
+    static bool AwaitParent(EventWaitHandle barrier, Process parent)
+    {
+        while (!barrier.WaitOne(1000))
+            if (parent.HasExited) return false;
+        return true;
     }
 
     internal static void Run(Action<string, bool, string> check)
@@ -132,6 +149,13 @@ internal static class DiagLogAppend
         string name = @"Local\hm-diaglog-" + Guid.NewGuid().ToString("N");
         var procs = new List<(Process P, System.Threading.Tasks.Task<string> Err)>();
         string barriers = "";
+        // The writers start at normal priority, not this process's idle or
+        // below-normal class, which a child takes from its parent
+        // (CreateProcess), so their writes do not wait behind a loaded
+        // machine's spinning threads.
+        using var self = Process.GetCurrentProcess();
+        var priorBefore = self.PriorityClass;
+        self.PriorityClass = ProcessPriorityClass.Normal;
         try
         {
             using var ready = new Semaphore(0, Writers, name + "-ready");
@@ -147,7 +171,8 @@ internal static class DiagLogAppend
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                 };
-                foreach (string a in new[] { "diag-append", kind, w.ToString(), log, name }) psi.ArgumentList.Add(a);
+                foreach (string a in new[] { "diag-append", kind, w.ToString(), log, name, Environment.ProcessId.ToString() })
+                    psi.ArgumentList.Add(a);
                 psi.Environment["TEMP"] = scratch;
                 psi.Environment["TMP"] = scratch;
                 psi.Environment["HIDMAESTRO_DIAG"] = kind == "diag" ? "1" : null;
@@ -171,6 +196,7 @@ internal static class DiagLogAppend
             else if (!halfway) barriers = "not every writer wrote its first half";
         }
         catch (Exception e) { barriers = $"{e.GetType().Name}: {e.Message}"; }
+        finally { self.PriorityClass = priorBefore; }
 
         string exits = string.Join(", ", procs.Select(x => x.P.HasExited ? x.P.ExitCode.ToString() : "running"));
         string errors = string.Join(" ", procs.Select(x => x.Err.IsCompleted ? x.Err.Result.Trim() : "").Where(e => e.Length > 0));
@@ -236,15 +262,16 @@ internal static class DiagLogAppend
     }
 
     /// <summary>Takes one count per writer from the semaphore, or fails as
-    /// soon as a writer has ended.</summary>
+    /// soon as a writer has ended. No other bound: a writer that runs is on
+    /// its way, however slowly the machine starts it, and the parts' runner
+    /// ends a part that hangs.</summary>
     static bool Count(Semaphore s, List<(Process P, System.Threading.Tasks.Task<string> Err)> procs)
     {
-        var sw = Stopwatch.StartNew();
         for (int taken = 0; taken < procs.Count;)
         {
             if (s.WaitOne(50)) { taken++; continue; }
             // No writer ends before the last barrier.
-            if (sw.ElapsedMilliseconds > 60_000 || procs.Any(x => x.P.HasExited)) return false;
+            if (procs.Any(x => x.P.HasExited)) return false;
         }
         return true;
     }
