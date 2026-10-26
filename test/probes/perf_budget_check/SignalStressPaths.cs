@@ -51,9 +51,8 @@
 //                 acknowledgement: the driver writes the SeqNo of the frame
 //                 a READ_REPORT carried into Global\HIDMaestroInputAck<N>
 //                 when HID class sends its next READ_REPORT, which it does once
-//                 it has stored that report. Each submit's time is the SDK's
-//                 own record of the write, taken after the wait, and its
-//                 reading is the first acknowledgement at or past its SeqNo.
+//                 it has stored that report. A submit's reading is the first
+//                 acknowledgement at or past its SeqNo.
 // Each carries the count in the two sticks' X axes the profile lays out, as
 // the Windows.Gaming.Input pass does, the left stick's step plus the right
 // stick's times the steps an axis has. An axis has 200 steps, or fewer where
@@ -637,9 +636,14 @@ internal static partial class Program
             Volatile.Write(ref stop, true);
             reader.Join(2000);
 
-            // Each submit's time is its write, after the SDK's wait for the
-            // frame before. A wait of the full 200 ms is a frame before it that
-            // was never acknowledged.
+            // Each submit's time is the call's start, as on every pass, so a
+            // frame's wait holds the SDK's wait for the one before. The SDK's
+            // own record of the write, taken after it, came 0.04 ms after the
+            // frame's acknowledgement once on the Celeron, its thread held
+            // between the write and the record, and the frame then counted as
+            // read first at the next count (SIG-release-rel3i-celeron). A wait
+            // of the full 200 ms is a frame before it that was never
+            // acknowledged.
             var sent = new List<(int Count, long Time, int Mode, int Block)>(called.Count);
             int timedOut = 0;
             double longest = 0;
@@ -649,7 +653,7 @@ internal static partial class Program
                 double waited = (wrote[x.Count] - x.Time) * 1000.0 / Stopwatch.Frequency;
                 longest = Math.Max(longest, waited);
                 if (waited >= 200) timedOut++;
-                sent.Add((x.Count, wrote[x.Count], x.Mode, x.Block));
+                sent.Add(x);
             }
             Console.WriteLine(FormattableString.Invariant(
                 $"  {name}: the longest wait inside a submit for the frame before {longest:F2} ms, {timedOut} waits of the full 200 ms"));
