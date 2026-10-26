@@ -1,26 +1,42 @@
-// SWD create bound check. No elevation, no device.
+// SWD helper bound check. No elevation, no device.
 //
-// SwdDeviceFactory.Create runs hmswd.exe once and waits for its answer up to
-// the SDK's bound: the helper's own 60 s wait and 30 s more, scaled by
-// HIDMAESTRO_TIMEOUT_SCALE. Until v2.1.0 it stopped the helper at 15 s and
-// ran it twice more. Here this probe, run with hmswd.exe's arguments, takes
-// the helper's place (SwdDeviceFactory.HelperPathForTest) and answers as
-// hmswd.exe does, after a delay. The SDK reads the scale once, so each case
-// runs in a child process of its own:
+// SwdDeviceFactory runs hmswd.exe once per create or remove and waits for it
+// by the steps it prints (driver\hmswd\hmswd.c, "Steps"): up to the SDK's
+// bound, the helper's own 60 s wait and 30 s more scaled by
+// HIDMAESTRO_TIMEOUT_SCALE, until the helper begins its close (STEP
+// CLOSING), then up to 8 s, scaled, for the close. Until v2.1.0 a create
+// stopped the helper at 15 s and ran it twice more, and a remove stopped it
+// at 8 s wherever it stood. Here this probe, run with hmswd.exe's arguments,
+// takes the helper's place (SwdDeviceFactory.HelperPathForTest) and plays a
+// script of hmswd.exe's lines, exit code and pauses. The SDK reads the scale
+// once, so each case runs in a child process of its own, all at once:
 //
-//   A. A helper that answers after 20 s times the scale, past the old
-//      attempt's 15 s and inside the bound: the device is created, and the
-//      helper ran once.
-//   B. A helper still running at the bound, at scale 0.1 (9 s): stopped and
-//      gone, the create failed no sooner than the bound, with WAIT_TIMEOUT
-//      and a cause that names the SDK's bound. The companion's exception
+//   A. A create and a remove whose helper waits 20 s times the scale for
+//      Plug and Play, past the old 15 s and 8 s and inside the bound: the
+//      device is created, the remove counts as done, and each helper ran
+//      once.
+//   B1. At scale 0.1 (a 9 s bound, a 0.8 s close): a create whose helper
+//      never reaches its close is stopped no sooner than the bound and
+//      fails with WAIT_TIMEOUT and a cause that names the bound and the
+//      step it stood at. The companion's exception
 //      (DeviceOrchestrator.CompanionNotCreated) is an
 //      InvalidOperationException with that cause and HRESULT, and the
-//      registration gate's refusal keeps its own message and HRESULT.
-//   C. hmswd.exe's exit codes as driver\hmswd\hmswd.c defines them: 0 with
-//      the instance id, 1 for arguments it refused, 2 with SwDeviceCreate's
-//      HRESULT, 3 for the helper's own wait, 4 with the callback's HRESULT,
-//      and any other code a failure that names it.
+//      registration gate's refusal keeps its own message and HRESULT. A
+//      create whose helper printed OK and then hangs in its close succeeds
+//      once the close's bound has passed.
+//   B2. At scale 0.1: a remove whose helper never reaches its close fails
+//      with WAIT_TIMEOUT and says the device stays. A remove whose helper
+//      set the Handle lifetime and then hangs in its close, issue #18's
+//      case, counts as done once the close's bound has passed, and says so.
+//   C. hmswd.exe's exit codes as hmswd.c defines them, for a create (0 with
+//      the instance id, also on the reuse fast path, 1, 2, 3, 4, 5 and a
+//      crash) and a remove (0, 3, 5).
+//   D. The deploy's pnputil adds (DriverBuilder): each gets as long as
+//      Windows gives a device installation task, 240 s unless the policy
+//      sets more. A tool still running at its bound is stopped and the run
+//      says so, through DriverBuilder's runner and through PnputilHelper's,
+//      which the WinUSB package's add uses, and a stopped add is a failure
+//      that names the stop, the driver store's state and the next deploy.
 //
 // Usage: SwdBoundCheck [scale]
 //   scale  case A's timeout scale, 1 when not given (a 20 s helper)
@@ -30,6 +46,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Reflection;
 using System.Threading;
 using HIDMaestro.Internal;
 
@@ -40,10 +57,9 @@ internal static class Program
     const int E_FAIL = unchecked((int)0x80004005);
     const int E_INVALIDARG = unchecked((int)0x80070057);
 
-    // What the stand-in does, read from its environment, which it inherits
-    // from the case that runs the create.
-    const string DelayVar = "SWDBOUND_DELAY_MS", ExitVar = "SWDBOUND_EXIT",
-                 OutVar = "SWDBOUND_OUT", ErrVar = "SWDBOUND_ERR", RunsVar = "SWDBOUND_RUNS";
+    // The stand-in's script and the file it notes its runs in, read from its
+    // environment, which it inherits from the case that runs it.
+    const string ScriptVar = "SWDBOUND_SCRIPT", RunsVar = "SWDBOUND_RUNS";
 
     static int s_failures;
 
@@ -55,8 +71,8 @@ internal static class Program
 
     static int Main(string[] args)
     {
-        // The stand-in, run by SwdDeviceFactory.Create in hmswd.exe's place.
-        if (args.Length > 0 && args[0] == "create") return StandIn(args);
+        // The stand-in, run by SwdDeviceFactory in hmswd.exe's place.
+        if (args.Length > 0 && (args[0] == "create" || args[0] == "remove")) return StandIn(args);
         if (args.Length == 2 && args[0] == "case") return Case(args[1]);
 
         double scale = 1;
@@ -67,47 +83,46 @@ internal static class Program
             Console.WriteLine("usage: SwdBoundCheck [scale], a scale from 0.1 to 100");
             return 1;
         }
-        int failed = RunCase("A", scale) + RunCase("B", 0.1) + RunCase("C", 1);
+        var cases = new (string Name, double Scale)[] { ("A", scale), ("B1", 0.1), ("B2", 0.1), ("C", 1), ("D", 1) };
+        var running = new List<(string Name, Process P, System.Threading.Tasks.Task<string> Out, System.Threading.Tasks.Task<string> Err)>();
+        foreach (var (name, s) in cases)
+        {
+            var psi = new ProcessStartInfo(Environment.ProcessPath!)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            psi.ArgumentList.Add("case");
+            psi.ArgumentList.Add(name);
+            psi.Environment["HIDMAESTRO_TIMEOUT_SCALE"] = s.ToString(CultureInfo.InvariantCulture);
+            var p = Process.Start(psi)!;
+            running.Add((name, p, p.StandardOutput.ReadToEndAsync(), p.StandardError.ReadToEndAsync()));
+        }
+        int failed = 0;
+        foreach (var (name, p, stdout, stderr) in running)
+        {
+            bool ended = p.WaitForExit(600_000);
+            if (!ended)
+            {
+                try { p.Kill(entireProcessTree: true); } catch { }
+                p.WaitForExit(10_000);
+            }
+            // Each case's helpers have ended by then, so nothing else holds
+            // the pipes.
+            System.Threading.Tasks.Task.WaitAll(new System.Threading.Tasks.Task[] { stdout, stderr }, 10_000);
+            string text = stdout.IsCompletedSuccessfully ? stdout.Result : "";
+            Console.Write(text);
+            if (stderr.IsCompletedSuccessfully && stderr.Result.Length > 0) Console.Write(stderr.Result);
+            if (!ended) Console.WriteLine($"  [FAIL] case {name} had not ended after 600 s and was stopped");
+            else if (p.ExitCode != 0 && !text.Contains("[FAIL]", StringComparison.Ordinal))
+                Console.WriteLine($"  [FAIL] case {name} exited with 0x{p.ExitCode:X8} before it reported a failed check");
+            if (!ended || p.ExitCode != 0) failed++;
+            p.Dispose();
+        }
         Console.WriteLine($"swd_bound_check: {(failed == 0 ? "PASS" : $"{failed} case(s) FAIL")}");
         return failed == 0 ? 0 : 1;
-    }
-
-    /// <summary>One case in a child process with its own timeout scale. Its
-    /// check lines are written to this process's output once it ends.</summary>
-    static int RunCase(string name, double scale)
-    {
-        var psi = new ProcessStartInfo(Environment.ProcessPath!)
-        {
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-        };
-        psi.ArgumentList.Add("case");
-        psi.ArgumentList.Add(name);
-        psi.Environment["HIDMAESTRO_TIMEOUT_SCALE"] = scale.ToString(CultureInfo.InvariantCulture);
-        using var p = Process.Start(psi)!;
-        var stdout = p.StandardOutput.ReadToEndAsync();
-        var stderr = p.StandardError.ReadToEndAsync();
-        bool ended = p.WaitForExit(600_000);
-        if (!ended)
-        {
-            try { p.Kill(entireProcessTree: true); } catch { }
-            p.WaitForExit(10_000);
-        }
-        // Each case's helpers have ended by then, so nothing else holds the
-        // pipes.
-        System.Threading.Tasks.Task.WaitAll(new System.Threading.Tasks.Task[] { stdout, stderr }, 10_000);
-        if (stdout.IsCompletedSuccessfully) Console.Write(stdout.Result);
-        if (stderr.IsCompletedSuccessfully && stderr.Result.Length > 0) Console.Write(stderr.Result);
-        if (!ended)
-        {
-            Console.WriteLine($"  [FAIL] case {name} had not ended after 600 s and was stopped");
-            return 1;
-        }
-        if (p.ExitCode != 0 && !(stdout.IsCompletedSuccessfully && stdout.Result.Contains("[FAIL]", StringComparison.Ordinal)))
-            Console.WriteLine($"  [FAIL] case {name} exited with 0x{p.ExitCode:X8} before it reported a failed check");
-        return p.ExitCode == 0 ? 0 : 1;
     }
 
     static int Case(string name)
@@ -117,8 +132,10 @@ internal static class Program
         switch (name)
         {
             case "A": CaseA(); break;
-            case "B": CaseB(); break;
+            case "B1": CaseB1(); break;
+            case "B2": CaseB2(); break;
             case "C": CaseC(); break;
+            case "D": CaseD(); break;
             default: Console.WriteLine($"  no case {name}"); return 1;
         }
         Console.Out.Flush();
@@ -127,106 +144,233 @@ internal static class Program
 
     static string S(int ms) => SwdDeviceFactory.Seconds(ms);
 
+    static int Bound => TimeoutScale.Apply(SwdDeviceFactory.HelperBoundMs);
+    static int Close => TimeoutScale.Apply(SwdDeviceFactory.HelperCloseMs);
+
+    // hmswd.exe's lines as hmswd.c prints them, each case's script built
+    // from them.
+    const string Started = "out:STEP STARTED", Created = "out:STEP CREATED", Enumerated = "out:STEP ENUMERATED",
+                 Ok = "out:OK {id}", Handle = "out:STEP LIFETIME HANDLE", Removed = "out:OK REMOVED";
+    static string Closing(int code) => $"out:STEP CLOSING {code}";
+    static string Sleep(int ms) => $"sleep:{ms}";
+    static string Exit(int code) => $"exit:{code}";
+
+    static string Script(params string[] actions) => string.Join(";", actions);
+
     static void CaseA()
     {
-        int oldAttempt = TimeoutScale.Apply(15_000);
-        int bound = TimeoutScale.Apply(SwdDeviceFactory.HelperBoundMs);
         int delay = TimeoutScale.Apply(20_000);
-        Check("A: the helper's delay is past the old attempt's bound and inside the create's",
-              delay > oldAttempt && delay < bound,
-              $"old attempt {S(oldAttempt)}, helper {S(delay)}, bound {S(bound)}");
-        var (r, ms, runs) = CreateWith("SWDBOUND_A", delay, 0, null, null);
-        Check($"A: a helper that answers after {S(delay)} -> created, the helper run once, the create no sooner than its answer",
-              r.Success && r.InstanceId == $@"SWD\{Enumerator}\SWDBOUND_A" && r.Cause == null && runs.Count == 1 && ms >= delay,
-              $"success {r.Success}, id {r.InstanceId ?? "none"}, 0x{r.HResult:X8}, {runs.Count} helper run(s), {ms} ms, cause \"{r.Cause}\"");
+        int oldCreate = TimeoutScale.Apply(15_000), oldRemove = TimeoutScale.Apply(8_000);
+        Check("A: the helper's wait is past the old create's 15 s and the old remove's 8 s, and inside the bound",
+              delay > oldCreate && delay > oldRemove && delay < Bound,
+              $"old create {S(oldCreate)}, old remove {S(oldRemove)}, helper {S(delay)}, bound {S(Bound)}");
+
+        var (c, ms, runs) = CreateWith("SWDBOUND_A",
+            Script(Started, Created, Sleep(delay), Enumerated, Ok, Closing(0), Exit(0)));
+        Check($"A: a create whose helper waits {S(delay)} for Plug and Play -> created, the helper run once, no sooner than its answer",
+              c.Success && c.InstanceId == $@"SWD\{Enumerator}\SWDBOUND_A" && c.Cause == null && runs.Count == 1 && ms >= delay,
+              $"success {c.Success}, id {c.InstanceId ?? "none"}, 0x{c.HResult:X8}, {runs.Count} helper run(s), {ms} ms, cause \"{c.Cause}\"");
+
+        var (hr, cause, rms, rruns) = RemoveWith("SWDBOUND_AR",
+            Script(Started, Created, Sleep(delay), Enumerated, Handle, Closing(0), Removed, Exit(0)));
+        Check($"A: a remove whose helper waits {S(delay)} for the reconnect -> done, the helper run once, no sooner than its answer",
+              hr == 0 && cause.Length == 0 && rruns.Count == 1 && rms >= delay,
+              $"0x{hr:X8}, {rruns.Count} helper run(s), {rms} ms, cause \"{cause}\"");
     }
 
-    static void CaseB()
+    static void CaseB1()
     {
-        int bound = TimeoutScale.Apply(SwdDeviceFactory.HelperBoundMs);
-        var (r, ms, runs) = CreateWith("SWDBOUND_B", 120_000, 0, null, null);
+        var (r, ms, runs) = CreateWith("SWDBOUND_B", Script(Started, Created, Sleep(120_000), Exit(0)));
         bool gone = runs.Count == 1 && Gone(runs[0]);
-        string expected = $"hmswd.exe was still running when the SDK's bound of {S(bound)} ran out, and was stopped " +
-                          $"(its own wait for Plug and Play is {S(SwdDeviceFactory.HelperWaitMs)}).";
-        Check($"B: a helper still running at the {S(bound)} bound -> stopped and gone, the create failed no sooner than the bound, WAIT_TIMEOUT, the cause names the bound",
-              !r.Success && r.HResult == WaitTimeoutHr && r.Cause == expected && ms >= bound && runs.Count == 1 && gone,
+        string expected = $"hmswd.exe was still running, waiting for Plug and Play to report the device enumerated, when the SDK's bound of {S(Bound)} ran out, " +
+                          $"and was stopped (its own wait for Plug and Play is {S(SwdDeviceFactory.HelperWaitMs)}).";
+        Check($"B1: a create whose helper never begins its close -> stopped and gone no sooner than the {S(Bound)} bound, WAIT_TIMEOUT, the cause names the bound and the step",
+              !r.Success && r.HResult == WaitTimeoutHr && r.Cause == expected && ms >= Bound && runs.Count == 1 && gone,
               $"0x{r.HResult:X8}, {ms} ms, {runs.Count} helper run(s), gone {gone}, cause \"{r.Cause}\"");
 
         const string Id = @"SWD\HIDMAESTRO\SWDBOUND_B";
         var e = DeviceOrchestrator.CompanionNotCreated("XUSB companion", Id, "xbox-360-wired", 0, r);
-        Check("B: the companion's exception -> InvalidOperationException, the create's cause in its message, its HRESULT",
+        Check("B1: the companion's exception -> InvalidOperationException, the create's cause in its message, its HRESULT",
               e.GetType() == typeof(InvalidOperationException) && e.HResult == WaitTimeoutHr
               && e.Message == $"The XUSB companion {Id} of profile 'xbox-360-wired' at index 0 was not created: {expected}",
               $"{e.GetType().Name} 0x{e.HResult:X8}: {e.Message}");
         var g = DeviceOrchestrator.CompanionNotCreated("XUSB companion", Id, "xbox-360-wired", 0, null);
-        Check("B: the registration gate's refusal -> its own message, InvalidOperationException's own HRESULT",
+        Check("B1: the registration gate's refusal -> its own message, InvalidOperationException's own HRESULT",
               g.GetType() == typeof(InvalidOperationException) && g.HResult == new InvalidOperationException().HResult
               && g.Message == $"The XUSB companion {Id} of profile 'xbox-360-wired' at index 0 was not created: " +
                               "a prior life of it or a device with its ParentIdPrefix was still there after its removal.",
               $"0x{g.HResult:X8}: {g.Message}");
+
+        var (k, kms, kruns) = CreateWith("SWDBOUND_K",
+            Script(Started, Created, Enumerated, Ok, Closing(0), Sleep(120_000), Exit(0)));
+        bool kgone = kruns.Count == 1 && Gone(kruns[0]);
+        Check($"B1: a create whose helper printed OK and hangs in its close -> created once the {S(Close)} close bound passed, the helper stopped",
+              k.Success && k.InstanceId == $@"SWD\{Enumerator}\SWDBOUND_K" && kms >= Close && kruns.Count == 1 && kgone,
+              $"success {k.Success}, id {k.InstanceId ?? "none"}, {kms} ms, {kruns.Count} helper run(s), gone {kgone}");
+    }
+
+    static void CaseB2()
+    {
+        var (hr, cause, ms, runs) = RemoveWith("SWDBOUND_BR", Script(Started, Created, Sleep(120_000), Exit(0)));
+        bool gone = runs.Count == 1 && Gone(runs[0]);
+        string expected = $"hmswd.exe was still running, waiting for Plug and Play to report the device enumerated, when the SDK's bound of {S(Bound)} ran out, " +
+                          "and was stopped. The device's lifetime is still ParentPresent, so it stays.";
+        Check($"B2: a remove whose helper never begins its close -> stopped and gone no sooner than the {S(Bound)} bound, WAIT_TIMEOUT, the device stays",
+              hr == WaitTimeoutHr && cause == expected && ms >= Bound && runs.Count == 1 && gone,
+              $"0x{hr:X8}, {ms} ms, {runs.Count} helper run(s), gone {gone}, cause \"{cause}\"");
+
+        var (khr, kcause, kms, kruns) = RemoveWith("SWDBOUND_KR",
+            Script(Started, Created, Enumerated, Handle, Closing(0), Sleep(120_000), Removed, Exit(0)));
+        bool kgone = kruns.Count == 1 && Gone(kruns[0]);
+        string kexpected = $"Its SwDeviceClose had not returned after {S(Close)}, and it was stopped. " +
+                           "The device's lifetime is Handle, so the end of the helper's process closes the handle, which removes the device.";
+        Check($"B2: a remove whose helper set the Handle lifetime and hangs in its close (issue #18) -> done once the {S(Close)} close bound passed, the helper stopped",
+              khr == 0 && kcause == kexpected && kms >= Close && kruns.Count == 1 && kgone,
+              $"0x{khr:X8}, {kms} ms, {kruns.Count} helper run(s), gone {kgone}, cause \"{kcause}\"");
     }
 
     static void CaseC()
     {
-        var cases = new (string Name, int Exit, string? Out, string? Err, int Hr, string? Cause)[]
+        var creates = new (string Name, string Script, int Hr, string? Cause)[]
         {
-            ("exit 0 with the instance id", 0, null, null, 0, null),
-            ("exit 0 with no instance id", 0, "READY", null, E_FAIL,
-             "hmswd.exe exited with code 0 but printed no instance id (\"READY\")."),
-            ("exit 1, arguments refused", 1, null, "ERR BAD_GUID: x", E_INVALIDARG,
+            ("exit 0 with the instance id", Script(Started, Created, Enumerated, Ok, Closing(0), Exit(0)), 0, null),
+            ("exit 0 on the reuse fast path, its lifetime left as it was",
+             Script(Started, Created, "out:STEP LIFETIME UNCHANGED 0x80070032", Ok, Closing(0), Exit(0)), 0, null),
+            ("exit 0 with no instance id", Script(Started, Created, Enumerated, "out:READY", Closing(0), Exit(0)), E_FAIL,
+             "hmswd.exe exited with code 0 but printed no instance id (\"STEP STARTED | STEP CREATED | STEP ENUMERATED | READY | STEP CLOSING 0\")."),
+            ("exit 1, arguments refused", Script("err:ERR BAD_GUID: x", Exit(1)), E_INVALIDARG,
              "hmswd.exe refused its arguments, exit code 1 (\"ERR BAD_GUID: x\")."),
-            ("exit 2, SwDeviceCreate's HRESULT", 2, null, "ERR SwDeviceCreate: 0x80070005", unchecked((int)0x80070005),
+            ("exit 2, SwDeviceCreate's HRESULT", Script(Started, "err:ERR SwDeviceCreate: 0x80070005", Exit(2)), unchecked((int)0x80070005),
              "SwDeviceCreate failed with 0x80070005 (hmswd.exe exit code 2)."),
-            ("exit 3, the helper's own wait", 3, null, "ERR callback timeout", WaitTimeoutHr,
+            ("exit 3, the helper's own wait", Script(Started, Created, "err:ERR callback timeout", Closing(3), Exit(3)), WaitTimeoutHr,
              "Plug and Play did not report the device enumerated within hmswd.exe's own wait of 60 s, and hmswd.exe closed it (exit code 3)."),
-            ("exit 4, the callback's HRESULT", 4, null, "ERR callback hr=0x8007001F", unchecked((int)0x8007001F),
+            ("exit 4, the callback's HRESULT", Script(Started, Created, Enumerated, "err:ERR callback hr=0x8007001F", Closing(4), Exit(4)), unchecked((int)0x8007001F),
              "Plug and Play reported the device's creation failed with 0x8007001F (hmswd.exe exit code 4)."),
-            ("exit 5, a code no create returns", 5, null, "ERR SwDeviceSetLifetime: 0x80070032", E_FAIL,
-             "hmswd.exe exited with code 0x00000005 (\"ERR SwDeviceSetLifetime: 0x80070032\")."),
-            ("a crash, 0xC0000005", unchecked((int)0xC0000005), null, null, E_FAIL,
+            ("exit 5, SwDeviceSetLifetime's HRESULT", Script(Started, Created, Enumerated, "err:ERR SwDeviceSetLifetime: 0x80070032", Closing(5), Exit(5)),
+             unchecked((int)0x80070032), "SwDeviceSetLifetime failed with 0x80070032, and hmswd.exe closed the device (exit code 5)."),
+            ("a crash, 0xC0000005", Script(Started, Created, Exit(unchecked((int)0xC0000005))), E_FAIL,
              "hmswd.exe exited with code 0xC0000005 (no output)."),
         };
-        for (int n = 0; n < cases.Length; n++)
+        for (int n = 0; n < creates.Length; n++)
         {
-            var c = cases[n];
+            var c = creates[n];
             string suffix = $"SWDBOUND_C{n}";
-            var (r, _, runs) = CreateWith(suffix, 0, c.Exit, c.Out, c.Err);
+            var (r, _, runs) = CreateWith(suffix, c.Script);
             bool ok = c.Cause == null
                 ? r.Success && r.InstanceId == $@"SWD\{Enumerator}\{suffix}" && r.HResult == 0 && r.Cause == null
                 : !r.Success && r.InstanceId == null && r.HResult == c.Hr && r.Cause == c.Cause;
-            Check($"C: {c.Name} -> {(c.Cause == null ? "created" : $"0x{c.Hr:X8} and its cause")}", ok && runs.Count == 1,
+            Check($"C: create, {c.Name} -> {(c.Cause == null ? "created" : $"0x{c.Hr:X8} and its cause")}", ok && runs.Count == 1,
                   $"success {r.Success}, id {r.InstanceId ?? "none"}, 0x{r.HResult:X8}, {runs.Count} helper run(s), cause \"{r.Cause}\"");
+        }
+
+        var removes = new (string Name, string Script, int Hr, string Cause)[]
+        {
+            ("exit 0, removed", Script(Started, Created, Enumerated, Handle, Closing(0), Removed, Exit(0)), 0, ""),
+            ("exit 3, the reconnect's wait", Script(Started, Created, "err:ERR callback timeout", Closing(3), Exit(3)), WaitTimeoutHr,
+             "Plug and Play did not answer the reconnect within hmswd.exe's own wait of 60 s (exit code 3). The device's lifetime is still ParentPresent, so it stays."),
+            ("exit 5, SwDeviceSetLifetime's HRESULT", Script(Started, Created, Enumerated, "err:ERR SwDeviceSetLifetime: 0x80070032", Closing(5), Exit(5)),
+             unchecked((int)0x80070032),
+             "SwDeviceSetLifetime failed (hmswd.exe exit code 5, \"ERR SwDeviceSetLifetime: 0x80070032\"). The device's lifetime is still ParentPresent, so it stays."),
+        };
+        for (int n = 0; n < removes.Length; n++)
+        {
+            var c = removes[n];
+            var (hr, cause, _, runs) = RemoveWith($"SWDBOUND_CR{n}", c.Script);
+            Check($"C: remove, {c.Name} -> 0x{c.Hr:X8}{(c.Cause.Length > 0 ? " and its cause" : "")}",
+                  hr == c.Hr && cause == c.Cause && runs.Count == 1,
+                  $"0x{hr:X8}, {runs.Count} helper run(s), cause \"{cause}\"");
         }
     }
 
-    /// <summary>One create through the stand-in, which waits
-    /// <paramref name="delayMs"/>, prints <paramref name="stdout"/> (the
-    /// instance id when null and the exit code is 0) and
-    /// <paramref name="stderr"/>, and exits with <paramref name="exitCode"/>.
-    /// Returns the result, the create's time and the process id of each
-    /// stand-in run.</summary>
-    static (SwdDeviceFactory.Result Result, long Ms, List<int> Runs) CreateWith(string suffix, int delayMs, int exitCode,
-                                                                               string? stdout, string? stderr)
+    static void CaseD()
     {
-        string runs = Path.Combine(Path.GetTempPath(), $"swd_bound_check-{Environment.ProcessId}-{suffix}.txt");
-        File.Delete(runs);
-        Environment.SetEnvironmentVariable(DelayVar, delayMs.ToString(CultureInfo.InvariantCulture));
-        Environment.SetEnvironmentVariable(ExitVar, exitCode.ToString(CultureInfo.InvariantCulture));
-        Environment.SetEnvironmentVariable(OutVar, stdout);
-        Environment.SetEnvironmentVariable(ErrVar, stderr);
-        Environment.SetEnvironmentVariable(RunsVar, runs);
+        int policy = 0;
+        using (var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"Software\Policies\Microsoft\Windows\DeviceInstall\Settings"))
+            if (key?.GetValue("InstallTimeout") is int set) policy = set;
+        int expected = Math.Max(240, policy) * 1000;
+        int addMs = DriverBuilder.PnputilAddMs();
+        Check("D: a pnputil add gets as long as Windows gives a device installation task",
+              addMs == expected, $"{S(addMs)}, the policy {(policy == 0 ? "not set" : $"{policy} s")}");
+
+        const BindingFlags Private = BindingFlags.NonPublic | BindingFlags.Static;
+        var runBounded = typeof(DriverBuilder).GetMethod("RunBounded", Private);
+        var addStopped = typeof(DriverBuilder).GetMethod("AddStopped", Private);
+        if (runBounded == null || addStopped == null)
+        {
+            Check("D: DriverBuilder.RunBounded and AddStopped exist", false, "");
+            return;
+        }
+        string cmd = Path.Combine(Environment.SystemDirectory, "cmd.exe");
+        int bound = TimeoutScale.Apply(1_000);
+        var sw = Stopwatch.StartNew();
+        var run = (ValueTuple<int, string, bool>)runBounded.Invoke(null, new object?[] { cmd, "/d /c ping -n 30 127.0.0.1 >nul", null, 1_000 })!;
+        long ms = sw.ElapsedMilliseconds;
+        Check($"D: a tool still running at its {S(bound)} bound -> stopped no sooner than the bound, and the run says so",
+              run.Item3 && ms >= bound, $"stopped {run.Item3}, exit {run.Item1}, {ms} ms");
+        var quick = (ValueTuple<int, string, bool>)runBounded.Invoke(null, new object?[] { cmd, "/d /c exit 3", null, 60_000 })!;
+        Check("D: a tool that exits on its own -> not stopped, its exit code kept",
+              !quick.Item3 && quick.Item1 == 3, $"stopped {quick.Item3}, exit {quick.Item1}");
+        // The WinUSB package's add runs through PnputilHelper's runner.
+        sw.Restart();
+        var tool = PnputilHelper.RunToolBounded(cmd, "/d /c ping -n 30 127.0.0.1 >nul", 1_000);
+        long toolMs = sw.ElapsedMilliseconds;
+        Check($"D: PnputilHelper's runner, a tool still running at its {S(bound)} bound -> stopped no sooner than the bound, and the run says so",
+              tool.stopped && toolMs >= bound, $"stopped {tool.stopped}, exit {tool.exitCode}, {toolMs} ms");
+        var toolQuick = PnputilHelper.RunToolBounded(cmd, "/d /c exit 3", 60_000);
+        Check("D: PnputilHelper's runner, a tool that exits on its own -> not stopped, its exit code kept",
+              !toolQuick.stopped && toolQuick.exitCode == 3, $"stopped {toolQuick.stopped}, exit {toolQuick.exitCode}");
+
+        var e = (InvalidOperationException)addStopped.Invoke(null, new object[] { "/add-driver hidmaestro.inf /install", "hidmaestro.inf", true })!;
+        string m = e.Message;
+        Check("D: a stopped add -> a failure naming the stop, the driver store's state, the earlier packages' removal and the next deploy",
+              m.StartsWith($"pnputil /add-driver hidmaestro.inf /install was stopped after {expected / 1000} s, the time Windows gives a device installation task, before it finished. ", StringComparison.Ordinal)
+              && (m.Contains("The driver store lists hidmaestro.inf ", StringComparison.Ordinal)
+                  || m.Contains("The driver store does not list hidmaestro.inf ", StringComparison.Ordinal))
+              && m.Contains("This deploy removed HIDMaestro's earlier packages before its adds. ", StringComparison.Ordinal)
+              && m.EndsWith("The install record still names the payload installed before, so the next InstallDriver deploys again.", StringComparison.Ordinal),
+              m);
+    }
+
+    /// <summary>One create through the stand-in playing
+    /// <paramref name="script"/>. Returns the result, the create's time and
+    /// the process id of each stand-in run.</summary>
+    static (SwdDeviceFactory.Result Result, long Ms, List<int> Runs) CreateWith(string suffix, string script)
+    {
+        string runs = Prepare(suffix, script);
         var sw = Stopwatch.StartNew();
         var r = SwdDeviceFactory.Create(suffix, new[] { @"SWDBOUND\HW" }, Array.Empty<string>(),
                                         SwdDeviceFactory.ContainerIdFor(0), "SWD bound check", Enumerator);
-        long ms = sw.ElapsedMilliseconds;
+        return (r, sw.ElapsedMilliseconds, Runs(runs));
+    }
+
+    /// <summary>One remove through the stand-in playing
+    /// <paramref name="script"/>.</summary>
+    static (int Hr, string Cause, long Ms, List<int> Runs) RemoveWith(string suffix, string script)
+    {
+        string runs = Prepare(suffix, script);
+        var sw = Stopwatch.StartNew();
+        int hr = SwdDeviceFactory.RemoveWith(Enumerator, suffix, SwdDeviceFactory.ContainerIdFor(0), new[] { @"SWDBOUND\HW" },
+                                             Array.Empty<string>(), "SWD bound check", out string cause);
+        return (hr, cause, sw.ElapsedMilliseconds, Runs(runs));
+    }
+
+    static string Prepare(string suffix, string script)
+    {
+        string runs = Path.Combine(Path.GetTempPath(), $"swd_bound_check-{Environment.ProcessId}-{suffix}.txt");
+        File.Delete(runs);
+        Environment.SetEnvironmentVariable(ScriptVar, script);
+        Environment.SetEnvironmentVariable(RunsVar, runs);
+        return runs;
+    }
+
+    static List<int> Runs(string runs)
+    {
         var pids = new List<int>();
-        if (File.Exists(runs))
-        {
-            foreach (string line in File.ReadAllLines(runs))
-                if (int.TryParse(line, NumberStyles.None, CultureInfo.InvariantCulture, out int pid)) pids.Add(pid);
-            File.Delete(runs);
-        }
-        return (r, ms, pids);
+        if (!File.Exists(runs)) return pids;
+        foreach (string line in File.ReadAllLines(runs))
+            if (int.TryParse(line, NumberStyles.None, CultureInfo.InvariantCulture, out int pid)) pids.Add(pid);
+        File.Delete(runs);
+        return pids;
     }
 
     /// <summary>Whether a stand-in run has ended: no process of its id, or
@@ -242,20 +386,31 @@ internal static class Program
         catch (InvalidOperationException) { return true; }
     }
 
-    /// <summary>hmswd.exe's part: <c>create &lt;enumerator&gt; &lt;suffix&gt;
-    /// &lt;container&gt; &lt;hardware ids&gt; &lt;compatible ids&gt;
-    /// &lt;description&gt;</c>, answered as the environment says. It notes
-    /// its process id first, so a run that is stopped is counted.</summary>
+    /// <summary>hmswd.exe's part: <c>create|remove &lt;enumerator&gt;
+    /// &lt;suffix&gt; &lt;container&gt; &lt;hardware ids&gt; &lt;compatible
+    /// ids&gt; &lt;description&gt;</c>, answered by the script in its
+    /// environment: <c>out:</c> and <c>err:</c> lines, flushed at once as
+    /// hmswd.exe flushes its steps, with <c>{id}</c> standing for the
+    /// instance id, <c>sleep:</c> pauses in milliseconds and the
+    /// <c>exit:</c> code. It notes its process id first, so a run that is
+    /// stopped is counted.</summary>
     static int StandIn(string[] args)
     {
         if (Environment.GetEnvironmentVariable(RunsVar) is string runs)
             File.AppendAllText(runs, Environment.ProcessId.ToString(CultureInfo.InvariantCulture) + Environment.NewLine);
-        int delay = int.Parse(Environment.GetEnvironmentVariable(DelayVar) ?? "0", CultureInfo.InvariantCulture);
-        if (delay > 0) Thread.Sleep(delay);
-        int exit = int.Parse(Environment.GetEnvironmentVariable(ExitVar) ?? "0", NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture);
-        if (Environment.GetEnvironmentVariable(OutVar) is string stdout) Console.Out.WriteLine(stdout);
-        else if (exit == 0 && args.Length >= 3) Console.Out.WriteLine($@"OK SWD\{args[1]}\{args[2]}");
-        if (Environment.GetEnvironmentVariable(ErrVar) is string stderr) Console.Error.WriteLine(stderr);
-        return exit;
+        string id = args.Length >= 3 ? $@"SWD\{args[1]}\{args[2]}" : "";
+        foreach (string action in (Environment.GetEnvironmentVariable(ScriptVar) ?? "").Split(';', StringSplitOptions.RemoveEmptyEntries))
+        {
+            int colon = action.IndexOf(':');
+            string verb = action[..colon], arg = action[(colon + 1)..];
+            switch (verb)
+            {
+                case "out": Console.Out.WriteLine(arg.Replace("{id}", id)); Console.Out.Flush(); break;
+                case "err": Console.Error.WriteLine(arg); Console.Error.Flush(); break;
+                case "sleep": Thread.Sleep(int.Parse(arg, CultureInfo.InvariantCulture)); break;
+                case "exit": return int.Parse(arg, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture);
+            }
+        }
+        return 0;
     }
 }
