@@ -102,6 +102,13 @@ UmdfFsContextUsePolicy      = CanUseFsContext2
 ; 2+ virtuals co-exist with a real xinputhid device in the same host. See
 ; issue #3 and docs/investigations/issue3-dual-xinputhid-saturation-2026-04/.
 UmdfHostProcessSharing      = ProcessSharingDisabled
+; A UMDF HID client driver may run its host at high priority (Learn,
+; "Specifying WDF Directives in INF Files", UmdfHostPriority, UMDF 2.15
+; and later). At normal priority, other programs' threads busy on every
+; processor kept the frame worker and the dispatch threads that carry
+; HID class's reads waiting 4 to 533 ms for a processor, and no report
+; went out meanwhile. DsHidMini sets the same directive.
+UmdfHostPriority            = PriorityHigh
 
 [HIDMaestro_UmdfService]
 UmdfLibraryVersion = 2.15.0
