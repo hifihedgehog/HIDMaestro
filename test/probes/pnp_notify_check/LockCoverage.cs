@@ -44,7 +44,7 @@ internal static class LockCoverage
         "SetupDiCreateDeviceInfoW(", "SetupDiCallClassInstaller(", "SwdDeviceFactory.Create(",
         "SetupDiRemoveDevice(", "CM_Uninstall_DevNode(", "DIF_REMOVE,", "SwdDeviceFactory.Remove(",
         "/remove-device", "remove \\\"@",
-        "DifRemoveDevice(", "DisableAndUninstall(", "RemoveDeviceLocked(",
+        "DifRemoveDevice(", "DisableAndUninstall(", "RemoveDeviceLocked(", "AddWithInstall(",
         " /install\"", "DiInstallDevice(", "DiInstallNullDriver(", "\"force-driver\"",
         "CM_Disable_DevNode(", "CM_Enable_DevNode(", "CM_Setup_DevNode(", "CM_Reenumerate_DevNode(",
         "CM_Query_And_Remove_SubTreeW(", "/uninstall /force",
@@ -57,7 +57,7 @@ internal static class LockCoverage
     /// in the caller is not enough: the call must sit inside the hold.</summary>
     static readonly string[] HeldCalls = { "RestartDevice(" };
 
-    static readonly HashSet<string> UnderLockOnly = new() { "DifRemoveDevice", "DisableAndUninstall", "RemoveDeviceLocked" };
+    static readonly HashSet<string> UnderLockOnly = new() { "DifRemoveDevice", "DisableAndUninstall", "RemoveDeviceLocked", "AddWithInstall" };
 
     // A call passed as a delegate to a helper that runs it under the lock
     // it takes itself: RemovePhantom runs each phantom's uninstall, and
