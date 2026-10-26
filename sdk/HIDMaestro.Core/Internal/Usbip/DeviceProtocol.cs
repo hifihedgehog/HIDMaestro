@@ -255,8 +255,8 @@ internal sealed class CompiledProtocol
             SourcePollRules = Array.Empty<(uint, double)>();
             if (BuildsReports)
             {
-                if (clock?.PeriodMs is not double period || !(period > 0) || double.IsInfinity(period))
-                    throw Fail($"{at}.clock.periodMs: a device that builds its reports sends them on its own clock, so it needs a period above 0.");
+                if (clock?.PeriodMs is not double period || !(period >= 0.125) || double.IsInfinity(period))
+                    throw Fail($"{at}.clock.periodMs: a device that builds its reports sends them on its own clock, so it needs a period of at least 0.125 ms.");
                 if (clock.SourcePollMs != null || clock.SourcePollRules != null)
                     throw Fail($"{at}.clock: a source poll goes with a device that sends the SDK's report, and this one builds its own.");
                 ClockPeriodMs = period;

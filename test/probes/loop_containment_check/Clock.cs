@@ -114,6 +114,34 @@ internal static class Clock
     /// through HostTick into the clock.</summary>
     public static void ProtocolHostTick()
     {
+        var p = ClockProfile(4);
+        var compiled = CompiledProtocol.Compile(p, null) ?? throw new InvalidOperationException("the test profile has no protocol");
+        var channel = new FailingChannel();
+        const int index = 7961;
+        string name = $"HMProtocolClock_{index}";
+        ProtocolHostBody(p, compiled, channel, index, name);
+    }
+
+    /// <summary>A protocol clock period under 0.125 ms is refused at
+    /// compile, as a stream period is: a period of ticks that rounds to
+    /// nothing would make the clock thread tick on every pass.</summary>
+    public static void ClockPeriodFloor()
+    {
+        foreach (var ms in new[] { 0.001, 0.1, 0.124 })
+        {
+            string msg = "";
+            try { CompiledProtocol.Compile(ClockProfile(ms), null); }
+            catch (Exception e) { msg = e.Message; }
+            Checks.Check($"a protocol clock period of {ms} ms is refused", msg.Contains("clock.periodMs"), msg);
+        }
+        string ok = "";
+        try { CompiledProtocol.Compile(ClockProfile(0.125), null); }
+        catch (Exception e) { ok = e.Message; }
+        Checks.Check("a protocol clock period of 0.125 ms is accepted", ok.Length == 0, ok);
+    }
+
+    static ControllerProfile ClockProfile(double periodMs)
+    {
         // switch-pro's identity and descriptor with a protocol of the
         // probe's own, as protocol_engine_check builds its UMDF2 profiles.
         var o = JsonNode.Parse(Program.Catalog("switch-pro"))!.AsObject();
@@ -132,11 +160,12 @@ internal static class Clock
           "replies": { "pending": 4, "overflow": "dropOldest" }
         }
         """);
-        var p = Program.Profile(o.ToJsonString());
-        var compiled = CompiledProtocol.Compile(p, null) ?? throw new InvalidOperationException("the test profile has no protocol");
-        var channel = new FailingChannel();
-        const int index = 7961;
-        string name = $"HMProtocolClock_{index}";
+        o["protocol"]!["input"]!["clock"]!["periodMs"] = periodMs;
+        return Program.Profile(o.ToJsonString());
+    }
+
+    static void ProtocolHostBody(ControllerProfile p, CompiledProtocol compiled, FailingChannel channel, int index, string name)
+    {
         var host = new ProtocolHost(p, compiled, index, channel, new object());
         host.Start();
         bool again = Program.WaitUntil(() => Volatile.Read(ref channel.Writes) >= 2);
