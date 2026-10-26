@@ -1147,9 +1147,14 @@ internal static partial class RegistryLedger
         foreach (var entry in entries)
         {
             var (name, id, seen, own) = entry;
+            WinUsbBinding.StepForProbe?.Invoke("entry " + id);
             try
             {
-                if (followUp && !own && IsFollowed(name)) continue;
+                if (followUp && !own && IsFollowed(name))
+                {
+                    WinUsbBinding.StepForProbe?.Invoke("followed");
+                    continue;
+                }
                 if (own) WinUsbBinding.WaitGone(id, waitGoneMs);
                 using var devnodes = own || !followUp ? WinUsbBinding.AcquireDevnodeLock() : WinUsbBinding.TryAcquireDevnodeLock();
                 if (devnodes == null)

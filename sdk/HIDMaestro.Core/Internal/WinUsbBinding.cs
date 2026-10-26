@@ -204,8 +204,22 @@ DeviceName = ""{deviceName}""
     /// the deploy lock before it takes this one, never inside it.</para></summary>
     /// <exception cref="UnauthorizedAccessException">The process is not
     /// elevated.</exception>
-    internal static Mutex AcquireDevnodeLock() => AcquireUnlessStopped(DevnodeMutexObject, 120_000, null,
-        "Another program held HIDMaestro's machine-wide WinUSB lock for two minutes.");
+    internal static Mutex AcquireDevnodeLock()
+    {
+        StepForProbe?.Invoke("lock wait");
+        return AcquireUnlessStopped(DevnodeMutexObject, 120_000, null,
+            "Another program held HIDMaestro's machine-wide WinUSB lock for two minutes.");
+    }
+
+    /// <summary>Called on the restoring thread at each step a restore can
+    /// take: the devnode lock waited for ("lock wait"), taken with no wait
+    /// ("lock taken") or found held ("lock busy"), and a wait for a devnode
+    /// to leave ("wait gone"). <see cref="RegistryLedger"/> adds the entry
+    /// each restore starts on ("entry" and its instance ID) and an entry it
+    /// leaves to the follow-up watching it ("followed"). Coexistence probe
+    /// section Z sets it through reflection to see what a teardown's sweep
+    /// does for another program's entry. Null outside the probe.</summary>
+    internal static Action<string>? StepForProbe;
 
     /// <summary>Take a mutex of <see cref="AdminNamespace"/> for up to
     /// <paramref name="timeoutMs"/>, giving up once
@@ -653,6 +667,7 @@ DeviceName = ""{deviceName}""
     /// device was just detached to leave. No lock is held.</summary>
     internal static void WaitGone(string instanceId, int waitGoneMs)
     {
+        if (waitGoneMs > 0) StepForProbe?.Invoke("wait gone");
         var until = Environment.TickCount64 + waitGoneMs;
         while (waitGoneMs > 0 && Environment.TickCount64 < until
                && CM_Locate_DevNodeW(out _, instanceId, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS)
@@ -733,16 +748,19 @@ DeviceName = ""{deviceName}""
     internal static Mutex? TryAcquireDevnodeLock()
     {
         var m = new Mutex(false, AdminNamespace.Name(DevnodeMutexObject));
+        bool taken;
         try
         {
-            if (m.WaitOne(0)) return m;
+            try { taken = m.WaitOne(0); }
+            catch (AbandonedMutexException) { taken = true; }
         }
-        catch (AbandonedMutexException) { return m; }
         catch
         {
             m.Dispose();
             throw;
         }
+        StepForProbe?.Invoke(taken ? "lock taken" : "lock busy");
+        if (taken) return m;
         m.Dispose();
         return null;
     }
