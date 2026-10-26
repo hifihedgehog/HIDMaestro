@@ -142,8 +142,8 @@ internal sealed unsafe class ProtocolHost : IDisposable
         if (!NeedsClock()) return;
         _origin = System.Diagnostics.Stopwatch.GetTimestamp();
         long period = Math.Max(1, (long)Math.Round(Protocol.ClockPeriodMs * System.Diagnostics.Stopwatch.Frequency / 1000.0));
-        // The device clock of mechanism 2, above normal priority as the
-        // idle repeat and the USB/IP input pump run (decision (b)). Its
+        // The device clock of mechanism 2, at the highest priority every
+        // device clock runs at, the idle repeat's too (decision (b)). Its
         // ticks hold the grid from the start (decision (e)): a tick that
         // cannot send, a reply still undelivered, sends nothing, and the
         // next comes at the next grid point.

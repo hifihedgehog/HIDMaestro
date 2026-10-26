@@ -125,9 +125,12 @@ internal sealed class DeviceClock<TTick> : IDeviceClock where TTick : struct, IC
         {
             IsBackground = true,
             Name = threadName,
-            // The same priority as the USB/IP input pump that carries a
-            // device's frames to the wire.
-            Priority = ThreadPriority.AboveNormal,
+            // A device's frames ride this clock. Beside one spinning
+            // above-normal thread per processor, a clock at above normal
+            // made a median 229 of its 250 ticks a second and 78 in the
+            // worst of six rounds. At highest it made all 250 in every
+            // round, with the same CPU, and at idle the two are level.
+            Priority = ThreadPriority.Highest,
         };
     }
 
