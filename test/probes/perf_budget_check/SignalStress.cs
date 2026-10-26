@@ -827,9 +827,9 @@ internal static partial class Program
                 int x = Digit(r.LeftThumbstickX), y = Digit(r.RightThumbstickX);
                 if (x < 0 || x > 199 || y < 0 || y > 199) continue;
                 int code = y * 200 + x;
-                // Until the probe's first frame, count 0, shows, the reading
-                // is the pad's own state.
-                if (code == last || (last < 0 && code != 0)) continue;
+                // The first reading counts once it carries a count the probe
+                // has submitted. Before that the pad shows its own state.
+                if (code == last || (last < 0 && code > Volatile.Read(ref highest))) continue;
                 // Counts go up, 40,000 codes a lap.
                 int delta = ((code - prev) % 40000 + 40000) % 40000;
                 int count = last >= 0 ? unwrapped + delta : code;
