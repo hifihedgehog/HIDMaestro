@@ -94,7 +94,8 @@
 // are held against the gate-off block of each pair by the same sign test at
 // the same level. Load that delays the worker past the next submit leaves
 // the same mark in both blocks of a pair, and the coin decides which one the
-// gate ran in.
+// gate ran in. The input control fails it in every pair on the DualShock 4
+// and the F310 (SIG-stress-rel3g-celeron).
 //   Each submit before a pause past the worker's 500 ms wait must be read
 // first at its own count, gated or not. A frame read first at a later count
 // never went out on its own and waited out the pause for the next submit:
