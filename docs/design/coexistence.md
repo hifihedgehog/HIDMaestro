@@ -417,7 +417,7 @@ These change devnodes outside the lock, and each is exposure the lock does not c
 - A retry's removal query of a dead program's device that a program refused before, and its request that the driver fail the device (`OwnerSweep.RefusalRetry`), made under the index and identity claims of the device's group, so no create of this release registers it meanwhile. A holder that refuses keeps the query waiting about 5.4 s, and no program waits for the lock through that. When nothing refuses, Windows removes the device and its HID children, and the retry deletes their records under the lock.
 - Every program built before v2.0.0.
 
-Outside the lock as well, on a controller's own devnodes or on residue: the naming writes after a registration, `RestartDevice` (public, and a program's own call of it takes no lock), the package removal's `pnputil /delete-driver`, run once no device and no other program remains, the usbip-win2 host controller's repair and installer, and a WinUSB restore's reinstall flag on a devnode that has left. S77's source check lists each of these calls and fails on one made anywhere else outside the lock.
+Outside the lock as well, on a controller's own devnodes or on residue: the naming writes after a registration, `RestartDevice` (public, and a program's own call of it takes no lock), the package removal's `pnputil /delete-driver`, run once no device remains (the full removal's after its walk, the others' with no other program running either), the usbip-win2 host controller's repair and installer, and a WinUSB restore's reinstall flag on a devnode that has left. S77's source check lists each of these calls and fails on one made anywhere else outside the lock.
 
 ### The registration gate
 

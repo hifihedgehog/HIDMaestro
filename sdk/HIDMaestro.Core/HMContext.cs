@@ -305,7 +305,10 @@ public sealed class HMContext : IDisposable
     /// it and whether or not that program still runs, which is what an
     /// uninstall, a test harness or a support tool wants. With
     /// <paramref name="preserveInstall"/> false it also removes the driver
-    /// packages and <c>HKLM\SOFTWARE\HIDMaestro</c>.
+    /// packages and <c>HKLM\SOFTWARE\HIDMaestro</c>, once no HIDMaestro
+    /// device is left in the tree: a device a program holds against its
+    /// removal keeps them, since their removal would force the driver off
+    /// it.
     ///
     /// <para>A controller the calling program still holds stays a usable
     /// object with no device behind it. Its submits and PID calls return

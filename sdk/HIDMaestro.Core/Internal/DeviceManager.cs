@@ -1388,8 +1388,10 @@ public static partial class DeviceManager
     /// create or delete no record. RestartDevice is public, and a program's
     /// own call of it takes no lock.</item>
     /// <item>The driver package removal's pnputil /delete-driver /uninstall
-    /// /force, under the deploy lock, run once the census shows no device
-    /// and no other live program, so what it uninstalls is residue.</item>
+    /// /force, under the deploy lock, run once no HIDMaestro device is in
+    /// the tree: after the full removal's walk, or once the census shows no
+    /// device and no other live program, so what it uninstalls is
+    /// residue.</item>
     /// <item>The usbip-win2 host controller's repair. Its
     /// CM_Query_And_Remove_SubTreeW on the vhci root runs only when no host
     /// controller answers and starting it failed, when no import has a

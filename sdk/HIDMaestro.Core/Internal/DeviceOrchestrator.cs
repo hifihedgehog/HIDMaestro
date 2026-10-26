@@ -2779,8 +2779,8 @@ internal static partial class DeviceOrchestrator
     /// which delete the packages without <c>/uninstall</c> or <c>/force</c>.
     /// It differs from the preserving sweep in two ways. It always waits for
     /// the driver hosts to exit and drains the ones left, since the packages
-    /// go next. And it removes present <c>ROOT\HMCOMPANION*</c> devnodes,
-    /// the April 2026 companion form, which only the phantom pass reaches
+    /// go next. And it removes present <c>HMCOMPANION*</c> devnodes, the
+    /// April 2026 companion form, which only the phantom pass reaches
     /// otherwise. The caller holds <see cref="OwnerSweep.CreateGate"/> for
     /// writing.</summary>
     internal static void RemoveEverythingForUninstall()
@@ -2851,19 +2851,30 @@ internal static partial class DeviceOrchestrator
         /// device it serves (the driver publishes no process id), and the
         /// host of a device left in place keeps serving it until the holder
         /// lets go: a wait for it ends only at its bound, and a stop fails
-        /// the device. The wait and the drain protect a package replacement,
-        /// which a present device's package blocks anyway.</summary>
+        /// the device. The wait and the drain protect a package removal,
+        /// which waits for the same (<see cref="KeepsPackages"/>).</summary>
         internal bool LeavesDriverHosts => _devnodes.Count > 0;
+
+        /// <summary>No driver package goes while a HIDMaestro devnode is in
+        /// the tree. The full removal deletes the packages with pnputil's
+        /// /delete-driver /uninstall /force, which takes the driver from a
+        /// present device and leaves it in Code 14 until a restart. A later
+        /// full removal or the uninstaller removes them once the device is
+        /// gone, and the uninstaller never forces one.</summary>
+        internal bool KeepsPackages => _devnodes.Count > 0;
     }
 
     /// <summary>A device id under <paramref name="enumRoot"/> whose every
     /// instance the full removal's walk removes without a HardwareID proof:
     /// HIDMAESTRO*, and for the uninstaller the April 2026 companion form
-    /// HMCOMPANION* under ROOT, which the phantom pass reaches
-    /// otherwise.</summary>
+    /// HMCOMPANION*, which the census counts as HIDMaestro's alone under
+    /// ROOT and SWD (OwnerCensus.IsExclusiveEnumerator) and the phantom pass
+    /// reaches otherwise. So nothing the census counts is left in the tree
+    /// by the uninstaller's walk alone, to keep its driver hosts from the
+    /// drain.</summary>
     internal static bool WalkOwnsAlone(string enumRoot, string sub, bool forUninstall) =>
         sub.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase)
-        || (forUninstall && enumRoot == "ROOT" && sub.StartsWith("HMCOMPANION", StringComparison.OrdinalIgnoreCase));
+        || (forUninstall && sub.StartsWith("HMCOMPANION", StringComparison.OrdinalIgnoreCase));
 
     private static void RemoveEverythingGated(bool preserveInstall, bool forUninstall = false)
     {
@@ -3100,7 +3111,12 @@ internal static partial class DeviceOrchestrator
         // every launch.
         phase("wudf-release-wait");
 
-        if (!preserveInstall) calls.RemovePackages();
+        if (!preserveInstall)
+        {
+            if (left.KeepsPackages)
+                LogDiag("    the driver packages stay: a HIDMaestro device is still in the tree, and their removal would force the driver off it");
+            else calls.RemovePackages();
+        }
         phase("package-removal");
 
         // Release shared-memory mappings
