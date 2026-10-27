@@ -136,6 +136,14 @@
 //                  cycles per second of the SDK's process, the reader and
 //                  the WUDFHost processes, and the reports read per second
 //                  (IdleLive.cs)
+//   xinput-calls [runs] [priority-ab]
+//                  live, elevated, a diagnostic and never a row of the
+//                  release comparison: on xbox-360-wired, the time of each
+//                  XInputGetState call around a new frame, the call that
+//                  first returns it, and the WAIT_FOR_INPUT requests parked
+//                  at each submit. With priority-ab the passes run with the
+//                  companion's host at its INF's priority class, at Normal,
+//                  then at its INF's class again (XInputCalls.cs)
 //   report-build [runs]
 //                  the Switch 2 Pro composite's device-built report in each
 //                  layout, offline
@@ -351,6 +359,8 @@ internal static partial class Program
         }
         if (mode == "gate-offline")
             return GateOffline(runs, args.Length > 2 && int.TryParse(args[2], out int gateCalls) ? gateCalls : 200_000);
+        if (mode == "xinput-calls")
+            return XInputCalls(runs, Array.IndexOf(args, "priority-ab") >= 0);
         if (mode is "submit" or "submit-repeat")
         {
             SubmitCost.Run(runs, args.Length > 2 && int.TryParse(args[2], out int calls) ? calls : 100_000, mode == "submit-repeat");
