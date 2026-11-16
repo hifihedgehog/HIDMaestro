@@ -10,6 +10,16 @@
 // and a joystick built in code that gets neither. Exit 0 PASS / 1 FAIL / 2
 // when another SDK consumer is running.
 //
+// GameInput 4.0.306 writes HapticFeedback = DS5 to its own key for
+// 054C:0CE6. The inbox Windows.Gaming.Input.dll does not know that value
+// and drops the pad before it opens the device. microsoftconnect/GameInput
+// #61 reports this for a real DualSense on USB. Measured on the bench on
+// 2026-11-16: with the value in place WGI listed no virtual DualSense, and
+// with only that value removed it listed the same profile as 'PS5
+// Controller', a RawGameController and no Gamepad. A DualShock 4 v1 was
+// listed in both runs. On such a machine the two listing checks are skipped
+// and say why. The GameInput key check still runs.
+//
 // `--explore [--absent] <profile> [<profile>...]` creates each profile in
 // turn, leaves it at rest, and prints the RawGameController reading (the
 // index space a GameInput registry mapping addresses) beside the Gamepad
@@ -246,9 +256,10 @@ internal static partial class Program
         try
         {
             var raw = FindRaw(vid, pid, 10000, others);
+            // Read while the pad lives, whether WGI lists it or not.
+            using (var k = Registry.LocalMachine.OpenSubKey(keyPath)) v.KeyWhileLive = k != null;
             if (raw == null) { v.Text = "WGI lists no RawGameController within 10 s"; return v; }
             v.Listed = true;
-            using (var k = Registry.LocalMachine.OpenSubKey(keyPath)) v.KeyWhileLive = k != null;
             Thread.Sleep(s_settleMs);
             var gp = WgiPins.PadOf(raw);
             string head = $"'{raw.DisplayName}' {raw.AxisCount}a/{raw.ButtonCount}b/{raw.SwitchCount}s";
@@ -424,8 +435,15 @@ internal static partial class Program
         Console.WriteLine("\n-- dualsense: no mapping, as on a real pad --");
         var ds = SweepOne(ctx, ctx.GetProfile("dualsense")!, "sdk");
         Console.WriteLine($"  {ds}");
-        Check("WGI lists the DualSense", ds.Listed);
-        Check("as a RawGameController, not a Gamepad read through a wrong table", ds.Listed && !ds.IsGamepad);
+        if (!ds.Listed && GameInputHapticFeedback(0x054C, 0x0CE6) == "DS5")
+            Console.WriteLine("  [SKIP] the listing checks: GameInput's key for 054C:0CE6 holds HapticFeedback = DS5, " +
+                              "and on that value this Windows.Gaming.Input lists no pad of that VID and PID, real or virtual " +
+                              "(microsoftconnect/GameInput #61)");
+        else
+        {
+            Check("WGI lists the DualSense", ds.Listed);
+            Check("as a RawGameController, not a Gamepad read through a wrong table", ds.Listed && !ds.IsGamepad);
+        }
         Check("no GameInput key under 054C:0CE6 while it lives", !ds.KeyWhileLive);
 
         Console.WriteLine("\n-- dualshock-4-v1: Windows' own mapping --");
@@ -464,6 +482,15 @@ internal static partial class Program
         using var k = Registry.LocalMachine.OpenSubKey(
             $@"SOFTWARE\Microsoft\Windows\CurrentVersion\GameInput\Devices\{vid:X4}{pid:X4}00010005");
         return k != null;
+    }
+
+    /// <summary>The HapticFeedback value in GameInput's own key for this VID
+    /// and PID, or null.</summary>
+    static string? GameInputHapticFeedback(ushort vid, ushort pid)
+    {
+        using var k = Registry.LocalMachine.OpenSubKey(
+            $@"SOFTWARE\Microsoft\Windows\CurrentVersion\GameInput\Devices\{vid:X4}{pid:X4}00010005");
+        return k?.GetValue("HapticFeedback") as string;
     }
 
     static int Sweep(string mode, string? only)
