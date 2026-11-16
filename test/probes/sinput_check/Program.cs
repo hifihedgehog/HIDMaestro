@@ -2,34 +2,37 @@
 // profiles answer SDL's features command and decode the host's output
 // report 0x03.
 //
-// Phase 1, raw HID, for each profile: SDL's RetrieveSDLFeatures exchange
-// (SDL_hidapi_sinput.c:559-609 at PadForge's fork, 91e1a5afa3): the 48-byte
-// output report 03 02, then reads until a 64-byte input report that starts
-// 02 02, while a pump submits frames the way PadForge does. Every byte of
-// the reply is checked against what the profile's references build: the
-// sinput reply against SINPUT-LIB-HID 8dd1e5a (sinput_lib_protocol.c
-// :271-366) and SDL's parser (SDL_hidapi_sinput.c:437-557), with the
-// issue's flags (rumble, motion, sticks, triggers and touchpads, player LEDs
-// and RGB clear), the joypad-steam-input reply against joypad-os 9fa79f45
-// with no pad attached (sinput_mode.c:709-830). Then each output command
-// against OutputDecoded: type 2 haptics (SDL_hidapi_sinput.c:766-788), type 1
-// haptics on sinput (sinput_lib_protocol.c:216-261, reduced as OpenPuck's
-// mode_sinput.cpp:292-299 reduces it) and, on joypad-steam-input, the RGB
-// write joypad-os handles (sinput_mode.c:621-631). The features command, a
-// player LED write, an RGB write on sinput and a type 1 write on
-// joypad-steam-input decode nothing. Each write carries a tag in its last
-// byte, which no rule or decoder reads, so a decode names the write behind
-// it, and a silence is read once a later write's decode has arrived.
-// Decodes without a tag, from another program writing to the pad, are
-// skipped.
+// Phase 1, raw HID, for each profile, on a controller with a nonzero index:
+// SDL's RetrieveSDLFeatures exchange (SDL_hidapi_sinput.c:559-609 at
+// PadForge's fork, 91e1a5afa3): the 48-byte output report 03 02, then reads
+// until a 64-byte input report that starts 02 02, while a pump submits
+// frames the way PadForge does. Every byte of the reply is checked: the
+// sinput reply is the issue's table, as SINPUT-LIB-HID 8dd1e5a builds it
+// (sinput_lib_protocol.c:271-386) but for byte 19, one finger per touchpad,
+// which follows OpenPuck's builder (mode_sinput.cpp:179-180), and as SDL's
+// parser reads it (SDL_hidapi_sinput.c:437-557). The joypad-steam-input
+// reply is joypad-os 9fa79f45's bytes 0 to 19 with no pad attached
+// (sinput_mode.c:709-818) and a serial of the profile's own. Then each
+// output command against OutputDecoded: type 2 haptics
+// (SDL_hidapi_sinput.c:766-788), type 1 haptics on sinput
+// (sinput_lib_protocol.c:216-261, reduced as OpenPuck's mode_sinput.cpp
+// :292-299 reduces it) and, on joypad-steam-input, the RGB write joypad-os
+// acts on (sinput_mode.c:621-631). The features command, a player LED write,
+// an RGB write on sinput and a type 1 write on joypad-steam-input decode
+// nothing. Each write carries a tag in its last byte, which no rule or
+// decoder reads, so a decode names the write behind it, and a silence is
+// read once a later write's decode has arrived. Decodes without a tag, from
+// another program writing to the pad, are skipped. Last, raw frames written
+// across each of 100 replies' delivery: every command gets its reply.
 //
 // Phase 2, SDL: the unfiltered SDL3.dll built from PadForge's fork at
-// 91e1a5afa3 (SDL3-build/build-unfiltered-91e1a5a/Release) opens two
-// sinput pads through its HIDAPI SInput driver. Checks their name, type,
-// serials, sensors, touchpads and capabilities, a raw frame's South button
-// and left stick, SDL_RumbleGamepad decoded on its own pad, SDL_SetGamepadLED
-// refused, and every output report SDL wrote: features and haptics only,
-// never a player LED or a color.
+// 91e1a5afa3 (SDL3-build/build-unfiltered-91e1a5a/Release, its revision
+// stamped SDL-3.5.0-91e1a5afa3-unfiltered) opens two sinput pads through its
+// HIDAPI SInput driver. Checks their name, type, serials, sensors,
+// touchpads and capabilities, a raw frame's South button and left stick,
+// SDL_RumbleGamepad decoded on its own pad, SDL_SetGamepadLED refused, and
+// every output report SDL wrote: features and haptics only, never a player
+// LED or a color.
 //
 // SKIPs phase 2 when that SDL3.dll is absent, and everything when not
 // elevated. Exit 0 PASS, 1 FAIL.
@@ -179,8 +182,12 @@ internal static class Program
 
     // ── the expected replies ───────────────────────────────────────────
 
-    // sinput: SINPUT-LIB-HID's builder with the issue's configuration.
-    // Bytes 0-19, then the serial: 2E 8A 10 C6 00 and the transport index.
+    // sinput: the issue's table, SINPUT-LIB-HID's builder with the issue's
+    // configuration but for byte 19. That builder writes 2 fingers there
+    // (sinput_lib_protocol.c:363-371), OpenPuck's writes 1
+    // (mode_sinput.cpp:179-180), and SDL reads one finger per touchpad
+    // when there are two (SDL_hidapi_sinput.c:748-752). Bytes 0-19, then the
+    // serial: 2E 8A 10 C6 00 and the transport index.
     static readonly byte[] SinputHead =
     {
         0x02, 0x02, 0x01, 0x00, 0xFD, 0x01, 0x01, 0x20, 0xE8, 0x03,
@@ -189,7 +196,9 @@ internal static class Program
     };
 
     // joypad-steam-input: joypad-os with its defaults, the version written
-    // 00 01. The serial: 4A 4F 59 00 00 and the transport index.
+    // 00 01. The serial is the profile's own, 4A 4F 59 00 00 and the
+    // transport index, where joypad-os writes its board's ID
+    // (sinput_mode.c:820-828).
     static readonly byte[] JoypadHead =
     {
         0x02, 0x02, 0x00, 0x01, 0xF3, 0x02, 0x01, 0x20, 0xE8, 0x03,
@@ -299,7 +308,13 @@ internal static class Program
         var profile = ctx.GetProfile(id);
         Check($"{id} is in the catalog", profile != null);
         if (profile == null) return;
+        // A controller made first takes the lowest free index, so the one
+        // under test has a nonzero index, and the reply's index byte cannot
+        // pass as a constant 0.
+        using var filler = ctx.CreateController(profile);
         using var c = ctx.CreateController(profile);
+        Check("the controller under test has a nonzero index", c.TransportIndex != 0,
+              $"index {c.TransportIndex}, the first controller's {filler.TransportIndex}");
         var q = new ConcurrentQueue<Decoded>();
         Watch(c, q);
         using var pump = new Pump(c);
@@ -313,13 +328,33 @@ internal static class Program
         using var hid = s_hid;
         HidD_SetNumInputBuffers(s_hid, 512);
 
+        // The pump's data-only frames go out under the report the layout
+        // builder fills, the first with a Generic Desktop, Simulation or
+        // Button field (HidReportBuilder.cs:620-648): the pad's report 0x01,
+        // which SDL reads as state (SDL_hidapi_sinput.c:1076), on both
+        // descriptors, joypad-os's listing vendor report 0x02 first. The
+        // probe reads one before it writes the features command, skipping a
+        // features reply another program's command brought.
+        var sw = Stopwatch.StartNew();
+        byte[]? first = null;
+        int firstLen = 0;
+        while (first == null && sw.ElapsedMilliseconds < 3000)
+        {
+            var r = HidRead(Math.Max(1, (int)(3000 - sw.ElapsedMilliseconds)));
+            if (r == null || (s_lastReadLen == 64 && r[0] == 0x02 && r[1] == 0x02)) continue;
+            first = r;
+            firstLen = s_lastReadLen;
+        }
+        Check("the pump's frames arrive as input report 0x01, 64 bytes", first != null && first[0] == 0x01 && firstLen == 64,
+              first == null ? "no frame" : $"report {first[0]:X2}, {firstLen} bytes");
+
         // SDL's write: report 0x03, command 0x02, zeros to 48 bytes.
         var features = new byte[CommandSize];
         features[0] = 0x03; features[1] = 0x02;
-        var sw = Stopwatch.StartNew();
+        sw.Restart();
         Check("features command written (48 bytes)", HidWrite(features, 0xA1));
         // SDL takes the first 64-byte report that starts 02 02 and skips the
-        // rest, the pump's frames among them.
+        // rest, the pump's frames among them, which must be 0x01 too.
         byte[]? reply = null;
         int skipped = 0;
         var other = new List<string>();
@@ -331,15 +366,9 @@ internal static class Program
             skipped++;
             if (s_lastReadLen != 64 || r[0] != 0x01) other.Add($"{r[0]:X2}/{s_lastReadLen}");
         }
-        Check("features reply arrives (64 bytes, 02 02)", reply != null,
-              reply == null ? "" : $"{sw.ElapsedMilliseconds} ms after the write, {skipped} pump frames skipped");
-        // The pump's data-only frames go out under the report the layout
-        // builder fills, the first with a Generic Desktop, Simulation or
-        // Button field (HidReportBuilder.cs:620-648): the pad's report 0x01,
-        // which SDL reads as state (SDL_hidapi_sinput.c:1076), on both
-        // descriptors, joypad-os's listing vendor report 0x02 first.
-        Check("the pump's frames arrive as input report 0x01, 64 bytes", skipped > 0 && other.Count == 0,
-              other.Count == 0 ? $"{skipped} frames" : "also " + string.Join(", ", other.Distinct()));
+        Check("features reply arrives (64 bytes, 02 02), any frame before it report 0x01", reply != null && other.Count == 0,
+              (reply == null ? "no reply" : $"{sw.ElapsedMilliseconds} ms after the write, {skipped} pump frames before it")
+              + (other.Count == 0 ? "" : ", also " + string.Join(", ", other.Distinct())));
         if (reply == null) return;
         var want = Expected(head, c.TransportIndex);
         var diffs = Enumerable.Range(0, 64).Where(i => reply[i] != want[i]).ToList();
@@ -394,6 +423,49 @@ internal static class Program
               Same(d, ("leftMotor", 0x11), ("rightMotor", 0x22)) && early.Count == 0, Detail(d, early));
         var late = q.Where(x => Mine(x.Tag)).ToList();
         Check("no other decode of this probe's writes", late.Count == 0, string.Join("; ", late));
+
+        RepliesUnderBurst(c);
+    }
+
+    // SDL writes the features command once and drops a pad whose reply it
+    // never reads (SDL_hidapi_sinput.c:564-609, 659-661), while a program
+    // like PadForge submits on every tick. The reply and the program's
+    // frames share the input section's one frame, so a frame written before
+    // the driver reads the reply would replace it. After each of 100
+    // commands, 20 raw frames go out 0.1 ms apart, across the reply's
+    // write and delivery, and every command still gets its reply.
+    static void RepliesUnderBurst(HMController c)
+    {
+        var features = new byte[CommandSize];
+        features[0] = 0x03; features[1] = 0x02;
+        var frame = Frame(false, 0, 1);
+        long gap = Stopwatch.Frequency / 10000;
+        int got = 0, sent = 0, framesRead = 0;
+        for (int i = 0; i < 100; i++)
+        {
+            if (!HidWrite(features, 0xA7)) break;
+            sent++;
+            long next = Stopwatch.GetTimestamp();
+            for (int k = 0; k < 20; k++)
+            {
+                while (Stopwatch.GetTimestamp() < next) Thread.SpinWait(20);
+                next += gap;
+                c.SubmitRawReport(frame);
+            }
+            var sw = Stopwatch.StartNew();
+            bool seen = false;
+            while (!seen && sw.ElapsedMilliseconds < 1000)
+            {
+                var r = HidRead(Math.Max(1, (int)(1000 - sw.ElapsedMilliseconds)));
+                if (r == null) continue;
+                if (s_lastReadLen == 64 && r[0] == 0x02 && r[1] == 0x02) seen = true;
+                else framesRead++;
+            }
+            if (seen) got++;
+            else if (sent - got >= 5) break;
+        }
+        Check("with 20 raw frames 0.1 ms apart after each of 100 features commands, every command gets its reply",
+              sent == 100 && got == 100, $"{got} replies to {sent} commands, {framesRead} frames read beside them");
     }
 
     // ── phase 2 ────────────────────────────────────────────────────────
@@ -430,6 +502,7 @@ internal static class Program
     [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)]
     static extern bool SDL_GetBooleanProperty(uint props, [MarshalAs(UnmanagedType.LPUTF8Str)] string name, [MarshalAs(UnmanagedType.U1)] bool defaultValue);
     [DllImport(SDL)] static extern IntPtr SDL_GetError();
+    [DllImport(SDL)] static extern IntPtr SDL_GetRevision();
 
     const uint SDL_INIT_GAMEPAD = 0x00002000;
     const int SDL_GAMEPAD_TYPE_STANDARD = 1, SDL_GAMEPAD_BUTTON_SOUTH = 0, SDL_GAMEPAD_BUTTON_EAST = 1, SDL_GAMEPAD_AXIS_LEFTX = 0;
@@ -496,7 +569,13 @@ internal static class Program
         Check("both pads' HID interfaces enumerate", pathA != null && pathB != null);
         if (pathA == null || pathB == null) return;
 
-        Check("SDL_Init(GAMEPAD)", SDL_Init(SDL_INIT_GAMEPAD), Utf8(SDL_GetError()));
+        // The build is stamped with its fork commit, since a git archive
+        // carries none (build-sdl-unfiltered-91e1a5a.sh).
+        string revision = Utf8(SDL_GetRevision());
+        Check("SDL3 is the unfiltered build of the fork at 91e1a5afa3", revision == "SDL-3.5.0-91e1a5afa3-unfiltered", $"'{revision}'");
+        bool init = SDL_Init(SDL_INIT_GAMEPAD);
+        Check("SDL_Init(GAMEPAD)", init, init ? "" : Utf8(SDL_GetError()));
+        if (!init) return;
         IntPtr padA = IntPtr.Zero, padB = IntPtr.Zero;
         try
         {

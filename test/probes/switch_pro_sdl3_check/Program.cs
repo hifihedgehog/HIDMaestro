@@ -51,7 +51,6 @@ internal static class Program
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern IntPtr LoadLibraryW(string path);
 
-    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_SetHint(string name, string value);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     delegate void SdlLogFn(IntPtr userdata, int category, int priority, IntPtr message);
     [DllImport(SDL)] static extern void SDL_SetLogOutputFunction(SdlLogFn callback, IntPtr userdata);

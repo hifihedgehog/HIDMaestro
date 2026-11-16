@@ -2567,14 +2567,15 @@ function Scenario-Loop-Containment {
                  -Message 'an SDK loop spins on a pass that fails, ends on one, or does not log it (see probe stdout)'
 }
 
-# S103: the SInput personas (issue #75). Over raw HID, sinput and
-# joypad-steam-input answer SDL's features command byte for byte as
-# SINPUT-LIB-HID and joypad-os build it, decode the host's haptics, and
-# decode nothing for the commands their references ignore. Then the
-# unfiltered SDL3 build of PadForge's fork beside the repository opens two
-# sinput pads through its SInput driver, reads a frame, rumbles one pad, is
-# refused a color, and writes no player LED or color. The probe prints
-# [SKIP] for the SDL part where that build is not there.
+# S103: the SInput personas (issue #75). Over raw HID, sinput answers
+# SDL's features command with the issue's bytes and joypad-steam-input
+# with joypad-os's, each decodes the host's haptics and decodes nothing
+# for the commands its reference ignores, and raw frames written across
+# a reply's delivery never replace it. Then the unfiltered SDL3 build of
+# PadForge's fork beside the repository opens two sinput pads through its
+# SInput driver, reads a frame, rumbles one pad, is refused a color, and
+# writes no player LED or color. The probe prints [SKIP] for the SDL part
+# where that build is not there.
 function Scenario-Sinput-Persona {
     Invoke-Probe -Dir 'sinput_check' -Exe 'SinputCheck.exe' `
                  -Message 'an SInput persona no longer answers SDL''s features command as its reference does, decodes the host''s output wrongly, or does not open in SDL3''s SInput driver (see probe stdout)'
