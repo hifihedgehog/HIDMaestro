@@ -75,6 +75,7 @@ internal static class ChildPaths
     static readonly Dictionary<string, (string Path, string Enumerator)> AddedAfterRecord = new(StringComparer.Ordinal)
     {
         ["switch-pro-usb"] = ("Root", "HIDClass"),
+        ["sinput"] = ("Root", "HIDClass"),
     };
 
     internal static void Run(Action<string, bool, string> check)
