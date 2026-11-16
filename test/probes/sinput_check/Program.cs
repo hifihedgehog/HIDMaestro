@@ -123,11 +123,16 @@ internal static class Program
         GetOverlappedResultEx(s_hid, ref ov, out _, 0xFFFFFFFF, false);
     }
 
+    // Both descriptors' input reports are 64 bytes with their ID. HID class
+    // fills a read with as many queued reports as fit, 192 to 512 bytes of
+    // them after a burst of frames, so each read asks for one report.
+    const int InputSize = 64;
+
     static byte[]? HidRead(int timeoutMs)
     {
-        var buf = GC.AllocateArray<byte>(512, pinned: true);
+        var buf = GC.AllocateArray<byte>(InputSize, pinned: true);
         var ov = new NativeOverlapped { EventHandle = s_readEvent };
-        if (!ReadFile(s_hid, buf, 512, IntPtr.Zero, ref ov)
+        if (!ReadFile(s_hid, buf, InputSize, IntPtr.Zero, ref ov)
             && Marshal.GetLastWin32Error() != 997)
             return null;
         if (!GetOverlappedResultEx(s_hid, ref ov, out uint read, (uint)timeoutMs, false))
