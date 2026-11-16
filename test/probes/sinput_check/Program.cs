@@ -322,15 +322,24 @@ internal static class Program
         // rest, the pump's frames among them.
         byte[]? reply = null;
         int skipped = 0;
+        var other = new List<string>();
         while (reply == null && sw.ElapsedMilliseconds < 3000)
         {
             var r = HidRead(Math.Max(1, (int)(3000 - sw.ElapsedMilliseconds)));
             if (r == null) continue;
-            if (s_lastReadLen == 64 && r[0] == 0x02 && r[1] == 0x02) reply = r;
-            else skipped++;
+            if (s_lastReadLen == 64 && r[0] == 0x02 && r[1] == 0x02) { reply = r; continue; }
+            skipped++;
+            if (s_lastReadLen != 64 || r[0] != 0x01) other.Add($"{r[0]:X2}/{s_lastReadLen}");
         }
         Check("features reply arrives (64 bytes, 02 02)", reply != null,
               reply == null ? "" : $"{sw.ElapsedMilliseconds} ms after the write, {skipped} pump frames skipped");
+        // The pump's data-only frames go out under the report the layout
+        // builder fills, the first with a Generic Desktop, Simulation or
+        // Button field (HidReportBuilder.cs:620-648): the pad's report 0x01,
+        // which SDL reads as state (SDL_hidapi_sinput.c:1076), on both
+        // descriptors, joypad-os's listing vendor report 0x02 first.
+        Check("the pump's frames arrive as input report 0x01, 64 bytes", skipped > 0 && other.Count == 0,
+              other.Count == 0 ? $"{skipped} frames" : "also " + string.Join(", ", other.Distinct()));
         if (reply == null) return;
         var want = Expected(head, c.TransportIndex);
         var diffs = Enumerable.Range(0, 64).Where(i => reply[i] != want[i]).ToList();
