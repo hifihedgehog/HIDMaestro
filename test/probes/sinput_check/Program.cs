@@ -28,11 +28,14 @@
 // Phase 2, SDL: the unfiltered SDL3.dll built from PadForge's fork at
 // 91e1a5afa3 (SDL3-build/build-unfiltered-91e1a5a/Release, its revision
 // stamped SDL-3.5.0-91e1a5afa3-unfiltered) opens two sinput pads through its
-// HIDAPI SInput driver. Checks their name, type, serials, sensors,
-// touchpads and capabilities, a raw frame's South button and left stick,
-// SDL_RumbleGamepad decoded on its own pad, SDL_SetGamepadLED refused, and
-// every output report SDL wrote: features and haptics only, never a player
-// LED or a color.
+// HIDAPI SInput driver, then two joypad-steam-input pads. Checks their
+// name, type, serials, sensors, touchpads and capabilities, a raw frame's
+// South button and left stick, SDL_RumbleGamepad decoded on its own pad, and
+// every output report SDL wrote. On sinput, whose reply leaves player LEDs
+// and RGB clear, SDL_SetGamepadLED is refused and SDL writes features and
+// haptics only. On joypad-steam-input, whose reply sets both, SDL writes the
+// player number when it opens each pad, and its color decodes to
+// lightbarRed, lightbarGreen and lightbarBlue.
 //
 // SKIPs phase 2 when that SDL3.dll is absent, and everything when not
 // elevated. Exit 0 PASS, 1 FAIL.
@@ -299,7 +302,8 @@ internal static class Program
 
         RawPhase(ctx, "sinput", SinputHead, type1: true, rgb: false);
         RawPhase(ctx, "joypad-steam-input", JoypadHead, type1: false, rgb: true);
-        SdlPhase(ctx);
+        SdlPhase(ctx, "sinput", SinputSdl);
+        SdlPhase(ctx, "joypad-steam-input", JoypadSdl);
 
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} passed ===");
         return s_failures == 0 ? 0 : 1;
@@ -524,9 +528,9 @@ internal static class Program
                 wire.Enqueue((p.Data.Span[0], p.Data.Span[1]));
         };
 
-    // Pumps SDL until the queue yields a decode with these motor values,
+    // Pumps SDL until the queue yields a decode with exactly these fields,
     // skipping any other, or returns null at the hang bound.
-    static Decoded? MotorDecode(ConcurrentQueue<Decoded> q, byte left, byte right)
+    static Decoded? SdlDecode(ConcurrentQueue<Decoded> q, params (string Key, byte Value)[] want)
     {
         var sw = Stopwatch.StartNew();
         while (sw.ElapsedMilliseconds < 3000)
@@ -534,7 +538,7 @@ internal static class Program
             SDL_PumpEvents();
             if (q.TryDequeue(out var x))
             {
-                if (Same(x, ("leftMotor", left), ("rightMotor", right))) return x;
+                if (Same(x, want)) return x;
                 continue;
             }
             Thread.Sleep(5);
@@ -542,9 +546,23 @@ internal static class Program
         return null;
     }
 
-    static void SdlPhase(HMContext ctx)
+    // What SDL makes of a profile's reply (ProcessSDLFeaturesResponse,
+    // SDL_hidapi_sinput.c:437-557, which reads from report byte 2): the name
+    // from the USB product string for the generic ID (:666-687), the serial
+    // from bytes 20-25, sensors from byte 4's bits 2 and 3, touchpads from
+    // byte 5's bit 0 and bytes 18-19, and the player LED and RGB
+    // capabilities from byte 4's bit 1 and byte 5's bit 1 (:790-808). With
+    // player LEDs set, SDL writes the player number when it opens the pad
+    // (SDL_joystick.c:2417-2422, SDL_hidapi_sinput.c:691-709), and with RGB
+    // set it writes a color (:810-826).
+    sealed record SdlExpect(string Product, string SerialHead, bool Sensors, int Touchpads, bool PlayerLed, bool Rgb);
+
+    static readonly SdlExpect SinputSdl = new("SInput Gamepad", "2e-8a-10-c6-00", Sensors: true, Touchpads: 2, PlayerLed: false, Rgb: false);
+    static readonly SdlExpect JoypadSdl = new("Joypad (SInput)", "4a-4f-59-00-00", Sensors: false, Touchpads: 0, PlayerLed: true, Rgb: true);
+
+    static void SdlPhase(HMContext ctx, string profileId, SdlExpect e)
     {
-        Console.WriteLine("\n-- Phase 2: PadForge's SDL fork (91e1a5afa3, unfiltered) opens two sinput pads --");
+        Console.WriteLine($"\n-- Phase 2, {profileId}: PadForge's SDL fork (91e1a5afa3, unfiltered) opens two pads --");
         string repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", ".."));
         string sdlDir = Path.GetFullPath(Path.Combine(repoRoot, "..", "SDL3-build", "build-unfiltered-91e1a5a", "Release"));
         if (!File.Exists(Path.Combine(sdlDir, SDL)))
@@ -557,7 +575,7 @@ internal static class Program
         SetDllDirectoryW(sdlDir);
         Console.WriteLine($"  SDL3: {sdlDir}\\{SDL} (libusb {(libusbLoaded ? "preloaded" : "MISSING")})");
 
-        var profile = ctx.GetProfile("sinput")!;
+        var profile = ctx.GetProfile(profileId)!;
         using var a = ctx.CreateController(profile);
         using var b = ctx.CreateController(profile);
         var qa = new ConcurrentQueue<Decoded>();
@@ -614,23 +632,28 @@ internal static class Program
             if (padA == IntPtr.Zero || padB == IntPtr.Zero) return;
 
             string nameA = Utf8(SDL_GetGamepadName(padA));
-            Check("name is the product string", nameA.Contains("SInput Gamepad", StringComparison.Ordinal), $"'{nameA}'");
+            Check("name is the product string", nameA.Contains(e.Product, StringComparison.Ordinal), $"'{nameA}'");
             Check("type is SDL_GAMEPAD_TYPE_STANDARD (reply byte 6)", SDL_GetGamepadType(padA) == SDL_GAMEPAD_TYPE_STANDARD,
                   $"{SDL_GetGamepadType(padA)}");
             string serialA = Utf8(SDL_GetGamepadSerial(padA)), serialB = Utf8(SDL_GetGamepadSerial(padB));
             Check("serials are the reply's bytes 20-25 with each pad's index",
-                  serialA == $"2e-8a-10-c6-00-{a.TransportIndex:x2}" && serialB == $"2e-8a-10-c6-00-{b.TransportIndex:x2}",
+                  serialA == $"{e.SerialHead}-{a.TransportIndex:x2}" && serialB == $"{e.SerialHead}-{b.TransportIndex:x2}",
                   $"'{serialA}' and '{serialB}'");
-            Check("accelerometer and gyroscope (reply byte 4)",
-                  SDL_GamepadHasSensor(padA, SDL_SENSOR_ACCEL) && SDL_GamepadHasSensor(padA, SDL_SENSOR_GYRO));
-            Check("two touchpads (reply bytes 18-19)", SDL_GetNumGamepadTouchpads(padA) == 2, $"{SDL_GetNumGamepadTouchpads(padA)}");
+            bool accel = SDL_GamepadHasSensor(padA, SDL_SENSOR_ACCEL), gyro = SDL_GamepadHasSensor(padA, SDL_SENSOR_GYRO);
+            Check(e.Sensors ? "accelerometer and gyroscope (reply byte 4)" : "no accelerometer and no gyroscope (reply byte 4)",
+                  accel == e.Sensors && gyro == e.Sensors, $"accelerometer {accel}, gyroscope {gyro}");
+            int touchpads = SDL_GetNumGamepadTouchpads(padA);
+            Check(e.Touchpads == 0 ? "no touchpads (reply byte 5)" : $"{e.Touchpads} touchpads (reply bytes 18-19)",
+                  touchpads == e.Touchpads, $"{touchpads}");
             // SDL fills these from the driver's flags at open
             // (SDL_hidapijoystick.c:1040-1070, SDL_hidapi_sinput.c:790-808).
+            // Each default is the wrong answer, so a missing property fails.
             uint props = SDL_GetGamepadProperties(padA);
             bool rumbleCap = SDL_GetBooleanProperty(props, "SDL.joystick.cap.rumble", false);
-            bool playerLedCap = SDL_GetBooleanProperty(props, "SDL.joystick.cap.player_led", true);
-            bool rgbCap = SDL_GetBooleanProperty(props, "SDL.joystick.cap.rgb_led", true);
-            Check("capabilities: rumble, no player LED, no RGB LED (reply bytes 4 and 5)", rumbleCap && !playerLedCap && !rgbCap,
+            bool playerLedCap = SDL_GetBooleanProperty(props, "SDL.joystick.cap.player_led", !e.PlayerLed);
+            bool rgbCap = SDL_GetBooleanProperty(props, "SDL.joystick.cap.rgb_led", !e.Rgb);
+            Check($"capabilities: rumble, {(e.PlayerLed ? "player LED" : "no player LED")}, {(e.Rgb ? "RGB LED" : "no RGB LED")} (reply bytes 4 and 5)",
+                  rumbleCap && playerLedCap == e.PlayerLed && rgbCap == e.Rgb,
                   $"rumble {rumbleCap}, player LED {playerLedCap}, RGB LED {rgbCap}");
 
             // A raw frame on pad A: South held, left stick full right.
@@ -652,15 +675,24 @@ internal static class Program
             Check("pad B's South stays up", !SDL_GetGamepadButton(padB, SDL_GAMEPAD_BUTTON_SOUTH));
 
             Check("SDL_RumbleGamepad", SDL_RumbleGamepad(padA, 0x8000, 0x4000, 1000), Utf8(SDL_GetError()));
-            var d = MotorDecode(qa, 0x80, 0x40);
+            var d = SdlDecode(qa, ("leftMotor", 0x80), ("rightMotor", 0x40));
             Check("rumble decodes on pad A: leftMotor 128, rightMotor 64", d != null, d?.ToString() ?? "no decode");
 
             // With RGB clear in the reply, SDL refuses the color and writes
-            // nothing (SDL_hidapi_sinput.c:810-826).
+            // nothing. With it set, SDL writes 03 04 R G B
+            // (SDL_hidapi_sinput.c:810-826).
             bool ledAccepted = SDL_SetGamepadLED(padA, 10, 20, 30);
-            Check("SDL_SetGamepadLED is refused", !ledAccepted, ledAccepted ? "accepted" : Utf8(SDL_GetError()));
+            if (e.Rgb)
+            {
+                Check("SDL_SetGamepadLED is accepted", ledAccepted, ledAccepted ? "" : Utf8(SDL_GetError()));
+                var color = SdlDecode(qa, ("lightbarRed", 10), ("lightbarGreen", 20), ("lightbarBlue", 30));
+                Check("the color decodes on pad A: lightbarRed 10, lightbarGreen 20, lightbarBlue 30", color != null,
+                      color?.ToString() ?? "no decode");
+            }
+            else
+                Check("SDL_SetGamepadLED is refused", !ledAccepted, ledAccepted ? "accepted" : Utf8(SDL_GetError()));
             Check("SDL_RumbleGamepad again", SDL_RumbleGamepad(padA, 0x1100, 0x2200, 1000), Utf8(SDL_GetError()));
-            d = MotorDecode(qa, 0x11, 0x22);
+            d = SdlDecode(qa, ("leftMotor", 0x11), ("rightMotor", 0x22));
             Check("the second rumble decodes on pad A: leftMotor 17, rightMotor 34", d != null, d?.ToString() ?? "no decode");
 
             // Every output report 0x03 each pad received through the second
@@ -668,13 +700,23 @@ internal static class Program
             var onA = wireA.ToArray();
             var onB = wireB.ToArray();
             string Wire((byte Command, byte Sub)[] w) => string.Join(" ", w.Select(x => $"{x.Command:X2}{x.Sub:X2}"));
-            Check("pad A received SDL's features command and type 2 haptics only, no player LED and no color",
-                  onA.Any(x => x.Command == 0x02) && onA.Count(x => x.Command == 0x01) >= 2
-                  && onA.All(x => x.Command == 0x02 || (x.Command == 0x01 && x.Sub == 0x02)), Wire(onA));
-            Check("pad B received the features command and no player LED or color",
-                  onB.Any(x => x.Command == 0x02) && onB.All(x => x.Command == 0x02 || x.Command == 0x01), Wire(onB));
-            var crossed = qb.Where(x => Same(x, ("leftMotor", 0x80), ("rightMotor", 0x40)) || Same(x, ("leftMotor", 0x11), ("rightMotor", 0x22))).ToList();
-            Check("pad A's rumble never decoded on pad B", crossed.Count == 0, string.Join("; ", crossed));
+            bool FromSdl((byte Command, byte Sub) x) => x.Command == 0x02 || (x.Command == 0x01 && x.Sub == 0x02)
+                || (e.PlayerLed && x.Command == 0x03) || (e.Rgb && x.Command == 0x04);
+            Check(e.PlayerLed
+                      ? "pad A received SDL's features command, a player LED write, type 2 haptics and the color, nothing else"
+                      : "pad A received SDL's features command and type 2 haptics only, no player LED and no color",
+                  onA.Any(x => x.Command == 0x02) && onA.Count(x => x.Command == 0x01) >= 2 && onA.All(FromSdl)
+                  && (!e.PlayerLed || onA.Any(x => x.Command == 0x03)) && (!e.Rgb || onA.Any(x => x.Command == 0x04)), Wire(onA));
+            Check(e.PlayerLed
+                      ? "pad B received the features command and a player LED write, and no color"
+                      : "pad B received the features command and no player LED or color",
+                  onB.Any(x => x.Command == 0x02)
+                  && onB.All(x => x.Command == 0x02 || x.Command == 0x01 || (e.PlayerLed && x.Command == 0x03))
+                  && (!e.PlayerLed || onB.Any(x => x.Command == 0x03)), Wire(onB));
+            var crossed = qb.Where(x => Same(x, ("leftMotor", 0x80), ("rightMotor", 0x40)) || Same(x, ("leftMotor", 0x11), ("rightMotor", 0x22))
+                                        || Same(x, ("lightbarRed", 10), ("lightbarGreen", 20), ("lightbarBlue", 30))).ToList();
+            Check(e.Rgb ? "pad A's rumble and color never decoded on pad B" : "pad A's rumble never decoded on pad B",
+                  crossed.Count == 0, string.Join("; ", crossed));
         }
         finally
         {
