@@ -1874,9 +1874,15 @@ internal static partial class Program
         using var p = PeerProcess.Start("T3");
         string c = p.Send("create pad F0F7 -");
         string v = Ok(c) ? p.Send("driverversion") : "";
-        Check("T3: a create without InstallDriver upgrades the driver and succeeds",
-              Ok(c) && v.Contains(p.SdkVersion.Split('.')[0] + "." + p.SdkVersion.Split('.')[1] + ".", StringComparison.Ordinal),
-              $"{c}; {v}; SDK {p.SdkVersion}");
+        // The controller reports this build's driver, the release its
+        // embedded INF names. A release that changes no driver code embeds
+        // the driver of the release before it, below the SDK's own version:
+        // 2.2.0 embeds 2.1.0's.
+        string? own = EmbeddedDriverVer("hidmaestro.inf");
+        string release = own == null ? "none" : string.Join('.', own.Split('.').Take(3));
+        Check("T3: a create without InstallDriver upgrades the driver to this build's and succeeds",
+              Ok(c) && v == $"OK driverversion {release}",
+              $"{c}; {v}; this build's driver {own ?? "none"}; SDK {p.SdkVersion}");
     }
 
     /// <summary>A running v1.12.0 program's Xbox 360 controller, whose XUSB
