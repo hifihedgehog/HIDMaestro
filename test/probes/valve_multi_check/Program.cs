@@ -28,8 +28,8 @@ using HIDMaestro;
 static class ValveMultiCheck
 {
     const string SDL = "SDL3";
-    [DllImport(SDL)] static extern bool SDL_SetHint(string name, string value);
-    [DllImport(SDL)] static extern bool SDL_Init(uint flags);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_SetHint(string name, string value);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_Init(uint flags);
     [DllImport(SDL)] static extern void SDL_Quit();
     [DllImport(SDL)] static extern IntPtr SDL_GetGamepads(out int count);
     [DllImport(SDL)] static extern IntPtr SDL_OpenGamepad(uint id);

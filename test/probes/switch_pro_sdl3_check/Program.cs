@@ -51,7 +51,7 @@ internal static class Program
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern IntPtr LoadLibraryW(string path);
 
-    [DllImport(SDL)] static extern bool SDL_SetHint(string name, string value);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_SetHint(string name, string value);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     delegate void SdlLogFn(IntPtr userdata, int category, int priority, IntPtr message);
     [DllImport(SDL)] static extern void SDL_SetLogOutputFunction(SdlLogFn callback, IntPtr userdata);
@@ -61,7 +61,7 @@ internal static class Program
     [DllImport(SDL)] static extern IntPtr SDL_GetError();
     static readonly SdlLogFn s_logFn = (u, cat, pri, msg) =>
         Console.WriteLine($"  [sdl:{cat}:{pri}] {Marshal.PtrToStringUTF8(msg)}");
-    [DllImport(SDL)] static extern bool SDL_Init(uint flags);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_Init(uint flags);
     [DllImport(SDL)] static extern void SDL_Quit();
     [DllImport(SDL)] static extern void SDL_PumpEvents();
     [DllImport(SDL)] static extern IntPtr SDL_GetGamepads(out int count);
@@ -71,12 +71,12 @@ internal static class Program
     [DllImport(SDL)] static extern IntPtr SDL_GetGamepadName(IntPtr gamepad);
     [DllImport(SDL)] static extern IntPtr SDL_GetGamepadSerial(IntPtr gamepad);
     [DllImport(SDL)] static extern IntPtr SDL_GetGamepadPath(IntPtr gamepad);
-    [DllImport(SDL)] static extern bool SDL_GetGamepadButton(IntPtr gamepad, int button);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_GetGamepadButton(IntPtr gamepad, int button);
     [DllImport(SDL)] static extern short SDL_GetGamepadAxis(IntPtr gamepad, int axis);
-    [DllImport(SDL)] static extern bool SDL_GamepadHasSensor(IntPtr gamepad, int type);
-    [DllImport(SDL)] static extern bool SDL_SetGamepadSensorEnabled(IntPtr gamepad, int type, bool enabled);
-    [DllImport(SDL)] static extern bool SDL_GetGamepadSensorData(IntPtr gamepad, int type, float[] data, int num);
-    [DllImport(SDL)] static extern bool SDL_RumbleGamepad(IntPtr gamepad, ushort low, ushort high, uint ms);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_GamepadHasSensor(IntPtr gamepad, int type);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_SetGamepadSensorEnabled(IntPtr gamepad, int type, [MarshalAs(UnmanagedType.U1)] bool enabled);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_GetGamepadSensorData(IntPtr gamepad, int type, float[] data, int num);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_RumbleGamepad(IntPtr gamepad, ushort low, ushort high, uint ms);
     [DllImport(SDL)] static extern int SDL_hid_init();
     [DllImport(SDL)] static extern IntPtr SDL_hid_enumerate(ushort vid, ushort pid);
     [DllImport(SDL)] static extern void SDL_hid_free_enumeration(IntPtr devs);

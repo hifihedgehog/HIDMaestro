@@ -1080,7 +1080,7 @@ internal static class Program
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool SetDllDirectoryW(string p);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr LoadLibraryW(string p);
-        [DllImport("SDL3")] static extern bool SDL_Init(uint flags);
+        [DllImport("SDL3")] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_Init(uint flags);
         [DllImport("SDL3")] static extern void SDL_Quit();
         [DllImport("SDL3")] static extern void SDL_PumpEvents();
         [DllImport("SDL3")] static extern IntPtr SDL_GetJoysticks(out int count);

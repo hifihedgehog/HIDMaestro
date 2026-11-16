@@ -30,8 +30,8 @@ static class ValveSdlCheck
 {
     const string SDL = "SDL3";
 
-    [DllImport(SDL)] static extern bool SDL_SetHint(string name, string value);
-    [DllImport(SDL)] static extern bool SDL_Init(uint flags);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_SetHint(string name, string value);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_Init(uint flags);
     [DllImport(SDL)] static extern void SDL_Quit();
     [DllImport(SDL)] static extern IntPtr SDL_GetGamepads(out int count);
     [DllImport(SDL)] static extern IntPtr SDL_OpenGamepad(uint id);
@@ -42,12 +42,12 @@ static class ValveSdlCheck
     [DllImport(SDL)] static extern IntPtr SDL_GetGamepadName(IntPtr gp);
     [DllImport(SDL)] static extern short SDL_GetGamepadAxis(IntPtr gp, int axis);
     [DllImport(SDL)] static extern int SDL_GetNumGamepadTouchpads(IntPtr gp);
-    [DllImport(SDL)] static extern bool SDL_GetGamepadTouchpadFinger(
-        IntPtr gp, int touchpad, int finger, out bool down,
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_GetGamepadTouchpadFinger(
+        IntPtr gp, int touchpad, int finger, [MarshalAs(UnmanagedType.U1)] out bool down,
         out float x, out float y, out float pressure);
-    [DllImport(SDL)] static extern bool SDL_SetGamepadSensorEnabled(IntPtr gp, int type, bool enabled);
-    [DllImport(SDL)] static extern bool SDL_GamepadHasSensor(IntPtr gp, int type);
-    [DllImport(SDL)] static extern bool SDL_GetGamepadSensorData(
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_SetGamepadSensorEnabled(IntPtr gp, int type, [MarshalAs(UnmanagedType.U1)] bool enabled);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_GamepadHasSensor(IntPtr gp, int type);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_GetGamepadSensorData(
         IntPtr gp, int type, [Out] float[] data, int num_values);
     [DllImport(SDL)] static extern void SDL_free(IntPtr mem);
     [DllImport(SDL)] static extern IntPtr SDL_GetError();
@@ -55,11 +55,11 @@ static class ValveSdlCheck
     [DllImport(SDL)] static extern ushort SDL_GetJoystickVendorForID(uint id);
     [DllImport(SDL)] static extern ushort SDL_GetJoystickProductForID(uint id);
     [DllImport(SDL)] static extern IntPtr SDL_GetJoystickNameForID(uint id);
-    [DllImport(SDL)] static extern bool SDL_IsGamepad(uint id);
-    [DllImport(SDL)] static extern bool SDL_GetGamepadButton(IntPtr gp, int button);
-    [DllImport(SDL)] static extern bool SDL_GamepadHasCapSense(IntPtr gp, int type);
-    [DllImport(SDL)] static extern bool SDL_GetGamepadCapSense(IntPtr gp, int type);
-    [DllImport(SDL)] static extern unsafe bool SDL_PollEvent(byte* ev);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_IsGamepad(uint id);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_GetGamepadButton(IntPtr gp, int button);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_GamepadHasCapSense(IntPtr gp, int type);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_GetGamepadCapSense(IntPtr gp, int type);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern unsafe bool SDL_PollEvent(byte* ev);
     [DllImport(SDL)] static extern uint SDL_GetGamepadID(IntPtr gp);
     [DllImport(SDL)] static extern ulong SDL_GetTicksNS();
 
@@ -554,10 +554,10 @@ static class ValveSdlCheck
     static extern int CM_Get_Device_Interface_List_SizeW(out uint len, ref Guid c, string? d, uint f);
     [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
     static extern int CM_Get_Device_Interface_ListW(ref Guid c, string? d, char[] b, uint bl, uint f);
-    [DllImport("hid.dll")] static extern bool HidD_GetPreparsedData(IntPtr h, out IntPtr pp);
-    [DllImport("hid.dll")] static extern bool HidD_FreePreparsedData(IntPtr pp);
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_GetPreparsedData(IntPtr h, out IntPtr pp);
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_FreePreparsedData(IntPtr pp);
     [DllImport("hid.dll")] static extern int HidP_GetCaps(IntPtr pp, byte[] caps);
-    [DllImport("hid.dll")] static extern bool HidD_SetNumInputBuffers(IntPtr h, uint n);
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_SetNumInputBuffers(IntPtr h, uint n);
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern IntPtr CreateWaitableTimerExW(IntPtr attrs, IntPtr name, uint flags, uint access);
     [DllImport("kernel32.dll", SetLastError = true)]

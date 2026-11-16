@@ -22,13 +22,13 @@ internal static partial class Program
 {
     const string SDL = "SDL3";
 
-    [DllImport(SDL)] static extern bool SDL_SetHint(string name, string value);
-    [DllImport(SDL)] static extern bool SDL_Init(uint flags);
-    [DllImport(SDL)] static extern bool SDL_InitSubSystem(uint flags);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_SetHint(string name, string value);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_Init(uint flags);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_InitSubSystem(uint flags);
     [DllImport(SDL)] static extern void SDL_QuitSubSystem(uint flags);
     [DllImport(SDL)] static extern void SDL_Quit();
     [DllImport(SDL)] static extern void SDL_PumpEvents();
-    [DllImport(SDL)] static extern bool SDL_PollEvent(IntPtr sdlEvent);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_PollEvent(IntPtr sdlEvent);
     [DllImport(SDL)] static extern void SDL_free(IntPtr mem);
     [DllImport(SDL)] static extern IntPtr SDL_GetError();
     [DllImport(SDL)] static extern IntPtr SDL_GetJoysticks(out int count);
@@ -36,19 +36,19 @@ internal static partial class Program
     [DllImport(SDL)] static extern ushort SDL_GetJoystickProductForID(uint id);
     [DllImport(SDL)] static extern IntPtr SDL_GetJoystickNameForID(uint id);
     [DllImport(SDL)] static extern IntPtr SDL_GetJoystickPathForID(uint id);
-    [DllImport(SDL)] static extern bool SDL_IsGamepad(uint id);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_IsGamepad(uint id);
     [DllImport(SDL)] static extern IntPtr SDL_OpenGamepad(uint id);
     [DllImport(SDL)] static extern void SDL_CloseGamepad(IntPtr gamepad);
     [DllImport(SDL)] static extern IntPtr SDL_GetGamepadName(IntPtr gamepad);
     [DllImport(SDL)] static extern IntPtr SDL_GetGamepadSerial(IntPtr gamepad);
     [DllImport(SDL)] static extern uint SDL_GetGamepadID(IntPtr gamepad);
-    [DllImport(SDL)] static extern bool SDL_GetGamepadButton(IntPtr gamepad, int button);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_GetGamepadButton(IntPtr gamepad, int button);
     [DllImport(SDL)] static extern short SDL_GetGamepadAxis(IntPtr gamepad, int axis);
-    [DllImport(SDL)] static extern bool SDL_GamepadHasSensor(IntPtr gamepad, int type);
-    [DllImport(SDL)] static extern bool SDL_SetGamepadSensorEnabled(IntPtr gamepad, int type, bool enabled);
-    [DllImport(SDL)] static extern bool SDL_GetGamepadSensorData(IntPtr gamepad, int type, [Out] float[] data, int count);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_GamepadHasSensor(IntPtr gamepad, int type);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_SetGamepadSensorEnabled(IntPtr gamepad, int type, [MarshalAs(UnmanagedType.U1)] bool enabled);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_GetGamepadSensorData(IntPtr gamepad, int type, [Out] float[] data, int count);
     [DllImport(SDL)] static extern float SDL_GetGamepadSensorDataRate(IntPtr gamepad, int type);
-    [DllImport(SDL)] static extern bool SDL_RumbleGamepad(IntPtr gamepad, ushort low, ushort high, uint durationMs);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_RumbleGamepad(IntPtr gamepad, ushort low, ushort high, uint durationMs);
 
     const uint SDL_INIT_JOYSTICK = 0x00000200, SDL_INIT_GAMEPAD = 0x00002000;
     const uint SDL_EVENT_GAMEPAD_SENSOR_UPDATE = 0x659;

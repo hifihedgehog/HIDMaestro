@@ -65,7 +65,7 @@ internal static class Program
     [StructLayout(LayoutKind.Sequential)]
     struct SdlGuid { public ulong Lo, Hi; }
 
-    [DllImport(SDL)] static extern bool SDL_Init(uint flags);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_Init(uint flags);
     [DllImport(SDL)] static extern void SDL_Quit();
     [DllImport(SDL)] static extern void SDL_PumpEvents();
     [DllImport(SDL)] static extern void SDL_free(IntPtr mem);
@@ -82,14 +82,14 @@ internal static class Program
     [DllImport(SDL)] static extern int SDL_GetNumJoystickButtons(IntPtr joystick);
     [DllImport(SDL)] static extern int SDL_GetNumJoystickHats(IntPtr joystick);
     [DllImport(SDL)] static extern short SDL_GetJoystickAxis(IntPtr joystick, int axis);
-    [DllImport(SDL)] static extern bool SDL_GetJoystickButton(IntPtr joystick, int button);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_GetJoystickButton(IntPtr joystick, int button);
     [DllImport(SDL)] static extern void SDL_UpdateJoysticks();
-    [DllImport(SDL)] static extern bool SDL_IsGamepad(uint id);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_IsGamepad(uint id);
     [DllImport(SDL)] static extern int SDL_AddGamepadMapping(string mapping);
     [DllImport(SDL)] static extern IntPtr SDL_OpenGamepad(uint id);
     [DllImport(SDL)] static extern void SDL_CloseGamepad(IntPtr gamepad);
     [DllImport(SDL)] static extern IntPtr SDL_GetGamepadName(IntPtr gamepad);
-    [DllImport(SDL)] static extern bool SDL_GetGamepadButton(IntPtr gamepad, int button);
+    [DllImport(SDL)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_GetGamepadButton(IntPtr gamepad, int button);
     [DllImport(SDL)] static extern short SDL_GetGamepadAxis(IntPtr gamepad, int axis);
     [DllImport(SDL)] static extern void SDL_UpdateGamepads();
 
