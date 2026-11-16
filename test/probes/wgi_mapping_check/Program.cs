@@ -10,15 +10,15 @@
 // and a joystick built in code that gets neither. Exit 0 PASS / 1 FAIL / 2
 // when another SDK consumer is running.
 //
-// GameInput 4.0.306 writes HapticFeedback = DS5 to its own key for
-// 054C:0CE6. The inbox Windows.Gaming.Input.dll does not know that value
-// and drops the pad before it opens the device. microsoftconnect/GameInput
-// #61 reports this for a real DualSense on USB. Measured on the bench on
-// 2026-11-16: with the value in place WGI listed no virtual DualSense, and
-// with only that value removed it listed the same profile as 'PS5
-// Controller', a RawGameController and no Gamepad. A DualShock 4 v1 was
-// listed in both runs. On such a machine the two listing checks are skipped
-// and say why. The GameInput key check still runs.
+// GameInput 4.0 sets HapticFeedback = DS5 in its own key for 054C:0CE6.
+// The inbox Windows.Gaming.Input.dll does not know that value and drops
+// the pad before it opens the device (microsoftconnect/GameInput #61).
+// Measured on the bench on 2026-11-16, with HidHide's cloak off: with the
+// value in place WGI listed neither the virtual DualSense nor the real one
+// on Bluetooth, and with only that value removed it listed both, the
+// virtual one as 'PS5 Controller', a RawGameController and no Gamepad. A
+// DualShock 4 v1 was listed in every run. On such a machine the two listing
+// checks are skipped and say why. The GameInput key check still runs.
 //
 // `--explore [--absent] <profile> [<profile>...]` creates each profile in
 // turn, leaves it at rest, and prints the RawGameController reading (the
