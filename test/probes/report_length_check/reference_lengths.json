@@ -177,6 +177,7 @@
   {"profile": "sega-mega-drive-mini", "source": "descriptor", "sha256": "05A151C932362FEE13503905962880CE75212BBF8C43C95701527B8290833162", "input": {"0": 8}, "output": {"0": 4}, "feature": {}},
   {"profile": "shanwan-gioteck-ps3", "source": "descriptor", "sha256": "43BAC740E7820B713355020CC4B71B25CDEC300A3A71FD8FB9320006BAA73A56", "input": {"0": 7}, "output": {"0": 4}, "feature": {}},
   {"profile": "sidewinder-force-feedback-2", "source": "descriptor", "sha256": "6728EC79A327CF0256CA31699AA6A0BE4AEA13E1F81C38F094EBF67E5C62CF84", "input": {"1": 9, "2": 3}, "output": {"17": 16, "18": 8, "19": 9, "20": 7, "21": 4, "22": 4, "23": 16, "24": 3, "26": 4, "27": 2, "28": 2, "29": 2, "30": 5}, "feature": {"17": 4}},
+  {"profile": "sinput", "source": "descriptor", "sha256": "ED24E2518228FB1CC36B4CFBAF926314E32949343505203F972B588C5D53B0EC", "input": {"1": 64, "2": 64}, "output": {"3": 48}, "feature": {}},
   {"profile": "snes-nso", "source": "descriptor", "sha256": "421DBC392EA406CD864C602ACB17E9E5FB24E2D764B61AE80A4F0C60B6252AC8", "input": {"33": 49, "48": 49, "49": 362, "50": 362, "51": 362, "63": 12}, "output": {"1": 49, "16": 49, "17": 49, "18": 49}, "feature": {}},
   {"profile": "snk-neogeo-mini", "source": "descriptor", "sha256": "F7E10917F498565C5EC1EC6FFBE361D65CFB87FBDDA86D25AF1C10765D53358D", "input": {"0": 21}, "output": {"0": 4}, "feature": {}},
   {"profile": "stadia-controller-bt", "source": "descriptor", "sha256": "4317E34B66D9C247B0FB12327516C38C74DEEA04619DB54A05CF190444482A3F", "input": {"3": 11}, "output": {"5": 5}, "feature": {}},

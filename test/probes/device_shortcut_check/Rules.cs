@@ -125,7 +125,7 @@ internal static class Rules
             "dance", "designer", "device", "devices", "direct", "dongle", "drive", "driving", "dual", "edge", "edition",
             "elite", "engine", "ergonomic", "extreme", "feedback", "fighter", "fighting", "firmware", "flight", "for",
             "force", "formula", "full", "game", "gamepad", "gaming", "gear", "general", "generic", "grip", "guitar",
-            "handbrake", "handle", "hero", "hood", "hyper", "input", "internal", "joy", "joypad", "joystick", "keyboard",
+            "hand", "handbrake", "handle", "held", "hero", "hood", "hyper", "input", "internal", "joy", "joypad", "joystick", "keyboard",
             "keypad", "laser", "launch", "light", "limited", "lite", "low", "magic", "man", "master", "mechanical",
             "mechanlcal", "mega", "metal", "mini", "minor", "mode", "model", "modern", "module", "motion", "mouse", "move",
             "natural", "normal", "notebook", "numeric", "one", "online", "open", "optical", "original", "pad", "pairing",
@@ -210,6 +210,9 @@ internal static class Rules
         new(@"sdk\HIDMaestro.Core\Internal\VendorBlobProgram.cs", "ds3-battery",
             "the codec type v2.0.0 drops, compared only to refuse a profile that carries it with its replacement named, uint8-level-map and the "
             + "table to write (VendorBlobProgram.Compile). No field compiles to it. Design note, mechanism 1 and \"What a program sees change\""),
+        new(@"sdk\HIDMaestro.Core\Internal\Usbip\UsbipRemoval.cs", "Handheld Companion",
+            "the Apps entry of Handheld Companion, a program whose installer installs usbip-win2 (UsbipRemoval.OtherConsumers), so a removal "
+            + "keeps usbip-win2 for it. It names a program, not a device. It reads as one since the catalog's Hand Held Legend spells handheld across words"),
     };
 
     // The OpenVR SDK header the OpenVR driver builds against. It is Valve's
