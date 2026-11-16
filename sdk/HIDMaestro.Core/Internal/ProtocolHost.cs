@@ -239,6 +239,15 @@ internal sealed unsafe class ProtocolHost : IDisposable
     /// may send past it.</summary>
     private bool AwaitReplyLocked(int waitMs) => AwaitLocked(ref _replyPending, _replySeq, waitMs);
 
+    /// <summary>For a frame the controller writes to the input section
+    /// itself, a program's raw or descriptor frame on a device whose frames
+    /// do not pass through this host. The caller holds the send lock it
+    /// shares with this host, HMController's submit lock. Returns once the
+    /// last reply is delivered, or once the wait passes, as this host's own
+    /// sends do, so the frame does not take the place of a reply the
+    /// driver has not read: the section holds one frame.</summary>
+    public void AwaitReplyForFrame(int waitMs) => AwaitReplyLocked(waitMs);
+
     /// <summary>True once the last report that goes out once is delivered,
     /// or when the caller may send past it.</summary>
     private bool AwaitReportLocked(int waitMs) => AwaitLocked(ref _reportPending, _reportSeq, waitMs);

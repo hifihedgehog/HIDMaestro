@@ -84,6 +84,39 @@ internal static class ReplyOverReport
         ChangeReport();
         ClockReport();
         ModeSwitchInsideTick();
+        ProgramFrame();
+    }
+
+    /// <summary>A program's frame on a device whose frames do not pass
+    /// through the host, sinput's, written right after the features reply
+    /// and before the driver reads it. SDL writes that command once and
+    /// drops a pad whose reply it never reads (SDL_hidapi_sinput.c:564-609,
+    /// 659-661). The controller waits as AwaitReplyForFrame does before each
+    /// frame it writes itself (HMController.AwaitHostReply). Written without
+    /// the wait, the frame takes the reply's place.</summary>
+    static void ProgramFrame()
+    {
+        var p = ProfileDatabase.LoadEmbedded().All.First(x => x.Id == "sinput");
+        var compiled = CompiledProtocol.Compile(p, null)!;
+        var features = new byte[48];
+        features[0] = 0x03;
+        features[1] = 0x02;
+        var frame = new byte[64];
+        frame[0] = 0x01;
+        string Run(bool wait)
+        {
+            var ch = new Section();
+            using var host = new ProtocolHost(p, compiled, 7976, ch, new object());
+            host.OnOutput(features, features.Length, ProtocolHost.DeliveryTimeoutMs);
+            if (wait) host.AwaitReplyForFrame(ProtocolHost.DeliveryTimeoutMs);
+            ch.Write(Array.Empty<byte>(), 0, frame, frame.Length);
+            ch.DriverReads();
+            return string.Join(" ", ch.Read.Select(f => $"{f[0]:X2}{(f.Length > 1 ? f[1] : 0):X2}"));
+        }
+        string waited = Run(true), unwaited = Run(false);
+        Check("on sinput a program's frame waits for the features reply before it, which the driver reads first",
+              waited == "0202 0100", $"read {waited}");
+        Check("control: written without the wait, the frame takes the reply's place", unwaited == "0100", $"read {unwaited}");
     }
 
     static void ChangeReport()

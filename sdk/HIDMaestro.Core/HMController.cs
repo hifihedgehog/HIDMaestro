@@ -1115,6 +1115,8 @@ public sealed partial class HMController : IDisposable
         // is also skipped via the gipData=null path in WriteInputFrame.
         if (_packsGipBuffer) PackXusbSlice(in state, mlx, mly, mrx, mry, mlt, mrt, _gipBuf);
 
+        if (_host != null) AwaitHostReply();
+
         // v1.3.5: two write paths, mutually exclusive per frame:
         //
         //  • Legacy (default, _extendedModeArmed=false or no ExtendedReport):
@@ -1450,6 +1452,7 @@ public sealed partial class HMController : IDisposable
 
     private void SubmitRawReportCore(ReadOnlySpan<byte> report)
     {
+        if (_host != null) AwaitHostReply();
         // A frame with no fixed bytes to overlay and no report id to prepend
         // goes into the section from the caller's own span, in the one copy
         // the section takes.
@@ -1754,6 +1757,17 @@ public sealed partial class HMController : IDisposable
         if (_deliverEvery && _deliveryPending) AwaitPreviousDeliveryCore();
     }
 
+    /// <summary>A frame the controller writes to the input section itself
+    /// waits for a protocol reply the driver has not delivered. On a device
+    /// with a protocol host and no state block (sinput, joypad-steam-input)
+    /// the program's frames and the host's replies share the section's one
+    /// frame, and a frame written first would replace the reply, which SDL
+    /// asks for once (SDL_hidapi_sinput.c:564-609, 659-661). The host's own
+    /// sends wait the same way (ProtocolHost.Tick, PumpLocked). Caller holds
+    /// _submitLock, the host's send lock.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private void AwaitHostReply() => _host!.AwaitReplyForFrame(Internal.ProtocolHost.DeliveryTimeoutMs);
+
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private void AwaitPreviousDeliveryCore()
     {
@@ -1799,6 +1813,7 @@ public sealed partial class HMController : IDisposable
 
     private void SubmitRawExtendedReportCore(ReadOnlySpan<byte> report)
     {
+        if (_host != null) AwaitHostReply();
         // Straight from the caller's span: the section's copy is the only one.
         SharedMemoryIO.WriteInputFrame(
             _inputView, _inputEvent, ref _inputSeqNo,
