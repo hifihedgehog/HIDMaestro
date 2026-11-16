@@ -1,4 +1,4 @@
-﻿# WGI XUSB haptic dispatch gating on ROOT-enumerated UMDF2 virtuals
+# WGI XUSB haptic dispatch gating on ROOT-enumerated UMDF2 virtuals
 
 **Windows build:** 11 26200.8115 (Kits 10.0.26100.0)
 **Device class:** XUSB (Xbox 360 / Xbox One compatible controllers)

@@ -1,4 +1,4 @@
-﻿# Issue #3 Report (draft): Dual xinputhid virtuals: CPU saturation + state-propagation hang
+# Issue #3 Report (draft): Dual xinputhid virtuals: CPU saturation + state-propagation hang
 
 **Branch:** `v1-dev-investigate-dual-xinputhid-saturation`
 **Date:** 2026-04-19

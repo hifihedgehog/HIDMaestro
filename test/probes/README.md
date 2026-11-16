@@ -1,4 +1,4 @@
-﻿# HIDMaestro Probes
+# HIDMaestro Probes
 
 Diagnostic and gate probes. The first ten come from the [WGI Silent Sink investigation (2026-04)](../../docs/investigations/wgi-silent-sink-2026-04/finding.md). The rest are release gates that `test/regression/regression_battery.ps1` invokes as scenarios S24 through S100. Each probe answers a specific "does API X reach device Y with value Z" question for gamepad input/haptic dispatch on Windows. Preserved here as a reusable toolkit for future HIDMaestro profile work or Windows build regressions.
 

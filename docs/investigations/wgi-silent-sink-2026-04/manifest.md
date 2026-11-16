@@ -1,4 +1,4 @@
-﻿# /tmp Manifest: Preserve / Discard Recommendations
+# /tmp Manifest: Preserve / Discard Recommendations
 
 Survey of `c:\tmp\` at investigation closeout (2026-04-18 19:00). For each entry: recommendation + rationale. Awaiting user approval before moving.
 

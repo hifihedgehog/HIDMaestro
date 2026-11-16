@@ -1,4 +1,4 @@
-﻿# ETW Extract: msedge.exe gaming device file accesses
+# ETW Extract: msedge.exe gaming device file accesses
 
 Filtered extract from a 1.4 GB kernel ETW trace captured during a Chromium `vibrationActuator.playEffect` click targeting HIDMaestro's virtual Xbox 360 Wired controller on hardwaretester.com.
 

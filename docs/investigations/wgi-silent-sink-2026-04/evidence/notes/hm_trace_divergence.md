@@ -1,4 +1,4 @@
-﻿# WGI 045E-branch divergence: three hypotheses to differentiate via F310 vs real 360 trace
+# WGI 045E-branch divergence: three hypotheses to differentiate via F310 vs real 360 trace
 
 From external review (2026-04-17, corrected):
 - F310 (046D:C21D) in XInput mode binds to xusb22 via USB\MS_COMP_XUSB10.

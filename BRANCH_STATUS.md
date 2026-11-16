@@ -1,4 +1,4 @@
-﻿# Branch status: `v1-dev-experiment-xusb-child-pdo`
+# Branch status: `v1-dev-experiment-xusb-child-pdo`
 
 **Created to answer:** can HIDMaestro virtuals receive browser-dispatched rumble on Win11 26200+ by registering the XUSB interface class (and related WGI interface GUIDs) on the virtual's HID child via a UMDF2 upper filter?
 

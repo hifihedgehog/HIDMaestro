@@ -1,4 +1,4 @@
-﻿# Investigation History: WGI Silent Sink on HIDMaestro Virtuals
+# Investigation History: WGI Silent Sink on HIDMaestro Virtuals
 
 Brief-by-brief sequence of the investigation with retractions marked. Read in conjunction with [finding.md](finding.md) for the formal conclusion and [manifest.md](manifest.md) for preserved artifacts.
 

@@ -1,4 +1,4 @@
-﻿# HIDMaestro Internals
+# HIDMaestro Internals
 
 Technical reference for HIDMaestro. The [README](../README.md) covers what HIDMaestro is and how to use it. This document covers how it works: the descriptor and enumeration techniques, the device topology, the user-mode rationale, the validation methodology, and the timing characteristics.
 

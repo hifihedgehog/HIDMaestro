@@ -1,4 +1,4 @@
-﻿# Microsoft-Facing Questions (Drafted, Ready to Send)
+# Microsoft-Facing Questions (Drafted, Ready to Send)
 
 Two open technical questions derived from the WGI Silent Sink investigation (2026-04-18). Each file is a standalone, sendable form of the question: copy-paste into the named channel.
 

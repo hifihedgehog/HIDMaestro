@@ -1,4 +1,4 @@
-﻿# `HMButton.Guide` in test pulse loops: banned by default, allowlist for intentional use
+# `HMButton.Guide` in test pulse loops: banned by default, allowlist for intentional use
 
 ## Why this is enforced
 

@@ -1,4 +1,4 @@
-﻿# HIDMaestro v1.3.0: Performance + Durability Work
+# HIDMaestro v1.3.0: Performance + Durability Work
 
 > Closed record of the v1.3.0 effort. Its counts, line numbers and wall-clock
 > figures are that era's: the battery was 26 scenarios and is 60 as of v1.8.1,

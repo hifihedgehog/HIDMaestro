@@ -1,4 +1,4 @@
-﻿# WGI Silent Sink on ROOT-Enumerated UMDF2 XUSB Virtuals
+# WGI Silent Sink on ROOT-Enumerated UMDF2 XUSB Virtuals
 
 **Investigation date:** 2026-04-18
 **Windows build:** 11 26200.8115 / 26100 Kits

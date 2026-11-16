@@ -1,4 +1,4 @@
-﻿# GameInput `supportedRumbleMotors = 0` on ROOT-enumerated UMDF2 XUSB-class virtual
+# GameInput `supportedRumbleMotors = 0` on ROOT-enumerated UMDF2 XUSB-class virtual
 
 **Windows build:** 11 26200.8115
 **GameInput runtime:** `C:\Windows\System32\GameInput.dll` (in-box, 2026-04-14 build)
