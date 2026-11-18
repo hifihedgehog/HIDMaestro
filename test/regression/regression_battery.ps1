@@ -2581,20 +2581,17 @@ function Scenario-Sinput-Persona {
                  -Message 'an SInput persona no longer answers SDL''s features command as its reference does, decodes the host''s output wrongly, or does not open in SDL3''s SInput driver (see probe stdout)'
 }
 
-# S104: driver signing and backend resolution. The verdict on HIDMaestro's
-# driver package against the probe's own read of the code integrity options
-# and against the driver store, the decision over the options the test
-# machines read, the backend Auto resolves to and the resolution of a create,
-# and Windows' own answer for HIDMaestro's installed catalog and for a
-# catalog signed as HIDMaestro signs. On a machine whose Windows refuses the
-# package and that holds none, an explicit Umdf2 request throws
-# HMDriverSigningException and writes nothing of the driver, and a program
-# that names no backend installs the USB/IP host controller and creates a
-# controller on it. That part prints [SKIP] where Windows installs
-# HIDMaestro's driver.
+# S104: driver signing. HMDriverSigning.Check() against the probe's own read
+# of the code integrity options and against the driver store, the decision
+# over the options the three test machines read, and Windows' own answer
+# for HIDMaestro's installed catalog and for a catalog signed as HIDMaestro
+# signs. On a machine whose Windows installs only Microsoft-signed driver
+# packages and that holds no HIDMaestro package, InstallDriver and a create
+# throw HMDriverSigningException and the machine reads the same after. That
+# part prints [SKIP] where Windows installs HIDMaestro's driver.
 function Scenario-Driver-Signing {
     Invoke-Probe -Dir 'driver_signing_check' -Exe 'DriverSigningCheck.exe' `
-                 -Message 'the signing verdict disagrees with the machine, a create resolves to the wrong backend, a failed import is blamed on signing where Windows accepts the catalog, or a refused install changed the machine (see probe stdout)'
+                 -Message 'HMDriverSigning.Check disagrees with the machine, a failed import is blamed on signing where Windows accepts the catalog, or a refused install changed the machine (see probe stdout)'
 }
 
 # S105: the wired Xbox 360 pad as a USB device on the USB/IP backend
