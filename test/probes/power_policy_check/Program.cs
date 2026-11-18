@@ -71,7 +71,9 @@ internal static class Program
     static void Log(string line) =>
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"  [{DateTime.Now:HH:mm:ss.fff}] {line}"));
 
-    const string DefaultPwrtest = @"C:\Program Files (x86)\Windows Kits\10\Tools\10.0.26100.0\x64\pwrtest.exe";
+    // The Windows Kit's pwrtest for this machine's architecture.
+    static readonly string DefaultPwrtest = @"C:\Program Files (x86)\Windows Kits\10\Tools\10.0.26100.0\"
+        + (RuntimeInformation.OSArchitecture == Architecture.Arm64 ? "arm64" : "x64") + @"\pwrtest.exe";
 
     /// <summary>One pad, its HID handle and the count its read thread
     /// keeps.</summary>
