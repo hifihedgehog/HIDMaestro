@@ -465,6 +465,14 @@ internal static class Peer
                               })
                               ? "OK pausereclaim" : "ERR pausereclaim no hook");
                         break;
+                    case "backend":
+                    {
+                        // What Auto resolves to on this machine, read by
+                        // reflection, since an SDK before 2.3.0 has none.
+                        var machine = typeof(HMContext).GetProperty("MachineBackend", BindingFlags.Public | BindingFlags.Static);
+                        Reply($"OK backend machine={machine?.GetValue(null)?.ToString() ?? "none"}");
+                        break;
+                    }
                     case "alive":
                         Reply("OK alive");
                         break;

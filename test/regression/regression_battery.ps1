@@ -2489,7 +2489,11 @@ function Scenario-Kbm-Raw-Input {
 
 # S71: programs that embed HIDMaestro, side by side on one machine. Each
 # program is a peer process the probe drives, and the probe judges what
-# they did from outside both. Its header lists every section.
+# they did from outside both. Its header lists every section. On a machine
+# whose backend is USB/IP the sections whose subject is HIDMaestro's driver
+# package or its events print their own condition, J too where Windows
+# refuses the package, and the rest run on the backend each create
+# resolves to.
 function Scenario-Coexistence {
     # About 10.5 minutes on the devbox, so its hang deadline is ten times
     # that, 105, which load or another program cannot reach.
@@ -2506,7 +2510,9 @@ function Scenario-Coexistence {
 # of one that may not be and cannot move, T6 at timeout scales 1, 1.5 and
 # 2, the pin's opens and holds, the deploy's tools running from held files,
 # the refusal of a foreign folder above Staging, the prune's keep-or-delete
-# decision, and diagnostic files written as the user.
+# decision, and diagnostic files written as the user. On a machine whose
+# backend is USB/IP no driver payload is staged, so section I prints its
+# condition there and the offline checks run.
 function Scenario-Protected-Staging {
     Invoke-Probe -Dir 'coexist_check' -Exe 'CoexistCheck.exe' -Arguments 'I' -Tag 'staging' `
                  -Message 'a staged file the elevated SDK runs was writable by a non-administrator or not checked by hash (see probe stdout)' -SkipCodes 2

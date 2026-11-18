@@ -137,6 +137,16 @@
 //   S71 runs A to H and J to Z, and S72 runs I
 //   (test/regression/README.md).
 //
+// On a machine whose backend is USB/IP (Windows refuses HIDMaestro's
+// driver package there, or HIDMAESTRO_BACKEND says usbip), this SDK
+// installs no driver package and its controllers run on USB/IP. The
+// sections whose subject is this SDK's driver package, its staging, its
+// install and upgrade policy or the driver's own events (E, F, I, M, N, O,
+// P, Q, R, S, T, Y) print their own condition there and run nothing. J
+// needs a v1.12.0 program, which runs only on HIDMaestro's UMDF2 driver,
+// and prints its condition where Windows refuses the package. Every other
+// section runs on whichever backend each create resolves to.
+//
 // "child-paths" [sandbox] checks the 0xCA invariant, no two HID children
 // on one device instance path, while a v1.12.0 program and this release
 // create one identity key in turn, and runs only inside lane T's Windows
@@ -310,6 +320,7 @@ internal static partial class Program
             return rc;
         }
         Clean();
+        ReadMachineBackend();
         var sections = new (char Id, string Title, Action Body)[]
         {
             ('A', "two programs with no identity key", SectionA),
@@ -344,6 +355,11 @@ internal static partial class Program
             if (!only.Contains(id)) continue;
             Console.WriteLine();
             Console.WriteLine($"{id}. {title}");
+            if (NotOnThisBackend(id) is { } condition)
+            {
+                Console.WriteLine($"  [SKIP] {id}: {condition}");
+                continue;
+            }
             var section = Stopwatch.StartNew();
             double cleaning = s_cleanSeconds;
             try { body(); }
@@ -356,6 +372,46 @@ internal static partial class Program
         Console.WriteLine();
         Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed, {s_cleans} cleanups took {s_cleanSeconds:F1} s ===");
         return s_failures == 0 ? 0 : 1;
+    }
+
+    // What Auto resolves to on this machine, as a peer of this SDK reads it,
+    // and whether HIDMAESTRO_BACKEND chose it. The probe itself never loads
+    // the SDK.
+    static string s_machineBackend = "Umdf2";
+    static bool s_backendOverridden;
+
+    static void ReadMachineBackend()
+    {
+        using (var p = PeerProcess.Begin("backend").AwaitReady())
+        {
+            string reply = p.Send("backend");
+            int at = reply.IndexOf("machine=", StringComparison.Ordinal);
+            if (at >= 0) s_machineBackend = reply[(at + "machine=".Length)..].Trim();
+        }
+        s_backendOverridden = string.Equals(Environment.GetEnvironmentVariable("HIDMAESTRO_BACKEND")?.Trim(), "usbip", StringComparison.OrdinalIgnoreCase);
+        Console.WriteLine($"  backend: Auto resolves to {s_machineBackend} on this machine{(s_backendOverridden ? ", by HIDMAESTRO_BACKEND" : "")}");
+    }
+
+    /// <summary>The condition under which a section has no subject on this
+    /// machine, or null when it runs.</summary>
+    static string? NotOnThisBackend(char id)
+    {
+        if (s_machineBackend != "Usbip") return null;
+        const string Driver = "this machine's backend is USB/IP, where this SDK installs no HIDMaestro driver package";
+        switch (id)
+        {
+            case 'E': return $"the install policy between SDK versions decides which HIDMaestro driver package each program runs on, and {Driver}";
+            case 'F': return $"two programs deploy HIDMaestro's driver package at once, and {Driver}";
+            case 'I': return $"a deploy stages HIDMaestro's driver payload and hmswd.exe, and {Driver}";
+            case 'M': return $"a create takes over a v1.11.0 program's XUSB companion on HIDMaestro's driver, and {Driver}";
+            case 'N': case 'O': case 'P': case 'Q': case 'S': case 'T':
+                return $"the section installs, removes or upgrades HIDMaestro's driver packages, and {Driver}";
+            case 'R': return $"a deploy keeps the driver staging a running program's record names, and {Driver}";
+            case 'Y': return $"the section tests the events HIDMaestro's UMDF2 driver opens, and {Driver}";
+            case 'J' when !s_backendOverridden:
+                return "a v1.12.0 program runs only on HIDMaestro's UMDF2 driver, which Windows on this machine does not install";
+            default: return null;
+        }
     }
 
     /// <summary>Remove every controller the sections left, through a peer
