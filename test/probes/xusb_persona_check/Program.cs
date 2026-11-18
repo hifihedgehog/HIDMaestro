@@ -41,8 +41,9 @@
 //          arguments name (hex, default 01 to 13): XInputGetCapabilities and
 //          the parsed fields of the HID collection xusb22 makes for it.
 //
-// No argument runs model and wire. Exit 0 PASS, 1 FAIL, 2 SKIP when another
-// program that embeds HIDMaestro is running (live parts only).
+// No argument runs model, wire, and live on USB/IP for xbox-360-wired and
+// xbox-360-wireless, as the battery runs it. Exit 0 PASS, 1 FAIL, 2 SKIP
+// when another program that embeds HIDMaestro is running (live parts only).
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -100,7 +101,11 @@ internal static unsafe partial class Program
         int skip = 0;
         switch (part)
         {
-            case "": Model(); Wire(); WireReceiver(); break;
+            case "":
+                Model(); Wire(); WireReceiver();
+                skip = Live("usbip", ProfileId);
+                if (skip == 0) skip = Live("usbip", "xbox-360-wireless");
+                break;
             case "model": Model(); break;
             case "wire": Wire(); WireReceiver(); break;
             case "live": skip = Live(backend.Length > 0 ? backend : "usbip", rest.Count > 0 ? rest[0] : ProfileId); break;

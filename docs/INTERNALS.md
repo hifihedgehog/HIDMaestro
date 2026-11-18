@@ -795,7 +795,7 @@ Disposal speed depends on which kernel-side drivers are in the device stack. Eac
 
 #### 1. Plain HID: generic gamepads, wheels, HOTAS, flight sticks (~200ms)
 
-Profiles with no XInput presentation. Includes DualSense, DualShock 4, all Logitech wheels, Thrustmaster HOTAS, flight sticks, pedals, arcade sticks, and most of the 339-profile catalog.
+Profiles with no XInput presentation. Includes DualSense, DualShock 4, all Logitech wheels, Thrustmaster HOTAS, flight sticks, pedals, arcade sticks, and most of the 338-profile catalog.
 
 ```
 ROOT\HIDClass\HM_0000               ← our UMDF2 driver (mshidumdf host)

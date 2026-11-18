@@ -346,17 +346,18 @@ internal static class XusbFunction
 
     /// <summary>Why <paramref name="profile"/>'s identity is one the XUSB
     /// function never takes, or null. A profile whose XInput presentation is
-    /// the companion is refused at load for such an identity on either
-    /// backend: on UMDF2 the companion's &amp;IG_00 HID child of that
+    /// the companion is refused for such an identity on either backend, at
+    /// load when its own block names the companion and at create when a
+    /// model gives it: on UMDF2 the companion's &amp;IG_00 HID child of that
     /// identity takes xinputhid, which publishes the XUSB interface a second
     /// time.</summary>
-    internal static string? RefusedIdentityReason(ControllerProfile profile)
+    internal static string? RefusedIdentityReason(ControllerProfile profile, bool companion = false)
     {
         // The identity first, which is cheap, then the presentation, which
-        // resolves the profile's device model.
+        // resolves the profile's device model unless the caller knows it.
         ushort vid = profile.VendorId, pid = profile.ProductId;
         var infs = Model.RefusedIds.Where(r => r.Vid == vid && r.Pid == pid).Select(r => r.Inf).Distinct().ToList();
-        if (infs.Count == 0 || !XInputPresentation.Resolve(profile).XusbCompanion) return null;
+        if (infs.Count == 0 || !(companion || XInputPresentation.Resolve(profile).XusbCompanion)) return null;
         return $"{vid:X4}:{pid:X4} is an identity Windows' {string.Join(" and ", infs)} {(infs.Count == 1 ? "binds" : "bind")}, and an XUSB companion's controller " +
                "takes xusb22 alone: with that identity Windows would give the one controller a second XInput provider or its GIP driver in xusb22's place.";
     }
