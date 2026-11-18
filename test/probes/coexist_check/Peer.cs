@@ -229,7 +229,7 @@ internal static class Peer
                         lock (s_live) s_live.Add(c);
                         string index = Get(c, "Index") ?? "?";
                         Reply($"OK create index={index} transport={Get(c, "TransportIndex") ?? index} " +
-                              $"instance={Get(c, "InstanceId") ?? "none"} key={c.IdentityKey} ms={ms}");
+                              $"instance={DeviceIdOf(c) ?? "none"} key={c.IdentityKey} ms={ms}");
                         break;
                     }
                     case "createat":
@@ -1270,6 +1270,19 @@ internal static class Peer
             finally { CloseHandle(h); }
         }
         return n;
+    }
+
+    /// <summary>The devnode a controller made: the UMDF2 parent's instance
+    /// id, or on the USB/IP backend the USB device's, read by reflection,
+    /// since an SDK before 2.3.0 has no USB/IP controller of this kind.</summary>
+    static string? DeviceIdOf(object c)
+    {
+        const BindingFlags All = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+        if (Get(c, "InstanceId") is { } id) return id;
+        object? handle = c.GetType().GetProperty("UsbipHandle", All)?.GetValue(c);
+        object? device = handle?.GetType().GetProperty("Device", All)?.GetValue(handle);
+        object? descriptors = device?.GetType().GetProperty("Descriptors", All)?.GetValue(device);
+        return descriptors?.GetType().GetProperty("UsbInstanceId", All)?.GetValue(descriptors) as string;
     }
 
     static string? Get(object o, string name) =>
