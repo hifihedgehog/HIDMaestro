@@ -21,10 +21,13 @@
 //          created, its devnode must carry Windows' GIP driver from
 //          dc1-controller.inf, a submitted state must read back through
 //          XInputGetState, the device must log the host's GIP messages raw,
-//          vibration with trigger levels must arrive as the Direct Motor
-//          command, Windows.Gaming.Input must list the pad once, and Share
-//          must read through the XUSB gamepad state. dualsense-composite is
-//          created beside it as the positive control and read over HID.
+//          xboxgip must hold the pad's arrival and metadata, XInputSetState
+//          must arrive as the Direct Motor command and reach OutputReceived
+//          in the UMDF2 form's shape, Windows.Gaming.Input must list the pad
+//          once, and Share must read through the XUSB gamepad state. Trigger
+//          levels from GameInput are recorded: Windows sends them for a
+//          program with input focus. dualsense-composite is created beside
+//          it as the positive control and read over HID.
 //
 // No argument runs all three. "model", "wire" and "live" each run one, and
 // "live" with "nooptout" serves the metadata without the security opt-out.

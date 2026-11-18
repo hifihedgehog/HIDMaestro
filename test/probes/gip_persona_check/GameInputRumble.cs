@@ -45,6 +45,16 @@ internal static unsafe class GameInputRumble
         s_found = device;
     }
 
+    /// <summary>GameInputCreate's result in this process's session, with
+    /// the object released: an HRESULT, negative when GameInput does not run
+    /// here.</summary>
+    public static int Create()
+    {
+        int hr = GameInputCreate(out IntPtr gi);
+        if (hr >= 0) ((delegate* unmanaged[Stdcall]<IntPtr, uint>)Slot(gi, 2))(gi);
+        return hr;
+    }
+
     /// <summary>Sets the rumble state of the first connected gamepad of
     /// <paramref name="vid"/>:<paramref name="pid"/>, holds it for
     /// <paramref name="holdMs"/>, then clears it. Returns 0 when both calls

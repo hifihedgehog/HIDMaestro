@@ -114,7 +114,7 @@ internal static unsafe partial class Program
             ulong deviceId = 0;
             for (int i = 0; i < 6; i++) deviceId |= (ulong)Convert.ToByte(serial.Substring(serial.Length - 2 - 2 * i, 2), 16) << (8 * i);
             var held = GipCapture(4_000).Where(m => m.DeviceId == deviceId).ToList();
-            foreach (var m in held) Console.WriteLine($"  command 0x{m.Command:X2}, {m.Data.Length} bytes: {Hex(m.Data)}");
+            foreach (var m in held) Console.WriteLine($"  command 0x{m.Command:X2}, header {Hex(m.Header)}, {m.Data.Length} bytes: {Hex(m.Data)}");
             var arrival = held.FirstOrDefault(m => m.Command == 0x02);
             Check($"xboxgip announces the pad's arrival under the Hello's device ID {deviceId:X16}, with 045E:02EA and firmware 4D48.{(noOptOut ? "0231" : "0230")}",
                   arrival != null && arrival.Data.Length >= 16 && BitConverter.ToUInt64(arrival.Data, 0) == deviceId
@@ -217,13 +217,22 @@ internal static unsafe partial class Program
                 Check("a HID interface sits under the device", child != null, child ?? "none");
                 if (child != null) Console.WriteLine($"  {child}: output report {HidOutputLength(child)} bytes");
 
-                // The trigger motors from a program with no window: GameInput's
-                // SetRumbleState (GameInputRumble.cs), each level its own value
-                // so the Direct Motor bytes show which lands where.
+                // The trigger motors: GameInput's SetRumbleState
+                // (GameInputRumble.cs), each level its own value so the
+                // Direct Motor bytes show which lands where. Windows sends
+                // trigger levels for a program with input focus, which this
+                // one never has: GameInput in this session, GameInput run as
+                // the console session's user, Windows.Gaming.Input's
+                // Vibration and a Direct Motor message written to
+                // \\.\XboxGIP each reached the pad with no Direct Motor
+                // command, in the window where XInputSetState's did. So the
+                // result is recorded, not checked.
                 Console.WriteLine("\n-- trigger rumble through GameInput --");
+                int create = GameInputRumble.Create();
+                Console.WriteLine($"  GameInputCreate in this session: 0x{create:X8}");
                 Motor(engine, "GameInput SetRumbleState(low 1.0, high 0.5, left trigger 0.8, right trigger 0.3)",
-                      () => GameInputRumble.Pulse(0x045E, 0x02EA, 1.0f, 0.5f, 0.8f, 0.3f, 800, line => Console.WriteLine($"  GameInput: {line}")),
-                      c => c[6] is >= 79 and <= 81 && c[7] is >= 29 and <= 31 && c[8] >= 99 && c[9] is >= 49 and <= 51 && (c[5] & 0x0F) == 0x0F);
+                      () => create < 0 ? (uint)create : GameInputRumble.Pulse(0x045E, 0x02EA, 1.0f, 0.5f, 0.8f, 0.3f, 800, line => Console.WriteLine($"  GameInput: {line}")),
+                      c => c[6] is >= 79 and <= 81 && c[7] is >= 29 and <= 31 && c[8] >= 99 && c[9] is >= 49 and <= 51 && (c[5] & 0x0F) == 0x0F, strict: false);
             }
 
             Console.WriteLine("\n-- Windows.Gaming.Input --");
@@ -368,7 +377,7 @@ internal static unsafe partial class Program
     /// the 20-byte header's device ID and command, and the data after it
     /// (GIP Interface Writeup, "Header", "Device Arrival" and "Device
     /// Descriptor").</summary>
-    sealed record GipMessage(ulong DeviceId, byte Command, byte[] Data);
+    sealed record GipMessage(ulong DeviceId, byte Command, byte[] Data, byte[] Header);
 
     const uint GIP_ADD_REENUMERATE_CALLER_CONTEXT = 0x40001CD0;
 
@@ -444,7 +453,7 @@ internal static unsafe partial class Program
                         ulong id = BitConverter.ToUInt64(buffer, 0);
                         uint length = BitConverter.ToUInt32(buffer, 12);
                         int n = (int)Math.Min(length, got - 20);
-                        list.Add(new GipMessage(id, buffer[8], buffer.AsSpan(20, n).ToArray()));
+                        list.Add(new GipMessage(id, buffer[8], buffer.AsSpan(20, n).ToArray(), buffer.AsSpan(0, 20).ToArray()));
                     }
                 }
             }
