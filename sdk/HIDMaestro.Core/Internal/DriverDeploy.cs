@@ -71,7 +71,7 @@ internal static partial class DriverDeploy
         internal virtual void AddPackages(IReadOnlyCollection<string> infs) => DriverBuilder.AddPackagesLocked(infs);
         internal virtual void RecordPayload() => DriverBuilder.RecordInstalledPayload();
         internal virtual void PruneStaging() => ProtectedStaging.PruneOldVersions();
-        internal virtual HMDriverSigningStatus Signing() => DriverSigningPolicy.Status;
+        internal virtual DriverSigningPolicy.Verdict Signing() => DriverSigningPolicy.Status;
 
         /// <summary>The deploy lock held: releasing it releases the mutex
         /// and closes the handle Acquire opened for this hold.</summary>
@@ -89,8 +89,8 @@ internal static partial class DriverDeploy
     internal static DeployMachine Machine = new();
 
     /// <summary>True on a machine that holds no HIDMaestro driver package
-    /// and whose Windows installs only Microsoft-signed ones
-    /// (<see cref="DriverSigningPolicy"/>). A deploy there would end at the
+    /// and whose Windows refuses one (<see cref="DriverSigningPolicy"/>).
+    /// A deploy there would end at the
     /// driver store import, after the certificate went into the machine's
     /// stores and the payload into staging, so nothing that leads to one
     /// starts: the constructor's prewarm, InstallDriver and a create's
@@ -107,9 +107,8 @@ internal static partial class DriverDeploy
     internal static void ThrowIfSigningStopsDeploy()
     {
         if (!SigningStopsDeploy()) return;
-        var status = Machine.Signing();
-        DeviceOrchestrator.LogDiag($"    deploy: not started. {status.Explanation}");
-        throw new HMDriverSigningException(status);
+        DeviceOrchestrator.LogDiag($"    deploy: not started. {HMDriverSigningException.DefaultMessage}");
+        throw new HMDriverSigningException();
     }
 
     /// <summary>A driver package's version stamp, from its INF's

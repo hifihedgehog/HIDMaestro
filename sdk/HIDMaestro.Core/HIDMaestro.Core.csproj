@@ -300,9 +300,10 @@
          The composite USB personas (dualsense-composite,
          dualshock-4-v2-composite and the rest) ride the USB/IP backend,
          whose transport this assembly carries and installs on the first
-         composite create. A build made with HMSkipUsbip carries the
-         profiles but refuses to create them. Consumers check
-         HMProfile.RequiresUsbipBackend against HMBuildInfo.UsbipArchitectures. -->
+         USB/IP create. A build made with HMSkipUsbip carries the
+         profiles but refuses to create them on that backend. Consumers
+         check HMProfile.RequiresUsbipBackend against
+         HMBuildInfo.UsbipArchitectures. -->
     <HMProfileJson Include="..\..\profiles\**\*.json"
                    Exclude="..\..\profiles\schema.json;..\..\profiles\scraped_descriptors.json;..\..\profiles\linux-kernel-fixed-descriptors.json;..\..\profiles\models\**" />
     <!-- Named models: never read as profiles, and embedded under a logical

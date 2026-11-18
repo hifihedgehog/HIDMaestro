@@ -5,14 +5,12 @@ using System.Runtime.InteropServices;
 namespace HIDMaestro.Internal;
 
 /// <summary>
-/// Whether Windows on this machine installs a driver package signed by a
-/// publisher the machine trusts, as HIDMaestro signs its own
-/// (<see cref="DriverBuilder.EnsureTestCertificate()"/>), or only one that
-/// Microsoft signed.
+/// Whether Windows on this machine installs HIDMaestro's driver package,
+/// which HIDMaestro signs on the machine with a certificate it creates
+/// there (<see cref="DriverBuilder.EnsureTestCertificate()"/>).
 ///
-/// <para>The driver store import of the first kind fails with 0x800B0109
-/// when all four of these hold. Each is read from the Windows binary named,
-/// with its public symbols.</para>
+/// <para>Windows refuses the package when both of these hold. Each is read
+/// from the Windows binary named, with its public symbols.</para>
 /// <list type="number">
 /// <item>drvinst.exe is in the state its log calls Enforced:
 /// CODEINTEGRITY_OPTION_ENABLED set and CODEINTEGRITY_OPTION_TESTSIGN clear
@@ -23,70 +21,60 @@ namespace HIDMaestro.Internal;
 /// 10.0.28000.3365 always does: the flags are a constant. The x64 build
 /// 10.0.26100.9711 does only when WldpQueryWindowsLockdownMode reports a
 /// mode other than unlocked, which is Windows in S mode
-/// (SpSignSkuRequiresSignedInf).</item>
-/// <item>In that mode wintrust.dll reads SystemCodeIntegrityInformation,
-/// and with CODEINTEGRITY_OPTION_WHQL_ENFORCEMENT_ENABLED set the signer
-/// has to chain to a Microsoft root with the WHQL usage
-/// (CheckValidSignature, _SatisfiesSysDevWhqlRequirement). The x64 and the
-/// ARM64 build carry the same test of bit 14.</item>
-/// <item>The system integrity policy is not in audit mode
-/// (_SIAuditModeEnabled), in which wintrust.dll lets the signer pass.</item>
+/// (SpSignSkuRequiresSignedInf). In that mode a signer the machine's own
+/// stores trust is not enough.</item>
 /// </list>
 ///
-/// <para>Measured on 2026-11-17 with one catalog, signed as HIDMaestro
-/// signs and its certificate in Root and TrustedPublisher. On Windows 11
-/// ARM64 build 28000, options 0xF405, WinVerifyTrust returns 0 without the
-/// mode flag and 0x800B0109 with it, and the import of HIDMaestro's package
-/// fails with that code. On x64 builds 19044 and 26100, options 0x1 and
-/// 0x2001, it returns 0 both ways and the package installs. Memory
-/// integrity plays no part: on build 19044 with it running in strict mode,
-/// options 0x3401, the catalog verified both ways and the driver installed
-/// and ran a controller.</para>
+/// <para>Measured on the ARM64 Surface, Windows 11 build 28000, on
+/// 2026-11-18: pnputil refused the package with 0xE0000243, and
+/// setupapi.dev.log gave the verdict "Driver package signer is not trusted
+/// by system, and Code Integrity is enforced", in four machine states:
+/// options 0xF405 as shipped, 0x3405 with the developer mode for driver
+/// signing set, 0x3405 with Secure Boot off, and 0x3405 with integrity
+/// checks turned off in the boot configuration. Each of them has
+/// CODEINTEGRITY_OPTION_ENABLED set and CODEINTEGRITY_OPTION_TESTSIGN
+/// clear. On x64 builds 19044 and 26100, options 0x1, 0x2001 and, with
+/// memory integrity running in strict mode, 0x3401, the catalog verified
+/// with and without the mode flag and the package installed.</para>
 /// </summary>
 internal static partial class DriverSigningPolicy
 {
     // CodeIntegrityOptions of SYSTEM_CODEINTEGRITY_INFORMATION. winternl.h
-    // of the 10.0.26100.0 SDK names the first two (:371, :372). phnt's
-    // ntexapi.h names all three (:4064, :4065, :4078).
-    internal const uint CodeIntegrityEnabled = 0x01, CodeIntegrityTestSign = 0x02, WhqlEnforcement = 0x4000;
+    // of the 10.0.26100.0 SDK names both (:371, :372).
+    internal const uint CodeIntegrityEnabled = 0x01, CodeIntegrityTestSign = 0x02;
 
-    // SYSTEM_INFORMATION_CLASS. winternl.h:401 gives the first. The other
-    // two are their positions in phnt's ntexapi.h, and the constants
-    // wintrust.dll passes: 0x67, 0x8F and 0xA4.
-    private const int SystemCodeIntegrityInformation = 103,
-        SystemSecureBootPolicyInformation = 143,
-        SystemCodeIntegrityPolicyInformation = 164;
+    // SYSTEM_INFORMATION_CLASS, winternl.h:401.
+    private const int SystemCodeIntegrityInformation = 103;
 
     /// <summary>What the decision reads. <paramref name="CodeIntegrityOptions"/>
     /// is null when the query failed.</summary>
-    internal readonly record struct Inputs(uint? CodeIntegrityOptions, bool AuditMode, bool DriverMode, Architecture Architecture);
+    internal readonly record struct Inputs(uint? CodeIntegrityOptions, bool DriverMode, Architecture Architecture);
 
-    /// <summary>The four conditions of the class summary. Options that could
+    /// <summary>What the decision answers for one machine.</summary>
+    internal readonly record struct Verdict(bool Refuses, uint? CodeIntegrityOptions, Architecture Architecture)
+    {
+        /// <summary>True when Windows installs HIDMaestro's driver package
+        /// here.</summary>
+        public bool CanInstallDriver => !Refuses;
+    }
+
+    /// <summary>The two conditions of the class summary. Options that could
     /// not be read decide nothing, so the import is tried.</summary>
     internal static bool Refuses(in Inputs i) =>
         i.CodeIntegrityOptions is uint options
         && (options & CodeIntegrityEnabled) != 0
         && (options & CodeIntegrityTestSign) == 0
-        && i.DriverMode
-        && (options & WhqlEnforcement) != 0
-        && !i.AuditMode;
+        && i.DriverMode;
 
-    internal static HMDriverSigningStatus StatusOf(in Inputs i) => new(
-        Refuses(i) ? HMDriverSigningRequirement.MicrosoftSigned : HMDriverSigningRequirement.TrustedPublisher,
-        i.CodeIntegrityOptions is uint options && (options & WhqlEnforcement) != 0,
-        i.Architecture);
+    internal static Verdict VerdictOf(in Inputs i) => new(Refuses(i), i.CodeIntegrityOptions, i.Architecture);
 
-    private static readonly Lazy<HMDriverSigningStatus> s_status = new(() => StatusOf(Read()));
+    private static readonly Lazy<Verdict> s_status = new(() => VerdictOf(Read()));
 
-    /// <summary>This machine's status. Windows sets the options when it
+    /// <summary>This machine's verdict. Windows sets the options when it
     /// starts, so one read serves the process.</summary>
-    internal static HMDriverSigningStatus Status => s_status.Value;
+    internal static Verdict Status => s_status.Value;
 
-    internal static Inputs Read()
-    {
-        uint? options = CodeIntegrityOptions();
-        return new Inputs(options, options != null && AuditMode(), DriverMode(), RuntimeInformation.OSArchitecture);
-    }
+    internal static Inputs Read() => new(CodeIntegrityOptions(), DriverMode(), RuntimeInformation.OSArchitecture);
 
     /// <summary>SYSTEM_CODEINTEGRITY_INFORMATION's CodeIntegrityOptions
     /// (winternl.h:386: ULONG Length, ULONG CodeIntegrityOptions), or null
@@ -97,25 +85,6 @@ internal static partial class DriverSigningPolicy
         info[0] = 8;
         info[1] = 0;
         return NtQuerySystemInformation(SystemCodeIntegrityInformation, info, 8, null) >= 0 ? info[1] : null;
-    }
-
-    /// <summary>wintrust.dll's _SIAuditModeEnabled. False when
-    /// SYSTEM_SECUREBOOT_POLICY_INFORMATION (GUID PolicyPublisher, ULONG
-    /// PolicyVersion, ULONG PolicyOptions) reads with PolicyOptions bit 0x80
-    /// set. Otherwise bit 1, Audit, of the Options that open
-    /// SYSTEM_CODEINTEGRITYPOLICY_INFORMATION (32 bytes), and false when that
-    /// query fails. Both layouts are phnt's (ntexapi.h:5208, :5976).</summary>
-    private static unsafe bool AuditMode()
-    {
-        uint* secureBoot = stackalloc uint[6];
-        new Span<uint>(secureBoot, 6).Clear();
-        if (NtQuerySystemInformation(SystemSecureBootPolicyInformation, secureBoot, 24, null) >= 0
-            && (secureBoot[5] & 0x80) != 0)
-            return false;
-        uint* policy = stackalloc uint[8];
-        new Span<uint>(policy, 8).Clear();
-        return NtQuerySystemInformation(SystemCodeIntegrityPolicyInformation, policy, 32, null) >= 0
-            && (policy[0] & 0x2) != 0;
     }
 
     /// <summary>Whether drvinst.exe checks a package's catalog in driver
@@ -135,21 +104,20 @@ internal static partial class DriverSigningPolicy
 
     // ── After an import that did not land ────────────────────────────────
 
-    /// <summary>For an import that did not land on a machine whose status
-    /// says Microsoft-signed only: asks Windows about the staged catalog
-    /// both ways, and throws <see cref="HMDriverSigningException"/> when the
-    /// catalog is trusted without the mode flag and refused with it. Any
-    /// other outcome returns, and the caller reports the import as it did
+    /// <summary>For an import that did not land on a machine whose verdict
+    /// says Windows refuses the package: asks Windows about the staged
+    /// catalog both ways, and throws <see cref="HMDriverSigningException"/>
+    /// when the catalog is trusted without the mode flag and refused with it.
+    /// Any other outcome returns, and the caller reports the import as it did
     /// before.</summary>
-    internal static void ThrowIfImportRefused(HMDriverSigningStatus status, string catalog)
+    internal static void ThrowIfImportRefused(Verdict status, string catalog)
     {
         if (status.CanInstallDriver || !File.Exists(catalog)) return;
         int plain = Verify(catalog, driverMode: false);
         int mode = Verify(catalog, driverMode: true);
         DeviceOrchestrator.LogDiag($"    deploy: {Path.GetFileName(catalog)} verifies 0x{plain:X8}, 0x{mode:X8} in driver mode");
         if (plain == 0 && mode != 0)
-            throw new HMDriverSigningException(status,
-                $"{status.Explanation} Windows answered 0x{mode:X8} for the signed catalog.");
+            throw new HMDriverSigningException($"{HMDriverSigningException.DefaultMessage} Windows answered 0x{mode:X8} for the signed catalog.");
     }
 
     // wintrust.h of the 10.0.26100.0 SDK: WTD_UI_NONE (:102), WTD_REVOKE_NONE

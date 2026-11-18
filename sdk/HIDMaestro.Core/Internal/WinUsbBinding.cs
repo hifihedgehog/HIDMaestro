@@ -1057,16 +1057,21 @@ DeviceName = ""{deviceName}""
     /// <summary>The add itself. The caller holds the deploy lock.
     ///
     /// <para>The package is signed as the driver's is, so a Windows that
-    /// installs only Microsoft-signed packages refuses it the same way
+    /// refuses HIDMaestro's driver package refuses it the same way
     /// (<see cref="DriverSigningPolicy"/>). With no HIDMaestro package of
     /// either kind in the store, the add stops before the certificate and
     /// the staging. Otherwise it is tried, and a failed one is named as a
     /// signing refusal when Windows' own check of the catalog says
     /// so.</para></summary>
+    /// <summary>The refusal's message: the binding's package is signed as
+    /// HIDMaestro's driver is, and Windows here installs neither.</summary>
+    internal const string RefusedMessage =
+        "Windows on this PC does not install the WinUSB binding's driver package, which is signed as HIDMaestro's own driver is.";
+
     private static string AddPackage(Package p)
     {
         if (DriverDeploy.SigningStopsDeploy() && OurPackages().Count == 0)
-            throw new HMDriverSigningException(DriverDeploy.Machine.Signing());
+            throw new HMDriverSigningException(RefusedMessage);
 
         string dir = ProtectedStaging.DirFor(p.StagingOperation);
         // UTF-16 LE with its byte-order mark, the Unicode form an INF may

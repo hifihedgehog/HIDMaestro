@@ -1066,6 +1066,37 @@ internal static partial class SharedMemoryIO
         }
     }
 
+    /// <summary>A USB/IP device's half of the delivery acknowledgement, the
+    /// half the driver plays for a UMDF2 controller (driver.c
+    /// TryOpenInputAck): it announces that it stores delivered sequence
+    /// numbers. The release bit stays clear, since no driver watches the
+    /// owner pipe.</summary>
+    internal static unsafe void AnnounceDeviceDelivery(int controllerIndex)
+    {
+        lock (s_inputViews)
+        {
+            if (s_inputAckViews.TryGetValue(controllerIndex, out IntPtr v) && v != IntPtr.Zero)
+                Interlocked.Or(ref *(int*)(v + INPUT_ACK_OFFSET_CAPS), INPUT_ACK_CAP_DELIVERED);
+        }
+    }
+
+    /// <summary>A USB/IP device's delivery of the frame written with
+    /// <paramref name="seqNo"/>, as driver.c AckInputDeliveredLocked stores
+    /// it, and the event set when a thread of this SDK waits on it
+    /// (<paramref name="signal"/>, the driver's AckSignal). Under the lock
+    /// the teardown unmaps the section under, so a late call after the
+    /// controller's teardown writes nothing.</summary>
+    internal static unsafe void StoreDeviceDelivered(int controllerIndex, uint seqNo, bool signal)
+    {
+        lock (s_inputViews)
+        {
+            if (!s_inputAckViews.TryGetValue(controllerIndex, out IntPtr v) || v == IntPtr.Zero) return;
+            Interlocked.Exchange(ref *(int*)(v + INPUT_ACK_OFFSET_DELIVERED), (int)seqNo);
+            if (signal && s_inputAckEvents.TryGetValue(controllerIndex, out IntPtr ev) && ev != IntPtr.Zero)
+                SetEvent(ev);
+        }
+    }
+
     /// <summary>Whether the driver watches this controller's owner pipe and
     /// will send the release frames when this process lets go of it.</summary>
     public static bool ReleaseOnExitSupported(int controllerIndex)

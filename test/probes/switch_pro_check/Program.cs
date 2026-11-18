@@ -188,6 +188,12 @@ internal static class Program
         return ReadUntil(0x21, timeoutMs, r => r[14] == id && (r[13] & 0x80) != 0);
     }
 
+    /// <summary>The serial the controller's HID device serves: the UMDF2
+    /// driver's HM-CTL- and the transport index, or on the USB/IP backend the
+    /// identity's serial its device descriptor names.</summary>
+    static string SerialOf(HMController c) =>
+        c.Backend == HMBackend.Usbip ? c.UsbipHandle!.Device.Descriptors.SerialString! : DeviceOrchestrator.DriverSerial(c.TransportIndex);
+
     static int Main(string[] args)
     {
         if (args.Length == 0) return Checks();
@@ -251,10 +257,11 @@ internal static class Program
         // when a real Pro Controller is paired to the same box (2026-07-22:
         // the probe opened the live pad and asserted against its real
         // firmware/calibration), and so is any HM-CTL- serial while another
-        // program runs a virtual Switch Pro. This one serves HM-CTL- and its
-        // own transport index (DeviceOrchestrator.DriverSerial). A real one
-        // serves its MAC.
-        string serial = DeviceOrchestrator.DriverSerial(ctrl.TransportIndex);
+        // program runs a virtual Switch Pro. On the UMDF2 driver this one
+        // serves HM-CTL- and its own transport index
+        // (DeviceOrchestrator.DriverSerial), and on the USB/IP backend its
+        // identity's serial. A real one serves its MAC.
+        string serial = SerialOf(ctrl);
         string? path = null;
         for (int i = 0; i < 300 && path == null; i++)
         {
@@ -645,7 +652,7 @@ internal static class Program
             // THIS pad, by its own serial as in Checks: a real Pro and
             // another program's virtual Switch Pro share VID, PID and the
             // HM-CTL- prefix.
-            string serial = DeviceOrchestrator.DriverSerial(ctrl.TransportIndex);
+            string serial = SerialOf(ctrl);
             string? path = null;
             for (int i = 0; i < 300 && path == null; i++)
             {

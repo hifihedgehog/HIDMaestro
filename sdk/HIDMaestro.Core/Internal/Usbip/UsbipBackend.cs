@@ -37,6 +37,7 @@ internal static class UsbipBackend
 
         var server = UsbipServer.GetOrStart();
         SweepStaleOnce(server);
+        ThrowIfPortsFull();
 
         var device = new UsbipEmulatedDevice(profile, index, identity);
         if (identity != null)
@@ -45,7 +46,14 @@ internal static class UsbipBackend
         try
         {
             BeforeAttach?.Invoke(device);
-            device.SetVhciPortIfAttached(VhciClient.Attach("127.0.0.1", server.Port, device.BusId));
+            try { device.SetVhciPortIfAttached(VhciClient.Attach("127.0.0.1", server.Port, device.BusId)); }
+            catch (System.ComponentModel.Win32Exception) when (PortsFull(out _, out _))
+            {
+                // Another program took the last port between the count and
+                // the attach.
+                ThrowIfPortsFull();
+                throw;
+            }
             return new UsbipBackendHandle(server, device);
         }
         catch
@@ -62,6 +70,43 @@ internal static class UsbipBackend
             device.Dispose();
             throw;
         }
+    }
+
+    /// <summary>The USB 2.0 ports the host controller has: its
+    /// <c>NumberOfUsb20Ports</c> parameter, 30 when not set, held to 1 to
+    /// 254, as usbip-win2 0.9.8.1 reads it (drivers/ude/vhci.cpp,
+    /// get_usb_ports_cnt and set_usb_ports_cnt). Every device the SDK
+    /// attaches is full or high speed and takes one of them.</summary>
+    internal static int Usb20Ports()
+    {
+        try
+        {
+            using var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\usbip2_ude\Parameters");
+            if (k?.GetValue("NumberOfUsb20Ports") is int n) return Math.Clamp(n, 1, 254);
+        }
+        catch { }
+        return 30;
+    }
+
+    /// <summary>True when the host controller lists as many imports as it
+    /// has USB 2.0 ports, every program's counted.</summary>
+    private static bool PortsFull(out int ports, out int used)
+    {
+        ports = Usb20Ports();
+        used = 0;
+        try { used = VhciClient.GetImportedDevices().Count; } catch { return false; }
+        return used >= ports;
+    }
+
+    /// <summary>The named refusal of a create past the host controller's
+    /// ports, before the device is registered, so nothing is undone.</summary>
+    private static void ThrowIfPortsFull()
+    {
+        if (!PortsFull(out int ports, out int used)) return;
+        throw new HMResourceInUseException(
+            $"Every one of the USB/IP host controller's {ports} USB 2.0 ports holds a device ({used} attached, "
+          + "this program's and others'). Dispose a controller that runs on the USB/IP backend first.",
+            "a port of the USB/IP host controller", null);
     }
 
     /// <summary>Called on the creating thread after the device is
@@ -145,16 +190,15 @@ internal static class UsbipBackend
         {
             if (!VhciClient.IsAvailable()) return;
             view ??= new SweepView();
-            var listening = view.Listening;
             int own = UsbipServer.Current?.Port ?? 0;
             var recorded = RecordedPorts();
             foreach (var row in VhciClient.GetImportedDevices())
             {
                 if (!IsOurLocation(row.Host, row.Service, recorded, out int port)) continue;
-                if (port == own || listening.Contains(port)) continue;
+                if (port == own || view.IsListening(port)) continue;
                 VhciClient.DetachLocation(row.Host, port, row.BusId);
             }
-            var locations = AttemptLocations(port => port == own || !listening.Contains(port), deadOnly: true);
+            var locations = AttemptLocations(port => port == own || !view.IsListening(port), deadOnly: true);
             VhciClient.StopAttachAttempts("127.0.0.1", WithoutLiveExports(locations, view));
         }
         catch { /* best-effort recovery */ }
@@ -210,7 +254,7 @@ internal static class UsbipBackend
         int own = UsbipServer.Current?.Port ?? 0;
         foreach (var (port, busId) in locations)
         {
-            if (port != own && !view.Listening.Contains(port)) { kept.Add((port, busId)); continue; }
+            if (port != own && !view.IsListening(port)) { kept.Add((port, busId)); continue; }
             var set = view.ExportsOf(port);
             if (set != null && !set.Contains(busId)) kept.Add((port, busId));
         }
@@ -226,6 +270,21 @@ internal static class UsbipBackend
         private readonly Dictionary<int, HashSet<string>?> _exports = new();
 
         public HashSet<int> Listening => _listening ??= ListeningLoopbackPorts();
+
+        // Ports the listener table left out, each asked once by a connect.
+        private readonly Dictionary<int, bool> _answered = new();
+
+        /// <summary>Whether a server listens on the loopback port: the TCP
+        /// listener table lists it, or a connect to it succeeds. The table
+        /// alone is not enough: on the ARM64 test PC on 2026-11-18 it left a
+        /// live program's listening port out of one sweep in two, and that
+        /// sweep plugged out the program's devices as a dead server's.</summary>
+        public bool IsListening(int port)
+        {
+            if (Listening.Contains(port)) return true;
+            if (!_answered.TryGetValue(port, out bool live)) _answered[port] = live = Connects(port);
+            return live;
+        }
 
         public HashSet<string>? ExportsOf(int port)
         {
@@ -328,7 +387,7 @@ internal static class UsbipBackend
             // the location: canceling one never touches an import, and this
             // record is the last thing that names the location.
             int own = UsbipServer.Current?.Port ?? 0;
-            if (serverPort != own && !view.Listening.Contains(serverPort))
+            if (serverPort != own && !view.IsListening(serverPort))
                 VhciClient.DetachLocation("127.0.0.1", serverPort, busId);
             else if (view.ExportsOf(serverPort) is not { } exports)
                 return false;
@@ -336,6 +395,21 @@ internal static class UsbipBackend
                 return true;
             VhciClient.StopAttachAttempts("127.0.0.1", serverPort, busId);
             return true;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>True when a TCP connect to the loopback port succeeds
+    /// within the device-list exchange's deadline. A port nothing listens on
+    /// is refused at once.</summary>
+    private static bool Connects(int port)
+    {
+        try
+        {
+            using var socket = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork,
+                System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp);
+            var connect = socket.ConnectAsync(System.Net.IPAddress.Loopback, port);
+            return connect.Wait(ExportsDeadlineMs) && socket.Connected;
         }
         catch { return false; }
     }
