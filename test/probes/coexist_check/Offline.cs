@@ -32,7 +32,8 @@
 //        file gets through, while the file still runs and copies. Released,
 //        the root renames and the file opens for writing (the controls).
 //        The check Pin makes through each handle refuses a folder its user
-//        owns and passes this machine's %ProgramData%\HIDMaestro.
+//        owns and passes one Administrators own that only SYSTEM and
+//        Administrators write.
 //   OF6  The deploy's tools run from held files: the driver staging set
 //        written to a scratch directory as EnsureExtracted writes it, every
 //        file held, Inf2Cat run through DriverBuilder.Run as
@@ -249,11 +250,19 @@ internal static partial class Program
                 using (var h = Call<Microsoft.Win32.SafeHandles.SafeFileHandle>(openLevel, new object[] { root, false }))
                     Check("OF5: through its handle, a folder its user owns is not protected",
                           !Call<bool>(isProtected, new object[] { h }), root);
-                string real = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "HIDMaestro");
-                if (Directory.Exists(real))
-                    using (var h = Call<Microsoft.Win32.SafeHandles.SafeFileHandle>(openLevel, new object[] { real, false }))
-                        Check("OF5: through its handle, this machine's %ProgramData%\\HIDMaestro is",
-                              Call<bool>(isProtected, new object[] { h }), real);
+                // A folder of the probe's own with the owner and DACL the SDK
+                // gives its staging: Administrators own it, only SYSTEM and
+                // Administrators write. The machine's own
+                // %ProgramData%\HIDMaestro is not read: another program can
+                // make that folder with the inherited DACL, which lets Users
+                // write, on a machine where this SDK never staged anything.
+                string guarded = Path.Combine(scratch, "guarded");
+                var security = new System.Security.AccessControl.DirectorySecurity();
+                security.SetSecurityDescriptorSddlForm("O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)");
+                System.IO.FileSystemAclExtensions.CreateDirectory(security, guarded);
+                using (var h = Call<Microsoft.Win32.SafeHandles.SafeFileHandle>(openLevel, new object[] { guarded, false }))
+                    Check("OF5: through its handle, a folder Administrators own that only SYSTEM and Administrators write is protected",
+                          Call<bool>(isProtected, new object[] { h }), guarded);
             }
 
             // The root's own open blocks nothing: with it alone open, the
