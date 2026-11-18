@@ -81,12 +81,12 @@ internal static partial class Program
         using (var id = WindowsIdentity.GetCurrent())
             if (!new WindowsPrincipal(id).IsInRole(WindowsBuiltInRole.Administrator))
             {
-                Console.WriteLine("  SKIP: creating a controller needs elevation.");
+                Console.WriteLine("  [SKIP] creating a controller needs elevation.");
                 return 2;
             }
         if (part != "child" && SdkConsumers.Find() is { } other)
         {
-            Console.WriteLine($"  SKIP: {other} has HIDMaestro.Core.dll loaded, and two programs that embed HIDMaestro never test at once.");
+            Console.WriteLine($"  [SKIP] {other} has HIDMaestro.Core.dll loaded, and two programs that embed HIDMaestro never test at once.");
             return 2;
         }
         Note($"{System.Runtime.InteropServices.RuntimeInformation.OSArchitecture}, Windows {Environment.OSVersion.Version}, " +

@@ -1,6 +1,6 @@
 # regression_battery.ps1: the regression battery
 
-Runs 104 scenarios and verifies every one leaves zero HIDMaestro PnP
+Runs 106 scenarios and verifies every one leaves zero HIDMaestro PnP
 devnodes in the `PRESENT` state. S01 to S23 drive `HIDMaestroTest.exe`
 through single- and multi-controller create/swap/remove/force-kill
 sequences, and S24 and up run the probe programs under `test/probes`.
@@ -33,7 +33,28 @@ custom profile (BEEF:F000) authored via the SDK's `HMProfileBuilder`
 
 # stop at the first failure, as the release gate does
 ./test/regression/regression_battery.ps1 -StopOnFailure
+
+# every create of the run on the USB/IP backend (or Umdf2)
+./test/regression/regression_battery.ps1 -Backend Usbip
 ```
+
+`-Backend` is `Auto` by default: each create resolves as it does in a
+program that names no backend, the UMDF2 driver where Windows installs
+HIDMaestro's package and the USB/IP backend elsewhere, and an
+`HIDMAESTRO_BACKEND` already in the environment stays in force. `Umdf2` or
+`Usbip` sets `HIDMAESTRO_BACKEND` for every process the battery starts, so
+`Auto` resolves to that backend in every probe, and passes `--backend` to
+the test app, whose contexts ask for it. S17's USB/IP pass asks for `Auto`
+under `Umdf2`, since its profiles have only the USB/IP backend. The log
+opens with what `Auto` resolves to on the machine, the override in force,
+and the backend each profile of S01 to S23 resolves to, or the exception
+its create would throw.
+
+The battery takes the machine's bench lock, the named mutex
+`Global\HIDMaestro.Bench`, before its first scenario and holds it to the
+end, so no other live run on the machine overlaps it. It waits up to 60
+minutes for another holder. A caller that holds the lock already passes
+`-BenchLockHeld`.
 
 Exit code: `0` if every scenario passed, `1` if any failed.
 
@@ -66,8 +87,8 @@ command, and the test app's exit after quit get 3600 s, S71 6300 s and S73
 still running then fails its scenario as a hang, with the probe's
 transcript, and its process tree is stopped.
 
-Total wall time: 30 minutes for all 102
-scenarios, every section and check, on the development laptop, a 16-core
+Total wall time at 2.2.0, with 102
+scenarios: 30 minutes for every scenario, every section and check, on the development laptop, a 16-core
 Lenovo Legion Pro 7, and 42 minutes on a 4-core Celeron J4125 at
 `HIDMAESTRO_TIMEOUT_SCALE=2`. Use `-Filter` to run one scenario when
 iterating.
@@ -77,6 +98,17 @@ own architecture: `test\bin\Release\net10.0-windows10.0.26100.0\win-x64`
 or `win-arm64` by `RuntimeInformation.OSArchitecture`, unless `-Exe`
 names another, and each probe's own build output, which an ARM64
 machine gets from a build with `-p:HMTargetArchitecture=arm64`.
+
+### Building for ARM64
+
+Build each architecture in a tree of its own: one worktree for x64 and
+another for arm64. `PlatformTarget` is not an input of the compile step,
+so a tree built for x64 and then with `-p:HMTargetArchitecture=arm64`
+keeps its x64 assemblies beside arm64 app hosts, and the reverse after a
+source change. Before the first scenario the battery reads the machine
+type of every probe built for the target architecture, its app host and
+its own assembly, and stops with the names of the probes built for
+another architecture.
 
 ## Expected skips
 
@@ -95,6 +127,7 @@ driven over SSH.
 | Windows Sandbox not available | `S73_Usbip_Clean_Install`, and the sandbox part of `S101_Uninstall` | runs | skips | skips |
 | Windows Sandbox available, or `HIDMAESTRO_UNINSTALL_FIXTURE` not 1 | the fixture part of `S101_Uninstall` | skips | runs with the variable set | skips |
 | SteamVR not installed | phase 2 of `S50_Vr_Controller_Smoke` | runs | runs | skips |
+| Windows installs HIDMaestro's driver package | the refusing-machine part of `S104_Driver_Signing` | skips | skips | runs |
 
 Any other skip on these machines is a fault of the machine's setup or of
 the scenario, and is read and fixed like a failure.
@@ -152,7 +185,7 @@ not run elevated.
 | `S39_Foreign_Devnode_Survival`    | A foreign root devnode present during a sweep | The ownership guard: our sweep never mutates a devnode we do not own (issue #28). |
 | `S40_Xbox_Combined_Trigger`       | Xbox 360 split-trigger synthesis | The combined-Z workaround still writes both the DI view and Vx/Vy (PadForge#130). |
 | `S41_Xbox_Gip_Trigger_Resolver`   | GIP-side trigger resolver | The GIP buffer's trigger resolution matches the HID side. |
-| `S42_Usb_Composite_Schema`        | Composite persona schema, no device | Each composite persona matches its hardware dump, and none leaks into the UMDF2 path. |
+| `S42_Usb_Composite_Schema`        | Composite persona schema and the derived USB presentation, no device | Each composite persona matches its hardware dump, and none leaks into the UMDF2 path. Every other profile with a descriptor derives its USB device on the USB/IP backend, except the Xbox profiles that reach XInput through the XUSB companion or xinputhid, and every derived descriptor matches the golden record. The pins of a `usbConfiguration` without blobs land in their fields, and one that does not fit is refused at its path. |
 | `S43_Usbip_Server_Protocol`       | USB/IP wire contract, no device | Descriptors, HID in both directions, isochronous pacing, unlink handling, and stream state both with SET_INTERFACE and with only the audio traffic to go on. |
 | `S44_Usbip_Bundle_Deploy`         | The bundled transport | It is present, its hash matches the pinned SHA-256, and the deploy path refuses tampered bytes. |
 | `S45_Usbip_E2E_Composite`         | A composite persona through the real USB stack | Enumeration, HID, and the audio endpoints end to end. |
@@ -213,8 +246,10 @@ not run elevated.
 | `S101_Uninstall`                  | Removing HIDMaestro: `HIDMaestroUninstall.exe` and `HMUninstall` | Every machine: the tool's `--preview --json` and `HMUninstall.Preview` change nothing against a snapshot of devices, packages, the certificate, registry keys and files, and the preview lists every HIDMaestro package the snapshot finds. Where Windows Sandbox exists, the real removal runs inside it, started after S73 and collected at this slot: the desktop link usbip-win2's installer leaves is removed from the Public profile. With a program running that holds four controllers (a composite among them), an OEM name override and the OpenVR registration, the tool exits 2, names it and changes nothing. Once it is killed, the removal leaves no device record, package, certificate, private key, registry key or folder, puts the OEM targets back, puts GameInputSvc back to starting on demand with its start triggers after the first create set it to start automatically and recorded the type it had, takes the OpenVR registration, restarts no USB root hub, keeps a `%TEMP%` that is a junction and its target's file, and deletes a junction under a HIDMaestro name as a link. With the removal held at the driver deploy lock, a program that installs and one that creates from two threads at once both wait at the removal gate, hold no owner record and have installed and created nothing until the lock goes, and do not block the removal. Each install and create then returns with the removal's lock free, and both programs keep their controllers. The installing program calls back into the gate from the gate's own wait, and the call returns. A running program that only set an OEM name override, registered the OpenVR driver or installed the USB/IP transport blocks a removal, and one that asked for the OpenVR registration with no SteamVR present does not. A junction at `%ProgramData%\HIDMaestro` goes as a link with its target's file kept. A program removes HIDMaestro in its own process with its controller open, then installs and creates again. A file held open under `%ProgramFiles%\HIDMaestro` waits for the next start and one under `%ProgramData%\HIDMaestro` stays, reported failed. OEM override records older than 2.0.1, or set from another account, keep what they cannot prove. A record as 2.0.0 wrote it gets no write to this account's hive from a Set or a Clear unless that hive holds its label, and one whose label it holds is taken over by a Set and put back by a removal. With `HIDMAESTRO_UNINSTALL_FIXTURE=1` on a machine without Windows Sandbox: the real removal, a clean read of the machine, and a reinstall with one controller created and disposed. The sandbox part skips where `wsb.exe` is missing, and the fixture part where Windows Sandbox exists or the variable is not 1. Live, elevated |
 | `S102_Loop_Containment`           | The SDK's loops on a pass that fails | The device clock, the protocol host's tick, the USB/IP input and audio pumps, the audio event thread, the server's accept loop, a connection that ends on the server's own exception, the VR haptic reader and the output reader each outlive a failing pass, wait between passes, log the failures at powers of two and the end of the episode, and cost under 5% of a spinning thread's cycles. A protocol clock period under 0.125 ms is refused, and the audio pump with no waitable timer sleeps instead of spinning. Each case runs in a child process. Offline |
 | `S103_Sinput_Persona`             | The SInput personas, against SDL's SInput driver | Over raw HID, on a controller with a nonzero index, `sinput` answers SDL's features command (output report 0x03, command 0x02) with the issue's 64-byte input report 0x02, SINPUT-LIB-HID's layout with OpenPuck's one finger per touchpad, and `joypad-steam-input` with joypad-os's bytes 0 to 19 and a serial of its own, the last serial byte the controller's index. Data-only frames arrive as report 0x01. Type 2 haptics decode to `leftMotor` and `rightMotor`, type 1 on `sinput` to the louder amplitude's high byte per side, and RGB on `joypad-steam-input` to `lightbarRed`, `lightbarGreen` and `lightbarBlue`. The features command, a player LED write, RGB on `sinput` and type 1 on `joypad-steam-input` decode nothing. With 20 raw frames 0.1 ms apart after each of 100 features commands, every command gets its reply. The unfiltered SDL3 build of PadForge's fork, its revision stamped, then opens two `sinput` pads: their name, standard type, a serial each, accelerometer and gyroscope, two touchpads, rumble without player LED or RGB capabilities, South and the left stick from a submitted frame, rumble decoded on its own pad, a refused color, and no player LED or color on the wire. Then two `joypad-steam-input` pads: their name, a serial each, no sensors and no touchpads, rumble, player LED and RGB capabilities, South and the left stick, rumble and a color decoded on their own pad, and on the wire the features command, each pad's player number, haptics and the color. [SKIP] for the SDL part without that build. Live, elevated |
-| `S104_Driver_Signing`             | What Windows requires of a driver package's signature, and a machine that takes only Microsoft-signed ones | The decision over its inputs: the code integrity options the three test machines read on 2026-11-17, each of its four conditions taken away in turn, and the status a program gets. On this machine, `HMDriverSigning.Check()` agrees with the probe's own read of `SystemCodeIntegrityInformation`, and a driver store that holds HIDMaestro's package reads as a machine that installs it. Windows' own answer (`WinVerifyTrust`) for HIDMaestro's installed catalog and for a catalog of Windows itself, without and with `WTD_CODE_INTEGRITY_DRIVER_MODE`. A catalog signed as HIDMaestro signs, with a certificate of the probe's own that it removes: Windows trusts it without the mode flag, and with the flag refuses it exactly where it enforces WHQL signing. There a failed import is named with `HMDriverSigningException`, and elsewhere it is never blamed on signing. On a machine whose Windows installs only Microsoft-signed packages and that holds no HIDMaestro package, `InstallDriver` and a create throw `HMDriverSigningException` and the machine reads the same after: certificates, folders, registry keys and GameInputSvc's start type. That part skips where Windows installs the driver. No device. The certificate part needs elevation |
+| `S104_Driver_Signing`             | Whether Windows installs HIDMaestro's driver package, and which backend a create resolves to | The decision over its inputs: the code integrity options the test machines read, the four states the ARM64 Surface was measured in on 2026-11-18, and each condition taken away in turn. The machine rule for `Auto` over the build's payloads and the verdict, a create's resolution over the profile's data and the request, the process override, and the neutral `HMDriverSigningException` of an explicit `Umdf2` request on a refusing machine of the probe's own. On this machine, the verdict agrees with the probe's own read of `SystemCodeIntegrityInformation`, `MachineBackend` with the rule, and `IsDriverInstalled` with the backend it answers for. Windows' own answer (`WinVerifyTrust`) for HIDMaestro's installed catalog and for a catalog of Windows itself, without and with `WTD_CODE_INTEGRITY_DRIVER_MODE`, and for a catalog signed as HIDMaestro signs, with a certificate of the probe's own that it removes. On a machine whose Windows refuses the package and that holds none, an explicit `Umdf2` request throws and writes no certificate, package or payload record, and a program that names no backend installs the USB/IP host controller and creates a controller on it. That part skips where Windows installs the driver and runs on the ARM64 Surface. The certificate part and the last part need elevation, and the last creates a device, under the battery's bench lock. Live, elevated |
 | `S105_Xusb_Persona`               | The wired Xbox 360 pad as a USB device, under Windows' own XUSB driver | `xbox-360-wired-full` runs on the USB/IP backend with no HID interface and no descriptor. Offline: its descriptor set is the device [MS-XUSBI] describes (class FF/FF/FF, one FF/5D/01 interface with its 17-byte XUSB descriptor, interrupt IN 0x81 and OUT 0x02), a copy with a descriptor, another interface class, no interrupt IN endpoint or no `xusb` name is refused at the JSON path of its mistake, and each of the other eight USB/IP personas still needs its HID interface, its descriptor and, where it serves Microsoft OS descriptors, its extended properties. On the wire, a USB/IP client as the host reads every descriptor, string 0xEE and the compatible ID XUSB10, is stalled on the extended properties, the capability and serial requests, SET_CONTROL, the HID descriptors and the HID class's other requests, reads the 20-byte input report byte for byte from interrupt IN and from GET_REPORT(Input), and writes the rumble and LED reports, which reach the output ring raw and decode to `leftMotor`, `rightMotor` and `ledPattern`. Live: the devnode `USB\VID_045E&PID_028E\<serial>` starts under the USB/IP root hub with service `xusb22` from `xusb22.inf`, the pad takes a free XInput slot, every button, the d-pad, Guide, both triggers and both sticks read back through XInputGetState, the slot's LED request arrives, XInputSetState's motor speeds arrive at the OUT endpoint as their high bytes, a second pad takes a slot of its own, and `dualsense-composite` beside them reads back over HID. Both devnodes are gone after Dispose. Exit 2 when another program that embeds HIDMaestro is running. Live, elevated |
+| `S106_Gip_Persona`                | The wired Xbox One S pad as a USB device, under Windows' own GIP driver | `xbox-one-s-full` runs on the USB/IP backend with no HID interface and speaks the Gaming Input Protocol. Offline: its descriptor set is the device Microsoft's GIP specification describes, its metadata is Santroller's with the persona's own firmware version, and a mis-authored copy is refused at its mistake. On the wire, a USB/IP client as the host sees Hello every 500 ms until answered, the metadata in fragments paced by the host's acknowledgements, Start, Status and the first input report, Guide and Share, and the Direct Motor command on the output ring in the UMDF2 form's shape. Live: Windows' inbox `dc1-controller` and `xboxgip` bind the device, `xboxgip` holds the metadata it served, a submitted state reads back through XInputGetState, Share reads in the XUSB gamepad state, XInputSetState arrives as the Direct Motor command, GameInput's trigger levels are recorded, Windows.Gaming.Input lists the pad once, and `dualsense-composite` beside it reads back over HID. Exit 2 when another program that embeds HIDMaestro is running. Live, elevated |
+| `S107_Backend_Parity`             | One profile on both backends | `parity`: every deployable profile both backends present is created on each backend the machine runs, both on x64 and the USB/IP backend where Windows refuses HIDMaestro's driver, and starts with no problem code. Where both run, the HID class reads the same attributes, button and value caps of every report type and product string on each, and an output report written to the device reaches the program as the same packet. `long`: input reports over 64 bytes read whole in one `ReadFile` on USB/IP and output reports arrive whole, at the derived speed and pinned to full speed. `ports`: the create past the host controller's last USB 2.0 port is refused by name and the controllers on the other ports keep their HID interface. `start`: each derived device's HID interface opens the moment its create returns. `oem`: the identity's joy.cpl name while a USB/IP controller lives, and the value before it once it goes. `identity`: one key's HID interface path is the same after a dispose and after a process restart. `twoprograms`: two programs on one host controller keep their own bus locations, and one's dispose leaves the other's device. Exit 2 when another program that embeds HIDMaestro is running. Live, elevated |
 
 ## What "PASS" means
 
@@ -226,26 +261,51 @@ Per scenario:
    include `root\HIDMaestro`, `root\HIDMaestroGamepad` or
    `root\HIDMaestroXUSB`, whatever its enumerator (`ROOT\HIDClass`, any
    `ROOT\VID_xxxx&PID_yyyy&IG_00`, `SWD\HIDMAESTRO*`), and its children.
-   A USB/IP controller carries no HIDMaestro ID, so its devnodes are
-   found by where they sit: every devnode below the root hub of the
-   usbip-win2 host controller whose hardware IDs include
-   `ROOT\HIDMAESTRO_UDE`, the stamp the SDK puts on the host controller
-   it installs. That is the USB device, its interfaces, their HID
-   collections and audio endpoints. The host controller and its root hub
-   are the transport and are left out, and nothing below another
-   program's usbip-win2 host controller counts. `HMDevnodes.ps1` holds
-   the rule, and `devnode_owner_check.ps1` checks it offline (no device,
-   no elevation): a `ROOT\HIDClass` parent and an `IG_00` parent other
-   than 045E:028E are reported with their HID children, a composite
-   persona is reported whole, a persona left behind is a leftover, and a
-   foreign `ROOT\HIDClass` device, a phantom, the host controller, its
-   root hub and another program's host controller are not.
+   A USB/IP controller carries no HIDMaestro ID. It is a USB device on
+   the root hub of a usbip-win2 host controller whose hardware IDs
+   include `ROOT\HIDMAESTRO_UDE`, and an owner record of a program built
+   on HIDMaestro (`HKLM\SOFTWARE\HIDMaestroOwners`) names it: by its USB
+   instance id, which the create records for every persona whose serial
+   names it, or, for a persona that shares its serial and that Windows
+   names by port, by its vhci port, its port on the root hub. The device,
+   its interfaces, their HID collections and audio endpoints count. The
+   SDK stamps every usbip-win2 host controller present, so the stamp
+   alone does not make a device HIDMaestro's, and a device another
+   program attaches through usbip-win2 does not count. A program's
+   record goes when it exits, so the battery keeps every USB instance id
+   a record has named since it started, read every 100 ms, and a persona
+   a program left behind still counts. The host controller and its root
+   hub are the transport and are left out, and nothing below a host
+   controller without the stamp counts. `HMDevnodes.ps1` holds the rule,
+   and `devnode_owner_check.ps1` checks it offline (no device, no
+   elevation): a `ROOT\HIDClass` parent and an `IG_00` parent other than
+   045E:028E are reported with their HID children, a composite persona
+   its record names is reported whole, a shared-serial persona by its
+   port, a persona left behind is a leftover, and a foreign
+   `ROOT\HIDClass` device, a phantom, the host controller, its root hub,
+   a device another program attached through the same host controller, a
+   persona no record names and an unstamped host controller are not.
 2. Run the scenario, then call `Wait-CascadeSettle`: wait until the test
    app has acknowledged the last command the scenario sent, which it does
-   after running it, then for two consecutive 200 ms samples of the
-   devnode set to agree (about 600 ms on a fast box, 60 s scaled cap).
-   `-Verbose` prints how the first wait ended and whether the command
-   changed the set.
+   after running it. A UMDF2 teardown returns once Windows has removed
+   the devnodes. A USB/IP teardown returns once the host controller has
+   unplugged the device, before Windows removes its devnodes, so the
+   settle then waits for each USB device the command took away to leave
+   the device tree (120 s scaled). Then it waits for two consecutive
+   200 ms samples of the devnode set to agree (about 600 ms on a fast
+   box, 60 s scaled cap). `-Verbose` prints how the first wait ended and
+   whether the command changed the set. While the test app runs, each
+   of its slots is then checked against the backend it runs on: the
+   test app prints a `[SLOT]` line for every create, swap and removal
+   with the profile, the backend the create resolved to and the device
+   it made. The backend must be the one the run resolves the profile to
+   (the log's opening lines). On UMDF2 the devnode must be a present
+   HIDMaestro controller devnode, and on USB/IP the USB device must be
+   present on HIDMaestro's host controller with an owner record naming
+   it. An `[ERROR]` line, a create, swap or `InstallDriver` the app could
+   not run, fails the scenario with the app's exception, so a profile
+   the run cannot present on its backend fails where it is created and
+   is never skipped.
 3. Snapshot the same set AFTER.
 4. PASS iff `(after \ before) == empty` (i.e. no new `PRESENT` entries
    leaked across the scenario).
