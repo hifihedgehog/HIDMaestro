@@ -726,6 +726,9 @@ public sealed class ControllerProfile
         AnswerModels.Validate(this, global::HIDMaestro.Internal.DeviceModel.OwnOf(this), taken: false, new List<string>());
         if (DeviceModel != null && DeviceModel != "none")
             throw new ProfileDefectException("$.deviceModel", $"\"{DeviceModel}\" is not a value it takes. The one value is \"none\".");
+        // An identity the XUSB function never takes, on either backend.
+        if (Usbip.XusbFunction.RefusedIdentityReason(this) is { } refused)
+            throw new ProfileDefectException("$.pid", refused);
         if (!HasDescriptor && !ReportsOnXusbInterface)
         {
             // A USB/IP persona's HID interface presents the descriptor, so

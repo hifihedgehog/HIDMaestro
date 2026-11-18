@@ -991,6 +991,10 @@ public sealed class HMContext : IDisposable
         try
         {
             Internal.DeviceOrchestrator.PrepareUsbipController(index, profile.Inner);
+            // The XUSB function's start wait ends when XInput has one slot
+            // more than before the attach, as the UMDF2 create's slot wait.
+            bool xusb = Internal.Usbip.UsbPresentation.Resolve(profile.Inner).Kind == Internal.Usbip.UsbPresentationKind.XusbFunction;
+            int slotsBefore = xusb ? Internal.DeviceOrchestrator.ConnectedXInputSlots() : -1;
             // The device emulator maps the index's sections before its
             // attach, so a failed attach leaves them for the catch below.
             handle = Internal.Usbip.UsbipBackend.CreateDevice(profile.Inner, index, lease.Identity);
@@ -1002,6 +1006,9 @@ public sealed class HMContext : IDisposable
                 // A derived device's HID interface is started before the
                 // create returns, as the UMDF2 create's is.
                 if (handle.Device.Derived) Internal.DeviceOrchestrator.AwaitUsbipStart(usbId, index);
+                // The XUSB function's XUSB interface is there and its XInput
+                // slot taken, as the UMDF2 create's companion is.
+                else if (xusb) Internal.DeviceOrchestrator.AwaitUsbipXusbStart(usbId, index, slotsBefore);
             }
             var controller = new HMController(this, slot, lease, profile, instanceId: null, handle, lease.Identity.Key);
             try

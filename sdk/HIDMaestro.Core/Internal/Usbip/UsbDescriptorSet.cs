@@ -177,7 +177,8 @@ internal sealed class UsbDescriptorSet
         SerialVariant = identity.SerialVariant;
         // The authored blobs, or the ones the presentation derives from the
         // profile, which then meet every check below by construction.
-        var cfg = UsbPresentation.Resolve(profile).Spec;
+        var presentation = UsbPresentation.Resolve(profile);
+        var cfg = presentation.Spec;
         CheckStructure(cfg);
         DeviceDescriptor = FromHex(cfg.DeviceDescriptorHex, "deviceDescriptor");
         ConfigurationDescriptor = FromHex(cfg.ConfigurationDescriptorHex, "configurationDescriptor");
@@ -185,23 +186,28 @@ internal sealed class UsbDescriptorSet
             ? FromHex(cfg.OtherSpeedConfigurationDescriptorHex, "otherSpeedConfigurationDescriptor") : null;
         // A device with no HID interface names the interface its reports
         // travel on "xusb" (UsbInterfaceSpec.Function) and carries no report
-        // descriptor. Every other persona is held to both.
+        // descriptor. Every other persona is held to both. The XUSB function
+        // of an XUSB companion profile is such a device: the profile's HID
+        // descriptor is the UMDF2 backend's, and on this one xusb22 makes
+        // the HID child and its descriptor.
         int xusbAt = cfg.Interfaces.FindIndex(x => x.Function == "xusb");
         string xusbPath = $"$.usbConfiguration.interfaces[{xusbAt}].function";
-        if (xusbAt >= 0 && profile.HasDescriptor)
+        bool authored = presentation.Kind == UsbPresentationKind.Authored;
+        if (xusbAt >= 0 && authored && profile.HasDescriptor)
             throw new ProfileDefectException("$.descriptor",
                 $"has no interface to present it: {xusbPath} \"xusb\" marks a device with no HID interface.");
         // With no descriptor, the always-armed extended report is the one
         // report the profile describes, and the device sends nothing else.
-        if (xusbAt >= 0 && profile.ExtendedReport == null)
+        if (xusbAt >= 0 && presentation.Report == null)
             throw new ProfileDefectException("$.extendedReport",
                 "is required for a device with no HID interface: it is the report the device sends.");
-        if (xusbAt >= 0 && !profile.ExtendedReport!.AlwaysArmed)
+        if (xusbAt >= 0 && !presentation.Report!.AlwaysArmed)
             throw new ProfileDefectException("$.extendedReport.alwaysArmed",
                 "must be true on a device with no HID interface, which has no other report to send.");
-        ReportDescriptor = profile.GetDescriptorBytes()
-            ?? (xusbAt >= 0 ? Array.Empty<byte>()
-                : throw new ProfileDefectException("$.descriptor", "is required for the usbip backend: the HID interface presents it."));
+        ReportDescriptor = xusbAt >= 0 ? Array.Empty<byte>()
+            : profile.GetDescriptorBytes()
+              ?? throw new ProfileDefectException("$.descriptor", "is required for the usbip backend: the HID interface presents it.");
+        _strings0 = presentation.Strings;
 
         if (DeviceDescriptor.Length != 18 || DeviceDescriptor[0] != 18 || DeviceDescriptor[1] != 0x01)
             throw new ProfileDefectException("$.usbConfiguration.deviceDescriptor", "is not an 18-byte USB device descriptor.");
@@ -249,10 +255,14 @@ internal sealed class UsbDescriptorSet
         _product = profile.ProductString;
         if (!cfg.SharedSerial && _iSerial != 0 && !string.IsNullOrEmpty(_serial)
             && _serial.All(c => c > ' ' && c < (char)0x7F && c != ','))
-            UsbInstanceId = $@"USB\VID_{profile.VendorId:X4}&PID_{profile.ProductId:X4}\{_serial}";
+            UsbInstanceId = $@"USB\VID_{VendorId:X4}&PID_{ProductId:X4}\{_serial}";
 
+        // An XUSB function may present another identity than the profile's:
+        // a wireless pad's profile names the pad, and its function is the
+        // receiver the pad reaches Windows through, whose identity the
+        // profile's xinput.information gives.
         ushort profileVid = profile.VendorId, profilePid = profile.ProductId;
-        if (VendorId != profileVid || ProductId != profilePid)
+        if (presentation.Kind != UsbPresentationKind.XusbFunction && (VendorId != profileVid || ProductId != profilePid))
             throw new ProfileDefectException("$.usbConfiguration.deviceDescriptor",
                 $"its VID/PID {VendorId:X4}:{ProductId:X4} does not match the profile's {profileVid:X4}:{profilePid:X4}.");
 
@@ -603,6 +613,8 @@ internal sealed class UsbDescriptorSet
     // Each string descriptor, built the first time a host asks for it. The
     // strings never change after construction.
     private readonly byte[]?[] _strings = new byte[]?[256];
+    // The presentation's strings by index (UsbPresentation.Strings).
+    private readonly IReadOnlyDictionary<byte, string> _strings0;
 
     private byte[]? GetStringDescriptor(byte index)
     {
@@ -622,12 +634,19 @@ internal sealed class UsbDescriptorSet
         // declare iSerial 0 and get null below, unchanged; Valve's declare a
         // real serial at index 3 and a configuration name at 4, and Steam
         // logs the serial it reads here (issue #56).
+        // The presentation's own strings first: the XUSB function serves a
+        // retail pad's, whatever the profile's HID strings say.
+        if (_strings0.TryGetValue(index, out var own)) return Encode(own);
         string? s = index == _iManufacturer && _iManufacturer != 0 ? _manufacturer
                   : index == _iProduct && _iProduct != 0 ? _product
                   : index == _iSerial && _iSerial != 0 ? _serial
                   : index == _iConfiguration && _iConfiguration != 0 ? _configurationName
                   : null;
-        if (s == null) return null;
+        return s == null ? null : Encode(s);
+    }
+
+    private static byte[] Encode(string s)
+    {
         var bytes = Encoding.Unicode.GetBytes(s);
         var d = new byte[2 + bytes.Length];
         d[0] = (byte)d.Length;

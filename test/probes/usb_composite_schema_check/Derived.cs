@@ -2,9 +2,11 @@
 // no usbConfiguration presents on the USB/IP backend.
 //
 //   1. Which deployable profiles the USB/IP backend presents: every one but
-//      the Xbox profiles that reach XInput through the XUSB companion or
-//      xinputhid, which it refuses by name. The profiles with no descriptor
-//      are deployable on neither backend.
+//      the Xbox profiles that reach XInput through xinputhid, which it
+//      refuses by name. The profiles with no descriptor are deployable on
+//      neither backend. Every profile that reaches XInput through the XUSB
+//      companion presents the XUSB function of the XUSB model, its VID, PID
+//      and resolved subtype written in, and the golden record holds each.
 //   2. Every presentable profile derives, and the descriptor set the
 //      create builds holds its descriptors: one HID interface, the HID
 //      class descriptor's length the descriptor's, VID, PID and bcdDevice
@@ -47,13 +49,9 @@ internal static partial class Program
               string.Join(", ", deployable.Where(p => !p.SupportsBackend(HMBackend.Auto)).Select(p => p.Id)));
 
         var refused = deployable.Where(p => !p.SupportsBackend(HMBackend.Usbip)).ToList();
-        var xbox = refused.Where(p =>
-        {
-            var xi = XInputPresentation.Resolve(p.Inner);
-            return xi.XusbCompanion || xi.Xinputhid;
-        }).ToList();
+        var xbox = refused.Where(p => XInputPresentation.Resolve(p.Inner).Xinputhid).ToList();
         Console.WriteLine($"  [note] {refused.Count} deployable profiles the USB/IP backend does not present yet: {string.Join(", ", refused.Select(p => p.Id))}");
-        Check("the USB/IP backend refuses only the Xbox profiles that reach XInput through the companion or xinputhid",
+        Check("the USB/IP backend refuses only the Xbox profiles that reach XInput through xinputhid",
               refused.Count == xbox.Count && refused.Count > 0,
               string.Join(", ", refused.Except(xbox).Select(p => p.Id)));
         Check("none of the Xbox profiles it refuses has a usbConfiguration", refused.All(p => p.Inner.UsbConfiguration == null));
@@ -68,12 +66,13 @@ internal static partial class Program
             }
         }
 
-        var derived = deployable.Where(p => p.SupportsBackend(HMBackend.Usbip) && p.Inner.UsbConfiguration == null).ToList();
+        var xusb = deployable.Where(p => XInputPresentation.Resolve(p.Inner).XusbCompanion && p.Inner.UsbConfiguration == null).ToList();
+        var derived = deployable.Where(p => p.SupportsBackend(HMBackend.Usbip) && p.Inner.UsbConfiguration == null && !xusb.Contains(p)).ToList();
         var authored = deployable.Where(p => p.Inner.UsbConfiguration is { IsAuthored: true }).ToList();
-        Console.WriteLine($"  [note] {derived.Count} derive their presentation, {authored.Count} author it");
+        Console.WriteLine($"  [note] {derived.Count} derive their presentation, {xusb.Count} present the XUSB function, {authored.Count} author it");
         Check("every UMDF2-default profile with a descriptor and no XInput stack of its own derives one",
-              derived.Count + refused.Count + authored.Count == deployable.Count,
-              $"{derived.Count} + {refused.Count} + {authored.Count} of {deployable.Count}");
+              derived.Count + xusb.Count + refused.Count + authored.Count == deployable.Count,
+              $"{derived.Count} + {xusb.Count} + {refused.Count} + {authored.Count} of {deployable.Count}");
 
         var golden = new StringBuilder();
         golden.AppendLine("# The device and configuration descriptors each profile with no usbConfiguration presents on the USB/IP backend.");
@@ -89,6 +88,19 @@ internal static partial class Program
         }
         Check($"all {derived.Count} derive, and their descriptor sets meet the derivation's rules", failures.Count == 0,
               string.Join("; ", failures.Take(5)));
+
+        // The XUSB function, one line each, with the speed written "xusb".
+        var xusbFailures = new List<string>();
+        foreach (var p in xusb.OrderBy(p => p.Id, StringComparer.Ordinal))
+        {
+            string? why = XusbDefect(p, out var set);
+            if (why != null) { xusbFailures.Add($"{p.Id}: {why}"); continue; }
+            golden.Append(p.Id).Append(" xusb")
+                  .Append(" device=").Append(Convert.ToHexString(set!.DeviceDescriptor))
+                  .Append(" config=").Append(Convert.ToHexString(set.ConfigurationDescriptor)).AppendLine();
+        }
+        Check($"all {xusb.Count} XUSB companion profiles present the XUSB function: the model's descriptors with the profile's VID, PID and subtype, no HID interface",
+              xusb.Count > 0 && xusbFailures.Count == 0, string.Join("; ", xusbFailures.Take(5)));
 
         string goldenPath = Path.Combine(repoRoot, "test", "probes", "usb_composite_schema_check", GoldenName);
         string text = golden.ToString().Replace("\r\n", "\n");
@@ -122,6 +134,36 @@ internal static partial class Program
               && !UsbPresentation.Resolve(ctx.GetProfile("steam-controller-2")!.Inner).HasIsochronous);
 
         CheckPins(ctx);
+    }
+
+    /// <summary>Null when <paramref name="p"/> presents the XUSB function
+    /// as the model gives it, else the first rule it breaks.</summary>
+    static string? XusbDefect(HMProfile p, out UsbDescriptorSet? set)
+    {
+        set = null;
+        UsbPresentation presentation;
+        try
+        {
+            presentation = UsbPresentation.Resolve(p.Inner);
+            set = new UsbDescriptorSet(p.Inner, 0);
+        }
+        catch (Exception e) { return $"{e.GetType().Name}: {e.Message}"; }
+        if (presentation.Kind != UsbPresentationKind.XusbFunction) return $"kind {presentation.Kind}";
+        // The descriptor set serves the function's blobs with the profile's
+        // values written in (xusb_persona_check holds them to the retail
+        // dumps), and its subtype is the one the UMDF2 companion answers.
+        var f = XusbFunction.For(p.Inner);
+        var built = XusbFunction.Build(p.Inner, f);
+        if (Convert.ToHexString(set.DeviceDescriptor) != built.DeviceDescriptorHex) return "device descriptor";
+        if (Convert.ToHexString(set.ConfigurationDescriptor) != built.ConfigurationDescriptorHex) return "configuration descriptor";
+        foreach (var (descriptor, at, value) in f.Fields)
+            if (value == "subType" && set.ConfigurationDescriptor[at] != XusbFunction.SubType(p.Inner)) return "subtype";
+        if (set.HasHidInterface || set.HidInterfaceNumber != 0 || set.ReportDescriptor.Length != 0) return "a HID interface";
+        if (set.GetMicrosoftOsFeature(4) != null || set.GetDescriptor(0x03, 0xEE, 0) != null) return "Microsoft OS descriptors";
+        if (presentation.Report is not { AlwaysArmed: true } || !ReferenceEquals(presentation.Report, f.Report)) return "the function's report";
+        if (set.UsbInstanceId == null || !set.UsbInstanceId.StartsWith($@"USB\VID_{set.VendorId:X4}&PID_{set.ProductId:X4}\", StringComparison.Ordinal))
+            return $"USB instance id {set.UsbInstanceId ?? "none"}";
+        return null;
     }
 
     /// <summary>Null when the derived presentation of <paramref name="p"/>

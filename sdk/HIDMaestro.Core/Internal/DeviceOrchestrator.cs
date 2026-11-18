@@ -994,6 +994,41 @@ internal static partial class DeviceOrchestrator
         LogDiag($"    usbip start wait {usbInstanceId}: child {childId ?? "(none)"} {child}, start {started} in {sw.ElapsedMilliseconds}ms");
     }
 
+    /// <summary>The XUSB function's start wait, the UMDF2 create's companion
+    /// and slot waits for the USB device: xusb22 publishes the XUSB interface
+    /// on the device's own instance, then XInput lists one slot more than
+    /// <paramref name="slotsBefore"/>, read before the attach. A failed
+    /// start throws as the UMDF2 create's does. A wait that runs out is
+    /// logged and the create goes on, as there: the controller still reaches
+    /// XInput on a consumer's next poll.</summary>
+    internal static void AwaitUsbipXusbStart(string usbInstanceId, int controllerIndex, int slotsBefore)
+    {
+        var sw = Stopwatch.StartNew();
+        bool arrived = DeviceManager.WaitForDeviceInterface(usbInstanceId, XusbInterfaceGuid, TimeoutScale.Apply(10000),
+            () => StartFailed(usbInstanceId, controllerIndex));
+        if (!arrived && StartFailed(usbInstanceId, controllerIndex, final: true))
+            throw StartError(usbInstanceId, controllerIndex);
+        long interfaceMs = sw.ElapsedMilliseconds;
+        int slotsAfter = slotsBefore;
+        if (arrived)
+        {
+            // The UMDF2 create's budget for the slot claim (SetupController).
+            var slotClock = Stopwatch.StartNew();
+            int budget = TimeoutScale.Apply(500);
+            while (slotClock.ElapsedMilliseconds < budget)
+            {
+                slotsAfter = CountConnectedXInputSlots();
+                if (slotsAfter > slotsBefore) break;
+                Thread.Sleep(10);
+            }
+        }
+        LogDiag($"    usbip xusb start wait {usbInstanceId}: interface {(arrived ? "arrived" : "TIMEOUT")} in {interfaceMs}ms, " +
+                $"XInput slots before={slotsBefore} after={slotsAfter} in {sw.ElapsedMilliseconds}ms");
+    }
+
+    /// <summary>The XInput slots that read connected now, 0 to 4.</summary>
+    internal static int ConnectedXInputSlots() => CountConnectedXInputSlots();
+
     /// <summary>The CachedInputReportIds value: the report IDs of a UMDF2
     /// protocol host's layouts in their order, each once, when the
     /// descriptor numbers its reports, else empty.</summary>
