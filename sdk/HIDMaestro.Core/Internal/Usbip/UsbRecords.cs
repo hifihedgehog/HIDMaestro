@@ -169,6 +169,10 @@ internal static partial class UsbRecords
         return list;
     }
 
+    /// <summary>Drop an instance whose records another removal took from
+    /// the ledger (UsbipRemoval.RemovePersonaPhantoms).</summary>
+    internal static void ForgetRemoved(string instanceId) => Forget(instanceId);
+
     /// <summary>Drop an instance from the ledger, and the ledger's key once
     /// it names none.</summary>
     private static void Forget(string instanceId)

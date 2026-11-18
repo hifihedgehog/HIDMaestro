@@ -940,8 +940,8 @@ internal static partial class Uninstaller
     /// The run keeps a WinUSB package while any USB device record names it,
     /// present or not (WinUsbBinding.RemovePackage, through
     /// WinUsbBinding.DevnodesByPackage), and every record left after its
-    /// device steps counts: a composite persona's record whose serial is a
-    /// real adapter's stays, since every real adapter of the model shares it.
+    /// device steps counts: a persona's record no ledger entry names as
+    /// made by HIDMaestro's create stays (UsbipRemoval.PersonaVerdict).
     /// So the preview reads the same records, less the ones its own device
     /// entries would remove, and keeps that package, the certificate it is
     /// signed with and HIDMaestroPackagesLeft, which names it, as the run

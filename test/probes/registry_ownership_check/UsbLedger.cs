@@ -661,3 +661,26 @@ internal static partial class Program
         Check("an unreadable claim is not", !WinUsbBinding.IsOsDescriptorBinding("winusb.inf", null));
     }
 }
+
+internal static partial class Program
+{
+    /// <summary>The usbip-win2 removal's rule for a not-present record below
+    /// the host controller: the ledger of records HIDMaestro's creates caused
+    /// decides, for every record alike.</summary>
+    static void PersonaRuleOffline()
+    {
+        Console.WriteLine("\n== Offline: the usbip-win2 removal takes a record by the ledger's proof alone ==");
+        const string adapter = @"USB\VID_057E&PID_0337\15/07/2014";
+        const string synthetic = @"USB\VID_054C&PID_09CC\HM0123456789AB";
+        var a = UsbipRemoval.PersonaVerdict(adapter, caused: true, keepReason: null);
+        Check("a ledgered record with a serial real units share (the GameCube adapter's) goes", a.Take, a.Reason ?? "");
+        var b = UsbipRemoval.PersonaVerdict(synthetic, caused: false, keepReason: null);
+        Check("a record with HIDMaestro's serial form that the ledger does not name stays", !b.Take, b.Reason ?? "taken");
+        var c = UsbipRemoval.PersonaVerdict(adapter, caused: false, keepReason: null);
+        Check("the GameCube adapter's record the ledger does not name stays", !c.Take, c.Reason ?? "taken");
+        var d = UsbipRemoval.PersonaVerdict(synthetic, caused: true, keepReason: "since boot");
+        Check("a ledgered record whose device arrived since Windows started stays, with that reason", !d.Take && d.Reason == "since boot", d.Reason ?? "taken");
+        var e = UsbipRemoval.PersonaVerdict(synthetic, caused: true, keepReason: null);
+        Check("a ledgered record with HIDMaestro's serial form goes", e.Take, e.Reason ?? "");
+    }
+}

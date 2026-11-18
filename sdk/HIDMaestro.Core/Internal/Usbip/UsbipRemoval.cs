@@ -47,11 +47,6 @@ internal static partial class UsbipRemoval
     /// (setup.iss at v.0.9.8.1, 248-288).</summary>
     internal const string DetachTaskName = "USBip Detach All On Reboot Or Shutdown";
 
-    /// <summary>The synthetic serial a persona without a captured one
-    /// serves: "HM" and twelve hex digits of its identity's hash
-    /// (DeviceIdentity.SyntheticSerial).</summary>
-    private static readonly Regex SyntheticSerial = new("^HM[0-9A-F]{12}$", RegexOptions.CultureInvariant);
-
     private const string FilterInf = "usbip2_filter.inf";
     private const string UdeServiceKey = @"SYSTEM\CurrentControlSet\Services\usbip2_ude";
     private const string FilterServiceKey = @"SYSTEM\CurrentControlSet\Services\usbip2_filter";
@@ -475,6 +470,23 @@ internal static partial class UsbipRemoval
     /// and only a made-up serial rules that out. A persona with a captured
     /// serial is reported and left, and so is every persona while
     /// <paramref name="keepReason"/> says why.</summary>
+    /// <summary>Whether the removal takes a not-present record below a
+    /// host controller's root hub, and why it keeps one. One rule for every
+    /// record, the GameCube adapter's serial-named one included: the ledger
+    /// of records HIDMaestro's creates caused (UsbRecords) decides. A record
+    /// it names goes, unless its device arrived since Windows started
+    /// (<paramref name="keepReason"/>). A record it does not name stays: a
+    /// real device's, one that was there before HIDMaestro's create took
+    /// its instance, and one an SDK before this ledger made.
+    /// registry_ownership_check's offline part checks it.</summary>
+    internal static (bool Take, string? Reason) PersonaVerdict(string instanceId, bool caused, string? keepReason)
+    {
+        if (!caused)
+            return (false, "no record of HIDMaestro's shows its create made it: a real device of that VID, PID and serial can share it, or it was there before.");
+        if (keepReason != null) return (false, keepReason);
+        return (true, null);
+    }
+
     private static void RemovePersonaPhantoms(List<UninstallEntry> entries, List<(string Hub, string Controller)> hubs, bool preview, string? keepReason)
     {
         if (hubs.Count == 0) return;
@@ -482,6 +494,7 @@ internal static partial class UsbipRemoval
         foreach (var h in hubs) hubIds.Add(h.Hub);
 
         var personas = new List<string>();
+        var caused = new HashSet<string>(UsbRecords.Caused(), StringComparer.OrdinalIgnoreCase);
         foreach (string id in UsbipDriverInstaller.DeviceIdList("USB"))
         {
             string[] parts = id.Split('\\');
@@ -490,14 +503,9 @@ internal static partial class UsbipRemoval
             if (UsbipDriverInstaller.IsPresent(id)) continue;
             string? parent = UsbipDriverInstaller.ParentOf(id);
             if (parent == null || !hubIds.Contains(parent)) continue;
-            if (!SyntheticSerial.IsMatch(parts[2]))
-            {
-                entries.Add(new("devnode", id, UninstallOutcome.Kept,
-                    "a composite persona's record whose serial is a real device's: a real device of that VID, PID and serial shares it."));
-                continue;
-            }
-            if (keepReason != null) entries.Add(new("devnode", id, UninstallOutcome.Kept, keepReason));
-            else personas.Add(id);
+            var (take, reason) = PersonaVerdict(id, caused.Contains(id), keepReason);
+            if (take) personas.Add(id);
+            else entries.Add(new("devnode", id, UninstallOutcome.Kept, reason));
         }
         if (personas.Count == 0) return;
 
@@ -541,6 +549,8 @@ internal static partial class UsbipRemoval
                 bool ok = RemoveRecord(id);
                 entries.Add(new("devnode", id, ok ? UninstallOutcome.Removed : UninstallOutcome.Failed, ok ? why : why + ", not removed"));
             }
+            // A record removed here leaves the ledger with it.
+            if (!preview && !UsbRecords.Exists(persona)) UsbRecords.ForgetRemoved(persona);
         }
     }
 
