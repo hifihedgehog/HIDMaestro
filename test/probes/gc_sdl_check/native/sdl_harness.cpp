@@ -15,7 +15,8 @@
 //   state <id>                   "state <buttons> <six axes> raw <buttons> <six axes>", the gamepad's
 //                                and then the joystick's, each button set a hex bit mask
 //   rumble <id> <low> <high>     SDL_RumbleGamepad with no expiry: "ok" or "error <text>"
-//   watch <id> <axis>            "armed", then pump until the joystick axis changes: "seen <qpc>" or "timeout"
+//   watch <id> <axis> <ms>       "armed", then pump until the joystick axis changes, for at most ms:
+//                                "seen <qpc>" or "timeout"
 //   count <id> <axis> <ms>       changes of the joystick axis seen over ms: "changes <n>"
 //   close <id>                   SDL_CloseGamepad: "ok"
 //   quit                         SDL_Quit and exit: "bye"
@@ -270,9 +271,7 @@ static bool Handle(const std::string& line)
   {
     SDL_JoystickID id = 0;
     int axis = 0, ms = 0;
-    in >> id >> axis;
-    if (command == "count")
-      in >> ms;
+    in >> id >> axis >> ms;
     SDL_Gamepad* gamepad = Find(id);
     if (gamepad == nullptr)
     {
@@ -285,7 +284,7 @@ static bool Handle(const std::string& line)
     if (command == "watch")
     {
       Answer("armed");
-      const long long deadline = Qpc() + 2 * QpcFrequency();
+      const long long deadline = Qpc() + QpcFrequency() * ms / 1000;
       long long seen = 0;
       while (Qpc() < deadline)
       {
