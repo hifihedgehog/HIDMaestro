@@ -3,15 +3,21 @@
 # device_oracle_check\native\oracle\driver.c (whose blob that probe's build
 # checks) into oracle_frames.inc beside the object files.
 #
-# Usage: build.ps1 -Out <dir> [-Obj <dir>]
+# -Arch picks the compiler's target (probe_common\NativeToolset.ps1): x64 by
+# default, arm64 for the probe's ARM64 build, which loads the DLL in its own
+# ARM64 process.
+#
+# Usage: build.ps1 -Out <dir> [-Arch x64|arm64] [-Obj <dir>]
 param(
     [Parameter(Mandatory = $true)][string]$Out,
+    [ValidateSet('x64', 'arm64')][string]$Arch = 'x64',
     [string]$Obj
 )
 $ErrorActionPreference = 'Stop'
 $Out = [IO.Path]::GetFullPath($Out)
-if (-not $Obj) { $Obj = Join-Path $PSScriptRoot '..\obj\native' }
+if (-not $Obj) { $Obj = Join-Path $PSScriptRoot "..\obj\native-$Arch" }
 $Obj = [IO.Path]::GetFullPath($Obj)
+. (Join-Path $PSScriptRoot '..\..\probe_common\NativeToolset.ps1')
 New-Item -ItemType Directory -Force -Path $Out, $Obj | Out-Null
 
 $oracle = Join-Path $PSScriptRoot '..\..\device_oracle_check\native\oracle\driver.c'
@@ -32,17 +38,13 @@ $incPath = Join-Path $Obj 'oracle_frames.inc'
 
 $dll = Join-Path $Out 'hm9bd6279.dll'
 $src = Join-Path $PSScriptRoot 'hm9bd6279.c'
-$stamp = (Get-FileHash $src).Hash + (Get-FileHash $incPath).Hash + (Get-FileHash $PSCommandPath).Hash
+$stamp = (Get-FileHash $src).Hash + (Get-FileHash $incPath).Hash + (Get-FileHash $PSCommandPath).Hash + $Arch
 $stampPath = Join-Path $Out 'hm9bd6279.stamp'
 if ((Test-Path $dll) -and (Test-Path $stampPath) -and ((Get-Content -Raw $stampPath).Trim() -eq $stamp)) { return }
 
-$installer = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer'
-$env:PATH = "$installer;$env:PATH"
-$vs = & (Join-Path $installer 'vswhere.exe') -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-if (-not $vs) { throw 'No Visual Studio with the x64 C++ tools.' }
-$vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+$toolset = Get-HMNativeToolset -Arch $Arch
 # The driver build's optimizer (scripts\build.cmd): /O2, the static runtime.
-$cmd = "`"$vcvars`" >nul && cl /nologo /O2 /W3 /LD /MT `"/I$Obj`" `"$src`" `"/Fo$Obj\\`" `"/Fe$dll`" /link /NOLOGO"
+$cmd = "$($toolset.Vcvars) >nul && cl /nologo /O2 /W3 /LD /MT `"/I$Obj`" `"$src`" `"/Fo$Obj\\`" `"/Fe$dll`" /link /NOLOGO"
 & cmd.exe /c $cmd
 if ($LASTEXITCODE -ne 0) { throw "cl failed with $LASTEXITCODE." }
 [IO.File]::WriteAllText($stampPath, $stamp)

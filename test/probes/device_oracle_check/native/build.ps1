@@ -12,7 +12,9 @@
 # (scripts\native_env.cmd, scripts\build.cmd, scripts\build_companion.cmd):
 # the Windows SDK and WDK of HM_SDK_ROOT / HM_WDK_ROOT or the installed kit,
 # version HM_WDK_VERSION or 10.0.26100.0, the UMDF 2.15 headers, and the
-# newest Visual Studio with the x64 C++ tools as vswhere finds it. The
+# newest Visual Studio with the C++ tools for -Arch as vswhere finds it
+# (probe_common\NativeToolset.ps1): x64 by default, arm64 for the probe's
+# ARM64 build, whose harnesses then run natively on an ARM64 machine. The
 # driver sources get build.cmd's defines and warning flags. Nothing links
 # WdfDriverStubUm.lib: the harness defines WdfFunctions_02015 and
 # WdfDriverGlobals itself (wdf.h:69-72, wdffuncenum.h:21). Every Win32 call
@@ -20,9 +22,10 @@
 # fails if a compiled driver object still imports anything from a system
 # DLL.
 #
-# Usage: build.ps1 -Out <dir> [-Obj <dir>] [-Repo <worktree root>]
+# Usage: build.ps1 -Out <dir> [-Arch x64|arm64] [-Obj <dir>] [-Repo <worktree root>]
 param(
     [Parameter(Mandatory = $true)][string]$Out,
+    [ValidateSet('x64', 'arm64')][string]$Arch = 'x64',
     [string]$Obj,
     [string]$Repo
 )
@@ -30,8 +33,9 @@ $ErrorActionPreference = 'Stop'
 $Out = [IO.Path]::GetFullPath($Out)
 # Windows PowerShell 5.1 leaves $PSScriptRoot empty in parameter defaults.
 if (-not $Repo) { $Repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..\..')).Path }
-if (-not $Obj) { $Obj = Join-Path $PSScriptRoot '..\obj\driver_harness' }
+if (-not $Obj) { $Obj = Join-Path $PSScriptRoot "..\obj\driver_harness-$Arch" }
 $Obj = [IO.Path]::GetFullPath($Obj)
+. (Join-Path $PSScriptRoot '..\..\probe_common\NativeToolset.ps1')
 
 # 9bd6279's blobs. oracle\.gitattributes keeps git from converting them.
 $oracleBlobs = [ordered]@{
@@ -76,13 +80,8 @@ foreach ($f in "$umInc\windows.h", "$sharedInc\sdkddkver.h", "$kmInc\hidport.h",
     if (-not (Test-Path $f)) { throw "Kit file missing: $f. Set HM_SDK_ROOT, HM_WDK_ROOT or HM_WDK_VERSION as for scripts\build.cmd." }
 }
 
-$installer = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer'
-$vswhere = Join-Path $installer 'vswhere.exe'
-# vcvars64.bat runs vswhere from PATH.
-$env:PATH = "$installer;$env:PATH"
-$vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-if (-not $vs) { throw 'No Visual Studio with the x64 C++ tools.' }
-$vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+$toolset = Get-HMNativeToolset -Arch $Arch
+$vs = $toolset.Vs
 
 New-Item -ItemType Directory -Force -Path $Out, $Obj | Out-Null
 $stubs = Join-Path $PSScriptRoot 'stubs'
@@ -121,8 +120,9 @@ $versionGen = @"
 
 # build.cmd's flags for the drivers (scripts\build.cmd:57-67), the WDK's
 # release optimization (/Ox /Os) among them, the forced include in front.
-# The harness gets the same defines.
-$defines = '/D _AMD64_ /D _WIN64 /D UNICODE /D _UNICODE /D UMDF_VERSION_MAJOR=2 /D UMDF_VERSION_MINOR=15'
+# The harness gets the same defines. The architecture define is the target's,
+# as build.cmd's is for each driver build.
+$defines = "/D $($toolset.Define) /D _WIN64 /D UNICODE /D _UNICODE /D UMDF_VERSION_MAJOR=2 /D UMDF_VERSION_MINOR=15"
 $includes = "`"/I$stubs`" `"/I$harnessDir`" `"/I$genDir`" `"/I$umInc`" `"/I$sharedInc`" `"/I$ucrtInc`" `"/I$kmInc`" `"/I$wdfInc`""
 $driverFlags = "/nologo /W4 /GS /Gz /Ox /Os /wd4324 /MT $defines /FIhm_fi.h $includes"
 $harnessFlags = "/nologo /W4 /GS /O2 /wd4324 /MT $defines $includes"
@@ -145,7 +145,7 @@ foreach ($f in $flavors) {
     $contractH = Join-Path $f.Dir 'hm_contract.h'
     if (Test-Path $contractH) { $sources += $contractH }
     $srcIds = ($sources | ForEach-Object { BlobId $_ }) -join ' '
-    $stamp = "$srcIds $ownHash $kit $vs"
+    $stamp = "$srcIds $ownHash $kit $vs $Arch"
     if ((Test-Path $exe) -and (Test-Path $stampPath) -and ((Get-Content $stampPath -Raw).Trim() -eq $stamp)) {
         Write-Host "driver_harness_$($f.Name).exe is current"
         continue
@@ -178,7 +178,7 @@ foreach ($f in $flavors) {
     # Both drivers define DriverEntry, so the companion's is renamed.
     $cmd = @"
 @echo off
-call "$vcvars" >nul || exit /b 1
+call $($toolset.Vcvars) >nul || exit /b 1
 cl $driverFlags "/Fo$work\driver.obj" /c "$driverC" || exit /b 1
 cl $driverFlags /DDriverEntry=CompanionDriverEntry "/Fo$work\companion.obj" /c "$companionC" || exit /b 1
 cl $driverFlags "/I$($f.Dir)" "/Fo$work\driver_tag.obj" /c "$tagC" || exit /b 1

@@ -15,6 +15,6 @@
        clones beside this repository (native\build.ps1). The script skips
        whatever is already built from the same sources and pins. -->
   <Target Name="BuildSdlHarness" AfterTargets="Build">
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\native\build.ps1&quot; -Out &quot;$(MSBuildProjectDirectory)\$(OutDir)native&quot;" />
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\native\build.ps1&quot; -Arch $(HMTargetArchitecture) -Out &quot;$(MSBuildProjectDirectory)\$(OutDir)native&quot;" />
   </Target>
 </Project>

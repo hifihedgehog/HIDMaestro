@@ -15,6 +15,6 @@
        this repository (native\build.ps1). The script skips a harness whose
        sources and pins have not changed. -->
   <Target Name="BuildGcHarnesses" AfterTargets="Build">
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\native\build.ps1&quot; -Out &quot;$(MSBuildProjectDirectory)\$(OutDir)native&quot;" />
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\native\build.ps1&quot; -Arch $(HMTargetArchitecture) -Out &quot;$(MSBuildProjectDirectory)\$(OutDir)native&quot;" />
   </Target>
 </Project>
