@@ -867,9 +867,6 @@ public sealed class HMContext : IDisposable
             {
                 throw Internal.ProfileDefects.ToProfileException(profile.Inner, e);
             }
-            // A host controller whose USB 2.0 ports all hold a device,
-            // before the lease and the host controller's install.
-            Internal.Usbip.UsbipBackend.ThrowIfPortsFull();
         }
 
         // What programs that have exited left goes first, once per
@@ -878,6 +875,12 @@ public sealed class HMContext : IDisposable
         // program that only creates composites clears what a killed one
         // left as well.
         Internal.OwnerSweep.SessionSweepOnce();
+
+        // A host controller whose USB 2.0 ports all hold a device, refused
+        // before the lease and the host controller's install. After the
+        // sweep, which plugs out what programs that have exited left on
+        // its ports.
+        if (resolved == HMBackend.Usbip) Internal.Usbip.UsbipBackend.ThrowIfPortsFull();
 
         // From the lease to the last write of the controller's entry, so the
         // exit handler never deletes the record of a create in flight
