@@ -564,8 +564,14 @@ public sealed class MemoryWriteSpec
 /// an output report it keeps.</summary>
 public sealed class EmitOutputSpec
 {
+    /// <summary>The report ID, hex, which a program's const writes at byte
+    /// 0. Absent for a program whose report carries no ID: its first byte
+    /// is the report's first byte, as the HID class hands a minidriver an
+    /// output report of a descriptor that declares no report IDs, and
+    /// OutputReceived raises that byte as the report ID. A memory image's
+    /// report needs one.</summary>
     [JsonPropertyName("reportId")]
-    public string ReportId { get; set; } = "";
+    public string? ReportId { get; set; }
 
     [JsonPropertyName("size")]
     public int Size { get; set; }

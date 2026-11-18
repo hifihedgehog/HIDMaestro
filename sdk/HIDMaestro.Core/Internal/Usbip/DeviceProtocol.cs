@@ -421,7 +421,9 @@ internal sealed class CompiledProtocol
                 {
                     var rule = Rules[i];
                     rule.EmitMemory = MemoryIndex(emitMemory, $"{rat}.emitOutput.memory");
-                    rule.EmitReportId = HexByte(emitSpec.ReportId, $"{rat}.emitOutput.reportId");
+                    rule.EmitReportId = emitSpec.ReportId == null
+                        ? throw Fail($"{rat}.emitOutput.reportId is missing: a report taken from a memory image starts with its report ID.")
+                        : HexByte(emitSpec.ReportId, $"{rat}.emitOutput.reportId");
                     rule.EmitSize = emitSpec.Size;
                     if (rule.EmitSize < 2 || rule.EmitSize > Programs.ProgramForm.MaxReport)
                         throw Fail($"{rat}.emitOutput.size {rule.EmitSize} is outside 2 to {Programs.ProgramForm.MaxReport}.");
@@ -513,14 +515,12 @@ internal sealed class CompiledProtocol
                 double first = t.FirstMs ?? periods[0].PeriodMs;
                 if (!(first >= 0) || double.IsInfinity(first)) throw Fail($"{tat}.firstMs {first} is not 0 or more.");
                 if (t.Reply is not { Count: > 0 }) throw Fail($"{tat}.reply is missing: a timer sends a message.");
-                // No command to echo, so every part is fixed: minLength 0.
+                // No command to read, so the parts compile under minLength 0,
+                // which refuses every echo and every length read from a
+                // command: each part left has a fixed length.
                 var parts = Parts(t.Reply, $"{tat}.reply", 0, allowStatus: false);
                 int length = 0;
-                foreach (var part in parts)
-                {
-                    if (part.FixedLength < 0) throw Fail($"{tat}.reply: a part's length is read from a command, and a timer has none.");
-                    length += part.FixedLength;
-                }
+                foreach (var part in parts) length += part.FixedLength;
                 timers[i] = new Timer(t.Name, Cond(t.While, $"{tat}.while"), MsTicks(first), steps, parts, length);
                 MaxReplyLength = Math.Max(MaxReplyLength, length);
             }

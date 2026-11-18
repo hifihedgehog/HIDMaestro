@@ -209,7 +209,7 @@ internal static class ModelCompiler
                 }
                 int state = rule.MinLength ?? 0;
                 if (state < 1) throw new FormException($"$.protocol.commands.rules[{i}].minLength", "a rule that emits a report reads its command, so it needs a minLength");
-                int id = ByteValue(e.ReportId, path + ".reportId");
+                int id = e.ReportId == null ? -1 : ByteValue(e.ReportId, path + ".reportId");
                 emits.Add(new EmitForm(id, e.Size, Program("emit", e.Size, state, regs, counterNames, e.Program, path + ".program", path + ".size", reportId: id)));
             }
         }

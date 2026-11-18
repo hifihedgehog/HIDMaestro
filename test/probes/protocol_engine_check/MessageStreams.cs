@@ -58,6 +58,7 @@ internal static class MessageStreams
               { "match": "04 20/EF .. 00", "minLength": 4, "set": { "answered": 1 }, "consume": true,
                 "replies": [ [ { "hex": "04F0" }, { "echo": "2" }, { "hex": "3ADA01" } ], [ { "hex": "04A0" }, { "echo": "2" }, { "hex": "BA003A" } ] ] },
               { "match": "78", "reply": [ { "counter": "wrap" } ] },
+              { "match": "09 00/EF .. 09 00", "minLength": 13, "emitOutput": { "size": 8, "program": [ { "copy": "5-12", "to": 0 } ] } },
               { "match": "..", "consume": true }
             ]
           },
@@ -161,6 +162,17 @@ internal static class MessageStreams
         string ack2 = Take(e);
         Check("a command only the last rule matches gets the acknowledgement and is consumed",
               ack2 == "01200709000A2003000000" + "0000" && other.Consume, ack2);
+
+        // A report emitted with no report ID: its first byte is the
+        // command's, as a device whose output reports carry no ID hands the
+        // HID class's write on whole.
+        var motor = Checks.Bytes("09 00 08 09 00 0F 00 00 19 32 FF 00 EB");
+        var emitted = Send(e, Checks.Hex(motor));
+        var emitBuf = new byte[64];
+        int emittedLength = emitted.Emit >= 0 ? e.BuildEmit(emitted.Emit, motor, emitBuf) : -1;
+        Check("an emitted report with no report ID takes its first byte from the command: the motor bitmap and the seven bytes after it",
+              emittedLength == 8 && Checks.Hex(emitBuf.AsSpan(0, 8)) == "0F00001932FF00EB" && !emitted.Consume,
+              emittedLength < 0 ? "no emit" : Checks.Hex(emitBuf.AsSpan(0, emittedLength)));
 
         // Several message streams.
         long t1 = Stopwatch.GetTimestamp();
