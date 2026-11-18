@@ -575,6 +575,12 @@ internal static class Program
         string oemAfter = OemTargets();
         Record("removal: the OEM name targets hold what they held before HIDMaestro", oemAfter == oemBefore,
                oemAfter == oemBefore ? "" : $"before [{oemBefore}] after [{oemAfter}]");
+        // usbflags keeps Windows' answers to string 0xEE per VID, PID and
+        // revision. The USB/IP personas' answers go with the removal, and the
+        // key reads as it did before HIDMaestro.
+        string flagsAfter = Inventory.Dump(@"HKLM\SYSTEM\CurrentControlSet\Control\usbflags");
+        Record("removal: usbflags holds what it held before HIDMaestro",
+               flagsAfter == clean.Keys[@"HKLM\SYSTEM\CurrentControlSet\Control\usbflags"], flagsAfter);
         if (gi)
         {
             var giEntry = parsed?.Entries.FirstOrDefault(e => e.Kind == "service setting");

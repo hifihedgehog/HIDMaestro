@@ -39,6 +39,8 @@ internal sealed class Inventory
         @"HKLM\SOFTWARE\HIDMaestroPackagesLeft",
         @"HKLM\SOFTWARE\HIDMaestroOemOverrides",
         @"HKLM\SOFTWARE\HIDMaestroGameInputSvc",
+        @"HKLM\SOFTWARE\HIDMaestroUsbRecords",
+        @"HKLM\SYSTEM\CurrentControlSet\Control\usbflags",
         @"HKLM\SYSTEM\CurrentControlSet\Control\DeviceOverrides",
         @"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\WUDF\Services\HIDMaestro",
         @"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\WUDF\Services\HMXInput",
