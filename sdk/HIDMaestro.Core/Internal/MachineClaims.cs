@@ -392,12 +392,7 @@ internal static partial class MachineClaims
 
     /// <summary>One controller as its owner's record lists it.</summary>
     internal sealed record ControllerEntry(string Token, int TransportIndex, string Backend,
-        string? ProfileId, string? InstanceId, string? UsbInstanceId = null, IReadOnlyList<string>? CreatedUsbRecords = null)
-    {
-        /// <summary>The USB instances whose records this controller's create
-        /// caused (Usbip.UsbRecords), none for a UMDF2 controller.</summary>
-        public IReadOnlyList<string> UsbRecords => CreatedUsbRecords ?? Array.Empty<string>();
-    }
+        string? ProfileId, string? InstanceId, string? UsbInstanceId = null);
 
     /// <summary>One program's record, and whether its owner claim is held.</summary>
     internal sealed record OwnerRecord(string OwnerId, int Pid, string? Image, long StartTime,
@@ -430,22 +425,6 @@ internal static partial class MachineClaims
             if (s_ownerId == null) return;
             using var c = Registry.LocalMachine.OpenSubKey($@"{RecordsRoot}\{s_ownerId}\{ControllersKey}\{token}", writable: true);
             c?.SetValue(name, value, value is int ? RegistryValueKind.DWord : RegistryValueKind.String);
-        }
-    }
-
-    /// <summary>Add <paramref name="item"/> to a multi-string value of a
-    /// controller's entry, once.</summary>
-    internal static void AddControllerListItem(string token, string name, string item)
-    {
-        lock (s_lock)
-        {
-            if (s_ownerId == null) return;
-            using var c = Registry.LocalMachine.OpenSubKey($@"{RecordsRoot}\{s_ownerId}\{ControllersKey}\{token}", writable: true);
-            if (c == null) return;
-            var items = new List<string>(c.GetValue(name) as string[] ?? Array.Empty<string>());
-            if (items.Contains(item, StringComparer.OrdinalIgnoreCase)) return;
-            items.Add(item);
-            c.SetValue(name, items.ToArray(), RegistryValueKind.MultiString);
         }
     }
 
@@ -567,8 +546,7 @@ internal static partial class MachineClaims
                         c.GetValue("Backend") as string ?? "umdf",
                         c.GetValue("Profile") as string,
                         c.GetValue("InstanceId") as string,
-                        c.GetValue(Usbip.UsbRecords.InstanceValue) as string,
-                        c.GetValue(Usbip.UsbRecords.CreatedValue) as string[]));
+                        c.GetValue(Usbip.UsbRecords.InstanceValue) as string));
                 }
         }
         bool self = string.Equals(id, selfId, StringComparison.OrdinalIgnoreCase);

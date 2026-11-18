@@ -3054,10 +3054,11 @@ internal static partial class DeviceOrchestrator
         Usbip.UsbipBackend.DetachAllOwned();
         Phase("usbip-detach");
 
-        // The device records those creates caused, each named by its owner
-        // record (Usbip.UsbRecords). A record whose removal did not settle
-        // keeps the owner record that names it.
-        var usbRecordsLeft = RemoveOwnedUsbRecords(MachineClaims.ReadAll());
+        // Then the device records those personas caused, each named in the
+        // ledger of records HIDMaestro caused (Usbip.UsbRecords). A record
+        // whose device is still present stays, and so does its entry.
+        int usbRecordsLeft = Usbip.UsbRecords.RemoveCaused(TimeoutScale.Apply(Usbip.UsbRecords.LeaveWaitMs));
+        if (usbRecordsLeft > 0) LogDiag($"    {usbRecordsLeft} USB record(s) the ledger names stay: their devices are present");
         Phase("usb-records");
 
         // Walk ROOT + SWD enumerators and remove HIDMaestro-owned devices.
@@ -3197,7 +3198,7 @@ internal static partial class DeviceOrchestrator
 
         Phase("hid-orphans");
 
-        EndEverything(preserveInstall, forUninstall, EverythingEndCalls.Machine, Phase, usbRecordsLeft);
+        EndEverything(preserveInstall, forUninstall, EverythingEndCalls.Machine, Phase);
         LogDiag($"<<< SWEEP EXIT total={sweepSw.ElapsedMilliseconds}ms");
     }
 
@@ -3209,8 +3210,7 @@ internal static partial class DeviceOrchestrator
     /// drain of driver hosts, each through <paramref name="calls"/>.
     /// pnp_notify_check's part 10 runs it on a census and records of its
     /// own.</summary>
-    internal static void EndEverything(bool preserveInstall, bool forUninstall, EverythingEndCalls calls, Action<string> phase,
-                                       IReadOnlySet<string>? usbRecordsLeft = null)
+    internal static void EndEverything(bool preserveInstall, bool forUninstall, EverythingEndCalls calls, Action<string> phase)
     {
         // What the walk left in the tree, read once before anything below.
         var left = new LeftInPlace(calls.Census());
@@ -3281,7 +3281,7 @@ internal static partial class DeviceOrchestrator
         // running program's record stays: it still holds its claims, and
         // its own dispose removes its entries.
         foreach (var rec in calls.Records())
-            if (!left.KeepsRecord(rec) && usbRecordsLeft?.Contains(rec.OwnerId) != true) calls.DeleteRecord(rec.OwnerId);
+            if (!left.KeepsRecord(rec)) calls.DeleteRecord(rec.OwnerId);
 
         // Drain orphaned WUDFHost processes that STILL have our stale
         // HIDMaestro.dll memory-mapped from a since-deleted DriverStore
@@ -3382,41 +3382,6 @@ internal static partial class DeviceOrchestrator
     {
         string dpPath = $@"SYSTEM\CurrentControlSet\Enum\{instanceId}\Device Parameters";
         RunProcess("reg.exe", $"delete \"HKLM\\{dpPath}\" /f", timeoutMs: 3000);
-    }
-
-    /// <summary>The USB instances owner records name as caused by their
-    /// create (<see cref="Usbip.UsbRecords"/>), every program's.</summary>
-    internal static List<string> OwnedUsbRecords() =>
-        MachineClaims.ReadAll()
-            .SelectMany(r => r.Controllers)
-            .SelectMany(c => c.UsbRecords)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-    /// <summary>Remove the USB records each of <paramref name="records"/>
-    /// names as caused by its create, once the device has left. Returns the
-    /// owner ids whose records name one that stays. The full removal calls
-    /// it after every import is detached.</summary>
-    internal static HashSet<string> RemoveOwnedUsbRecords(IEnumerable<MachineClaims.OwnerRecord> records)
-    {
-        var left = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        Usbip.UsbRecords.Tree? tree = null;
-        foreach (var rec in records)
-            foreach (var c in rec.Controllers)
-            foreach (string id in c.UsbRecords)
-            {
-                Usbip.UsbRecords.Result r;
-                try
-                {
-                    // One read of the machine's records serves every removal.
-                    tree ??= Usbip.UsbRecords.Tree.Read();
-                    r = Usbip.UsbRecords.Remove(id, TimeoutScale.Apply(Usbip.UsbRecords.LeaveWaitMs), tree);
-                }
-                catch (Exception e) { r = new(Usbip.UsbRecords.Outcome.Failed, Array.Empty<string>(), e.Message); }
-                LogDiag($"    usb records of {id} ({rec.OwnerId}): {r.Outcome}, {r.Detail}");
-                if (!r.Settled) left.Add(rec.OwnerId);
-            }
-        return left;
     }
 
     /// <summary>Shared joy.cpl and GameInput keys (foundation-sunshine

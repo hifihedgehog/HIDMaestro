@@ -51,12 +51,8 @@ internal static class UsbipBackend
         // kept, and the one it takes is told apart from them once it is
         // found (UsbipBackendHandle.ResolveRecord).
         HashSet<string>? known = null;
-        bool created = false;
         if (device.Descriptors.UsbInstanceId is { } usbId)
-        {
-            created = !UsbRecords.Exists(usbId);
-            if (identity != null) UsbRecords.Note(identity.Token, usbId, created);
-        }
+            UsbRecords.Note(identity?.Token, usbId, created: !UsbRecords.Exists(usbId));
         else known = UsbRecords.Known(device.Descriptors.VendorId, device.Descriptors.ProductId);
         // The usbflags claim of the device's identity before Windows asks
         // it for string 0xEE (RegistryLedger.ClaimUsbFlags).
@@ -74,7 +70,7 @@ internal static class UsbipBackend
                 ThrowIfPortsFull();
                 throw;
             }
-            return new UsbipBackendHandle(server, device, identity?.Token, known, created);
+            return new UsbipBackendHandle(server, device, identity?.Token, known);
         }
         catch
         {
@@ -580,17 +576,13 @@ internal sealed class UsbipBackendHandle : IDisposable
     private int _disposed;
 
     internal UsbipBackendHandle(UsbipServer server, UsbipEmulatedDevice device, string? token = null,
-                                HashSet<string>? known = null, bool created = false)
+                                HashSet<string>? known = null)
     {
         _server = server;
         Device = device;
         _token = token;
         _known = known;
-        if (device.Descriptors.UsbInstanceId is { } id)
-        {
-            _instance = id;
-            if (created) _created.Add(id);
-        }
+        _instance = device.Descriptors.UsbInstanceId;
     }
 
     private readonly string? _token;
@@ -598,33 +590,22 @@ internal sealed class UsbipBackendHandle : IDisposable
     // its attach, for a device it names by its port. Null for one named by
     // its serial.
     private readonly HashSet<string>? _known;
-    // The device's USB instance now, once known, and every instance whose
-    // records its attaches caused. Guarded by the handle.
+    // The device's USB instance now, once known. Guarded by the handle.
     private string? _instance;
-    private readonly List<string> _created = new();
-
-    /// <summary>The USB instances whose records the device's attaches
-    /// caused, which go once the device has left. Empty when every instance
-    /// it took had a record before.</summary>
-    public IReadOnlyList<string> CreatedRecords
-    {
-        get { lock (this) return _created.ToArray(); }
-    }
 
     /// <summary>Name the instance of a device Windows names by its port once
     /// it is found (<paramref name="instanceId"/>): written to the owner
-    /// record, and listed as caused when its name was not among those listed
-    /// before the first attach. A device named by its serial was named
-    /// before the attach, and this does nothing.</summary>
+    /// record, and to the ledger of records HIDMaestro caused when its name
+    /// was not among those listed before the first attach. A device named
+    /// by its serial was named before the attach, and this does
+    /// nothing.</summary>
     public void ResolveRecord(string instanceId)
     {
         lock (this)
         {
             if (_known == null || string.Equals(_instance, instanceId, StringComparison.OrdinalIgnoreCase)) return;
             _instance = instanceId;
-            bool created = UsbRecords.CreatedBy(instanceId, _known);
-            if (created && !_created.Contains(instanceId, StringComparer.OrdinalIgnoreCase)) _created.Add(instanceId);
-            if (_token != null) UsbRecords.Note(_token, instanceId, created);
+            UsbRecords.Note(_token, instanceId, UsbRecords.CreatedBy(instanceId, _known));
         }
     }
 

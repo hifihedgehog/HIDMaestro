@@ -17,10 +17,19 @@ namespace HIDMaestro.Internal.Usbip;
 /// endpoints). A persona carries no HIDMaestro token anywhere, so no sweep
 /// can tell its records from a real device's by looking at them. The create
 /// therefore writes the instance id into its owner record before the attach,
-/// and adds it to the list of records it caused (<see cref="CreatedValue"/>)
-/// when Windows held no record of that id then. Only a record
-/// so named is removed, never one found by a pattern, and never one that
-/// was there before the create.</para>
+/// and, when Windows holds no record of that id then, into the ledger of
+/// records HIDMaestro caused (<see cref="LedgerRoot"/>), which outlives the
+/// program. Only a record so named is removed, never one found by a
+/// pattern, and never one that was there before the create.</para>
+///
+/// <para>A dispose leaves the records, so the identity's next life has the
+/// same USB instance and the same HID child, whose instance id Windows
+/// builds from a prefix it keeps in the USB instance's record: a record
+/// removed and made again gets a new prefix, and the HID interface path
+/// changes with it (measured on the Celeron and the Surface,
+/// 2026-11-18). The full removal (RemoveAllVirtualControllers with
+/// Everything) and the uninstall remove every record the ledger names whose
+/// device has left.</para>
 ///
 /// <para>The records below the instance are found by the parent Windows
 /// keeps for each devnode, present or not (DEVPKEY_Device_Parent, which
@@ -35,10 +44,11 @@ internal static partial class UsbRecords
     /// controller's device.</summary>
     internal const string InstanceValue = "UsbInstanceId";
 
-    /// <summary>The owner record's multi-string value that lists the USB
-    /// instances whose records the controller's device caused: each found
-    /// with no record before the attach that took it.</summary>
-    internal const string CreatedValue = "UsbRecordsCreated";
+    /// <summary>The ledger of USB instances whose records HIDMaestro caused:
+    /// one subkey per instance, its value <c>InstanceId</c> the id. Outside
+    /// the registry ledger's root, which its full release deletes.</summary>
+    internal const string LedgerRoot = @"SOFTWARE\HIDMaestroUsbRecords";
+    private const string V_InstanceId = "InstanceId";
 
     /// <summary>How long a removal waits, before any scale, for the device
     /// to leave the device tree after its unplug.</summary>
@@ -62,8 +72,8 @@ internal static partial class UsbRecords
     /// removed, deepest first.</summary>
     internal readonly record struct Result(Outcome Outcome, IReadOnlyList<string> Removed, string Detail)
     {
-        /// <summary>True when nothing of the instance is left: the owner
-        /// record that names it may go.</summary>
+        /// <summary>True when nothing of the instance is left: the ledger
+        /// entry that names it may go.</summary>
         public bool Settled => Outcome is Outcome.Removed or Outcome.Absent;
     }
 
@@ -97,18 +107,103 @@ internal static partial class UsbRecords
     internal static bool CreatedBy(string instanceId, HashSet<string> known) =>
         !known.Contains(instanceId.Substring(instanceId.LastIndexOf('\\') + 1));
 
-    /// <summary>Record in the controller's owner entry the USB instance its
-    /// device takes, and whether the create caused its record. Written
-    /// before the attach for a device Windows names by its serial, so a
-    /// crash after the attach leaves a record that names it.</summary>
-    internal static void Note(string token, string instanceId, bool created)
+    /// <summary>Record the USB instance a controller's device takes: in its
+    /// owner entry, and in the ledger when the create caused its record.
+    /// Written before the attach for a device Windows names by its serial,
+    /// so a crash after the attach leaves the record named.</summary>
+    internal static void Note(string? token, string instanceId, bool created)
     {
-        MachineClaims.SetControllerValue(token, InstanceValue, instanceId);
-        if (created) MachineClaims.AddControllerListItem(token, CreatedValue, instanceId);
+        if (token != null) MachineClaims.SetControllerValue(token, InstanceValue, instanceId);
+        if (created) NoteCaused(instanceId);
     }
 
-    /// <summary>Remove the records of the USB instance an owner record
-    /// names, once the device has left the device tree, waiting up to
+    /// <summary>A registry key name for an instance id, which carries
+    /// backslashes a key name cannot.</summary>
+    private static string EntryName(string instanceId) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(instanceId.ToUpperInvariant())))[..16];
+
+    /// <summary>Add an instance to the ledger of records HIDMaestro
+    /// caused.</summary>
+    internal static void NoteCaused(string instanceId)
+    {
+        try
+        {
+            using var e = Registry.LocalMachine.CreateSubKey($@"{LedgerRoot}\{EntryName(instanceId)}");
+            e.SetValue(V_InstanceId, instanceId, RegistryValueKind.String);
+        }
+        catch (Exception ex)
+        {
+            DeviceOrchestrator.LogDiag($"    usb records: {instanceId} was not noted: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>The instances the ledger names.</summary>
+    internal static List<string> Caused()
+    {
+        var list = new List<string>();
+        try
+        {
+            using var root = Registry.LocalMachine.OpenSubKey(LedgerRoot);
+            if (root == null) return list;
+            foreach (string n in root.GetSubKeyNames())
+            {
+                using var e = root.OpenSubKey(n);
+                if (e?.GetValue(V_InstanceId) is string id) list.Add(id);
+            }
+        }
+        catch (Exception e) when (e is System.Security.SecurityException or UnauthorizedAccessException or System.IO.IOException) { }
+        return list;
+    }
+
+    /// <summary>Drop an instance from the ledger, and the ledger's key once
+    /// it names none.</summary>
+    private static void Forget(string instanceId)
+    {
+        try
+        {
+            using var root = Registry.LocalMachine.OpenSubKey(LedgerRoot, writable: true);
+            if (root == null) return;
+            root.DeleteSubKeyTree(EntryName(instanceId), throwOnMissingSubKey: false);
+            bool empty = root.SubKeyCount == 0 && root.ValueCount == 0;
+            root.Close();
+            if (empty) Registry.LocalMachine.DeleteSubKey(LedgerRoot, throwOnMissingSubKey: false);
+        }
+        catch (Exception ex)
+        {
+            DeviceOrchestrator.LogDiag($"    usb records: {instanceId} stays in the ledger: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>Remove the records of every instance the ledger names whose
+    /// device has left, waiting up to <paramref name="leaveWaitMs"/> (already
+    /// scaled) for each to leave, and drop each settled one from the ledger.
+    /// One read of the machine's records serves them all. Returns how many
+    /// stay. The full removal calls it once every import is detached.</summary>
+    internal static int RemoveCaused(int leaveWaitMs)
+    {
+        var ids = Caused();
+        if (ids.Count == 0) return 0;
+        int left = 0;
+        Tree? tree = null;
+        foreach (string id in ids)
+        {
+            Result r;
+            try
+            {
+                tree ??= Tree.Read();
+                r = Remove(id, leaveWaitMs, tree);
+            }
+            catch (Exception e) { r = new Result(Outcome.Failed, Array.Empty<string>(), $"{e.GetType().Name}: {e.Message}"); }
+            DeviceOrchestrator.LogDiag($"    usb records of {id}: {r.Outcome}, {r.Detail}");
+            if (r.Settled) Forget(id);
+            else left++;
+        }
+        return left;
+    }
+
+    /// <summary>Remove the records of a USB instance the ledger names, once
+    /// the device has left the device tree, waiting up to
     /// <paramref name="leaveWaitMs"/> (already scaled) for it to leave. Under
     /// the PnP lock every devnode removal of the SDK takes.</summary>
     internal static Result Remove(string instanceId, int leaveWaitMs) => Remove(instanceId, leaveWaitMs, null);

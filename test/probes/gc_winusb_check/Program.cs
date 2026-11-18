@@ -69,6 +69,7 @@ internal static partial class Program
     {
         if (args.Length > 0 && args[0] == "child")
             return Probe.RefuseWithoutDepartingRule("S81's child") ? 1 : Child();
+        if (args.Length > 0 && args[0] == "--bind-timing") return BindTiming();
 
         Console.WriteLine("=== S81: the WinUSB binding of the GameCube adapter persona ===");
         if (Probe.OtherSdkRunning()) return 2;

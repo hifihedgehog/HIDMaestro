@@ -12,13 +12,15 @@
 //        record names, removed through the SDK's removal alone, with the
 //        host controller, its root hub and every other record read before
 //        and after, then the identity created again on USB/IP and compared
-//        with the record it replaced, then disposed, which removes the
-//        records its create caused.
+//        with the record it replaced, disposed, which leaves the records,
+//        created again on the same USB instance and HID child (R20), and
+//        removed by RemoveAllVirtualControllers(Everything).
 //   R19: the usbflags key of a derived identity across a create and a
 //        dispose, for an identity with no key and one with planted values.
 //   A program killed with a USB/IP controller alive: the next program's
-//        first create removes the records and puts usbflags back, and so
-//        does RemoveAllVirtualControllers(Everything).
+//        first create puts usbflags back and leaves the records, which the
+//        ledger names, and RemoveAllVirtualControllers(Everything) removes
+//        them.
 
 using System;
 using System.Collections.Generic;
@@ -206,7 +208,9 @@ internal static partial class Program
             .Select(n => $"{n}={EnumValue(id, n)}"));
 
     static string[] OwnerNamed() =>
-        MachineClaims.ReadAll().SelectMany(r => r.Controllers).SelectMany(c => c.UsbRecords).ToArray();
+        MachineClaims.ReadAll().SelectMany(r => r.Controllers).Select(c => c.UsbInstanceId).OfType<string>().ToArray();
+
+    static bool LedgerNames(string id) => UsbRecords.Caused().Contains(id, StringComparer.OrdinalIgnoreCase);
 
     static bool args13Only;
 
@@ -293,12 +297,12 @@ internal static partial class Program
         // same USB instance. A record below it is named by the prefix Windows
         // gives its new parent record, so those are matched by device id.
         static string DeviceIdOf(string r) => r[..r.LastIndexOf('\\')];
+        List<string> again;
         using (var ctx = new HMContext())
         {
             ctx.LoadDefaultProfiles();
             var prof = ctx.GetProfile(profileId)!;
             sw.Restart();
-            List<string> again;
             using (var pad = ctx.CreateController(prof, key, HMBackend.Usbip))
             {
                 Console.WriteLine($"  created {profileId} on USB/IP under {key} in {sw.ElapsedMilliseconds} ms");
@@ -315,17 +319,35 @@ internal static partial class Program
                           now == null ? "missing" : Shape(now) == shapes[r] ? (now.Equals(r, StringComparison.OrdinalIgnoreCase) ? "same instance id" : $"instance {now}") : Shape(now));
                 }
                 var entry = MachineClaims.ReadAll().First(x => x.Self).Controllers.First();
-                Check("R13: the owner record names the instance and marks it caused by this create",
-                      string.Equals(entry.UsbInstanceId, id, StringComparison.OrdinalIgnoreCase) && entry.UsbRecords.Contains(id, StringComparer.OrdinalIgnoreCase));
+                Check("R13: the owner record names the instance", string.Equals(entry.UsbInstanceId, id, StringComparison.OrdinalIgnoreCase));
+                Check("R13: the ledger of records HIDMaestro caused names it, since the create found none", LedgerNames(id));
             }
-            Thread.Sleep(200);
-            foreach (string r in again) Check($"R13: the dispose removed {r}", !UsbRecords.Exists(r));
-            var end = ReadMachine();
-            Check("R13: after the dispose the host controller reads as before", end.HostController == before.HostController,
-                  end.HostController == before.HostController ? "" : Indent(end.HostController));
-            var end2 = end.Records.Except(after.Records, StringComparer.OrdinalIgnoreCase).ToList();
-            Check("R13: the second life left no record", end2.Count == 0, string.Join(" ; ", end2));
+            foreach (string r in again) Check($"R13: the dispose leaves {r} for the identity's next life", UsbRecords.Exists(r) && !UsbRecords.Present(r));
+            Check("R13: and the ledger still names it", LedgerNames(id));
+
+            // R20 at this key: the next life has the same USB instance and
+            // the same HID child, so the same HID interface path.
+            using (var pad = ctx.CreateController(prof, key, HMBackend.Usbip))
+            {
+                Feed(pad, prof);
+                var third = UsbRecords.Tree.Read().Subtree(id);
+                Check("R20: the next life is on the same USB instance and the same records below it",
+                      UsbRecords.Present(id) && third.OrderBy(x => x).SequenceEqual(again.OrderBy(x => x), StringComparer.OrdinalIgnoreCase),
+                      string.Join(" ; ", third));
+            }
         }
+
+        // The full removal takes every record the ledger names.
+        sw.Restart();
+        HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall: true);
+        Console.WriteLine($"  RemoveAllVirtualControllers(Everything) in {sw.ElapsedMilliseconds} ms");
+        foreach (string r in again) Check($"R13: the full removal removed {r}", !UsbRecords.Exists(r));
+        Check("R13: and the ledger names it no more", !LedgerNames(id));
+        var end = ReadMachine();
+        Check("R13: after the full removal the host controller reads as before", end.HostController == before.HostController,
+              end.HostController == before.HostController ? "" : Indent(end.HostController));
+        var end2 = end.Records.Except(after.Records, StringComparer.OrdinalIgnoreCase).ToList();
+        Check("R13: no record of the run is left", end2.Count == 0, string.Join(" ; ", end2));
     }
 
     static string Indent(string s) => string.Join("\n", s.TrimEnd('\n').Split('\n').Select(l => "    " + l)) + "\n";
@@ -427,9 +449,10 @@ internal static partial class Program
         var until = Stopwatch.StartNew();
         while (UsbRecords.Present(id) && until.ElapsedMilliseconds < 10000) Thread.Sleep(50);
         Check($"{how}: the device left with its program", !UsbRecords.Present(id));
-        Check($"{how}: its records stay until a sweep", UsbRecords.Exists(id));
-        Check($"{how}: the dead program's owner record names the record as its create's",
-              MachineClaims.ReadAll().Any(r => !r.Live && r.Controllers.Any(c => c.UsbRecords.Contains(id, StringComparer.OrdinalIgnoreCase))));
+        Check($"{how}: its records stay", UsbRecords.Exists(id));
+        Check($"{how}: the dead program's owner record names the instance",
+              MachineClaims.ReadAll().Any(r => !r.Live && r.Controllers.Any(c => string.Equals(c.UsbInstanceId, id, StringComparison.OrdinalIgnoreCase))));
+        Check($"{how}: the ledger names it as HIDMaestro's", LedgerNames(id));
         Console.WriteLine($"  usbflags\\{flags} after the kill: {FlagsDump(flags)?.Replace("\n", " / ").Trim() ?? "absent"} (before the child: {(flagsBefore == null ? "absent" : "present")})");
 
         if (everything)
@@ -443,7 +466,16 @@ internal static partial class Program
             other.StandardOutput.ReadToEnd();
             other.WaitForExit(120000);
         }
-        foreach (string r in subtree) Check($"{how}: {r} is gone", !UsbRecords.Exists(r));
+        if (everything)
+        {
+            foreach (string r in subtree) Check($"{how}: {r} is gone", !UsbRecords.Exists(r));
+            Check($"{how}: the ledger names it no more", !LedgerNames(id));
+        }
+        else
+        {
+            foreach (string r in subtree) Check($"{how}: {r} stays for the identity's next life", UsbRecords.Exists(r));
+            Check($"{how}: the ledger still names it", LedgerNames(id));
+        }
         Check($"{how}: no owner record names it any more", !OwnerNamed().Contains(id, StringComparer.OrdinalIgnoreCase));
         Check($"{how}: the ledger has no usbflags entry for {flags}", LedgerHolders("UsbFlags", flags) == -1);
     }
@@ -472,5 +504,89 @@ internal static partial class Program
         using (var pad = ctx.CreateController(p, "ledger-next-program", HMBackend.Usbip)) Feed(pad, p);
         Console.WriteLine("DONE");
         return 0;
+    }
+}
+
+internal static partial class Program
+{
+    /// <summary>"--remove-listed &lt;file&gt;": the not-present USB records a
+    /// test run left, by the instance ids its report lists, removed through
+    /// the SDK's own removal (UsbRecords.Remove). A listed USB instance goes
+    /// only when it is not present, no owner record of a running program
+    /// names it, and every record below it is listed too. Any other record
+    /// stays and is listed as kept.</summary>
+    static int RemoveListed(string file)
+    {
+        Console.WriteLine($"=== Removing the listed USB records: {file} ===");
+        if (FindLiveSdkConsumer() is { } consumer)
+        {
+            Console.WriteLine($"  [SKIP] {consumer} is running");
+            return 2;
+        }
+        var listed = new HashSet<string>(System.IO.File.ReadAllLines(file).Select(l => l.Trim()).Where(l => l.Length > 0),
+                                         StringComparer.OrdinalIgnoreCase);
+        var live = new HashSet<string>(MachineClaims.ReadAll().Where(r => r.Live).SelectMany(r => r.Controllers)
+            .Select(c => c.UsbInstanceId ?? ""), StringComparer.OrdinalIgnoreCase);
+        var tree = UsbRecords.Tree.Read();
+        int removed = 0, kept = 0, absent = 0;
+        var sw = Stopwatch.StartNew();
+        foreach (string id in listed.Where(UsbRecords.IsUsbInstance).OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+        {
+            if (!UsbRecords.Exists(id)) { absent++; Console.WriteLine($"  absent  {id}"); continue; }
+            string? why = live.Contains(id) ? "a running program's owner record names it"
+                : UsbRecords.Present(id) ? "it is present"
+                : null;
+            var subtree = tree.Subtree(id);
+            var unlisted = subtree.Where(r => !listed.Contains(r)).ToList();
+            why ??= unlisted.Count > 0 ? "records below it are not listed: " + string.Join(", ", unlisted) : null;
+            if (why != null) { kept++; Console.WriteLine($"  kept    {id}: {why}"); continue; }
+            var r = UsbRecords.Remove(id, 0, tree);
+            if (r.Outcome == UsbRecords.Outcome.Removed)
+            {
+                removed++;
+                foreach (string x in r.Removed) Console.WriteLine($"  removed {x}");
+            }
+            else { kept++; Console.WriteLine($"  kept    {id}: {r.Outcome}, {r.Detail}"); }
+        }
+        var left = listed.Where(UsbRecords.Exists).ToList();
+        Console.WriteLine($"\n  {removed} USB instance(s) removed with every record below them, {kept} kept, {absent} already absent, in {sw.ElapsedMilliseconds} ms");
+        Console.WriteLine($"  listed records still on the machine: {left.Count}");
+        foreach (string x in left) Console.WriteLine($"    {x}");
+        return 0;
+    }
+
+    /// <summary>"--uninstall": HIDMaestro's removal with usbip-win2 kept,
+    /// after its preview, and the start type GameInputSvc had before
+    /// HIDMaestro set it, read from its record first.</summary>
+    static int UninstallKeepingUsbip()
+    {
+        Console.WriteLine("=== HIDMaestro's removal, usbip-win2 kept ===");
+        if (FindLiveSdkConsumer() is { } consumer)
+        {
+            Console.WriteLine($"  [SKIP] {consumer} is running");
+            return 2;
+        }
+        object? recorded;
+        using (var k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestroGameInputSvc")) recorded = k?.GetValue("Start");
+        object? before;
+        using (var k = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\GameInputSvc")) before = k?.GetValue("Start");
+        Console.WriteLine($"  GameInputSvc Start {before}, recorded before HIDMaestro: {recorded ?? "(no record)"}");
+        var preview = HMUninstall.Preview();
+        Console.WriteLine($"  preview: {preview.Entries.Count} entries");
+        foreach (var e in preview.Entries) Console.WriteLine($"    {e.Outcome} {e.Kind}: {e.Location}{(e.Reason is { Length: > 0 } r ? "  (" + r + ")" : "")}");
+        var report = HMUninstall.Run();
+        Console.WriteLine($"  removal: {report.Entries.Count} entries");
+        foreach (var e in report.Entries) Console.WriteLine($"    {e.Outcome} {e.Kind}: {e.Location}{(e.Reason is { Length: > 0 } r ? "  (" + r + ")" : "")}");
+        object? after;
+        using (var k = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\GameInputSvc")) after = k?.GetValue("Start");
+        Console.WriteLine($"  GameInputSvc Start after: {after}");
+        if (recorded != null)
+            Check("the removal put GameInputSvc's recorded start type back", Equals(after, recorded), $"{after}");
+        using (var k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestroGameInputSvc"))
+            Check("and its record is gone", k == null);
+        using (var k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestroRegistryLedger"))
+            Check("the registry ledger is gone", k == null);
+        Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
+        return s_failures == 0 ? 0 : 1;
     }
 }

@@ -86,6 +86,7 @@ internal static partial class Uninstaller
         @"SOFTWARE\HIDMaestro",
         MachineClaims.RecordsRoot,
         RegistryLedger.Root,
+        Usbip.UsbRecords.LedgerRoot,
         PackagesLeftKey,
         @"SOFTWARE\HIDMaestroOemOverrides",
         DeviceOrchestrator.GameInputStartRoot,
@@ -527,9 +528,9 @@ internal static partial class Uninstaller
             if (!IsUsbipHostController(id) && seen.Add(id)) list.Add(Would(KindDevnode, id));
         foreach (string id in DeviceOrchestrator.ListOwnedHidChildren())
             if (seen.Add(id)) list.Add(Would(KindDevnode, id));
-        // The USB records a USB/IP create caused, which an owner record
+        // The USB records USB/IP creates caused, which the ledger of them
         // names (Usbip.UsbRecords).
-        foreach (string id in DeviceOrchestrator.OwnedUsbRecords())
+        foreach (string id in Usbip.UsbRecords.Caused())
             if (Usbip.UsbRecords.Exists(id) && seen.Add(id)) list.Add(Would(KindDevnode, id));
     }
 
@@ -1377,6 +1378,17 @@ internal static partial class Uninstaller
             return k?.SubKeyCount ?? 0;
         }
         bool winUsbLeft = EntriesOf("WinUsb") > 0;
+
+        // The ledger of USB records goes once the Everything removal has
+        // removed every record it names, which drops each entry. An entry
+        // left names a record whose device is present, and is its only
+        // proof of being HIDMaestro's.
+        using (var usb = Registry.LocalMachine.OpenSubKey(Usbip.UsbRecords.LedgerRoot))
+            if (usb != null && usb.SubKeyCount > 0)
+                Fail(Usbip.UsbRecords.LedgerRoot, $"{usb.SubKeyCount} USB device record(s) it names were not removed: their devices are present");
+        if (Usbip.UsbRecords.Caused().Count == 0)
+            try { Registry.LocalMachine.DeleteSubKeyTree(Usbip.UsbRecords.LedgerRoot, throwOnMissingSubKey: false); }
+            catch (Exception ex) { Fail(Usbip.UsbRecords.LedgerRoot, ex.Message); }
         int sharedLeft = EntriesOf("GameInput") + EntriesOf("JoystickOem") + EntriesOf("UsbFlags");
         if (sharedLeft > 0)
             Fail(RegistryLedger.Root, $"{sharedLeft} shared key(s) it records were not put back, and it is their only record of what they held before");

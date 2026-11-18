@@ -109,3 +109,37 @@ internal static partial class Program
         Probe.Check("usbflags 057E03370100 is as it was once that one is gone too", Flags() == flagsBefore, Flags());
     }
 }
+
+internal static partial class Program
+{
+    /// <summary>"--bind-timing": one create of the adapter and its bind,
+    /// each step timed, for a run under CPU load. The process's own CPU time
+    /// is printed with each step, to tell work from waiting.</summary>
+    static int BindTiming()
+    {
+        Console.WriteLine("=== S81 timing: one create and its WinUSB bind ===");
+        if (Probe.OtherSdkRunning()) return 2;
+        var self = System.Diagnostics.Process.GetCurrentProcess();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        void Step(string what)
+        {
+            self.Refresh();
+            Console.WriteLine($"  {DateTime.Now:HH:mm:ss.fff} +{sw.ElapsedMilliseconds,7} ms  cpu {self.TotalProcessorTime.TotalMilliseconds,7:F0} ms  {what}");
+        }
+        Step("start");
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        Step("context");
+        var gc = ctx.GetProfile("gamecube-adapter")!;
+        using (var a = ctx.CreateController(gc))
+        {
+            Step("created");
+            string? id = Arrived(a);
+            Step($"devnode {id}");
+            var r = a.BindWinUsb();
+            Step($"BindWinUsb {r}");
+        }
+        Step("disposed");
+        return 0;
+    }
+}
