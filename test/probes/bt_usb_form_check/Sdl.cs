@@ -82,12 +82,49 @@ internal static partial class Program
             using var ctx = new HMContext(backend);
             ctx.LoadDefaultProfiles();
             ctx.InstallDriver();
-            foreach (var id in ids.Length > 0 ? ids : s_default)
+            var list = ids.Length > 0 ? ids : backend == HMBackend.Usbip ? s_default.Concat(s_plain).ToArray() : s_default;
+            string? plainDir = list.Any(i => i.StartsWith("plain:", StringComparison.Ordinal)) ? PlainCopies(ctx, list) : null;
+            foreach (var id in list)
             {
-                var p = ctx.GetProfile(id);
+                var p = ctx.GetProfile(id.StartsWith("plain:", StringComparison.Ordinal) ? id.Substring(6) + "-plain" : id);
                 if (p == null) { Check($"{id} is in the catalog", false); continue; }
                 One(ctx, p, p.RequiresUsbipBackend ? HMBackend.Usbip : backend);
             }
+            if (plainDir != null)
+            {
+                try { Directory.Delete(plainDir, true); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
+
+        // The control for the rule itself: the same Bluetooth profile with
+        // no usbForm, which presents its Bluetooth form on the USB bus, as
+        // every Bluetooth profile did before usbForm.
+        static readonly string[] s_plain = { "plain:dualsense-bt", "plain:dualshock-4-v2-bt", "plain:switch-pro" };
+
+        /// <summary>Loads "&lt;id&gt;-plain", a catalog profile's file with
+        /// no usbForm, for each plain: entry, from a directory of its own.</summary>
+        static string PlainCopies(HMContext ctx, string[] list)
+        {
+            string dir = Path.Combine(Path.GetTempPath(), $"hm-btform-plain-{Environment.ProcessId}");
+            Directory.CreateDirectory(dir);
+            var asm = typeof(HMContext).Assembly;
+            foreach (var entry in list.Where(i => i.StartsWith("plain:", StringComparison.Ordinal)))
+            {
+                string id = entry.Substring(6);
+                foreach (var res in asm.GetManifestResourceNames().Where(n => n.StartsWith("HIDMaestro.Profiles.", StringComparison.Ordinal)))
+                {
+                    using var st = asm.GetManifestResourceStream(res)!;
+                    string t = new StreamReader(st, System.Text.Encoding.UTF8).ReadToEnd();
+                    if (System.Text.Json.Nodes.JsonNode.Parse(t) is not System.Text.Json.Nodes.JsonObject o || (string?)o["id"] != id) continue;
+                    o["id"] = id + "-plain";
+                    o.Remove("usbForm");
+                    File.WriteAllText(Path.Combine(dir, id + "-plain.json"), o.ToJsonString());
+                }
+            }
+            ctx.LoadProfilesFromDirectory(dir);
+            return dir;
         }
 
         static void One(HMContext ctx, HMProfile profile, HMBackend backend)
@@ -160,6 +197,17 @@ internal static partial class Program
                 if (jid == 0) Thread.Sleep(50);
             }
             bool nintendoNoForm = profile.VendorId == 0x057E && form.Inner.Protocol == null;
+            // A plain copy is the control the rule is measured against: what
+            // SDL does with it is recorded, not asserted.
+            if (profile.Id.EndsWith("-plain", StringComparison.Ordinal)) nintendoNoForm = true;
+            // The Nintendo pads with no USB form and the plain copies are
+            // findings: their lines are recorded, not asserted.
+            bool record = nintendoNoForm;
+            void Expect(string name, bool cond, string detail = "")
+            {
+                if (record) Console.WriteLine($"  [INFO] {name}: {(cond ? "yes" : "no")}{(detail.Length > 0 ? "  " + detail : "")}");
+                else Check(name, cond, detail);
+            }
             if (jid == 0)
             {
                 string err = Marshal.PtrToStringUTF8(SDL_GetError()) ?? "";
@@ -168,7 +216,7 @@ internal static partial class Program
                     Console.WriteLine($"  [INFO] SDL lists no joystick for the pad after {sw.ElapsedMilliseconds} ms. SDL_GetError: '{err}'");
                     return;
                 }
-                Check("SDL lists a joystick for the pad's HID interface", false, $"SDL_GetError '{err}'");
+                Expect("SDL lists a joystick for the pad's HID interface", false, $"SDL_GetError '{err}'");
                 return;
             }
             var guid = SDL_GetJoystickGUIDForID(jid);
@@ -179,9 +227,9 @@ internal static partial class Program
             char driver = (char)g[14];
             string name = Marshal.PtrToStringUTF8(SDL_GetJoystickNameForID(jid)) ?? "";
             Console.WriteLine($"  joystick {jid} '{name}' guid {Convert.ToHexString(g)} bus 0x{bus:X2} driver '{driver}' gamepad {SDL_IsGamepad(jid)}");
-            Check("SDL's HIDAPI backend drives the pad (GUID driver 'h')", driver == 'h', $"'{driver}'");
+            Expect("SDL's HIDAPI backend drives the pad (GUID driver 'h')", driver == 'h', $"'{driver}'");
             bool wantBt = ctrl.Backend == HMBackend.Umdf2 && profile.Connection == "bluetooth";
-            Check($"SDL reads the bus as {(wantBt ? "Bluetooth (0x05)" : "USB (0x03)")}", bus == (wantBt ? 0x05 : 0x03), $"0x{bus:X2}");
+            Expect($"SDL reads the bus as {(wantBt ? "Bluetooth (0x05)" : "USB (0x03)")}", bus == (wantBt ? 0x05 : 0x03), $"0x{bus:X2}");
 
             SDL_ClearError();
             IntPtr pad = SDL_OpenGamepad(jid);
@@ -193,24 +241,24 @@ internal static partial class Program
                     Console.WriteLine($"  [INFO] SDL does not open the pad: '{err}'");
                     return;
                 }
-                Check("SDL opens the pad", false, $"SDL_GetError '{err}'");
+                Expect("SDL opens the pad", false, $"SDL_GetError '{err}'");
                 return;
             }
             if (nintendoNoForm) Console.WriteLine("  [INFO] SDL opens the pad");
-            else Check("SDL opens the pad", true);
+            else Expect("SDL opens the pad", true);
             try
             {
                 int type = SDL_GetGamepadType(pad);
                 Console.WriteLine($"  gamepad '{Marshal.PtrToStringUTF8(SDL_GetGamepadName(pad))}' type {Marshal.PtrToStringUTF8(SDL_GetGamepadStringForType(type))}");
                 int conn = SDL_GetJoystickConnectionState(SDL_GetGamepadJoystick(pad));
                 Console.WriteLine($"  connection state {conn} (1 wired, 2 wireless)");
-                Check($"SDL reports the connection {(wantBt ? "wireless" : "wired")}", conn == (wantBt ? 2 : 1), conn.ToString());
+                Expect($"SDL reports the connection {(wantBt ? "wireless" : "wired")}", conn == (wantBt ? 2 : 1), conn.ToString());
 
                 // A face button: A and B, so a Nintendo label remap still
                 // shows one of the four.
                 setState(new HMGamepadState { Buttons = HMButton.A | HMButton.B });
                 bool pressed = WaitPump(() => Enumerable.Range(0, 4).Any(b => SDL_GetGamepadButton(pad, b)), 5000);
-                Check("a face button submitted with SubmitState reads back through SDL", pressed);
+                Expect("a face button submitted with SubmitState reads back through SDL", pressed);
                 setState(new HMGamepadState());
 
                 lock (decoded) decoded.Clear();
@@ -218,7 +266,7 @@ internal static partial class Program
                 bool reached = rumbled && WaitPump(() => { lock (decoded) return decoded.Any(f => Num(f, "leftMotor") > 0 || Num(f, "rightMotor") > 0); }, 5000);
                 string motors;
                 lock (decoded) motors = decoded.Count == 0 ? "none" : string.Join(" ", decoded[^1].Where(k => k.Key.EndsWith("Motor")).Select(k => $"{k.Key}={k.Value}"));
-                Check("SDL_RumbleGamepad reaches OutputDecoded leftMotor/rightMotor", reached, $"rumble call {rumbled}, {motors}");
+                Expect("SDL_RumbleGamepad reaches OutputDecoded leftMotor/rightMotor", reached, $"rumble call {rumbled}, {motors}");
 
                 if (form.Inner.ExtendedOutputReport?.Fields?.Any(f => f.Semantic == "lightbar") == true)
                 {
@@ -227,7 +275,7 @@ internal static partial class Program
                     bool lit = set && WaitPump(() => { lock (decoded) return decoded.Any(f => f.TryGetValue("lightbar", out var lb) && LightRed(lb)); }, 5000);
                     string bar;
                     lock (decoded) bar = decoded.Count == 0 ? "none" : decoded[^1].TryGetValue("lightbar", out var lb) ? Show(lb) : "no lightbar";
-                    Check("SDL_SetGamepadLED reaches OutputDecoded lightbar", lit, $"call {set}, {bar}");
+                    Expect("SDL_SetGamepadLED reaches OutputDecoded lightbar", lit, $"call {set}, {bar}");
                 }
                 else if (form.Inner.Protocol != null)
                 {
@@ -235,11 +283,11 @@ internal static partial class Program
                     // (UpdateSlotLED, SDL_hidapi_switch.c:777-788).
                     bool led;
                     lock (packets) led = packets.Any(p => p.Id == 0x01 && p.Data.Length > 9 && p.Data[9] == 0x30);
-                    Check("SDL sets the player LEDs (subcommand 0x30 reaches OutputReceived)", led);
+                    Expect("SDL sets the player LEDs (subcommand 0x30 reaches OutputReceived)", led);
                     bool handshake;
                     lock (packets) handshake = packets.Any(p => p.Id == 0x80);
                     Console.WriteLine($"  the 0x80 USB handshake {(handshake ? "reached" : "did not reach")} the device");
-                    if (ctrl.Backend == HMBackend.Usbip) Check("SDL set the pad up with the USB handshake (0x80)", handshake);
+                    if (ctrl.Backend == HMBackend.Usbip) Expect("SDL set the pad up with the USB handshake (0x80)", handshake);
                 }
             }
             finally { SDL_CloseGamepad(pad); }
