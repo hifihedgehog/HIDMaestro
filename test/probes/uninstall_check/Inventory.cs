@@ -38,6 +38,7 @@ internal sealed class Inventory
         @"HKLM\SOFTWARE\HIDMaestroRegistryLedger",
         @"HKLM\SOFTWARE\HIDMaestroPackagesLeft",
         @"HKLM\SOFTWARE\HIDMaestroOemOverrides",
+        @"HKLM\SOFTWARE\HIDMaestroGameInputSvc",
         @"HKLM\SYSTEM\CurrentControlSet\Control\DeviceOverrides",
         @"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\WUDF\Services\HIDMaestro",
         @"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\WUDF\Services\HMXInput",
@@ -48,6 +49,14 @@ internal sealed class Inventory
         @"HKLM\SYSTEM\CurrentControlSet\Control\DeviceClasses\{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}",
         @"HKLM\SYSTEM\CurrentControlSet\Control\DeviceClasses\{6c53d5fd-6480-440f-b618-476750c5e1a6}",
     };
+
+    /// <summary>Whether a removal takes the watched key itself: HIDMaestro's
+    /// own roots and its WUDF service keys. The others are Windows' keys
+    /// that hold HIDMaestro's entries among others', read for their
+    /// contents.</summary>
+    internal static bool GoesWithRemoval(string key) =>
+        key.StartsWith(@"HKLM\SOFTWARE\HIDMaestro", StringComparison.OrdinalIgnoreCase)
+        || key.StartsWith(@"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\WUDF\Services\", StringComparison.OrdinalIgnoreCase);
 
     internal static string ProgramFilesFolder => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "HIDMaestro");
     internal static string ProgramDataFolder => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "HIDMaestro");

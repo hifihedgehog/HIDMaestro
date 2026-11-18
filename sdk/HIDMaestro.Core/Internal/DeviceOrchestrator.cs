@@ -682,6 +682,11 @@ internal static partial class DeviceOrchestrator
             uint state = GameInputServiceState(out bool missing);
             if (state != SERVICE_RUNNING && !missing)
             {
+                // The start type it had goes on record first, so a removal
+                // can put it back (Uninstaller.ActGameInputService). A
+                // record that cannot be written, as in a process that is
+                // not elevated, leaves the two steps as they were.
+                try { RecordGameInputStart(); } catch { }
                 RunProcess("sc.exe", "config GameInputSvc start= auto");
                 RunProcess("sc.exe", "start GameInputSvc");
             }
@@ -690,9 +695,11 @@ internal static partial class DeviceOrchestrator
         catch { }
     }
 
-    // winsvc.h of the 10.0.26100.0 SDK: SC_MANAGER_CONNECT, SERVICE_QUERY_STATUS
-    // and SERVICE_RUNNING. winerror.h: ERROR_SERVICE_DOES_NOT_EXIST.
-    private const uint SC_MANAGER_CONNECT = 0x0001, SERVICE_QUERY_STATUS = 0x0004, SERVICE_RUNNING = 0x00000004;
+    // winsvc.h of the 10.0.26100.0 SDK: SC_MANAGER_CONNECT, SERVICE_QUERY_STATUS,
+    // SERVICE_RUNNING, SERVICE_CHANGE_CONFIG and SERVICE_NO_CHANGE. winerror.h:
+    // ERROR_SERVICE_DOES_NOT_EXIST.
+    private const uint SC_MANAGER_CONNECT = 0x0001, SERVICE_QUERY_STATUS = 0x0004, SERVICE_RUNNING = 0x00000004,
+        SERVICE_CHANGE_CONFIG = 0x0002, SERVICE_NO_CHANGE = 0xFFFFFFFF;
     private const int ERROR_SERVICE_DOES_NOT_EXIST = 1060;
 
     /// <summary>GameInputSvc's dwCurrentState (QueryServiceStatus), or 0
@@ -743,6 +750,88 @@ internal static partial class DeviceOrchestrator
     [LibraryImport("advapi32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool CloseServiceHandle(IntPtr handle);
+
+    // winsvc.h:1041. SERVICE_NO_CHANGE and null leave a setting as it is.
+    [LibraryImport("advapi32.dll", EntryPoint = "ChangeServiceConfigW", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool ChangeServiceConfigW(IntPtr service, uint serviceType, uint startType, uint errorControl,
+        string? binaryPathName, string? loadOrderGroup, IntPtr tagId, string? dependencies,
+        string? serviceStartName, string? password, string? displayName);
+
+    /// <summary>The key that holds, as the DWORD <c>Start</c>, the start
+    /// type GameInputSvc had before <see cref="EnsureGameInputService"/>
+    /// last set it to start automatically. It sits beside
+    /// HKLM\SOFTWARE\HIDMaestro, as the OEM override records do
+    /// (docs/oem-name-override.md): a removal deletes that key, and keeps
+    /// this one while the start type it holds was not put back, since it is
+    /// that start type's only record.</summary>
+    internal const string GameInputStartRoot = @"SOFTWARE\HIDMaestroGameInputSvc";
+    private const string GameInputServiceKey = @"SYSTEM\CurrentControlSet\Services\GameInputSvc";
+
+    // winnt.h of the 10.0.26100.0 SDK: SERVICE_AUTO_START, and
+    // SERVICE_DISABLED, the last of the five start types from
+    // SERVICE_BOOT_START, 0.
+    internal const int ServiceAutoStart = 2;
+    private const int ServiceDisabled = 4;
+
+    /// <summary>GameInputSvc's start type, the Start value the service
+    /// control manager writes for it, or null when it has none.</summary>
+    internal static int? GameInputStart()
+    {
+        using var k = Registry.LocalMachine.OpenSubKey(GameInputServiceKey);
+        return k?.GetValue("Start") is int start ? start : null;
+    }
+
+    /// <summary>Records GameInputSvc's start type before
+    /// <see cref="EnsureGameInputService"/> sets it to start automatically.
+    /// A service that already starts automatically leaves the record as it
+    /// is, since its start type does not change. Any other start type
+    /// replaces the record, so the record holds the type from before the
+    /// latest change: a user who set the service back to manual or disabled
+    /// after an earlier change gets that type back.</summary>
+    private static void RecordGameInputStart()
+    {
+        if (GameInputStart() is not int start || start == ServiceAutoStart) return;
+        using var k = Registry.LocalMachine.CreateSubKey(GameInputStartRoot);
+        k.SetValue("Start", start, RegistryValueKind.DWord);
+    }
+
+    /// <summary>The recorded start type, while GameInputSvc still starts
+    /// automatically as HIDMaestro set it. Null without a record of a start
+    /// type other than automatic, and once the service's start type has
+    /// changed since, which makes it someone else's, as a shared value
+    /// another program changed is (RegistryLedger).</summary>
+    internal static int? GameInputStartToPutBack()
+    {
+        int? recorded;
+        using (var k = Registry.LocalMachine.OpenSubKey(GameInputStartRoot))
+            recorded = k?.GetValue("Start") is int r && r is >= 0 and <= ServiceDisabled && r != ServiceAutoStart ? r : null;
+        return recorded != null && GameInputStart() == ServiceAutoStart ? recorded : null;
+    }
+
+    /// <summary>Sets GameInputSvc's start type with ChangeServiceConfigW,
+    /// as sc.exe config does, so the service control manager's database
+    /// changes with the registry. Every other setting stays. The call has
+    /// no part for the service's start triggers, which ChangeServiceConfig2
+    /// sets, and a running service keeps running. 0, or the Win32
+    /// error.</summary>
+    internal static int SetGameInputStart(int startType)
+    {
+        IntPtr scm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
+        if (scm == IntPtr.Zero) return Marshal.GetLastPInvokeError();
+        try
+        {
+            IntPtr svc = OpenServiceW(scm, "GameInputSvc", SERVICE_CHANGE_CONFIG);
+            if (svc == IntPtr.Zero) return Marshal.GetLastPInvokeError();
+            try
+            {
+                return ChangeServiceConfigW(svc, SERVICE_NO_CHANGE, (uint)startType, SERVICE_NO_CHANGE,
+                    null, null, IntPtr.Zero, null, null, null, null) ? 0 : Marshal.GetLastPInvokeError();
+            }
+            finally { CloseServiceHandle(svc); }
+        }
+        finally { CloseServiceHandle(scm); }
+    }
 
     /// <summary>T11: pre-warm hook called from HMContext's background ctor
     /// task, so the per-process cache is usually set before the first

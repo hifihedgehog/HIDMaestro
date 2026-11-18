@@ -15,6 +15,9 @@
 //            HIDMaestro device record, package, certificate, registry key or
 //            folder is left, the OEM targets hold what they held before, the
 //            OpenVR registration is gone, and no USB root hub arrived again.
+//            GameInputSvc, stopped and starting on demand before the first
+//            create, starts on demand again with its start triggers, and
+//            the report says its start type was put back.
 //            Programs that start while the tool removes HIDMaestro, one
 //            installing and one creating from two threads, wait at the gate
 //            while the probe holds the removal at the deploy lock, do not
@@ -245,7 +248,7 @@ internal static class Program
         check($"{p}: the certificate is gone from My, Root and TrustedPublisher", certsUnexplained.Count == 0,
               after.Certificates.Count == 0 ? "" : $"kept, with the reason in the report: {string.Join(", ", after.Certificates.Except(certsUnexplained))}" +
               (certsUnexplained.Count > 0 ? $"; left with no reason: {string.Join(", ", certsUnexplained)}" : ""));
-        foreach (string key in Inventory.WatchedKeys.Take(5).Concat(Inventory.WatchedKeys.Skip(6).Take(2)))
+        foreach (string key in Inventory.WatchedKeys.Where(Inventory.GoesWithRemoval))
         {
             bool kept = report.Entries.Any(e => e.Outcome == "Kept" && e.Location.Equals(key, StringComparison.OrdinalIgnoreCase));
             check($"{p}: {key} is gone", !Inventory.KeyExists(key) || kept, kept ? "kept, with the reason in the report" : "");
@@ -452,6 +455,22 @@ internal static class Program
         var clean = Inventory.Take();
         Record("the sandbox starts without HIDMaestro", clean.Packages.Count == 0 && clean.HidMaestroDevnodes().Count == 0 && clean.Certificates.Count == 0);
 
+        // GameInputSvc stopped and starting on demand, as a clean Windows has
+        // it, so the holder's first create sets it to start automatically
+        // and records the start type it had.
+        bool gi = GameInputStart() != null;
+        string giTriggers = "";
+        if (gi)
+        {
+            Note($"GameInputSvc at the start: start type {GameInputStart()}, {(GameInputRunning() ? "running" : "stopped")}");
+            Run("sc.exe", 30_000, "config", "GameInputSvc", "start=", "demand");
+            if (GameInputRunning()) Run("net.exe", 60_000, "stop", "GameInputSvc");
+            giTriggers = GameInputTriggers();
+            Record("GameInputSvc starts on demand and is stopped before the first create (setup)",
+                   GameInputStart() == 3 && !GameInputRunning(), $"start type {GameInputStart()}, {(GameInputRunning() ? "running" : "stopped")}");
+        }
+        else Note("GameInputSvc is absent here, so the checks on its start type do not run");
+
         // A stand-in SteamVR: discovery finds C:\SteamVR by its
         // bin\win64\vrpathreg.exe, which HIDMaestro never runs.
         Directory.CreateDirectory(@"C:\SteamVR\bin\win64");
@@ -474,6 +493,10 @@ internal static class Program
         Record("a program installs the driver", said.Contains("installed"), string.Join(" / ", said));
         Record("it creates a plain HID controller (positive control)", said.Contains("created dualshock-4-v2"));
         Record("it sets an OEM name override", said.Contains("oem set"));
+        if (gi)
+            Record("its first create sets GameInputSvc to start automatically and records the start type it had (positive control)",
+                   GameInputStart() == 2 && RecordedGameInputStart() == 3,
+                   $"start type {GameInputStart()}, record {RecordedGameInputStart()?.ToString() ?? "none"}");
         Note(FormattableString.Invariant($"setup took {clock.Elapsed.TotalSeconds:F1} s"));
 
         // The composite's HID functions arrive after its create returns, so
@@ -552,6 +575,42 @@ internal static class Program
         string oemAfter = OemTargets();
         Record("removal: the OEM name targets hold what they held before HIDMaestro", oemAfter == oemBefore,
                oemAfter == oemBefore ? "" : $"before [{oemBefore}] after [{oemAfter}]");
+        if (gi)
+        {
+            var giEntry = parsed?.Entries.FirstOrDefault(e => e.Kind == "service setting");
+            Record("removal: GameInputSvc starts on demand again, as the service control manager reports it, with its start triggers as they were",
+                   GameInputStart() == 3 && GameInputTriggers() == giTriggers,
+                   $"start type {GameInputStart()}, triggers {(GameInputTriggers() == giTriggers ? "as they were" : "changed")}");
+            Record("removal: the report lists GameInputSvc's start type as put back to manual",
+                   giEntry?.Outcome == "Removed" && giEntry.Reason?.Contains("put back to manual", StringComparison.Ordinal) == true,
+                   giEntry?.ToString() ?? "no entry for it");
+            Record("removal: the record of GameInputSvc's start type is gone", !Inventory.KeyExists(@"HKLM\SOFTWARE\HIDMaestroGameInputSvc"));
+        }
+    }
+
+    /// <summary>GameInputSvc's start type as the service control manager
+    /// reports it (sc qc), or null when the service is absent.</summary>
+    static int? GameInputStart()
+    {
+        var (exit, output) = Run("sc.exe", 30_000, "qc", "GameInputSvc");
+        var m = System.Text.RegularExpressions.Regex.Match(output, @"START_TYPE\s*:\s*(\d+)");
+        return exit == 0 && m.Success ? int.Parse(m.Groups[1].Value) : null;
+    }
+
+    /// <summary>Whether sc query reports GameInputSvc's state as 4,
+    /// winsvc.h's SERVICE_RUNNING.</summary>
+    static bool GameInputRunning() =>
+        System.Text.RegularExpressions.Regex.Match(Run("sc.exe", 30_000, "query", "GameInputSvc").Output, @"STATE\s*:\s*(\d+)") is { Success: true } m
+        && m.Groups[1].Value == "4";
+
+    static string GameInputTriggers() => Run("sc.exe", 30_000, "qtriggerinfo", "GameInputSvc").Output.Trim();
+
+    /// <summary>The start type the SDK recorded before it set GameInputSvc
+    /// to start automatically, read from the registry.</summary>
+    static int? RecordedGameInputStart()
+    {
+        using var k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestroGameInputSvc");
+        return k?.GetValue("Start") is int v ? v : null;
     }
 
     /// <summary>The CNG key name and provider of the HIDMaestro certificate

@@ -34,6 +34,8 @@ namespace HIDMaestro.Internal.Uninstall;
 /// <item>The driver packages, with SetupUninstallOEMInf and no
 /// SUOI_FORCEDELETE.</item>
 /// <item>The WUDF service keys whose driver folder is gone.</item>
+/// <item>GameInputSvc's start type, put back to the one the SDK recorded
+/// before it set the service to start automatically.</item>
 /// <item>HIDMaestro's registry roots.</item>
 /// <item>The signing certificate, once no package whose provider is
 /// HIDMaestro is left.</item>
@@ -86,6 +88,7 @@ internal static partial class Uninstaller
         RegistryLedger.Root,
         PackagesLeftKey,
         @"SOFTWARE\HIDMaestroOemOverrides",
+        DeviceOrchestrator.GameInputStartRoot,
     };
 
     /// <summary>The original INF names of HIDMaestro's driver packages,
@@ -229,6 +232,9 @@ internal static partial class Uninstaller
                 {
                     Step(told, "driver packages", () => ActPackages(told));
                     Step(told, "WUDF service keys", () => ActWudf(told));
+                    // Before the registry keys, whose step deletes the record
+                    // once the start type is back.
+                    Step(told, "GameInputSvc start type", () => ActGameInputService(told));
                     Step(told, "registry keys", () => ActRegistryRoots(told));
                     Step(told, "certificate", () => ActCertificate(told));
                     // This process's logs live in a folder the next step
@@ -1129,12 +1135,18 @@ internal static partial class Uninstaller
         return list;
     }
 
+    private const string GameInputLocation = "GameInputSvc start type (automatic)";
+
+    /// <summary>GameInputSvc while it starts automatically: put back when
+    /// the SDK recorded the start type it had before
+    /// (<see cref="ActGameInputService"/>), kept otherwise.</summary>
     private static void ScanGameInputService(List<UninstallEntry> list)
     {
-        using var k = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\GameInputSvc");
-        if (k?.GetValue("Start") is 2)
-            list.Add(Keep(KindServiceSetting, "GameInputSvc start type (automatic)",
-                "HIDMaestro sets GameInputSvc to start automatically when it finds the service stopped, and records no earlier value, so a removal leaves it as it is"));
+        if (DeviceOrchestrator.GameInputStart() != DeviceOrchestrator.ServiceAutoStart) return;
+        list.Add(DeviceOrchestrator.GameInputStartToPutBack() != null
+            ? Would(KindServiceSetting, GameInputLocation)
+            : Keep(KindServiceSetting, GameInputLocation,
+                "HIDMaestro sets GameInputSvc to start automatically when it finds the service stopped, and releases through 2.2.0 recorded no earlier start type, so a removal leaves it as it is"));
     }
 
     // ── The steps ────────────────────────────────────────────────────────
@@ -1285,6 +1297,28 @@ internal static partial class Uninstaller
         }
     }
 
+    /// <summary>GameInputSvc back to the start type the SDK recorded before
+    /// it set the service to start automatically, while the service still
+    /// starts automatically (DeviceOrchestrator.GameInputStartToPutBack). A
+    /// service whose start type changed since keeps it.</summary>
+    private static void ActGameInputService(Told told)
+    {
+        if (DeviceOrchestrator.GameInputStartToPutBack() is not int before) return;
+        int error = DeviceOrchestrator.SetGameInputStart(before);
+        told.Add(error == 0
+            ? new UninstallEntry(KindServiceSetting, GameInputLocation, UninstallOutcome.Removed,
+                $"put back to {StartTypeName(before)}, the start type it had before HIDMaestro set it to start automatically")
+            : new UninstallEntry(KindServiceSetting, GameInputLocation, UninstallOutcome.Failed,
+                $"could not be put back to {StartTypeName(before)}: Win32 error {error}"));
+    }
+
+    /// <summary>A start type's name, winnt.h's SERVICE_BOOT_START 0 to
+    /// SERVICE_DISABLED 4.</summary>
+    private static string StartTypeName(int start) => start switch
+    {
+        0 => "boot", 1 => "system", 3 => "manual", 4 => "disabled", _ => $"start type {start}",
+    };
+
     private static void ActRegistryRoots(Told told)
     {
         void Fail(string root, string why) => told.Add(new UninstallEntry(KindRegistryKey, $@"HKLM\{root}", UninstallOutcome.Failed, why));
@@ -1314,6 +1348,16 @@ internal static partial class Uninstaller
         if (overridesEmpty)
             try { Registry.LocalMachine.DeleteSubKeyTree(overrides, throwOnMissingSubKey: false); }
             catch (Exception ex) { Fail(overrides, ex.Message); }
+
+        // The GameInputSvc record once its start type is back, or once the
+        // service no longer starts automatically as HIDMaestro set it. A
+        // start type not put back has no other record, so its record stays
+        // for the next run.
+        if (DeviceOrchestrator.GameInputStartToPutBack() != null)
+            Fail(DeviceOrchestrator.GameInputStartRoot, "it holds the start type GameInputSvc had before HIDMaestro, which was not put back, and is the only record of it");
+        else
+            try { Registry.LocalMachine.DeleteSubKeyTree(DeviceOrchestrator.GameInputStartRoot, throwOnMissingSubKey: false); }
+            catch (Exception ex) { Fail(DeviceOrchestrator.GameInputStartRoot, ex.Message); }
 
         // The ledger goes once the Everything removal has put back every
         // shared key it records (RegistryLedger.ReleaseAll deletes it then).
