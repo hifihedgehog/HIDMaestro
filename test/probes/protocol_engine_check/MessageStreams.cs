@@ -41,7 +41,7 @@ internal static class MessageStreams
         """);
         o["protocol"] = JsonNode.Parse("""
         {
-          "state": [ { "name": "started" }, { "name": "answered" } ],
+          "state": [ { "name": "started" }, { "name": "answered" }, { "name": "waiting", "bits": 2 } ],
           "counters": [
             { "name": "globalSeq", "bits": 8, "on": "frame", "skipZero": true },
             { "name": "inputSeq", "bits": 8, "on": "frame", "skipZero": true },
@@ -57,6 +57,8 @@ internal static class MessageStreams
               { "match": "05 20/EF .. 01 07", "set": { "started": 0, "answered": 0 }, "consume": true },
               { "match": "04 20/EF .. 00", "minLength": 4, "set": { "answered": 1 }, "consume": true,
                 "replies": [ [ { "hex": "04F0" }, { "echo": "2" }, { "hex": "3ADA01" } ], [ { "hex": "04A0" }, { "echo": "2" }, { "hex": "BA003A" } ] ] },
+              { "match": "7A", "set": { "waiting": 1, "answered": 1 }, "consume": true },
+              { "match": "7B", "while": "waiting==1", "set": { "waiting": 2 }, "consume": true, "reply": [ { "hex": "7B" } ] },
               { "match": "78", "reply": [ { "counter": "wrap" } ] },
               { "match": "09 00/EF .. 09 00", "minLength": 13, "emitOutput": { "size": 8, "program": [ { "copy": "5-12", "to": 0 } ] } },
               { "match": "..", "consume": true }
@@ -67,7 +69,8 @@ internal static class MessageStreams
             { "name": "hello", "while": "!answered", "firstMs": 500, "periods": [ { "periodMs": 500 } ],
               "reply": [ { "hex": "0220" }, { "counter": "globalSeq" }, { "hex": "08" }, { "value": "serial", "encoding": "hex-le", "length": { "value": 8 } } ] },
             { "name": "status", "while": "started", "firstMs": 0, "periods": [ { "periodMs": 1000, "count": 10 }, { "periodMs": 20000 } ],
-              "reply": [ { "hex": "0320" }, { "counter": "globalSeq" }, { "hex": "0480000000" } ] }
+              "reply": [ { "hex": "0320" }, { "counter": "globalSeq" }, { "hex": "0480000000" } ] },
+            { "name": "timeout", "while": "waiting==1", "firstMs": 1000, "periods": [ { "periodMs": 1000 } ], "set": { "waiting": 0 } }
           ]
         }
         """);
@@ -174,10 +177,13 @@ internal static class MessageStreams
               emittedLength == 8 && Checks.Hex(emitBuf.AsSpan(0, 8)) == "0F00001932FF00EB" && !emitted.Consume,
               emittedLength < 0 ? "no emit" : Checks.Hex(emitBuf.AsSpan(0, emittedLength)));
 
-        // Several message streams.
+        // Several message streams. The Status that comes due as the device
+        // starts finds a reply waiting, and queues after it.
+        Send(e, "78");
         long t1 = Stopwatch.GetTimestamp();
         e.RunTimers(t1);
-        string status1 = Take(e);
+        string waited = Take(e), status1 = Take(e);
+        Check("a timer's message that comes due while a rule's reply waits queues after that reply", waited.Length == 2 && status1.StartsWith("0320", StringComparison.Ordinal), $"{waited} {status1}");
         Check("a timer with firstMs 0 sends as its condition begins to hold", status1.StartsWith("0320", StringComparison.Ordinal) && status1.EndsWith("0480000000", StringComparison.Ordinal), status1);
         int statuses = 0;
         for (int s = 1; s <= 40; s++)
@@ -209,6 +215,58 @@ internal static class MessageStreams
         string again = Next();
         Check("a layout that becomes selected again forgets the bytes it last sent, so the first report after a new start goes out",
               stopped == "-" && again.StartsWith("200003", StringComparison.Ordinal), $"{stopped} {again}");
+
+        StateTimersAndConditions();
+    }
+
+    /// <summary>A timer that sets registers and sends nothing, a rule that
+    /// applies only while a condition holds, and a read of the selected
+    /// layout, which records nothing. Each on an engine of its own.</summary>
+    static void StateTimersAndConditions()
+    {
+        var built = Build(out string error);
+        if (built is not { } b) { Check("a second engine of the test profile builds", false, error); return; }
+        var (e, model, runner) = b;
+        int Reg(string name) => model.Registers.IndexOf(name);
+
+        // A timeout: the timer sets its register when it fires and queues
+        // no message.
+        Send(e, "7A");
+        long t = Stopwatch.GetTimestamp();
+        e.RunTimers(t);
+        e.RunTimers(Ms(t, 999));
+        uint before = e.GetRegister(Reg("waiting"));
+        bool queued = e.RunTimers(Ms(t, 1000));
+        uint after = e.GetRegister(Reg("waiting"));
+        Check("a timer with set and no reply sets its register when it fires, and not before, and queues nothing",
+              before == 1 && after == 0 && !queued && !e.HasReply, $"waiting {before} then {after}, queued {queued}");
+
+        // A rule with a condition answers once in its state.
+        Send(e, "7A");
+        Send(e, "7B");
+        string first = Take(e);
+        var second = Send(e, "7B");
+        string none = Take(e);
+        Check("a rule with a condition applies while it holds, and a command it matches after goes on to the rules after it",
+              first == "7B" && none == "-" && e.GetRegister(Reg("waiting")) == 2 && second.Consume, $"{first} {none}, waiting {e.GetRegister(Reg("waiting"))}");
+
+        // Reading the selected layout records nothing: a stop and a start
+        // the clock never saw leave the stream's last report as sent.
+        var tick = new Builder { Engine = e };
+        string Next() { int n = runner.Visit(tick); return n == 0 ? "-" : Checks.Hex(tick.Buffer.AsSpan(0, n)); }
+        Send(e, "05 20 01 01 00");
+        e.SetStateBlock(new byte[] { 0x01, 0x00 });
+        string sent = Next();
+        Send(e, "05 20 02 01 07");
+        int selected = e.SelectedLayout;
+        Send(e, "05 20 03 01 00");
+        string again = Next();
+        Check("reading SelectedLayout between a stop and a start the clock never saw changes nothing: the same bytes do not go out again",
+              sent.StartsWith("20", StringComparison.Ordinal) && selected == -1 && again == "-", $"{sent} {selected} {again}");
+
+        // The serial's last hex digits fill a hex-le value of fewer bytes.
+        var id = CompiledProtocol.ValueBytes("serial", "hex-le", 4, 0, "HM0123456789ABCDEF0123", 0);
+        Check("hex-le takes the serial's last two hex digits per byte, low byte first", Checks.Hex(id) == "2301EFCD", Checks.Hex(id));
     }
 
     static ProtocolEngine Fire(ProtocolEngine e, string hex)

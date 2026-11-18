@@ -37,6 +37,8 @@ internal sealed unsafe class ProtocolEngine
     // chunk at a time, and _headOffset is how much of it has gone out.
     private readonly byte[][] _replyBuf;
     private readonly int[] _replyLen;
+    // Per queued reply: the timer that queued it, or -1 for a rule's.
+    private readonly int[] _replyOrigin;
     private int _replyHead, _replyCount, _headOffset;
 
     // The command log: the last commands with their arrival times.
@@ -171,6 +173,7 @@ internal sealed unsafe class ProtocolEngine
         _replyBuf = new byte[protocol.PendingReplies][];
         for (int i = 0; i < _replyBuf.Length; i++) _replyBuf[i] = new byte[reply];
         _replyLen = new int[protocol.PendingReplies];
+        _replyOrigin = new int[protocol.PendingReplies];
 
         _logTicks = new long[protocol.LogCapacity];
         _logBuf = new byte[protocol.LogCapacity][];
@@ -581,6 +584,7 @@ internal sealed unsafe class ProtocolEngine
         {
             var r = rules[i];
             if (command.Length < r.MinLength || command.Length > r.MaxLength) continue;
+            if (r.While != null && !r.While.Holds(_regs)) continue;
             int end = r.At + r.Match.Length;
             if (command.Length < end) continue;
             bool hit = true;
@@ -657,7 +661,7 @@ internal sealed unsafe class ProtocolEngine
 
     /// <summary>Queue one message built from <paramref name="parts"/>, with
     /// the protocol's prefix when the rule takes it.</summary>
-    private bool EnqueueLocked(CompiledProtocol.Rule? rule, CompiledProtocol.Part[] parts, ReadOnlySpan<byte> cmd, bool prefix)
+    private bool EnqueueLocked(CompiledProtocol.Rule? rule, CompiledProtocol.Part[] parts, ReadOnlySpan<byte> cmd, bool prefix, int origin = -1)
     {
         if (_replyCount >= _p.PendingReplies)
         {
@@ -679,6 +683,7 @@ internal sealed unsafe class ProtocolEngine
         }
         int slot = (_replyHead + _replyCount) % _replyBuf.Length;
         _replyLen[slot] = BuildReplyLocked(rule, parts, cmd, _replyBuf[slot], prefix);
+        _replyOrigin[slot] = origin;
         _replyCount++;
         return true;
     }
@@ -702,10 +707,11 @@ internal sealed unsafe class ProtocolEngine
     /// <summary>Queue each timed message due at <paramref name="nowTicks"/>,
     /// a Stopwatch time. A timer whose condition holds and did not before
     /// starts its schedule now, and one whose condition stops holding stops.
-    /// A message that comes due while an earlier reply still waits is not
-    /// queued, and its schedule moves on. A timer that fell more than a
-    /// period behind sends once and skips the points it passed. Returns true
-    /// when a message was queued.</summary>
+    /// A message that comes due queues after the replies waiting, unless the
+    /// timer's last message still waits or the queue is full: then it is not
+    /// queued, and its schedule moves on. A timer that fires sets its
+    /// registers. A timer that fell more than a period behind fires once and
+    /// skips the points it passed. Returns true when a message was queued.</summary>
     public bool RunTimers(long nowTicks)
     {
         var timers = _p.Timers;
@@ -730,7 +736,9 @@ internal sealed unsafe class ProtocolEngine
                     _timerLeft[i] = 0;
                 }
                 if (nowTicks < _timerDue[i]) continue;
-                if (_replyCount == 0 && EnqueueLocked(null, t.Reply, ReadOnlySpan<byte>.Empty, prefix: false)) queued = true;
+                foreach (var (reg, value) in t.Sets) _regs[reg] = value;
+                if (t.Reply != null && _replyCount < _p.PendingReplies && !WaitingFromLocked(i)
+                    && EnqueueLocked(null, t.Reply, ReadOnlySpan<byte>.Empty, prefix: false, origin: i)) queued = true;
                 // The next point, past now: each step's count in turn, the
                 // last step repeating.
                 do
@@ -750,6 +758,14 @@ internal sealed unsafe class ProtocolEngine
             }
         }
         return queued;
+    }
+
+    /// <summary>Whether a message timer <paramref name="timer"/> queued still waits.</summary>
+    private bool WaitingFromLocked(int timer)
+    {
+        for (int k = 0; k < _replyCount; k++)
+            if (_replyOrigin[(_replyHead + k) % _replyOrigin.Length] == timer) return true;
+        return false;
     }
 
     /// <summary>True when the protocol declares timers.</summary>
@@ -978,7 +994,7 @@ internal sealed unsafe class ProtocolEngine
     /// holds, or -1.</summary>
     public int SelectedLayout
     {
-        get { lock (_sync) return SelectLocked(); }
+        get { lock (_sync) return PickLocked(_unnamedStream >= 0 ? _unnamedStream : 0); }
     }
 
     /// <summary>The unnamed stream's layout, or with none the first stream's.</summary>
@@ -989,20 +1005,28 @@ internal sealed unsafe class ProtocolEngine
     /// stream that becomes selected forgets the bytes it last sent.</summary>
     private int SelectStreamLocked(int stream)
     {
-        var members = _streams[stream];
-        var layouts = _m.Layouts;
-        int pick = -1;
-        for (int k = 0; k < members.Length; k++)
-        {
-            int i = members[k];
-            if (layouts[i].While == null || layouts[i].While!.Holds(_regs)) { pick = i; break; }
-        }
+        int pick = PickLocked(stream);
         if (pick != _streamSelected[stream])
         {
             if (_streamNamed[stream] && pick >= 0) _sentOnce[pick] = false;
             _streamSelected[stream] = pick;
         }
         return pick;
+    }
+
+    /// <summary>The first layout of stream <paramref name="stream"/> whose
+    /// condition holds, or -1, with nothing recorded: what a read-only
+    /// question about the selection reads.</summary>
+    private int PickLocked(int stream)
+    {
+        var members = _streams[stream];
+        var layouts = _m.Layouts;
+        for (int k = 0; k < members.Length; k++)
+        {
+            int i = members[k];
+            if (layouts[i].While == null || layouts[i].While!.Holds(_regs)) return i;
+        }
+        return -1;
     }
 
     /// <summary>Whether a change layout's bytes are the ones it last sent,
@@ -1060,7 +1084,7 @@ internal sealed unsafe class ProtocolEngine
         {
             lock (_sync)
             {
-                int layout = SelectLocked();
+                int layout = PickLocked(_unnamedStream >= 0 ? _unnamedStream : 0);
                 return layout >= 0 && _m.Layouts[layout].Send == SendRule.Submit;
             }
         }

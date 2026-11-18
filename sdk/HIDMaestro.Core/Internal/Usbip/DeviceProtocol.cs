@@ -137,6 +137,8 @@ internal sealed class CompiledProtocol
         public Part[][]? Packets;
         /// <summary>The rules after this one are tried too once it applies.</summary>
         public bool Continue;
+        /// <summary>When the rule applies, or null for always.</summary>
+        public Condition? While;
         public bool UsePrefix = true;
         public byte Status;
         /// <summary>The reply's length, zero padded, or -1 for its parts' own.</summary>
@@ -149,7 +151,7 @@ internal sealed class CompiledProtocol
     /// condition holds, one at <see cref="FirstTicks"/> after the condition
     /// began to hold, then one per period of each step, a step with a count
     /// of 0 repeating.</summary>
-    internal sealed record Timer(string Name, Condition? While, long FirstTicks, (long PeriodTicks, int Count)[] Steps, Part[] Reply, int Length);
+    internal sealed record Timer(string Name, Condition? While, long FirstTicks, (long PeriodTicks, int Count)[] Steps, Part[]? Reply, int Length, (int Reg, uint Value)[] Sets);
 
     internal sealed record Record(int At, int Size, int CountByte, int DivideBy, int KeyOffset, byte KeyValue,
                                   (int Reg, int Offset, int Bytes, bool BigEndian)[] Fields);
@@ -514,14 +516,15 @@ internal sealed class CompiledProtocol
                 }
                 double first = t.FirstMs ?? periods[0].PeriodMs;
                 if (!(first >= 0) || double.IsInfinity(first)) throw Fail($"{tat}.firstMs {first} is not 0 or more.");
-                if (t.Reply is not { Count: > 0 }) throw Fail($"{tat}.reply is missing: a timer sends a message.");
+                if (t.Reply is not { Count: > 0 } && t.Set is not { Count: > 0 }) throw Fail($"{tat}.reply is missing: a timer sends a message or sets a register.");
                 // No command to read, so the parts compile under minLength 0,
                 // which refuses every echo and every length read from a
                 // command: each part left has a fixed length.
-                var parts = Parts(t.Reply, $"{tat}.reply", 0, allowStatus: false);
+                var parts = t.Reply is { Count: > 0 } ? Parts(t.Reply, $"{tat}.reply", 0, allowStatus: false) : null;
                 int length = 0;
-                foreach (var part in parts) length += part.FixedLength;
-                timers[i] = new Timer(t.Name, Cond(t.While, $"{tat}.while"), MsTicks(first), steps, parts, length);
+                foreach (var part in parts ?? Array.Empty<Part>()) length += part.FixedLength;
+                var sets = t.Set != null ? CompileSets(t.Set, $"{tat}.set") : Array.Empty<(int, uint)>();
+                timers[i] = new Timer(t.Name, Cond(t.While, $"{tat}.while"), MsTicks(first), steps, parts, length, sets);
                 MaxReplyLength = Math.Max(MaxReplyLength, length);
             }
             Timers = timers;
@@ -777,6 +780,30 @@ internal sealed class CompiledProtocol
         return b;
     }
 
+    /// <summary>The register assignments of a rule's or a timer's
+    /// <c>set</c>, each checked to fit its register.</summary>
+    /// <summary>The index of register <paramref name="name"/>, refused at
+    /// <paramref name="where"/> when protocol.state does not declare it.</summary>
+    private int Reg(string name, string where)
+    {
+        int i = Model.Registers.IndexOf(name);
+        if (i < 0) throw Fail($"{where} names '{name}', which protocol.state does not declare.");
+        return i;
+    }
+
+    private (int Reg, uint Value)[] CompileSets(Dictionary<string, HexNumber> set, string at)
+    {
+        var regs = Model.Registers;
+        var sets = new List<(int, uint)>();
+        foreach (var (name, value) in set)
+        {
+            int i = Reg(name, at);
+            if ((value.Value & ~regs.WidthMask(i)) != 0) throw Fail($"{at}.{name} 0x{value.Value:X} does not fit {regs.Bits[i]} bits.");
+            sets.Add((i, value.Value));
+        }
+        return sets.ToArray();
+    }
+
     private Rule CompileRule(ProtocolRuleSpec r, string at, EmitForm? emit)
     {
         var rule = new Rule
@@ -805,23 +832,7 @@ internal sealed class CompiledProtocol
                            $"endpoint 0x{CommandEndpoint:X2} delivers, so it never matches.");
         }
         var regs = Model.Registers;
-        int Reg(string name, string where)
-        {
-            int i = regs.IndexOf(name);
-            if (i < 0) throw Fail($"{where} names '{name}', which protocol.state does not declare.");
-            return i;
-        }
-        if (r.Set != null)
-        {
-            var sets = new List<(int, uint)>();
-            foreach (var (name, value) in r.Set)
-            {
-                int i = Reg(name, $"{at}.set");
-                if ((value.Value & ~regs.WidthMask(i)) != 0) throw Fail($"{at}.set.{name} 0x{value.Value:X} does not fit {regs.Bits[i]} bits.");
-                sets.Add((i, value.Value));
-            }
-            rule.Sets = sets.ToArray();
-        }
+        if (r.Set != null) rule.Sets = CompileSets(r.Set, $"{at}.set");
         if (r.Store != null)
         {
             var stores = new List<Store>();
@@ -934,6 +945,9 @@ internal sealed class CompiledProtocol
             if (Model.Decoders[rule.Decode].MinLength > rule.MinLength && r.MinLength != null)
                 throw Fail($"{at}.decode '{r.Decode}' reads {Model.Decoders[rule.Decode].MinLength} bytes, past the rule's minLength {rule.MinLength}.");
         }
+        rule.While = Cond(r.While, $"{at}.while");
+        if (rule.While != null && (emit != null || r.EmitOutput != null || r.Decode != null))
+            throw Fail($"{at}.while: a rule that emits or decodes a report applies to every command it matches, so it has no condition.");
         rule.Continue = r.Continue ?? false;
         if (rule.Continue && (emit != null || r.EmitOutput != null || r.Decode != null))
             throw Fail($"{at}.continue: the rules after this one apply to the command too, so it is not the command's own rule, which emits or decodes it.");

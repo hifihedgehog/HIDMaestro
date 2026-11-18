@@ -98,9 +98,11 @@ public sealed class ProtocolSpec
 /// starts each time <see cref="While"/> begins to hold, at attach and after
 /// a port reset included: the first message goes out
 /// <see cref="FirstMs"/> later, then one per period of each step in turn.
-/// A message that comes due while an earlier reply still waits for the host
-/// is not queued, as a device whose endpoint holds one packet sends nothing
-/// more until the host reads it, and the schedule moves on.</summary>
+/// A message that comes due while replies wait for the host queues after
+/// them. A timer has at most one message waiting: one that comes due while
+/// its last still waits is not queued, as a device holds one packet of each
+/// message until the host reads it, and the schedule moves on. A timer that
+/// fires sets its registers (<see cref="Set"/>) as it queues its message.</summary>
 public sealed class ProtocolTimerSpec
 {
     [JsonPropertyName("name")]
@@ -122,9 +124,15 @@ public sealed class ProtocolTimerSpec
     public List<ProtocolTimerStepSpec>? Periods { get; set; }
 
     /// <summary>The message, built as a rule's reply is, with no command to
-    /// echo.</summary>
+    /// echo. Absent for a timer that only sets registers.</summary>
     [JsonPropertyName("reply")]
     public List<ReplyPartSpec>? Reply { get; set; }
+
+    /// <summary>Registers the timer sets each time it fires: a timeout that
+    /// moves the device to another state, such as back to its announcement
+    /// when a host stops acknowledging.</summary>
+    [JsonPropertyName("set")]
+    public Dictionary<string, HexNumber>? Set { get; set; }
 }
 
 /// <summary>One step of a timer's schedule.</summary>
@@ -365,6 +373,13 @@ public sealed class ProtocolRuleSpec
     /// byte whose bits under the mask <c>mm</c> hold <c>vv</c>.</summary>
     [JsonPropertyName("match")]
     public string Match { get; set; } = "";
+
+    /// <summary>When the rule applies. Absent is always. A command the rule
+    /// matches while the condition does not hold goes on to the rules after
+    /// it, as an answer a device gives once in a given state. A rule with
+    /// a condition neither emits nor decodes.</summary>
+    [JsonPropertyName("while")]
+    public ConditionText? While { get; set; }
 
     /// <summary>True when the rules after this one are tried too once it
     /// has applied, so a command can draw this rule's reply and its own
