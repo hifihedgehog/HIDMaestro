@@ -91,10 +91,13 @@ public sealed class HMContext : IDisposable
             // and never touches it, so the prewarm stages (and hashes) the
             // payload only when a deploy is coming. Staging needs elevation;
             // a non-elevated context skips it here and fails nothing.
+            // On a machine whose Windows will not install the driver, nothing
+            // is staged and no owner claim is taken for it.
             try
             {
                 if (HMBuildInfo.Carries(HMPayload.Driver, System.Runtime.InteropServices.RuntimeInformation.OSArchitecture) &&
-                    !Internal.DriverBuilder.WillTakeFastPath())
+                    !Internal.DriverBuilder.WillTakeFastPath() &&
+                    !Internal.DriverDeploy.SigningStopsDeploy())
                 {
                     // Staging needs this process's owner claim. It is taken
                     // here, holding no lock, through the removal gate, which
@@ -114,7 +117,15 @@ public sealed class HMContext : IDisposable
         });
         System.Threading.Tasks.Task.Run(() =>
         {
-            try { Internal.DeviceOrchestrator.PrewarmGameInputService(); } catch { }
+            // GameInputSvc serves controllers, and a machine whose Windows
+            // will not install the driver gets none, so its start type
+            // stays as it is.
+            try
+            {
+                if (!Internal.DriverDeploy.SigningStopsDeploy())
+                    Internal.DeviceOrchestrator.PrewarmGameInputService();
+            }
+            catch { }
         });
     }
 
@@ -223,10 +234,21 @@ public sealed class HMContext : IDisposable
     /// staging lock for two.</exception>
     /// <exception cref="HMPayloadMissingException">This build carries no
     /// driver for this machine's architecture.</exception>
+    /// <exception cref="HMDriverSigningException">Windows on this machine
+    /// installs only driver packages Microsoft signed, as Windows on ARM64
+    /// with WHQL driver enforcement and Windows in S mode do. On a machine
+    /// that holds no HIDMaestro driver it is thrown before anything
+    /// changes. <see cref="HMDriverSigning.Check"/> says so without the
+    /// exception.</exception>
     public void InstallDriver()
     {
         ThrowIfDisposed();
         HMBuildInfo.ThrowIfMissing(HMPayload.Driver);
+
+        // Before the sweep below takes this process's owner claim, so a
+        // machine whose Windows will not install the driver keeps no record
+        // of the call.
+        Internal.DriverDeploy.ThrowIfSigningStopsDeploy();
 
         // Devices of programs that have exited go first: a device bound to
         // the old INF keeps pnputil from replacing the package. Only
@@ -652,8 +674,12 @@ public sealed class HMContext : IDisposable
             HMBuildInfo.ThrowIfMissing(HMPayload.UsbipTransport,
                 $"Profile '{profile.Id}' is a composite persona, which rides the USB/IP transport.");
         else
+        {
             HMBuildInfo.ThrowIfMissing(HMPayload.Driver,
                 $"Profile '{profile.Id}' runs on the UMDF2 driver.");
+            // The same refusal as InstallDriver's, before the lease.
+            Internal.DriverDeploy.ThrowIfSigningStopsDeploy();
+        }
 
         // What programs that have exited left goes first, once per
         // process, before this create claims anything: a keyless program

@@ -1359,6 +1359,10 @@ public sealed partial class HMController : IDisposable
     /// <exception cref="InvalidOperationException">The profile declares no
     /// winUsb, or no driver Windows has ranks above the package, which would
     /// let Windows choose the package for real devices.</exception>
+    /// <exception cref="HMDriverSigningException">Windows on this machine
+    /// installs only driver packages Microsoft signed, and the binding's
+    /// package is signed as HIDMaestro's driver is
+    /// (<see cref="HMDriverSigning"/>).</exception>
     public HMWinUsbBinding BindWinUsb()
     {
         ThrowIfDisposed();

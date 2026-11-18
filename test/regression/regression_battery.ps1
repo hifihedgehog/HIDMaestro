@@ -2581,6 +2581,19 @@ function Scenario-Sinput-Persona {
                  -Message 'an SInput persona no longer answers SDL''s features command as its reference does, decodes the host''s output wrongly, or does not open in SDL3''s SInput driver (see probe stdout)'
 }
 
+# S104: driver signing. HMDriverSigning.Check() against the probe's own read
+# of the code integrity options and against the driver store, the decision
+# over the options the three test machines read, and Windows' own answer
+# for HIDMaestro's installed catalog and for a catalog signed as HIDMaestro
+# signs. On a machine whose Windows installs only Microsoft-signed driver
+# packages and that holds no HIDMaestro package, InstallDriver and a create
+# throw HMDriverSigningException and the machine reads the same after. That
+# part prints [SKIP] where Windows installs HIDMaestro's driver.
+function Scenario-Driver-Signing {
+    Invoke-Probe -Dir 'driver_signing_check' -Exe 'DriverSigningCheck.exe' `
+                 -Message 'HMDriverSigning.Check disagrees with the machine, a failed import is blamed on signing where Windows accepts the catalog, or a refused install changed the machine (see probe stdout)'
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -2687,7 +2700,8 @@ $scenarios = @(
     @{ Name = 'S100_Switch_Pro_Sdl3';            Body = ${function:Scenario-Switch-Pro-Sdl3} },
     @{ Name = 'S101_Uninstall';                  Body = ${function:Scenario-Uninstall} },
     @{ Name = 'S102_Loop_Containment';           Body = ${function:Scenario-Loop-Containment} },
-    @{ Name = 'S103_Sinput_Persona';             Body = ${function:Scenario-Sinput-Persona} }
+    @{ Name = 'S103_Sinput_Persona';             Body = ${function:Scenario-Sinput-Persona} },
+    @{ Name = 'S104_Driver_Signing';             Body = ${function:Scenario-Driver-Signing} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

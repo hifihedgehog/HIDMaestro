@@ -70,6 +70,7 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("ProfileModelCheck")]
 [assembly: InternalsVisibleTo("ContractLiveCheck")]
 [assembly: InternalsVisibleTo("LoopContainmentCheck")]
+[assembly: InternalsVisibleTo("DriverSigningCheck")]
 // The profile check tool in the release ZIP runs a profile's programs on the
 // interpreter to measure them (tools\HIDMaestroProfileCheck).
 [assembly: InternalsVisibleTo("HIDMaestroProfileCheck")]
