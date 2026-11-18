@@ -1,8 +1,8 @@
 # Builds what S83 runs:
 #
 #   sdl_harness.exe              loads an SDL3.dll from the directory it is given
-#   sdl-official\SDL3.dll        the official SDL3 3.4.18 release for Windows x64,
-#                                checked against its SHA-256
+#   sdl-official\SDL3.dll        the official SDL3 3.4.18 release for Windows x64
+#                                or ARM64, checked against its SHA-256
 #   sdl-libusb\SDL3.dll          SDL 3.4.18 built from source by its own CMake,
 #                                with SDL_HIDAPI_LIBUSB and SDL_HIDAPI_LIBUSB_SHARED
 #   sdl-libusb\libusb-1.0.dll    libusb 1.0.29 built by its own MSVC project
@@ -10,11 +10,14 @@
 # The SDL and libusb sources are the reference clones beside this repository,
 # at the commits named below, and nothing from them is copied into it. The
 # CMake options are the ones PadForge's native build passes for SDL with
-# libusb (SDL3-build\build-natives.ps1).
+# libusb (SDL3-build\build-natives.ps1). -Arch picks the target
+# (probe_common\NativeToolset.ps1): x64 by default, arm64 for the probe's
+# ARM64 build, whose harness and DLLs then run natively on an ARM64 machine.
 #
-# Usage: build.ps1 -Out <dir> [-Refs <reference root>] [-Obj <dir>]
+# Usage: build.ps1 -Out <dir> [-Arch x64|arm64] [-Refs <reference root>] [-Obj <dir>]
 param(
     [Parameter(Mandatory = $true)][string]$Out,
+    [ValidateSet('x64', 'arm64')][string]$Arch = 'x64',
     [string]$Refs,
     [string]$Obj
 )
@@ -22,35 +25,39 @@ $ErrorActionPreference = 'Stop'
 $Out = [IO.Path]::GetFullPath($Out)
 # Windows PowerShell 5.1 leaves $PSScriptRoot empty in parameter defaults.
 if (-not $Refs) { $Refs = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..\..\..')).Path }
-if (-not $Obj) { $Obj = Join-Path $PSScriptRoot '..\obj\native' }
+if (-not $Obj) { $Obj = Join-Path $PSScriptRoot "..\obj\native-$Arch" }
 $Obj = [IO.Path]::GetFullPath($Obj)
+. (Join-Path $PSScriptRoot '..\..\probe_common\NativeToolset.ps1')
 
 $sdlCommit = '829a65d769d935c4852f8159e964312c0957260a'      # release-3.4.18
 $libusbCommit = '15a7ebb4d426c5ce196684347d2b7cafad862626'   # v1.0.29
-# SDL3.dll from SDL3-3.4.18-win32-x64.zip, the release's Windows x64 asset
-# (https://github.com/libsdl-org/SDL/releases/tag/release-3.4.18). Its
-# .git-hash names $sdlCommit.
-$officialSha = '2B4B128D8D510CC2D442693CF848C050D700D43DC667AFE9E5FD82B0570D667E'
+# SDL3.dll from SDL3-3.4.18-win32-x64.zip and SDL3-3.4.18-win32-arm64.zip,
+# the release's Windows x64 and ARM64 assets
+# (https://github.com/libsdl-org/SDL/releases/tag/release-3.4.18), each
+# unpacked into a folder of its own beside this repository. The zips' SHA-256
+# are the digests the release lists, 75c2c0fc...985f2c and a95910a1...2f5086,
+# and each .git-hash names $sdlCommit.
+$officialRelease = @{
+    x64   = @{ Folder = 'SDL3-release-3.4.18';       Sha = '2B4B128D8D510CC2D442693CF848C050D700D43DC667AFE9E5FD82B0570D667E' }
+    arm64 = @{ Folder = 'SDL3-release-3.4.18-arm64'; Sha = '4F053391ED8659D5F0D234E2836D4FDA9FCC2C6222FB188F4219EC3AFCB2FBB7' }
+}[$Arch]
+$officialSha = $officialRelease.Sha
 
 $sdlSource = Join-Path $Refs 'SDL-3.4.18'
 $libusbSource = Join-Path $Refs 'libusb-1.0.29'
-$official = Join-Path $Refs 'SDL3-release-3.4.18\SDL3.dll'
+$official = Join-Path $Refs "$($officialRelease.Folder)\SDL3.dll"
 foreach ($p in $sdlSource, $libusbSource, $official) { if (-not (Test-Path $p)) { throw "Reference missing: $p" } }
 if ((git -C $sdlSource rev-parse HEAD).Trim() -ne $sdlCommit) { throw "$sdlSource is not at $sdlCommit." }
 if ((git -C $libusbSource rev-parse HEAD).Trim() -ne $libusbCommit) { throw "$libusbSource is not at $libusbCommit." }
 if ((Get-FileHash -Algorithm SHA256 $official).Hash -ne $officialSha) { throw "$official is not the release's SDL3.dll (SHA-256 $officialSha)." }
 
-$installer = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer'
-$vswhere = Join-Path $installer 'vswhere.exe'
-# vcvars64.bat runs vswhere from PATH.
-$env:PATH = "$installer;$env:PATH"
-$vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-if (-not $vs) { throw 'No Visual Studio with the x64 C++ tools.' }
-$vsMajor = ((& $vswhere -latest -products * -property installationVersion) -split '\.')[0]
-$vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+$native = Get-HMNativeToolset -Arch $Arch
+$vs = $native.Vs
+$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+$vsMajor = ((& $vswhere -path $vs -property installationVersion) -split '\.')[0]
 $msbuild = Join-Path $vs 'MSBuild\Current\Bin\MSBuild.exe'
 $cmake = Join-Path $vs 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
-foreach ($p in $vcvars, $msbuild, $cmake) { if (-not (Test-Path $p)) { throw "Visual Studio is missing $p" } }
+foreach ($p in $msbuild, $cmake) { if (-not (Test-Path $p)) { throw "Visual Studio is missing $p" } }
 # libusb's msvc\Configuration.Base.props names a toolset for Visual Studio
 # 2013 through 2022 only, so a newer one gets the toolset it installs. The
 # CMake generator is named for the release year, which vswhere does not
@@ -92,7 +99,7 @@ function Current([string]$stampPath, [string]$stamp, [string[]]$outputs) {
 $officialDir = Join-Path $Out 'sdl-official'
 $libusbDir = Join-Path $Out 'sdl-libusb'
 $sdlStampPath = Join-Path $Out 'sdl-builds.stamp'
-$sdlStamp = "$sdlCommit $libusbCommit $officialSha $toolset $((Get-FileHash -Algorithm SHA256 $PSCommandPath).Hash)"
+$sdlStamp = "$sdlCommit $libusbCommit $officialSha $toolset $Arch $((Get-FileHash -Algorithm SHA256 $PSCommandPath).Hash)"
 $sdlOutputs = @((Join-Path $officialDir 'SDL3.dll'), (Join-Path $libusbDir 'SDL3.dll'), (Join-Path $libusbDir 'libusb-1.0.dll'))
 if (Current $sdlStampPath $sdlStamp $sdlOutputs) {
     Write-Host 'the SDL builds are current'
@@ -103,7 +110,8 @@ if (Current $sdlStampPath $sdlStamp $sdlOutputs) {
     New-Item -ItemType Directory -Force -Path $officialDir, $libusbDir | Out-Null
     Copy-Item $official (Join-Path $officialDir 'SDL3.dll')
 
-    # libusb's own DLL project, its Release x64 configuration. Its intermediate
+    # libusb's own DLL project, its Release configuration for the target
+    # platform, x64 or ARM64. Its intermediate
     # and output directories are redirected here so the clone stays clean.
     # Warning C5287, which libusb's project treats as an error, is off: the
     # compilers in Visual Studio 2022 17.14 and later raise it on libusb's
@@ -115,7 +123,7 @@ if (Current $sdlStampPath $sdlStamp $sdlOutputs) {
     $env:_CL_ = '/wd5287'
     try {
         Run $msbuild (Quote @((Join-Path $libusbSource 'msvc\libusb_dll.vcxproj'), '/nologo', '/v:minimal',
-            '/p:Configuration=Release', '/p:Platform=x64', "/p:PlatformToolset=$toolset",
+            '/p:Configuration=Release', "/p:Platform=$($native.Platform)", "/p:PlatformToolset=$toolset",
             "/p:IntDir=$libusbObj\obj\", "/p:OutDir=$libusbObj\out\")) (Join-Path $Obj 'libusb.log')
     } finally {
         Remove-Item Env:\_CL_
@@ -131,7 +139,7 @@ if (Current $sdlStampPath $sdlStamp $sdlOutputs) {
     # worktree.
     $sdlBuild = Join-Path $Obj 'sdl'
     $revision = 'SDL-' + (git -C $sdlSource describe --tags --long --abbrev=12).Trim()
-    Run $cmake (Quote @('-S', $sdlSource, '-B', $sdlBuild, '-G', $generator, '-A', 'x64',
+    Run $cmake (Quote @('-S', $sdlSource, '-B', $sdlBuild, '-G', $generator, '-A', $native.Platform,
         '-DSDL_SHARED=ON', '-DSDL_STATIC=OFF', '-DSDL_TESTS=OFF', '-DSDL_TEST_LIBRARY=OFF', '-DSDL_EXAMPLES=OFF',
         "-DSDL_REVISION=$revision", '-DSDL_HIDAPI_LIBUSB=ON', '-DSDL_HIDAPI_LIBUSB_SHARED=ON',
         "-DLibUSB_INCLUDE_PATH=$(Join-Path $libusbSource 'libusb')", "-DLibUSB_LIBRARY=$importLib")) (Join-Path $Obj 'sdl-configure.log')
@@ -150,7 +158,7 @@ if (Current $sdlStampPath $sdlStamp $sdlOutputs) {
 
 $exe = Join-Path $Out 'sdl_harness.exe'
 $harnessStampPath = Join-Path $Out 'sdl_harness.stamp'
-$harnessStamp = "$sdlCommit $ownHash"
+$harnessStamp = "$sdlCommit $ownHash $Arch"
 if (Current $harnessStampPath $harnessStamp @($exe)) {
     Write-Host 'sdl_harness.exe is current'
 } else {
@@ -160,7 +168,7 @@ if (Current $harnessStampPath $harnessStamp @($exe)) {
     $source = Join-Path $PSScriptRoot 'sdl_harness.cpp'
     $cmd = @"
 @echo off
-call "$vcvars" >nul || exit /b 1
+call $($native.Vcvars) >nul || exit /b 1
 cl /nologo /O2 /MT /EHsc /std:c++17 /W4 /WX /utf-8 /DUNICODE /D_UNICODE /I"$sdlSource\include" /Fo"$work\\" /Fe"$exe" "$source" winmm.lib || exit /b 1
 "@
     $cmdPath = Join-Path $work 'build.cmd'

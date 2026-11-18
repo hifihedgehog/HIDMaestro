@@ -336,13 +336,10 @@ internal static class Program
     static void WindowsParse()
     {
         Console.WriteLine("\n--- the catalog against Windows' own parser ---");
-        // The loader binds an x64 image. The catalog's bytes are the same on
-        // every architecture, so an x64 run checks them for all.
-        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
-        {
-            Console.WriteLine($"  [INFO] not run in a {RuntimeInformation.ProcessArchitecture} process: the loader binds x64 images only");
-            return;
-        }
+        // The loader binds the machine's own image, x64 or ARM64, in a
+        // process of the same architecture. Any other process fails the
+        // load check below with its reason: a check that did not run is no
+        // pass.
         bool loaded = WindowsParser.TryLoad(out string why);
         Check($"Windows' HID parser loads in this process from {WindowsParser.ImagePath}", loaded, why);
         if (!loaded) return;

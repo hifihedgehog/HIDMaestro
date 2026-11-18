@@ -22,7 +22,12 @@ using HIDMaestro.Internal.Usbip;
 /// The planted set must show its call, or the check proves nothing. The JIT
 /// run then reads the NativeAOT build beside it the same way, through
 /// dumpbin /disasm with the build's symbols, where a Visual Studio C++
-/// toolset is installed.</summary>
+/// toolset is installed. Each listing is read with the call instructions of
+/// its architecture: call on x64, bl on ARM64. The ARM64 JIT names no target
+/// of a call through a register, so there the JIT run also lists every
+/// kernel and Run the child compiles on its own, which it does only for one
+/// that is called: the planted kernel must be among them and no catalog
+/// one may be.</summary>
 internal static class InlineCheck
 {
     sealed class Binder : IReportSetBinder
@@ -91,7 +96,15 @@ internal static class InlineCheck
             UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true,
         };
         start.ArgumentList.Add("inline-child");
-        start.Environment["DOTNET_JitDisasm"] = "BuildNext";
+        // On ARM64 the JIT calls a method it has not compiled yet through a
+        // register, blr, loaded from an address the listing gives as bare
+        // movz and movk immediates, so the listing names no target. A kernel
+        // or Run that is called rather than inlined is then compiled on its
+        // own when the call first runs, and that listing names it: the
+        // child also lists every method whose name starts with K and every
+        // Run.
+        bool arm64 = RuntimeInformation.ProcessArchitecture == Architecture.Arm64;
+        start.Environment["DOTNET_JitDisasm"] = arm64 ? "BuildNext K* Run" : "BuildNext";
         start.Environment["DOTNET_JitStdOutFile"] = listing;
         start.Environment.Remove("HIDMAESTRO_DIAG");
         string output;
@@ -108,8 +121,8 @@ internal static class InlineCheck
         if (exit != 0 || !File.Exists(listing)) { Checks.Fail($"inline: the child exited {exit}, listing {(File.Exists(listing) ? "written" : "missing")}"); return Checks.Failures - before; }
         string text = File.ReadAllText(listing);
         File.Delete(listing);
-        var methods = text.Split("; Assembly listing for method ", StringSplitOptions.RemoveEmptyEntries)
-            .Where(m => m.Contains("BuildNext[", StringComparison.Ordinal)).ToList();
+        var all = text.Split("; Assembly listing for method ", StringSplitOptions.RemoveEmptyEntries).ToList();
+        var methods = all.Where(m => m.Contains("BuildNext[", StringComparison.Ordinal)).ToList();
         int catalog = 0, planted = 0;
         foreach (var m in methods)
         {
@@ -117,28 +130,67 @@ internal static class InlineCheck
             bool isPlanted = header.Contains("_NotInlined", StringComparison.Ordinal);
             bool isCatalog = header.Contains("Programs.Set", StringComparison.Ordinal) && !isPlanted;
             if (!isPlanted && !isCatalog) continue;
-            var calls = m.Split('\n').Select(l => l.Trim())
-                .Where(l => l.StartsWith("call ", StringComparison.Ordinal) || l.Contains(" call ", StringComparison.Ordinal))
+            var calls = JitCalls(m.Split('\n'), arm64)
                 .Where(l => l.Contains("Kernels:K", StringComparison.Ordinal) || l.Contains(":Run(", StringComparison.Ordinal))
                 .ToList();
             string set = header.Contains('[') ? header[(header.IndexOf('[') + 1)..header.IndexOf(']')] : header;
             if (isPlanted)
             {
                 planted++;
-                if (calls.Count > 0) Console.WriteLine($"{set}: the planted NoInlining kernel is called ({calls[0]}), so the check sees a call");
+                if (arm64) Console.WriteLine($"{set}: BuildNext over the planted set is listed");
+                else if (calls.Count > 0) Console.WriteLine($"{set}: the planted NoInlining kernel is called ({calls[0]}), so the check sees a call");
                 else Checks.Fail($"{set}: the planted NoInlining kernel shows no call, so the check cannot see one");
             }
             else
             {
                 catalog++;
-                if (calls.Count == 0) Console.WriteLine($"{set}: BuildNext holds no call to a kernel or the set's Run");
+                if (calls.Count == 0) Console.WriteLine($"{set}: BuildNext holds no{(arm64 ? " named" : "")} call to a kernel or the set's Run");
                 else Checks.Fail($"{set}: BuildNext calls {string.Join("; ", calls)}");
             }
         }
         if (catalog == 0) Checks.Fail("inline: no listing of BuildNext over a catalog set");
         if (planted == 0) Checks.Fail("inline: no listing of BuildNext over the planted set");
+        if (arm64)
+        {
+            // The kernels and Runs compiled on their own: each one was called.
+            var compiled = all.Select(m => m[..Math.Max(0, m.IndexOf('\n'))].Trim())
+                .Where(h => h.Contains("Kernels:K", StringComparison.Ordinal)
+                    || (h.Contains("Programs.Set", StringComparison.Ordinal) && h.Contains(":Run(", StringComparison.Ordinal)))
+                .ToList();
+            var plantedKernel = compiled.Where(h => h.Contains("_NotInlined", StringComparison.Ordinal)).ToList();
+            var catalogCalled = compiled.Where(h => !h.Contains("_NotInlined", StringComparison.Ordinal)).ToList();
+            if (plantedKernel.Count > 0) Console.WriteLine($"the planted NoInlining kernel is compiled on its own ({plantedKernel[0]}), so the check sees a call");
+            else Checks.Fail("the planted NoInlining kernel is not compiled on its own, so the check cannot see a call");
+            if (catalogCalled.Count == 0) Console.WriteLine("no catalog kernel or set's Run is compiled on its own: each is inlined where it runs");
+            else Checks.Fail($"called rather than inlined: {string.Join("; ", catalogCalled)}");
+        }
         Aot();
         return Checks.Failures - before;
+    }
+
+    /// <summary>The calls in one method of the JIT's listing that name their
+    /// target. On x64 a call is one instruction, call, with its target on the
+    /// line. On ARM64 a direct call is bl with its target on the line, and a
+    /// call through a register, blr, names none.</summary>
+    internal static IEnumerable<string> JitCalls(IEnumerable<string> lines, bool arm64)
+    {
+        foreach (var raw in lines)
+        {
+            string l = raw.Trim();
+            if (arm64 ? l.StartsWith("bl ", StringComparison.Ordinal)
+                      : l.StartsWith("call ", StringComparison.Ordinal) || l.Contains(" call ", StringComparison.Ordinal))
+                yield return l;
+        }
+    }
+
+    /// <summary>The target of a call in one line of dumpbin's disassembly, or
+    /// null when the line holds no call. x64 calls with call, ARM64 with bl,
+    /// or blr through a register, which names no target.</summary>
+    internal static string? AotCall(string line, bool arm64)
+    {
+        string op = arm64 ? " bl " : " call ";
+        int at = line.IndexOf(op, StringComparison.Ordinal);
+        return at < 0 ? null : line[(at + op.Length)..].Trim();
     }
 
     /// <summary>dumpbin from the newest Visual Studio C++ toolset for this
@@ -168,7 +220,13 @@ internal static class InlineCheck
     /// dumpbin's disassembly, one function per symbol line.</summary>
     static void Aot()
     {
-        string arch = RuntimeInformation.OSArchitecture == Architecture.Arm64 ? "arm64" : "x64";
+        // HM_PEC_AOT_ARCH names the other architecture's build, so an x64
+        // machine's dumpbin can read the ARM64 build, which the probe's ARM64
+        // output carries, through the ARM64 reading.
+        string arch = Environment.GetEnvironmentVariable("HM_PEC_AOT_ARCH") is ("arm64" or "x64") and var named
+            ? named
+            : RuntimeInformation.OSArchitecture == Architecture.Arm64 ? "arm64" : "x64";
+        bool arm64 = arch == "arm64";
         string aot = Path.Combine(AppContext.BaseDirectory, "aot-" + arch, "ProgramEquivalenceCheck.exe");
         string? dumpbin = Dumpbin();
         // The check reads the NativeAOT build or fails: a machine without the
@@ -217,9 +275,9 @@ internal static class InlineCheck
                     name = line[..^1];
                     calls.Clear();
                 }
-                else if (name != null && line.Contains(" call ", StringComparison.Ordinal))
+                else if (name != null && AotCall(line, arm64) is { } target)
                 {
-                    calls.Add(line[(line.IndexOf(" call ", StringComparison.Ordinal) + 6)..].Trim());
+                    calls.Add(target);
                 }
             }
             End();

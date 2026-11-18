@@ -14,14 +14,16 @@ public enum HMPayload
 {
     /// <summary>The UMDF2 driver, its XUSB companion, the SWD helper, both
     /// INFs and the signing and catalog tools that install them, for one
-    /// architecture. Every controller except a composite persona runs on
-    /// it. A build made with <c>HMSkipArm64</c> carries it for x64
+    /// architecture. Every controller on <see cref="HMBackend.Umdf2"/> runs
+    /// on it. A build made with <c>HMSkipArm64</c> carries it for x64
     /// only.</summary>
     Driver = 0,
 
     /// <summary>usbip-win2's host controller files for one
-    /// architecture, the transport composite personas ride
-    /// (<see cref="HMProfile.RequiresUsbipBackend"/>). A build made with
+    /// architecture, the transport every controller on
+    /// <see cref="HMBackend.Usbip"/> rides: composite personas
+    /// (<see cref="HMProfile.RequiresUsbipBackend"/>), and every profile on a
+    /// machine whose <see cref="HMContext.MachineBackend"/> is USB/IP. A build made with
     /// <c>HMSkipUsbip</c> carries none, and one made with
     /// <c>HMSkipArm64</c> none for ARM64.</summary>
     UsbipTransport = 1,
@@ -55,12 +57,13 @@ public static class HMBuildInfo
     private static readonly Architecture[] s_built = { Architecture.X64, Architecture.Arm64 };
 
     /// <summary>The architectures this build carries the UMDF2 driver for.
-    /// Every controller except a composite persona needs the one matching
-    /// the machine.</summary>
+    /// Every controller on <see cref="HMBackend.Umdf2"/> needs the one
+    /// matching the machine.</summary>
     public static IReadOnlyList<Architecture> DriverArchitectures => s_state.Value.Driver;
 
     /// <summary>The architectures this build carries the USB/IP transport
-    /// for, which composite personas ride. Empty in a build made with
+    /// for, which every controller on <see cref="HMBackend.Usbip"/> rides.
+    /// Empty in a build made with
     /// <c>HMSkipUsbip</c>.</summary>
     public static IReadOnlyList<Architecture> UsbipArchitectures => s_state.Value.Usbip;
 

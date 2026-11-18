@@ -2,6 +2,8 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <PlatformTarget>$(HMTargetArchitecture)</PlatformTarget>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyName>CoexistCheck</AssemblyName>
@@ -33,6 +35,6 @@
        probe. Batched on HMLegacyRelease. -->
   <Target Name="BuildLegacyPeers" AfterTargets="Build" Inputs="@(HMLegacyRelease)" Outputs="$(OutDir)legacy\%(HMLegacyRelease.Identity)\CoexistPeer.exe">
     <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)fetch_legacy.ps1&quot; -Version %(HMLegacyRelease.Identity) -ZipSha256 %(HMLegacyRelease.ZipSha256) -CoreSha256 %(HMLegacyRelease.CoreSha256) -Cache &quot;$(HMLegacyCache.TrimEnd('\'))&quot;" />
-    <Exec Command="dotnet build &quot;$(MSBuildThisFileDirectory)legacy_peer\CoexistPeer.csproj&quot; -c $(Configuration) --nologo -v:quiet -p:HMLegacyVersion=%(HMLegacyRelease.Identity) -p:HMLegacyCore=&quot;$(HMLegacyCache)%(HMLegacyRelease.Identity)\HIDMaestro.Core.dll&quot; -o &quot;$(OutDir)legacy\%(HMLegacyRelease.Identity)&quot;" />
+    <Exec Command="dotnet build &quot;$(MSBuildThisFileDirectory)legacy_peer\CoexistPeer.csproj&quot; -c $(Configuration) --nologo -v:quiet -p:HMTargetArchitecture=$(HMTargetArchitecture) -p:HMLegacyVersion=%(HMLegacyRelease.Identity) -p:HMLegacyCore=&quot;$(HMLegacyCache)%(HMLegacyRelease.Identity)\HIDMaestro.Core.dll&quot; -o &quot;$(OutDir)legacy\%(HMLegacyRelease.Identity)&quot;" />
   </Target>
 </Project>

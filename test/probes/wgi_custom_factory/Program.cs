@@ -52,9 +52,11 @@ internal sealed class MyController : IGameController
     public bool IsWireless => false;
     public Headset? Headset => null;
     public Windows.System.User? User => null;
-    public event Windows.Foundation.TypedEventHandler<IGameController, Headset>? HeadsetConnected;
-    public event Windows.Foundation.TypedEventHandler<IGameController, Headset>? HeadsetDisconnected;
-    public event Windows.Foundation.TypedEventHandler<IGameController, Windows.System.UserChangedEventArgs>? UserChanged;
+    // No headset and no user ever change on this controller, so it keeps no
+    // handlers for the three events IGameController requires.
+    public event Windows.Foundation.TypedEventHandler<IGameController, Headset>? HeadsetConnected { add { } remove { } }
+    public event Windows.Foundation.TypedEventHandler<IGameController, Headset>? HeadsetDisconnected { add { } remove { } }
+    public event Windows.Foundation.TypedEventHandler<IGameController, Windows.System.UserChangedEventArgs>? UserChanged { add { } remove { } }
 }
 
 internal static class P

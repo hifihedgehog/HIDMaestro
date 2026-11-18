@@ -240,25 +240,28 @@ public sealed class ControllerProfile
     [JsonPropertyName("extendedOutputReport")]
     public ExtendedReportSpec? ExtendedOutputReport { get; set; }
 
-    /// <summary>Issue #39. Which instantiation path creates this device.
-    /// Absent or <c>"umdf2"</c> is the default: one HID device via the
-    /// UMDF2 driver. <c>"usbip"</c> marks a composite USB persona, which
-    /// rides the USB transport bundled inside HIDMaestro.Core.dll and
-    /// deployed on first use.
+    /// <summary>Issue #39. The device's default backend. Absent or
+    /// <c>"umdf2"</c>: both backends present the device, and the UMDF2
+    /// driver is the default where Windows installs it. <c>"usbip"</c>: the
+    /// device has interfaces or a report path the UMDF2 driver cannot
+    /// present, such as a composite USB persona's audio interfaces, and it
+    /// runs on the USB/IP backend on every machine.
     ///
     /// <para>This is a property of the DEVICE the profile describes, not
     /// a mode switch on an existing one. A profile that presented four
     /// interfaces on machines with the backend and one without would
     /// name a device plus a machine state. Composite personas therefore
-    /// ship as separate profiles, and the five existing USB Sony
-    /// profiles are untouched.</para></summary>
+    /// ship as separate profiles. A program picks the backend of any other
+    /// profile per create (HMBackend).</para></summary>
     [JsonPropertyName("backend")]
     public string? Backend { get; set; }
 
-    /// <summary>Issue #39. The USB configuration this profile presents
-    /// when <see cref="Backend"/> is <c>"usbip"</c>. Null for every
-    /// UMDF2 profile, where Windows composes the configuration itself
-    /// and only the HID report descriptor is ours to author.</summary>
+    /// <summary>Issue #39. The USB device this profile presents on the
+    /// USB/IP backend: authored descriptors, or pins over the presentation
+    /// derived from the profile (<see cref="Usbip.UsbPresentation"/>). Null
+    /// for a profile that takes the derived presentation whole. The UMDF2
+    /// backend does not read it: Windows composes that device's
+    /// configuration itself.</summary>
     [JsonPropertyName("usbConfiguration")]
     public UsbConfigurationSpec? UsbConfiguration { get; set; }
 
@@ -385,9 +388,8 @@ public sealed class ControllerProfile
     [JsonPropertyName("valueSources")]
     public Dictionary<string, ValueSourceSpec>? ValueSources { get; set; }
 
-    /// <summary>True when this profile is a composite USB persona and
-    /// therefore takes the USB/IP create path rather than the UMDF2
-    /// one.</summary>
+    /// <summary>True when the profile's backend is <c>"usbip"</c>: only
+    /// the USB/IP backend presents its device.</summary>
     [JsonIgnore]
     public bool RequiresUsbipBackend =>
         Backend?.Equals("usbip", StringComparison.OrdinalIgnoreCase) == true;
@@ -666,6 +668,7 @@ public sealed class ControllerProfile
     internal void ForgetCompiled()
     {
         _cachedKbmPacker = null;
+        UsbPresentationCache = null;
         _cachedReportMap = null;
         _cachedDescriptor = null;
         _descriptorCached = false;
@@ -782,14 +785,28 @@ public sealed class ControllerProfile
         if (RequiresUsbipBackend)
         {
             // The descriptor set a create builds, built here, so a
-            // usbConfiguration it cannot hold, or none, or no descriptor, is
-            // refused at load for what it lacks, with or without a protocol
-            // or a WinUSB package.
+            // usbConfiguration it cannot hold, or no descriptor, is refused
+            // at load for what it lacks, with or without a protocol or a
+            // WinUSB package. A derived device runs the UMDF2 form of a
+            // protocol behind the input section, which names no endpoint.
             var descriptors = new Usbip.UsbDescriptorSet(this);
             if (!engine) return;
-            if (checkModelGroups) Usbip.CompiledProtocol.Compile(this, descriptors);
+            bool derived = Usbip.UsbPresentation.Resolve(this).Derived;
+            if (derived && Protocol is { } protocol && NamesUsbTransfers(protocol))
+                throw new ProfileDefectException("$.usbConfiguration",
+                    "is required for this protocol: it names endpoints or USB transfers, and only a usbConfiguration that authors its descriptors has them.");
+            if (checkModelGroups) Usbip.CompiledProtocol.Compile(this, derived ? null : descriptors);
             WinUsbBinding.PackageFor(this, descriptors);
             return;
+        }
+        // A usbConfiguration on a profile whose default is UMDF2 is the USB
+        // device it presents on the USB/IP backend: authored, or pins over
+        // the derived one. Built here for the same reason.
+        if (cfg != null)
+        {
+            if (Usbip.UsbPresentation.NotPresentableReason(this) is { } reason)
+                throw new ProfileDefectException("$.usbConfiguration", $"describes a USB/IP presentation, and {reason}");
+            _ = new Usbip.UsbDescriptorSet(this);
         }
         if (!engine) return;
         if (cfg?.WinUsb != null)
@@ -800,6 +817,16 @@ public sealed class ControllerProfile
         // checks the built-in catalog's load leaves to the build step.
         if (checkModelGroups) Usbip.CompiledProtocol.Compile(this, null);
     }
+
+    /// <summary>True when a protocol is in its USB/IP form: it names an
+    /// endpoint, a command source or reply channel of the USB transfers, or
+    /// an answer the HID class gives on UMDF2. A derived device has none of
+    /// those, and runs the UMDF2 form behind the input section.</summary>
+    private static bool NamesUsbTransfers(ProtocolSpec p) =>
+        p.Input?.Endpoint != null || p.Commands?.Endpoint != null || p.Replies?.Endpoint != null
+        || p.Commands?.Source is "interruptOut" or "bulkOut" or "setReport"
+        || p.Commands?.SetReport == true || p.Replies?.Channel == "bulkIn"
+        || p.Halt != null || p.SetProtocol != null || p.GetStatus != null || p.GetReport != null;
 
     /// <summary>v2.0.0: the model groups compile, the state block's fields fit
     /// it, and the stream's keys name what the profile declares.</summary>
@@ -923,6 +950,11 @@ public sealed class ControllerProfile
 
     [JsonIgnore]
     private KeyboardMousePacker? _cachedKbmPacker;
+
+    /// <summary>The USB/IP presentation, resolved once
+    /// (<see cref="Usbip.UsbPresentation.Resolve"/>).</summary>
+    [JsonIgnore]
+    internal Usbip.UsbPresentation? UsbPresentationCache;
 
     /// <summary>The keyboard, mouse and consumer-control packer for this
     /// profile's descriptor, built once.</summary>

@@ -271,9 +271,14 @@ internal static class Program
         }
     }
 
+    static string SerialOf(HMController c) =>
+        c.Backend == HMBackend.Usbip ? c.UsbipHandle!.Device.Descriptors.SerialString! : $"HM-CTL-{c.TransportIndex:D4}";
+
     static string? PathFor(HMController c)
     {
-        string serial = $"HM-CTL-{c.TransportIndex:D4}";
+        // The UMDF2 driver serves HM-CTL- and the transport index, the
+        // USB/IP backend the identity's serial its device descriptor names.
+        string serial = SerialOf(c);
         for (int i = 0; i < 300; i++)
         {
             string? p = HMDeviceExtractor.ListDevices()
@@ -329,7 +334,7 @@ internal static class Program
         using var pump = new Pump(c);
 
         string? path = PathFor(c);
-        Check($"HID interface enumerates (2E8A:10C6, serial HM-CTL-{c.TransportIndex:D4})", path != null, path ?? "");
+        Check($"HID interface enumerates (2E8A:10C6, serial {SerialOf(c)})", path != null, path ?? "");
         if (path == null) return;
         s_hid = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_RW, IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, IntPtr.Zero);
         Check("CreateFile read/write", !s_hid.IsInvalid);

@@ -667,7 +667,7 @@ internal static partial class DeviceOrchestrator
     // the service is running in this process, subsequent calls are a no-op.
     private static volatile bool s_gameInputSvcRunning;
 
-    private static void EnsureGameInputService()
+    internal static void EnsureGameInputService()
     {
         if (s_gameInputSvcRunning) return;
         try
@@ -852,7 +852,7 @@ internal static partial class DeviceOrchestrator
     /// reads through WGI as the real device does. A table an older build
     /// left under the identity goes first, or this virtual and any real pad
     /// of the same identity would read through it.</summary>
-    private static void ApplyGameInputMapping(int controllerIndex, ControllerProfile profile)
+    internal static void ApplyGameInputMapping(int controllerIndex, ControllerProfile profile)
     {
         if (GameInputMapping.Applies(profile))
             RegistryLedger.ClaimGameInput(profile.VendorId, profile.ProductId, controllerIndex);
@@ -955,6 +955,43 @@ internal static partial class DeviceOrchestrator
             RegistryLedger.ClaimJoystickOem(profile.VendorId, profile.ProductId, displayName, controllerIndex);
 
         WriteIdentityEntry(identity.Token, controllerIndex);
+    }
+
+    /// <summary>The machine steps a USB/IP create takes before its device
+    /// exists, the ones <see cref="SetupController"/> takes for a UMDF2
+    /// create in its steps 0 and 1: GameInputSvc started, which serves WGI
+    /// and GameInput their controllers, the GameInput table of a profile
+    /// built in code, and the joy.cpl name of the identity, which the ledger
+    /// records first and puts back when the last virtual holding it goes. A
+    /// keyboard or mouse is no joystick and takes no joy.cpl name.
+    /// <see cref="RegistryLedger.Release"/> of the index gives the holds
+    /// back.</summary>
+    internal static void PrepareUsbipController(int controllerIndex, ControllerProfile profile)
+    {
+        EnsureGameInputService();
+        ApplyGameInputMapping(controllerIndex, profile);
+        if (!profile.IsKeyboardOrMouse)
+            RegistryLedger.ClaimJoystickOem(profile.VendorId, profile.ProductId,
+                profile.DeviceDescription ?? profile.ProductString ?? "HIDMaestro Controller", controllerIndex);
+    }
+
+    /// <summary>A derived USB/IP device's start wait, the UMDF2 create's
+    /// step 4 for the USB device: its HID child appears under the USB
+    /// device's instance, then starts, so a program that opens the HID
+    /// interface as the create returns finds it. A failed start throws as
+    /// the UMDF2 create's does. A wait that runs out is logged and the
+    /// create goes on, as there.</summary>
+    internal static void AwaitUsbipStart(string usbInstanceId, int controllerIndex)
+    {
+        var sw = Stopwatch.StartNew();
+        var child = WaitForHidChild(usbInstanceId, controllerIndex, timeoutMs: 10000);
+        if (child == StartWait.Failed) throw StartError(usbInstanceId, controllerIndex);
+        string? childId = child == StartWait.Done ? HidChildOf(usbInstanceId) : null;
+        var started = childId != null
+            ? WaitForDeviceStarted(childId, usbInstanceId, controllerIndex, timeoutMs: 10000)
+            : StartWait.TimedOut;
+        if (started == StartWait.Failed) throw StartError(usbInstanceId, controllerIndex, childId);
+        LogDiag($"    usbip start wait {usbInstanceId}: child {childId ?? "(none)"} {child}, start {started} in {sw.ElapsedMilliseconds}ms");
     }
 
     /// <summary>The CachedInputReportIds value: the report IDs of a UMDF2
