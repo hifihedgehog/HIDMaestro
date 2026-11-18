@@ -97,10 +97,6 @@ public sealed class HMContext : IDisposable
         if (backend is not (HMBackend.Auto or HMBackend.Umdf2 or HMBackend.Usbip))
             throw new ArgumentOutOfRangeException(nameof(backend));
         Backend = backend;
-        // The backend InstallDriver installs, read before the prewarm
-        // decides what to stage.
-        bool installsDriver = backend == HMBackend.Umdf2
-            || (backend == HMBackend.Auto && Internal.BackendSelection.Machine == HMBackend.Umdf2);
         // T28: fan out independent prewarm tasks in parallel. The original
         // serial sequence was: Sha256Hex → EnsureExtracted → LoadEmbedded →
         // IsDriverInstalled → PrewarmGameInputService, taking ~150-250 ms
@@ -113,6 +109,16 @@ public sealed class HMContext : IDisposable
         System.Threading.Tasks.Task.Run(() =>
         {
             try { _ = Internal.EmbeddedManifest.Sha256Hex; } catch { }
+            // The backend InstallDriver installs decides what to stage. It is
+            // read here, off the constructor's thread: on a machine that
+            // refuses the package it reads the driver store.
+            bool installsDriver = false;
+            try
+            {
+                installsDriver = backend == HMBackend.Umdf2
+                    || (backend == HMBackend.Auto && Internal.BackendSelection.Machine == HMBackend.Umdf2);
+            }
+            catch { }
             // Only a deploy reads the staged payload. On a machine already
             // running this build's driver, InstallDriver takes the fast path
             // and never touches it, so the prewarm stages (and hashes) the
