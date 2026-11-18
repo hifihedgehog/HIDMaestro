@@ -75,8 +75,16 @@ $scriptDir = if ($PSScriptRoot) {
     $PWD.Path
 }
 
+# The architecture of this machine, x64 or arm64. The test app, the probes
+# and the smoke apps the battery runs are built for it. The operating
+# system's architecture is read, not this process's, so a PowerShell host
+# that runs under emulation still picks the machine's own build.
+function Get-MachineArch {
+    if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq [System.Runtime.InteropServices.Architecture]::Arm64) { 'arm64' } else { 'x64' }
+}
+
 if (-not $Exe) {
-    $Exe = Join-Path $scriptDir '..\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestroTest.exe'
+    $Exe = Join-Path $scriptDir ('..\bin\Release\net10.0-windows10.0.26100.0\win-' + (Get-MachineArch) + '\HIDMaestroTest.exe')
 }
 
 # ====================================================================
@@ -223,6 +231,8 @@ $Profiles = @{
     DualSenseBT   = 'dualsense-bt'             # Sony PS5 BT, plain HID, no companions
     SwitchPro     = 'switch-pro'               # Nintendo, plain HID, no companions
     Custom        = 'padforge-custom'          # PadForge-style custom (BEEF:F000), built via HMProfileBuilder+HidDescriptorBuilder
+    UsbipComposite = 'dualsense-composite'     # USB/IP: audio and HID interfaces on one USB device
+    UsbipSingle    = 'steam-controller-2'      # USB/IP: one HID interface
 }
 
 # Author a PadForge-style custom profile JSON to a temp dir so the test
@@ -342,6 +352,12 @@ function Send-Cmd {
         $code = $Proc.ExitCode
         throw ("Cannot send '" + $Cmd + "': process already exited (code " + $code + ")")
     }
+    # For the next Wait-CascadeSettle's Phase A: the process, whether it
+    # has acknowledged the command yet, and under -Verbose the devnodes as
+    # they stand before it, so the settle can say whether it changed them.
+    $script:HMSendCmdBaseline = if ($VerbosePreference -eq 'Continue') { Get-HMPresentKey } else { '' }
+    $script:HMSendCmdProc = $Proc
+    $script:HMSendCmdAcked = $false
     $Proc.StandardInput.WriteLine($Cmd)
     if (-not $NoFlush) { $Proc.StandardInput.Flush() }
     if ($VerbosePreference -eq 'Continue') {
@@ -360,10 +376,10 @@ function Send-Cmd {
     while ($true) {
         $line = $null
         if ($drain.Queue.TryDequeue([ref]$line)) {
-            if ($line.Trim() -eq '[ACK]') { return }
+            if ($line.Trim() -eq '[ACK]') { $script:HMSendCmdAcked = $true; return }
             continue
         }
-        if ($Proc.HasExited) { return }
+        if ($Proc.HasExited) { $script:HMSendCmdAcked = $true; return }
         if ($deadline.ElapsedMilliseconds -ge (HMScaleMs ($script:HangSeconds * 1000))) {
             throw ("HIDMaestroTest did not acknowledge '" + $Cmd + "' in " + [int]((HMScaleMs ($script:HangSeconds * 1000)) / 1000) + " s: a hang")
         }
@@ -471,13 +487,17 @@ function Wait-Ready {
     Wait-CascadeSettle
 }
 
-# Wait for the test app's initial create to bring a HIDMaestro devnode
-# PRESENT. Returns as soon as one appears, or false when the app exits
-# first or the hang deadline passes. The first scenario of a run can take
-# some 30 s on a heavy machine, since the app's HMContext init runs a full
+# Wait for the test app's initial create to bring a controller's devnode
+# PRESENT: one of HIDMaestro's own driver, or a USB/IP device on
+# HIDMaestro's host controller (HMDevnodes.ps1). Returns as soon as one
+# appears, or false when the app exits first or the hang deadline passes,
+# and the scenario then fails with $script:NoCreateMessage. The first
+# scenario of a run can take some 30 s on a heavy machine, since the
+# app's HMContext init runs a full
 # RemoveAllVirtualControllers, the driver install check and the phantom
 # sweep, so the bound is the hang deadline and only a create that never
 # brings a device reaches it.
+$script:NoCreateMessage = 'the initial create brought no controller devnode: none of HIDMaestro''s driver, and no USB/IP device on HIDMaestro''s host controller'
 function Wait-CreateBound {
     param(
         [string]$ProfileId,
@@ -494,21 +514,32 @@ function Wait-CreateBound {
     return $false
 }
 
+# The present HIDMaestro devnodes as one string, sorted, for comparing two
+# reads.
+function Get-HMPresentKey { ((Get-HMPresentDevnodes) | Sort-Object) -join '|' }
+
 # Wait until the SDK-driven create/teardown has actually propagated to
 # PnP and then settled. Two phases:
 #
-#   Phase A (change detection): poll the present-devnode set until it
-#     differs from the snapshot taken at function entry. The harness
-#     has just sent a stdin command to the test process; we don't know
-#     when the test process will pick it up (single-threaded stdin
-#     reader, may still be busy creating its initial controller batch
-#     on slow machines, may have other commands queued ahead of ours).
-#     Without this phase, the prior stability-only check would exit
-#     early on the first poll because nothing had started changing
-#     yet -- the test process simply hadn't begun processing the
-#     command. On atom (Z8350) the queued-command latency can be
-#     30+ s during the initial-batch phase of multi-controller
-#     scenarios. Generous Phase A budget so we wait out the queue.
+#   Phase A (the command has run): wait until the test process has
+#     processed the command Send-Cmd sent last. The test process reads
+#     stdin on one thread, only once its initial controllers exist, so a
+#     command can wait behind that batch or behind earlier commands.
+#     Without this phase, the stability-only check would exit early on
+#     the first poll because nothing had started changing yet: the test
+#     process simply had not begun processing the command. On the Atom
+#     (Z8350) the queued-command latency reached 30 s and more during the
+#     initial-batch phase of multi-controller scenarios. The test app
+#     acknowledges a command after running it, and its creates return
+#     once the device has started and its teardowns once the devnodes are
+#     removed, so the acknowledgment marks the command's change as made.
+#     A change in the present set before it does not: the initial batch
+#     changes the set too. Send-Cmd waits for the acknowledgment unless
+#     told not to, so for most commands the phase finds it already there.
+#     For a command sent with -NoWaitAck the phase reads it from the
+#     process's output. Under -Verbose, Send-Cmd also snapshots the
+#     present set before it writes the command, and the phase prints
+#     whether the command changed it.
 #
 #   Phase B (stability): once a change is observed, poll until the
 #     present set is stable for two consecutive 200 ms samples. The
@@ -516,9 +547,8 @@ function Wait-CreateBound {
 #     REMOVED so by the time it returns the kernel has already settled,
 #     so this is usually one or two polls.
 #
-# If Phase A times out without seeing a change, Phase B becomes a
-# brief no-op and we return -- that's the "command was a no-op or
-# already complete by the time we got here" path. Total worst case is
+# If Phase A reaches its budget without an acknowledgment, or the test
+# process exits first, Phase B runs from there. Total worst case is the
 # Phase A budget, well above any observed latency.
 function Wait-CascadeSettle {
     $changeBudgetMs    = HMScaleMs 60000   # max wait for first state change
@@ -534,25 +564,39 @@ function Wait-CascadeSettle {
     $stabilityBudgetMs = HMScaleMs 60000
     $stableN           = 2
 
-    # Pull and consume the most recent Send-Cmd snapshot. If null, the
+    # Pull and consume what the most recent Send-Cmd left. If null, the
     # caller didn't send a command before this settle (e.g. the final
     # post-Stop-HMTestProcess settle in Test-Scenario), so skip Phase A
     # entirely and just check stability.
     $baseline = $script:HMSendCmdBaseline
+    $proc     = $script:HMSendCmdProc
+    $acked    = $script:HMSendCmdAcked
     $script:HMSendCmdBaseline = $null
+    $script:HMSendCmdProc     = $null
+    $script:HMSendCmdAcked    = $false
 
     if ($null -ne $baseline) {
-        # Phase A: wait for state to differ from the pre-Send-Cmd baseline.
-        # Detects when the test process has begun propagating the command
-        # we sent. Critical on slow boxes where stdin commands can queue
-        # behind an in-progress initial-batch creation; without this,
-        # stability-only would exit on the first poll because the test
-        # process simply hadn't started processing yet.
+        # Phase A: wait until the test process has run the command we sent.
+        # Critical on slow boxes where stdin commands can queue behind an
+        # in-progress initial-batch creation; without this, stability-only
+        # would exit on the first poll because the test process simply
+        # hadn't started processing yet.
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $ended = 'no acknowledgment'
         while ($sw.ElapsedMilliseconds -lt $changeBudgetMs) {
-            $cur = ((Get-HMPresentDevnodes) | Sort-Object) -join '|'
-            if ($cur -ne $baseline) { break }
-            Start-Sleep -Milliseconds 200
+            if ($acked) { $ended = 'acknowledged'; break }
+            if (-not $proc -or $proc.HasExited) { $ended = 'the test process exited'; break }
+            # The acknowledgment of a command sent without waiting for it.
+            $line = $null
+            while ($proc.HMDrain -and $proc.HMDrain.Queue.TryDequeue([ref]$line)) {
+                if ($line.Trim() -eq '[ACK]') { $acked = $true; break }
+            }
+            if (-not $acked) { Start-Sleep -Milliseconds 50 }
+        }
+        if ($VerbosePreference -eq 'Continue') {
+            $ms = $sw.ElapsedMilliseconds
+            $changed = if ((Get-HMPresentKey) -ne $baseline) { 'the devnodes changed' } else { 'the devnodes as before' }
+            Write-Verbose ('    [settle] phase A: {0} after {1} ms, {2}' -f $ended, $ms, $changed)
         }
     }
 
@@ -561,7 +605,7 @@ function Wait-CascadeSettle {
     $prev  = ''
     $count = 0
     while ($stableSw.ElapsedMilliseconds -lt $stabilityBudgetMs) {
-        $cur = ((Get-HMPresentDevnodes) | Sort-Object) -join '|'
+        $cur = Get-HMPresentKey
         if ($cur -eq $prev) {
             $count++
             if ($count -ge $stableN) { return }
@@ -752,15 +796,28 @@ function Wait-ProbeExit {
     }
 }
 
+# The probe's own [SKIP] lines, each the condition the probe found, so a
+# skip in the log reads as what this machine lacks, in the probe's words.
+function Write-ProbeSkips {
+    param([string]$Out)
+    if (-not $Out -or -not (Test-Path $Out)) { return }
+    foreach ($l in @(Get-Content $Out -ErrorAction SilentlyContinue)) {
+        if ($l -match '\[SKIP\]') { Write-Host ('      ' + $l.Trim()) -ForegroundColor Yellow }
+    }
+}
+
 # What Invoke-Probe does once the probe has exited: a skip code prints
-# [SKIP], and any other exit but 0 prints the probe's [FAIL] lines, or its
-# tail, and throws.
+# [SKIP] and the probe's own skip lines, an exit of 0 prints the skip lines
+# of the parts the probe skipped, and any other exit prints the probe's
+# [FAIL] lines, or its tail, and throws.
 function Resolve-ProbeExit {
     param([int]$ExitCode, [string]$Out, [string]$Exe, [string]$Message, [int[]]$SkipCodes = @())
     if ($SkipCodes -contains $ExitCode) {
         Write-Host ('    [SKIP] probe reported exit ' + $ExitCode) -ForegroundColor Yellow
+        Write-ProbeSkips $Out
         return
     }
+    if ($ExitCode -eq 0) { Write-ProbeSkips $Out }
     if ($ExitCode -ne 0) {
         if (Test-Path $Out) {
             $lines = @(Get-Content $Out -ErrorAction SilentlyContinue)
@@ -822,7 +879,7 @@ function Complete-BackgroundProbe {
 function Scenario-Single-360-BT-360 {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
+        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw $script:NoCreateMessage }
         Wait-Ready -Proc $proc
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT)
@@ -840,7 +897,7 @@ function Scenario-Single-360-BT-360 {
 function Scenario-Single-360-BT-360-BT {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
+        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw $script:NoCreateMessage }
         Wait-Ready -Proc $proc
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT);    Wait-CascadeSettle
@@ -885,7 +942,7 @@ function Scenario-Single-LongCycle {
     }
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
+        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw $script:NoCreateMessage }
         Send-Cmd -Proc $proc -Cmd 'resume'
         Wait-Settled
         foreach ($p in $sequence) {
@@ -901,7 +958,7 @@ function Scenario-Single-LongCycle {
 function Scenario-Single-BT-360-BT {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.XboxBT)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.XboxBT -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
+        if (-not (Wait-CreateBound -ProfileId $Profiles.XboxBT -Proc $proc)) { throw $script:NoCreateMessage }
         Wait-Ready -Proc $proc
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.Xbox360);   Wait-CascadeSettle
@@ -916,7 +973,7 @@ function Scenario-Single-BT-360-BT {
 function Scenario-Single-Mixed-Families {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
+        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw $script:NoCreateMessage }
         Wait-Ready -Proc $proc
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.DualSense);   Wait-CascadeSettle
@@ -934,7 +991,7 @@ function Scenario-Single-Mixed-Families {
 function Scenario-Single-SameProfileSwap {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.XboxBT)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.XboxBT -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
+        if (-not (Wait-CreateBound -ProfileId $Profiles.XboxBT -Proc $proc)) { throw $script:NoCreateMessage }
         Wait-Ready -Proc $proc
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT);   Wait-CascadeSettle
@@ -1082,7 +1139,7 @@ function Scenario-AcrossProcess-Recreation {
 function Scenario-RapidSwaps-NoSettle {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
+        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw $script:NoCreateMessage }
         Wait-Ready -Proc $proc
 
         # Queue 4 swap commands with no inter-command sleep. Each one
@@ -1127,7 +1184,7 @@ function Scenario-Multi-SixControllers {
 function Scenario-Single-SameVidPid {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
+        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw $script:NoCreateMessage }
         Wait-Ready -Proc $proc
 
         # xbox-360-arcade-stick: same 045E:028E as xbox-360-wired.
@@ -1157,34 +1214,79 @@ function Scenario-Single-SameVidPid {
 # the present devnodes last changed 31 ms later on the bench, so three
 # reads 50 ms apart that agree replace the 5 s sleep, which stays the
 # limit.
-function Scenario-ForceKill-MidCascade {
-    function Get-PresentKey { ((Get-HMPresentDevnodes) | Sort-Object) -join '|' }
-    $proc1 = Start-HMTestProcess -ProfileIds @($Profiles.XboxBT)
+#
+# A USB/IP controller's teardown is the other shape. The SDK's part is the
+# host controller's plugout and the device's own stop, about 2 ms plus a
+# plugout of 0.5 to 22 ms, and it ends before Windows removes any of the
+# device's devnodes. The app then creates the next device while Windows
+# removes the persona. The kill therefore keys on the swapped pad's own
+# devnodes, read one by one through CM_Locate_DevNodeW, which takes
+# microseconds where a read of every devnode takes 10 ms and more: the
+# app dies the moment the first of them leaves. On HIDMaestro's driver
+# that is the moment the whole-set read caught before, the BT pad's HID
+# child gone, seen sooner: on the Celeron 108 to 155 ms after the swap,
+# with one of the pad's two devnodes still present. On USB/IP Windows
+# removes the persona's devnodes together, and the kill came 27 to 63 ms
+# after the swap with none of the persona's six devnodes and none of the
+# next pad's present: inside the swap, after the plugout and before the
+# next device enumerates, where a crash leaves the next import cut short,
+# the host controller's re-attach attempts for a server that is gone, and
+# an owner record of a dead program. The whole-set read never saw a
+# USB/IP device change before HMDevnodes.ps1 counted personas, so the
+# kill fell at its 5 s limit, after the swap. A second pass runs that
+# shape with USB/IP profiles, so every machine kills inside both. Each
+# pass prints how many of the pad's devnodes and of the next pad's were
+# present when the kill was sent, which shows where it landed.
+function Invoke-KillMidTeardown {
+    param([Parameter(Mandatory)][string]$From, [Parameter(Mandatory)][string]$To,
+          [Parameter(Mandatory)][string]$Next)
+    # Get-HMPresentDevnodes returns its list as one object, so each read
+    # is assigned or parenthesized before its devnodes are walked.
+    $before = Get-HMPresentDevnodes
+    $proc1 = Start-HMTestProcess -ProfileIds @($From)
+    $own = @()
+    $sw = $null
+    $stillPresent = -1
+    $newDevnodes = -1
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.XboxBT -Proc $proc1)) { throw "the initial create brought no HIDMaestro devnode" }
+        if (-not (Wait-CreateBound -ProfileId $From -Proc $proc1)) { throw $script:NoCreateMessage }
         Wait-Ready -Proc $proc1
+        # The swapped pad's own devnodes: what the app's create added.
+        $own = @((Get-HMPresentDevnodes) | Where-Object { $before -notcontains $_ })
+        if ($own.Count -eq 0) { throw ($From + ' brought no devnode to watch for the kill') }
 
-        # Kick off swap-back-to-360 without waiting for it.
-        $before = Get-PresentKey
-        Send-Cmd -Proc $proc1 -Cmd ('0 ' + $Profiles.Xbox360) -NoWaitAck
+        # Kick off the swap without waiting for it.
+        $devInst = [uint32]0
+        Send-Cmd -Proc $proc1 -Cmd ('0 ' + $To) -NoWaitAck
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        while ($sw.ElapsedMilliseconds -lt (HMScaleMs 5000)) {
-            if ((Get-PresentKey) -ne $before) { break }
-            Start-Sleep -Milliseconds 5
+        $limit = HMScaleMs 5000
+        $gone = $false
+        while (-not $gone -and $sw.ElapsedMilliseconds -lt $limit) {
+            foreach ($id in $own) {
+                if ([CMxz]::CM_Locate_DevNodeW([ref]$devInst, $id, [uint32]0) -ne 0) { $gone = $true; break }
+            }
+            if (-not $gone) { [System.Threading.Thread]::Yield() | Out-Null }
         }
     } finally {
         # Hard-kill while teardown still in flight.
         if (-not $proc1.HasExited) { try { $proc1.Kill() } catch {} }
+        if ($sw) {
+            $killMs = $sw.ElapsedMilliseconds
+            $stillPresent = @($own | Where-Object { (Get-DevnodeState $_) -eq 'PRESENT' }).Count
+            $newDevnodes = @((Get-HMPresentDevnodes) | Where-Object { $before -notcontains $_ -and $own -notcontains $_ }).Count
+        }
         Stop-HMProcessTree -Proc $proc1
         $proc1.WaitForExit(5000) | Out-Null
     }
+    Write-Host ('    {0} to {1}: killed {2} ms after the swap, {3} of the pad''s {4} devnodes still present, {5} of the next pad''s' -f `
+        $From, $To, $killMs, $stillPresent, $own.Count, $newDevnodes)
 
     # Wait for any in-flight kernel work to complete or stall.
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $prev = $null
     $count = 0
     while ($sw.ElapsedMilliseconds -lt (HMScaleMs 5000)) {
-        $cur = Get-PresentKey
+        $cur = Get-HMPresentKey
         if ($cur -eq $prev) {
             $count++
             if ($count -ge 2) { break }
@@ -1197,12 +1299,21 @@ function Scenario-ForceKill-MidCascade {
 
     # Fresh session should reliably clean up whatever was left in mid-
     # cascade state.
-    $proc2 = Start-HMTestProcess -ProfileIds @($Profiles.SwitchPro)
+    $proc2 = Start-HMTestProcess -ProfileIds @($Next)
     try {
         Wait-Ready -Proc $proc2
     } finally {
         Stop-HMTestProcess -Proc $proc2 | Out-Null
     }
+}
+
+function Scenario-ForceKill-MidCascade {
+    Invoke-KillMidTeardown -From $Profiles.XboxBT -To $Profiles.Xbox360 -Next $Profiles.SwitchPro
+    # The USB/IP shape: a composite with audio and HID interfaces, swapped
+    # for a single-interface persona, and a new process whose first device
+    # is that persona again, so it imports at the bus id the killed
+    # program's re-attach attempts name.
+    Invoke-KillMidTeardown -From $Profiles.UsbipComposite -To $Profiles.UsbipSingle -Next $Profiles.UsbipSingle
 }
 
 # S18: Alternating multi-target swap pattern (A->B->A->C->A). Stresses
@@ -1212,7 +1323,7 @@ function Scenario-ForceKill-MidCascade {
 function Scenario-Single-AlternatingPattern {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw "the initial create brought no HIDMaestro devnode" }
+        if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360 -Proc $proc)) { throw $script:NoCreateMessage }
         Wait-Ready -Proc $proc
 
         # A=Xbox360, B=XboxBT, C=DualSense.
@@ -1766,16 +1877,17 @@ function Scenario-Switch2-Pro {
 # IPC protocol to each other byte-for-byte, with the probe playing the
 # driver's role, holds a HapticReceived handler past Dispose's join of the
 # haptic reader in a child, and in another has a handler dispose its own
-# controller. Phase 2 runs when a SteamVR install is
-# present (BOTH
+# controller. Phase 2 runs when a SteamVR install is present (the x64
 # battery machines carry the Steam-free steamcmd install at C:\SteamVR,
 # with the headless null-HMD rig config): registers the embedded OpenVR
 # driver, boots the stack, and asserts controller enumeration, hand
 # roles, legacy axis types, the haptic round trip, the consumer-restart
 # cycle, and the #55 legacy GetControllerState lane via a spawned
-# scene-app reader. A [SKIP] of phase 2 on a battery machine is a rig
-# fault, not a pass: both machines are provisioned with SteamVR, so the
-# skip reason must be read, the rig repaired, and the scenario re-run.
+# scene-app reader. Phase 2 prints [SKIP] and its condition where SteamVR
+# is not installed, as on the ARM64 battery machine
+# (test\regression\README.md, "Expected skips"). Where SteamVR
+# is installed, a [SKIP] of phase 2 is a rig fault, not a pass: its
+# condition must be read, the rig repaired, and the scenario re-run.
 function Scenario-Vr-Controller-Smoke {
     Invoke-Probe -Dir 'vr_controller_smoke' -Exe 'VrControllerSmoke.exe' `
                  -Message 'the VR IPC protocol drifted between the C# and C++ mirrors, the OpenVR driver failed to register/load in SteamVR, the controllers stopped enumerating, or the haptic round trip broke (see probe stdout)'
@@ -2164,9 +2276,7 @@ function Scenario-Usbip-Clean-Install {
 
 # The smoke apps the aot_smoke probe publishes for this machine's
 # architecture.
-function Get-SmokeArch {
-    if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq [System.Runtime.InteropServices.Architecture]::Arm64) { 'arm64' } else { 'x64' }
-}
+function Get-SmokeArch { Get-MachineArch }
 
 # S74: HIDMaestro.Core in a NativeAOT app. The whole catalog loads, the
 # driver installs, a UMDF2 controller and a USB/IP composite each deliver the

@@ -17,7 +17,9 @@
 // It also measures what an SDL program gets: the time from a port submit
 // returning to SDL's joystick holding that state, and the reports SDL
 // receives per second, at the descriptor's 8 ms poll and at an overclocked
-// 1 ms.
+// 1 ms. Both are the host's numbers, which other work on the machine slows
+// with no defect, so they are printed, and the checks fail only a state that
+// never reaches SDL and a report the poll did not ask for.
 //
 // Requires elevation and the reference clones native\build.ps1 names. Exit
 // 0 PASS, 1 FAIL, 2 when another program that embeds HIDMaestro is running.
@@ -459,19 +461,21 @@ internal static class Program
         double max = complete ? samples!.Max() : double.NaN;
         s_measurements.Add($"SDL, {ms} ms host poll: submit to read p50 {p50:F3} ms, p95 {p95:F3} ms, max {max:F3} ms (40 samples)");
         // A submit waits at most one controller read, 1.19971 ms, and one
-        // host poll. The bound adds 2 ms for the loopback, SDL's libusb read
-        // thread and Windows' timer scheduling, as S82's does. The median is
-        // judged: a device that waits a poll too long moves every sample,
-        // while a busy machine delays a few, and the slowest are printed.
-        double bound = ms + 1.19971 + 2;
-        Probe.Check($"SDL at a {ms} ms poll: the median submit read within {bound:F1} ms", complete && p50 <= bound,
+        // host poll before the device sends it, which gc_protocol_check holds
+        // on the engine's own clock. The rest is SDL's libusb read thread,
+        // which waits on the machine: with four busy threads on the Celeron,
+        // SDL's median at 8 ms rose to 89 ms. So the time is printed, and
+        // the check fails only a state SDL never reads.
+        Probe.Check($"SDL at a {ms} ms poll: all 40 submitted states reach SDL's joystick", complete,
             $"p50 {p50:F3}, p95 {p95:F3}, max {max:F3} ms");
     }
 
     /// <summary>Forty submit-to-read times in milliseconds at one host
-    /// poll, or null when SDL missed one.</summary>
+    /// poll, or null when SDL missed one. Each wait is a hang bound, since a
+    /// busy machine holds SDL's reads back with no defect.</summary>
     static List<double>? LatencySamples(Harness h, HMController controller, uint id, TimeSpan poll)
     {
+        int hangMs = Probe.HangMs();
         controller.DeviceProtocol!.HostPollInterval = poll;
         var port1 = controller.Ports[0];
         var i = Inputs[0];
@@ -482,10 +486,12 @@ internal static class Program
         {
             Probe.SpinMicros(rng.Next(2_000, 20_000));
             value = (byte)(value == 0xF0 ? 0x40 : value + 1);
-            if (h.Ask($"watch {id} {LEFTX}") != "armed") break;
+            if (h.Ask($"watch {id} {LEFTX} {hangMs}") != "armed") break;
             port1.SubmitState(Pad(i.Button, HMHat.None, value, i.Sy, i.Cx, i.Cy, i.L, i.R));
             long t0 = Stopwatch.GetTimestamp();
-            string? seen = h.Next(3000);
+            // Past the harness's own deadline, so its answer is always read
+            // here and never taken as the answer to a later command.
+            string? seen = h.Next(hangMs + 5000);
             if (seen == null || !seen.StartsWith("seen ", StringComparison.Ordinal)) break;
             samples.Add((long.Parse(seen[5..]) - t0) * 1000.0 / Stopwatch.Frequency);
         }

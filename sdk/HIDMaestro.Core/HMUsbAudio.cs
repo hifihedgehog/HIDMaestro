@@ -62,14 +62,15 @@ public sealed class HMUsbAudio
     /// events.</summary>
     internal bool RunsOnCurrentThread => _engine.RunsOnCurrentThread;
 
-    internal HMUsbAudio(ControllerProfile profile, UsbipEmulatedDevice device) : this(profile, device.Audio)
+    internal HMUsbAudio(ControllerProfile profile, UsbipEmulatedDevice device)
+        : this(profile, device.Audio ?? throw new InvalidOperationException($"Profile '{profile.Id}' presents no audio interface."))
     {
     }
 
     internal HMUsbAudio(ControllerProfile profile, UsbAudioEngine engine)
     {
         _engine = engine;
-        var cfg = profile.UsbConfiguration!;
+        var cfg = UsbPresentation.Resolve(profile).Spec;
 
         UsbAudioStreamSpec? outStream = null, inStream = null;
         byte outIface = 0xFF, inIface = 0xFF;

@@ -9,7 +9,7 @@
 //   input <c>            GCAdapter::Input(c): "pad <button> <sx> <sy> <cx> <cy> <l> <r>"
 //   connected <c>        GCAdapter::DeviceConnected(c): "connected 0|1"
 //   output <c> <cmd>     GCAdapter::Output(c, cmd): "ok"
-//   watch <c> <sx>       "armed", then poll Input(c) until stickX is sx: "seen <qpc>" or "timeout"
+//   watch <c> <sx> <ms>  "armed", then poll Input(c) until stickX is sx, for at most ms: "seen <qpc>" or "timeout"
 //   count <c> <ms>       changes of Input(c)'s stick X seen over ms: "changes <n>"
 //   rate                 the emulator's own poll rate figure: "rate <value>"
 //   loglevel <n>         libusb's log level for contexts made after it: "ok"
@@ -203,14 +203,14 @@ int main()
     }
     else if (command == "watch")
     {
-      int chan = 0, want = 0;
-      in >> chan >> want;
+      int chan = 0, want = 0, ms = 0;
+      in >> chan >> want >> ms;
       Answer("armed");
-      const long long deadline = Qpc() + 2 * [] {
+      const long long deadline = Qpc() + [] {
         LARGE_INTEGER f;
         QueryPerformanceFrequency(&f);
         return f.QuadPart;
-      }();
+      }() * ms / 1000;
       long long seen = 0;
       while (Qpc() < deadline)
       {

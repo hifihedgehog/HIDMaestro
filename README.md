@@ -47,7 +47,7 @@ HIDMaestro 2.0.0 moves device behavior out of code and into the profiles, and it
 
 ## Quick start
 
-Requirements: Visual Studio 2022+ with the MSVC x64 and ARM64 build tools, Windows SDK/WDK 10.0.26100.0, .NET 10. `HIDMaestro.Core.dll` is one AnyCPU assembly that carries a driver payload for x64 and for ARM64 and picks the one matching the machine it is on. The driver installs on x64 Windows. An ARM64 PC with Secure Boot on installs only driver packages Microsoft signed, so HIDMaestro's does not install there, and `HMDriverSigning.Check()` says so before anything changes: [Where the driver installs](#where-the-driver-installs).
+Requirements: Visual Studio 2022+ with the MSVC x64 and ARM64 build tools, Windows SDK/WDK 10.0.26100.0, .NET 10. `HIDMaestro.Core.dll` is one AnyCPU assembly that carries a driver payload for x64 and for ARM64 and picks the one matching the machine it is on. The driver installs on x64 Windows. Windows on ARM64 and Windows in S mode do not install it, and there every controller runs on the USB/IP backend the assembly also carries, with no code change in the program: [Where the driver installs](#where-the-driver-installs).
 
 As of v2.0.0 the SDK also runs in NativeAOT, trimmed and single-file apps. Profiles load through source-generated JSON, every Win32 call goes through `LibraryImport`, and the trim, single-file and AOT analyzers fail a Release build on any warning of theirs. A source build can leave out the ARM64 payload (`HMSkipArm64`) or the USB/IP transport (`HMSkipUsbip`), and can point at a NuGet WDK or at the variables an EWDK prompt sets. `HMBuildInfo` reports what a build carries, and a build without the USB/IP transport refuses a composite persona before it touches the machine. [Build settings](#build-settings).
 
@@ -267,29 +267,40 @@ A UMDF2 `CreateController` checks the installed set under the same lock, after i
 
 ### Where the driver installs
 
-HIDMaestro signs its driver package on the machine, with a certificate it creates there and adds to the machine's Trusted Root and Trusted Publishers stores. Windows on x64 installs a package signed that way. Once Windows enforces WHQL driver signing, two kinds of Windows install only packages Microsoft signed: Windows on ARM64, and Windows in S mode. An ARM64 PC with Secure Boot on enforces it, so HIDMaestro's driver does not install there.
+HIDMaestro signs its driver package on the machine, with a certificate it creates there and adds to the machine's Trusted Root and Trusted Publishers stores. Windows on x64 installs a package signed that way. Windows on ARM64 and Windows in S mode do not. On the ARM64 test PC, Windows 11 build 28000, the package was refused with 0xE0000243 with Secure Boot on, with Secure Boot off, with the developer mode for driver signing set and with integrity checks turned off in the boot configuration.
 
-`HMDriverSigning.Check()` says which kind a machine is. It changes nothing and needs no elevation and no `HMContext`:
+A controller runs on one of two backends (`HMBackend`):
+
+| Backend | What Windows sees |
+|--|--|
+| `Umdf2` | HIDMaestro's own UMDF2 driver: a HID device on the root enumerator, with the XUSB companion or the xinputhid filter an Xbox profile asks for |
+| `Usbip` | A USB device on the USB/IP host controller `HIDMaestro.Core.dll` carries, bound by Windows' own class drivers. A profile with no `usbConfiguration` presents one HID interface built from its own descriptor, VID, PID, version and strings |
+
+Every context and every create defaults to `HMBackend.Auto`. A profile whose `backend` is `usbip`, such as a composite persona with audio interfaces, runs on `Usbip` everywhere. Every other profile runs on `HMContext.MachineBackend`: `Umdf2` where Windows installs the package, `Usbip` where it does not. So a program written before 2.3.0, which calls `new HMContext()`, `InstallDriver()` and `CreateController(profile)`, runs on ARM64 unchanged. There `InstallDriver` installs the USB/IP host controller, `IsDriverInstalled` reports it, and every controller is a USB device.
+
+A program can name the backend:
 
 ```csharp
-HMDriverSigningStatus signing = HMDriverSigning.Check();
-if (!signing.CanInstallDriver)
-    ShowNotice(signing.Explanation);   // or the program's own wording
+var ctx = new HMContext(HMBackend.Usbip);                 // the default of every create on this context
+var pad = ctx.CreateController(profile, "slot-1", HMBackend.Umdf2);   // or per create
+HMBackend where = pad.Backend;                            // Umdf2 or Usbip, never Auto
 ```
 
 | Member | Meaning |
 |--|--|
-| `CanInstallDriver` | False where Windows installs only Microsoft-signed driver packages |
-| `Requirement` | `TrustedPublisher` or `MicrosoftSigned` |
-| `WhqlEnforcement` | True when Windows enforces WHQL driver signing. Windows on x64 outside S mode installs the driver either way |
-| `OSArchitecture` | The machine's architecture |
-| `Explanation` | One or two English sentences a program can show its user |
+| `HMContext.MachineBackend` | What `Auto` picks here for a profile both backends present. Static, needs no elevation |
+| `HMContext.Backend` | The context's default, as it was given |
+| `ResolveBackend(profile, backend)` | The backend a create would run on, or the exception it would throw, with nothing changed |
+| `HMController.Backend` | The backend a controller runs on |
+| `HMProfile.SupportsBackend(backend)` | Whether the profile's data has a presentation on that backend |
 
-Where `CanInstallDriver` is false, `InstallDriver`, the create of a profile that runs on the driver, and `BindWinUsb` throw `HMDriverSigningException`, which carries the same status. On a machine that holds no HIDMaestro driver they throw before they change anything: no certificate goes into the stores, nothing is staged, and constructing an `HMContext` leaves GameInputSvc's start type alone. Through 2.2.0 the install ran as far as pnputil, failed there with 0x800B0109, and left the certificate and the staged files behind. `HIDMaestroUninstall.exe` removes those.
+An explicit `Umdf2`, on the context or on a create, where Windows does not install the package throws `HMDriverSigningException` before anything changes: no certificate goes into the stores and nothing is staged. `Auto` never throws it. A profile with no presentation on the backend asked for throws `HMBackendNotSupportedException`: `Umdf2` for a `usbip` profile, and, in this release, `Usbip` for an Xbox profile that reaches XInput through the XUSB companion or xinputhid. Both derive from `InvalidOperationException` and come before the create takes anything machine-wide.
+
+On `Usbip` a create starts GameInputSvc and claims the joy.cpl name and the GameInput table, as a UMDF2 create does. For a profile with no `usbConfiguration` it returns once Windows has started the HID interface. The USB/IP host controller has 30 USB 2.0 ports unless its `NumberOfUsb20Ports` parameter says otherwise, shared by every program on the machine, and a create past them throws `HMResourceInUseException`. A Bluetooth profile on `Usbip` presents on the USB bus with its own VID, PID, descriptor and reports.
 
 Memory integrity plays no part. With it on, in strict mode, the driver installed and ran a controller on the x64 Windows 10 test machine.
 
-A composite profile does not run on HIDMaestro's driver. It rides usbip-win2's host controller, whose package Microsoft signed for x64 and ARM64, so this check does not cover it. Composite profiles have not been run on ARM64.
+The environment variable `HIDMAESTRO_BACKEND`, `umdf2` or `usbip`, read once per process, replaces `MachineBackend` for diagnostics. It never changes an explicit request.
 
 ### Registrations and removals
 
@@ -572,7 +583,7 @@ HIDMaestro is Windows optimized and focused on game controllers, keyboards, mice
 - **Vendor-specific feature reports.** LED control, calibration, and firmware-update reports vary per device. A profile answers the ones its answer table holds, and a report no table holds goes unanswered.
 - **One interface per keyboard or mouse.** A keyboard or mouse profile carries the descriptor of the real device's keyboard or mouse interface. Its other interfaces, including the ones vendor configuration tools use, are not emulated.
 - **Anti-cheat.** Virtual devices are detectable by kernel-level anti-cheat. HIDMaestro does not hide that it is virtual.
-- **Windows on ARM64.** The driver does not install on an ARM64 PC with Secure Boot on. Windows there installs only driver packages Microsoft signed, and HIDMaestro's is signed on the machine. `HMDriverSigning.Check()` reports it: [Where the driver installs](#where-the-driver-installs).
+- **Windows on ARM64.** HIDMaestro's own driver does not install on Windows on ARM64 or in S mode, so controllers there run on the USB/IP backend. The Xbox profiles that reach XInput through the XUSB companion or xinputhid have no USB/IP presentation yet, and a Bluetooth profile presents on the USB bus: [Where the driver installs](#where-the-driver-installs).
 - **Programs built on 1.x.** A program built on HIDMaestro 1.x removes every HIDMaestro device on the machine when it calls `InstallDriver` or first creates a controller, another program's included, and puts its own driver back. Programs on 2.0.0 leave each other's devices alone. Move every program on the machine to 2.0.0.
 
 ## Security and Scope

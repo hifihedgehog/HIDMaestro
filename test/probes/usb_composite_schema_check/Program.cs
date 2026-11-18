@@ -32,7 +32,7 @@ using HIDMaestro;
 using HIDMaestro.Internal;
 using HIDMaestro.Internal.Usbip;
 
-internal static class Program
+internal static partial class Program
 {
     static int s_total, s_failures;
 
@@ -43,7 +43,7 @@ internal static class Program
         Console.WriteLine($"  [{(cond ? "PASS" : "FAIL")}] {name}{(detail.Length > 0 ? "  " + detail : "")}");
     }
 
-    static int Main()
+    static int Main(string[] args)
     {
         Console.WriteLine("=== Composite USB persona schema (issue #39) ===");
 
@@ -144,6 +144,8 @@ internal static class Program
         Check("no create-path API refuses a composite for lack of an install",
               typeof(HMContext).GetMethod("CreateController", new[] { typeof(HMProfile) }) != null);
 
+        CheckDerived(ctx, repoRoot, write: args.Length > 0 && args[0] == "write");
+
         Summary();
         return s_failures == 0 ? 0 : 1;
     }
@@ -208,7 +210,7 @@ internal static class Program
         Check("four interfaces", cfg.Interfaces.Count == 4, $"{cfg.Interfaces.Count}");
         Check("self-powered 500 mA", cfg.Attributes == 0xC0 && cfg.MaxPowerMilliamps == 500);
         Check("busSpeed matches the real pad",
-              cfg.BusSpeed == (expectHighSpeed ? "high" : "full"), cfg.BusSpeed);
+              cfg.BusSpeed == (expectHighSpeed ? "high" : "full"), cfg.BusSpeed ?? "unset");
 
         var outIf = cfg.Interfaces.FirstOrDefault(i => i.Function == "audioStreamingOut");
         var inIf = cfg.Interfaces.FirstOrDefault(i => i.Function == "audioStreamingIn");
