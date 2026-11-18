@@ -944,7 +944,9 @@ public sealed class InputReportSpec
     /// way and goes out beside the others, as a device sends its input
     /// report and its button message each on its own change. A layout of a
     /// named stream sends on the clock or on change, and forgets the bytes
-    /// it last sent each time it becomes its stream's selected layout.</summary>
+    /// it last sent each time it becomes its stream's selected layout. Sent
+    /// on change, it compares its bytes apart from the ones its counters
+    /// write, which number each message it sends.</summary>
     [JsonPropertyName("stream")]
     public string? Stream { get; set; }
 

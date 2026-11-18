@@ -55,7 +55,7 @@ internal static class MessageStreams
                 "reply": [ { "hex": "0120" }, { "echo": "2" }, { "hex": "0900" }, { "echo": "0" }, { "hex": "20" }, { "echo": "3" }, { "hex": "000000" }, { "hex": "0000" } ] },
               { "match": "05 20/EF .. 01 00", "set": { "started": 1, "answered": 1 }, "consume": true },
               { "match": "05 20/EF .. 01 07", "set": { "started": 0, "answered": 0 }, "consume": true },
-              { "match": "04 20/EF .. 00", "set": { "answered": 1 }, "consume": true,
+              { "match": "04 20/EF .. 00", "minLength": 4, "set": { "answered": 1 }, "consume": true,
                 "replies": [ [ { "hex": "04F0" }, { "echo": "2" }, { "hex": "3ADA01" } ], [ { "hex": "04A0" }, { "echo": "2" }, { "hex": "BA003A" } ] ] },
               { "match": "78", "reply": [ { "counter": "wrap" } ] },
               { "match": "..", "consume": true }

@@ -84,6 +84,10 @@ internal sealed class CompiledProtocol
     public ReplyOverflow Overflow { get; }
     public int MaxReplyLength { get; }
 
+    // ── Timers ──
+    /// <summary>The messages the device sends on its own schedule.</summary>
+    public Timer[] Timers { get; } = Array.Empty<Timer>();
+
     // ── Memory ──
     public MemoryImage[] Memories { get; }
 
@@ -128,6 +132,11 @@ internal sealed class CompiledProtocol
         public int EmitSize;
         public int Decode = -1;
         public Part[]? Reply;
+        /// <summary>The replies of a rule that queues several, each a message
+        /// of its own, in place of <see cref="Reply"/>.</summary>
+        public Part[][]? Packets;
+        /// <summary>The rules after this one are tried too once it applies.</summary>
+        public bool Continue;
         public bool UsePrefix = true;
         public byte Status;
         /// <summary>The reply's length, zero padded, or -1 for its parts' own.</summary>
@@ -135,6 +144,12 @@ internal sealed class CompiledProtocol
     }
 
     internal readonly record struct Store(int Reg, int Byte, int Bytes, bool BigEndian, uint[]? In, bool Nonzero);
+
+    /// <summary>A message the device sends on its own schedule: while its
+    /// condition holds, one at <see cref="FirstTicks"/> after the condition
+    /// began to hold, then one per period of each step, a step with a count
+    /// of 0 repeating.</summary>
+    internal sealed record Timer(string Name, Condition? While, long FirstTicks, (long PeriodTicks, int Count)[] Steps, Part[] Reply, int Length);
 
     internal sealed record Record(int At, int Size, int CountByte, int DivideBy, int KeyOffset, byte KeyValue,
                                   (int Reg, int Offset, int Bytes, bool BigEndian)[] Fields);
@@ -461,10 +476,68 @@ internal sealed class CompiledProtocol
                     throw Fail($"{root}.memory[{w.Memory}].size 0x{Memories[w.Memory].Size:X}: a rule writes this image, so it is held whole, at most 0x{MaxMemory:X} bytes.");
         foreach (var r in Rules)
         {
-            if (r.Reply == null) continue;
+            if (r.Reply == null && r.Packets == null) continue;
             if (Channel == ReplyChannel.Input && InputEndpoint == 0 && descriptors != null)
                 throw Fail($"{root}.commands has a rule with a reply, and the protocol declares no input endpoint to send it on.");
             MaxReplyLength = Math.Max(MaxReplyLength, Largest(r));
+        }
+
+        // Timers. They run on the device clock of a USB/IP device that builds
+        // its reports, and their messages wait with the replies on its input
+        // endpoint.
+        if (spec.Timers != null)
+        {
+            if (descriptors == null) throw Fail($"{root}.timers go with the usbip backend, where the device clock sends them on the input endpoint.");
+            if (!BuildsReports) throw Fail($"{root}.timers run on the device clock of a device that builds its reports, and this one declares no inputReports.");
+            if (Channel != ReplyChannel.Input) throw Fail($"{root}.timers send on the input endpoint, so they need replies.channel \"input\".");
+            var timers = new Timer[spec.Timers.Count];
+            var timerNames = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < timers.Length; i++)
+            {
+                string tat = $"{root}.timers[{i}]";
+                var t = spec.Timers[i] ?? throw Fail($"{tat} is null.");
+                if (string.IsNullOrWhiteSpace(t.Name)) throw Fail($"{tat}.name: a timer needs a name.");
+                if (!timerNames.Add(t.Name)) throw Fail($"{tat}.name '{t.Name}' names two timers.");
+                if (t.Periods is not { Count: > 0 } periods) throw Fail($"{tat}.periods is missing: a timer needs at least one step.");
+                var steps = new (long, int)[periods.Count];
+                for (int k = 0; k < steps.Length; k++)
+                {
+                    string sat = $"{tat}.periods[{k}]";
+                    var step = periods[k] ?? throw Fail($"{sat} is null.");
+                    if (!(step.PeriodMs >= 1) || double.IsInfinity(step.PeriodMs)) throw Fail($"{sat}.periodMs {step.PeriodMs} is under the 1 ms a timer runs at.");
+                    bool last = k == steps.Length - 1;
+                    if (last && step.Count != null) throw Fail($"{sat}.count: the last step repeats, so it has no count.");
+                    if (!last && step.Count is not >= 1) throw Fail($"{sat}.count: a step before the last sends 1 or more messages.");
+                    steps[k] = (MsTicks(step.PeriodMs), step.Count ?? 0);
+                }
+                double first = t.FirstMs ?? periods[0].PeriodMs;
+                if (!(first >= 0) || double.IsInfinity(first)) throw Fail($"{tat}.firstMs {first} is not 0 or more.");
+                if (t.Reply is not { Count: > 0 }) throw Fail($"{tat}.reply is missing: a timer sends a message.");
+                // No command to echo, so every part is fixed: minLength 0.
+                var parts = Parts(t.Reply, $"{tat}.reply", 0, allowStatus: false);
+                int length = 0;
+                foreach (var part in parts)
+                {
+                    if (part.FixedLength < 0) throw Fail($"{tat}.reply: a part's length is read from a command, and a timer has none.");
+                    length += part.FixedLength;
+                }
+                timers[i] = new Timer(t.Name, Cond(t.While, $"{tat}.while"), MsTicks(first), steps, parts, length);
+                MaxReplyLength = Math.Max(MaxReplyLength, length);
+            }
+            Timers = timers;
+        }
+
+        // A device that builds its reports hands each reply waiting on its
+        // input endpoint to one read whole, between its reports, so a reply
+        // is one packet of that endpoint.
+        if (descriptors != null && BuildsReports && Channel == ReplyChannel.Input && InputPacketSize > 0)
+        {
+            for (int i = 0; i < Rules.Length; i++)
+                if ((Rules[i].Reply != null || Rules[i].Packets != null) && Largest(Rules[i]) > InputPacketSize)
+                    throw Fail($"{root}.commands.rules[{i}]: a reply of {Largest(Rules[i])} bytes is past the {InputPacketSize}-byte packets input endpoint 0x{InputEndpoint:X2} carries, and this device sends each reply in one.");
+            for (int i = 0; i < Timers.Length; i++)
+                if (Timers[i].Length > InputPacketSize)
+                    throw Fail($"{root}.timers[{i}].reply is {Timers[i].Length} bytes, past the {InputPacketSize}-byte packets input endpoint 0x{InputEndpoint:X2} carries.");
         }
 
         if (descriptors == null)
@@ -553,6 +626,8 @@ internal sealed class CompiledProtocol
             if (map.UsesReportIds && r.At == 0 && r.MatchMask.Length > 0 && r.MatchMask[0] == 0xFF
                 && map.Find(HidReportKind.Output, r.Match[0]) == null)
                 throw Fail($"{at}.match: output report 0x{r.Match[0]:X2} is not one the HID descriptor declares, and HID class refuses a write of it.");
+            if (r.Packets != null)
+                throw Fail($"{at}.replies go with the usbip backend. A UMDF2 device's reply is one input report.");
             if (r.Reply == null) continue;
             var first = r.UsePrefix && ReplyPrefix is { Length: > 0 } ? ReplyPrefix[0] : r.Reply[0];
             int id = 0;
@@ -570,6 +645,8 @@ internal sealed class CompiledProtocol
                 throw Fail($"{at}.replyLength: the reply runs {(fixedLength ? $"{len} bytes" : "to a length the command sets")}, and the HID descriptor declares input report 0x{id:X2} at {declared}. Give a replyLength of {declared}.");
         }
     }
+
+    private static long MsTicks(double ms) => Math.Max(0, (long)Math.Round(ms * Stopwatch.Frequency / 1000.0));
 
     /// <summary>The protocol of <paramref name="profile"/>, or null when it
     /// declares none.</summary>
@@ -649,8 +726,15 @@ internal sealed class CompiledProtocol
             "uint8" => 1,
             "uint16-le" => 2,
             "uint32-le" => 4,
-            _ => throw Fail($"{at}.encoding \"{encoding}\" is not one of ascii, uint8, uint16-le, uint32-le."),
+            "hex-le" => -2,
+            _ => throw Fail($"{at}.encoding \"{encoding}\" is not one of ascii, uint8, uint16-le, uint32-le, hex-le."),
         };
+        if (natural == -2)
+        {
+            if (source != "serial") throw Fail($"{at}.encoding \"hex-le\" reads the serial's hex digits, and value \"{source}\" is not the serial.");
+            if (length is not int h || h < 1 || h > 32) throw Fail($"{at}.length: a hex-le value needs a length of 1 to 32 bytes.");
+            return h;
+        }
         if (natural < 0)
         {
             if (length is not int n || n < 1 || n > 256) throw Fail($"{at}.length: an ascii value needs a length of 1 to 256 bytes.");
@@ -664,6 +748,22 @@ internal sealed class CompiledProtocol
     internal static byte[] ValueBytes(string source, string? encoding, int length, int add, string? serial, int index)
     {
         var b = new byte[length];
+        if (encoding == "hex-le")
+        {
+            // The hex digits that end the serial, last digit lowest: two per
+            // byte, low byte first, zeros past them.
+            string text = serial ?? "";
+            int end = text.Length, start = end;
+            while (start > 0 && Uri.IsHexDigit(text[start - 1])) start--;
+            for (int i = 0; i < length; i++)
+            {
+                int lo = end - 1 - 2 * i, hi = lo - 1;
+                int digits = lo >= start ? Convert.ToInt32(text[lo].ToString(), 16) : 0;
+                if (hi >= start) digits |= Convert.ToInt32(text[hi].ToString(), 16) << 4;
+                b[i] = (byte)digits;
+            }
+            return b;
+        }
         if (encoding is null or "ascii")
         {
             string text = source == "serial" ? serial ?? "" : (index + add).ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -834,9 +934,31 @@ internal sealed class CompiledProtocol
             if (Model.Decoders[rule.Decode].MinLength > rule.MinLength && r.MinLength != null)
                 throw Fail($"{at}.decode '{r.Decode}' reads {Model.Decoders[rule.Decode].MinLength} bytes, past the rule's minLength {rule.MinLength}.");
         }
+        rule.Continue = r.Continue ?? false;
+        if (rule.Continue && (emit != null || r.EmitOutput != null || r.Decode != null))
+            throw Fail($"{at}.continue: the rules after this one apply to the command too, so it is not the command's own rule, which emits or decodes it.");
         rule.UsePrefix = r.Prefix ?? true;
         rule.Status = r.Status == null ? DefaultStatus : HexByte(r.Status, $"{at}.status");
-        if (r.Reply != null)
+        if (r.Replies != null)
+        {
+            if (r.Reply != null) throw Fail($"{at}: give reply or replies, not both.");
+            if (r.ReplyLength != null || r.Status != null || r.Prefix != null)
+                throw Fail($"{at}.replies take no replyLength, status or prefix: each reply is its parts.");
+            if (r.Replies.Count < 2) throw Fail($"{at}.replies holds {r.Replies.Count}: give reply for one.");
+            if (r.Replies.Count > PendingReplies)
+                throw Fail($"{at}.replies queues {r.Replies.Count} messages, past the {PendingReplies} replies.pending lets wait.");
+            rule.UsePrefix = false;
+            rule.Packets = new Part[r.Replies.Count][];
+            for (int k = 0; k < rule.Packets.Length; k++)
+            {
+                var list = r.Replies[k] ?? throw Fail($"{at}.replies[{k}] is null.");
+                if (list.Count == 0) throw Fail($"{at}.replies[{k}] is empty.");
+                rule.Packets[k] = Parts(list, $"{at}.replies[{k}]", rule.MinLength, allowStatus: false);
+                if (Channel == ReplyChannel.Input && LargestOf(rule.Packets[k]) > ReplyLimit)
+                    throw Fail($"{at}.replies[{k}] is {LargestOf(rule.Packets[k])} bytes, longer than the {ReplyLimit}-byte reports its channel carries.");
+            }
+        }
+        else if (r.Reply != null)
         {
             rule.Reply = Parts(r.Reply, $"{at}.reply", rule.MinLength, allowStatus: !rule.UsePrefix || ReplyPrefix == null);
             int own = 0;
@@ -859,9 +981,23 @@ internal sealed class CompiledProtocol
     /// size, past which the input report path's buffers end.</summary>
     private int ReplyLimit => Math.Max(Math.Max(ReportSize, SharedMemoryIO.EXTENDED_DATA_CAPACITY), SharedMemoryIO.DATA_CAPACITY + 1);
 
-    /// <summary>The longest the rule's reply can be.</summary>
+    private static int LargestOf(Part[] parts)
+    {
+        int n = 0;
+        foreach (var p in parts) n += p.LargestLength;
+        return n;
+    }
+
+    /// <summary>The longest the rule's reply can be, or the longest of its
+    /// replies.</summary>
     internal int Largest(Rule r)
     {
+        if (r.Packets != null)
+        {
+            int most = 0;
+            foreach (var packet in r.Packets) most = Math.Max(most, LargestOf(packet));
+            return most;
+        }
         if (r.Reply == null) return 0;
         int n = 0;
         if (r.UsePrefix && ReplyPrefix != null) foreach (var p in ReplyPrefix) n += p.LargestLength;
@@ -1056,8 +1192,21 @@ internal sealed class CompiledProtocol
         foreach (var tok in (text ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries))
         {
             if (tok == "..") { bytes.Add(0); masks.Add(0); continue; }
+            int slash = tok.IndexOf('/');
+            if (slash >= 0)
+            {
+                // vv/mm: the bits of one byte under a mask.
+                if (!ModelText.TryParseBytes(tok[..slash], out var v) || v.Length != 1
+                    || !ModelText.TryParseBytes(tok[(slash + 1)..], out var m) || m.Length != 1)
+                    throw Fail($"{at} \"{tok}\" is not one hex byte and its mask, such as 20/EF.");
+                if ((v[0] & ~m[0]) != 0)
+                    throw Fail($"{at} \"{tok}\" sets bits outside its mask, which no byte matches.");
+                bytes.Add(v[0]);
+                masks.Add(m[0]);
+                continue;
+            }
             if (!ModelText.TryParseBytes(tok, out var b))
-                throw Fail($"{at} \"{tok}\" is neither hex bytes nor ..");
+                throw Fail($"{at} \"{tok}\" is neither hex bytes, vv/mm nor ..");
             foreach (byte x in b) { bytes.Add(x); masks.Add(0xFF); }
         }
         match = bytes.ToArray();
