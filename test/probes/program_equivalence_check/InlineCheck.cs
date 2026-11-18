@@ -22,7 +22,8 @@ using HIDMaestro.Internal.Usbip;
 /// The planted set must show its call, or the check proves nothing. The JIT
 /// run then reads the NativeAOT build beside it the same way, through
 /// dumpbin /disasm with the build's symbols, where a Visual Studio C++
-/// toolset is installed.</summary>
+/// toolset is installed. Each listing is read with the call instructions of
+/// its architecture: call on x64, bl and blr on ARM64.</summary>
 internal static class InlineCheck
 {
     sealed class Binder : IReportSetBinder
@@ -117,8 +118,7 @@ internal static class InlineCheck
             bool isPlanted = header.Contains("_NotInlined", StringComparison.Ordinal);
             bool isCatalog = header.Contains("Programs.Set", StringComparison.Ordinal) && !isPlanted;
             if (!isPlanted && !isCatalog) continue;
-            var calls = m.Split('\n').Select(l => l.Trim())
-                .Where(l => l.StartsWith("call ", StringComparison.Ordinal) || l.Contains(" call ", StringComparison.Ordinal))
+            var calls = JitCalls(m.Split('\n'), RuntimeInformation.ProcessArchitecture == Architecture.Arm64)
                 .Where(l => l.Contains("Kernels:K", StringComparison.Ordinal) || l.Contains(":Run(", StringComparison.Ordinal))
                 .ToList();
             string set = header.Contains('[') ? header[(header.IndexOf('[') + 1)..header.IndexOf(']')] : header;
@@ -139,6 +139,47 @@ internal static class InlineCheck
         if (planted == 0) Checks.Fail("inline: no listing of BuildNext over the planted set");
         Aot();
         return Checks.Failures - before;
+    }
+
+    /// <summary>The calls in one method of the JIT's listing, each as the
+    /// text that names its target. On x64 a call is one instruction, call,
+    /// with its target on the line. On ARM64 a direct call is bl with its
+    /// target on the line, and a call through a register is blr, whose
+    /// target the JIT names in the "code for" comment of the instruction that
+    /// loaded the address, so the blr line is paired with the last such
+    /// comment before it.</summary>
+    internal static IEnumerable<string> JitCalls(IEnumerable<string> lines, bool arm64)
+    {
+        string? codeFor = null;
+        foreach (var raw in lines)
+        {
+            string l = raw.Trim();
+            if (!arm64)
+            {
+                if (l.StartsWith("call ", StringComparison.Ordinal) || l.Contains(" call ", StringComparison.Ordinal)) yield return l;
+                continue;
+            }
+            int comment = l.IndexOf("code for ", StringComparison.Ordinal);
+            if (l.StartsWith("bl ", StringComparison.Ordinal))
+                yield return l;
+            else if (l.StartsWith("blr ", StringComparison.Ordinal))
+            {
+                yield return codeFor == null ? l : l + " ; code for " + codeFor;
+                codeFor = null;
+            }
+            else if (comment >= 0)
+                codeFor = l[(comment + "code for ".Length)..].Trim();
+        }
+    }
+
+    /// <summary>The target of a call in one line of dumpbin's disassembly, or
+    /// null when the line holds no call. x64 calls with call, ARM64 with bl,
+    /// or blr through a register, which names no target.</summary>
+    internal static string? AotCall(string line, bool arm64)
+    {
+        string op = arm64 ? " bl " : " call ";
+        int at = line.IndexOf(op, StringComparison.Ordinal);
+        return at < 0 ? null : line[(at + op.Length)..].Trim();
     }
 
     /// <summary>dumpbin from the newest Visual Studio C++ toolset for this
@@ -168,7 +209,13 @@ internal static class InlineCheck
     /// dumpbin's disassembly, one function per symbol line.</summary>
     static void Aot()
     {
-        string arch = RuntimeInformation.OSArchitecture == Architecture.Arm64 ? "arm64" : "x64";
+        // HM_PEC_AOT_ARCH names the other architecture's build, so an x64
+        // machine's dumpbin can read the ARM64 build, which the probe's ARM64
+        // output carries, through the ARM64 reading.
+        string arch = Environment.GetEnvironmentVariable("HM_PEC_AOT_ARCH") is ("arm64" or "x64") and var named
+            ? named
+            : RuntimeInformation.OSArchitecture == Architecture.Arm64 ? "arm64" : "x64";
+        bool arm64 = arch == "arm64";
         string aot = Path.Combine(AppContext.BaseDirectory, "aot-" + arch, "ProgramEquivalenceCheck.exe");
         string? dumpbin = Dumpbin();
         // The check reads the NativeAOT build or fails: a machine without the
@@ -217,9 +264,9 @@ internal static class InlineCheck
                     name = line[..^1];
                     calls.Clear();
                 }
-                else if (name != null && line.Contains(" call ", StringComparison.Ordinal))
+                else if (name != null && AotCall(line, arm64) is { } target)
                 {
-                    calls.Add(line[(line.IndexOf(" call ", StringComparison.Ordinal) + 6)..].Trim());
+                    calls.Add(target);
                 }
             }
             End();
