@@ -31,6 +31,10 @@
 // PadForge's FfbTest run remains the canonical end-to-end arbiter for
 // the dinput8 PID handshake. This probe exercises the parts of v1.1.37
 // the test environment can drive deterministically.
+//
+// The live run uses the controller's backend, UMDF2 or USB/IP, and expects
+// the same allocation on both. "offline" runs Offline.cs instead: a USB/IP
+// device's PID block over the USB/IP wire, with no kernel.
 
 using System;
 using System.IO;
@@ -78,8 +82,9 @@ internal static class Program
         0xC0,
     };
 
-    static int Main()
+    static int Main(string[] args)
     {
+        if (args.Contains("offline")) return Offline.Run();
         Console.WriteLine("=== HIDMaestro PID FFB alloc/free + pool exhaustion (v1.1.37 / S25) ===");
 
         // Make sure file trace is on for this probe; clean any prior log so
@@ -98,7 +103,7 @@ internal static class Program
         Console.Write("  Creating two controllers (A, B)... ");
         using var ctrlA = ctx.CreateController(profileA);
         using var ctrlB = ctx.CreateController(profileB);
-        Console.WriteLine("OK");
+        Console.WriteLine($"OK ({ctrlA.Backend}, {ctrlB.Backend})");
 
         int failures = 0;
 
@@ -217,7 +222,7 @@ internal static class Program
 
         // ── Section 4: dynamic SetFeature/SetOutputReport (best-effort) ──
         Console.WriteLine("  --- Section 4: dynamic driver-side allocation (best-effort) ---");
-        SafeFileHandle? hidA = OpenHmHid(ProbeVid, ProbePidA, ctrlA.TransportIndex);
+        SafeFileHandle? hidA = OpenHmHid(ctrlA);
         bool dynamicHit = false;
         if (hidA != null && !hidA.IsInvalid)
         {
@@ -240,8 +245,9 @@ internal static class Program
             }
             else
             {
-                Console.WriteLine($"  [dynamic SetFeature/SetOutputReport] SKIP: both rejected by HidClass " +
-                    $"(Win32={Marshal.GetLastWin32Error()}). PadForge FfbTest is the dynamic arbiter.");
+                Console.WriteLine($"  [dynamic SetFeature/SetOutputReport] FAIL: both rejected " +
+                    $"(Win32={Marshal.GetLastWin32Error()})");
+                failures++;
             }
 
             if (dynamicHit)
@@ -264,7 +270,8 @@ internal static class Program
         }
         else
         {
-            Console.WriteLine("  [dynamic SetFeature/SetOutputReport] SKIP: no HID handle");
+            Console.WriteLine("  [dynamic SetFeature/SetOutputReport] FAIL: the controller's HID interface did not open");
+            failures++;
         }
 
         if (failures == 0) { Console.WriteLine("=== PASS ==="); return 0; }
@@ -312,20 +319,29 @@ internal static class Program
         finally { CloseHandle(h); }
     }
 
-    /// <summary>The controller's own HID interface: this VID and PID, and
-    /// the serial the driver serves, HM-CTL- and the controller's transport
-    /// index. Another program's controller with the same VID and PID
-    /// serves its own index.</summary>
-    static SafeFileHandle? OpenHmHid(ushort vid, ushort pid, int transportIndex)
+    /// <summary>The controller's own HID interface: its VID and PID, and the
+    /// serial its backend serves, the UMDF2 driver's HM-CTL- and the
+    /// transport index or the USB/IP device's identity serial. Another
+    /// program's controller with the same VID and PID serves its own.
+    /// Waited for up to ten seconds.</summary>
+    static SafeFileHandle? OpenHmHid(HMController c)
     {
-        string serial = $"HM-CTL-{transportIndex:D4}";
-        var match = HMDeviceExtractor.ListDevices()
-            .FirstOrDefault(d => d.VendorId == vid && d.ProductId == pid && d.SerialNumberString == serial);
-        if (match == null) return null;
-        var h = CreateFile(match.DevicePath, GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
-        if (h.IsInvalid) { h.Dispose(); return null; }
-        return h;
+        string serial = c.Backend == HMBackend.Usbip ? c.UsbipHandle!.Device.Descriptors.SerialString!
+                                                     : HIDMaestro.Internal.DeviceOrchestrator.DriverSerial(c.TransportIndex);
+        for (int i = 0; i < 100; i++)
+        {
+            var match = HMDeviceExtractor.ListDevices()
+                .FirstOrDefault(d => d.VendorId == c.Profile.VendorId && d.ProductId == c.Profile.ProductId && d.SerialNumberString == serial);
+            if (match != null)
+            {
+                var h = CreateFile(match.DevicePath, GENERIC_READ | GENERIC_WRITE,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+                if (!h.IsInvalid) return h;
+                h.Dispose();
+            }
+            Thread.Sleep(100);
+        }
+        return null;
     }
 
     const uint FILE_MAP_READ = 0x4;

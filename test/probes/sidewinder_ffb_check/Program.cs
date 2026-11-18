@@ -25,6 +25,10 @@
 // FfbTest verification (Device.CreateEffect → SUCCESS for ConstantForce
 // + Sine), this covers the dinput-pid.dll-driver-SDK round trip.
 //
+// The checks run on the controller's backend, UMDF2 or USB/IP, and expect
+// the same allocation and free on both: on USB/IP the device plays the
+// driver's PID block (UsbipEmulatedDevice.Pid.cs).
+//
 // Requires admin (driver install + virtual creation). Exit 0 on PASS, 1 on FAIL.
 
 using System;
@@ -95,7 +99,7 @@ internal static class Program
 
         Console.Write("  Creating SideWinder virtual... ");
         using var ctrl = ctx.CreateController(profile);
-        Console.WriteLine("OK");
+        Console.WriteLine($"OK ({ctrl.Backend})");
 
         // Settle for HID interface to come fully online.
         Thread.Sleep(800);
@@ -133,9 +137,10 @@ internal static class Program
                             sharedParameterBlocks: true);
 
         // Open the virtual SideWinder's HID handle.
-        SafeFileHandle? hid = OpenHmHidByVidPid(0x045E, 0x001B, kIndex);
+        string serial = SerialOf(ctrl);
+        SafeFileHandle? hid = OpenHmHidByVidPid(0x045E, 0x001B, serial);
         bool hidOpen = hid != null && !hid.IsInvalid;
-        Check("HID handle opened", hidOpen, $"serial HM-CTL-{kIndex:D4}");
+        Check("HID handle opened", hidOpen, $"serial {serial}");
         if (!hidOpen) return s_failures > 0 ? 1 : 0;
 
         // SetFeature(CreateNewEffect at canonical RID 0x11): driver must
@@ -171,8 +176,13 @@ internal static class Program
               blPublished.RAMPoolAvailable > 0,
               $"got 0x{blPublished.RAMPoolAvailable:X4}");
 
-        // Free EBI=1 via Block Free RID so we leave the device in a clean state.
-        SendSetFeature(hid!, rids.BlockFreeReportId, new byte[] { 0x01 });
+        // Free EBI=1 via Block Free RID so we leave the device in a clean
+        // state. Block Free is an output report in this descriptor, which
+        // HidD_SetOutputReport sends, and the free clears the block's bit.
+        bool freed = SendSetOutputReport(hid!, rids.BlockFreeReportId, new byte[] { 0x01 });
+        uint bitmap = TryReadSection(sectionName, out byte[] after) ? BitConverter.ToUInt32(after, 20) : 0xFFFFFFFF;
+        Check($"HidD_SetOutputReport(0x{rids.BlockFreeReportId:X2} Block Free, EBI 1) frees the block",
+              freed && bitmap == 0, freed ? $"bitmap 0x{bitmap:X8}" : $"Win32={Marshal.GetLastWin32Error()}");
 
         hid?.Dispose();
 
@@ -180,16 +190,21 @@ internal static class Program
         return s_failures == 0 ? 0 : 1;
     }
 
-    static SafeFileHandle? OpenHmHidByVidPid(ushort vid, ushort pid, int index)
+    /// <summary>The serial the controller's HID device serves: the UMDF2
+    /// driver's HM-CTL- and the transport index, or on the USB/IP backend the
+    /// identity's serial its device descriptor names.</summary>
+    static string SerialOf(HMController c) =>
+        c.Backend == HMBackend.Usbip ? c.UsbipHandle!.Device.Descriptors.SerialString!
+                                     : DeviceOrchestrator.DriverSerial(c.TransportIndex);
+
+    static SafeFileHandle? OpenHmHidByVidPid(ushort vid, ushort pid, string serial)
     {
-        // The driver serves HM-CTL- and the controller's index as the serial
-        // (driver.c InitInstancePaths), so a physical SideWinder plugged in
-        // beside the virtual one is never opened. The path cannot tell them
-        // apart: the virtual SideWinder is not an XInput device, so its path
-        // has no &IG_, the same as the real joystick's.
+        // The controller's own serial (SerialOf), so a physical SideWinder
+        // plugged in beside the virtual one is never opened. The path cannot
+        // tell them apart: the virtual SideWinder is not an XInput device,
+        // so its path has no &IG_, the same as the real joystick's.
         // The interface can arrive late on a loaded machine. The deadline
         // only catches a device that never comes up.
-        string serial = $"HM-CTL-{index:D4}";
         HMHidDeviceInfo? match = null;
         var watch = System.Diagnostics.Stopwatch.StartNew();
         while (match == null && watch.ElapsedMilliseconds < 30000)
@@ -212,6 +227,35 @@ internal static class Program
         Buffer.BlockCopy(payload, 0, buf, 1, payload.Length);
         return HidD_SetFeature(h, buf, (uint)buf.Length);
     }
+
+    /// <summary>An output report in a buffer of the collection's output
+    /// report length, which HID class takes for HidD_SetOutputReport.</summary>
+    static bool SendSetOutputReport(SafeFileHandle h, byte reportId, byte[] payload)
+    {
+        int length = 1 + payload.Length;
+        if (HidD_GetPreparsedData(h, out IntPtr pp))
+        {
+            var caps = new byte[64];
+            if (HidP_GetCaps(pp, caps) == 0x00110000) length = Math.Max(length, BitConverter.ToUInt16(caps, 6));
+            HidD_FreePreparsedData(pp);
+        }
+        byte[] buf = new byte[length];
+        buf[0] = reportId;
+        Buffer.BlockCopy(payload, 0, buf, 1, payload.Length);
+        return HidD_SetOutputReport(h, buf, (uint)buf.Length);
+    }
+
+    [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    static extern bool HidD_SetOutputReport(SafeFileHandle h, byte[] buf, uint len);
+    [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    static extern bool HidD_GetPreparsedData(SafeFileHandle h, out IntPtr preparsed);
+    [DllImport("hid.dll")]
+    [return: MarshalAs(UnmanagedType.U1)]
+    static extern bool HidD_FreePreparsedData(IntPtr preparsed);
+    [DllImport("hid.dll")]
+    static extern uint HidP_GetCaps(IntPtr preparsed, byte[] caps);
 
     const uint GENERIC_READ = 0x80000000, GENERIC_WRITE = 0x40000000;
     const uint FILE_SHARE_READ = 1, FILE_SHARE_WRITE = 2;

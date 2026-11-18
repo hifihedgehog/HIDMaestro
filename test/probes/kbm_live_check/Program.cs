@@ -39,6 +39,8 @@
 //
 // --leds-diag prints a timeline of the LED reports two keyboards receive,
 // with each one's output ring read from its first slot, read or not.
+// --order N, --dispose-ack N and --held-on-kill are measurements on
+// either backend, described in Bench.cs. The first two need no Raw Input.
 
 using System;
 using System.Collections.Generic;
@@ -425,12 +427,26 @@ internal static class Program
         bool fourOnly = Environment.GetCommandLineArgs().Contains("--four-mice");
         // The --hold-diag child runs beside its own parent, which has the SDK
         // loaded.
-        string? consumer = Environment.GetCommandLineArgs().Contains("--hold-child") ? null : FindLiveSdkConsumer();
+        string[] argv = Environment.GetCommandLineArgs();
+        string? consumer = argv.Contains("--hold-child") || argv.Contains("--held-shift-child") ? null : FindLiveSdkConsumer();
         if (consumer != null)
         {
             Console.WriteLine($"  [SKIP] {consumer} is running and shares the SDK's devices.");
             return 2;
         }
+        int orderAt = Array.IndexOf(argv, "--order"), ackAt = Array.IndexOf(argv, "--dispose-ack");
+        if (orderAt > 0 || ackAt > 0 || argv.Contains("--held-shift-child"))
+        {
+            int at = orderAt > 0 ? orderAt : ackAt;
+            int count = at > 0 && at + 1 < argv.Length && int.TryParse(argv[at + 1], out int c) ? c : 1;
+            using var bctx = new HMContext();
+            bctx.LoadDefaultProfiles();
+            bctx.InstallDriver();
+            return orderAt > 0 ? Bench.Order(bctx, count)
+                 : ackAt > 0 ? Bench.DisposeAck(bctx, count)
+                 : Bench.HoldShiftChild(bctx);
+        }
+
         // Every check here reads Raw Input. Exit 3, which the battery reads as
         // a skip, unlike the running consumer's 2.
         if (RawInputSink.NoRawInputHere(out string why))
@@ -438,6 +454,8 @@ internal static class Program
             Console.WriteLine($"  [SKIP] {why}.");
             return 3;
         }
+
+        if (argv.Contains("--held-on-kill")) return Bench.HeldOnKill();
 
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
