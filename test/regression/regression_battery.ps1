@@ -350,10 +350,10 @@ function Send-Cmd {
         $code = $Proc.ExitCode
         throw ("Cannot send '" + $Cmd + "': process already exited (code " + $code + ")")
     }
-    # The devnodes as they stand before the command, for the next
-    # Wait-CascadeSettle's Phase A, with the process and whether it has
-    # acknowledged the command yet.
-    $script:HMSendCmdBaseline = Get-HMPresentKey
+    # For the next Wait-CascadeSettle's Phase A: the process, whether it
+    # has acknowledged the command yet, and under -Verbose the devnodes as
+    # they stand before it, so the settle can say whether it changed them.
+    $script:HMSendCmdBaseline = if ($VerbosePreference -eq 'Continue') { Get-HMPresentKey } else { '' }
     $script:HMSendCmdProc = $Proc
     $script:HMSendCmdAcked = $false
     $Proc.StandardInput.WriteLine($Cmd)
@@ -535,9 +535,9 @@ function Get-HMPresentKey { ((Get-HMPresentDevnodes) | Sort-Object) -join '|' }
 #     changes the set too. Send-Cmd waits for the acknowledgment unless
 #     told not to, so for most commands the phase finds it already there.
 #     For a command sent with -NoWaitAck the phase reads it from the
-#     process's output. Send-Cmd also snapshots the present set before it
-#     writes the command, and the phase compares it with the set once the
-#     command has run: -Verbose prints whether the command changed it.
+#     process's output. Under -Verbose, Send-Cmd also snapshots the
+#     present set before it writes the command, and the phase prints
+#     whether the command changed it.
 #
 #   Phase B (stability): once a change is observed, poll until the
 #     present set is stable for two consecutive 200 ms samples. The
@@ -562,7 +562,7 @@ function Wait-CascadeSettle {
     $stabilityBudgetMs = HMScaleMs 60000
     $stableN           = 2
 
-    # Pull and consume the most recent Send-Cmd snapshot. If null, the
+    # Pull and consume what the most recent Send-Cmd left. If null, the
     # caller didn't send a command before this settle (e.g. the final
     # post-Stop-HMTestProcess settle in Test-Scenario), so skip Phase A
     # entirely and just check stability.
@@ -592,8 +592,9 @@ function Wait-CascadeSettle {
             if (-not $acked) { Start-Sleep -Milliseconds 50 }
         }
         if ($VerbosePreference -eq 'Continue') {
+            $ms = $sw.ElapsedMilliseconds
             $changed = if ((Get-HMPresentKey) -ne $baseline) { 'the devnodes changed' } else { 'the devnodes as before' }
-            Write-Verbose ('    [settle] phase A: {0} after {1} ms, {2}' -f $ended, $sw.ElapsedMilliseconds, $changed)
+            Write-Verbose ('    [settle] phase A: {0} after {1} ms, {2}' -f $ended, $ms, $changed)
         }
     }
 
