@@ -940,15 +940,14 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             }
 
             // Interrupt OUT: a full output report, Report ID first when the
-            // descriptor declares IDs. Same split as driver.c WRITE_REPORT.
-            // A derived device whose descriptor declares none gets the data
-            // alone, which the driver gets after the ID 0 HID class puts
-            // first, so the ring holds what the UMDF2 driver puts there.
+            // descriptor declares IDs. Same split as driver.c WRITE_REPORT,
+            // which takes the first byte for the ID whatever the descriptor
+            // declares: on a descriptor with no IDs both get the data alone,
+            // and both publish its first byte as the ID.
             var payload = outPayload;
-            bool ids = !_derived || _usesReportIds;
-            byte rid = ids && payload.Length > 0 ? payload[0] : (byte)0;
+            byte rid = payload.Length > 0 ? payload[0] : (byte)0;
             PublishOutput(SourceHidOutput, rid,
-                !ids ? payload : payload.Length > 0 ? payload[1..] : ReadOnlySpan<byte>.Empty);
+                payload.Length > 0 ? payload[1..] : ReadOnlySpan<byte>.Empty);
             SendRetSubmit(cmd.Seqnum, 0, payload.Length, null);
             return;
         }
@@ -1381,9 +1380,8 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 ProtocolEngine.CommandResult? command = _engine is { Protocol.Source: CommandSource.SetReport }
                     ? _engine.HandleCommand(payload, System.Diagnostics.Stopwatch.GetTimestamp())
                     : null;
-                bool ids = !_derived || _usesReportIds;
-                byte rid = ids && payload.Length > 0 ? payload[0] : reportId;
-                var data = !ids ? payload : payload.Length > 0 ? payload[1..] : ReadOnlySpan<byte>.Empty;
+                byte rid = payload.Length > 0 ? payload[0] : reportId;
+                var data = payload.Length > 0 ? payload[1..] : ReadOnlySpan<byte>.Empty;
                 // The data a message entry follows, as the SET carried it:
                 // from the report ID for a descriptor that declares report
                 // IDs, from the first data byte for one that declares none.
