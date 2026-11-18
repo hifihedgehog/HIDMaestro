@@ -333,8 +333,9 @@ public sealed class ControllerProfile
     /// <paramref name="backend"/>: this one, or on the USB/IP backend the USB
     /// form <see cref="UsbForm"/> names, as a copy that takes this profile's
     /// id, name, vendor, strings, device description and serial string and
-    /// the form's every other key. Built once, resolved and checked as a
-    /// create checks a profile.</summary>
+    /// the form's every other key. Resolved and checked as a create checks a
+    /// profile, and kept until the next create resolves this profile
+    /// again (<see cref="ResolveForCreate"/>).</summary>
     internal ControllerProfile UsbFormOf(HMBackend backend)
     {
         if (backend != HMBackend.Usbip || UsbForm == null) return this;
@@ -745,8 +746,13 @@ public sealed class ControllerProfile
     /// edit a loaded profile before it creates, and the create serves what
     /// the profile then holds. Throws for a defect of the profile's own
     /// keys, as the load does.</summary>
-    internal void ResolveForCreate() =>
+    internal void ResolveForCreate()
+    {
         ResolvedCache = ModelRegistry.Resolve(this, Registry ?? ModelRegistry.Catalog, OutsideCatalog);
+        // The USB form is built again from what this profile and its form
+        // hold now, for the same reason.
+        _usbFormPresented = null;
+    }
 
     /// <summary>Drops everything compiled from the profile's keys: the
     /// parsed descriptor, its report map, the report builder, the keyboard
