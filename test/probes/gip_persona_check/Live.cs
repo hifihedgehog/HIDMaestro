@@ -94,14 +94,38 @@ internal static unsafe partial class Program
             bool askedMetadata = log.Any(x => x.Command.Length >= 4 && x.Command[0] == 0x04 && x.Command[3] == 0x00);
             bool ackedFirst = log.Any(x => x.Command.Length >= 13 && x.Command[0] == 0x01 && x.Command[5] == 0x04 && x.Command[7] == 0x3A);
             bool startedGip = log.Any(x => x.Command.Length >= 5 && x.Command[0] == 0x05 && x.Command[3] == 0x01 && x.Command[4] == 0x00);
-            int security = log.Count(x => x.Command.Length >= 1 && x.Command[0] == 0x06);
+            var security = log.Where(x => x.Command.Length >= 1 && x.Command[0] == 0x06).Select(x => Hex(x.Command)).ToList();
             Check("the host answered the Hello with a Metadata Request, or knew the metadata already", askedMetadata || startedGip,
                   askedMetadata ? "requested" : "no request: the metadata was cached");
             if (askedMetadata) Check("and acknowledged the first fragment, which let the rest go", ackedFirst);
             Check("the host sent Set Device State Start", startedGip);
-            Console.WriteLine($"  security messages (0x06) from the host: {security}");
-            if (noOptOut) Check("info: without the opt-out the host sent security messages", true, security.ToString());
-            else Check("with the opt-out in the metadata the host sent no security message", security == 0, security.ToString());
+            Console.WriteLine($"  security messages (0x06) from the host: {security.Count}: {string.Join(" ", security)}");
+            // The two bytes 01 00 are the host's word that the exchange is
+            // done (GP2040-CE XBOneDriver.cpp:60-86 and 325-329, Santroller
+            // xone_device.cpp:24-25 and 413-418).
+            bool onlyDone = security.All(x => x.Length == 12 && x.EndsWith("020100", StringComparison.Ordinal));
+            if (noOptOut) Check("info: without the opt-out, the host's security messages", true, string.Join(" ", security));
+            else Check("with the opt-out in the metadata the host sends no challenge, at most its word that the exchange is done (01 00)",
+                       onlyDone, string.Join(" ", security));
+
+            // What Windows' GIP driver holds for the pad: its arrival, read
+            // from the Hello, and its descriptor, the metadata it took.
+            Console.WriteLine("\n-- the pad as xboxgip holds it, through \\\\.\\XboxGIP --");
+            ulong deviceId = 0;
+            for (int i = 0; i < 6; i++) deviceId |= (ulong)Convert.ToByte(serial.Substring(serial.Length - 2 - 2 * i, 2), 16) << (8 * i);
+            var held = GipCapture(4_000).Where(m => m.DeviceId == deviceId).ToList();
+            foreach (var m in held) Console.WriteLine($"  command 0x{m.Command:X2}, {m.Data.Length} bytes: {Hex(m.Data)}");
+            var arrival = held.FirstOrDefault(m => m.Command == 0x02);
+            Check($"xboxgip announces the pad's arrival under the Hello's device ID {deviceId:X16}, with 045E:02EA and firmware 4D48.{(noOptOut ? "0231" : "0230")}",
+                  arrival != null && arrival.Data.Length >= 16 && BitConverter.ToUInt64(arrival.Data, 0) == deviceId
+                  && Hex(arrival.Data.AsSpan(8, 8)) == "5E04EA02484D" + (noOptOut ? "3102" : "3002"),
+                  arrival == null ? $"{held.Count} messages for the device" : Hex(arrival.Data));
+            var descriptor = held.FirstOrDefault(m => m.Command == 0x04);
+            if (!noOptOut)
+                Check("and holds the metadata it took: 045E:02EA, then the persona's 214 bytes as served",
+                      descriptor != null && descriptor.Data.Length >= 4 + 214 && Hex(descriptor.Data.AsSpan(0, 4)) == "5E04EA02"
+                      && descriptor.Data.AsSpan(4, 214).SequenceEqual(ExpectedMetadata()),
+                      descriptor == null ? "no descriptor message" : $"{descriptor.Data.Length} bytes, first difference {FirstDifference(descriptor.Data.AsSpan(4).ToArray(), ExpectedMetadata())}");
 
             Console.WriteLine("\n-- the HID child xboxgip makes --");
             var children = Descendants(instance);
@@ -185,6 +209,21 @@ internal static unsafe partial class Program
                       c => c[8] is >= 24 and <= 26 && c[9] is >= 49 and <= 51 && (c[5] & 0x03) == 0x03);
                 Motor(engine, "XInputSetState(0, 0)", () => { var v = new XINPUT_VIBRATION(); return XInputSetState(s, ref v); },
                       c => c[8] == 0 && c[9] == 0);
+
+                // The HID child xboxgip makes: its capabilities, for the
+                // record. Rumble reaches the pad through xinputhid and
+                // xboxgip, not through a HID output report.
+                string? child = InterfaceUnder(s_hidInterface, instance);
+                Check("a HID interface sits under the device", child != null, child ?? "none");
+                if (child != null) Console.WriteLine($"  {child}: output report {HidOutputLength(child)} bytes");
+
+                // The trigger motors from a program with no window: GameInput's
+                // SetRumbleState (GameInputRumble.cs), each level its own value
+                // so the Direct Motor bytes show which lands where.
+                Console.WriteLine("\n-- trigger rumble through GameInput --");
+                Motor(engine, "GameInput SetRumbleState(low 1.0, high 0.5, left trigger 0.8, right trigger 0.3)",
+                      () => GameInputRumble.Pulse(0x045E, 0x02EA, 1.0f, 0.5f, 0.8f, 0.3f, 800, line => Console.WriteLine($"  GameInput: {line}")),
+                      c => c[6] is >= 79 and <= 81 && c[7] is >= 29 and <= 31 && c[8] >= 99 && c[9] is >= 49 and <= 51 && (c[5] & 0x0F) == 0x0F);
             }
 
             Console.WriteLine("\n-- Windows.Gaming.Input --");
@@ -206,24 +245,43 @@ internal static unsafe partial class Program
                 Check("Gamepad lists it once", gp != null && pads == 1, $"{pads} gamepads of 045E:02EA");
                 if (gp != null)
                 {
+                    // Readings reach a program the session gives input to.
+                    // An SSH session has no desktop, so these are recorded
+                    // beside the same read of a HID pad below.
                     var on = new HMGamepadState { Buttons = HMButton.Y };
                     Windows.Gaming.Input.GamepadReading reading = default;
                     bool y = WaitUntil(() => { pad.SubmitState(in on); reading = gp.GetCurrentReading(); return (reading.Buttons & Windows.Gaming.Input.GamepadButtons.Y) != 0; }, 5_000);
-                    Check("Gamepad.GetCurrentReading reads Y", y, $"buttons {reading.Buttons}");
+                    var rawButtons = new bool[r0.ButtonCount];
+                    var rawSwitches = new Windows.Gaming.Input.GameControllerSwitchPosition[r0.SwitchCount];
+                    var rawAxes = new double[r0.AxisCount];
+                    r0.GetCurrentReading(rawButtons, rawSwitches, rawAxes);
+                    s_wgiGip = y;
+                    Console.WriteLine($"  info: Gamepad.GetCurrentReading with Y held: {reading.Buttons}; RawGameController buttons pressed: {rawButtons.Count(b => b)}, axes {string.Join(",", rawAxes.Select(a => a.ToString("F2")))}");
                     var rest = new HMGamepadState();
                     pad.SubmitState(in rest);
+                    // Vibration, like a reading, reaches the pad for a program
+                    // the session gives input to. Where readings arrive the
+                    // trigger levels must; elsewhere the result is recorded.
                     Motor(engine, "Gamepad.Vibration with trigger levels (left 1.0, right 0.5, left trigger 1.0, right trigger 0.5)", () =>
                     {
                         gp.Vibration = new Windows.Gaming.Input.GamepadVibration { LeftMotor = 1.0, RightMotor = 0.5, LeftTrigger = 1.0, RightTrigger = 0.5 };
                         return 0;
-                    }, c => c[6] >= 99 && c[7] is >= 49 and <= 51 && c[8] >= 99 && c[9] is >= 49 and <= 51 && (c[5] & 0x0F) == 0x0F);
-                    Motor(engine, "Gamepad.Vibration at rest", () => { gp.Vibration = default; return 0; }, c => c[6] == 0 && c[7] == 0 && c[8] == 0 && c[9] == 0);
+                    }, c => c[6] >= 99 && c[7] is >= 49 and <= 51 && c[8] >= 99 && c[9] is >= 49 and <= 51 && (c[5] & 0x0F) == 0x0F, strict: y);
+                    Motor(engine, "Gamepad.Vibration at rest", () => { gp.Vibration = default; return 0; }, c => c[6] == 0 && c[7] == 0 && c[8] == 0 && c[9] == 0, strict: y);
                 }
             }
 
             lock (raw)
                 Console.WriteLine($"  OutputReceived for the pad: {raw.Count} reports, ids {string.Join(" ", raw.Select(o => o.Id.ToString("X2")).Distinct())}");
-            Check("each Direct Motor command reached OutputReceived as the host wrote it", raw.Any(o => o.Id == 0x09), raw.Count.ToString());
+            // Each Direct Motor command reaches OutputReceived as the UMDF2
+            // form's HID output report: byte 5, the motor bitmap, as the
+            // report ID, then bytes 6 to 12.
+            var motors = engine.SnapshotLog().Where(x => x.Command.Length >= 13 && x.Command[0] == 0x09).Select(x => x.Command).ToList();
+            bool allRaised;
+            lock (raw)
+                allRaised = motors.Count > 0 && motors.All(m => raw.Any(o => o.Id == m[5] && o.Data.AsSpan().SequenceEqual(m.AsSpan(6, 7))));
+            Check("each Direct Motor command reached OutputReceived as the UMDF2 form's HID output report", allRaised,
+                  $"{motors.Count} commands, {raw.Count} reports");
 
             Console.WriteLine("\n-- the control requests Windows sent the pad --");
             string busId = HIDMaestro.Internal.Usbip.UsbipEmulatedDevice.BusIdFor(pad.TransportIndex);
@@ -249,6 +307,26 @@ internal static unsafe partial class Program
                 bool up = WaitUntil(() => { control.SubmitState(in rest); return HidInput(hidPath, 0x01, 64) is { Length: > 8 } r && ((released = r[8]) & 0x20) == 0; }, 10_000);
                 Check("a submitted Cross reads back over HID and releases (report 0x01, byte 8)", down && up, $"pressed 0x{pressed:X2}, released 0x{released:X2}");
             }
+            // The same Windows.Gaming.Input read of this HID pad: where it
+            // reads, the GIP pad's must have read too.
+            var hidRaw = WgiPins.Raws().FirstOrDefault(r => r.HardwareVendorId == 0x054C && r.HardwareProductId == 0x0CE6);
+            bool wgiControl = false;
+            if (hidRaw != null)
+            {
+                var cross2 = new HMGamepadState { Buttons = HMButton.A };
+                var b2 = new bool[hidRaw.ButtonCount];
+                wgiControl = WaitUntil(() =>
+                {
+                    control.SubmitState(in cross2);
+                    hidRaw.GetCurrentReading(b2, new Windows.Gaming.Input.GameControllerSwitchPosition[hidRaw.SwitchCount], new double[hidRaw.AxisCount]);
+                    return b2.Any(b => b);
+                }, 5_000);
+                var rest2 = new HMGamepadState();
+                control.SubmitState(in rest2);
+            }
+            Console.WriteLine($"  Windows.Gaming.Input readings in this session: the HID pad {(wgiControl ? "reads" : "reads nothing")}, the GIP pad {(s_wgiGip ? "reads" : "reads nothing")}");
+            // A reading is recorded, not checked: over SSH no window has the
+            // session's input, and the HID pad's readings come and go there.
             if (slot >= 0)
             {
                 Reads(pad, (uint)slot, "the pad still reads through XInput beside it: B", new HMGamepadState { Buttons = HMButton.B }, g => g.wButtons == 0x2000);
@@ -284,7 +362,223 @@ internal static unsafe partial class Program
     /// logged after it, raw: 09 00 seq 09 00, the motor bitmap, the left and
     /// right trigger levels, the left and right vibration levels, duration,
     /// delay and repeat (the GIP specification's Table 467).</summary>
-    static void Motor(HIDMaestro.Internal.Usbip.ProtocolEngine engine, string name, Func<uint> send, Func<byte[], bool> want)
+    static bool s_wgiGip;
+
+    /// <summary>One message xboxgip's user-mode interface hands a reader:
+    /// the 20-byte header's device ID and command, and the data after it
+    /// (GIP Interface Writeup, "Header", "Device Arrival" and "Device
+    /// Descriptor").</summary>
+    sealed record GipMessage(ulong DeviceId, byte Command, byte[] Data);
+
+    const uint GIP_ADD_REENUMERATE_CALLER_CONTEXT = 0x40001CD0;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool ReadFile(IntPtr file, byte* buffer, uint count, out uint read, NativeOverlapped* overlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "DeviceIoControl")]
+    static extern bool DeviceIoControlOverlapped(IntPtr device, uint code, byte* input, uint inputSize, byte* output, uint outputSize, out uint returned, NativeOverlapped* overlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetOverlappedResult(IntPtr file, NativeOverlapped* overlapped, out uint transferred, bool wait);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CancelIoEx(IntPtr file, NativeOverlapped* overlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr CreateEventW(IntPtr attributes, bool manualReset, bool initialState, string? name);
+
+    [DllImport("kernel32.dll")]
+    static extern uint WaitForSingleObject(IntPtr handle, uint ms);
+
+    /// <summary>Every message \\.\XboxGIP hands this program within
+    /// <paramref name="ms"/> after it asks the driver to announce the devices
+    /// it holds again: each device's arrival, with its Hello's fields, and
+    /// its descriptor, the metadata it served, whatever Windows had cached.
+    /// Input reports go only to a program with focus, which this one is
+    /// not.</summary>
+    static List<GipMessage> GipCapture(int ms)
+    {
+        var list = new List<GipMessage>();
+        IntPtr h = CreateFileW(@"\\.\XboxGIP", 0xC0000000, 3, IntPtr.Zero, 3, 0x40000000 /* FILE_FLAG_OVERLAPPED */, IntPtr.Zero);
+        if (h == new IntPtr(-1)) { Console.WriteLine($"  \\\\.\\XboxGIP does not open: {Marshal.GetLastPInvokeError()}"); return list; }
+        IntPtr evt = CreateEventW(IntPtr.Zero, true, false, null);
+        try
+        {
+            var buffer = new byte[4096];
+            var overlapped = new NativeOverlapped { EventHandle = evt };
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            fixed (byte* b = buffer)
+            {
+                // The re-enumeration answers on the handle's own reads, so a
+                // read goes out first.
+                bool asked = false;
+                while (clock.ElapsedMilliseconds < ms)
+                {
+                    overlapped.InternalLow = IntPtr.Zero; overlapped.InternalHigh = IntPtr.Zero;
+                    uint got;
+                    bool done = ReadFile(h, b, (uint)buffer.Length, out got, &overlapped);
+                    if (!done && Marshal.GetLastPInvokeError() != 997 /* ERROR_IO_PENDING */) break;
+                    if (!asked)
+                    {
+                        asked = true;
+                        IntPtr ioEvt = CreateEventW(IntPtr.Zero, true, false, null);
+                        var io = new NativeOverlapped { EventHandle = ioEvt };
+                        if (!DeviceIoControlOverlapped(h, GIP_ADD_REENUMERATE_CALLER_CONTEXT, null, 0, null, 0, out _, &io)
+                            && (Marshal.GetLastPInvokeError() != 997 || !GetOverlappedResult(h, &io, out _, true)))
+                            Console.WriteLine($"  re-enumeration IOCTL failed: {Marshal.GetLastPInvokeError()}");
+                        CloseHandle(ioEvt);
+                    }
+                    if (!done)
+                    {
+                        uint left = (uint)Math.Max(1, ms - clock.ElapsedMilliseconds);
+                        if (WaitForSingleObject(evt, left) != 0)
+                        {
+                            CancelIoEx(h, &overlapped);
+                            GetOverlappedResult(h, &overlapped, out _, true);
+                            break;
+                        }
+                        if (!GetOverlappedResult(h, &overlapped, out got, false)) break;
+                    }
+                    if (got >= 20)
+                    {
+                        ulong id = BitConverter.ToUInt64(buffer, 0);
+                        uint length = BitConverter.ToUInt32(buffer, 12);
+                        int n = (int)Math.Min(length, got - 20);
+                        list.Add(new GipMessage(id, buffer[8], buffer.AsSpan(20, n).ToArray()));
+                    }
+                }
+            }
+        }
+        finally
+        {
+            CloseHandle(evt);
+            CloseHandle(h);
+        }
+        return list;
+    }
+
+    /// <summary>The capture part: every GIP device's arrival and metadata,
+    /// as xboxgip holds them, printed whole. Plug a real pad in by cable and
+    /// run this to read its Hello and metadata.</summary>
+    static int Capture()
+    {
+        Console.WriteLine("\n=== capture: the arrival and metadata of every GIP device xboxgip holds ===");
+        var messages = GipCapture(4_000);
+        Console.WriteLine($"  {messages.Count} messages");
+        foreach (var m in messages)
+        {
+            Console.WriteLine($"  device {m.DeviceId:X16} command 0x{m.Command:X2}, {m.Data.Length} bytes: {Hex(m.Data)}");
+            if (m.Command == 0x02 && m.Data.Length >= 20)
+                Console.WriteLine($"    arrival: device ID {BitConverter.ToUInt64(m.Data, 0):X16}, {BitConverter.ToUInt16(m.Data, 8):X4}:{BitConverter.ToUInt16(m.Data, 10):X4}, " +
+                                  $"firmware {BitConverter.ToUInt16(m.Data, 12):X4}.{BitConverter.ToUInt16(m.Data, 14):X4} build {BitConverter.ToUInt16(m.Data, 16):X4} revision {BitConverter.ToUInt16(m.Data, 18):X4}");
+            if (m.Command == 0x04 && m.Data.Length >= 4)
+                Console.WriteLine($"    descriptor: {BitConverter.ToUInt16(m.Data, 0):X4}:{BitConverter.ToUInt16(m.Data, 2):X4}, metadata {m.Data.Length - 4} bytes: {Hex(m.Data.AsSpan(4))}");
+        }
+        return 0;
+    }
+
+
+    /// <summary>The UMDF2 form of the same identity, xbox-one-s, for the
+    /// comparison of the vibration a consumer sees on each backend: what
+    /// OutputReceived raises for XInputSetState and for the HID output
+    /// report with four different magnitudes. Runs where the UMDF2 driver
+    /// installs.</summary>
+    static int Umdf2Rumble()
+    {
+        Console.WriteLine("\n=== umdf2: xbox-one-s on the UMDF2 driver, the vibration OutputReceived raises ===");
+        if (SdkConsumers.Find() is { } other)
+        {
+            Console.WriteLine($"  SKIP: {other} has HIDMaestro.Core.dll loaded.");
+            return 2;
+        }
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        var raw = new List<(HMOutputSource Source, byte Id, byte[] Data)>();
+        HMController? pad = null;
+        try
+        {
+            pad = ctx.CreateController(ctx.GetProfile("xbox-one-s")!);
+            pad.OutputReceived += (_, pkt) => { lock (raw) raw.Add((pkt.Source, pkt.ReportId, pkt.Data.ToArray())); };
+            var mark = new HMGamepadState { Buttons = HMButton.A };
+            int slot = -1;
+            WaitUntil(() =>
+            {
+                pad.SubmitState(in mark);
+                for (uint i = 0; i < 4; i++)
+                    if (XInputGetState(i, out var s) == 0 && s.Gamepad.wButtons == 0x1000) { slot = (int)i; return true; }
+                return false;
+            }, 30_000);
+            Check("the UMDF2 pad takes an XInput slot", slot >= 0, $"slot {slot}");
+            if (slot < 0) return 0;
+            string Seen(int from)
+            {
+                lock (raw) return string.Join(" | ", raw.Skip(from).Select(o => $"{o.Source} {o.Id:X2} {Hex(o.Data)}"));
+            }
+            int at;
+            lock (raw) at = raw.Count;
+            var v = new XINPUT_VIBRATION { wLeftMotorSpeed = 16384, wRightMotorSpeed = 32768 };
+            XInputSetState((uint)slot, ref v);
+            Thread.Sleep(500);
+            Console.WriteLine($"  XInputSetState(16384, 32768): {Seen(at)}");
+            Check("XInputSetState reaches OutputReceived", Seen(at).Length > 0, Seen(at));
+            string? hid = null;
+            WaitUntil(() => (hid = InterfaceUnderAny(s_hidInterface, "vid_045e&pid_02ea")) != null, 5_000);
+            if (hid != null)
+            {
+                int outLen = HidOutputLength(hid);
+                var report = new byte[Math.Max(9, outLen)];
+                report[1] = 0x0F; report[2] = 10; report[3] = 20; report[4] = 30; report[5] = 40; report[6] = 0xFF;
+                lock (raw) at = raw.Count;
+                uint code = HidWrite(hid, report.AsSpan(0, outLen).ToArray());
+                Thread.Sleep(500);
+                Console.WriteLine($"  HID output report 00 0F 0A 14 1E 28 FF 00 00 to {hid} ({outLen} bytes) returned {code}: {Seen(at)}");
+            }
+            v = default;
+            XInputSetState((uint)slot, ref v);
+
+            // Windows.Gaming.Input in this session, on the UMDF2 form: the
+            // same reading and vibration the live part makes on the GIP form.
+            var raws = WgiPins.Raws().Where(r => r.HardwareVendorId == 0x045E && r.HardwareProductId == 0x02EA).ToList();
+            Console.WriteLine($"  Windows.Gaming.Input lists {raws.Count} RawGameController of 045E:02EA: {string.Join(" ; ", raws.Select(r => r.DisplayName))}");
+            if (raws.Count > 0 && WgiPins.PadOf(raws[0]) is { } gp)
+            {
+                var y = new HMGamepadState { Buttons = HMButton.Y };
+                Windows.Gaming.Input.GamepadReading reading = default;
+                bool read = WaitUntil(() => { pad.SubmitState(in y); reading = gp.GetCurrentReading(); return (reading.Buttons & Windows.Gaming.Input.GamepadButtons.Y) != 0; }, 5_000);
+                Console.WriteLine($"  Gamepad.GetCurrentReading with Y held: {(read ? "reads Y" : $"reads {reading.Buttons}")}");
+                lock (raw) at = raw.Count;
+                gp.Vibration = new Windows.Gaming.Input.GamepadVibration { LeftMotor = 1.0, RightMotor = 0.5, LeftTrigger = 1.0, RightTrigger = 0.5 };
+                Thread.Sleep(700);
+                Console.WriteLine($"  Gamepad.Vibration (1.0, 0.5, triggers 1.0, 0.5): {Seen(at)}");
+                lock (raw) at = raw.Count;
+                gp.Vibration = default;
+                Thread.Sleep(500);
+                Console.WriteLine($"  Gamepad.Vibration at rest: {Seen(at)}");
+            }
+            lock (raw) at = raw.Count;
+            uint gi = GameInputRumble.Pulse(0x045E, 0x02EA, 1.0f, 0.5f, 0.8f, 0.3f, 800, line => Console.WriteLine($"  GameInput: {line}"));
+            Thread.Sleep(300);
+            Console.WriteLine($"  GameInput SetRumbleState(1.0, 0.5, triggers 0.8, 0.3) returned {gi}: {Seen(at)}");
+        }
+        catch (Exception e) { Check("the umdf2 part ran to its end", false, e.ToString()); }
+        finally { try { pad?.Dispose(); } catch { } }
+        return 0;
+    }
+
+    /// <summary>A present interface of <paramref name="interfaceClass"/>
+    /// whose path holds <paramref name="pathHolds"/>.</summary>
+    static string? InterfaceUnderAny(Guid interfaceClass, string pathHolds)
+    {
+        if (CM_Get_Device_Interface_List_SizeW(out uint length, ref interfaceClass, null, 0) != 0 || length <= 1) return null;
+        var list = new char[length];
+        fixed (char* b = list)
+        {
+            if (CM_Get_Device_Interface_ListW(ref interfaceClass, null, b, length, 0) != 0) return null;
+            return MultiSz(b, length * 2).FirstOrDefault(p => p.Contains(pathHolds, StringComparison.OrdinalIgnoreCase));
+        }
+    }
+
+    static void Motor(HIDMaestro.Internal.Usbip.ProtocolEngine engine, string name, Func<uint> send, Func<byte[], bool> want, bool strict = true)
     {
         int from = engine.SnapshotLog().Count;
         long sentAt = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -293,12 +587,14 @@ internal static unsafe partial class Program
         byte[]? got = null;
         bool ok = WaitUntil(() =>
         {
-            var after = engine.SnapshotLog().Where(x => x.Ticks >= sentAt && x.Command.Length >= 13 && x.Command[0] == 0x09).ToList();
-            got = after.LastOrDefault().Command;
+            var after = engine.SnapshotLog().Where(x => x.Ticks >= sentAt && x.Command.Length >= 13 && x.Command[0] == 0x09)
+                              .Select(x => x.Command).ToList();
+            got = after.FirstOrDefault(want) ?? after.LastOrDefault();
             return got != null && want(got);
         }, 3_000);
         Console.WriteLine($"  {name} returned {code}. Direct Motor: {(got == null ? "(nothing)" : Hex(got))}");
-        Check($"{name} arrives as the Direct Motor command with those levels", code == 0 && ok, got == null ? "nothing" : Hex(got));
+        if (strict) Check($"{name} arrives as the Direct Motor command with those levels", code == 0 && ok, got == null ? "nothing" : Hex(got));
+        else Console.WriteLine($"  info: {name} in a session that gives this program no input: {(got == null ? "no Direct Motor command" : Hex(got))}");
     }
 
     static HMGamepadState Axes(float lx, float ly, float rx, float ry, float lt, float rt) => new()
@@ -570,6 +866,65 @@ internal static unsafe partial class Program
     [DllImport("hid.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.U1)]
     static extern bool HidD_GetInputReport(IntPtr device, byte* report, uint length);
+
+    [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    static extern bool HidD_SetOutputReport(IntPtr device, byte* report, uint length);
+
+    [DllImport("hid.dll")]
+    [return: MarshalAs(UnmanagedType.U1)]
+    static extern bool HidD_GetPreparsedData(IntPtr device, out IntPtr preparsed);
+
+    [DllImport("hid.dll")]
+    [return: MarshalAs(UnmanagedType.U1)]
+    static extern bool HidD_FreePreparsedData(IntPtr preparsed);
+
+    [DllImport("hid.dll")]
+    static extern int HidP_GetCaps(IntPtr preparsed, ushort* caps);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool WriteFile(IntPtr file, byte* buffer, uint count, out uint written, IntPtr overlapped);
+
+    /// <summary>The collection's OutputReportByteLength (HIDP_CAPS, the
+    /// fourth USHORT), or 0.</summary>
+    static int HidOutputLength(string path)
+    {
+        IntPtr h = CreateFileW(path, 0, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
+        if (h == new IntPtr(-1)) { Console.WriteLine($"  open for caps failed: {Marshal.GetLastPInvokeError()}"); return 0; }
+        try
+        {
+            if (!HidD_GetPreparsedData(h, out var pp)) { Console.WriteLine($"  HidD_GetPreparsedData failed: {Marshal.GetLastPInvokeError()}"); return 0; }
+            try
+            {
+                ushort* caps = stackalloc ushort[32];
+                int status = HidP_GetCaps(pp, caps);
+                Console.WriteLine($"  HidP_GetCaps 0x{status:X8}: usage page 0x{caps[1]:X4} usage 0x{caps[0]:X4}, input {caps[2]}, output {caps[3]}, feature {caps[4]} bytes");
+                return status == 0x00110000 ? caps[3] : 0;
+            }
+            finally { HidD_FreePreparsedData(pp); }
+        }
+        finally { CloseHandle(h); }
+    }
+
+    /// <summary>An output report written to the collection, as an interrupt
+    /// transfer, or as SET_REPORT where the write is refused. Returns 0 when
+    /// one went through, else the last error.</summary>
+    static uint HidWrite(string path, byte[] report)
+    {
+        IntPtr h = CreateFileW(path, 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
+        if (h == new IntPtr(-1)) return (uint)Marshal.GetLastPInvokeError();
+        try
+        {
+            fixed (byte* r = report)
+            {
+                if (WriteFile(h, r, (uint)report.Length, out _, IntPtr.Zero)) return 0;
+                uint write = (uint)Marshal.GetLastPInvokeError();
+                if (HidD_SetOutputReport(h, r, (uint)report.Length)) { Console.WriteLine($"  WriteFile failed with {write}, HidD_SetOutputReport went through"); return 0; }
+                return (uint)Marshal.GetLastPInvokeError();
+            }
+        }
+        finally { CloseHandle(h); }
+    }
 
     static byte[]? HidInput(string path, byte reportId, int length)
     {

@@ -28,6 +28,10 @@
 //
 // No argument runs all three. "model", "wire" and "live" each run one, and
 // "live" with "nooptout" serves the metadata without the security opt-out.
+// Two more run only when named. "umdf2" creates xbox-one-s on the UMDF2
+// driver and prints the vibration OutputReceived raises there, beside the
+// GIP form's. "capture" prints the arrival and metadata xboxgip holds for
+// every GIP device, a real pad on a cable included, through \\.\XboxGIP.
 // Exit 0 PASS, 1 FAIL, 2 SKIP when another program that embeds HIDMaestro
 // is running (live part only).
 using System;
@@ -70,11 +74,14 @@ internal static unsafe partial class Program
         // Before any SDK type loads: the device then logs each control
         // request a host sends it, which the live part prints.
         Environment.SetEnvironmentVariable("HIDMAESTRO_DIAG", "1");
-        bool all = !args.Contains("model") && !args.Contains("wire") && !args.Contains("live");
+        if (args.Contains("capture")) return Capture();
+        bool all = !args.Contains("model") && !args.Contains("wire") && !args.Contains("live") && !args.Contains("umdf2");
         int skip = 0;
         if (all || args.Contains("model")) Model();
         if (all || args.Contains("wire")) Wire();
         if (all || args.Contains("live")) skip = Live(args.Contains("nooptout"));
+        // The UMDF2 comparison runs only when asked: it needs the driver.
+        if (args.Contains("umdf2")) skip = Math.Max(skip, Umdf2Rumble());
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
         if (s_failures != 0) return 1;
         return skip;
@@ -437,6 +444,10 @@ internal static unsafe partial class Program
                   statusMsg != null && statusMsg.Length == 8 && statusMsg[1] == 0x20 && Hex(statusMsg.AsSpan(3)) == "0480000000", statusMsg == null ? "none" : Hex(statusMsg));
             Check("and the first input report, the pad at rest: 20 00, sequence 1, 32 bytes, sticks centered and nothing pressed",
                   input != null && input.Length == 36 && Hex(input.AsSpan(0, 4)) == "20000120" && input.AsSpan(4).IndexOfAnyExcept((byte)0) < 0, input == null ? "none" : Hex(input));
+            // From here a Status goes out every second for ten seconds. The
+            // reads below set those aside and count them.
+            cl.Skip = x => x.Length == 8 && x[0] == 0x03 && x[4] == 0x80;
+            var started = System.Diagnostics.Stopwatch.StartNew();
             Check("then nothing while nothing changes", cl.ReadIn(300) == null);
 
             Console.WriteLine("\n-- an acknowledgement for a message that asks for one --");
@@ -492,8 +503,8 @@ internal static unsafe partial class Program
             var motor = Bytes("09 00 04 09 00 0F 64 32 19 0A FF 00 00");
             cl.Out(1, motor);
             bool ringed = WaitRing(ring, ref last, buf, out byte source, out byte id, out int size);
-            Check("it reaches the output ring as the host wrote it: 0x09, then its twelve bytes",
-                  ringed && source == UsbipEmulatedDevice.SourceHidOutput && id == 0x09 && buf.AsSpan(0, size).SequenceEqual(motor.AsSpan(1)),
+            Check("it reaches the output ring as xinputhid's HID output report on UMDF2: the motor bitmap 0x0F as the report ID, then its seven bytes",
+                  ringed && source == UsbipEmulatedDevice.SourceHidOutput && id == 0x0F && buf.AsSpan(0, size).SequenceEqual(motor.AsSpan(6)),
                   $"source {source} id {id:X2} data {Hex(buf.AsSpan(0, size))}");
             Check("and the device's command log holds it raw, beside the host's earlier messages",
                   device.Protocol!.SnapshotLog().Select(x => Hex(x.Command)).Contains(Hex(motor)));
@@ -501,6 +512,11 @@ internal static unsafe partial class Program
             Check("the Guide LED command without the flag draws nothing and stays off the ring",
                   cl.ReadIn(300) == null && !WaitRing(ring, ref last, buf, out _, out _, out _, 100));
 
+            double secs = started.Elapsed.TotalSeconds;
+            Check("meanwhile a Status went out about once a second", cl.Skipped >= (int)secs - 2 && cl.Skipped <= (int)secs + 1,
+                  $"{cl.Skipped} in {secs:F1} s");
+
+            // A Status already waiting goes out ahead of the Reset's own.
             Console.WriteLine("\n-- Reset brings the Hellos back --");
             cl.Out(1, Bytes("05 20 06 01 07"));
             var off = cl.ReadIn(1_000);
@@ -544,6 +560,11 @@ internal static unsafe partial class Program
         readonly Dictionary<uint, Ret> _stash = new();
         readonly HashSet<uint> _pendingIn = new();
         uint _parked;
+
+        /// <summary>Packets <see cref="ReadIn"/> sets aside, counted in
+        /// <see cref="Skipped"/>.</summary>
+        public Func<byte[], bool>? Skip;
+        public int Skipped;
 
         public Client(int port, int index)
         {
@@ -635,7 +656,19 @@ internal static unsafe partial class Program
             var clock = System.Diagnostics.Stopwatch.StartNew();
             while (true)
             {
-                if (_stash.Remove(_parked, out var hit)) { _parked = 0; return hit.Data; }
+                if (_stash.Remove(_parked, out var hit))
+                {
+                    _parked = 0;
+                    if (Skip != null && Skip(hit.Data))
+                    {
+                        Skipped++;
+                        _parked = NextSeq();
+                        _pendingIn.Add(_parked);
+                        SendHeader(_parked, 1, 1, 64, 4, 0);
+                        continue;
+                    }
+                    return hit.Data;
+                }
                 int left = ms - (int)clock.ElapsedMilliseconds;
                 if (left <= 0) return null;
                 if (!_tcp.Client.Poll(left * 1000, SelectMode.SelectRead)) return null;

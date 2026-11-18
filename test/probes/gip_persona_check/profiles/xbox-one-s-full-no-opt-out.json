@@ -438,7 +438,16 @@
         },
         {
           "match": "09 00/EF .. 09 00",
-          "minLength": 13
+          "minLength": 13,
+          "emitOutput": {
+            "size": 8,
+            "program": [
+              {
+                "copy": "5-12",
+                "to": 0
+              }
+            ]
+          }
         },
         {
           "match": "..",
