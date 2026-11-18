@@ -13,7 +13,6 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("TriggerLiveCheck")]
 [assembly: InternalsVisibleTo("SideWinderFfbCheck")]
 [assembly: InternalsVisibleTo("PidFfbRoundtrip")]
-[assembly: InternalsVisibleTo("PidFfbAllocFree")]
 [assembly: InternalsVisibleTo("PidSetUsagesProbe")]
 [assembly: InternalsVisibleTo("LayoutAuditCheck")]
 [assembly: InternalsVisibleTo("AxisAddressingCheck")]

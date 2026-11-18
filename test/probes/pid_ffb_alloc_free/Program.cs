@@ -33,8 +33,8 @@
 // the test environment can drive deterministically.
 //
 // The live run uses the controller's backend, UMDF2 or USB/IP, and expects
-// the same allocation on both. "offline" runs Offline.cs instead: a USB/IP
-// device's PID block over the USB/IP wire, with no kernel.
+// the same allocation on both. The PID block's offline check over the
+// USB/IP wire is sidewinder_ffb_check's "offline" run.
 
 using System;
 using System.IO;
@@ -82,9 +82,8 @@ internal static class Program
         0xC0,
     };
 
-    static int Main(string[] args)
+    static int Main()
     {
-        if (args.Contains("offline")) return Offline.Run();
         Console.WriteLine("=== HIDMaestro PID FFB alloc/free + pool exhaustion (v1.1.37 / S25) ===");
 
         // Make sure file trace is on for this probe; clean any prior log so
@@ -101,6 +100,7 @@ internal static class Program
         ctx.InstallDriver();
 
         Console.Write("  Creating two controllers (A, B)... ");
+        var beforeA = Present(ProbeVid, ProbePidA);
         using var ctrlA = ctx.CreateController(profileA);
         using var ctrlB = ctx.CreateController(profileB);
         Console.WriteLine($"OK ({ctrlA.Backend}, {ctrlB.Backend})");
@@ -222,7 +222,7 @@ internal static class Program
 
         // ── Section 4: dynamic SetFeature/SetOutputReport (best-effort) ──
         Console.WriteLine("  --- Section 4: dynamic driver-side allocation (best-effort) ---");
-        SafeFileHandle? hidA = OpenHmHid(ctrlA);
+        SafeFileHandle? hidA = OpenNew(ProbeVid, ProbePidA, beforeA);
         bool dynamicHit = false;
         if (hidA != null && !hidA.IsInvalid)
         {
@@ -319,19 +319,22 @@ internal static class Program
         finally { CloseHandle(h); }
     }
 
-    /// <summary>The controller's own HID interface: its VID and PID, and the
-    /// serial its backend serves, the UMDF2 driver's HM-CTL- and the
-    /// transport index or the USB/IP device's identity serial. Another
-    /// program's controller with the same VID and PID serves its own.
+    /// <summary>The HID interfaces of this VID and PID present now.</summary>
+    static string[] Present(ushort vid, ushort pid) =>
+        HMDeviceExtractor.ListDevices().Where(d => d.VendorId == vid && d.ProductId == pid)
+            .Select(d => d.DevicePath).ToArray();
+
+    /// <summary>The controller's own HID interface: the one of its VID and
+    /// PID that was not there before its create, on either backend. Another
+    /// program's controller with the same VID and PID was there before.
     /// Waited for up to ten seconds.</summary>
-    static SafeFileHandle? OpenHmHid(HMController c)
+    static SafeFileHandle? OpenNew(ushort vid, ushort pid, string[] before)
     {
-        string serial = c.Backend == HMBackend.Usbip ? c.UsbipHandle!.Device.Descriptors.SerialString!
-                                                     : HIDMaestro.Internal.DeviceOrchestrator.DriverSerial(c.TransportIndex);
         for (int i = 0; i < 100; i++)
         {
             var match = HMDeviceExtractor.ListDevices()
-                .FirstOrDefault(d => d.VendorId == c.Profile.VendorId && d.ProductId == c.Profile.ProductId && d.SerialNumberString == serial);
+                .FirstOrDefault(d => d.VendorId == vid && d.ProductId == pid
+                                     && !before.Contains(d.DevicePath, StringComparer.OrdinalIgnoreCase));
             if (match != null)
             {
                 var h = CreateFile(match.DevicePath, GENERIC_READ | GENERIC_WRITE,

@@ -29,6 +29,9 @@
 // the same allocation and free on both: on USB/IP the device plays the
 // driver's PID block (UsbipEmulatedDevice.Pid.cs).
 //
+// "offline" runs Offline.cs instead: a USB/IP device's PID block over the
+// USB/IP wire, with no kernel and no device.
+//
 // Requires admin (driver install + virtual creation). Exit 0 on PASS, 1 on FAIL.
 
 using System;
@@ -49,8 +52,9 @@ internal static class Program
         else { Console.WriteLine($"  [FAIL] {name}{(detail.Length > 0 ? "  " + detail : "")}"); s_failures++; }
     }
 
-    static int Main()
+    static int Main(string[] args)
     {
+        if (args.Contains("offline")) return Offline.Run();
         Console.WriteLine("=== SideWinder Force Feedback 2: descriptor-aware PID dispatch ===");
 
         using var ctx = new HMContext();

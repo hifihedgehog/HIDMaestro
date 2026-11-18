@@ -1,5 +1,5 @@
 #nullable enable
-// "offline": a USB/IP device's PID block over the USB/IP wire, with no
+// SideWinderFfbCheck offline: a USB/IP device's PID block over the USB/IP wire, with no
 // kernel and no Windows device. The device is built on process memory,
 // registered with the SDK's own USB/IP server, and imported by a client on
 // loopback that sends what HidUsb sends for HidD_GetFeature, HidD_SetFeature,
