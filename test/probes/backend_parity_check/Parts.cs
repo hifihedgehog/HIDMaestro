@@ -86,8 +86,10 @@ internal static partial class Program
                 pattern[0] = dataId;
                 for (int i = 1; i < carried; i++) pattern[i] = (byte)(i * 7 + 3);
                 pattern[carried - 1] = 0xA5;
+                // The device may send other reports first, an idle repeat
+                // among them: read until the report submitted arrives.
                 var sw = Stopwatch.StartNew();
-                while (!read.IsCompleted && sw.ElapsedMilliseconds < 3000)
+                while (sw.ElapsedMilliseconds < 3000)
                 {
                     try
                     {
@@ -96,6 +98,9 @@ internal static partial class Program
                     }
                     catch (Exception e) { Note($"{name}: submit {e.GetType().Name}: {e.Message}"); break; }
                     read.Wait(20);
+                    if (!read.IsCompleted) continue;
+                    if (own || buf[0] == dataId) break;
+                    read = fs.ReadAsync(buf, 0, buf.Length);
                 }
                 if (!read.IsCompleted) { Check($"{name}: a read returns", false); }
                 else
