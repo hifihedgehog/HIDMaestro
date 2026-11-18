@@ -90,7 +90,7 @@ internal static unsafe partial class Program
         return skip;
     }
 
-    // The device of the GIP specification, tables 34 to 38: USB 2.00, class
+    // The device of the GIP specification H001419, tables 34 to 38: USB 2.00, class
     // FF/47/D0, a 64-byte control endpoint, Santroller's bcdDevice 0x0100
     // (src/emulation/usb/usb_descriptors.cpp), strings 1 to 3.
     static readonly byte[] DeviceDescriptor = Bytes("12 01 00 02 FF 47 D0 40 5E 04 EA 02 00 01 01 02 03 01");
@@ -153,17 +153,69 @@ internal static unsafe partial class Program
         return s_profile;
     }
 
-    /// <summary>The replies of the rules whose match starts with
-    /// <paramref name="match"/>, each packet's bytes with sequence 00.</summary>
-    static List<byte[]> Packets(ControllerProfile p, string match)
+    /// <summary>The packets the last of <paramref name="commands"/> draws,
+    /// sent in order to a new engine of <paramref name="p"/>.</summary>
+    static List<byte[]> Packets(ControllerProfile p, params string[] commands)
     {
         var compiled = CompiledProtocol.Compile(p, new UsbDescriptorSet(p))!;
         var engine = new ProtocolEngine(compiled, "HM000000000000", 0, ProgramBinder.BindLayouts(compiled.Model));
         var list = new List<byte[]>();
         var buf = new byte[64];
-        engine.HandleCommand(Bytes(match), System.Diagnostics.Stopwatch.GetTimestamp());
-        for (int n; (n = engine.TakeReply(64, buf)) >= 0;) list.Add(buf[..n]);
+        foreach (string command in commands)
+        {
+            list.Clear();
+            engine.HandleCommand(Bytes(command), System.Diagnostics.Stopwatch.GetTimestamp());
+            for (int n; (n = engine.TakeReply(64, buf)) >= 0;) list.Add(buf[..n]);
+        }
         return list;
+    }
+
+    const string MetadataRequest = "04 20 01 00", FirstAck = "01 20 01 09 00 04 20 3A 00 00 00 9C 00", LastAck = "01 20 01 09 00 04 20 D6 00 00 00 00 00";
+
+    /// <summary>A GIP persona's metadata as its fragments carry it, and the
+    /// key Windows caches it under: VID, PID and the firmware major and minor
+    /// its Hello announces.</summary>
+    static (string Key, byte[] Metadata) MetadataOf(ControllerProfile p)
+    {
+        var frags = Packets(p, MetadataRequest).Concat(Packets(p, MetadataRequest, FirstAck)).ToList();
+        var meta = frags.SelectMany(x => x.Skip(6)).ToArray();
+        var compiled = CompiledProtocol.Compile(p, new UsbDescriptorSet(p))!;
+        var engine = new ProtocolEngine(compiled, "HM000000000000", 0, ProgramBinder.BindLayouts(compiled.Model));
+        long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        engine.RunTimers(t0);
+        engine.RunTimers(t0 + System.Diagnostics.Stopwatch.Frequency * 2);
+        var hello = new byte[64];
+        int hn = engine.TakeReply(64, hello);
+        string fw = hn >= 20 && hello[0] == 0x02
+            ? $"{BinaryPrimitives.ReadUInt16LittleEndian(hello.AsSpan(16)):X4}.{BinaryPrimitives.ReadUInt16LittleEndian(hello.AsSpan(18)):X4}"
+            : "no-hello";
+        return ($"{p.VendorId:X4} {p.ProductId:X4} {fw}", meta);
+    }
+
+    /// <summary>Why <paramref name="p"/>'s metadata does not match the pin
+    /// for its VID, PID and firmware version, or null when it does. Windows
+    /// caches metadata by those three, so metadata that changes keeps a
+    /// firmware version of its own.</summary>
+    static string? PinMismatch(ControllerProfile p, Dictionary<string, string> pins)
+    {
+        var (key, meta) = MetadataOf(p);
+        string hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(meta));
+        if (!pins.TryGetValue(key, out var pinned)) return $"{p.Id}: no pin for {key}, metadata {hash}";
+        return pinned == hash ? null : $"{p.Id}: {key} is pinned to {pinned}, and its metadata is now {hash}. Give the new metadata a firmware version of its own";
+    }
+
+    static Dictionary<string, string> Pins()
+    {
+        var pins = new Dictionary<string, string>(StringComparer.Ordinal);
+        string file = Path.Combine(AppContext.BaseDirectory, "metadata-pins.txt");
+        if (!File.Exists(file)) return pins;
+        foreach (var line in File.ReadAllLines(file))
+        {
+            if (line.Length == 0 || line[0] == '#') continue;
+            var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 4) pins[$"{parts[0]} {parts[1]} {parts[2]}"] = parts[3];
+        }
+        return pins;
     }
 
     static void Model()
@@ -183,9 +235,9 @@ internal static unsafe partial class Program
         try { set = new UsbDescriptorSet(p); } catch (Exception e) { Check("its descriptor set builds", false, e.Message); }
         if (set != null)
         {
-            Check("device descriptor, 18 bytes of the GIP specification's table 34",
+            Check("device descriptor, 18 bytes of H001419's table 34",
                   set.DeviceDescriptor.AsSpan().SequenceEqual(DeviceDescriptor), Hex(set.DeviceDescriptor));
-            Check("configuration descriptor, 32 bytes: the GIP data interface of tables 35 to 38",
+            Check("configuration descriptor, 32 bytes: the GIP data interface of H001419's tables 35 to 38",
                   set.ConfigurationDescriptor.AsSpan().SequenceEqual(ConfigurationDescriptor), Hex(set.ConfigurationDescriptor));
             Check("no HID interface, and the messages travel on interface 0, function gip",
                   !set.HasHidInterface && set.HidInterfaceNumber == 0 && set.ReportFunction == "gip" && !set.IsHidInterface(0) && set.SecondaryHidInterfaces.Count == 0);
@@ -205,9 +257,10 @@ internal static unsafe partial class Program
         Console.WriteLine("\n-- the metadata and the Hello --");
         Check("Santroller's blob is 218 bytes, as its header says", Santroller.Length == 218 && Santroller[14] == 0xDA, $"{Santroller.Length}");
         var expected = ExpectedMetadata();
-        var first = Packets(p, "04 20 01 00");
-        var rest = Packets(p, "01 20 01 09 00 04 20 3A 00 00 00 9C 00");
-        var done = Packets(p, "01 20 01 09 00 04 20 D6 00 00 00 00 00");
+        var first = Packets(p, MetadataRequest);
+        var rest = Packets(p, MetadataRequest, FirstAck);
+        var done = Packets(p, MetadataRequest, FirstAck, LastAck);
+        var again = Packets(p, MetadataRequest, FirstAck, FirstAck);
         Check("a Metadata Request draws one fragment, 04 F0 with the request's sequence, total 214 as D6 01",
               first.Count == 1 && first[0].Length == 64 && Hex(first[0].AsSpan(0, 6)) == "04F0013AD601", first.Count > 0 ? Hex(first[0].AsSpan(0, 6)) : "none");
         Check("the host's acknowledgement of 58 bytes draws the other three fragments: offsets 3A, 74 and AE 01",
@@ -216,6 +269,7 @@ internal static unsafe partial class Program
               string.Join(" ", rest.Select(x => Hex(x.AsSpan(0, 6)))));
         Check("the acknowledgement of all 214 bytes draws the completion, 04 A0 with length 0 and D6 01",
               done.Count == 1 && Hex(done[0]) == "04A00100D601", done.Count > 0 ? Hex(done[0]) : "none");
+        Check("a second acknowledgement of the first fragment draws nothing", again.Count == 0, string.Join(" ", again.Select(x => Hex(x.AsSpan(0, 6)))));
         var assembled = first.Concat(rest).SelectMany(x => x.Skip(6)).ToArray();
         Check("the fragments carry Santroller's metadata with the persona's firmware version alone",
               assembled.AsSpan().SequenceEqual(expected), $"{assembled.Length} bytes, first difference at {FirstDifference(assembled, expected)}");
@@ -228,8 +282,65 @@ internal static unsafe partial class Program
         engine.RunTimers(t0 + System.Diagnostics.Stopwatch.Frequency / 2);
         var hello = new byte[64];
         int hn = engine.TakeReply(64, hello);
-        Check("the Hello: 02 20, sequence 1, 28 bytes, the serial's hex digits as the device ID, then 045E:02EA and the persona's firmware 0x4D48.0x0230",
-              hn == 32 && Hex(hello.AsSpan(0, hn)) == "0220011C" + "AB89674523010000" + HelloTail, hn > 0 ? Hex(hello.AsSpan(0, hn)) : "none");
+        Check("the Hello: 02 20, sequence 1, 28 bytes, the device ID (the serial's last eight hex digits, then 00 00 FF FB as the top bytes), then 045E:02EA and the persona's firmware 0x4D48.0x0230",
+              hn == 32 && Hex(hello.AsSpan(0, hn)) == "0220011C" + "AB896745FBFF0000" + HelloTail, hn > 0 ? Hex(hello.AsSpan(0, hn)) : "none");
+
+        // Quiesce clears the motors: the consumer gets a report with every
+        // level at 0 ([MS-GIPUSB] 3.1.5.6.1, Quiesce).
+        {
+            var qc = CompiledProtocol.Compile(p, new UsbDescriptorSet(p))!;
+            var qe = new ProtocolEngine(qc, "HM0123456789AB", 0, ProgramBinder.BindLayouts(qc.Model));
+            var quiesce = Bytes("05 20 07 01 05");
+            var qr = qe.HandleCommand(quiesce, System.Diagnostics.Stopwatch.GetTimestamp());
+            var qbuf = new byte[64];
+            int qn = qr.Emit >= 0 ? qe.BuildEmit(qr.Emit, quiesce, qbuf) : -1;
+            Check("Quiesce emits a report with every motor level at 0: 0F, then seven zero bytes",
+                  qn == 8 && Hex(qbuf.AsSpan(0, 8)) == "0F00000000000000", qn < 0 ? "no report" : Hex(qbuf.AsSpan(0, qn)));
+        }
+
+        // No acknowledgement within a second of a fragment that asks for one
+        // sends the device back to Hello ([MS-GIPUSB] 3.1.5.2).
+        {
+            var mc = CompiledProtocol.Compile(p, new UsbDescriptorSet(p))!;
+            var me = new ProtocolEngine(mc, "HM0123456789AB", 0, ProgramBinder.BindLayouts(mc.Model));
+            var mbuf = new byte[64];
+            long m0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            long Ms(double ms) => m0 + (long)(ms * System.Diagnostics.Stopwatch.Frequency / 1000);
+            me.HandleCommand(Bytes(MetadataRequest), m0);
+            while (me.TakeReply(64, mbuf) >= 0) { }
+            me.RunTimers(m0);
+            me.RunTimers(Ms(999));
+            bool early = me.TakeReply(64, mbuf) >= 0;
+            // The device clock ticks every 4 ms: the timeout at 1000 ms, the
+            // Hello's schedule from the next tick, its first 500 ms after.
+            me.RunTimers(Ms(1000));
+            me.RunTimers(Ms(1004));
+            me.RunTimers(Ms(1504));
+            int hn2 = me.TakeReply(64, mbuf);
+            Check("with no acknowledgement of the first fragment within a second, the device sends Hello again 500 ms later",
+                  !early && hn2 == 32 && mbuf[0] == 0x02, early ? "a message before the second" : hn2 < 0 ? "nothing" : Hex(mbuf.AsSpan(0, hn2)));
+        }
+
+        // Windows caches metadata by VID, PID and firmware version, so
+        // metadata that changes needs a firmware version of its own. Each
+        // persona's metadata is pinned under its key, and a copy with one
+        // metadata byte changed and the same version is refused.
+        Console.WriteLine("\n-- metadata pinned to its firmware version --");
+        var pins = Pins();
+        var personas = new List<ControllerProfile> { p };
+        string local = Path.Combine(AppContext.BaseDirectory, "profiles", "xbox-one-s-full-no-opt-out.json");
+        if (File.Exists(local) && ControllerProfile.Parse(File.ReadAllBytes(local)) is { } variant) personas.Add(variant);
+        foreach (var persona in personas)
+        {
+            string? why = PinMismatch(persona, pins);
+            Check($"{persona.Id}: its metadata matches the pin for its VID, PID and firmware version", why == null, why ?? MetadataOf(persona).Key);
+        }
+        var bumped = JsonNode.Parse(Source(p))!;
+        var frag = bumped["protocol"]!["commands"]!["rules"]!.AsArray().First(r => r!["match"]!.GetValue<string>().StartsWith("04", StringComparison.Ordinal))!["reply"]!.AsArray();
+        string tail = frag[^1]!["hex"]!.GetValue<string>();
+        frag[^1]!["hex"] = tail[..^2] + (tail[^2..] == "00" ? "01" : "00");
+        var changed = ControllerProfile.Parse(Encoding.UTF8.GetBytes(bumped.ToJsonString()))!;
+        Check("a copy with one metadata byte changed and the same firmware version is refused by the pin", PinMismatch(changed, pins) != null, PinMismatch(changed, pins) ?? "matched");
         Check("the Hello's firmware major and minor are the metadata's one supported version",
               hn == 32 && hello.AsSpan(16, 4).SequenceEqual(assembled.AsSpan(39, 4)));
 
@@ -400,19 +511,20 @@ internal static unsafe partial class Program
                   && cl.ControlOut(0x21, 0x0A, 0, 0, Array.Empty<byte>()).Status != 0);
 
             Console.WriteLine("\n-- Hello until the host answers --");
-            var h1 = cl.ReadIn(2_000);
-            long helloMs = attached.ElapsedMilliseconds;
-            Check("the first IN packet is the Hello, sequence 1, 500 ms after the attach or later",
-                  h1 is { Length: 32 } && Hex(h1.AsSpan(0, 4)) == "0220011C" && helloMs >= 450, h1 == null ? "nothing" : $"{Hex(h1)} at {helloMs} ms");
-            var expectedId = Bytes("0000000000000000");
-            string hexId = serial[^12..];
-            for (int i = 0; i < 6; i++) expectedId[i] = Convert.ToByte(hexId.Substring(10 - 2 * i, 2), 16);
-            Check("its device ID is the serial's twelve hex digits low byte first, then 00 00, and its tail 045E:02EA and the persona's versions",
-                  h1 is { Length: 32 } && h1.AsSpan(4, 8).SequenceEqual(expectedId) && Hex(h1.AsSpan(12)) == HelloTail, h1 == null ? "" : Hex(h1.AsSpan(4)));
+            // The Hello's cadence is the timer's, which S95 checks on a
+            // virtual clock. Here a read waits as long as a hang takes to
+            // show on the slowest machine, and the times are printed.
+            int hang = TimeoutScale.Apply(5_000);
+            var h1 = cl.ReadIn(hang);
+            Check("the first IN packet is the Hello, sequence 1", h1 is { Length: 32 } && Hex(h1.AsSpan(0, 4)) == "0220011C",
+                  h1 == null ? "nothing" : $"{Hex(h1)} at {attached.ElapsedMilliseconds} ms");
+            Check("its device ID's four most significant bytes are 00 00 FF FB ([MS-GIPUSB] 2.2.1.3), and the other four the serial's last eight hex digits low byte first",
+                  h1 is { Length: 32 } && h1.AsSpan(4, 8).SequenceEqual(ExpectedDeviceId(serial)), h1 == null ? "" : Hex(h1.AsSpan(4, 8)));
+            Check("its tail is 045E:02EA and the persona's versions", h1 is { Length: 32 } && Hex(h1.AsSpan(12)) == HelloTail, h1 == null ? "" : Hex(h1.AsSpan(12)));
             var tw = System.Diagnostics.Stopwatch.StartNew();
-            var h2 = cl.ReadIn(2_000);
-            Check("the next Hello comes about 500 ms later, sequence 2",
-                  h2 is { Length: 32 } && h2[2] == 2 && tw.ElapsedMilliseconds is >= 400 and <= 1500, h2 == null ? "nothing" : $"{Hex(h2.AsSpan(0, 4))} after {tw.ElapsedMilliseconds} ms");
+            var h2 = cl.ReadIn(hang);
+            Check("the next Hello follows, sequence 2", h2 is { Length: 32 } && h2[2] == 2,
+                  h2 == null ? "nothing" : $"{Hex(h2.AsSpan(0, 4))} after {tw.ElapsedMilliseconds} ms");
 
             Console.WriteLine("\n-- metadata, paced by the host's acknowledgements --");
             cl.Out(1, Bytes("04 20 01 00"));
@@ -427,6 +539,8 @@ internal static unsafe partial class Program
                   f2 != null && f3 != null && f4 != null && f2[1] == 0xA0 && f3[1] == 0xA0 && f4[1] == 0xB0 && f4.Length == 46,
                   string.Join(" ", new[] { f2, f3, f4 }.Select(x => x == null ? "none" : Hex(x.AsSpan(0, 6)))));
             Check("nothing more before the host acknowledges the last", cl.ReadIn(300) == null);
+            cl.Out(1, Bytes("01 20 01 09 00 04 20 3A 00 00 00 9C 00"));
+            Check("a second acknowledgement of the first fragment draws nothing", cl.ReadIn(300) == null);
             cl.Out(1, Bytes("01 20 01 09 00 04 20 D6 00 00 00 00 00"));
             var f5 = cl.ReadIn(1_000);
             Check("the acknowledgement of all 214 bytes draws the completion", f5 != null && Hex(f5) == "04A00100D601", f5 == null ? "nothing" : Hex(f5));
@@ -515,17 +629,37 @@ internal static unsafe partial class Program
             Check("the Guide LED command without the flag draws nothing and stays off the ring",
                   cl.ReadIn(300) == null && !WaitRing(ring, ref last, buf, out _, out _, out _, 100));
 
+            Console.WriteLine("\n-- Quiesce --");
+            cl.Out(1, Bytes("05 20 07 01 05"));
+            bool quiet = WaitRing(ring, ref last, buf, out byte qSource, out byte qId, out int qSize);
+            Check("Quiesce raises a report with every motor level at 0: the motor bitmap 0x0F as the report ID, then zeros",
+                  quiet && qSource == UsbipEmulatedDevice.SourceHidOutput && qId == 0x0F && qSize == 7 && buf.AsSpan(0, qSize).IndexOfAnyExcept((byte)0) < 0,
+                  quiet ? $"source {qSource} id {qId:X2} data {Hex(buf.AsSpan(0, qSize))}" : "nothing on the ring");
+
+            // The Status cadence is the timer's, checked in S95. Here the
+            // count is printed, and a hang shows as none.
             double secs = started.Elapsed.TotalSeconds;
-            Check("meanwhile a Status went out about once a second", cl.Skipped >= (int)secs - 2 && cl.Skipped <= (int)secs + 1,
-                  $"{cl.Skipped} in {secs:F1} s");
+            Check("meanwhile Status messages went out", cl.Skipped >= 1, $"{cl.Skipped} in {secs:F1} s");
 
             // A Status already waiting goes out ahead of the Reset's own.
             Console.WriteLine("\n-- Reset brings the Hellos back --");
             cl.Out(1, Bytes("05 20 06 01 07"));
             var off = cl.ReadIn(1_000);
             Check("Reset draws a powering-off Status, 03 20 .. 04 00 00 00 00", off != null && off[0] == 0x03 && Hex(off.AsSpan(3)) == "0400000000", off == null ? "nothing" : Hex(off));
-            var again = cl.ReadIn(2_000);
+            var again = cl.ReadIn(hang);
             Check("and then a Hello", again != null && again[0] == 0x02 && again.Length == 32, again == null ? "nothing" : Hex(again.AsSpan(0, 4)));
+
+            // A host that asks for the metadata and never acknowledges the
+            // first fragment: within a second the device goes back to Hello
+            // ([MS-GIPUSB] 3.1.5.2).
+            Console.WriteLine("\n-- no acknowledgement of the metadata --");
+            cl.Out(1, Bytes("04 20 08 00"));
+            var lone = cl.ReadIn(1_000);
+            Check("the Metadata Request draws the first fragment", lone is { Length: 64 } && lone[0] == 0x04, lone == null ? "nothing" : Hex(lone.AsSpan(0, 6)));
+            var tm = System.Diagnostics.Stopwatch.StartNew();
+            var back = cl.ReadIn(hang);
+            Check("with no acknowledgement the device sends Hello again", back is { Length: 32 } && back[0] == 0x02,
+                  back == null ? "nothing" : $"{Hex(back.AsSpan(0, 4))} after {tm.ElapsedMilliseconds} ms");
         }
         catch (Exception e) { Check("the wire part ran to its end", false, e.ToString()); }
         finally
@@ -534,6 +668,17 @@ internal static unsafe partial class Program
             device.Dispose();
             SharedMemoryIO.DestroyController(Index);
         }
+    }
+
+    /// <summary>The Hello's device ID for <paramref name="serial"/>: its
+    /// last eight hex digits low byte first, then FB FF 00 00, so the four
+    /// most significant bytes are 00 00 FF FB ([MS-GIPUSB] 2.2.1.3).</summary>
+    internal static byte[] ExpectedDeviceId(string serial)
+    {
+        var id = Bytes("00000000FBFF0000");
+        string hex = serial[^8..];
+        for (int i = 0; i < 4; i++) id[i] = Convert.ToByte(hex.Substring(6 - 2 * i, 2), 16);
+        return id;
     }
 
     static string Text(Client.Ret r) =>

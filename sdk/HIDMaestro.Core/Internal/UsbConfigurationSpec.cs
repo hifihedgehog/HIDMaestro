@@ -360,7 +360,7 @@ public sealed class UsbInterfaceSpec
     ///
     /// <para><c>"gip"</c> marks a device with no HID interface whose
     /// messages travel on a GIP data interface, class 0xFF, subclass 0x47,
-    /// protocol 0xD0 (Microsoft's GIP specification, table 36), which
+    /// protocol 0xD0 (Microsoft's GIP specification H001419, table 36), which
     /// Windows gives its inbox GIP driver. The profile carries no
     /// <c>descriptor</c> and builds every message it sends from its state
     /// block and protocol: its <c>protocol.input.endpoint</c> is the
