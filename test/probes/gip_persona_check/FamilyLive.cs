@@ -190,8 +190,14 @@ internal static unsafe partial class Program
                       string.Join(" ; ", raws.Select(r => $"{r.DisplayName} wireless {r.IsWireless}")));
                 if (raws.Count >= 1)
                 {
-                    int pads = WgiPins.Pads().Count(g => WgiPins.RawOf(g) is { HardwareVendorId: 0x045E } r && r.HardwareProductId == pid);
-                    Check($"{id}: and one Gamepad", pads == 1, $"{pads}");
+                    // The Gamepad list can fill after the RawGameController
+                    // list, so the count is read until it settles.
+                    int pads = 0;
+                    var wgiClock = System.Diagnostics.Stopwatch.StartNew();
+                    WaitUntil(() => (pads = WgiPins.Pads().Count(g => WgiPins.RawOf(g) is { HardwareVendorId: 0x045E } r && r.HardwareProductId == pid)) >= 1, 10_000);
+                    Thread.Sleep(500);
+                    pads = WgiPins.Pads().Count(g => WgiPins.RawOf(g) is { HardwareVendorId: 0x045E } r && r.HardwareProductId == pid);
+                    Check($"{id}: and one Gamepad", pads == 1, $"{pads}, first seen after {wgiClock.ElapsedMilliseconds - 500} ms");
                     Console.WriteLine($"  WGI: {raws[0].DisplayName}, buttons {raws[0].ButtonCount}, axes {raws[0].AxisCount}, wireless {raws[0].IsWireless}, motors {raws[0].ForceFeedbackMotors.Count}");
                 }
             }
