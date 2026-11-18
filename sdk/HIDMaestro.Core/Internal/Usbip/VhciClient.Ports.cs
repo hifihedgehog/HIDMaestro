@@ -163,13 +163,13 @@ internal static partial class VhciClient
     private static readonly IntPtr INVALID_HANDLE_VALUE = new(-1);
 
     [StructLayout(LayoutKind.Sequential)]
-    private struct DEVPROPKEY { public Guid fmtid; public uint pid; }
+    private struct DEVPROPKEY { public Guid fmtid; public uint propertyId; }
 
     // devpkey.h DEVPKEY_Device_InstanceId.
     private static readonly DEVPROPKEY DEVPKEY_Device_InstanceId = new()
     {
         fmtid = new Guid(0x78C34FC8, 0x104A, 0x4ACA, 0x9E, 0xA4, 0x52, 0x4D, 0x52, 0x99, 0x6E, 0x57),
-        pid = 256,
+        propertyId = 256,
     };
 
     [LibraryImport("cfgmgr32.dll", StringMarshalling = StringMarshalling.Utf16)]
