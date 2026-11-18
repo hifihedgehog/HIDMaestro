@@ -47,7 +47,7 @@ internal static unsafe partial class Program
         if (profile == null) return 0;
 
         var raw = new List<(byte Id, byte[] Data)>();
-        HMController? pad = null, control = null;
+        HMController? pad = null, control = null, umdf2 = null;
         try
         {
             var clock = System.Diagnostics.Stopwatch.StartNew();
@@ -111,8 +111,7 @@ internal static unsafe partial class Program
             // What Windows' GIP driver holds for the pad: its arrival, read
             // from the Hello, and its descriptor, the metadata it took.
             Console.WriteLine("\n-- the pad as xboxgip holds it, through \\\\.\\XboxGIP --");
-            ulong deviceId = 0;
-            for (int i = 0; i < 6; i++) deviceId |= (ulong)Convert.ToByte(serial.Substring(serial.Length - 2 - 2 * i, 2), 16) << (8 * i);
+            ulong deviceId = BitConverter.ToUInt64(ExpectedDeviceId(serial), 0);
             var held = GipCapture(4_000).Where(m => m.DeviceId == deviceId).ToList();
             foreach (var m in held) Console.WriteLine($"  command 0x{m.Command:X2}, header {Hex(m.Header)}, {m.Data.Length} bytes: {Hex(m.Data)}");
             var arrival = held.FirstOrDefault(m => m.Command == 0x02);
@@ -342,6 +341,51 @@ internal static unsafe partial class Program
                 Reads(pad, (uint)slot, "and back at rest", new HMGamepadState(), g => g.wButtons == 0);
             }
 
+            // Trigger rumble through the haptics output report the HID
+            // child's descriptor declares: the motor enable bits, the left
+            // and right trigger and the left and right motor magnitudes 0 to
+            // 100, duration, start delay and loop count (XInputHID
+            // Documentation, the output report). HidD_SetOutputReport takes
+            // no input focus. The GIP form's command must carry the trigger
+            // magnitudes. Where the UMDF2 driver runs, xbox-one-s on it takes
+            // the same report in the same window as the positive control.
+            Console.WriteLine("\n-- trigger rumble through the HID child's haptics output report --");
+            Func<byte[], bool> hapticLevels = c => (c[5] & 0x0F) == 0x0F && c[6] == 80 && c[7] == 30 && c[8] == 100 && c[9] == 50;
+            string? gipHid = InterfaceUnder(s_hidInterface, instance);
+            int gipOut = gipHid == null ? 0 : HidOutputLength(gipHid);
+            Motor(engine, "HidD_SetOutputReport(triggers 80 and 30, motors 100 and 50) on the GIP form's HID child",
+                  () => gipHid == null ? 2u : HidSetOutput(gipHid, Haptics(gipHid, gipOut, 80, 30, 100, 50)), hapticLevels);
+            Motor(engine, "HidD_SetOutputReport at rest on the GIP form's HID child",
+                  () => gipHid == null ? 2u : HidSetOutput(gipHid, Haptics(gipHid, gipOut, 0, 0, 0, 0)), c => c[6] == 0 && c[7] == 0 && c[8] == 0 && c[9] == 0);
+
+            var one = ctx.GetProfile("xbox-one-s");
+            string? noUmdf2 = null;
+            try { if (one == null || ctx.ResolveBackend(one, HMBackend.Umdf2) != HMBackend.Umdf2) noUmdf2 = "the catalog has no xbox-one-s"; }
+            catch (Exception e) { noUmdf2 = e.Message; }
+            if (noUmdf2 != null) Console.WriteLine($"  no UMDF2 positive control on this machine: {noUmdf2}");
+            else
+            {
+                var got = new List<(byte Id, byte[] Data)>();
+                umdf2 = ctx.CreateController(one!, null, HMBackend.Umdf2);
+                umdf2.OutputReceived += (_, pkt) => { if (pkt.Source == HMOutputSource.HidOutput) lock (got) got.Add((pkt.ReportId, pkt.Data.ToArray())); };
+                string? umdf2Hid = null;
+                WaitUntil(() => (umdf2Hid = InterfaceUnderAny(s_hidInterface, "_pid_02ea&ig_00")) != null, 30_000);
+                Check("positive control: xbox-one-s on the UMDF2 driver has its HID interface", umdf2Hid != null, umdf2Hid ?? "none");
+                if (umdf2Hid != null)
+                {
+                    int umdf2Out = HidOutputLength(umdf2Hid);
+                    uint code = HidSetOutput(umdf2Hid, Haptics(umdf2Hid, umdf2Out, 80, 30, 100, 50));
+                    // The driver raises a report of a descriptor with no
+                    // IDs with its first data byte as the ID: the enable bits.
+                    bool arrived = WaitUntil(() => { lock (got) return got.Any(o => o.Id == 0x0F && o.Data.Length >= 4 && o.Data[0] == 80 && o.Data[1] == 30 && o.Data[2] == 100 && o.Data[3] == 50); }, 3_000);
+                    string seen;
+                    lock (got) seen = string.Join(" | ", got.Select(o => $"{o.Id:X2} {Hex(o.Data)}"));
+                    Check("positive control: the same report reaches the UMDF2 form's OutputReceived with the trigger magnitudes", code == 0 && arrived, $"HidD_SetOutputReport {code}, OutputReceived {seen}");
+                }
+                umdf2.Dispose();
+                umdf2 = null;
+            }
+
             Console.WriteLine("\n-- cleanup --");
             control.Dispose();
             control = null;
@@ -360,6 +404,7 @@ internal static unsafe partial class Program
         }
         finally
         {
+            try { umdf2?.Dispose(); } catch { }
             try { control?.Dispose(); } catch { }
             try { pad?.Dispose(); } catch { }
             DeviceOrchestrator.DiagTap = null;
@@ -931,6 +976,58 @@ internal static unsafe partial class Program
                 if (HidD_SetOutputReport(h, r, (uint)report.Length)) { Console.WriteLine($"  WriteFile failed with {write}, HidD_SetOutputReport went through"); return 0; }
                 return (uint)Marshal.GetLastPInvokeError();
             }
+        }
+        finally { CloseHandle(h); }
+    }
+
+    /// <summary>The haptics output report for the collection at
+    /// <paramref name="path"/>, <paramref name="length"/> bytes with its ID
+    /// first: the ID of its first output value (0 for a descriptor with no
+    /// IDs), the four enable bits, then the four magnitudes, duration 0xFF,
+    /// start delay 0 and loop count 0.</summary>
+    static byte[] Haptics(string path, int length, byte leftTrigger, byte rightTrigger, byte left, byte right)
+    {
+        var r = new byte[Math.Max(length, 9)];
+        r[0] = OutputReportId(path);
+        r[1] = 0x0F;
+        r[2] = leftTrigger; r[3] = rightTrigger; r[4] = left; r[5] = right;
+        r[6] = 0xFF;
+        return r;
+    }
+
+    /// <summary>The report ID of the collection's first output value
+    /// (HIDP_VALUE_CAPS.ReportID, byte 2), or 0.</summary>
+    static byte OutputReportId(string path)
+    {
+        IntPtr h = CreateFileW(path, 0, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
+        if (h == new IntPtr(-1)) return 0;
+        try
+        {
+            if (!HidD_GetPreparsedData(h, out var pp)) return 0;
+            try
+            {
+                byte* caps = stackalloc byte[72 * 16];
+                ushort count = 16;
+                return HidP_GetValueCaps(1 /* HidP_Output */, caps, &count, pp) == 0x00110000 && count > 0 ? caps[2] : (byte)0;
+            }
+            finally { HidD_FreePreparsedData(pp); }
+        }
+        finally { CloseHandle(h); }
+    }
+
+    [DllImport("hid.dll")]
+    static extern int HidP_GetValueCaps(int reportType, byte* caps, ushort* length, IntPtr preparsed);
+
+    /// <summary>HidD_SetOutputReport of <paramref name="report"/>. Returns 0,
+    /// or the last error.</summary>
+    static uint HidSetOutput(string path, byte[] report)
+    {
+        IntPtr h = CreateFileW(path, 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
+        if (h == new IntPtr(-1)) return (uint)Marshal.GetLastPInvokeError();
+        try
+        {
+            fixed (byte* r = report)
+                return HidD_SetOutputReport(h, r, (uint)report.Length) ? 0u : (uint)Marshal.GetLastPInvokeError();
         }
         finally { CloseHandle(h); }
     }
