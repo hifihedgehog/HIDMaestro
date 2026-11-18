@@ -37,7 +37,10 @@ namespace HIDMaestro.Internal.Usbip;
 /// xinputhid get no derived HID device: a plain HID function would give
 /// Windows the identity of a controller that serves Microsoft OS
 /// descriptors with none, and Windows remembers that answer per identity
-/// (<see cref="NotPresentableReason"/>).</para>
+/// (<see cref="NotPresentableReason"/>). A profile that reaches XInput
+/// through xinputhid presents the GIP function instead
+/// (<see cref="GipFunction"/>), the USB device Windows gives its GIP
+/// stack, whose HID child xinputhid binds.</para>
 /// </summary>
 internal sealed class UsbPresentation
 {
@@ -78,6 +81,15 @@ internal sealed class UsbPresentation
         }
         if (NotPresentableReason(profile) is { } reason)
             throw new HMBackendNotSupportedException(profile.Id, HMBackend.Usbip, reason);
+        if (XInputPresentation.Resolve(profile).Xinputhid)
+        {
+            // The GIP function is the model's device. A usbConfiguration of
+            // pins has no derived HID device to pin.
+            if (cfg != null)
+                throw new ProfileDefectException(Root,
+                    "pins a derived HID device, and this profile presents the GIP function, whose descriptors are the GIP model's.");
+            return Resolve(GipFunction.FormOf(profile));
+        }
         return new UsbPresentation(Derive(profile, cfg), derived: true);
     }
 
@@ -91,8 +103,7 @@ internal sealed class UsbPresentation
         var xi = XInputPresentation.Resolve(profile);
         if (xi.XusbCompanion)
             return "it reaches XInput through the XUSB companion, and the USB/IP backend has no XUSB function for it yet.";
-        if (xi.Xinputhid)
-            return "it reaches XInput through xinputhid, and the USB/IP backend's GIP function needs the device's GIP metadata and messages, which this profile does not carry yet.";
+        if (xi.Xinputhid) return GipFunction.RefusedReason(profile);
         return null;
     }
 

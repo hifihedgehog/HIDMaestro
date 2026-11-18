@@ -78,13 +78,21 @@ internal static unsafe partial class Program
         // request a host sends it, which the live part prints.
         Environment.SetEnvironmentVariable("HIDMAESTRO_DIAG", "1");
         if (args.Contains("capture")) return Capture();
-        bool all = !args.Contains("model") && !args.Contains("wire") && !args.Contains("live") && !args.Contains("umdf2");
+        bool all = !args.Contains("model") && !args.Contains("wire") && !args.Contains("live") && !args.Contains("umdf2") && !args.Contains("family");
         int skip = 0;
         if (all || args.Contains("model")) Model();
+        if (all || args.Contains("model")) FamilyModel();
         if (all || args.Contains("wire")) Wire();
         if (all || args.Contains("live")) skip = Live(args.Contains("nooptout"));
         // The UMDF2 comparison runs only when asked: it needs the driver.
         if (args.Contains("umdf2")) skip = Math.Max(skip, Umdf2Rumble());
+        // The family's live part runs only when asked: "family", then the
+        // profile ids, or none for all twelve.
+        if (args.Contains("family"))
+        {
+            var ids = args.SkipWhile(a => a != "family").Skip(1).ToList();
+            skip = Math.Max(skip, FamilyLive(ids.Count > 0 ? ids : Family.Select(f => f.Id).ToList()));
+        }
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
         if (s_failures != 0) return 1;
         return skip;

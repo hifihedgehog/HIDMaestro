@@ -170,10 +170,13 @@ internal static partial class Program
         Check("an explicit backend wins over the machine",
               Resolve(plain, HMBackend.Usbip, HMBackend.Umdf2) == "Usbip" && Resolve(plain, HMBackend.Umdf2, HMBackend.Usbip) == "Umdf2");
         Check("Umdf2 for a usbip profile is refused", Resolve(composite, HMBackend.Umdf2, HMBackend.Umdf2) == "refused:Umdf2");
-        Check("Usbip for an Xbox profile that reaches XInput through the companion or xinputhid is refused",
+        Check("Usbip for an Xbox profile that reaches XInput through the companion is refused",
               Resolve(x360, HMBackend.Usbip, HMBackend.Umdf2) == "refused:Usbip"
-              && Resolve(xinputhid, HMBackend.Usbip, HMBackend.Umdf2) == "refused:Usbip"
               && Resolve(x360, HMBackend.Auto, HMBackend.Usbip) == "refused:Usbip");
+        Check("an xinputhid profile resolves to Usbip, its GIP function, when asked and on a USB/IP machine",
+              Resolve(xinputhid, HMBackend.Usbip, HMBackend.Umdf2) == "Usbip"
+              && Resolve(xinputhid, HMBackend.Auto, HMBackend.Usbip) == "Usbip"
+              && Resolve(xinputhid, HMBackend.Auto, HMBackend.Umdf2) == "Umdf2");
         Check("SupportsBackend gives the same answers without the exception",
               ctx.GetProfile("dualshock-4-v2")!.SupportsBackend(HMBackend.Usbip) && ctx.GetProfile("dualshock-4-v2")!.SupportsBackend(HMBackend.Umdf2)
               && !ctx.GetProfile("dualsense-composite")!.SupportsBackend(HMBackend.Umdf2)

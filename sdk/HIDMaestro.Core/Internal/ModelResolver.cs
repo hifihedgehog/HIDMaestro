@@ -196,6 +196,12 @@ internal sealed class DeviceModelFile
     /// companion.</summary>
     [JsonPropertyName("xusbAnswers")]
     public XusbModelSpec? XusbAnswers { get; set; }
+
+    /// <summary>The GIP function, the USB device an xinputhid profile
+    /// presents on the USB/IP backend (<see cref="Usbip.GipFunction"/>).
+    /// Part of no group, as <see cref="XusbAnswers"/>.</summary>
+    [JsonPropertyName("gipFunction")]
+    public JsonElement? GipFunction { get; set; }
 }
 
 /// <summary><c>identity-defaults.json</c>: what a profile with no keys of

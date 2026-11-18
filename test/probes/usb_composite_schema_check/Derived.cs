@@ -50,10 +50,10 @@ internal static partial class Program
         var xbox = refused.Where(p =>
         {
             var xi = XInputPresentation.Resolve(p.Inner);
-            return xi.XusbCompanion || xi.Xinputhid;
+            return xi.XusbCompanion;
         }).ToList();
         Console.WriteLine($"  [note] {refused.Count} deployable profiles the USB/IP backend does not present yet: {string.Join(", ", refused.Select(p => p.Id))}");
-        Check("the USB/IP backend refuses only the Xbox profiles that reach XInput through the companion or xinputhid",
+        Check("the USB/IP backend refuses only the Xbox profiles that reach XInput through the companion",
               refused.Count == xbox.Count && refused.Count > 0,
               string.Join(", ", refused.Except(xbox).Select(p => p.Id)));
         Check("none of the Xbox profiles it refuses has a usbConfiguration", refused.All(p => p.Inner.UsbConfiguration == null));
@@ -68,12 +68,21 @@ internal static partial class Program
             }
         }
 
-        var derived = deployable.Where(p => p.SupportsBackend(HMBackend.Usbip) && p.Inner.UsbConfiguration == null).ToList();
+        // A profile that reaches XInput through xinputhid presents the GIP
+        // function, the GIP model's device (gip_persona_check's family
+        // part checks each one).
+        var gip = deployable.Where(p => p.SupportsBackend(HMBackend.Usbip) && p.Inner.UsbConfiguration == null
+                                        && XInputPresentation.Resolve(p.Inner).Xinputhid).ToList();
+        Check("every profile that reaches XInput through xinputhid presents the GIP function, authored from the GIP model",
+              gip.Count > 0 && gip.All(p => UsbPresentation.Resolve(p.Inner) is { Derived: false } pr
+                                             && pr.Spec.Interfaces is { Count: 1 } ifs && ifs[0].Function == "gip"),
+              $"{gip.Count}: {string.Join(", ", gip.Select(p => p.Id))}");
+        var derived = deployable.Where(p => p.SupportsBackend(HMBackend.Usbip) && p.Inner.UsbConfiguration == null && !gip.Contains(p)).ToList();
         var authored = deployable.Where(p => p.Inner.UsbConfiguration is { IsAuthored: true }).ToList();
-        Console.WriteLine($"  [note] {derived.Count} derive their presentation, {authored.Count} author it");
+        Console.WriteLine($"  [note] {derived.Count} derive their presentation, {authored.Count} author it, {gip.Count} present the GIP function");
         Check("every UMDF2-default profile with a descriptor and no XInput stack of its own derives one",
-              derived.Count + refused.Count + authored.Count == deployable.Count,
-              $"{derived.Count} + {refused.Count} + {authored.Count} of {deployable.Count}");
+              derived.Count + refused.Count + authored.Count + gip.Count == deployable.Count,
+              $"{derived.Count} + {refused.Count} + {authored.Count} + {gip.Count} of {deployable.Count}");
 
         var golden = new StringBuilder();
         golden.AppendLine("# The device and configuration descriptors each profile with no usbConfiguration presents on the USB/IP backend.");

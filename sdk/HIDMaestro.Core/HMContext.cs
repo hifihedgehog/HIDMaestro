@@ -847,6 +847,12 @@ public sealed class HMContext : IDisposable
             {
                 throw Internal.ProfileDefects.ToProfileException(profile.Inner, e);
             }
+            // A profile that reaches XInput through xinputhid runs on this
+            // backend as its GIP form, the GIP model's device with the
+            // profile's identity (Internal.Usbip.GipFunction): the device,
+            // the controller's reports and its outputs are the form's.
+            if (Internal.XInputPresentation.Resolve(profile.Inner).Xinputhid && profile.Inner.UsbConfiguration == null)
+                profile = new HMProfile(Internal.Usbip.GipFunction.FormOf(profile.Inner));
         }
 
         // What programs that have exited left goes first, once per

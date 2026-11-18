@@ -17,6 +17,7 @@
   "deviceDescription": "Xbox Wireless Controller",
   "triggerMode": "separate",
   "driverMode": "xinputhid",
+  "gip": { "identity": "xbox-one-s-1708" },
   "layout": {
     "kind": "gamepad",
     "source": "https://en.wikipedia.org/wiki/Xbox_Wireless_Controller",
