@@ -876,12 +876,6 @@ public sealed class HMContext : IDisposable
         // left as well.
         Internal.OwnerSweep.SessionSweepOnce();
 
-        // A host controller whose USB 2.0 ports all hold a device, refused
-        // before the lease and the host controller's install. After the
-        // sweep, which plugs out what programs that have exited left on
-        // its ports.
-        if (resolved == HMBackend.Usbip) Internal.Usbip.UsbipBackend.ThrowIfPortsFull();
-
         // From the lease to the last write of the controller's entry, so the
         // exit handler never deletes the record of a create in flight
         // (OwnerSweep.RegisterExitCleanup). Creates in one process are meant
@@ -916,6 +910,13 @@ public sealed class HMContext : IDisposable
         // and again for its attach: one open serves both
         // (VhciClient.HoldOpen), closed as this create returns.
         using var vhci = usbip ? Internal.Usbip.VhciClient.HoldOpen() : null;
+        // A host controller whose USB 2.0 ports all hold a device, refused
+        // before the lease and the host controller's install. After the
+        // session sweep, which plugs out what programs that have exited
+        // left on its ports, and inside the create gate: work between the
+        // sweep and the gate lets the phantom cleanup the sweep started
+        // take the gate first, and the create then waits for all of it.
+        if (usbip) Internal.Usbip.UsbipBackend.ThrowIfPortsFull();
         // The record's backend tag is the resolved backend, which the sweeps
         // and the deploy policy read.
         var lease = AcquireLease(slot, identityKey, usbip ? "usbip" : "umdf", profile.Id);
