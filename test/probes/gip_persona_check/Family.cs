@@ -77,11 +77,13 @@ internal static partial class Program
     /// request and the host's two acknowledgements draw, reassembled.</summary>
     static byte[] ServedMetadata(ControllerProfile form, out string trace)
     {
-        var first = Packets(form, "04 20 01 00");
+        const string request = "04 20 01 00";
+        var first = Packets(form, request);
         int total = first.Count == 1 && first[0].Length >= 6 ? Vlen(first[0], 4) : -1;
-        var rest = Packets(form, "01 20 01 09 00 04 20 3A 00 00 00 00 00");
+        string firstAck = "01 20 01 09 00 04 20 3A 00 00 00 00 00";
+        var rest = Packets(form, request, firstAck);
         var t = BitConverter.GetBytes(total);
-        var done = Packets(form, $"01 20 01 09 00 04 20 {t[0]:X2} {t[1]:X2} 00 00 00 00");
+        var done = Packets(form, request, firstAck, $"01 20 01 09 00 04 20 {t[0]:X2} {t[1]:X2} 00 00 00 00");
         trace = $"{first.Count}+{rest.Count}+{done.Count} packets, total {total}";
         if (first.Count != 1 || rest.Count < 2 || done.Count != 1 || done[0].Length != 6 || done[0][3] != 0) return Array.Empty<byte>();
         return first.Concat(rest).SelectMany(x => x.Skip(6)).ToArray();
@@ -122,8 +124,8 @@ internal static partial class Program
 
         var persona = Catalog();
         if (persona == null) { Check("the catalog holds xbox-one-s-full", false); return; }
-        var personaFrags = Packets(persona, "04 20 01 00").Concat(Packets(persona, "01 20 01 09 00 04 20 3A 00 00 00 9C 00"))
-            .Concat(Packets(persona, "01 20 01 09 00 04 20 D6 00 00 00 00 00")).Select(x => { var c = (byte[])x.Clone(); c[2] = 0; return c; }).ToList();
+        var personaFrags = Packets(persona, MetadataRequest).Concat(Packets(persona, MetadataRequest, FirstAck))
+            .Concat(Packets(persona, MetadataRequest, FirstAck, LastAck)).Select(x => { var c = (byte[])x.Clone(); c[2] = 0; return c; }).ToList();
         var ours = GipFunction.Fragments(ExpectedMetadata());
         Check("the fragmenter cuts the persona's 214 bytes into the packets xbox-one-s-full serves",
               ours.Count == personaFrags.Count && ours.Zip(personaFrags).All(z => z.First.AsSpan().SequenceEqual(z.Second)),
@@ -161,6 +163,7 @@ internal static partial class Program
         var xinputhid = catalog.Where(x => x.UsesXinputhid).Select(x => x.Id).OrderBy(x => x, StringComparer.Ordinal).ToList();
         Check("the catalog's xinputhid profiles are the twelve this part knows",
               xinputhid.SequenceEqual(Family.Select(f => f.Id).OrderBy(x => x, StringComparer.Ordinal)), string.Join(" ", xinputhid));
+        var pins = Pins();
         var served = new Dictionary<string, (byte[] Metadata, byte[] Hello, ControllerProfile Form)>();
         var cacheKeys = new Dictionary<string, (string Id, byte[] Metadata)>();
         foreach (var (id, identity, pid, sibling) in Family)
@@ -216,6 +219,7 @@ internal static partial class Program
                     Check($"{id}: shares Windows' metadata cache key {key} with {other.Id}, and the same metadata", other.Metadata.AsSpan().SequenceEqual(meta));
                 else cacheKeys[key] = (id, meta);
             }
+            Check($"{id}: its metadata matches the pin for its cache key in metadata-pins.txt", PinMismatch(form, pins) == null, PinMismatch(form, pins) ?? "");
             served[id] = (meta, h, form);
             if (sibling != null && served.TryGetValue(sibling, out var usb))
                 Check($"{id}: takes {sibling}'s metadata and input report with its own PID",

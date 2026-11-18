@@ -222,6 +222,10 @@
         },
         {
           "name": "answered"
+        },
+        {
+          "name": "metaWait",
+          "bits": 2
         }
       ],
       "counters": [
@@ -309,7 +313,8 @@
             "match": "04 20/EF .. 00",
             "minLength": 4,
             "set": {
-              "answered": 1
+              "answered": 1,
+              "metaWait": 1
             },
             "consume": true,
             "reply": "@metadataFirst"
@@ -317,12 +322,19 @@
           {
             "match": "01 20/EF .. 09 00 04 20 @metadataFirstEnd",
             "minLength": 13,
+            "while": "metaWait==1",
+            "set": {
+              "metaWait": 2
+            },
             "consume": true,
             "replies": "@metadataRest"
           },
           {
             "match": "01 20/EF .. 09 00 04 20 @metadataEnd 00 00",
             "minLength": 13,
+            "set": {
+              "metaWait": 0
+            },
             "consume": true,
             "reply": "@metadataComplete"
           },
@@ -335,7 +347,8 @@
             "minLength": 5,
             "set": {
               "started": 1,
-              "answered": 1
+              "answered": 1,
+              "metaWait": 0
             },
             "consume": true
           },
@@ -371,7 +384,8 @@
             "minLength": 5,
             "set": {
               "started": 0,
-              "answered": 0
+              "answered": 0,
+              "metaWait": 0
             },
             "consume": true,
             "reply": [
@@ -385,6 +399,27 @@
                 "hex": "0400000000"
               }
             ]
+          },
+          {
+            "match": "05 20/EF .. 01 05",
+            "minLength": 5,
+            "emitOutput": {
+              "size": 8,
+              "program": [
+                {
+                  "const": {
+                    "0": "0F",
+                    "1": "00",
+                    "2": "00",
+                    "3": "00",
+                    "4": "00",
+                    "5": "00",
+                    "6": "00",
+                    "7": "00"
+                  }
+                }
+              ]
+            }
           },
           {
             "match": "05",
@@ -437,8 +472,11 @@
               "value": "serial",
               "encoding": "hex-le",
               "length": {
-                "value": 8
+                "value": 4
               }
+            },
+            {
+              "hex": "FBFF0000"
             },
             {
               "hex": "@helloIdentity"
@@ -469,6 +507,34 @@
               "hex": "0480000000"
             }
           ]
+        },
+        {
+          "name": "metadataAck",
+          "while": "metaWait==1",
+          "firstMs": 1000,
+          "periods": [
+            {
+              "periodMs": 1000
+            }
+          ],
+          "set": {
+            "answered": 0,
+            "metaWait": 0
+          }
+        },
+        {
+          "name": "metadataLastAck",
+          "while": "metaWait==2",
+          "firstMs": 1000,
+          "periods": [
+            {
+              "periodMs": 1000
+            }
+          ],
+          "set": {
+            "answered": 0,
+            "metaWait": 0
+          }
         }
       ],
       "getStatus": "descriptor",
