@@ -2439,10 +2439,15 @@ function Scenario-Switch2-Composite {
 # claim and release, and a consumer killed with its virtual alive. The
 # probe exits 2, a skip, when another program that embeds HIDMaestro runs
 # or holds an input section open, since its live part would remove that
-# program's virtuals.
+# program's virtuals. A second run, --usb-ledger, follows what a USB/IP
+# persona leaves: the usbflags value Windows keeps for its identity, put
+# back as it was, and the device records it caused, named and removed.
 function Scenario-Registry-Ownership {
     Invoke-Probe -Dir 'registry_ownership_check' -Exe 'RegistryOwnershipCheck.exe' `
                  -Message 'a registry key a real device owns was changed, or a key HIDMaestro wrote outlived its virtual (see probe stdout)' `
+                 -SkipCodes 2
+    Invoke-Probe -Dir 'registry_ownership_check' -Exe 'RegistryOwnershipCheck.exe' -Arguments '--usb-ledger' -Tag 'usb-ledger' `
+                 -Message 'a USB/IP persona left a usbflags value or a device record HIDMaestro did not put back or name (see probe stdout)' `
                  -SkipCodes 2
 }
 
@@ -2637,7 +2642,9 @@ function Scenario-Build-Info {
 # corrected descriptors and one Full, and the persona's device,
 # configuration, string and report descriptors are a real WUP-028's as the
 # persona serves them, as Windows enumerates them before any driver loads,
-# and as libusb reads them through WinUSB after BindWinUsb.
+# and as libusb reads them through WinUSB after BindWinUsb. On a machine
+# that refuses HIDMaestro's driver package, the persona serves the
+# Microsoft OS string 0xEE after the bind.
 function Scenario-GameCube-Descriptors {
     Invoke-Probe -Dir 'gc_descriptor_check' -Exe 'GcDescriptorCheck.exe' `
                  -Message 'the GameCube adapter persona served a byte a real WUP-028 does not (see probe stdout)' -SkipCodes 2
@@ -2659,9 +2666,13 @@ function Scenario-GameCube-Protocol {
 # after a killed program, flag the instance once its devnode is gone, so
 # the next adapter on it installs by rank. An adapter arrives before the
 # next program's reclaim and after it: one present before keeps WinUSB
-# until it leaves.
+# until it leaves. The package is x64's path. On a machine that refuses
+# HIDMaestro's driver package the binding comes from Microsoft OS
+# descriptors the persona serves, which the probe takes there by itself,
+# and on x64 --os-descriptors runs that path after the package sections.
 function Scenario-GameCube-WinUsb {
-    Invoke-Probe -Dir 'gc_winusb_check' -Exe 'GcWinUsbCheck.exe' `
+    $a = if ((Get-MachineArch) -eq 'x64') { '--os-descriptors' } else { '' }
+    Invoke-Probe -Dir 'gc_winusb_check' -Exe 'GcWinUsbCheck.exe' -Arguments $a `
                  -Message 'the WinUSB binding reached a device it should not, or was not put back (see probe stdout)' -SkipCodes 2
 }
 
