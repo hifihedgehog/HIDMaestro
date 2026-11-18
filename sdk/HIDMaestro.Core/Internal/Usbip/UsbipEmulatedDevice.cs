@@ -29,21 +29,41 @@ namespace HIDMaestro.Internal.Usbip;
 /// (<see cref="FeatureStubTable"/>), the one table the UMDF2 driver serves
 /// as well, including the HID_FEATURE_READ ring notification that drives
 /// the extendedReport.armOn watcher for an entry that publishes one.</item>
+/// <item>Delivery: once a report a read carried is followed by the host's
+/// next read on the endpoint, its sequence number goes into the delivery
+/// acknowledgement, the driver's half for a UMDF2 controller
+/// (driver.c AckInputDeliveredLocked), so a protocol host's replies and a
+/// keyboard's reports wait for it on either backend.</item>
 /// </list>
 ///
-/// <para>PID FFB feature serving is deliberately absent here: no usbip
-/// profile declares a PID block (they are Sony composite personas), and
-/// the UMDF2 backend remains the PID path. A future PID-over-usbip
-/// profile must port driver.c's PID Get/SetFeature handling first.</para>
+/// <para>A derived presentation (<see cref="UsbPresentation"/>) plays the
+/// UMDF2 driver's half of the shared-memory contract: the data lane goes
+/// out as the report <see cref="DeviceOrchestrator.DriverInputReport"/>
+/// names, a live feature report is answered from the data lane, GET_STATUS
+/// reads the configuration's bmAttributes, and a protocol runs in the
+/// controller's protocol host, not here.</para>
+///
+/// <para>PID force feedback is not served here yet. The UMDF2 backend
+/// remains the PID path.</para>
 ///
 /// <para>Isochronous endpoints route to <see cref="UsbAudioEngine"/>;
 /// completions come back on the pacing thread and are serialized onto the
-/// connection by the server's send lock.</para></summary>
+/// connection by the server's send lock. A device with none has no audio
+/// engine and no audio thread.</para></summary>
 internal sealed partial class UsbipEmulatedDevice : IDisposable
 {
     public UsbDescriptorSet Descriptors { get; }
-    public UsbAudioEngine Audio { get; }
+
+    /// <summary>The audio engine, for a device with an isochronous
+    /// endpoint. Null for every other device, which starts no audio
+    /// thread.</summary>
+    public UsbAudioEngine? Audio { get; }
     public string BusId { get; }
+
+    /// <summary>True when the device's descriptors are derived from the
+    /// profile (<see cref="UsbPresentation.Derived"/>).</summary>
+    internal bool Derived => _derived;
+    private readonly bool _derived;
 
     /// <summary>The vhci port this device is attached on, 0 while it is
     /// not. The server sets it on every import, the driver's own re-attach
@@ -186,8 +206,38 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     {
         public readonly byte[] Buffer;
         public readonly int Length;
-        public QueuedFrame(byte[] buffer, int length) { Buffer = buffer; Length = length; }
+        public readonly uint Seq;
+        public QueuedFrame(byte[] buffer, int length, uint seq) { Buffer = buffer; Length = length; Seq = seq; }
     }
+
+    // The data-lane report a derived device sends, as the UMDF2 driver is
+    // given it (DeviceOrchestrator.DriverInputReport): its length on the
+    // wire, report ID included, and the ID. A length of 0 is a device with
+    // no such rule, built without its constructor by a check, which keeps
+    // the report builder's.
+    private readonly int _dataReportLength;
+    private readonly byte _dataReportId;
+
+    // The live feature report, its ID plus one, as the driver's
+    // LiveFeatureReport value reads, 0 for none: the feature report whose
+    // answer is the data lane (driver.c:2001-2009, 3371-3386). Its answer,
+    // guarded by _hidLock, and the pump's copy of the lane from the frame
+    // it read.
+    private readonly int _liveFeatureReport;
+    private readonly bool _usesReportIds;
+    private readonly byte[]? _liveFeature;
+    private int _liveFeatureSize;
+    private readonly byte[]? _pumpFeature;
+    private int _pumpFeatureSize;
+    private bool _pumpExtended;
+
+    // The delivery acknowledgement: the frame a read carried waits for the
+    // host's next read on the endpoint, as the driver's waits for HID
+    // class's next READ_REPORT (driver.c NoteFrameCompletedLocked). Guarded
+    // by _hidLock. _ackSignal: a thread of this SDK waits on the event.
+    private bool _ackPending;
+    private uint _ackSeq;
+    private readonly bool _ackSignal;
 
     // Device state.
     private volatile byte _configurationValue;
@@ -264,14 +314,19 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     public UsbipEmulatedDevice(ControllerProfile profile, int index, DeviceIdentity? identity = null)
     {
         _index = index;
+        var presentation = UsbPresentation.Resolve(profile);
+        _derived = presentation.Derived;
         Descriptors = new UsbDescriptorSet(profile, index, identity);
         BusId = BusIdFor(index);
         // Before any section or thread exists, so a profile whose protocol
         // does not fit its descriptors is refused with nothing to undo. A
         // device that builds its reports binds its layouts here: to the
         // kernels generated from the catalog's JSON, or to the interpreter.
+        // A derived device's protocol is the UMDF2 form, which names no
+        // endpoint: the controller's protocol host runs it, behind the input
+        // section, as it does behind the UMDF2 driver.
         LayoutRunner? runner = null;
-        if (CompiledProtocol.Compile(profile, Descriptors) is { } protocol)
+        if (!_derived && CompiledProtocol.Compile(profile, Descriptors) is { } protocol)
         {
             runner = ProgramBinder.BindLayouts(protocol.Model);
             _engine = new ProtocolEngine(protocol, Descriptors.SerialString, index, runner);
@@ -296,10 +351,27 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         _builder = profile.GetOrBuildReportBuilder();
         // As DeviceOrchestrator.WaitsOnDelivery decides it for the HID path.
         _deliverEvery = profile.HasDescriptor && profile.DeliversEveryReport(profile.GetOrBuildKeyboardMousePacker());
+        if (_derived)
+        {
+            var (dataId, dataLength, _) = DeviceOrchestrator.DriverInputReport(profile);
+            _dataReportId = dataId;
+            _dataReportLength = dataLength;
+            _usesReportIds = profile.GetOrBuildReportMap().UsesReportIds;
+            if (profile.Protocol != null && profile.GetOrCompileModel().LiveFeatureIds is { Length: > 0 } live)
+            {
+                _liveFeatureReport = live[0] + 1;
+                _liveFeature = new byte[SharedMemoryIO.DATA_CAPACITY];
+                _pumpFeature = new byte[SharedMemoryIO.DATA_CAPACITY];
+            }
+        }
+        // The driver's AckSignal: a protocol host waits for its replies, and
+        // a keyboard or mouse writer for every report.
+        _ackSignal = _deliverEvery || (_derived && profile.Protocol != null);
         // A device with no HID interface has no descriptor to size its report
         // by: a data frame fills its extended report, whole.
         _ownReportSize = !Descriptors.HasHidInterface && profile.ExtendedReport is { Size: > 0 } sized ? sized.Size : 0;
-        int expectedSize = _builder.InputReportByteSize > 0 ? _builder.InputReportByteSize
+        int expectedSize = _dataReportLength > 0 ? _dataReportLength
+            : _builder.InputReportByteSize > 0 ? _builder.InputReportByteSize
             : _ownReportSize > 0 ? _ownReportSize : 17;
         _reportCapacity = Math.Max(expectedSize, SharedMemoryIO.EXTENDED_DATA_CAPACITY);
         _pumpReport = new byte[_reportCapacity];
@@ -348,7 +420,9 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             _outputEvent = SharedMemoryIO.EnsureOutputEvent(index);
             _inputWaitEvent = SharedMemoryIO.OpenInputEventForWait(index);
 
-            Audio = new UsbAudioEngine(profile, CompleteIsoOnWire, AnswerIsoUnlink);
+            if (presentation.HasIsochronous)
+                Audio = new UsbAudioEngine(profile, CompleteIsoOnWire, AnswerIsoUnlink);
+            SharedMemoryIO.AnnounceDeviceDelivery(index);
 
             var input = new Thread(InputPumpLoop)
             {
@@ -415,11 +489,12 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         // queued for them and the protocol state go while the connection
         // still holds the device: a new import claims it only once it is
         // let go, so nothing the new import parks is cleared here.
-        Audio.Clear();
+        Audio?.Clear();
         lock (_hidLock)
         {
             foreach (var q in _pendingInterruptIn.Values) q.Clear();
             ClearFrameQueue();
+            _ackPending = false;
         }
         ResetLayoutState();
         ResetProtocolState();
@@ -520,6 +595,19 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 if (!fresh) continue;
                 var report = new ReadOnlySpan<byte>(_pumpReport, 0, length);
 
+                // With a live feature report the data lane is that report's
+                // answer, never an input report, and a frame that carries
+                // nothing else only replaces the answer (driver.c:2001-2009).
+                if (_liveFeature != null)
+                {
+                    lock (_hidLock)
+                    {
+                        _pumpFeature.AsSpan(0, _pumpFeatureSize).CopyTo(_liveFeature);
+                        _liveFeatureSize = _pumpFeatureSize;
+                    }
+                    if (!_pumpExtended) continue;
+                }
+
                 // A device that builds its reports sends nothing from here.
                 // The frame is the state block its own clock builds the next
                 // report from.
@@ -557,6 +645,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                         seq = pending.Dequeue();
                         answer = true;
                         CountPrimaryCompletionLocked();
+                        NoteCarriedLocked(_lastSharedSeqNo);
                         conn = HoldSendLocked();
                     }
                     else
@@ -569,7 +658,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                             : _spareFrames.Count > 0 ? _spareFrames.Pop()
                             : new byte[_reportCapacity];
                         report.CopyTo(buffer);
-                        _frameQueue.Enqueue(new QueuedFrame(buffer, length));
+                        _frameQueue.Enqueue(new QueuedFrame(buffer, length, _lastSharedSeqNo));
                     }
                 }
                 if (answer) SendHeld(conn, seq, 0, length, report);
@@ -584,6 +673,15 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 Thread.Sleep(failures.Threw(e, PollMs));
             }
         }
+    }
+
+    /// <summary>A read is answered with the frame written with
+    /// <paramref name="seq"/>. Its acknowledgement waits for the host's
+    /// next read. Caller holds <see cref="_hidLock"/>.</summary>
+    private void NoteCarriedLocked(uint seq)
+    {
+        _ackPending = true;
+        _ackSeq = seq;
     }
 
     /// <summary>Caller holds <see cref="_hidLock"/>.</summary>
@@ -616,9 +714,11 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         // or the data. A size read while the writer was mid-frame is caught
         // by the sequence check like any other byte, and each length is cut
         // to its region before the copy.
-        int expectedSize = _builder.InputReportByteSize > 0 ? _builder.InputReportByteSize
+        int expectedSize = _dataReportLength > 0 ? _dataReportLength
+            : _builder.InputReportByteSize > 0 ? _builder.InputReportByteSize
             : _ownReportSize > 0 ? _ownReportSize : 17;
-        bool hasReportId = _builder.InputReportId != 0;
+        byte dataReportId = _dataReportLength > 0 ? _dataReportId : _builder.InputReportId;
+        bool hasReportId = dataReportId != 0;
         int maxData = hasReportId ? Math.Max(expectedSize - 1, 16) : expectedSize;
         if (hasReportId && expectedSize > 1) maxData = expectedSize - 1;
         uint seq1, seq2;
@@ -628,6 +728,16 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             seq1 = (uint)Marshal.ReadInt32(view, 0);
             Thread.MemoryBarrier();
             int extSize = Unsafe.ReadUnaligned<int>((byte*)view + SharedMemoryIO.EXTENDED_SIZE_OFFSET);
+            if (_pumpFeature != null)
+            {
+                // The data lane whole, for the live feature report's answer,
+                // clamped as driver.c KeepLiveFeatureLocked clamps it.
+                int lane = Unsafe.ReadUnaligned<int>((byte*)view + 4);
+                lane = Math.Clamp(lane, 0, SharedMemoryIO.DATA_CAPACITY);
+                new ReadOnlySpan<byte>((byte*)view + SharedMemoryIO.DATA_OFFSET, lane).CopyTo(_pumpFeature);
+                _pumpFeatureSize = lane;
+                _pumpExtended = extSize > 0 && extSize <= SharedMemoryIO.EXTENDED_DATA_CAPACITY;
+            }
             if (extSize > 0 && extSize <= SharedMemoryIO.EXTENDED_DATA_CAPACITY)
             {
                 new ReadOnlySpan<byte>((byte*)view + SharedMemoryIO.EXTENDED_DATA_OFFSET, extSize).CopyTo(report);
@@ -646,7 +756,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 var data = new ReadOnlySpan<byte>((byte*)view + SharedMemoryIO.DATA_OFFSET, dataLen);
                 if (hasReportId)
                 {
-                    r[0] = _builder.InputReportId;
+                    r[0] = dataReportId;
                     data[..Math.Min(dataLen, expectedSize - 1)].CopyTo(r[1..]);
                 }
                 else
@@ -745,7 +855,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             return;
         }
 
-        if (ep.TransferType == 1) // isochronous → audio engine
+        if (ep.TransferType == 1 && Audio != null) // isochronous → audio engine
         {
             // The engine's own URB, since the packets and data arrived in the
             // reader's reused buffers and the URB waits for its due tick.
@@ -782,8 +892,18 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
 
                 QueuedFrame frame = default;
                 UsbipServer.Connection? conn = null;
+                uint delivered = 0;
+                bool ack = false;
                 lock (_hidLock)
                 {
+                    // The host's next read on the endpoint: the report the
+                    // last one carried is delivered.
+                    if (epAddr == _primaryInEndpoint && _ackPending)
+                    {
+                        ack = true;
+                        delivered = _ackSeq;
+                        _ackPending = false;
+                    }
                     // Only the primary HID interface's endpoint has frames.
                     // A secondary interface (the Deck's keyboard and mouse)
                     // parks its reads and never completes them, which is
@@ -794,12 +914,14 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     if (epAddr == _primaryInEndpoint && _frameQueue.Count > 0)
                     {
                         frame = _frameQueue.Dequeue();
+                        NoteCarriedLocked(frame.Seq);
                         // In order with the frames the input pump answers.
                         conn = HoldSendLocked();
                     }
                     else
                         PendingFor(epAddr).Enqueue(cmd.Seqnum);
                 }
+                if (ack) SharedMemoryIO.StoreDeviceDelivered(_index, delivered, _ackSignal);
                 if (frame.Buffer != null)
                 {
                     // The buffer is this thread's until it goes back.
@@ -860,7 +982,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     public void HandleUnlink(uint seqnum, uint victimSeqnum)
     {
         if (_stop) return;
-        var audio = Audio.TryUnlink(victimSeqnum, seqnum, Volatile.Read(ref _connection));
+        var audio = Audio?.TryUnlink(victimSeqnum, seqnum, Volatile.Read(ref _connection)) ?? UsbAudioEngine.UnlinkResult.NotFound;
         // An isochronous URB the audio pump is completing: the pump answers
         // the unlink once the URB's RET_SUBMIT is on the wire.
         if (audio == UsbAudioEngine.UnlinkResult.Completing) return;
@@ -963,8 +1085,12 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 case 0x00: // GET_STATUS
                 {
                     if (!deviceToHost) break;
-                    // Device: self-powered bit from bmAttributes 0xC0. Interface/endpoint: zero.
-                    ushort status = recipient == 0 ? (ushort)0x0001 : (ushort)0x0000;
+                    // Device: the self-powered bit. An authored device answers
+                    // self-powered, as the captured pads do, unless its
+                    // protocol reads the descriptor. A derived device reads
+                    // its configuration's bmAttributes (USB 2.0 9.4.5).
+                    bool selfPowered = !_derived || (Descriptors.ConfigurationDescriptor[7] & 0x40) != 0;
+                    ushort status = recipient == 0 && selfPowered ? (ushort)0x0001 : (ushort)0x0000;
                     Span<byte> d = stackalloc byte[2];
                     d[0] = (byte)(status & 0xFF);
                     d[1] = (byte)(status >> 8);
@@ -986,13 +1112,13 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     return;
                 }
                 case 0x0B: // SET_INTERFACE
-                    Audio.SetAltSetting((byte)(wIndex & 0xFF), (byte)(wValue & 0xFF));
+                    Audio?.SetAltSetting((byte)(wIndex & 0xFF), (byte)(wValue & 0xFF));
                     SendRetSubmit(cmd.Seqnum, 0, 0, null);
                     return;
                 case 0x0A: // GET_INTERFACE
                 {
                     Span<byte> d = stackalloc byte[1];
-                    d[0] = Audio.GetAltSetting((byte)(wIndex & 0xFF));
+                    d[0] = Audio?.GetAltSetting((byte)(wIndex & 0xFF)) ?? 0;
                     int n = Math.Min(1, (int)wLength);
                     SendRetSubmitSpan(cmd.Seqnum, 0, n, d[..n]);
                     return;
@@ -1034,7 +1160,9 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 return;
             }
 
-            // UAC1 feature-unit request: wIndex high byte is the entity.
+            // UAC1 feature-unit request: wIndex high byte is the entity. A
+            // device with no audio engine has no such unit.
+            if (Audio == null) { SendError(cmd.Seqnum, -UsbipProtocol.EPipe); return; }
             byte unitId = (byte)(wIndex >> 8);
             byte selector = (byte)(wValue >> 8);
             byte channel = (byte)(wValue & 0xFF);
@@ -1182,6 +1310,21 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     SendRetSubmitSpan(cmd.Seqnum, 0, n, _controlReply.AsSpan(0, n));
                     return;
                 }
+                if (reportType == 0x03 && _liveFeature != null
+                    && (!_usesReportIds || reportId == (byte)(_liveFeatureReport - 1)))
+                {
+                    // The live feature report of a derived device: the data
+                    // lane the protocol host last wrote, as far as the
+                    // request holds it (driver.c:3371-3386).
+                    int n;
+                    lock (_hidLock)
+                    {
+                        n = Math.Min(_liveFeatureSize, wLength);
+                        _liveFeature.AsSpan(0, n).CopyTo(_controlReply);
+                    }
+                    SendRetSubmitSpan(cmd.Seqnum, 0, n, _controlReply.AsSpan(0, n));
+                    return;
+                }
                 if (reportType == 0x03 && _engine != null)
                 {
                     // A live feature report: its program over the state
@@ -1281,11 +1424,12 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     {
         _configurationValue = 0;
         ResetAltSettings();
-        Audio.Clear();
+        Audio?.Clear();
         lock (_hidLock)
         {
             foreach (var q in _pendingInterruptIn.Values) q.Clear();
             ClearFrameQueue();
+            _ackPending = false;
         }
         ResetLayoutState();
         ResetProtocolState(portReset: true);
@@ -1304,7 +1448,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         foreach (var kv in Descriptors.Endpoints)
         {
             if (kv.Value.TransferType == 1)
-                Audio.ResetAltSetting(kv.Value.InterfaceNumber);
+                Audio?.ResetAltSetting(kv.Value.InterfaceNumber);
         }
     }
 

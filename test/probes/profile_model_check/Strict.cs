@@ -252,13 +252,14 @@ internal static class Strict
             new("i-bad-input-report.json", WithId("user-bad-input-report", o => o["inputReports"] = JsonNode.Parse(
                 "[{\"name\":\"r\",\"reportId\":\"0x01\",\"size\":8,\"send\":\"clock\",\"program\":[]}]")), "user-bad-input-report",
                 "Refused", "$.inputReports", "needs a stateBlock"),
-            // A USB/IP persona with a protocol and no usbConfiguration is
-            // refused for the configuration it lacks. At a00fb18e the check
-            // said a protocol applies to the usbip backend, which the
-            // profile names.
+            // A USB/IP persona with no usbConfiguration derives one HID
+            // interface, which has none of the endpoints its protocol names,
+            // so it is refused for the configuration it lacks. At a00fb18e
+            // the check said a protocol applies to the usbip backend, which
+            // the profile names.
             new("i-no-usb-configuration.json", Catalog("nintendo/switch2-pro-composite.json", "user-no-usb-configuration",
                 o => o.Remove("usbConfiguration")), "user-no-usb-configuration",
-                "Refused", "$.usbConfiguration", "is required for the usbip backend"),
+                "Refused", "$.usbConfiguration", "is required for this protocol"),
             // The same group with its key spelled through an escape, which
             // the reader decodes, in a file with no other escape: the load
             // still reads the group.
@@ -631,11 +632,23 @@ internal static class Strict
             return o.ToJsonString();
         }, "$.extendedReport.fields[6].initial");
         // A USB/IP persona with no protocol or WinUSB package is refused at
-        // load for the usbConfiguration or descriptor it lacks. At f00f0482
-        // each loaded and built, and was refused at create after the lease.
-        Add("a USB/IP persona with no usbConfiguration and no protocol", "steam-controller-composite", o =>
+        // load for the descriptor it lacks. At f00f0482 it loaded and built,
+        // and was refused at create after the lease. One with no
+        // usbConfiguration derives its device since 2.3.0, and a
+        // usbConfiguration's pins are refused at load where they do not fit.
+        Add("a derived presentation's pin that does not fit", "dualsense", o =>
         {
-            o.Remove("usbConfiguration");
+            o["usbConfiguration"] = JsonNode.Parse("{\"inEndpoint\":{\"address\":\"0x02\"}}");
+            return o.ToJsonString();
+        }, "$.usbConfiguration.inEndpoint.address");
+        Add("a pin beside authored descriptors", "steam-controller-composite", o =>
+        {
+            o["usbConfiguration"]!["hid"] = JsonNode.Parse("{\"interfaceNumber\":1}");
+            return o.ToJsonString();
+        }, "$.usbConfiguration.hid");
+        Add("a usbConfiguration on an Xbox profile the USB/IP backend has no function for", "xbox-360-wired", o =>
+        {
+            o["usbConfiguration"] = JsonNode.Parse("{\"busSpeed\":\"full\"}");
             return o.ToJsonString();
         }, "$.usbConfiguration");
         Add("a USB/IP persona with no descriptor and no protocol", "steam-controller-composite", o =>

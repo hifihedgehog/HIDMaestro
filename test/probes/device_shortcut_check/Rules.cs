@@ -195,8 +195,6 @@ internal static class Rules
             "Microsoft OS descriptors, a USB descriptor standard any device may serve, which the profile's data holds and the persona serves verbatim (UsbDescriptorSet.cs)"),
         new(new[] { "CheckMicrosoftOsFeature", "GetMicrosoftOsFeature" }, new[] { @"sdk\HIDMaestro.Core\Internal\Usbip\UsbDescriptorSet.cs" },
             "Microsoft OS descriptors, a USB descriptor standard any device may serve, which the profile's data holds and the persona serves verbatim"),
-        new(new[] { "MicrosoftSigned" }, new[] { @"sdk\HIDMaestro.Core\HMDriverSigning.cs" },
-            "HMDriverSigningRequirement.MicrosoftSigned: the signer Windows requires of a driver package on the machine (DriverSigningPolicy), not an impersonated device"),
         new(new[] { "steam" }, new[] { @"sdk\HIDMaestro.Core\Internal\VrDriverBuilder.cs" },
             "the Steam client's registry key, read only to find the library that holds SteamVR (VrDriverBuilder.cs:103)"),
         new(new[] { "steamRoot" }, new[] { @"sdk\HIDMaestro.Core\Internal\VrDriverBuilder.cs" },

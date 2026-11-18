@@ -37,6 +37,7 @@ internal static class UsbipBackend
 
         var server = UsbipServer.GetOrStart();
         SweepStaleOnce(server);
+        ThrowIfPortsFull();
 
         var device = new UsbipEmulatedDevice(profile, index, identity);
         if (identity != null)
@@ -45,7 +46,14 @@ internal static class UsbipBackend
         try
         {
             BeforeAttach?.Invoke(device);
-            device.SetVhciPortIfAttached(VhciClient.Attach("127.0.0.1", server.Port, device.BusId));
+            try { device.SetVhciPortIfAttached(VhciClient.Attach("127.0.0.1", server.Port, device.BusId)); }
+            catch (System.ComponentModel.Win32Exception) when (PortsFull(out _, out _))
+            {
+                // Another program took the last port between the count and
+                // the attach.
+                ThrowIfPortsFull();
+                throw;
+            }
             return new UsbipBackendHandle(server, device);
         }
         catch
@@ -62,6 +70,43 @@ internal static class UsbipBackend
             device.Dispose();
             throw;
         }
+    }
+
+    /// <summary>The USB 2.0 ports the host controller has: its
+    /// <c>NumberOfUsb20Ports</c> parameter, 30 when not set, held to 1 to
+    /// 254, as usbip-win2 0.9.8.1 reads it (drivers/ude/vhci.cpp,
+    /// get_usb_ports_cnt and set_usb_ports_cnt). Every device the SDK
+    /// attaches is full or high speed and takes one of them.</summary>
+    internal static int Usb20Ports()
+    {
+        try
+        {
+            using var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\usbip2_ude\Parameters");
+            if (k?.GetValue("NumberOfUsb20Ports") is int n) return Math.Clamp(n, 1, 254);
+        }
+        catch { }
+        return 30;
+    }
+
+    /// <summary>True when the host controller lists as many imports as it
+    /// has USB 2.0 ports, every program's counted.</summary>
+    private static bool PortsFull(out int ports, out int used)
+    {
+        ports = Usb20Ports();
+        used = 0;
+        try { used = VhciClient.GetImportedDevices().Count; } catch { return false; }
+        return used >= ports;
+    }
+
+    /// <summary>The named refusal of a create past the host controller's
+    /// ports, before the device is registered, so nothing is undone.</summary>
+    private static void ThrowIfPortsFull()
+    {
+        if (!PortsFull(out int ports, out int used)) return;
+        throw new HMResourceInUseException(
+            $"Every one of the USB/IP host controller's {ports} USB 2.0 ports holds a device ({used} attached, "
+          + "this program's and others'). Dispose a controller that runs on the USB/IP backend first.",
+            "a port of the USB/IP host controller", null);
     }
 
     /// <summary>Called on the creating thread after the device is

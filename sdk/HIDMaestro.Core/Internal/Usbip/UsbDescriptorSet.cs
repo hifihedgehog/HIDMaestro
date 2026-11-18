@@ -1,14 +1,15 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 
 namespace HIDMaestro.Internal.Usbip;
 
-/// <summary>The descriptor store for one emulated composite device
-/// (issue #39). Owns the verbatim blobs the profile carries (device,
-/// configuration, other-speed configuration), the profile's HID report
-/// descriptor, and the string table, and answers every GET_DESCRIPTOR
-/// with real-pad bytes.
+/// <summary>The descriptor store for one emulated USB device (issue #39).
+/// Owns the device, configuration and other-speed configuration blobs of
+/// the profile's presentation (<see cref="UsbPresentation"/>: authored
+/// verbatim or derived), the profile's HID report descriptor, and the
+/// string table, and answers every GET_DESCRIPTOR.
 ///
 /// <para>Construction validates the blobs against each other and against
 /// the structured <see cref="UsbConfigurationSpec"/>, because the blob is
@@ -56,6 +57,15 @@ internal sealed class UsbDescriptorSet
     /// also writes it into its flash image, where SDL reads it (issue
     /// #66).</summary>
     public string? SerialString => _serial;
+
+    /// <summary>The instance id Windows gives the device on the host
+    /// controller's hub, <c>USB\VID_vvvv&amp;PID_pppp\&lt;serial&gt;</c>: the
+    /// hub driver names a device by its serial when it serves one Windows
+    /// takes (no character below 0x21 or above 0x7F, and no comma). Null for
+    /// a device without such a serial, and for one whose units all carry the
+    /// same serial (<see cref="UsbConfigurationSpec.SharedSerial"/>), which
+    /// Windows names by its port instead.</summary>
+    public string? UsbInstanceId { get; }
 
     /// <summary>The identity's <see cref="DeviceIdentity.SerialVariant"/>,
     /// which varies a captured serial here and the captured text of an
@@ -165,8 +175,9 @@ internal sealed class UsbDescriptorSet
     {
         identity ??= DeviceIdentity.ForIndex(index);
         SerialVariant = identity.SerialVariant;
-        var cfg = profile.UsbConfiguration
-            ?? throw new ProfileDefectException("$.usbConfiguration", "is required for the usbip backend.");
+        // The authored blobs, or the ones the presentation derives from the
+        // profile, which then meet every check below by construction.
+        var cfg = UsbPresentation.Resolve(profile).Spec;
         CheckStructure(cfg);
         DeviceDescriptor = FromHex(cfg.DeviceDescriptorHex, "deviceDescriptor");
         ConfigurationDescriptor = FromHex(cfg.ConfigurationDescriptorHex, "configurationDescriptor");
@@ -236,6 +247,9 @@ internal sealed class UsbDescriptorSet
         _configurationName = profile.ConfigurationString;
         _manufacturer = profile.ManufacturerString;
         _product = profile.ProductString;
+        if (!cfg.SharedSerial && _iSerial != 0 && !string.IsNullOrEmpty(_serial)
+            && _serial.All(c => c > ' ' && c < (char)0x7F && c != ','))
+            UsbInstanceId = $@"USB\VID_{profile.VendorId:X4}&PID_{profile.ProductId:X4}\{_serial}";
 
         ushort profileVid = profile.VendorId, profilePid = profile.ProductId;
         if (VendorId != profileVid || ProductId != profilePid)

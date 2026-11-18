@@ -18,11 +18,11 @@
 // any problem the devnode shows as the verdict. A device that started is
 // checked for a driver whose range of protocols holds 4.
 //
-// On a machine whose Windows installs only driver packages Microsoft
-// signed (DriverSigningPolicy), and whose store holds no HIDMaestro
-// package, InstallDriver and a create's gate throw
-// HMDriverSigningException and run no deploy step. With a package in the
-// store the deploy is tried as on any machine.
+// On a machine whose Windows refuses HIDMaestro's driver package
+// (DriverSigningPolicy), and whose store holds no HIDMaestro package, the
+// UMDF2 InstallDriver and a create's gate throw HMDriverSigningException and
+// run no deploy step. With a package in the store the deploy is tried as on
+// any machine.
 //
 // The checks run the gate on machines of their own (DriverDeploy.Machine):
 // a driver store, a census and a lock the check gives, the deploy steps
@@ -43,7 +43,7 @@ internal static class Deploy
         Section(c, "the deploy lock", LockHandle);
         Section(c, "what HMDriverVersionException says", Cases);
         Section(c, "a refused create", RefusedCreate);
-        Section(c, "a Windows that installs only Microsoft-signed packages", SigningRefused);
+        Section(c, "a Windows that refuses HIDMaestro's package", SigningRefused);
         // The deploy refuses no holder (decision (c)), so the list of holders
         // that refusal named went with it. Until this check DriverDeploy
         // still carried Describe, with no caller.
@@ -67,15 +67,15 @@ internal static class Deploy
     static DriverDeploy.DriverStamp Stamp(int major, int minor, int patch, int build = 1) =>
         new(new DateTime(2026, 10, 1), new Version(major, minor, patch, build));
 
-    /// <summary>x64 with code integrity on and no WHQL enforcement, as the
-    /// two x64 test machines read on 2026-11-17.</summary>
-    static readonly HMDriverSigningStatus Installs = DriverSigningPolicy.StatusOf(
-        new DriverSigningPolicy.Inputs(0x1, false, false, System.Runtime.InteropServices.Architecture.X64));
+    /// <summary>x64 with code integrity on, as the two x64 test machines
+    /// read on 2026-11-17.</summary>
+    static readonly DriverSigningPolicy.Verdict Installs = DriverSigningPolicy.VerdictOf(
+        new DriverSigningPolicy.Inputs(0x1, false, System.Runtime.InteropServices.Architecture.X64));
 
-    /// <summary>Windows 11 on ARM64 with WHQL enforcement: the options the
-    /// Surface read on 2026-11-17.</summary>
-    static readonly HMDriverSigningStatus MicrosoftOnly = DriverSigningPolicy.StatusOf(
-        new DriverSigningPolicy.Inputs(0xF405, false, true, System.Runtime.InteropServices.Architecture.Arm64));
+    /// <summary>Windows 11 on ARM64: the options the Surface read on
+    /// 2026-11-17.</summary>
+    static readonly DriverSigningPolicy.Verdict Refusing = DriverSigningPolicy.VerdictOf(
+        new DriverSigningPolicy.Inputs(0xF405, true, System.Runtime.InteropServices.Architecture.Arm64));
 
     /// <summary>A machine: the two INFs' packages, this build's stamp, the
     /// census, and what the policy did.</summary>
@@ -93,7 +93,7 @@ internal static class Deploy
         /// <summary>What this machine's Windows requires of a driver
         /// package. A machine that installs HIDMaestro's unless a check
         /// says otherwise, whatever the machine the check runs on.</summary>
-        public HMDriverSigningStatus Signing_ = Installs;
+        public DriverSigningPolicy.Verdict Signing_ = Installs;
 
         public FakeMachine Holding(params DriverDeploy.DriverStamp[] both)
         {
@@ -129,7 +129,7 @@ internal static class Deploy
         }
         internal override void RecordPayload() => Manifest = Ours;
         internal override void PruneStaging() { }
-        internal override HMDriverSigningStatus Signing() => Signing_;
+        internal override DriverSigningPolicy.Verdict Signing() => Signing_;
 
         sealed class Nothing : IDisposable { public void Dispose() { } }
     }
@@ -182,44 +182,43 @@ internal static class Deploy
         string Threw(Action act)
         {
             try { act(); return "returned"; }
-            catch (HMDriverSigningException e) { return $"HMDriverSigningException, {e.Status.Requirement}"; }
+            catch (HMDriverSigningException) { return "HMDriverSigningException"; }
         }
 
-        c.Check("the two statuses the checks use differ as named (positive control)",
-                Installs.CanInstallDriver && !MicrosoftOnly.CanInstallDriver
-                && MicrosoftOnly.Requirement == HMDriverSigningRequirement.MicrosoftSigned && MicrosoftOnly.WhqlEnforcement,
-                $"{Installs.Requirement} / {MicrosoftOnly.Requirement}");
+        c.Check("the two verdicts the checks use differ as named (positive control)",
+                Installs.CanInstallDriver && !Refusing.CanInstallDriver && Refusing.Refuses,
+                $"{Installs.Refuses} / {Refusing.Refuses}");
         c.Run("an empty store: InstallDriver throws HMDriverSigningException and runs no deploy step", () =>
         {
-            var m = new FakeMachine { Signing_ = MicrosoftOnly };
+            var m = new FakeMachine { Signing_ = Refusing };
             string r = On(m, () => Threw(() => DriverDeploy.Run()));
-            return (r == "HMDriverSigningException, MicrosoftSigned" && !Stepped(m), $"{r}, [{Calls(m)}]");
+            return (r == "HMDriverSigningException" && !Stepped(m), $"{r}, [{Calls(m)}]");
         });
         c.Run("an empty store: a create's gate throws the same and runs no deploy step", () =>
         {
-            var m = new FakeMachine { Signing_ = MicrosoftOnly };
+            var m = new FakeMachine { Signing_ = Refusing };
             string r = On(m, () => Threw(() => Gate(Token)));
-            return (r == "HMDriverSigningException, MicrosoftSigned" && !Stepped(m), $"{r}, [{Calls(m)}]");
+            return (r == "HMDriverSigningException" && !Stepped(m), $"{r}, [{Calls(m)}]");
         });
         c.Run("an empty store: the question the constructor's prewarm asks answers yes", () =>
         {
-            var m = new FakeMachine { Signing_ = MicrosoftOnly };
+            var m = new FakeMachine { Signing_ = Refusing };
             bool stops = On(m, DriverDeploy.SigningStopsDeploy);
             return (stops, stops.ToString());
         });
-        c.Run("the exception's message is the status's explanation", () =>
+        c.Run("the exception's message is the neutral one, naming the backend that runs the controller", () =>
         {
-            var m = new FakeMachine { Signing_ = MicrosoftOnly };
+            var m = new FakeMachine { Signing_ = Refusing };
             string? message = On(m, () =>
             {
                 try { DriverDeploy.Run(); return null; }
                 catch (HMDriverSigningException e) { return e.Message; }
             });
-            return (message == MicrosoftOnly.Explanation, message ?? "no exception");
+            return (message == HMDriverSigningException.DefaultMessage, message ?? "no exception");
         });
         c.Run("a package in the store shows the machine took one: the deploy is tried", () =>
         {
-            var m = new FakeMachine { Signing_ = MicrosoftOnly }.Holding(Stamp(1, 12, 0));
+            var m = new FakeMachine { Signing_ = Refusing }.Holding(Stamp(1, 12, 0));
             bool stops = false;
             string r = On(m, () =>
             {
@@ -230,12 +229,12 @@ internal static class Deploy
         });
         c.Run("one INF's package alone in the store counts as a package", () =>
         {
-            var m = new FakeMachine { Signing_ = MicrosoftOnly };
+            var m = new FakeMachine { Signing_ = Refusing };
             m.Store["hidmaestro_xusb.inf"].Add(Stamp(1, 12, 0));
             bool stops = On(m, DriverDeploy.SigningStopsDeploy);
             return (!stops, stops.ToString());
         });
-        c.Run("a machine that installs a trusted publisher's package deploys onto an empty store (control)", () =>
+        c.Run("a machine that installs HIDMaestro's package deploys onto an empty store (control)", () =>
         {
             var m = new FakeMachine();
             bool stops = true;
