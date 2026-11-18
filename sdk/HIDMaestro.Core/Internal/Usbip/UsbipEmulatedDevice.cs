@@ -43,8 +43,8 @@ namespace HIDMaestro.Internal.Usbip;
 /// reads the configuration's bmAttributes, and a protocol runs in the
 /// controller's protocol host, not here.</para>
 ///
-/// <para>PID force feedback is not served here yet. The UMDF2 backend
-/// remains the PID path.</para>
+/// <para>A descriptor that declares the PID usage page gets the UMDF2
+/// driver's PID block (UsbipEmulatedDevice.Pid.cs).</para>
 ///
 /// <para>Isochronous endpoints route to <see cref="UsbAudioEngine"/>;
 /// completions come back on the pacing thread and are serialized onto the
@@ -334,6 +334,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             if (protocol.BuildsReports) _engine.SetStateBlock(profile.StateBlockAtRest());
         }
         _stubs = FeatureStubTable.From(profile, index, Descriptors.SerialString, Descriptors.SerialVariant);
+        // The PID block (UsbipEmulatedDevice.Pid.cs): on a derived device by
+        // the driver's own rule, on an authored one only for a descriptor
+        // that declares the PID usage page.
+        _pidCandidate = PidCandidatesFor(profile.GetDescriptorBytes(), requirePidPage: !_derived);
         _primaryInEndpoint = 0;
         foreach (var kv in Descriptors.Endpoints)
         {
@@ -1271,6 +1275,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             {
                 if (_engine != null && ProtocolGetReport(cmd, reportType, reportId, wLength))
                     return;
+                // The PID State report, ahead of the input reports, as the
+                // driver answers it ahead of its input cache.
+                if (reportType == 0x01 && _pidCandidate != null && TryAnswerPidState(cmd.Seqnum, reportId, wLength))
+                    return;
                 if (reportType == 0x01)
                 {
                     int length;
@@ -1349,6 +1357,8 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     // serves, stalls, as a real device does.
                     bool notify = false;
                     int n = _stubs?.Lookup(reportId, wLength, out notify) ?? -1;
+                    // No entry: the PID block, as the driver goes on to it.
+                    if (n == -1 && _pidCandidate != null) { AnswerPidFeature(cmd.Seqnum, reportId, wLength); return; }
                     if (n < 0) { SendError(cmd.Seqnum, -UsbipProtocol.EPipe); return; }
                     if (notify) PublishOutput(SourceHidFeatureRead, reportId, ReadOnlySpan<byte>.Empty);
                     SendRetSubmitSpan(cmd.Seqnum, 0, n, _stubs!.Answer(n));
@@ -1386,6 +1396,9 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 // from the report ID for a descriptor that declares report
                 // IDs, from the first data byte for one that declares none.
                 if (reportType == 0x03) _stubs?.OnSetFeature(reportId, payload);
+                // The PID block acts on the report before it is published,
+                // as the driver acts on it before PublishOutput.
+                if (_pidCandidate != null) PidOnSetReport(reportType, rid, data);
                 // After the answer table has read the write, the command goes
                 // to the ring as every protocol's commands do: as the host
                 // sent it, as the report its rule emits, or not at all when

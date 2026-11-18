@@ -1041,6 +1041,21 @@ internal static partial class SharedMemoryIO
             (ushort)Marshal.ReadInt16(view, PID_OFFSET_BL_RAMAVAIL));
     }
 
+    /// <summary>The lock the PID state sections are made and unmapped
+    /// under. A USB/IP device reads and writes its controller's section only
+    /// while it holds it, so a request on the connection's thread that
+    /// outlives the controller's teardown touches no unmapped view
+    /// (UsbipEmulatedDevice.Pid.cs).</summary>
+    internal static object PidStateLock => s_pidStateViews;
+
+    /// <summary>The PID state section's view for this index, or
+    /// <see cref="IntPtr.Zero"/> until the program's first PublishPid* call
+    /// makes it: the in-process form of the driver's EnsurePidStateMapping,
+    /// which opens the section by name and fails while it does not exist.
+    /// Caller holds <see cref="PidStateLock"/>.</summary>
+    internal static IntPtr PidStateViewLocked(int controllerIndex) =>
+        s_pidStateViews.TryGetValue(controllerIndex, out IntPtr v) ? v : IntPtr.Zero;
+
     /// <summary>Returns the signaling event handle for a controller's input
     /// section, or <see cref="IntPtr.Zero"/> if no mapping has been created
     /// for that index yet. Used by <see cref="HMController"/> to cache the

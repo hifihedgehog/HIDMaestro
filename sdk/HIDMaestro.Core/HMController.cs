@@ -654,8 +654,10 @@ public sealed partial class HMController : IDisposable
 
         // Issue #67. A keyboard or mouse profile gets every frame delivered,
         // and so does an "other" profile whose descriptor is a mouse or a
-        // keyboard, the shape a consumer built before the types existed.
-        if (usbipHandle == null && profile.Inner.HasDescriptor)
+        // keyboard, the shape a consumer built before the types existed. On
+        // either backend: a USB/IP device acknowledges delivery from its side
+        // as the UMDF2 driver does (UsbipEmulatedDevice, NoteCarriedLocked).
+        if (profile.Inner.HasDescriptor)
         {
             var kbm = profile.Inner.GetOrBuildKeyboardMousePacker();
             if (kbm.HasMouse || kbm.HasKeyboard || kbm.HasConsumer) _kbm = kbm;
