@@ -276,7 +276,7 @@ internal static partial class Program
                 int sentBefore;
                 lock (packets) sentBefore = packets.Count(p => p.Source == HMOutputSource.HidOutput);
                 bool rumbled = SDL_RumbleGamepad(pad, 0xFFFF, 0x8000, 1000);
-                // A profile that decodes its motors raises them; any other
+                // A profile that decodes its motors raises them. Any other
                 // shows SDL's rumble write as the output report it is.
                 bool decodes = form.Inner.ExtendedOutputReport?.Fields?.Any(f => f.Semantic is "leftMotor" or "rightMotor") == true
                     || form.Inner.GetOrCompileModel().Decoders.Any(d => d.Semantics.Contains("leftMotor"));
