@@ -27,11 +27,11 @@
 
 **Virtual game controllers, keyboards and mice that look like real hardware to Windows. No kernel driver. No network. No reboot.**
 
-HIDMaestro creates virtual controllers that present the exact identity of real hardware across the whole Windows input stack at once. Pick from 339 built-in profiles, 103 of them keyboards and mice, or point it at a device you own and clone it. DirectInput, XInput, SDL3, the browser Gamepad API, and WGI/GameInput all see the VID/PID, product name, HID descriptor, axis and button layout, and bus type the profile defines. A virtual keyboard or mouse reaches Raw Input and the desktop as the device it copies.
+HIDMaestro creates virtual controllers that present the exact identity of real hardware across the whole Windows input stack at once. Pick from 340 built-in profiles, 103 of them keyboards and mice, or point it at a device you own and clone it. DirectInput, XInput, SDL3, the browser Gamepad API, and WGI/GameInput all see the VID/PID, product name, HID descriptor, axis and button layout, and bus type the profile defines. A virtual keyboard or mouse reaches Raw Input and the desktop as the device it copies.
 
 It runs entirely in user mode (UMDF2), signed with a locally trusted self-signed certificate. No EV certificate, no `testsigning` boot mode, no kernel driver that can blue-screen the machine.
 
-<p align="center"><b>339</b> device profiles · <b>20+</b> projects shipping it · <b>~35 µs</b> median single-press · <b>0</b> kernel drivers</p>
+<p align="center"><b>340</b> device profiles · <b>20+</b> projects shipping it · <b>~35 µs</b> median single-press · <b>0</b> kernel drivers</p>
 
 ```csharp
 using var ctx = new HMContext();
@@ -66,7 +66,7 @@ bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestroTest.exe emulate xbox-
 # Several controllers at once, any mix of profiles
 HIDMaestroTest.exe emulate xbox-series-xs-bt xbox-360-wired dualsense
 
-# List or search the 339 profiles
+# List or search the 340 profiles
 HIDMaestroTest.exe list
 HIDMaestroTest.exe search thrustmaster
 
@@ -357,7 +357,7 @@ DirectInput, XInput, SDL3, the browser Gamepad API, and WGI/GameInput all see on
 - **Reports at rest, as the hardware sends them.** A device that reports on its own clock repeats its last frame at rest: 21 catalog profiles, the DualSense and DualShock 4 families, the Steam personas, OpenFFBoard and five Thrustmaster wheels, each at its real period, from 1 ms to 250 ms. A profile's `stream` key sets it.
 - **Hot-plug.** Create and remove controllers with no reboot. Live-swap a controller's profile mid-session. A warm single-controller create takes about 220 ms: a DualShock 4 in 217 ms at the median of 30, against 467 ms on v1.12.0 on the same machine.
 - **A throwing handler stays contained.** An exception a handler throws on one of the SDK's own threads is dropped and the next handler runs. The nine events covered are `OutputReceived`, `OutputDecoded` and `KeyboardLedsChanged`, a port's `OutputChanged`, the USB audio events and `HapticReceived`. Set `HIDMAESTRO_DIAG=1` to log each dropped exception.
-- **Validated across every API and both ends of the spectrum.** A 104-scenario regression battery checks DirectInput, XInput, SDL3/HIDAPI, the browser Gamepad API, WGI and Raw Input on every change. It runs on the development laptop, a 16-core Lenovo Legion Pro 7 on Windows 11, and on a 4-core Intel Celeron Windows 10 mini PC, with the latest results under the battery below.
+- **Validated across every API and both ends of the spectrum.** A 105-scenario regression battery checks DirectInput, XInput, SDL3/HIDAPI, the browser Gamepad API, WGI and Raw Input on every change. It runs on the development laptop, a 16-core Lenovo Legion Pro 7 on Windows 11, and on a 4-core Intel Celeron Windows 10 mini PC, with the latest results under the battery below.
 
 ### Validation
 
@@ -372,7 +372,7 @@ Tested on Windows 11 IoT Enterprise LTSC 2024 (build 26200) and Windows 10 IoT E
 
 The Xbox Series BT row shows 16 buttons because Windows' `xinputhid` synthesizes a 16-button layout over the 12-button source descriptor. [Details](docs/INTERNALS.md#validation-results).
 
-A 104-scenario [regression battery](test/regression/regression_battery.ps1) drives every create / swap / remove / force-kill sequence, the FFB round-trip, the Sony vendor-blob encode/decode, the composite USB personas end to end through the real USB stack, the battery reply a pad gives XInput, the device identity of every family across nine lives, the driver catalog for both architectures, the 2026 Steam Controller persona against Steam's own firmware updater, the DualShock 3 and 4 reports against SDL, Linux and RPCS3, the Switch 2 Pro Controller persona against a capture of a real pad, SDL and the Steam client, the Switch Pro Controller against SDL3's Bluetooth init and a real pad's idle stream, the SInput personas against SDL's SInput driver, the registry keys a virtual shares with real devices, what WGI reads from a virtual pad, every keyboard and mouse through Raw Input, programs side by side with peers built on v1.12.0 and v1.11.0, NativeAOT and single-file apps, and the Wii U GameCube adapter against Dolphin, Slippi and SDL, the device code against recordings of the code it replaces, every report program three ways, the protocol engine and device clock, profiles and models as data, the version contract on the live driver, a Joy-Con built from the Switch Pro's mechanisms, every raw value back through the SDK, and descriptors against the captures they come from, and removing HIDMaestro from a machine, verifying no PnP devnodes are left behind. On the development laptop, a Lenovo Legion Pro 7 16AFR10H with a 16-core AMD Ryzen 9 9955HX3D, 64 GB of DDR5-5600 and an NVIDIA GeForce RTX 5080 Laptop GPU on Windows 11 build 26200, the 2.2.0 release build passed all 102 scenarios in 30 minutes. The 4-core Intel Celeron J4125 Windows 10 mini PC, the low end of the performance and OS spectrum, was not reachable for this release, so its half of the battery did not run. On 2.1.0 there, 97 passed and 4 skipped in 42 minutes, leaving out the checks that need a Steam client, a desktop session or Windows Sandbox.
+A 105-scenario [regression battery](test/regression/regression_battery.ps1) drives every create / swap / remove / force-kill sequence, the FFB round-trip, the Sony vendor-blob encode/decode, the composite USB personas end to end through the real USB stack, the battery reply a pad gives XInput, the device identity of every family across nine lives, the driver catalog for both architectures, the 2026 Steam Controller persona against Steam's own firmware updater, the DualShock 3 and 4 reports against SDL, Linux and RPCS3, the Switch 2 Pro Controller persona against a capture of a real pad, SDL and the Steam client, the Switch Pro Controller against SDL3's Bluetooth init and a real pad's idle stream, the SInput personas against SDL's SInput driver, the registry keys a virtual shares with real devices, what WGI reads from a virtual pad, every keyboard and mouse through Raw Input, programs side by side with peers built on v1.12.0 and v1.11.0, NativeAOT and single-file apps, and the Wii U GameCube adapter against Dolphin, Slippi and SDL, the device code against recordings of the code it replaces, every report program three ways, the protocol engine and device clock, profiles and models as data, the version contract on the live driver, a Joy-Con built from the Switch Pro's mechanisms, every raw value back through the SDK, and descriptors against the captures they come from, and removing HIDMaestro from a machine, verifying no PnP devnodes are left behind. On the development laptop, a Lenovo Legion Pro 7 16AFR10H with a 16-core AMD Ryzen 9 9955HX3D, 64 GB of DDR5-5600 and an NVIDIA GeForce RTX 5080 Laptop GPU on Windows 11 build 26200, the 2.2.0 release build passed all 102 scenarios in 30 minutes. The 4-core Intel Celeron J4125 Windows 10 mini PC, the low end of the performance and OS spectrum, was not reachable for this release, so its half of the battery did not run. On 2.1.0 there, 97 passed and 4 skipped in 42 minutes, leaving out the checks that need a Steam client, a desktop session or Windows Sandbox.
 
 Full device-tree dumps, HIDAPI enumeration logs, per-profile results, and startup/teardown timing are in [docs/INTERNALS.md](docs/INTERNALS.md#validation-results).
 
@@ -541,7 +541,7 @@ The hands hold real SteamVR hand roles, serve SteamVR Input through a full input
 | Installs without test-signing mode | **Yes** | Yes | Yes | Yes | No (ships test-signed) |
 | EV certificate for new builds | **No** | No (uses signed usbip-win2) | Yes ($300+/yr) | Yes | No (OV cert for x64) |
 | Network play | **App layer via consumers (PadForge Remote Link), zero local penalty** | In the driver: +1-5 ms wired, +10-50 ms Wi-Fi | No | No | No |
-| Identity per controller | **Exact, 339 profiles** | 6 fixed device types | 2 fixed types | Fixed "vJoy Device" | 4 presets, or raw descriptor |
+| Identity per controller | **Exact, 340 profiles** | 6 fixed device types | 2 fixed types | Fixed "vJoy Device" | 4 presets, or raw descriptor |
 | Bus type fidelity | **Per-profile, incl. Bluetooth** | USB only (USBIP) | USB only | USB only | USB only |
 | Add a new device | **JSON file, or capture one you own** | Write Go (a few hundred lines/device) | N/A | N/A | Write C, or raw descriptor |
 | Local single-press latency | **~35 µs measured** | 168 µs published (localhost) | N/A | N/A | Not published |
