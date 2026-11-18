@@ -178,11 +178,16 @@ internal static unsafe partial class Program
                     // (lane GIP's check in Live.cs, for each identity).
                     string? gipHid = InterfaceUnder(s_hidInterface, instance);
                     int gipOut = gipHid == null ? 0 : HidOutputLength(gipHid);
-                    Motor(engine, $"{id}: HidD_SetOutputReport(triggers 80 and 30, motors 100 and 50) on the HID child",
-                          () => gipHid == null ? 2u : HidSetOutput(gipHid, Haptics(gipHid, gipOut, 80, 30, 100, 50)),
-                          c => (c[5] & 0x0F) == 0x0F && c[6] == 80 && c[7] == 30 && c[8] == 100 && c[9] == 50);
-                    Motor(engine, $"{id}: HidD_SetOutputReport at rest on the HID child",
-                          () => gipHid == null ? 2u : HidSetOutput(gipHid, Haptics(gipHid, gipOut, 0, 0, 0, 0)), c => c[6] == 0 && c[7] == 0 && c[8] == 0 && c[9] == 0);
+                    // The handle stays open while the effect plays, as a
+                    // program's does (Live.cs).
+                    using (var handle = gipHid == null ? null : HidHandle.Open(gipHid))
+                    {
+                        Motor(engine, $"{id}: HidD_SetOutputReport(triggers 80 and 30, motors 100 and 50) on the HID child",
+                              () => handle == null ? 2u : handle.SetOutput(Haptics(gipHid!, gipOut, 80, 30, 100, 50)),
+                              c => (c[5] & 0x0F) == 0x0F && c[6] == 80 && c[7] == 30 && c[8] == 100 && c[9] == 50);
+                        Motor(engine, $"{id}: HidD_SetOutputReport at rest on the HID child",
+                              () => handle == null ? 2u : handle.SetOutput(Haptics(gipHid!, gipOut, 0, 0, 0, 0)), c => c[6] == 0 && c[7] == 0 && c[8] == 0 && c[9] == 0);
+                    }
                     var motors = engine.SnapshotLog().Where(x => x.Command.Length >= 13 && x.Command[0] == 0x09).Select(x => x.Command).ToList();
                     bool raised;
                     lock (raw) raised = motors.Count > 0 && motors.All(m => raw.Any(o => o.Id == m[5] && o.Data.AsSpan().SequenceEqual(m.AsSpan(6, 7))));
@@ -246,7 +251,8 @@ internal static unsafe partial class Program
             WaitUntil(() => (hid = InterfaceUnder(s_hidInterface, parent)) != null, 30_000);
             Check($"{profile.Id}: parity, the UMDF2 form has its HID interface", hid != null, hid ?? parent);
             if (hid == null) return;
-            uint code = HidSetOutput(hid, Haptics(hid, HidOutputLength(hid), 80, 30, 100, 50));
+            using var handle = HidHandle.Open(hid);
+            uint code = handle?.SetOutput(Haptics(hid, HidOutputLength(hid), 80, 30, 100, 50)) ?? 2u;
             bool arrived = WaitUntil(() => { lock (got) return got.Any(o => o.Id == 0x0F && o.Data.Length >= 4 && o.Data[0] == 80 && o.Data[1] == 30 && o.Data[2] == 100 && o.Data[3] == 50); }, 3_000);
             string seen;
             lock (got) seen = string.Join(" | ", got.Select(o => $"{o.Id:X2} {Hex(o.Data)}"));
