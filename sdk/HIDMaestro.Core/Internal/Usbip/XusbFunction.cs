@@ -407,8 +407,8 @@ internal sealed class XusbFunctionSpec
     [JsonPropertyName("report")]
     public ExtendedReportSpec? Report { get; set; }
 
-    /// <summary>Messages the reporting interface sends, in order, when the
-    /// host sets the configuration.</summary>
+    /// <summary>Messages the reporting interface sends, in order, on its
+    /// first reads after the device is attached.</summary>
     [JsonPropertyName("startMessages")]
     public List<XusbMessageSpec>? StartMessages { get; set; }
 

@@ -48,7 +48,7 @@ internal static unsafe partial class Program
             var status = cl.ControlIn(0x80, 0x00, 0, 0, 2);
             Check("GET_STATUS reads bus-powered, as bmAttributes 0xA0 says", status.Status == 0 && status.Data.AsSpan().SequenceEqual(new byte[] { 0, 0 }), Hex(status.Data));
 
-            Console.WriteLine("\n-- the first slot announces its pad once configured --");
+            Console.WriteLine("\n-- the first slot announces its pad on its first reads --");
             var link = XusbFunction.Bytes(rx.StartMessages[1], serial, XusbFunction.SubType(p));
             Check("SET_CONFIGURATION(1) acks", cl.ControlOut(0x00, 0x09, 1, 0, Array.Empty<byte>()).Status == 0);
             var first = ReadIn(cl, 1);
@@ -107,6 +107,10 @@ internal static unsafe partial class Program
                    new byte[] { 0x00, 0x00, 0x08, 0x46, 0, 0, 0, 0, 0, 0, 0, 0 }, new byte[] { 0, 6, 0, 0, 1 });
             Packet("power off 00 00 08 C0 is taken and carried nowhere",
                    new byte[] { 0x00, 0x00, 0x08, 0xC0, 0, 0, 0, 0, 0, 0, 0, 0 }, null);
+            Packet("a header-only controller request 00 00 00 40 is taken and carried nowhere",
+                   new byte[] { 0x00, 0x00, 0x00, 0x40, 0, 0, 0, 0, 0, 0, 0, 0 }, null);
+            Packet("a voice device request 01 03 09 01 is taken and carried nowhere",
+                   new byte[] { 0x01, 0x03, 0x09, 0x01, 0, 0, 0, 0, 0, 0, 0, 0 }, null);
         }
         catch (Exception e) { Check("the receiver's wire part ran to its end", false, e.ToString()); }
         finally

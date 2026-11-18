@@ -499,8 +499,10 @@ static class XusbWgiSingleCheck
                     // this create: its path names its instance.
                     string? path = null;
                     var arrival = System.Diagnostics.Stopwatch.StartNew();
+                    // A wireless pad's device is the receiver, whose PID is
+                    // not the pad's: any USB device's interface that arrived.
                     while ((path = XusbInterfaces().FirstOrDefault(s => !xusbBefore.Contains(s)
-                                && s.Contains($"usb#vid_{Vid:x4}&pid_{Pid:x4}#", StringComparison.OrdinalIgnoreCase))) == null
+                                && s.Contains($"usb#vid_{Vid:x4}&pid_", StringComparison.OrdinalIgnoreCase))) == null
                            && arrival.ElapsedMilliseconds < 10_000) Thread.Sleep(25);
                     string usb = path == null ? "" : InstanceOf(path);
                     using var k = usb.Length == 0 ? null : Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{usb}");
@@ -533,7 +535,11 @@ static class XusbWgiSingleCheck
                     if (c2.Gamepads > 1 || c2.Raw > 1) break;
                 }
                 counts = WgiCounts(bench);
-                Check("WGI shows exactly ONE Gamepad for the virtual", counts.Gamepads == 1,
+                // A Gamepad only for a pad WGI classes as one: Windows lists
+                // an XUSB wheel as a RawGameController alone, as it lists
+                // the retail wheel. Never two.
+                Check(c.Backend == HMBackend.Usbip ? "WGI shows at most ONE Gamepad for the virtual" : "WGI shows exactly ONE Gamepad for the virtual",
+                      c.Backend == HMBackend.Usbip ? counts.Gamepads <= 1 : counts.Gamepads == 1,
                       $"gamepads={counts.Gamepads}");
                 Check("WGI shows exactly ONE RawGameController", counts.Raw == 1,
                       $"raw={counts.Raw}");
@@ -542,6 +548,8 @@ static class XusbWgiSingleCheck
                 foreach (var s in xusbIfs) Console.WriteLine($"       {s}");
                 if (counts.Raw != 1)
                 {
+                    foreach (var r in WgiPins.Raws())
+                        Console.WriteLine($"       every raw: {r.HardwareVendorId:X4}:{r.HardwareProductId:X4} '{r.DisplayName}' id={r.NonRoamableId}");
                     // Name the impostors: NonRoamableId embeds the backing
                     // device interface path, which says WHICH two devices
                     // WGI is holding, instead of leaving that to argument.

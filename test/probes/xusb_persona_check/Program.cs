@@ -253,14 +253,16 @@ internal static unsafe partial class Program
               && m.OutputPackets[2] is { Packet: null, Replies.Length: 0 } level && level.Match.SequenceEqual(new byte[] { 0x02 }));
         var rr = rx.OutputPackets;
         Check("the receiver's rules: a data link request answered 08 80 and the link packet, other requests 08 80, empty slots 08 00, power off taken, "
-              + "the LED 00 00 08 4P to {0, P, 0, 0, 1}, rumble 00 01 0F C0 00 L R to {0, 0, L, R, 2}",
-              rr.Length == 6
+              + "the LED 00 00 08 4P to {0, P, 0, 0, 1}, header-only and voice requests taken, rumble 00 01 0F C0 00 L R to {0, 0, L, R, 2}",
+              rr.Length == 8
               && rr[0].Match.SequenceEqual(new byte[] { 0x08, 0x00 }) && rr[0].Replies.Length == 2 && rr[0].Packet == null
               && rr[1].Match.SequenceEqual(new byte[] { 0x08 }) && rr[1].Replies.Length == 1 && rr[1].Interfaces == null
               && rr[2].Interfaces!.SequenceEqual(new byte[] { 2, 4, 6 }) && rr[2].Replies[0].Template.SequenceEqual(new byte[] { 0x08, 0x00 })
               && rr[3].Match.SequenceEqual(new byte[] { 0x00, 0x00, 0x08, 0xC0 }) && rr[3].Packet == null && rr[3].Replies.Length == 0
               && rr[4].Packet!.SequenceEqual(new byte[] { 0, 0, 0, 0, 1 }) && rr[4].Copies.SequenceEqual(new[] { (3, 1, (byte)0x0F) })
-              && rr[5].Match.SequenceEqual(new byte[] { 0x00, 0x01, 0x0F, 0xC0 }) && rr[5].Copies.SequenceEqual(new[] { (5, 2, (byte)0xFF), (6, 3, (byte)0xFF) }));
+              && rr[5].Match.SequenceEqual(new byte[] { 0x00, 0x00 }) && rr[5].Packet == null && rr[5].Replies.Length == 0
+              && rr[6].Match.SequenceEqual(new byte[] { 0x01 }) && rr[6].Packet == null && rr[6].Replies.Length == 0
+              && rr[7].Match.SequenceEqual(new byte[] { 0x00, 0x01, 0x0F, 0xC0 }) && rr[7].Copies.SequenceEqual(new[] { (5, 2, (byte)0xFF), (6, 3, (byte)0xFF) }));
 
         Console.WriteLine("\n-- refusals --");
         var wired = catalog.First(x => x.Id == ProfileId);

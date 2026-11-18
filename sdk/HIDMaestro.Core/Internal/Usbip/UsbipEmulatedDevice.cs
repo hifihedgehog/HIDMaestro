@@ -517,7 +517,16 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         // messages a function had waiting.
         ResetLayoutState();
         ResetProtocolState();
-        if (_messages != null) lock (_hidLock) _messages.Clear();
+        if (_messages != null)
+        {
+            lock (_hidLock) _messages.Clear();
+            // A function that announces itself, as a receiver announces the
+            // pad on its first slot, sends its start messages on the
+            // reporting interface's first reads. Windows reads that
+            // endpoint once the device is configured.
+            if (_startMessages is { Length: > 0 } start)
+                foreach (var m in start) QueueMessage(_primaryInEndpoint, m);
+        }
         // Set before the import's reply goes out, on the reader that then
         // serves the import's requests.
         _loggedSetups = DeviceOrchestrator.DiagEnabled ? new HashSet<ulong>() : null;
@@ -1260,10 +1269,6 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 case 0x09: // SET_CONFIGURATION
                     _configurationValue = (byte)(wValue & 0xFF);
                     ResetAltSettings();
-                    // A function that announces itself sends its start
-                    // messages on the reporting interface once configured.
-                    if (_startMessages is { Length: > 0 } start && _configurationValue != 0)
-                        foreach (var m in start) QueueMessage(_primaryInEndpoint, m);
                     SendRetSubmit(cmd.Seqnum, 0, 0, null);
                     return;
                 case 0x08: // GET_CONFIGURATION
