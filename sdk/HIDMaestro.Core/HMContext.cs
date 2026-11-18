@@ -106,7 +106,7 @@ public sealed class HMContext : IDisposable
         // case where the consumer's foreground InstallDriver fires before
         // prewarm completes. Catches per-task so one failure doesn't kill
         // the rest.
-        System.Threading.Tasks.Task.Run(() =>
+        var staging = System.Threading.Tasks.Task.Run(() =>
         {
             try { _ = Internal.EmbeddedManifest.Sha256Hex; } catch { }
             // The backend InstallDriver installs decides what to stage. It is
@@ -146,11 +146,11 @@ public sealed class HMContext : IDisposable
             if (installsDriver)
                 try { Internal.DriverBuilder.IsDriverInstalled(); } catch { }
         });
-        System.Threading.Tasks.Task.Run(() =>
+        var catalog = System.Threading.Tasks.Task.Run(() =>
         {
             try { _ = Internal.ProfileDatabase.LoadEmbedded(); } catch { }
         });
-        System.Threading.Tasks.Task.Run(() =>
+        var service = System.Threading.Tasks.Task.Run(() =>
         {
             // GameInputSvc serves the controllers of both backends: WGI and
             // GameInput read a USB/IP pad through it as they read a UMDF2
@@ -158,7 +158,14 @@ public sealed class HMContext : IDisposable
             try { Internal.DeviceOrchestrator.PrewarmGameInputService(); }
             catch { }
         });
+        Prewarmed = System.Threading.Tasks.Task.WhenAll(staging, catalog, service);
     }
+
+    /// <summary>Completes when the constructor's warm-up tasks have all
+    /// ended. Each catches its own failures, so it never faults.
+    /// driver_signing_check (S104) waits on it before it reads what the
+    /// warm-up left on a machine that refuses the package.</summary>
+    internal System.Threading.Tasks.Task Prewarmed { get; }
 
     /// <summary>The backend this context's creates default to, as it was
     /// given: <see cref="HMBackend.Auto"/> unless the context was built
@@ -168,10 +175,14 @@ public sealed class HMContext : IDisposable
     /// <summary>What <see cref="HMBackend.Auto"/> resolves to on this
     /// machine for a profile both backends present:
     /// <see cref="HMBackend.Umdf2"/> where this build carries the driver for
-    /// the machine's architecture and Windows installs its package, else
-    /// <see cref="HMBackend.Usbip"/> where it carries the USB/IP transport.
+    /// the machine's architecture and Windows installs its package, or this
+    /// build's driver is installed whole already, else
+    /// <see cref="HMBackend.Usbip"/> where the build carries either
+    /// payload. A build that carries the driver alone then names the
+    /// USB/IP transport it lacks rather than a driver Windows refuses.
     /// Windows on ARM64 and Windows in S mode, which do not install
-    /// HIDMaestro's package, read <see cref="HMBackend.Usbip"/>. Needs no
+    /// HIDMaestro's package, read <see cref="HMBackend.Usbip"/> unless this
+    /// build's driver is installed there already. Needs no
     /// elevation and changes nothing. The environment variable
     /// <c>HIDMAESTRO_BACKEND</c>, <c>umdf2</c> or <c>usbip</c>, read once per
     /// process, replaces the answer, for diagnostics.</summary>

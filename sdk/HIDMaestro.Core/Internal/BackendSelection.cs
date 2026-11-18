@@ -58,21 +58,24 @@ internal static class BackendSelection
 
     /// <summary>What Auto resolves to on this machine for a profile both
     /// backends present: UMDF2 where the build carries the driver for this
-    /// architecture and Windows installs its package, else USB/IP where the
-    /// build carries the transport, else UMDF2, so the create names the
-    /// driver the build lacks (<see cref="HMPayloadMissingException"/>).
+    /// architecture and Auto can run it without an import Windows refuses
+    /// (<see cref="DriverDeploy.AutoAvoidsDriver"/>). Else USB/IP whenever
+    /// the build carries either payload: a build without the transport then
+    /// names the transport it lacks (<see cref="HMPayloadMissingException"/>)
+    /// rather than a driver Windows refuses. A build that carries neither
+    /// resolves to UMDF2 and names the driver.
     /// <see cref="OverrideVariable"/> replaces the answer.</summary>
     internal static HMBackend Machine => Override ?? MachineRule(
         HMBuildInfo.Carries(HMPayload.Driver, RuntimeInformation.OSArchitecture),
         HMBuildInfo.Carries(HMPayload.UsbipTransport, RuntimeInformation.OSArchitecture),
-        () => DriverDeploy.SigningStopsDeploy());
+        () => DriverDeploy.AutoAvoidsDriver());
 
-    /// <summary>The machine rule over its inputs. <paramref name="signingStops"/>
+    /// <summary>The machine rule over its inputs. <paramref name="avoidsDriver"/>
     /// is asked only when the build carries the driver.</summary>
-    internal static HMBackend MachineRule(bool carriesDriver, bool carriesTransport, Func<bool> signingStops)
+    internal static HMBackend MachineRule(bool carriesDriver, bool carriesTransport, Func<bool> avoidsDriver)
     {
-        if (carriesDriver && !signingStops()) return HMBackend.Umdf2;
-        return carriesTransport ? HMBackend.Usbip : HMBackend.Umdf2;
+        if (carriesDriver && !avoidsDriver()) return HMBackend.Umdf2;
+        return carriesDriver || carriesTransport ? HMBackend.Usbip : HMBackend.Umdf2;
     }
 
     /// <summary>The backend a request names: the create's when it is not
@@ -114,16 +117,22 @@ internal static class BackendSelection
     }
 
     /// <summary>Why <paramref name="profile"/>'s data has no presentation
-    /// on <paramref name="backend"/>, or null when it has one. The machine
-    /// plays no part.</summary>
-    internal static string? NotSupportedReason(ControllerProfile profile, HMBackend backend)
+    /// on <paramref name="backend"/>, or null when it has one. For
+    /// <see cref="HMBackend.Auto"/> the answer is for the backend Auto
+    /// resolves to on this machine (<see cref="Machine"/>), so it is the
+    /// answer an Auto create gets. For Umdf2 and Usbip the machine plays no
+    /// part.</summary>
+    internal static string? NotSupportedReason(ControllerProfile profile, HMBackend backend) =>
+        NotSupportedReason(profile, backend, () => Machine);
+
+    /// <summary><see cref="NotSupportedReason(ControllerProfile, HMBackend)"/>
+    /// with Auto resolved through <paramref name="machine"/>.</summary>
+    internal static string? NotSupportedReason(ControllerProfile profile, HMBackend backend, Func<HMBackend> machine)
     {
         switch (backend)
         {
             case HMBackend.Auto:
-                return NotSupportedReason(profile, profile.RequiresUsbipBackend ? HMBackend.Usbip : HMBackend.Umdf2) == null
-                    || NotSupportedReason(profile, HMBackend.Usbip) == null
-                    ? null : "it has no HID descriptor.";
+                return NotSupportedReason(profile, profile.RequiresUsbipBackend ? HMBackend.Usbip : machine(), machine);
             case HMBackend.Umdf2:
                 if (profile.RequiresUsbipBackend)
                     return "its backend is \"usbip\": it has interfaces only the USB/IP backend presents.";

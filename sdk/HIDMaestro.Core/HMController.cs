@@ -1382,7 +1382,9 @@ public sealed partial class HMController : IDisposable
     /// let Windows choose the package for real devices.</exception>
     /// <exception cref="HMDriverSigningException">Windows on this machine
     /// does not install HIDMaestro's driver package, and the binding's
-    /// package is signed as HIDMaestro's driver is.</exception>
+    /// package is signed as HIDMaestro's driver is. Thrown whatever backend
+    /// the controller runs on, <see cref="HMBackend.Auto"/>'s included,
+    /// when the driver store holds no HIDMaestro package.</exception>
     public HMWinUsbBinding BindWinUsb()
     {
         ThrowIfDisposed();

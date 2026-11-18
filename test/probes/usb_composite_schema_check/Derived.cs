@@ -47,8 +47,16 @@ internal static partial class Program
               placeholders.All(p => !p.Inner.HasDescriptor && !p.SupportsBackend(HMBackend.Umdf2)
                                     && !p.SupportsBackend(HMBackend.Usbip) && !p.SupportsBackend(HMBackend.Auto)),
               string.Join(", ", placeholders.Where(p => p.Inner.HasDescriptor || p.SupportsBackend(HMBackend.Auto)).Select(p => p.Id)));
-        Check("every deployable profile runs on Auto", deployable.All(p => p.SupportsBackend(HMBackend.Auto)),
-              string.Join(", ", deployable.Where(p => !p.SupportsBackend(HMBackend.Auto)).Select(p => p.Id)));
+        // SupportsBackend(Auto) answers for the backend Auto resolves to on
+        // this machine: on a USB/IP machine the profiles that backend does
+        // not present are refused, and on a UMDF2 machine none is.
+        var autoRefused = deployable.Where(p => !p.SupportsBackend(HMBackend.Auto)).Select(p => p.Id).ToList();
+        var autoExpected = HMContext.MachineBackend == HMBackend.Usbip
+            ? deployable.Where(p => !p.SupportsBackend(HMBackend.Usbip)).Select(p => p.Id).ToList()
+            : new List<string>();
+        Check($"Auto refuses exactly the deployable profiles the machine's backend, {HMContext.MachineBackend}, does not present ({autoExpected.Count})",
+              autoRefused.SequenceEqual(autoExpected),
+              $"refused {string.Join(", ", autoRefused.Take(6))}; expected {string.Join(", ", autoExpected.Take(6))}");
 
         var refused = deployable.Where(p => !p.SupportsBackend(HMBackend.Usbip)).ToList();
         var xbox = refused.Where(p =>
