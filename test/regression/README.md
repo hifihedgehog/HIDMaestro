@@ -72,6 +72,33 @@ Lenovo Legion Pro 7, and 42 minutes on a 4-core Celeron J4125 at
 `HIDMAESTRO_TIMEOUT_SCALE=2`. Use `-Filter` to run one scenario when
 iterating.
 
+The battery runs the test app and the probes built for the machine's
+own architecture: `test\bin\Release\net10.0-windows10.0.26100.0\win-x64`
+or `win-arm64` by `RuntimeInformation.OSArchitecture`, unless `-Exe`
+names another, and each probe's own build output, which an ARM64
+machine gets from a build with `-p:HMTargetArchitecture=arm64`.
+
+## Expected skips
+
+A scenario whose probe finds a condition missing prints `[SKIP]` and,
+under it, the probe's own line naming that condition. These are the
+conditions, the scenarios they skip, and the three machines the release
+gate runs on: the development laptop, the Celeron J4125 (Windows 10,
+x64) and an ARM64 Surface (Snapdragon X2 Plus, Windows 11), the last two
+driven over SSH.
+
+| Condition | What skips | Laptop | Celeron | Surface |
+|---|---|---|---|---|
+| No Steam client installed | `S54_Valve_Steam`, `S62_Valve_Firmware`, and the Steam part of `S65_Switch2_Composite` | runs | skips | skips |
+| Session 0, as over SSH, where Raw Input lists no device | `S70_Kbm_Raw_Input`, the two Raw Input checks of microsoft-designer-keyboard in `S37_Layout_Audit_Check`, and the legacy reader app of `S50_Vr_Controller_Smoke` | runs | skips | skips |
+| No user signed in | sections C and Y of `S71_Coexistence` | runs | skips | skips |
+| Windows Sandbox not available | `S73_Usbip_Clean_Install`, and the sandbox part of `S101_Uninstall` | runs | skips | skips |
+| Windows Sandbox available, or `HIDMAESTRO_UNINSTALL_FIXTURE` not 1 | the fixture part of `S101_Uninstall` | skips | runs with the variable set | skips |
+| SteamVR not installed | phase 2 of `S50_Vr_Controller_Smoke` | runs | runs | skips |
+
+Any other skip on these machines is a fault of the machine's setup or of
+the scenario, and is read and fixed like a failure.
+
 ## Why elevated
 
 `HIDMaestroTest.exe` self-elevates via UAC if launched without admin
@@ -100,7 +127,7 @@ not run elevated.
 | `S14_Single_RapidSwaps_NoSettle`  | 4 swaps queued back-to-back, no inter-command sleep | Per-controllerIndex teardown gate + reentrancy in Setup/Teardown. |
 | `S15_Multi_SixControllers`        | 6 mixed (beyond XInput's 4) + swap slot 5 | Slot-allocator skip and ContainerID encoding for high indices. The HM "6-controller baseline" use case. |
 | `S16_Single_SameVidPid`           | xbox-360-wired <-> xbox-360-arcade-stick (both 045E:028E) | Registry-reuse path when only profile-level metadata differs. |
-| `S17_ForceKill_MidCascade`        | Hard-kill as a Series BT teardown starts: the first devnode change after the swap command | Worst-case force-kill timing: phantoms left in mid-cascade state. |
+| `S17_ForceKill_MidCascade`        | Hard-kill as a teardown starts: the moment the first of the swapped pad's own devnodes leaves after the swap command. Twice: a Series BT pad swapped for an Xbox 360 pad, then the USB/IP composite `dualsense-composite` swapped for `steam-controller-2` | Worst-case force-kill timing: phantoms left in mid-cascade state, and on USB/IP the next device's import cut short after the persona's plugout. Each pass prints how many of the pad's devnodes, and of the next pad's, were present at the kill. |
 | `S18_Single_AlternatingPattern`   | A->B->A->C->A->B->A | Registry and devnode state when revisiting prior profiles at one identity. |
 | `S19_Multi_RapidMultiSlotSwap`    | 4 controllers, swap each slot's profile back-to-back, no settle | Closest stdin proxy for PadForge's `ApplyAscendingIndexPreemption` async-dispose path. |
 | `S20_Multi_HeterogeneousCascade`  | 4 controllers, every family in one batch, then `quit` | `HMContext.DisposeControllersInParallel` correctness with all four families simultaneously: ROOT-enumerated, SWD-XUSB, SWD-gamepad-xinputhid, plain HID. |
@@ -199,15 +226,26 @@ Per scenario:
    include `root\HIDMaestro`, `root\HIDMaestroGamepad` or
    `root\HIDMaestroXUSB`, whatever its enumerator (`ROOT\HIDClass`, any
    `ROOT\VID_xxxx&PID_yyyy&IG_00`, `SWD\HIDMAESTRO*`), and its children.
-   The usbip-win2 host controllers (`ROOT\HIDMAESTRO_UDE`) are the
-   transport and are left out. `HMDevnodes.ps1` holds the rule, and
-   `devnode_owner_check.ps1` checks it offline (no device, no
-   elevation): a `ROOT\HIDClass` parent and an `IG_00` parent other than
-   045E:028E are reported with their HID children, and a foreign
-   `ROOT\HIDClass` device, a phantom and the host controller are not.
-2. Run the scenario, then call `Wait-CascadeSettle`: wait for the devnode
-   set to change, then for two consecutive 200 ms samples to agree (about
-   600 ms on a fast box, 60 s scaled cap).
+   A USB/IP controller carries no HIDMaestro ID, so its devnodes are
+   found by where they sit: every devnode below the root hub of the
+   usbip-win2 host controller whose hardware IDs include
+   `ROOT\HIDMAESTRO_UDE`, the stamp the SDK puts on the host controller
+   it installs. That is the USB device, its interfaces, their HID
+   collections and audio endpoints. The host controller and its root hub
+   are the transport and are left out, and nothing below another
+   program's usbip-win2 host controller counts. `HMDevnodes.ps1` holds
+   the rule, and `devnode_owner_check.ps1` checks it offline (no device,
+   no elevation): a `ROOT\HIDClass` parent and an `IG_00` parent other
+   than 045E:028E are reported with their HID children, a composite
+   persona is reported whole, a persona left behind is a leftover, and a
+   foreign `ROOT\HIDClass` device, a phantom, the host controller, its
+   root hub and another program's host controller are not.
+2. Run the scenario, then call `Wait-CascadeSettle`: wait until the test
+   app has acknowledged the last command the scenario sent, which it does
+   after running it, then for two consecutive 200 ms samples of the
+   devnode set to agree (about 600 ms on a fast box, 60 s scaled cap).
+   `-Verbose` prints how the first wait ended and whether the command
+   changed the set.
 3. Snapshot the same set AFTER.
 4. PASS iff `(after \ before) == empty` (i.e. no new `PRESENT` entries
    leaked across the scenario).

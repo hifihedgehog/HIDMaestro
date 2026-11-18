@@ -10,9 +10,14 @@
 # git show at the pinned commit, and the stand-in headers under stubs/ are
 # this repository's own.
 #
-# Usage: build.ps1 -Out <dir> [-Refs <reference root>] [-Obj <dir>]
+# -Arch picks the compiler's target (probe_common\NativeToolset.ps1): x64 by
+# default, arm64 for the probe's ARM64 build, whose harnesses then run
+# natively on an ARM64 machine.
+#
+# Usage: build.ps1 -Out <dir> [-Arch x64|arm64] [-Refs <reference root>] [-Obj <dir>]
 param(
     [Parameter(Mandatory = $true)][string]$Out,
+    [ValidateSet('x64', 'arm64')][string]$Arch = 'x64',
     [string]$Refs,
     [string]$Obj
 )
@@ -20,7 +25,8 @@ $ErrorActionPreference = 'Stop'
 $Out = [IO.Path]::GetFullPath($Out)
 # Windows PowerShell 5.1 leaves $PSScriptRoot empty in parameter defaults.
 if (-not $Refs) { $Refs = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..\..\..')).Path }
-if (-not $Obj) { $Obj = Join-Path $PSScriptRoot '..\obj\native' }
+if (-not $Obj) { $Obj = Join-Path $PSScriptRoot "..\obj\native-$Arch" }
+. (Join-Path $PSScriptRoot '..\..\probe_common\NativeToolset.ps1')
 
 $flavors = @(
     @{
@@ -60,13 +66,7 @@ $libusbSources = @(
 
 function Head([string]$dir) { (git -C $dir rev-parse HEAD).Trim() }
 
-$installer = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer'
-$vswhere = Join-Path $installer 'vswhere.exe'
-# vcvars64.bat runs vswhere from PATH.
-$env:PATH = "$installer;$env:PATH"
-$vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-if (-not $vs) { throw 'No Visual Studio with the x64 C++ tools.' }
-$vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+$toolset = Get-HMNativeToolset -Arch $Arch
 
 New-Item -ItemType Directory -Force -Path $Out, $Obj | Out-Null
 $stubs = Join-Path $PSScriptRoot 'stubs'
@@ -85,7 +85,7 @@ foreach ($f in $flavors) {
 
     $exe = Join-Path $Out "gc_harness_$($f.Name).exe"
     $stampPath = Join-Path $Out "gc_harness_$($f.Name).stamp"
-    $stamp = "$commit $($f.LibusbCommit) $($f.FmtCommit) $ownHash"
+    $stamp = "$commit $($f.LibusbCommit) $($f.FmtCommit) $ownHash $Arch"
     if ((Test-Path $exe) -and (Test-Path $stampPath) -and ((Get-Content $stampPath -Raw).Trim() -eq $stamp)) {
         Write-Host "gc_harness_$($f.Name).exe is current"
         continue
@@ -116,7 +116,7 @@ foreach ($f in $flavors) {
     ) | ForEach-Object { '"' + $_ + '"' }
     $cmd = @"
 @echo off
-call "$vcvars" >nul || exit /b 1
+call $($toolset.Vcvars) >nul || exit /b 1
 cl /nologo /c /O2 /MT /DWIN32 /D_WINDOWS /I"$libusb\msvc" /I"$libusb\libusb" /Fo"$libObj\\" $libusbFiles || exit /b 1
 lib /nologo /OUT:"$work\libusb.lib" "$libObj\*.obj" || exit /b 1
 cl /nologo /c /O2 /MT /EHsc /std:c++latest /Zc:preprocessor /permissive- /utf-8 /DWIN32 /DNOMINMAX /D_WIN32_WINNT=0x0A00 /D__LIBUSB__ /DFMT_HEADER_ONLY $($f.Define) /I"$src" /I"$stubs" /I"$libusb\libusb" /I"$fmt\include" /Fo"$appObj\\" $($appFiles -join ' ') || exit /b 1

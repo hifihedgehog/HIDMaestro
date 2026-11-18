@@ -1,0 +1,4 @@
+# openvr_api.cs is Valve's generated OpenVR binding, kept as Valve ships it.
+# Its (T)Marshal.PtrToStructure casts unbox a nullable object: CS8605, 24 times.
+[openvr_api.cs]
+dotnet_diagnostic.CS8605.severity = none
