@@ -126,9 +126,12 @@ public sealed class HMProfile
 
     // ── HID descriptor ───────────────────────────────────────────────────
 
-    /// <summary>True if this profile has a HID descriptor and can be deployed
-    /// as a virtual controller. Some catalog entries are placeholders.</summary>
-    public bool IsDeployable => Inner.HasDescriptor;
+    /// <summary>True if this profile can be deployed as a virtual
+    /// controller: it has a HID descriptor, or it is a USB/IP persona with
+    /// no HID interface, whose reports travel on an XUSB interface that
+    /// Windows gives its inbox XUSB driver. Some catalog entries are
+    /// placeholders.</summary>
+    public bool IsDeployable => Inner.HasDescriptor || Inner.ReportsOnXusbInterface;
 
     /// <summary>Input report size in bytes (including Report ID byte if any).
     /// Returns 0 if not specified in the profile.</summary>

@@ -162,6 +162,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     private readonly bool _inputReportIds;
     private uint _lastSharedSeqNo;
 
+    // On a device with no HID interface, the length of its extended report,
+    // which a data-only frame fills since no descriptor sizes one. 0 on
+    // every other device, whose descriptor gives the length.
+    private readonly int _ownReportSize;
     // The longest report the input section yields: the builder's report,
     // or an extended report.
     private readonly int _reportCapacity;
@@ -198,9 +202,11 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     // driver keeps one frame for a read (driver.c ProcessSharedInput).
     private readonly bool _deliverEvery;
 
-    /// <summary>The interrupt-IN endpoint on the primary HID interface: the
-    /// one the input pump feeds. Any other interrupt-IN endpoint belongs to
-    /// a secondary HID interface and simply parks its reads.</summary>
+    /// <summary>The interrupt-IN endpoint on the primary HID interface, or
+    /// on the report interface of a device with none
+    /// (<see cref="UsbDescriptorSet.HasHidInterface"/>): the one the input
+    /// pump feeds. Any other interrupt-IN endpoint belongs to a secondary
+    /// HID interface and simply parks its reads.</summary>
     private readonly byte _primaryInEndpoint;
 
     /// <summary>The parked reads of <see cref="_primaryInEndpoint"/>, the
@@ -290,7 +296,11 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         _builder = profile.GetOrBuildReportBuilder();
         // As DeviceOrchestrator.WaitsOnDelivery decides it for the HID path.
         _deliverEvery = profile.HasDescriptor && profile.DeliversEveryReport(profile.GetOrBuildKeyboardMousePacker());
-        int expectedSize = _builder.InputReportByteSize > 0 ? _builder.InputReportByteSize : 17;
+        // A device with no HID interface has no descriptor to size its report
+        // by: a data frame fills its extended report, whole.
+        _ownReportSize = !Descriptors.HasHidInterface && profile.ExtendedReport is { Size: > 0 } sized ? sized.Size : 0;
+        int expectedSize = _builder.InputReportByteSize > 0 ? _builder.InputReportByteSize
+            : _ownReportSize > 0 ? _ownReportSize : 17;
         _reportCapacity = Math.Max(expectedSize, SharedMemoryIO.EXTENDED_DATA_CAPACITY);
         _pumpReport = new byte[_reportCapacity];
         // One slot per declared input report, and one for the builder's
@@ -308,6 +318,18 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             _inputReports[r][0] = declared[r].Id;
             _inputReportLength[r] = Math.Clamp(declared[r].ByteSize, 1, _reportCapacity);
             _inputSlot[declared[r].Id] = r;
+        }
+        // A device with no HID interface answers GET_REPORT(Input) with its
+        // report from the first request ([MS-XUSBI] 2.2.8.2), so until a
+        // frame comes its slot holds the extended report of a pad at rest,
+        // encoded as SubmitState encodes one.
+        if (!Descriptors.HasHidInterface && profile.ExtendedReport is { AlwaysArmed: true } atRest
+            && atRest.Size <= _reportCapacity && _inputSlot[atRest.ReportIdByte] is int restSlot and >= 0)
+        {
+            var rest = new HMGamepadState();
+            VendorBlobCodec.EncodeInput(atRest, in rest, 0.5f, 0.5f, 0.5f, 0.5f, 0f, 0f,
+                                        _inputReports[restSlot], new VendorBlobCodec.EncoderState());
+            _inputReportLength[restSlot] = atRest.Size;
         }
 
         try
@@ -594,7 +616,8 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         // or the data. A size read while the writer was mid-frame is caught
         // by the sequence check like any other byte, and each length is cut
         // to its region before the copy.
-        int expectedSize = _builder.InputReportByteSize > 0 ? _builder.InputReportByteSize : 17;
+        int expectedSize = _builder.InputReportByteSize > 0 ? _builder.InputReportByteSize
+            : _ownReportSize > 0 ? _ownReportSize : 17;
         bool hasReportId = _builder.InputReportId != 0;
         int maxData = hasReportId ? Math.Max(expectedSize - 1, 16) : expectedSize;
         if (hasReportId && expectedSize > 1) maxData = expectedSize - 1;
@@ -993,6 +1016,21 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             {
                 HandleHidClassRequest(cmd, bRequest, wValue, wLength, deviceToHost, outPayload,
                                       ifaceNum == Descriptors.HidInterfaceNumber);
+                return;
+            }
+
+            // The report interface of a device with no HID interface keeps
+            // two of the HID class's requests, GET_REPORT(Input) and
+            // SET_REPORT(Output), and stalls the rest ([MS-XUSBI] 2.2.8.1,
+            // table 29: the device stalls every request the table leaves
+            // out).
+            if (!Descriptors.HasHidInterface && ifaceNum == Descriptors.HidInterfaceNumber)
+            {
+                byte reportType = (byte)(wValue >> 8);
+                bool kept = bRequest == 0x01 ? deviceToHost && reportType == 0x01
+                          : bRequest == 0x09 && !deviceToHost && reportType == 0x02;
+                if (kept) HandleHidClassRequest(cmd, bRequest, wValue, wLength, deviceToHost, outPayload);
+                else SendError(cmd.Seqnum, -UsbipProtocol.EPipe);
                 return;
             }
 

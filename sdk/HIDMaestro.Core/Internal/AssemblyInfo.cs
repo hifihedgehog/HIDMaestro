@@ -24,6 +24,7 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("ValvePersonaCheck")]
 [assembly: InternalsVisibleTo("ValveSteamCheck")]
 [assembly: InternalsVisibleTo("UsbipServerCheck")]
+[assembly: InternalsVisibleTo("XusbPersonaCheck")]
 [assembly: InternalsVisibleTo("UsbipE2ECheck")]
 [assembly: InternalsVisibleTo("UsbipBundleCheck")]
 [assembly: InternalsVisibleTo("switch_writer_tap")]

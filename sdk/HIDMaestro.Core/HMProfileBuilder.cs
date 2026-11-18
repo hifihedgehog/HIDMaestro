@@ -171,7 +171,10 @@ public sealed class HMProfileBuilder
     /// <c>versionNumber</c>, <c>companionOnly</c>) and the model the profile
     /// names stay. Set any dropped key again after the descriptor. The same
     /// bytes drop nothing, and a builder's first descriptor drops nothing
-    /// set before it.</para>
+    /// set before it, except on a copy of a profile with no HID interface
+    /// (an <c>xusb</c> interface in its <c>usbConfiguration</c>): that
+    /// interface is the copy's report format, and its first descriptor
+    /// drops the same keys.</para>
     /// </summary>
     public HMProfileBuilder Descriptor(byte[] bytes)
     {
@@ -191,8 +194,13 @@ public sealed class HMProfileBuilder
     private void SetDescriptor(string? hex)
     {
         // Null clears the descriptor, as before v2.0.0, and a cleared
-        // descriptor governs no report format either.
-        if (_descriptorHex != null && (hex == null || !SameBytes(_descriptorHex, hex))) DropReportFormat();
+        // descriptor governs no report format either. A copy of a profile
+        // that reports on an XUSB interface holds a report format with no
+        // descriptor, the interface's, and a descriptor replaces it.
+        bool replaces = _descriptorHex != null
+            ? hex == null || !SameBytes(_descriptorHex, hex)
+            : hex != null && _copy is { ReportsOnXusbInterface: true };
+        if (replaces) DropReportFormat();
         _descriptorHex = hex;
     }
 

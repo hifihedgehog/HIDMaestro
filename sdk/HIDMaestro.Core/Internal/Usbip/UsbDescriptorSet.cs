@@ -78,9 +78,19 @@ internal sealed class UsbDescriptorSet
     /// <summary>The 9-byte HID class descriptor found inside the config
     /// blob, and the interface number it belongs to. This is the PRIMARY
     /// HID interface: the one serving the profile's own report descriptor,
-    /// carrying its input reports and answering its feature requests.</summary>
+    /// carrying its input reports and answering its feature requests. On a
+    /// device with no HID interface (<see cref="HasHidInterface"/>) it is
+    /// the interface the profile's reports travel on, and there is no
+    /// class descriptor.</summary>
     public byte HidInterfaceNumber { get; }
-    private readonly byte[] _hidClassDescriptor;
+    private readonly byte[]? _hidClassDescriptor;
+
+    /// <summary>False for a device whose profile names an interface
+    /// <c>"xusb"</c> (<see cref="UsbInterfaceSpec.Function"/>): it has no
+    /// HID interface and serves no HID descriptor, and its reports travel
+    /// on that interface's interrupt endpoints. True for every other
+    /// persona.</summary>
+    public bool HasHidInterface { get; }
 
     /// <summary>Issue #56. Secondary HID interfaces, keyed by interface
     /// number: the class descriptor found in the blob paired with the
@@ -162,8 +172,25 @@ internal sealed class UsbDescriptorSet
         ConfigurationDescriptor = FromHex(cfg.ConfigurationDescriptorHex, "configurationDescriptor");
         OtherSpeedConfiguration = cfg.OtherSpeedConfigurationDescriptorHex != null
             ? FromHex(cfg.OtherSpeedConfigurationDescriptorHex, "otherSpeedConfigurationDescriptor") : null;
+        // A device with no HID interface names the interface its reports
+        // travel on "xusb" (UsbInterfaceSpec.Function) and carries no report
+        // descriptor. Every other persona is held to both.
+        int xusbAt = cfg.Interfaces.FindIndex(x => x.Function == "xusb");
+        string xusbPath = $"$.usbConfiguration.interfaces[{xusbAt}].function";
+        if (xusbAt >= 0 && profile.HasDescriptor)
+            throw new ProfileDefectException("$.descriptor",
+                $"has no interface to present it: {xusbPath} \"xusb\" marks a device with no HID interface.");
+        // With no descriptor, the always-armed extended report is the one
+        // report the profile describes, and the device sends nothing else.
+        if (xusbAt >= 0 && profile.ExtendedReport == null)
+            throw new ProfileDefectException("$.extendedReport",
+                "is required for a device with no HID interface: it is the report the device sends.");
+        if (xusbAt >= 0 && !profile.ExtendedReport!.AlwaysArmed)
+            throw new ProfileDefectException("$.extendedReport.alwaysArmed",
+                "must be true on a device with no HID interface, which has no other report to send.");
         ReportDescriptor = profile.GetDescriptorBytes()
-            ?? throw new ProfileDefectException("$.descriptor", "is required for the usbip backend: the HID interface presents it.");
+            ?? (xusbAt >= 0 ? Array.Empty<byte>()
+                : throw new ProfileDefectException("$.descriptor", "is required for the usbip backend: the HID interface presents it."));
 
         if (DeviceDescriptor.Length != 18 || DeviceDescriptor[0] != 18 || DeviceDescriptor[1] != 0x01)
             throw new ProfileDefectException("$.usbConfiguration.deviceDescriptor", "is not an 18-byte USB device descriptor.");
@@ -260,6 +287,8 @@ internal sealed class UsbDescriptorSet
         byte hidIface = 0xFF;
         bool sawInterface = false;
         var classByIface = new Dictionary<byte, byte[]>();
+        // Each interface's class and subclass, from its first descriptor.
+        var classOf = new Dictionary<byte, (byte Class, byte SubClass)>();
         // Every endpoint descriptor, alternate settings included. _endpoints
         // keeps one per address, the last one written.
         var everyEndpoint = new List<EndpointInfo>();
@@ -273,6 +302,7 @@ internal sealed class UsbDescriptorSet
             {
                 curIface = blob[off + 2];
                 curAlt = blob[off + 3];
+                classOf.TryAdd(curIface, (blob[off + 5], blob[off + 6]));
                 if (blob[off + 5] == 0x03 && hidIface == 0xFF) hidIface = curIface;
                 if (!sawInterface)
                 {
@@ -288,7 +318,10 @@ internal sealed class UsbDescriptorSet
                 _endpoints[addr] = info;
                 everyEndpoint.Add(info);
             }
-            else if (type == 0x21) // HID class descriptor
+            // An XUSB interface carries a descriptor of this type too, the
+            // XUSB interface descriptor ([MS-XUSBI] 2.2.4.5), which is no
+            // HID class descriptor.
+            else if (type == 0x21 && xusbAt < 0) // HID class descriptor
             {
                 var thisClass = new byte[len];
                 Array.Copy(blob, off, thisClass, 0, len);
@@ -296,41 +329,66 @@ internal sealed class UsbDescriptorSet
             }
             off += len;
         }
-        if (classByIface.Count == 0 || hidIface == 0xFF)
-            throw new ProfileDefectException(ConfigurationPath, "has no HID interface.");
-
-        // A spec-declared "hid" function wins; otherwise the first HID
-        // interface in the blob, which is the pre-#56 rule verbatim.
-        if (declaredPrimary != 0xFF && classByIface.ContainsKey(declaredPrimary))
-            hidIface = declaredPrimary;
-        byte[] hidClass = classByIface[hidIface];
-
-        // Every HID class descriptor must agree with the descriptor its own
-        // interface serves: the profile's for the primary, the spec's for a
-        // secondary. A device that declares one length then serves another
-        // does not enumerate, so a mismatch is refused at create time.
-        int declaredPrimaryLen = hidClass[7] | (hidClass[8] << 8);
-        if (declaredPrimaryLen != ReportDescriptor.Length)
-            throw new ProfileDefectException(ConfigurationPath,
-                $"its HID class descriptor declares a {declaredPrimaryLen}-byte report descriptor, " +
-                $"and the profile's descriptor is {ReportDescriptor.Length} bytes.");
-        foreach (var kv in classByIface)
+        if (xusbAt >= 0)
         {
-            if (kv.Key == hidIface) continue;
-            int specAt = cfg.Interfaces.FindIndex(x => x.InterfaceNumber == kv.Key);
-            string ifacePath = specAt >= 0 ? $"$.usbConfiguration.interfaces[{specAt}]" : "$.usbConfiguration.interfaces";
-            if (!declaredReports.TryGetValue(kv.Key, out var rd))
-                throw new ProfileDefectException(ifacePath,
-                    $"interface {kv.Key} is a HID interface in the configuration descriptor, and no alternate setting gives its reportDescriptor.");
-            int declared = kv.Value[7] | (kv.Value[8] << 8);
-            if (declared != rd.Length)
-                throw new ProfileDefectException(ifacePath,
-                    $"interface {kv.Key}'s HID class descriptor declares a {declared}-byte report " +
-                    $"descriptor, and its reportDescriptor is {rd.Length} bytes.");
-            _secondaryHid[kv.Key] = (kv.Value, rd);
+            // The reports travel on the XUSB interface: vendor class 0xFF,
+            // subclass 0x5D ([MS-XUSBI] 2.2.4.3), with the interrupt IN
+            // endpoint the input report goes out on (3.2).
+            byte number = cfg.Interfaces[xusbAt].InterfaceNumber;
+            if (hidIface != 0xFF)
+                throw new ProfileDefectException(xusbPath,
+                    $"\"xusb\" marks a device with no HID interface, and interface {hidIface} of the configuration descriptor is one.");
+            if (!classOf.TryGetValue(number, out var kind))
+                throw new ProfileDefectException(xusbPath,
+                    $"\"xusb\" names interface {number}, which the configuration descriptor lacks.");
+            if (kind.Class != 0xFF || kind.SubClass != 0x5D)
+                throw new ProfileDefectException(xusbPath,
+                    $"\"xusb\" names interface {number}, whose class is 0x{kind.Class:X2} and subclass 0x{kind.SubClass:X2} " +
+                    "in the configuration descriptor. An XUSB interface is class 0xFF, subclass 0x5D.");
+            if (!everyEndpoint.Exists(e => e.InterfaceNumber == number && e.TransferType == 3 && e.IsIn))
+                throw new ProfileDefectException(xusbPath,
+                    $"\"xusb\" names interface {number}, which has no interrupt IN endpoint to report on.");
+            HidInterfaceNumber = number;
         }
-        _hidClassDescriptor = hidClass;
-        HidInterfaceNumber = hidIface;
+        else
+        {
+            if (classByIface.Count == 0 || hidIface == 0xFF)
+                throw new ProfileDefectException(ConfigurationPath, "has no HID interface.");
+
+            // A spec-declared "hid" function wins; otherwise the first HID
+            // interface in the blob, which is the pre-#56 rule verbatim.
+            if (declaredPrimary != 0xFF && classByIface.ContainsKey(declaredPrimary))
+                hidIface = declaredPrimary;
+            byte[] hidClass = classByIface[hidIface];
+
+            // Every HID class descriptor must agree with the descriptor its own
+            // interface serves: the profile's for the primary, the spec's for a
+            // secondary. A device that declares one length then serves another
+            // does not enumerate, so a mismatch is refused at create time.
+            int declaredPrimaryLen = hidClass[7] | (hidClass[8] << 8);
+            if (declaredPrimaryLen != ReportDescriptor.Length)
+                throw new ProfileDefectException(ConfigurationPath,
+                    $"its HID class descriptor declares a {declaredPrimaryLen}-byte report descriptor, " +
+                    $"and the profile's descriptor is {ReportDescriptor.Length} bytes.");
+            foreach (var kv in classByIface)
+            {
+                if (kv.Key == hidIface) continue;
+                int specAt = cfg.Interfaces.FindIndex(x => x.InterfaceNumber == kv.Key);
+                string ifacePath = specAt >= 0 ? $"$.usbConfiguration.interfaces[{specAt}]" : "$.usbConfiguration.interfaces";
+                if (!declaredReports.TryGetValue(kv.Key, out var rd))
+                    throw new ProfileDefectException(ifacePath,
+                        $"interface {kv.Key} is a HID interface in the configuration descriptor, and no alternate setting gives its reportDescriptor.");
+                int declared = kv.Value[7] | (kv.Value[8] << 8);
+                if (declared != rd.Length)
+                    throw new ProfileDefectException(ifacePath,
+                        $"interface {kv.Key}'s HID class descriptor declares a {declared}-byte report " +
+                        $"descriptor, and its reportDescriptor is {rd.Length} bytes.");
+                _secondaryHid[kv.Key] = (kv.Value, rd);
+            }
+            _hidClassDescriptor = hidClass;
+            HidInterfaceNumber = hidIface;
+            HasHidInterface = true;
+        }
 
         // Cross-check the structured spec against the blob's endpoint
         // descriptors, each against the one in its own interface and
@@ -433,13 +491,19 @@ internal sealed class UsbDescriptorSet
         // Microsoft OS 1.0 descriptors (issue #66). All three or none: a
         // device that answers the string and then stalls a feature request
         // leaves its interface with no driver. Each blob states its own
-        // length, so a mis-authored one is refused here.
+        // length, so a mis-authored one is refused here. A device that
+        // reports on an XUSB interface may leave the extended properties
+        // out: Windows matches its driver on the compatible ID alone, and
+        // such a device stalls every other feature request ([MS-XUSBI]
+        // 2.2.4.6).
         var os = cfg.MicrosoftOs;
         if (os != null)
         {
             _msOsString = FromHex(os.StringHex, "microsoftOs.string");
             _msOsCompatId = FromHex(os.ExtendedCompatIdHex, "microsoftOs.extendedCompatId");
-            _msOsProperties = FromHex(os.ExtendedPropertiesHex, "microsoftOs.extendedProperties");
+            _msOsProperties = xusbAt >= 0 && os.ExtendedPropertiesHex == null
+                ? null
+                : FromHex(os.ExtendedPropertiesHex, "microsoftOs.extendedProperties");
 
             bool signature = _msOsString.Length == 18 && _msOsString[0] == 18 && _msOsString[1] == 0x03
                 && Encoding.Unicode.GetString(_msOsString, 2, 14) == "MSFT100";
@@ -447,7 +511,7 @@ internal sealed class UsbDescriptorSet
                 throw new InvalidOperationException(
                     "microsoftOs.string is not the 18-byte MSFT100 string descriptor.");
             CheckMicrosoftOsFeature(_msOsCompatId, 4, 16, "extendedCompatId");
-            CheckMicrosoftOsFeature(_msOsProperties, 5, 10, "extendedProperties");
+            if (_msOsProperties != null) CheckMicrosoftOsFeature(_msOsProperties, 5, 10, "extendedProperties");
         }
     }
 
@@ -504,9 +568,11 @@ internal sealed class UsbDescriptorSet
     /// <summary>HID-class GET_DESCRIPTOR on a HID interface: 0x22 is the
     /// report descriptor, 0x21 the HID class descriptor. Answered per
     /// interface, so a composite presenting several HID interfaces serves
-    /// each its own (issue #56).</summary>
+    /// each its own (issue #56). Null, a stall, on a device with no HID
+    /// interface.</summary>
     public byte[]? GetHidDescriptor(byte type, byte interfaceNumber)
     {
+        if (!HasHidInterface) return null;
         if (interfaceNumber != HidInterfaceNumber
             && _secondaryHid.TryGetValue(interfaceNumber, out var sec))
             return type switch { 0x22 => sec.ReportDescriptor, 0x21 => sec.ClassDescriptor, _ => null };
@@ -516,7 +582,7 @@ internal sealed class UsbDescriptorSet
     /// <summary>True when the interface number is a HID interface this
     /// device presents, primary or secondary.</summary>
     public bool IsHidInterface(byte interfaceNumber)
-        => interfaceNumber == HidInterfaceNumber || _secondaryHid.ContainsKey(interfaceNumber);
+        => (HasHidInterface && interfaceNumber == HidInterfaceNumber) || _secondaryHid.ContainsKey(interfaceNumber);
 
     private static readonly byte[] LangIds = { 0x04, 0x03, 0x09, 0x04 }; // one LANGID: en-US
 

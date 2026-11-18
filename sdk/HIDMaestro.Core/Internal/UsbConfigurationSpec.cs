@@ -125,7 +125,10 @@ public sealed class UsbMicrosoftOsSpec
 
     /// <summary>The extended properties descriptor, feature index 5. It
     /// carries registry values for the interface's device key, such as the
-    /// <c>DeviceInterfaceGUID</c> WinUSB registers.</summary>
+    /// <c>DeviceInterfaceGUID</c> WinUSB registers. Required, except on a
+    /// device that reports on an <c>"xusb"</c> interface
+    /// (<see cref="UsbInterfaceSpec.Function"/>), which may leave it out and
+    /// then stalls the request.</summary>
     [JsonPropertyName("extendedProperties")]
     public string? ExtendedPropertiesHex { get; set; }
 }
@@ -185,13 +188,28 @@ public sealed class UsbInterfaceSpec
 
     /// <summary>What this interface is, for the backend's routing rather
     /// than for the wire: <c>"hid"</c>, <c>"audioControl"</c>,
-    /// <c>"audioStreamingOut"</c>, <c>"audioStreamingIn"</c>, or
+    /// <c>"audioStreamingOut"</c>, <c>"audioStreamingIn"</c>,
     /// <c>"vendor"</c> for a class 0xFF interface whose protocol the backend
-    /// answers itself (issue #66). The wire
+    /// answers itself (issue #66), or <c>"xusb"</c>. The wire
     /// values live in <see cref="UsbAltSettingSpec"/>. The HID interface
     /// keeps serving the profile's existing report descriptor and codec
     /// unchanged, which is why a composite persona reuses everything the
-    /// profile already declares.</summary>
+    /// profile already declares.
+    ///
+    /// <para><c>"xusb"</c> marks a device with no HID interface: its
+    /// reports travel on an XUSB game controller interface, class 0xFF and
+    /// subclass 0x5D ([MS-XUSBI] 2.2.4.3), which Windows gives its inbox
+    /// XUSB driver. The profile then carries no <c>descriptor</c>, and its
+    /// <c>extendedReport</c>, always armed, is the report the device
+    /// sends. The interface's interrupt IN endpoint sends that report and
+    /// its interrupt OUT endpoint takes the output reports, as the HID
+    /// interface's endpoints do on every other persona. A raw frame is the
+    /// report whole, at the extended report's length. Of the HID class's
+    /// requests the interface answers GET_REPORT(Input) and
+    /// SET_REPORT(Output) and stalls the rest, and the device may leave
+    /// <c>microsoftOs.extendedProperties</c> out ([MS-XUSBI] 2.2.8.1 and
+    /// 2.2.4.6). A profile that names no interface <c>"xusb"</c> is held
+    /// to a HID interface and a <c>descriptor</c>.</para></summary>
     [JsonPropertyName("function")]
     public string Function { get; set; } = "";
 
