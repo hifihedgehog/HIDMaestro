@@ -18,5 +18,6 @@
   <ItemGroup>
     <!-- The live part's variant without the security opt-out. -->
     <None Include="profiles\*.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="metadata-pins.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

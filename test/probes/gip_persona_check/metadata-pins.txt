@@ -1,0 +1,5 @@
+# The metadata of each GIP persona, by the key Windows caches it under:
+# VID, PID, firmware major.minor, then the SHA-256 of the metadata bytes.
+# Metadata that changes takes a firmware version of its own and a new line.
+045E 02EA 4D48.0230 47A8E987195F9005288E8FCC0C85CD4DFE80FB84C46CF4FE78513B5614E88C33
+045E 02EA 4D48.0231 4DD8279B1A6EFC683377C7C48430671C1613F4F49FC2BA51883E5668640742FE

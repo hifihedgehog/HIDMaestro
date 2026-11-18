@@ -52,6 +52,7 @@ internal static partial class RuleChecks
         // Bit matches and fall-through.
         yield return X("a bit match whose mask is not hex", "$.protocol.commands.rules[0].match", Set("$.protocol.commands.rules[0].match", "\".. 30/GG\""));
         yield return X("a bit match that sets bits outside its mask", "$.protocol.commands.rules[0].match", Set("$.protocol.commands.rules[0].match", "\".. 30/0F\""));
+        yield return E("a rule with a condition that emits", "$.protocol.commands.rules[0].while", Rule("{\"match\":\"7F\",\"while\":\"reportsOn\",\"emitOutput\":{\"reportId\":\"0x01\",\"size\":8,\"memory\":\"flash\"}}"));
         yield return E("a fall-through rule that emits", "$.protocol.commands.rules[0].continue", Rule("{\"match\":\"7F\",\"continue\":true,\"emitOutput\":{\"reportId\":\"0x01\",\"size\":8,\"memory\":\"flash\"}}"));
 
         // The serial's hex digits.
