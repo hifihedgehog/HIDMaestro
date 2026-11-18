@@ -482,6 +482,14 @@ public sealed class HMProfileBuilder
         inner.DriverPid = _driverPid;
         inner.FeatureStubs = _featureStubs == null ? null : CopyOf(_featureStubs);
         inner.ValueSources = _valueSources == null ? null : CopyOf(_valueSources);
+        // A copy keeps its source's USB form only as the same device: a new
+        // descriptor, ID or connection is a device the form does not
+        // describe, and it then presents its own data on both backends.
+        if (inner.UsbForm != null && (_copy == null || !string.Equals(inner.Descriptor, _copy.Descriptor, StringComparison.OrdinalIgnoreCase)
+            || _copy.VendorId != _vid || _copy.ProductId != _pid
+            || !string.Equals(inner.Connection, _copy.Connection, StringComparison.OrdinalIgnoreCase)))
+            inner.UsbForm = null;
+        inner.UsbFormProfile = null;
         inner.SourceFile = null;
         inner.MarkBuiltInCode(true);
         StampDeviceDescriptor(inner, _vid.Value, _pid.Value);

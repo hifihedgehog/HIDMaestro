@@ -189,7 +189,14 @@ internal static class Program
         // serial, HM-CTL- and its transport index
         // (DeviceOrchestrator.DriverSerial). SDL's Switch driver replaces
         // the serial with the pad's MAC, so the path decides.
-        string ownSerial = $"HM-CTL-{ctrl.TransportIndex:D4}";
+        // On the USB/IP backend the pad serves its identity's serial, and
+        // it presents switch-pro-usb's form (usbForm): SDL reads the bus as
+        // USB there and sets the pad up with the 0x80 handshake
+        // (SDL_hidapi_switch.c:1617-1622), which that form answers.
+        string ownSerial = ctrl.Backend == HMBackend.Usbip
+            ? ctrl.UsbipHandle!.Device.Descriptors.SerialString!
+            : $"HM-CTL-{ctrl.TransportIndex:D4}";
+        Console.WriteLine($"  backend {ctrl.Backend}, presents {ctrl.Profile.FormOn(ctrl.Backend).Id}, serial {ownSerial}");
         string? ownPath = null;
         IntPtr pad = IntPtr.Zero;
         var logged = new System.Collections.Generic.HashSet<uint>();

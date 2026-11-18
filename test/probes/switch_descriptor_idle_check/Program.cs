@@ -32,6 +32,13 @@
 // reads it. Before v2.0.0 a registry value the driver read at its add
 // held the pad.
 //
+// On the USB/IP backend the pad is on the USB bus and presents
+// switch-pro-usb's form (usbForm), which has no 0x3F report and sends
+// nothing until a host speaks the protocol (switch-pro-usb's notes). There
+// phase 1 asserts that silence, phase 2 has no simple-mode report to read
+// and says so, the held copy is a held switch-pro whose usbForm names a
+// held copy of switch-pro-usb, and every write and read is 64 bytes.
+//
 // Headless, elevation-required, exit 0 PASS / 1 FAIL.
 
 using System;
@@ -90,6 +97,16 @@ internal static class Program
 
     static int s_lastReadLen;
 
+    // The form the pad presents: Bluetooth on the UMDF2 backend, USB
+    // (switch-pro-usb's) on the USB/IP backend.
+    static bool s_usb;
+    static int OutLen => s_usb ? 64 : 49;
+    static int InLen => s_usb ? 64 : 362;
+
+    /// <summary>The serial the controller's HID device serves.</summary>
+    static string SerialOf(HMController c) =>
+        c.Backend == HMBackend.Usbip ? c.UsbipHandle!.Device.Descriptors.SerialString! : DeviceOrchestrator.DriverSerial(c.TransportIndex);
+
     // BT descriptor: InputReportByteLength is 362 (the 0x31-0x33 family).
     // HidClass zero-pads every completed read to that length regardless
     // of the report's wire size (0x3F = 12, 0x21/0x30 = 49); a live BT
@@ -111,13 +128,14 @@ internal static class Program
         return read > 0 ? buf : null;
     }
 
-    // BT descriptor: OutputReportByteLength is 49 (48 vendor bytes + ID).
+    // OutputReportByteLength: 49 (48 vendor bytes + ID) on Bluetooth, 64 on USB.
     static bool HidWrite(byte[] report)
     {
-        var buf = GC.AllocateArray<byte>(49, pinned: true);
-        Array.Copy(report, buf, Math.Min(report.Length, 49));
+        int len = OutLen;
+        var buf = GC.AllocateArray<byte>(len, pinned: true);
+        Array.Copy(report, buf, Math.Min(report.Length, len));
         var ov = new NativeOverlapped { EventHandle = s_writeEvent };
-        if (!WriteFile(s_hid, buf, 49, IntPtr.Zero, ref ov)
+        if (!WriteFile(s_hid, buf, (uint)len, IntPtr.Zero, ref ov)
             && Marshal.GetLastWin32Error() != 997)
             return false;
         if (!GetOverlappedResultEx(s_hid, ref ov, out uint written, 1000, false))
@@ -125,7 +143,7 @@ internal static class Program
             CancelAndWait(ref ov);
             return false;
         }
-        return written == 49;
+        return written == (uint)len;
     }
 
     // A canceled transfer still completes, and the system writes its status
@@ -231,13 +249,29 @@ internal static class Program
         var held = System.Text.Json.Nodes.JsonNode.Parse(text ?? throw new InvalidOperationException("switch-pro.json is not embedded"))!.AsObject();
         held["id"] = "switch-pro-held";
         foreach (var rule in held["protocol"]!["commands"]!["rules"]!.AsArray()) rule!.AsObject().Remove("set");
+        // Its USB form, held the same way, from the same directory.
+        string? usbText = null;
+        foreach (var res in asm.GetManifestResourceNames().Where(n => n.StartsWith("HIDMaestro.Profiles.", StringComparison.Ordinal)))
+        {
+            using var st = asm.GetManifestResourceStream(res)!;
+            string t = new System.IO.StreamReader(st, System.Text.Encoding.UTF8).ReadToEnd();
+            if (System.Text.Json.Nodes.JsonNode.Parse(t) is System.Text.Json.Nodes.JsonObject o && (string?)o["id"] == "switch-pro-usb") { usbText = t; break; }
+        }
+        var heldUsb = System.Text.Json.Nodes.JsonNode.Parse(usbText ?? throw new InvalidOperationException("switch-pro-usb.json is not embedded"))!.AsObject();
+        heldUsb["id"] = "switch-pro-usb-held";
+        foreach (var rule in heldUsb["protocol"]!["commands"]!["rules"]!.AsArray()) rule!.AsObject().Remove("set");
+        held["usbForm"] = "switch-pro-usb-held";
         System.IO.File.WriteAllText(System.IO.Path.Combine(heldDir, "switch-pro-held.json"), held.ToJsonString());
+        System.IO.File.WriteAllText(System.IO.Path.Combine(heldDir, "switch-pro-usb-held.json"), heldUsb.ToJsonString());
         ctx.LoadProfilesFromDirectory(heldDir);
         var heldProfile = ctx.GetProfile("switch-pro-held")
             ?? throw new InvalidOperationException("the held copy of switch-pro did not load");
 
         Console.WriteLine("  Creating the held copy of switch-pro...");
         using var ctrl = ctx.CreateController(heldProfile);
+        var form = heldProfile.FormOn(ctrl.Backend);
+        s_usb = !ReferenceEquals(form, heldProfile);
+        Console.WriteLine($"  backend {ctrl.Backend}, presents {form.Id}: writes {OutLen}, reads {InLen}");
 
         // Neutral pump keeps the shared body populated. NO protocol traffic
         // is written until phase 3, so the stream must stay in descriptor
@@ -260,7 +294,7 @@ internal static class Program
         // (2026-07-22), and another program's virtual Switch Pro shares the
         // HM-CTL- prefix. This one serves HM-CTL- and its own transport
         // index (DeviceOrchestrator.DriverSerial). A real one serves its MAC.
-        string serial = DeviceOrchestrator.DriverSerial(ctrl.TransportIndex);
+        string serial = SerialOf(ctrl);
         string? path = null;
         for (int i = 0; i < 300 && path == null; i++)
         {
@@ -280,6 +314,21 @@ internal static class Program
         Check("HID device opens", !s_hid.IsInvalid);
         if (s_hid.IsInvalid) { Volatile.Write(ref pumpStop, true); return 1; }
 
+        if (s_usb)
+        {
+            // ── Phase 1, USB form: nothing before the protocol ──────────
+            Console.WriteLine("\n-- Phase 1: the USB form sends nothing before a host speaks the protocol --");
+            HidD_FlushQueue(s_hid);
+            var quiet = Own(Collect(600));
+            Check("no report at rest", quiet.Count == 0, Ids(quiet));
+            lock (pumpLock) pumpState = new HMGamepadState { Buttons = (HMButton)(1u << 1) };
+            var onPress = Own(Collect(400));
+            lock (pumpLock) pumpState = new HMGamepadState();
+            Check("a press sends no report: the USB form has no 0x3F", onPress.Count == 0, Ids(onPress));
+            Console.WriteLine("\n-- Phase 2: the USB form has no simple-mode report, so no simple-mode field to read --");
+        }
+        else
+        {
         // ── Phase 1: 0x3F is sent on a change, not streamed ─────────────
         Console.WriteLine("\n-- Phase 1: 0x3F on change, no stream at rest (no protocol traffic yet) --");
 
@@ -366,6 +415,7 @@ internal static class Program
         // Back to neutral before the handshake.
         lock (pumpLock) pumpState = new HMGamepadState();
         Thread.Sleep(40);
+        }
 
         // ── Phase 3: held pad answers a subcommand but stays 0x3F ──────
         Console.WriteLine("\n-- Phase 3: held pad answers 0x01 subcommand but stays 0x3F --");
@@ -373,27 +423,36 @@ internal static class Program
         // Bare 0x01 subcommand, SDL BT framing: counter + neutral rumble
         // + subcommand 0x02 (device info). The 0x80 USB-init family does
         // not exist in the BT descriptor, exactly like real BT hardware.
-        var cmd = new byte[49];
+        var cmd = new byte[OutLen];
         cmd[0] = 0x01; cmd[1] = 0x00;
         cmd[2] = 0x00; cmd[3] = 0x01; cmd[4] = 0x40; cmd[5] = 0x40;
         cmd[6] = 0x00; cmd[7] = 0x01; cmd[8] = 0x40; cmd[9] = 0x40;
         cmd[10] = 0x02;                 // subcommand: device info
-        Check("0x01 subcommand write (49-byte BT framing)", HidWrite(cmd));
+        Check($"0x01 subcommand write ({OutLen}-byte framing)", HidWrite(cmd));
         // Matched on the echoed subcommand, as SDL's ReadSubcommandReply
         // does: another program's handshake gets replies of its own.
         var ack = ReadUntil(0x21, 60000, r => r[14] == 0x02);
         Check("0x21 subcommand reply (the held copy answers)",
               ack != null && ack[14] == 0x02, ack != null ? $"len={s_lastReadLen}" : "no reply");
-        Check("0x21 reply completes at 362 (padded)", ack != null && s_lastReadLen == 362, $"{s_lastReadLen}");
+        Check($"0x21 reply completes at {InLen} (the form's InputReportByteLength)", ack != null && s_lastReadLen == InLen, $"{s_lastReadLen}");
         // The held copy never sets protocolSeen, so a change after the
         // subcommand still goes out as 0x3F, and no 0x30 starts. The reads
         // run 400 ms, long enough for a 15 ms stream to show, and past that
         // until the press arrives, so a pump that runs late cannot fail it.
         lock (pumpLock) pumpState = new HMGamepadState { Buttons = (HMButton)(1u << 1) };
-        var still = CollectUntil(f => f[0] == 0x3F && (f[1] & 0x02) != 0, 400, 60000);
-        lock (pumpLock) pumpState = new HMGamepadState();
-        Check("a change after it still sends 0x3F on the held copy, and no 0x30",
-              still.Any(f => f[0] == 0x3F && (f[1] & 0x02) != 0) && !still.Any(f => f[0] == 0x30), Ids(still));
+        if (s_usb)
+        {
+            var still = Own(Collect(400));
+            lock (pumpLock) pumpState = new HMGamepadState();
+            Check("a change after it sends no 0x30 on the held copy", !still.Any(f => f[0] == 0x30), Ids(still));
+        }
+        else
+        {
+            var still = CollectUntil(f => f[0] == 0x3F && (f[1] & 0x02) != 0, 400, 60000);
+            lock (pumpLock) pumpState = new HMGamepadState();
+            Check("a change after it still sends 0x3F on the held copy, and no 0x30",
+                  still.Any(f => f[0] == 0x3F && (f[1] & 0x02) != 0) && !still.Any(f => f[0] == 0x30), Ids(still));
+        }
 
         Volatile.Write(ref pumpStop, true);
         pump.Join(1000);
@@ -405,7 +464,7 @@ internal static class Program
         // running, Edge/Chrome arms it within milliseconds; otherwise our
         // own 0x01 subcommand does. Either way the stream must be the
         // 49-byte BT full-mode 0x30: timer at byte 1, battery at byte 2.
-        Console.WriteLine("\n-- Phase 4: unheld pad locks 49-byte 0x30 full-mode on protocol traffic --");
+        Console.WriteLine($"\n-- Phase 4: unheld pad locks {InLen}-byte-read 0x30 full-mode on protocol traffic --");
 
         using (var ctrl2 = ctx.CreateController(profile))
         {
@@ -417,7 +476,7 @@ internal static class Program
             }) { IsBackground = true };
             pump2.Start();
 
-            string serial2 = DeviceOrchestrator.DriverSerial(ctrl2.TransportIndex);
+            string serial2 = SerialOf(ctrl2);
             string? path2 = null;
             for (int i = 0; i < 300 && path2 == null; i++)
             {
@@ -449,11 +508,11 @@ internal static class Program
                         if (r != null && r[0] == 0x30)
                         {
                             nf.Add(r);
-                            if (s_lastReadLen != 362) allLen362 = false;
+                            if (s_lastReadLen != InLen) allLen362 = false;
                         }
                     }
                     Check("post-arm 0x30 frames", nf.Count >= 3, $"{nf.Count}");
-                    Check("0x30 frames complete at 362 (padded)", nf.Count > 0 && allLen362);
+                    Check($"0x30 frames complete at {InLen} (the form's InputReportByteLength)", nf.Count > 0 && allLen362);
                     if (nf.Count >= 3)
                     {
                         bool timerAdvances = false;
@@ -481,7 +540,7 @@ internal static class Program
         }
 
         Console.WriteLine(s_failures == 0
-            ? "\n=== PASS: 0x3F simple-mode on change; subcommand locks 49-byte 0x30 on unheld pad ==="
+            ? "\n=== PASS: the pad's form before and after the protocol, on its backend ==="
             : $"\n=== FAIL: {s_failures} check(s) failed ===");
         return s_failures == 0 ? 0 : 1;
     }

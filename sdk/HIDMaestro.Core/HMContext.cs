@@ -838,11 +838,18 @@ public sealed class HMContext : IDisposable
         // not install the driver and a payload this build lacks all refuse
         // here, before the lease.
         var resolved = ResolveFor(profile, backend);
+        // The profile the device runs: the one asked for, or on the USB/IP
+        // backend the USB form a Bluetooth identity names (usbForm).
+        var presented = profile;
         if (resolved == HMBackend.Usbip)
         {
             // The USB device the profile presents, so a pin that does not fit
             // is refused with nothing to undo.
-            try { _ = Internal.Usbip.UsbPresentation.Resolve(profile.Inner); }
+            try
+            {
+                if (profile.Inner.UsbForm != null) presented = new HMProfile(profile.Inner.UsbFormOf(HMBackend.Usbip));
+                _ = Internal.Usbip.UsbPresentation.Resolve(presented.Inner);
+            }
             catch (Exception e) when (e is not HMBackendNotSupportedException && Internal.ProfileDefects.IsDefect(e))
             {
                 throw Internal.ProfileDefects.ToProfileException(profile.Inner, e);
@@ -869,7 +876,7 @@ public sealed class HMContext : IDisposable
         // under LockRecursionPolicy.SupportsRecursion, a writer waiting or
         // not (ReaderWriterLockSlim.TryEnterReadLockCore).
         Internal.OwnerSweep.CreateGate.EnterReadLock();
-        try { return CreateUnderLease(slot, profile, identityKey, resolved); }
+        try { return CreateUnderLease(slot, profile, presented, identityKey, resolved); }
         finally { Internal.OwnerSweep.CreateGate.ExitReadLock(); }
     }
 
@@ -883,7 +890,7 @@ public sealed class HMContext : IDisposable
     internal static Action<int, string?> TeardownDevices = Internal.DeviceOrchestrator.TeardownController;
     internal static Action<HMController>? AfterControllerBuilt;
 
-    private HMController CreateUnderLease(int slot, HMProfile profile, string? identityKey, HMBackend backend)
+    private HMController CreateUnderLease(int slot, HMProfile profile, HMProfile presented, string? identityKey, HMBackend backend)
     {
         bool usbip = backend == HMBackend.Usbip;
         // A USB/IP create opens the host controller for its lease's census
@@ -903,7 +910,7 @@ public sealed class HMContext : IDisposable
             // and deploys itself on first use, so this path needs no
             // precondition from the consumer.
             if (usbip)
-                return CreateUsbipController(slot, lease, profile);
+                return CreateUsbipController(slot, lease, profile, presented);
 
             string? instanceId = null;
             long refused = Internal.DeviceManager.LockTakesRefusedHere;
@@ -984,16 +991,16 @@ public sealed class HMContext : IDisposable
     // sections and events, attaches through usbip-win2's vhci, and the
     // HMController then binds to the same sections it always does. No INF,
     // no HIDMaestro driver.
-    private HMController CreateUsbipController(int slot, Internal.ControllerLease lease, HMProfile profile)
+    private HMController CreateUsbipController(int slot, Internal.ControllerLease lease, HMProfile profile, HMProfile presented)
     {
         int index = lease.TransportIndex;
         Internal.Usbip.UsbipBackendHandle? handle = null;
         try
         {
-            Internal.DeviceOrchestrator.PrepareUsbipController(index, profile.Inner);
+            Internal.DeviceOrchestrator.PrepareUsbipController(index, presented.Inner);
             // The device emulator maps the index's sections before its
             // attach, so a failed attach leaves them for the catch below.
-            handle = Internal.Usbip.UsbipBackend.CreateDevice(profile.Inner, index, lease.Identity);
+            handle = Internal.Usbip.UsbipBackend.CreateDevice(presented.Inner, index, lease.Identity);
             // The USB instance the device's records sit under, in the owner
             // record, for the start wait and for record cleanup.
             if (handle.Device.Descriptors.UsbInstanceId is { } usbId)
@@ -1003,7 +1010,7 @@ public sealed class HMContext : IDisposable
                 // create returns, as the UMDF2 create's is.
                 if (handle.Device.Derived) Internal.DeviceOrchestrator.AwaitUsbipStart(usbId, index);
             }
-            var controller = new HMController(this, slot, lease, profile, instanceId: null, handle, lease.Identity.Key);
+            var controller = new HMController(this, slot, lease, profile, instanceId: null, handle, lease.Identity.Key, presented);
             try
             {
                 AfterControllerBuilt?.Invoke(controller);
