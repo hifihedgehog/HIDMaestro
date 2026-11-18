@@ -1771,8 +1771,8 @@ internal static partial class Program
         SectionT5();
     }
 
-    /// <summary>The runner the deploy starts pnputil
-    /// with, on a tool whose last line arrives after its own process has
+    /// <summary>The runner the deploy starts pnputil with, on a tool
+    /// whose last line arrives after its own process has
     /// exited, from a child that shares its output: the line is in what the
     /// runner returns, as a tool's closing error has to be. A child that
     /// keeps the output open longer holds the runner for a bounded time.</summary>

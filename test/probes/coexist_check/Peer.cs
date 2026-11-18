@@ -518,8 +518,8 @@ internal static class Peer
                     case "runtool":
                     {
                         // DriverBuilder.Run, the SDK's runner for pnputil,
-                        // on a tool that exits at once
-                        // and leaves a child that holds the same output for
+                        // on a tool that exits at once and leaves a child
+                        // that holds the same output for
                         // a[1] seconds (2 when absent) and then writes its
                         // last line. "beyond" holds it 60 s against the
                         // runner's 10 s drain bound, both scaled by this
