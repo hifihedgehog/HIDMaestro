@@ -75,8 +75,16 @@ $scriptDir = if ($PSScriptRoot) {
     $PWD.Path
 }
 
+# The architecture of this machine, x64 or arm64. The test app, the probes
+# and the smoke apps the battery runs are built for it. The operating
+# system's architecture is read, not this process's, so a PowerShell host
+# that runs under emulation still picks the machine's own build.
+function Get-MachineArch {
+    if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq [System.Runtime.InteropServices.Architecture]::Arm64) { 'arm64' } else { 'x64' }
+}
+
 if (-not $Exe) {
-    $Exe = Join-Path $scriptDir '..\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestroTest.exe'
+    $Exe = Join-Path $scriptDir ('..\bin\Release\net10.0-windows10.0.26100.0\win-' + (Get-MachineArch) + '\HIDMaestroTest.exe')
 }
 
 # ====================================================================
@@ -2164,9 +2172,7 @@ function Scenario-Usbip-Clean-Install {
 
 # The smoke apps the aot_smoke probe publishes for this machine's
 # architecture.
-function Get-SmokeArch {
-    if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq [System.Runtime.InteropServices.Architecture]::Arm64) { 'arm64' } else { 'x64' }
-}
+function Get-SmokeArch { Get-MachineArch }
 
 # S74: HIDMaestro.Core in a NativeAOT app. The whole catalog loads, the
 # driver installs, a UMDF2 controller and a USB/IP composite each deliver the

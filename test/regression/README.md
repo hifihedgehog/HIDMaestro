@@ -72,6 +72,12 @@ Lenovo Legion Pro 7, and 42 minutes on a 4-core Celeron J4125 at
 `HIDMAESTRO_TIMEOUT_SCALE=2`. Use `-Filter` to run one scenario when
 iterating.
 
+The battery runs the test app and the probes built for the machine's
+own architecture: `test\bin\Release\net10.0-windows10.0.26100.0\win-x64`
+or `win-arm64` by `RuntimeInformation.OSArchitecture`, unless `-Exe`
+names another, and each probe's own build output, which an ARM64
+machine gets from a build with `-p:HMTargetArchitecture=arm64`.
+
 ## Why elevated
 
 `HIDMaestroTest.exe` self-elevates via UAC if launched without admin
