@@ -95,8 +95,7 @@ internal static unsafe partial class Program
                 Check($"{id}: the host started the device (Set Device State Start) and sent no security challenge",
                       startedGip && security.All(x => x.Length == 12 && x.EndsWith("020100", StringComparison.Ordinal)), string.Join(" ", security));
 
-                ulong deviceId = 0;
-                for (int i = 0; i < 6; i++) deviceId |= (ulong)Convert.ToByte(serial.Substring(serial.Length - 2 - 2 * i, 2), 16) << (8 * i);
+                ulong deviceId = BitConverter.ToUInt64(ExpectedDeviceId(serial), 0);
                 var held = GipCapture(4_000).Where(m => m.DeviceId == deviceId).ToList();
                 var arrival = held.FirstOrDefault(m => m.Command == 0x02);
                 Check($"{id}: xboxgip holds the arrival, 045E:{pid:X4} firmware 4D48.0300",
@@ -168,6 +167,17 @@ internal static unsafe partial class Program
                     Motor(engine, $"{id}: XInputSetState(16384, 32768)", () => { var v = new XINPUT_VIBRATION { wLeftMotorSpeed = 16384, wRightMotorSpeed = 32768 }; return XInputSetState(s, ref v); },
                           c => c[8] is >= 24 and <= 26 && c[9] is >= 49 and <= 51 && (c[5] & 0x03) == 0x03);
                     Motor(engine, $"{id}: XInputSetState(0, 0)", () => { var v = new XINPUT_VIBRATION(); return XInputSetState(s, ref v); }, c => c[8] == 0 && c[9] == 0);
+                    // Trigger rumble: the haptics output report the HID
+                    // child's descriptor declares, written with
+                    // HidD_SetOutputReport, which takes no input focus
+                    // (lane GIP's check in Live.cs, for each identity).
+                    string? gipHid = InterfaceUnder(s_hidInterface, instance);
+                    int gipOut = gipHid == null ? 0 : HidOutputLength(gipHid);
+                    Motor(engine, $"{id}: HidD_SetOutputReport(triggers 80 and 30, motors 100 and 50) on the HID child",
+                          () => gipHid == null ? 2u : HidSetOutput(gipHid, Haptics(gipHid, gipOut, 80, 30, 100, 50)),
+                          c => (c[5] & 0x0F) == 0x0F && c[6] == 80 && c[7] == 30 && c[8] == 100 && c[9] == 50);
+                    Motor(engine, $"{id}: HidD_SetOutputReport at rest on the HID child",
+                          () => gipHid == null ? 2u : HidSetOutput(gipHid, Haptics(gipHid, gipOut, 0, 0, 0, 0)), c => c[6] == 0 && c[7] == 0 && c[8] == 0 && c[9] == 0);
                     var motors = engine.SnapshotLog().Where(x => x.Command.Length >= 13 && x.Command[0] == 0x09).Select(x => x.Command).ToList();
                     bool raised;
                     lock (raw) raised = motors.Count > 0 && motors.All(m => raw.Any(o => o.Id == m[5] && o.Data.AsSpan().SequenceEqual(m.AsSpan(6, 7))));
@@ -195,6 +205,7 @@ internal static unsafe partial class Program
                 if (slot >= 0)
                     Check($"{id}: its XInput slot is free again", WaitUntil(() => XInputGetState((uint)slot, out _) != 0, 10_000), Slots(ConnectedSlots()));
             }
+            Umdf2Haptics(ctx, profile);
         }
 
         try { control?.Dispose(); } catch { }
@@ -202,6 +213,37 @@ internal static unsafe partial class Program
             Check("the positive control's devnode is gone after Dispose", WaitUntil(() => Node(controlInstance) == null, 30_000));
         Console.WriteLine($"\n  not-present USB records this run leaves: {string.Join(", ", left)}");
         return 0;
+    }
+
+    /// <summary>The same haptics output report on the profile's UMDF2 form,
+    /// for parity, where the UMDF2 driver runs: it must reach
+    /// OutputReceived with the trigger magnitudes.</summary>
+    static void Umdf2Haptics(HMContext ctx, HMProfile profile)
+    {
+        string? why = null;
+        try { if (ctx.ResolveBackend(profile, HMBackend.Umdf2) != HMBackend.Umdf2) why = "it resolves elsewhere"; }
+        catch (Exception e) { why = e.GetType().Name; }
+        if (why != null) { Console.WriteLine($"  no UMDF2 form on this machine for the parity write: {why}"); return; }
+        HMController? umdf2 = null;
+        try
+        {
+            var got = new List<(byte Id, byte[] Data)>();
+            umdf2 = ctx.CreateController(profile, null, HMBackend.Umdf2);
+            umdf2.OutputReceived += (_, pkt) => { if (pkt.Source == HMOutputSource.HidOutput) lock (got) got.Add((pkt.ReportId, pkt.Data.ToArray())); };
+            string? hid = null;
+            string parent = umdf2.InstanceId ?? "";
+            WaitUntil(() => (hid = InterfaceUnder(s_hidInterface, parent)) != null, 30_000);
+            Check($"{profile.Id}: parity, the UMDF2 form has its HID interface", hid != null, hid ?? parent);
+            if (hid == null) return;
+            uint code = HidSetOutput(hid, Haptics(hid, HidOutputLength(hid), 80, 30, 100, 50));
+            bool arrived = WaitUntil(() => { lock (got) return got.Any(o => o.Id == 0x0F && o.Data.Length >= 4 && o.Data[0] == 80 && o.Data[1] == 30 && o.Data[2] == 100 && o.Data[3] == 50); }, 3_000);
+            string seen;
+            lock (got) seen = string.Join(" | ", got.Select(o => $"{o.Id:X2} {Hex(o.Data)}"));
+            Check($"{profile.Id}: parity, the same report reaches the UMDF2 form's OutputReceived with the trigger magnitudes", code == 0 && arrived,
+                  $"HidD_SetOutputReport {code}, OutputReceived {seen}");
+        }
+        catch (Exception e) { Check($"{profile.Id}: parity, the UMDF2 form", false, e.Message); }
+        finally { try { umdf2?.Dispose(); } catch { } }
     }
 
     /// <summary>True when the identity's input report carries Share: an
