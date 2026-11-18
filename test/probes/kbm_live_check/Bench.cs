@@ -263,6 +263,10 @@ internal static class Bench
         var sw = Stopwatch.StartNew();
         while (k.KeyboardLeds == null && sw.ElapsedMilliseconds < 15000) Thread.Sleep(10);
         Thread.Sleep(300);
+        // The control: F22 pressed and released, which the parent's hook
+        // must see before Left Shift's state means anything.
+        k.SubmitKeyboard(HMKeyModifiers.None, new[] { HMKey.F22 });
+        k.SubmitKeyboard(HMKeyModifiers.None, ReadOnlySpan<HMKey>.Empty);
         k.SubmitKeyboard(HMKeyModifiers.LeftShift, ReadOnlySpan<HMKey>.Empty);
         Console.WriteLine($"HELD backend {k.Backend} release-on-exit {(k.ReleasesOnConsumerExit ? "on" : "off")}");
         Console.Out.Flush();
@@ -286,6 +290,14 @@ internal static class Bench
         var kb = RawInputSink.Devices().FirstOrDefault(d => d.Type == RawInputSink.RIM_TYPEKEYBOARD && !before.Contains(d.Name)
                                                            && RawInputSink.Attributes(d.Name) is { Vid: 0xBEEF, Pid: 0xF0CA });
         Console.WriteLine($"  Raw Input lists the keyboard: {(kb.Name != null ? kb.Name : "no")}");
+        var cw = Stopwatch.StartNew();
+        bool control = false;
+        while (!control && cw.ElapsedMilliseconds < 3000)
+        {
+            control = sink.HookKeys.Any(k => k.VKey == 0x85 && (k.Flags & 0x80) == 0);
+            Thread.Sleep(10);
+        }
+        Console.WriteLine($"  control: the child's F22 reached this program's hook: {(control ? "yes" : "no, so keyboard input does not reach this desktop and nothing below means anything")}");
         // Windows repeats a held key after the keyboard delay. 1.5 s held.
         sink.Clear();
         Thread.Sleep(1500);
@@ -312,8 +324,9 @@ internal static class Bench
         Console.WriteLine($"  hook after the kill: {(hook.Count == 0 ? "nothing" : string.Join(" ", hook.Select(k => ((k.Flags & 0x80) != 0 ? "up" : "down") + ((k.Flags & 0x10) != 0 ? "(injected)" : ""))))}");
         Console.WriteLine($"  Raw Input from the keyboard after the kill: {(raw.Count == 0 ? "nothing" : string.Join(" ", raw.Select(k => $"vk 0x{k.VKey:X2} {((k.Flags & 1) != 0 ? "break" : "make")}")))}");
         int repeats = hook.Count(k => (k.Flags & 0x80) == 0);
-        Console.WriteLine($"=== R4: Left Shift {(upAt >= 0 ? "went up" : "stayed down")} after the kill, {repeats} repeats after it ===");
-        return 0;
+        Console.WriteLine($"=== R4: control {(control ? "seen" : "NOT seen")}; Left Shift {(downBefore ? "down" : "up")} before the kill, " +
+                          $"{(upAt >= 0 ? "up" : "still down")} after it, {repeats} repeats after it ===");
+        return control && downBefore ? 0 : 1;
     }
 
     [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);

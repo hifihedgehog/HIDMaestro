@@ -112,6 +112,28 @@ internal static class Program
     static bool DeviceGone(string instanceId) =>
         CM_Locate_DevNodeW(out _, instanceId, 0) != 0 && CM_Locate_DevNodeW(out _, instanceId, 1) != 0;
 
+    /// <summary>The devices of this VID and PID either backend presents,
+    /// live or phantom: the UMDF2 driver's root devices under
+    /// ROOT\HIDCLASS, and a USB/IP persona's USB device,
+    /// USB\VID_v&amp;PID_p\&lt;serial&gt;.</summary>
+    static List<string> PresentedDevices(string tag)
+    {
+        var ids = RootDevices(tag);
+        using var key = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\USB\{tag}");
+        if (key != null)
+            foreach (var inst in key.GetSubKeyNames()) ids.Add($@"USB\{tag}\{inst}");
+        return ids;
+    }
+
+    /// <summary>The device is gone as its backend removes it: a UMDF2 root
+    /// device neither live nor phantom, a USB/IP persona's USB device no
+    /// longer present. A USB device keeps its record once unplugged, as a
+    /// real one's does.</summary>
+    static bool Removed(string instanceId) =>
+        instanceId.StartsWith(@"USB\", StringComparison.OrdinalIgnoreCase)
+            ? CM_Locate_DevNodeW(out _, instanceId, 0) != 0
+            : DeviceGone(instanceId);
+
     /// <summary>A Raw Input device of this VID and PID. Plain HID profiles
     /// sit under the HIDClass enumerator, so the path does not carry them.</summary>
     static bool Is(string path, string tag)
@@ -1333,7 +1355,7 @@ internal static class Program
             return;
         }
         Check("the driver watches the consumer's exit", line.EndsWith(" on"), line);
-        var held = new[] { 0xF0B6, 0xF0B8, 0xF0B9 }.SelectMany(p => RootDevices(Tag(0xBEEF, (ushort)p)))
+        var held = new[] { 0xF0B6, 0xF0B8, 0xF0B9 }.SelectMany(p => PresentedDevices(Tag(0xBEEF, (ushort)p)))
                                                    .Where(id => CM_Locate_DevNodeW(out _, id, 0) == 0).ToList();
         var devs = RawInputSink.Devices();
         IntPtr Find(uint type, ushort pid) => devs.FirstOrDefault(d => d.Type == type && Is(d.Name, Tag(0xBEEF, pid))).Handle;
@@ -1382,11 +1404,11 @@ internal static class Program
         var cleanup = Stopwatch.StartNew();
         HMContext.RemoveAllVirtualControllers();
         long cleanupMs = cleanup.ElapsedMilliseconds;
-        var left = held.Where(id => !DeviceGone(id)).ToList();
+        var left = held.Where(id => !Removed(id)).ToList();
         while (left.Count > 0 && cleanup.ElapsedMilliseconds < cleanupMs + HangMs)
         {
             Thread.Sleep(100);
-            left = held.Where(id => !DeviceGone(id)).ToList();
+            left = held.Where(id => !Removed(id)).ToList();
         }
         Check("the cleanup removes the dead consumer's keyboard and both mice",
               held.Count == 3 && left.Count == 0,
