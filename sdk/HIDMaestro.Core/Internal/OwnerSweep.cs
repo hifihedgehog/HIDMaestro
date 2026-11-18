@@ -296,6 +296,12 @@ internal static class OwnerSweep
         // release.
         WinUsbBinding.StopKeepingAll();
         Usbip.UsbipBackend.DetachOwn();
+        // The USB records this process's creates caused go once their
+        // devices have left. One that stays keeps the record for the next
+        // sweep, as a device left in the tree does.
+        bool usbRecordsLeft = DeviceOrchestrator.RemoveOwnedUsbRecords(new[] { own }).Count > 0;
+        if (usbRecordsLeft)
+            DeviceOrchestrator.LogDiag("    exit: a USB record of this process stays, so the record stays for the next sweep");
         var groups = census.Devices.Where(d => d.Owner == OwnerCensus.Owner.Self).ToList();
         if (groups.Count > 0)
         {
@@ -345,7 +351,7 @@ internal static class OwnerSweep
         // bound of its own.
         var released = own.Controllers.Where(c => c.TransportIndex >= 0).Select(c => c.TransportIndex).ToList();
         if (released.Count > 0) try { RegistryLedger.Release(released); } catch { }
-        return true;
+        return !usbRecordsLeft;
     }
 
     /// <summary>Called once <see cref="Reclaim"/> holds the claims of the
@@ -425,12 +431,16 @@ internal static class OwnerSweep
         finally { claims.ReleaseAll(); }
 
         var usbip = new Usbip.UsbipBackend.SweepView();
+        Usbip.UsbRecords.Tree? tree = null;
         foreach (var rec in census.DeadRecords)
         {
             bool settled = true;
             foreach (var c in rec.Controllers)
                 if (string.Equals(c.Backend, "usbip", StringComparison.OrdinalIgnoreCase))
+                {
                     settled &= Usbip.UsbipBackend.DetachDeadImport(rec.UsbipPort, c.TransportIndex, usbip);
+                    settled &= RemoveDeadUsbRecords(c, ref tree);
+                }
             // A composite whose attempt was left, because a listener on its
             // port did not say what it exports, is named by this record
             // alone, so the record stays for the next sweep.
@@ -440,6 +450,42 @@ internal static class OwnerSweep
 
         if (targets.Count > 0 || census.DeadRecords.Any())
             try { RegistryLedger.PruneDead(); } catch { }
+    }
+
+    /// <summary>The USB records a dead program's create caused, which its
+    /// owner record names (<see cref="Usbip.UsbRecords"/>), go once its
+    /// device has left, under the controller's identity claim, so no create
+    /// of this release brings the device back during the removal. A claim
+    /// another program holds is that program's controller of the same
+    /// identity: the records stay, and so does the dead record, for a later
+    /// sweep. True when none is left.</summary>
+    private static bool RemoveDeadUsbRecords(MachineClaims.ControllerEntry c, ref Usbip.UsbRecords.Tree? tree)
+    {
+        var ids = c.UsbRecords.Where(Usbip.UsbRecords.Exists).ToList();
+        if (ids.Count == 0) return true;
+        try
+        {
+            using var claim = MachineClaims.TryClaim(MachineClaims.IdentityPipeName(c.Token));
+            if (claim == null)
+            {
+                DeviceOrchestrator.LogDiag($"    reclaim left the usb records of {string.Join(", ", ids)}: a running program holds its identity");
+                return false;
+            }
+            bool settled = true;
+            foreach (string id in ids)
+            {
+                tree ??= Usbip.UsbRecords.Tree.Read();
+                var r = Usbip.UsbRecords.Remove(id, TimeoutScale.Apply(Usbip.UsbRecords.LeaveWaitMs), tree);
+                DeviceOrchestrator.LogDiag($"    reclaim: usb records of {id}: {r.Outcome}, {r.Detail}");
+                settled &= r.Settled;
+            }
+            return settled;
+        }
+        catch (Exception e)
+        {
+            DeviceOrchestrator.LogDiag($"    reclaim left the usb records of {string.Join(", ", ids)}: {e.GetType().Name}: {e.Message}");
+            return false;
+        }
     }
 
     /// <summary>The groups of <paramref name="candidates"/>, dead owners'
@@ -1188,9 +1234,13 @@ internal static class OwnerSweep
                 bool named = settled.Any(g => g.Record?.OwnerId == rec.OwnerId);
                 if (!named || census.Devices.Any(g => g.Record?.OwnerId == rec.OwnerId && !settled.Contains(g))) continue;
                 bool detached = true;
+                Usbip.UsbRecords.Tree? tree = null;
                 foreach (var c in rec.Controllers)
                     if (string.Equals(c.Backend, "usbip", StringComparison.OrdinalIgnoreCase))
+                    {
                         detached &= Usbip.UsbipBackend.DetachDeadImport(rec.UsbipPort, c.TransportIndex, usbip);
+                        detached &= RemoveDeadUsbRecords(c, ref tree);
+                    }
                 if (detached) _calls.DeleteRecord(rec.OwnerId);
             }
         }

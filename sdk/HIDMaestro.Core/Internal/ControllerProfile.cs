@@ -796,7 +796,7 @@ public sealed class ControllerProfile
                 throw new ProfileDefectException("$.usbConfiguration",
                     "is required for this protocol: it names endpoints or USB transfers, and only a usbConfiguration that authors its descriptors has them.");
             if (checkModelGroups) Usbip.CompiledProtocol.Compile(this, derived ? null : descriptors);
-            WinUsbBinding.PackageFor(this, descriptors);
+            WinUsbBinding.PackageFor(this, descriptors, HMBackend.Usbip);
             return;
         }
         // A usbConfiguration on a profile whose default is UMDF2 is the USB

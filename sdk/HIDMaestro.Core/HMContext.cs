@@ -903,7 +903,7 @@ public sealed class HMContext : IDisposable
             // and deploys itself on first use, so this path needs no
             // precondition from the consumer.
             if (usbip)
-                return CreateUsbipController(slot, lease, profile);
+                return CreateUsbipController(slot, lease, profile, ref keepLease);
 
             string? instanceId = null;
             long refused = Internal.DeviceManager.LockTakesRefusedHere;
@@ -984,7 +984,7 @@ public sealed class HMContext : IDisposable
     // sections and events, attaches through usbip-win2's vhci, and the
     // HMController then binds to the same sections it always does. No INF,
     // no HIDMaestro driver.
-    private HMController CreateUsbipController(int slot, Internal.ControllerLease lease, HMProfile profile)
+    private HMController CreateUsbipController(int slot, Internal.ControllerLease lease, HMProfile profile, ref bool keepLease)
     {
         int index = lease.TransportIndex;
         Internal.Usbip.UsbipBackendHandle? handle = null;
@@ -994,15 +994,12 @@ public sealed class HMContext : IDisposable
             // The device emulator maps the index's sections before its
             // attach, so a failed attach leaves them for the catch below.
             handle = Internal.Usbip.UsbipBackend.CreateDevice(profile.Inner, index, lease.Identity);
-            // The USB instance the device's records sit under, in the owner
-            // record, for the start wait and for record cleanup.
-            if (handle.Device.Descriptors.UsbInstanceId is { } usbId)
-            {
-                Internal.MachineClaims.SetControllerValue(lease.Identity.Token, "UsbInstanceId", usbId);
-                // A derived device's HID interface is started before the
-                // create returns, as the UMDF2 create's is.
-                if (handle.Device.Derived) Internal.DeviceOrchestrator.AwaitUsbipStart(usbId, index);
-            }
+            // The USB instance the device's records sit under is in the owner
+            // record from before the attach (UsbipBackend.CreateDevice). A
+            // derived device's HID interface is started before the create
+            // returns, as the UMDF2 create's is.
+            if (handle.Device.Descriptors.UsbInstanceId is { } usbId && handle.Device.Derived)
+                Internal.DeviceOrchestrator.AwaitUsbipStart(usbId, index);
             var controller = new HMController(this, slot, lease, profile, instanceId: null, handle, lease.Identity.Key);
             try
             {
@@ -1025,8 +1022,36 @@ public sealed class HMContext : IDisposable
             try { handle?.Dispose(); } catch { }
             try { Internal.SharedMemoryIO.DestroyController(index); } catch { }
             try { Internal.RegistryLedger.Release(index); } catch { }
+            // The records a failed create's attach caused go as a dispose's
+            // do. A record that stays keeps the lease, so the owner record
+            // names it for the next sweep.
+            if (handle != null && !RemoveCreatedRecords(handle)) keepLease = true;
             throw;
         }
+    }
+
+    /// <summary>Remove the USB records a controller's device caused, once
+    /// it has left (<see cref="Internal.Usbip.UsbRecords"/>). True when none
+    /// is left. A device Windows names by its port is looked up on its vhci
+    /// port first, while it is still there, by the caller.</summary>
+    internal static bool RemoveCreatedRecords(Internal.Usbip.UsbipBackendHandle handle)
+    {
+        bool settled = true;
+        foreach (string id in handle.CreatedRecords)
+        {
+            try
+            {
+                var r = Internal.Usbip.UsbRecords.Remove(id, Internal.TimeoutScale.Apply(Internal.Usbip.UsbRecords.LeaveWaitMs));
+                if (!r.Settled) Internal.DeviceOrchestrator.LogDiag($"    usb records of {id} stay for the next sweep: {r.Outcome}, {r.Detail}");
+                settled &= r.Settled;
+            }
+            catch (Exception e)
+            {
+                Internal.DeviceOrchestrator.LogDiag($"    usb records of {id} stay for the next sweep: {e.GetType().Name}: {e.Message}");
+                settled = false;
+            }
+        }
+        return settled;
     }
 
     /// <summary>Create a controller pinned to a specific slot of this
@@ -1193,11 +1218,21 @@ public sealed class HMContext : IDisposable
                 // No WinUSB bind after a re-import lands once the ledger
                 // below has released the controller's holds.
                 try { Internal.WinUsbBinding.StopKeeping(controller); } catch { }
+                // A device Windows names by its port is found on that port
+                // while it is still there, so its records can go below.
+                try { Internal.WinUsbBinding.ResolveRecord(controller.UsbipHandle); } catch { }
                 try { controller.UsbipHandle.Dispose(); } catch { }
+                // A devnode the device was bound to WinUSB on by its own
+                // descriptors installs by rank at its next arrival.
+                try { Internal.WinUsbBinding.FlagOsBound(controller.UsbipHandle); } catch { }
                 try { Internal.SharedMemoryIO.DestroyController(controller.Index); } catch { }
-                // A WinUSB binding (HMController.BindWinUsb) goes back once
-                // the device is gone.
+                // A WinUSB binding (HMController.BindWinUsb) and the usbflags
+                // claim go back once the device is gone.
                 try { Internal.RegistryLedger.Release(controller.Index); } catch { }
+                // Then the device records the create caused. One that stays
+                // keeps the lease, so the owner record names it for the next
+                // sweep, as a UMDF2 teardown that leaves a device does.
+                if (!RemoveCreatedRecords(controller.UsbipHandle)) keepLease = true;
                 return;
             }
 

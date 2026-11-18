@@ -1366,7 +1366,18 @@ public sealed partial class HMController : IDisposable
     /// while the virtual one is gone opens on WinUSB until it is unplugged,
     /// and comes back on WinUSB if it is plugged in again before any of
     /// those has marked the devnode. Requires elevation, as creating the
-    /// controller does.</summary>
+    /// controller does.
+    ///
+    /// <para>On a machine where Windows installs no package signed as
+    /// HIDMaestro's driver is (Windows on ARM64, Windows in S mode), the
+    /// device asks for Windows' own WinUSB driver instead: from the bind on
+    /// it serves the Microsoft OS 1.0 descriptors that name WinUSB and the
+    /// profile's <c>winUsb.interfaceGuid</c>, and it is plugged in again so
+    /// Windows reads them. No package is installed there. A real device
+    /// serves none of these descriptors, so on such a machine the virtual
+    /// device differs from it from the bind on. The usbflags key in which
+    /// Windows keeps the device's answer is put back as it was when the
+    /// last controller of the identity goes.</para></summary>
     /// <returns><see cref="HMWinUsbBinding.Bound"/>, or
     /// <see cref="HMWinUsbBinding.AlreadyBound"/> when the device already
     /// carries a driver libusb opens, or <see cref="HMWinUsbBinding.OtherDriver"/>
@@ -1375,9 +1386,6 @@ public sealed partial class HMController : IDisposable
     /// <exception cref="InvalidOperationException">The profile declares no
     /// winUsb, or no driver Windows has ranks above the package, which would
     /// let Windows choose the package for real devices.</exception>
-    /// <exception cref="HMDriverSigningException">Windows on this machine
-    /// does not install HIDMaestro's driver package, and the binding's
-    /// package is signed as HIDMaestro's driver is.</exception>
     public HMWinUsbBinding BindWinUsb()
     {
         ThrowIfDisposed();

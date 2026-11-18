@@ -47,7 +47,7 @@ using System.Threading;
 using HIDMaestro;
 using HIDMaestro.Internal;
 
-internal static class Program
+internal static partial class Program
 {
     const uint CONFIGFLAG_REINSTALL = 0x20;
 
@@ -81,6 +81,19 @@ internal static class Program
         ctx.LoadDefaultProfiles();
         var gc = ctx.GetProfile("gamecube-adapter")!;
 
+        // Where Windows installs no package signed as HIDMaestro's driver
+        // is, the device asks for WinUSB with its own Microsoft OS
+        // descriptors, and the package's rank, reclaim and lock order have
+        // no subject there (OsDescriptors.cs).
+        if (WinUsbBinding.BindsByOsDescriptors())
+        {
+            Console.WriteLine("  Windows here installs no package signed as HIDMaestro's driver is: the binding goes by Microsoft OS descriptors");
+            OsDescriptorBinding(ctx, gc);
+            Probe.Check("no WinUSB hold left in the ledger", RegistryLedger.HeldWinUsbDevnodes().Count == 0,
+                string.Join(", ", RegistryLedger.HeldWinUsbDevnodes()));
+            return Probe.Finish("S81");
+        }
+
         BindAndRank(ctx, gc);
         Cycles(ctx, gc);
         LockOrder(ctx, gc);
@@ -88,6 +101,12 @@ internal static class Program
         Crash(ctx, gc, reclaimFirst: false);
         Crash(ctx, gc, reclaimFirst: true);
         Crash(ctx, gc, reclaimFirst: false, bindArrival: true);
+        if (args.Contains("--os-descriptors"))
+        {
+            WinUsbBinding.OsDescriptorsForProbe = true;
+            try { OsDescriptorBinding(ctx, gc); }
+            finally { WinUsbBinding.OsDescriptorsForProbe = false; }
+        }
 
         Console.WriteLine("-- afterward");
         Probe.Check("no WinUSB hold left in the ledger", RegistryLedger.HeldWinUsbDevnodes().Count == 0,

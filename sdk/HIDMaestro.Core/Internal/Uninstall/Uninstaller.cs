@@ -527,6 +527,10 @@ internal static partial class Uninstaller
             if (!IsUsbipHostController(id) && seen.Add(id)) list.Add(Would(KindDevnode, id));
         foreach (string id in DeviceOrchestrator.ListOwnedHidChildren())
             if (seen.Add(id)) list.Add(Would(KindDevnode, id));
+        // The USB records a USB/IP create caused, which an owner record
+        // names (Usbip.UsbRecords).
+        foreach (string id in DeviceOrchestrator.OwnedUsbRecords())
+            if (Usbip.UsbRecords.Exists(id) && seen.Add(id)) list.Add(Would(KindDevnode, id));
     }
 
     private static bool IsUsbipHostController(string instanceId)
@@ -564,6 +568,10 @@ internal static partial class Uninstaller
             if (joy != null)
                 foreach (string name in joy.GetSubKeyNames())
                     list.Add(Would(KindSharedValue, $@"HKLM\{RegistryLedger.JoystickOemRoot}\{name}\OEMName"));
+        using (var flags = Registry.LocalMachine.OpenSubKey($@"{RegistryLedger.Root}\UsbFlags"))
+            if (flags != null)
+                foreach (string name in flags.GetSubKeyNames())
+                    list.Add(Would(KindSharedKey, $@"HKLM\{RegistryLedger.UsbFlagsRoot}\{name}"));
         using (var winUsb = Registry.LocalMachine.OpenSubKey($@"{RegistryLedger.Root}\WinUsb"))
             if (winUsb != null)
                 foreach (string name in winUsb.GetSubKeyNames())
@@ -1362,14 +1370,14 @@ internal static partial class Uninstaller
         // The ledger goes once the Everything removal has put back every
         // shared key it records (RegistryLedger.ReleaseAll deletes it then).
         // An entry left is the only record of a key's earlier value, so a
-        // ledger still holding a GameInput or joy.cpl entry stays.
+        // ledger still holding a GameInput, joy.cpl or usbflags entry stays.
         int EntriesOf(string kind)
         {
             using var k = Registry.LocalMachine.OpenSubKey($@"{RegistryLedger.Root}\{kind}");
             return k?.SubKeyCount ?? 0;
         }
         bool winUsbLeft = EntriesOf("WinUsb") > 0;
-        int sharedLeft = EntriesOf("GameInput") + EntriesOf("JoystickOem");
+        int sharedLeft = EntriesOf("GameInput") + EntriesOf("JoystickOem") + EntriesOf("UsbFlags");
         if (sharedLeft > 0)
             Fail(RegistryLedger.Root, $"{sharedLeft} shared key(s) it records were not put back, and it is their only record of what they held before");
         else if (!winUsbLeft)
