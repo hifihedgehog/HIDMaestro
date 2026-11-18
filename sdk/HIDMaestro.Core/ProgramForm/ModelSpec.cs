@@ -84,6 +84,59 @@ public sealed class ProtocolSpec
     /// returns them. Absent keeps none.</summary>
     [JsonPropertyName("log")]
     public int? Log { get; set; }
+
+    /// <summary>Messages the device sends on its own schedule, each built
+    /// from reply parts and queued with the replies while its condition
+    /// holds: an announcement repeated until a host answers it, or a status
+    /// sent on a period. They run on the device clock of a device that
+    /// builds its reports.</summary>
+    [JsonPropertyName("timers")]
+    public List<ProtocolTimerSpec>? Timers { get; set; }
+}
+
+/// <summary>A message the device sends on its own schedule. The schedule
+/// starts each time <see cref="While"/> begins to hold, at attach and after
+/// a port reset included: the first message goes out
+/// <see cref="FirstMs"/> later, then one per period of each step in turn.
+/// A message that comes due while an earlier reply still waits for the host
+/// is not queued, as a device whose endpoint holds one packet sends nothing
+/// more until the host reads it, and the schedule moves on.</summary>
+public sealed class ProtocolTimerSpec
+{
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = "";
+
+    /// <summary>When the schedule runs. Absent is always.</summary>
+    [JsonPropertyName("while")]
+    public ConditionText? While { get; set; }
+
+    /// <summary>The delay from the start of the schedule to the first
+    /// message. Absent is the first step's period.</summary>
+    [JsonPropertyName("firstMs")]
+    public double? FirstMs { get; set; }
+
+    /// <summary>The steps of the schedule, in order. A step with a count
+    /// sends that many messages after the first, one per period, and the
+    /// next step follows. The last step has no count and repeats.</summary>
+    [JsonPropertyName("periods")]
+    public List<ProtocolTimerStepSpec>? Periods { get; set; }
+
+    /// <summary>The message, built as a rule's reply is, with no command to
+    /// echo.</summary>
+    [JsonPropertyName("reply")]
+    public List<ReplyPartSpec>? Reply { get; set; }
+}
+
+/// <summary>One step of a timer's schedule.</summary>
+public sealed class ProtocolTimerStepSpec
+{
+    [JsonPropertyName("periodMs")]
+    public double PeriodMs { get; set; }
+
+    /// <summary>The messages this step sends. Absent on the last step,
+    /// which repeats.</summary>
+    [JsonPropertyName("count")]
+    public int? Count { get; set; }
 }
 
 /// <summary>One register: a name, a width of 1 to 32 bits, and an initial
@@ -151,8 +204,10 @@ public sealed class MemorySegmentSpec
     [JsonPropertyName("length")]
     public int? Length { get; set; }
 
-    /// <summary><c>"ascii"</c>, <c>"uint8"</c>, <c>"uint16-le"</c> or
-    /// <c>"uint32-le"</c>.</summary>
+    /// <summary><c>"ascii"</c>, <c>"uint8"</c>, <c>"uint16-le"</c>,
+    /// <c>"uint32-le"</c>, or <c>"hex-le"</c>: the hex digits that end the
+    /// serial, read as one number and written low byte first over the
+    /// length, for a device ID a protocol derives from the serial.</summary>
     [JsonPropertyName("encoding")]
     public string? Encoding { get; set; }
 
@@ -186,6 +241,12 @@ public sealed class CounterSpec
 
     [JsonPropertyName("initial")]
     public HexNumber? Initial { get; set; }
+
+    /// <summary>True for a counter that never holds 0: it advances from its
+    /// largest value to 1, and an initial value of 0 reads as 1, for a
+    /// protocol that reserves sequence number 0.</summary>
+    [JsonPropertyName("skipZero")]
+    public bool? SkipZero { get; set; }
 }
 
 /// <summary>The endpoint a device reports on, and when.</summary>
@@ -300,9 +361,18 @@ public sealed class ProtocolCommandsSpec
 public sealed class ProtocolRuleSpec
 {
     /// <summary>The bytes the command holds at <see cref="At"/>, hex, with
-    /// <c>..</c> for a byte the rule does not test.</summary>
+    /// <c>..</c> for a byte the rule does not test and <c>vv/mm</c> for a
+    /// byte whose bits under the mask <c>mm</c> hold <c>vv</c>.</summary>
     [JsonPropertyName("match")]
     public string Match { get; set; } = "";
+
+    /// <summary>True when the rules after this one are tried too once it
+    /// has applied, so a command can draw this rule's reply and its own
+    /// rule's: an acknowledgement any command with a flag set gets. A
+    /// command's own rule, the one that emits or decodes it, never has
+    /// this.</summary>
+    [JsonPropertyName("continue")]
+    public bool? Continue { get; set; }
 
     [JsonPropertyName("at")]
     public int? At { get; set; }
@@ -356,6 +426,13 @@ public sealed class ProtocolRuleSpec
     /// anything.</summary>
     [JsonPropertyName("reply")]
     public List<ReplyPartSpec>? Reply { get; set; }
+
+    /// <summary>In place of <see cref="Reply"/>: several replies, each
+    /// queued as a message of its own in this order, for a command whose
+    /// answer is a message sent in several packets. They take no prefix,
+    /// status or replyLength.</summary>
+    [JsonPropertyName("replies")]
+    public List<List<ReplyPartSpec>>? Replies { get; set; }
 
     /// <summary>The reply's length, zero padded. Absent is the parts' own.</summary>
     [JsonPropertyName("replyLength")]
@@ -860,6 +937,24 @@ public sealed class InputReportSpec
     /// <c>"submit"</c>: on every SubmitState.</summary>
     [JsonPropertyName("send")]
     public string? Send { get; set; }
+
+    /// <summary>The message stream the layout belongs to. Layouts without
+    /// one share the device's one stream, where the first whose condition
+    /// holds goes out. Each named stream selects its own layout the same
+    /// way and goes out beside the others, as a device sends its input
+    /// report and its button message each on its own change. A layout of a
+    /// named stream sends on the clock or on change, and forgets the bytes
+    /// it last sent each time it becomes its stream's selected layout.</summary>
+    [JsonPropertyName("stream")]
+    public string? Stream { get; set; }
+
+    /// <summary>For a layout of a named stream sent on change: what its
+    /// first report after it becomes selected does. <c>"send"</c>, the
+    /// default, sends it. <c>"skip"</c> keeps its bytes as the ones last
+    /// sent without sending them, for a message that reports a change and
+    /// never the state a device starts in.</summary>
+    [JsonPropertyName("first")]
+    public string? First { get; set; }
 
     [JsonPropertyName("program")]
     public List<ProgramOpSpec> Program { get; set; } = new();

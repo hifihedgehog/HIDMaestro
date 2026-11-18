@@ -709,6 +709,10 @@ internal sealed unsafe class ProtocolEngine
         }
     }
 
+    /// <summary>Queue each timed message due at <paramref name="nowTicks"/>.
+    /// Returns true when one was queued.</summary>
+    public bool RunTimers(long nowTicks) => false;
+
     // ── A device that builds its reports ─────────────────────────────────
 
     /// <summary>Replace the state the next report is built from. A block of

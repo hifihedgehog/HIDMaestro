@@ -43,6 +43,7 @@ Umdf2.Run();
 Host.Run();
 Deliberate.Run();
 ReplyOverReport.Run();
+MessageStreams.Run();
 Console.WriteLine(Checks.Failed == 0 ? "protocol_engine_check: PASS" : $"protocol_engine_check: {Checks.Failed} FAILED");
 return Checks.Failed == 0 ? 0 : 1;
 
