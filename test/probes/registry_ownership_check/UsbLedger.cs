@@ -224,6 +224,7 @@ internal static partial class Program
             return false;
         }
         args13Only = r13Only;
+        PositiveControl("before");
         int failedBefore = s_failures;
         R13();
         // Nothing else removes a record before R13 has shown one removal is
@@ -232,7 +233,36 @@ internal static partial class Program
         R19();
         DeadProgram(everything: false);
         DeadProgram(everything: true);
+        PositiveControl("after");
         return true;
+    }
+
+    /// <summary>The same window's positive control: a dualsense-composite,
+    /// an authored USB/IP persona, enumerates with its HID collection and
+    /// leaves the device tree at its dispose.</summary>
+    static void PositiveControl(string when)
+    {
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        var prof = ctx.GetProfile("dualsense-composite")!;
+        string? id;
+        bool hid;
+        using (var pad = ctx.CreateController(prof, "ledger-control", HMBackend.Usbip))
+        {
+            Feed(pad, prof);
+            id = pad.UsbipHandle!.Device.Descriptors.UsbInstanceId;
+            var wait = Stopwatch.StartNew();
+            hid = false;
+            while (!hid && wait.ElapsedMilliseconds < 20000)
+            {
+                hid = id != null && UsbRecords.Tree.Read().Subtree(id).Any(r => r.StartsWith(@"HID\", StringComparison.OrdinalIgnoreCase) && UsbRecords.Present(r));
+                if (!hid) Thread.Sleep(100);
+            }
+        }
+        Check($"positive control {when}: dualsense-composite enumerated with its HID collection", id != null && hid, id ?? "no instance id");
+        var gone = Stopwatch.StartNew();
+        while (id != null && UsbRecords.Present(id) && gone.ElapsedMilliseconds < 10000) Thread.Sleep(50);
+        Check($"positive control {when}: and left the device tree at its dispose", id != null && !UsbRecords.Present(id));
     }
 
     /// <summary>R13. A child program makes the record: it creates a USB/IP
