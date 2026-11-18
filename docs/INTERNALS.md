@@ -425,6 +425,32 @@ Every UMDF2 create passes a deploy gate after its record entry and before its Pn
 
 A create of a plain HID or non-xinputhid controller then installs the driver on its own devnode with `DiInstallDevice` and no driver named (`DeviceNodeCreator.CreateDeviceNode`), which installs the best match the driver store holds on that device and no other. The search's choice is kept for the device's hardware and compatible ids, in the process and under `HKLM\SOFTWARE\HIDMaestro\StoreDriverChoice`, with the installed-payload record and the last write of the driver store's `FileRepository` directory (`DeviceNodeCreator.StoreDriverChoice`). While both are unchanged, the next create of the same ids builds its driver list from that one INF (`DI_ENUMSINGLEINF`) and passes the list's best-ranked driver to `DiInstallDevice`, which skips the search. A failed install, two drivers tied for the best rank or an INF gone sends the create to the search. Through v1.12.0 it called `UpdateDriverForPlugAndPlayDevices` with the VID/PID hardware id and the SDK's INF, which installs the package on every present device with a matching id. That staged the SDK's package beside one the policy had kept, and with two programs of one profile it moved the older program's controller onto the newer driver.
 
+#### Driver Signing
+
+HIDMaestro signs its driver package on the machine. `DriverBuilder.EnsureTestCertificate` creates `CN=HIDMaestroTestCert` once and adds it to LocalMachine `My`, `Root` and `TrustedPublisher`, and a deploy signs the two driver binaries and the catalogs with it. Whether Windows then imports the package into the driver store is decided in `drvinst.exe` and `wintrust.dll`, and `DriverSigningPolicy` reads the inputs they read. The import of a package signed that way fails with 0x800B0109 when four conditions hold:
+
+1. `drvinst.exe` is in the state its log calls Enforced: `CodeIntegrityOptions` of `SYSTEM_CODEINTEGRITY_INFORMATION` has `CODEINTEGRITY_OPTION_ENABLED` set and `CODEINTEGRITY_OPTION_TESTSIGN` clear (`ValidateDriverPackage`). In that state a failed signature check fails the import with no prompt.
+2. Its Authenticode check of the catalog runs with `WTD_CODE_INTEGRITY_DRIVER_MODE` (`SpSignVerifyInfFile`). The ARM64 build always passes the flag. The x64 build passes it only when `WldpQueryWindowsLockdownMode` reports a mode other than unlocked, which is Windows in S mode.
+3. In that mode `wintrust.dll` reads the same options, and with `CODEINTEGRITY_OPTION_WHQL_ENFORCEMENT_ENABLED` (0x4000) set the signer has to chain to a Microsoft root with the WHQL usage (`CheckValidSignature`).
+4. The system integrity policy is not in audit mode.
+
+`HMDriverSigning.Check()` returns the outcome as an `HMDriverSigningStatus`, read once per process, since Windows sets the options as it starts. On x64 outside S mode the second condition never holds, so the driver installs with WHQL enforcement set or clear.
+
+On a machine whose status says Microsoft-signed only and whose driver store holds no HIDMaestro package, nothing that leads to a deploy starts (`DriverDeploy.SigningStopsDeploy`). The constructor's prewarm stages nothing and leaves GameInputSvc alone. `InstallDriver` and a UMDF2 create throw `HMDriverSigningException` before the certificate, the staging and the owner claim, and `BindWinUsb` throws it before it stages or signs its package. A package in the store shows the machine took one, so there the deploy is tried. When its import does not land, `DriverSigningPolicy.ThrowIfImportRefused` asks `WinVerifyTrust` about the signed catalog without the mode flag and with it, and throws `HMDriverSigningException` when Windows trusts the first and refuses the second. On a machine whose status says Windows installs the package, a failed import is reported as before and never blamed on signing.
+
+The three test machines read as follows on 2026-11-17, each with one catalog signed as HIDMaestro signs:
+
+| Machine | Options | Secure Boot | WHQL enforcement | Without the flag | With the flag | Driver |
+|--|--|--|--|--|--|--|
+| Surface Pro, Windows 11 ARM64 build 28000 | 0xF405 | on | set | 0 | 0x800B0109 | refused |
+| Lenovo Legion Pro 7, Windows 11 x64 build 26200 | 0x2001 | off | clear | 0 | 0 | installs |
+| MeLE PCG02, Windows 10 x64 build 19044 | 0x1 | off | clear | 0 | 0 | installs |
+| The same MeLE with memory integrity on, in strict mode | 0x3401 | off | clear | 0 | 0 | installs, and ran a controller |
+
+Memory integrity changes none of the four conditions. Windows logs which way it decided WHQL enforcement at each start, as Code Integrity event 3084 or 3085, and on these machines it followed Secure Boot.
+
+A composite controller does not run on this driver. usbip-win2's host controller carries Microsoft's signature for x64 and ARM64, so the conditions above do not apply to it. Composite profiles have not been run on ARM64.
+
 #### Version Handshake
 
 `Global\HIDMaestroVersion<N>` is a 64-byte per-controller section the SDK creates beside the input section, before the devnode exists, the pattern v1.12.0 used for `InputAck<N>`. No existing layout changes. The layout is `HIDMAESTRO_VERSION_INFO` in `driver/driver.h`:

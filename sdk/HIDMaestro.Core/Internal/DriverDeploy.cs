@@ -71,6 +71,7 @@ internal static partial class DriverDeploy
         internal virtual void AddPackages(IReadOnlyCollection<string> infs) => DriverBuilder.AddPackagesLocked(infs);
         internal virtual void RecordPayload() => DriverBuilder.RecordInstalledPayload();
         internal virtual void PruneStaging() => ProtectedStaging.PruneOldVersions();
+        internal virtual HMDriverSigningStatus Signing() => DriverSigningPolicy.Status;
 
         /// <summary>The deploy lock held: releasing it releases the mutex
         /// and closes the handle Acquire opened for this hold.</summary>
@@ -86,6 +87,30 @@ internal static partial class DriverDeploy
 
     /// <summary>The machine the policy acts on.</summary>
     internal static DeployMachine Machine = new();
+
+    /// <summary>True on a machine that holds no HIDMaestro driver package
+    /// and whose Windows installs only Microsoft-signed ones
+    /// (<see cref="DriverSigningPolicy"/>). A deploy there would end at the
+    /// driver store import, after the certificate went into the machine's
+    /// stores and the payload into staging, so nothing that leads to one
+    /// starts: the constructor's prewarm, InstallDriver and a create's
+    /// deploy gate all ask this first. A package in the store shows the
+    /// machine took one, so the deploy is tried, and
+    /// <see cref="DriverSigningPolicy.ThrowIfImportRefused"/> names the
+    /// cause when its import does not land.</summary>
+    internal static bool SigningStopsDeploy() =>
+        !Machine.Signing().CanInstallDriver
+        && !DriverBuilder.PackageInfs.Any(inf => Machine.Stamps(inf).Count > 0);
+
+    /// <summary>Throws <see cref="HMDriverSigningException"/> when
+    /// <see cref="SigningStopsDeploy"/>.</summary>
+    internal static void ThrowIfSigningStopsDeploy()
+    {
+        if (!SigningStopsDeploy()) return;
+        var status = Machine.Signing();
+        DeviceOrchestrator.LogDiag($"    deploy: not started. {status.Explanation}");
+        throw new HMDriverSigningException(status);
+    }
 
     /// <summary>A driver package's version stamp, from its INF's
     /// <c>DriverVer</c> line: <c>MM/dd/yyyy,major.minor.patch.build</c>.</summary>
@@ -268,6 +293,8 @@ internal static partial class DriverDeploy
                 // DriverVer date among equally ranked drivers), and the
                 // devices on the old package keep it until they restart.
                 bool present = DriverBuilder.PackageInfs.Any(inf => Machine.Stamps(inf).Count > 0);
+                // The one path that deploys onto a machine with no package.
+                if (!present) ThrowIfSigningStopsDeploy();
                 if (!held || !present)
                 {
                     Machine.Deploy();

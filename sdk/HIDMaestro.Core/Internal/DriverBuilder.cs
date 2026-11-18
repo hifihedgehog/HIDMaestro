@@ -677,10 +677,15 @@ public static class DriverBuilder
         }
 
         if (!PnputilHelper.IsHidMaestroDriverInstalled())
+        {
+            // A Windows that installs only Microsoft-signed packages is
+            // named as the cause when its own check of the catalog says so.
+            DriverSigningPolicy.ThrowIfImportRefused(DriverDeploy.Machine.Signing(), Path.Combine(dir, "hidmaestro.cat"));
             throw new InvalidOperationException(
                 $"pnputil /add-driver ran to its end ({string.Join(", ", exits)}), but the driver store does not hold "
               + "every HIDMaestro package. "
               + $"Required INFs: {string.Join(", ", PnputilHelper.HidMaestroInfNames)}.");
+        }
 
         // /scan-devices removed (Option 1). Our INFs are function INFs that bind via
         // SwDeviceCreate's own install path: /scan-devices was a no-op for
@@ -850,7 +855,10 @@ public static class DriverBuilder
         if (RunBounded(PnputilExe, $"/add-driver \"{Path.Combine(package, inf)}\"", timeoutMs: PnputilAddMs()).stopped)
             throw AddStopped($"/add-driver {inf}", inf, removedBefore: false);
         if (!DriverDeploy.InstalledStamps(inf).Any(s => s.CompareTo(embedded) == 0))
+        {
+            DriverSigningPolicy.ThrowIfImportRefused(DriverDeploy.Machine.Signing(), Path.Combine(package, Path.ChangeExtension(inf, ".cat")));
             throw new InvalidOperationException($"pnputil /add-driver did not add {inf} {embedded} to the driver store.");
+        }
     }
 
     /// <summary>Record the embedded payload's hash as the installed one,

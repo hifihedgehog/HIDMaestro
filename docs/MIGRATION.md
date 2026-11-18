@@ -87,6 +87,7 @@ New keys: `min`, `max`, `invert`, `center` on `int16-le`, `scale` with `negate` 
 - `HMContext.IsDriverInstalled` answers false when the driver store cannot be read, logs why, and throws only `ObjectDisposedException`. `DriverBuilder.IsDriverInstalled()` throws `InvalidOperationException` when the driver store listing fails, where it returned false.
 - `%TEMP%\HIDMaestro\hmswd_<enumerator>_<suffix>.log` is no longer written, and hmswd.exe writes no `hmswd_self.log`. hmswd's exit code and output go into `teardown_diag.log` under `HIDMAESTRO_DIAG=1`, and the diagnostic logs are written as the user.
 - The driver changed, so the first `InstallDriver()` after updating reinstalls it once.
+- Since 2.3.0 `InstallDriver`, a UMDF2 `CreateController` and `BindWinUsb` throw `HMDriverSigningException` on a machine whose Windows installs only driver packages Microsoft signed: an ARM64 PC with Secure Boot on, or Windows in S mode. It derives from `InvalidOperationException`, which `InstallDriver` threw there through 2.2.0 once pnputil had failed, so a handler for that still catches it. On a machine that holds no HIDMaestro driver it is thrown before anything changes. `HMDriverSigning.Check()` gives the same answer without the exception, with no elevation. The README's [Where the driver installs](../README.md#where-the-driver-installs) has the members.
 
 ## Controllers and events
 

@@ -1054,9 +1054,20 @@ DeviceName = ""{deviceName}""
         return (rc, output);
     }
 
-    /// <summary>The add itself. The caller holds the deploy lock.</summary>
+    /// <summary>The add itself. The caller holds the deploy lock.
+    ///
+    /// <para>The package is signed as the driver's is, so a Windows that
+    /// installs only Microsoft-signed packages refuses it the same way
+    /// (<see cref="DriverSigningPolicy"/>). With no HIDMaestro package of
+    /// either kind in the store, the add stops before the certificate and
+    /// the staging. Otherwise it is tried, and a failed one is named as a
+    /// signing refusal when Windows' own check of the catalog says
+    /// so.</para></summary>
     private static string AddPackage(Package p)
     {
+        if (DriverDeploy.SigningStopsDeploy() && OurPackages().Count == 0)
+            throw new HMDriverSigningException(DriverDeploy.Machine.Signing());
+
         string dir = ProtectedStaging.DirFor(p.StagingOperation);
         // UTF-16 LE with its byte-order mark, the Unicode form an INF may
         // take, so a product string outside ASCII reaches Device Manager
@@ -1077,7 +1088,15 @@ DeviceName = ""{deviceName}""
             (rc, output) = AddOrThrow(infPath, p.InfName);
         }
         string staged = Sha256Hex(inf);
-        return RecordAdd(p.InfName, OurPackages(), rc, output, published => PublishedHash(published) == staged);
+        try
+        {
+            return RecordAdd(p.InfName, OurPackages(), rc, output, published => PublishedHash(published) == staged);
+        }
+        catch (InvalidOperationException)
+        {
+            DriverSigningPolicy.ThrowIfImportRefused(DriverDeploy.Machine.Signing(), Path.Combine(dir, p.CatalogName));
+            throw;
+        }
     }
 
     /// <summary>The SHA-256 of a published INF, or null when it cannot be
