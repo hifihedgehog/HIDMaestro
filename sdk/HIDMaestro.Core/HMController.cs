@@ -1606,7 +1606,10 @@ public sealed partial class HMController : IDisposable
     /// motion stops, and an absolute pointer stays where it was. Without
     /// it a held key repeats until the device is removed.
     /// <see cref="Dispose"/> sends the same release itself. False once this
-    /// program's own Everything sweep has removed the device.</summary>
+    /// program's own Everything sweep has removed the device. False on the
+    /// USB/IP backend (<see cref="Backend"/>): there the device runs in the
+    /// consuming process and goes with it, unplugged by the host
+    /// controller, and no release frame is sent.</summary>
     public bool ReleasesOnConsumerExit =>
         _deliverEvery && SharedMemoryIO.ReleaseOnExitSupported(Index);
 

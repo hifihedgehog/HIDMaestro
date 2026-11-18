@@ -563,7 +563,7 @@ internal static class Program
             k.SubmitKeyboard(HMKeyModifiers.None, new[] { HMKey.F24 });
             m.SubmitMouse(new HMMouseState { Buttons = HMMouseButtons.Button6 });
             a.SubmitMouse(new HMMouseState { X = 16384, Y = 16384 });
-            Console.WriteLine($"HELD release-on-exit {(k.ReleasesOnConsumerExit ? "on" : "off")}");
+            Console.WriteLine($"HELD release-on-exit {(k.ReleasesOnConsumerExit ? "on" : "off")} backend {k.Backend}");
             Console.Out.Flush();
             Thread.Sleep(Timeout.Infinite);
             return 0;
@@ -1354,7 +1354,14 @@ internal static class Program
             Check("the child holds its input", false, "it exited first");
             return;
         }
-        Check("the driver watches the consumer's exit", line.EndsWith(" on"), line);
+        // On UMDF2 the driver watches the consumer's owner pipe and sends the
+        // release frames when it closes. On USB/IP the device runs in the
+        // consumer's process and goes with it: the host controller unplugs
+        // it, and nothing is left to send a frame.
+        bool usbipChild = line.EndsWith(" backend Usbip");
+        Check(usbipChild ? "the device goes with the consumer, so nothing announces a release on exit"
+                         : "the driver watches the consumer's exit",
+              line.StartsWith(usbipChild ? "HELD release-on-exit off" : "HELD release-on-exit on"), line);
         var held = new[] { 0xF0B6, 0xF0B8, 0xF0B9 }.SelectMany(p => PresentedDevices(Tag(0xBEEF, (ushort)p)))
                                                    .Where(id => CM_Locate_DevNodeW(out _, id, 0) == 0).ToList();
         var devs = RawInputSink.Devices();
