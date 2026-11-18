@@ -219,9 +219,12 @@ Per scenario:
    persona is reported whole, a persona left behind is a leftover, and a
    foreign `ROOT\HIDClass` device, a phantom, the host controller, its
    root hub and another program's host controller are not.
-2. Run the scenario, then call `Wait-CascadeSettle`: wait for the devnode
-   set to change, then for two consecutive 200 ms samples to agree (about
-   600 ms on a fast box, 60 s scaled cap).
+2. Run the scenario, then call `Wait-CascadeSettle`: wait until the test
+   app has acknowledged the last command the scenario sent, which it does
+   after running it, then for two consecutive 200 ms samples of the
+   devnode set to agree (about 600 ms on a fast box, 60 s scaled cap).
+   `-Verbose` prints how the first wait ended and whether the command
+   changed the set.
 3. Snapshot the same set AFTER.
 4. PASS iff `(after \ before) == empty` (i.e. no new `PRESENT` entries
    leaked across the scenario).
