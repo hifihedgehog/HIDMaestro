@@ -7,8 +7,9 @@
 // 10 with that status (setupapi.dev.log, "problem status: 0xc000001d" for
 // ps3-remote's create in S93 at b7b19bf7). hidparse.sys is a kernel image that exports the
 // function, imports from ntoskrnl.exe only, and parses with pool memory and
-// no device. This loads the machine's own copy into memory the way a loader
-// does (sections at their virtual addresses, DIR64 relocations, the import
+// no device. This loads the machine's own copy, x64 or ARM64 as the machine
+// is, into memory the way a loader does (sections at their virtual
+// addresses, DIR64 relocations, the import
 // table bound by name), binds the pool calls to this process's heap and
 // RtlQueryFeatureConfiguration to ntdll's export of the same name, so the
 // parser reads this machine's feature configuration as user mode reads it,
@@ -85,8 +86,13 @@ internal static unsafe class WindowsParser
         ushort sections = BitConverter.ToUInt16(d, pe + 6);
         ushort optSize = BitConverter.ToUInt16(d, pe + 20);
         int opt = pe + 24;
-        // IMAGE_FILE_MACHINE_AMD64 and PE32+, the form this process runs.
-        if (machine != 0x8664 || BitConverter.ToUInt16(d, opt) != 0x20B || RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        // PE32+ of the machine this process runs as: IMAGE_FILE_MACHINE_AMD64
+        // in an x64 process, IMAGE_FILE_MACHINE_ARM64 in an ARM64 one. Each
+        // is the machine's own hidparse.sys on a Windows of that
+        // architecture.
+        bool runnable = (machine == 0x8664 && RuntimeInformation.ProcessArchitecture == Architecture.X64)
+            || (machine == 0xAA64 && RuntimeInformation.ProcessArchitecture == Architecture.Arm64);
+        if (!runnable || BitConverter.ToUInt16(d, opt) != 0x20B)
         {
             why = $"machine 0x{machine:X4} beside a {RuntimeInformation.ProcessArchitecture} process";
             return false;
@@ -160,6 +166,15 @@ internal static unsafe class WindowsParser
             why = "no HidP_GetCollectionDescription export";
             return false;
         }
+        // The code was written as data. An ARM64 processor's instruction
+        // cache does not see those writes until it is flushed, as a loader
+        // does after it maps an image (Learn, FlushInstructionCache). On x64
+        // the call has nothing to do.
+        if (!FlushInstructionCache(GetCurrentProcess(), (IntPtr)image, imageSize))
+        {
+            why = $"FlushInstructionCache failed, error {Marshal.GetLastPInvokeError()}";
+            return false;
+        }
         s_free = (delegate* unmanaged<DeviceDesc*, void>)free;
         s_get = (delegate* unmanaged<byte*, uint, int, DeviceDesc*, int>)get;
         return true;
@@ -206,4 +221,10 @@ internal static unsafe class WindowsParser
 
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern IntPtr VirtualAlloc(IntPtr address, nuint size, uint allocationType, uint protect);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool FlushInstructionCache(IntPtr process, IntPtr address, nuint size);
+
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentProcess();
 }
