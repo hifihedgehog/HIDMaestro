@@ -23,8 +23,11 @@ internal sealed partial class UsbipEmulatedDevice
     // A device that builds its reports and sends its replies on the same
     // input endpoint: the buffer a reply goes out from, one packet of that
     // endpoint at most (CompiledProtocol). Empty when its replies go to a
-    // bulk endpoint or it has none.
-    private byte[] _layoutReply = Array.Empty<byte>();
+    // bulk endpoint or it has none. A device that device_oracle_check builds
+    // without its constructor leaves it null, which reads as empty.
+    private byte[]? _layoutReply;
+
+    private bool RepliesOnLayoutEndpoint => _layoutReply is { Length: > 0 };
 
     // A tick that found no read parked leaves one report owed, and the next
     // read is answered as it arrives: the device had its report ready and the
@@ -127,15 +130,15 @@ internal sealed partial class UsbipEmulatedDevice
             lock (_hidLock)
             {
                 if (!engine.InputOpenSince(out long since) || since != run) return;
-                if (_layoutReply.Length > 0 && engine.HasTimers) engine.RunTimers(System.Diagnostics.Stopwatch.GetTimestamp());
+                if (RepliesOnLayoutEndpoint && engine.HasTimers) engine.RunTimers(System.Diagnostics.Stopwatch.GetTimestamp());
                 var pending = PendingFor(_layoutInEndpoint);
                 if (pending.Count == 0)
                 {
                     if (engine.TickWouldSend(ref set)) _reportOwed = true;
                     return;
                 }
-                if (_layoutReply.Length > 0 && engine.ReplyWaiting
-                    && (length = engine.TakeReply(_layoutReply.Length, _layoutReply)) >= 0)
+                if (RepliesOnLayoutEndpoint && engine.ReplyWaiting
+                    && (length = engine.TakeReply(_layoutReply!.Length, _layoutReply)) >= 0)
                 {
                     reply = true;
                     if (engine.TickWouldSend(ref set)) _reportOwed = true;
@@ -149,7 +152,7 @@ internal sealed partial class UsbipEmulatedDevice
                 CountCompletion();
                 conn = HoldSendLocked();
             }
-            SendHeld(conn, seq, 0, length, (reply ? _layoutReply : _layoutReport).AsSpan(0, length));
+            SendHeld(conn, seq, 0, length, (reply ? _layoutReply! : _layoutReport).AsSpan(0, length));
         }
     }
 
@@ -159,7 +162,7 @@ internal sealed partial class UsbipEmulatedDevice
     /// thread calls this.</summary>
     private void CompleteLayoutReplies(ProtocolEngine.Effect effect)
     {
-        if ((effect & ProtocolEngine.Effect.Reply) == 0 || _layoutReply.Length == 0) return;
+        if ((effect & ProtocolEngine.Effect.Reply) == 0 || !RepliesOnLayoutEndpoint) return;
         var engine = _engine!;
         lock (_streamSendLock)
         {
@@ -172,13 +175,13 @@ internal sealed partial class UsbipEmulatedDevice
                 {
                     var pending = PendingFor(_layoutInEndpoint);
                     if (pending.Count == 0 || !engine.HasReply) return;
-                    n = engine.TakeReply(_layoutReply.Length, _layoutReply);
+                    n = engine.TakeReply(_layoutReply!.Length, _layoutReply);
                     if (n < 0) return;
                     seq = pending.Dequeue();
                     CountCompletion();
                     conn = HoldSendLocked();
                 }
-                SendHeld(conn, seq, 0, n, _layoutReply.AsSpan(0, n));
+                SendHeld(conn, seq, 0, n, _layoutReply!.AsSpan(0, n));
             }
         }
     }
@@ -208,8 +211,8 @@ internal sealed partial class UsbipEmulatedDevice
                         _readsPerEp.TryGetValue(_layoutInEndpoint, out var rc) ? rc + 1 : 1;
                 // A reply waiting on this endpoint goes to the first read
                 // that finds none parked before it, ahead of an owed report.
-                if (_layoutReply.Length > 0 && PendingFor(_layoutInEndpoint).Count == 0 && engine.ReplyWaiting
-                    && (length = engine.TakeReply(_layoutReply.Length, _layoutReply)) >= 0)
+                if (RepliesOnLayoutEndpoint && PendingFor(_layoutInEndpoint).Count == 0 && engine.ReplyWaiting
+                    && (length = engine.TakeReply(_layoutReply!.Length, _layoutReply)) >= 0)
                 {
                     CountCompletion();
                     reply = true;
@@ -233,7 +236,7 @@ internal sealed partial class UsbipEmulatedDevice
                     CountCompletion();
                 }
             }
-            SendRetSubmitSpan(seqnum, 0, length, (reply ? _layoutReply : _layoutReport).AsSpan(0, length));
+            SendRetSubmitSpan(seqnum, 0, length, (reply ? _layoutReply! : _layoutReport).AsSpan(0, length));
         }
     }
 
