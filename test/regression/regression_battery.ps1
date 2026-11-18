@@ -2612,6 +2612,27 @@ function Scenario-Xusb-Persona {
                  -Message 'the wired Xbox 360 pad on USB/IP no longer presents the device [MS-XUSBI] describes, does not bind xusb22, or does not round-trip state and rumble through XInput (see probe stdout)' -SkipCodes 2
 }
 
+# S106: the wired Xbox One S pad as a USB device on the USB/IP backend
+# (xbox-one-s-full), which has no HID interface and speaks the Gaming Input
+# Protocol. Offline, the profile's descriptor set is the device Microsoft's
+# GIP specification describes, its metadata is Santroller's with the
+# persona's own firmware version, and a mis-authored copy is refused at its
+# mistake. A USB/IP client then plays the host: Hello every 500 ms until
+# answered, the metadata in fragments paced by the host's acknowledgements,
+# Start, Status and the first input report, Guide and Share, and the Direct
+# Motor command on the output ring in the UMDF2 form's shape. Live, Windows'
+# inbox dc1-controller and xboxgip bind the device, xboxgip holds the
+# metadata it served, a submitted state reads back through XInputGetState,
+# Share reads in the XUSB gamepad state, XInputSetState and GameInput's
+# trigger levels arrive as Direct Motor commands, Windows.Gaming.Input lists
+# the pad once, and dualsense-composite beside it reads back over HID as the
+# positive control. Exit 2 when another program that embeds HIDMaestro is
+# running.
+function Scenario-Gip-Persona {
+    Invoke-Probe -Dir 'gip_persona_check' -Exe 'GipPersonaCheck.exe' `
+                 -Message 'the wired Xbox One S pad on USB/IP no longer presents the device the GIP specification describes, does not bind Windows'' GIP driver, or does not round-trip state and rumble through XInput (see probe stdout)' -SkipCodes 2
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -2720,7 +2741,8 @@ $scenarios = @(
     @{ Name = 'S102_Loop_Containment';           Body = ${function:Scenario-Loop-Containment} },
     @{ Name = 'S103_Sinput_Persona';             Body = ${function:Scenario-Sinput-Persona} },
     @{ Name = 'S104_Driver_Signing';             Body = ${function:Scenario-Driver-Signing} },
-    @{ Name = 'S105_Xusb_Persona';               Body = ${function:Scenario-Xusb-Persona} }
+    @{ Name = 'S105_Xusb_Persona';               Body = ${function:Scenario-Xusb-Persona} },
+    @{ Name = 'S106_Gip_Persona';                Body = ${function:Scenario-Gip-Persona} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

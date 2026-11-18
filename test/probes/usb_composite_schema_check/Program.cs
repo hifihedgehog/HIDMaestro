@@ -55,15 +55,15 @@ internal static class Program
 
         var strays = ctx.AllProfiles.Where(p => p.RequiresUsbipBackend).Select(p => p.Id).OrderBy(x => x).ToList();
         // The three Valve personas (issue #56), the Switch 2 Pro Controller
-        // (issue #66), the Wii U GameCube adapter (5903c059) and the wired
-        // Xbox 360 pad as a USB device ride the same backend and are pinned
-        // by their own probes. This list is the guard against a profile
-        // acquiring the backend by accident.
-        Check("exactly the nine personas require the backend",
+        // (issue #66), the Wii U GameCube adapter (5903c059), and the wired
+        // Xbox 360 and Xbox One S pads as USB devices ride the same backend
+        // and are pinned by their own probes. This list is the guard against
+        // a profile acquiring the backend by accident.
+        Check("exactly the ten personas require the backend",
               strays.SequenceEqual(new[] { "dualsense-composite", "dualsense-edge-composite",
                                            "dualshock-4-v2-composite", "gamecube-adapter", "steam-controller-2",
                                            "steam-controller-composite", "steam-deck-composite",
-                                           "switch2-pro-controller-composite", "xbox-360-wired-full"
+                                           "switch2-pro-controller-composite", "xbox-360-wired-full", "xbox-one-s-full"
                                          }.OrderBy(x => x)),
               string.Join(", ", strays));
 
