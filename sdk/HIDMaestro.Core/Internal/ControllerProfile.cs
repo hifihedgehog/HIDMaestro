@@ -351,6 +351,23 @@ public sealed class ControllerProfile
         p.SerialString = SerialString;
         p.Registry = form.Registry;
         p.OutsideCatalog = form.OutsideCatalog;
+        // The Bluetooth form carries the consumer's whole state, sensors,
+        // touch and battery included, in its extended report once a host
+        // arms it. A pad on USB streams its full report from power-on, so
+        // the USB form sends its extended report from the start, and
+        // SubmitState reaches the device whole on both backends. The fixed
+        // bytes the legacy path overlays (inputDefaults) become constants of
+        // that report, as the codec path declares them.
+        if (ExtendedReport is { ArmOn.Count: > 0 } && p.ExtendedReport is { AlwaysArmed: false } ext
+            && ext.ArmOn is not { Count: > 0 } && ext.Ports == null)
+        {
+            ext.AlwaysArmed = true;
+            foreach (var d in p.InputDefaults ?? new List<InputBytePatch>())
+            {
+                if (d.Byte <= 0 || d.Byte >= ext.Size || ext.Fields.Exists(f => f.Byte == d.Byte)) continue;
+                ext.Fields.Add(new FieldSpec { Byte = d.Byte, Type = "uint8", Semantic = "constant", Initial = d.Value });
+            }
+        }
         p.ValidateAtLoad();
         p.ResolveForCreate();
         return _usbFormPresented = p;

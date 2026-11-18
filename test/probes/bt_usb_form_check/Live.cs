@@ -75,8 +75,11 @@ internal static partial class Program
         Check($"version is {form.Id}'s", info.VersionNumber == wantVersion, $"0x{info.VersionNumber:X4}, want 0x{wantVersion:X4}");
         Check("the product string is the profile's", info.ProductString == profile.ProductString, $"'{info.ProductString}'");
 
-        // A feature report of the form, the first one its descriptor declares.
-        var feature = map.Reports.FirstOrDefault(r => r.Kind == HidReportKind.Feature);
+        // A feature report of the form: the calibration SDL reads first, 0x05
+        // on a DualSense and on a DualShock 4 over Bluetooth, 0x02 on a
+        // DualShock 4 over USB (SDL_hidapi_ps4.c:494-510).
+        var feature = new byte[] { 0x05, 0x02 }.Select(id => map.Reports.FirstOrDefault(r => r.Kind == HidReportKind.Feature && r.ReportId == id))
+            .FirstOrDefault(r => r != null);
         if (feature != null && caps.Feature > 0)
         {
             var buf = new byte[caps.Feature];

@@ -134,9 +134,9 @@ internal static partial class Program
             var form = profile.FormOn(ctrl.Backend);
             Console.WriteLine($"  presents {form.Id}");
             var decoded = new List<IReadOnlyDictionary<string, object>>();
-            var packets = new List<(byte Id, byte[] Data)>();
+            var packets = new List<(byte Id, byte[] Data, HMOutputSource Source)>();
             ctrl.OutputDecoded += (_, e) => { lock (decoded) decoded.Add(e.Fields); };
-            ctrl.OutputReceived += (_, pkt) => { lock (packets) packets.Add((pkt.ReportId, pkt.Data.ToArray())); };
+            ctrl.OutputReceived += (_, pkt) => { lock (packets) packets.Add((pkt.ReportId, pkt.Data.ToArray(), pkt.Source)); };
 
             var state = new HMGamepadState();
             var stateLock = new object();
@@ -177,7 +177,7 @@ internal static partial class Program
         }
 
         static void Drive(HMProfile profile, HMProfile form, HMController ctrl, string ownPath,
-            List<IReadOnlyDictionary<string, object>> decoded, List<(byte Id, byte[] Data)> packets,
+            List<IReadOnlyDictionary<string, object>> decoded, List<(byte Id, byte[] Data, HMOutputSource Source)> packets,
             object stateLock, Action<HMGamepadState> setState)
         {
             // The joystick SDL lists for this controller's HID interface.
@@ -262,11 +262,27 @@ internal static partial class Program
                 setState(new HMGamepadState());
 
                 lock (decoded) decoded.Clear();
+                int sentBefore;
+                lock (packets) sentBefore = packets.Count(p => p.Source == HMOutputSource.HidOutput);
                 bool rumbled = SDL_RumbleGamepad(pad, 0xFFFF, 0x8000, 1000);
-                bool reached = rumbled && WaitPump(() => { lock (decoded) return decoded.Any(f => Num(f, "leftMotor") > 0 || Num(f, "rightMotor") > 0); }, 5000);
-                string motors;
-                lock (decoded) motors = decoded.Count == 0 ? "none" : string.Join(" ", decoded[^1].Where(k => k.Key.EndsWith("Motor")).Select(k => $"{k.Key}={k.Value}"));
-                Expect("SDL_RumbleGamepad reaches OutputDecoded leftMotor/rightMotor", reached, $"rumble call {rumbled}, {motors}");
+                // A profile that decodes its motors raises them; any other
+                // shows SDL's rumble write as the output report it is.
+                bool decodes = form.Inner.ExtendedOutputReport?.Fields?.Any(f => f.Semantic is "leftMotor" or "rightMotor") == true
+                    || form.Inner.GetOrCompileModel().Decoders.Any(d => d.Semantics.Contains("leftMotor"));
+                if (decodes)
+                {
+                    bool reached = rumbled && WaitPump(() => { lock (decoded) return decoded.Any(f => Num(f, "leftMotor") > 0 || Num(f, "rightMotor") > 0); }, 5000);
+                    string motors;
+                    lock (decoded) motors = decoded.Count == 0 ? "none" : string.Join(" ", decoded[^1].Where(k => k.Key.EndsWith("Motor")).Select(k => $"{k.Key}={k.Value}"));
+                    Expect("SDL_RumbleGamepad reaches OutputDecoded leftMotor/rightMotor", reached, $"rumble call {rumbled}, {motors}");
+                }
+                else
+                {
+                    bool wrote = rumbled && WaitPump(() => { lock (packets) return packets.Count(p => p.Source == HMOutputSource.HidOutput) > sentBefore; }, 5000);
+                    string what;
+                    lock (packets) what = string.Join(" ", packets.Where(p => p.Source == HMOutputSource.HidOutput).Skip(sentBefore).Take(2).Select(p => $"0x{p.Id:X2}:{Convert.ToHexString(p.Data)}"));
+                    Expect($"SDL_RumbleGamepad's write reaches OutputReceived ({form.Id} decodes no motors)", wrote, $"rumble call {rumbled}, {(what.Length > 0 ? what : "none")}");
+                }
 
                 if (form.Inner.ExtendedOutputReport?.Fields?.Any(f => f.Semantic == "lightbar") == true)
                 {
@@ -284,10 +300,11 @@ internal static partial class Program
                     bool led;
                     lock (packets) led = packets.Any(p => p.Id == 0x01 && p.Data.Length > 9 && p.Data[9] == 0x30);
                     Expect("SDL sets the player LEDs (subcommand 0x30 reaches OutputReceived)", led);
-                    bool handshake;
-                    lock (packets) handshake = packets.Any(p => p.Id == 0x80);
-                    Console.WriteLine($"  the 0x80 USB handshake {(handshake ? "reached" : "did not reach")} the device");
-                    if (ctrl.Backend == HMBackend.Usbip) Expect("SDL set the pad up with the USB handshake (0x80)", handshake);
+                    // On a USB bus SDL opens the pad only after the 0x80 0x02
+                    // handshake is answered (SDL_hidapi_switch.c:1617-1622,
+                    // 689-711), and the device's protocol consumes the 0x80
+                    // commands, so they reach no OutputReceived handler: the
+                    // open itself is the evidence.
                 }
             }
             finally { SDL_CloseGamepad(pad); }

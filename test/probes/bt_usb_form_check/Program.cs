@@ -148,9 +148,27 @@ internal static partial class Program
             Check("the presented profile has the form's protocol, state block and reports",
                 ReferenceEquals(p.Protocol, form.Protocol) && ReferenceEquals(p.StateBlock, form.StateBlock)
                 && ReferenceEquals(p.InputReports, form.InputReports)
-                && JsonOf(p.ExtendedReport) == JsonOf(form.ExtendedReport)
                 && JsonOf(p.ExtendedOutputReport) == JsonOf(form.ExtendedOutputReport));
             Check("the presented profile names no USB form", p.UsbForm == null);
+            if (bt.ExtendedReport?.ArmOn is { Count: > 0 })
+            {
+                // The Bluetooth form sends the whole state once armed, so the
+                // USB form sends its extended report from the start.
+                Check("the USB form's extended report is the form's, sent from the start (alwaysArmed)",
+                    p.ExtendedReport is { AlwaysArmed: true } e && e.ReportId == form.ExtendedReport!.ReportId
+                    && e.Size == form.ExtendedReport.Size && form.ExtendedReport.Fields.All(f => e.Fields.Any(g => FieldJson(g) == FieldJson(f))),
+                    $"report {p.ExtendedReport?.ReportId} size {p.ExtendedReport?.Size} alwaysArmed {p.ExtendedReport?.AlwaysArmed}");
+                foreach (var d in form.InputDefaults ?? new List<InputBytePatch>())
+                    Check($"the form's fixed byte {d.Byte} = 0x{d.Value:X2} is a constant of that report",
+                        p.ExtendedReport!.Fields.Any(f => f.Byte == d.Byte && f.Type == "uint8" && f.Initial == d.Value));
+                var block = new byte[p.ExtendedReport!.Size];
+                VendorBlobCodec.EncodeInput(p.ExtendedReport, new HMGamepadState { GyroPitch = 1000, AccelY = 8192, BatteryLevel = 7 },
+                    0.5f, 0.5f, 0.5f, 0.5f, 0f, 0f, block, new VendorBlobCodec.EncoderState());
+                Check("SubmitState's sensors reach the USB form's report", block.Skip(1).Count(b => b != 0) > 8,
+                    Convert.ToHexString(block, 0, Math.Min(32, block.Length)));
+            }
+            else
+                Check("the presented profile's extended report is the form's", JsonOf(p.ExtendedReport) == JsonOf(form.ExtendedReport));
 
             var pres = HIDMaestro.Internal.Usbip.UsbPresentation.Resolve(bt);
             var formPres = HIDMaestro.Internal.Usbip.UsbPresentation.Resolve(form);
@@ -265,6 +283,9 @@ internal static partial class Program
         Check($"{what} is refused at $.usbForm", issue != null && issue.JsonPath == "$.usbForm" && issue.Reason.Contains(reason),
             issue == null ? $"loaded {db.All.Count}" : $"{issue.JsonPath}: {issue.Reason}");
     }
+
+    static string FieldJson(FieldSpec f) =>
+        System.Text.Json.JsonSerializer.Serialize(f, HMJsonContext.Default.FieldSpec);
 
     static string JsonOf(ExtendedReportSpec? s) =>
         s == null ? "" : System.Text.Json.JsonSerializer.Serialize(s, HMJsonContext.Default.ExtendedReportSpec);

@@ -722,10 +722,22 @@ internal static class Program
             // the calibration read can still go out as report 0x01. Read the
             // device through a second handle until report 0x11 shows, so the
             // stick check below cannot pass on a stale pre-arm frame.
+            // On the USB/IP backend the persona presents dualshock-4-v2's USB
+            // form (usbForm), which sends its whole state in report 0x01 from
+            // the start, as a pad on USB does: there is nothing to arm.
+            bool usbForm = !ReferenceEquals(prof.FormOn(c.Backend), prof);
             using (var rd = new HidReader(dev.DevicePath, Math.Max(dev.InputReportByteLength, (ushort)78)))
             {
-                var armed = DriveUntil(c, rd, Rest(0.5f), r => r[0] == 0x11, 3000);
-                Check("the persona now sends report 0x11 (SDL's calibration read armed it)", armed != null);
+                if (usbForm)
+                {
+                    var whole = DriveUntil(c, rd, Rest(0.5f), r => r[0] == 0x01 && S16(r, 1 + OffAccel + 2) == 8192, 3000);
+                    Check("the USB form sends report 0x01 with the accelerometer from the start", whole != null);
+                }
+                else
+                {
+                    var armed = DriveUntil(c, rd, Rest(0.5f), r => r[0] == 0x11, 3000);
+                    Check("the persona now sends report 0x11 (SDL's calibration read armed it)", armed != null);
+                }
             }
 
             // The regression itself: input keeps arriving once armed.
@@ -733,8 +745,11 @@ internal static class Program
             short lx1 = SDL_GetGamepadAxis(gp, AXIS_LEFTX);
             Check("after arming SDL still reads input (left stick hard right)", lx1 >= 30000, $"LEFTX {lx1}");
 
-            // SDL reads touch and battery only from report 0x11, after it has
-            // seen one (enhanced_reports), so these show 0x11 was accepted.
+            // Over Bluetooth SDL reads touch and battery only from report
+            // 0x11, after it has seen one (enhanced_reports), so these show
+            // 0x11 was accepted. On a USB bus SDL turns enhanced reports on
+            // itself and reads them from the 64-byte report 0x01
+            // (SDL_hidapi_ps4.c:340-342, 808-810).
             Check("SDL publishes the touchpad", SDL_GetNumGamepadTouchpads(gp) >= 1);
             SDL_GetGamepadTouchpadFinger(gp, 0, 0, out bool d0, out float x0, out float y0, out _);
             Check("SDL reads the first finger at the center of the pad",
