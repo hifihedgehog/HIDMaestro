@@ -90,12 +90,12 @@ internal static class P
         Console.ReadLine();
     }
 
-    static void OnGamepadAdded(object? sender, Gamepad e)
+    static void OnGamepadAdded(object sender, Gamepad e)
     {
         Console.WriteLine($"[event] GamepadAdded fired: captured instance.");
         g_eventPads.Add(e);
     }
-    static void OnGamepadRemoved(object? sender, Gamepad e)
+    static void OnGamepadRemoved(object sender, Gamepad e)
     {
         Console.WriteLine($"[event] GamepadRemoved fired.");
     }
