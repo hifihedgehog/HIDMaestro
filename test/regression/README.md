@@ -78,6 +78,27 @@ or `win-arm64` by `RuntimeInformation.OSArchitecture`, unless `-Exe`
 names another, and each probe's own build output, which an ARM64
 machine gets from a build with `-p:HMTargetArchitecture=arm64`.
 
+## Expected skips
+
+A scenario whose probe finds a condition missing prints `[SKIP]` and,
+under it, the probe's own line naming that condition. These are the
+conditions, the scenarios they skip, and the three machines the release
+gate runs on: the development laptop, the Celeron J4125 (Windows 10,
+x64) and an ARM64 Surface (Snapdragon X2 Plus, Windows 11), the last two
+driven over SSH.
+
+| Condition | What skips | Laptop | Celeron | Surface |
+|---|---|---|---|---|
+| No Steam client installed | `S54_Valve_Steam`, `S62_Valve_Firmware`, and the Steam part of `S65_Switch2_Composite` | runs | skips | skips |
+| Session 0, as over SSH, where Raw Input lists no device | `S70_Kbm_Raw_Input`, the two Raw Input checks of microsoft-designer-keyboard in `S37_Layout_Audit_Check`, and the legacy reader app of `S50_Vr_Controller_Smoke` | runs | skips | skips |
+| No user signed in | sections C and Y of `S71_Coexistence` | runs | skips | skips |
+| Windows Sandbox not available | `S73_Usbip_Clean_Install`, and the sandbox part of `S101_Uninstall` | runs | skips | skips |
+| Windows Sandbox available, or `HIDMAESTRO_UNINSTALL_FIXTURE` not 1 | the fixture part of `S101_Uninstall` | skips | runs with the variable set | skips |
+| SteamVR not installed | phase 2 of `S50_Vr_Controller_Smoke` | runs | runs | skips |
+
+Any other skip on these machines is a fault of the machine's setup or of
+the scenario, and is read and fixed like a failure.
+
 ## Why elevated
 
 `HIDMaestroTest.exe` self-elevates via UAC if launched without admin

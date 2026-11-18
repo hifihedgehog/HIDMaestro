@@ -793,15 +793,28 @@ function Wait-ProbeExit {
     }
 }
 
+# The probe's own [SKIP] lines, each the condition the probe found, so a
+# skip in the log reads as what this machine lacks, in the probe's words.
+function Write-ProbeSkips {
+    param([string]$Out)
+    if (-not $Out -or -not (Test-Path $Out)) { return }
+    foreach ($l in @(Get-Content $Out -ErrorAction SilentlyContinue)) {
+        if ($l -match '\[SKIP\]') { Write-Host ('      ' + $l.Trim()) -ForegroundColor Yellow }
+    }
+}
+
 # What Invoke-Probe does once the probe has exited: a skip code prints
-# [SKIP], and any other exit but 0 prints the probe's [FAIL] lines, or its
-# tail, and throws.
+# [SKIP] and the probe's own skip lines, an exit of 0 prints the skip lines
+# of the parts the probe skipped, and any other exit prints the probe's
+# [FAIL] lines, or its tail, and throws.
 function Resolve-ProbeExit {
     param([int]$ExitCode, [string]$Out, [string]$Exe, [string]$Message, [int[]]$SkipCodes = @())
     if ($SkipCodes -contains $ExitCode) {
         Write-Host ('    [SKIP] probe reported exit ' + $ExitCode) -ForegroundColor Yellow
+        Write-ProbeSkips $Out
         return
     }
+    if ($ExitCode -eq 0) { Write-ProbeSkips $Out }
     if ($ExitCode -ne 0) {
         if (Test-Path $Out) {
             $lines = @(Get-Content $Out -ErrorAction SilentlyContinue)
@@ -1807,16 +1820,17 @@ function Scenario-Switch2-Pro {
 # IPC protocol to each other byte-for-byte, with the probe playing the
 # driver's role, holds a HapticReceived handler past Dispose's join of the
 # haptic reader in a child, and in another has a handler dispose its own
-# controller. Phase 2 runs when a SteamVR install is
-# present (BOTH
+# controller. Phase 2 runs when a SteamVR install is present (the x64
 # battery machines carry the Steam-free steamcmd install at C:\SteamVR,
 # with the headless null-HMD rig config): registers the embedded OpenVR
 # driver, boots the stack, and asserts controller enumeration, hand
 # roles, legacy axis types, the haptic round trip, the consumer-restart
 # cycle, and the #55 legacy GetControllerState lane via a spawned
-# scene-app reader. A [SKIP] of phase 2 on a battery machine is a rig
-# fault, not a pass: both machines are provisioned with SteamVR, so the
-# skip reason must be read, the rig repaired, and the scenario re-run.
+# scene-app reader. Phase 2 prints [SKIP] and its condition where SteamVR
+# is not installed, as on the ARM64 battery machine
+# (test\regression\README.md, "Expected skips"). Where SteamVR
+# is installed, a [SKIP] of phase 2 is a rig fault, not a pass: its
+# condition must be read, the rig repaired, and the scenario re-run.
 function Scenario-Vr-Controller-Smoke {
     Invoke-Probe -Dir 'vr_controller_smoke' -Exe 'VrControllerSmoke.exe' `
                  -Message 'the VR IPC protocol drifted between the C# and C++ mirrors, the OpenVR driver failed to register/load in SteamVR, the controllers stopped enumerating, or the haptic round trip broke (see probe stdout)'
