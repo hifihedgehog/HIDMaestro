@@ -500,12 +500,22 @@ function Receive-HMAppLine {
     return $false
 }
 
-# Every line the test app has written that no one read yet.
+# Every line the test app has written that no one read yet. Output read
+# asynchronously can still arrive after the process has exited, so for an
+# exited app the read goes on until no line has come for 200 ms, at most
+# 2 s.
 function Read-HMAppLines {
     param([System.Diagnostics.Process]$Proc)
     if (-not $Proc.HMDrain) { return }
     $line = $null
     while ($Proc.HMDrain.Queue.TryDequeue([ref]$line)) { $null = Receive-HMAppLine -Proc $Proc -Line $line }
+    if (-not $Proc.HasExited) { return }
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $quiet = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($quiet.ElapsedMilliseconds -lt 200 -and $sw.ElapsedMilliseconds -lt 2000) {
+        if ($Proc.HMDrain.Queue.TryDequeue([ref]$line)) { $null = Receive-HMAppLine -Proc $Proc -Line $line; $quiet.Restart() }
+        else { Start-Sleep -Milliseconds 20 }
+    }
 }
 
 # The first error the test app reported, as a scenario failure.
@@ -683,8 +693,13 @@ function Stop-HMTestProcess {
             try { Send-Cmd -Proc $Proc -Cmd 'quit' -NoWaitAck } catch {}
         }
         Wait-Exit -Proc $Proc -What 'HIDMaestroTest after quit'
+        # An error the app reported before it exited fails the scenario.
+        Read-HMAppLines $Proc
+        Assert-HMNoAppError $Proc
         return 'GRACEFUL'
     }
+    Read-HMAppLines $Proc
+    Assert-HMNoAppError $Proc
     return 'ALREADY_EXITED'
 }
 
@@ -871,10 +886,12 @@ function Wait-CascadeSettle {
         Start-Sleep -Milliseconds 200
     }
 
-    # What the app's slots present, while it runs.
-    if ($proc -and -not $proc.HasExited -and $proc.HMSlots) {
+    # An error the app reported fails the scenario, whether or not the app
+    # is still running, and while it runs, what its slots present.
+    if ($proc -and $proc.HMSlots) {
         Read-HMAppLines $proc
-        Assert-HMPresentation $proc
+        Assert-HMNoAppError $proc
+        if (-not $proc.HasExited) { Assert-HMPresentation $proc }
     }
 }
 
