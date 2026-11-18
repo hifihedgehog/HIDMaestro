@@ -205,12 +205,20 @@ Per scenario:
    include `root\HIDMaestro`, `root\HIDMaestroGamepad` or
    `root\HIDMaestroXUSB`, whatever its enumerator (`ROOT\HIDClass`, any
    `ROOT\VID_xxxx&PID_yyyy&IG_00`, `SWD\HIDMAESTRO*`), and its children.
-   The usbip-win2 host controllers (`ROOT\HIDMAESTRO_UDE`) are the
-   transport and are left out. `HMDevnodes.ps1` holds the rule, and
-   `devnode_owner_check.ps1` checks it offline (no device, no
-   elevation): a `ROOT\HIDClass` parent and an `IG_00` parent other than
-   045E:028E are reported with their HID children, and a foreign
-   `ROOT\HIDClass` device, a phantom and the host controller are not.
+   A USB/IP controller carries no HIDMaestro ID, so its devnodes are
+   found by where they sit: every devnode below the root hub of the
+   usbip-win2 host controller whose hardware IDs include
+   `ROOT\HIDMAESTRO_UDE`, the stamp the SDK puts on the host controller
+   it installs. That is the USB device, its interfaces, their HID
+   collections and audio endpoints. The host controller and its root hub
+   are the transport and are left out, and nothing below another
+   program's usbip-win2 host controller counts. `HMDevnodes.ps1` holds
+   the rule, and `devnode_owner_check.ps1` checks it offline (no device,
+   no elevation): a `ROOT\HIDClass` parent and an `IG_00` parent other
+   than 045E:028E are reported with their HID children, a composite
+   persona is reported whole, a persona left behind is a leftover, and a
+   foreign `ROOT\HIDClass` device, a phantom, the host controller, its
+   root hub and another program's host controller are not.
 2. Run the scenario, then call `Wait-CascadeSettle`: wait for the devnode
    set to change, then for two consecutive 200 ms samples to agree (about
    600 ms on a fast box, 60 s scaled cap).
