@@ -329,14 +329,18 @@ internal static class Program
 
     /// <summary>The stamp of the second of two reports, the first taken at
     /// the clock's origin, must equal the time between them in 16/3 us
-    /// ticks. a0..a1 and b0..b1 bracket the two encodes.</summary>
-    static void CheckElapsed(string who, ushort first, ushort second, long a0, long a1, long b0, long b1)
+    /// ticks. a0..a1 and b0..b1 bracket the two encodes. With
+    /// <paramref name="origin"/> false the clock started at an earlier
+    /// report, the first the device sent without a consumer timestamp, and
+    /// only the step between the two is checked.</summary>
+    static void CheckElapsed(string who, ushort first, ushort second, long a0, long a1, long b0, long b1, bool origin = true)
     {
         double f = 1_000_000.0 / Stopwatch.Frequency;
         double minUs = (b0 - a1) * f, maxUs = (b1 - a0) * f;
         int lo = (int)Math.Floor(minUs * 3 / 16) - 1, hi = (int)Math.Ceiling(maxUs * 3 / 16) + 1;
         int delta = (ushort)(second - first);
-        Check($"{who}: the first stamp is the clock's origin, 0", first == 0, $"0x{first:X4}");
+        if (origin) Check($"{who}: the first stamp is the clock's origin, 0", first == 0, $"0x{first:X4}");
+        else Console.WriteLine($"  {who}: the clock started at the device's first report without a consumer timestamp, and the first stamp here is 0x{first:X4}");
         Check($"{who}: the next one advances by the elapsed time in 16/3 us ticks",
               delta >= lo && delta <= hi, $"{delta} ticks, bound {lo}..{hi} ({minUs:F0}-{maxUs:F0} us)");
     }
@@ -403,7 +407,9 @@ internal static class Program
             var rb = ReadUntil(rd, r => r[0] == rid && r[b] == 255, 2000);
             Check("both timestamp reports arrive", ra != null && rb != null);
             if (ra != null && rb != null)
-                CheckElapsed("live, no consumer timestamp", U16(ra, b + OffTimestamp), U16(rb, b + OffTimestamp), a0, a1, b0, b1);
+                // The USB form sends its whole report from the start, so its
+                // clock started at part B's first report, the positive control.
+                CheckElapsed("live, no consumer timestamp", U16(ra, b + OffTimestamp), U16(rb, b + OffTimestamp), a0, a1, b0, b1, origin: !usb);
         }
         catch (Exception ex) { Check("part B ran without throwing", false, ex.Message); }
         finally

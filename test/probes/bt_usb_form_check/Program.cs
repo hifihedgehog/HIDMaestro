@@ -15,7 +15,8 @@
 //                      device, HMProfile.FormOn, the raw-frame rule, the
 //                      decoded output names and the builder rule. No device.
 //   live <backend>     each Bluetooth identity with a USB form, created on
-//                      <backend> (umdf2 or usbip), and dualsense-composite as
+//                      <backend> (umdf2, usbip, or auto for what Auto
+//                      resolves to here), and dualsense-composite as
 //                      the positive control: the HID interface's report
 //                      lengths, version and strings, a feature read, the
 //                      raw-frame rule. Elevated.
@@ -75,7 +76,7 @@ internal static partial class Program
                     Sdl.Run(sb, args[2], args.Skip(3).ToArray());
                     break;
                 default:
-                    Console.WriteLine("usage: BtUsbFormCheck offline | live <umdf2|usbip> | sdl <umdf2|usbip> <SDL3 dir> [profile ids]");
+                    Console.WriteLine("usage: BtUsbFormCheck offline | live <umdf2|usbip|auto> | sdl <umdf2|usbip|auto> <SDL3 dir> [profile ids]");
                     return 2;
             }
         }
@@ -91,6 +92,9 @@ internal static partial class Program
     {
         "umdf2" => HMBackend.Umdf2,
         "usbip" => HMBackend.Usbip,
+        // What Auto resolves to here, HIDMAESTRO_BACKEND included: the
+        // backend the regression battery runs.
+        "auto" => HMContext.MachineBackend,
         _ => null,
     };
 

@@ -258,7 +258,18 @@ internal static partial class Program
                 // shows one of the four.
                 setState(new HMGamepadState { Buttons = HMButton.A | HMButton.B });
                 bool pressed = WaitPump(() => Enumerable.Range(0, 4).Any(b => SDL_GetGamepadButton(pad, b)), 5000);
-                Expect("a face button submitted with SubmitState reads back through SDL", pressed);
+                // The SDK places HMButton bits on the descriptor's buttons in
+                // declaration order. A descriptor that declares its button
+                // usages out of order (stadia: 0x12 first) puts A where a
+                // reader by usage or by bit finds another button, on both
+                // backends alike. That is finding F1 of lane BTFORM's
+                // report, outside the USB form, and its line is recorded.
+                var usages = form.Inner.GetOrBuildReportBuilder().Buttons.Where(b => b.UsagePage == 0x09).Select(b => (int)b.Usage).ToList();
+                bool outOfOrder = usages.Zip(usages.Skip(1), (x, y) => y < x).Any(t => t);
+                if (outOfOrder && !record)
+                    Console.WriteLine($"  [INFO] a face button submitted with SubmitState reads back through SDL: {(pressed ? "yes" : "no")}  the descriptor declares its button usages out of order ({string.Join(",", usages.Take(4).Select(u => "0x" + u.ToString("X2")))}...), finding F1");
+                else
+                    Expect("a face button submitted with SubmitState reads back through SDL", pressed);
                 setState(new HMGamepadState());
 
                 lock (decoded) decoded.Clear();
