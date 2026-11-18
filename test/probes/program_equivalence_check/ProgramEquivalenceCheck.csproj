@@ -10,6 +10,7 @@
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
     <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <PlatformTarget>$(HMTargetArchitecture)</PlatformTarget>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Optimize>true</Optimize>
@@ -32,12 +33,13 @@
   <Import Project="..\..\..\sdk\HIDMaestro.KernelGen\KernelGen.targets" />
 
   <!-- The same check under NativeAOT, published beside the JIT build for the
-       machine's architecture, as aot_smoke publishes its apps. Its own
-       intermediate directory is deleted first, so every build compiles it
-       again from this build's kernels. -->
+       architecture the probe is built for, as aot_smoke publishes its apps:
+       aot-x64 by default on an x64 machine, and aot-arm64 for a build with
+       -p:HMTargetArchitecture=arm64, which an x64 machine cross-compiles.
+       Its own intermediate directory is deleted first, so every build
+       compiles it again from this build's kernels. -->
   <PropertyGroup>
-    <_PecArch Condition="'$(PROCESSOR_ARCHITECTURE)' == 'ARM64'">arm64</_PecArch>
-    <_PecArch Condition="'$(_PecArch)' == ''">x64</_PecArch>
+    <_PecArch>$(HMTargetArchitecture)</_PecArch>
     <_PecPath>$([MSBuild]::Escape('$(MSBuildProgramFiles32)\Microsoft Visual Studio\Installer;$(PATH)'))</_PecPath>
   </PropertyGroup>
   <Target Name="PublishAotCheck" AfterTargets="Build" Condition="'$(PecAotPublish)' != 'true' and '$(PecSkipAot)' != 'true'">
