@@ -847,6 +847,9 @@ public sealed class HMContext : IDisposable
             {
                 throw Internal.ProfileDefects.ToProfileException(profile.Inner, e);
             }
+            // A host controller whose USB 2.0 ports all hold a device,
+            // before the lease and the host controller's install.
+            Internal.Usbip.UsbipBackend.ThrowIfPortsFull();
         }
 
         // What programs that have exited left goes first, once per

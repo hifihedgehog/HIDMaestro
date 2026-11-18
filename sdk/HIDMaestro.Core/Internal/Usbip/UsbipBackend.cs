@@ -37,7 +37,6 @@ internal static class UsbipBackend
 
         var server = UsbipServer.GetOrStart();
         SweepStaleOnce(server);
-        ThrowIfPortsFull();
 
         var device = new UsbipEmulatedDevice(profile, index, identity);
         if (identity != null)
@@ -72,36 +71,72 @@ internal static class UsbipBackend
         }
     }
 
-    /// <summary>The USB 2.0 ports the host controller has: its
-    /// <c>NumberOfUsb20Ports</c> parameter, 30 when not set, held to 1 to
-    /// 254, as usbip-win2 0.9.8.1 reads it (drivers/ude/vhci.cpp,
-    /// get_usb_ports_cnt and set_usb_ports_cnt). Every device the SDK
+    /// <summary>The USB 2.0 ports the host controller runs with: the count
+    /// its root hub reports (<see cref="VhciClient.Usb20PortsFromRootHub"/>),
+    /// which is the one the driver loaded. When the hub does not answer,
+    /// the driver's own rule over its parameters
+    /// (<see cref="Usb20PortsFromParameters"/>). Every device the SDK
     /// attaches is full or high speed and takes one of them.</summary>
-    internal static int Usb20Ports()
+    internal static int Usb20Ports() => VhciClient.Usb20PortsFromRootHub() ?? Usb20PortsFromParameters();
+
+    /// <summary>usbip-win2 0.9.8.1's count of USB 2.0 ports from its
+    /// <c>NumberOfUsb20Ports</c> and <c>NumberOfUsb30Ports</c> parameters
+    /// (drivers/ude/vhci.cpp, query_usb_ports_cnt and set_usb_ports_cnt):
+    /// each 30 when not set and held to 1 to 254, USB 3 first, and the
+    /// USB 2.0 count then cut to the 255 ports the two may take together.
+    /// The values read now, which a change since the driver loaded makes
+    /// differ from the driver's own.</summary>
+    internal static int Usb20PortsFromParameters()
     {
+        int usb2 = 30, usb3 = 30;
         try
         {
             using var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\usbip2_ude\Parameters");
-            if (k?.GetValue("NumberOfUsb20Ports") is int n) return Math.Clamp(n, 1, 254);
+            if (k?.GetValue("NumberOfUsb20Ports") is int n2) usb2 = n2;
+            if (k?.GetValue("NumberOfUsb30Ports") is int n3) usb3 = n3;
         }
         catch { }
-        return 30;
+        return Usb20PortsRule(usb2, usb3);
     }
 
-    /// <summary>True when the host controller lists as many imports as it
-    /// has USB 2.0 ports, every program's counted.</summary>
+    /// <summary>set_usb_ports_cnt over the two parameter values.</summary>
+    internal static int Usb20PortsRule(int usb2, int usb3)
+    {
+        usb3 = Math.Clamp(usb3, 1, 254);
+        return Math.Min(Math.Clamp(usb2, 1, 254), 255 - usb3);
+    }
+
+    /// <summary>The imports on USB 2.0 ports among <paramref name="speeds"/>,
+    /// the speed of every import the host controller lists, every
+    /// program's. A SuperSpeed import sits on a USB 3 port (vhci.cpp
+    /// get_port_range).</summary>
+    internal static int Usb20PortsUsed(IEnumerable<int> speeds)
+    {
+        int used = 0;
+        foreach (int speed in speeds)
+            if (speed < VhciClient.UsbSpeedSuper) used++;
+        return used;
+    }
+
+    /// <summary>True when every USB 2.0 port of the host controller holds
+    /// an import, every program's counted.</summary>
     private static bool PortsFull(out int ports, out int used)
     {
         ports = Usb20Ports();
         used = 0;
-        try { used = VhciClient.GetImportedDevices().Count; } catch { return false; }
+        try { used = Usb20PortsUsed(VhciClient.GetImportedSpeeds()); } catch { return false; }
         return used >= ports;
     }
 
     /// <summary>The named refusal of a create past the host controller's
-    /// ports, before the device is registered, so nothing is undone.</summary>
-    private static void ThrowIfPortsFull()
+    /// USB 2.0 ports. A create calls it before its lease and before
+    /// anything else machine-wide (HMContext.CreateAtSlot), and nothing is
+    /// asked of a machine whose host controller is not installed: it has
+    /// no import. The attach asks again when it fails, since another
+    /// program can take the last port in between.</summary>
+    internal static void ThrowIfPortsFull()
     {
+        if (!VhciClient.IsAvailable()) return;
         if (!PortsFull(out int ports, out int used)) return;
         throw new HMResourceInUseException(
             $"Every one of the USB/IP host controller's {ports} USB 2.0 ports holds a device ({used} attached, "
