@@ -468,8 +468,13 @@ static class XusbWgiSingleCheck
         Pid = prof.ProductId;
         bool onUsbip = backend == HMBackend.Usbip || (backend == HMBackend.Auto && HMContext.MachineBackend == HMBackend.Usbip);
         WgiPid = onUsbip && prof.Connection == "wireless-adapter" ? (ushort)0 : Pid;
+        // WGI lists a Gamepad only for an XInput pad of the gamepad subtype,
+        // as for the retail pads: an arcade stick, a dance pad, a flight
+        // stick, a guitar or a wheel is a RawGameController alone.
+        string subType = prof.XInput?.SubType ?? "gamepad";
+        int wantGamepads = subType is "gamepad" or "1" or "0x01" ? 1 : 0;
         Console.WriteLine();
-        Console.WriteLine($"== {prof.Id}, {Vid:X4}:{Pid:X4}, WGI {Vid:X4}:{WgiPid:X4} ==");
+        Console.WriteLine($"== {prof.Id}, {Vid:X4}:{Pid:X4}, WGI {Vid:X4}:{WgiPid:X4}, subtype {subType}, {wantGamepads} Gamepad ==");
         // A device of the identity already here is not the probe's, and the
         // counts below leave it out.
         var bench = WgiIds();
@@ -531,7 +536,7 @@ static class XusbWgiSingleCheck
                 {
                     Thread.Sleep(50);
                     counts = WgiCounts(bench);
-                    if (counts.Gamepads >= 1 && counts.Raw >= 1) break;
+                    if (counts.Gamepads >= wantGamepads && counts.Raw >= 1) break;
                 }
                 var hold = System.Diagnostics.Stopwatch.StartNew();
                 while (hold.ElapsedMilliseconds < SecondRegistrationMs)
@@ -541,12 +546,10 @@ static class XusbWgiSingleCheck
                     if (c2.Gamepads > 1 || c2.Raw > 1) break;
                 }
                 counts = WgiCounts(bench);
-                // A Gamepad only for a pad WGI classes as one: Windows lists
-                // an XUSB wheel as a RawGameController alone, as it lists
-                // the retail wheel. Never two.
-                Check(c.Backend == HMBackend.Usbip ? "WGI shows at most ONE Gamepad for the virtual" : "WGI shows exactly ONE Gamepad for the virtual",
-                      c.Backend == HMBackend.Usbip ? counts.Gamepads <= 1 : counts.Gamepads == 1,
-                      $"gamepads={counts.Gamepads}");
+                // One Gamepad for a pad of the gamepad subtype, none for the
+                // others, on both backends. Never two.
+                Check(wantGamepads == 1 ? "WGI shows exactly ONE Gamepad for the virtual" : "WGI shows no Gamepad for a pad of this subtype",
+                      counts.Gamepads == wantGamepads, $"gamepads={counts.Gamepads}");
                 Check("WGI shows exactly ONE RawGameController", counts.Raw == 1,
                       $"raw={counts.Raw}");
                 var xusbIfs = XusbInterfaces();

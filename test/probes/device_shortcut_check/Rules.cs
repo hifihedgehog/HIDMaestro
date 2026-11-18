@@ -290,6 +290,8 @@ internal static class Rules
 
     const string XInputIds = "the IDs and flags an XUSB companion reports apart from its HID child's (PresentationPlan, XusbAnswers.Compile), for any pad behind a receiver: xbox-360-wireless today, and every wireless XUSB device PlasticBand captured (ProductId 0 with WIRELESS, the receiver's 045E:0719 in GET_INFORMATION), the Microsoft Wireless Racing Wheel among them (Microsoft Wireless Racing Wheel.txt:1-17)";
 
+    const string XInputBattery = "the battery an XUSB companion answers in GET_BATTERY_INFORMATION (XInputPresentation.BatteryBytes, the XUSB model's battery fields), for any XUSB pad that is not wired and full: xbox-360-wireless today, which reads unknown and full as xusb22 answers for the pad behind the receiver, and any wireless XUSB device on batteries";
+
     // Discriminators of rule C's per-kind count (Profiles.cs), as
     // Type.Prop: a key on an object of one kind is counted apart from the
     // same key on another.
@@ -358,6 +360,8 @@ internal static class Rules
         new("XInputSpec.Capabilities", XInputIds),
         new("XInputIdSpec.*", XInputIds),
         new("XInputCapabilitiesSpec.*", XInputIds),
+        new("XInputSpec.Battery", XInputBattery),
+        new("XInputBatterySpec.*", XInputBattery),
         new("ControllerProfile.BluetoothVendorIdSource", "the Device ID's vendor ID source in a Bluetooth device's hardware IDs (PresentationPlan.BluetoothIds), for any Bluetooth device whose VID the Bluetooth SIG assigned: the Luna's 0x0171 today, and Apple's Bluetooth keyboards and mice under 0x004C (Linux hid-ids.h:98, hid-apple.c:1084)"),
         new("FieldSpec.Resolution", "a parameter of the u10be codec op, for any 10-bit sensor (VendorBlobProgram.cs:363)"),
         new("FieldSpec.SourceResolution", "a parameter of the u10be codec op, for any 10-bit sensor (VendorBlobProgram.cs:363)"),

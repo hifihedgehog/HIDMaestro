@@ -31,9 +31,11 @@ xbox-360-wired 0x8000E00C 10=14 | WAKE | after the first report GET_STATE carrie
 xbox-360-wireless 0x8000E00C 4=FF | WAKE | GET_STATE carries 0xFF at byte 4, the headset byte for no headset, as xusb22's GetState0101 writes it (xusb22.sys 10.0.26100.9549), where 9bd6279 gave 0
 xbox-360-wireless 0x8000E00C 10=14 | WAKE | after the first report GET_STATE carries 0x14 at byte 10, the length of the pad's report that xusb22 copies with the state (HandleIncomingStateReport and GetState0101), where 9bd6279 gave 0
 
-# XUSBFAM: the retail subtypes of the sticks, the dance pad and the guitars.
+# XUSBFAM: the retail subtypes of the sticks, the dance pad and the guitars, and the
+# battery type xusb22 gives the pad behind the receiver.
 xbox-360-arcade-stick 0x8000E004 3=03 | XUSBFAM | XINPUT_DEVSUBTYPE_ARCADE_STICK in both capability forms: the subtype xusb22 reports for the same pad on the USB/IP backend, whose HID device it names and lays out for that subtype (measured with xusb22 10.0.28000.3365)
 xbox-360-dance-pad 0x8000E004 3=05 | XUSBFAM | XINPUT_DEVSUBTYPE_DANCE_PAD in both capability forms: the subtype xusb22 reports for the same pad on the USB/IP backend, whose HID device it names and lays out for that subtype (measured with xusb22 10.0.28000.3365)
 xbox-360-flight-stick 0x8000E004 3=04 | XUSBFAM | XINPUT_DEVSUBTYPE_FLIGHT_STICK in both capability forms: the subtype xusb22 reports for the same pad on the USB/IP backend, whose HID device it names and lays out for that subtype (measured with xusb22 10.0.28000.3365)
 xbox-360-guitar-v1 0x8000E004 3=06 | XUSBFAM | XINPUT_DEVSUBTYPE_GUITAR in both capability forms: the subtype xusb22 reports for the same pad on the USB/IP backend, whose HID device it names and lays out for that subtype (measured with xusb22 10.0.28000.3365)
 xbox-360-guitar-v2 0x8000E004 3=07 | XUSBFAM | XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE in both capability forms: the subtype xusb22 reports for the same pad on the USB/IP backend, whose HID device it names and lays out for that subtype (measured with xusb22 10.0.28000.3365)
+xbox-360-wireless 0x8000E018 2=FF | XUSBFAM | GET_BATTERY_INFORMATION carries BATTERY_TYPE_UNKNOWN, the type xusb22 reports for the pad behind the receiver on the USB/IP backend, whose link control packet carries the battery byte 0xE7 tattiebogle.net captured from a retail pad (measured with xusb22 10.0.28000.3365). The level stays FULL, as xusb22 reads it
