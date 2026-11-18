@@ -220,6 +220,7 @@ internal sealed partial class UsbipEmulatedDevice
         var effect = ProtocolHandleCommands(payload);
         SendRetSubmit(seqnum, 0, payload.Length, null);
         CompleteBulkReplies(effect);
+        CompleteLayoutReplies(effect);
     }
 
     /// <summary>Every parked read fails once the device stops answering.</summary>

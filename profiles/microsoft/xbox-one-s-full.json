@@ -1,0 +1,514 @@
+{
+  "id": "xbox-one-s-full",
+  "name": "Xbox One S Controller (Model 1708): Full",
+  "vendor": "Microsoft",
+  "vid": "0x045E",
+  "pid": "0x02EA",
+  "productString": "Controller",
+  "manufacturerString": "Microsoft",
+  "type": "gamepad",
+  "connection": "usb",
+  "backend": "usbip",
+  "deviceModel": "none",
+  "notes": "A wired Xbox One S controller as the USB device itself, 045E:02EA, on the USB/IP backend. The device speaks the Gaming Input Protocol (GIP) on its one interface, and Windows binds its own GIP stack to it: dc1-controller.sys with xboxgip.sys as its upper filter, which makes the HID child that xinputhid.sys gives an XInput slot, on x64 and ARM64, with no HIDMaestro driver. The device has no HID interface and the profile no descriptor: interface 0 is function gip. Sources: Microsoft's GIP specification (H001419) and [MS-GIPUSB], GP2040-CE's src/drivers/xbone and src/drivers/shared/xgip_protocol.cpp, and Santroller's src/emulation/usb/xone_device.cpp. Device: USB 2.00, class FF/47/D0, a 64-byte control endpoint, bcdDevice 0x0100 (Santroller's), strings 1 to 3, full speed, so the device qualifier stalls. String 3 is the controller's own synthetic serial. Configuration: 32 bytes, bus-powered with remote wakeup, 500 mA, and the GIP data interface alone, class FF/47/D0 with interrupt IN 0x81 and interrupt OUT 0x01 of 64 bytes at 4 ms (specification tables 34 to 38). The Microsoft OS descriptors are the specification's: string 0xEE with vendor code 0x90 and the compatible ID XGIP10 for interface 0, which gives the device USB\\MS_COMP_XGIP10. The extended properties request stalls. The start sequence is the specification's. The device sends Hello (0x02) 500 ms after attach and every 500 ms until the host answers: its device ID is the serial's last twelve hex digits low byte first, then two zero bytes, and its VID, PID, firmware build, hardware version and protocol versions are Santroller's announce_gamepad (xone_device.cpp:170-172). The firmware version is 0x4D48.0x0230, which no real pad announces, because Windows caches metadata by VID, PID and firmware version until it restarts. A Metadata Request (0x04) draws the metadata in four fragments and a completion, as GP2040-CE's generatePacket sends them: the first at once, the next three when the host acknowledges the first, and the completion when the host acknowledges the last. The metadata is Santroller's xb1_descriptor_gamepad (xone_device.cpp:174-188) with its firmware version list replaced by 0x4D48.0x0230 alone: preferred type Windows.Xbox.Input.Gamepad, the interfaces IController, IGamepad, INavigationController, IConsoleFunctionMap and the security opt-out, message 0x20 of 32 bytes upstream and message 0x09 of 60 bytes downstream. Every host message with the acknowledge flag set gets a Protocol Control acknowledgement. Set Device State Start (0x05, 0x00) starts the device: it sends a Status message (0x03, wired with no battery: full power, battery absent, level critically low) at once, every second for ten seconds and every twenty seconds after, and its first input report. Stop ends the reports, and Off and Reset send a powering off Status, after which Reset brings the Hellos back. The input report is message 0x20 with a 32-byte payload, sent when its payload changes: the specification's 14-byte gamepad report (Table 468: Menu, View, A, B, X and Y, the d-pad, the bumpers and the stick clicks, two triggers from 0 to 1023 and four sticks from -32768 to 32767 with up positive) and the 18-byte console function map, whose first byte is 0x01 while Share is held (tables 471 and 472). Guide goes out as its own message, 0x07, on each change after the start. Each message numbers itself: the input report from its own counter, every system message from the global one, neither ever 0. SubmitState fills the 15-byte stateBlock, and a raw submit is that block. Rumble arrives as the Direct Motor command (0x09, Table 467): the motor bitmap, the left and right impulse trigger levels and the left and right vibration levels from 0 to 100, a duration, a delay and a repeat count, raised on OutputReceived as the host wrote it. The Guide LED command and every other host message are consumed. Not emulated: the security exchange (the metadata opts out), audio, the expansion port, firmware update and the Keep Alive message, which the specification says USB devices never need.",
+  "layout": {
+    "kind": "unspecified",
+    "note": "The device has no HID interface, so no descriptor declares axes or buttons for a layout to reference. The input report's shape is in stateBlock and inputReports, and SubmitState resolves its sticks and triggers canonically: X and Y, Rx and Ry, Z and Rz.",
+    "source": "Microsoft GIP specification H001419, Table 468, Typical Gamepad Input Report"
+  },
+  "usbConfiguration": {
+    "configurationValue": 1,
+    "attributes": 160,
+    "maxPowerMilliamps": 500,
+    "busSpeed": "full",
+    "deviceDescriptor": "12010002ff47d0405e04ea02000101020301",
+    "configurationDescriptor": "09022000010100a0fa0904000002ff47d0000705810340000407050103400004",
+    "interfaces": [
+      {
+        "interfaceNumber": 0,
+        "function": "gip",
+        "altSettings": [
+          {
+            "altSetting": 0,
+            "interfaceClass": 255,
+            "interfaceSubClass": 71,
+            "interfaceProtocol": 208,
+            "endpoints": [
+              {
+                "address": 129,
+                "transferType": "interrupt",
+                "maxPacketSize": 64,
+                "interval": 4
+              },
+              {
+                "address": 1,
+                "transferType": "interrupt",
+                "maxPacketSize": 64,
+                "interval": 4
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "microsoftOs": {
+      "string": "12034d005300460054003100300030009000",
+      "extendedCompatId": "28000000000104000100000000000000000158474950313000000000000000000000000000000000"
+    }
+  },
+  "stateBlock": {
+    "size": 15,
+    "fields": [
+      {
+        "byte": 0,
+        "type": "button-mask",
+        "buttons": [
+          "_",
+          "_",
+          "Start",
+          "Back",
+          "A",
+          "B",
+          "X",
+          "Y"
+        ]
+      },
+      {
+        "byte": 1,
+        "type": "button-mask",
+        "buttons": [
+          "DPAD_UP",
+          "DPAD_DOWN",
+          "DPAD_LEFT",
+          "DPAD_RIGHT",
+          "LeftBumper",
+          "RightBumper",
+          "LeftStick",
+          "RightStick"
+        ]
+      },
+      {
+        "byte": 2,
+        "type": "uint16-trigger",
+        "semantic": "leftTrigger",
+        "max": 1023
+      },
+      {
+        "byte": 4,
+        "type": "uint16-trigger",
+        "semantic": "rightTrigger",
+        "max": 1023
+      },
+      {
+        "byte": 6,
+        "type": "int16-axis",
+        "semantic": "leftStickX",
+        "min": -32768,
+        "max": 32767
+      },
+      {
+        "byte": 8,
+        "type": "int16-axis",
+        "semantic": "leftStickY",
+        "min": -32768,
+        "max": 32767,
+        "invert": true
+      },
+      {
+        "byte": 10,
+        "type": "int16-axis",
+        "semantic": "rightStickX",
+        "min": -32768,
+        "max": 32767
+      },
+      {
+        "byte": 12,
+        "type": "int16-axis",
+        "semantic": "rightStickY",
+        "min": -32768,
+        "max": 32767,
+        "invert": true
+      },
+      {
+        "byte": 14,
+        "type": "button-mask",
+        "buttons": [
+          "Share",
+          "Guide"
+        ]
+      }
+    ]
+  },
+  "inputReports": [
+    {
+      "name": "input",
+      "reportId": "0x20",
+      "size": 36,
+      "stream": "input",
+      "while": "started",
+      "send": "change",
+      "program": [
+        {
+          "const": {
+            "0": "20",
+            "1": "00",
+            "3": "20"
+          }
+        },
+        {
+          "counter": "inputSeq",
+          "at": 2,
+          "width": 8
+        },
+        {
+          "copy": "0-13",
+          "to": 4
+        },
+        {
+          "bits": [
+            [
+              112,
+              144
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "guide",
+      "reportId": "0x07",
+      "size": 6,
+      "stream": "guide",
+      "while": "started",
+      "send": "change",
+      "first": "skip",
+      "program": [
+        {
+          "const": {
+            "0": "07",
+            "1": "20",
+            "3": "02",
+            "5": "5B"
+          }
+        },
+        {
+          "counter": "globalSeq",
+          "at": 2,
+          "width": 8
+        },
+        {
+          "bits": [
+            [
+              113,
+              32
+            ]
+          ]
+        }
+      ]
+    }
+  ],
+  "protocol": {
+    "state": [
+      {
+        "name": "started"
+      },
+      {
+        "name": "answered"
+      }
+    ],
+    "counters": [
+      {
+        "name": "globalSeq",
+        "bits": 8,
+        "on": "frame",
+        "skipZero": true
+      },
+      {
+        "name": "inputSeq",
+        "bits": 8,
+        "on": "frame",
+        "skipZero": true
+      }
+    ],
+    "input": {
+      "endpoint": "0x81",
+      "clock": {
+        "periodMs": 4,
+        "origin": "attach",
+        "missedTick": "owe"
+      }
+    },
+    "commands": {
+      "endpoint": "0x01",
+      "rules": [
+        {
+          "match": ".. 30/B0",
+          "minLength": 4,
+          "continue": true,
+          "reply": [
+            {
+              "hex": "0120"
+            },
+            {
+              "echo": "2"
+            },
+            {
+              "hex": "0900"
+            },
+            {
+              "echo": "0"
+            },
+            {
+              "hex": "20"
+            },
+            {
+              "echo": "3"
+            },
+            {
+              "hex": "0000000000"
+            }
+          ]
+        },
+        {
+          "match": ".. 10/B0",
+          "minLength": 4,
+          "continue": true,
+          "reply": [
+            {
+              "hex": "0120"
+            },
+            {
+              "echo": "2"
+            },
+            {
+              "hex": "0900"
+            },
+            {
+              "echo": "0"
+            },
+            {
+              "hex": "00"
+            },
+            {
+              "echo": "3"
+            },
+            {
+              "hex": "0000000000"
+            }
+          ]
+        },
+        {
+          "match": "04 20/EF .. 00",
+          "minLength": 4,
+          "set": {
+            "answered": 1
+          },
+          "consume": true,
+          "reply": [
+            {
+              "hex": "04F0"
+            },
+            {
+              "echo": "2"
+            },
+            {
+              "hex": "3AD6011000010000000000000000000000D600970016001B001C00230029004600000000000000000001484D3002000601020304060705010405060A01"
+            }
+          ]
+        },
+        {
+          "match": "01 20/EF .. 09 00 04 20 3A 00 00 00",
+          "minLength": 13,
+          "consume": true,
+          "replies": [
+            [
+              {
+                "hex": "04A0"
+              },
+              {
+                "echo": "2"
+              },
+              {
+                "hex": "BA003A1A0057696E646F77732E58626F782E496E7075742E47616D657061640556FF7697FD9B8145AD45B645BBA526D62C402E08DF07E145A5ABA3127A"
+              }
+            ],
+            [
+              {
+                "hex": "04A0"
+              },
+              {
+                "echo": "2"
+              },
+              {
+                "hex": "BA0074F197B5E71FF3B88673E940A9F82F21263ACFB7FED2DDEC87D39442BD961A712E3DC77D77CE347AE27DC6458CA40042C08BD94A02170020200001"
+              }
+            ],
+            [
+              {
+                "hex": "04B0"
+              },
+              {
+                "echo": "2"
+              },
+              {
+                "hex": "28AE0100100000000000000000000000000000001700093C00010008000000000000000000000000000000"
+              }
+            ]
+          ]
+        },
+        {
+          "match": "01 20/EF .. 09 00 04 20 D6 00 00 00 00 00",
+          "minLength": 13,
+          "consume": true,
+          "reply": [
+            {
+              "hex": "04A0"
+            },
+            {
+              "echo": "2"
+            },
+            {
+              "hex": "00D601"
+            }
+          ]
+        },
+        {
+          "match": "01",
+          "consume": true
+        },
+        {
+          "match": "05 20/EF .. 01 00",
+          "minLength": 5,
+          "set": {
+            "started": 1,
+            "answered": 1
+          },
+          "consume": true
+        },
+        {
+          "match": "05 20/EF .. 01 01",
+          "minLength": 5,
+          "set": {
+            "started": 0
+          },
+          "consume": true
+        },
+        {
+          "match": "05 20/EF .. 01 04",
+          "minLength": 5,
+          "set": {
+            "started": 0
+          },
+          "consume": true,
+          "reply": [
+            {
+              "hex": "0320"
+            },
+            {
+              "counter": "globalSeq"
+            },
+            {
+              "hex": "0400000000"
+            }
+          ]
+        },
+        {
+          "match": "05 20/EF .. 01 07",
+          "minLength": 5,
+          "set": {
+            "started": 0,
+            "answered": 0
+          },
+          "consume": true,
+          "reply": [
+            {
+              "hex": "0320"
+            },
+            {
+              "counter": "globalSeq"
+            },
+            {
+              "hex": "0400000000"
+            }
+          ]
+        },
+        {
+          "match": "05",
+          "consume": true
+        },
+        {
+          "match": "09 00/EF .. 09 00",
+          "minLength": 13
+        },
+        {
+          "match": "..",
+          "consume": true
+        }
+      ]
+    },
+    "replies": {
+      "channel": "input",
+      "pending": 8
+    },
+    "timers": [
+      {
+        "name": "hello",
+        "while": "!answered",
+        "firstMs": 500,
+        "periods": [
+          {
+            "periodMs": 500
+          }
+        ],
+        "reply": [
+          {
+            "hex": "0220"
+          },
+          {
+            "counter": "globalSeq"
+          },
+          {
+            "hex": "1C"
+          },
+          {
+            "value": "serial",
+            "encoding": "hex-le",
+            "length": {
+              "value": 8
+            }
+          },
+          {
+            "hex": "5E04EA02484D3002820C00000405010001000100"
+          }
+        ]
+      },
+      {
+        "name": "status",
+        "while": "started",
+        "firstMs": 0,
+        "periods": [
+          {
+            "periodMs": 1000,
+            "count": 10
+          },
+          {
+            "periodMs": 20000
+          }
+        ],
+        "reply": [
+          {
+            "hex": "0320"
+          },
+          {
+            "counter": "globalSeq"
+          },
+          {
+            "hex": "0480000000"
+          }
+        ]
+      }
+    ],
+    "getStatus": "descriptor",
+    "log": 256
+  }
+}

@@ -1,0 +1,514 @@
+{
+  "id": "xbox-one-s-full-no-opt-out",
+  "name": "Xbox One S Controller (Model 1708): Full, no security opt-out",
+  "vendor": "Microsoft",
+  "vid": "0x045E",
+  "pid": "0x02EA",
+  "productString": "Controller",
+  "manufacturerString": "Microsoft",
+  "type": "gamepad",
+  "connection": "usb",
+  "backend": "usbip",
+  "deviceModel": "none",
+  "notes": "A test variant of xbox-one-s-full for gip_persona_check: the same device with the security opt-out interface left out of its metadata, and firmware version 0x4D48.0x0231.",
+  "layout": {
+    "kind": "unspecified",
+    "note": "The device has no HID interface, so no descriptor declares axes or buttons for a layout to reference. The input report's shape is in stateBlock and inputReports, and SubmitState resolves its sticks and triggers canonically: X and Y, Rx and Ry, Z and Rz.",
+    "source": "Microsoft GIP specification H001419, Table 468, Typical Gamepad Input Report"
+  },
+  "usbConfiguration": {
+    "configurationValue": 1,
+    "attributes": 160,
+    "maxPowerMilliamps": 500,
+    "busSpeed": "full",
+    "deviceDescriptor": "12010002ff47d0405e04ea02000101020301",
+    "configurationDescriptor": "09022000010100a0fa0904000002ff47d0000705810340000407050103400004",
+    "interfaces": [
+      {
+        "interfaceNumber": 0,
+        "function": "gip",
+        "altSettings": [
+          {
+            "altSetting": 0,
+            "interfaceClass": 255,
+            "interfaceSubClass": 71,
+            "interfaceProtocol": 208,
+            "endpoints": [
+              {
+                "address": 129,
+                "transferType": "interrupt",
+                "maxPacketSize": 64,
+                "interval": 4
+              },
+              {
+                "address": 1,
+                "transferType": "interrupt",
+                "maxPacketSize": 64,
+                "interval": 4
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "microsoftOs": {
+      "string": "12034d005300460054003100300030009000",
+      "extendedCompatId": "28000000000104000100000000000000000158474950313000000000000000000000000000000000"
+    }
+  },
+  "stateBlock": {
+    "size": 15,
+    "fields": [
+      {
+        "byte": 0,
+        "type": "button-mask",
+        "buttons": [
+          "_",
+          "_",
+          "Start",
+          "Back",
+          "A",
+          "B",
+          "X",
+          "Y"
+        ]
+      },
+      {
+        "byte": 1,
+        "type": "button-mask",
+        "buttons": [
+          "DPAD_UP",
+          "DPAD_DOWN",
+          "DPAD_LEFT",
+          "DPAD_RIGHT",
+          "LeftBumper",
+          "RightBumper",
+          "LeftStick",
+          "RightStick"
+        ]
+      },
+      {
+        "byte": 2,
+        "type": "uint16-trigger",
+        "semantic": "leftTrigger",
+        "max": 1023
+      },
+      {
+        "byte": 4,
+        "type": "uint16-trigger",
+        "semantic": "rightTrigger",
+        "max": 1023
+      },
+      {
+        "byte": 6,
+        "type": "int16-axis",
+        "semantic": "leftStickX",
+        "min": -32768,
+        "max": 32767
+      },
+      {
+        "byte": 8,
+        "type": "int16-axis",
+        "semantic": "leftStickY",
+        "min": -32768,
+        "max": 32767,
+        "invert": true
+      },
+      {
+        "byte": 10,
+        "type": "int16-axis",
+        "semantic": "rightStickX",
+        "min": -32768,
+        "max": 32767
+      },
+      {
+        "byte": 12,
+        "type": "int16-axis",
+        "semantic": "rightStickY",
+        "min": -32768,
+        "max": 32767,
+        "invert": true
+      },
+      {
+        "byte": 14,
+        "type": "button-mask",
+        "buttons": [
+          "Share",
+          "Guide"
+        ]
+      }
+    ]
+  },
+  "inputReports": [
+    {
+      "name": "input",
+      "reportId": "0x20",
+      "size": 36,
+      "stream": "input",
+      "while": "started",
+      "send": "change",
+      "program": [
+        {
+          "const": {
+            "0": "20",
+            "1": "00",
+            "3": "20"
+          }
+        },
+        {
+          "counter": "inputSeq",
+          "at": 2,
+          "width": 8
+        },
+        {
+          "copy": "0-13",
+          "to": 4
+        },
+        {
+          "bits": [
+            [
+              112,
+              144
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "guide",
+      "reportId": "0x07",
+      "size": 6,
+      "stream": "guide",
+      "while": "started",
+      "send": "change",
+      "first": "skip",
+      "program": [
+        {
+          "const": {
+            "0": "07",
+            "1": "20",
+            "3": "02",
+            "5": "5B"
+          }
+        },
+        {
+          "counter": "globalSeq",
+          "at": 2,
+          "width": 8
+        },
+        {
+          "bits": [
+            [
+              113,
+              32
+            ]
+          ]
+        }
+      ]
+    }
+  ],
+  "protocol": {
+    "state": [
+      {
+        "name": "started"
+      },
+      {
+        "name": "answered"
+      }
+    ],
+    "counters": [
+      {
+        "name": "globalSeq",
+        "bits": 8,
+        "on": "frame",
+        "skipZero": true
+      },
+      {
+        "name": "inputSeq",
+        "bits": 8,
+        "on": "frame",
+        "skipZero": true
+      }
+    ],
+    "input": {
+      "endpoint": "0x81",
+      "clock": {
+        "periodMs": 4,
+        "origin": "attach",
+        "missedTick": "owe"
+      }
+    },
+    "commands": {
+      "endpoint": "0x01",
+      "rules": [
+        {
+          "match": ".. 30/B0",
+          "minLength": 4,
+          "continue": true,
+          "reply": [
+            {
+              "hex": "0120"
+            },
+            {
+              "echo": "2"
+            },
+            {
+              "hex": "0900"
+            },
+            {
+              "echo": "0"
+            },
+            {
+              "hex": "20"
+            },
+            {
+              "echo": "3"
+            },
+            {
+              "hex": "0000000000"
+            }
+          ]
+        },
+        {
+          "match": ".. 10/B0",
+          "minLength": 4,
+          "continue": true,
+          "reply": [
+            {
+              "hex": "0120"
+            },
+            {
+              "echo": "2"
+            },
+            {
+              "hex": "0900"
+            },
+            {
+              "echo": "0"
+            },
+            {
+              "hex": "00"
+            },
+            {
+              "echo": "3"
+            },
+            {
+              "hex": "0000000000"
+            }
+          ]
+        },
+        {
+          "match": "04 20/EF .. 00",
+          "minLength": 4,
+          "set": {
+            "answered": 1
+          },
+          "consume": true,
+          "reply": [
+            {
+              "hex": "04F0"
+            },
+            {
+              "echo": "2"
+            },
+            {
+              "hex": "3AC6011000010000000000000000000000C600870016001B001C00230029004600000000000000000001484D3102000601020304060705010405060A01"
+            }
+          ]
+        },
+        {
+          "match": "01 20/EF .. 09 00 04 20 3A 00 00 00",
+          "minLength": 13,
+          "consume": true,
+          "replies": [
+            [
+              {
+                "hex": "04A0"
+              },
+              {
+                "echo": "2"
+              },
+              {
+                "hex": "BA003A1A0057696E646F77732E58626F782E496E7075742E47616D657061640456FF7697FD9B8145AD45B645BBA526D62C402E08DF07E145A5ABA3127A"
+              }
+            ],
+            [
+              {
+                "hex": "04A0"
+              },
+              {
+                "echo": "2"
+              },
+              {
+                "hex": "BA0074F197B5E71FF3B88673E940A9F82F21263ACFB7FED2DDEC87D39442BD961A712E3DC77D0217002020000100100000000000000000000000000000"
+              }
+            ],
+            [
+              {
+                "hex": "04B0"
+              },
+              {
+                "echo": "2"
+              },
+              {
+                "hex": "18AE01001700093C00010008000000000000000000000000000000"
+              }
+            ]
+          ]
+        },
+        {
+          "match": "01 20/EF .. 09 00 04 20 C6 00 00 00 00 00",
+          "minLength": 13,
+          "consume": true,
+          "reply": [
+            {
+              "hex": "04A0"
+            },
+            {
+              "echo": "2"
+            },
+            {
+              "hex": "00C601"
+            }
+          ]
+        },
+        {
+          "match": "01",
+          "consume": true
+        },
+        {
+          "match": "05 20/EF .. 01 00",
+          "minLength": 5,
+          "set": {
+            "started": 1,
+            "answered": 1
+          },
+          "consume": true
+        },
+        {
+          "match": "05 20/EF .. 01 01",
+          "minLength": 5,
+          "set": {
+            "started": 0
+          },
+          "consume": true
+        },
+        {
+          "match": "05 20/EF .. 01 04",
+          "minLength": 5,
+          "set": {
+            "started": 0
+          },
+          "consume": true,
+          "reply": [
+            {
+              "hex": "0320"
+            },
+            {
+              "counter": "globalSeq"
+            },
+            {
+              "hex": "0400000000"
+            }
+          ]
+        },
+        {
+          "match": "05 20/EF .. 01 07",
+          "minLength": 5,
+          "set": {
+            "started": 0,
+            "answered": 0
+          },
+          "consume": true,
+          "reply": [
+            {
+              "hex": "0320"
+            },
+            {
+              "counter": "globalSeq"
+            },
+            {
+              "hex": "0400000000"
+            }
+          ]
+        },
+        {
+          "match": "05",
+          "consume": true
+        },
+        {
+          "match": "09 00/EF .. 09 00",
+          "minLength": 13
+        },
+        {
+          "match": "..",
+          "consume": true
+        }
+      ]
+    },
+    "replies": {
+      "channel": "input",
+      "pending": 8
+    },
+    "timers": [
+      {
+        "name": "hello",
+        "while": "!answered",
+        "firstMs": 500,
+        "periods": [
+          {
+            "periodMs": 500
+          }
+        ],
+        "reply": [
+          {
+            "hex": "0220"
+          },
+          {
+            "counter": "globalSeq"
+          },
+          {
+            "hex": "1C"
+          },
+          {
+            "value": "serial",
+            "encoding": "hex-le",
+            "length": {
+              "value": 8
+            }
+          },
+          {
+            "hex": "5E04EA02484D3102820C00000405010001000100"
+          }
+        ]
+      },
+      {
+        "name": "status",
+        "while": "started",
+        "firstMs": 0,
+        "periods": [
+          {
+            "periodMs": 1000,
+            "count": 10
+          },
+          {
+            "periodMs": 20000
+          }
+        ],
+        "reply": [
+          {
+            "hex": "0320"
+          },
+          {
+            "counter": "globalSeq"
+          },
+          {
+            "hex": "0480000000"
+          }
+        ]
+      }
+    ],
+    "getStatus": "descriptor",
+    "log": 256
+  }
+}

@@ -20,6 +20,11 @@ internal sealed partial class UsbipEmulatedDevice
     private byte _layoutInEndpoint;
     private OwedReport? _owedReport;
     private SubmitReport? _submitReport;
+    // A device that builds its reports and sends its replies on the same
+    // input endpoint: the buffer a reply goes out from, one packet of that
+    // endpoint at most (CompiledProtocol). Empty when its replies go to a
+    // bulk endpoint or it has none.
+    private byte[] _layoutReply = Array.Empty<byte>();
 
     // A tick that found no read parked leaves one report owed, and the next
     // read is answered as it arrives: the device had its report ready and the
@@ -93,6 +98,8 @@ internal sealed partial class UsbipEmulatedDevice
         _layoutInEndpoint = _engine.Protocol.InputEndpoint;
         _owedReport = new OwedReport(this);
         _submitReport = new SubmitReport(this);
+        if (_engine.Protocol.Channel == ReplyChannel.Input && _engine.Protocol.MaxReplyLength > 0)
+            _layoutReply = new byte[_engine.Protocol.MaxReplyLength];
         _layoutClock = runner.Visit(new LayoutClockFactory(this));
     }
 
@@ -104,7 +111,9 @@ internal sealed partial class UsbipEmulatedDevice
     /// started it. A tick of a run that has ended, or that a later start has
     /// replaced, sends nothing, and so does a tick whose layout goes out on
     /// submit or on change with its bytes unchanged: the read stays parked
-    /// and nothing is owed.</summary>
+    /// and nothing is owed. On a device whose replies wait on this endpoint
+    /// the tick first queues the timed messages due, and a waiting reply
+    /// goes out ahead of the report, which the next read gets.</summary>
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     internal void ClockReport<TSet>(ref TSet set, long run) where TSet : struct, IReportSet
     {
@@ -114,22 +123,63 @@ internal sealed partial class UsbipEmulatedDevice
             uint seq;
             int length;
             UsbipServer.Connection? conn;
+            bool reply = false;
             lock (_hidLock)
             {
                 if (!engine.InputOpenSince(out long since) || since != run) return;
+                if (_layoutReply.Length > 0 && engine.HasTimers) engine.RunTimers(System.Diagnostics.Stopwatch.GetTimestamp());
                 var pending = PendingFor(_layoutInEndpoint);
                 if (pending.Count == 0)
                 {
                     if (engine.TickWouldSend(ref set)) _reportOwed = true;
                     return;
                 }
-                length = engine.BuildNext(ref set, _layoutReport);
-                if (length == 0) return;
+                if (_layoutReply.Length > 0 && engine.ReplyWaiting
+                    && (length = engine.TakeReply(_layoutReply.Length, _layoutReply)) >= 0)
+                {
+                    reply = true;
+                    if (engine.TickWouldSend(ref set)) _reportOwed = true;
+                }
+                else
+                {
+                    length = engine.BuildNext(ref set, _layoutReport);
+                    if (length == 0) return;
+                }
                 seq = pending.Dequeue();
                 CountCompletion();
                 conn = HoldSendLocked();
             }
-            SendHeld(conn, seq, 0, length, _layoutReport.AsSpan(0, length));
+            SendHeld(conn, seq, 0, length, (reply ? _layoutReply : _layoutReport).AsSpan(0, length));
+        }
+    }
+
+    /// <summary>Replies a command left on the input endpoint of a device
+    /// that builds its reports go to the reads parked there, oldest of each
+    /// first, after the command's own answer. Only the connection's reader
+    /// thread calls this.</summary>
+    private void CompleteLayoutReplies(ProtocolEngine.Effect effect)
+    {
+        if ((effect & ProtocolEngine.Effect.Reply) == 0 || _layoutReply.Length == 0) return;
+        var engine = _engine!;
+        lock (_streamSendLock)
+        {
+            while (true)
+            {
+                uint seq;
+                int n;
+                UsbipServer.Connection? conn;
+                lock (_hidLock)
+                {
+                    var pending = PendingFor(_layoutInEndpoint);
+                    if (pending.Count == 0 || !engine.HasReply) return;
+                    n = engine.TakeReply(_layoutReply.Length, _layoutReply);
+                    if (n < 0) return;
+                    seq = pending.Dequeue();
+                    CountCompletion();
+                    conn = HoldSendLocked();
+                }
+                SendHeld(conn, seq, 0, n, _layoutReply.AsSpan(0, n));
+            }
         }
     }
 
@@ -150,28 +200,40 @@ internal sealed partial class UsbipEmulatedDevice
         lock (_streamSendLock)
         {
             int length;
+            bool reply = false;
             lock (_hidLock)
             {
                 if (DiagPath != null)
                     _readsPerEp[_layoutInEndpoint] =
                         _readsPerEp.TryGetValue(_layoutInEndpoint, out var rc) ? rc + 1 : 1;
-                if (!_reportOwed || !engine.InputOpenSince(out _))
+                // A reply waiting on this endpoint goes to the first read
+                // that finds none parked before it, ahead of an owed report.
+                if (_layoutReply.Length > 0 && PendingFor(_layoutInEndpoint).Count == 0 && engine.ReplyWaiting
+                    && (length = engine.TakeReply(_layoutReply.Length, _layoutReply)) >= 0)
+                {
+                    CountCompletion();
+                    reply = true;
+                }
+                else if (!_reportOwed || !engine.InputOpenSince(out _))
                 {
                     PendingFor(_layoutInEndpoint).Enqueue(seqnum);
                     return;
                 }
-                _reportOwed = false;
-                length = BuildOwedReport();
-                if (length == 0)
+                else
                 {
-                    // The report changed back to the one last sent, or the
-                    // layout turned to one that goes out on submit.
-                    PendingFor(_layoutInEndpoint).Enqueue(seqnum);
-                    return;
+                    _reportOwed = false;
+                    length = BuildOwedReport();
+                    if (length == 0)
+                    {
+                        // The report changed back to the one last sent, or the
+                        // layout turned to one that goes out on submit.
+                        PendingFor(_layoutInEndpoint).Enqueue(seqnum);
+                        return;
+                    }
+                    CountCompletion();
                 }
-                CountCompletion();
             }
-            SendRetSubmitSpan(seqnum, 0, length, _layoutReport.AsSpan(0, length));
+            SendRetSubmitSpan(seqnum, 0, length, (reply ? _layoutReply : _layoutReport).AsSpan(0, length));
         }
     }
 
