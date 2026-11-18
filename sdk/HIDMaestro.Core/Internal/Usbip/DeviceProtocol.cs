@@ -780,8 +780,6 @@ internal sealed class CompiledProtocol
         return b;
     }
 
-    /// <summary>The register assignments of a rule's or a timer's
-    /// <c>set</c>, each checked to fit its register.</summary>
     /// <summary>The index of register <paramref name="name"/>, refused at
     /// <paramref name="where"/> when protocol.state does not declare it.</summary>
     private int Reg(string name, string where)
@@ -791,6 +789,8 @@ internal sealed class CompiledProtocol
         return i;
     }
 
+    /// <summary>The register assignments of a rule's or a timer's
+    /// <c>set</c>, each checked to fit its register.</summary>
     private (int Reg, uint Value)[] CompileSets(Dictionary<string, HexNumber> set, string at)
     {
         var regs = Model.Registers;
