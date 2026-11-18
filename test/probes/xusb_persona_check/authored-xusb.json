@@ -1,0 +1,181 @@
+{
+  "id": "user-xusb-authored",
+  "name": "Authored XUSB device (probe fixture)",
+  "vendor": "Microsoft",
+  "vid": "0x045E",
+  "pid": "0x028E",
+  "productString": "Controller",
+  "manufacturerString": "©Microsoft Corporation",
+  "type": "gamepad",
+  "connection": "usb",
+  "backend": "usbip",
+  "deviceModel": "none",
+  "inputReportSize": 20,
+  "notes": "A profile outside the catalog that authors a USB device with no HID interface, function xusb, as a user's own profile may. Its descriptors are the game controller interface alone, [MS-XUSBI] 3.2.1.1, with the Microsoft OS compatible ID XUSB10. xusb_persona_check loads it to hold the authored path to its rules.",
+  "layout": {
+    "kind": "unspecified",
+    "note": "The device has no HID interface, so no descriptor declares axes or buttons for a layout to reference. The 20-byte report's shape is in extendedReport, and SubmitState resolves its sticks and triggers canonically: X and Y, Rx and Ry, Z and Rz.",
+    "source": "[MS-XUSBI] 3.2.5.1.1, Default Game Controller Input Report"
+  },
+  "extendedReport": {
+    "reportId": "0x00",
+    "size": 20,
+    "alwaysArmed": true,
+    "comment": "[MS-XUSBI] 3.2.5.1.1, tables 53 and 54, and GP2040-CE's XInputReport and XBOX_MASK values (headers/drivers/xinput/XInputDescriptors.h:16-49). Bit 11 of the button word is the binding switch of a wireless pad, which a wired pad never sets. The stick fields run from -32768 to 32767 with 0 at rest, and Y is inverted because the pad reports up as positive.",
+    "fields": [
+      {
+        "byte": 1,
+        "type": "uint8",
+        "semantic": "reportSize",
+        "initial": 20
+      },
+      {
+        "byte": 2,
+        "bits": "0-15",
+        "type": "button-mask",
+        "buttons": [
+          "DPAD_UP",
+          "DPAD_DOWN",
+          "DPAD_LEFT",
+          "DPAD_RIGHT",
+          "Start",
+          "Back",
+          "LeftStick",
+          "RightStick",
+          "LeftBumper",
+          "RightBumper",
+          "Guide",
+          "_",
+          "A",
+          "B",
+          "X",
+          "Y"
+        ]
+      },
+      {
+        "byte": 4,
+        "type": "uint8-trigger",
+        "semantic": "leftTrigger"
+      },
+      {
+        "byte": 5,
+        "type": "uint8-trigger",
+        "semantic": "rightTrigger"
+      },
+      {
+        "byte": 6,
+        "type": "int16-axis",
+        "semantic": "leftStickX",
+        "min": -32768,
+        "max": 32767
+      },
+      {
+        "byte": 8,
+        "type": "int16-axis",
+        "semantic": "leftStickY",
+        "min": -32768,
+        "max": 32767,
+        "invert": true
+      },
+      {
+        "byte": 10,
+        "type": "int16-axis",
+        "semantic": "rightStickX",
+        "min": -32768,
+        "max": 32767
+      },
+      {
+        "byte": 12,
+        "type": "int16-axis",
+        "semantic": "rightStickY",
+        "min": -32768,
+        "max": 32767,
+        "invert": true
+      }
+    ]
+  },
+  "extendedOutputReport": {
+    "reportId": "0x00",
+    "size": 8,
+    "comment": "[MS-XUSBI] 3.2.5.2.1, table 61: report ID 0x00, size 0x08, a zero byte, the big motor, the small motor, three zero bytes. GP2040-CE reads bytes 3 and 4 the same way (src/drivers/xinput/XInputDriver.cpp:368-378), and so does Santroller's XInputRumbleReport_t (include/protocols/xinput.hpp:189-197).",
+    "fields": [
+      {
+        "byte": 3,
+        "type": "uint8",
+        "semantic": "leftMotor"
+      },
+      {
+        "byte": 4,
+        "type": "uint8",
+        "semantic": "rightMotor"
+      }
+    ]
+  },
+  "protocol": {
+    "decoders": {
+      "led": {
+        "reports": [
+          "0x01"
+        ],
+        "minLength": 3,
+        "fields": [
+          {
+            "semantic": "ledPattern",
+            "type": "packed-uint",
+            "parts": [
+              {
+                "pieces": [
+                  {
+                    "at": 16,
+                    "count": 8
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "getStatus": "descriptor"
+  },
+  "usbConfiguration": {
+    "configurationValue": 1,
+    "attributes": 160,
+    "maxPowerMilliamps": 500,
+    "busSpeed": "full",
+    "deviceDescriptor": "12010002ffffff085e048e02140101020301",
+    "configurationDescriptor": "09023100010100a0fa0904000002ff5d010011210001012581140000000013020800000705810320000407050203200008",
+    "interfaces": [
+      {
+        "interfaceNumber": 0,
+        "function": "xusb",
+        "altSettings": [
+          {
+            "altSetting": 0,
+            "interfaceClass": 255,
+            "interfaceSubClass": 93,
+            "interfaceProtocol": 1,
+            "endpoints": [
+              {
+                "address": 129,
+                "transferType": "interrupt",
+                "maxPacketSize": 32,
+                "interval": 4
+              },
+              {
+                "address": 2,
+                "transferType": "interrupt",
+                "maxPacketSize": 32,
+                "interval": 8
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "microsoftOs": {
+      "string": "12034d005300460054003100300030002000",
+      "extendedCompatId": "28000000000104000100000000000000000158555342313000000000000000000000000000000000"
+    }
+  }
+}
