@@ -50,10 +50,12 @@ internal static unsafe partial class Program
         // Every control request a host sends the devices, as the device
         // logs each setup packet once per import.
         var controls = new List<string>();
+        var since = System.Diagnostics.Stopwatch.StartNew();
         DeviceOrchestrator.DiagTap = line =>
         {
-            if (line.StartsWith("usbip control", StringComparison.Ordinal) || line.Contains("start wait", StringComparison.Ordinal))
-                lock (controls) controls.Add(line);
+            if (line.StartsWith("usbip control", StringComparison.Ordinal) || line.StartsWith("usbip output", StringComparison.Ordinal)
+                || line.StartsWith("usbip message", StringComparison.Ordinal) || line.Contains("start wait", StringComparison.Ordinal))
+                lock (controls) controls.Add($"{since.ElapsedMilliseconds,6} ms  {line}");
         };
 
         uint before = ConnectedSlots();
@@ -148,23 +150,28 @@ internal static unsafe partial class Program
 
                 if (backend == HMBackend.Usbip)
                 {
-                    // SubmitRawReport: the frame is the 20-byte report as the
-                    // device sends it. B alone.
-                    byte[] rawFrame = { 0x00, 0x14, 0x00, 0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+                    // SubmitRawReport: the frame is the function's report as
+                    // the device sends it, built here by the model's own
+                    // layout. B alone.
+                    var layout = pad.UsbipHandle!.Device.Presentation.Report!;
+                    int size = layout.Size;
+                    var rawFrame = new byte[size];
+                    var onlyB = new HMGamepadState { Buttons = HMButton.B };
+                    VendorBlobCodec.EncodeInput(layout, in onlyB, 0.5f, 0.5f, 0.5f, 0.5f, 0f, 0f, rawFrame, new VendorBlobCodec.EncoderState());
                     XINPUT_STATE rawState = default;
                     bool rawRead = WaitUntil(() =>
                     {
                         pad.SubmitRawReport(rawFrame);
                         return XInputGetState(s, out rawState) == 0 && rawState.Gamepad.wButtons == 0x2000;
                     }, 3_000);
-                    Check("a raw 20-byte report reads through XInput: B", rawRead, $"buttons 0x{rawState.Gamepad.wButtons:X4}");
-                    foreach (int length in new[] { 19, 18, 21 })
+                    Check($"a raw {size}-byte report reads through XInput: B", rawRead, $"{Hex(rawFrame)}, buttons 0x{rawState.Gamepad.wButtons:X4}");
+                    foreach (int length in new[] { size - 1, size + 1, size == 20 ? 18 : 20 })
                     {
                         string refused = "accepted";
                         try { pad.SubmitRawReport(new byte[length]); }
                         catch (ArgumentException e) { refused = e.Message; }
                         Check($"a raw frame of {length} bytes is refused with a message that names the length",
-                              refused.Contains($"this frame is {length} bytes", StringComparison.Ordinal) && refused.Contains("20-byte", StringComparison.Ordinal), refused);
+                              refused.Contains($"this frame is {length} bytes", StringComparison.Ordinal) && refused.Contains($"{size}-byte", StringComparison.Ordinal), refused);
                     }
                     Reads(pad, s, "and SubmitState takes over again, at rest", new HMGamepadState(), g => g.wButtons == 0);
                 }
@@ -187,7 +194,7 @@ internal static unsafe partial class Program
                           string.Join(", ", packets.Where(o => !(o.Source == HMOutputSource.XInput && o.Data.Length == 5)).Select(o => $"{o.Source} {Hex(o.Data)}")));
             }
 
-            Console.WriteLine("\n-- what the create and Windows did --");
+            Console.WriteLine("\n-- what the create and Windows did, from the probe's start --");
             string busId = HIDMaestro.Internal.Usbip.UsbipEmulatedDevice.BusIdFor(pad.TransportIndex);
             lock (controls)
                 foreach (string line in controls.Where(c => c.Contains($" {busId}:", StringComparison.Ordinal) || c.Contains("start wait", StringComparison.Ordinal)))

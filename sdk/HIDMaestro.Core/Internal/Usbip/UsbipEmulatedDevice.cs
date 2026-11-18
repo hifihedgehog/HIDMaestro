@@ -851,6 +851,8 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             bool here = rule.Interfaces == null ? interfaceNumber == Descriptors.HidInterfaceNumber
                                                 : Array.IndexOf(rule.Interfaces, interfaceNumber) >= 0;
             if (!here || report.Length < rule.MinLength || !report.StartsWith(rule.Match)) continue;
+            if (DeviceOrchestrator.DiagEnabled)
+                DeviceOrchestrator.LogDiag($"usbip output {BusId}: interface {interfaceNumber} {Convert.ToHexString(report)} rule {rule.Name}");
             if (_ruleReplies is { } replies && replies[i].Length > 0)
             {
                 byte inEp = InEndpointOf(interfaceNumber);
@@ -867,6 +869,8 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             }
             return true;
         }
+        if (DeviceOrchestrator.DiagEnabled)
+            DeviceOrchestrator.LogDiag($"usbip output {BusId}: interface {interfaceNumber} {Convert.ToHexString(report)} no rule");
         return false;
     }
 
@@ -899,10 +903,14 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             {
                 if (!_messages.TryGetValue(endpoint, out var q)) _messages[endpoint] = q = new Queue<byte[]>();
                 q.Enqueue(message);
+                if (DeviceOrchestrator.DiagEnabled)
+                    DeviceOrchestrator.LogDiag($"usbip message {BusId}: endpoint 0x{endpoint:X2} {Convert.ToHexString(message)} waits for a read");
                 return;
             }
         }
         SendHeld(conn, seq, 0, message.Length, message);
+        if (DeviceOrchestrator.DiagEnabled)
+            DeviceOrchestrator.LogDiag($"usbip message {BusId}: endpoint 0x{endpoint:X2} {Convert.ToHexString(message)} sent");
     }
 
     private void PublishOutput(byte source, byte reportId, ReadOnlySpan<byte> data)

@@ -606,8 +606,10 @@ internal static unsafe partial class Program
                 new byte[] { 0x00, 0x08, 0x00, 0x40, 0x80, 0x00, 0x00, 0x00 }, UsbipEmulatedDevice.SourceXInput, 0, new byte[] { 0, 0, 0x40, 0x80, 2 });
             Out("the LED 01 03 06 is the companion's packet: XInput, 00 06 00 00 01", 1,
                 new byte[] { 0x01, 0x03, 0x06 }, UsbipEmulatedDevice.SourceXInput, 0, new byte[] { 0, 6, 0, 0, 1 });
-            Out("a report no rule takes goes to the ring as it came: HidOutput 02, 08 03", 1,
-                new byte[] { 0x02, 0x08, 0x03 }, UsbipEmulatedDevice.SourceHidOutput, 0x02, new byte[] { 0x08, 0x03 });
+            Out("the master rumble level 02 08 03 ([MS-XUSBI] 3.2.5.2.3), which xusb22 sends at start, is taken and carried nowhere", 1,
+                new byte[] { 0x02, 0x08, 0x03 }, 0, 0, null);
+            Out("a report no rule takes goes to the ring as it came: HidOutput 03, 03 01", 1,
+                new byte[] { 0x03, 0x03, 0x01 }, UsbipEmulatedDevice.SourceHidOutput, 0x03, new byte[] { 0x03, 0x01 });
             Out("a short rumble report no rule takes goes as it came", 1,
                 new byte[] { 0x00, 0x08, 0x00, 0x40 }, UsbipEmulatedDevice.SourceHidOutput, 0x00, new byte[] { 0x08, 0x00, 0x40 });
             Out("a write to the headset interface's OUT 0x02 is taken and carried nowhere", 2,
