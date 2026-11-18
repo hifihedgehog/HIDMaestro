@@ -610,8 +610,20 @@ internal static unsafe partial class Program
                   shareInput != null && shareInput[4] == 0 && shareInput[5] == 0 && shareInput[18] == 0x01 && shareInput.AsSpan(19).IndexOfAnyExcept((byte)0) < 0,
                   shareInput == null ? "nothing" : Hex(shareInput));
             Check("and Guide's release goes out as 07 20 .. 02 00 5B", guideUp != null && Hex(guideUp.AsSpan(3)) == "02005B", guideUp == null ? "nothing" : Hex(guideUp));
-            Check("the two system messages number from one pool, which never gives 0",
-                  g1 != null && guideUp != null && guideUp[2] == (byte)(g1[2] == 0xFF ? 1 : g1[2] + 1), $"{g1?[2]:X2} then {guideUp?[2]:X2}");
+            // Guide and Status number from the global pool, so a Status
+            // sent between the two Guide messages takes the number between.
+            var pool = new List<byte>();
+            bool inWindow = false;
+            foreach (var m in cl.Seen)
+            {
+                if (ReferenceEquals(m, g1)) inWindow = true;
+                if (inWindow && (m[0] == 0x07 || m[0] == 0x03)) pool.Add(m[2]);
+                if (ReferenceEquals(m, guideUp)) break;
+            }
+            bool counts = g1 != null && guideUp != null && pool.Count >= 2 && pool[^1] == guideUp[2]
+                          && pool.Zip(pool.Skip(1)).All(x => x.Second == (byte)(x.First == 0xFF ? 1 : x.First + 1));
+            Check("the system messages number from one pool, each the next, which never gives 0",
+                  counts, string.Join(" ", pool.Select(x => x.ToString("X2"))));
 
             Console.WriteLine("\n-- the Direct Motor command on interrupt OUT 0x01 --");
             IntPtr ring = SharedMemoryIO.EnsureOutputMapping(Index);
@@ -714,6 +726,10 @@ internal static unsafe partial class Program
         public Func<byte[], bool>? Skip;
         public int Skipped;
 
+        /// <summary>Every IN packet read, the skipped ones included, in the
+        /// order the device sent them.</summary>
+        public readonly List<byte[]> Seen = new();
+
         public Client(int port, int index)
         {
             _tcp = new TcpClient("127.0.0.1", port) { NoDelay = true };
@@ -807,6 +823,7 @@ internal static unsafe partial class Program
                 if (_stash.Remove(_parked, out var hit))
                 {
                     _parked = 0;
+                    Seen.Add(hit.Data);
                     if (Skip != null && Skip(hit.Data))
                     {
                         Skipped++;
