@@ -13,12 +13,15 @@ namespace HIDMaestro.Internal;
 
 /// <summary>
 /// Self-contained driver installer. The driver binaries (HIDMaestro.dll,
-/// HMXInput.dll), their INFs, and every external tool needed to sign + catalog
-/// + deploy them (signtool.exe + SXS deps, inf2cat.exe + deps) ship as embedded
-/// resources inside HIDMaestro.Core.dll. At install time the whole payload is
-/// staged under <c>%ProgramFiles%\HIDMaestro\Staging\&lt;version&gt;-&lt;hash&gt;\driver</c>
+/// HMXInput.dll) and their INFs ship as embedded resources inside
+/// HIDMaestro.Core.dll. At install time the payload is staged under
+/// <c>%ProgramFiles%\HIDMaestro\Staging\&lt;version&gt;-&lt;hash&gt;\driver</c>
 /// (<see cref="ProtectedStaging"/>), each file checked against its embedded
-/// SHA-256, and the SDK shells out to the staged tools.
+/// SHA-256. The SDK signs the binaries and writes and signs the catalogs in
+/// its own process through Windows' own wintrust.dll and mssign32.dll
+/// (<see cref="DriverCatalog"/>, <see cref="AuthenticodeSigner"/>), then
+/// hands the package to pnputil. Through v2.2.0 it carried signtool and
+/// Inf2Cat from the Windows kits and ran them.
 ///
 /// No WDK install is required on the consumer's machine. The SDK consumer ships
 /// a single DLL.
@@ -38,9 +41,8 @@ public static class DriverBuilder
     /// <c>hidmaestro.inf</c>. Now points at the extraction staging dir.
     /// Calls <see cref="EnsureExtracted"/> each time it is read, with its
     /// cost: the machine-wide staging lock, which another program's staging
-    /// prune holds for the length of its deletes, and a SHA-256 of the 23
-    /// staged files, 6.6 MB, measured at 8.9 ms p50 and 9.6 to 11.1 ms p95
-    /// warm (30 runs, twice). Read it once and keep the path.</summary>
+    /// prune holds for the length of its deletes, and a SHA-256 of the
+    /// staged files. Read it once and keep the path.</summary>
     public static string BuildDir => EnsureExtracted();
 
     static (int exitCode, string output) Run(string fileName, string arguments,
@@ -72,10 +74,9 @@ public static class DriverBuilder
             CreateNoWindow = true,
         };
         if (workingDir != null) psi.WorkingDirectory = workingDir;
-        // signtool and Inf2Cat run with workingDir set to the protected tools
-        // folder and keep their temporary files there. pnputil runs with no
-        // working directory and gets this process's protected child-temp
-        // folder. If that folder cannot be made the tool does not run.
+        // pnputil runs with no working directory and gets this process's
+        // protected child-temp folder. If that folder cannot be made the
+        // tool does not run.
         ProtectedStaging.ConfineChildTemp(psi, workingDir);
 
         using var proc = Process.Start(psi)!;
@@ -176,7 +177,7 @@ public static class DriverBuilder
     /// <summary>Logical-name prefix for the payload built for this
     /// machine's architecture. The assembly is AnyCPU and carries both
     /// sets, so the choice is made at extraction time rather than at
-    /// build time. Every lookup of a driver, INF, helper or signing tool
+    /// build time. Every lookup of a driver, INF or helper
     /// goes through here, including SwdDeviceFactory's and
     /// EmbeddedManifest's.</summary>
     internal static string NativePrefix => NativePrefixFor(RuntimeInformation.OSArchitecture);
@@ -189,49 +190,15 @@ public static class DriverBuilder
             : "HIDMaestro.Native.x64.";
 
     /// <summary>Architecture-specific payload: the driver, the XUSB
-    /// companion, the SWD helper, both stamped INFs and the signing tool
-    /// tree. The machine that installs these is the one that runs them.</summary>
+    /// companion and both stamped INFs. The machine that installs these is
+    /// the one that runs them. Through v2.2.0 the set also held signtool
+    /// with its side-by-side files, and Inf2Cat with its libraries.</summary>
     static readonly string[] EmbeddedFiles = new[]
     {
-        // Drivers + INFs
         "HIDMaestro.dll",
         "HMXInput.dll",
         "hidmaestro.inf",
         "hidmaestro_xusb.inf",
-
-        // signtool.exe + its SXS dep tree, built for this architecture
-        "signtool.exe",
-        "signtool.exe.manifest",
-        "mssign32.dll",
-        "Microsoft.Windows.Build.Signing.mssign32.dll.manifest",
-        "wintrust.dll",
-        "wintrust.dll.ini",
-        "Microsoft.Windows.Build.Signing.wintrust.dll.manifest",
-        "appxsip.dll",
-        "Microsoft.Windows.Build.Appx.AppxSip.dll.manifest",
-        "appxpackaging.dll",
-        "Microsoft.Windows.Build.Appx.AppxPackaging.dll.manifest",
-        "opcservices.dll",
-        "Microsoft.Windows.Build.Appx.OpcServices.dll.manifest",
-
-    };
-
-    /// <summary>Architecture-neutral payload. Inf2Cat.exe and its
-    /// UniversalStore libraries are AMD64 .NET assemblies, so on ARM64 they
-    /// run under Windows 11's x64 emulation, which Windows 10 on ARM does
-    /// not have. One copy serves both targets. These six are the files
-    /// Inf2Cat loads or reads. inf2cat.exe.manifest and
-    /// Microsoft.Kits.Logger.dll, staged until v2.0.0, did nothing: no
-    /// assembly here references the logger, and Inf2Cat.exe's embedded
-    /// manifest takes precedence over an external one.</summary>
-    static readonly string[] NeutralFiles = new[]
-    {
-        "Inf2Cat.exe",
-        "WindowsProtectedFiles.xml",
-        "Microsoft.UniversalStore.HardwareWorkflow.Cabinets.dll",
-        "Microsoft.UniversalStore.HardwareWorkflow.Catalogs.dll",
-        "Microsoft.UniversalStore.HardwareWorkflow.InfReader.dll",
-        "Microsoft.UniversalStore.HardwareWorkflow.SubmissionBuilder.dll",
     };
 
     /// <summary>Every file the staging directory must hold, paired with
@@ -239,13 +206,11 @@ public static class DriverBuilder
     private static IEnumerable<(string File, string Logical)> AllPayload() =>
         PayloadFor(RuntimeInformation.OSArchitecture);
 
-    /// <summary>The staging set for a given architecture: its own payload
-    /// plus the neutral tool tree.</summary>
+    /// <summary>The staging set for a given architecture.</summary>
     internal static IEnumerable<(string File, string Logical)> PayloadFor(Architecture arch)
     {
         string prefix = NativePrefixFor(arch);
         foreach (string f in EmbeddedFiles) yield return (f, prefix + f);
-        foreach (string f in NeutralFiles) yield return (f, "HIDMaestro.Resources." + f);
     }
 
     /// <summary>Stages the embedded payload into this build's protected
@@ -260,17 +225,14 @@ public static class DriverBuilder
     /// directory was under <c>%TEMP%</c> and reuse trusted a matching file
     /// size.</para>
     ///
-    /// <para>Every call checks every staged file again, signtool's and
-    /// Inf2Cat's libraries and manifests included, and restages any that is
-    /// missing or differs, so each deploy and each caller that runs the tools
-    /// uses files verified for that use. Until v2.0.0 the directory was
-    /// cached for the life of the process, and only signtool.exe and
-    /// Inf2Cat.exe were checked again, so a library another program's prune
-    /// or anyone else removed stayed missing for every later deploy. The
-    /// embedded hashes are computed once per process, so a call costs one
-    /// read of the staged files, 6.6 MB: 8.9 ms p50 and 9.6 to 11.1 ms p95
-    /// warm (30 runs, twice), against under 1 ms for the two files checked
-    /// before. Each call also takes the machine-wide staging lock
+    /// <para>Every call checks every staged file again and restages any that
+    /// is missing or differs, so each deploy uses files verified for that
+    /// use. Until v2.0.0 the directory was cached for the life of the
+    /// process, and only two files were checked again, so a file another
+    /// program's prune or anyone else removed stayed missing for every later
+    /// deploy. The embedded hashes are computed once per process, so a call
+    /// costs one read of the staged files. Each call also takes the
+    /// machine-wide staging lock
     /// (<see cref="ProtectedStaging.StagingMutexObject"/>) for its record
     /// note, and waits while another program's prune holds it. A deploy
     /// checks the files again under its pin.</para></summary>
@@ -328,7 +290,8 @@ public static class DriverBuilder
     /// <summary>The same for a certificate of another name. Coexistence
     /// probe section Z calls this through reflection with a name that does
     /// not contain HIDMaestroTestCert, which the store's subject search and
-    /// signtool's <c>/n</c> both match as a substring.</summary>
+    /// <see cref="AuthenticodeSigner.SelectCertificate"/> both match as a
+    /// substring.</summary>
     internal static void EnsureTestCertificate(string name)
     {
         // Present, as it is after the first deploy on a machine: no lock.
@@ -373,7 +336,7 @@ public static class DriverBuilder
         cert.FriendlyName = name;
 
         // Re-import with PersistKeySet so the private key lives in the machine
-        // key store (signtool needs it from LocalMachine\My).
+        // key store, where the signing finds it through LocalMachine\My.
         byte[] pfx = cert.Export(X509ContentType.Pfx, "");
         using var persistableCert = X509CertificateLoader.LoadPkcs12(pfx, "",
             X509KeyStorageFlags.PersistKeySet | X509KeyStorageFlags.MachineKeySet | X509KeyStorageFlags.Exportable);
@@ -394,8 +357,8 @@ public static class DriverBuilder
     // ── Sign / Catalog / Install pipeline ──────────────────────────────────
 
     /// <summary>Signs HIDMaestro.dll and HMXInput.dll of a driver package
-    /// staged fresh from the embedded bytes, with the staged signtool.exe and
-    /// the test certificate from LocalMachine\My. Holds the machine-wide
+    /// staged fresh from the embedded bytes, with the test certificate from
+    /// LocalMachine\My (<see cref="AuthenticodeSigner"/>). Holds the machine-wide
     /// deploy lock, since the package directory is the one every program of
     /// this build deploys from. Until v2.0.0 it took no lock, and a later
     /// call reused the package one call before had staged.
@@ -408,7 +371,7 @@ public static class DriverBuilder
     /// elevated. The deploy lock lives in the namespace only an elevated
     /// process can open (<see cref="AdminNamespace"/>).</exception>
     /// <exception cref="InvalidOperationException">Another program held the
-    /// deploy lock for ten minutes, or signtool failed.</exception>
+    /// deploy lock for ten minutes, or the signing failed.</exception>
     public static bool SignDrivers()
     {
         using var mutex = DriverDeploy.Acquire();
@@ -417,7 +380,7 @@ public static class DriverBuilder
             string tools = EnsureExtracted();
             string package = StagePackage();
             using var pin = PinForUse(tools, package, driverPackage: true, signed: null);
-            SignDriversIn(tools, package, pin);
+            SignDriversIn(package, pin);
         }
         finally { mutex.ReleaseMutex(); }
         return true;
@@ -425,26 +388,22 @@ public static class DriverBuilder
 
     /// <summary>Sign the package's two binaries, then hold each under
     /// <paramref name="pin"/> and record the SHA-256 read through the hold,
-    /// so what the catalog and pnputil read next is what signtool
+    /// so what the catalog and pnputil read next is what the signing
     /// wrote.</summary>
-    private static void SignDriversIn(string tools, string package, ProtectedStaging.Pinned pin)
+    private static void SignDriversIn(string package, ProtectedStaging.Pinned pin)
     {
         EnsureTestCertificate();
-        string signtool = Path.Combine(tools, "signtool.exe");
         s_signedPackage = null;
         var signed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         var asm = typeof(DriverBuilder).Assembly;
+        using var cert = AuthenticodeSigner.SelectCertificate(CertFriendlyName);
         foreach (string dll in new[] { "HIDMaestro.dll", "HMXInput.dll" })
         {
             string path = Path.Combine(package, dll);
             if (!File.Exists(path)) continue;
             ProtectedStaging.VerifyBeforeUse(path, asm, NativePrefix + dll);
-            var (rc, output) = Run(signtool,
-                $"sign /a /sm /s My /n {CertFriendlyName} /fd SHA256 \"{path}\"",
-                workingDir: tools);
-            if (rc != 0)
-                throw new InvalidOperationException($"signtool failed for {dll}: {output}");
+            AuthenticodeSigner.Sign(path, cert);
             signed[dll] = pin.HoldAndHash(path);
         }
         s_signedPackage = signed;
@@ -486,9 +445,9 @@ public static class DriverBuilder
         return StagePackage();
     }
 
-    /// <summary>Pin the tools directory and <paramref name="package"/>, and
-    /// every directory above them up to the root
-    /// (<see cref="ProtectedStaging.Pin"/>), then hold every staged tool
+    /// <summary>Pin the driver staging directory and <paramref name="package"/>,
+    /// and every directory above them up to the root
+    /// (<see cref="ProtectedStaging.Pin"/>), then hold every staged
     /// file, the INFs of this build's own package, and the binaries an
     /// earlier signing left (<paramref name="signed"/>), each checked
     /// through its hold against the embedded bytes or the hash the signing
@@ -519,15 +478,17 @@ public static class DriverBuilder
         }
     }
 
-    /// <summary>The Inf2Cat <c>/os:</c> value for an architecture's INFs.
-    /// The catalog names the architecture the INF is decorated for.
+    /// <summary>The Windows release an architecture's catalogs are written
+    /// for, as the <c>/os:</c> value Inf2Cat took through v2.2.0. The
+    /// catalog names the architecture the INF is decorated for
+    /// (<see cref="DriverCatalog.CatalogOsAttribute"/>).
     ///
     /// <para>Issue #63. Inf2Cat has no bare <c>10_ARM64</c>: its ARM64 values
     /// name a release, starting at <c>10_RS3_ARM64</c> because 1709 is the
     /// first Windows 10 release on ARM64. <c>10_X64</c> exists and covers
-    /// every Windows 10 release. Both produce the same catalog OS attribute,
-    /// <c>2:10.0</c>, so the ARM64 catalog reads to Windows exactly as the x64
-    /// one does.</para></summary>
+    /// every Windows 10 release. Both produce the same member attribute
+    /// OSAttr, <c>2:10.0</c>, so the ARM64 catalog reads to Windows exactly as
+    /// the x64 one does.</para></summary>
     internal static string CatalogOsFor(Architecture arch) =>
         arch == Architecture.Arm64 ? "10_RS3_ARM64" : "10_X64";
 
@@ -543,7 +504,8 @@ public static class DriverBuilder
     /// <exception cref="UnauthorizedAccessException">The process is not
     /// elevated (see <see cref="SignDrivers"/>).</exception>
     /// <exception cref="InvalidOperationException">Another program held the
-    /// deploy lock for ten minutes, or inf2cat or signtool failed.</exception>
+    /// deploy lock for ten minutes, or the catalog or its signing
+    /// failed.</exception>
     public static bool GenerateCatalogs()
     {
         using var mutex = DriverDeploy.Acquire();
@@ -552,8 +514,8 @@ public static class DriverBuilder
             string tools = EnsureExtracted();
             string package = PackageLocked(out var signed);
             using var pin = PinForUse(tools, package, driverPackage: true, signed);
-            if (signed == null) SignDriversIn(tools, package, pin);
-            GenerateCatalogsIn(tools, package, pin);
+            if (signed == null) SignDriversIn(package, pin);
+            GenerateCatalogsIn(package, pin);
         }
         finally { mutex.ReleaseMutex(); }
         return true;
@@ -561,67 +523,38 @@ public static class DriverBuilder
 
     /// <summary>Catalog the package and sign each catalog, then hold each
     /// one under <paramref name="pin"/> for pnputil's add.</summary>
-    private static void GenerateCatalogsIn(string tools, string package, ProtectedStaging.Pinned pin)
-    {
-        string inf2cat = Path.Combine(tools, "Inf2Cat.exe");
-        string signtool = Path.Combine(tools, "signtool.exe");
-
-        // Delete any stale catalogs from a previous run.
-        foreach (string cat in Directory.GetFiles(package, "*.cat"))
-        {
-            try { File.Delete(cat); } catch { }
-        }
-
-        string catalogOs = CatalogOsFor(RuntimeInformation.OSArchitecture);
-        var (rc, output) = Run(inf2cat, $"/driver:\"{package}\" /os:{catalogOs}", workingDir: tools);
-        if (rc != 0)
-            throw new InvalidOperationException($"inf2cat failed: {output}");
-
-        foreach (string cat in Directory.GetFiles(package, "*.cat"))
-        {
-            var (rc2, output2) = Run(signtool,
-                $"sign /a /sm /s My /n {CertFriendlyName} /fd SHA256 \"{cat}\"",
-                workingDir: tools);
-            if (rc2 != 0)
-                throw new InvalidOperationException($"Catalog sign failed for {cat}: {output2}");
-            pin.HoldAndHash(cat);
-        }
-    }
+    private static void GenerateCatalogsIn(string package, ProtectedStaging.Pinned pin) =>
+        CatalogAndSign(package, pin);
 
     /// <summary>Catalog and sign an INF-only package staged in its own
-    /// directory, with the same Inf2Cat, signtool and test certificate the
-    /// driver package uses, such as a profile's WinUSB binding. Inf2Cat
-    /// catalogs every INF in the directory it is given, which is why the
-    /// package has a directory of its own. Each signed catalog is held under
+    /// directory, as the driver package is, such as a profile's WinUSB
+    /// binding. The catalogs take the hardware IDs of every INF in the
+    /// directory (<see cref="DriverCatalog"/>), which is why the package has
+    /// a directory of its own. Each signed catalog is held under
     /// <paramref name="holder"/>, the caller's pin over the package, until
     /// pnputil has added it.</summary>
     internal static void CatalogAndSignPackage(string packageDir, ProtectedStaging.Pinned holder)
     {
         EnsureTestCertificate();
-        // Checks every staged tool file, libraries and manifests included,
-        // and again under the pin.
-        string tools = EnsureExtracted();
-        using var pin = PinForUse(tools, packageDir, driverPackage: false, signed: null);
-        string inf2cat = Path.Combine(tools, "Inf2Cat.exe");
-        string signtool = Path.Combine(tools, "signtool.exe");
+        CatalogAndSign(packageDir, holder);
+    }
 
+    /// <summary>Delete the package's catalogs, write them again
+    /// (<see cref="DriverCatalog.Write"/>), sign each with the test
+    /// certificate (<see cref="AuthenticodeSigner"/>) and hold it under
+    /// <paramref name="holder"/>.</summary>
+    private static void CatalogAndSign(string packageDir, ProtectedStaging.Pinned holder)
+    {
         foreach (string cat in Directory.GetFiles(packageDir, "*.cat"))
         {
             try { File.Delete(cat); } catch { }
         }
 
-        string catalogOs = CatalogOsFor(RuntimeInformation.OSArchitecture);
-        var (rc, output) = Run(inf2cat, $"/driver:\"{packageDir}\" /os:{catalogOs}", workingDir: tools);
-        if (rc != 0)
-            throw new InvalidOperationException($"inf2cat failed: {output}");
-
-        foreach (string cat in Directory.GetFiles(packageDir, "*.cat"))
+        var cats = DriverCatalog.Write(packageDir, RuntimeInformation.OSArchitecture);
+        using var cert = AuthenticodeSigner.SelectCertificate(CertFriendlyName);
+        foreach (string cat in cats)
         {
-            var (rc2, output2) = Run(signtool,
-                $"sign /a /sm /s My /n {CertFriendlyName} /fd SHA256 \"{cat}\"",
-                workingDir: tools);
-            if (rc2 != 0)
-                throw new InvalidOperationException($"Catalog sign failed for {cat}: {output2}");
+            AuthenticodeSigner.Sign(cat, cert);
             holder.HoldAndHash(cat);
         }
     }
@@ -738,7 +671,7 @@ public static class DriverBuilder
 
     /// <summary>Full extract + sign + catalog + install pipeline. Returns
     /// true on success; throws <see cref="InvalidOperationException"/> with
-    /// the failing tool's output on any pipeline-step failure. The
+    /// the failing step's message on any pipeline-step failure. The
     /// <paramref name="rebuild"/> parameter is retained for ABI
     /// compatibility but ignored: there is no source build step any more
     /// (the driver binaries ship pre-built inside the SDK DLL).
@@ -773,8 +706,8 @@ public static class DriverBuilder
         string package = PackageLocked(out var signed);
         using var pin = PinForUse(tools, package, driverPackage: true, signed);
         PnputilHelper.RemoveAllHidMaestroPackages();
-        if (signed == null) SignDriversIn(tools, package, pin);
-        GenerateCatalogsIn(tools, package, pin);
+        if (signed == null) SignDriversIn(package, pin);
+        GenerateCatalogsIn(package, pin);
         InstallDriversFrom(package);
         RecordInstalledPayload();
     }
@@ -822,8 +755,8 @@ public static class DriverBuilder
         string tools = EnsureExtracted();
         string package = PackageLocked(out var signed);
         using var pin = PinForUse(tools, package, driverPackage: true, signed);
-        if (signed == null) SignDriversIn(tools, package, pin);
-        GenerateCatalogsIn(tools, package, pin);
+        if (signed == null) SignDriversIn(package, pin);
+        GenerateCatalogsIn(package, pin);
         foreach (string inf in infs) AddMissingInf(package, inf);
         PnputilHelper.InvalidateInstalledCache();
     }

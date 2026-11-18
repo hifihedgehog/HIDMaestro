@@ -155,6 +155,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using System.Threading;
 using Microsoft.Win32;
@@ -917,14 +918,28 @@ internal static partial class Program
             text = Regex.Replace(text, @"(?m)^(DriverVer\s*=\s*)\d{2}/\d{2}/\d{4}\s*,\s*[\d.]+", "${1}" + DateTime.Now.ToString("MM/dd/yyyy") + "," + version);
             File.WriteAllText(p, text);
         }
-        Run(Path.Combine(dir, "signtool.exe"), $"sign /a /sm /s My /n HIDMaestroTestCert /fd SHA256 \"{Path.Combine(dir, "HIDMaestro.dll")}\" \"{Path.Combine(dir, "HMXInput.dll")}\"", dir);
-        string os = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture == System.Runtime.InteropServices.Architecture.Arm64 ? "10_RS3_ARM64" : "10_X64";
-        Run(Path.Combine(dir, "Inf2Cat.exe"), $"/driver:\"{dir}\" /os:{os}", dir);
-        foreach (var cat in Directory.GetFiles(dir, "*.cat"))
-            Run(Path.Combine(dir, "signtool.exe"), $"sign /a /sm /s My /n HIDMaestroTestCert /fd SHA256 \"{cat}\"", dir);
+        SignAndCatalog(dir);
         foreach (var inf in new[] { "hidmaestro.inf", "hidmaestro_xusb.inf" })
             Run("pnputil.exe", $"/add-driver \"{Path.Combine(dir, inf)}\" /install", dir);
         return version;
+    }
+
+    /// <summary>Sign the package's binaries, write its catalogs and sign
+    /// them, through the SDK's own signer and catalog writer
+    /// (AuthenticodeSigner, DriverCatalog), as a deploy does.</summary>
+    static void SignAndCatalog(string dir)
+    {
+        var asm = typeof(HIDMaestro.HMContext).Assembly;
+        var signer = asm.GetType("HIDMaestro.Internal.AuthenticodeSigner")!;
+        var select = signer.GetMethod("SelectCertificate", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var sign = signer.GetMethod("Sign", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var write = asm.GetType("HIDMaestro.Internal.DriverCatalog")!.GetMethod("Write", BindingFlags.NonPublic | BindingFlags.Static)!;
+        using var cert = (System.Security.Cryptography.X509Certificates.X509Certificate2)select.Invoke(null, new object[] { "HIDMaestroTestCert" })!;
+        foreach (var dll in new[] { "HIDMaestro.dll", "HMXInput.dll" })
+            sign.Invoke(null, new object[] { Path.Combine(dir, dll), cert });
+        var cats = (IReadOnlyList<string>)write.Invoke(null, new object[] { dir, System.Runtime.InteropServices.RuntimeInformation.OSArchitecture })!;
+        foreach (var cat in cats)
+            sign.Invoke(null, new object[] { cat, cert });
     }
 
     static void Run(string exe, string args, string dir)
@@ -1562,36 +1577,35 @@ internal static partial class Program
 
         // I4. A staged file changed to different bytes of the same length is
         // caught by its hash on the next use, not trusted on its size.
-        byte[]? good = ReadEmbedded("HIDMaestro.Resources.Inf2Cat.exe");
-        if (good == null) { Check("I4: the embedded Inf2Cat.exe is readable", false); return; }
+        byte[]? good = ReadEmbedded(NativePrefix + "hidmaestro.inf");
+        if (good == null) { Check("I4: the embedded hidmaestro.inf is readable", false); return; }
         string? dirA;
         using (var p = PeerProcess.Start("I4-a"))
         {
             p.Send("install");
             dirA = StagingPath(p.Send("stagingdir"));
         }
-        string tool = dirA == null ? "" : Path.Combine(dirA, "Inf2Cat.exe");
-        if (dirA == null || !File.Exists(tool)) { Check("I4: Inf2Cat.exe is staged", false, tool); return; }
+        string tool = dirA == null ? "" : Path.Combine(dirA, "hidmaestro.inf");
+        if (dirA == null || !File.Exists(tool)) { Check("I4: hidmaestro.inf is staged", false, tool); return; }
         byte[] tampered = (byte[])good.Clone();
         for (int i = 0; i < tampered.Length; i++) tampered[i] ^= 0xFF;
         try
         {
             File.WriteAllBytes(tool, tampered);
-            Check("I4: the staged tool starts out tampered, same length",
+            Check("I4: the staged INF starts out tampered, same length",
                   new FileInfo(tool).Length == good.Length && !File.ReadAllBytes(tool).SequenceEqual(good));
             // Staging only: a fresh process re-stages, and nothing in this
-            // step runs the tool.
+            // step reads the INF.
             using (var p = PeerProcess.Start("I4-b"))
                 p.Send("stagingdir");
-            Check("I4: the next use restores the staged tool from the embedded bytes",
+            Check("I4: the next use restores the staged INF from the embedded bytes",
                   File.ReadAllBytes(tool).SequenceEqual(good));
         }
         finally
         {
             // An SDK that trusts the size leaves the scrambled bytes in
-            // place, and Windows answers an attempt to run them with a
-            // modal "Unsupported 16-Bit Application" dialog. Put the
-            // original back before anything later can run it.
+            // place. Put the original back before anything later reads
+            // it.
             try { if (!File.ReadAllBytes(tool).SequenceEqual(good)) File.WriteAllBytes(tool, good); } catch { }
         }
 
@@ -1757,7 +1771,7 @@ internal static partial class Program
         SectionT5();
     }
 
-    /// <summary>The runner the deploy starts signtool, inf2cat and pnputil
+    /// <summary>The runner the deploy starts pnputil
     /// with, on a tool whose last line arrives after its own process has
     /// exited, from a child that shares its output: the line is in what the
     /// runner returns, as a tool's closing error has to be. A child that

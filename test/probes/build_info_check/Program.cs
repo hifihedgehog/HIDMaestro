@@ -2,9 +2,10 @@
 // assembly, and what it refuses when a payload is missing.
 //
 // "complete": the build every release ships. It carries the driver and the
-// USB/IP transport for x64 and ARM64 and the OpenVR driver, its Inf2Cat
-// set holds only the six files Inf2Cat loads, and its four INFs carry the
-// one DriverVer stamp the build took.
+// USB/IP transport for x64 and ARM64 and the OpenVR driver, it carries no
+// tool from a Windows kit (no resource whose name holds signtool, Inf2Cat,
+// mssign32, wintrust, UniversalStore or WindowsProtectedFiles), and its four
+// INFs carry the one DriverVer stamp the build took.
 //
 // "variant": the copy of this probe the project build puts in variant\,
 // beside an SDK built with HMSkipArm64 and HMSkipUsbip from a tree whose
@@ -71,15 +72,13 @@ internal static class Program
         return 1;
     }
 
-    // The six files of Inf2Cat's set that Inf2Cat loads or reads.
-    static readonly string[] Inf2CatSet =
+    // Parts of the names of the Windows SDK's signtool set and the WDK's
+    // Inf2Cat set, which the SDK carried through v2.2.0. It now writes and
+    // signs catalogs through Windows' own wintrust.dll and mssign32.dll.
+    static readonly string[] KitTools =
     {
-        "HIDMaestro.Resources.Inf2Cat.exe",
-        "HIDMaestro.Resources.Microsoft.UniversalStore.HardwareWorkflow.Cabinets.dll",
-        "HIDMaestro.Resources.Microsoft.UniversalStore.HardwareWorkflow.Catalogs.dll",
-        "HIDMaestro.Resources.Microsoft.UniversalStore.HardwareWorkflow.InfReader.dll",
-        "HIDMaestro.Resources.Microsoft.UniversalStore.HardwareWorkflow.SubmissionBuilder.dll",
-        "HIDMaestro.Resources.WindowsProtectedFiles.xml",
+        "signtool", "inf2cat", "mssign32", "wintrust", "appxsip", "appxpackaging", "opcservices",
+        "UniversalStore", "WindowsProtectedFiles", "Kits.Logger",
     };
 
     static int Complete()
@@ -95,16 +94,9 @@ internal static class Program
         Check("the build reports itself complete", HMBuildInfo.IsComplete);
 
         string[] names = ResourceNames();
-        string[] inf2cat = names.Where(n =>
-                n.StartsWith("HIDMaestro.Resources.", StringComparison.Ordinal) &&
-                (n.Contains("Inf2Cat", StringComparison.OrdinalIgnoreCase) ||
-                 n.Contains("UniversalStore", StringComparison.Ordinal) ||
-                 n.Contains("WindowsProtectedFiles", StringComparison.Ordinal) ||
-                 n.Contains("Kits.Logger", StringComparison.Ordinal)))
-            .ToArray();
-        Check("the Inf2Cat set is the six files Inf2Cat loads",
-              inf2cat.SequenceEqual(Inf2CatSet),
-              string.Join(", ", inf2cat.Select(n => n["HIDMaestro.Resources.".Length..])));
+        string[] kit = names.Where(n => KitTools.Any(t => n.Contains(t, StringComparison.OrdinalIgnoreCase))).ToArray();
+        Check("no tool from a Windows kit is carried (signtool, Inf2Cat and their files)",
+              kit.Length == 0, string.Join(", ", kit));
 
         // One build, one stamp. build_all.cmd takes the time once for both
         // architectures, and the companion INF takes the driver INF's stamp.
