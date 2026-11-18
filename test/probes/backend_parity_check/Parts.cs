@@ -34,28 +34,46 @@ internal static partial class Program
                     inner.UsbConfiguration = new UsbConfigurationSpec { BusSpeed = speed };
                     p = new HMProfile(inner);
                 }
-                LongOne(ctx, p, speed ?? "derived");
+                string? got = LongOne(ctx, p, speed ?? "derived", HMBackend.Usbip);
+                if (speed == null && HMContext.MachineBackend == HMBackend.Umdf2)
+                {
+                    string? umdf2 = LongOne(ctx, p, "driver", HMBackend.Umdf2);
+                    if (got != null && umdf2 != null)
+                        Check($"{p.Id}: the report read on USB/IP is the one read on UMDF2, byte for byte", got == umdf2,
+                              $"USB/IP {got[..Math.Min(40, got.Length)]}..., UMDF2 {umdf2[..Math.Min(40, umdf2.Length)]}...");
+                }
             }
         }
     }
 
-    static void LongOne(HMContext ctx, HMProfile p, string speed)
+    /// <summary>One profile on one backend: the widest input report read
+    /// in one ReadFile, and the longest output report written in one
+    /// WriteFile. Returns the report read, hex, or null.</summary>
+    static string? LongOne(HMContext ctx, HMProfile p, string speed, HMBackend backend)
     {
-        string name = $"{p.Id} at the {speed} speed";
-        using var c = ctx.CreateController(p, "long:" + p.Id + ":" + speed, HMBackend.Usbip);
-        var set = c.UsbipHandle!.Device.Descriptors;
-        string parent = set.UsbInstanceId!;
-        s_usbIds.Add(parent);
-        Note($"{name}: bus speed {set.Speed}, IN 0x81 wMaxPacketSize {set.Endpoints[0x81].MaxPacketSize}");
+        string name = $"{p.Id} on {backend} at the {speed} speed";
+        using var c = ctx.CreateController(p, "long:" + p.Id + ":" + speed, backend);
+        string parent = ParentOf(c)!;
+        if (backend == HMBackend.Usbip)
+        {
+            var set = c.UsbipHandle!.Device.Descriptors;
+            s_usbIds.Add(parent);
+            Note($"{name}: bus speed {set.Speed}, IN 0x81 wMaxPacketSize {set.Endpoints[0x81].MaxPacketSize}");
+        }
         var collections = Hid.Read(parent, out var errors);
+        for (int i = 0; collections.Count == 0 && i < 100; i++) { Thread.Sleep(50); collections = Hid.Read(parent, out errors); }
         var widest = collections.OrderByDescending(x => x.InputLength).FirstOrDefault();
-        if (widest == null) { Check($"{name}: a HID collection enumerates", false, string.Join("; ", errors)); return; }
+        if (widest == null) { Check($"{name}: a HID collection enumerates", false, string.Join("; ", errors)); return null; }
+        string? result = null;
 
-        // Input: the data lane, a pattern with a marker at the end of what
-        // the lane carries, read back in one ReadFile.
-        var (dataId, dataLength, _) = DeviceOrchestrator.DriverInputReport(p.Inner);
-        int carried = Math.Min(dataLength, SharedMemoryIO.DATA_CAPACITY + 1);
-        bool own = p.BuildsItsOwnReports || p.Inner.Protocol != null;
+        // Input: the widest input report the descriptor declares, whole on
+        // the extended lane with a marker in its last byte, read back in one
+        // ReadFile. A device whose protocol builds its reports sends its own.
+        var map = p.Inner.GetOrBuildReportMap();
+        var wide = map.Reports.Where(r => r.Kind == HidReportKind.Input).OrderByDescending(r => r.FrameBytes).First();
+        bool own = p.BuildsItsOwnReports || p.Inner.Protocol != null || wide.FrameBytes > SharedMemoryIO.EXTENDED_DATA_CAPACITY;
+        int carried = wide.FrameBytes;
+        byte dataId = wide.ReportId;
         using (var h = Hid.Open(widest.Path, 0xC0000000))
         {
             if (h.IsInvalid) Note($"{name}: the widest collection ({widest.UsagePage:X4}:{widest.Usage:X4}) does not open for reading here");
@@ -74,7 +92,7 @@ internal static partial class Program
                     try
                     {
                         if (own) c.SubmitState(new HMGamepadState());
-                        else c.SubmitRawReport(dataId != 0 ? pattern : pattern.AsSpan(0, carried));
+                        else c.SubmitRawExtendedReport(pattern);
                     }
                     catch (Exception e) { Note($"{name}: submit {e.GetType().Name}: {e.Message}"); break; }
                     read.Wait(20);
@@ -84,9 +102,10 @@ internal static partial class Program
                 {
                     int n = read.Result;
                     Check($"{name}: one ReadFile returns one whole report of {widest.InputLength} bytes", n == widest.InputLength, $"{n} bytes, ID 0x{buf[0]:X2}");
-                    if (!own && buf[0] == dataId)
-                        Check($"{name}: the data lane's last byte, {carried - 1}, arrived in that read", buf[carried - 1] == 0xA5 && buf[1] == pattern[1],
-                              $"byte {carried - 1} 0x{buf[carried - 1]:X2}");
+                    if (!own)
+                        Check($"{name}: report 0x{dataId:X2} of {carried} bytes arrived whole, its last byte included",
+                              buf.AsSpan(0, carried).SequenceEqual(pattern), $"byte {carried - 1} 0x{buf[carried - 1]:X2}");
+                    if (!own) result = Convert.ToHexString(buf, 0, n);
                 }
 
                 // Output: the longest output report, written whole.
@@ -119,6 +138,7 @@ internal static partial class Program
                 }
             }
         }
+        return result;
     }
 
     // ── ports ────────────────────────────────────────────────────────────
@@ -338,13 +358,23 @@ internal static partial class Program
         Check("the child program created its controllers", ready?.StartsWith("READY", StringComparison.Ordinal) == true, ready ?? "no answer");
         if (ready == null || !ready.StartsWith("READY", StringComparison.Ordinal)) { try { child.Kill(); } catch { } return; }
         var theirs = ready.Split(' ').Skip(1).ToList();   // port/busid/usbid each
+        string States(IEnumerable<string> ids) => string.Join(", ", ids.Select(u => $"{u.Split('/')[2].Split('\\').Last()} {Hid.Status(u.Split('/')[2])}"));
+        string Imports() => string.Join(", ", HIDMaestro.Internal.Usbip.VhciClient.GetImportedDevices().Select(r => $"{r.Port}:{r.Service}/{r.BusId}"));
+        Note("the child's devices before this program creates: " + States(theirs) + "; imports " + Imports());
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
-        var mine = new List<HMController>
-        {
-            ctx.CreateController(ctx.GetProfile("dualshock-4-v2")!, "two:parent:0", HMBackend.Usbip),
-            ctx.CreateController(ctx.GetProfile("dualsense")!, "two:parent:1", HMBackend.Usbip),
-        };
+        var mine = new List<HMController>();
+        string Listeners() => string.Join(" ", System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners()
+            .Where(e => e.Port is >= 18509 and < 18530).Select(e => e.ToString()));
+        HIDMaestro.Internal.Usbip.UsbipBackend.DuringStaleSweep = stage => Note($"stale sweep at '{stage}': imports {Imports()}; the child's {States(theirs)}; listeners {Listeners()}");
+        mine.Add(ctx.CreateController(ctx.GetProfile("dualshock-4-v2")!, "two:parent:0", HMBackend.Usbip));
+        HIDMaestro.Internal.Usbip.UsbipBackend.DuringStaleSweep = null;
+        Note("the child's devices after this program's first create: " + States(theirs) + "; imports " + Imports());
+        mine.Add(ctx.CreateController(ctx.GetProfile("dualsense")!, "two:parent:1", HMBackend.Usbip));
+        Note("the child's devices after its second: " + States(theirs));
+        var settle = Stopwatch.StartNew();
+        while (settle.ElapsedMilliseconds < 10000 && !theirs.All(x => Hid.Status(x.Split('/')[2]) is { Present: true, Started: true })) Thread.Sleep(100);
+        Note($"the child's devices {settle.ElapsedMilliseconds} ms later: " + States(theirs));
         var ours = mine.Select(c => $"{c.UsbipHandle!.ServerPort}/{c.UsbipHandle.Device.BusId}/{ParentOf(c)}").ToList();
         foreach (var c in mine) s_usbIds.Add(ParentOf(c)!);
         Note("this program: " + string.Join(" ", ours));
