@@ -1,6 +1,6 @@
 # regression_battery.ps1: the regression battery
 
-Runs 105 scenarios and verifies every one leaves zero HIDMaestro PnP
+Runs 104 scenarios and verifies every one leaves zero HIDMaestro PnP
 devnodes in the `PRESENT` state. S01 to S23 drive `HIDMaestroTest.exe`
 through single- and multi-controller create/swap/remove/force-kill
 sequences, and S24 and up run the probe programs under `test/probes`.
