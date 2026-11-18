@@ -156,8 +156,10 @@ internal static partial class Program
         ctx.LoadDefaultProfiles();
         var p = ctx.GetProfile("dualshock-4-v2")!;
         int ports = HIDMaestro.Internal.Usbip.UsbipBackend.Usb20Ports();
-        int used = HIDMaestro.Internal.Usbip.VhciClient.IsAvailable() ? HIDMaestro.Internal.Usbip.VhciClient.GetImportedDevices().Count : 0;
-        Note($"{ports} USB 2.0 ports, {used} in use before the run");
+        int used = HIDMaestro.Internal.Usbip.VhciClient.IsAvailable()
+            ? HIDMaestro.Internal.Usbip.UsbipBackend.Usb20PortsUsed(HIDMaestro.Internal.Usbip.VhciClient.GetImportedSpeeds()) : 0;
+        Note($"{ports} USB 2.0 ports (root hub {HIDMaestro.Internal.Usbip.VhciClient.Usb20PortsFromRootHub()?.ToString() ?? "no answer"}, " +
+             $"parameters {HIDMaestro.Internal.Usbip.UsbipBackend.Usb20PortsFromParameters()}), {used} in use before the run");
         var made = new List<HMController>();
         try
         {
@@ -168,9 +170,18 @@ internal static partial class Program
                 s_usbIds.Add(ParentOf(c)!);
             }
             Check($"{ports - used} creates fill the free ports", made.Count == ports - used, $"{made.Count}");
+            // dualshock-4-v2 derives a full-speed device, USB_SPEED_FULL (2).
+            var speeds = HIDMaestro.Internal.Usbip.VhciClient.GetImportedSpeeds();
+            Check("the host controller lists each of them at full speed, read at the row's speed offset",
+                  speeds.Count(v => v == 2) >= made.Count, string.Join(" ", speeds));
             Exception? past = null;
+            int leases = 0;
+            var lease = HMContext.AcquireLease;
+            HMContext.AcquireLease = (slot, key, profileId, backend) => { leases++; return lease(slot, key, profileId, backend); };
             try { using var extra = ctx.CreateController(p, "ports:past", HMBackend.Usbip); }
             catch (Exception e) { past = e; }
+            finally { HMContext.AcquireLease = lease; }
+            Check("the refusal comes before the create's lease, so nothing machine-wide is taken", leases == 0, $"{leases} lease(s)");
             Check("the create past the last port is refused by name",
                   past is HMResourceInUseException r && r.Message.Contains("USB 2.0 ports", StringComparison.Ordinal),
                   past == null ? "it returned" : $"{past.GetType().Name}: {past.Message}");
@@ -357,9 +368,16 @@ internal static partial class Program
             UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, CreateNoWindow = true,
         };
         using var child = Process.Start(psi)!;
+        // The child's lines are read on a task of their own, so a child that
+        // hangs without a word fails this within the bound.
         string? ready = null;
-        var sw = Stopwatch.StartNew();
-        while (sw.ElapsedMilliseconds < 60000 && (ready = child.StandardOutput.ReadLine()) != null && !ready.StartsWith("READY", StringComparison.Ordinal)) { }
+        var reading = System.Threading.Tasks.Task.Run(() =>
+        {
+            string? line;
+            while ((line = child.StandardOutput.ReadLine()) != null && !line.StartsWith("READY", StringComparison.Ordinal)) { }
+            return line;
+        });
+        if (reading.Wait(HIDMaestro.Internal.TimeoutScale.Apply(60000))) ready = reading.Result;
         Check("the child program created its controllers", ready?.StartsWith("READY", StringComparison.Ordinal) == true, ready ?? "no answer");
         if (ready == null || !ready.StartsWith("READY", StringComparison.Ordinal)) { try { child.Kill(); } catch { } return; }
         var theirs = ready.Split(' ').Skip(1).ToList();   // port/busid/usbid each
@@ -390,14 +408,23 @@ internal static partial class Program
               ours.Select(x => x.Split('/')[0]).Distinct().Single() != theirs.Select(x => x.Split('/')[0]).Distinct().Single());
         bool AllUp(IEnumerable<string> usbIds) => usbIds.All(u => Hid.Status(u) is { Present: true, Started: true });
         Check("all four devices are started", AllUp(ours.Concat(theirs).Select(x => x.Split('/')[2])));
+        // Each "gone" waits for its devnodes, bounded by the scaled limit,
+        // and the check reads the state the wait ended on.
+        bool AllGone(IEnumerable<string> located)
+        {
+            var bound = Stopwatch.StartNew();
+            bool gone;
+            while (!(gone = located.All(x => !Hid.Status(x.Split('/')[2]).Present)) && bound.ElapsedMilliseconds < HIDMaestro.Internal.TimeoutScale.Apply(10000))
+                Thread.Sleep(50);
+            return gone;
+        }
         ctx.DisposeControllersInParallel(mine);
-        Thread.Sleep(500);
+        bool oursGone = AllGone(ours);
         Check("this program's dispose leaves the child's devices started", AllUp(theirs.Select(x => x.Split('/')[2])));
-        Check("and its own are gone", ours.All(x => !Hid.Status(x.Split('/')[2]).Present));
+        Check("and its own are gone", oursGone);
         child.StandardInput.WriteLine("quit");
         child.WaitForExit(30000);
-        Thread.Sleep(500);
-        Check("the child's dispose takes its devices", theirs.All(x => !Hid.Status(x.Split('/')[2]).Present));
+        Check("the child's dispose takes its devices", AllGone(theirs));
         foreach (var t in theirs) s_usbIds.Add(t.Split('/')[2]);
     }
 
@@ -413,5 +440,236 @@ internal static partial class Program
         Console.In.ReadLine();
         ctx.DisposeControllersInParallel(made);
         return 0;
+    }
+
+    // ── Liveness of a server port ────────────────────────────────────────
+
+    /// <summary>A sweep's answer to "does a server listen on this loopback
+    /// port", the way a stale sweep asks it: a listener another process holds
+    /// reads live, and each of 16 closed ports reads gone, asked one after
+    /// another through a fresh view, all within 3 s. A connect to a closed
+    /// port that waits out Windows's SYN retries takes about 2 s alone, and
+    /// a sweep asks every port of the 16-port range.</summary>
+    static void Liveness()
+    {
+        int live = FreePort();
+        var child = Process.Start(new ProcessStartInfo(Environment.ProcessPath!, $"listener {live}")
+            { RedirectStandardInput = true, RedirectStandardOutput = true, UseShellExecute = false })!;
+        try
+        {
+            string? up = null;
+            var reading = System.Threading.Tasks.Task.Run(() => child.StandardOutput.ReadLine());
+            if (reading.Wait(30000)) up = reading.Result;
+            Check("the child holds a loopback listener", up == "LISTENING", up ?? "no answer in 30 s");
+            if (up != "LISTENING") return;
+            var closed = new List<int>();
+            while (closed.Count < 16) { int p = FreePort(); if (p != live && !closed.Contains(p)) closed.Add(p); }
+            var view = new HIDMaestro.Internal.Usbip.UsbipBackend.SweepView();
+            var clock = Stopwatch.StartNew();
+            bool liveRead = view.IsListening(live);
+            var wrong = closed.Where(p => view.IsListening(p)).ToList();
+            long ms = clock.ElapsedMilliseconds;
+            Check("the other process's listener reads live", liveRead);
+            Check("each of 16 closed ports reads gone", wrong.Count == 0, string.Join(" ", wrong));
+            Check("the 17 answers take under 3 s all told", ms < 3000, $"{ms} ms");
+        }
+        finally
+        {
+            try { child.StandardInput.WriteLine(); child.WaitForExit(10000); } catch { }
+            try { if (!child.HasExited) child.Kill(); } catch { }
+        }
+    }
+
+    /// <summary>A loopback port nothing listens on now: bound, read and
+    /// closed.</summary>
+    static int FreePort()
+    {
+        var l = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        l.Start();
+        int port = ((System.Net.IPEndPoint)l.LocalEndpoint).Port;
+        l.Stop();
+        return port;
+    }
+
+    static int Listener(int port)
+    {
+        var l = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, port);
+        l.Start();
+        new Thread(() => { while (true) { try { l.AcceptSocket().Dispose(); } catch { return; } } }) { IsBackground = true }.Start();
+        Console.WriteLine("LISTENING");
+        Console.Out.Flush();
+        Console.In.ReadLine();
+        l.Stop();
+        return 0;
+    }
+
+    // ── The first create of a process ────────────────────────────────────
+
+    /// <summary>n fresh processes, each creating one dualshock-4-v2 on the
+    /// USB/IP backend and disposing it: the time of each process's first
+    /// CreateController call, p50 and p95. Every first create runs the
+    /// process's stale sweep.</summary>
+    static void FirstCreate(int n)
+    {
+        var times = new List<long>();
+        for (int i = 0; i < n; i++)
+        {
+            var child = Process.Start(new ProcessStartInfo(Environment.ProcessPath!, "firstone")
+                { RedirectStandardOutput = true, UseShellExecute = false })!;
+            string output = child.StandardOutput.ReadToEnd();
+            child.WaitForExit();
+            string? line = output.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.StartsWith("FIRST ", StringComparison.Ordinal));
+            if (child.ExitCode != 0 || line == null) { Check($"run {i + 1}: the child created and disposed its controller", false, output.Trim()); return; }
+            times.Add(long.Parse(line[6..]));
+        }
+        times.Sort();
+        Note($"first create, {n} fresh processes: p50 {times[n / 2]} ms, p95 {times[(n * 95 + 99) / 100 - 1]} ms, min {times[0]} ms, max {times[^1]} ms, all {string.Join(" ", times)}");
+        Check($"{n} fresh processes each created their first controller", times.Count == n);
+    }
+
+    static int FirstOne()
+    {
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        var clock = Stopwatch.StartNew();
+        var c = ctx.CreateController(ctx.GetProfile("dualshock-4-v2")!, "first:one", HMBackend.Usbip);
+        long ms = clock.ElapsedMilliseconds;
+        c.Dispose();
+        Console.WriteLine($"FIRST {ms}");
+        return 0;
+    }
+
+    // ── A late acknowledgement after a re-create ─────────────────────────
+
+    /// <summary>A USB/IP device's reader thread past its stop check can
+    /// store a delivered sequence number after its controller's teardown.
+    /// When this process has made the same index again by then, the number
+    /// must not land in the new controller's acknowledgement section. The
+    /// teardown and the re-create are played on SharedMemoryIO's own tables,
+    /// with plain memory for the sections, so no Global object is made.</summary>
+    static void AckGeneration()
+    {
+        const int index = 4093;
+        var sm = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.SharedMemoryIO", throwOnError: true)!;
+        const System.Reflection.BindingFlags all = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public;
+        var views = (Dictionary<int, IntPtr>)sm.GetField("s_inputAckViews", all)!.GetValue(null)!;
+        var generations = sm.GetField("s_inputAckGenerations", all)?.GetValue(null) as Dictionary<int, long>;
+        var lastGeneration = sm.GetField("s_lastAckGeneration", all);
+        var lockObject = sm.GetField("s_inputViews", all)!.GetValue(null)!;
+        int size = (int)sm.GetField("INPUT_ACK_SIZE", all)!.GetValue(null)!;
+        var announce = sm.GetMethod("AnnounceDeviceDelivery", all)!;
+        var store = sm.GetMethod("StoreDeviceDelivered", all)!;
+        Note(generations == null ? "this SDK keeps no acknowledgement generation" : "this SDK keeps an acknowledgement generation per index");
+
+        IntPtr Map()
+        {
+            IntPtr view = System.Runtime.InteropServices.Marshal.AllocHGlobal(size);
+            System.Runtime.InteropServices.Marshal.Copy(new byte[size], 0, view, size);
+            lock (lockObject)
+            {
+                views[index] = view;
+                if (generations != null)
+                {
+                    long next = (long)lastGeneration!.GetValue(null)! + 1;
+                    lastGeneration.SetValue(null, next);
+                    generations[index] = next;
+                }
+            }
+            return view;
+        }
+        void Unmap()
+        {
+            lock (lockObject)
+            {
+                generations?.Remove(index);
+                if (views.Remove(index, out IntPtr v)) System.Runtime.InteropServices.Marshal.FreeHGlobal(v);
+            }
+        }
+        // The device's own call, in whichever form this SDK has.
+        void Store(object? generation, uint seq) =>
+            store.Invoke(null, store.GetParameters().Length == 4
+                ? new object[] { index, generation!, seq, false }
+                : new object[] { index, seq, false });
+
+        try
+        {
+            IntPtr first = Map();
+            object? oldGeneration = announce.Invoke(null, new object[] { index });
+            Store(oldGeneration, 41);
+            Check("the device's store lands in its own section (positive control)",
+                  System.Runtime.InteropServices.Marshal.ReadInt32(first, 0) == 41);
+            Unmap();
+            IntPtr second = Map();
+            object? newGeneration = announce.Invoke(null, new object[] { index });
+            Store(oldGeneration, 42);
+            Check("a store from the torn-down device leaves the re-created index's section alone",
+                  System.Runtime.InteropServices.Marshal.ReadInt32(second, 0) == 0,
+                  $"it reads {System.Runtime.InteropServices.Marshal.ReadInt32(second, 0)}");
+            Store(newGeneration, 43);
+            Check("the new device's store lands there",
+                  System.Runtime.InteropServices.Marshal.ReadInt32(second, 0) == 43);
+        }
+        finally { Unmap(); }
+    }
+
+    // ── The port rule ────────────────────────────────────────────────────
+
+    /// <summary>The host controller's USB 2.0 port count from its parameters,
+    /// as usbip-win2 0.9.8.1 sets it (vhci.cpp set_usb_ports_cnt: each held
+    /// to 1 to 254, USB 3 first, 255 in all), the imports that count against
+    /// it, and where an import row carries its speed. Offline.</summary>
+    static void PortRule()
+    {
+        int Rule(int usb2, int usb3) => HIDMaestro.Internal.Usbip.UsbipBackend.Usb20PortsRule(usb2, usb3);
+        Check("30 and 30, the defaults: 30", Rule(30, 30) == 30);
+        Check("254 and 254: USB 3 takes 254 first, which leaves 1", Rule(254, 254) == 1, Rule(254, 254).ToString());
+        Check("200 and 100: 155 left beside USB 3's 100", Rule(200, 100) == 155, Rule(200, 100).ToString());
+        Check("0 and 0 are held to 1 each", Rule(0, 0) == 1);
+        Check("only imports below SuperSpeed take a USB 2.0 port",
+              HIDMaestro.Internal.Usbip.UsbipBackend.Usb20PortsUsed(new[] { 1, 2, 3, 5, 6 }) == 3);
+        var layouts = HIDMaestro.Internal.Usbip.VhciClient.Layouts;
+        string offsets = string.Join(", ", layouts.Select(l => $"{l.Name} {HIDMaestro.Internal.Usbip.VhciClient.SpeedOffset(l)}"));
+        Check("an import row's speed sits after its devid: 1104 in 0.9.8.1, 1100 in 0.9.8.0 and 0.9.7.x",
+              offsets == "0.9.8.1 1104, 0.9.8.0 1100, 0.9.7.x 1100", offsets);
+    }
+
+    // ── A device Windows names by its port ───────────────────────────────
+
+    /// <summary>One create of dualshock-4-v2 on USB/IP with the usbflags
+    /// value IgnoreHWSerNum054C09CC set, which makes Windows name the device
+    /// by its hub port rather than its serial. The start wait finds the
+    /// device on its port and returns within its own 10 s bound, scaled, and
+    /// the HID interface is up at return. The value is deleted after.</summary>
+    static void IgnoreSerial()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== A device Windows names by its port ===");
+        const string flags = @"SYSTEM\CurrentControlSet\Control\usbflags";
+        const string name = "IgnoreHWSerNum054C09CC";
+        using (var k = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(flags))
+            k.SetValue(name, new byte[] { 1 }, Microsoft.Win32.RegistryValueKind.Binary);
+        try
+        {
+            using var ctx = new HMContext();
+            ctx.LoadDefaultProfiles();
+            var clock = Stopwatch.StartNew();
+            using var c = ctx.CreateController(ctx.GetProfile("dualshock-4-v2")!, "ignoreserial:0", HMBackend.Usbip);
+            long ms = clock.ElapsedMilliseconds;
+            string serialId = c.UsbipHandle!.Device.Descriptors.UsbInstanceId!;
+            string? onPort = HIDMaestro.Internal.Usbip.VhciClient.DeviceOnRootHubPort(c.UsbipHandle.Device.VhciPort);
+            if (onPort != null) s_usbIds.Add(onPort);
+            Note($"serial name {serialId}, the device on port {c.UsbipHandle.Device.VhciPort}: {onPort ?? "none"}, create {ms} ms");
+            Check("Windows named the device by its port, not its serial (positive control for the flag)",
+                  onPort != null && !string.Equals(onPort, serialId, StringComparison.OrdinalIgnoreCase), onPort ?? "none");
+            int bound = HIDMaestro.Internal.TimeoutScale.Apply(10000);
+            Check($"the create returns inside the start wait's {bound} ms bound", ms < bound, $"{ms} ms");
+            int interfaces = onPort == null ? 0 : Hid.Interfaces(Hid.Children(onPort).FirstOrDefault() ?? "-").Count;
+            Check("the HID interface is up when the create returns", interfaces > 0, $"{interfaces} interface(s)");
+        }
+        finally
+        {
+            using var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(flags, writable: true);
+            k?.DeleteValue(name, throwOnMissingValue: false);
+        }
     }
 }

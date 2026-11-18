@@ -388,9 +388,18 @@ public sealed class HMContext : IDisposable
         if (Internal.BackendSelection.ProcessElevated && !Internal.MachineClaims.ClaimBeforeWrite())
             throw new InvalidOperationException(Internal.MachineClaims.RemovingHereMessage);
         Internal.OwnerSweep.ReclaimDeadOwners();
+        int moves = Internal.Usbip.UsbipDriverInstaller.LegacyMoves;
         Internal.Usbip.UsbipDriverInstaller.EnsureInstalled();
-        LastDriverInstall = present ? HMDriverInstallOutcome.AlreadyCurrent : HMDriverInstallOutcome.Installed;
+        LastDriverInstall = UsbipInstallOutcome(present, moved: Internal.Usbip.UsbipDriverInstaller.LegacyMoves != moves);
     }
+
+    /// <summary>What an install of the USB/IP host controller did:
+    /// <see cref="HMDriverInstallOutcome.Installed"/> when it installed the
+    /// host controller, or moved one already there off an older usbip-win2
+    /// onto the bundled one, else
+    /// <see cref="HMDriverInstallOutcome.AlreadyCurrent"/>.</summary>
+    internal static HMDriverInstallOutcome UsbipInstallOutcome(bool presentBefore, bool moved) =>
+        !presentBefore || moved ? HMDriverInstallOutcome.Installed : HMDriverInstallOutcome.AlreadyCurrent;
 
     /// <summary>What the last <see cref="InstallDriver"/> call on this
     /// context did, or null before the first one.</summary>
@@ -998,13 +1007,20 @@ public sealed class HMContext : IDisposable
             // attach, so a failed attach leaves them for the catch below.
             handle = Internal.Usbip.UsbipBackend.CreateDevice(profile.Inner, index, lease.Identity);
             // The USB instance the device's records sit under, in the owner
-            // record, for the start wait and for record cleanup.
+            // record, for record cleanup.
             if (handle.Device.Descriptors.UsbInstanceId is { } usbId)
             {
                 Internal.MachineClaims.SetControllerValue(lease.Identity.Token, "UsbInstanceId", usbId);
                 // A derived device's HID interface is started before the
-                // create returns, as the UMDF2 create's is.
-                if (handle.Device.Derived) Internal.DeviceOrchestrator.AwaitUsbipStart(usbId, index);
+                // create returns, as the UMDF2 create's is. The wait finds
+                // the device on its port, and the record takes the name
+                // Windows gave it when that is not the serial's.
+                if (handle.Device.Derived)
+                {
+                    string named = Internal.DeviceOrchestrator.AwaitUsbipStart(usbId, handle.Device.VhciPort, index);
+                    if (!string.Equals(named, usbId, StringComparison.OrdinalIgnoreCase))
+                        Internal.MachineClaims.SetControllerValue(lease.Identity.Token, "UsbInstanceId", named);
+                }
             }
             var controller = new HMController(this, slot, lease, profile, instanceId: null, handle, lease.Identity.Key);
             try

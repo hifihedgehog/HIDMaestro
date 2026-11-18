@@ -32,6 +32,20 @@
 //   twoprograms    This process and a child each create USB/IP controllers on
 //                  one host controller: their bus locations differ, and one's
 //                  dispose leaves the other's device in place.
+//   liveness       A stale sweep's answer to whether a server listens on a
+//                  loopback port: another process's listener reads live, 16
+//                  closed ports read gone, all within 3 s. Creates no device
+//                  and needs no elevation.
+//   ackgen         A delivered sequence number a torn-down USB/IP device
+//                  stores after its index is made again does not land in
+//                  the new controller's section. Offline, no elevation.
+//   ignoreserial   One create with usbflags IgnoreHWSerNum set for its VID
+//                  and PID: the start wait finds the device on its port.
+//   portrule       The host controller's USB 2.0 port count and the imports
+//                  that count against it. Offline, no elevation.
+//   firstcreate [n]
+//                  n fresh processes, each timing its first USB/IP create,
+//                  p50 and p95.
 //
 // --backend umdf2|usbip|both limits parity to backends (default: every backend
 // the machine runs). --out <file> writes one JSON line per profile.
@@ -78,13 +92,24 @@ internal static partial class Program
         string part = list.Count > 0 ? list[0] : "parity";
         var rest = list.Skip(1).ToList();
 
+        if (part == "listener") return Listener(int.Parse(rest[0]));
+        if (part is "liveness" or "ackgen" or "portrule")
+        {
+            if (part == "liveness") Liveness();
+            else if (part == "ackgen") AckGeneration();
+            else PortRule();
+            Console.WriteLine();
+            Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");
+            return s_failures == 0 ? 0 : 1;
+        }
+
         using (var id = WindowsIdentity.GetCurrent())
             if (!new WindowsPrincipal(id).IsInRole(WindowsBuiltInRole.Administrator))
             {
                 Console.WriteLine("  SKIP: creating a controller needs elevation.");
                 return 2;
             }
-        if (part != "child" && SdkConsumers.Find() is { } other)
+        if (part is not ("child" or "firstone") && SdkConsumers.Find() is { } other)
         {
             Console.WriteLine($"  SKIP: {other} has HIDMaestro.Core.dll loaded, and two programs that embed HIDMaestro never test at once.");
             return 2;
@@ -106,6 +131,9 @@ internal static partial class Program
                 case "identity": Identity(rest.Count > 0 ? rest[0] : "first"); break;
                 case "twoprograms": TwoPrograms(); break;
                 case "child": return Child(rest);
+                case "ignoreserial": IgnoreSerial(); break;
+                case "firstcreate": FirstCreate(rest.Count > 0 ? int.Parse(rest[0]) : 30); break;
+                case "firstone": return FirstOne();
                 default: Console.WriteLine($"unknown part {part}"); return 1;
             }
         }
