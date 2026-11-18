@@ -353,10 +353,16 @@ internal static unsafe partial class Program
             Func<byte[], bool> hapticLevels = c => (c[5] & 0x0F) == 0x0F && c[6] == 80 && c[7] == 30 && c[8] == 100 && c[9] == 50;
             string? gipHid = InterfaceUnder(s_hidInterface, instance);
             int gipOut = gipHid == null ? 0 : HidOutputLength(gipHid);
-            Motor(engine, "HidD_SetOutputReport(triggers 80 and 30, motors 100 and 50) on the GIP form's HID child",
-                  () => gipHid == null ? 2u : HidSetOutput(gipHid, Haptics(gipHid, gipOut, 80, 30, 100, 50)), hapticLevels);
-            Motor(engine, "HidD_SetOutputReport at rest on the GIP form's HID child",
-                  () => gipHid == null ? 2u : HidSetOutput(gipHid, Haptics(gipHid, gipOut, 0, 0, 0, 0)), c => c[6] == 0 && c[7] == 0 && c[8] == 0 && c[9] == 0);
+            // A program keeps its handle open while its effect plays. With
+            // the handle closed right after the write, the Surface's device
+            // got two stop commands and never the effect.
+            using (var gipHandle = gipHid == null ? null : HidHandle.Open(gipHid))
+            {
+                Motor(engine, "HidD_SetOutputReport(triggers 80 and 30, motors 100 and 50) on the GIP form's HID child",
+                      () => gipHandle == null ? 2u : gipHandle.SetOutput(Haptics(gipHid!, gipOut, 80, 30, 100, 50)), hapticLevels);
+                Motor(engine, "HidD_SetOutputReport at rest on the GIP form's HID child",
+                      () => gipHandle == null ? 2u : gipHandle.SetOutput(Haptics(gipHid!, gipOut, 0, 0, 0, 0)), c => c[6] == 0 && c[7] == 0 && c[8] == 0 && c[9] == 0);
+            }
 
             var one = ctx.GetProfile("xbox-one-s");
             string? noUmdf2 = null;
@@ -374,7 +380,8 @@ internal static unsafe partial class Program
                 if (umdf2Hid != null)
                 {
                     int umdf2Out = HidOutputLength(umdf2Hid);
-                    uint code = HidSetOutput(umdf2Hid, Haptics(umdf2Hid, umdf2Out, 80, 30, 100, 50));
+                    using var umdf2Handle = HidHandle.Open(umdf2Hid);
+                    uint code = umdf2Handle?.SetOutput(Haptics(umdf2Hid, umdf2Out, 80, 30, 100, 50)) ?? 2u;
                     // The driver raises a report of a descriptor with no
                     // IDs with its first data byte as the ID: the enable bits.
                     bool arrived = WaitUntil(() => { lock (got) return got.Any(o => o.Id == 0x0F && o.Data.Length >= 4 && o.Data[0] == 80 && o.Data[1] == 30 && o.Data[2] == 100 && o.Data[3] == 50); }, 3_000);
@@ -1018,18 +1025,28 @@ internal static unsafe partial class Program
     [DllImport("hid.dll")]
     static extern int HidP_GetValueCaps(int reportType, byte* caps, ushort* length, IntPtr preparsed);
 
-    /// <summary>HidD_SetOutputReport of <paramref name="report"/>. Returns 0,
-    /// or the last error.</summary>
-    static uint HidSetOutput(string path, byte[] report)
+    /// <summary>A read-write handle on a HID collection, held open while
+    /// its output reports play.</summary>
+    sealed class HidHandle : IDisposable
     {
-        IntPtr h = CreateFileW(path, 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
-        if (h == new IntPtr(-1)) return (uint)Marshal.GetLastPInvokeError();
-        try
+        readonly IntPtr _h;
+        HidHandle(IntPtr h) => _h = h;
+
+        public static HidHandle? Open(string path)
+        {
+            IntPtr h = CreateFileW(path, 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
+            return h == new IntPtr(-1) ? null : new HidHandle(h);
+        }
+
+        /// <summary>HidD_SetOutputReport of <paramref name="report"/>.
+        /// Returns 0, or the last error.</summary>
+        public uint SetOutput(byte[] report)
         {
             fixed (byte* r = report)
-                return HidD_SetOutputReport(h, r, (uint)report.Length) ? 0u : (uint)Marshal.GetLastPInvokeError();
+                return HidD_SetOutputReport(_h, r, (uint)report.Length) ? 0u : (uint)Marshal.GetLastPInvokeError();
         }
-        finally { CloseHandle(h); }
+
+        public void Dispose() => CloseHandle(_h);
     }
 
     static byte[]? HidInput(string path, byte reportId, int length)
