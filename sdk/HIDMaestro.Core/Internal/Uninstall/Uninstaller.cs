@@ -531,8 +531,18 @@ internal static partial class Uninstaller
         // The USB records USB/IP creates caused, which the ledger of them
         // names (Usbip.UsbRecords).
         foreach (string id in Usbip.UsbRecords.Caused())
-            if (Usbip.UsbRecords.Exists(id) && seen.Add(id)) list.Add(Would(KindDevnode, id));
+            if (Usbip.UsbRecords.Exists(id) && seen.Add(id))
+                list.Add(Usbip.UsbRecords.Present(id) ? Keep(KindDevnode, id, UsbRecordPresentReason)
+                    : Usbip.UsbRecords.ArrivedSinceBoot(id) ? Keep(KindDevnode, id, UsbRecordSinceBootReason)
+                    : Would(KindDevnode, id));
     }
+
+    private const string UsbRecordPresentReason =
+        "the USB/IP device it records is plugged in. Its program's removal unplugs it, and a removal after that takes the record";
+
+    private const string UsbRecordSinceBootReason =
+        "its device arrived since Windows started, and whether the USB/IP host controller has carried a device since then is read from such records. " +
+        "It stays until a restart, and a removal after it takes it";
 
     private static bool IsUsbipHostController(string instanceId)
     {
@@ -1383,10 +1393,11 @@ internal static partial class Uninstaller
         // removed every record it names, which drops each entry. An entry
         // left names a record whose device is present, and is its only
         // proof of being HIDMaestro's.
-        using (var usb = Registry.LocalMachine.OpenSubKey(Usbip.UsbRecords.LedgerRoot))
-            if (usb != null && usb.SubKeyCount > 0)
-                Fail(Usbip.UsbRecords.LedgerRoot, $"{usb.SubKeyCount} USB device record(s) it names were not removed: their devices are present");
-        if (Usbip.UsbRecords.Caused().Count == 0)
+        int usbLeft = Usbip.UsbRecords.Caused().Count;
+        if (usbLeft > 0)
+            told.Add(new UninstallEntry(KindRegistryKey, $@"HKLM\{Usbip.UsbRecords.LedgerRoot}", UninstallOutcome.Kept,
+                $"it names {usbLeft} USB device record(s) HIDMaestro caused that stay, and is their only proof of being HIDMaestro's. A removal after a restart takes them and it"));
+        else
             try { Registry.LocalMachine.DeleteSubKeyTree(Usbip.UsbRecords.LedgerRoot, throwOnMissingSubKey: false); }
             catch (Exception ex) { Fail(Usbip.UsbRecords.LedgerRoot, ex.Message); }
         int sharedLeft = EntriesOf("GameInput") + EntriesOf("JoystickOem") + EntriesOf("UsbFlags");

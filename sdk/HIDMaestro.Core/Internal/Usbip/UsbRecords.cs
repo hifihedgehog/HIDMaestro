@@ -31,6 +31,15 @@ namespace HIDMaestro.Internal.Usbip;
 /// Everything) and the uninstall remove every record the ledger names whose
 /// device has left.</para>
 ///
+/// <para>A record of a device that arrived since Windows started stays until
+/// a restart, as the usbip-win2 removal keeps such records
+/// (UsbipRemoval.RemovePersonaPhantoms): whether the host controller has
+/// carried a device since Windows started is read from those records'
+/// arrival times (UsbipDriverInstaller.HostControllerUsedSinceBoot), and a
+/// host controller that has carries a forced removal or driver change into a
+/// four-minute query-remove timeout that lasts until Windows restarts. A
+/// removal after the restart takes them.</para>
+///
 /// <para>The records below the instance are found by the parent Windows
 /// keeps for each devnode, present or not (DEVPKEY_Device_Parent, which
 /// CM_Get_DevNode_Property answers for a non-present devnode with the parent
@@ -63,6 +72,10 @@ internal static partial class UsbRecords
         /// <summary>The instance or a record below it is in the device tree,
         /// and nothing was removed.</summary>
         Present,
+        /// <summary>A record of the instance names a device that arrived
+        /// since Windows started, and nothing was removed. A removal after
+        /// a restart takes it.</summary>
+        SinceBoot,
         /// <summary>A removal failed or the id is not a USB instance. What
         /// was not removed stays.</summary>
         Failed,
@@ -210,8 +223,12 @@ internal static partial class UsbRecords
 
     /// <summary>The same with the machine's records read once by the caller
     /// (<see cref="Tree.Read"/>), for a removal of many instances in a row.
-    /// Presence is read live for each record all the same.</summary>
-    internal static Result Remove(string instanceId, int leaveWaitMs, Tree? tree)
+    /// Presence is read live for each record all the same. With
+    /// <paramref name="sinceBoot"/> a record of a device that arrived since
+    /// Windows started is removed too, which only a caller that has shown
+    /// another such record stays on the host controller may ask
+    /// (registry_ownership_check's R13).</summary>
+    internal static Result Remove(string instanceId, int leaveWaitMs, Tree? tree, bool sinceBoot = false)
     {
         var removed = new List<string>();
         if (!IsUsbInstance(instanceId))
@@ -228,6 +245,8 @@ internal static partial class UsbRecords
         string? present;
         while ((present = subtree.FirstOrDefault(Present)) != null && until.ElapsedMilliseconds < leaveWaitMs) Thread.Sleep(25);
         if (present != null) return new Result(Outcome.Present, removed, $"{present}, below {instanceId}, is in the device tree");
+        if (!sinceBoot && subtree.FirstOrDefault(ArrivedSinceBoot) is { } recent)
+            return new Result(Outcome.SinceBoot, removed, $"{recent} arrived since Windows started, and its record stays until a restart");
 
         using var pnp = DeviceManager.HoldPnpLock();
         // The walk is read again under the lock: a device that came back
@@ -246,6 +265,24 @@ internal static partial class UsbRecords
         }
         DeviceOrchestrator.LogDiag($"    usb records: removed {removed.Count} under {instanceId}");
         return new Result(Outcome.Removed, removed, $"{removed.Count} record(s)");
+    }
+
+    /// <summary>True when the device of a record arrived after Windows
+    /// started, or its arrival cannot be read: the test
+    /// UsbipDriverInstaller.HostControllerUsedSinceBoot makes of each record
+    /// below the host controller.</summary>
+    internal static bool ArrivedSinceBoot(string instanceId)
+    {
+        if (CM_Locate_DevNodeW(out uint dev, instanceId, CM_LOCATE_DEVNODE_PHANTOM) != CR_SUCCESS) return false;
+        var key = DEVPKEY_Device_LastArrivalDate;
+        var buffer = new byte[8];
+        uint size = 8;
+        if (CM_Get_DevNode_PropertyW(dev, ref key, out uint type, buffer, ref size, 0) != CR_SUCCESS
+            || type != DEVPROP_TYPE_FILETIME || size != 8)
+            return true;
+        DateTime arrived = DateTime.FromFileTimeUtc(BitConverter.ToInt64(buffer, 0));
+        DateTime bootUtc = DateTime.UtcNow - TimeSpan.FromMilliseconds(Environment.TickCount64);
+        return arrived >= bootUtc;
     }
 
     /// <summary><c>USB\&lt;device id&gt;\&lt;instance&gt;</c>, the form the hub
@@ -355,6 +392,7 @@ internal static partial class UsbRecords
     private const uint CM_LOCATE_DEVNODE_PHANTOM = 0x1;
     private const uint CM_GETIDLIST_FILTER_NONE = 0x0;
     private const uint DEVPROP_TYPE_STRING = 0x12;
+    private const uint DEVPROP_TYPE_FILETIME = 0x10;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct DEVPROPKEY { public Guid fmtid; public uint pid; }
@@ -364,6 +402,13 @@ internal static partial class UsbRecords
     {
         fmtid = new Guid(0x4340a6c5, 0x93fa, 0x4706, 0x97, 0x2c, 0x7b, 0x64, 0x80, 0x08, 0xa5, 0xa7),
         pid = 8,
+    };
+
+    // devpkey.h: {83da6326-97a6-4088-9453-a1923f573b29}, 102, a FILETIME.
+    private static readonly DEVPROPKEY DEVPKEY_Device_LastArrivalDate = new()
+    {
+        fmtid = new Guid(0x83da6326, 0x97a6, 0x4088, 0x94, 0x53, 0xa1, 0x92, 0x3f, 0x57, 0x3b, 0x29),
+        pid = 102,
     };
 
     [StructLayout(LayoutKind.Sequential)]

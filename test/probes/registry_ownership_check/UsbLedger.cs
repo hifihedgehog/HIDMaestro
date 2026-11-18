@@ -275,8 +275,26 @@ internal static partial class Program
         var before = ReadMachine();
         Console.Write(before.HostController.Length > 0 ? "  host controller before:\n" + Indent(before.HostController) : "  no host controller listed\n");
 
+        // The device arrived since Windows started, so the SDK's removal
+        // keeps its records until a restart: the host controller's
+        // since-boot test reads them.
+        var kept = UsbRecords.Remove(id, 0);
+        Check("R13: the SDK keeps the record of a device that arrived since Windows started", kept.Outcome == UsbRecords.Outcome.SinceBoot
+              && kept.Removed.Count == 0 && UsbRecords.Exists(id), $"{kept.Outcome}, {kept.Detail}");
+        // The removal itself runs on this record only while another record
+        // of a device that arrived since Windows started stays below the host
+        // controller, so its test reads the same after.
+        var hubKids = UsbRecords.AllDeviceIds().Where(IsUsbipRootHub).SelectMany(h => UsbRecords.Tree.Read().Subtree(h).Skip(1)).ToList();
+        string? witness = hubKids.FirstOrDefault(r => !subtree.Contains(r, StringComparer.OrdinalIgnoreCase)
+                                                      && !UsbRecords.Present(r) && UsbRecords.ArrivedSinceBoot(r));
+        if (witness == null)
+        {
+            Console.WriteLine("  [SKIP] R13's removal: no other record of a device that arrived since Windows started is on the host controller");
+            return;
+        }
+        Console.WriteLine($"  another record of a device that arrived since Windows started stays: {witness}");
         var sw = Stopwatch.StartNew();
-        var result = UsbRecords.Remove(id, 0);
+        var result = UsbRecords.Remove(id, 0, null, sinceBoot: true);
         Console.WriteLine($"  removal: {result.Outcome}, {result.Detail}, {sw.ElapsedMilliseconds} ms");
         Check("R13: the removal reports every record of the instance removed", result.Outcome == UsbRecords.Outcome.Removed
               && result.Removed.Count == subtree.Count, $"{result.Removed.Count} of {subtree.Count}");
@@ -292,6 +310,8 @@ internal static partial class Program
               gone.Count == expectGone.Count && expectGone.All(r => gone.Contains(r, StringComparer.OrdinalIgnoreCase)) && added.Count == 0,
               $"gone {gone.Count} (expected {expectGone.Count}), added {added.Count}");
         foreach (string r in subtree) Check($"R13: Windows has no record of {r}", !UsbRecords.Exists(r));
+        Check("R13: the host controller still reads as used since Windows started",
+              UsbipDriverInstaller.UsedSinceBoot(out string why), why);
 
         // The identity again, under the child's key, whose serial names the
         // same USB instance. A record below it is named by the prefix Windows
@@ -337,17 +357,19 @@ internal static partial class Program
             }
         }
 
-        // The full removal takes every record the ledger names.
+        // The full removal takes every record the ledger names whose device
+        // arrived before Windows started. This one arrived since, so it
+        // stays with its entry until a restart.
         sw.Restart();
         HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall: true);
         Console.WriteLine($"  RemoveAllVirtualControllers(Everything) in {sw.ElapsedMilliseconds} ms");
-        foreach (string r in again) Check($"R13: the full removal removed {r}", !UsbRecords.Exists(r));
-        Check("R13: and the ledger names it no more", !LedgerNames(id));
+        foreach (string r in again) Check($"R13: the full removal keeps {r}, whose device arrived since Windows started", UsbRecords.Exists(r) && !UsbRecords.Present(r));
+        Check("R13: and the ledger still names it for a removal after a restart", LedgerNames(id));
         var end = ReadMachine();
         Check("R13: after the full removal the host controller reads as before", end.HostController == before.HostController,
               end.HostController == before.HostController ? "" : Indent(end.HostController));
-        var end2 = end.Records.Except(after.Records, StringComparer.OrdinalIgnoreCase).ToList();
-        Check("R13: no record of the run is left", end2.Count == 0, string.Join(" ; ", end2));
+        var end2 = end.Records.Except(after.Records, StringComparer.OrdinalIgnoreCase).Except(again, StringComparer.OrdinalIgnoreCase).ToList();
+        Check("R13: no other record of the run is left", end2.Count == 0, string.Join(" ; ", end2));
     }
 
     static string Indent(string s) => string.Join("\n", s.TrimEnd('\n').Split('\n').Select(l => "    " + l)) + "\n";
@@ -422,6 +444,14 @@ internal static partial class Program
         string how = everything ? "RemoveAllVirtualControllers(Everything)" : "the next program's first create";
         Console.WriteLine($"\n-- A program killed with a USB/IP controller alive, then {how} --");
         string key = everything ? "ledger-dead-everything" : "ledger-dead-next";
+        string flagsName;
+        using (var c = new HMContext())
+        {
+            c.LoadDefaultProfiles();
+            var p = c.GetProfile("dualshock-4-v2")!;
+            flagsName = RegistryLedger.UsbFlagsName(p.VendorId, p.ProductId, new UsbDescriptorSet(p.Inner).BcdDevice);
+        }
+        string? flagsBefore = FlagsDump(flagsName);
         string self = Environment.ProcessPath!;
         var child = Process.Start(new ProcessStartInfo(self, $"--child-hold-usbip dualshock-4-v2 {key}")
         {
@@ -441,7 +471,7 @@ internal static partial class Program
             try { child.Kill(); } catch { }
             return;
         }
-        string? flagsBefore = FlagsDump(flags);
+        Check($"{how}: the child's device is the identity whose usbflags key was read before it", flags == flagsName, flags);
         var subtree = UsbRecords.Tree.Read().Subtree(id);
         child.Kill();
         child.WaitForExit(10000);
@@ -466,18 +496,15 @@ internal static partial class Program
             other.StandardOutput.ReadToEnd();
             other.WaitForExit(120000);
         }
-        if (everything)
-        {
-            foreach (string r in subtree) Check($"{how}: {r} is gone", !UsbRecords.Exists(r));
-            Check($"{how}: the ledger names it no more", !LedgerNames(id));
-        }
-        else
-        {
-            foreach (string r in subtree) Check($"{how}: {r} stays for the identity's next life", UsbRecords.Exists(r));
-            Check($"{how}: the ledger still names it", LedgerNames(id));
-        }
+        // The device arrived since Windows started, so both keep its records
+        // until a restart, and the ledger names them for the removal after
+        // it.
+        foreach (string r in subtree) Check($"{how}: {r} stays, its device having arrived since Windows started", UsbRecords.Exists(r));
+        Check($"{how}: the ledger still names it", LedgerNames(id));
         Check($"{how}: no owner record names it any more", !OwnerNamed().Contains(id, StringComparer.OrdinalIgnoreCase));
         Check($"{how}: the ledger has no usbflags entry for {flags}", LedgerHolders("UsbFlags", flags) == -1);
+        Check($"{how}: usbflags key {flags} is as it was before the child's create", FlagsDump(flags) == flagsBefore,
+              $"{OneLine(FlagsDump(flags))} against {OneLine(flagsBefore)}");
     }
 
     static int ChildHoldUsbip(string id, string key)
