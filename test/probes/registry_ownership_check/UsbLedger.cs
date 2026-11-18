@@ -590,3 +590,17 @@ internal static partial class Program
         return s_failures == 0 ? 0 : 1;
     }
 }
+
+internal static partial class Program
+{
+    static void OsBindingOffline()
+    {
+        Console.WriteLine("\n== Offline: which restore flags a devnode bound by Microsoft OS descriptors ==");
+        Check("winusb.inf on a devnode claimed on input.inf is a binding by OS descriptors",
+              WinUsbBinding.IsOsDescriptorBinding(@"C:\Windows\INF\winusb.inf", @"C:\Windows\INF\input.inf"));
+        Check("winusb.inf on a devnode claimed with no driver is not", !WinUsbBinding.IsOsDescriptorBinding("winusb.inf", ""));
+        Check("winusb.inf on a devnode claimed on winusb.inf is not", !WinUsbBinding.IsOsDescriptorBinding("winusb.inf", "winusb.inf"));
+        Check("HIDMaestro's package on a devnode is not", !WinUsbBinding.IsOsDescriptorBinding("oem12.inf", "input.inf"));
+        Check("an unreadable claim is not", !WinUsbBinding.IsOsDescriptorBinding("winusb.inf", null));
+    }
+}

@@ -380,6 +380,7 @@ internal static partial class Program
         bool offlineOnly = args.Contains("--offline");
         Offline();
         UsbLedgerOffline();
+        OsBindingOffline();
         bool ranLive = false;
         if (args.Contains("--usb-ledger"))
             ranLive = UsbLedgerLive(args.Contains("--r13-only"));

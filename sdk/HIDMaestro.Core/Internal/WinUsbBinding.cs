@@ -748,6 +748,11 @@ DeviceName = ""{deviceName}""
             if (priorInf == null) return false;
             if (priorInf.Length > 0) return HasLeft(instanceId) && FlagForNextArrival(instanceId);
         }
+        // Windows' own winusb.inf, on a devnode whose claim recorded another
+        // driver: the device asked for it with its Microsoft OS descriptors
+        // (BindByOsDescriptors). Flagged as a package bind is, so the next
+        // arrival, which serves no such descriptors, installs by rank.
+        if (IsOsDescriptorBinding(inf, priorInf)) return HasLeft(instanceId) && FlagForNextArrival(instanceId);
         switch (IsOurPackage(inf))
         {
             case false:
@@ -1415,6 +1420,15 @@ DeviceName = ""{deviceName}""
     /// <summary>No driver, or one that ships with Windows. The driver store
     /// publishes every third-party INF under an oem name, so an INF with any
     /// other name is an inbox one (Microsoft Learn, "Driver Store").</summary>
+    /// <summary>True when a devnode runs Windows' own winusb.inf while its
+    /// claim recorded another driver INF: the binding by Microsoft OS
+    /// descriptors put it there. registry_ownership_check's offline part
+    /// checks it.</summary>
+    internal static bool IsOsDescriptorBinding(string? inf, string? priorInf) =>
+        string.Equals(Path.GetFileName(inf ?? ""), "winusb.inf", StringComparison.OrdinalIgnoreCase)
+        && !string.IsNullOrEmpty(priorInf)
+        && !string.Equals(Path.GetFileName(priorInf), "winusb.inf", StringComparison.OrdinalIgnoreCase);
+
     private static bool IsInboxOrNone(string? inf) =>
         string.IsNullOrEmpty(inf)
         || !Path.GetFileName(inf).StartsWith("oem", StringComparison.OrdinalIgnoreCase);

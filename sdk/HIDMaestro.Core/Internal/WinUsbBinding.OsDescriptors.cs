@@ -25,7 +25,11 @@ namespace HIDMaestro.Internal;
 /// puts it back as it was when the last controller of the identity goes.
 /// The device is then plugged in again: the hub reads its descriptors anew,
 /// and a devnode with a driver from the first arrival is flagged to install
-/// again by rank, which picks WinUSB by the new compatible ID.</para></summary>
+/// again by rank, which picks WinUSB by the new compatible ID. The ledger's
+/// WinUSB entry of the devnode puts it back: once the device has left, its
+/// restore flags the devnode on winusb.inf again, so the next arrival, which
+/// serves no descriptors until its own bind, gets the driver Windows gives
+/// the real adapter (<see cref="RestoreLocked"/>).</para></summary>
 internal static partial class WinUsbBinding
 {
     /// <summary>Set through reflection by a probe to take the Microsoft OS
@@ -62,11 +66,7 @@ internal static partial class WinUsbBinding
         handle.ResolveRecord(instanceId);
         WaitInstalled(instanceId, waitMs, keeper);
         var (service, inf) = DriverOf(instanceId, phantom: false);
-        if (IsLibusbService(service))
-        {
-            if (d.ServesWinUsb) handle.NoteOsBound(instanceId);
-            return HMWinUsbBinding.AlreadyBound;
-        }
+        if (IsLibusbService(service)) return HMWinUsbBinding.AlreadyBound;
         if (!IsInboxOrNone(inf)) return HMWinUsbBinding.OtherDriver;
 
         if (!d.ServesWinUsb)
@@ -130,7 +130,6 @@ internal static partial class WinUsbBinding
             instanceId = again;
         }
 
-        handle.NoteOsBound(instanceId);
         var started = Environment.TickCount64 + waitMs;
         while (Environment.TickCount64 < started)
         {
@@ -143,24 +142,5 @@ internal static partial class WinUsbBinding
         var (last, lastInf) = DriverOf(instanceId, phantom: false);
         throw new InvalidOperationException(
             $"WinUSB did not start on {instanceId} within 10 s of its re-plug with Microsoft OS descriptors: it runs {last ?? "no driver"} ({lastInf ?? "no INF"}).");
-    }
-
-    /// <summary>Flag each devnode the device was bound on by its Microsoft OS
-    /// descriptors to install again by rank at its next arrival, once it has
-    /// left: the device's next life, which serves no descriptors until its
-    /// own bind, gets the driver Windows gives the real adapter. A devnode
-    /// whose record the dispose removes needs none. Called at dispose, after
-    /// the unplug.</summary>
-    internal static void FlagOsBound(Usbip.UsbipBackendHandle handle)
-    {
-        foreach (string id in handle.OsBound)
-        {
-            try
-            {
-                WaitGone(id, TimeoutScale.Apply(2000));
-                if (HasLeft(id)) FlagForNextArrival(id);
-            }
-            catch (Exception ex) { DeviceOrchestrator.LogDiag($"    winusb: {id} was not flagged for its next arrival: {ex.Message}"); }
-        }
     }
 }

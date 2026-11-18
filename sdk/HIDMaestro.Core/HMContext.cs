@@ -1195,9 +1195,6 @@ public sealed class HMContext : IDisposable
                 // while it is still there, so the ledger names its record.
                 try { Internal.WinUsbBinding.ResolveRecord(controller.UsbipHandle); } catch { }
                 try { controller.UsbipHandle.Dispose(); } catch { }
-                // A devnode the device was bound to WinUSB on by its own
-                // descriptors installs by rank at its next arrival.
-                try { Internal.WinUsbBinding.FlagOsBound(controller.UsbipHandle); } catch { }
                 try { Internal.SharedMemoryIO.DestroyController(controller.Index); } catch { }
                 // A WinUSB binding (HMController.BindWinUsb) and the usbflags
                 // claim go back once the device is gone. The device's records

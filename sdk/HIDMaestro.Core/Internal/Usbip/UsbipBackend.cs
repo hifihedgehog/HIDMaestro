@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Threading;
 
 namespace HIDMaestro.Internal.Usbip;
@@ -647,23 +646,6 @@ internal sealed class UsbipBackendHandle : IDisposable
                 Thread.Sleep(50);
             }
         }
-    }
-
-    // The USB instances the device was bound to WinUSB on by Microsoft OS
-    // descriptors (WinUsbBinding.BindByOsDescriptors). Guarded by the handle.
-    private readonly List<string> _osBound = new();
-
-    /// <summary>Note an instance bound to WinUSB by the device's Microsoft OS
-    /// descriptors.</summary>
-    public void NoteOsBound(string instanceId)
-    {
-        lock (this) if (!_osBound.Contains(instanceId, StringComparer.OrdinalIgnoreCase)) _osBound.Add(instanceId);
-    }
-
-    /// <summary>The instances <see cref="NoteOsBound"/> named.</summary>
-    public IReadOnlyList<string> OsBound
-    {
-        get { lock (this) return _osBound.ToArray(); }
     }
 
     public void Dispose()
