@@ -231,6 +231,8 @@ $Profiles = @{
     DualSenseBT   = 'dualsense-bt'             # Sony PS5 BT, plain HID, no companions
     SwitchPro     = 'switch-pro'               # Nintendo, plain HID, no companions
     Custom        = 'padforge-custom'          # PadForge-style custom (BEEF:F000), built via HMProfileBuilder+HidDescriptorBuilder
+    UsbipComposite = 'dualsense-composite'     # USB/IP: audio and HID interfaces on one USB device
+    UsbipSingle    = 'steam-controller-2'      # USB/IP: one HID interface
 }
 
 # Author a PadForge-style custom profile JSON to a temp dir so the test
@@ -1212,34 +1214,79 @@ function Scenario-Single-SameVidPid {
 # the present devnodes last changed 31 ms later on the bench, so three
 # reads 50 ms apart that agree replace the 5 s sleep, which stays the
 # limit.
-function Scenario-ForceKill-MidCascade {
-    function Get-PresentKey { ((Get-HMPresentDevnodes) | Sort-Object) -join '|' }
-    $proc1 = Start-HMTestProcess -ProfileIds @($Profiles.XboxBT)
+#
+# A USB/IP controller's teardown is the other shape. The SDK's part is the
+# host controller's plugout and the device's own stop, about 2 ms plus a
+# plugout of 0.5 to 22 ms, and it ends before Windows removes any of the
+# device's devnodes. The app then creates the next device while Windows
+# removes the persona. The kill therefore keys on the swapped pad's own
+# devnodes, read one by one through CM_Locate_DevNodeW, which takes
+# microseconds where a read of every devnode takes 10 ms and more: the
+# app dies the moment the first of them leaves. On HIDMaestro's driver
+# that is the moment the whole-set read caught before, the BT pad's HID
+# child gone, seen sooner: on the Celeron 108 to 155 ms after the swap,
+# with one of the pad's two devnodes still present. On USB/IP Windows
+# removes the persona's devnodes together, and the kill came 27 to 63 ms
+# after the swap with none of the persona's six devnodes and none of the
+# next pad's present: inside the swap, after the plugout and before the
+# next device enumerates, where a crash leaves the next import cut short,
+# the host controller's re-attach attempts for a server that is gone, and
+# an owner record of a dead program. The whole-set read never saw a
+# USB/IP device change before HMDevnodes.ps1 counted personas, so the
+# kill fell at its 5 s limit, after the swap. A second pass runs that
+# shape with USB/IP profiles, so every machine kills inside both. Each
+# pass prints how many of the pad's devnodes and of the next pad's were
+# present when the kill was sent, which shows where it landed.
+function Invoke-KillMidTeardown {
+    param([Parameter(Mandatory)][string]$From, [Parameter(Mandatory)][string]$To,
+          [Parameter(Mandatory)][string]$Next)
+    # Get-HMPresentDevnodes returns its list as one object, so each read
+    # is assigned or parenthesized before its devnodes are walked.
+    $before = Get-HMPresentDevnodes
+    $proc1 = Start-HMTestProcess -ProfileIds @($From)
+    $own = @()
+    $sw = $null
+    $stillPresent = -1
+    $newDevnodes = -1
     try {
-        if (-not (Wait-CreateBound -ProfileId $Profiles.XboxBT -Proc $proc1)) { throw "the initial create brought no HIDMaestro devnode" }
+        if (-not (Wait-CreateBound -ProfileId $From -Proc $proc1)) { throw $script:NoCreateMessage }
         Wait-Ready -Proc $proc1
+        # The swapped pad's own devnodes: what the app's create added.
+        $own = @((Get-HMPresentDevnodes) | Where-Object { $before -notcontains $_ })
+        if ($own.Count -eq 0) { throw ($From + ' brought no devnode to watch for the kill') }
 
-        # Kick off swap-back-to-360 without waiting for it.
-        $before = Get-PresentKey
-        Send-Cmd -Proc $proc1 -Cmd ('0 ' + $Profiles.Xbox360) -NoWaitAck
+        # Kick off the swap without waiting for it.
+        $devInst = [uint32]0
+        Send-Cmd -Proc $proc1 -Cmd ('0 ' + $To) -NoWaitAck
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        while ($sw.ElapsedMilliseconds -lt (HMScaleMs 5000)) {
-            if ((Get-PresentKey) -ne $before) { break }
-            Start-Sleep -Milliseconds 5
+        $limit = HMScaleMs 5000
+        $gone = $false
+        while (-not $gone -and $sw.ElapsedMilliseconds -lt $limit) {
+            foreach ($id in $own) {
+                if ([CMxz]::CM_Locate_DevNodeW([ref]$devInst, $id, [uint32]0) -ne 0) { $gone = $true; break }
+            }
+            if (-not $gone) { [System.Threading.Thread]::Yield() | Out-Null }
         }
     } finally {
         # Hard-kill while teardown still in flight.
         if (-not $proc1.HasExited) { try { $proc1.Kill() } catch {} }
+        if ($sw) {
+            $killMs = $sw.ElapsedMilliseconds
+            $stillPresent = @($own | Where-Object { (Get-DevnodeState $_) -eq 'PRESENT' }).Count
+            $newDevnodes = @((Get-HMPresentDevnodes) | Where-Object { $before -notcontains $_ -and $own -notcontains $_ }).Count
+        }
         Stop-HMProcessTree -Proc $proc1
         $proc1.WaitForExit(5000) | Out-Null
     }
+    Write-Host ('    {0} to {1}: killed {2} ms after the swap, {3} of the pad''s {4} devnodes still present, {5} of the next pad''s' -f `
+        $From, $To, $killMs, $stillPresent, $own.Count, $newDevnodes)
 
     # Wait for any in-flight kernel work to complete or stall.
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $prev = $null
     $count = 0
     while ($sw.ElapsedMilliseconds -lt (HMScaleMs 5000)) {
-        $cur = Get-PresentKey
+        $cur = Get-HMPresentKey
         if ($cur -eq $prev) {
             $count++
             if ($count -ge 2) { break }
@@ -1252,12 +1299,21 @@ function Scenario-ForceKill-MidCascade {
 
     # Fresh session should reliably clean up whatever was left in mid-
     # cascade state.
-    $proc2 = Start-HMTestProcess -ProfileIds @($Profiles.SwitchPro)
+    $proc2 = Start-HMTestProcess -ProfileIds @($Next)
     try {
         Wait-Ready -Proc $proc2
     } finally {
         Stop-HMTestProcess -Proc $proc2 | Out-Null
     }
+}
+
+function Scenario-ForceKill-MidCascade {
+    Invoke-KillMidTeardown -From $Profiles.XboxBT -To $Profiles.Xbox360 -Next $Profiles.SwitchPro
+    # The USB/IP shape: a composite with audio and HID interfaces, swapped
+    # for a single-interface persona, and a new process whose first device
+    # is that persona again, so it imports at the bus id the killed
+    # program's re-attach attempts name.
+    Invoke-KillMidTeardown -From $Profiles.UsbipComposite -To $Profiles.UsbipSingle -Next $Profiles.UsbipSingle
 }
 
 # S18: Alternating multi-target swap pattern (A->B->A->C->A). Stresses
