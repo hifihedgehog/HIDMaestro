@@ -997,6 +997,10 @@ public sealed class HMContext : IDisposable
         try
         {
             Internal.DeviceOrchestrator.PrepareUsbipController(index, profile.Inner);
+            // The GIP function's start wait ends when XInput has one slot
+            // more than before the attach, as the UMDF2 xinputhid create's.
+            bool gip = profile.Inner.ReportsOnGipInterface;
+            int slotsBefore = gip ? Internal.DeviceOrchestrator.ConnectedXInputSlots() : -1;
             // The device emulator maps the index's sections before its
             // attach, so a failed attach leaves them for the catch below.
             handle = Internal.Usbip.UsbipBackend.CreateDevice(profile.Inner, index, lease.Identity);
@@ -1008,6 +1012,9 @@ public sealed class HMContext : IDisposable
                 // A derived device's HID interface is started before the
                 // create returns, as the UMDF2 create's is.
                 if (handle.Device.Derived) Internal.DeviceOrchestrator.AwaitUsbipStart(usbId, index);
+                // The GIP function's HID child is started under xinputhid and
+                // its XInput slot taken, as the UMDF2 xinputhid create's.
+                else if (gip) Internal.DeviceOrchestrator.AwaitUsbipGipStart(usbId, index, slotsBefore);
             }
             var controller = new HMController(this, slot, lease, profile, instanceId: null, handle, lease.Identity.Key);
             try

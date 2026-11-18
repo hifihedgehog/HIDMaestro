@@ -68,6 +68,11 @@ internal static unsafe partial class Program
                 uint before = ConnectedSlots();
                 var clock = System.Diagnostics.Stopwatch.StartNew();
                 pad = ctx.CreateController(profile, null, HMBackend.Usbip);
+                long createdMs = clock.ElapsedMilliseconds;
+                uint atReturn = ConnectedSlots();
+                Check($"{id}: the create returns with an XInput slot more, as the UMDF2 xinputhid create does",
+                      System.Numerics.BitOperations.PopCount(atReturn) > System.Numerics.BitOperations.PopCount(before),
+                      $"returned in {createdMs} ms, slots {Slots(before)} before, {Slots(atReturn)} at return");
                 var raw = new List<(byte Id, byte[] Data)>();
                 pad.OutputReceived += (_, pkt) => { if (pkt.Source == HMOutputSource.HidOutput) lock (raw) raw.Add((pkt.ReportId, pkt.Data.ToArray())); };
                 ushort pid = profile.ProductId;

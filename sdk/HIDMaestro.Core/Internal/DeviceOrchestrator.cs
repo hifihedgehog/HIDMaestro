@@ -994,6 +994,49 @@ internal static partial class DeviceOrchestrator
         LogDiag($"    usbip start wait {usbInstanceId}: child {childId ?? "(none)"} {child}, start {started} in {sw.ElapsedMilliseconds}ms");
     }
 
+    /// <summary>The GIP function's start wait, the UMDF2 create's xinputhid
+    /// wait for the USB device: Windows' GIP driver takes the Hello, the
+    /// metadata and Start, and makes the device's XInput child, whose HID
+    /// child xinputhid binds and starts. Then XInput lists one slot more
+    /// than <paramref name="slotsBefore"/>, read before the attach, within
+    /// the UMDF2 create's slot budget. A failed
+    /// start throws as the UMDF2 create's does. A wait that runs out is
+    /// logged and the create goes on, as there: the controller still reaches
+    /// XInput on a consumer's next poll.</summary>
+    internal static void AwaitUsbipGipStart(string usbInstanceId, int controllerIndex, int slotsBefore)
+    {
+        var sw = Stopwatch.StartNew();
+        string? child = null, hid = null;
+        int budget = TimeoutScale.Apply(15000);
+        while (sw.ElapsedMilliseconds < budget)
+        {
+            child ??= HidChildOf(usbInstanceId);
+            if (child != null && (hid = HidChildOf(child)) != null) break;
+            if (StartFailed(usbInstanceId, controllerIndex)) throw StartError(usbInstanceId, controllerIndex, child);
+            Thread.Sleep(25);
+        }
+        var started = hid != null ? WaitForDeviceStarted(hid, child!, controllerIndex, timeoutMs: 10000) : StartWait.TimedOut;
+        if (started == StartWait.Failed) throw StartError(usbInstanceId, controllerIndex, hid);
+        long hidMs = sw.ElapsedMilliseconds;
+        int slotsAfter = slotsBefore;
+        if (started == StartWait.Done)
+        {
+            var slotClock = Stopwatch.StartNew();
+            int slotBudget = TimeoutScale.Apply(500);
+            while (slotClock.ElapsedMilliseconds < slotBudget)
+            {
+                slotsAfter = CountConnectedXInputSlots();
+                if (slotsAfter > slotsBefore) break;
+                Thread.Sleep(10);
+            }
+        }
+        LogDiag($"    usbip gip start wait {usbInstanceId}: child {child ?? "(none)"}, HID {hid ?? "(none)"} {started} at {hidMs}ms, XInput slots {slotsBefore} to {slotsAfter} in {sw.ElapsedMilliseconds}ms");
+    }
+
+    /// <summary>XInput's connected slots, for a start wait that reads them
+    /// before the attach.</summary>
+    internal static int ConnectedXInputSlots() => CountConnectedXInputSlots();
+
     /// <summary>The CachedInputReportIds value: the report IDs of a UMDF2
     /// protocol host's layouts in their order, each once, when the
     /// descriptor numbers its reports, else empty.</summary>
