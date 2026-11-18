@@ -126,8 +126,11 @@ static class XusbWgiSingleCheck
         public uint cbSize; public Guid Class; public uint Flags; public IntPtr Reserved;
     }
 
-    // The identity of the profile a cycle runs.
-    static ushort Vid = 0x045E, Pid = 0x028E;
+    // The identity of the profile a cycle runs, and the product ID WGI
+    // reports for it: the HID child's, or 0 for a pad behind the receiver
+    // on USB/IP, which WGI names by the capabilities xusb22 reports, PID 0,
+    // as PlasticBand's captures of retail wireless pads read.
+    static ushort Vid = 0x045E, Pid = 0x028E, WgiPid = 0x028E;
 
     [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
     static extern int CM_Get_Device_Interface_List_SizeW(out uint len, ref Guid g,
@@ -270,17 +273,17 @@ static class XusbWgiSingleCheck
         foreach (var g in WgiPins.Pads())
         {
             var r = WgiPins.RawOf(g);
-            if (r != null && r.HardwareVendorId == Vid && r.HardwareProductId == Pid && !skip.Contains(r.NonRoamableId)) gp++;
+            if (r != null && r.HardwareVendorId == Vid && r.HardwareProductId == WgiPid && !skip.Contains(r.NonRoamableId)) gp++;
         }
         int raw = WgiPins.Raws()
-            .Count(r => r.HardwareVendorId == Vid && r.HardwareProductId == Pid && !skip.Contains(r.NonRoamableId));
+            .Count(r => r.HardwareVendorId == Vid && r.HardwareProductId == WgiPid && !skip.Contains(r.NonRoamableId));
         return (gp, raw);
     }
 
     /// <summary>The NonRoamableId of every RawGameController of the
     /// identity WGI lists now.</summary>
     static HashSet<string> WgiIds() =>
-        WgiPins.Raws().Where(r => r.HardwareVendorId == Vid && r.HardwareProductId == Pid)
+        WgiPins.Raws().Where(r => r.HardwareVendorId == Vid && r.HardwareProductId == WgiPid)
             .Select(r => r.NonRoamableId).ToHashSet(StringComparer.Ordinal);
 
     /// <summary>UpperFilters on the main devnode, found by ControllerIndex
@@ -417,6 +420,7 @@ static class XusbWgiSingleCheck
         var prof = ctx.GetProfile("xbox-360-wired") ?? last;
         Vid = prof.VendorId;
         Pid = prof.ProductId;
+        WgiPid = Pid;
 
         Console.WriteLine();
         Console.WriteLine($"-- Dispose leaves no XInput slot behind: {prof.Id} --");
@@ -462,8 +466,10 @@ static class XusbWgiSingleCheck
     {
         Vid = prof.VendorId;
         Pid = prof.ProductId;
+        bool onUsbip = backend == HMBackend.Usbip || (backend == HMBackend.Auto && HMContext.MachineBackend == HMBackend.Usbip);
+        WgiPid = onUsbip && prof.Connection == "wireless-adapter" ? (ushort)0 : Pid;
         Console.WriteLine();
-        Console.WriteLine($"== {prof.Id}, {Vid:X4}:{Pid:X4} ==");
+        Console.WriteLine($"== {prof.Id}, {Vid:X4}:{Pid:X4}, WGI {Vid:X4}:{WgiPid:X4} ==");
         // A device of the identity already here is not the probe's, and the
         // counts below leave it out.
         var bench = WgiIds();
@@ -554,7 +560,7 @@ static class XusbWgiSingleCheck
                     // device interface path, which says WHICH two devices
                     // WGI is holding, instead of leaving that to argument.
                     foreach (var r in WgiPins.Raws())
-                        if (r.HardwareVendorId == Vid && r.HardwareProductId == Pid && !bench.Contains(r.NonRoamableId))
+                        if (r.HardwareVendorId == Vid && r.HardwareProductId == WgiPid && !bench.Contains(r.NonRoamableId))
                             Console.WriteLine($"       raw: '{r.DisplayName}' id={r.NonRoamableId}");
                 }
 
