@@ -2594,6 +2594,24 @@ function Scenario-Driver-Signing {
                  -Message 'HMDriverSigning.Check disagrees with the machine, a failed import is blamed on signing where Windows accepts the catalog, or a refused install changed the machine (see probe stdout)'
 }
 
+# S105: the wired Xbox 360 pad as a USB device on the USB/IP backend
+# (xbox-360-wired-full), which has no HID interface. Offline, the profile's
+# descriptor set is the device [MS-XUSBI] describes, a mis-authored copy is
+# refused at its mistake, and every other USB/IP persona still needs its
+# HID interface and descriptor. A USB/IP client then plays the host: the
+# descriptors, the Microsoft OS compatible ID XUSB10, the stalls
+# [MS-XUSBI] table 29 asks for, the 20-byte input report and the rumble and
+# LED reports, raw and decoded. Live, Windows' inbox xusb22 binds the
+# device, a submitted state reads back through XInputGetState,
+# XInputSetState's motor bytes arrive at the OUT endpoint, a second pad
+# takes a slot of its own, and dualsense-composite beside them reads back
+# over HID as the positive control. Exit 2 when another program that embeds
+# HIDMaestro is running.
+function Scenario-Xusb-Persona {
+    Invoke-Probe -Dir 'xusb_persona_check' -Exe 'XusbPersonaCheck.exe' `
+                 -Message 'the wired Xbox 360 pad on USB/IP no longer presents the device [MS-XUSBI] describes, does not bind xusb22, or does not round-trip state and rumble through XInput (see probe stdout)' -SkipCodes 2
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -2701,7 +2719,8 @@ $scenarios = @(
     @{ Name = 'S101_Uninstall';                  Body = ${function:Scenario-Uninstall} },
     @{ Name = 'S102_Loop_Containment';           Body = ${function:Scenario-Loop-Containment} },
     @{ Name = 'S103_Sinput_Persona';             Body = ${function:Scenario-Sinput-Persona} },
-    @{ Name = 'S104_Driver_Signing';             Body = ${function:Scenario-Driver-Signing} }
+    @{ Name = 'S104_Driver_Signing';             Body = ${function:Scenario-Driver-Signing} },
+    @{ Name = 'S105_Xusb_Persona';               Body = ${function:Scenario-Xusb-Persona} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

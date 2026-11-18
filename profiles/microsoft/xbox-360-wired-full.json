@@ -1,0 +1,87 @@
+{
+  "id": "xbox-360-wired-full",
+  "name": "Xbox 360 Controller (Wired): Full",
+  "vendor": "Microsoft",
+  "vid": "0x045E",
+  "pid": "0x028E",
+  "productString": "Controller",
+  "manufacturerString": "©Microsoft Corporation",
+  "type": "gamepad",
+  "connection": "usb",
+  "backend": "usbip",
+  "deviceModel": "none",
+  "inputReportSize": 20,
+  "notes": "A wired Xbox 360 controller as the USB device itself, 045E:028E, on the USB/IP backend. Windows binds its inbox XUSB driver, xusb22.sys, to the device, so the pad takes an XInput slot through Windows' own driver stack, with no HIDMaestro driver, on x64 and ARM64. The device has no HID interface and the profile no descriptor: interface 0 is function xusb. The descriptors are written from Microsoft's [MS-XUSBI] and GP2040-CE's headers/drivers/xinput/XInputDescriptors.h. Device: USB 2.00, class FF/FF/FF, an 8-byte control endpoint, bcdDevice 0x0114, strings 1 to 3, full speed. The strings are GP2040-CE's, ©Microsoft Corporation and Controller, and string 3 is the controller's own synthetic serial. Configuration: 49 bytes, bus-powered with remote wakeup, 500 mA, and the game controller interface of [MS-XUSBI] 3.2.1.1 alone: class FF/5D/01, the 17-byte XUSB interface descriptor (version 1.00, subtype 0x01, endpoint 0x81 with five reports of which report 0x00 is 20 bytes, endpoint 0x02 with three of which report 0x00 is 8), interrupt IN 0x81 of 32 bytes at 4 ms and interrupt OUT 0x02 of 32 bytes at 8 ms. GP2040-CE polls IN at 1 ms and gives the control endpoint 64 bytes, and [MS-XUSBI] tables 13 and 48 give the values used here. A retail pad adds a headset interface, a plug-in module interface and the console's security interface. [MS-XUSBI] 2.2.2.3 makes the first two optional, the third is for the console alone, and this profile presents none of them. The Microsoft OS descriptors are [MS-XUSBI] 2.2.4.6's: string 0xEE with vendor code 0x20 and the compatible ID XUSB10 for interface 0, which gives the device USB\\MS_COMP_XUSB10. The extended properties request stalls. Input report 0x00 is [MS-XUSBI] 3.2.5.1.1's 20 bytes: the report ID, the size 0x14, sixteen button bits (d-pad up, down, left and right, Start, Back, the left and right stick clicks, the left and right bumpers, Guide, one unused bit, A, B, X and Y), the left and right trigger bytes, and the left and right stick X and Y as signed 16-bit values with up positive, then six zero bytes. Each SubmitState sends one report, and the endpoint holds the newest for the host's next read. SubmitState reads the left stick from X and Y, the right from Rx and Ry, and the triggers from Z and Rz. A raw report is the 20 bytes whole. Output report 0x00 is rumble ([MS-XUSBI] 3.2.5.2.1), decoded on OutputDecoded as leftMotor, the big motor at byte 3, and rightMotor, the small one at byte 4. Output report 0x01 is the LED request ([MS-XUSBI] 3.2.5.2.2), which protocol.decoders.led raises as ledPattern: 0 off, 1 all blinking, 2 to 5 the first to fourth LED flashing then on, 6 to 9 the first to fourth LED on, 10 rotating, 11 blinking, 12 slow blinking, 13 alternating (GP2040-CE src/drivers/xinput/XInputDriver.cpp:37-50). The device stalls every vendor request but the compatible ID's, as GP2040-CE does with no console authentication (XInputDriver.cpp:419-423). xusb22 asks for the input capabilities, the vibration capabilities and the device ID (C1 01 with wValue 0x0100 and 0x0000, C0 01), is stalled on each, and starts the pad. [MS-XUSBI] 2.2.8.7 has a version 1.00 device stall the capabilities, and 2.2.8.5 has a device answer its ID, which this one does not. GET_REPORT(Input) answers the last report, or the pad at rest before the first, SET_REPORT(Output) is read as an output report, and GET_STATUS answers bus-powered from the configuration's attributes. Not emulated: the headset, the plug-in module port, console authentication, and the LED state, rumble level and battery status reports.",
+  "layout": {
+    "kind": "unspecified",
+    "note": "The device has no HID interface, so no descriptor declares axes or buttons for a layout to reference. The 20-byte report's shape is in extendedReport, and SubmitState resolves its sticks and triggers canonically: X and Y, Rx and Ry, Z and Rz.",
+    "source": "[MS-XUSBI] 3.2.5.1.1, Default Game Controller Input Report"
+  },
+  "extendedReport": {
+    "reportId": "0x00",
+    "size": 20,
+    "alwaysArmed": true,
+    "comment": "[MS-XUSBI] 3.2.5.1.1, tables 53 and 54, and GP2040-CE's XInputReport and XBOX_MASK values (headers/drivers/xinput/XInputDescriptors.h:16-49). Bit 11 of the button word is the binding switch of a wireless pad, which a wired pad never sets. The stick fields run from -32768 to 32767 with 0 at rest, and Y is inverted because the pad reports up as positive.",
+    "fields": [
+      { "byte": 1, "type": "uint8", "semantic": "reportSize", "initial": 20 },
+      { "byte": 2, "bits": "0-15", "type": "button-mask", "buttons": ["DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT", "Start", "Back", "LeftStick", "RightStick", "LeftBumper", "RightBumper", "Guide", "_", "A", "B", "X", "Y"] },
+      { "byte": 4, "type": "uint8-trigger", "semantic": "leftTrigger" },
+      { "byte": 5, "type": "uint8-trigger", "semantic": "rightTrigger" },
+      { "byte": 6, "type": "int16-axis", "semantic": "leftStickX", "min": -32768, "max": 32767 },
+      { "byte": 8, "type": "int16-axis", "semantic": "leftStickY", "min": -32768, "max": 32767, "invert": true },
+      { "byte": 10, "type": "int16-axis", "semantic": "rightStickX", "min": -32768, "max": 32767 },
+      { "byte": 12, "type": "int16-axis", "semantic": "rightStickY", "min": -32768, "max": 32767, "invert": true }
+    ]
+  },
+  "extendedOutputReport": {
+    "reportId": "0x00",
+    "size": 8,
+    "comment": "[MS-XUSBI] 3.2.5.2.1, table 61: report ID 0x00, size 0x08, a zero byte, the big motor, the small motor, three zero bytes. GP2040-CE reads bytes 3 and 4 the same way (src/drivers/xinput/XInputDriver.cpp:368-378), and so does Santroller's XInputRumbleReport_t (include/protocols/xinput.hpp:189-197).",
+    "fields": [
+      { "byte": 3, "type": "uint8", "semantic": "leftMotor" },
+      { "byte": 4, "type": "uint8", "semantic": "rightMotor" }
+    ]
+  },
+  "protocol": {
+    "decoders": {
+      "led": {
+        "reports": ["0x01"],
+        "minLength": 3,
+        "fields": [
+          { "semantic": "ledPattern", "type": "packed-uint", "parts": [ { "pieces": [ { "at": 16, "count": 8 } ] } ] }
+        ]
+      }
+    },
+    "getStatus": "descriptor"
+  },
+  "usbConfiguration": {
+    "configurationValue": 1,
+    "attributes": 160,
+    "maxPowerMilliamps": 500,
+    "busSpeed": "full",
+    "deviceDescriptor": "12010002ffffff085e048e02140101020301",
+    "configurationDescriptor": "09023100010100a0fa0904000002ff5d010011210001012581140000000013020800000705810320000407050203200008",
+    "interfaces": [
+      {
+        "interfaceNumber": 0,
+        "function": "xusb",
+        "altSettings": [
+          {
+            "altSetting": 0,
+            "interfaceClass": 255,
+            "interfaceSubClass": 93,
+            "interfaceProtocol": 1,
+            "endpoints": [
+              { "address": 129, "transferType": "interrupt", "maxPacketSize": 32, "interval": 4 },
+              { "address": 2, "transferType": "interrupt", "maxPacketSize": 32, "interval": 8 }
+            ]
+          }
+        ]
+      }
+    ],
+    "microsoftOs": {
+      "string": "12034d005300460054003100300030002000",
+      "extendedCompatId": "28000000000104000100000000000000000158555342313000000000000000000000000000000000"
+    }
+  }
+}

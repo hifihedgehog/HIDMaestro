@@ -71,11 +71,14 @@ internal static class ChildPaths
     // shipped, each with the parent v1.12.0 makes for it if a v1 program
     // loads its file: DeviceNodeCreator.CreateDeviceNode at b4d29d9 puts a
     // profile with no upper filter and a vendor other than Microsoft's
-    // under ROOT\HIDClass.
+    // under ROOT\HIDClass. xbox-360-wired-full is a USB/IP persona, whose
+    // device sits under the USB/IP host controller in every release and has
+    // no HIDMaestro parent, as the record's USB/IP personas have none.
     static readonly Dictionary<string, (string Path, string Enumerator)> AddedAfterRecord = new(StringComparer.Ordinal)
     {
         ["switch-pro-usb"] = ("Root", "HIDClass"),
         ["sinput"] = ("Root", "HIDClass"),
+        ["xbox-360-wired-full"] = ("Usbip", "-"),
     };
 
     internal static void Run(Action<string, bool, string> check)

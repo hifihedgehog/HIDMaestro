@@ -392,6 +392,17 @@ public sealed class ControllerProfile
     public bool RequiresUsbipBackend =>
         Backend?.Equals("usbip", StringComparison.OrdinalIgnoreCase) == true;
 
+    /// <summary>True for a USB/IP persona with no HID interface: one of its
+    /// interfaces is named <c>"xusb"</c> (<see cref="UsbInterfaceSpec.Function"/>),
+    /// and the profile's reports travel on that interface's interrupt
+    /// endpoints. Such a profile carries no <c>descriptor</c> and is
+    /// deployable without one. Every other profile needs its
+    /// descriptor.</summary>
+    [JsonIgnore]
+    internal bool ReportsOnXusbInterface =>
+        RequiresUsbipBackend && UsbConfiguration?.Interfaces is { } interfaces
+        && interfaces.Exists(x => x?.Function == "xusb");
+
     /// <summary>v2.0.0: check the profile's port blocks. They fit their
     /// reports, an output report's ports pair with the input report's, every
     /// port field compiles, and a report's own fields leave the blocks to
@@ -712,7 +723,7 @@ public sealed class ControllerProfile
         AnswerModels.Validate(this, global::HIDMaestro.Internal.DeviceModel.OwnOf(this), taken: false, new List<string>());
         if (DeviceModel != null && DeviceModel != "none")
             throw new ProfileDefectException("$.deviceModel", $"\"{DeviceModel}\" is not a value it takes. The one value is \"none\".");
-        if (!HasDescriptor)
+        if (!HasDescriptor && !ReportsOnXusbInterface)
         {
             // A USB/IP persona's HID interface presents the descriptor, so
             // the create's descriptor set would refuse it after the lease.
@@ -723,6 +734,8 @@ public sealed class ControllerProfile
             ValidateExtendedReports();
             return;
         }
+        // A persona that reports on an XUSB interface has no descriptor and
+        // meets every other check a USB/IP persona meets.
         ValidateDeviceModel(checkModelGroups);
         _ = GetOrBuildReportBuilder();
     }
