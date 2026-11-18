@@ -13,9 +13,11 @@
 // WaveBird, and see a port leave and return with a new origin. The probe also
 // measures what a host gets: the time from a port submit returning to the
 // emulator's read holding that state, and the reports the emulator receives
-// per second, at the descriptor's 8 ms poll and at an overclocked 1 ms. Their
-// checks hold medians and wide floors, since other work on the machine slows
-// the emulator's reads with no defect.
+// per second, at the descriptor's 8 ms poll and at an overclocked 1 ms. Both
+// are the host's numbers: other work on the machine slows the emulator's
+// reads with no defect. So they are printed, and the checks fail only a
+// state that never reaches the emulator and a report the poll did not ask
+// for. gc_protocol_check holds the device's own timing on its own clock.
 //
 // Requires elevation and the reference clones native\build.ps1 names. Exit
 // 0 PASS, 1 FAIL, 2 when another program that embeds HIDMaestro is running.
@@ -316,19 +318,25 @@ internal static class Program
         double max = complete ? samples!.Max() : double.NaN;
         s_measurements.Add($"{name}, {ms} ms host poll: submit to read p50 {p50:F3} ms, p95 {p95:F3} ms, max {max:F3} ms (40 samples)");
         // A submit waits at most one controller read, 1.19971 ms, and one
-        // host poll. The bound adds 2 ms for the loopback, the emulator's
-        // read loop and Windows' timer scheduling. It holds the median: a
-        // read late by a whole poll moves every sample past it, while other
-        // work on the machine delays only some, so the slowest is printed.
-        double bound = ms + 1.19971 + 2;
-        Probe.Check($"{name} at a {ms} ms poll: the median submit read within {bound:F1} ms",
-            complete && p50 <= bound, $"p50 {p50:F3}, p95 {p95:F3}, max {max:F3} ms");
+        // host poll before the device sends it, which gc_protocol_check holds
+        // on the engine's own clock. The rest is the emulator's read thread,
+        // which waits on the machine. With four busy threads on the Celeron,
+        // Dolphin's median at 1 ms rose from 1.6 ms to 113 ms and its reads
+        // fell to 13 a second. Raising the probe's process, which serves the
+        // device, to high priority changed neither, and raising the
+        // emulator's doubled its reads. So the time is printed, and the check
+        // fails only a state the emulator never reads.
+        Probe.Check($"{name} at a {ms} ms poll: all 40 submitted states reach its read",
+            complete, $"p50 {p50:F3}, p95 {p95:F3}, max {max:F3} ms");
     }
 
     /// <summary>Forty submit-to-read times in milliseconds at one host
-    /// poll, or null when the emulator missed one.</summary>
+    /// poll, or null when the emulator missed one. Each wait is a hang
+    /// bound, since a busy machine holds the emulator's reads back with no
+    /// defect.</summary>
     static List<double>? LatencySamples(Harness h, HMController controller, TimeSpan poll)
     {
+        int hangMs = Probe.HangMs();
         controller.DeviceProtocol!.HostPollInterval = poll;
         var port1 = controller.Ports[0];
         var i = Inputs[0];
@@ -339,10 +347,12 @@ internal static class Program
         {
             Probe.SpinMicros(rng.Next(2_000, 20_000));
             value = (byte)(value == 0xF0 ? 0x40 : value + 1);
-            if (h.Ask($"watch 0 {value}") != "armed") break;
+            if (h.Ask($"watch 0 {value} {hangMs}") != "armed") break;
             port1.SubmitState(Pad(i.Button, value, i.Sy, i.Cx, i.Cy, i.L, i.R));
             long t0 = Stopwatch.GetTimestamp();
-            string? seen = h.Next(3000);
+            // Past the harness's own deadline, so its answer is always read
+            // here and never taken as the answer to a later command.
+            string? seen = h.Next(hangMs + 5000);
             if (seen == null || !seen.StartsWith("seen ", StringComparison.Ordinal)) break;
             samples.Add((long.Parse(seen[5..]) - t0) * 1000.0 / Stopwatch.Frequency);
         }
