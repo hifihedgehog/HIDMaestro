@@ -152,8 +152,20 @@ internal static partial class Program
     static void VTakenOverPort(HashSet<(int Port, string BusId)> touched)
     {
         using var b = PeerProcess.Start("V1-running");
-        string pad = b.Send("create pad F1C0 -");
-        if (!Ok(pad)) { Check("V1: the running program creates a gamepad", false, pad); return; }
+        // The running program has swept and runs no USB/IP server yet. A
+        // gamepad's create does both on UMDF2. Where the gamepad itself runs
+        // on USB/IP it would start the server and take the port first, so
+        // there the program sweeps without a create.
+        if (s_machineBackend == "Usbip")
+        {
+            string sw = b.Send("sweep");
+            if (!Ok(sw)) { Check("V1: the running program sweeps", false, sw); return; }
+        }
+        else
+        {
+            string pad = b.Send("create pad F1C0 -");
+            if (!Ok(pad)) { Check("V1: the running program creates a gamepad", false, pad); return; }
+        }
 
         int port;
         string busId;
@@ -174,6 +186,9 @@ internal static partial class Program
         if (!Ok(cb)) { Check("V1: the running program creates its first composite", false, cb); return; }
         int bPort = RecordUsbipPort(b.Pid);
         touched.Add((bPort, "1-" + (int.Parse(PeerProcess.Field(cb, "transport")!) + 1)));
+        // A server takes the lowest port of the range no live program holds,
+        // so another program's server on a lower port leaves the killed
+        // program's port the lowest free one all the same.
         Check($"V1: its server takes the killed program's port {port}", bPort == port, $"port {bPort}");
         int left = Vhci.Stop("127.0.0.1", port, busId);
         Check($"V1: no re-attach attempt for {busId} at {port} outlives the takeover", left == 0, $"{left} canceled by the probe");
@@ -449,13 +464,24 @@ internal static partial class Program
                 Check($"V4: its composite {portA}/{busA} is attached", x > 0);
                 if (x <= 0) return false;
 
+                // The other program starts, and runs a gamepad, before the
+                // drop: its first create on USB/IP, where the gamepad runs
+                // there, sets up its server, so the composite it creates
+                // after the drop plugs in at once, ahead of the host
+                // controller's re-attach 30 s after the drop. The gamepad
+                // takes a vhci port while the first program's composite
+                // still holds x.
+                var bWarm = Start("V4-other");
+                string pb = bWarm.Send("create pad F1C4 -");
+                if (!Ok(pb)) { Check("V4: another program creates a gamepad", false, pb); return false; }
+
                 int reset = Tcp.ResetServerEnd(portA, a.Pid);
                 Check("V4: the probe resets the composite's connection", reset == 1, $"{reset} connection(s) reset");
                 Check($"V4: the host controller drops it from vhci port {x}",
                       WaitFor(() => !Vhci.Imported().Any(r => r.Port == portA && r.BusId == busA), 10_000));
                 dropped4.Start();
 
-                var b = Start("V4-other");
+                var b = bWarm;
                 string cb = b.Send("create composite -");
                 if (!Ok(cb)) { Check("V4: another program creates a composite", false, cb); return false; }
                 busB = "1-" + (int.Parse(PeerProcess.Field(cb, "transport")!) + 1);
@@ -545,12 +571,17 @@ internal static partial class Program
             // Bus ids 1-11 to 1-14: past the 1-1 to 1-8 a sweep tries with no
             // record, and clear of part 2's v1.12.0 program, which holds
             // indices 0 and 9 while this part runs in its wait.
+            // A running v1.12.0 program with a controller present moves a
+            // create to 64 plus its slot, or the lowest free index from 64
+            // (HMContext.CreateControllerAt), and part 2's v1.12.0 program
+            // runs beside this part. Either index is past 1-8.
             for (int i = 10; i <= 13; i++)
             {
                 string c = k.Send($"createat {i} composite -");
-                if (!Ok(c) || PeerProcess.Field(c, "transport") != i.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                bool placed = int.TryParse(PeerProcess.Field(c, "transport"), out int t) && (t == i || t >= 64);
+                if (!Ok(c) || !placed)
                 {
-                    Check($"V6: the program to be killed creates a composite at index {i}", false, c);
+                    Check($"V6: the program to be killed creates a composite at index {i}, or from 64 beside a v1.12.0 program", false, c);
                     return;
                 }
                 buses.Add("1-" + (int.Parse(PeerProcess.Field(c, "transport")!) + 1));

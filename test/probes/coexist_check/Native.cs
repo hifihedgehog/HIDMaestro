@@ -410,6 +410,27 @@ internal static class Native
     /// <summary>The owner records with a controller entry for
     /// <paramref name="token"/>, each with the process id it names, or null
     /// when it names none.</summary>
+    /// <summary>Whether the owner record of process <paramref name="pid"/>
+    /// names <paramref name="usbInstanceId"/> as one of its controllers'
+    /// USB devices (the entry's UsbInstanceId).</summary>
+    internal static bool RecordNamesUsb(int pid, string usbInstanceId)
+    {
+        using var k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestroOwners");
+        if (k == null) return false;
+        foreach (var id in k.GetSubKeyNames())
+        {
+            using var r = k.OpenSubKey(id);
+            if (r?.GetValue("Pid") is not int p || p != pid) continue;
+            using var cs = r.OpenSubKey("Controllers");
+            foreach (var token in cs?.GetSubKeyNames() ?? Array.Empty<string>())
+            {
+                using var c = cs!.OpenSubKey(token);
+                if (string.Equals(c?.GetValue("UsbInstanceId") as string, usbInstanceId, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+        }
+        return false;
+    }
+
     internal static List<(string OwnerId, int? Pid)> RecordsNaming(string token)
     {
         var list = new List<(string, int?)>();

@@ -64,6 +64,18 @@
 //        program runs a composite on USB/IP: its input section has no
 //        configuration, record or acknowledgement section, and its import
 //        alone explains it. A cleanup removes the table.
+//
+//    Where the controllers run on USB/IP a device lives on its program's
+//    connection, and the host controller unplugs it when the program is
+//    killed or exits. W2 then checks that the killed program's device is
+//    gone before any sweep, so no census reads it. W3 and W4 check that the
+//    held sweep finds no group of the killed program's to remove, and that
+//    the program started again has its device started and named in its
+//    owner record by its USB instance. W9 checks that the device the
+//    program's own handler made leaves with the program and that its record
+//    named it, and the next sweep removes that record. W8 holds a create at
+//    the UMDF2 create's input mapping, a point the USB/IP create does not
+//    pass, so it prints its own condition there.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -129,6 +141,7 @@ internal static partial class Program
     static void SectionWUnrecorded()
     {
         string inst, t;
+        bool usbip;
         string? ownerId;
         using (var k = PeerProcess.Start("W2-killed"))
         {
@@ -136,8 +149,15 @@ internal static partial class Program
             if (!Ok(c)) { Check("W2: the program creates", false, c); return; }
             inst = PeerProcess.Field(c, "instance")!;
             t = PeerProcess.Field(c, "transport")!;
+            usbip = PeerProcess.Field(c, "backend") == "Usbip";
             ownerId = Native.OwnerRecords().Where(r => r.Value == k.Pid).Select(r => r.Key).FirstOrDefault();
             k.Kill();
+        }
+        if (usbip)
+        {
+            Check("W2: on USB/IP the killed program's device leaves with its connection, so no device of a dead program is left for a census",
+                  WaitFor(() => !Native.IsPresent(inst), 10_000), inst);
+            return;
         }
         if (ownerId == null) { Check("W2: the program has an owner record", false); return; }
         Native.DeleteRecord(ownerId);
@@ -169,19 +189,30 @@ internal static partial class Program
     /// <summary>W3 with an identity key, W4 without.</summary>
     static void SectionWReclaim(string label, ushort pid, string key)
     {
+        bool usbip;
+        string killedInst;
         using (var k1 = PeerProcess.Start($"{label}-killed"))
         {
             string c1 = k1.Send($"create pad {pid:X4} {key}");
             if (!Ok(c1)) { Check($"{label}: the program creates", false, c1); return; }
+            usbip = PeerProcess.Field(c1, "backend") == "Usbip";
+            killedInst = PeerProcess.Field(c1, "instance")!;
             k1.Kill();
         }
+        if (usbip)
+            Check($"{label}: on USB/IP the killed program's device leaves with its connection",
+                  WaitFor(() => !Native.IsPresent(killedInst), 10_000), killedInst);
         using var s = PeerProcess.Start($"{label}-sweeper");
         string ph = s.Send("pausereclaim");
         if (!Ok(ph)) { Check($"{label}: the sweep can be held", false, ph); return; }
         s.Post("sweep");
         string paused = s.Receive("sweep, held");
-        Check($"{label}: another program's sweep is held after its census, one group to remove",
-              paused.StartsWith("OK paused", StringComparison.Ordinal) && PeerProcess.Field(paused, "targets") == "1", paused);
+        if (usbip)
+            Check($"{label}: another program's sweep is held after its census, with nothing of the killed program's to remove",
+                  paused.StartsWith("OK paused", StringComparison.Ordinal) && PeerProcess.Field(paused, "targets") == "0", paused);
+        else
+            Check($"{label}: another program's sweep is held after its census, one group to remove",
+                  paused.StartsWith("OK paused", StringComparison.Ordinal) && PeerProcess.Field(paused, "targets") == "1", paused);
 
         using var k2 = PeerProcess.Start($"{label}-again");
         k2.Post($"create pad {pid:X4} {key}");
@@ -197,6 +228,14 @@ internal static partial class Program
         if (!Ok(c2)) return;
         string inst = PeerProcess.Field(c2, "instance")!, t = PeerProcess.Field(c2, "transport")!;
         Check($"{label}: its device is present and started once the sweep is done", WaitFor(() => Native.IsStarted(inst), 10_000), inst);
+        if (usbip)
+        {
+            // The census lists the UMDF2 driver's devices and their
+            // configurations. A USB/IP device has neither: its owner record
+            // names it by its USB instance.
+            Check($"{label}: its owner record names its USB device", Native.RecordNamesUsb(k2.Pid, inst), inst);
+            return;
+        }
         Check($"{label}: its configuration Controller{t} is there", ConfigExists(t));
         string token = inst.Substring(inst.LastIndexOf('\\') + 1);
         string? entry = Y.CensusEntry(k2.Send("census"), token);
@@ -300,6 +339,11 @@ internal static partial class Program
     /// <summary>W8.</summary>
     static void SectionWExitMidCreate()
     {
+        if (s_machineBackend == "Usbip")
+        {
+            Console.WriteLine("  [SKIP] W8: the create runs on USB/IP, which maps its input section without passing the UMDF2 create's hold point, and its device leaves with the program's connection, which D and K check");
+            return;
+        }
         using var p = PeerProcess.Start("W8");
         string r = p.Send("quitmidcreate pad F20C coexist-w8");
         if (!Ok(r)) { Check("W8: the program exits with a create in flight", false, r); return; }
@@ -320,10 +364,26 @@ internal static partial class Program
         string c = p.Send("create pad F20D -");
         if (!Ok(c)) { Check("W9: the program creates", false, c); return; }
         string first = PeerProcess.Field(c, "instance")!;
+        bool usbip = PeerProcess.Field(c, "backend") == "Usbip";
         string r = p.Send("quitthencreate pad F20E coexist-w9");
         if (!Ok(r)) { Check("W9: the program exits", false, r); return; }
         Check("W9: the program ends", p.WaitExit(120_000));
-        Check("W9: the SDK's exit handler removed the controller the program left", !Native.IsPresent(first), first);
+        Check("W9: the SDK's exit handler removed the controller the program left", WaitFor(() => !Native.IsPresent(first), usbip ? 10_000 : 0), first);
+        if (usbip)
+        {
+            // The handler's create runs on USB/IP: its device lives on the
+            // program's connection and goes when the program ends. Its record
+            // named it, and the next sweep removes that dead record.
+            Check("W9: on USB/IP the device the program's own handler made leaves with the program",
+                  WaitFor(() => Native.HidPaths(0xBEEF, 0xF20E).Count == 0, 10_000));
+            var namedU = Native.RecordsNaming(PeerProcess.Field(r, "token")!);
+            Check("W9: the record that names it carries the program's process id", namedU.Any(n => n.Pid == p.Pid),
+                  string.Join(", ", namedU.Select(n => $"{n.OwnerId} pid {n.Pid?.ToString() ?? "none"}")));
+            using var su = PeerProcess.Start("W9-sweeper");
+            su.Send("sweep");
+            Check("W9: and the next sweep removes that record", WaitFor(() => Native.RecordsNaming(PeerProcess.Field(r, "token")!).Count == 0, 15_000));
+            return;
+        }
         string inst = $@"ROOT\HIDClass\{PeerProcess.Field(r, "token")}";
         Check("W9: the create in the program's own handler, after the SDK's, made its device", Native.IsPresent(inst), inst);
         var named = Native.RecordsNaming(PeerProcess.Field(r, "token")!);
