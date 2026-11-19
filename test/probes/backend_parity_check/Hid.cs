@@ -22,8 +22,13 @@ internal sealed record Collection(
 
     /// <summary>Every field the HID class parses from the descriptor, the
     /// path and the strings aside.</summary>
-    public string ParsedKey =>
-        $"{Vid:X4}:{Pid:X4}:{Version:X4} caps {Convert.ToHexString(Caps)} ib {Convert.ToHexString(InputButtons)} iv {Convert.ToHexString(InputValues)} " +
+    public string ParsedKey => $"{Vid:X4}:{Pid:X4}:{Version:X4} {FieldsKey}";
+
+    /// <summary>The fields the HID class parses from the descriptor, without
+    /// the attributes, which the parity part checks against what Windows
+    /// gives each backend's device.</summary>
+    public string FieldsKey =>
+        $"caps {Convert.ToHexString(Caps)} ib {Convert.ToHexString(InputButtons)} iv {Convert.ToHexString(InputValues)} " +
         $"ob {Convert.ToHexString(OutputButtons)} ov {Convert.ToHexString(OutputValues)} fb {Convert.ToHexString(FeatureButtons)} fv {Convert.ToHexString(FeatureValues)}";
 }
 

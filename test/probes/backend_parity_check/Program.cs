@@ -159,22 +159,19 @@ internal static partial class Program
 
     sealed record Snapshot(HMBackend Backend, string? Parent, bool OpenAtReturn, long CreateMs, long ReadyMs,
                            List<Collection> Collections, List<string> Errors, (bool Present, bool Started, uint Problem) State, string? Failure,
-                           string Output = "", (ushort Vid, ushort Pid) Attributes = default);
+                           string Output = "", (ushort Vid, ushort Pid, ushort Version) Attributes = default);
 
-    /// <summary>The VID and PID Windows gives the controller's HID
-    /// collections, as it gives them a real device of that kind: on the
-    /// UMDF2 driver the PID the driver reports (the profile's resolved
-    /// driverPid, else its PID, PresentationPlan.Of). On USB/IP a device
-    /// whose presented form is a GIP device has its HID collection on the
-    /// child Windows' GIP driver makes, which carries that driver's own VID
-    /// and PID (the GIP model's hidChild) whatever the device announces.
-    /// Every other USB/IP device presents its own VID and PID.</summary>
-    static (ushort Vid, ushort Pid) AttributesOf(HMController c, HMProfile p)
-    {
-        if (c.Backend == HMBackend.Usbip)
-            return c.Presented.Inner.ReportsOnGipInterface ? HIDMaestro.Internal.Usbip.GipFunction.HidChild : (p.VendorId, p.ProductId);
-        return (p.VendorId, p.Inner.ResolvedDriverPid is { } d ? Convert.ToUInt16(d, 16) : p.ProductId);
-    }
+    /// <summary>The VID, PID and version Windows gives the controller's HID
+    /// collections, as it gives them a real device of that kind. On USB/IP a
+    /// device whose presented form is a GIP device has its HID collection on
+    /// the child Windows' GIP driver makes, which carries that driver's own
+    /// VID, PID and version (the GIP model's hidChild) whatever the device
+    /// announces. Every other device, on either backend, presents the
+    /// profile's own VID, PID and version.</summary>
+    static (ushort Vid, ushort Pid, ushort Version) AttributesOf(HMController c, HMProfile p) =>
+        c.Backend == HMBackend.Usbip && c.Presented.Inner.ReportsOnGipInterface
+            ? HIDMaestro.Internal.Usbip.GipFunction.HidChild
+            : (p.VendorId, p.ProductId, p.Inner.VersionNumber ?? 0x0100);
 
     static Snapshot Take(HMContext ctx, HMProfile p, HMBackend backend, string key)
     {
@@ -278,6 +275,7 @@ internal static partial class Program
         using var log = output != null ? new StreamWriter(output, append: false) : null;
         int matched = 0, umdf2Up = 0, usbipUp = 0, openAtReturn = 0, accepted = 0;
         var bad = new List<string>();
+        var attributesOff = new HashSet<string>();
         foreach (var p in profiles)
         {
             string key = "parity:" + p.Id;
@@ -312,15 +310,19 @@ internal static partial class Program
             foreach (var x in new[] { u, s })
                 if (x != null && x.Failure == null)
                     foreach (var c in x.Collections)
-                        if (c.Vid != x.Attributes.Vid || c.Pid != x.Attributes.Pid || c.Version != (p.Inner.VersionNumber ?? 0x0100))
-                            problems.Add($"{x.Backend} attributes {c.Vid:X4}:{c.Pid:X4}:{c.Version:X4}, Windows gives this kind of device {x.Attributes.Vid:X4}:{x.Attributes.Pid:X4}:{p.Inner.VersionNumber ?? 0x0100:X4}");
+                        if (c.Vid != x.Attributes.Vid || c.Pid != x.Attributes.Pid || c.Version != x.Attributes.Version)
+                        {
+                            problems.Add($"{x.Backend} attributes {c.Vid:X4}:{c.Pid:X4}:{c.Version:X4}, Windows gives this kind of device {x.Attributes.Vid:X4}:{x.Attributes.Pid:X4}:{x.Attributes.Version:X4}");
+                            attributesOff.Add(p.Id);
+                        }
             if (!accepts && u != null && s != null && Code10(u) && Code10(s)) matched++;
             else if (u != null && s != null && u.Failure == null && s.Failure == null)
             {
-                var uk = u.Collections.Select(c => c.ParsedKey).ToList();
-                var sk = s.Collections.Select(c => c.ParsedKey).ToList();
+                var uk = u.Collections.Select(c => c.FieldsKey).ToList();
+                var sk = s.Collections.Select(c => c.FieldsKey).ToList();
                 if (!uk.SequenceEqual(sk))
-                    problems.Add($"parsed fields differ: UMDF2 {uk.Count} collection(s), USB/IP {sk.Count}");
+                    problems.Add($"parsed fields differ: UMDF2 {uk.Count} collection(s), USB/IP {sk.Count}" +
+                                 (uk.Count > 0 && sk.Count > 0 ? $", UMDF2 {uk[0]} against USB/IP {sk[0]}" : ""));
                 else if (!u.Collections.Select(c => c.Product).SequenceEqual(s.Collections.Select(c => c.Product)))
                     problems.Add($"product string {u.Collections[0].Product} against {s.Collections[0].Product}");
                 else if (u.Output != s.Output)
@@ -350,6 +352,8 @@ internal static partial class Program
                   matched == profiles.Count, $"{matched} of {profiles.Count}");
         if (usbipHere)
             Check("on USB/IP the HID interface opens the moment the create returns, for every descriptor Windows' parser accepts", openAtReturn == accepted, $"{openAtReturn} of {accepted}");
+        Check("every HID collection carries the attributes Windows gives that kind of device, on each backend here",
+              attributesOff.Count == 0, string.Join(", ", attributesOff));
         if (bad.Count > 0) Note("differ or failed: " + string.Join(", ", bad));
     }
 

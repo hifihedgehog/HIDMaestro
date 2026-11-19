@@ -86,16 +86,17 @@ internal static class GipFunction
     static bool HasIdentity(string name) =>
         Root.TryGetProperty("identities", out var ids) && ids.ValueKind == JsonValueKind.Object && ids.TryGetProperty(name, out _);
 
-    /// <summary>The VID and PID of the HID child Windows' GIP driver makes
-    /// for a GIP device, from the model's <c>hidChild</c>: the device under
-    /// whose XInput child xinputhid sits.</summary>
-    internal static (ushort Vid, ushort Pid) HidChild
+    /// <summary>The VID, PID and version of the HID child Windows' GIP
+    /// driver makes for a GIP device, from the model's <c>hidChild</c>: the
+    /// device under whose XInput child xinputhid sits.</summary>
+    internal static (ushort Vid, ushort Pid, ushort Version) HidChild
     {
         get
         {
             var c = Root.GetProperty("hidChild");
             return (ModelRegistry.ParseId(c.GetProperty("vid").GetString()!, "$.gipFunction.hidChild.vid"),
-                    ModelRegistry.ParseId(c.GetProperty("pid").GetString()!, "$.gipFunction.hidChild.pid"));
+                    ModelRegistry.ParseId(c.GetProperty("pid").GetString()!, "$.gipFunction.hidChild.pid"),
+                    ModelRegistry.ParseId(c.GetProperty("version").GetString()!, "$.gipFunction.hidChild.version"));
         }
     }
 
