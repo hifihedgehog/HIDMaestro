@@ -3,7 +3,10 @@
 // (foundation-sunshine #1056).
 //
 // With no arguments it is the battery's check: the XUSB Xbox 360 pad as the
-// same-window positive control, a DualSense that must stay a
+// same-window positive control (on USB/IP, where Windows' own xusb22 drives
+// it and WGI gives a process over SSH no reading of it, its listing and an
+// XInput read of the feed, with the pads after it as WGI's control), a
+// DualSense that must stay a
 // RawGameController with no GameInput key, a DualShock 4 v1 that must read
 // correctly through the mapping Windows ships for it, a game pad built in
 // code that holds the table while it lives and reads correctly through it,
@@ -71,6 +74,8 @@ internal static partial class Program
         public bool[] Buttons = Array.Empty<bool>();
         public GameControllerSwitchPosition[] Switches = Array.Empty<GameControllerSwitchPosition>();
         public GamepadReading? Pad;
+        // 0 until WGI has given this process a reading of the pad.
+        public ulong Timestamp;
     }
 
     static Snapshot Read(RawGameController raw, Gamepad? pad)
@@ -81,7 +86,7 @@ internal static partial class Program
             Buttons = new bool[raw.ButtonCount],
             Switches = new GameControllerSwitchPosition[raw.SwitchCount],
         };
-        raw.GetCurrentReading(s.Buttons, s.Switches, s.Axes);
+        s.Timestamp = raw.GetCurrentReading(s.Buttons, s.Switches, s.Axes);
         if (pad != null) s.Pad = pad.GetCurrentReading();
         return s;
     }
@@ -212,6 +217,13 @@ internal static partial class Program
         public bool KeyWhileLive;
         public List<string> Problems = new();
         public string Text = "";
+        public HMBackend Backend;
+        // WGI gave this process at least one reading of the pad.
+        public bool Delivered;
+        // When it gave none: whether XInput read the left stick the probe
+        // moved full right, and what it read.
+        public bool XInputMoved;
+        public string XInputSeen = "";
         public override string ToString() => Text;
     }
 
@@ -238,6 +250,7 @@ internal static partial class Program
         HMController pad;
         try { pad = ctx.CreateController(profile); }
         catch (Exception ex) { v.Text = $"CREATE FAILED: {ex.GetType().Name}: {ex.Message}"; return v; }
+        v.Backend = pad.Backend;
         bool stop = false;
         var neutral = new HMGamepadState { Axes = HMGamepadStateHelpers.StandardAxes(profile) };
         var state = neutral;
@@ -268,6 +281,7 @@ internal static partial class Program
 
             var problems = v.Problems;
             var rest = Read(raw, gp);
+            if (rest.Timestamp != 0) v.Delivered = true;
             if (rest.Pad is { } r0)
             {
                 void RestCheck(string n, double v, double lim) { if (Math.Abs(v) > lim) problems.Add($"rest {n}={F(v)}"); }
@@ -302,6 +316,7 @@ internal static partial class Program
                 while (true)
                 {
                     now = Read(raw, gp);
+                    if (now.Timestamp != 0) v.Delivered = true;
                     if (Moved(now) && now.Pad is { } p0 && rest.Pad is { } r1 && expected(p0, r1)) break;
                     if (sw.ElapsedMilliseconds >= 2000) break;
                     Thread.Sleep(10);
@@ -351,6 +366,27 @@ internal static partial class Program
                  (a, b) => a.Buttons == GamepadButtons.DPadUp, "DPadUp");
             Stim("Hat East", new HMGamepadState { Axes = HMGamepadStateHelpers.StandardAxes(profile), Hat = HMHat.East },
                  (a, b) => a.Buttons == GamepadButtons.DPadRight, "DPadRight");
+
+            if (!v.Delivered)
+            {
+                // WGI gave this process no reading of the pad. Whether the
+                // feed reached it is read through XInput: the left stick
+                // full right on a connected slot within 2 s.
+                lock (gate) state = Ax(lx: 1f);
+                var xs = System.Diagnostics.Stopwatch.StartNew();
+                while (!v.XInputMoved && xs.ElapsedMilliseconds < 2000)
+                {
+                    for (uint i = 0; i < 4 && !v.XInputMoved; i++)
+                        if (XInputGetState(i, out var st) == 0 && st.LX > 30000)
+                        {
+                            v.XInputMoved = true;
+                            v.XInputSeen = $"slot {i} LX {st.LX}, packet {st.Packet}";
+                        }
+                    if (!v.XInputMoved) Thread.Sleep(10);
+                }
+                if (!v.XInputMoved) v.XInputSeen = XInputText();
+                lock (gate) state = neutral;
+            }
 
             v.Judged = judged;
             v.Text = problems.Count == 0
@@ -429,8 +465,21 @@ internal static partial class Program
         Console.WriteLine("\n-- xbox-360-wired, the positive control --");
         var x = SweepOne(ctx, ctx.GetProfile("xbox-360-wired")!, "sdk");
         Console.WriteLine($"  {x}");
-        Check("WGI reads the XUSB pad as a Gamepad, correct at rest and on every control",
-              x.IsGamepad && x.Problems.Count == 0 && x.Judged >= 16, $"{x.Judged} judged");
+        if (x.Backend == HMBackend.Usbip && x.IsGamepad && !x.Delivered)
+        {
+            // On USB/IP Windows' own xusb22 drives the pad. Over SSH on the
+            // ARM64 Surface, WGI gave the probe's process no reading of it,
+            // timestamp 0 throughout, while XInput read the feed
+            // (2026-11-19). The pads below, read by WGI in this process, are
+            // then the same-window control.
+            Check("WGI lists the XUSB pad as a Gamepad", x.IsGamepad);
+            Check("and XInput reads the feed the probe sends it", x.XInputMoved, x.XInputSeen);
+            Console.WriteLine("  [SKIP] WGI's readings of the XUSB pad: WGI gave this process no reading of the pad xusb22 drives " +
+                              "(timestamp 0) while XInput read the feed");
+        }
+        else
+            Check("WGI reads the XUSB pad as a Gamepad, correct at rest and on every control",
+                  x.IsGamepad && x.Problems.Count == 0 && x.Judged >= 16, $"{x.Judged} judged");
 
         Console.WriteLine("\n-- dualsense: no mapping, as on a real pad --");
         var ds = SweepOne(ctx, ctx.GetProfile("dualsense")!, "sdk");
