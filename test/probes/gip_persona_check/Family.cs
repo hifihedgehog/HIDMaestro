@@ -247,6 +247,8 @@ internal static partial class Program
         Check("the model's preferred type is Windows.Xbox.Input.Gamepad, as every real pad's metadata names it",
               GipFunction.Model["preferredTypes"] is JsonArray pt && pt.Count == 1 && (string?)pt[0] == "Windows.Xbox.Input.Gamepad");
         Check("the model names the HID child Windows' GIP driver makes, 045E:02FF version 0x0000", GipFunction.HidChild == (0x045E, 0x02FF, 0x0000), $"{GipFunction.HidChild}");
+        Check("and the product string Windows' GIP driver gives it, Controller (Xbox One For Windows)",
+              GipFunction.HidChildProduct == "Controller (Xbox One For Windows)", GipFunction.HidChildProduct);
         // Every thread builds the forms of its own copies of the profiles at
         // once, the first reads of the model among them.
         var copies = Enumerable.Range(0, 16).Select(_ => Family.Select(f => catalog.First(x => x.Id == f.Id).Clone()).ToList()).ToList();

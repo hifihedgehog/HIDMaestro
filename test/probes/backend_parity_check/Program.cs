@@ -159,7 +159,7 @@ internal static partial class Program
 
     sealed record Snapshot(HMBackend Backend, string? Parent, bool OpenAtReturn, long CreateMs, long ReadyMs,
                            List<Collection> Collections, List<string> Errors, (bool Present, bool Started, uint Problem) State, string? Failure,
-                           string Output = "", (ushort Vid, ushort Pid, ushort Version) Attributes = default);
+                           string Output = "", (ushort Vid, ushort Pid, ushort Version) Attributes = default, string? Product = null);
 
     /// <summary>The VID, PID and version Windows gives the controller's HID
     /// collections, as it gives them a real device of that kind. On USB/IP a
@@ -172,6 +172,14 @@ internal static partial class Program
         c.Backend == HMBackend.Usbip && c.Presented.Inner.ReportsOnGipInterface
             ? HIDMaestro.Internal.Usbip.GipFunction.HidChild
             : (p.VendorId, p.ProductId, p.Inner.VersionNumber ?? 0x0100);
+
+    /// <summary>The product string Windows gives the HID collection of a
+    /// device whose presented form is a GIP device on USB/IP: the GIP
+    /// driver's own (the GIP model's hidChild), whatever the device serves.
+    /// Null for every other device, whose product string is the one the
+    /// two backends compare.</summary>
+    static string? ProductOf(HMController c) =>
+        c.Backend == HMBackend.Usbip && c.Presented.Inner.ReportsOnGipInterface ? HIDMaestro.Internal.Usbip.GipFunction.HidChildProduct : null;
 
     static Snapshot Take(HMContext ctx, HMProfile p, HMBackend backend, string key)
     {
@@ -198,7 +206,7 @@ internal static partial class Program
                 if (collections.Count > 0 && errors.Count == 0) { readyMs = sw.ElapsedMilliseconds; break; }
             }
             return new(c.Backend, parent, openAtReturn, createMs, readyMs, collections, errors, Hid.Status(parent), null,
-                       OutputOf(c, p, collections), AttributesOf(c, p));
+                       OutputOf(c, p, collections), AttributesOf(c, p), ProductOf(c));
         }
         finally { c.Dispose(); }
     }
@@ -315,6 +323,11 @@ internal static partial class Program
                             problems.Add($"{x.Backend} attributes {c.Vid:X4}:{c.Pid:X4}:{c.Version:X4}, Windows gives this kind of device {x.Attributes.Vid:X4}:{x.Attributes.Pid:X4}:{x.Attributes.Version:X4}");
                             attributesOff.Add(p.Id);
                         }
+                        else if (x.Product != null && c.Product != x.Product)
+                        {
+                            problems.Add($"{x.Backend} product string {c.Product}, Windows gives this kind of device {x.Product}");
+                            attributesOff.Add(p.Id);
+                        }
             if (!accepts && u != null && s != null && Code10(u) && Code10(s)) matched++;
             else if (u != null && s != null && u.Failure == null && s.Failure == null)
             {
@@ -323,7 +336,9 @@ internal static partial class Program
                 if (!uk.SequenceEqual(sk))
                     problems.Add($"parsed fields differ: UMDF2 {uk.Count} collection(s), USB/IP {sk.Count}" +
                                  (uk.Count > 0 && sk.Count > 0 ? $", UMDF2 {uk[0]} against USB/IP {sk[0]}" : ""));
-                else if (!u.Collections.Select(c => c.Product).SequenceEqual(s.Collections.Select(c => c.Product)))
+                // A GIP form's product string is the GIP driver's, checked
+                // above against the model, so only the others compare.
+                else if (s.Product == null && !u.Collections.Select(c => c.Product).SequenceEqual(s.Collections.Select(c => c.Product)))
                     problems.Add($"product string {u.Collections[0].Product} against {s.Collections[0].Product}");
                 else if (u.Output != s.Output)
                     problems.Add($"output packet UMDF2 '{u.Output}' against USB/IP '{s.Output}'");
@@ -352,7 +367,7 @@ internal static partial class Program
                   matched == profiles.Count, $"{matched} of {profiles.Count}");
         if (usbipHere)
             Check("on USB/IP the HID interface opens the moment the create returns, for every descriptor Windows' parser accepts", openAtReturn == accepted, $"{openAtReturn} of {accepted}");
-        Check("every HID collection carries the attributes Windows gives that kind of device, on each backend here",
+        Check("every HID collection carries the attributes Windows gives that kind of device, and a GIP form's the product string Windows' GIP driver gives, on each backend here",
               attributesOff.Count == 0, string.Join(", ", attributesOff));
         if (bad.Count > 0) Note("differ or failed: " + string.Join(", ", bad));
     }

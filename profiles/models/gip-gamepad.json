@@ -24,10 +24,11 @@
       "Windows.Xbox.Input.Gamepad"
     ],
     "hidChild": {
-      "comment": "The HID device Windows' GIP driver makes under a GIP gamepad, whatever the Hello's PID: xboxgip names the device's XInput child USB\\VID_045E&PID_02FF&IG_00, and its HID child HID\\VID_045E&PID_02FF&IG_00 is the one xinputhid.inf binds as \"XINPUT compatible HID device\" (xinputhid.inf line 86, under the comment \"From xboxgip default appears with an GIP software PID\", line 78). A real wired 1914 shows the same chain (DsHidMini docs/XINPUTHID.md 150-154), and SDL names 045E:02FF \"Microsoft Xbox One Controller with XBOXGIP driver on Windows\" (controller_list.h 341). Its HID attributes carry version 0x0000, as HidD_GetAttributes read it on Windows 10 19044 x64 and Windows 11 28000 ARM64 for all twelve identities (backend_parity_check, 2026-11-18).",
+      "comment": "The HID device Windows' GIP driver makes under a GIP gamepad, whatever the Hello's PID: xboxgip names the device's XInput child USB\\VID_045E&PID_02FF&IG_00, and its HID child HID\\VID_045E&PID_02FF&IG_00 is the one xinputhid.inf binds as \"XINPUT compatible HID device\" (xinputhid.inf line 86, under the comment \"From xboxgip default appears with an GIP software PID\", line 78). A real wired 1914 shows the same chain (DsHidMini docs/XINPUTHID.md 150-154), and SDL names 045E:02FF \"Microsoft Xbox One Controller with XBOXGIP driver on Windows\" (controller_list.h 341). Its HID attributes carry version 0x0000, as HidD_GetAttributes read it on Windows 10 19044 x64 and Windows 11 28000 ARM64 for all twelve identities, and its product string is \"Controller (Xbox One For Windows)\", read by HidD_GetProductString on Windows 10 19044 x64 for all twelve whatever product string the device serves (backend_parity_check, 2026-11-18).",
       "vid": "0x045E",
       "pid": "0x02FF",
-      "version": "0x0000"
+      "version": "0x0000",
+      "product": "Controller (Xbox One For Windows)"
     },
     "messages": [
       {

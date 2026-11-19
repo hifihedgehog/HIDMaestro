@@ -100,6 +100,10 @@ internal static class GipFunction
         }
     }
 
+    /// <summary>The product string Windows' GIP driver gives the HID child
+    /// it makes, from the model's <c>hidChild</c>.</summary>
+    internal static string HidChildProduct => Root.GetProperty("hidChild").GetProperty("product").GetString()!;
+
     /// <summary>A model file's <c>gipFunction</c>, read through the
     /// catalog's strict model format first, so a key the format lacks is
     /// refused as in any model.</summary>
