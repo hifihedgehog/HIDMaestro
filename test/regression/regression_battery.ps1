@@ -2939,6 +2939,34 @@ function Scenario-Switch-Pro-Sdl3 {
                  -Message 'SDL3''s HIDAPI_DriverSwitch no longer opens the virtual Switch Pro, completes its init, or reads its sticks, buttons and motion (see probe stdout)'
 }
 
+# S108: a Bluetooth identity's USB form (usbForm). Offline the load rule,
+# the presented profile and its USB device, FormOn, the raw-frame rule and
+# the decoded output names. Live, on the backend the run resolves to, the
+# HID interface each of the five presents, with dualsense-composite as the
+# positive control. Then SDL 3.4.18's release DLL for this architecture
+# opens each Sony and Nintendo Bluetooth identity, the USB forms and the
+# Stadia and Luna pads, and on USB/IP the same Bluetooth profiles without
+# usbForm as the control. The release is the official SDL3-3.4.18 zip
+# beside the tree, SDL3-release-3.4.18 on x64 and SDL3-release-3.4.18-arm64
+# on ARM64.
+function Scenario-Bt-Usb-Form {
+    $failed = @()
+    try {
+        Invoke-Probe -Dir 'bt_usb_form_check' -Exe 'BtUsbFormCheck.exe' -Arguments 'offline' -Tag 'offline' `
+                     -Message 'a Bluetooth identity no longer resolves to its USB form, or the form is refused or presented wrong (see probe stdout)'
+    } catch { $failed += $_.Exception.Message }
+    try {
+        Invoke-Probe -Dir 'bt_usb_form_check' -Exe 'BtUsbFormCheck.exe' -Arguments 'live auto' -Tag 'live' `
+                     -Message 'a Bluetooth identity presents the wrong form on this backend (see probe stdout)'
+    } catch { $failed += $_.Exception.Message }
+    $sdl = Join-Path (Split-Path $repoRoot) ('SDL3-release-3.4.18' + $(if ((Get-MachineArch) -eq 'arm64') { '-arm64' } else { '' }))
+    try {
+        Invoke-Probe -Dir 'bt_usb_form_check' -Exe 'BtUsbFormCheck.exe' -Arguments "sdl auto `"$sdl`"" -Tag 'sdl' `
+                     -Message 'SDL 3.4.18 no longer opens, reads or drives a Bluetooth identity in the form this backend presents (see probe stdout)'
+    } catch { $failed += $_.Exception.Message }
+    if ($failed.Count -gt 0) { throw ($failed -join ' AND ') }
+}
+
 # S101: removing HIDMaestro, HIDMaestroUninstall.exe and HMUninstall. On
 # every machine the tool's preview and the API's change nothing, read
 # against a snapshot the probe takes without the SDK. On a machine without
@@ -3182,7 +3210,8 @@ $scenarios = @(
     @{ Name = 'S104_Driver_Signing';             Body = ${function:Scenario-Driver-Signing} },
     @{ Name = 'S105_Xusb_Persona';               Body = ${function:Scenario-Xusb-Persona} },
     @{ Name = 'S106_Gip_Persona';                Body = ${function:Scenario-Gip-Persona} },
-    @{ Name = 'S107_Backend_Parity';             Body = ${function:Scenario-Backend-Parity} }
+    @{ Name = 'S107_Backend_Parity';             Body = ${function:Scenario-Backend-Parity} },
+    @{ Name = 'S108_Bt_Usb_Form';                Body = ${function:Scenario-Bt-Usb-Form} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
