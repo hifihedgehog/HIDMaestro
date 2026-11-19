@@ -1,6 +1,6 @@
 // Keyboard and mouse measurements that run on either backend, outside the
 // battery's sections. Two of them need no Raw Input and run in session 0,
-// as over SSH; the third runs in a signed-in user's session.
+// as over SSH. The third runs in a signed-in user's session.
 //
 //   --order N        Four mice, each with a vendor collection carrying a
 //                    running counter in buttons 6 to 13, 500 reports each
