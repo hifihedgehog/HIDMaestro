@@ -100,10 +100,11 @@ command, and the test app's exit after quit get 3600 s, S71 6300 s and S73
 still running then fails its scenario as a hang, with the probe's
 transcript, and its process tree is stopped.
 
-Total wall time at 2.2.0, with 102
-scenarios: 30 minutes for every scenario, every section and check, on the development laptop, a 16-core
-Lenovo Legion Pro 7, and 42 minutes on a 4-core Celeron J4125 at
-`HIDMAESTRO_TIMEOUT_SCALE=2`. Use `-Filter` to run one scenario when
+Total wall time at 2.3.0, with 111
+scenarios: 42 minutes for every scenario, every section and check, on the development laptop, a 16-core
+Lenovo Legion Pro 7, 63 minutes on a 4-core Celeron J4125 at
+`HIDMAESTRO_TIMEOUT_SCALE=2`, 41 minutes there with every controller on USB/IP,
+and 24 minutes on an ARM64 Surface. Use `-Filter` to run one scenario when
 iterating.
 
 The battery runs the test app and the probes built for the machine's
