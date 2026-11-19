@@ -484,9 +484,18 @@ static class XusbWgiSingleCheck
         var bench = WgiIds();
         Console.WriteLine($"  {Vid:X4}:{Pid:X4} devices WGI lists before the first create, left out of the counts: {bench.Count}");
         // The buttons the HID child reports: on UMDF2 the profile's own
-        // descriptor, which is 10 for xbox-360-wired; on USB/IP the HID child
-        // xusb22 makes. Read on the first cycle, held on the next two.
+        // descriptor, which is 10 for xbox-360-wired. On USB/IP the HID child
+        // is xusb22's, which also has 10 for a gamepad. Read on the first
+        // cycle, held on the next two.
         int firstButtons = -2;
+        // The USB device's identity: a receiver's is the xinput block's
+        // information, every other device's the profile's.
+        ushort usbVid = Vid, usbPid = Pid;
+        if (prof.Connection == "wireless-adapter" && prof.XInput?.Information is { } info)
+        {
+            if (info.Vid != null) usbVid = Convert.ToUInt16(info.Vid, 16);
+            if (info.Pid != null) usbPid = Convert.ToUInt16(info.Pid, 16);
+        }
 
         for (int cycle = 1; cycle <= 3; cycle++)
         {
@@ -514,10 +523,10 @@ static class XusbWgiSingleCheck
                     // this create: its path names its instance.
                     string? path = null;
                     var arrival = System.Diagnostics.Stopwatch.StartNew();
-                    // A wireless pad's device is the receiver, whose PID is
-                    // not the pad's: any USB device's interface that arrived.
+                    // A wireless pad's device is the receiver, of the
+                    // identity the profile's xinput.information gives.
                     while ((path = XusbInterfaces().FirstOrDefault(s => !xusbBefore.Contains(s)
-                                && s.Contains($"usb#vid_{Vid:x4}&pid_", StringComparison.OrdinalIgnoreCase))) == null
+                                && s.Contains($"usb#vid_{usbVid:x4}&pid_{usbPid:x4}#", StringComparison.OrdinalIgnoreCase))) == null
                            && arrival.ElapsedMilliseconds < 10_000) Thread.Sleep(25);
                     string usb = path == null ? "" : InstanceOf(path);
                     using var k = usb.Length == 0 ? null : Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{usb}");
@@ -579,7 +588,7 @@ static class XusbWgiSingleCheck
 
                 int buttons = ButtonCount();
                 if (firstButtons == -2) firstButtons = buttons;
-                if (c.Backend == HMBackend.Umdf2 && prof.Id == "xbox-360-wired")
+                if (prof.Id == "xbox-360-wired")
                     Check("the HID child still reports exactly 10 buttons", buttons == 10, $"buttons={buttons}");
                 else
                     Check("the HID child reports its buttons, the same count every cycle", buttons > 0 && buttons == firstButtons,

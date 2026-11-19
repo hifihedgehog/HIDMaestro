@@ -133,7 +133,7 @@ internal static class Program
                 // 1a. The request as xinput1_4 sends it: version 1.2, device
                 // index 0, device type gamepad. Both drivers answer it.
                 var asked = Ioctl(iface, IOCTL_XUSB_GET_BATTERY_INFO, 4, out uint askedLen, out int askedErr, new byte[] { 0x02, 0x01, 0x00, 0x00 });
-                Check($"GET_BATTERY_INFO in xinput1_4's form answers four bytes: version 1.2, then {want}",
+                Check($"GET_BATTERY_INFO, asked with xinput1_4's request bytes 02 01 00 00, answers four bytes that end {want}",
                       asked != null && askedLen == 4 && asked[2] == wantType && asked[3] == wantLevel,
                       asked == null ? $"DeviceIoControl failed, err={askedErr}" : $"{BitConverter.ToString(asked)} returned={askedLen}");
                 if (usbip)
