@@ -528,13 +528,18 @@ internal static partial class Program
 #if !HM_BASE
             // The census walks the Enum keys instead of listing every present
             // device. With a shared-enumerator devnode and an SWD companion up,
-            // the two must find the same devnodes.
+            // the two must find the same devnodes. On USB/IP the pad is a USB
+            // device Windows' own drivers own and has neither, so there the two
+            // must agree with no devnode of the pad's among them.
             if (gate)
             {
+                bool umdf2 = x360.Backend == HMBackend.Umdf2;
                 var walked = HIDMaestro.Internal.OwnerCensus.PresentOwnedDevnodes().OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
                 var listed = HIDMaestro.Internal.OwnerCensus.PresentOwnedDevnodesListed().OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
-                Check("the census walk finds the devnodes the configuration manager lists, the Xbox 360's two among them",
-                    walked.Count >= 2 && walked.SequenceEqual(listed, StringComparer.OrdinalIgnoreCase),
+                Check(umdf2 ? "the census walk finds the devnodes the configuration manager lists, the Xbox 360's two among them"
+                            : "the census walk finds the devnodes the configuration manager lists, none of them the USB/IP pad's",
+                    (umdf2 ? walked.Count >= 2 : !walked.Contains(x360.UsbipHandle?.Device.Descriptors.UsbInstanceId ?? "", StringComparer.OrdinalIgnoreCase))
+                    && walked.SequenceEqual(listed, StringComparer.OrdinalIgnoreCase),
                     $"walked {string.Join(", ", walked)}; listed {string.Join(", ", listed)}");
                 // The walk falls back to the listings when it cannot read a
                 // key, which makes the check above pass by construction. The

@@ -18,7 +18,10 @@
 // Then it disposes the controller and requires the devnode gone within 5 s
 // (SetupDiGetClassDevsW through DifRemoveDevice), and runs the phantom sweep
 // (the other SetupDiGetClassDevsW caller), which must remove at least the one
-// record the dispose leaves.
+// record the dispose leaves. A controller on USB/IP has no devnode of
+// HIDMaestro's driver: its USB device must leave the tree within 5 s, and
+// the sweep must leave its USB record, which a dispose keeps for the
+// identity's next life.
 //
 // Exit 0 PASS, 1 FAIL, 2 when another program that embeds HIDMaestro runs or,
 // for static, when the SDK source tree is not beside the exe.
@@ -527,15 +530,36 @@ internal static class Program
         Check("the SDK's XInputGetState reads every slot as xinput.h's does, with a slot connected", agree, slots);
 
         string instanceId = ctrl.InstanceId ?? "";
+        string? usbId = ctrl.UsbipHandle?.Device.Descriptors.UsbInstanceId;
+        bool usbip = ctrl.Backend == HMBackend.Usbip;
         ctrl.Dispose();
-        // DifRemoveDevice (SetupDiGetClassDevsW) removes the parent devnode.
-        Check("the devnode is gone within 5 s of Dispose",
-              instanceId.Length > 0 && DeviceManager.WaitForDeviceRemoval(instanceId, 5000), instanceId);
-        // At least the one record this run's dispose leaves, after a sweep that
-        // cleared older ones. Another program's dispose in between adds its own.
-        int removed = DeviceManager.RemoveAccumulatedHmPhantoms();
-        Check("the phantom sweep (SetupDiGetClassDevsW enumeration) removes the record this run left",
-              removed >= 1, $"removed {removed}");
+        if (usbip)
+        {
+            // On USB/IP the controller is a USB device on usbip-win2's host
+            // controller with no devnode of HIDMaestro's driver: its dispose
+            // unplugs it, and its USB records stay for the identity's next
+            // life. The phantom sweep still enumerates through
+            // SetupDiGetClassDevsW and must leave them.
+            var gone = Stopwatch.StartNew();
+            while (usbId != null && HIDMaestro.Internal.Usbip.UsbRecords.Present(usbId) && gone.ElapsedMilliseconds < 5000) Thread.Sleep(50);
+            Check("the USB device leaves the device tree within 5 s of Dispose",
+                  usbId != null && !HIDMaestro.Internal.Usbip.UsbRecords.Present(usbId), usbId ?? "no USB instance id");
+            int swept = DeviceManager.RemoveAccumulatedHmPhantoms();
+            Check("the phantom sweep (SetupDiGetClassDevsW enumeration) leaves the USB record for the identity's next life",
+                  usbId != null && HIDMaestro.Internal.Usbip.UsbRecords.Exists(usbId), $"removed {swept}");
+            Console.WriteLine("  [SKIP] DifRemoveDevice and the record a UMDF2 dispose leaves: the controller ran on USB/IP");
+        }
+        else
+        {
+            // DifRemoveDevice (SetupDiGetClassDevsW) removes the parent devnode.
+            Check("the devnode is gone within 5 s of Dispose",
+                  instanceId.Length > 0 && DeviceManager.WaitForDeviceRemoval(instanceId, 5000), instanceId);
+            // At least the one record this run's dispose leaves, after a sweep that
+            // cleared older ones. Another program's dispose in between adds its own.
+            int removed = DeviceManager.RemoveAccumulatedHmPhantoms();
+            Check("the phantom sweep (SetupDiGetClassDevsW enumeration) removes the record this run left",
+                  removed >= 1, $"removed {removed}");
+        }
 
         Console.WriteLine(s_failures == 0 ? $"=== ALL PASS ({s_total}) ===" : $"=== FAIL: {s_failures}/{s_total} ===");
         return s_failures == 0 ? 0 : 1;
