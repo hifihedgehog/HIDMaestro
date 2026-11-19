@@ -110,12 +110,12 @@ internal static partial class Program
         using (var id = WindowsIdentity.GetCurrent())
             if (!new WindowsPrincipal(id).IsInRole(WindowsBuiltInRole.Administrator))
             {
-                Console.WriteLine("  SKIP: creating a controller needs elevation.");
+                Console.WriteLine("  [SKIP] creating a controller needs elevation.");
                 return 2;
             }
         if (part is not ("child" or "firstone") && SdkConsumers.Find() is { } other)
         {
-            Console.WriteLine($"  SKIP: {other} has HIDMaestro.Core.dll loaded, and two programs that embed HIDMaestro never test at once.");
+            Console.WriteLine($"  [SKIP] {other} has HIDMaestro.Core.dll loaded, and two programs that embed HIDMaestro never test at once.");
             return 2;
         }
         Note($"{System.Runtime.InteropServices.RuntimeInformation.OSArchitecture}, Windows {Environment.OSVersion.Version}, " +
@@ -240,6 +240,18 @@ internal static partial class Program
         var profiles = (ids.Count > 0 ? ids.Select(i => ctx.GetProfile(i) ?? throw new ArgumentException($"no profile {i}")) : ctx.AllProfiles)
             .Where(p => p.IsDeployable && p.SupportsBackend(HMBackend.Usbip) && p.SupportsBackend(HMBackend.Umdf2))
             .OrderBy(p => p.Id, StringComparer.Ordinal).ToList();
+        // A profile whose USB/IP presentation is an XUSB function reaches
+        // Windows through xusb22, which makes the HID device itself from the
+        // subtype, so its HID collection is xusb22's and not the profile's
+        // descriptor. xusb_persona_check's family part compares those
+        // profiles across backends where they meet: XInput's capabilities,
+        // state and packets.
+        var xusb = profiles.Where(p => HIDMaestro.Internal.Usbip.UsbPresentation.Resolve(p.Inner).Kind == HIDMaestro.Internal.Usbip.UsbPresentationKind.XusbFunction).ToList();
+        if (xusb.Count > 0)
+        {
+            Note($"{xusb.Count} present an XUSB function on USB/IP and are compared by xusb_persona_check family: {string.Join(", ", xusb.Select(p => p.Id))}");
+            profiles = profiles.Except(xusb).ToList();
+        }
         Note($"{profiles.Count} profiles, UMDF2 {(umdf2Here ? "on" : "off")}, USB/IP {(usbipHere ? "on" : "off")}");
         // HID class hands the descriptor to hidparse.sys when the device
         // starts, and a status other than success fails the start with Code

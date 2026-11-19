@@ -38,6 +38,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -145,13 +146,17 @@ internal static class Program
         return result;
     }
 
-    // Our virtuals are identifiable by their HID interface path: every
-    // HIDMaestro pad hangs off the software devnode, so the path carries
-    // "hid#hidclass#". A real Nintendo pad paired to this box would sit
-    // under the Bluetooth HID class instead. This matters because a real
-    // Switch 2 Pro enumerates with the SAME VID/PID.
+    // Our virtuals are identifiable by their HID interface path. On the
+    // UMDF2 driver every HIDMaestro pad hangs off the software devnode, so
+    // the path carries "hid#hidclass#". On the USB/IP backend the pad is a
+    // USB device, and its path is that of the HID collection whose serial
+    // is the one its USB device serves (s_ourPaths). A real Nintendo pad
+    // paired to this box would sit under the Bluetooth HID class instead.
+    // This matters because a real Switch 2 Pro enumerates with the SAME
+    // VID/PID.
+    static readonly HashSet<string> s_ourPaths = new(StringComparer.OrdinalIgnoreCase);
     static bool IsOurs(in Seen s) =>
-        s.Path.Contains("hid#hidclass#", StringComparison.OrdinalIgnoreCase);
+        s.Path.Contains("hid#hidclass#", StringComparison.OrdinalIgnoreCase) || s_ourPaths.Contains(s.Path);
 
     // ── staged state, published by the pump thread ─────────────────────
     static readonly object s_stageLock = new();
@@ -266,6 +271,14 @@ internal static class Program
         Console.WriteLine("  Creating switch-pro virtual controller (positive control)...");
         using var padS1 = ctx.CreateController(s1);
         ctx.FinalizeNames();
+        foreach (var pad in new[] { padS2, padS1 })
+        {
+            var resolved = ctx.ResolveBackend(pad.Profile);
+            Check($"{pad.Profile.Id} runs on {pad.Backend}, the backend its create resolves to here", pad.Backend == resolved, $"resolves to {resolved}");
+            if (pad.Backend == HMBackend.Usbip && pad.UsbipHandle?.Device.Descriptors.SerialString is { Length: > 0 } serial)
+                foreach (var d in HMDeviceExtractor.ListDevices().Where(x => x.SerialNumberString == serial))
+                    s_ourPaths.Add(d.DevicePath);
+        }
 
         bool pumpStop = false;
         var pump = new Thread(() =>

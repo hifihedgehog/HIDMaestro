@@ -65,6 +65,31 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     internal bool Derived => _derived;
     private readonly bool _derived;
 
+    /// <summary>The presentation the device serves
+    /// (<see cref="UsbPresentation"/>).</summary>
+    internal UsbPresentation Presentation { get; }
+
+    /// <summary>The length a raw frame must have on this device, 0 for any:
+    /// on a device with no HID interface a raw frame is its input report
+    /// whole.</summary>
+    internal int RawFrameLength { get; }
+
+    // The output reports the device answers or turns into packets
+    // (UsbPresentation.OutputPackets), or null, and for each rule the bytes
+    // of its replies, built with this device's serial.
+    private readonly XusbFunction.OutputPacket[]? _outputPackets;
+    private readonly byte[][][]? _ruleReplies;
+    // The messages the reporting interface sends when the host sets the
+    // configuration (XusbFunction.Function.StartMessages), built the same
+    // way, or null.
+    private readonly byte[][]? _startMessages;
+    // Messages waiting for a read on an IN endpoint, by its address: an
+    // answer goes out ahead of any report. Null for a device with none.
+    // Guarded by _hidLock.
+    // The messages waiting on each IN endpoint, by endpoint number, made at
+    // create for a function that sends any.
+    private readonly Queue<byte[]>?[]? _messages;
+
     /// <summary>The vhci port this device is attached on, 0 while it is
     /// not. The server sets it on every import, the driver's own re-attach
     /// included, which lands on a new port. Detaching goes by location,
@@ -318,8 +343,32 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     {
         _index = index;
         var presentation = UsbPresentation.Resolve(profile);
+        Presentation = presentation;
         _derived = presentation.Derived;
+        _outputPackets = presentation.OutputPackets;
         Descriptors = new UsbDescriptorSet(profile, index, identity);
+        if (presentation.Function is { } function)
+        {
+            string? serial = Descriptors.SerialString;
+            byte subType = presentation.SubType;
+            bool replies = false;
+            _ruleReplies = new byte[function.OutputPackets.Length][][];
+            for (int r = 0; r < _ruleReplies.Length; r++)
+            {
+                var messages = function.OutputPackets[r].Replies;
+                _ruleReplies[r] = new byte[messages.Length][];
+                for (int m = 0; m < messages.Length; m++) _ruleReplies[r][m] = XusbFunction.Bytes(messages[m], serial, subType);
+                replies |= messages.Length > 0;
+            }
+            _startMessages = new byte[function.StartMessages.Length][];
+            for (int m = 0; m < _startMessages.Length; m++) _startMessages[m] = XusbFunction.Bytes(function.StartMessages[m], serial, subType);
+            if (_startMessages.Length > 0 || replies)
+            {
+                _messages = new Queue<byte[]>?[16];
+                foreach (var kv in Descriptors.Endpoints)
+                    if (kv.Value is { TransferType: 3, IsIn: true } e) _messages[e.Address & 0x0F] = new Queue<byte[]>();
+            }
+        }
         BusId = BusIdFor(index);
         // Before any section or thread exists, so a profile whose protocol
         // does not fit its descriptors is refused with nothing to undo. A
@@ -371,16 +420,21 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         // a keyboard or mouse writer for every report.
         _ackSignal = _deliverEvery || (_derived && profile.Protocol != null);
         // A device with no HID interface has no descriptor to size its report
-        // by: a data frame fills its extended report, whole.
-        _ownReportSize = !Descriptors.HasHidInterface && profile.ExtendedReport is { Size: > 0 } sized ? sized.Size : 0;
-        int expectedSize = _dataReportLength > 0 ? _dataReportLength
-            : _builder.InputReportByteSize > 0 ? _builder.InputReportByteSize
-            : _ownReportSize > 0 ? _ownReportSize : 17;
+        // by: a data frame fills its extended report, whole. The XUSB
+        // function's profile has a HID descriptor, the UMDF2 backend's, which
+        // sizes nothing here.
+        _ownReportSize = !Descriptors.HasHidInterface && presentation.Report is { Size: > 0 } sized ? sized.Size : 0;
+        RawFrameLength = _ownReportSize;
+        int expectedSize = _ownReportSize > 0 ? _ownReportSize
+            : _dataReportLength > 0 ? _dataReportLength
+            : _builder.InputReportByteSize > 0 ? _builder.InputReportByteSize : 17;
         _reportCapacity = Math.Max(expectedSize, SharedMemoryIO.EXTENDED_DATA_CAPACITY);
         _pumpReport = new byte[_reportCapacity];
         // One slot per declared input report, and one for the builder's
         // report when the descriptor declares none the parser read.
-        var declared = _builder.InputReports.Count > 0
+        var declared = _ownReportSize > 0
+            ? new[] { (Id: presentation.Report!.ReportIdByte, ByteSize: _ownReportSize) }
+            : _builder.InputReports.Count > 0
             ? _builder.InputReports
             : new[] { (Id: _builder.InputReportId, ByteSize: _builder.InputReportByteSize) };
         _inputReportIds = declared[0].Id != 0;
@@ -398,7 +452,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         // report from the first request ([MS-XUSBI] 2.2.8.2), so until a
         // frame comes its slot holds the extended report of a pad at rest,
         // encoded as SubmitState encodes one.
-        if (!Descriptors.HasHidInterface && profile.ExtendedReport is { AlwaysArmed: true } atRest
+        if (!Descriptors.HasHidInterface && presentation.Report is { AlwaysArmed: true } atRest
             && atRest.Size <= _reportCapacity && _inputSlot[atRest.ReportIdByte] is int restSlot and >= 0)
         {
             var rest = new HMGamepadState();
@@ -469,9 +523,20 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             Interlocked.CompareExchange(ref _connection, null, connection);
             return false;
         }
-        // Attach is power-on for a declared protocol's state.
+        // Attach is power-on for a declared protocol's state, and for the
+        // messages a function had waiting.
         ResetLayoutState();
         ResetProtocolState();
+        if (_messages != null)
+        {
+            lock (_hidLock) foreach (var q in _messages) q?.Clear();
+            // A function that announces itself, as a receiver announces the
+            // pad on its first slot, sends its start messages on the
+            // reporting interface's first reads. Windows reads that
+            // endpoint once the device is configured.
+            if (_startMessages is { Length: > 0 } start)
+                foreach (var m in start) QueueMessage(_primaryInEndpoint, m);
+        }
         // Set before the import's reply goes out, on the reader that then
         // serves the import's requests.
         _loggedSetups = DeviceOrchestrator.DiagEnabled ? new HashSet<ulong>() : null;
@@ -717,10 +782,12 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         // or the data. A size read while the writer was mid-frame is caught
         // by the sequence check like any other byte, and each length is cut
         // to its region before the copy.
-        int expectedSize = _dataReportLength > 0 ? _dataReportLength
-            : _builder.InputReportByteSize > 0 ? _builder.InputReportByteSize
-            : _ownReportSize > 0 ? _ownReportSize : 17;
-        byte dataReportId = _dataReportLength > 0 ? _dataReportId : _builder.InputReportId;
+        int expectedSize = _ownReportSize > 0 ? _ownReportSize
+            : _dataReportLength > 0 ? _dataReportLength
+            : _builder.InputReportByteSize > 0 ? _builder.InputReportByteSize : 17;
+        // A report with no HID interface is the frame whole, its report ID
+        // its own first byte.
+        byte dataReportId = _ownReportSize > 0 ? (byte)0 : _dataReportLength > 0 ? _dataReportId : _builder.InputReportId;
         bool hasReportId = dataReportId != 0;
         int maxData = hasReportId ? Math.Max(expectedSize - 1, 16) : expectedSize;
         if (hasReportId && expectedSize > 1) maxData = expectedSize - 1;
@@ -781,9 +848,89 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
 
     public const byte SourceHidOutput = 0;       // driver.h HIDMAESTRO_OUTPUT_SOURCE_*
     public const byte SourceHidFeature = 1;
+    public const byte SourceXInput = 2;
     public const byte SourceHidFeatureRead = 3;
 
     private readonly object _publishLock = new();
+
+    /// <summary>Answer an output report on interface
+    /// <paramref name="interfaceNumber"/> by the first of the presentation's
+    /// rules (<see cref="UsbPresentation.OutputPackets"/>) that reads that
+    /// interface, whose bytes the report starts with and whose length it
+    /// meets: its replies go out on the interface's IN endpoint, and its
+    /// packet to the ring. False when no rule takes the report, which then
+    /// goes to the ring as it came.</summary>
+    private bool ApplyOutputRule(byte interfaceNumber, ReadOnlySpan<byte> report)
+    {
+        var rules = _outputPackets;
+        if (rules == null) return false;
+        for (int i = 0; i < rules.Length; i++)
+        {
+            var rule = rules[i];
+            bool here = rule.Interfaces == null ? interfaceNumber == Descriptors.HidInterfaceNumber
+                                                : Array.IndexOf(rule.Interfaces, interfaceNumber) >= 0;
+            if (!here || report.Length < rule.MinLength || !rule.Matches(report)) continue;
+            if (DeviceOrchestrator.DiagEnabled)
+                DeviceOrchestrator.LogDiag($"usbip output {BusId}: interface {interfaceNumber} {Convert.ToHexString(report)} rule {rule.Name}");
+            if (_ruleReplies is { } replies && replies[i].Length > 0)
+            {
+                byte inEp = InEndpointOf(interfaceNumber);
+                foreach (var m in replies[i]) QueueMessage(inEp, m);
+            }
+            if (rule.Packet is { } template)
+            {
+                Span<byte> packet = stackalloc byte[template.Length];
+                template.CopyTo(packet);
+                foreach (var (from, to, mask) in rule.Copies) packet[to] = (byte)(report[from] & mask);
+                // The companion's form: report ID 0 and the whole buffer
+                // (driver/companion.c, IOCTL_XUSB_SET_STATE).
+                PublishOutput(rule.Source, 0, packet);
+            }
+            return true;
+        }
+        if (DeviceOrchestrator.DiagEnabled)
+            DeviceOrchestrator.LogDiag($"usbip output {BusId}: interface {interfaceNumber} {Convert.ToHexString(report)} no rule");
+        return false;
+    }
+
+    /// <summary>The interrupt IN endpoint of interface
+    /// <paramref name="interfaceNumber"/>, 0 for none.</summary>
+    private byte InEndpointOf(byte interfaceNumber)
+    {
+        foreach (var kv in Descriptors.Endpoints)
+            if (kv.Value is { TransferType: 3, IsIn: true } e && e.InterfaceNumber == interfaceNumber) return e.Address;
+        return 0;
+    }
+
+    /// <summary>Send <paramref name="message"/> on IN endpoint
+    /// <paramref name="endpoint"/>: to a read parked there now, or to the
+    /// next read, ahead of any report.</summary>
+    private void QueueMessage(byte endpoint, byte[] message)
+    {
+        if (endpoint == 0 || _messages == null) return;
+        uint seq = 0;
+        UsbipServer.Connection? conn = null;
+        lock (_hidLock)
+        {
+            var parked = PendingFor(endpoint);
+            if (parked.Count > 0)
+            {
+                seq = parked.Dequeue();
+                conn = HoldSendLocked();
+            }
+            else
+            {
+                if (_messages[endpoint & 0x0F] is not { } q) return;
+                q.Enqueue(message);
+                if (DeviceOrchestrator.DiagEnabled)
+                    DeviceOrchestrator.LogDiag($"usbip message {BusId}: endpoint 0x{endpoint:X2} {Convert.ToHexString(message)} waits for a read");
+                return;
+            }
+        }
+        SendHeld(conn, seq, 0, message.Length, message);
+        if (DeviceOrchestrator.DiagEnabled)
+            DeviceOrchestrator.LogDiag($"usbip message {BusId}: endpoint 0x{endpoint:X2} {Convert.ToHexString(message)} sent");
+    }
 
     private void PublishOutput(byte source, byte reportId, ReadOnlySpan<byte> data)
     {
@@ -894,6 +1041,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 }
 
                 QueuedFrame frame = default;
+                byte[]? message = null;
                 UsbipServer.Connection? conn = null;
                 uint delivered = 0;
                 bool ack = false;
@@ -914,7 +1062,14 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     // off: those pipes go quiet rather than reporting.
                     if (DiagPath != null)
                         _readsPerEp[epAddr] = _readsPerEp.TryGetValue(epAddr, out var rc) ? rc + 1 : 1;
-                    if (epAddr == _primaryInEndpoint && _frameQueue.Count > 0)
+                    // A message the device answers with goes ahead of any
+                    // report (XusbFunction's replies and start messages).
+                    if (_messages?[epAddr & 0x0F] is { Count: > 0 } waiting)
+                    {
+                        message = waiting.Dequeue();
+                        conn = HoldSendLocked();
+                    }
+                    else if (epAddr == _primaryInEndpoint && _frameQueue.Count > 0)
                     {
                         frame = _frameQueue.Dequeue();
                         NoteCarriedLocked(frame.Seq);
@@ -925,6 +1080,8 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                         PendingFor(epAddr).Enqueue(cmd.Seqnum);
                 }
                 if (ack) SharedMemoryIO.StoreDeviceDelivered(_index, _ackGeneration, delivered, _ackSignal);
+                if (message != null)
+                    SendHeld(conn, cmd.Seqnum, 0, Math.Min(message.Length, cmd.TransferBufferLength), message.AsSpan(0, Math.Min(message.Length, cmd.TransferBufferLength)));
                 if (frame.Buffer != null)
                 {
                     // The buffer is this thread's until it goes back.
@@ -948,9 +1105,21 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             // declares: on a descriptor with no IDs both get the data alone,
             // and both publish its first byte as the ID.
             var payload = outPayload;
-            byte rid = payload.Length > 0 ? payload[0] : (byte)0;
-            PublishOutput(SourceHidOutput, rid,
-                payload.Length > 0 ? payload[1..] : ReadOnlySpan<byte>.Empty);
+            // A device with no HID interface reports on one interface. Its
+            // other interfaces, an XUSB pad's headset and plug-in module
+            // ports, take a write and carry it nowhere, as a retail pad does
+            // with nothing plugged in.
+            if (ApplyOutputRule(ep.InterfaceNumber, payload)
+                || (!Descriptors.HasHidInterface && ep.InterfaceNumber != Descriptors.HidInterfaceNumber))
+            {
+                SendRetSubmit(cmd.Seqnum, 0, payload.Length, null);
+                return;
+            }
+            {
+                byte rid = payload.Length > 0 ? payload[0] : (byte)0;
+                PublishOutput(SourceHidOutput, rid,
+                    payload.Length > 0 ? payload[1..] : ReadOnlySpan<byte>.Empty);
+            }
             SendRetSubmit(cmd.Seqnum, 0, payload.Length, null);
             return;
         }
@@ -1095,7 +1264,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     // self-powered, as the captured pads do, unless its
                     // protocol reads the descriptor. A derived device reads
                     // its configuration's bmAttributes (USB 2.0 9.4.5).
-                    bool selfPowered = !_derived || (Descriptors.ConfigurationDescriptor[7] & 0x40) != 0;
+                    // The XUSB function reads it too: its configuration is a
+                    // retail pad's, bus powered.
+                    bool selfPowered = (!_derived && Presentation?.Kind != UsbPresentationKind.XusbFunction)
+                                       || (Descriptors.ConfigurationDescriptor[7] & 0x40) != 0;
                     ushort status = recipient == 0 && selfPowered ? (ushort)0x0001 : (ushort)0x0000;
                     Span<byte> d = stackalloc byte[2];
                     d[0] = (byte)(status & 0xFF);
@@ -1398,7 +1570,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 // the rule or the protocol consumes it. It keeps its kind.
                 byte source = reportType == 0x03 ? SourceHidFeature : SourceHidOutput;
                 if (command is { } c && payload.Length > 0) PublishCommand(c, payload, source);
-                else PublishOutput(source, rid, data);
+                else if (reportType != 0x02 || !ApplyOutputRule(Descriptors.HidInterfaceNumber, payload)) PublishOutput(source, rid, data);
                 // What the command did, as on the OUT endpoint and the
                 // SET_REPORT(Output) path: a halt fails the parked reads, and
                 // a change wakes the clocks.

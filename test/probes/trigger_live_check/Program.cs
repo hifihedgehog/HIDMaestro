@@ -231,6 +231,8 @@ internal sealed class Program
             .Build();
 
         using var ctrl = ctx.CreateController(profile);
+        var resolved = ctx.ResolveBackend(profile);
+        Check($"{label} runs on {ctrl.Backend}, the backend its create resolves to here", ctrl.Backend == resolved, $"resolves to {resolved}");
 
         // The HID interface can come up after the create returns. A hang
         // bound: the poll ends as soon as the interface shows.

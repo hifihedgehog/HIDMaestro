@@ -175,6 +175,11 @@ internal static class InlineCheck
             else Checks.Fail("the planted NoInlining kernel is not compiled on its own, so the check cannot see a call");
             if (catalogCalled.Count == 0) Console.WriteLine("no catalog kernel or set's Run is compiled on its own: each is inlined where it runs");
             else Checks.Fail($"called rather than inlined: {string.Join("; ", catalogCalled)}");
+            // A method is compiled on its own only once a call to it runs, so
+            // a call on a path the child never takes goes unseen here. The x64
+            // listing shows every call site BuildNext compiles. The NativeAOT
+            // listing, read next, holds every path on both architectures.
+            Console.WriteLine("[LIMIT] inline, JIT on ARM64: a kernel or Run called from BuildNext shows only once that call has run, so this part covers the paths the child ran. The NativeAOT part reads every path.");
         }
         Aot();
         return Checks.Failures - before;
@@ -248,6 +253,8 @@ internal static class InlineCheck
         if (Environment.GetEnvironmentVariable("HM_PEC_NO_AOT") == "1")
         {
             Console.WriteLine("inline, NativeAOT: left out, HM_PEC_NO_AOT=1");
+            if (RuntimeInformation.ProcessArchitecture == Architecture.Arm64)
+                Console.WriteLine("[LIMIT] inline on ARM64 without the NativeAOT part: only the paths the JIT child ran are read");
             return;
         }
         if (!File.Exists(aot)) { Checks.Fail($"inline, NativeAOT: no NativeAOT build at {aot}"); return; }
