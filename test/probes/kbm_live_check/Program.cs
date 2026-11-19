@@ -25,10 +25,12 @@
 //   J. Dispose with a key held sends the key up first. A consumer killed
 //      while holding F24, mouse button 6 and an absolute pointer leaves
 //      F24 and button 6 up and the pointer where it was, through the
-//      release frames the driver sends when the consumer's owner pipe
-//      closes. A child process of this probe is the consumer. The cleanup
-//      that follows removes all three of its devices, the keyboard
-//      included, which Windows will not disable.
+//      release frames the UMDF2 driver sends when the consumer's owner pipe
+//      closes. On USB/IP the devices go with the consumer's process and no
+//      frame follows: they leave Raw Input and F24 stops repeating. A child
+//      process of this probe is the consumer. The cleanup that follows
+//      removes all three of its devices, the keyboard included, which
+//      Windows will not disable.
 //
 // The burst moves the cursor 300 counts and back, and D puts it at the
 // center of the screen. The probe puts the cursor back at the end. No
@@ -1379,27 +1381,43 @@ internal static class Program
         var clock = Stopwatch.StartNew();
         child.Kill();
         child.WaitForExit();
-        // The driver's release frames: F24 up, button 6 up and the pointer
-        // where it was. Then 500 ms, ten of Windows' key repeats, for a key
-        // that goes down again or a pointer that moves after them.
+        long killedAt = Stopwatch.GetTimestamp();
+        // On UMDF2 the driver's release frames: F24 up, button 6 up and the
+        // pointer where it was. On USB/IP the three devices leave with the
+        // consumer and nothing sends a frame: Windows keeps F24 down (measured
+        // with --held-on-kill, 2026-11-18) and its repeat stops with the
+        // device. Then 500 ms, ten of Windows' key repeats, for a key that
+        // goes down again or a pointer that moves after them.
         long released = -1;
         while (clock.ElapsedMilliseconds < HangMs)
         {
-            if (released < 0
-                && sink.Keys.Any(k => k.Device == hk && k.VKey == 0x87 && (k.Flags & 1) == 1)
-                && sink.Reports.Any(r => r.Device == hv && Convert.ToHexString(r.Report) == "0200")
-                && sink.Mice.Any(x => x.Device == hp))
-                released = clock.ElapsedMilliseconds;
+            bool done = usbipChild
+                ? !RawInputSink.Devices().Any(d => d.Handle == hk || d.Handle == hv || d.Handle == hp)
+                : sink.Keys.Any(k => k.Device == hk && k.VKey == 0x87 && (k.Flags & 1) == 1)
+                  && sink.Reports.Any(r => r.Device == hv && Convert.ToHexString(r.Report) == "0200")
+                  && sink.Mice.Any(x => x.Device == hp);
+            if (released < 0 && done) released = clock.ElapsedMilliseconds;
             if (released >= 0 && clock.ElapsedMilliseconds - released >= 500) break;
             Thread.Sleep(20);
         }
         var keys = sink.Keys.Where(k => k.Device == hk && k.VKey == 0x87).ToList();
         int up = keys.FindIndex(k => (k.Flags & 1) == 1);
         Console.WriteLine($"  held: {repeats} F24 repeats in {heldMs} ms; after the kill: {string.Join(" ", keys.Select(k => (k.Flags & 1) == 1 ? "up" : "down"))}");
-        Check("F24 goes up when the consumer is killed, and stops repeating",
-              up >= 0 && keys.Skip(up + 1).All(k => (k.Flags & 1) == 1), $"{keys.Count} F24 messages");
         var vendor = sink.Reports.Where(r => r.Device == hv).Select(r => Convert.ToHexString(r.Report)).ToList();
-        Check("button 6 goes up (vendor report 2, 0x00)", vendor.Contains("0200"), string.Join(",", vendor));
+        if (usbipChild)
+        {
+            Check("the three devices leave Raw Input with the consumer", released >= 0,
+                  released >= 0 ? $"{released} ms after the kill" : "still listed");
+            Check("F24 stops repeating once the device is gone, with no frame after the kill",
+                  !keys.Any(k => k.Ticks > killedAt) && vendor.Count == 0,
+                  $"{keys.Count(k => k.Ticks > killedAt)} F24 messages after the kill, vendor [{string.Join(",", vendor)}]");
+        }
+        else
+        {
+            Check("F24 goes up when the consumer is killed, and stops repeating",
+                  up >= 0 && keys.Skip(up + 1).All(k => (k.Flags & 1) == 1), $"{keys.Count} F24 messages");
+            Check("button 6 goes up (vendor report 2, 0x00)", vendor.Contains("0200"), string.Join(",", vendor));
+        }
         var moves = sink.Mice.Where(x => x.Device == hp).ToList();
         Check("the absolute pointer stays where it was",
               moves.All(x => Math.Abs(x.X - 32768) < 64 && Math.Abs(x.Y - 32768) < 64),
