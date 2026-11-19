@@ -247,6 +247,11 @@ internal static partial class Program
     /// v1.12.0 program's.</summary>
     static void SectionULegacyRace(PeerProcess a, string t, HashSet<string> baseline)
     {
+        if (s_machineBackend == "Usbip")
+        {
+            Console.WriteLine("  [SKIP] U: the v1.12.0 race: the create runs on USB/IP, which maps its input section without passing the UMDF2 create's hold point the race waits at");
+            return;
+        }
         if (!File.Exists(Path.Combine(AppContext.BaseDirectory, "legacy", "v1.12.0", "CoexistPeer.exe")))
         {
             Check("U: the v1.12.0 peer is built", false, "build CoexistCheck.csproj");
