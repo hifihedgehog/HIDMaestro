@@ -107,15 +107,19 @@ public sealed class HMProfile
     /// the model its identity gives it. Null when nothing went wrong.</summary>
     public string? DeviceModelProblem => Inner.Resolved.Problem;
 
-    /// <summary>Which instantiation path this profile needs: "umdf2" for
-    /// the single-HID-device path most profiles use, or "usbip" for a
-    /// composite USB persona whose audio interfaces need the bundled USB
-    /// transport (issue #39).</summary>
+    /// <summary>The profile's default backend: "umdf2", the UMDF2 driver
+    /// where Windows installs it, or "usbip" for a device with interfaces
+    /// or reports only the USB/IP backend presents, such as a composite USB
+    /// persona's audio interfaces (issue #39). <see cref="HMBackend.Auto"/>
+    /// follows it: a "usbip" profile runs on the USB/IP backend on every
+    /// machine, and any other on <see cref="HMContext.MachineBackend"/>.
+    /// An explicit backend overrides it for any profile it can present
+    /// (<see cref="SupportsBackend"/>).</summary>
     public string Backend => Inner.Backend ?? "umdf2";
 
-    /// <summary>True when this profile is a composite USB persona, which
-    /// rides the USB transport bundled inside HIDMaestro.Core.dll rather
-    /// than the UMDF2 driver.
+    /// <summary>True when this profile's <see cref="Backend"/> is "usbip":
+    /// only the USB/IP backend, which ships inside HIDMaestro.Core.dll,
+    /// presents its device.
     ///
     /// <para>This is NOT a "can I create it" gate: the transport deploys
     /// itself on first use, so <see cref="HMContext.CreateController"/>
@@ -123,6 +127,22 @@ public sealed class HMProfile
     /// entries bring controller audio, or to warn that the first such
     /// controller triggers a one-time driver install (issue #39).</para></summary>
     public bool RequiresUsbipBackend => Inner.RequiresUsbipBackend;
+
+    /// <summary>Whether this profile's data can be presented on
+    /// <paramref name="backend"/>. For <see cref="HMBackend.Auto"/> the
+    /// answer is for the backend an Auto create of this profile resolves to
+    /// on this machine: <see cref="HMBackend.Usbip"/> for a profile whose
+    /// backend is "usbip", else <see cref="HMContext.MachineBackend"/>. For
+    /// the other two the machine plays no part.
+    /// <see cref="HMBackend.Umdf2"/> needs a HID descriptor and a backend
+    /// other than "usbip". <see cref="HMBackend.Usbip"/> takes every profile
+    /// with a HID descriptor or a <c>usbConfiguration</c> that authors its
+    /// descriptors, except an Xbox profile that reaches XInput through the
+    /// XUSB companion or xinputhid, which the USB/IP backend has no function
+    /// for yet. A create on a backend this answers false for throws
+    /// <see cref="HMBackendNotSupportedException"/>.</summary>
+    public bool SupportsBackend(HMBackend backend) =>
+        IsDeployable && Internal.BackendSelection.NotSupportedReason(Inner, backend) == null;
 
     // ── HID descriptor ───────────────────────────────────────────────────
 

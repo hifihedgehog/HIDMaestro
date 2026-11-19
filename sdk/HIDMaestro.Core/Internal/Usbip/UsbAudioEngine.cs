@@ -223,7 +223,7 @@ internal sealed partial class UsbAudioEngine : IDisposable
         _complete = complete;
         _unlinkAnswer = unlinkAnswer;
 
-        var cfg = profile.UsbConfiguration!;
+        var cfg = UsbPresentation.Resolve(profile).Spec;
         int micBytes = 0;
         int micFrame = 0;
         foreach (var iface in cfg.Interfaces)

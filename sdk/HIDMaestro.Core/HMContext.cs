@@ -21,15 +21,26 @@ namespace HIDMaestro;
 /// process, and several programs that embed HIDMaestro on one machine, run
 /// side by side without sharing a section, an identity or a device.</para>
 ///
+/// <para><b>Backends:</b> a controller runs on HIDMaestro's own UMDF2
+/// driver or on the USB/IP host controller this assembly carries, which
+/// Windows' own class drivers serve (<see cref="HMBackend"/>). Every
+/// context and every create defaults to <see cref="HMBackend.Auto"/>: a
+/// profile only the USB/IP backend presents runs there, and every other
+/// profile on <see cref="MachineBackend"/>, the UMDF2 driver where Windows
+/// installs it and the USB/IP backend where it does not, as on Windows on
+/// ARM64. A program written for one backend runs on either with no code
+/// change.</para>
+///
 /// <para><b>Driver install:</b> the UMDF2 driver and its XUSB companion are
-/// embedded as resources inside this assembly. On first run on a given
-/// machine, call <see cref="InstallDriver"/> to stage them under
-/// <c>%ProgramFiles%\HIDMaestro\Staging</c>, in directories only
-/// Administrators and SYSTEM can write, and register them with Windows via
-/// pnputil. This requires admin and only needs to happen once per machine:
-/// subsequent runs detect that the driver is already in the DriverStore and
-/// skip the install. Nothing is written to the consuming app's
-/// directory.</para>
+/// embedded as resources inside this assembly, and so is the USB/IP host
+/// controller. On first run on a given machine, call
+/// <see cref="InstallDriver"/>. On the UMDF2 backend it stages the driver
+/// under <c>%ProgramFiles%\HIDMaestro\Staging</c>, in directories only
+/// Administrators and SYSTEM can write, and registers it with Windows via
+/// pnputil. On the USB/IP backend it installs the host controller. This
+/// requires admin and only needs to happen once per machine: subsequent runs
+/// find the driver installed and skip the install. Nothing is written to the
+/// consuming app's directory.</para>
 ///
 /// <para><b>Admin requirement:</b> Windows requires SeLoadDriverPrivilege
 /// (admin) for both <see cref="InstallDriver"/> and <see cref="CreateController"/>.
@@ -72,8 +83,20 @@ public sealed class HMContext : IDisposable
     /// in the consumer's think-time budget. Failures are silently
     /// swallowed: if the warm-up couldn't stage for some reason, the
     /// foreground InstallDriver path will retry it.</para></summary>
-    public HMContext()
+    public HMContext() : this(HMBackend.Auto) { }
+
+    /// <summary>Create a new SDK context whose creates default to
+    /// <paramref name="backend"/>, and whose <see cref="InstallDriver"/> and
+    /// <see cref="IsDriverInstalled"/> answer for that backend.
+    /// <see cref="HMBackend.Auto"/> is what <see cref="HMContext()"/> gives.
+    /// A create's own backend argument overrides the context's.</summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="backend"/>
+    /// is not one of the three values.</exception>
+    public HMContext(HMBackend backend)
     {
+        if (backend is not (HMBackend.Auto or HMBackend.Umdf2 or HMBackend.Usbip))
+            throw new ArgumentOutOfRangeException(nameof(backend));
+        Backend = backend;
         // T28: fan out independent prewarm tasks in parallel. The original
         // serial sequence was: Sha256Hex → EnsureExtracted → LoadEmbedded →
         // IsDriverInstalled → PrewarmGameInputService, taking ~150-250 ms
@@ -83,9 +106,19 @@ public sealed class HMContext : IDisposable
         // case where the consumer's foreground InstallDriver fires before
         // prewarm completes. Catches per-task so one failure doesn't kill
         // the rest.
-        System.Threading.Tasks.Task.Run(() =>
+        var staging = System.Threading.Tasks.Task.Run(() =>
         {
             try { _ = Internal.EmbeddedManifest.Sha256Hex; } catch { }
+            // The backend InstallDriver installs decides what to stage. It is
+            // read here, off the constructor's thread: on a machine that
+            // refuses the package it reads the driver store.
+            bool installsDriver = false;
+            try
+            {
+                installsDriver = backend == HMBackend.Umdf2
+                    || (backend == HMBackend.Auto && Internal.BackendSelection.Machine == HMBackend.Umdf2);
+            }
+            catch { }
             // Only a deploy reads the staged payload. On a machine already
             // running this build's driver, InstallDriver takes the fast path
             // and never touches it, so the prewarm stages (and hashes) the
@@ -95,7 +128,8 @@ public sealed class HMContext : IDisposable
             // is staged and no owner claim is taken for it.
             try
             {
-                if (HMBuildInfo.Carries(HMPayload.Driver, System.Runtime.InteropServices.RuntimeInformation.OSArchitecture) &&
+                if (installsDriver &&
+                    HMBuildInfo.Carries(HMPayload.Driver, System.Runtime.InteropServices.RuntimeInformation.OSArchitecture) &&
                     !Internal.DriverBuilder.WillTakeFastPath() &&
                     !Internal.DriverDeploy.SigningStopsDeploy())
                 {
@@ -109,35 +143,110 @@ public sealed class HMContext : IDisposable
                 }
             }
             catch { }
-            try { Internal.DriverBuilder.IsDriverInstalled(); } catch { }
+            if (installsDriver)
+                try { Internal.DriverBuilder.IsDriverInstalled(); } catch { }
         });
-        System.Threading.Tasks.Task.Run(() =>
+        var catalog = System.Threading.Tasks.Task.Run(() =>
         {
             try { _ = Internal.ProfileDatabase.LoadEmbedded(); } catch { }
         });
-        System.Threading.Tasks.Task.Run(() =>
+        var service = System.Threading.Tasks.Task.Run(() =>
         {
-            // GameInputSvc serves controllers, and a machine whose Windows
-            // will not install the driver gets none, so its start type
-            // stays as it is.
-            try
-            {
-                if (!Internal.DriverDeploy.SigningStopsDeploy())
-                    Internal.DeviceOrchestrator.PrewarmGameInputService();
-            }
+            // GameInputSvc serves the controllers of both backends: WGI and
+            // GameInput read a USB/IP pad through it as they read a UMDF2
+            // one.
+            try { Internal.DeviceOrchestrator.PrewarmGameInputService(); }
             catch { }
         });
+        Prewarmed = System.Threading.Tasks.Task.WhenAll(staging, catalog, service);
+    }
+
+    /// <summary>Completes when the constructor's warm-up tasks have all
+    /// ended. Each catches its own failures, so it never faults.
+    /// driver_signing_check (S104) waits on it before it reads what the
+    /// warm-up left on a machine that refuses the package.</summary>
+    internal System.Threading.Tasks.Task Prewarmed { get; }
+
+    /// <summary>The backend this context's creates default to, as it was
+    /// given: <see cref="HMBackend.Auto"/> unless the context was built
+    /// with another.</summary>
+    public HMBackend Backend { get; }
+
+    /// <summary>What <see cref="HMBackend.Auto"/> resolves to on this
+    /// machine for a profile both backends present:
+    /// <see cref="HMBackend.Umdf2"/> where this build carries the driver for
+    /// the machine's architecture and Windows installs its package, or this
+    /// build's driver is installed whole already, else
+    /// <see cref="HMBackend.Usbip"/> where the build carries either
+    /// payload. A build that carries the driver alone then names the
+    /// USB/IP transport it lacks rather than a driver Windows refuses.
+    /// Windows on ARM64 and Windows in S mode, which do not install
+    /// HIDMaestro's package, read <see cref="HMBackend.Usbip"/> unless this
+    /// build's driver is installed there already. Needs no
+    /// elevation and changes nothing. The environment variable
+    /// <c>HIDMAESTRO_BACKEND</c>, <c>umdf2</c> or <c>usbip</c>, read once per
+    /// process, replaces the answer, for diagnostics.</summary>
+    public static HMBackend MachineBackend => Internal.BackendSelection.Machine;
+
+    /// <summary>The backend <see cref="InstallDriver"/> and
+    /// <see cref="IsDriverInstalled"/> answer for: the context's own, or the
+    /// machine's for <see cref="HMBackend.Auto"/>.</summary>
+    private HMBackend InstallBackend => Backend != HMBackend.Auto ? Backend : MachineBackend;
+
+    /// <summary>The backend a create of <paramref name="profile"/> with
+    /// <paramref name="backend"/> would run on, never
+    /// <see cref="HMBackend.Auto"/>. It changes nothing. Throws what the
+    /// create would throw for the backend before it takes anything
+    /// machine-wide.</summary>
+    /// <exception cref="ArgumentNullException"><paramref name="profile"/> is null.</exception>
+    /// <exception cref="HMProfileException">The profile cannot be deployed.</exception>
+    /// <exception cref="HMBackendNotSupportedException">The profile's data has
+    /// no presentation on the backend the request resolves to.</exception>
+    /// <exception cref="HMDriverSigningException">The request names
+    /// <see cref="HMBackend.Umdf2"/>, on the call or the context, and Windows
+    /// on this machine does not install HIDMaestro's driver.</exception>
+    /// <exception cref="HMPayloadMissingException">This build lacks the
+    /// resolved backend's payload.</exception>
+    public HMBackend ResolveBackend(HMProfile profile, HMBackend backend = HMBackend.Auto)
+    {
+        if (profile == null) throw new ArgumentNullException(nameof(profile));
+        ThrowIfDisposed();
+        ThrowIfNotDeployable(profile);
+        return ResolveFor(profile, backend);
+    }
+
+    /// <summary>The selection's five steps for one create
+    /// (<see cref="Internal.BackendSelection"/>).</summary>
+    private HMBackend ResolveFor(HMProfile profile, HMBackend backend)
+    {
+        if (backend is not (HMBackend.Auto or HMBackend.Umdf2 or HMBackend.Usbip))
+            throw new ArgumentOutOfRangeException(nameof(backend));
+        var requested = Internal.BackendSelection.Requested(backend, Backend);
+        var resolved = Internal.BackendSelection.ForProfile(profile.Inner, requested, () => MachineBackend);
+        Internal.BackendSelection.ThrowIfMachineRefuses(profile.Inner, resolved, requested != HMBackend.Auto);
+        return resolved;
+    }
+
+    private static void ThrowIfNotDeployable(HMProfile profile)
+    {
+        if (!profile.IsDeployable)
+            throw new HMProfileException(profile.Id, profile.Inner.SourceFile, "$.descriptor",
+                "the profile has no HID descriptor and cannot be deployed.");
     }
 
     // ════════════════════════════════════════════════════════════════════
     //  Driver lifecycle
     // ════════════════════════════════════════════════════════════════════
 
-    /// <summary>True if the HIDMaestro driver is registered in the Windows
-    /// driver store. Does not require admin to check. It answers from what it
-    /// can read, and a driver store whose packages it cannot list answers
-    /// false. The reason goes to the diagnostic log, and
-    /// <see cref="InstallDriver"/> then reports it.</summary>
+    /// <summary>True when the driver of the context's backend is installed:
+    /// on the UMDF2 backend, the HIDMaestro driver registered in the Windows
+    /// driver store, and on the USB/IP backend, the USB/IP host controller
+    /// answering. The backend is the context's own, or
+    /// <see cref="MachineBackend"/> for <see cref="HMBackend.Auto"/>. Does not
+    /// require admin to check. It answers from what it can read, and a
+    /// driver store whose packages it cannot list answers false. The reason
+    /// goes to the diagnostic log, and <see cref="InstallDriver"/> then
+    /// reports it.</summary>
     /// <exception cref="ObjectDisposedException">The context was
     /// disposed.</exception>
     public bool IsDriverInstalled
@@ -145,6 +254,8 @@ public sealed class HMContext : IDisposable
         get
         {
             ThrowIfDisposed();
+            if (InstallBackend == HMBackend.Usbip)
+                return AnswerInstalled(() => IsUsbipBackendAvailable);
             return AnswerInstalled(DriverBuilder.IsDriverInstalled);
         }
     }
@@ -162,29 +273,28 @@ public sealed class HMContext : IDisposable
         }
     }
 
-    /// <summary>Issue #39: true when the USB transport that composite
-    /// personas ride (usbip-win2's virtual host controller) is already
-    /// installed on this machine.
+    /// <summary>Issue #39: true when the USB transport that controllers on
+    /// <see cref="HMBackend.Usbip"/> ride (usbip-win2's virtual host
+    /// controller) is already installed on this machine.
     ///
-    /// <para>This is NOT a gate on creating composite controllers.
-    /// The transport is bundled inside HIDMaestro.Core.dll and installs
-    /// itself on the first composite create, the same way the UMDF2
-    /// driver does, so <see cref="CreateController"/> works either way.
-    /// Read this only when you want to tell the user that the first
-    /// composite controller will trigger a one-time driver install
-    /// (a few seconds, and USB devices blink once as Windows
-    /// re-enumerates the root hubs).</para>
+    /// <para>This is NOT a gate on creating USB/IP controllers. The
+    /// transport is bundled inside HIDMaestro.Core.dll and installs itself
+    /// on the first USB/IP create, the same way the UMDF2 driver does, so
+    /// <see cref="CreateController"/> works either way. Read this only when
+    /// you want to tell the user that the first such controller will
+    /// trigger a one-time driver install (a few seconds, and USB devices
+    /// blink once as Windows re-enumerates the root hubs).</para>
     ///
     /// <para>Pure presence probe: requires no admin and installs
     /// nothing. False in a build that carries no USB/IP transport for this
     /// machine (<see cref="HMBuildInfo.UsbipArchitectures"/>), which creates
-    /// no composite controller whatever the machine has installed.</para></summary>
+    /// no USB/IP controller whatever the machine has installed.</para></summary>
     public static bool IsUsbipBackendAvailable =>
         HMBuildInfo.Carries(HMPayload.UsbipTransport, System.Runtime.InteropServices.RuntimeInformation.OSArchitecture) &&
         Internal.Usbip.UsbipBackend.IsAvailable;
 
     /// <summary>Issue #39: install the bundled USB transport now instead
-    /// of on the first composite create. Optional, and only worth calling
+    /// of on the first USB/IP create. Optional, and only worth calling
     /// when a consumer wants the one-time install to happen at a moment
     /// it controls (an onboarding step, a settings toggle) rather than
     /// mid-session. Idempotent, requires elevation, and reports progress
@@ -207,19 +317,29 @@ public sealed class HMContext : IDisposable
         Internal.Usbip.UsbipDriverInstaller.EnsureInstalled(progress);
     }
 
-    /// <summary>Stage the embedded driver files under
+    /// <summary>Install the driver of the context's backend: the context's
+    /// own, or <see cref="MachineBackend"/> for <see cref="HMBackend.Auto"/>.
+    ///
+    /// <para>On the UMDF2 backend: stage the embedded driver files under
     /// <c>%ProgramFiles%\HIDMaestro\Staging</c>, verifying each against its
     /// embedded SHA-256, install the self-signed code-signing certificate to
     /// the trusted root and trusted publisher stores, sign the driver
-    /// binaries, and register them with Windows via pnputil. Requires admin.
-    /// Idempotent and silent: no user prompts beyond the elevation that
-    /// brought the calling process here. A deploy also removes the staging of
-    /// SDK versions no running program uses.
+    /// binaries, and register them with Windows via pnputil. A deploy also
+    /// removes the staging of SDK versions no running program uses. If this
+    /// build's driver is already installed with both its packages, this
+    /// returns <see cref="HMDriverInstallOutcome.AlreadyCurrent"/> without
+    /// deploying, and without elevation.</para>
     ///
-    /// <para>If this build's driver is already installed with both its
-    /// packages, this returns <see cref="HMDriverInstallOutcome.AlreadyCurrent"/>
-    /// without deploying, and without elevation. In an elevated process the
-    /// controllers of programs that have exited are removed first.</para>
+    /// <para>On the USB/IP backend: install the bundled USB/IP host
+    /// controller (<see cref="InstallUsbipBackend"/>), reported as
+    /// <see cref="HMDriverInstallOutcome.Installed"/>, or
+    /// <see cref="HMDriverInstallOutcome.AlreadyCurrent"/> when it was
+    /// already answering. A create installs it on first use either way.</para>
+    ///
+    /// <para>Requires admin. Idempotent and silent: no user prompts beyond
+    /// the elevation that brought the calling process here. In an elevated
+    /// process the controllers of programs that have exited are removed
+    /// first.</para>
     /// </summary>
     /// <exception cref="UnauthorizedAccessException">The calling process is
     /// not elevated, and this build's driver is not installed.</exception>
@@ -233,16 +353,21 @@ public sealed class HMContext : IDisposable
     /// when another program held the deploy lock for ten minutes or the
     /// staging lock for two.</exception>
     /// <exception cref="HMPayloadMissingException">This build carries no
-    /// driver for this machine's architecture.</exception>
-    /// <exception cref="HMDriverSigningException">Windows on this machine
-    /// installs only driver packages Microsoft signed, as Windows on ARM64
-    /// with WHQL driver enforcement and Windows in S mode do. On a machine
-    /// that holds no HIDMaestro driver it is thrown before anything
-    /// changes. <see cref="HMDriverSigning.Check"/> says so without the
-    /// exception.</exception>
+    /// driver, or no USB/IP transport, for this machine's architecture.</exception>
+    /// <exception cref="HMDriverSigningException">The context was built with
+    /// <see cref="HMBackend.Umdf2"/>, and Windows on this machine does not
+    /// install HIDMaestro's driver, as Windows on ARM64 and Windows in S
+    /// mode do not. On a machine that holds no HIDMaestro driver it is thrown
+    /// before anything changes. <see cref="MachineBackend"/> says so without
+    /// the exception.</exception>
     public void InstallDriver()
     {
         ThrowIfDisposed();
+        if (InstallBackend == HMBackend.Usbip)
+        {
+            InstallUsbipDriver();
+            return;
+        }
         HMBuildInfo.ThrowIfMissing(HMPayload.Driver);
 
         // Before the sweep below takes this process's owner claim, so a
@@ -260,6 +385,32 @@ public sealed class HMContext : IDisposable
 
         LastDriverInstall = Internal.DriverDeploy.Run();
     }
+
+    /// <summary><see cref="InstallDriver"/> on the USB/IP backend.</summary>
+    private void InstallUsbipDriver()
+    {
+        HMBuildInfo.ThrowIfMissing(HMPayload.UsbipTransport);
+        bool present = Internal.Usbip.UsbipDriverInstaller.IsInstalled;
+        if (!present && !Internal.BackendSelection.ProcessElevated)
+            throw new UnauthorizedAccessException(
+                "Installing the USB/IP host controller needs an elevated process, and it is not installed.");
+        // The owner claim first, through the removal gate, as
+        // InstallUsbipBackend takes it.
+        if (Internal.BackendSelection.ProcessElevated && !Internal.MachineClaims.ClaimBeforeWrite())
+            throw new InvalidOperationException(Internal.MachineClaims.RemovingHereMessage);
+        Internal.OwnerSweep.ReclaimDeadOwners();
+        int moves = Internal.Usbip.UsbipDriverInstaller.LegacyMoves;
+        Internal.Usbip.UsbipDriverInstaller.EnsureInstalled();
+        LastDriverInstall = UsbipInstallOutcome(present, moved: Internal.Usbip.UsbipDriverInstaller.LegacyMoves != moves);
+    }
+
+    /// <summary>What an install of the USB/IP host controller did:
+    /// <see cref="HMDriverInstallOutcome.Installed"/> when it installed the
+    /// host controller, or moved one already there off an older usbip-win2
+    /// onto the bundled one, else
+    /// <see cref="HMDriverInstallOutcome.AlreadyCurrent"/>.</summary>
+    internal static HMDriverInstallOutcome UsbipInstallOutcome(bool presentBefore, bool moved) =>
+        !presentBefore || moved ? HMDriverInstallOutcome.Installed : HMDriverInstallOutcome.AlreadyCurrent;
 
     /// <summary>What the last <see cref="InstallDriver"/> call on this
     /// context did, or null before the first one.</summary>
@@ -559,10 +710,14 @@ public sealed class HMContext : IDisposable
     /// controller to remove the device, or dispose the entire context to
     /// remove all controllers it owns.</para>
     ///
-    /// <para>All three profile paths are supported: plain HID (DualSense,
-    /// generic gamepads), xinputhid companion-only (Xbox Series BT, Xbox
-    /// One), and non-xinputhid Xbox with XUSB companion (Xbox 360 Wired).
-    /// </para>
+    /// <para>On the UMDF2 backend all three profile paths are supported:
+    /// plain HID (DualSense, generic gamepads), xinputhid companion-only
+    /// (Xbox Series BT, Xbox One), and non-xinputhid Xbox with XUSB companion
+    /// (Xbox 360 Wired). On the USB/IP backend the controller is a USB
+    /// device the USB/IP host controller presents, and the create returns
+    /// once Windows has started its HID interface. The backend is the
+    /// context's (<see cref="Backend"/>), resolved as
+    /// <see cref="ResolveBackend"/> says.</para>
     /// </summary>
     /// <exception cref="ArgumentNullException"><paramref name="profile"/> is null.</exception>
     /// <exception cref="HMProfileException">A defect of the profile itself:
@@ -577,8 +732,12 @@ public sealed class HMContext : IDisposable
     /// that dropped protocol 4, or a mis-stamped one.</exception>
     /// <exception cref="InvalidOperationException">This build lacks the
     /// profile's payload (<see cref="HMPayloadMissingException"/>), the
-    /// driver install failed, or the device node creation failed.</exception>
-    public HMController CreateController(HMProfile profile) => CreateController(profile, null);
+    /// driver install failed, or the device node creation failed. The
+    /// profile has no presentation on the resolved backend
+    /// (<see cref="HMBackendNotSupportedException"/>), or the context names
+    /// <see cref="HMBackend.Umdf2"/> on a machine whose Windows does not
+    /// install HIDMaestro's driver (<see cref="HMDriverSigningException"/>).</exception>
+    public HMController CreateController(HMProfile profile) => CreateController(profile, null, HMBackend.Auto);
 
     /// <summary>Create a new virtual controller with a durable identity
     /// (issue #60). <paramref name="identityKey"/> names the controller
@@ -629,12 +788,36 @@ public sealed class HMContext : IDisposable
     /// <exception cref="InvalidOperationException">This build lacks the
     /// profile's payload (<see cref="HMPayloadMissingException"/>), the
     /// driver install failed, or the device node creation failed.</exception>
-    public HMController CreateController(HMProfile profile, string? identityKey)
+    public HMController CreateController(HMProfile profile, string? identityKey) =>
+        CreateController(profile, identityKey, HMBackend.Auto);
+
+    /// <summary>Create a controller with a durable identity on
+    /// <paramref name="backend"/>. See
+    /// <see cref="CreateController(HMProfile, string)"/> for the identity
+    /// key. <see cref="HMBackend.Auto"/> takes the context's
+    /// <see cref="Backend"/>, and when that is Auto too, the profile's and
+    /// the machine's (<see cref="ResolveBackend"/>). The controller's
+    /// <see cref="HMController.Backend"/> says which it got.</summary>
+    /// <exception cref="ArgumentNullException"><paramref name="profile"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="backend"/>
+    /// is not one of the three values.</exception>
+    /// <exception cref="HMBackendNotSupportedException">The profile's data has
+    /// no presentation on the resolved backend. Nothing machine-wide is
+    /// taken.</exception>
+    /// <exception cref="HMDriverSigningException">The request names
+    /// <see cref="HMBackend.Umdf2"/> on a machine whose Windows does not
+    /// install HIDMaestro's driver. Nothing changes.</exception>
+    /// <exception cref="HMResourceInUseException">As for
+    /// <see cref="CreateController(HMProfile, string)"/>, and on the USB/IP
+    /// backend when every port of the host controller holds a
+    /// device.</exception>
+    /// <exception cref="HMProfileException">As for
+    /// <see cref="CreateController(HMProfile)"/>, and a <c>usbConfiguration</c>
+    /// pin that does not fit the profile.</exception>
+    public HMController CreateController(HMProfile profile, string? identityKey, HMBackend backend)
     {
         if (profile == null) throw new ArgumentNullException(nameof(profile));
-        if (!profile.IsDeployable)
-            throw new HMProfileException(profile.Id, profile.Inner.SourceFile, "$.descriptor",
-                "the profile has no HID descriptor and cannot be deployed.");
+        ThrowIfNotDeployable(profile);
         ThrowIfDisposed();
 
         // The lowest slot free in this context. Linear scan from 0, no
@@ -648,14 +831,14 @@ public sealed class HMContext : IDisposable
             while (_controllers.ContainsKey(slot) || _pendingSlots.Contains(slot)) slot++;
             _pendingSlots.Add(slot);
         }
-        try { return CreateAtSlot(slot, profile, identityKey); }
+        try { return CreateAtSlot(slot, profile, identityKey, backend); }
         finally { lock (_lock) _pendingSlots.Remove(slot); }
     }
 
     /// <summary>The machine-wide half of a create: the lease on a
     /// transport index and an identity, taken before any PnP work, then the
     /// backend's create on them.</summary>
-    private HMController CreateAtSlot(int slot, HMProfile profile, string? identityKey)
+    private HMController CreateAtSlot(int slot, HMProfile profile, string? identityKey, HMBackend backend)
     {
         // A profile whose device model does not compile, and a payload this
         // build lacks, refuse the create before the lease, so the refusal
@@ -670,15 +853,20 @@ public sealed class HMContext : IDisposable
         {
             throw Internal.ProfileDefects.ToProfileException(profile.Inner, e);
         }
-        if (profile.RequiresUsbipBackend)
-            HMBuildInfo.ThrowIfMissing(HMPayload.UsbipTransport,
-                $"Profile '{profile.Id}' is a composite persona, which rides the USB/IP transport.");
-        else
+        // The backend, checked against the profile and the machine: an
+        // unsupported profile, an explicit UMDF2 request where Windows does
+        // not install the driver and a payload this build lacks all refuse
+        // here, before the lease.
+        var resolved = ResolveFor(profile, backend);
+        if (resolved == HMBackend.Usbip)
         {
-            HMBuildInfo.ThrowIfMissing(HMPayload.Driver,
-                $"Profile '{profile.Id}' runs on the UMDF2 driver.");
-            // The same refusal as InstallDriver's, before the lease.
-            Internal.DriverDeploy.ThrowIfSigningStopsDeploy();
+            // The USB device the profile presents, so a pin that does not fit
+            // is refused with nothing to undo.
+            try { _ = Internal.Usbip.UsbPresentation.Resolve(profile.Inner); }
+            catch (Exception e) when (e is not HMBackendNotSupportedException && Internal.ProfileDefects.IsDefect(e))
+            {
+                throw Internal.ProfileDefects.ToProfileException(profile.Inner, e);
+            }
         }
 
         // What programs that have exited left goes first, once per
@@ -701,7 +889,7 @@ public sealed class HMContext : IDisposable
         // under LockRecursionPolicy.SupportsRecursion, a writer waiting or
         // not (ReaderWriterLockSlim.TryEnterReadLockCore).
         Internal.OwnerSweep.CreateGate.EnterReadLock();
-        try { return CreateUnderLease(slot, profile, identityKey); }
+        try { return CreateUnderLease(slot, profile, identityKey, resolved); }
         finally { Internal.OwnerSweep.CreateGate.ExitReadLock(); }
     }
 
@@ -715,24 +903,33 @@ public sealed class HMContext : IDisposable
     internal static Action<int, string?> TeardownDevices = Internal.DeviceOrchestrator.TeardownController;
     internal static Action<HMController>? AfterControllerBuilt;
 
-    private HMController CreateUnderLease(int slot, HMProfile profile, string? identityKey)
+    private HMController CreateUnderLease(int slot, HMProfile profile, string? identityKey, HMBackend backend)
     {
-        // A composite create opens the USB/IP host controller for its
-        // lease's census and again for its attach: one open serves both
+        bool usbip = backend == HMBackend.Usbip;
+        // A USB/IP create opens the host controller for its lease's census
+        // and again for its attach: one open serves both
         // (VhciClient.HoldOpen), closed as this create returns.
-        using var vhci = profile.RequiresUsbipBackend ? Internal.Usbip.VhciClient.HoldOpen() : null;
-        var lease = AcquireLease(slot, identityKey,
-            profile.RequiresUsbipBackend ? "usbip" : "umdf", profile.Id);
+        using var vhci = usbip ? Internal.Usbip.VhciClient.HoldOpen() : null;
+        // A host controller whose USB 2.0 ports all hold a device, refused
+        // before the lease and the host controller's install. After the
+        // session sweep, which plugs out what programs that have exited
+        // left on its ports, and inside the create gate: work between the
+        // sweep and the gate lets the phantom cleanup the sweep started
+        // take the gate first, and the create then waits for all of it.
+        if (usbip) Internal.Usbip.UsbipBackend.ThrowIfPortsFull();
+        // The record's backend tag is the resolved backend, which the sweeps
+        // and the deploy policy read.
+        var lease = AcquireLease(slot, identityKey, usbip ? "usbip" : "umdf", profile.Id);
         bool keepLease = false;
         try
         {
-            // Issue #39: composite USB personas run on the USB/IP backend,
-            // never on UMDF2, which can only present the single HID
-            // interface and would silently drop the three USB Audio Class
-            // interfaces the profile promises. The backend's transport is
-            // bundled and deploys itself on first use, so this path needs no
+            // The USB/IP backend: a composite persona, whose audio
+            // interfaces UMDF2 cannot present, any profile on a machine
+            // whose Windows does not install the UMDF2 driver, and any
+            // profile a program asked to run there. The transport is bundled
+            // and deploys itself on first use, so this path needs no
             // precondition from the consumer.
-            if (profile.RequiresUsbipBackend)
+            if (usbip)
                 return CreateUsbipController(slot, lease, profile);
 
             string? instanceId = null;
@@ -808,20 +1005,52 @@ public sealed class HMContext : IDisposable
         }
     }
 
-    // Issue #39: the USB/IP create path. The backend's device emulator
-    // pre-creates the per-index shared sections and events, attaches
-    // through usbip-win2's vhci, and the HMController then binds to the
-    // same sections it always does. No PnP, no INF, no driver install.
+    // Issue #39: the USB/IP create path. The machine steps a UMDF2 create
+    // takes first (GameInputSvc, the GameInput table, the joy.cpl name),
+    // then the backend's device emulator pre-creates the per-index shared
+    // sections and events, attaches through usbip-win2's vhci, and the
+    // HMController then binds to the same sections it always does. No INF,
+    // no HIDMaestro driver.
     private HMController CreateUsbipController(int slot, Internal.ControllerLease lease, HMProfile profile)
     {
         int index = lease.TransportIndex;
         Internal.Usbip.UsbipBackendHandle? handle = null;
         try
         {
+            Internal.DeviceOrchestrator.PrepareUsbipController(index, profile.Inner);
             // The device emulator maps the index's sections before its
             // attach, so a failed attach leaves them for the catch below.
             handle = Internal.Usbip.UsbipBackend.CreateDevice(profile.Inner, index, lease.Identity);
+            // The USB instance the device's records sit under, in the owner
+            // record, for record cleanup.
+            if (handle.Device.Descriptors.UsbInstanceId is { } usbId)
+            {
+                Internal.MachineClaims.SetControllerValue(lease.Identity.Token, "UsbInstanceId", usbId);
+                // A derived device's HID interface is started before the
+                // create returns, as the UMDF2 create's is. The wait finds
+                // the device on its port, and the record takes the name
+                // Windows gave it when that is not the serial's.
+                if (handle.Device.Derived)
+                {
+                    string named = Internal.DeviceOrchestrator.AwaitUsbipStart(usbId, handle.Device.VhciPort, index);
+                    if (!string.Equals(named, usbId, StringComparison.OrdinalIgnoreCase))
+                        Internal.MachineClaims.SetControllerValue(lease.Identity.Token, "UsbInstanceId", named);
+                }
+            }
             var controller = new HMController(this, slot, lease, profile, instanceId: null, handle, lease.Identity.Key);
+            try
+            {
+                AfterControllerBuilt?.Invoke(controller);
+                // A protocol the controller runs for a derived device starts
+                // once the device has started and the output reader runs, as
+                // on UMDF2.
+                controller.StartProtocol();
+            }
+            catch
+            {
+                try { controller.StopThreads(); } catch { }
+                throw;
+            }
             lock (_lock) _controllers[slot] = controller;
             return controller;
         }
@@ -829,6 +1058,7 @@ public sealed class HMContext : IDisposable
         {
             try { handle?.Dispose(); } catch { }
             try { Internal.SharedMemoryIO.DestroyController(index); } catch { }
+            try { Internal.RegistryLedger.Release(index); } catch { }
             throw;
         }
     }
@@ -858,7 +1088,7 @@ public sealed class HMContext : IDisposable
     /// reasons <see cref="CreateController(HMProfile)"/> gives.</exception>
     /// <exception cref="HMProfileException">As for
     /// <see cref="CreateController(HMProfile)"/>.</exception>
-    public HMController CreateControllerAt(int index, HMProfile profile) => CreateControllerAt(index, profile, null);
+    public HMController CreateControllerAt(int index, HMProfile profile) => CreateControllerAt(index, profile, null, HMBackend.Auto);
 
     /// <summary>Create a controller pinned to a specific slot with a
     /// durable identity key. See <see cref="CreateController(HMProfile, string)"/>
@@ -881,12 +1111,27 @@ public sealed class HMContext : IDisposable
     /// device of that name. A device a closed program left does not refuse
     /// its own key: the create takes that device back. A controller of a context this process dropped
     /// without disposing holds its key until the process exits.</exception>
-    public HMController CreateControllerAt(int index, HMProfile profile, string? identityKey)
+    public HMController CreateControllerAt(int index, HMProfile profile, string? identityKey) =>
+        CreateControllerAt(index, profile, identityKey, HMBackend.Auto);
+
+    /// <summary>Create a controller pinned to a specific slot with a
+    /// durable identity key on <paramref name="backend"/>. See
+    /// <see cref="CreateControllerAt(int, HMProfile, string)"/> for the slot
+    /// and <see cref="CreateController(HMProfile, string, HMBackend)"/> for
+    /// the backend.</summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/>
+    /// is negative, or <paramref name="backend"/> is not one of the three
+    /// values.</exception>
+    /// <exception cref="InvalidOperationException">If the slot is already
+    /// in use by another live controller of this context, and for the
+    /// reasons <see cref="CreateController(HMProfile, string, HMBackend)"/>
+    /// gives.</exception>
+    /// <exception cref="HMProfileException">As for
+    /// <see cref="CreateController(HMProfile)"/>.</exception>
+    public HMController CreateControllerAt(int index, HMProfile profile, string? identityKey, HMBackend backend)
     {
         if (profile == null) throw new ArgumentNullException(nameof(profile));
-        if (!profile.IsDeployable)
-            throw new HMProfileException(profile.Id, profile.Inner.SourceFile, "$.descriptor",
-                "the profile has no HID descriptor and cannot be deployed.");
+        ThrowIfNotDeployable(profile);
         if (index < 0) throw new ArgumentOutOfRangeException(nameof(index));
         ThrowIfDisposed();
 
@@ -897,7 +1142,7 @@ public sealed class HMContext : IDisposable
                     $"Controller index {index} is already in use. Dispose the existing controller first.");
             _pendingSlots.Add(index);
         }
-        try { return CreateAtSlot(index, profile, identityKey); }
+        try { return CreateAtSlot(index, profile, identityKey, backend); }
         finally { lock (_lock) _pendingSlots.Remove(index); }
     }
 

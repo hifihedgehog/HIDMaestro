@@ -1,38 +1,43 @@
+using System;
 using System.Collections.Generic;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace HIDMaestro.Internal;
 
-/// <summary>Issue #39. A USB configuration a composite persona presents,
-/// shaped after the standard descriptor set so a profile can be authored
-/// directly from a real device's descriptor dump.
+/// <summary>Issue #39. The USB device a profile presents on the USB/IP
+/// backend, shaped after the standard descriptor set so a profile can be
+/// authored directly from a real device's descriptor dump.
 ///
-/// <para>Every UMDF2 profile leaves this null. Windows composes the
-/// configuration itself there, and the HID report descriptor is the only
-/// piece the profile owns. Only a profile whose
-/// <see cref="ControllerProfile.Backend"/> is <c>"usbip"</c> carries one,
-/// because only the USB/IP backend is in a position to present interfaces
-/// Windows did not compose.</para>
-///
-/// <para>This is a data model, not a driver. Authoring one changes no
-/// behavior on its own: nothing instantiates it until the backend exists,
-/// and the five existing USB Sony profiles never gain one.</para></summary>
+/// <para>Two forms. With <see cref="DeviceDescriptorHex"/> and
+/// <see cref="ConfigurationDescriptorHex"/> it is authored: the device
+/// serves those blobs verbatim, and the structured fields describe them.
+/// Without them it is a set of pins over the presentation the SDK derives
+/// from the profile's own descriptor and identity: one HID interface, each
+/// field a pin leaves out taken from the profile (UsbPresentation). A
+/// profile with no <c>usbConfiguration</c> at all gets that derived
+/// presentation whole. A pin is a value read from a real device. The UMDF2
+/// backend reads none of this: Windows composes that device's
+/// configuration itself, and the HID report descriptor is the piece the
+/// profile owns there.</para></summary>
 public sealed class UsbConfigurationSpec
 {
     /// <summary>bConfigurationValue, the value SET_CONFIGURATION selects.
-    /// One on every device in scope.</summary>
+    /// One when not given.</summary>
     [JsonPropertyName("configurationValue")]
-    public byte ConfigurationValue { get; set; } = 1;
+    public byte? ConfigurationValue { get; set; }
 
     /// <summary>bmAttributes. 0xC0 is self-powered with no remote wakeup,
-    /// which is what both Sony pads report over USB.</summary>
+    /// which is what both Sony pads report over USB, and 0x80 bus powered,
+    /// what a derived presentation reports when not given.</summary>
     [JsonPropertyName("attributes")]
-    public byte Attributes { get; set; } = 0xC0;
+    public byte? Attributes { get; set; }
 
     /// <summary>Bus current in milliamps, as the device reports it.
-    /// bMaxPower carries half this value, so 500 mA is encoded 0xFA.</summary>
+    /// bMaxPower carries half this value, so 500 mA is encoded 0xFA. 500
+    /// when not given.</summary>
     [JsonPropertyName("maxPowerMilliamps")]
-    public int MaxPowerMilliamps { get; set; } = 500;
+    public int? MaxPowerMilliamps { get; set; }
 
     /// <summary>The interfaces in bInterfaceNumber order. A DualSense has
     /// four: Audio Control, two Audio Streaming, and HID.</summary>
@@ -41,7 +46,9 @@ public sealed class UsbConfigurationSpec
 
     /// <summary>The bus speed the real device enumerates at:
     /// <c>"high"</c> (DualSense), <c>"full"</c> (DualShock 4) or
-    /// <c>"low"</c>. Reported in the USB/IP import reply. usbip-win2
+    /// <c>"low"</c>. When not given, an authored device is high speed, and a
+    /// derived one is full speed unless a report it carries is longer than
+    /// 64 bytes. Reported in the USB/IP import reply. usbip-win2
     /// patches the endpoint intervals of every device below high speed for
     /// its high-speed UDE presentation itself (wsk_receive.cpp,
     /// post_control_transfer), so the blobs stay verbatim either way. A
@@ -50,7 +57,7 @@ public sealed class UsbConfigurationSpec
     /// held to an 8-byte control endpoint, interrupt endpoints of at most
     /// 8 bytes and no bulk or isochronous ones.</summary>
     [JsonPropertyName("busSpeed")]
-    public string BusSpeed { get; set; } = "high";
+    public string? BusSpeed { get; set; }
 
     /// <summary>The 18-byte device descriptor, hex, verbatim from a real
     /// pad. The backend serves this blob for GET_DESCRIPTOR(Device); the
@@ -104,6 +111,146 @@ public sealed class UsbConfigurationSpec
     /// <see cref="WinUsbSpec"/>.</summary>
     [JsonPropertyName("winUsb")]
     public WinUsbSpec? WinUsb { get; set; }
+
+    /// <summary>Pins over the derived device descriptor. Read only when the
+    /// blobs are absent.</summary>
+    [JsonPropertyName("device")]
+    public UsbDevicePins? Device { get; set; }
+
+    /// <summary>Pins over the derived HID interface and its class
+    /// descriptor. Read only when the blobs are absent.</summary>
+    [JsonPropertyName("hid")]
+    public UsbHidPins? Hid { get; set; }
+
+    /// <summary>Pins over the derived interrupt IN endpoint. Read only when
+    /// the blobs are absent.</summary>
+    [JsonPropertyName("inEndpoint")]
+    public UsbEndpointPins? InEndpoint { get; set; }
+
+    /// <summary>Pins over the derived interrupt OUT endpoint, which a
+    /// derived device has when its descriptor declares an output report.
+    /// <c>null</c> written in the file pins a device that has none. Read
+    /// only when the blobs are absent.</summary>
+    [JsonPropertyName("outEndpoint")]
+    [JsonConverter(typeof(UsbEndpointPinsConverter))]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public UsbEndpointPins? OutEndpoint { get; set; }
+
+    /// <summary>True when the profile authors the device and configuration
+    /// descriptors.</summary>
+    [JsonIgnore]
+    public bool IsAuthored =>
+        !string.IsNullOrEmpty(DeviceDescriptorHex) || !string.IsNullOrEmpty(ConfigurationDescriptorHex);
+}
+
+/// <summary>Pins over a derived device descriptor's fields.</summary>
+public sealed class UsbDevicePins
+{
+    /// <summary>bcdUSB, hex, such as <c>"0x0200"</c>.</summary>
+    [JsonPropertyName("bcdUsb")]
+    public string? BcdUsb { get; set; }
+
+    /// <summary>bMaxPacketSize0: 8, 16, 32 or 64.</summary>
+    [JsonPropertyName("maxPacketSize0")]
+    public byte? MaxPacketSize0 { get; set; }
+
+    /// <summary>bcdDevice, hex. The profile's <c>versionNumber</c> when not
+    /// given.</summary>
+    [JsonPropertyName("bcdDevice")]
+    public string? BcdDevice { get; set; }
+}
+
+/// <summary>Pins over a derived HID interface descriptor and its HID class
+/// descriptor.</summary>
+public sealed class UsbHidPins
+{
+    /// <summary>bInterfaceNumber.</summary>
+    [JsonPropertyName("interfaceNumber")]
+    public byte? InterfaceNumber { get; set; }
+
+    /// <summary>bInterfaceSubClass: 0, or 1 for a boot device.</summary>
+    [JsonPropertyName("subClass")]
+    public byte? SubClass { get; set; }
+
+    /// <summary>bInterfaceProtocol: 0, 1 keyboard or 2 mouse.</summary>
+    [JsonPropertyName("protocol")]
+    public byte? Protocol { get; set; }
+
+    /// <summary>bcdHID, hex, such as <c>"0x0111"</c>.</summary>
+    [JsonPropertyName("bcdHid")]
+    public string? BcdHid { get; set; }
+
+    /// <summary>bCountryCode.</summary>
+    [JsonPropertyName("countryCode")]
+    public byte? CountryCode { get; set; }
+}
+
+/// <summary>Pins over a derived interrupt endpoint descriptor.</summary>
+public sealed class UsbEndpointPins
+{
+    /// <summary>bEndpointAddress, hex, direction bit included, such as
+    /// <c>"0x84"</c>.</summary>
+    [JsonPropertyName("address")]
+    public string? Address { get; set; }
+
+    /// <summary>wMaxPacketSize.</summary>
+    [JsonPropertyName("maxPacketSize")]
+    public int? MaxPacketSize { get; set; }
+
+    /// <summary>bInterval.</summary>
+    [JsonPropertyName("interval")]
+    public byte? Interval { get; set; }
+
+    /// <summary>True when the file wrote <c>null</c> for the endpoint: the
+    /// device has none.</summary>
+    [JsonIgnore]
+    public bool None { get; set; }
+}
+
+/// <summary>Reads <see cref="UsbEndpointPins"/>, and a JSON <c>null</c> as
+/// the pin that says the device has no such endpoint. Strict as the
+/// profile's own reader: a key the type lacks and a key written twice are
+/// refused.</summary>
+internal sealed class UsbEndpointPinsConverter : JsonConverter<UsbEndpointPins>
+{
+    public override bool HandleNull => true;
+
+    public override UsbEndpointPins Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.Null) return new UsbEndpointPins { None = true };
+        if (reader.TokenType != JsonTokenType.StartObject)
+            throw new JsonException("An endpoint pin is an object, or null for no endpoint.");
+        var pins = new UsbEndpointPins();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        while (reader.Read() && reader.TokenType != JsonTokenType.EndObject)
+        {
+            if (reader.TokenType != JsonTokenType.PropertyName)
+                throw new JsonException("An endpoint pin holds named values.");
+            string name = reader.GetString()!;
+            if (!seen.Add(name)) throw new JsonException($"'{name}' is written twice.");
+            reader.Read();
+            bool isNull = reader.TokenType == JsonTokenType.Null;
+            switch (name.ToLowerInvariant())
+            {
+                case "address": pins.Address = isNull ? null : reader.GetString(); break;
+                case "maxpacketsize": pins.MaxPacketSize = isNull ? null : reader.GetInt32(); break;
+                case "interval": pins.Interval = isNull ? null : reader.GetByte(); break;
+                default:
+                    throw new JsonException($"'{name}' is not a key of an endpoint pin: address, maxPacketSize, interval.");
+            }
+        }
+        return pins;
+    }
+
+    public override void Write(Utf8JsonWriter writer, UsbEndpointPins value, JsonSerializerOptions options)
+    {
+        if (value == null || value.None) { writer.WriteNullValue(); return; }
+        writer.WriteStartObject();
+        if (value.Address != null) writer.WriteString("address", value.Address);
+        if (value.MaxPacketSize is int size) writer.WriteNumber("maxPacketSize", size);
+        if (value.Interval is byte interval) writer.WriteNumber("interval", interval);
+        writer.WriteEndObject();
+    }
 }
 
 /// <summary>Issue #66. Microsoft OS 1.0 descriptors, each a hex string of the

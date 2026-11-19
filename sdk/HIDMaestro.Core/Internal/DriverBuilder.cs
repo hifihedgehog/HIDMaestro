@@ -678,8 +678,8 @@ public static class DriverBuilder
 
         if (!PnputilHelper.IsHidMaestroDriverInstalled())
         {
-            // A Windows that installs only Microsoft-signed packages is
-            // named as the cause when its own check of the catalog says so.
+            // A Windows that refuses HIDMaestro's package is named as the
+            // cause when its own check of the catalog says so.
             DriverSigningPolicy.ThrowIfImportRefused(DriverDeploy.Machine.Signing(), Path.Combine(dir, "hidmaestro.cat"));
             throw new InvalidOperationException(
                 $"pnputil /add-driver ran to its end ({string.Join(", ", exits)}), but the driver store does not hold "

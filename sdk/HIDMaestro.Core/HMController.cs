@@ -72,8 +72,9 @@ public sealed partial class HMController : IDisposable
     /// <summary>The version of the HIDMaestro driver this controller runs
     /// on, as the driver reports it in <c>Global\HIDMaestroVersion&lt;N&gt;</c>.
     /// Null until the driver has started the device, on a driver older than
-    /// 2.0.0, which does not report one, on a composite persona, which
-    /// runs on the USB/IP transport instead of the HIDMaestro driver, and
+    /// 2.0.0, which does not report one, on a controller whose
+    /// <see cref="Backend"/> is <see cref="HMBackend.Usbip"/>, which no
+    /// HIDMaestro driver serves, and
     /// once this program's own
     /// <see cref="HMContext.RemoveAllVirtualControllers(HMCleanupScope, bool)"/>
     /// with <see cref="HMCleanupScope.Everything"/> has removed the
@@ -89,6 +90,13 @@ public sealed partial class HMController : IDisposable
     public string IdentityKey { get; }
     public HMProfile Profile { get; }
 
+    /// <summary>The backend this controller runs on:
+    /// <see cref="HMBackend.Umdf2"/> or <see cref="HMBackend.Usbip"/>, never
+    /// <see cref="HMBackend.Auto"/>. The create resolved it from its own
+    /// backend, the context's and the machine's
+    /// (<see cref="HMContext.ResolveBackend"/>).</summary>
+    public HMBackend Backend => UsbipHandle != null ? HMBackend.Usbip : HMBackend.Umdf2;
+
     // Issue #39: non-null when this controller runs on the USB/IP
     // backend instead of the UMDF2 driver. The backend's device emulator
     // speaks the SAME shared-memory contract the driver does (it reads the
@@ -103,9 +111,15 @@ public sealed partial class HMController : IDisposable
 
     /// <summary>Issue #39: the audio surfaces of a composite USB persona
     /// (speaker/haptic PCM out, microphone in, volume/mute control
-    /// events). Null on every UMDF2 profile; non-null exactly when
-    /// <see cref="HMProfile.RequiresUsbipBackend"/> and the controller
-    /// was created through the USB/IP backend.</summary>
+    /// events). Non-null exactly when the controller runs on
+    /// <see cref="HMBackend.Usbip"/> and an alternate setting of an
+    /// interface in its USB configuration declares an isochronous endpoint,
+    /// as a composite persona's audio interfaces do. Null on every other
+    /// controller: every controller on <see cref="HMBackend.Umdf2"/>, every
+    /// derived USB/IP device, and an authored USB/IP profile with no
+    /// isochronous endpoint, such as gamecube-adapter, steam-controller-2
+    /// and xbox-360-wired-full. Before 2.3.0 every USB/IP controller had
+    /// one.</summary>
     public HMUsbAudio? UsbAudio { get; }
 
     // Encoder built once from the profile descriptor at construction time;
@@ -588,7 +602,7 @@ public sealed partial class HMController : IDisposable
         IdentityKey = identityKey ?? Internal.DeviceIdentity.DefaultKey(index);
         Profile = profile;
         UsbipHandle = usbipHandle;
-        if (usbipHandle != null)
+        if (usbipHandle?.Device.Audio != null)
             UsbAudio = new HMUsbAudio(profile.Inner, usbipHandle.Device);
 
         // v1.3.0 T10: cached per-profile builder; same descriptor + same
@@ -623,8 +637,9 @@ public sealed partial class HMController : IDisposable
         // xinputhid controller publishes XInput through the upper filter,
         // and every other controller has no XInput at all, so the 14-byte
         // packing is skipped for them: the presentation plan decides it
-        // with the companion it makes (PresentationPlan.PacksGip).
-        _packsGipBuffer = PresentationPlan.Of(profile.Inner).PacksGip;
+        // with the companion it makes (PresentationPlan.PacksGip). A USB/IP
+        // controller has no companion.
+        _packsGipBuffer = usbipHandle == null && PresentationPlan.Of(profile.Inner).PacksGip;
         // From here a sweep's release of this process's sections leaves the
         // ones this controller's threads write until its own Dispose
         // (SharedMemoryIO.Hold). The create mapped them before this, and
@@ -682,7 +697,13 @@ public sealed partial class HMController : IDisposable
         // v2.0.0: the device model. The profile compiled at load and at
         // create's validation, so this reuses that work.
         var model = profile.Inner.GetOrCompileModel();
-        if (!profile.Inner.RequiresUsbipBackend && profile.Inner.Protocol != null)
+        // The UMDF2 form of a protocol runs here, behind the input section:
+        // on the UMDF2 driver, and on a derived USB/IP device, which plays
+        // the driver's half of the section. An authored USB/IP device runs
+        // its protocol itself, and so does a USB/IP profile's controller a
+        // check builds on process memory alone.
+        if (profile.Inner.Protocol != null
+            && (usbipHandle != null ? usbipHandle.Device.Derived : !profile.Inner.RequiresUsbipBackend))
         {
             var compiled = Internal.Usbip.CompiledProtocol.Compile(profile.Inner, null)!;
             _host = new Internal.ProtocolHost(profile.Inner, compiled, index, new SectionChannel(this), _submitLock);
@@ -1360,9 +1381,10 @@ public sealed partial class HMController : IDisposable
     /// winUsb, or no driver Windows has ranks above the package, which would
     /// let Windows choose the package for real devices.</exception>
     /// <exception cref="HMDriverSigningException">Windows on this machine
-    /// installs only driver packages Microsoft signed, and the binding's
-    /// package is signed as HIDMaestro's driver is
-    /// (<see cref="HMDriverSigning"/>).</exception>
+    /// does not install HIDMaestro's driver package, and the binding's
+    /// package is signed as HIDMaestro's driver is. Thrown whatever backend
+    /// the controller runs on, <see cref="HMBackend.Auto"/>'s included,
+    /// when the driver store holds no HIDMaestro package.</exception>
     public HMWinUsbBinding BindWinUsb()
     {
         ThrowIfDisposed();

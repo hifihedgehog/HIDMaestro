@@ -91,8 +91,8 @@
 
          The ARM64 installer: the 0.9.8.1 release page carries the x64
          installer only. This is the ARM64 build of the same tag that the
-         project's signer posted in usbip-win2 issue #13, with drivers
-         attestation-signed by Microsoft. -->
+         project's signer posted in usbip-win2 issue #13, its drivers
+         signed as the project ships them. -->
     <HMUsbipVersion>0.9.8.1</HMUsbipVersion>
     <HMUsbipAsset>USBip-$(HMUsbipVersion)-x64.exe</HMUsbipAsset>
     <HMUsbipSha256>38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a</HMUsbipSha256>
@@ -300,9 +300,10 @@
          The composite USB personas (dualsense-composite,
          dualshock-4-v2-composite and the rest) ride the USB/IP backend,
          whose transport this assembly carries and installs on the first
-         composite create. A build made with HMSkipUsbip carries the
-         profiles but refuses to create them. Consumers check
-         HMProfile.RequiresUsbipBackend against HMBuildInfo.UsbipArchitectures. -->
+         USB/IP create. A build made with HMSkipUsbip carries the
+         profiles but refuses to create them on that backend. Consumers
+         check HMProfile.RequiresUsbipBackend against
+         HMBuildInfo.UsbipArchitectures. -->
     <HMProfileJson Include="..\..\profiles\**\*.json"
                    Exclude="..\..\profiles\schema.json;..\..\profiles\scraped_descriptors.json;..\..\profiles\linux-kernel-fixed-descriptors.json;..\..\profiles\models\**" />
     <!-- Named models: never read as profiles, and embedded under a logical
