@@ -372,6 +372,17 @@ internal static partial class Program
         if (args.Length >= 2 && args[0] == "--child-create-usbip") return ChildCreateUsbip(args[1]);
         if (args.Length >= 2 && args[0] == "--remove-listed") return RemoveListed(args[1]);
         if (args.Length >= 1 && args[0] == "--uninstall") return UninstallKeepingUsbip();
+        // An argument this build does not know runs nothing it names, so it
+        // is refused rather than read as the default run.
+        string[] known = { "--offline", "--usb-ledger", "--r13-only", "--winusb-note" };
+        var unknown = args.Where(a => !known.Contains(a)).ToList();
+        if (args.Contains("--r13-only") && !args.Contains("--usb-ledger")) unknown.Add("--r13-only (it goes with --usb-ledger)");
+        if (unknown.Count > 0)
+        {
+            Console.WriteLine($"RegistryOwnershipCheck: unknown argument {string.Join(", ", unknown)}. Known: {string.Join(" ", known)}, " +
+                              "--remove-listed <file>, --uninstall.");
+            return 64;
+        }
         Console.WriteLine("=== Registry keys shared with real devices (foundation-sunshine #1138) ===");
         bool offlineOnly = args.Contains("--offline");
         Offline();

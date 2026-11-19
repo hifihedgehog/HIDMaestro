@@ -935,14 +935,29 @@ internal static partial class Program
         Console.WriteLine("\n-- A derived device Windows names by its port --");
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
-        var profile = ctx.AllProfiles.Where(p => p.Type is not ("keyboard" or "mouse") && p.Connection == "usb" && p.Inner.UsbConfiguration == null && p.SupportsBackend(HMBackend.Usbip)
-                                              && UsbRecords.Known(p.VendorId, p.ProductId).All(n => !n.Contains('&')))
-                                  .OrderBy(p => p.Id, StringComparer.Ordinal).FirstOrDefault();
-        if (profile == null)
+        var candidates = ctx.AllProfiles.Where(p => p.Type is not ("keyboard" or "mouse") && p.Connection == "usb" && p.Inner.UsbConfiguration == null && p.SupportsBackend(HMBackend.Usbip)
+                                                 && UsbRecords.Known(p.VendorId, p.ProductId).All(n => !n.Contains('&')))
+                                     .GroupBy(p => (p.VendorId, p.ProductId)).Select(g => g.First())
+                                     .OrderBy(p => p.Id, StringComparer.Ordinal).Take(6).ToList();
+        if (candidates.Count == 0)
         {
             Console.WriteLine("  [SKIP] every derived profile's VID and PID has a port-named record on this machine");
             return;
         }
+        // Windows does not take the flag for every VID and PID it already
+        // knows by serial. The first candidate it names by its port is the
+        // one checked, and each it does not is printed.
+        foreach (var profile in candidates)
+            if (PortNamedWith(ctx, profile)) return;
+        Check("Windows named a candidate's device by its port, not its serial (positive control for the flag)", false,
+              string.Join(", ", candidates.Select(p => p.Id)));
+    }
+
+    /// <summary>One create of <paramref name="profile"/> with its
+    /// IgnoreHWSerNum value set. False when Windows named the device by its
+    /// serial anyway, and nothing was checked.</summary>
+    static bool PortNamedWith(HMContext ctx, HMProfile profile)
+    {
         const string flags = @"SYSTEM\CurrentControlSet\Control\usbflags";
         string value = $"IgnoreHWSerNum{profile.VendorId:X4}{profile.ProductId:X4}";
         Console.WriteLine($"  {profile.Id}, {value}");
@@ -958,9 +973,12 @@ internal static partial class Program
             {
                 serialId = pad.UsbipHandle!.Device.Descriptors.UsbInstanceId!;
                 onPort = VhciClient.DeviceOnRootHubPort(pad.UsbipHandle.Device.VhciPort) ?? "";
-                Check("Windows named the device by its port, not its serial (positive control for the flag)",
-                      onPort.Length > 0 && !string.Equals(onPort, serialId, StringComparison.OrdinalIgnoreCase), $"{serialId} on the port: {onPort}");
-                if (onPort.Length == 0 || string.Equals(onPort, serialId, StringComparison.OrdinalIgnoreCase)) return;
+                if (onPort.Length == 0 || string.Equals(onPort, serialId, StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine($"  Windows named it by its serial: {serialId} on the port: {onPort}");
+                    return false;
+                }
+                Check("Windows named the device by its port, not its serial (positive control for the flag)", true, $"{serialId} on the port: {onPort}");
                 bool created = UsbRecords.CreatedBy(onPort, known);
                 Console.WriteLine($"  {onPort}: {(created ? "new, the create caused it" : "there before the create")}");
                 if (created)
@@ -972,6 +990,7 @@ internal static partial class Program
                     Check("the ledger does not name a port-named record that was there before the create", !LedgerNames(onPort), onPort);
                 Check("the serial's name has no record", !UsbRecords.Exists(serialId), serialId);
             }
+            return true;
         }
         finally
         {

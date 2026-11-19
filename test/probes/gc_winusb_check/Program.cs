@@ -70,6 +70,14 @@ internal static partial class Program
         if (args.Length > 0 && args[0] == "child")
             return Probe.RefuseWithoutDepartingRule("S81's child") ? 1 : Child();
         if (args.Length > 0 && args[0] == "--bind-timing") return BindTiming();
+        // An argument this build does not know runs nothing it names, so it
+        // is refused rather than read as the default run.
+        var unknown = args.Where(a => a != "--os-descriptors").ToList();
+        if (unknown.Count > 0)
+        {
+            Console.WriteLine($"GcWinUsbCheck: unknown argument {string.Join(", ", unknown)}. Known: --os-descriptors, --bind-timing, child.");
+            return 64;
+        }
 
         Console.WriteLine("=== S81: the WinUSB binding of the GameCube adapter persona ===");
         if (Probe.OtherSdkRunning()) return 2;
