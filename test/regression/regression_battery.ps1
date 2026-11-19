@@ -2401,16 +2401,19 @@ function Scenario-Xusb-Battery {
                  -Message 'a virtual pad no longer reports a wired, full battery to XInput (see probe stdout)' -SkipCodes 2
 }
 
-# S61: the driver catalog per architecture (issue #63). No device. Stages
-# the x64 and the ARM64 payload with the Inf2Cat tree exactly as
-# EnsureExtracted does and runs the embedded Inf2Cat with the /os value
-# GenerateCatalogs picks for each, requiring one catalog per INF. v1.9.0
-# asked for 10_ARM64, which Inf2Cat rejects, so no ARM64 deploy reached
-# the install. Controls: that value is rejected, and each architecture's
-# INFs are refused under the other's value.
+# S61: the driver catalogs and their signatures (issue #63, release 2.3.0).
+# No device. Writes the catalogs of the x64 and the ARM64 driver package
+# and of a WinUSB package with the SDK's own catalog writer and checks them
+# with the probe's own ASN.1 reader. Where the WDK's Inf2Cat is installed it
+# compares them with Inf2Cat's element for element. Elevated, it signs them
+# and the binaries in process and verifies them, and where the Windows SDK's
+# signtool is installed compares each signature byte for byte. Controls: a
+# changed INF and a changed HWID are caught, a missing certificate throws.
+# Exit 2 when every check passed but the signing part could not run (not
+# elevated, or no certificate).
 function Scenario-Driver-Catalog {
     Invoke-Probe -Dir 'driver_catalog_check' -Exe 'DriverCatalogCheck.exe' `
-                 -Message 'an architecture''s driver INFs no longer catalog with the value GenerateCatalogs passes Inf2Cat (see probe stdout)'
+                 -Message 'a driver catalog or its signature differs from what Inf2Cat and signtool make, or does not verify (see probe stdout)' -SkipCodes 2
 }
 
 # S62: the 2026 Steam Controller persona against Steam's own firmware
@@ -2672,7 +2675,7 @@ function Scenario-Pnp-Notify {
 # any machine-wide step, and still run a UMDF2 controller on x64.
 function Scenario-Build-Info {
     Invoke-Probe -Dir 'build_info_check' -Exe 'BuildInfoCheck.exe' -Arguments 'complete' -Tag 'complete' `
-                 -Message 'the release build does not carry every payload, or carries Inf2Cat files Inf2Cat never loads (see probe stdout)'
+                 -Message 'the release build does not carry every payload, or carries a tool from a Windows kit (see probe stdout)'
     Invoke-Probe -Dir 'build_info_check' -Exe 'variant\BuildInfoCheck.exe' -Arguments 'variant' -Tag 'variant' `
                  -Message 'a build without the ARM64, USB/IP or OpenVR payload reported or refused the wrong thing (see probe stdout)' -SkipCodes 2
 }
@@ -3011,6 +3014,40 @@ function Scenario-Bt-Usb-Form {
     if ($failed.Count -gt 0) { throw ($failed -join ' AND ') }
 }
 
+# S109: the ten Xbox 360 profiles on each backend the machine runs. Each is
+# created, takes a slot, and reads its capabilities, its HID device and
+# its product string. Where both backends run, XInputGetCapabilities, the
+# XInput state of one input, XInputSetState's packet and the product
+# string are the same on both, and UMDF2's HID device has the layout of
+# the profile's descriptor. On USB/IP xusb22's HID device has that layout
+# too, unless the profile's notes state the difference (R8). Exit 2 when
+# another program that embeds HIDMaestro is running.
+function Scenario-Xusb-Family {
+    Invoke-Probe -Dir 'xusb_persona_check' -Exe 'XusbPersonaCheck.exe' -Arguments 'family' -Tag 'family' `
+                 -Message 'an Xbox 360 profile reads differently on the two backends, or its HID device on USB/IP differs from its descriptor where its notes do not say so (see probe stdout)' -SkipCodes 2
+}
+
+# S110: the battery the pad behind the receiver reports, on the backend
+# Auto resolves to: what xusb22 answers on USB/IP for the receiver's
+# battery status, and the same from the companion on UMDF2.
+function Scenario-Xusb-Battery-Receiver {
+    Invoke-Probe -Dir 'xusb_battery_check' -Exe 'XusbBatteryCheck.exe' -Arguments '--profile xbox-360-wireless' -Tag 'receiver' `
+                 -Message 'the pad behind the receiver no longer reports the battery its profile states (see probe stdout)' -SkipCodes 2
+}
+
+# S111: one WGI device for each of the ten Xbox 360 profiles, three fresh
+# creates each: one RawGameController, and one Gamepad for a pad of the
+# gamepad subtype, none for a wheel, stick, dance pad or guitar.
+function Scenario-Xusb-Wgi-Family {
+    $probe = Resolve-ProbeBinary 'xusb_wgi_single_check' 'XusbWgiSingleCheck.exe'
+    $p = Start-Process -FilePath $probe -ArgumentList '--profiles family' -PassThru -NoNewWindow
+    $null = $p.Handle
+    Wait-Exit -Proc $p -What (Split-Path $probe -Leaf)
+    if ($p.ExitCode -ne 0) {
+        throw ("XusbWgiSingleCheck --profiles family exited " + $p.ExitCode + ": an Xbox 360 profile is not one WGI device, or its Gamepad count is not its subtype's (see probe stdout)")
+    }
+}
+
 # S101: removing HIDMaestro, HIDMaestroUninstall.exe and HMUninstall. On
 # every machine the tool's preview and the API's change nothing, read
 # against a snapshot the probe takes without the SDK. On a machine without
@@ -3085,14 +3122,16 @@ function Scenario-Driver-Signing {
 # XUSB companion profiles presents its function from the XUSB model (a
 # retail wired pad, or for xbox-360-wireless a retail 045E:0719 receiver
 # with the pad on its first slot) with its VID, PID and the subtype the
-# UMDF2 companion answers, each function's input report reads in XInput as
+# UMDF2 companion answers. Each function's input report reads in XInput as
 # the companion's state does for 20,000 states, its output rules give the
-# companion's packets, the identities xinputhid.inf and dc1-controller.inf
-# bind are refused at load, and a user's authored device with no HID
-# interface keeps its rules. A USB/IP client then plays the host for both
-# functions: descriptors, strings, stalls, the receiver's announcement and
-# its answers to connection requests, the input reports, and the rumble and
-# LED requests as the companion's 5-byte XInput packets. Live, for
+# companion's packets, an identity xusb22.inf does not list by hardware ID
+# serves the compatible ID XUSB10 (XUSB20 for a receiver), and the
+# identities xinputhid.inf and dc1-controller.inf bind are refused at load,
+# a receiver's xinput.information among them. A USB/IP client then plays
+# the host for both functions: descriptors, strings, stalls, the receiver's
+# announcement, link packet and battery status, its answers to connection
+# requests, the input reports, and the rumble and LED requests as the
+# companion's 5-byte XInput packets. Live, for
 # xbox-360-wired and xbox-360-wireless on USB/IP: xusb22 binds the device,
 # the create returns with the XInput slot taken, a submitted state reads
 # back through XInputGetState, XInputSetState arrives as the companion's
@@ -3262,7 +3301,10 @@ $scenarios = @(
     @{ Name = 'S105_Xusb_Persona';               Body = ${function:Scenario-Xusb-Persona} },
     @{ Name = 'S106_Gip_Persona';                Body = ${function:Scenario-Gip-Persona} },
     @{ Name = 'S107_Backend_Parity';             Body = ${function:Scenario-Backend-Parity} },
-    @{ Name = 'S108_Bt_Usb_Form';                Body = ${function:Scenario-Bt-Usb-Form} }
+    @{ Name = 'S108_Bt_Usb_Form';                Body = ${function:Scenario-Bt-Usb-Form} },
+    @{ Name = 'S109_Xusb_Family';                Body = ${function:Scenario-Xusb-Family} },
+    @{ Name = 'S110_Xusb_Battery_Receiver';      Body = ${function:Scenario-Xusb-Battery-Receiver} },
+    @{ Name = 'S111_Xusb_Wgi_Family';            Body = ${function:Scenario-Xusb-Wgi-Family} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
