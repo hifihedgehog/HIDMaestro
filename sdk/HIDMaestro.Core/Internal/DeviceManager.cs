@@ -3179,6 +3179,12 @@ public static partial class DeviceManager
         return null;
     }
 
+    /// <summary>The instance IDs of a devnode's children in the device tree,
+    /// none when the devnode is not there.</summary>
+    public static List<string> GetChildIds(string parentInstanceId) =>
+        CM_Locate_DevNodeW(out uint parentInst, parentInstanceId, 0) == CR_SUCCESS
+            ? GetAllChildDeviceIds(parentInst) : new List<string>();
+
     /// <summary>
     /// Gets all child device instance IDs for a given devnode (CM_Get_Child + CM_Get_Sibling loop).
     /// </summary>

@@ -1060,6 +1060,14 @@ public sealed class HMContext : IDisposable
             else if (handle.Device.Descriptors.UsbInstanceId is { } gipId && gip)
                 handle.ResolveRecord(Internal.DeviceOrchestrator.AwaitUsbipGipStart(gipId, handle.Device.VhciPort, index, slotsBefore,
                     Internal.Usbip.GipFunction.CompatibleIdOf(presented.Inner)));
+            // A form that a profile which runs on UMDF2 presents from authored
+            // descriptors, a Joy-Con's Charging Grip, starts its HID
+            // interfaces before the create returns too, as the profile's
+            // UMDF2 create does.
+            else if (handle.Device.Descriptors.UsbInstanceId is { } formId && !ReferenceEquals(presented, profile)
+                     && handle.Device.Descriptors.HasHidInterface)
+                handle.ResolveRecord(Internal.DeviceOrchestrator.AwaitUsbipFormStart(formId, handle.Device.VhciPort, index,
+                    1 + handle.Device.Descriptors.SecondaryHidInterfaces.Count));
             var controller = new HMController(this, slot, lease, profile, instanceId: null, handle, lease.Identity.Key, presented);
             try
             {

@@ -1023,6 +1023,69 @@ internal static partial class DeviceOrchestrator
         return usbInstanceId;
     }
 
+    /// <summary>The start wait of a form that a profile which runs on UMDF2
+    /// presents on USB/IP from authored descriptors, as a Joy-Con presents
+    /// the Joy-Con Charging Grip: the USB device appears on the host
+    /// controller's port, as <see cref="AwaitUsbipStart"/> finds it, and a
+    /// started HID collection appears for each of its
+    /// <paramref name="hidInterfaces"/> HID interfaces, under the device
+    /// itself or, on a device with more than one interface, under that
+    /// interface's own node. A program that opens a HID interface as the
+    /// create returns then finds it, as after the profile's UMDF2 create. A
+    /// failed start throws as the derived wait's does. A wait that runs out,
+    /// in the derived wait's two 10 s budgets, is logged and the create goes
+    /// on, as there. Returns the instance id Windows gave the device,
+    /// <paramref name="serialInstanceId"/> when none was found in
+    /// time.</summary>
+    internal static string AwaitUsbipFormStart(string serialInstanceId, int vhciPort, int controllerIndex, int hidInterfaces)
+    {
+        var sw = Stopwatch.StartNew();
+        string? onPort = FindOnPort(serialInstanceId, vhciPort, sw);
+        string usbInstanceId = onPort ?? serialInstanceId;
+        int budget = TimeoutScale.Apply(20000);
+        int started;
+        while (true)
+        {
+            started = StartedHidInterfaces(usbInstanceId, controllerIndex);
+            if (started >= hidInterfaces) break;
+            if (StartFailed(usbInstanceId, controllerIndex)) throw StartError(usbInstanceId, controllerIndex);
+            if (sw.ElapsedMilliseconds >= budget) break;
+            Thread.Sleep(25);
+        }
+        LogDiag($"    usbip form start wait {usbInstanceId} on port {vhciPort}{(onPort == null ? " (not found on the port)" : "")}: " +
+                $"{started} of {hidInterfaces} HID interfaces started in {sw.ElapsedMilliseconds}ms");
+        return usbInstanceId;
+    }
+
+    /// <summary>How many of the USB device's HID interfaces have a started
+    /// HID collection: one for the device when its collections sit directly
+    /// under it, and one for each interface node (<c>USB\...&amp;MI_nn</c>)
+    /// that has one. A collection or interface node whose start failed
+    /// throws, naming the device.</summary>
+    private static int StartedHidInterfaces(string usbInstanceId, int controllerIndex)
+    {
+        int count = 0;
+        bool direct = false;
+        foreach (string child in DeviceManager.GetChildIds(usbInstanceId))
+        {
+            if (IsHidCollection(child)) { direct |= HidCollectionStarted(child, usbInstanceId, controllerIndex); continue; }
+            if (StartFailed(child, controllerIndex)) throw StartError(usbInstanceId, controllerIndex, child);
+            foreach (string hid in DeviceManager.GetChildIds(child))
+                if (IsHidCollection(hid) && HidCollectionStarted(hid, usbInstanceId, controllerIndex)) { count++; break; }
+        }
+        return direct ? count + 1 : count;
+
+        static bool IsHidCollection(string id) => id.StartsWith(@"HID\", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool HidCollectionStarted(string hid, string usbInstanceId, int controllerIndex)
+    {
+        var (present, status, _) = DevnodeStatus(hid);
+        if (present && (status & DN_STARTED) != 0) return true;
+        if (StartFailed(hid, controllerIndex)) throw StartError(usbInstanceId, controllerIndex, hid);
+        return false;
+    }
+
     /// <summary>The GIP function's start wait, the UMDF2 create's xinputhid
     /// wait for the USB device: Windows' GIP driver takes the Hello, the
     /// metadata and Start, and makes the device's XInput child, whose HID

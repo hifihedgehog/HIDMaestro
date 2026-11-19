@@ -4,7 +4,9 @@
 // attributes are compared with what the form presents on UMDF2. The
 // identity keeps its own strings, so its product string is compared with
 // the identity's own on UMDF2. The form may carry another PID, never
-// another VID.
+// another VID. A form only USB/IP presents, as the Joy-Cons' Charging Grip,
+// has no UMDF2 device: its USB/IP device must show a collection for each
+// HID interface it declares, with its own product string.
 
 using System.Collections.Generic;
 using System.Linq;
@@ -27,6 +29,19 @@ internal static partial class Program
         if (formVerdict.Ok != ownOk)
             problems.Add($"Windows' parser takes {p.Id}'s descriptor {(ownOk ? "" : "not ")}and {form.Id}'s {(formVerdict.Ok ? "" : "not ")}({formVerdict})");
         if (u == null || s == null || u.Failure != null || s.Failure != null) return false;
+        if (!form.SupportsBackend(HMBackend.Umdf2))
+        {
+            // A form only USB/IP presents, as a Joy-Con's Charging Grip with
+            // its two HID interfaces, has no UMDF2 device to compare with.
+            // Its USB/IP device shows a collection for each HID interface the
+            // form declares, each with the form's own product string.
+            string? product = form.Inner.ProductString;
+            if (s.Collections.Count < s.HidInterfaces)
+                problems.Add($"{form.Id} declares {s.HidInterfaces} HID interfaces, and USB/IP shows {s.Collections.Count} collection(s)");
+            else if (s.Collections.Any(c => c.Product != product))
+                problems.Add($"product string on USB/IP {string.Join(", ", s.Collections.Select(c => c.Product).Distinct())} against {form.Id}'s {product}");
+            return problems.Count == before;
+        }
         var f = Take(ctx, form, HMBackend.Umdf2, key + ":form");
         if (f.Failure != null || f.Collections.Count == 0)
         {

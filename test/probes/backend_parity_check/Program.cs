@@ -161,7 +161,13 @@ internal static partial class Program
 
     sealed record Snapshot(HMBackend Backend, string? Parent, bool OpenAtReturn, long CreateMs, long ReadyMs,
                            List<Collection> Collections, List<string> Errors, (bool Present, bool Started, uint Problem) State, string? Failure,
-                           string Output = "", (ushort Vid, ushort Pid, ushort Version) Attributes = default, string? Product = null);
+                           string Output = "", (ushort Vid, ushort Pid, ushort Version) Attributes = default, string? Product = null,
+                           int HidInterfaces = 0);
+
+    /// <summary>The HID interfaces a USB/IP controller's device declares,
+    /// the primary one and each secondary one. 0 on UMDF2.</summary>
+    static int HidInterfacesOf(HMController c) =>
+        c.UsbipHandle?.Device.Descriptors is { } d ? (d.HasHidInterface ? 1 : 0) + d.SecondaryHidInterfaces.Count : 0;
 
     /// <summary>The VID, PID and version Windows gives the controller's HID
     /// collections, as it gives them a real device of that kind. On USB/IP a
@@ -212,7 +218,7 @@ internal static partial class Program
                 if (collections.Count > 0 && errors.Count == 0) { readyMs = sw.ElapsedMilliseconds; break; }
             }
             return new(c.Backend, parent, openAtReturn, createMs, readyMs, collections, errors, Hid.Status(parent), null,
-                       OutputOf(c, p, collections), AttributesOf(c, p), ProductOf(c));
+                       OutputOf(c, p, collections), AttributesOf(c, p), ProductOf(c), HidInterfacesOf(c));
         }
         finally { c.Dispose(); }
     }
