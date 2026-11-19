@@ -41,6 +41,7 @@
 //
 // --leds-diag prints a timeline of the LED reports two keyboards receive,
 // with each one's output ring read from its first slot, read or not.
+// --owner-exit runs section J's killed consumer alone.
 // --order N, --dispose-ack N and --held-on-kill are measurements on
 // either backend, described in Bench.cs. The first two need no Raw Input.
 
@@ -706,6 +707,15 @@ internal static class Program
                 Console.WriteLine($"Move {mx},{my}: sum {ev.Sum(x => x.X)},{ev.Sum(x => x.Y)} in {ev.Count} messages");
             }
             return 0;
+        }
+
+        if (argv.Contains("--owner-exit"))
+        {
+            // Section J's killed consumer alone.
+            using var osink = new RawInputSink(true, (0x01, 0x02), (0x01, 0x06), (0xFF00, 0x01), (0x0C, 0x01));
+            OwnerExit(ctx, osink);
+            Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
+            return s_failures == 0 ? 0 : 1;
         }
 
         using var sink = new RawInputSink(true, (0x01, 0x02), (0x01, 0x06), (0xFF00, 0x01), (0x0C, 0x01));
