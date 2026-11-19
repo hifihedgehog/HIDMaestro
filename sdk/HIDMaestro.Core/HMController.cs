@@ -798,13 +798,14 @@ public sealed partial class HMController : IDisposable
         }
 
         // v1.3.5: pre-allocate vendor-blob buffer + encoder state ONLY when
-        // the profile actually arms (Sony BT post-handshake). Profiles with
-        // extendedReport metadata but no armOn list (every USB Sony profile,
-        // every generic profile) never run the codec, so the buffer alloc
-        // would be dead memory and the SubmitState hot path would carry an
-        // unused extended-write branch. Issue #21 USB jerkiness: keeping
-        // this allocation off entirely on USB profiles is the difference
-        // between v1.3.4-equivalent hot-path codegen and the regressed path.
+        // the profile arms (a Sony Bluetooth pad after the handshake) or is
+        // always armed. Profiles with extendedReport metadata but neither
+        // (every generic profile) never run the codec, so the buffer would
+        // be dead memory and the SubmitState hot path would carry an unused
+        // extended-write branch (issue #21). Since 2.3.0 the USB Sony
+        // profiles are always armed: a pad on USB streams its whole report
+        // from power-on, and only the codec carries SubmitState's motion,
+        // touch and battery, which their descriptors' own fields lack.
         // alwaysArmed profiles (Switch 2 Pro) skip the handshake entirely:
         // their real firmware streams the vendor report from power-on, and
         // their descriptor's FIRST declared input report is an opaque
@@ -1197,21 +1198,17 @@ public sealed partial class HMController : IDisposable
         // A profile whose extendedReport sets alwaysArmed starts armed and
         // never takes the legacy path, for controllers that stream the
         // vendor report from power-on rather than switching into it.
-        // The codec runs only after the host-side arm-handshake has fired.
-        // Profiles without an armOn list (every USB Sony profile, every
-        // generic profile) never arm, so they always take the legacy
-        // BuildReportInto path: same code path v1.3.4 used. This avoids
-        // the per-frame codec cost (field-list walk, CRC compute, byte
-        // re-encode) on the 250 Hz SubmitState hot path for profiles that
-        // don't need vendor-blob input emission. Bug #21: pre-v1.3.5 USB
-        // profiles had no extendedReport at all and this gate didn't apply;
-        // 0cec81d added extendedReport metadata to USB Sony profiles for
-        // PadForge's bidirectional decode, which silently flipped USB onto
-        // the codec path even though USB doesn't need vendor-blob input
-        // (its descriptor already declares structured X/Y/Rx/Ry usages
-        // that joy.cpl, dinput, and the test app's parsers all decode
-        // correctly). Restoring the v1.3.4 path for USB removes the
-        // regression. useExtended is read at the top of this method.
+        // The codec runs after the host-side arm-handshake has fired, or
+        // from the first frame on an always-armed profile. Profiles with
+        // neither (every generic profile) take the legacy BuildReportInto
+        // path, the one v1.3.4 used, and skip the per-frame codec cost
+        // (field-list walk, CRC compute, byte re-encode). Bug #21: commit
+        // 0cec81d gave the USB Sony profiles extendedReport metadata and
+        // put them on the codec without the sensors that justify it. Since
+        // 2.3.0 they are always armed on purpose, because a pad on USB
+        // sends its whole report 0x01, motion, touch and battery included,
+        // which the descriptor path cannot fill. useExtended is read at the
+        // top of this method.
         if (useExtended)
         {
             // _extSpec's field list drives byte placement.
@@ -1664,7 +1661,12 @@ public sealed partial class HMController : IDisposable
         {
             int len = Math.Min(report.Length, _rawReportBuffer.Length);
             byte rid = (byte)(_reportBuilder.InputReportId);
-            int dataShift = rid != 0 ? 1 : 0;
+            // A profile that is always in extended mode also takes a frame
+            // of the whole report, its report id included (EmitExtendedFrame
+            // tells the two by length). That frame is in wire coordinates
+            // already, so the fixed bytes land unshifted.
+            bool carriesId = _rawEmitsVerbatim && report.Length == Presented.Inner.ExtendedReport!.Size;
+            int dataShift = rid != 0 && !carriesId ? 1 : 0;
             foreach (var p in rawDefaults)
             {
                 int idx = p.Byte - dataShift;

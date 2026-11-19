@@ -322,7 +322,12 @@
     },
     "usbForm": {
       "type": ["string", "null"],
-      "description": "2.3.0: for a Bluetooth identity (connection 'bluetooth'), the id of the profile whose USB form the device takes on the USB/IP backend, where it sits on the USB bus. hidapi reads the bus from the device's parent, so SDL and every reader built on hidapi drive such a device in its USB protocol, which the Bluetooth descriptor does not declare. The device then presents the named profile's descriptor, reports, feature answers and protocol, as one HID function, under this profile's id, name and strings. The named profile has this profile's VID and PID, is not a Bluetooth identity, names no usbForm itself and has no backend 'usbip'. A load refuses any other name, and a profile with usbForm takes no usbConfiguration. The UMDF2 backend ignores the key and presents the Bluetooth form. HMProfile.FormOn says which profile a backend presents."
+      "description": "2.3.0: for a Bluetooth identity (connection 'bluetooth'), the id of the profile whose USB form the device takes on the USB/IP backend, where it sits on the USB bus. hidapi reads the bus from the device's parent, so SDL and every reader built on hidapi drive such a device in its USB protocol, which the Bluetooth descriptor does not declare. The device then presents the named profile's descriptor, reports, feature answers and protocol under this profile's id and name. The named profile has this profile's VID, is not a Bluetooth identity and names no usbForm itself. It has this profile's PID and is presented as one HID function under this profile's strings, unless its usbFormOf names this profile or the identity it copies: then it may carry another PID or a configuration of its own, with backend 'usbip', and the device serves its strings. A load refuses any other name, and a profile with usbForm takes no usbConfiguration. The UMDF2 backend ignores the key and presents the Bluetooth form. HMProfile.FormOn says which profile a backend presents."
+    },
+    "usbFormOf": {
+      "type": ["array", "null"],
+      "items": {"type": "string"},
+      "description": "2.3.0: for a USB form, the ids of the Bluetooth identities whose usbForm names this profile. A form that differs from its identity in PID or configuration is accepted only for the identities it names here: the Genesis pad for Nintendo Switch Online reports 057E:2017 over Bluetooth and 057E:201E over USB, and a Joy-Con reaches USB only through the charging grip, 057E:200E. A copy of a named identity, its VID, PID and descriptor under another id, counts as named. A load refuses an entry that names no Bluetooth profile."
     },
     "deviceModelFrom": {
       "type": ["string", "null"],

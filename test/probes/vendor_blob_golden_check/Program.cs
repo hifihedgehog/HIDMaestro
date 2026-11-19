@@ -73,6 +73,10 @@ internal static class Program
     // in a pad pressure the state sets above 0, and in the trigger bits,
     // LT_DIGITAL clear below 90 percent on the Deck and the Triton and
     // both clear below 255 on the 2015 controller.
+    // In v2.3.0 the three dualsense-edge input rows were regenerated when
+    // its report map gained the Edge's fixed bytes 49 to 52 as constants
+    // (the USB Sony profiles send that report from the start): with --bytes
+    // before and after, each report differs only in byte 49, 0x00 to 0x80.
     static readonly string[] Goldens =
     {
         "golden dualsense in 0 728BEC8461DD20621FBC713B28165DAD10DBB0722B6362B707CB35E3DDA1949D",
@@ -82,9 +86,9 @@ internal static class Program
         "golden dualsense out 1 D12BD0586374C7816F9474A0FCA296BE2B6E10A98C85894B58E2C4F60F694F5F",
         "golden dualsense out 2 A94544952CCCB8A14C0FB46D6424AED8146D3C46DD7A0C79BC26732785552505",
         "golden dualsense dec 0 52756DE5DB40B971507510186D306B288AD5C352841FE8D253EC995A6143DD40",
-        "golden dualsense-edge in 0 CE87BFF757AF39B8657CF6A7DB721E6127D64BE82B6C5FDFFA4A5A8420D8F055",
-        "golden dualsense-edge in 1 B0C253148F8C9D162B2F0606CBB0501DCB3002A921BBE0F07924B2E7FAF81EFE",
-        "golden dualsense-edge in 2 4A642312163B2345BFBAA76EFC18A12EDA3BAF005253B3FE7A66F279029D6C65",
+        "golden dualsense-edge in 0 C7462F43A3761CFFED7D652AA55DA55475EAD433EDF4B1C8625DAA135F671604",
+        "golden dualsense-edge in 1 C8EA41BBC73E3987FD8F2E879BE00A5E2C168DC093EA691FF1D59830EFC91790",
+        "golden dualsense-edge in 2 C05802ABB5CB73B9D89CF08505871DE88388446592A1A7077AC2E66FD46EE271",
         "golden dualsense-edge out 0 953E8E28585A6BD2D2C45EFE53853CEAD310F32636A61E5C3EF25178571564EC",
         "golden dualsense-edge out 1 2ED5B6C68433FEECF72737E28F62310F1AF20A9CB5FACACB13967C0B25CA6D09",
         "golden dualsense-edge out 2 EF86AAE9971624DE0319A35D9E8A168B27A96803F9A672FB3106152B2C172774",

@@ -71,14 +71,20 @@ internal static class ChildPaths
     // shipped, each with the parent v1.12.0 makes for it if a v1 program
     // loads its file: DeviceNodeCreator.CreateDeviceNode at b4d29d9 puts a
     // profile with no upper filter and a vendor other than Microsoft's
-    // under ROOT\HIDClass. xbox-one-s-full is a USB/IP persona: its
-    // device sits under the USB/IP host controller in every release and
-    // has no HIDMaestro parent, as the record's USB/IP personas have none.
+    // under ROOT\HIDClass. xbox-one-s-full and the Joy-Con Charging Grip
+    // forms joycon-l-usb and joycon-r-usb are USB/IP personas: their
+    // devices sit under the USB/IP host controller in every release and
+    // have no HIDMaestro parent, as the record's USB/IP personas have none.
     static readonly Dictionary<string, (string Path, string Enumerator)> AddedAfterRecord = new(StringComparer.Ordinal)
     {
         ["switch-pro-usb"] = ("Root", "HIDClass"),
         ["sinput"] = ("Root", "HIDClass"),
         ["xbox-one-s-full"] = ("Usbip", "-"),
+        ["joycon-l-usb"] = ("Usbip", "-"),
+        ["joycon-r-usb"] = ("Usbip", "-"),
+        ["snes-nso-usb"] = ("Root", "HIDClass"),
+        ["n64-nso-usb"] = ("Root", "HIDClass"),
+        ["genesis-nso-usb"] = ("Root", "HIDClass"),
     };
 
     internal static void Run(Action<string, bool, string> check)

@@ -38,7 +38,7 @@
 // `live` (elevated, creates devices): the reports the installed driver
 // sends. Three controllers are up and read in one window. dualshock-4-v2,
 // whose report did not change, is the positive control: report 0x01
-// carrying the submitted left stick X. genesis-nso must arrive as report
+// carrying the submitted left stick X. joycon-charging-grip must arrive as report
 // 0x3F carrying the submitted button and never as 0x21, the report the
 // driver sent before InputReportId. microsoft-designer-keyboard's
 // data-only frame must arrive as its keyboard report 0x01, seen through
@@ -181,7 +181,11 @@ internal static class Program
     /// protocol stream, keyed on VID 0x057E and PID 0x2009 (driver.c
     /// ReadConfigFromRegistry), and returns from ProcessSharedInput before
     /// the data lane, so no data-only frame of that profile goes out.</summary>
-    static bool DriverStreamsItself(ControllerProfile p) => p.VendorId == 0x057E && p.ProductId == 0x2009;
+    // A profile whose protocol builds its own input reports (inputReports)
+    // streams them itself, whatever report the driver's scan names: the
+    // Switch Bluetooth pads fill the 12-byte 0x3F and send 0x21 and 0x30
+    // from their protocol.
+    static bool DriverStreamsItself(ControllerProfile p) => p.BuildsItsOwnReports;
 
     static ControllerProfile Synthetic(string hex, string type = "gamepad", int? inputReportSize = null,
                                        string? dataReportId = null)
@@ -503,15 +507,16 @@ internal static class Program
         var catalog = ProfileDatabase.LoadEmbedded().All;
         ControllerProfile Get(string id) => catalog.First(x => x.Id == id);
 
-        // genesis-nso fills 0x3F, 12 bytes. The value is that ID, that
-        // length and the descriptor. A v1.12.0 program writes the same
-        // descriptor with InputReportByteLength 49 (its count of 0x21) and
-        // no InputReportId, so a value a killed program left beside it is
-        // ignored, and 0x3F never goes out at 49 bytes.
-        var nso = Get("genesis-nso");
+        // joycon-charging-grip fills 0x3F, 12 bytes, of the Switch
+        // Bluetooth descriptor, with no protocol of its own. The value is
+        // that ID, that length and the descriptor. A v1.12.0 program writes
+        // the same descriptor with InputReportByteLength 49 (its count of
+        // 0x21) and no InputReportId, so a value a killed program left
+        // beside it is ignored, and 0x3F never goes out at 49 bytes.
+        var nso = Get("joycon-charging-grip");
         byte[]? v = IdValue(nso);
         byte[] d = nso.GetDescriptorBytes()!;
-        Check("genesis-nso's InputReportId is 0x3F, 12 and its descriptor",
+        Check("joycon-charging-grip's InputReportId is 0x3F, 12 and its descriptor",
             v != null && v.Length == 5 + d.Length && v[0] == 0x3F
             && System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(v.AsSpan(1, 4)) == 12 && v.AsSpan(5).SequenceEqual(d),
             v == null ? "none" : Convert.ToHexString(v.AsSpan(0, 5)));
