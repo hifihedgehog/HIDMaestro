@@ -248,8 +248,18 @@ internal static unsafe partial class Program
                 var r0 = raws[0];
                 Console.WriteLine($"  RawGameController: {r0.DisplayName}, buttons {r0.ButtonCount}, axes {r0.AxisCount}, switches {r0.SwitchCount}, wireless {r0.IsWireless}, " +
                                   $"motors {r0.ForceFeedbackMotors.Count}, NonRoamableId {r0.NonRoamableId}");
-                var gp = WgiPins.PadOf(r0);
-                int pads = WgiPins.Pads().Count(g => WgiPins.RawOf(g) is { HardwareVendorId: 0x045E, HardwareProductId: 0x02EA });
+                // Windows.Gaming.Input adds a pad to Gamepad.Gamepads after
+                // it adds its RawGameController, so the Gamepad list gets
+                // its own wait: read as the raw list first shows the pad, it
+                // can still be empty.
+                Windows.Gaming.Input.Gamepad? gp = null;
+                int pads = 0;
+                WaitUntil(() =>
+                {
+                    gp = WgiPins.PadOf(r0);
+                    pads = WgiPins.Pads().Count(g => WgiPins.RawOf(g) is { HardwareVendorId: 0x045E, HardwareProductId: 0x02EA });
+                    return gp != null && pads >= 1;
+                }, 10_000);
                 Check("Gamepad lists it once", gp != null && pads == 1, $"{pads} gamepads of 045E:02EA");
                 if (gp != null)
                 {

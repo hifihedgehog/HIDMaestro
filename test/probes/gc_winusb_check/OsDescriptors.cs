@@ -108,9 +108,24 @@ internal static partial class Program
             Probe.Check("the next adapter arrives", next != null, next ?? "");
             if (next != null)
             {
-                Probe.WaitFor(() => Devnodes.Status(next) is { Problem: 10 } || Devnodes.Service(next) == "WINUSB", Probe.HangMs(InstallBoundMs));
+                // The record names the last life's WinUSB, flagged to install
+                // again, until Windows has installed this arrival, so a read
+                // as it arrives finds WinUSB whatever comes next. The wait is
+                // for input.inf with the flag spent, as the package path's
+                // stand-in waits, and each state on the way is printed.
+                string seen = "";
+                var clock = System.Diagnostics.Stopwatch.StartNew();
+                bool onInput = Probe.WaitFor(() =>
+                {
+                    string? service = Devnodes.Service(next);
+                    uint flags = Devnodes.ConfigFlags(next) ?? 0;
+                    string state = $"{service ?? "no service"} with ConfigFlags 0x{flags:X}";
+                    if (!seen.EndsWith(state, StringComparison.Ordinal)) seen += $"{(seen.Length > 0 ? ", " : "")}{clock.ElapsedMilliseconds} ms {state}";
+                    return service == "HidUsb" && (flags & CONFIGFLAG_REINSTALL) == 0;
+                }, Probe.HangMs(InstallBoundMs));
+                Console.WriteLine($"  the next adapter after it arrives: {seen}");
                 Probe.Check("before its own bind it is on input.inf, as the first was, not on WinUSB",
-                    Devnodes.Service(next) == "HidUsb", $"{Devnodes.Service(next)} on {next}");
+                    onInput, $"{Devnodes.Service(next)} on {next}");
             }
         }
         Probe.Check("usbflags 057E03370100 is as it was once that one is gone too", Flags() == flagsBefore, Flags());
