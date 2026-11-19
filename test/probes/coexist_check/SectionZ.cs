@@ -107,7 +107,9 @@
 //    part 2 prints its own condition there. Where Windows refuses
 //    HIDMaestro's driver package, BindWinUsb binds by the Microsoft OS
 //    descriptors the persona serves and adds no package: part 8 then checks
-//    that the bind does not wait for the deploy lock, and parts 9, e and f,
+//    that the bind does not wait for the deploy lock, part c that a bind
+//    made while the devnode leaves binds the import that comes back, since
+//    the device asks for WinUSB itself on every import, and parts 9, e and f,
 //    whose subject is the package's rank against input.inf, the reinstall
 //    flag it leaves and the single-INF install, print their condition.
 //    Parts 1, 4, 5 and 6 test the SDK's pnputil runner and the transport's
@@ -867,6 +869,32 @@ internal static partial class Program
 
     // ── Zc ─────────────────────────────────────────────────────────────
 
+    /// <summary>Part c where Windows refuses HIDMaestro's package: the bind
+    /// made while the devnode leaves serves the OS descriptors from the
+    /// device, the import that comes back binds WinUSB by itself, and the
+    /// next bind finds it bound. The control: the devnode was on input.inf's
+    /// HidUsb before the bind.</summary>
+    static void ZcByOsDescriptors(PeerProcess a, string r, string? beforeService, int portA, string busA, Stopwatch dropped, Action? inWait)
+    {
+        Check("Zc: control: the adapter was on input.inf's HidUsb before the bind",
+              string.Equals(beforeService, "HidUsb", StringComparison.OrdinalIgnoreCase), beforeService ?? "no driver");
+        Check("Zc: where Windows refuses the package, the bind made while the devnode leaves serves the OS descriptors and replies Bound",
+              r == "OK bindwinusb Bound", r);
+        inWait?.Invoke();
+        int y = 0;
+        WaitFor(() => (y = Vhci.Imported().FirstOrDefault(i => i.Port == portA && i.BusId == busA).VhciPort) > 0,
+                (int)Math.Max(0, 45_000 - dropped.ElapsedMilliseconds));
+        Console.WriteLine($"    Zc: the re-import came {dropped.Elapsed.TotalSeconds:F1} s after the drop");
+        string? dev2 = null;
+        if (y > 0) WaitFor(() => (dev2 = Usb.OnVhciPort(0x057E, 0x0337, y)) != null, 15_000);
+        Check("Zc: the import that comes back binds WinUSB by itself, from the device's OS descriptors",
+              dev2 != null && WaitFor(() => string.Equals(Usb.Service(dev2), "WinUSB", StringComparison.OrdinalIgnoreCase), 30_000),
+              dev2 == null ? $"vhci {y}, no devnode" : Usb.Service(dev2) ?? "no driver");
+        string again = dev2 == null ? "no devnode" : a.Send("bindwinusb");
+        Check("Zc: the program's next BindWinUsb finds the import that came back bound",
+              again == "OK bindwinusb AlreadyBound", again);
+    }
+
     /// <summary>Part c. <paramref name="inWait"/> runs while it waits for the
     /// host controller's re-import, after the bind has thrown.</summary>
     static void ZBindWhileDevnodeLeaves(Action? inWait)
@@ -905,6 +933,16 @@ internal static partial class Program
             Console.WriteLine($"    Zc: the bind replied {dropped.Elapsed.TotalSeconds:F1} s after the drop");
             var after = EnumDriver(devA);
             Console.WriteLine($"    Zc: the bind: {r}; {devA} was {before.Service} {before.Class}, is {after.Service} {after.Class}");
+            if (s_refusesPackage)
+            {
+                // Where Windows refuses the package, the device itself asks
+                // for WinUSB through its Microsoft OS descriptors, on every
+                // import after a drop (WinUsbBinding.Bind): the binding is
+                // the device's, and no devnode that leaves takes it along.
+                ZcByOsDescriptors(a, r, before.Service, portA, busA, dropped, inWait);
+                a.Send("dispose");
+                return;
+            }
             Check("Zc: the bind changes neither the driver nor the setup class of the devnode that left",
                   string.Equals(after.Service, before.Service, StringComparison.OrdinalIgnoreCase)
                   && string.Equals(after.Class, before.Class, StringComparison.OrdinalIgnoreCase),

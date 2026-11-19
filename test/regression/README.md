@@ -1,6 +1,6 @@
 # regression_battery.ps1: the regression battery
 
-Runs 110 scenarios and verifies every one leaves zero HIDMaestro PnP
+Runs 111 scenarios and verifies every one leaves zero HIDMaestro PnP
 devnodes in the `PRESENT` state. S01 to S23 drive `HIDMaestroTest.exe`
 through single- and multi-controller create/swap/remove/force-kill
 sequences, and S24 and up run the probe programs under `test/probes`.
@@ -255,6 +255,7 @@ not run elevated.
 | `S109_Xusb_Family`                | The ten Xbox 360 profiles on each backend | Each profile is created on each backend the machine runs and takes a slot. Where both run, XInputGetCapabilities, one input's XInput state, XInputSetState's packet and the product string are the same on both, and UMDF2's HID device has the layout of the profile's descriptor. On USB/IP, xusb22's HID device has that layout too unless the profile's notes state the difference. Live, elevated |
 | `S110_Xusb_Battery_Receiver`      | The battery of the pad behind the receiver | `xusb_battery_check --profile xbox-360-wireless`: the battery the profile states, which is xusb22's answer for the receiver's battery status on USB/IP and the companion's on UMDF2. Live, elevated |
 | `S111_Xusb_Wgi_Family`            | One WGI device for each Xbox 360 profile | `xusb_wgi_single_check --profiles family`: three fresh creates of each of the ten, one RawGameController each, one Gamepad for a pad of the gamepad subtype and none for the others. Live, elevated |
+| `S112_Standard_Axes`              | A stick's axes when the layout declares no triggers | `offline`: every catalog profile with a stick keeps each stick axis's value through `StandardAxes`, and `switch-pro-usb`, `dualshock-3`, `hori-horipad-switch`, `logitech-f310` and `logitech-f710` keep their right stick. `live auto`: the right stick read back in the HID report of `dualshock-3`, `hori-horipad-switch`, `logitech-f310` and `logitech-f710`. `sdl auto`: the right stick through SDL 3.4.18's release DLL for `switch-pro-usb`, `hori-horipad-switch` and `dualshock-3`, with SDL's PS3 hint on. Live, elevated |
 
 ## What "PASS" means
 

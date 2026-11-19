@@ -256,9 +256,12 @@ internal static partial class Program
         string nk = nu.Send("create pad F211 index:1");
         string? nkT = PeerProcess.Field(nk, "transport");
         string? nkInst = PeerProcess.Field(nk, "instance");
+        // Index 1's default identity names a UMDF2 device HM_0001, and a USB/IP
+        // device by the identity's USB serial (DeviceIdentity.SyntheticSerial).
+        string nkName = PeerProcess.Field(nk, "backend") == "Usbip" ? PeerProcess.Field(nu.Send("serial 1"), "serial") ?? "(no serial)" : "HM_0001";
         Check("W5: a create with the key index:1 takes index 1's default identity on a transport index from 64",
               Ok(nk) && int.TryParse(nkT, out int nkIndex) && nkIndex >= 64
-              && nkInst != null && nkInst.EndsWith(@"\HM_0001", StringComparison.OrdinalIgnoreCase), nk);
+              && nkInst != null && nkInst.EndsWith(@"\" + nkName, StringComparison.OrdinalIgnoreCase), $"{nk} (the identity names {nkName})");
         string nd = nu.Send("dispose");
         Check("W5: and its dispose removes it", nd == "OK dispose" && (nkInst == null || WaitFor(() => !Native.IsPresent(nkInst), 15_000)), nd);
         string n1 = nu.Send("create pad F205 -");

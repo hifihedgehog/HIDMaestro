@@ -38,27 +38,35 @@ internal static class UsbipBackend
         var server = UsbipServer.GetOrStart();
         SweepStaleOnce(server);
 
+        // The device's input pump reads the index's input section from its
+        // construction on. Every step after it runs inside the try, so a
+        // step that throws, a refused write of the owner record among them,
+        // disposes the device and stops the pump before the caller unmaps
+        // the sections (HMContext.CreateUsbipController).
         var device = new UsbipEmulatedDevice(profile, index, identity);
-        if (identity != null)
-            device.VhciPortChanged = port => MachineClaims.SetControllerValue(identity.Token, "VhciPort", port);
-        // Before the attach, the USB instance the device takes goes into the
-        // owner record, marked when Windows has no record of it yet, so the
-        // records the attach causes are named even if the program dies right
-        // after it (UsbRecords). Windows can name the device by its port
-        // instead: always for a device with no serial, and for one whose
-        // identity a usbflags IgnoreHWSerNum value names. The instance names
-        // already there are kept, and the one the device takes is told
-        // apart from them once it is found (UsbipBackendHandle.ResolveRecord).
-        var known = UsbRecords.Known(device.Descriptors.VendorId, device.Descriptors.ProductId);
-        if (device.Descriptors.UsbInstanceId is { } usbId)
-            UsbRecords.Note(identity?.Token, usbId, created: !UsbRecords.Exists(usbId));
-        // The usbflags claim of the device's identity before Windows asks
-        // it for string 0xEE (RegistryLedger.ClaimUsbFlags).
-        RegistryLedger.ClaimUsbFlags(device.Descriptors.VendorId, device.Descriptors.ProductId,
-                                     device.Descriptors.BcdDevice, index);
-        server.Register(device);
+        bool registered = false;
         try
         {
+            if (identity != null)
+                device.VhciPortChanged = port => MachineClaims.SetControllerValue(identity.Token, "VhciPort", port);
+            // Before the attach, the USB instance the device takes goes into
+            // the owner record, marked when Windows has no record of it yet,
+            // so the records the attach causes are named even if the program
+            // dies right after it (UsbRecords). Windows can name the device
+            // by its port instead: always for a device with no serial, and
+            // for one whose identity a usbflags IgnoreHWSerNum value names.
+            // The instance names already there are kept, and the one the
+            // device takes is told apart from them once it is found
+            // (UsbipBackendHandle.ResolveRecord).
+            var known = UsbRecords.Known(device.Descriptors.VendorId, device.Descriptors.ProductId);
+            if (device.Descriptors.UsbInstanceId is { } usbId)
+                UsbRecords.Note(identity?.Token, usbId, created: !UsbRecords.Exists(usbId));
+            // The usbflags claim of the device's identity before Windows asks
+            // it for string 0xEE (RegistryLedger.ClaimUsbFlags).
+            RegistryLedger.ClaimUsbFlags(device.Descriptors.VendorId, device.Descriptors.ProductId,
+                                         device.Descriptors.BcdDevice, index);
+            server.Register(device);
+            registered = true;
             BeforeAttach?.Invoke(device);
             try { device.SetVhciPortIfAttached(VhciClient.Attach("127.0.0.1", server.Port, device.BusId)); }
             catch (System.ComponentModel.Win32Exception) when (PortsFull(out _, out _))
@@ -78,9 +86,12 @@ internal static class UsbipBackend
             // ST_DEV_BUSY. Remove that import with the device, the way the
             // handle's Dispose does, or it stays plugged in on a device
             // that no longer answers.
-            try { VhciClient.DetachLocation("127.0.0.1", server.Port, device.BusId); } catch { }
-            VhciClient.StopAttachAttempts("127.0.0.1", server.Port, device.BusId);
-            server.Unregister(device);
+            if (registered)
+            {
+                try { VhciClient.DetachLocation("127.0.0.1", server.Port, device.BusId); } catch { }
+                VhciClient.StopAttachAttempts("127.0.0.1", server.Port, device.BusId);
+                server.Unregister(device);
+            }
             device.Dispose();
             throw;
         }

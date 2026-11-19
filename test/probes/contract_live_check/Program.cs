@@ -272,6 +272,22 @@ internal static class Program
     /// device and no elevation.</summary>
     static void Selftest()
     {
+        // The model the extract part expects: a Bluetooth identity's own on
+        // UMDF2, its USB form's on USB/IP, and for a Bluetooth profile with
+        // no USB form, its identity on the USB bus.
+        using (var ctx = new HMContext())
+        {
+            ctx.LoadDefaultProfiles();
+            var bt = ctx.GetProfile("dualsense-bt")!;
+            var onUmdf2 = PresentedIdentityModel(bt, HMBackend.Umdf2);
+            var onUsbip = PresentedIdentityModel(bt, HMBackend.Usbip);
+            Check("selftest: dualsense-bt presents sony-dualsense-bt on UMDF2 and its USB form's sony-dualsense on USB/IP",
+                  onUmdf2 == ("sony-dualsense-bt", "bluetooth") && onUsbip == ("sony-dualsense", "usb"), $"{onUmdf2}, {onUsbip}");
+            var remote = ctx.GetProfile("ps3-remote")!;
+            var remoteOnUsb = PresentedIdentityModel(remote, HMBackend.Usbip);
+            Check("selftest: ps3-remote, Bluetooth with no USB form, presents on the USB bus on USB/IP, where its identity gives the USB model",
+                  remoteOnUsb.Bus == "usb" && remoteOnUsb.Model != remote.Inner.Resolved.IdentityModel, $"{remoteOnUsb}, own {remote.Inner.Resolved.IdentityModel}");
+        }
         string prefix = $@"Local\HMContractLiveSelftest{Environment.ProcessId}_";
         (IntPtr H, IntPtr V) Make(int n, int protocol)
         {
@@ -374,7 +390,17 @@ internal static class Program
             }
         }
 
-        using (var c2 = Create(ctx, 2, ctx.GetProfile("xbox-one-s")!, "a fresh-token xbox-one-s at index 2 on the SWD xinputhid path"))
+        // A profile with no presentation on the backend Auto resolves to
+        // here is refused before any create: the part prints the SDK's
+        // refusal as its condition.
+        var oneS = ctx.GetProfile("xbox-one-s")!;
+        try { ctx.ResolveBackend(oneS); }
+        catch (HMBackendNotSupportedException e)
+        {
+            Console.WriteLine($"  [SKIP] xbox-one-s at index 2: no presentation on the backend Auto resolves to here: {e.Message}");
+            return;
+        }
+        using (var c2 = Create(ctx, 2, oneS, "a fresh-token xbox-one-s at index 2 on the SWD xinputhid path"))
         {
             if (c2 == null) return;
             DriverHalfCheck(c2, "a fresh-token xbox-one-s at index 2", "its driver wrote protocols 4 to 5 into its index's section at its first add");
@@ -455,6 +481,24 @@ internal static class Program
         return reports.Select(r => h == null ? null : Get(h, r, 65)).ToList();
     }
 
+    /// <summary>The model the identity of the device <paramref name="p"/>
+    /// presents on <paramref name="backend"/> gives it, which is what the
+    /// extractor reads back: the profile's own on UMDF2, and on USB/IP the
+    /// identity of what it presents there on the USB bus, the bus every
+    /// USB/IP device is on: its USB form under its own id and strings
+    /// (ControllerProfile.UsbFormOf), or itself.</summary>
+    static (string? Model, string Bus) PresentedIdentityModel(HMProfile p, HMBackend backend)
+    {
+        var shown = p.Inner.UsbFormOf(backend);
+        if (backend != HMBackend.Usbip || string.IsNullOrEmpty(shown.Connection) || shown.Connection == "usb")
+            return (shown.Resolved.IdentityModel, string.IsNullOrEmpty(shown.Connection) ? "usb" : shown.Connection);
+        var onUsb = shown.Clone();
+        onUsb.Connection = "usb";
+        onUsb.BluetoothTransport = null;
+        onUsb.ResolvedCache = null;
+        return (onUsb.Resolved.IdentityModel, "usb");
+    }
+
     static void Extract(HMContext ctx)
     {
         foreach (var p in ctx.AllProfiles.Where(x => !x.Inner.RequiresUsbipBackend && x.HasDeviceModel && x.Inner.Resolved.Model.FeatureStubs != null)
@@ -463,17 +507,20 @@ internal static class Program
             var reports = p.Inner.GetOrBuildReportMap().Reports.Where(r => r.Kind == HidReportKind.Feature).Select(r => r.ReportId).Distinct().ToList();
             HMProfile x;
             List<byte[]?> device;
+            HMBackend backend;
             using (var c = Create(ctx, 0, p, p.Id))
             {
                 if (c == null) continue;
+                backend = c.Backend;
                 var d = Find(c);
                 if (d == null) { Check($"{p.Id}: its HID device is listed", false, Node(c)); continue; }
                 x = HMDeviceExtractor.Extract(d);
                 device = Answers(c, reports);
             }
-            Check($"{p.Id}: the extracted profile names the model the device's identity gives it",
-                  x.Inner.DeviceModelFrom != null && x.Inner.DeviceModelFrom == p.Inner.Resolved.IdentityModel,
-                  $"{x.Inner.DeviceModelFrom ?? "none"}, {x.Connection} (the device's identity gives {p.Inner.Resolved.IdentityModel ?? "none"}, {p.Inner.Connection})");
+            var (want, bus) = PresentedIdentityModel(p, backend);
+            Check($"{p.Id}: the extracted profile names the model the identity of the device it presents gives it",
+                  x.Inner.DeviceModelFrom != null && x.Inner.DeviceModelFrom == want,
+                  $"{x.Inner.DeviceModelFrom ?? "none"}, {x.Connection} (on {backend} the device presents on the {bus} bus, where its identity gives {want ?? "none"})");
             using (var c = Create(ctx, 0, x, $"{p.Id}: the extracted profile"))
             {
                 if (c == null) continue;
