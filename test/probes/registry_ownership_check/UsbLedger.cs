@@ -958,14 +958,24 @@ internal static partial class Program
     /// serial anyway, and nothing was checked.</summary>
     static bool PortNamedWith(HMContext ctx, HMProfile profile)
     {
+        // Both forms: the identity key's IgnoreHWSerNum, which Microsoft's
+        // "USB Device Registry Entries" page documents, and the
+        // usbflags-level IgnoreHWSerNumVVVVPPPP value backend_parity_check
+        // sets.
         const string flags = @"SYSTEM\CurrentControlSet\Control\usbflags";
         string value = $"IgnoreHWSerNum{profile.VendorId:X4}{profile.ProductId:X4}";
-        Console.WriteLine($"  {profile.Id}, {value}");
+        string device = $@"{flags}\{RegistryLedger.UsbFlagsName(profile.VendorId, profile.ProductId, new UsbDescriptorSet(profile.Inner).BcdDevice)}";
+        Console.WriteLine($"  {profile.Id}, {value} and {device.Substring(flags.Length + 1)} IgnoreHWSerNum");
         object? prior;
         using (var k = Registry.LocalMachine.OpenSubKey(flags)) prior = k?.GetValue(value);
+        bool deviceKeyExisted;
+        object? priorDevice;
+        using (var k = Registry.LocalMachine.OpenSubKey(device)) { deviceKeyExisted = k != null; priorDevice = k?.GetValue("IgnoreHWSerNum"); }
         var known = UsbRecords.Known(profile.VendorId, profile.ProductId);
         using (var k = Registry.LocalMachine.CreateSubKey(flags))
             k.SetValue(value, new byte[] { 1 }, RegistryValueKind.Binary);
+        using (var k = Registry.LocalMachine.CreateSubKey(device))
+            k.SetValue("IgnoreHWSerNum", new byte[] { 1 }, RegistryValueKind.Binary);
         try
         {
             string serialId, onPort;
@@ -994,9 +1004,18 @@ internal static partial class Program
         }
         finally
         {
-            using var k = Registry.LocalMachine.OpenSubKey(flags, writable: true);
-            if (prior != null) k?.SetValue(value, prior, RegistryValueKind.Binary);
-            else k?.DeleteValue(value, throwOnMissingValue: false);
+            using (var k = Registry.LocalMachine.OpenSubKey(flags, writable: true))
+            {
+                if (prior != null) k?.SetValue(value, prior, RegistryValueKind.Binary);
+                else k?.DeleteValue(value, throwOnMissingValue: false);
+            }
+            if (!deviceKeyExisted) Registry.LocalMachine.DeleteSubKeyTree(device, throwOnMissingSubKey: false);
+            else
+            {
+                using var k = Registry.LocalMachine.OpenSubKey(device, writable: true);
+                if (priorDevice != null) k?.SetValue("IgnoreHWSerNum", priorDevice, RegistryValueKind.Binary);
+                else k?.DeleteValue("IgnoreHWSerNum", throwOnMissingValue: false);
+            }
         }
     }
 }
