@@ -175,10 +175,6 @@ internal static class Rules
 
     public static readonly AllowedName[] Names =
     {
-        new(new[] { "psAuthenticated", "psUnauthenticated", "psRequest" }, new[] { @"sdk\HIDMaestro.Core\Internal\AuthenticodeSigner.cs" },
-            "the Win32 names of SIGNER_SIGNATURE_INFO's attribute pointers and SignerSignEx3's request argument (mssign32.dll), where ps is Hungarian notation for a pointer to a struct"),
-        new(new[] { "psFlat" }, new[] { @"sdk\HIDMaestro.Core\Internal\DriverCatalog.cs" },
-            "the Win32 name of SIP_SUBJECTINFO's flat-file union member (mssip.h), where ps is Hungarian notation for a pointer to a struct"),
         new(new[] { "HatSwitch" }, new[] { @"sdk\HIDMaestro.Core\Internal\HidReportBuilder.cs" },
             "the HID usage Hat Switch (Generic Desktop 0x39), as linux-hid-ref drivers/hid/hid-bigbenff.c:136 names it"),
         new(new[] { "SafetySwitch", "ActuatorOverrideSwitch" }, new[] { @"sdk\HIDMaestro.Core\HMPidState.cs" },
