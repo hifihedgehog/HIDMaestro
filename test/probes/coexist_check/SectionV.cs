@@ -261,14 +261,23 @@ internal static partial class Program
         Check("V3: the host controller drops the v1.12.0 imports once the program is killed",
               WaitFor(() => !Vhci.Imported().Any(r => r.Port == port), 10_000));
 
+        // Another program running a composite on transport index 0, bus id
+        // 1-1 at its own port, keeps index 0 from the new program, whose
+        // composite then takes the lowest index free. The checks follow the
+        // bus id it got.
+        bool zeroElsewhere = Vhci.Imported().Any(r => r.BusId == "1-1" && r.Port != port);
         using (var nu = PeerProcess.Start("V3-new"))
         {
             string cn = nu.Send("create composite -");
             if (!Ok(cn)) { Check("V3: a program on this SDK creates a composite", false, cn); return; }
             string nuBus = "1-" + (int.Parse(PeerProcess.Field(cn, "transport")!) + 1);
             int nuPort = RecordUsbipPort(nu.Pid);
-            Check($"V3: its server takes the v1.12.0 program's port {port} and its composite bus id 1-1",
-                  nuPort == port && nuBus == "1-1", $"{nuPort}/{nuBus}");
+            if (zeroElsewhere)
+                Check($"V3: its server takes the v1.12.0 program's port {port}, its composite on the lowest bus id another program leaves free",
+                      nuPort == port && nuBus != "1-1", $"{nuPort}/{nuBus}");
+            else
+                Check($"V3: its server takes the v1.12.0 program's port {port} and its composite bus id 1-1",
+                      nuPort == port && nuBus == "1-1", $"{nuPort}/{nuBus}");
             int left1 = Vhci.Stop("127.0.0.1", port, "1-1");
             Check($"V3: no re-attach attempt for 1-1 at {port} outlives the create", left1 == 0, $"{left1} canceled by the probe");
 
@@ -277,7 +286,7 @@ internal static partial class Program
             // one for 1-10 has reached the new server and been answered.
             while (dropped.Elapsed < TimeSpan.FromSeconds(38)) Thread.Sleep(250);
             Check("V3: the new program's composite is still attached",
-                  Vhci.Imported().Any(r => r.Port == port && r.BusId == "1-1"));
+                  Vhci.Imported().Any(r => r.Port == port && r.BusId == nuBus));
         }
 
         // The answered attempt goes out again a first delay later, 30 s
@@ -414,7 +423,9 @@ internal static partial class Program
                 // before v2.0.0 having left no record. Only on one of those does
                 // the comeback check tell a sweep that leaves the program's exports
                 // from one that does not.
-                Check("V5: the composite has bus id 1-1, which the own-port sweep would cancel", bus == "1-1", bus);
+                // 1-1 unless another program runs a composite on index 0.
+                Check("V5: the composite has a bus id from 1-1 to 1-8, which the own-port sweep would cancel",
+                      int.TryParse(bus[2..], out int busN) && busN >= 1 && busN <= 8, bus);
                 if (!Drop("a first time")) return false;
                 dropped5.Start();
                 int recorded = -1;
@@ -697,7 +708,16 @@ internal static partial class Program
                     }
                     catch (System.Net.Sockets.SocketException) { }
                 }
-            Check("V8: the probe holds both port ranges", held.Count == 32, $"{held.Count} of 32");
+            // A port another program's server listens on is out of reach
+            // too: what the part needs is no free port in either range.
+            var listening = System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties()
+                .GetActiveTcpListeners().Select(e => e.Port).ToHashSet();
+            int others = 0;
+            foreach (int first in new[] { UsbipBasePort, UsbipSecondBasePort })
+                for (int i = 0; i < 16; i++)
+                    if (!held.Any(l => ((System.Net.IPEndPoint)l.LocalEndpoint).Port == first + i) && listening.Contains(first + i)) others++;
+            Check("V8: no port of either range is free: the probe holds the rest of what other programs' servers hold",
+                  held.Count + others == 32, $"{held.Count} held by the probe, {others} by other programs, of 32");
             bool Outside(int port) => port > 0 && (port < UsbipBasePort || port >= UsbipBasePort + 16)
                 && (port < UsbipSecondBasePort || port >= UsbipSecondBasePort + 16);
 
