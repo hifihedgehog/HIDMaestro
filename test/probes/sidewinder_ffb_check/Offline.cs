@@ -184,6 +184,9 @@ internal static class Offline
             Check("GET on an ID no PID report arrives on stalls", g.Status == -UsbipProtocol.EPipe, Ret(g));
 
             Check("Pool reads refused stay at 2 once a Pool is published", device.PidPoolRefusals == 2, $"{device.PidPoolRefusals}");
+
+            // It remakes the section: the view above is gone after it.
+            LateRequest(cl, rids);
         }
         finally
         {
@@ -191,6 +194,68 @@ internal static class Offline
             device.Dispose();
             SharedMemoryIO.DestroyController(Index);
         }
+    }
+
+    // ── SharedMemoryIO's own tables, for a teardown played in process ───
+
+    const System.Reflection.BindingFlags AnyStatic =
+        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public;
+    static readonly Type Sm = typeof(SharedMemoryIO);
+    static object InputLock => Sm.GetField("s_inputViews", AnyStatic)!.GetValue(null)!;
+    static Dictionary<int, long> AckGenerations => (Dictionary<int, long>)Sm.GetField("s_inputAckGenerations", AnyStatic)!.GetValue(null)!;
+
+    /// <summary>The section released as DestroyController releases it, then
+    /// made again as the controller's first PublishPid* call makes it, with
+    /// a Pool published on <paramref name="seq"/>, the program's counter.</summary>
+    static IntPtr RemakeSection(PidReportIdExtractor.PidReportIds rids, ref uint seq)
+    {
+        var release = Sm.GetMethod("ReleasePidStateLocked", AnyStatic)!;
+        lock (SharedMemoryIO.PidStateLock) release.Invoke(null, new object[] { Index });
+        IntPtr view = SharedMemoryIO.EnsurePidStateMapping(Index);
+        SharedMemoryIO.WritePidReportIds(view, rids.PoolReportId, rids.StateReportId, rids.BlockLoadReportId,
+            rids.CreateNewEffectReportId, rids.BlockFreeReportId, rids.DeviceControlReportId);
+        SharedMemoryIO.WritePidPool(view, ref seq, 0x0400, 2, deviceManagedPool: true, sharedParameterBlocks: false);
+        return view;
+    }
+
+    /// <summary>A request on the connection's thread of a device whose
+    /// controller is torn down, after this process made the index again: it
+    /// must not reach the new controller's section. The teardown and the
+    /// re-create are played on SharedMemoryIO's own tables, so the device's
+    /// own input and output views stay mapped.</summary>
+    static void LateRequest(Client cl, PidReportIdExtractor.PidReportIds rids)
+    {
+        Console.WriteLine("\n-- A late request after the index is made again --");
+        long own;
+        lock (InputLock) own = AckGenerations[Index];
+        var last = Sm.GetField("s_lastAckGeneration", AnyStatic)!;
+        lock (InputLock)
+        {
+            long next = (long)last.GetValue(null)! + 1;
+            last.SetValue(null, next);
+            AckGenerations[Index] = next;
+        }
+        uint seq = 0;
+        IntPtr view = RemakeSection(rids, ref seq);
+        try
+        {
+            var g = cl.GetFeature(0x13, 5);
+            Check("GET Pool from the torn-down device does not read the new controller's Pool", g.Status == -UsbipProtocol.EPipe, Ret(g));
+            cl.ControlOut(0x21, 0x09, 0x0311, 0, new byte[] { 0x11, 0x01, 0x00, 0x00 });
+            Check("its SET Create New Effect allocates nothing there", Bitmap(view) == (0u, 0u), Show(view));
+            g = cl.GetFeature(0x12, 5);
+            Check("its GET Block Load stalls as with no section", g.Status == -UsbipProtocol.EPipe, Ret(g));
+        }
+        finally
+        {
+            lock (InputLock) AckGenerations[Index] = own;
+        }
+        // Positive control, same section, same connection: with the
+        // device's own generation back, the same requests reach it.
+        var p = cl.GetFeature(0x13, 5);
+        Check("positive control: with its generation current, GET Pool reads 13 00 04 02 01", Hex(p) == "1300040201", Ret(p));
+        cl.ControlOut(0x21, 0x09, 0x0311, 0, new byte[] { 0x11, 0x01, 0x00, 0x00 });
+        Check("and SET Create New Effect allocates EBI 1", Bitmap(view) == (1u, 1u), Show(view));
     }
 
     static (uint Bitmap, uint Count) Bitmap(IntPtr view) =>

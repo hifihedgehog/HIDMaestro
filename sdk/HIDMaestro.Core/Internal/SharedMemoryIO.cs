@@ -1057,9 +1057,24 @@ internal static partial class SharedMemoryIO
     /// <see cref="IntPtr.Zero"/> until the program's first PublishPid* call
     /// makes it: the in-process form of the driver's EnsurePidStateMapping,
     /// which opens the section by name and fails while it does not exist.
+    /// <paramref name="generation"/> is the one
+    /// <see cref="AnnounceDeviceDelivery"/> returned to the device, checked
+    /// as <see cref="StoreDeviceDelivered"/> checks it: a request on the
+    /// connection's thread of a device already torn down can get here after
+    /// this process made the index again, and the section then is the new
+    /// controller's, so a lookup for another mapping gets none.
     /// Caller holds <see cref="PidStateLock"/>.</summary>
-    internal static IntPtr PidStateViewLocked(int controllerIndex) =>
-        s_pidStateViews.TryGetValue(controllerIndex, out IntPtr v) ? v : IntPtr.Zero;
+    internal static IntPtr PidStateViewLocked(int controllerIndex, long generation)
+    {
+        if (!s_pidStateViews.TryGetValue(controllerIndex, out IntPtr v)) return IntPtr.Zero;
+        // PidStateLock, then the input lock: no path takes them the other way.
+        lock (s_inputViews)
+        {
+            if (!s_inputAckGenerations.TryGetValue(controllerIndex, out long current) || current != generation)
+                return IntPtr.Zero;
+        }
+        return v;
+    }
 
     /// <summary>Returns the signaling event handle for a controller's input
     /// section, or <see cref="IntPtr.Zero"/> if no mapping has been created

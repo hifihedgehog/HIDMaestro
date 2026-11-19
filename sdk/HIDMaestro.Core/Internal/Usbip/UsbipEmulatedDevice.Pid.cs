@@ -192,7 +192,7 @@ internal sealed partial class UsbipEmulatedDevice
         if (!_pidCandidate![reportId]) return;
         lock (SharedMemoryIO.PidStateLock)
         {
-            IntPtr view = SharedMemoryIO.PidStateViewLocked(_index);
+            IntPtr view = SharedMemoryIO.PidStateViewLocked(_index, _ackGeneration);
             if (view == IntPtr.Zero) return;
             byte createNewEffect = PidIdLocked(view, SharedMemoryIO.PID_OFFSET_NEW_EFFECT_RID, PidCreateNewEffectId);
             byte blockFree = PidIdLocked(view, SharedMemoryIO.PID_OFFSET_BLOCK_FREE_RID, PidBlockFreeId);
@@ -224,7 +224,7 @@ internal sealed partial class UsbipEmulatedDevice
         bool poolRefused = false;
         lock (SharedMemoryIO.PidStateLock)
         {
-            IntPtr view = SharedMemoryIO.PidStateViewLocked(_index);
+            IntPtr view = SharedMemoryIO.PidStateViewLocked(_index, _ackGeneration);
             byte createNewEffect = PidIdLocked(view, SharedMemoryIO.PID_OFFSET_NEW_EFFECT_RID, PidCreateNewEffectId);
             byte pool = PidIdLocked(view, SharedMemoryIO.PID_OFFSET_POOL_RID, PidPoolId);
             byte state = PidIdLocked(view, SharedMemoryIO.PID_OFFSET_STATE_RID, PidStateId);
@@ -292,7 +292,7 @@ internal sealed partial class UsbipEmulatedDevice
         Span<byte> reply = stackalloc byte[3];
         lock (SharedMemoryIO.PidStateLock)
         {
-            IntPtr view = SharedMemoryIO.PidStateViewLocked(_index);
+            IntPtr view = SharedMemoryIO.PidStateViewLocked(_index, _ackGeneration);
             if (reportId != PidIdLocked(view, SharedMemoryIO.PID_OFFSET_STATE_RID, PidStateId)) return false;
             bool have = ReadPidState(view, out var pid);
             reply[0] = reportId;
