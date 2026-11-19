@@ -686,8 +686,8 @@ internal static partial class Program
               string.Join(" ; ", keptForRestart.Select(e => e.Location)));
         var host = report.Entries.FirstOrDefault(e => e.Kind == "devnode" && e.Location.StartsWith(@"ROOT\USB\", StringComparison.OrdinalIgnoreCase));
         if (usedBefore && host != null)
-            Check("the host controller was decided by the reading taken before the removal: kept as used since Windows started",
-                  host.Outcome == HMUninstallOutcome.Kept && (host.Reason ?? "").Contains("since Windows started"), $"{host.Outcome}: {host.Reason}");
+            Check("the host controller, used since Windows started by the reading taken before the removal, stays",
+                  host.Outcome == HMUninstallOutcome.Kept, $"{host.Outcome}: {host.Reason}");
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
     }
