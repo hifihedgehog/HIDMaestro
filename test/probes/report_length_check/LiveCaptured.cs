@@ -38,16 +38,23 @@ internal static partial class Live
                  && r[7] == 0x7F && r[8] == 0x7F && r[9] == 0x7F && r[10] == 0x7F,
             "report 0x01 with Cross at byte 2 bit 6, the trigger 0xFF at bytes 5 and 6 and 0x7F at 7 to 10",
             new byte[] { 0x03, 0x04, 0x05, 0x10, 0x11, 0xA0, 0xA1, 0xE0 });
+        // On USB/IP the flight stick is an XUSB function, and xusb22 makes its
+        // HID collection itself from the pad's XInput state: the same 12-byte
+        // report with its two 8-bit triggers, which xusb22, not the profile,
+        // places. On the ARM64 Surface (Windows 11 28000) the submitted
+        // trigger reads at byte 2.
         Captured(ctx, "xbox-360-flight-stick",
             new[] { new Caps(0x0001, 0x0004, 13, 0, 0) },
             new HMGamepadState { Axes = new Dictionary<HMAxis, float> { [HMAxis.Z] = 1.0f, [HMAxis.Rz] = 0.0f } },
             r => r.Length >= 13 && r[0] == 0x00 && r[1] == 0xFF && r[2] == 0x00,
             "the 12-byte report with Z 0xFF at byte 1 and Rz 0 at byte 2, after HID class's zero ID byte",
-            Array.Empty<byte>());
+            Array.Empty<byte>(),
+            r => r.Length >= 13 && r[0] == 0x00 && ((r[1] == 0xFF && r[2] == 0x00) || (r[1] == 0x00 && r[2] == 0xFF)),
+            "on USB/IP, xusb22's 12-byte report with one 8-bit trigger 0xFF and the other 0, after HID class's zero ID byte");
     }
 
     static void Captured(HMContext ctx, string id, Caps[] want, HMGamepadState state, Func<byte[], bool> match,
-                         string what, byte[] features)
+                         string what, byte[] features, Func<byte[], bool>? usbipMatch = null, string? usbipWhat = null)
     {
         var prof = ctx.GetProfile(id) ?? throw new InvalidOperationException($"no profile {id}");
         var before = Present(prof.VendorId, prof.ProductId);
@@ -87,6 +94,11 @@ internal static partial class Live
             using var rd = new HidReader(game, 64);
             Check($"{id}: the input collection opens for reading", rd.IsOpen, rd.OpenError);
             if (!rd.IsOpen) return;
+            if (c.Backend == HMBackend.Usbip && usbipMatch != null)
+            {
+                match = usbipMatch;
+                what = usbipWhat ?? what;
+            }
             byte[]? last = null;
             var report = DriveUntil(c, rd, state, r => { last = r; return match(r); }, 3000);
             Check($"{id}: {what}", report != null,
