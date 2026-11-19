@@ -901,8 +901,11 @@ public class HidReportBuilder
         if (LeftStickY  != null) d[Key(LeftStickY)]  = (float)leftY;
         if (RightStickX != null) d[Key(RightStickX)] = (float)rightX;
         if (RightStickY != null) d[Key(RightStickY)] = (float)rightY;
-        if (LeftTrigger != null) d[Key(LeftTrigger)] = (float)leftTrigger;
-        if (RightTrigger!= null) d[Key(RightTrigger)]= (float)rightTrigger;
+        // A trigger value never lands on a field a stick holds, so a
+        // descriptor whose trigger slot resolves to a stick's axis keeps
+        // the stick.
+        if (LeftTrigger != null) d.TryAdd(Key(LeftTrigger), (float)leftTrigger);
+        if (RightTrigger!= null) d.TryAdd(Key(RightTrigger), (float)rightTrigger);
         return d;
     }
 
