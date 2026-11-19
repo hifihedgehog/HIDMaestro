@@ -952,8 +952,19 @@ internal static class Program
             CheckString("WinUSB", usb.Control(0x80, 0x06, 0x0301, 0x0409, 255, null, out _), GcReal.Manufacturer, 1);
             CheckString("WinUSB", usb.Control(0x80, 0x06, 0x0302, 0x0409, 255, null, out _), GcReal.Product, 2);
             CheckString("WinUSB", usb.Control(0x80, 0x06, 0x0303, 0x0409, 255, null, out _), GcReal.Serial, 3);
-            Probe.Check("string 0xEE stalls: no Microsoft OS descriptors",
-                usb.Control(0x80, 0x06, 0x03EE, 0, 255, null, out _) == null);
+            // Where Windows installs no package signed as HIDMaestro's driver
+            // is, the bind goes by the device's own Microsoft OS descriptors,
+            // so from the bind on the device serves the string a real adapter
+            // stalls. That is the one byte S79 lets differ, and only there.
+            var byOs = typeof(HMController).Assembly.GetType("HIDMaestro.Internal.WinUsbBinding")?
+                .GetMethod("BindsByOsDescriptors", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+            bool osBound = byOs?.Invoke(null, null) is true;
+            var ee = usb.Control(0x80, 0x06, 0x03EE, 0, 255, null, out _);
+            if (osBound)
+                Probe.Check("string 0xEE is MSFT100 and the vendor code: this machine refuses HIDMaestro's package, so the bind went by Microsoft OS descriptors",
+                    ee != null && Probe.Hex(ee) == "12034D005300460054003100300030000100", ee == null ? "stalled" : Probe.Hex(ee));
+            else
+                Probe.Check("string 0xEE stalls: no Microsoft OS descriptors", ee == null);
             Probe.Check("device qualifier stalls, as on a full-speed device",
                 usb.Control(0x80, 0x06, 0x0600, 0, 10, null, out _) == null);
             Probe.Check("other-speed configuration stalls",

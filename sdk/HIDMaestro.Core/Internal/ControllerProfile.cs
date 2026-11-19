@@ -265,6 +265,114 @@ public sealed class ControllerProfile
     [JsonPropertyName("usbConfiguration")]
     public UsbConfigurationSpec? UsbConfiguration { get; set; }
 
+    /// <summary>2.3.0: for a Bluetooth identity, the id of the profile whose
+    /// USB form the device takes on a USB bus, the USB/IP backend: that
+    /// profile's descriptor, reports, feature answers and protocol, under
+    /// this profile's id and strings. The named profile has this profile's
+    /// VID and PID, a USB connection and no usbForm of its own, and the
+    /// USB/IP backend presents it as a single HID function. No inbox route
+    /// gives a USB/IP device a Bluetooth devnode, so hidapi, and with it
+    /// SDL, reads such a device as USB and drives it in its USB protocol,
+    /// which only the USB form answers. The UMDF2 backend does not read the
+    /// key (<see cref="UsbFormOf"/>).</summary>
+    [JsonPropertyName("usbForm")]
+    public string? UsbForm { get; set; }
+
+    /// <summary>The profile <see cref="UsbForm"/> names, set by the load
+    /// that checked it (<see cref="CheckUsbForm"/>), or found again on first
+    /// use for a profile no load resolved.</summary>
+    [JsonIgnore]
+    internal ControllerProfile? UsbFormProfile { get; set; }
+
+    /// <summary>Why <paramref name="form"/> cannot be the USB form of
+    /// <paramref name="p"/>, or null when it can. Null
+    /// <paramref name="form"/> is a name nothing holds.</summary>
+    internal static string? UsbFormRefusal(ControllerProfile p, ControllerProfile? form)
+    {
+        string name = p.UsbForm!;
+        if (form == null) return $"names '{name}', which no loaded profile or catalog profile holds.";
+        if (string.Equals(form.Id, p.Id, StringComparison.OrdinalIgnoreCase)) return "names the profile itself.";
+        if (string.Equals(form.Connection, "bluetooth", StringComparison.OrdinalIgnoreCase))
+            return $"names '{form.Id}', which is a Bluetooth identity itself. The USB form is the profile with the USB connection.";
+        if (form.UsbForm != null) return $"names '{form.Id}', which names a USB form of its own. A USB form is a profile with a USB connection, not a chain.";
+        if (form.VendorId != p.VendorId || form.ProductId != p.ProductId)
+            return $"names '{form.Id}', whose VID and PID {form.VendorId:X4}:{form.ProductId:X4} are not this profile's {p.VendorId:X4}:{p.ProductId:X4}. The USB form is the same device on another bus.";
+        if (form.RequiresUsbipBackend)
+            return $"names '{form.Id}', whose backend is \"usbip\": a composite would give the device interfaces the caller did not ask for. Name the single-HID profile.";
+        if (Usbip.UsbPresentation.NotPresentableReason(form) is { } reason)
+            return $"names '{form.Id}', which the USB/IP backend cannot present: {reason}";
+        return null;
+    }
+
+    /// <summary>Finds and checks the profile <see cref="UsbForm"/> names
+    /// through <paramref name="find"/>, keeps it in
+    /// <see cref="UsbFormProfile"/>, and throws
+    /// <see cref="ProfileDefectException"/> at <c>$.usbForm</c> when it
+    /// cannot be this profile's USB form.</summary>
+    internal void CheckUsbForm(Func<string, ControllerProfile?> find)
+    {
+        if (UsbForm == null) { UsbFormProfile = null; return; }
+        var form = string.IsNullOrWhiteSpace(UsbForm) ? null : find(UsbForm);
+        if (UsbFormRefusal(this, form) is { } why) throw new ProfileDefectException("$.usbForm", why);
+        UsbFormProfile = form;
+    }
+
+    /// <summary>The profile named by <see cref="UsbForm"/>, found under the
+    /// registry the profile resolved with when no load found it. Null for a
+    /// profile with no usbForm.</summary>
+    internal ControllerProfile? ResolveUsbForm()
+    {
+        if (UsbForm == null) return null;
+        if (UsbFormProfile == null) CheckUsbForm((Registry ?? ModelRegistry.Catalog).FindProfile);
+        return UsbFormProfile;
+    }
+
+    private ControllerProfile? _usbFormPresented;
+
+    /// <summary>The profile a device of this profile runs on
+    /// <paramref name="backend"/>: this one, or on the USB/IP backend the USB
+    /// form <see cref="UsbForm"/> names, as a copy that takes this profile's
+    /// id, name, vendor, strings, device description and serial string and
+    /// the form's every other key. Resolved and checked as a create checks a
+    /// profile, and kept until the next create resolves this profile
+    /// again (<see cref="ResolveForCreate"/>).</summary>
+    internal ControllerProfile UsbFormOf(HMBackend backend)
+    {
+        if (backend != HMBackend.Usbip || UsbForm == null) return this;
+        if (_usbFormPresented is { } built) return built;
+        var form = ResolveUsbForm()!;
+        var p = form.Clone();
+        p.Id = Id;
+        p.Name = Name;
+        p.Vendor = Vendor;
+        p.ProductString = ProductString;
+        p.ManufacturerString = ManufacturerString;
+        p.DeviceDescription = DeviceDescription;
+        p.SerialString = SerialString;
+        p.Registry = form.Registry;
+        p.OutsideCatalog = form.OutsideCatalog;
+        // The Bluetooth form carries the consumer's whole state, sensors,
+        // touch and battery included, in its extended report once a host
+        // arms it. A pad on USB streams its full report from power-on, so
+        // the USB form sends its extended report from the start, and
+        // SubmitState reaches the device whole on both backends. The fixed
+        // bytes the legacy path overlays (inputDefaults) become constants of
+        // that report, as the codec path declares them.
+        if (ExtendedReport is { ArmOn.Count: > 0 } && p.ExtendedReport is { AlwaysArmed: false } ext
+            && ext.ArmOn is not { Count: > 0 } && ext.Ports == null)
+        {
+            ext.AlwaysArmed = true;
+            foreach (var d in p.InputDefaults ?? new List<InputBytePatch>())
+            {
+                if (d.Byte <= 0 || d.Byte >= ext.Size || ext.Fields.Exists(f => f.Byte == d.Byte)) continue;
+                ext.Fields.Add(new FieldSpec { Byte = d.Byte, Type = "uint8", Semantic = "constant", Initial = d.Value });
+            }
+        }
+        p.ValidateAtLoad();
+        p.ResolveForCreate();
+        return _usbFormPresented = p;
+    }
+
     /// <summary>v2.0.0: how the device behaves beyond its descriptors: its
     /// registers, the commands it takes and the replies they draw, when it
     /// reports and how often, its output decoders, and when it stops
@@ -665,8 +773,13 @@ public sealed class ControllerProfile
     /// edit a loaded profile before it creates, and the create serves what
     /// the profile then holds. Throws for a defect of the profile's own
     /// keys, as the load does.</summary>
-    internal void ResolveForCreate() =>
+    internal void ResolveForCreate()
+    {
         ResolvedCache = ModelRegistry.Resolve(this, Registry ?? ModelRegistry.Catalog, OutsideCatalog);
+        // The USB form is built again from what this profile and its form
+        // hold now, for the same reason.
+        _usbFormPresented = null;
+    }
 
     /// <summary>Drops everything compiled from the profile's keys: the
     /// parsed descriptor, its report map, the report builder, the keyboard
@@ -679,6 +792,7 @@ public sealed class ControllerProfile
     {
         _cachedKbmPacker = null;
         UsbPresentationCache = null;
+        _usbFormPresented = null;
         _cachedReportMap = null;
         _cachedDescriptor = null;
         _descriptorCached = false;
@@ -733,6 +847,15 @@ public sealed class ControllerProfile
         // The identity first: the identity defaults match on it below.
         CheckHexId(Vid, "$.vid");
         CheckHexId(Pid, "$.pid");
+        if (UsbForm != null)
+        {
+            if (!string.Equals(Connection, "bluetooth", StringComparison.OrdinalIgnoreCase))
+                throw new ProfileDefectException("$.usbForm", "is for a Bluetooth identity. This profile's connection is not \"bluetooth\".");
+            if (UsbConfiguration != null)
+                throw new ProfileDefectException("$.usbForm", "and usbConfiguration both given. The USB form's own profile describes the USB device.");
+            if (RequiresUsbipBackend)
+                throw new ProfileDefectException("$.usbForm", "is for a profile both backends present. This profile's backend is \"usbip\".");
+        }
         AnswerModels.Validate(this, global::HIDMaestro.Internal.DeviceModel.OwnOf(this), taken: false, new List<string>());
         if (DeviceModel != null && DeviceModel != "none")
             throw new ProfileDefectException("$.deviceModel", $"\"{DeviceModel}\" is not a value it takes. The one value is \"none\".");
@@ -806,7 +929,7 @@ public sealed class ControllerProfile
                 throw new ProfileDefectException("$.usbConfiguration",
                     "is required for this protocol: it names endpoints or USB transfers, and only a usbConfiguration that authors its descriptors has them.");
             if (checkModelGroups) Usbip.CompiledProtocol.Compile(this, derived ? null : descriptors);
-            WinUsbBinding.PackageFor(this, descriptors);
+            WinUsbBinding.PackageFor(this, descriptors, HMBackend.Usbip);
             return;
         }
         // A usbConfiguration on a profile whose default is UMDF2 is the USB
@@ -2009,6 +2132,23 @@ public sealed class ProfileDatabase
                 }
                 _issues.Add(new HIDMaestro.HMProfileLoadIssue(r.ProblemFile ?? p.SourceFile ?? p.Id, p.Id, path,
                     r.Problem, HIDMaestro.HMProfileLoadIssueKind.ModelProblem));
+            }
+        }
+        // A Bluetooth identity's USB form: a profile of this load, else one
+        // the registry's names can take. Every model is resolved by now, so
+        // the check reads the form as a create would.
+        var kept = _profiles.Where(p => !refused.Contains(p)).ToDictionary(p => p.Id, StringComparer.OrdinalIgnoreCase);
+        foreach (var p in _profiles)
+        {
+            if (p.UsbForm == null || refused.Contains(p)) continue;
+            try { p.CheckUsbForm(id => kept.TryGetValue(id, out var own) ? own : registry.FindProfile(id)); }
+            catch (Exception e) when (ProfileDefects.IsDefect(e))
+            {
+                var (path, reason) = ProfileDefects.LocateAny(e);
+                if (_texts.TryGetValue(p, out var text)) path = ProfileDefects.Spell(text, path);
+                _issues.Add(new HIDMaestro.HMProfileLoadIssue(p.SourceFile ?? p.Id, p.Id, path, reason,
+                    HIDMaestro.HMProfileLoadIssueKind.Refused));
+                refused.Add(p);
             }
         }
         foreach (var p in refused) _profiles.Remove(p);

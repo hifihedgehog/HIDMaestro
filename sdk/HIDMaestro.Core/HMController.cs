@@ -90,6 +90,104 @@ public sealed partial class HMController : IDisposable
     public string IdentityKey { get; }
     public HMProfile Profile { get; }
 
+    /// <summary>The profile whose descriptor, reports, feature answers and
+    /// protocol the device runs: <see cref="Profile"/>, or on the USB/IP
+    /// backend the USB form a Bluetooth identity names, under
+    /// <see cref="Profile"/>'s id and strings
+    /// (<see cref="HMProfile.FormOn"/>).</summary>
+    internal HMProfile Presented { get; }
+
+    // Indexed by a raw frame's length: true for a length only the Bluetooth
+    // form of Profile takes, when the device presents its USB form. Built
+    // once at create. Null otherwise, which is every other controller.
+    private readonly bool[]? _otherFormRaw;
+
+    /// <summary>The raw-frame lengths <paramref name="own"/>'s form takes
+    /// and <paramref name="presented"/>'s does not: the data-lane report
+    /// with and without its ID, the extended report with and without its
+    /// ID, and the state block.</summary>
+    private static bool[]? OtherFormRawLengths(ControllerProfile own, ControllerProfile presented)
+    {
+        static HashSet<int> Lengths(ControllerProfile p)
+        {
+            var set = new HashSet<int>();
+            if (p.HasDescriptor)
+            {
+                int n = DeviceOrchestrator.DriverInputReport(p).Length;
+                set.Add(n);
+                set.Add(n - 1);
+            }
+            if (p.ExtendedReport is { Size: > 0 } ext) { set.Add(ext.Size); set.Add(ext.Size - 1); }
+            if (p.StateBlock is { Size: > 0 } block) set.Add(block.Size);
+            set.Remove(0);
+            return set;
+        }
+        var only = Lengths(own);
+        only.ExceptWith(Lengths(presented));
+        only.RemoveWhere(n => n <= 0);
+        if (only.Count == 0) return null;
+        int max = 0;
+        foreach (int n in only) max = Math.Max(max, n);
+        var table = new bool[max + 1];
+        foreach (int n in only) table[n] = true;
+        return table;
+    }
+
+    /// <summary>The axis keys a state built for <paramref name="own"/>
+    /// carries and <paramref name="form"/> reads elsewhere: the sticks' X
+    /// and Y and the triggers, slot by slot. Null when they agree.</summary>
+    private static (HMAxis From, HMAxis To)[]? FormAxisMoves(HMProfile own, HMProfile form)
+    {
+        var moves = new List<(HMAxis, HMAxis)>();
+        void Pair(HMAxis from, HMAxis to)
+        {
+            if (from != HMAxis.None && to != HMAxis.None && from != to) moves.Add((from, to));
+        }
+        var (os, fs) = (own.Sticks, form.Sticks);
+        for (int i = 0; i < Math.Min(os.Count, fs.Count); i++)
+        {
+            Pair(os[i].XAxis, fs[i].XAxis);
+            Pair(os[i].YAxis, fs[i].YAxis);
+        }
+        var (ot, ft) = (own.Triggers, form.Triggers);
+        for (int i = 0; i < Math.Min(ot.Count, ft.Count); i++) Pair(ot[i].Axis, ft[i].Axis);
+        return moves.Count == 0 ? null : moves.ToArray();
+    }
+
+    // The keys the presented form reads elsewhere (FormAxisMoves), and the
+    // dictionary the descriptor path reads in their place.
+    private readonly (HMAxis From, HMAxis To)[]? _formAxisMoves;
+    private readonly Dictionary<HMAxis, float> _formAxes = new();
+
+    /// <summary>The state's axes with each key the presented form reads
+    /// elsewhere moved to the form's key. Caller holds _submitLock.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private Dictionary<HMAxis, float>? FormAxes(Dictionary<HMAxis, float>? axes)
+    {
+        if (axes == null) return null;
+        var moved = _formAxes;
+        moved.Clear();
+        foreach (var kv in axes) moved[kv.Key] = kv.Value;
+        foreach (var (from, _) in _formAxisMoves!) moved.Remove(from);
+        foreach (var (from, to) in _formAxisMoves!)
+            if (axes.TryGetValue(from, out float v)) moved[to] = v;
+        return moved;
+    }
+
+    /// <summary>Refuses a raw frame of a length only the Bluetooth form
+    /// takes. No data maps one form's raw bytes onto the other's: the
+    /// reports differ in IDs, offsets, lengths and checksums, so the frame
+    /// would go out as the wrong report.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private void ThrowIfOtherForm(int length)
+    {
+        throw new ArgumentException(
+            $"Profile '{Profile.Id}' runs on the USB/IP backend in the USB form of '{Profile.Inner.UsbForm}', " +
+            $"and a {length}-byte raw frame is a report of its Bluetooth form. Build raw frames in the USB form " +
+            $"(HMProfile.FormOn(HMBackend.Usbip) gives that profile), or submit with SubmitState, which both forms take.",
+            "report");
+    }
+
     /// <summary>The backend this controller runs on:
     /// <see cref="HMBackend.Umdf2"/> or <see cref="HMBackend.Usbip"/>, never
     /// <see cref="HMBackend.Auto"/>. The create resolved it from its own
@@ -441,7 +539,7 @@ public sealed partial class HMController : IDisposable
             // Pool=0x03, BlockLoad=0x02, Set Effect=0x01) return non-zero
             // overrides and the driver dispatches IOCTLs to the right RIDs.
             // See PidReportIdExtractor for the LC-usage match table.
-            var rids = PidReportIdExtractor.Extract(Profile.Inner.GetDescriptorBytes());
+            var rids = PidReportIdExtractor.Extract(Presented.Inner.GetDescriptorBytes());
             SharedMemoryIO.WritePidReportIds(_pidStateView,
                 rids.PoolReportId, rids.StateReportId, rids.BlockLoadReportId,
                 rids.CreateNewEffectReportId, rids.BlockFreeReportId, rids.DeviceControlReportId);
@@ -585,36 +683,51 @@ public sealed partial class HMController : IDisposable
 
     internal HMController(HMContext context, int slot, Internal.ControllerLease lease, HMProfile profile, string? instanceId,
                           Internal.Usbip.UsbipBackendHandle? usbipHandle = null,
-                          string? identityKey = null)
-        : this(context, lease.TransportIndex, profile, instanceId, usbipHandle, identityKey)
+                          string? identityKey = null, HMProfile? presented = null)
+        : this(context, lease.TransportIndex, profile, instanceId, usbipHandle, identityKey, presented ?? profile)
     {
         Slot = slot;
         Lease = lease;
     }
 
+    // The form the checks build a controller through by reflection: the
+    // profile runs as it is.
     private HMController(HMContext context, int index, HMProfile profile, string? instanceId,
                          Internal.Usbip.UsbipBackendHandle? usbipHandle,
                          string? identityKey)
+        : this(context, index, profile, instanceId, usbipHandle, identityKey, profile)
+    {
+    }
+
+    private HMController(HMContext context, int index, HMProfile profile, string? instanceId,
+                         Internal.Usbip.UsbipBackendHandle? usbipHandle,
+                         string? identityKey, HMProfile presented)
     {
         _context = context;
         Index = index;
         InstanceId = instanceId;
         IdentityKey = identityKey ?? Internal.DeviceIdentity.DefaultKey(index);
         Profile = profile;
+        Presented = presented;
+        if (!ReferenceEquals(presented, profile)) _otherFormRaw = OtherFormRawLengths(profile.Inner, presented.Inner);
         UsbipHandle = usbipHandle;
         if (usbipHandle?.Device.Audio != null)
-            UsbAudio = new HMUsbAudio(profile.Inner, usbipHandle.Device);
+            UsbAudio = new HMUsbAudio(presented.Inner, usbipHandle.Device);
 
         // v1.3.0 T10: cached per-profile builder; same descriptor + same
         // maps produce identical output, so each CreateController for a
         // given profile reuses the same configured builder instead of
         // re-parsing the descriptor on every ctor.
-        _reportBuilder = profile.Inner.GetOrBuildReportBuilder();
+        _reportBuilder = presented.Inner.GetOrBuildReportBuilder();
         _reportBuffer = new byte[_reportBuilder.InputReportByteSize];
         _keptAxes = _reportBuilder.KeepsLookups ? new float[HidReportBuilder.MaxKeptWrites] : null;
 
         // Snapshot the layout projections once (audit 1n): see the field
-        // declarations. Profile.Sticks/Triggers allocate per access.
+        // declarations. Profile.Sticks/Triggers allocate per access. The
+        // slots are the profile's the consumer fills the state for,
+        // Profile, whose layout can differ from the presented form's
+        // (switch-pro's right stick is Rx/Ry, switch-pro-usb's Z/Rz). The
+        // presented form encodes what the slots read.
         _cachedSticks = profile.Sticks;
         _cachedTriggers = profile.Triggers;
         _slotLx = _cachedSticks.Count > 0 ? _cachedSticks[0].XAxis : HMAxis.X;
@@ -631,6 +744,12 @@ public sealed partial class HMController : IDisposable
         // declared override wins, else the Z/Rz defaults PadForge writes.
         _canonicalLt = ResolveCanonicalAxis(profile.Inner.AxisMap, "lefttrigger", HMAxis.Z);
         _canonicalRt = ResolveCanonicalAxis(profile.Inner.AxisMap, "righttrigger", HMAxis.Rz);
+        // The descriptor path reads the state's axes by key itself
+        // (BuildReportInto), so a presented form that puts a stick or trigger
+        // on other axes than Profile gets the keys moved to its own, once per
+        // frame, into a dictionary of its own. Null for every other
+        // controller.
+        if (!ReferenceEquals(presented, profile)) _formAxisMoves = FormAxisMoves(profile, presented);
 
         // Only a controller with an XUSB companion (HMXInput.dll) has a
         // reader of the GIP-format slice, on IOCTL_XUSB_GET_STATE. An
@@ -639,7 +758,7 @@ public sealed partial class HMController : IDisposable
         // packing is skipped for them: the presentation plan decides it
         // with the companion it makes (PresentationPlan.PacksGip). A USB/IP
         // controller has no companion.
-        _packsGipBuffer = usbipHandle == null && PresentationPlan.Of(profile.Inner).PacksGip;
+        _packsGipBuffer = usbipHandle == null && PresentationPlan.Of(presented.Inner).PacksGip;
         // From here a sweep's release of this process's sections leaves the
         // ones this controller's threads write until its own Dispose
         // (SharedMemoryIO.Hold). The create mapped them before this, and
@@ -660,12 +779,12 @@ public sealed partial class HMController : IDisposable
         // Issue #67. A keyboard or mouse profile gets every frame delivered,
         // and so does an "other" profile whose descriptor is a mouse or a
         // keyboard, the shape a consumer built before the types existed.
-        if (usbipHandle == null && profile.Inner.HasDescriptor)
+        if (usbipHandle == null && presented.Inner.HasDescriptor)
         {
-            var kbm = profile.Inner.GetOrBuildKeyboardMousePacker();
+            var kbm = presented.Inner.GetOrBuildKeyboardMousePacker();
             if (kbm.HasMouse || kbm.HasKeyboard || kbm.HasConsumer) _kbm = kbm;
-            _deliverEvery = profile.Inner.DeliversEveryReport(kbm);
-            _kbmDataReportId = profile.Inner.KeyboardMouseDataReportId(kbm);
+            _deliverEvery = presented.Inner.DeliversEveryReport(kbm);
+            _kbmDataReportId = presented.Inner.KeyboardMouseDataReportId(kbm);
         }
 
         // v1.3.5: pre-allocate vendor-blob buffer + encoder state ONLY when
@@ -682,37 +801,37 @@ public sealed partial class HMController : IDisposable
         // vendor blob, so the legacy fallback path has no buttons or axes
         // to fill and every consumer would read a live device that never
         // moves.
-        bool alwaysArmed = profile.Inner.ExtendedReport?.AlwaysArmed == true;
-        _rawVerbatimReportId = profile.Inner.ExtendedReport?.ReportIdByte ?? 0;
+        bool alwaysArmed = presented.Inner.ExtendedReport?.AlwaysArmed == true;
+        _rawVerbatimReportId = presented.Inner.ExtendedReport?.ReportIdByte ?? 0;
         _rawEmitsVerbatim = alwaysArmed && _rawVerbatimReportId != 0;
-        bool armOnDeclared = profile.Inner.ExtendedReport?.ArmOn != null
-                          && profile.Inner.ExtendedReport.ArmOn.Count > 0;
-        if (profile.Inner.ExtendedReport != null && (armOnDeclared || alwaysArmed))
+        bool armOnDeclared = presented.Inner.ExtendedReport?.ArmOn != null
+                          && presented.Inner.ExtendedReport.ArmOn.Count > 0;
+        if (presented.Inner.ExtendedReport != null && (armOnDeclared || alwaysArmed))
         {
-            _extendedReportBuffer = new byte[profile.Inner.ExtendedReport.Size];
+            _extendedReportBuffer = new byte[presented.Inner.ExtendedReport.Size];
             _extEncoderState = new VendorBlobCodec.EncoderState();
             _extendedModeArmed = alwaysArmed;
         }
 
         // v2.0.0: the device model. The profile compiled at load and at
         // create's validation, so this reuses that work.
-        var model = profile.Inner.GetOrCompileModel();
+        var model = presented.Inner.GetOrCompileModel();
         // The UMDF2 form of a protocol runs here, behind the input section:
         // on the UMDF2 driver, and on a derived USB/IP device, which plays
         // the driver's half of the section. An authored USB/IP device runs
         // its protocol itself, and so does a USB/IP profile's controller a
         // check builds on process memory alone.
-        if (profile.Inner.Protocol != null
-            && (usbipHandle != null ? usbipHandle.Device.Derived : !profile.Inner.RequiresUsbipBackend))
+        if (presented.Inner.Protocol != null
+            && (usbipHandle != null ? usbipHandle.Device.Derived : !presented.Inner.RequiresUsbipBackend))
         {
-            var compiled = Internal.Usbip.CompiledProtocol.Compile(profile.Inner, null)!;
-            _host = new Internal.ProtocolHost(profile.Inner, compiled, index, new SectionChannel(this), _submitLock);
+            var compiled = Internal.Usbip.CompiledProtocol.Compile(presented.Inner, null)!;
+            _host = new Internal.ProtocolHost(presented.Inner, compiled, index, new SectionChannel(this), _submitLock);
             _hostCommand = new byte[Math.Max(SharedMemoryIO.DATA_CAPACITY + 1, Internal.Programs.ProgramForm.MaxReport)];
         }
         _protocolEngine = usbipHandle?.Device.Protocol ?? _host?.Engine;
-        if (profile.Inner.StateBlock != null)
+        if (presented.Inner.StateBlock != null)
         {
-            _stateBlockSpec = profile.Inner.StateBlockSpecForCodec();
+            _stateBlockSpec = presented.Inner.StateBlockSpecForCodec();
             _stateBlockBuffer = new byte[_stateBlockSpec.Size];
             _stateBlockEncoder = new VendorBlobCodec.EncoderState();
             // The block's fields as a state program, bound once: the kernel
@@ -730,8 +849,8 @@ public sealed partial class HMController : IDisposable
         }
         // A sensor timestamp that holds while a register's condition does, as
         // a Triton's holds while its IMU is off.
-        if (_extEncoderState != null && profile.Inner.ExtendedReport != null
-            && VendorBlobProgram.Get(profile.Inner.ExtendedReport).HoldWhile is { } hold)
+        if (_extEncoderState != null && presented.Inner.ExtendedReport != null
+            && VendorBlobProgram.Get(presented.Inner.ExtendedReport).HoldWhile is { } hold)
         {
             _extEncoderState.Hold = ConditionParser.Parse(hold, model.Registers, "$.extendedReport.fields[].holdWhile");
             _extEncoderState.HoldRegisters = _protocolEngine?.RegisterWords ?? model.Registers.Initial;
@@ -739,7 +858,7 @@ public sealed partial class HMController : IDisposable
 
         // v2.0.0: the profile's controller ports, whose report goes out
         // once now so the device starts from it, and its USB/IP protocol.
-        Ports = new HMPortSet(this, profile.Inner);
+        Ports = new HMPortSet(this, presented.Inner);
         lock (_submitLock) Ports.PublishInitialLocked();
         if (_protocolEngine is { } engine)
             DeviceProtocol = new HMDeviceProtocol(engine);
@@ -747,8 +866,8 @@ public sealed partial class HMController : IDisposable
         // Output passthrough is best-effort. If the section can't be created
         // (rare: only LocalService permission issues) we just don't raise
         // OutputReceived events.
-        _stream = StreamClock.Compile(profile.Inner, model.Registers);
-        if (_stream != null && profile.Inner.ExtendedReport is { SendsOnClock: true })
+        _stream = StreamClock.Compile(presented.Inner, model.Registers);
+        if (_stream != null && presented.Inner.ExtendedReport is { SendsOnClock: true })
         {
             // Issue #72: the device reports on its own clock. The first
             // report goes out now, so the device streams before any driver
@@ -996,7 +1115,7 @@ public sealed partial class HMController : IDisposable
         // at one field.
         bool useExtended = _extendedReportBuffer != null
                         && _extEncoderState != null
-                        && Profile.Inner.ExtendedReport != null
+                        && Presented.Inner.ExtendedReport != null
                         && _extendedModeArmed;
 
         // The six simple slots feed the ports, the state block, the codec
@@ -1077,7 +1196,7 @@ public sealed partial class HMController : IDisposable
         // regression. useExtended is read at the top of this method.
         if (useExtended)
         {
-            // Profile.Inner.ExtendedReport's field list drives byte placement.
+            // Presented.Inner.ExtendedReport's field list drives byte placement.
             // Sticks / triggers / buttons / hat encode through
             // VendorBlobCodec; CRC32 (if declared) is computed last. For
             // Sony BT, the buffer is full 78 bytes including byte[0] = RID
@@ -1085,7 +1204,7 @@ public sealed partial class HMController : IDisposable
             // The driver-side WriteToInputReport recognizes the extended
             // path via the SHARED_INPUT.ExtendedReportSize > 0 hint set
             // alongside the legacy bytes below.
-            VendorBlobCodec.EncodeInput(Profile.Inner.ExtendedReport!, in state,
+            VendorBlobCodec.EncodeInput(Presented.Inner.ExtendedReport!, in state,
                 (float)mlx, (float)mly, (float)mrx, (float)mry, (float)mlt, (float)mrt,
                 _extendedReportBuffer!, _extEncoderState!);
             report = _extendedReportBuffer!;
@@ -1098,7 +1217,7 @@ public sealed partial class HMController : IDisposable
             // _keptAxes holds the lookups the trigger passes reread, and is
             // null, an empty span, for a profile whose passes read none.
             _reportBuilder.BuildReportInto(_reportBuffer,
-                axes: state.Axes,
+                axes: _formAxisMoves == null ? state.Axes : FormAxes(state.Axes),
                 kept: _keptAxes,
                 hatValue: (int)state.Hat,
                 buttonMask: (uint)state.Buttons,
@@ -1114,7 +1233,7 @@ public sealed partial class HMController : IDisposable
             // already lists these as uint8 entries with `initial` values,
             // so the constants participate in CRC32 computation. Legacy
             // path has no CRC, so a post-encode overlay is fine.
-            var inputDefaults = Profile.Inner.InputDefaults;
+            var inputDefaults = Presented.Inner.InputDefaults;
             if (inputDefaults != null)
             {
                 int len = _reportBuffer.Length;
@@ -1162,7 +1281,7 @@ public sealed partial class HMController : IDisposable
         // profiles so WriteInputFrame skips the 14-byte Marshal.Copy.
         if (useExtended)
         {
-            int extLen = Profile.Inner.ExtendedReport!.Size;
+            int extLen = Presented.Inner.ExtendedReport!.Size;
             SharedMemoryIO.WriteInputFrame(
                 _inputView, _inputEvent, ref _inputSeqNo,
                 Array.Empty<byte>(), 0,
@@ -1371,7 +1490,18 @@ public sealed partial class HMController : IDisposable
     /// while the virtual one is gone opens on WinUSB until it is unplugged,
     /// and comes back on WinUSB if it is plugged in again before any of
     /// those has marked the devnode. Requires elevation, as creating the
-    /// controller does.</summary>
+    /// controller does.
+    ///
+    /// <para>On a machine where Windows installs no package signed as
+    /// HIDMaestro's driver is (Windows on ARM64), the
+    /// device asks for Windows' own WinUSB driver instead: from the bind on
+    /// it serves the Microsoft OS 1.0 descriptors that name WinUSB and the
+    /// profile's <c>winUsb.interfaceGuid</c>, and it is plugged in again so
+    /// Windows reads them. No package is installed there. A real device
+    /// serves none of these descriptors, so on such a machine the virtual
+    /// device differs from it from the bind on. The usbflags key in which
+    /// Windows keeps the device's answer is put back as it was when the
+    /// last controller of the identity goes.</para></summary>
     /// <returns><see cref="HMWinUsbBinding.Bound"/>, or
     /// <see cref="HMWinUsbBinding.AlreadyBound"/> when the device already
     /// carries a driver libusb opens, or <see cref="HMWinUsbBinding.OtherDriver"/>
@@ -1379,12 +1509,15 @@ public sealed partial class HMController : IDisposable
     /// alone.</returns>
     /// <exception cref="InvalidOperationException">The profile declares no
     /// winUsb, or no driver Windows has ranks above the package, which would
-    /// let Windows choose the package for real devices.</exception>
+    /// let Windows choose the package for real devices, or the re-plug that
+    /// makes Windows read the Microsoft OS descriptors failed, after which
+    /// the device is plugged in again as it was before the call.</exception>
     /// <exception cref="HMDriverSigningException">Windows on this machine
-    /// does not install HIDMaestro's driver package, and the binding's
-    /// package is signed as HIDMaestro's driver is. Thrown whatever backend
-    /// the controller runs on, <see cref="HMBackend.Auto"/>'s included,
-    /// when the driver store holds no HIDMaestro package.</exception>
+    /// does not install HIDMaestro's driver package, its driver store holds
+    /// a HIDMaestro WinUSB package from before, and Windows refuses the
+    /// binding's package, which is signed as HIDMaestro's driver is. Where
+    /// the store holds none, the binding goes by the Microsoft OS
+    /// descriptors and adds no package.</exception>
     public HMWinUsbBinding BindWinUsb()
     {
         ThrowIfDisposed();
@@ -1434,6 +1567,7 @@ public sealed partial class HMController : IDisposable
     public void SubmitRawReport(ReadOnlySpan<byte> report)
     {
         ThrowIfDisposed();
+        if (_otherFormRaw is { } other && (uint)report.Length < (uint)other.Length && other[report.Length]) ThrowIfOtherForm(report.Length);
         if (_stateBlockSpec != null && SubmitRawStateBlock(report)) return;
         if ((uint)(report.Length - 1) >= SharedMemoryIO.DATA_CAPACITY)
             ThrowReportLength(report.Length, SharedMemoryIO.DATA_CAPACITY, "shared section payload");
@@ -1482,7 +1616,7 @@ public sealed partial class HMController : IDisposable
         // A frame with no fixed bytes to overlay and no report id to prepend
         // goes into the section from the caller's own span, in the one copy
         // the section takes.
-        var rawDefaults = Profile.Inner.InputDefaults;
+        var rawDefaults = Presented.Inner.InputDefaults;
         if (rawDefaults == null && !_rawEmitsVerbatim)
         {
             SharedMemoryIO.WriteInputFrame(
@@ -1571,6 +1705,7 @@ public sealed partial class HMController : IDisposable
     public void SubmitRawExtendedReport(ReadOnlySpan<byte> report)
     {
         ThrowIfDisposed();
+        if (_otherFormRaw is { } other && (uint)report.Length < (uint)other.Length && other[report.Length]) ThrowIfOtherForm(report.Length);
         if (_stateBlockSpec != null && SubmitRawStateBlock(report)) return;
         // The extended lane carries the whole frame in an 80-byte field. The
         // writer used to cut a longer one there without a word.
@@ -1706,7 +1841,7 @@ public sealed partial class HMController : IDisposable
     }
 
     private KeyboardMousePacker KbmPacker() =>
-        _kbm ??= Profile.Inner.GetOrBuildKeyboardMousePacker();
+        _kbm ??= Presented.Inner.GetOrBuildKeyboardMousePacker();
 
     /// <summary>A whole frame, report ID included, through the extended
     /// lane, which sends it at its own length. Caller holds _submitLock.</summary>
@@ -1855,7 +1990,7 @@ public sealed partial class HMController : IDisposable
     /// path so both conventions land on the same wire bytes.</summary>
     private void EmitExtendedFrame(byte[] buffer, int length)
     {
-        int declaredSize = Profile.Inner.ExtendedReport!.Size;
+        int declaredSize = Presented.Inner.ExtendedReport!.Size;
         byte rid = _rawVerbatimReportId;
         int emitLen = length;
 
@@ -1897,7 +2032,7 @@ public sealed partial class HMController : IDisposable
         ThrowIfDisposed();
         if (fields == null) throw new ArgumentNullException(nameof(fields));
 
-        var spec = Profile.Inner.ExtendedOutputReport;
+        var spec = Presented.Inner.ExtendedOutputReport;
         if (spec == null)
             throw new InvalidOperationException(
                 $"Profile '{Profile.Id}' has no extendedOutputReport spec: nothing to encode against.");
@@ -2098,7 +2233,7 @@ public sealed partial class HMController : IDisposable
                     // dictionary and surface as OutputDecoded. Consumers
                     // get named values (rumble amplitudes, lightbar RGB,
                     // adaptive-trigger blocks) instead of raw bytes.
-                    var extOut = Profile.Inner.ExtendedOutputReport;
+                    var extOut = Presented.Inner.ExtendedOutputReport;
                     if (extOut != null && reportId == extOut.ReportIdByte
                         && OutputDecoded != null)
                     {
@@ -2158,7 +2293,7 @@ public sealed partial class HMController : IDisposable
                     // outputWrite trigger types stay supported for
                     // future profiles that arm on writes (e.g. Switch
                     // Pro init handshake).
-                    var extIn = Profile.Inner.ExtendedReport;
+                    var extIn = Presented.Inner.ExtendedReport;
                     if (extIn?.ArmOn != null && !_extendedModeArmed)
                     {
                         bool isFeature     = source == (byte)HMOutputSource.HidFeature;

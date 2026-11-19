@@ -150,6 +150,9 @@ internal static partial class Program
         catch (Exception e) { return $"{e.GetType().Name}: {e.Message}"; }
         if (!presentation.Derived) return "not derived";
         if (presentation.HasIsochronous) return "has an isochronous endpoint";
+        // A Bluetooth identity with a USB form derives the form's device
+        // (usbForm): every field below is the form's.
+        p = p.FormOn(HMBackend.Usbip);
         var d = set.DeviceDescriptor;
         var c = set.ConfigurationDescriptor;
         if (set.VendorId != p.VendorId || set.ProductId != p.ProductId) return "VID or PID";

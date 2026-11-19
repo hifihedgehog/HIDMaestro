@@ -499,6 +499,15 @@ internal static class Program
     {
         Console.WriteLine("-- dualsense-bt: the feature read that switches it to report 0x31");
         var profile = ctx.GetProfile("dualsense-bt")!;
+        // On the USB/IP backend dualsense-bt presents dualsense's USB form
+        // (usbForm), whose reports never switch. The switch is the SDK's own
+        // mechanism, so there the check runs on a copy that keeps the
+        // Bluetooth reports: a USB connection names no USB form.
+        if (!ReferenceEquals(profile.FormOn(ctx.ResolveBackend(profile)), profile))
+        {
+            Console.WriteLine($"  dualsense-bt presents {profile.FormOn(HMBackend.Usbip).Id} here, so the check runs on a copy with the Bluetooth reports and a USB connection");
+            profile = new HMProfileBuilder().FromProfile(profile).Id("dualsense-bt-reports").Connection("usb").BluetoothTransport(null).Build();
+        }
         var before = HidPaths(profile.VendorId, profile.ProductId).ToHashSet(StringComparer.OrdinalIgnoreCase);
         using var c = ctx.CreateController(profile);
         var armedField = typeof(HMController).GetField("_extendedModeArmed", Any)!;

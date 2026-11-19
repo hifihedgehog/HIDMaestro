@@ -41,6 +41,21 @@ internal static class UsbipBackend
         var device = new UsbipEmulatedDevice(profile, index, identity);
         if (identity != null)
             device.VhciPortChanged = port => MachineClaims.SetControllerValue(identity.Token, "VhciPort", port);
+        // Before the attach, the USB instance the device takes goes into the
+        // owner record, marked when Windows has no record of it yet, so the
+        // records the attach causes are named even if the program dies right
+        // after it (UsbRecords). Windows can name the device by its port
+        // instead: always for a device with no serial, and for one whose
+        // identity a usbflags IgnoreHWSerNum value names. The instance names
+        // already there are kept, and the one the device takes is told
+        // apart from them once it is found (UsbipBackendHandle.ResolveRecord).
+        var known = UsbRecords.Known(device.Descriptors.VendorId, device.Descriptors.ProductId);
+        if (device.Descriptors.UsbInstanceId is { } usbId)
+            UsbRecords.Note(identity?.Token, usbId, created: !UsbRecords.Exists(usbId));
+        // The usbflags claim of the device's identity before Windows asks
+        // it for string 0xEE (RegistryLedger.ClaimUsbFlags).
+        RegistryLedger.ClaimUsbFlags(device.Descriptors.VendorId, device.Descriptors.ProductId,
+                                     device.Descriptors.BcdDevice, index);
         server.Register(device);
         try
         {
@@ -53,7 +68,7 @@ internal static class UsbipBackend
                 ThrowIfPortsFull();
                 throw;
             }
-            return new UsbipBackendHandle(server, device);
+            return new UsbipBackendHandle(server, device, identity?.Token, known);
         }
         catch
         {
@@ -641,11 +656,114 @@ internal sealed class UsbipBackendHandle : IDisposable
     public int ServerPort => _server.Port;
     private int _disposed;
 
-    internal UsbipBackendHandle(UsbipServer server, UsbipEmulatedDevice device)
+    internal UsbipBackendHandle(UsbipServer server, UsbipEmulatedDevice device, string? token = null,
+                                HashSet<string>? known = null)
     {
         _server = server;
         Device = device;
+        _token = token;
+        _known = known;
+        _instance = device.Descriptors.UsbInstanceId;
     }
+
+    private readonly string? _token;
+    // The instance names Windows kept for the device's VID and PID before
+    // its attach. Null for a handle made without them.
+    private readonly HashSet<string>? _known;
+    // The device's USB instance now, once known. Guarded by the handle.
+    private string? _instance;
+
+    /// <summary>Name the instance of a device Windows names by its port once
+    /// it is found (<paramref name="instanceId"/>): written to the owner
+    /// record, and to the ledger of records HIDMaestro caused when its name
+    /// was not among those listed before the first attach. For a device
+    /// Windows named by its serial, as the create noted before the attach,
+    /// this does nothing.</summary>
+    public void ResolveRecord(string instanceId)
+    {
+        lock (this)
+        {
+            if (_known == null || string.Equals(_instance, instanceId, StringComparison.OrdinalIgnoreCase)) return;
+            _instance = instanceId;
+            UsbRecords.Note(_token, instanceId, UsbRecords.CreatedBy(instanceId, _known));
+        }
+    }
+
+    /// <summary>Unplug the device and plug it in again on this server's
+    /// location, so Windows enumerates it anew: the hub reads its
+    /// descriptors again, the Microsoft OS string among them. Waits up to
+    /// <paramref name="leaveWaitMs"/> (already scaled) for the devnode
+    /// <paramref name="instanceId"/> to leave the device tree before the
+    /// attach, and runs <paramref name="whileAway"/> between the two.
+    /// Returns the vhci port of the new import.</summary>
+    public int Replug(string instanceId, int leaveWaitMs, Action? whileAway = null, Action? undo = null)
+    {
+        if (Volatile.Read(ref _disposed) != 0) throw new ObjectDisposedException(nameof(UsbipBackendHandle));
+        using (VhciClient.HoldOpen())
+        {
+            VhciClient.DetachLocation("127.0.0.1", _server.Port, Device.BusId);
+            VhciClient.StopAttachAttempts("127.0.0.1", _server.Port, Device.BusId);
+        }
+        try
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (UsbRecords.Present(instanceId) && sw.ElapsedMilliseconds < leaveWaitMs) Thread.Sleep(20);
+            if (UsbRecords.Present(instanceId))
+                throw new InvalidOperationException($"{instanceId} did not leave within {leaveWaitMs / 1000} s of its unplug.");
+            whileAway?.Invoke();
+            // The device's reader sees the old connection end, and the device
+            // takes the next import of its bus id (UsbipEmulatedDevice.TryClaim).
+            return AttachWithin(leaveWaitMs, AttachForProbe);
+        }
+        catch (Exception failed)
+        {
+            // Never a controller with no device: what the re-plug changed is
+            // put back (undo), and the device is plugged in again as it was.
+            try { undo?.Invoke(); }
+            catch (Exception ex) { DeviceOrchestrator.LogDiag($"    replug: the undo failed: {ex.GetType().Name}: {ex.Message}"); }
+            try
+            {
+                if (VhciClient.FindLocation("127.0.0.1", _server.Port, Device.BusId) <= 0)
+                    AttachWithin(2 * leaveWaitMs, attach: null);
+            }
+            catch (Exception again)
+            {
+                throw new InvalidOperationException(
+                    $"The re-plug of {instanceId} failed ({failed.Message}), and plugging the device in again failed too ({again.Message}).", failed);
+            }
+            throw new InvalidOperationException(
+                $"The re-plug of {instanceId} failed, and the device is plugged in again as it was: {failed.Message}", failed);
+        }
+    }
+
+    /// <summary>Attach the device's location, retrying while the device
+    /// still holds its old connection, for up to <paramref name="waitMs"/>.
+    /// <paramref name="attach"/> stands in for the attach when a probe sets
+    /// it.</summary>
+    private int AttachWithin(int waitMs, Func<int>? attach)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (true)
+        {
+            try
+            {
+                int port = attach?.Invoke() ?? VhciClient.Attach("127.0.0.1", _server.Port, Device.BusId);
+                Device.SetVhciPortIfAttached(port);
+                return port;
+            }
+            catch (System.ComponentModel.Win32Exception) when (sw.ElapsedMilliseconds < waitMs)
+            {
+                // The device still holds the old connection for a moment
+                // after the unplug, and refuses an import while it does.
+                Thread.Sleep(50);
+            }
+        }
+    }
+
+    /// <summary>Set by gc_winusb_check to stand in for the re-plug's attach
+    /// and fail it, so its run reaches the path that plugs the device in
+    /// again. Null outside the probe.</summary>
+    internal static Func<int>? AttachForProbe;
 
     public void Dispose()
     {

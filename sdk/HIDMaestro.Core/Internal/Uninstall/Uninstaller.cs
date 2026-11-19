@@ -86,6 +86,7 @@ internal static partial class Uninstaller
         @"SOFTWARE\HIDMaestro",
         MachineClaims.RecordsRoot,
         RegistryLedger.Root,
+        Usbip.UsbRecords.LedgerRoot,
         PackagesLeftKey,
         @"SOFTWARE\HIDMaestroOemOverrides",
         DeviceOrchestrator.GameInputStartRoot,
@@ -118,7 +119,8 @@ internal static partial class Uninstaller
                 $"could not be read: {ex.GetType().Name}: {ex.Message}"));
         }
         entries.AddRange(Scan());
-        entries.AddRange(Safely("usbip-win2", () => UsbipRemoval.Remove(preview: true, includeUnproven: options.IncludeUsbip)));
+        var used = UsedSinceBootReading();
+        entries.AddRange(Safely("usbip-win2", () => UsbipRemoval.Remove(preview: true, includeUnproven: options.IncludeUsbip, used)));
         KeepWhatWinUsbRecordsKeep(entries);
         // A preview that could not read part of the machine is not one a
         // removal can be judged by.
@@ -186,6 +188,11 @@ internal static partial class Uninstaller
         var clock = Stopwatch.StartNew();
         var before = Scan();
         var told = new Told();
+        // Whether usbip-win2's host controller has carried a device since
+        // Windows started, read once, before anything is removed: the
+        // devices step removes the records it is read from, and the
+        // usbip-win2 step decides the host controller by this reading.
+        var used = UsedSinceBootReading();
 
         // Each part of the device step is a step of its own, so one that
         // throws, such as a phantom pass that waited out the PnP lock's
@@ -212,7 +219,7 @@ internal static partial class Uninstaller
         // the PnP nor the transport lock, as UsbipRemoval requires.
         Step(told, "usbip-win2", () =>
         {
-            foreach (var e in UsbipRemoval.Remove(preview: false, includeUnproven: options.IncludeUsbip)) told.Add(e);
+            foreach (var e in UsbipRemoval.Remove(preview: false, includeUnproven: options.IncludeUsbip, used)) told.Add(e);
         });
 
         // The driver, its staging and the certificate it is signed with go
@@ -527,7 +534,24 @@ internal static partial class Uninstaller
             if (!IsUsbipHostController(id) && seen.Add(id)) list.Add(Would(KindDevnode, id));
         foreach (string id in DeviceOrchestrator.ListOwnedHidChildren())
             if (seen.Add(id)) list.Add(Would(KindDevnode, id));
+        // The USB records USB/IP creates caused, which the ledger of them
+        // names (Usbip.UsbRecords).
+        foreach (string id in Usbip.UsbRecords.Caused())
+            if (Usbip.UsbRecords.Exists(id) && seen.Add(id))
+                list.Add(Usbip.UsbRecords.Present(id) ? Keep(KindDevnode, id, UsbRecordPresentReason) : Would(KindDevnode, id));
     }
+
+    /// <summary>The host controller's since-boot state, read once. A
+    /// reading that throws counts as used, the side that keeps the host
+    /// controller.</summary>
+    private static (bool Used, string Why) UsedSinceBootReading()
+    {
+        try { return UsbipDriverInstaller.UsedSinceBoot(out string why) ? (true, why) : (false, ""); }
+        catch (Exception ex) { return (true, $"its records could not be read: {ex.GetType().Name}"); }
+    }
+
+    private const string UsbRecordPresentReason =
+        "the USB/IP device it records is plugged in. Its program's removal unplugs it, and a removal after that takes the record";
 
     private static bool IsUsbipHostController(string instanceId)
     {
@@ -564,6 +588,10 @@ internal static partial class Uninstaller
             if (joy != null)
                 foreach (string name in joy.GetSubKeyNames())
                     list.Add(Would(KindSharedValue, $@"HKLM\{RegistryLedger.JoystickOemRoot}\{name}\OEMName"));
+        using (var flags = Registry.LocalMachine.OpenSubKey($@"{RegistryLedger.Root}\UsbFlags"))
+            if (flags != null)
+                foreach (string name in flags.GetSubKeyNames())
+                    list.Add(Would(KindSharedKey, $@"HKLM\{RegistryLedger.UsbFlagsRoot}\{name}"));
         using (var winUsb = Registry.LocalMachine.OpenSubKey($@"{RegistryLedger.Root}\WinUsb"))
             if (winUsb != null)
                 foreach (string name in winUsb.GetSubKeyNames())
@@ -921,8 +949,8 @@ internal static partial class Uninstaller
     /// The run keeps a WinUSB package while any USB device record names it,
     /// present or not (WinUsbBinding.RemovePackage, through
     /// WinUsbBinding.DevnodesByPackage), and every record left after its
-    /// device steps counts: a composite persona's record whose serial is a
-    /// real adapter's stays, since every real adapter of the model shares it.
+    /// device steps counts: a persona's record no ledger entry names as
+    /// made by HIDMaestro's create stays (UsbipRemoval.PersonaVerdict).
     /// So the preview reads the same records, less the ones its own device
     /// entries would remove, and keeps that package, the certificate it is
     /// signed with and HIDMaestroPackagesLeft, which names it, as the run
@@ -1362,14 +1390,26 @@ internal static partial class Uninstaller
         // The ledger goes once the Everything removal has put back every
         // shared key it records (RegistryLedger.ReleaseAll deletes it then).
         // An entry left is the only record of a key's earlier value, so a
-        // ledger still holding a GameInput or joy.cpl entry stays.
+        // ledger still holding a GameInput, joy.cpl or usbflags entry stays.
         int EntriesOf(string kind)
         {
             using var k = Registry.LocalMachine.OpenSubKey($@"{RegistryLedger.Root}\{kind}");
             return k?.SubKeyCount ?? 0;
         }
         bool winUsbLeft = EntriesOf("WinUsb") > 0;
-        int sharedLeft = EntriesOf("GameInput") + EntriesOf("JoystickOem");
+
+        // The ledger of USB records goes once the Everything removal has
+        // removed every record it names, which drops each entry. An entry
+        // left names a record whose device is present, and is its only
+        // proof of being HIDMaestro's.
+        int usbLeft = Usbip.UsbRecords.Caused().Count;
+        if (usbLeft > 0)
+            told.Add(new UninstallEntry(KindRegistryKey, $@"HKLM\{Usbip.UsbRecords.LedgerRoot}", UninstallOutcome.Kept,
+                $"it names {usbLeft} USB device record(s) HIDMaestro caused that stay, their devices plugged in, and is their only proof of being HIDMaestro's. A removal after they are unplugged takes them and it"));
+        else
+            try { Registry.LocalMachine.DeleteSubKeyTree(Usbip.UsbRecords.LedgerRoot, throwOnMissingSubKey: false); }
+            catch (Exception ex) { Fail(Usbip.UsbRecords.LedgerRoot, ex.Message); }
+        int sharedLeft = EntriesOf("GameInput") + EntriesOf("JoystickOem") + EntriesOf("UsbFlags");
         if (sharedLeft > 0)
             Fail(RegistryLedger.Root, $"{sharedLeft} shared key(s) it records were not put back, and it is their only record of what they held before");
         else if (!winUsbLeft)

@@ -76,9 +76,12 @@ internal sealed class UsbDescriptorSet
     // Issue #66. Microsoft OS 1.0 descriptors, null unless the profile
     // declares them. A device without them stalls string 0xEE and every
     // vendor request, as the Sony and Valve pads do.
-    private readonly byte[]? _msOsString;
-    private readonly byte[]? _msOsCompatId;
-    private readonly byte[]? _msOsProperties;
+    // A device bound to WinUSB by these descriptors gets them after its
+    // construction (ServeWinUsb), the string last, since Windows asks for it
+    // before the two features.
+    private volatile byte[]? _msOsString;
+    private volatile byte[]? _msOsCompatId;
+    private volatile byte[]? _msOsProperties;
 
     /// <summary>Endpoint table parsed from the configuration blob. Keyed
     /// by bEndpointAddress (direction bit included).</summary>
@@ -179,6 +182,9 @@ internal sealed class UsbDescriptorSet
     /// is what every caller before the identity existed got.</summary>
     public UsbDescriptorSet(ControllerProfile profile, int index = 0, DeviceIdentity? identity = null)
     {
+        // A Bluetooth identity with a USB form is that form on the USB bus
+        // (ControllerProfile.UsbFormOf), descriptor and strings alike.
+        profile = profile.UsbFormOf(HMBackend.Usbip);
         identity ??= DeviceIdentity.ForIndex(index);
         SerialVariant = identity.SerialVariant;
         // The authored blobs, or the ones the presentation derives from the
@@ -588,6 +594,85 @@ internal sealed class UsbDescriptorSet
             throw new InvalidOperationException(
                 $"microsoftOs.{field} declares length {declared} and index {featureIndex}, " +
                 $"but is {blob.Length} bytes and must carry index {index}.");
+    }
+
+    /// <summary>True when the device serves the Microsoft OS descriptors
+    /// <see cref="ServeWinUsb"/> builds.</summary>
+    public bool ServesWinUsb { get; private set; }
+
+    /// <summary>The vendor code the Microsoft OS string names, which Windows
+    /// then puts in its feature requests. The device answers a feature by
+    /// its wIndex alone (<see cref="GetMicrosoftOsFeature"/>), so any code
+    /// would do.</summary>
+    internal const byte WinUsbVendorCode = 0x01;
+
+    /// <summary>Serve, from the next enumeration on, the Microsoft OS 1.0
+    /// descriptors that make Windows bind its own WinUSB driver to the
+    /// device with no INF: string 0xEE, the extended compatible ID
+    /// <c>WINUSB</c> for interface 0 and the extended property
+    /// <c>DeviceInterfaceGUID</c>, the interface WinUSB registers, which
+    /// libusb opens (Microsoft OS 1.0 Descriptors Specification; Microsoft
+    /// Learn, "WinUSB Device"). The layouts are those the Switch 2 Pro
+    /// persona's vendor interface serves (switch2-pro-composite.json), with
+    /// interface 0 and this GUID. For a device with one interface: Windows
+    /// reads the compatible ID of a device that is not composite for the
+    /// device itself.</summary>
+    internal void ServeWinUsb(Guid interfaceGuid)
+    {
+        byte[] str = new byte[18];
+        str[0] = 18; str[1] = 0x03;
+        Encoding.Unicode.GetBytes("MSFT100").CopyTo(str, 2);
+        str[16] = WinUsbVendorCode;
+
+        byte[] compat = new byte[40];
+        compat[0] = 40;                     // dwLength
+        compat[5] = 0x01;                   // bcdVersion 1.00
+        compat[6] = 0x04;                   // wIndex 4
+        compat[8] = 1;                      // bCount
+        compat[16] = 0;                     // bFirstInterfaceNumber
+        compat[17] = 0x01;                  // reserved, 1 as the specification writes it
+        Encoding.ASCII.GetBytes("WINUSB").CopyTo(compat, 18);
+
+        byte[] name = Encoding.Unicode.GetBytes("DeviceInterfaceGUID\0");
+        byte[] data = Encoding.Unicode.GetBytes(interfaceGuid.ToString("B").ToUpperInvariant() + "\0");
+        int section = 4 + 4 + 2 + name.Length + 4 + data.Length;
+        byte[] props = new byte[10 + section];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(props, (uint)props.Length);
+        props[5] = 0x01;                    // bcdVersion 1.00
+        props[6] = 0x05;                    // wIndex 5
+        props[8] = 1;                       // wCount
+        int at = 10;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(props.AsSpan(at), (uint)section); at += 4;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(props.AsSpan(at), 1); at += 4;   // REG_SZ
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(props.AsSpan(at), (ushort)name.Length); at += 2;
+        name.CopyTo(props, at); at += name.Length;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(props.AsSpan(at), (uint)data.Length); at += 4;
+        data.CopyTo(props, at);
+
+        CheckMicrosoftOsFeature(compat, 4, 16, "extendedCompatId");
+        CheckMicrosoftOsFeature(props, 5, 10, "extendedProperties");
+        _priorOs ??= (_msOsString, _msOsCompatId, _msOsProperties);
+        _msOsCompatId = compat;
+        _msOsProperties = props;
+        _msOsString = str;
+        ServesWinUsb = true;
+    }
+
+    // What the device served before ServeWinUsb, for StopServingWinUsb.
+    private (byte[]? String, byte[]? CompatId, byte[]? Properties)? _priorOs;
+
+    /// <summary>Serve again what the device served before
+    /// <see cref="ServeWinUsb"/>, the string first, so Windows asks for no
+    /// feature the device no longer names. A bind whose re-plug failed puts
+    /// the device back as it was with this.</summary>
+    internal void StopServingWinUsb()
+    {
+        if (_priorOs is not { } prior) return;
+        _msOsString = prior.String;
+        _msOsCompatId = prior.CompatId;
+        _msOsProperties = prior.Properties;
+        ServesWinUsb = false;
+        _priorOs = null;
     }
 
     /// <summary>The Microsoft OS 1.0 feature descriptor a vendor request

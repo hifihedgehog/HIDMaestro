@@ -858,11 +858,18 @@ public sealed class HMContext : IDisposable
         // not install the driver and a payload this build lacks all refuse
         // here, before the lease.
         var resolved = ResolveFor(profile, backend);
+        // The profile the device runs: the one asked for, or on the USB/IP
+        // backend the USB form a Bluetooth identity names (usbForm).
+        var presented = profile;
         if (resolved == HMBackend.Usbip)
         {
             // The USB device the profile presents, so a pin that does not fit
             // is refused with nothing to undo.
-            try { _ = Internal.Usbip.UsbPresentation.Resolve(profile.Inner); }
+            try
+            {
+                if (profile.Inner.UsbForm != null) presented = new HMProfile(profile.Inner.UsbFormOf(HMBackend.Usbip));
+                _ = Internal.Usbip.UsbPresentation.Resolve(presented.Inner);
+            }
             catch (Exception e) when (e is not HMBackendNotSupportedException && Internal.ProfileDefects.IsDefect(e))
             {
                 throw Internal.ProfileDefects.ToProfileException(profile.Inner, e);
@@ -889,7 +896,7 @@ public sealed class HMContext : IDisposable
         // under LockRecursionPolicy.SupportsRecursion, a writer waiting or
         // not (ReaderWriterLockSlim.TryEnterReadLockCore).
         Internal.OwnerSweep.CreateGate.EnterReadLock();
-        try { return CreateUnderLease(slot, profile, identityKey, resolved); }
+        try { return CreateUnderLease(slot, profile, presented, identityKey, resolved); }
         finally { Internal.OwnerSweep.CreateGate.ExitReadLock(); }
     }
 
@@ -903,7 +910,7 @@ public sealed class HMContext : IDisposable
     internal static Action<int, string?> TeardownDevices = Internal.DeviceOrchestrator.TeardownController;
     internal static Action<HMController>? AfterControllerBuilt;
 
-    private HMController CreateUnderLease(int slot, HMProfile profile, string? identityKey, HMBackend backend)
+    private HMController CreateUnderLease(int slot, HMProfile profile, HMProfile presented, string? identityKey, HMBackend backend)
     {
         bool usbip = backend == HMBackend.Usbip;
         // A USB/IP create opens the host controller for its lease's census
@@ -930,7 +937,7 @@ public sealed class HMContext : IDisposable
             // and deploys itself on first use, so this path needs no
             // precondition from the consumer.
             if (usbip)
-                return CreateUsbipController(slot, lease, profile);
+                return CreateUsbipController(slot, lease, profile, presented);
 
             string? instanceId = null;
             long refused = Internal.DeviceManager.LockTakesRefusedHere;
@@ -1011,33 +1018,27 @@ public sealed class HMContext : IDisposable
     // sections and events, attaches through usbip-win2's vhci, and the
     // HMController then binds to the same sections it always does. No INF,
     // no HIDMaestro driver.
-    private HMController CreateUsbipController(int slot, Internal.ControllerLease lease, HMProfile profile)
+    private HMController CreateUsbipController(int slot, Internal.ControllerLease lease, HMProfile profile, HMProfile presented)
     {
         int index = lease.TransportIndex;
         Internal.Usbip.UsbipBackendHandle? handle = null;
         try
         {
-            Internal.DeviceOrchestrator.PrepareUsbipController(index, profile.Inner);
+            Internal.DeviceOrchestrator.PrepareUsbipController(index, presented.Inner);
             // The device emulator maps the index's sections before its
             // attach, so a failed attach leaves them for the catch below.
-            handle = Internal.Usbip.UsbipBackend.CreateDevice(profile.Inner, index, lease.Identity);
-            // The USB instance the device's records sit under, in the owner
-            // record, for record cleanup.
-            if (handle.Device.Descriptors.UsbInstanceId is { } usbId)
-            {
-                Internal.MachineClaims.SetControllerValue(lease.Identity.Token, "UsbInstanceId", usbId);
-                // A derived device's HID interface is started before the
-                // create returns, as the UMDF2 create's is. The wait finds
-                // the device on its port, and the record takes the name
-                // Windows gave it when that is not the serial's.
-                if (handle.Device.Derived)
-                {
-                    string named = Internal.DeviceOrchestrator.AwaitUsbipStart(usbId, handle.Device.VhciPort, index);
-                    if (!string.Equals(named, usbId, StringComparison.OrdinalIgnoreCase))
-                        Internal.MachineClaims.SetControllerValue(lease.Identity.Token, "UsbInstanceId", named);
-                }
-            }
-            var controller = new HMController(this, slot, lease, profile, instanceId: null, handle, lease.Identity.Key);
+            handle = Internal.Usbip.UsbipBackend.CreateDevice(presented.Inner, index, lease.Identity);
+            // The USB instance the device's records sit under is in the owner
+            // record, and in the ledger of records HIDMaestro caused when it
+            // had none, from before the attach (UsbipBackend.CreateDevice). A
+            // derived device's HID interface is started before the create
+            // returns, as the UMDF2 create's is. The wait finds the device on
+            // its port, and when Windows named it by its port, not its
+            // serial, the owner record and the ledger take that name
+            // (UsbipBackendHandle.ResolveRecord).
+            if (handle.Device.Descriptors.UsbInstanceId is { } usbId && handle.Device.Derived)
+                handle.ResolveRecord(Internal.DeviceOrchestrator.AwaitUsbipStart(usbId, handle.Device.VhciPort, index));
+            var controller = new HMController(this, slot, lease, profile, instanceId: null, handle, lease.Identity.Key, presented);
             try
             {
                 AfterControllerBuilt?.Invoke(controller);
@@ -1227,10 +1228,15 @@ public sealed class HMContext : IDisposable
                 // No WinUSB bind after a re-import lands once the ledger
                 // below has released the controller's holds.
                 try { Internal.WinUsbBinding.StopKeeping(controller); } catch { }
+                // A device Windows names by its port is found on that port
+                // while it is still there, so the ledger names its record.
+                try { Internal.WinUsbBinding.ResolveRecord(controller.UsbipHandle); } catch { }
                 try { controller.UsbipHandle.Dispose(); } catch { }
                 try { Internal.SharedMemoryIO.DestroyController(controller.Index); } catch { }
-                // A WinUSB binding (HMController.BindWinUsb) goes back once
-                // the device is gone.
+                // A WinUSB binding (HMController.BindWinUsb) and the usbflags
+                // claim go back once the device is gone. The device's records
+                // stay, so its next life has the same USB instance and HID
+                // paths. The full removal and the uninstall remove them.
                 try { Internal.RegistryLedger.Release(controller.Index); } catch { }
                 return;
             }

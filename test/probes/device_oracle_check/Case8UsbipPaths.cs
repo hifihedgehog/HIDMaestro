@@ -724,7 +724,7 @@ internal sealed class Case8UsbipPaths : IOracleCase
             _lastSeq = t.GetField("_lastSharedSeqNo", Instance)!;
 
             var handle = (UsbipBackendHandle)Activator.CreateInstance(typeof(UsbipBackendHandle),
-                BindingFlags.Instance | BindingFlags.NonPublic, null, new object?[] { null, _dev }, null)!;
+                BindingFlags.Instance | BindingFlags.NonPublic, null, new object?[] { null, _dev, null, null }, null)!;
             _c = Case1Submit.Create(p, index, _view, _ring, handle);
             _c.OutputReceived += (_, pkt) =>
             {

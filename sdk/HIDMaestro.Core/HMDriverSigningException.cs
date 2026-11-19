@@ -19,8 +19,11 @@ namespace HIDMaestro;
 /// <see cref="HMBackend.Auto"/> then runs every profile it can on the USB/IP
 /// backend.</para>
 ///
-/// <para><see cref="HMController.BindWinUsb"/> throws it under any backend
-/// on such a PC: the binding's package is signed as the driver's is.</para>
+/// <para><see cref="HMController.BindWinUsb"/> throws it on such a PC whose
+/// driver store holds a HIDMaestro WinUSB package from before, when Windows
+/// refuses the binding's package, which is signed as the driver's is. Where
+/// the store holds none, the binding goes by the device's Microsoft OS
+/// descriptors and adds no package.</para>
 /// </summary>
 public sealed class HMDriverSigningException : InvalidOperationException
 {
