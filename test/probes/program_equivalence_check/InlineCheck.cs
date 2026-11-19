@@ -48,10 +48,15 @@ internal static class InlineCheck
     }
 
     /// <summary>The child: BuildNext for every catalog device that builds its
-    /// reports, then for the planted set.</summary>
+    /// reports, then for the planted set on the engine of the last of those
+    /// devices whose clock tick builds a report from it. A tick that sends
+    /// nothing returns 0 without running the set, and on ARM64 the JIT lists
+    /// the planted kernel only once it runs, so an engine that sends nothing
+    /// on its clock would leave the check blind. The planted set's Run calls
+    /// its kernel for every layout index.</summary>
     public static int Child()
     {
-        ProtocolEngine? last = null;
+        var engines = new List<(string Id, ProtocolEngine Engine)>();
         foreach (var p in ProfileDatabase.LoadEmbedded().All.Where(p => p.BuildsItsOwnReports))
         {
             var model = p.GetOrCompileModel();
@@ -61,21 +66,28 @@ internal static class InlineCheck
             // BuildNext.
             var compiled = CompiledProtocol.Compile(p, p.RequiresUsbipBackend ? new UsbDescriptorSet(p, 0) : null)!;
             var engine = new ProtocolEngine(compiled, "HM-INLINE-0001", 0, runner);
+            int bytes = 0;
             for (int layout = 0; layout < model.Layouts.Length; layout++)
-                runner.Visit(new Build { Engine = engine });
-            Console.WriteLine($"built {p.Id} through {(runner.Generated ? "its generated set" : "the interpreter")}");
-            last = engine;
+                bytes += runner.Visit(new Build { Engine = engine });
+            Console.WriteLine($"built {p.Id} through {(runner.Generated ? "its generated set" : "the interpreter")}, {bytes} bytes on its clock");
+            engines.Add((p.Id, engine));
         }
-        if (last == null) { Console.WriteLine("no catalog device builds its reports"); return 1; }
+        if (engines.Count == 0) { Console.WriteLine("no catalog device builds its reports"); return 1; }
         var v = ProgramForm.Validate(ProbeCorpus.NotInlined);
         if (!ProbeKernels.TryBindSet($"{v.Hash}|{PathMutation.NotInlined}", new Binder(), out var bound) || bound is not LayoutRunner planted)
         {
             Console.WriteLine("the probe's build has no NotInlined set");
             return 1;
         }
-        planted.Visit(new Build { Engine = last });
-        Console.WriteLine("built the planted set");
-        return 0;
+        for (int i = engines.Count - 1; i >= 0; i--)
+        {
+            int bytes = planted.Visit(new Build { Engine = engines[i].Engine });
+            if (bytes == 0) continue;
+            Console.WriteLine($"built the planted set on {engines[i].Id}'s engine, {bytes} bytes");
+            return 0;
+        }
+        Console.WriteLine("no catalog device's engine builds a report from the planted set on its clock, so its kernel never ran");
+        return 1;
     }
 
     public static int Run()
