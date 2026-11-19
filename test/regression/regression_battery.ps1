@@ -2029,9 +2029,15 @@ function Scenario-Trigger-Live-Check {
 # real virtual, publish PidPool, run SetFeature(0x01 Create New Effect)
 # and GetFeature(0x03 Pool) handshake. Both must succeed for dinput8/
 # pid.dll to enumerate FFB on a SideWinder virtual end-to-end.
+#
+# The offline run plays the host over the USB/IP wire against the SDK's own
+# server and checks each answer to a PID request against the UMDF2
+# driver's. It creates no device.
 function Scenario-Sidewinder-Ffb-Check {
     Invoke-Probe -Dir 'sidewinder_ffb_check' -Exe 'SideWinderFfbCheck.exe' `
                  -Message 'SideWinder PID FFB end-to-end regressed (see probe stdout)'
+    Invoke-Probe -Dir 'sidewinder_ffb_check' -Exe 'SideWinderFfbCheck.exe' -Arguments 'offline' -Tag 'offline' `
+                 -Message 'the USB/IP device answered a PID request otherwise than the UMDF2 driver does (see probe stdout)'
 }
 
 # S36: arbitrary-axis addressing: HMAxis enum / ExtraAxes / AvailableAxes /
@@ -2551,9 +2557,15 @@ function Scenario-Kbm-Descriptors {
 # Exit 3, a skip: the probe runs in session 0, as over SSH, where Raw Input
 # lists no device. Exit 2, also a skip: another program that embeds
 # HIDMaestro runs, and the probe creates nothing beside it.
+#
+# The --dispose-ack run needs no Raw Input, so it tests keyboards in every
+# session, session 0 included: a disposed keyboard delivers its release
+# frame before the device goes.
 function Scenario-Kbm-Raw-Input {
     Invoke-Probe -Dir 'kbm_live_check' -Exe 'KbmLiveCheck.exe' `
                  -Message 'a virtual keyboard or mouse reached Raw Input wrong, lost input, or did not start (see probe stdout)' -SkipCodes 2, 3
+    Invoke-Probe -Dir 'kbm_live_check' -Exe 'KbmLiveCheck.exe' -Arguments '--dispose-ack 5' -Tag 'dispose-ack' `
+                 -Message 'a disposed keyboard did not deliver its release frame before it went (see probe stdout)' -SkipCodes 2
 }
 
 # S71: programs that embed HIDMaestro, side by side on one machine. Each
@@ -3160,9 +3172,14 @@ function Scenario-Xusb-Persona {
 # lists the pad once, and dualsense-composite beside it reads back over HID
 # as the positive control. Exit 2 when another program that embeds
 # HIDMaestro is running.
+#
+# The family part creates each xinputhid profile as its GIP form and reads
+# it through XInput, WGI and the HID child's haptics output report.
 function Scenario-Gip-Persona {
     Invoke-Probe -Dir 'gip_persona_check' -Exe 'GipPersonaCheck.exe' `
                  -Message 'the wired Xbox One S pad on USB/IP no longer presents the device the GIP specification describes, does not bind Windows'' GIP driver, or does not round-trip state and rumble through XInput (see probe stdout)' -SkipCodes 2
+    Invoke-Probe -Dir 'gip_persona_check' -Exe 'GipPersonaCheck.exe' -Arguments 'family' -Tag 'family' `
+                 -Message 'an xinputhid profile no longer presents its GIP form, or reads differently through XInput, WGI or its haptics output report (see probe stdout)' -SkipCodes 2
 }
 
 # S107: the same profile on both backends. parity creates every deployable
