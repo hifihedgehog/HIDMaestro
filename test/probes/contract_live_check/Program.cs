@@ -51,6 +51,13 @@
 //   check        the four, the default.
 //   selftest     the version-section watch on a section this check makes,
 //                no device and no elevation.
+// On the USB/IP backend no HIDMaestro driver serves the device, so where a
+// check reads the driver's half of the version section, the USB/IP device
+// must leave that half empty and report no DriverVersion. The device is
+// found by the serial its backend serves, the index's HM-CTL serial on
+// UMDF2 and the identity's serial on USB/IP, and the checks of the index's
+// FeatureAnswers, the unnumbered reports, the extractor and the starts run
+// on whichever backend each create resolved to.
 // Each create that throws is a named failure with the exception, the
 // driver's half of its index's version section and the problem code
 // Windows gave the device, and the checks after it go on. A create whose
@@ -105,11 +112,15 @@ internal static class Program
         public short LX, LY, RX, RY;
     }
 
-    /// <summary>The HID device the driver serves for an index: its serial
-    /// is HM-CTL- and the index (driver.c InitInstancePaths).</summary>
-    static HMHidDeviceInfo? Find(int index)
+    /// <summary>The HID device a controller presents, by the serial its
+    /// backend serves: HM-CTL- and the transport index from the UMDF2
+    /// driver (driver.c InitInstancePaths), the identity's serial from the
+    /// USB/IP device's string descriptor.</summary>
+    static HMHidDeviceInfo? Find(HMController c)
     {
-        string serial = $"HM-CTL-{index:D4}";
+        string serial = c.Backend == HMBackend.Usbip
+            ? c.UsbipHandle!.Device.Descriptors.SerialString ?? ""
+            : $"HM-CTL-{c.TransportIndex:D4}";
         for (int i = 0; i < 50; i++)
         {
             var d = HMDeviceExtractor.ListDevices().FirstOrDefault(x => x.SerialNumberString == serial);
@@ -291,10 +302,15 @@ internal static class Program
         }
     }
 
+    /// <summary>The devnode a controller made: the UMDF2 parent, or the
+    /// USB/IP device's USB instance.</summary>
+    static string? DevnodeOf(HMController c) =>
+        c.Backend == HMBackend.Usbip ? c.UsbipHandle?.Device.Descriptors.UsbInstanceId : c.InstanceId;
+
     /// <summary>The device a controller made, as Windows reports it.</summary>
     static string Node(HMController c)
     {
-        if (c.InstanceId is not { } id) return "no device";
+        if (DevnodeOf(c) is not { } id) return $"no device on {c.Backend}";
         var (present, status, problem) = DeviceOrchestrator.DevnodeStatus(id);
         return present ? $"{id} status 0x{status:X} problem {problem}" : $"{id} not present";
     }
@@ -324,6 +340,7 @@ internal static class Program
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
         ctx.InstallDriver();
+        Console.WriteLine($"  backend: Auto resolves to {HMContext.MachineBackend} on this machine");
         if (mode is "identity" or "check") Lane("identity", () => Identity(ctx));
         if (mode is "unnumbered" or "check") Lane("unnumbered", () => Unnumbered(ctx));
         if (mode is "extract" or "check") Lane("extract", () => Extract(ctx));
@@ -342,30 +359,25 @@ internal static class Program
         using (var c0 = Create(ctx, 0, pad, "a generic pad at index 0, whose driver must read its instance ID before its device exists"))
         {
             if (c0 != null)
-                Check("a generic pad at index 0 starts on a driver of protocols 4 to 5",
-                      SharedMemoryIO.DriverHalf(0) is { Protocol: 5, ProtocolMin: 4 }, $"{SharedMemoryIO.DriverHalf(0)} | {Node(c0)}");
+                DriverHalfCheck(c0, "a generic pad at index 0", "starts on a driver of protocols 4 to 5");
         }
 
         using (var c1 = Create(ctx, 1, ctx.GetProfile("dualsense")!, "a fresh-token dualsense at index 1 on the ROOT path"))
         {
             if (c1 != null)
             {
-                var half = SharedMemoryIO.DriverHalf(1);
-                Check("a fresh-token dualsense at index 1 on the ROOT path: its driver wrote protocols 4 to 5 into index 1's section at its first add",
-                      half is { Protocol: 5, ProtocolMin: 4, ConfigError: 0 }, $"{half} | {Node(c1)}");
-                using var h = Open(Find(1));
+                DriverHalfCheck(c1, "a fresh-token dualsense at index 1", "its driver wrote protocols 4 to 5 into its index's section at its first add");
+                using var h = Open(Find(c1));
                 var r = h == null ? null : Get(h, 0x09, 20);
-                Check("its report 0x09 carries index 1 in its MAC, from index 1's FeatureAnswers",
-                      r != null && r[6] == 1, r == null ? $"no answer | {Node(c1)}" : Convert.ToHexString(r));
+                Check($"its report 0x09 carries its transport index {c1.TransportIndex} in its MAC, from that index's FeatureAnswers, on {c1.Backend}",
+                      r != null && r[6] == (byte)c1.TransportIndex, r == null ? $"no answer | {Node(c1)}" : Convert.ToHexString(r));
             }
         }
 
         using (var c2 = Create(ctx, 2, ctx.GetProfile("xbox-one-s")!, "a fresh-token xbox-one-s at index 2 on the SWD xinputhid path"))
         {
             if (c2 == null) return;
-            var half = SharedMemoryIO.DriverHalf(2);
-            Check("a fresh-token xbox-one-s at index 2 on the SWD xinputhid path: its driver wrote protocols 4 to 5 into index 2's section at its first add",
-                  half is { Protocol: 5, ProtocolMin: 4, ConfigError: 0 }, $"{half} | {Node(c2)}");
+            DriverHalfCheck(c2, "a fresh-token xbox-one-s at index 2", "its driver wrote protocols 4 to 5 into its index's section at its first add");
             var state = new HMGamepadState { Buttons = HMButton.A | HMButton.Y };
             // A hang bound: xinputhid claims a slot in about 100 ms, and the
             // poll ends as soon as the press shows, so only input that never
@@ -383,6 +395,20 @@ internal static class Program
         }
     }
 
+    /// <summary>The driver's half of the controller's version section. On
+    /// UMDF2 the driver writes protocols 4 to 5 and no configuration error
+    /// at its first add. On USB/IP no HIDMaestro driver serves the device:
+    /// the half stays empty and the controller reports no DriverVersion.</summary>
+    static void DriverHalfCheck(HMController c, string who, string umdf2)
+    {
+        var half = SharedMemoryIO.DriverHalf(c.TransportIndex);
+        if (c.Backend == HMBackend.Umdf2)
+            Check($"{who} on UMDF2: {umdf2}", half is { Protocol: 5, ProtocolMin: 4, ConfigError: 0 }, $"{half} | {Node(c)}");
+        else
+            Check($"{who} on USB/IP: no HIDMaestro driver serves it, so the driver's half of its index's version section is empty and DriverVersion is null",
+                  half is { Protocol: 0, ProtocolMin: 0, ConfigError: 0 } && c.DriverVersion == null, $"{half}, DriverVersion {c.DriverVersion?.ToString() ?? "null"} | {Node(c)}");
+    }
+
     static void Unnumbered(HMContext ctx)
     {
         var deck = ctx.GetProfile("steam-deck-composite")!;
@@ -390,7 +416,7 @@ internal static class Program
             .DescriptorHex(deck.DescriptorHex!).FeatureAnswers(System.Text.Json.JsonSerializer.Serialize(deck.Inner.FeatureStubs!, HMJsonContext.Default.FeatureStubSpec)).Build();
         using var c = Create(ctx, 3, p, "the unnumbered profile at index 3");
         if (c == null) return;
-        using var h = Open(Find(3));
+        using var h = Open(Find(c));
         if (h == null) { Check("the unnumbered profile's HID device opens", false, Node(c)); return; }
         // The caller writes report 0's leading 0 as SDL does, and HID class
         // leaves it out of the minidriver's buffer in both directions (Wine
@@ -419,12 +445,12 @@ internal static class Program
               $"set {b.Sent}, get {b.Got}, error {b.Error}: {Convert.ToHexString(b.Get, 0, 8)}");
     }
 
-    /// <summary>The answer the device at an index gives to each report,
-    /// read through the HID collection whose serial names the index, in
+    /// <summary>The answer a controller's device gives to each report,
+    /// read through the HID collection whose serial its backend serves, in
     /// the order given. Null for a GET that fails.</summary>
-    static List<byte[]?> Answers(int index, IEnumerable<byte> reports)
+    static List<byte[]?> Answers(HMController c, IEnumerable<byte> reports)
     {
-        var d = Find(index);
+        var d = Find(c);
         using var h = Open(d);
         return reports.Select(r => h == null ? null : Get(h, r, 65)).ToList();
     }
@@ -440,10 +466,10 @@ internal static class Program
             using (var c = Create(ctx, 0, p, p.Id))
             {
                 if (c == null) continue;
-                var d = Find(0);
+                var d = Find(c);
                 if (d == null) { Check($"{p.Id}: its HID device is listed", false, Node(c)); continue; }
                 x = HMDeviceExtractor.Extract(d);
-                device = Answers(0, reports);
+                device = Answers(c, reports);
             }
             Check($"{p.Id}: the extracted profile names the model the device's identity gives it",
                   x.Inner.DeviceModelFrom != null && x.Inner.DeviceModelFrom == p.Inner.Resolved.IdentityModel,
@@ -451,7 +477,7 @@ internal static class Program
             using (var c = Create(ctx, 0, x, $"{p.Id}: the extracted profile"))
             {
                 if (c == null) continue;
-                var extracted = Answers(0, reports);
+                var extracted = Answers(c, reports);
                 var differ = new List<string>();
                 for (int i = 0; i < reports.Count; i++)
                     if (device[i] == null ? extracted[i] != null : extracted[i] == null || !device[i]!.AsSpan().SequenceEqual(extracted[i]))
@@ -475,7 +501,7 @@ internal static class Program
         {
             using var started = Create(ctx, 0, ctx.GetProfile(id)!, id);
             if (started == null) continue;
-            var (present, status, problem) = started.InstanceId is { } node ? DeviceOrchestrator.DevnodeStatus(node) : (false, 0u, 0u);
+            var (present, status, problem) = DevnodeOf(started) is { } node ? DeviceOrchestrator.DevnodeStatus(node) : (false, 0u, 0u);
             Check($"{id}: its device starts, its descriptor parsed by Windows' HID class", present && (status & DN_STARTED) != 0 && problem == 0,
                   Node(started));
         }
