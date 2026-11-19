@@ -927,23 +927,34 @@ internal static partial class Program
     /// (usbflags IgnoreHWSerNum for its VID and PID). The create's start
     /// wait finds it on the port, and the ledger names the record it caused
     /// under that name. The serial's name has no record, and the removal
-    /// drops its entry as absent.</summary>
+    /// drops its entry as absent. The profile is one whose VID and PID have
+    /// no record on the machine, so the record the create makes is new
+    /// whatever port it lands on.</summary>
     static void PortNamed()
     {
         Console.WriteLine("\n-- A derived device Windows names by its port --");
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        var profile = ctx.AllProfiles.Where(p => p.Type is not ("keyboard" or "mouse") && p.Connection == "usb" && p.Inner.UsbConfiguration == null && p.SupportsBackend(HMBackend.Usbip)
+                                              && UsbRecords.Known(p.VendorId, p.ProductId).Count == 0)
+                                  .OrderBy(p => p.Id, StringComparer.Ordinal).FirstOrDefault();
+        if (profile == null)
+        {
+            Console.WriteLine("  [SKIP] every derived profile's VID and PID has a record on this machine");
+            return;
+        }
         const string flags = @"SYSTEM\CurrentControlSet\Control\usbflags";
-        const string value = "IgnoreHWSerNum054C09CC";
+        string value = $"IgnoreHWSerNum{profile.VendorId:X4}{profile.ProductId:X4}";
+        Console.WriteLine($"  {profile.Id}, {value}");
         object? prior;
         using (var k = Registry.LocalMachine.OpenSubKey(flags)) prior = k?.GetValue(value);
-        var known = UsbRecords.Known(0x054C, 0x09CC);
+        var known = UsbRecords.Known(profile.VendorId, profile.ProductId);
         using (var k = Registry.LocalMachine.CreateSubKey(flags))
             k.SetValue(value, new byte[] { 1 }, RegistryValueKind.Binary);
         try
         {
-            using var ctx = new HMContext();
-            ctx.LoadDefaultProfiles();
             string serialId, onPort;
-            using (var pad = ctx.CreateController(ctx.GetProfile("dualshock-4-v2")!, "ledger-portnamed", HMBackend.Usbip))
+            using (var pad = ctx.CreateController(profile, "ledger-portnamed", HMBackend.Usbip))
             {
                 serialId = pad.UsbipHandle!.Device.Descriptors.UsbInstanceId!;
                 onPort = VhciClient.DeviceOnRootHubPort(pad.UsbipHandle.Device.VhciPort) ?? "";
