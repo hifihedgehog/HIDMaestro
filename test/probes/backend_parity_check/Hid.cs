@@ -65,6 +65,18 @@ internal static partial class Hid
         return (true, (status & 0x8) != 0, (status & 0x400) != 0 ? problem : 0);
     }
 
+    /// <summary>The function driver Windows bound to a device, from its
+    /// record: the service, and the INF and provider of its driver
+    /// package. Empty strings for what the record does not hold.</summary>
+    public static (string Service, string Inf, string Provider) Binding(string instanceId)
+    {
+        using var dev = Microsoft.Win32.Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{instanceId}");
+        string service = dev?.GetValue("Service") as string ?? "";
+        string driver = dev?.GetValue("Driver") as string ?? "";
+        using var cls = driver.Length > 0 ? Microsoft.Win32.Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Control\Class\{driver}") : null;
+        return (service, cls?.GetValue("InfPath") as string ?? "", cls?.GetValue("ProviderName") as string ?? "");
+    }
+
     /// <summary>True when a record of the instance id exists, present or
     /// not.</summary>
     public static bool RecordExists(string instanceId) => CM_Locate_DevNodeW(out _, instanceId, 1) == 0;

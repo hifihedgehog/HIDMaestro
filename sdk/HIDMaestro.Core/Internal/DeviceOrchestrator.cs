@@ -1019,7 +1019,22 @@ internal static partial class DeviceOrchestrator
             ? WaitForDeviceStarted(childId, usbInstanceId, controllerIndex, timeoutMs: 10000)
             : StartWait.TimedOut;
         if (started == StartWait.Failed) throw StartError(usbInstanceId, controllerIndex, childId);
-        LogDiag($"    usbip start wait {usbInstanceId} on port {vhciPort}{(onPort == null ? " (not found on the port)" : "")}: child {childId ?? "(none)"} {child}, start {started} in {sw.ElapsedMilliseconds}ms");
+        // A driver package that names the device's VID and PID can bind it
+        // as a composite, as Logitech's binds usbccgp to its mice and
+        // keyboards, and the HID collection then sits under an interface
+        // node (USB\...&MI_nn), as for the real device. The wait goes on to
+        // that collection's start.
+        int deep = -1;
+        if (started == StartWait.Done && !childId!.StartsWith(@"HID\", StringComparison.OrdinalIgnoreCase))
+        {
+            int deepBudget = TimeoutScale.Apply(10000);
+            var deepClock = Stopwatch.StartNew();
+            while ((deep = StartedHidInterfaces(usbInstanceId, controllerIndex, nodeFailureThrows: false)) < 1
+                   && deepClock.ElapsedMilliseconds < deepBudget)
+                Thread.Sleep(25);
+        }
+        LogDiag($"    usbip start wait {usbInstanceId} on port {vhciPort}{(onPort == null ? " (not found on the port)" : "")}: child {childId ?? "(none)"} {child}, start {started}" +
+                $"{(deep < 0 ? "" : deep > 0 ? ", HID collection under it started" : ", no HID collection under it started")} in {sw.ElapsedMilliseconds}ms");
         return usbInstanceId;
     }
 
@@ -1046,7 +1061,7 @@ internal static partial class DeviceOrchestrator
         int started;
         while (true)
         {
-            started = StartedHidInterfaces(usbInstanceId, controllerIndex);
+            started = StartedHidInterfaces(usbInstanceId, controllerIndex, nodeFailureThrows: true);
             if (started >= hidInterfaces) break;
             if (StartFailed(usbInstanceId, controllerIndex)) throw StartError(usbInstanceId, controllerIndex);
             if (sw.ElapsedMilliseconds >= budget) break;
@@ -1060,16 +1075,19 @@ internal static partial class DeviceOrchestrator
     /// <summary>How many of the USB device's HID interfaces have a started
     /// HID collection: one for the device when its collections sit directly
     /// under it, and one for each interface node (<c>USB\...&amp;MI_nn</c>)
-    /// that has one. A collection or interface node whose start failed
-    /// throws, naming the device.</summary>
-    private static int StartedHidInterfaces(string usbInstanceId, int controllerIndex)
+    /// that has one. A HID collection whose start failed throws, naming the
+    /// device, and so does a failed interface node when
+    /// <paramref name="nodeFailureThrows"/>: a form's interface nodes are its
+    /// HID interfaces, where a node another driver package adds beside a
+    /// derived device's HID interface is not this create's.</summary>
+    private static int StartedHidInterfaces(string usbInstanceId, int controllerIndex, bool nodeFailureThrows)
     {
         int count = 0;
         bool direct = false;
         foreach (string child in DeviceManager.GetChildIds(usbInstanceId))
         {
             if (IsHidCollection(child)) { direct |= HidCollectionStarted(child, usbInstanceId, controllerIndex); continue; }
-            if (StartFailed(child, controllerIndex)) throw StartError(usbInstanceId, controllerIndex, child);
+            if (nodeFailureThrows && StartFailed(child, controllerIndex)) throw StartError(usbInstanceId, controllerIndex, child);
             foreach (string hid in DeviceManager.GetChildIds(child))
                 if (IsHidCollection(hid) && HidCollectionStarted(hid, usbInstanceId, controllerIndex)) { count++; break; }
         }

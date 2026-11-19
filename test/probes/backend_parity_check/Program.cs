@@ -162,7 +162,7 @@ internal static partial class Program
     sealed record Snapshot(HMBackend Backend, string? Parent, bool OpenAtReturn, long CreateMs, long ReadyMs,
                            List<Collection> Collections, List<string> Errors, (bool Present, bool Started, uint Problem) State, string? Failure,
                            string Output = "", (ushort Vid, ushort Pid, ushort Version) Attributes = default, string? Product = null,
-                           int HidInterfaces = 0);
+                           int HidInterfaces = 0, string FirstLook = "");
 
     /// <summary>The HID interfaces a USB/IP controller's device declares,
     /// the primary one and each secondary one. 0 on UMDF2.</summary>
@@ -208,6 +208,13 @@ internal static partial class Program
             // The moment the create returned: one look, no retry.
             var first = Hid.Read(parent, out var firstErrors);
             bool openAtReturn = first.Count > 0 && firstErrors.Count == 0;
+            // What the look saw when the interface was not open: each
+            // devnode under the device, its state and HID interfaces, and
+            // the opens that failed.
+            string firstLook = openAtReturn ? "" :
+                string.Join("; ", Hid.Descendants(parent).Select(d =>
+                    $"{d} {(Hid.Status(d) is var st && st.Started ? "started" : st.Present ? $"present problem {st.Problem}" : "absent")} {Hid.Interfaces(d).Count} interface(s)"))
+                + (firstErrors.Count > 0 ? " | " + string.Join("; ", firstErrors) : "") + $" | {first.Count} collection(s) read";
             var collections = first;
             var errors = firstErrors;
             long readyMs = openAtReturn ? createMs : -1;
@@ -218,20 +225,28 @@ internal static partial class Program
                 if (collections.Count > 0 && errors.Count == 0) { readyMs = sw.ElapsedMilliseconds; break; }
             }
             return new(c.Backend, parent, openAtReturn, createMs, readyMs, collections, errors, Hid.Status(parent), null,
-                       OutputOf(c, p, collections), AttributesOf(c, p), ProductOf(c), HidInterfacesOf(c));
+                       OutputOf(c, p, collections), AttributesOf(c, p), ProductOf(c), HidInterfacesOf(c), firstLook);
         }
         finally { c.Dispose(); }
     }
 
     /// <summary>An output report written to the first collection that has
-    /// one, and the first packet OutputReceived raises for it: source,
-    /// report ID and data. "none" when nothing arrives within a second, and
-    /// "not opened" for a collection Windows holds exclusively, as it holds
-    /// a keyboard's.</summary>
+    /// one and is not a keyboard's, a keypad's or a mouse's, and the first
+    /// packet OutputReceived raises for it: source, report ID and data.
+    /// "none" when nothing arrives within a second, "not opened" for a
+    /// collection that does not open for writing, and "held by Windows"
+    /// when only such a collection has an output report.</summary>
     static string OutputOf(HMController c, HMProfile p, List<Collection> collections)
     {
-        var target = collections.FirstOrDefault(x => x.OutputLength > 0);
-        if (target == null) return "";
+        // Windows opens a keyboard's, a keypad's and a mouse's collection for
+        // itself, and whether a program's open for writing reaches one in the
+        // moments after the device starts depends on when Windows' input
+        // stack took it: "not opened", or on the laptop on 2026-11-19 an open
+        // whose write failed with Incorrect function. The output path is
+        // read through the first other collection with an output report.
+        static bool HeldByWindows(Collection x) => x.UsagePage == 0x01 && x.Usage is 0x02 or 0x06 or 0x07;
+        var target = collections.FirstOrDefault(x => x.OutputLength > 0 && !HeldByWindows(x));
+        if (target == null) return collections.Any(x => x.OutputLength > 0) ? "held by Windows" : "";
         // The report the device's own descriptor declares: on USB/IP that is
         // the form's (FormParity.cs).
         var map = p.FormOn(c.Backend).Inner.GetOrBuildReportMap();
@@ -298,6 +313,13 @@ internal static partial class Program
         int matched = 0, umdf2Up = 0, usbipUp = 0, openAtReturn = 0, accepted = 0;
         var bad = new List<string>();
         var attributesOff = new HashSet<string>();
+        // USB/IP devices a driver package on this machine binds in place of
+        // HID class, as it binds the real device of that VID and PID
+        // (PadForge's ds3_winusb.inf binds WinUSB to 054C:0268). They carry
+        // no HID collection, so the USB/IP checks leave them out and name
+        // them.
+        var foreign = new List<string>();
+        int foreignAccepted = 0;
         foreach (var p in profiles)
         {
             string key = "parity:" + p.Id;
@@ -326,6 +348,19 @@ internal static partial class Program
                 else if (x.Collections.Count == 0) problems.Add($"{x.Backend} no HID collection ({string.Join("; ", x.Errors)})");
                 else if (x.Errors.Count > 0) problems.Add($"{x.Backend} {string.Join("; ", x.Errors)}");
                 else count++;
+            }
+            if (s is { Failure: null, Parent: { } usbDevice } && s.Collections.Count == 0
+                && Hid.Binding(usbDevice) is var bound && bound.Service.Length > 0
+                && !bound.Service.Equals("HidUsb", StringComparison.OrdinalIgnoreCase)
+                && !bound.Service.Equals("usbccgp", StringComparison.OrdinalIgnoreCase))
+            {
+                foreign.Add($"{p.Id} ({bound.Service} from {bound.Inf}, {bound.Provider})");
+                if (accepts) foreignAccepted++;
+                Up(u, ref umdf2Up);
+                Console.WriteLine($"  {p.Id,-44} USB/IP device bound by {bound.Service} from {bound.Inf} ({bound.Provider}), as that package binds the real device: no HID collection, left out of the USB/IP checks" +
+                                  (u != null ? $"  umdf2 {u.CreateMs} ms" : "") + (problems.Count > 0 ? " | " + string.Join(" | ", problems) : ""));
+                if (problems.Count > 0) bad.Add(p.Id);
+                continue;
             }
             Up(u, ref umdf2Up);
             Up(s, ref usbipUp);
@@ -369,7 +404,8 @@ internal static partial class Program
             string line = problems.Count == 0 ? (accepts ? "ok" : $"ok, Code 10 as Windows' parser predicts ({verdict})") : string.Join(" | ", problems);
             Console.WriteLine($"  {p.Id,-44} {line}" +
                 (s != null ? $"  usbip {s.CreateMs} ms{(s.OpenAtReturn ? "" : $", ready {s.ReadyMs} ms")}" : "") +
-                (u != null ? $"  umdf2 {u.CreateMs} ms" : ""));
+                (u != null ? $"  umdf2 {u.CreateMs} ms" : "") +
+                (s != null && accepts && !s.OpenAtReturn ? $"\n      first look on USB/IP: {s.FirstLook}" : ""));
             if (problems.Count > 0) bad.Add(p.Id);
             log?.WriteLine(JsonSerializer.Serialize(new Dictionary<string, object?>
             {
@@ -379,16 +415,19 @@ internal static partial class Program
             log?.Flush();
         }
         Note($"Windows' parser accepts {accepted} of {profiles.Count} descriptors");
+        if (foreign.Count > 0)
+            Note($"{foreign.Count} USB/IP device(s) bound by a driver package on this machine in place of HID class, left out of the USB/IP checks: {string.Join(", ", foreign)}");
         Check("the parser made no call this process does not bind, so its verdicts are Windows' own", WindowsParser.UnexpectedCalls == 0, $"{WindowsParser.UnexpectedCalls}");
         if (umdf2Here) Check("every profile reaches the outcome Windows' parser predicts on UMDF2: it starts and enumerates its HID collections, or fails with Code 10 where the parser refuses its descriptor",
                              umdf2Up == profiles.Count, $"{umdf2Up} of {profiles.Count}");
+        int onUsbip = profiles.Count - foreign.Count;
         if (usbipHere) Check("every profile reaches the outcome Windows' parser predicts on USB/IP: it starts and enumerates its HID collections, or fails with Code 10 where the parser refuses its descriptor",
-                             usbipUp == profiles.Count, $"{usbipUp} of {profiles.Count}");
+                             usbipUp == onUsbip, $"{usbipUp} of {onUsbip}");
         if (umdf2Here && usbipHere)
             Check("both backends reach the same outcome: Code 10 on both, or the same attributes, caps and product string, and an output report that reaches the program as the same packet",
-                  matched == profiles.Count, $"{matched} of {profiles.Count}");
+                  matched == onUsbip, $"{matched} of {onUsbip}");
         if (usbipHere)
-            Check("on USB/IP the HID interface opens the moment the create returns, for every descriptor Windows' parser accepts", openAtReturn == accepted, $"{openAtReturn} of {accepted}");
+            Check("on USB/IP the HID interface opens the moment the create returns, for every descriptor Windows' parser accepts", openAtReturn == accepted - foreignAccepted, $"{openAtReturn} of {accepted - foreignAccepted}");
         Check("every HID collection carries the attributes Windows gives that kind of device, and a GIP form's the product string Windows' GIP driver gives, on each backend here",
               attributesOff.Count == 0, string.Join(", ", attributesOff));
         if (bad.Count > 0) Note("differ or failed: " + string.Join(", ", bad));
