@@ -14,11 +14,15 @@
 //   5. The presentation plan of every catalog profile and of the builder
 //      cases (PresentationPlanCheck.cs) equals presentation-plan.txt but
 //      for the changes presentation-plan-changes.txt lists.
+//   6. Every profile's Button-page buttons are numbered by usage, so
+//      HMButton bit n writes the button DirectInput numbers n, and the
+//      Stadia pads' A, B, X, Y and Capture land on the bits SDL reads.
 //
 // This probe runs against the in-process catalog only: no driver
 // install, no virtual device. Exit 0 on PASS, 1 on FAIL.
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using HIDMaestro;
@@ -240,6 +244,49 @@ internal static class Program
         {
             string? why = JsonRefusal(json);
             Check($"XUSB model: {what} is refused at {path}", why != null && why.Contains(path), why ?? "accepted");
+        }
+
+        // Buttons by usage: HMButton bit n writes the Button-page button with
+        // the n-th lowest usage, whatever order the descriptor declares them
+        // in (HidReportBuilder.OrderButtonsByUsage), which is the number
+        // DirectInput and the profile's layout give it. stadia-controller-bt
+        // and -usb declare 0x12 first, and vader-4-pro declares 0x14 down to
+        // 0x01 after a Consumer button.
+        Console.WriteLine();
+        Console.WriteLine("--- buttons by usage ---");
+        var unordered = new List<string>();
+        foreach (var p in ctx.AllProfiles)
+        {
+            HidReportBuilder rb;
+            try { rb = p.Inner.GetOrBuildReportBuilder(); } catch { continue; }
+            var page = rb.Buttons.TakeWhile(b => b.UsagePage == 0x09).Select(b => (int)b.Usage).ToList();
+            bool sorted = page.Zip(page.Skip(1), (a, b) => a <= b).All(t => t)
+                          && rb.Buttons.Skip(page.Count).All(b => b.UsagePage != 0x09);
+            if (!sorted) unordered.Add(p.Id);
+        }
+        Check("every profile's Button-page buttons come first, by usage", unordered.Count == 0, string.Join(", ", unordered));
+        // SDL_hidapi_stadia.c HIDAPI_DriverStadia_HandleStatePacket: A at
+        // data[3] & 0x40, B 0x20, X 0x10, Y 0x08, Capture at data[2] & 0x01.
+        foreach (var id in new[] { "stadia-controller-bt", "stadia-controller-usb" })
+        {
+            var sp = ctx.GetProfile(id);
+            if (sp == null) { Check($"{id}: in the catalog", false); continue; }
+            var rb = sp.Inner.GetOrBuildReportBuilder();
+            var miss = new List<string>();
+            foreach (var (bit, at, mask, name) in new[] { (0, 3, 0x40, "A"), (1, 3, 0x20, "B"), (2, 3, 0x10, "X"), (3, 3, 0x08, "Y"), (12, 2, 0x01, "Capture") })
+            {
+                var r = rb.BuildReport(null, 0, 1u << bit);
+                if ((r[at] & mask) == 0 || r.Skip(2).Take(2).Count(x => x != 0) != 1) miss.Add($"{name}:{Convert.ToHexString(r.AsSpan(0, 4))}");
+            }
+            Check($"{id}: A, B, X, Y and Capture land where SDL's Stadia driver reads them", miss.Count == 0, string.Join(" ", miss));
+        }
+        var vader = ctx.GetProfile("vader-4-pro");
+        if (vader != null)
+        {
+            var rb = vader.Inner.GetOrBuildReportBuilder();
+            Check("vader-4-pro: HMButton bit 0 writes usage 0x01, the button DirectInput numbers 0",
+                  rb.Buttons.Count > 0 && rb.Buttons[0].UsagePage == 0x09 && rb.Buttons[0].Usage == 0x01,
+                  rb.Buttons.Count > 0 ? $"page 0x{rb.Buttons[0].UsagePage:X2} usage 0x{rb.Buttons[0].Usage:X2}" : "none");
         }
 
         // How every profile's devnodes present themselves (PresentationPlan),
