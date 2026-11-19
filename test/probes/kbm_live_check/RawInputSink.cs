@@ -14,7 +14,7 @@ internal sealed class RawInputSink : IDisposable
     /// <summary>A keyboard message. <see cref="Ticks"/> is the Stopwatch
     /// timestamp at which this window read it.</summary>
     public sealed record Key(IntPtr Device, ushort VKey, ushort Flags, ushort MakeCode, long Ticks = 0);
-    public sealed record Hid(IntPtr Device, byte[] Report);
+    public sealed record Hid(IntPtr Device, byte[] Report, long Ticks = 0);
 
     public readonly ConcurrentQueue<Mouse> Mice = new();
     public readonly ConcurrentQueue<Key> Keys = new();
@@ -142,7 +142,7 @@ internal sealed class RawInputSink : IDisposable
                     {
                         var r = new byte[each];
                         Marshal.Copy((IntPtr)(data + 8 + i * each), r, 0, (int)each);
-                        Reports.Enqueue(new Hid(h->hDevice, r));
+                        Reports.Enqueue(new Hid(h->hDevice, r, System.Diagnostics.Stopwatch.GetTimestamp()));
                     }
                     break;
             }

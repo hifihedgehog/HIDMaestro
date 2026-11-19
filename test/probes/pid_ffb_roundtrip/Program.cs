@@ -30,10 +30,15 @@
 //
 //   7. PublishPidState: State fields match.
 //
-// Steps 4–6 fail gracefully if HidD_SetFeature is rejected by HidClass
-// (some descriptor configurations cause it to refuse before forwarding to
-// the minidriver). The static layout checks (1, 2, 3, 7) always run and
-// catch any SDK-side regression.
+//   8. What a program reads back through HidD_GetFeature: before any Pool
+//      is published the Pool and Block Load reads fail and a Create New
+//      Effect read succeeds, and after it Pool, Block Load and State carry
+//      the section's values.
+//
+// The checks run on the controller's backend, UMDF2 or USB/IP, and expect
+// the same answers on both: on USB/IP the device plays the driver's PID
+// block (UsbipEmulatedDevice.Pid.cs). A HID handle that does not open, or
+// a HidD_SetFeature the stack refuses, fails the run.
 
 using System;
 using System.IO;
@@ -123,7 +128,7 @@ internal static class Program
 
         Console.Write("  Creating PID FFB Probe controller... ");
         using var ctrl = ctx.CreateController(profile);
-        Console.WriteLine("OK");
+        Console.WriteLine($"OK ({ctrl.Backend})");
 
         // The controller's sections and serial carry its transport index,
         // which is 0 only while no other program holds index 0
@@ -132,6 +137,13 @@ internal static class Program
         string sectionName = $@"Global\HIDMaestroPidState{kIndex}";
 
         int failures = 0;
+
+        // The HID handle every step below writes and reads through.
+        SafeFileHandle? hid = OpenHmHid(ctrl);
+        bool hidOpen = hid != null && !hid.IsInvalid;
+        Console.Write("  [HID handle] the controller's own interface opens ... ");
+        if (!hidOpen) { Console.WriteLine($"FAIL: serial {SerialOf(ctrl)} not found or not openable"); failures++; }
+        else Console.WriteLine($"OK (serial {SerialOf(ctrl)})");
 
         // Step 1: pre-publish: section MUST NOT exist yet.
         Console.Write("  [pre-publish] section not yet created ... ");
@@ -161,6 +173,25 @@ internal static class Program
                 failures++;
             }
             else Console.WriteLine("OK (vJoy-compatible defaults applied at section creation)");
+        }
+
+        // Step 8a: no Pool published yet. The driver fails the Pool read
+        // (STATUS_NO_SUCH_DEVICE) and the Block Load read
+        // (STATUS_NOT_SUPPORTED), and a USB/IP device stalls both. A Create
+        // New Effect read succeeds with nothing written.
+        if (hidOpen)
+        {
+            Console.Write("  [GetFeature before Pool] Pool and Block Load fail, Create New Effect succeeds ... ");
+            bool pool = GetFeature(hid!, 0x13, 5, out _, out int poolErr);
+            bool load = GetFeature(hid!, 0x12, 5, out _, out int loadErr);
+            bool create = GetFeature(hid!, 0x11, 5, out _, out int createErr);
+            if (pool || load || !create)
+            {
+                Console.WriteLine($"FAIL: pool {(pool ? "read" : $"failed {poolErr}")}, block load {(load ? "read" : $"failed {loadErr}")}, " +
+                                  $"create new effect {(create ? "read" : $"failed {createErr}")}");
+                failures++;
+            }
+            else Console.WriteLine($"OK (pool Win32={poolErr}, block load Win32={loadErr})");
         }
 
         // Step 2: PublishPidPool, verify Pool + v1.1.37 EBI bitmap.
@@ -206,21 +237,25 @@ internal static class Program
         }
         else Console.WriteLine("OK (ebi=0, status=0)");
 
-        // Steps 4-6: driver-side allocation via HidD_SetFeature.
-        SafeFileHandle? hid = OpenHmHid(ProbeVid, ProbePid, kIndex);
-        bool hidOpen = hid != null && !hid.IsInvalid;
-        if (!hidOpen)
+        // Step 8b: the Pool a program reads back once it is published.
+        if (hidOpen)
         {
-            Console.WriteLine("  [SetFeature path] SKIPPED: could not open HID handle");
+            Console.Write("  [GetFeature 0x13] Pool reads 13 FF FF 04 03 ... ");
+            bool ok = GetFeature(hid!, 0x13, 5, out byte[] pool, out int err);
+            string got = ok ? Convert.ToHexString(pool, 0, 5) : $"failed Win32={err}";
+            if (got != "13FFFF0403") { Console.WriteLine($"FAIL: {got}"); failures++; }
+            else Console.WriteLine("OK");
         }
-        else
+
+        // Steps 4-6: driver-side allocation via HidD_SetFeature.
+        if (hidOpen)
         {
             // Step 4: first SetFeature(0x11): driver should alloc EBI=1.
             Console.Write("  [SetFeature 0x11] driver allocates EBI=1 ... ");
             if (!SendSetFeature(hid!, 0x11, new byte[] { 0x01, 0x00, 0x00 }))
             {
-                Console.WriteLine($"SKIP: HidD_SetFeature failed (Win32={Marshal.GetLastWin32Error()}) " +
-                    ": probably HidClass descriptor rejection");
+                Console.WriteLine($"FAIL: HidD_SetFeature failed (Win32={Marshal.GetLastWin32Error()})");
+                failures++;
             }
             else
             {
@@ -237,6 +272,14 @@ internal static class Program
                     failures++;
                 }
                 else Console.WriteLine($"OK (ebi=1, status=Success, bitmap=0x{bitmap:X8}, count={count})");
+
+                // Step 8c: the Block Load a program reads back: EBI 1,
+                // Success, and the RAM left, (0xFFFF / 4) * 3 = 0xBFFD.
+                Console.Write("  [GetFeature 0x12] Block Load reads 12 01 01 FD BF ... ");
+                bool read = GetFeature(hid!, 0x12, 5, out byte[] load, out int loadErr);
+                string loaded = read ? Convert.ToHexString(load, 0, 5) : $"failed Win32={loadErr}";
+                if (loaded != "120101FDBF") { Console.WriteLine($"FAIL: {loaded}"); failures++; }
+                else Console.WriteLine("OK");
 
                 // Step 5: second SetFeature(0x11): EBI=2.
                 Console.Write("  [SetFeature 0x11 #2] driver allocates EBI=2 ... ");
@@ -291,7 +334,6 @@ internal static class Program
                 }
                 else Console.WriteLine($"OK (ebi=0, status=Full)");
             }
-            hid!.Dispose();
         }
 
         // Step 7: PublishPidState verification (regression guard, unchanged from v1.1.36).
@@ -311,6 +353,17 @@ internal static class Program
             }
             else Console.WriteLine($"OK (ebi={ebi}, flags=0x{flags:X2})");
         }
+
+        // Step 8d: the State a program reads back.
+        if (hidOpen)
+        {
+            Console.Write($"  [GetFeature 0x14] State reads 14 00 {(byte)kStateFlags:X2} ... ");
+            bool ok = GetFeature(hid!, 0x14, 5, out byte[] st, out int err);
+            string got = ok ? Convert.ToHexString(st, 0, 3) : $"failed Win32={err}";
+            if (got != $"1400{(byte)kStateFlags:X2}") { Console.WriteLine($"FAIL: {got}"); failures++; }
+            else Console.WriteLine("OK");
+        }
+        hid?.Dispose();
 
         if (failures == 0) { Console.WriteLine("=== PASS ==="); return 0; }
         Console.WriteLine($"=== FAIL: {failures} check(s) failed ==="); return 1;
@@ -346,20 +399,45 @@ internal static class Program
         finally { CloseHandle(h); }
     }
 
-    /// <summary>The controller's own HID interface: this VID and PID, and
-    /// the serial the driver serves, HM-CTL- and the controller's transport
-    /// index. Another program's controller with the same VID and PID
-    /// serves its own index.</summary>
-    static SafeFileHandle? OpenHmHid(ushort vid, ushort pid, int transportIndex)
+    /// <summary>The serial the controller's HID device serves: the UMDF2
+    /// driver's HM-CTL- and the transport index, or on the USB/IP backend the
+    /// identity's serial its device descriptor names. Another program's
+    /// controller with the same VID and PID serves its own.</summary>
+    static string SerialOf(HMController c) =>
+        c.Backend == HMBackend.Usbip ? c.UsbipHandle!.Device.Descriptors.SerialString!
+                                     : HIDMaestro.Internal.DeviceOrchestrator.DriverSerial(c.TransportIndex);
+
+    /// <summary>The controller's own HID interface, by its VID, PID and
+    /// serial, waited for up to ten seconds.</summary>
+    static SafeFileHandle? OpenHmHid(HMController c)
     {
-        string serial = $"HM-CTL-{transportIndex:D4}";
-        var match = HMDeviceExtractor.ListDevices()
-            .FirstOrDefault(d => d.VendorId == vid && d.ProductId == pid && d.SerialNumberString == serial);
-        if (match == null) return null;
-        var h = CreateFile(match.DevicePath, GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
-        if (h.IsInvalid) { h.Dispose(); return null; }
-        return h;
+        string serial = SerialOf(c);
+        for (int i = 0; i < 100; i++)
+        {
+            var match = HMDeviceExtractor.ListDevices()
+                .FirstOrDefault(d => d.VendorId == c.Profile.VendorId && d.ProductId == c.Profile.ProductId && d.SerialNumberString == serial);
+            if (match != null)
+            {
+                var h = CreateFile(match.DevicePath, GENERIC_READ | GENERIC_WRITE,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+                if (!h.IsInvalid) return h;
+                h.Dispose();
+            }
+            System.Threading.Thread.Sleep(100);
+        }
+        return null;
+    }
+
+    /// <summary>HidD_GetFeature on <paramref name="reportId"/> into a buffer
+    /// of <paramref name="length"/> bytes, with the Win32 error on
+    /// failure.</summary>
+    static bool GetFeature(SafeFileHandle h, byte reportId, int length, out byte[] buf, out int error)
+    {
+        buf = new byte[length];
+        buf[0] = reportId;
+        bool ok = HidD_GetFeature(h, buf, (uint)length);
+        error = ok ? 0 : Marshal.GetLastWin32Error();
+        return ok;
     }
 
     static bool SendSetFeature(SafeFileHandle h, byte reportId, byte[] payload)
@@ -389,4 +467,7 @@ internal static class Program
     [DllImport("hid.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.U1)]
     static extern bool HidD_SetFeature(SafeFileHandle h, byte[] buf, uint len);
+    [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    static extern bool HidD_GetFeature(SafeFileHandle h, byte[] buf, uint len);
 }

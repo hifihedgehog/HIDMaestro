@@ -12,6 +12,8 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("TriggerClassifierCheck")]
 [assembly: InternalsVisibleTo("TriggerLiveCheck")]
 [assembly: InternalsVisibleTo("SideWinderFfbCheck")]
+[assembly: InternalsVisibleTo("PidFfbRoundtrip")]
+[assembly: InternalsVisibleTo("PidSetUsagesProbe")]
 [assembly: InternalsVisibleTo("LayoutAuditCheck")]
 [assembly: InternalsVisibleTo("AxisAddressingCheck")]
 [assembly: InternalsVisibleTo("SonyBtAxisRoleCheck")]

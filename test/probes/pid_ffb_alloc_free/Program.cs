@@ -31,6 +31,10 @@
 // PadForge's FfbTest run remains the canonical end-to-end arbiter for
 // the dinput8 PID handshake. This probe exercises the parts of v1.1.37
 // the test environment can drive deterministically.
+//
+// The live run uses the controller's backend, UMDF2 or USB/IP, and expects
+// the same allocation on both. The PID block's offline check over the
+// USB/IP wire is sidewinder_ffb_check's "offline" run.
 
 using System;
 using System.IO;
@@ -96,9 +100,10 @@ internal static class Program
         ctx.InstallDriver();
 
         Console.Write("  Creating two controllers (A, B)... ");
+        var beforeA = Present(ProbeVid, ProbePidA);
         using var ctrlA = ctx.CreateController(profileA);
         using var ctrlB = ctx.CreateController(profileB);
-        Console.WriteLine("OK");
+        Console.WriteLine($"OK ({ctrlA.Backend}, {ctrlB.Backend})");
 
         int failures = 0;
 
@@ -217,7 +222,7 @@ internal static class Program
 
         // ── Section 4: dynamic SetFeature/SetOutputReport (best-effort) ──
         Console.WriteLine("  --- Section 4: dynamic driver-side allocation (best-effort) ---");
-        SafeFileHandle? hidA = OpenHmHid(ProbeVid, ProbePidA, ctrlA.TransportIndex);
+        SafeFileHandle? hidA = OpenNew(ProbeVid, ProbePidA, beforeA);
         bool dynamicHit = false;
         if (hidA != null && !hidA.IsInvalid)
         {
@@ -240,8 +245,9 @@ internal static class Program
             }
             else
             {
-                Console.WriteLine($"  [dynamic SetFeature/SetOutputReport] SKIP: both rejected by HidClass " +
-                    $"(Win32={Marshal.GetLastWin32Error()}). PadForge FfbTest is the dynamic arbiter.");
+                Console.WriteLine($"  [dynamic SetFeature/SetOutputReport] FAIL: both rejected " +
+                    $"(Win32={Marshal.GetLastWin32Error()})");
+                failures++;
             }
 
             if (dynamicHit)
@@ -264,7 +270,8 @@ internal static class Program
         }
         else
         {
-            Console.WriteLine("  [dynamic SetFeature/SetOutputReport] SKIP: no HID handle");
+            Console.WriteLine("  [dynamic SetFeature/SetOutputReport] FAIL: the controller's HID interface did not open");
+            failures++;
         }
 
         if (failures == 0) { Console.WriteLine("=== PASS ==="); return 0; }
@@ -312,20 +319,32 @@ internal static class Program
         finally { CloseHandle(h); }
     }
 
-    /// <summary>The controller's own HID interface: this VID and PID, and
-    /// the serial the driver serves, HM-CTL- and the controller's transport
-    /// index. Another program's controller with the same VID and PID
-    /// serves its own index.</summary>
-    static SafeFileHandle? OpenHmHid(ushort vid, ushort pid, int transportIndex)
+    /// <summary>The HID interfaces of this VID and PID present now.</summary>
+    static string[] Present(ushort vid, ushort pid) =>
+        HMDeviceExtractor.ListDevices().Where(d => d.VendorId == vid && d.ProductId == pid)
+            .Select(d => d.DevicePath).ToArray();
+
+    /// <summary>The controller's own HID interface: the one of its VID and
+    /// PID that was not there before its create, on either backend. Another
+    /// program's controller with the same VID and PID was there before.
+    /// Waited for up to ten seconds.</summary>
+    static SafeFileHandle? OpenNew(ushort vid, ushort pid, string[] before)
     {
-        string serial = $"HM-CTL-{transportIndex:D4}";
-        var match = HMDeviceExtractor.ListDevices()
-            .FirstOrDefault(d => d.VendorId == vid && d.ProductId == pid && d.SerialNumberString == serial);
-        if (match == null) return null;
-        var h = CreateFile(match.DevicePath, GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
-        if (h.IsInvalid) { h.Dispose(); return null; }
-        return h;
+        for (int i = 0; i < 100; i++)
+        {
+            var match = HMDeviceExtractor.ListDevices()
+                .FirstOrDefault(d => d.VendorId == vid && d.ProductId == pid
+                                     && !before.Contains(d.DevicePath, StringComparer.OrdinalIgnoreCase));
+            if (match != null)
+            {
+                var h = CreateFile(match.DevicePath, GENERIC_READ | GENERIC_WRITE,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+                if (!h.IsInvalid) return h;
+                h.Dispose();
+            }
+            Thread.Sleep(100);
+        }
+        return null;
     }
 
     const uint FILE_MAP_READ = 0x4;

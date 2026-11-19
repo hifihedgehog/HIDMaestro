@@ -788,8 +788,10 @@ public sealed partial class HMController : IDisposable
 
         // Issue #67. A keyboard or mouse profile gets every frame delivered,
         // and so does an "other" profile whose descriptor is a mouse or a
-        // keyboard, the shape a consumer built before the types existed.
-        if (usbipHandle == null && presented.Inner.HasDescriptor)
+        // keyboard, the shape a consumer built before the types existed. On
+        // either backend: a USB/IP device acknowledges delivery from its side
+        // as the UMDF2 driver does (UsbipEmulatedDevice, NoteCarriedLocked).
+        if (presented.Inner.HasDescriptor)
         {
             var kbm = presented.Inner.GetOrBuildKeyboardMousePacker();
             if (kbm.HasMouse || kbm.HasKeyboard || kbm.HasConsumer) _kbm = kbm;
@@ -1755,8 +1757,9 @@ public sealed partial class HMController : IDisposable
 
     /// <summary>True when this controller sends every report to HID class
     /// in order instead of the latest one: a keyboard or mouse profile (or
-    /// an "other" profile whose descriptor is a keyboard or mouse) on a
-    /// driver that acknowledges delivery. Gamepads keep latest-wins, which
+    /// an "other" profile whose descriptor is a keyboard or mouse) where the
+    /// device acknowledges delivery: the UMDF2 driver, or the USB/IP device
+    /// itself. Gamepads keep latest-wins, which
     /// suits state. False once this program's own Everything sweep has
     /// removed the device.</summary>
     public bool DeliversEveryReport =>
@@ -1768,7 +1771,10 @@ public sealed partial class HMController : IDisposable
     /// motion stops, and an absolute pointer stays where it was. Without
     /// it a held key repeats until the device is removed.
     /// <see cref="Dispose"/> sends the same release itself. False once this
-    /// program's own Everything sweep has removed the device.</summary>
+    /// program's own Everything sweep has removed the device. False on the
+    /// USB/IP backend (<see cref="Backend"/>): there the device runs in the
+    /// consuming process and goes with it, unplugged by the host
+    /// controller, and no release frame is sent.</summary>
     public bool ReleasesOnConsumerExit =>
         _deliverEvery && SharedMemoryIO.ReleaseOnExitSupported(Index);
 

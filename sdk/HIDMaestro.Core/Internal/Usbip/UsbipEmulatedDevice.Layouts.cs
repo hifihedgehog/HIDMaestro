@@ -149,6 +149,7 @@ internal sealed partial class UsbipEmulatedDevice
                     if (length == 0) return;
                 }
                 seq = pending.Dequeue();
+                length = TakeInLengthLocked(seq, length);
                 CountCompletion();
                 conn = HoldSendLocked();
             }
@@ -178,6 +179,7 @@ internal sealed partial class UsbipEmulatedDevice
                     n = engine.TakeReply(_layoutReply!.Length, _layoutReply);
                     if (n < 0) return;
                     seq = pending.Dequeue();
+                    n = TakeInLengthLocked(seq, n);
                     CountCompletion();
                     conn = HoldSendLocked();
                 }
@@ -197,7 +199,7 @@ internal sealed partial class UsbipEmulatedDevice
     /// It parks until the clock's next tick, unless a tick already passed with
     /// no read to answer. While reports do not flow it parks and stays
     /// parked: the device answers every poll with NAK.</summary>
-    private void SubmitLayoutRead(uint seqnum)
+    private void SubmitLayoutRead(uint seqnum, int transferLength)
     {
         var engine = _engine!;
         lock (_streamSendLock)
@@ -219,7 +221,7 @@ internal sealed partial class UsbipEmulatedDevice
                 }
                 else if (!_reportOwed || !engine.InputOpenSince(out _))
                 {
-                    PendingFor(_layoutInEndpoint).Enqueue(seqnum);
+                    ParkInLocked(_layoutInEndpoint, seqnum, transferLength);
                     return;
                 }
                 else
@@ -230,12 +232,14 @@ internal sealed partial class UsbipEmulatedDevice
                     {
                         // The report changed back to the one last sent, or the
                         // layout turned to one that goes out on submit.
-                        PendingFor(_layoutInEndpoint).Enqueue(seqnum);
+                        ParkInLocked(_layoutInEndpoint, seqnum, transferLength);
                         return;
                     }
                     CountCompletion();
                 }
             }
+            // No more than the URB asked for.
+            length = Math.Min(length, Math.Max(0, transferLength));
             SendRetSubmitSpan(seqnum, 0, length, (reply ? _layoutReply! : _layoutReport).AsSpan(0, length));
         }
     }
@@ -264,6 +268,7 @@ internal sealed partial class UsbipEmulatedDevice
                 length = _layoutRunner!.Visit(_submitReport!);
                 if (length == 0) return;
                 seq = pending.Dequeue();
+                length = TakeInLengthLocked(seq, length);
                 CountCompletion();
                 conn = HoldSendLocked();
             }

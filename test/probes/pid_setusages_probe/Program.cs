@@ -70,6 +70,13 @@ internal static class Program
         // behavior. The probe-creates-virtual-then-spawns-FfbTest test is
         // otherwise identical to a PadForge run except for this pump.
         bool pumpInput = args.Any(a => a.Equals("--pump-input", StringComparison.OrdinalIgnoreCase));
+        // --no-pool: publish no Pool, run FfbTest, and report what
+        // DirectInput concluded and, on USB/IP, how many Pool reads the
+        // device refused. The UMDF2 driver fails such a read with
+        // STATUS_NO_SUCH_DEVICE and a USB device can only stall it, so the
+        // two backends' runs side by side show whether DirectInput reaches
+        // the same "no force feedback" result without asking again.
+        bool noPool = args.Any(a => a.Equals("--no-pool", StringComparison.OrdinalIgnoreCase));
 
         // ── v1.1.41 builder-API preflight ──
         // Verify the three ergonomic absorptions (Gamepad guard, auto-inject,
@@ -137,7 +144,19 @@ internal static class Program
 
         Console.Write("  Creating virtual... ");
         using var ctrl = ctx.CreateController(profile);
-        Console.WriteLine("OK");
+        Console.WriteLine($"OK ({ctrl.Backend})");
+
+        if (noPool)
+        {
+            var dev = ctrl.UsbipHandle?.Device;
+            int refusedBefore = dev?.PidPoolRefusals ?? 0;
+            var noPoolWatch = System.Diagnostics.Stopwatch.StartNew();
+            int code = RunFfbTest();
+            long ms = noPoolWatch.ElapsedMilliseconds;
+            string refused = dev == null ? "not counted on UMDF2" : $"{dev.PidPoolRefusals - refusedBefore}";
+            Console.WriteLine($"  [no Pool] backend {ctrl.Backend}: FfbTest exit {code} after {ms} ms, Pool reads refused: {refused}");
+            return 0;
+        }
 
         // ── --keep-alive mode ──
         // Skip the test phases. Just hold the virtual up and wait for the
@@ -331,7 +350,7 @@ internal static class Program
         // the descriptor's preparsed-data shape but are NOT a regression
         // signal. If the FfbTest above succeeded, the HidP probe results
         // are informational.
-        SafeFileHandle? hid = OpenHmHid(ProbeVid, ProbePid, ctrl.TransportIndex);
+        SafeFileHandle? hid = OpenHmHid(ctrl);
         if (hid == null || hid.IsInvalid)
         {
             Console.Error.WriteLine("HidP probe: could not open HID handle (skipping)");
@@ -791,15 +810,16 @@ internal static class Program
     const uint FILE_SHARE_READ = 1, FILE_SHARE_WRITE = 2;
     const uint OPEN_EXISTING = 3;
 
-    /// <summary>The controller's own HID interface: this VID and PID, and
-    /// the serial the driver serves, HM-CTL- and the controller's transport
-    /// index. Another program's controller with the same VID and PID
-    /// serves its own index.</summary>
-    static SafeFileHandle? OpenHmHid(ushort vid, ushort pid, int transportIndex)
+    /// <summary>The controller's own HID interface: its VID and PID, and the
+    /// serial its backend serves, the UMDF2 driver's HM-CTL- and the
+    /// transport index or the USB/IP device's identity serial. Another
+    /// program's controller with the same VID and PID serves its own.</summary>
+    static SafeFileHandle? OpenHmHid(HMController c)
     {
-        string serial = $"HM-CTL-{transportIndex:D4}";
+        string serial = c.Backend == HMBackend.Usbip ? c.UsbipHandle!.Device.Descriptors.SerialString!
+                                                     : HIDMaestro.Internal.DeviceOrchestrator.DriverSerial(c.TransportIndex);
         var match = HMDeviceExtractor.ListDevices()
-            .FirstOrDefault(d => d.VendorId == vid && d.ProductId == pid && d.SerialNumberString == serial);
+            .FirstOrDefault(d => d.VendorId == c.Profile.VendorId && d.ProductId == c.Profile.ProductId && d.SerialNumberString == serial);
         if (match == null) return null;
         var h = CreateFile(match.DevicePath, GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);

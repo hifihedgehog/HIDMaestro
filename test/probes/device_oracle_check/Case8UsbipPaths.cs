@@ -834,6 +834,7 @@ internal sealed class Case8UsbipPaths : IOracleCase
             Set("_pendingInterruptIn", pending);
             Set("_primaryPending", primaryPending);
             Set("_parkedBulkLength", new Dictionary<uint, int>());
+            Set("_parkedInLength", new Dictionary<uint, int>());
             Set("_readsPerEp", new Dictionary<byte, long>());
             Set("_completionsPerEp", new Dictionary<byte, long>());
             Set("_connection", connection);
