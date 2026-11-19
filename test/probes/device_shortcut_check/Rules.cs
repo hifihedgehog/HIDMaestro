@@ -199,6 +199,10 @@ internal static class Rules
             "the Steam client's registry key, read only to find the library that holds SteamVR (VrDriverBuilder.cs:103)"),
         new(new[] { "steamRoot" }, new[] { @"sdk\HIDMaestro.Core\Internal\VrDriverBuilder.cs" },
             "the Steam client's install directory, read only to find the library that holds SteamVR (VrDriverBuilder.cs:105)"),
+        new(new[] { "psAuthenticated", "psUnauthenticated", "psRequest" }, new[] { @"sdk\HIDMaestro.Core\Internal\AuthenticodeSigner.cs" },
+            "mssign32's SIGNER_SIGNATURE_INFO fields and SignerSignEx2 parameter as Microsoft names them (psAuthenticated as in cryptuiapi.h:380). ps is the Windows SDK's prefix for a pointer to a structure, not a device"),
+        new(new[] { "psFlat" }, new[] { @"sdk\HIDMaestro.Core\Internal\DriverCatalog.cs" },
+            "SIP_SUBJECTINFO's MS_ADDINFO_FLAT pointer as mssip.h:117 names it. ps is the Windows SDK's prefix for a pointer to a structure, not a device"),
         new(new[] { "RemovedSteamFirmwareStamp" }, new[] { @"sdk\HIDMaestro.Core\Internal\ControllerProfile.cs" },
             "the steamFirmwareStamp key v1.9.1 to v1.12.0 wrote, read only so a profile that carries it is refused with its replacement named (ValueSources.Validate). "
             + "No answer, report or device reads it. Design note, decision (d) and \"Where errors appear\""),
