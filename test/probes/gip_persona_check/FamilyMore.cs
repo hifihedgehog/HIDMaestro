@@ -196,6 +196,10 @@ internal static unsafe partial class Program
             // then goes ahead without asking the drivers (CM_DISABLE_ABSOLUTE),
             // and the open handles see the device go.
             Console.WriteLine($"  the query and removal: CM_Query_And_Remove_SubTree {disabled}, veto type {vetoType}{(veto.Length > 0 ? $" by {veto}" : "")}");
+            // Windows 10 19044 refuses CM_REMOVE_DISABLE as CR_INVALID_FLAG
+            // (measured on the Celeron): the polite disable goes first there.
+            if (disabled == 0x4 /* CR_INVALID_FLAG */)
+                disabled = CM_Disable_DevNode(dev, 0x4 /* CM_DISABLE_UI_NOT_OK */);
             if (disabled == 0x17 /* CR_REMOVE_VETOED */)
                 disabled = CM_Disable_DevNode(dev, 0x1 /* CM_DISABLE_ABSOLUTE */ | 0x4 /* CM_DISABLE_UI_NOT_OK */);
             Check("the USB device is disabled, which stops its driver stack and leaves the port alone", disabled == 0, $"{disabled}");
