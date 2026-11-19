@@ -442,11 +442,11 @@ The verdict is read once per process, since Windows sets the options as it start
 
 | Machine | Options | Driver |
 |--|--|--|
-| Surface Pro, Windows 11 ARM64 build 28000, as shipped (2026-11-17) | 0xF405 | refused, 0x800B0109 at the import |
-| The same Surface with the developer mode for driver signing set, with Secure Boot off, and with integrity checks off in the boot configuration (2026-11-18) | 0x3405 | refused each time, pnputil 0xE0000243, `setupapi.dev.log`: "Driver package signer is not trusted by system, and Code Integrity is enforced" |
-| Lenovo Legion Pro 7, Windows 11 x64 build 26200 | 0x2001 | installs |
-| MeLE PCG02, Windows 10 x64 build 19044 | 0x1 | installs |
-| The same MeLE with memory integrity on, in strict mode | 0x3401 | installs, and ran a controller |
+| Microsoft Surface Pro for Business, 12-inch (2nd Edition), Windows 11 Pro ARM64, version 26H1 (build 28000), as shipped (2026-11-17) | 0xF405 | refused, 0x800B0109 at the import |
+| The same Surface Pro with the developer mode for driver signing set, with Secure Boot off, and with integrity checks off in the boot configuration (2026-11-18) | 0x3405 | refused each time, pnputil 0xE0000243, `setupapi.dev.log`: "Driver package signer is not trusted by system, and Code Integrity is enforced" |
+| Lenovo Legion Pro 7 16AFR10H, Windows 11 IoT Enterprise LTSC x64, version 25H2 (build 26200) | 0x2001 | installs |
+| MeLE PCG02 GLE stick PC, Windows 10 IoT Enterprise LTSC x64, version 21H2 (build 19044) | 0x1 | installs |
+| The same PCG02 GLE with memory integrity on, in strict mode | 0x3401 | installs, and ran a controller |
 
 `BackendSelection` resolves a create's backend before the create takes anything machine-wide, in five steps:
 

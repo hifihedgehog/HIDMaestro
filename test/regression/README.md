@@ -101,10 +101,10 @@ still running then fails its scenario as a hang, with the probe's
 transcript, and its process tree is stopped.
 
 Total wall time at 2.3.0, with 111
-scenarios: 42 minutes for every scenario, every section and check, on the development laptop, a 16-core
-Lenovo Legion Pro 7, 63 minutes on a 4-core Celeron J4125 at
+scenarios: 42 minutes for every scenario, every section and check, on the development laptop, a
+Lenovo Legion Pro 7 16AFR10H, 63 minutes on a MeLE PCG02 GLE stick PC at
 `HIDMAESTRO_TIMEOUT_SCALE=2`, 41 minutes there with every controller on USB/IP,
-and 24 minutes on an ARM64 Surface. Use `-Filter` to run one scenario when
+and 24 minutes on an ARM64 Microsoft Surface Pro. Use `-Filter` to run one scenario when
 iterating.
 
 The battery runs the test app and the probes built for the machine's
@@ -129,9 +129,12 @@ another architecture.
 A scenario whose probe finds a condition missing prints `[SKIP]` and,
 under it, the probe's own line naming that condition. These are the
 conditions, the scenarios they skip, and the three machines the release
-gate runs on: the development laptop, the Celeron J4125 (Windows 10,
-x64) and an ARM64 Surface (Snapdragon X2 Plus, Windows 11), the last two
-driven over SSH.
+gate runs on: a Lenovo Legion Pro 7 16AFR10H laptop (AMD Ryzen 9
+9955HX3D, Windows 11 IoT Enterprise LTSC, x64), a MeLE PCG02 GLE stick
+PC (Intel Celeron J4125, Windows 10 IoT Enterprise LTSC, x64) and a
+Microsoft Surface Pro for Business, 12-inch (2nd Edition) (Qualcomm
+Snapdragon X2 Plus, Windows 11 Pro, ARM64), the last two driven over
+SSH.
 
 | Condition | What skips | Laptop | Celeron | Surface |
 |---|---|---|---|---|
