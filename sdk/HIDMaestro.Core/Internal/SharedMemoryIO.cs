@@ -930,43 +930,77 @@ internal static partial class SharedMemoryIO
         }
     }
 
-    /// <summary>Atomic seqlock write of the full PID state struct. The
-    /// caller has already mutated the relevant fields; this method
-    /// publishes the new SeqNo so the driver's seqlocked read picks up
-    /// a consistent snapshot. Single-writer (the SDK consumer) →
-    /// single-reader (the driver per-IOCTL); seqlock retry handles the
-    /// (rare) reader-mid-write window.</summary>
-    private static void PidStateBeginWrite(IntPtr view, ref uint seqNo)
+    /// <summary>The start of a seqlocked write to the PID state section: an
+    /// odd SeqNo past the section's own. Every writer counts on that one
+    /// number: this SDK's PublishPid* calls, a USB/IP device's effect
+    /// blocks (UsbipEmulatedDevice.Pid.cs) and the UMDF2 driver's
+    /// (driver.c AllocateEbiInBlockLoad, ResetPidState), which reads the
+    /// section's SeqNo and adds one. A count of the program's own moved the
+    /// SeqNo back past the device's writes, and a reader whose two looks
+    /// fell on one number before and after a write took half-written fields
+    /// as whole. The start replaces the number only while the section still
+    /// holds the one it was worked out from. A write in progress elsewhere,
+    /// an odd number, gets a short wait first, and a writer that died
+    /// mid-write leaves one that the start passes. <paramref name="seqNo"/>
+    /// takes the start. Caller holds <see cref="PidStateLock"/>.</summary>
+    internal static unsafe void PidStateBeginWrite(IntPtr view, ref uint seqNo)
     {
-        // Mark write-in-progress (odd seqNo)
-        uint pending = seqNo + 1;
-        Marshal.WriteInt32(view, PID_OFFSET_SEQNO, (int)pending);
-        Thread.MemoryBarrier();
+        ref int word = ref *(int*)((byte*)view + PID_OFFSET_SEQNO);
+        for (int spin = 0; spin < 64 && (Volatile.Read(ref word) & 1) != 0; spin++)
+            Thread.SpinWait(16);
+        while (true)
+        {
+            int seen = Volatile.Read(ref word);
+            uint start = ((uint)seen + 1) | 1;
+            // A full fence: the odd number is out before any field.
+            if (Interlocked.CompareExchange(ref word, (int)start, seen) == seen)
+            {
+                seqNo = start;
+                return;
+            }
+        }
     }
 
-    private static void PidStateEndWrite(IntPtr view, ref uint seqNo)
+    /// <summary>The end of the write <see cref="PidStateBeginWrite"/>
+    /// started: the even number after its start, or after whatever another
+    /// writer left there meanwhile, so a reader never sees after the write a
+    /// number it saw before it. <paramref name="seqNo"/> takes it. Caller
+    /// holds <see cref="PidStateLock"/>.</summary>
+    internal static unsafe void PidStateEndWrite(IntPtr view, ref uint seqNo)
     {
-        // Mark write-complete (even seqNo)
-        Thread.MemoryBarrier();
-        seqNo += 2;
-        Marshal.WriteInt32(view, PID_OFFSET_SEQNO, (int)seqNo);
+        ref int word = ref *(int*)((byte*)view + PID_OFFSET_SEQNO);
+        while (true)
+        {
+            int seen = Volatile.Read(ref word);
+            uint end = (uint)seen == seqNo ? seqNo + 1 : ((uint)seen | 1) + 1;
+            // A full fence: every field is out before the even number.
+            if (Interlocked.CompareExchange(ref word, (int)end, seen) == seen)
+            {
+                seqNo = end;
+                return;
+            }
+        }
     }
 
     /// <summary>Publish PID Pool Report fields and flip PidEnabled to 1.
     /// First call enables FFB on this controller; subsequent calls update
-    /// the pool state.</summary>
+    /// the pool state. <paramref name="seqNo"/> takes the SeqNo the write
+    /// ended on, as every Write* here does.</summary>
     public static void WritePidPool(IntPtr view, ref uint seqNo,
                                     ushort ramPoolSize, byte maxSimultaneousEffects,
                                     bool deviceManagedPool, bool sharedParameterBlocks)
     {
-        PidStateBeginWrite(view, ref seqNo);
-        Marshal.WriteByte(view,  PID_OFFSET_ENABLED,           1);
-        Marshal.WriteInt16(view, PID_OFFSET_POOL_RAMSIZE,      (short)ramPoolSize);
-        Marshal.WriteByte(view,  PID_OFFSET_POOL_MAXSIM,       maxSimultaneousEffects);
-        byte memMgmt = (byte)((deviceManagedPool ? 0x01 : 0x00) |
-                              (sharedParameterBlocks ? 0x02 : 0x00));
-        Marshal.WriteByte(view,  PID_OFFSET_POOL_MEMMGMT,      memMgmt);
-        PidStateEndWrite(view, ref seqNo);
+        lock (s_pidStateViews)
+        {
+            PidStateBeginWrite(view, ref seqNo);
+            Marshal.WriteByte(view,  PID_OFFSET_ENABLED,           1);
+            Marshal.WriteInt16(view, PID_OFFSET_POOL_RAMSIZE,      (short)ramPoolSize);
+            Marshal.WriteByte(view,  PID_OFFSET_POOL_MAXSIM,       maxSimultaneousEffects);
+            byte memMgmt = (byte)((deviceManagedPool ? 0x01 : 0x00) |
+                                  (sharedParameterBlocks ? 0x02 : 0x00));
+            Marshal.WriteByte(view,  PID_OFFSET_POOL_MEMMGMT,      memMgmt);
+            PidStateEndWrite(view, ref seqNo);
+        }
     }
 
     /// <summary>Publish PID Block Load Report fields. Single-slot
@@ -978,11 +1012,14 @@ internal static partial class SharedMemoryIO
                                          byte effectBlockIndex, byte loadStatus,
                                          ushort ramPoolAvailable)
     {
-        PidStateBeginWrite(view, ref seqNo);
-        Marshal.WriteByte(view,  PID_OFFSET_BL_EBI,        effectBlockIndex);
-        Marshal.WriteByte(view,  PID_OFFSET_BL_LOADSTATUS, loadStatus);
-        Marshal.WriteInt16(view, PID_OFFSET_BL_RAMAVAIL,   (short)ramPoolAvailable);
-        PidStateEndWrite(view, ref seqNo);
+        lock (s_pidStateViews)
+        {
+            PidStateBeginWrite(view, ref seqNo);
+            Marshal.WriteByte(view,  PID_OFFSET_BL_EBI,        effectBlockIndex);
+            Marshal.WriteByte(view,  PID_OFFSET_BL_LOADSTATUS, loadStatus);
+            Marshal.WriteInt16(view, PID_OFFSET_BL_RAMAVAIL,   (short)ramPoolAvailable);
+            PidStateEndWrite(view, ref seqNo);
+        }
     }
 
     /// <summary>Publish the descriptor-derived PID Report ID overrides.
@@ -1012,10 +1049,13 @@ internal static partial class SharedMemoryIO
     public static void WritePidState(IntPtr view, ref uint seqNo,
                                      byte effectBlockIndex, byte stateFlags)
     {
-        PidStateBeginWrite(view, ref seqNo);
-        Marshal.WriteByte(view, PID_OFFSET_STATE_EBI,   effectBlockIndex);
-        Marshal.WriteByte(view, PID_OFFSET_STATE_FLAGS, stateFlags);
-        PidStateEndWrite(view, ref seqNo);
+        lock (s_pidStateViews)
+        {
+            PidStateBeginWrite(view, ref seqNo);
+            Marshal.WriteByte(view, PID_OFFSET_STATE_EBI,   effectBlockIndex);
+            Marshal.WriteByte(view, PID_OFFSET_STATE_FLAGS, stateFlags);
+            PidStateEndWrite(view, ref seqNo);
+        }
     }
 
     /// <summary>v1.1.37: seqlocked read of the Block Load fields the

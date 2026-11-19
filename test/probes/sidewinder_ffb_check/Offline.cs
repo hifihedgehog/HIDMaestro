@@ -185,7 +185,8 @@ internal static class Offline
 
             Check("Pool reads refused stay at 2 once a Pool is published", device.PidPoolRefusals == 2, $"{device.PidPoolRefusals}");
 
-            // It remakes the section: the view above is gone after it.
+            // Both remake the section: the view above is gone after them.
+            SeqLock(cl, rids);
             LateRequest(cl, rids);
         }
         finally
@@ -216,6 +217,40 @@ internal static class Offline
             rids.CreateNewEffectReportId, rids.BlockFreeReportId, rids.DeviceControlReportId);
         SharedMemoryIO.WritePidPool(view, ref seq, 0x0400, 2, deviceManagedPool: true, sharedParameterBlocks: false);
         return view;
+    }
+
+    static uint SeqNo(IntPtr view) => (uint)Marshal.ReadInt32(view, SharedMemoryIO.PID_OFFSET_SEQNO);
+
+    /// <summary>The program's writers and the device's share the section's
+    /// SeqNo. The program publishes a Pool, the host creates an effect, and
+    /// the program publishes a State: a reader that looks at the SeqNo
+    /// before and after that State write must see it move, or it takes the
+    /// half-written State as whole (driver.c ReadPidState).</summary>
+    static void SeqLock(Client cl, PidReportIdExtractor.PidReportIds rids)
+    {
+        Console.WriteLine("\n-- One SeqNo for the program's writes and the device's --");
+        uint seq = 0;
+        IntPtr view = RemakeSection(rids, ref seq);
+        cl.ControlOut(0x21, 0x09, 0x0311, 0, new byte[] { 0x11, 0x01, 0x00, 0x00 });
+        uint before = SeqNo(view);
+        uint seq1 = SeqNo(view);
+        Check("positive control: with no write between them, the reader's two looks agree", seq1 == SeqNo(view));
+
+        // WritePidState split where a reader on another thread or in the
+        // driver can look: the odd SeqNo, half the fields, the even one.
+        var begin = Sm.GetMethod("PidStateBeginWrite", AnyStatic)!;
+        var end = Sm.GetMethod("PidStateEndWrite", AnyStatic)!;
+        var args = new object[] { view, seq };
+        lock (SharedMemoryIO.PidStateLock) begin.Invoke(null, args);
+        uint during = SeqNo(view);
+        Marshal.WriteByte(view, SharedMemoryIO.PID_OFFSET_STATE_EBI, 7);
+        lock (SharedMemoryIO.PidStateLock) end.Invoke(null, args);
+        uint after = SeqNo(view);
+        Check("the SeqNo never moves backward: the program's write starts past the device's",
+              during > before && after > during, $"{before} -> {during} -> {after}");
+        Check("the write in progress is odd and the finished one even", (during & 1) == 1 && (after & 1) == 0, $"{during}, {after}");
+        Check("a reader that looked before the write and after it sees the SeqNo move and reads again",
+              seq1 != after, $"before {seq1}, after {after}");
     }
 
     /// <summary>A request on the connection's thread of a device whose

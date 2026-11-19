@@ -376,15 +376,14 @@ internal sealed partial class UsbipEmulatedDevice
         ushort poolSize = *(ushort*)(p + SharedMemoryIO.PID_OFFSET_POOL_RAMSIZE);
         uint allocCount = (uint)Volatile.Read(ref count);
         if (allocCount <= (uint)cap) remaining = (uint)(poolSize / cap) * ((uint)cap - allocCount);
-        ref int seqNo = ref *(int*)(p + SharedMemoryIO.PID_OFFSET_SEQNO);
-        int seq = Volatile.Read(ref seqNo) + 1;
-        Volatile.Write(ref seqNo, seq);
-        Interlocked.MemoryBarrier();
+        // The section's SeqNo, as the driver counts on it and the program's
+        // writers do (SharedMemoryIO.PidStateBeginWrite).
+        uint seq = 0;
+        SharedMemoryIO.PidStateBeginWrite(view, ref seq);
         p[SharedMemoryIO.PID_OFFSET_BL_EBI] = allocated;
         p[SharedMemoryIO.PID_OFFSET_BL_LOADSTATUS] = loadStatus;
         *(ushort*)(p + SharedMemoryIO.PID_OFFSET_BL_RAMAVAIL) = (ushort)remaining;
-        Interlocked.MemoryBarrier();
-        Volatile.Write(ref seqNo, seq + 1);
+        SharedMemoryIO.PidStateEndWrite(view, ref seq);
     }
 
     /// <summary>driver.c ResetPidState: every effect block freed, the Block
@@ -395,17 +394,14 @@ internal sealed partial class UsbipEmulatedDevice
         byte* p = (byte*)view;
         Interlocked.Exchange(ref *(int*)(p + SharedMemoryIO.PID_OFFSET_EBI_BITMAP), 0);
         Interlocked.Exchange(ref *(int*)(p + SharedMemoryIO.PID_OFFSET_EBI_COUNT), 0);
-        ref int seqNo = ref *(int*)(p + SharedMemoryIO.PID_OFFSET_SEQNO);
-        int seq = Volatile.Read(ref seqNo) + 1;
-        Volatile.Write(ref seqNo, seq);
-        Interlocked.MemoryBarrier();
+        uint seq = 0;
+        SharedMemoryIO.PidStateBeginWrite(view, ref seq);
         p[SharedMemoryIO.PID_OFFSET_BL_EBI] = 0;
         p[SharedMemoryIO.PID_OFFSET_BL_LOADSTATUS] = 0;
         *(ushort*)(p + SharedMemoryIO.PID_OFFSET_BL_RAMAVAIL) = *(ushort*)(p + SharedMemoryIO.PID_OFFSET_POOL_RAMSIZE);
         p[SharedMemoryIO.PID_OFFSET_STATE_EBI] = 0;
         p[SharedMemoryIO.PID_OFFSET_STATE_FLAGS] = 0;
-        Interlocked.MemoryBarrier();
-        Volatile.Write(ref seqNo, seq + 1);
+        SharedMemoryIO.PidStateEndWrite(view, ref seq);
     }
 
     /// <summary>driver.c FreeEbi: the block's bit cleared, and the count
