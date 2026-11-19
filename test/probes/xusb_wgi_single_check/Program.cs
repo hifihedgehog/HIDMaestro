@@ -38,6 +38,19 @@
 //
 // Three cycles, because the race this guards against was probabilistic.
 //
+// On the USB/IP backend the controller is the XUSB function: a USB device
+// xusb22 binds, which publishes the XUSB interface and makes the HID child
+// itself. There is no HIDMaestro devnode to carry the tripwire, so check 1
+// becomes what that backend presents in its place: the device's service is
+// xusb22, no xinputhid filter sits on it or on its HID child, and exactly
+// one XUSB interface is the device's own. Check 4 counts the buttons of
+// the HID child xusb22 makes. Checks 2 and 3 are the same on both.
+//
+// Arguments: [--backend umdf2|usbip] [--profiles id,id,...|family]. With
+// none, xbox-360-wired on the backend Auto resolves to, as the battery
+// runs it. "family" names the ten profiles that reach XInput through the
+// XUSB companion.
+//
 // Then thirty quick cycles under one identity key, as a consumer creates
 // them, each disposing as soon as XInput lists the pad and sampling the
 // pad's own slot every 2 ms after Dispose returns: it may not read connected
@@ -113,7 +126,11 @@ static class XusbWgiSingleCheck
         public uint cbSize; public Guid Class; public uint Flags; public IntPtr Reserved;
     }
 
-    const ushort Vid = 0x045E, Pid = 0x028E;
+    // The identity of the profile a cycle runs, and the product ID WGI
+    // reports for it: the HID child's, or 0 for a pad behind the receiver
+    // on USB/IP, which WGI names by the capabilities xusb22 reports, PID 0,
+    // as PlasticBand's captures of retail wireless pads read.
+    static ushort Vid = 0x045E, Pid = 0x028E, WgiPid = 0x028E;
 
     [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
     static extern int CM_Get_Device_Interface_List_SizeW(out uint len, ref Guid g,
@@ -146,6 +163,16 @@ static class XusbWgiSingleCheck
     }
 
     static int s_fail;
+
+    /// <summary>The instance id an interface path names:
+    /// <c>\\?\usb#vid_045e&amp;pid_028e#serial#{guid}</c> is
+    /// <c>usb\vid_045e&amp;pid_028e\serial</c>.</summary>
+    static string InstanceOf(string path)
+    {
+        string s = path.StartsWith(@"\\?\", StringComparison.Ordinal) ? path[4..] : path;
+        int g = s.LastIndexOf("#{", StringComparison.Ordinal);
+        return (g > 0 ? s[..g] : s).Replace('#', '\\');
+    }
 
     /// <summary>How long a cycle holds after WGI first lists the virtual,
     /// for a second registration. With the create's restart of the main
@@ -246,17 +273,17 @@ static class XusbWgiSingleCheck
         foreach (var g in WgiPins.Pads())
         {
             var r = WgiPins.RawOf(g);
-            if (r != null && r.HardwareVendorId == Vid && r.HardwareProductId == Pid && !skip.Contains(r.NonRoamableId)) gp++;
+            if (r != null && r.HardwareVendorId == Vid && r.HardwareProductId == WgiPid && !skip.Contains(r.NonRoamableId)) gp++;
         }
         int raw = WgiPins.Raws()
-            .Count(r => r.HardwareVendorId == Vid && r.HardwareProductId == Pid && !skip.Contains(r.NonRoamableId));
+            .Count(r => r.HardwareVendorId == Vid && r.HardwareProductId == WgiPid && !skip.Contains(r.NonRoamableId));
         return (gp, raw);
     }
 
-    /// <summary>The NonRoamableId of every 045E:028E RawGameController WGI
-    /// lists now.</summary>
+    /// <summary>The NonRoamableId of every RawGameController of the
+    /// identity WGI lists now.</summary>
     static HashSet<string> WgiIds() =>
-        WgiPins.Raws().Where(r => r.HardwareVendorId == Vid && r.HardwareProductId == Pid)
+        WgiPins.Raws().Where(r => r.HardwareVendorId == Vid && r.HardwareProductId == WgiPid)
             .Select(r => r.NonRoamableId).ToHashSet(StringComparer.Ordinal);
 
     /// <summary>UpperFilters on the main devnode, found by ControllerIndex
@@ -355,106 +382,48 @@ static class XusbWgiSingleCheck
         return 0;
     }
 
+    static readonly string[] Family =
+    {
+        "xbox-360-arcade-stick", "xbox-360-dance-pad", "xbox-360-flight-stick", "xbox-360-guitar-v1", "xbox-360-guitar-v2",
+        "xbox-360-type2", "xbox-360-wheel-v1", "xbox-360-wheel-v2", "xbox-360-wired", "xbox-360-wireless",
+    };
+
     static int Main(string[] args)
     {
         if (args.Length > 0 && args[0] == "--discriminate") return Discriminate();
         Console.WriteLine("=== XUSB-companion virtuals are ONE WGI gamepad (issue #59) ===");
+        var backend = HMBackend.Auto;
+        var ids = new List<string> { "xbox-360-wired" };
+        for (int i = 0; i + 1 < args.Length; i += 2)
+        {
+            if (args[i] == "--backend") backend = args[i + 1] == "usbip" ? HMBackend.Usbip : args[i + 1] == "umdf2" ? HMBackend.Umdf2 : HMBackend.Auto;
+            else if (args[i] == "--profiles") ids = args[i + 1] == "family" ? Family.ToList() : args[i + 1].Split(',').ToList();
+        }
 
         // Event subscription first: WGI's broker only tracks controllers for
         // processes it believes are listening.
         WgiPins.Listen();
         Thread.Sleep(1000);
 
-        // A 045E:028E device already here is not the probe's, and the
-        // counts below leave it out.
-        var bench = WgiIds();
-        Console.WriteLine($"  045E:028E devices WGI lists before the first create, left out of the counts: {bench.Count}");
-
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
-        var prof = ctx.GetProfile("xbox-360-wired");
-        if (prof == null) { Console.WriteLine("  xbox-360-wired missing"); return 1; }
-
-        for (int cycle = 1; cycle <= 3; cycle++)
+        Console.WriteLine($"  backend {backend}, resolving to {(backend == HMBackend.Auto ? HMContext.MachineBackend : backend)} for a profile both backends present");
+        HMProfile? last = null;
+        foreach (var id in ids)
         {
-            Console.WriteLine();
-            Console.WriteLine($"-- cycle {cycle}: fresh create --");
-            HMController? c = null;
-            try
-            {
-                c = ctx.CreateController(prof);
-
-                var filters = MainUpperFilters();
-                Check("the xinputhid tripwire is on the main devnode",
-                      filters.Any(f => string.Equals(f, "xinputhid", StringComparison.OrdinalIgnoreCase)),
-                      filters.Length > 0 ? string.Join(",", filters) : "(absent)");
-
-                // WGI settles asynchronously; poll until the virtual shows up,
-                // then hold for a moment so a late second registration would
-                // still be caught rather than raced past.
-                (int Gamepads, int Raw) counts = (0, 0);
-                var seen = System.Diagnostics.Stopwatch.StartNew();
-                while (seen.ElapsedMilliseconds < 20000)
-                {
-                    Thread.Sleep(50);
-                    counts = WgiCounts(bench);
-                    if (counts.Gamepads >= 1 && counts.Raw >= 1) break;
-                }
-                var hold = System.Diagnostics.Stopwatch.StartNew();
-                while (hold.ElapsedMilliseconds < SecondRegistrationMs)
-                {
-                    Thread.Sleep(50);
-                    var c2 = WgiCounts(bench);
-                    if (c2.Gamepads > 1 || c2.Raw > 1) break;
-                }
-                counts = WgiCounts(bench);
-                Check("WGI shows exactly ONE Gamepad for the virtual", counts.Gamepads == 1,
-                      $"gamepads={counts.Gamepads}");
-                Check("WGI shows exactly ONE RawGameController", counts.Raw == 1,
-                      $"raw={counts.Raw}");
-                var xusbIfs = XusbInterfaces();
-                Console.WriteLine($"     XUSB interfaces present: {xusbIfs.Count}");
-                foreach (var s in xusbIfs) Console.WriteLine($"       {s}");
-                if (counts.Raw != 1)
-                {
-                    // Name the impostors: NonRoamableId embeds the backing
-                    // device interface path, which says WHICH two devices
-                    // WGI is holding, instead of leaving that to argument.
-                    foreach (var r in WgiPins.Raws())
-                        if (r.HardwareVendorId == Vid && r.HardwareProductId == Pid && !bench.Contains(r.NonRoamableId))
-                            Console.WriteLine($"       raw: '{r.DisplayName}' id={r.NonRoamableId}");
-                }
-
-                // Polled: XInput may list the pad a moment after WGI does.
-                var look = System.Diagnostics.Stopwatch.StartNew();
-                bool xinputSeen;
-                while (!(xinputSeen = XInputMask() != 0) && look.ElapsedMilliseconds < 5000) Thread.Sleep(10);
-                Check("XInput still sees the controller", xinputSeen);
-
-                int buttons = ButtonCount();
-                Check("the HID child still reports exactly 10 buttons", buttons == 10,
-                      $"buttons={buttons}");
-            }
-            catch (Exception ex)
-            {
-                Check("create cycle runs without throwing", false, ex.Message);
-            }
-            finally
-            {
-                try { c?.Dispose(); } catch { }
-                // XUSB-companion teardown runs several seconds; wait until
-                // WGI has let go so the next cycle starts from zero.
-                var gone = System.Diagnostics.Stopwatch.StartNew();
-                while (gone.ElapsedMilliseconds < 30000)
-                {
-                    Thread.Sleep(100);
-                    if (WgiCounts(bench) is { Gamepads: 0, Raw: 0 }) break;
-                }
-            }
+            var p = ctx.GetProfile(id);
+            if (p == null) { Check($"{id} is in the catalog", false); continue; }
+            last = p;
+            Cycles(ctx, p, backend);
         }
+        if (last == null) return 1;
+        var prof = ctx.GetProfile("xbox-360-wired") ?? last;
+        Vid = prof.VendorId;
+        Pid = prof.ProductId;
+        WgiPid = Pid;
 
         Console.WriteLine();
-        Console.WriteLine("-- Dispose leaves no XInput slot behind --");
+        Console.WriteLine($"-- Dispose leaves no XInput slot behind: {prof.Id} --");
         const int ComeBackWindowMs = 100;
         int cameBack = 0, notEmpty = 0;
         for (int i = 0; i < 30; i++)
@@ -462,7 +431,7 @@ static class XusbWgiSingleCheck
             // Only the slot the pad takes is watched: another controller can
             // take or leave a slot of its own while this runs.
             int others = XInputMask(), own = 0;
-            using (ctx.CreateController(prof, "xusb-wgi-quick"))
+            using (ctx.CreateController(prof, "xusb-wgi-quick", backend))
             {
                 var up = System.Diagnostics.Stopwatch.StartNew();
                 while ((own = XInputMask() & ~others) == 0 && up.ElapsedMilliseconds < 5000) Thread.Sleep(1);
@@ -486,8 +455,162 @@ static class XusbWgiSingleCheck
 
         Console.WriteLine();
         Console.WriteLine(s_fail == 0
-            ? "=== ONE WGI GAMEPAD, TEN BUTTONS, EVERY CYCLE ==="
+            ? "=== ONE WGI GAMEPAD, ITS BUTTONS, EVERY CYCLE ==="
             : $"=== {s_fail} FAILED ===");
         return s_fail == 0 ? 0 : 1;
     }
+
+    /// <summary>Three fresh creates of <paramref name="prof"/> on
+    /// <paramref name="backend"/>, each held to the four checks.</summary>
+    static void Cycles(HMContext ctx, HMProfile prof, HMBackend backend)
+    {
+        Vid = prof.VendorId;
+        Pid = prof.ProductId;
+        // WGI lists the controller under the product ID XInput's
+        // capabilities give, on both backends: 0 for the pad behind a
+        // receiver, which the companion answers from the profile and xusb22
+        // from the receiver's link control packet.
+        string? capsPid = prof.XInput?.Capabilities?.Pid;
+        WgiPid = capsPid == null ? Pid : Convert.ToUInt16(capsPid, 16);
+        // WGI lists a Gamepad only for an XInput pad of the gamepad subtype,
+        // as for the retail pads: an arcade stick, a dance pad, a flight
+        // stick, a guitar or a wheel is a RawGameController alone.
+        string subType = prof.XInput?.SubType ?? "gamepad";
+        int wantGamepads = subType is "gamepad" or "1" or "0x01" ? 1 : 0;
+        Console.WriteLine();
+        Console.WriteLine($"== {prof.Id}, {Vid:X4}:{Pid:X4}, WGI {Vid:X4}:{WgiPid:X4}, subtype {subType}, {wantGamepads} Gamepad ==");
+        // A device of the identity already here is not the probe's, and the
+        // counts below leave it out.
+        var bench = WgiIds();
+        Console.WriteLine($"  {Vid:X4}:{Pid:X4} devices WGI lists before the first create, left out of the counts: {bench.Count}");
+        // The buttons the HID child reports: on UMDF2 the profile's own
+        // descriptor, which is 10 for xbox-360-wired. On USB/IP the HID child
+        // is xusb22's, which also has 10 for a gamepad. Read on the first
+        // cycle, held on the next two.
+        int firstButtons = -2;
+        // The USB device's identity: a receiver's is the xinput block's
+        // information, every other device's the profile's.
+        ushort usbVid = Vid, usbPid = Pid;
+        if (prof.Connection == "wireless-adapter" && prof.XInput?.Information is { } info)
+        {
+            if (info.Vid != null) usbVid = Convert.ToUInt16(info.Vid, 16);
+            if (info.Pid != null) usbPid = Convert.ToUInt16(info.Pid, 16);
+        }
+
+        for (int cycle = 1; cycle <= 3; cycle++)
+        {
+            Console.WriteLine();
+            Console.WriteLine($"-- {prof.Id} cycle {cycle}: fresh create --");
+            HMController? c = null;
+            var xusbBefore = XusbInterfaces().ToHashSet(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                c = ctx.CreateController(prof, null, backend);
+                Console.WriteLine($"  on {c.Backend}");
+
+                if (c.Backend == HMBackend.Umdf2)
+                {
+                    var filters = MainUpperFilters();
+                    Check("the xinputhid tripwire is on the main devnode",
+                          filters.Any(f => string.Equals(f, "xinputhid", StringComparison.OrdinalIgnoreCase)),
+                          filters.Length > 0 ? string.Join(",", filters) : "(absent)");
+                }
+                else
+                {
+                    // In the tripwire's place: the device is xusb22's, no
+                    // xinputhid filter on it, and one XUSB interface its own.
+                    // The device is the one whose XUSB interface arrived with
+                    // this create: its path names its instance.
+                    string? path = null;
+                    var arrival = System.Diagnostics.Stopwatch.StartNew();
+                    // A wireless pad's device is the receiver, of the
+                    // identity the profile's xinput.information gives.
+                    while ((path = XusbInterfaces().FirstOrDefault(s => !xusbBefore.Contains(s)
+                                && s.Contains($"usb#vid_{usbVid:x4}&pid_{usbPid:x4}#", StringComparison.OrdinalIgnoreCase))) == null
+                           && arrival.ElapsedMilliseconds < 10_000) Thread.Sleep(25);
+                    string usb = path == null ? "" : InstanceOf(path);
+                    using var k = usb.Length == 0 ? null : Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{usb}");
+                    string service = k?.GetValue("Service") as string ?? "(none)";
+                    string[] upper = k?.GetValue("UpperFilters") as string[] ?? Array.Empty<string>();
+                    Check("the USB device's service is xusb22, with no xinputhid filter", string.Equals(service, "xusb22", StringComparison.OrdinalIgnoreCase)
+                          && !upper.Any(f => f.Equals("xinputhid", StringComparison.OrdinalIgnoreCase)), $"{usb}: service {service}, upper filters {string.Join(",", upper)}");
+                    string hash = usb.Replace('\\', '#');
+                    int own = usb.Length == 0 ? 0 : XusbInterfaces().Count(s => s.Contains(hash, StringComparison.OrdinalIgnoreCase));
+                    Check("exactly one XUSB interface is the device's own", own == 1, $"{own}");
+                }
+
+
+                // WGI settles asynchronously; poll until the virtual shows up,
+                // then hold for a moment so a late second registration would
+                // still be caught rather than raced past.
+                (int Gamepads, int Raw) counts = (0, 0);
+                var seen = System.Diagnostics.Stopwatch.StartNew();
+                while (seen.ElapsedMilliseconds < 20000)
+                {
+                    Thread.Sleep(50);
+                    counts = WgiCounts(bench);
+                    if (counts.Gamepads >= wantGamepads && counts.Raw >= 1) break;
+                }
+                var hold = System.Diagnostics.Stopwatch.StartNew();
+                while (hold.ElapsedMilliseconds < SecondRegistrationMs)
+                {
+                    Thread.Sleep(50);
+                    var c2 = WgiCounts(bench);
+                    if (c2.Gamepads > 1 || c2.Raw > 1) break;
+                }
+                counts = WgiCounts(bench);
+                // One Gamepad for a pad of the gamepad subtype, none for the
+                // others, on both backends. Never two.
+                Check(wantGamepads == 1 ? "WGI shows exactly ONE Gamepad for the virtual" : "WGI shows no Gamepad for a pad of this subtype",
+                      counts.Gamepads == wantGamepads, $"gamepads={counts.Gamepads}");
+                Check("WGI shows exactly ONE RawGameController", counts.Raw == 1,
+                      $"raw={counts.Raw}");
+                var xusbIfs = XusbInterfaces();
+                Console.WriteLine($"     XUSB interfaces present: {xusbIfs.Count}");
+                foreach (var s in xusbIfs) Console.WriteLine($"       {s}");
+                if (counts.Raw != 1)
+                {
+                    foreach (var r in WgiPins.Raws())
+                        Console.WriteLine($"       every raw: {r.HardwareVendorId:X4}:{r.HardwareProductId:X4} '{r.DisplayName}' id={r.NonRoamableId}");
+                    // Name the impostors: NonRoamableId embeds the backing
+                    // device interface path, which says WHICH two devices
+                    // WGI is holding, instead of leaving that to argument.
+                    foreach (var r in WgiPins.Raws())
+                        if (r.HardwareVendorId == Vid && r.HardwareProductId == WgiPid && !bench.Contains(r.NonRoamableId))
+                            Console.WriteLine($"       raw: '{r.DisplayName}' id={r.NonRoamableId}");
+                }
+
+                // Polled: XInput may list the pad a moment after WGI does.
+                var look = System.Diagnostics.Stopwatch.StartNew();
+                bool xinputSeen;
+                while (!(xinputSeen = XInputMask() != 0) && look.ElapsedMilliseconds < 5000) Thread.Sleep(10);
+                Check("XInput still sees the controller", xinputSeen);
+
+                int buttons = ButtonCount();
+                if (firstButtons == -2) firstButtons = buttons;
+                if (prof.Id == "xbox-360-wired")
+                    Check("the HID child still reports exactly 10 buttons", buttons == 10, $"buttons={buttons}");
+                else
+                    Check("the HID child reports its buttons, the same count every cycle", buttons > 0 && buttons == firstButtons,
+                          $"buttons={buttons}, first cycle {firstButtons}");
+            }
+            catch (Exception ex)
+            {
+                Check("create cycle runs without throwing", false, ex.Message);
+            }
+            finally
+            {
+                try { c?.Dispose(); } catch { }
+                // XUSB-companion teardown runs several seconds; wait until
+                // WGI has let go so the next cycle starts from zero.
+                var gone = System.Diagnostics.Stopwatch.StartNew();
+                while (gone.ElapsedMilliseconds < 30000)
+                {
+                    Thread.Sleep(100);
+                    if (WgiCounts(bench) is { Gamepads: 0, Raw: 0 }) break;
+                }
+            }
+        }
+    }
+
 }

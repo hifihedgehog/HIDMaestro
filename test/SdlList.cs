@@ -104,7 +104,7 @@ partial class Program
             rec.Out("version", System.Text.Encoding.ASCII.GetBytes($"{v / 1000000}.{v / 1000 % 1000}.{v % 1000}"));
             Console.WriteLine($"  SDL {v / 1000000}.{v / 1000 % 1000}.{v % 1000} ({Marshal.PtrToStringUTF8(SDL_GetRevision())})");
 
-            using var ctx = new HMContext();
+            using var ctx = new HMContext(s_backend);
             ctx.LoadDefaultProfiles();
             ctx.InstallDriver();
             foreach (string id in ids)

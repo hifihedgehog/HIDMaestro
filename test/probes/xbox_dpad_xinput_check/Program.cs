@@ -10,6 +10,12 @@
 // (btnHigh >> 2) & 0x0F always read zero and wButtons.DPAD_* never
 // fired).
 //
+// On the USB/IP backend the pad is the XUSB function, a USB device Windows'
+// own xusb22 binds, and the same XInputGetState call reads the report the
+// device sends. The expected bits are the same on both backends.
+// Argument: [--backend umdf2|usbip]. With none, the backend Auto resolves
+// to, as the battery runs it.
+//
 // Exit code 0 on all PASS, 1 if any direction fails.
 
 using System;
@@ -55,7 +61,11 @@ internal sealed class Program
     public static int Main(string[] args)
     {
         Console.WriteLine("=== v1.3.3 Xbox 360 wired d-pad XInput probe (#19) ===\n");
-        using var ctx = new HMContext();
+        int at = Array.IndexOf(args, "--backend");
+        var backend = at >= 0 && at + 1 < args.Length
+            ? (args[at + 1] == "usbip" ? HMBackend.Usbip : args[at + 1] == "umdf2" ? HMBackend.Umdf2 : HMBackend.Auto)
+            : HMBackend.Auto;
+        using var ctx = new HMContext(backend);
         ctx.LoadDefaultProfiles();
         Console.Write("  Installing driver... ");
         ctx.InstallDriver();
@@ -66,6 +76,7 @@ internal sealed class Program
 
         Console.Write("  Creating xbox-360-wired controller... ");
         var ctrl = ctx.CreateController(profile);
+        Console.WriteLine($"  on {ctrl.Backend}");
         Console.WriteLine("OK");
 
         // Find the slot the new virtual claimed. SetupController has its own

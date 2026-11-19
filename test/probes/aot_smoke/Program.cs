@@ -108,7 +108,10 @@ internal static class Program
               $"{string.Join(",", kinds)} vs {string.Join(",", expectedKinds)}");
 
         // 3. The driver.
-        try { ctx.InstallDriver(); Check("the driver installs", true); }
+        // InstallDriver installs what the machine's backend needs: the UMDF2
+        // driver where Windows installs HIDMaestro's package, the USB/IP
+        // host controller where it does not or where HIDMAESTRO_BACKEND says so.
+        try { ctx.InstallDriver(); Check($"the driver installs, for the {HMContext.MachineBackend} backend", true); }
         catch (Exception ex) { Check("the driver installs", false, $"{ex.GetType().Name}: {ex.Message}"); return Finish(); }
 
         // 4 and 5. One controller on each backend.
@@ -129,6 +132,8 @@ internal static class Program
             catch (Exception ex) { Check($"{d.Id}: creates", false, $"{ex.GetType().Name}: {ex.Message}"); continue; }
             if (firstControllerMs < 0) firstControllerMs = create.Elapsed.TotalMilliseconds;
             Check($"{d.Id}: creates", true);
+            HMBackend resolved = ctx.ResolveBackend(profile);
+            Check($"{d.Id}: runs on {c.Backend}, the backend its create resolves to here", c.Backend == resolved, $"resolves to {resolved}");
 
             int outputs = 0;
             c.OutputReceived += (_, pkt) => { if (pkt.ReportId == d.OutputId) Interlocked.Increment(ref outputs); };

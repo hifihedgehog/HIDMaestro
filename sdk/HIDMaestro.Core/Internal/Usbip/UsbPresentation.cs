@@ -35,10 +35,11 @@ namespace HIDMaestro.Internal.Usbip;
 ///
 /// <para>The Xbox profiles that reach XInput through the XUSB companion or
 /// xinputhid get no derived HID device: a plain HID function would give
-/// Windows the identity of a controller that serves Microsoft OS
-/// descriptors with none, and Windows remembers that answer per identity
-/// (<see cref="NotPresentableReason"/>). A profile that reaches XInput
-/// through xinputhid presents the GIP function instead
+/// Windows a controller identity with another device's answers, which
+/// Windows remembers per identity. A profile whose presentation is the XUSB
+/// companion presents the XUSB function instead
+/// (<see cref="XusbFunction"/>), the USB device Windows gives xusb22. A profile
+/// that reaches XInput through xinputhid presents the GIP function
 /// (<see cref="GipFunction"/>), the USB device Windows gives its GIP
 /// stack, whose HID child xinputhid binds.</para>
 /// </summary>
@@ -47,17 +48,53 @@ internal sealed class UsbPresentation
     /// <summary>The configuration the device presents, blobs included.</summary>
     public UsbConfigurationSpec Spec { get; }
 
-    /// <summary>True when the SDK built the descriptors from the profile.</summary>
-    public bool Derived { get; }
+    /// <summary>Where the descriptors come from.</summary>
+    public UsbPresentationKind Kind { get; }
+
+    /// <summary>True when the SDK built the descriptors from the profile's
+    /// HID descriptor (<see cref="UsbPresentationKind.DerivedHid"/>).</summary>
+    public bool Derived => Kind == UsbPresentationKind.DerivedHid;
+
+    /// <summary>The report a device with no HID interface sends: the XUSB
+    /// function's 20-byte input report, or an authored profile's own
+    /// <c>extendedReport</c>. Null for a derived HID device.</summary>
+    public ExtendedReportSpec? Report { get; }
+
+    /// <summary>String descriptors by index that the device serves in place
+    /// of the profile's strings. Empty for every presentation but the XUSB
+    /// function.</summary>
+    public IReadOnlyDictionary<byte, string> Strings { get; }
+
+    /// <summary>The output reports the device turns into packets before
+    /// they reach the output ring, or null to publish every output report
+    /// as it came.</summary>
+    public XusbFunction.OutputPacket[]? OutputPackets { get; }
+
+    /// <summary>The XUSB function this presentation is, or null for any
+    /// other kind: its start messages, and the messages its output rules
+    /// send back, which the device builds with its own serial.</summary>
+    public XusbFunction.Function? Function { get; }
+
+    /// <summary>The profile's XInput subtype, written into the function's
+    /// messages. 0 for any other kind.</summary>
+    public byte SubType { get; }
 
     /// <summary>True when an endpoint of the configuration is isochronous:
     /// only such a device gets an audio engine.</summary>
     public bool HasIsochronous { get; }
 
-    private UsbPresentation(UsbConfigurationSpec spec, bool derived)
+    private static readonly IReadOnlyDictionary<byte, string> NoStrings = new Dictionary<byte, string>();
+
+    private UsbPresentation(UsbConfigurationSpec spec, UsbPresentationKind kind, ExtendedReportSpec? report = null,
+                            IReadOnlyDictionary<byte, string>? strings = null, XusbFunction.Function? function = null, byte subType = 0)
     {
         Spec = spec;
-        Derived = derived;
+        Kind = kind;
+        Report = report;
+        Strings = strings ?? NoStrings;
+        Function = function;
+        OutputPackets = function?.OutputPackets;
+        SubType = subType;
         foreach (var iface in spec.Interfaces ?? new List<UsbInterfaceSpec>())
             foreach (var alt in iface?.AltSettings ?? new List<UsbAltSettingSpec>())
                 foreach (var ep in alt?.Endpoints ?? new List<UsbEndpointSpec>())
@@ -85,7 +122,7 @@ internal sealed class UsbPresentation
         if (cfg != null && cfg.IsAuthored)
         {
             RefusePinsBesideBlobs(cfg);
-            return new UsbPresentation(cfg, derived: false);
+            return new UsbPresentation(cfg, UsbPresentationKind.Authored, profile.ExtendedReport);
         }
         if (NotPresentableReason(profile) is { } reason)
             throw new HMBackendNotSupportedException(profile.Id, HMBackend.Usbip, reason);
@@ -98,7 +135,18 @@ internal sealed class UsbPresentation
                     "pins a derived HID device, and this profile presents the GIP function, whose descriptors are the GIP model's.");
             return Resolve(GipFunction.FormOf(profile));
         }
-        return new UsbPresentation(Derive(profile, cfg), derived: true);
+        if (XInputPresentation.Resolve(profile).XusbCompanion)
+        {
+            // The XUSB function is the model's device. A usbConfiguration of
+            // pins has no derived HID device to pin.
+            if (cfg != null)
+                throw new ProfileDefectException(Root,
+                    "pins a derived HID device, and this profile presents the XUSB function, whose descriptors are the XUSB model's.");
+            var f = XusbFunction.For(profile);
+            return new UsbPresentation(XusbFunction.Build(profile, f), UsbPresentationKind.XusbFunction, f.Report, f.Strings, f,
+                                       XusbFunction.SubType(profile));
+        }
+        return new UsbPresentation(Derive(profile, cfg), UsbPresentationKind.DerivedHid);
     }
 
     /// <summary>Why the USB/IP backend cannot present
@@ -114,10 +162,11 @@ internal sealed class UsbPresentation
             return form == null ? "its usbForm names no profile." : NotPresentableReason(form);
         }
         if (profile.UsbConfiguration is { IsAuthored: true }) return null;
-        if (!profile.HasDescriptor) return "it has no HID descriptor.";
         var xi = XInputPresentation.Resolve(profile);
-        if (xi.XusbCompanion)
-            return "it reaches XInput through the XUSB companion, and the USB/IP backend has no XUSB function for it yet.";
+        // The XUSB function needs no HID descriptor: xusb22 makes the HID
+        // child and its descriptor.
+        if (xi.XusbCompanion) return XusbFunction.RefusedIdentityReason(profile);
+        if (!profile.HasDescriptor) return "it has no HID descriptor.";
         if (xi.Xinputhid) return GipFunction.RefusedReason(profile);
         return null;
     }
@@ -333,4 +382,18 @@ internal sealed class UsbPresentation
             throw new ProfileDefectException(path, $"\"{text}\" is not a 16-bit hex value such as \"0x0200\".");
         return v;
     }
+}
+
+/// <summary>Where a USB/IP device's descriptors come from.</summary>
+internal enum UsbPresentationKind
+{
+    /// <summary>The profile's <c>usbConfiguration</c> carries them, served
+    /// verbatim.</summary>
+    Authored,
+    /// <summary>Built from the profile's HID descriptor and identity, with
+    /// any pins applied.</summary>
+    DerivedHid,
+    /// <summary>The XUSB function of the catalog's XUSB model, with the
+    /// profile's VID, PID and XInput subtype written in.</summary>
+    XusbFunction,
 }

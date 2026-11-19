@@ -975,6 +975,26 @@ internal static partial class DeviceOrchestrator
                 profile.DeviceDescription ?? profile.ProductString ?? "HIDMaestro Controller", controllerIndex);
     }
 
+    /// <summary>The device on the USB/IP root hub port with the profile's
+    /// VID and PID, or the serial's name as soon as Windows has that one
+    /// present, within 10 s (scaled) of <paramref name="sw"/>'s start. Null
+    /// when neither appeared. Another device of that VID and PID can only be
+    /// on the port while its own removal finishes, and then it carries its
+    /// own serial.</summary>
+    private static string? FindOnPort(string serialInstanceId, int vhciPort, Stopwatch sw)
+    {
+        int budget = TimeoutScale.Apply(10000);
+        int vidPid = serialInstanceId.LastIndexOf('\\');
+        string prefix = vidPid > 0 ? serialInstanceId[..(vidPid + 1)] : serialInstanceId;
+        while (vhciPort >= 1 && sw.ElapsedMilliseconds < budget)
+        {
+            if (DeviceManager.IsPresent(serialInstanceId)) return serialInstanceId;
+            if (Usbip.VhciClient.DeviceOnRootHubPort(vhciPort) is { } id && id.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return id;
+            Thread.Sleep(25);
+        }
+        return null;
+    }
+
     /// <summary>A derived USB/IP device's start wait, the UMDF2 create's
     /// step 4 for the USB device: the USB device appears on the host
     /// controller's port <paramref name="vhciPort"/>, its HID child appears
@@ -989,7 +1009,7 @@ internal static partial class DeviceOrchestrator
     internal static string AwaitUsbipStart(string serialInstanceId, int vhciPort, int controllerIndex)
     {
         var sw = Stopwatch.StartNew();
-        string? onPort = UsbInstanceOnPort(serialInstanceId, vhciPort, TimeoutScale.Apply(10000), sw);
+        string? onPort = FindOnPort(serialInstanceId, vhciPort, sw);
         string usbInstanceId = onPort ?? serialInstanceId;
         int left = (int)Math.Max(0, 10000 - sw.ElapsedMilliseconds / TimeoutScale.Factor);
         var child = WaitForHidChild(usbInstanceId, controllerIndex, timeoutMs: left);
@@ -1001,27 +1021,6 @@ internal static partial class DeviceOrchestrator
         if (started == StartWait.Failed) throw StartError(usbInstanceId, controllerIndex, childId);
         LogDiag($"    usbip start wait {usbInstanceId} on port {vhciPort}{(onPort == null ? " (not found on the port)" : "")}: child {childId ?? "(none)"} {child}, start {started} in {sw.ElapsedMilliseconds}ms");
         return usbInstanceId;
-    }
-
-    /// <summary>The instance id Windows gave the USB device on the host
-    /// controller's port <paramref name="vhciPort"/>: the device there with
-    /// the VID and PID of <paramref name="serialInstanceId"/>, or the
-    /// serial's name as soon as Windows has that one present. Another device
-    /// of that VID and PID can only be on the port while its own removal
-    /// finishes, and then it carries its own serial. Null when none was
-    /// found within <paramref name="budgetMs"/> of <paramref name="sw"/>'s
-    /// start.</summary>
-    private static string? UsbInstanceOnPort(string serialInstanceId, int vhciPort, int budgetMs, Stopwatch sw)
-    {
-        int vidPid = serialInstanceId.LastIndexOf('\\');
-        string prefix = vidPid > 0 ? serialInstanceId[..(vidPid + 1)] : serialInstanceId;
-        while (vhciPort >= 1 && sw.ElapsedMilliseconds < budgetMs)
-        {
-            if (DeviceManager.IsPresent(serialInstanceId)) return serialInstanceId;
-            if (Usbip.VhciClient.DeviceOnRootHubPort(vhciPort) is { } id && id.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return id;
-            Thread.Sleep(25);
-        }
-        return null;
     }
 
     /// <summary>The GIP function's start wait, the UMDF2 create's xinputhid
@@ -1040,13 +1039,13 @@ internal static partial class DeviceOrchestrator
     /// start, and either way it has no XInput slot. A device that bound
     /// and made no HID child in time is logged and the create goes on, as
     /// the derived device's wait does. The device is found on its port as
-    /// <see cref="AwaitUsbipStart"/> finds it. Returns the instance id
+    /// <see cref="FindOnPort"/> finds it. Returns the instance id
     /// Windows gave it, <paramref name="serialInstanceId"/> when none was
     /// found in time.</summary>
     internal static string AwaitUsbipGipStart(string serialInstanceId, int vhciPort, int controllerIndex, int slotsBefore, string? compatibleId = null)
     {
         var sw = Stopwatch.StartNew();
-        string usbInstanceId = UsbInstanceOnPort(serialInstanceId, vhciPort, TimeoutScale.Apply(10000), sw) ?? serialInstanceId;
+        string usbInstanceId = FindOnPort(serialInstanceId, vhciPort, sw) ?? serialInstanceId;
         string? child = null, hid = null;
         int budget = TimeoutScale.Apply(15000);
         while (sw.ElapsedMilliseconds < budget)
@@ -1089,8 +1088,44 @@ internal static partial class DeviceOrchestrator
         return usbInstanceId;
     }
 
-    /// <summary>XInput's connected slots, for a start wait that reads them
-    /// before the attach.</summary>
+    /// <summary>The XUSB function's start wait, the UMDF2 create's companion
+    /// and slot waits for the USB device: xusb22 publishes the XUSB interface
+    /// on the device's own instance, then XInput lists one slot more than
+    /// <paramref name="slotsBefore"/>, read before the attach. A failed
+    /// start throws as the UMDF2 create's does. A wait that runs out is
+    /// logged and the create goes on, as there: the controller still reaches
+    /// XInput on a consumer's next poll. Returns the name Windows gave the
+    /// device, found on its port as the derived device's wait finds it.</summary>
+    internal static string AwaitUsbipXusbStart(string serialInstanceId, int vhciPort, int controllerIndex, int slotsBefore)
+    {
+        var sw = Stopwatch.StartNew();
+        string? onPort = FindOnPort(serialInstanceId, vhciPort, sw);
+        string usbInstanceId = onPort ?? serialInstanceId;
+        int left = (int)Math.Max(0, TimeoutScale.Apply(10000) - sw.ElapsedMilliseconds);
+        bool arrived = DeviceManager.WaitForDeviceInterface(usbInstanceId, XusbInterfaceGuid, left,
+            () => StartFailed(usbInstanceId, controllerIndex));
+        if (!arrived && StartFailed(usbInstanceId, controllerIndex, final: true))
+            throw StartError(usbInstanceId, controllerIndex);
+        long interfaceMs = sw.ElapsedMilliseconds;
+        int slotsAfter = slotsBefore;
+        if (arrived)
+        {
+            // The UMDF2 create's budget for the slot claim (SetupController).
+            var slotClock = Stopwatch.StartNew();
+            int budget = TimeoutScale.Apply(500);
+            while (slotClock.ElapsedMilliseconds < budget)
+            {
+                slotsAfter = CountConnectedXInputSlots();
+                if (slotsAfter > slotsBefore) break;
+                Thread.Sleep(10);
+            }
+        }
+        LogDiag($"    usbip xusb start wait {usbInstanceId} on port {vhciPort}{(onPort == null ? " (not found on the port)" : "")}: interface {(arrived ? "arrived" : "TIMEOUT")} in {interfaceMs}ms, " +
+                $"XInput slots before={slotsBefore} after={slotsAfter} in {sw.ElapsedMilliseconds}ms");
+        return usbInstanceId;
+    }
+
+    /// <summary>The XInput slots that read connected now, 0 to 4.</summary>
     internal static int ConnectedXInputSlots() => CountConnectedXInputSlots();
 
     /// <summary>The CachedInputReportIds value: the report IDs of a UMDF2

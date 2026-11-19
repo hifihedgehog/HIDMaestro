@@ -4,7 +4,7 @@ rem  pre-tag-validate.cmd
 rem
 rem  Mandatory pre-release validation. Run before `git tag vX.Y.Z`.
 rem  - Builds the SDK + test app
-rem  - Runs the full regression battery (104 scenarios, 30 min
+rem  - Runs the full regression battery (110 scenarios, 30 min
 rem    on the development laptop, a Lenovo Legion Pro 7)
 rem  - Exits non-zero if any scenario FAILed; do NOT tag/push/release in
 rem    that case
@@ -20,7 +20,7 @@ rem      and orphan the regression script's stdin pipe).
 rem    - sudo/gsudo NOT used here (caller is responsible for elevation).
 rem
 rem  Exit codes:
-rem    0  All 104 scenarios PASSED. Safe to tag/push/release.
+rem    0  All 110 scenarios PASSED. Safe to tag/push/release.
 rem    1  At least one scenario FAILED. Do NOT release.
 rem    2  Build failed. Fix before re-running.
 rem ====================================================================
@@ -136,9 +136,16 @@ echo       BUILD OK
 echo.
 
 rem 3. Run the full regression battery
-echo [2/3] Running regression battery (104 scenarios)...
+echo [2/3] Running regression battery (110 scenarios)...
 echo.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "test\regression\regression_battery.ps1" -StopOnFailure
+rem    The gate runs on the machine's own backend unless the caller names
+rem    one in HM_GATE_BACKEND (Auto, Umdf2 or Usbip). An HIDMAESTRO_BACKEND
+rem    left in the environment would make an x64 gate a USB/IP-only run, so
+rem    it is cleared here, and the battery prints the backend it runs first.
+set "HIDMAESTRO_BACKEND="
+if not defined HM_GATE_BACKEND set "HM_GATE_BACKEND=Auto"
+echo        Backend: %HM_GATE_BACKEND%
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "test\regression\regression_battery.ps1" -StopOnFailure -Backend %HM_GATE_BACKEND%
 set BATTERY_EXIT=%ERRORLEVEL%
 echo.
 
@@ -154,7 +161,7 @@ if %BATTERY_EXIT% neq 0 (
 echo [3/3] Validation complete.
 echo.
 echo ====================================================================
-echo  [PASS] 104/104 scenarios passed. Safe to:
+echo  [PASS] 110/110 scenarios passed. Safe to:
 echo         git tag vX.Y.Z
 echo         git push origin master vX.Y.Z
 echo         gh release create vX.Y.Z ...

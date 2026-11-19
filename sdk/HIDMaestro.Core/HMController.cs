@@ -219,8 +219,8 @@ public sealed partial class HMController : IDisposable
     /// controller: every controller on <see cref="HMBackend.Umdf2"/>, every
     /// derived USB/IP device, and an authored USB/IP profile with no
     /// isochronous endpoint, such as gamecube-adapter, steam-controller-2
-    /// and xbox-360-wired-full. Before 2.3.0 every USB/IP controller had
-    /// one.</summary>
+    /// and xbox-one-s-full, and an XUSB function. Before 2.3.0 every USB/IP
+    /// controller had one.</summary>
     public HMUsbAudio? UsbAudio { get; }
 
     // Encoder built once from the profile descriptor at construction time;
@@ -375,6 +375,16 @@ public sealed partial class HMController : IDisposable
     // v1.3.5: buffer sized to ExtendedReport.Size, allocated once. NULL
     // when the profile has no extendedReport.
     private byte[]? _extendedReportBuffer;
+
+    // The extended report the codec fills: the profile's extendedReport, or
+    // the report a USB/IP device with no HID interface sends
+    // (UsbPresentation.Report). Null when there is none.
+    private readonly ExtendedReportSpec? _extSpec;
+
+    // The length every raw frame must have, 0 for any: a USB/IP device with
+    // no HID interface takes its input report whole
+    // (UsbipEmulatedDevice.RawFrameLength).
+    private readonly int _rawFrameLength;
 
     // v1.3.5: host-side arm flag. False until a host write matches one of
     // ExtendedReport.armOn triggers; true thereafter for the lifetime of
@@ -804,14 +814,22 @@ public sealed partial class HMController : IDisposable
         // vendor blob, so the legacy fallback path has no buttons or axes
         // to fill and every consumer would read a live device that never
         // moves.
-        bool alwaysArmed = presented.Inner.ExtendedReport?.AlwaysArmed == true;
-        _rawVerbatimReportId = presented.Inner.ExtendedReport?.ReportIdByte ?? 0;
+        // The extended report this controller sends: the presented profile's,
+        // or on a USB/IP device with no HID interface the one its
+        // presentation sends, as the XUSB function sends its 20-byte input
+        // report for a profile whose descriptor is the UMDF2 backend's.
+        _extSpec = usbipHandle is { Device.Descriptors.HasHidInterface: false } noHid
+            ? noHid.Device.Presentation.Report
+            : presented.Inner.ExtendedReport;
+        _rawFrameLength = usbipHandle?.Device.RawFrameLength ?? 0;
+        bool alwaysArmed = _extSpec?.AlwaysArmed == true;
+        _rawVerbatimReportId = _extSpec?.ReportIdByte ?? 0;
         _rawEmitsVerbatim = alwaysArmed && _rawVerbatimReportId != 0;
-        bool armOnDeclared = presented.Inner.ExtendedReport?.ArmOn != null
-                          && presented.Inner.ExtendedReport.ArmOn.Count > 0;
-        if (presented.Inner.ExtendedReport != null && (armOnDeclared || alwaysArmed))
+        bool armOnDeclared = _extSpec?.ArmOn != null
+                          && _extSpec.ArmOn.Count > 0;
+        if (_extSpec != null && (armOnDeclared || alwaysArmed))
         {
-            _extendedReportBuffer = new byte[presented.Inner.ExtendedReport.Size];
+            _extendedReportBuffer = new byte[_extSpec.Size];
             _extEncoderState = new VendorBlobCodec.EncoderState();
             _extendedModeArmed = alwaysArmed;
         }
@@ -852,8 +870,8 @@ public sealed partial class HMController : IDisposable
         }
         // A sensor timestamp that holds while a register's condition does, as
         // a Triton's holds while its IMU is off.
-        if (_extEncoderState != null && presented.Inner.ExtendedReport != null
-            && VendorBlobProgram.Get(presented.Inner.ExtendedReport).HoldWhile is { } hold)
+        if (_extEncoderState != null && _extSpec != null
+            && VendorBlobProgram.Get(_extSpec).HoldWhile is { } hold)
         {
             _extEncoderState.Hold = ConditionParser.Parse(hold, model.Registers, "$.extendedReport.fields[].holdWhile");
             _extEncoderState.HoldRegisters = _protocolEngine?.RegisterWords ?? model.Registers.Initial;
@@ -870,7 +888,7 @@ public sealed partial class HMController : IDisposable
         // (rare: only LocalService permission issues) we just don't raise
         // OutputReceived events.
         _stream = StreamClock.Compile(presented.Inner, model.Registers);
-        if (_stream != null && presented.Inner.ExtendedReport is { SendsOnClock: true })
+        if (_stream != null && _extSpec is { SendsOnClock: true })
         {
             // Issue #72: the device reports on its own clock. The first
             // report goes out now, so the device streams before any driver
@@ -1118,7 +1136,7 @@ public sealed partial class HMController : IDisposable
         // at one field.
         bool useExtended = _extendedReportBuffer != null
                         && _extEncoderState != null
-                        && Presented.Inner.ExtendedReport != null
+                        && _extSpec != null
                         && _extendedModeArmed;
 
         // The six simple slots feed the ports, the state block, the codec
@@ -1199,7 +1217,7 @@ public sealed partial class HMController : IDisposable
         // regression. useExtended is read at the top of this method.
         if (useExtended)
         {
-            // Presented.Inner.ExtendedReport's field list drives byte placement.
+            // _extSpec's field list drives byte placement.
             // Sticks / triggers / buttons / hat encode through
             // VendorBlobCodec; CRC32 (if declared) is computed last. For
             // Sony BT, the buffer is full 78 bytes including byte[0] = RID
@@ -1207,7 +1225,7 @@ public sealed partial class HMController : IDisposable
             // The driver-side WriteToInputReport recognizes the extended
             // path via the SHARED_INPUT.ExtendedReportSize > 0 hint set
             // alongside the legacy bytes below.
-            VendorBlobCodec.EncodeInput(Presented.Inner.ExtendedReport!, in state,
+            VendorBlobCodec.EncodeInput(_extSpec!, in state,
                 (float)mlx, (float)mly, (float)mrx, (float)mry, (float)mlt, (float)mrt,
                 _extendedReportBuffer!, _extEncoderState!);
             report = _extendedReportBuffer!;
@@ -1284,7 +1302,7 @@ public sealed partial class HMController : IDisposable
         // profiles so WriteInputFrame skips the 14-byte Marshal.Copy.
         if (useExtended)
         {
-            int extLen = Presented.Inner.ExtendedReport!.Size;
+            int extLen = _extSpec!.Size;
             SharedMemoryIO.WriteInputFrame(
                 _inputView, _inputEvent, ref _inputSeqNo,
                 Array.Empty<byte>(), 0,
@@ -1570,6 +1588,7 @@ public sealed partial class HMController : IDisposable
     public void SubmitRawReport(ReadOnlySpan<byte> report)
     {
         ThrowIfDisposed();
+        if (_rawFrameLength != 0 && report.Length != _rawFrameLength) ThrowRawFrameLength(report.Length);
         if (_otherFormRaw is { } other && (uint)report.Length < (uint)other.Length && other[report.Length]) ThrowIfOtherForm(report.Length);
         if (_stateBlockSpec != null && SubmitRawStateBlock(report)) return;
         if ((uint)(report.Length - 1) >= SharedMemoryIO.DATA_CAPACITY)
@@ -1708,6 +1727,7 @@ public sealed partial class HMController : IDisposable
     public void SubmitRawExtendedReport(ReadOnlySpan<byte> report)
     {
         ThrowIfDisposed();
+        if (_rawFrameLength != 0 && report.Length != _rawFrameLength) ThrowRawFrameLength(report.Length);
         if (_otherFormRaw is { } other && (uint)report.Length < (uint)other.Length && other[report.Length]) ThrowIfOtherForm(report.Length);
         if (_stateBlockSpec != null && SubmitRawStateBlock(report)) return;
         // The extended lane carries the whole frame in an 80-byte field. The
@@ -1993,7 +2013,7 @@ public sealed partial class HMController : IDisposable
     /// path so both conventions land on the same wire bytes.</summary>
     private void EmitExtendedFrame(byte[] buffer, int length)
     {
-        int declaredSize = Presented.Inner.ExtendedReport!.Size;
+        int declaredSize = _extSpec!.Size;
         byte rid = _rawVerbatimReportId;
         int emitLen = length;
 
@@ -2296,7 +2316,7 @@ public sealed partial class HMController : IDisposable
                     // outputWrite trigger types stay supported for
                     // future profiles that arm on writes (e.g. Switch
                     // Pro init handshake).
-                    var extIn = Presented.Inner.ExtendedReport;
+                    var extIn = _extSpec;
                     if (extIn?.ArmOn != null && !_extendedModeArmed)
                     {
                         bool isFeature     = source == (byte)HMOutputSource.HidFeature;
@@ -2452,6 +2472,17 @@ public sealed partial class HMController : IDisposable
     [System.Diagnostics.CodeAnalysis.DoesNotReturn]
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static void ThrowDisposed() => throw new ObjectDisposedException(nameof(HMController));
+
+    /// <summary>A raw frame on a USB/IP device with no HID interface, such as
+    /// the XUSB function, is the device's input report whole, report ID
+    /// first, and no other length is one.</summary>
+    [System.Diagnostics.CodeAnalysis.DoesNotReturn]
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private void ThrowRawFrameLength(int length) =>
+        throw new ArgumentException(
+            $"A raw frame on this controller is its {_rawFrameLength}-byte input report whole, report ID first, " +
+            $"and this frame is {length} bytes. Profile '{Profile.Id}' presents a USB device with no HID interface on the USB/IP backend.",
+            "report");
 
     [System.Diagnostics.CodeAnalysis.DoesNotReturn]
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]

@@ -415,7 +415,7 @@ internal static unsafe partial class Program
         Console.WriteLine("\n-- every other USB/IP persona keeps its interface --");
         var catalog = ProfileDatabase.LoadEmbedded().All;
         var others = catalog.Where(x => x.RequiresUsbipBackend && x.Id != ProfileId).OrderBy(x => x.Id, StringComparer.Ordinal).ToList();
-        Check("the catalog's other USB/IP personas", others.Count >= 9, string.Join(" ", others.Select(x => x.Id)));
+        Check("the catalog's other USB/IP personas", others.Count >= 8, string.Join(" ", others.Select(x => x.Id)));
         foreach (var other in others)
         {
             string why = "";

@@ -14,5 +14,10 @@
   <ItemGroup>
     <!-- Another running program with HIDMaestro.Core.dll loaded. -->
     <Compile Include="..\probe_common\SdkConsumers.cs" Link="SdkConsumers.cs" />
+    <!-- The HID class's own reads of a collection, as backend_parity_check
+         makes them. -->
+    <Compile Include="..\backend_parity_check\Hid.cs" Link="Hid.cs" />
+    <!-- A user's own profile that authors a device with no HID interface. -->
+    <EmbeddedResource Include="authored-xusb.json" LogicalName="authored-xusb.json" />
   </ItemGroup>
 </Project>

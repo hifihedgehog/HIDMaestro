@@ -184,7 +184,7 @@ internal static partial class Program
             {
                 Type entry = sdk.GetType("HIDMaestro.Internal.MachineClaims")!.GetNestedType("ControllerEntry", BindingFlags.NonPublic | BindingFlags.Public)!;
                 var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(entry))!;
-                list.Add(Activator.CreateInstance(entry, "HM_0003", 3, "umdf2", null, null)!);
+                list.Add(Activator.CreateInstance(entry, "HM_0003", 3, "umdf2", null, null, null)!);
                 Array a = Array.CreateInstance(record, 1);
                 a.SetValue(Activator.CreateInstance(record, "of13-owner", pid ?? Environment.ProcessId, null, 0L, "1.13.0", 0, live, false, list, null)!, 0);
                 return a;
@@ -533,7 +533,7 @@ internal static partial class Program
         object Own(bool listsController)
         {
             var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(entry))!;
-            if (listsController) list.Add(Activator.CreateInstance(entry, "HM_0000", 0, "umdf2", null, null)!);
+            if (listsController) list.Add(Activator.CreateInstance(entry, "HM_0000", 0, "umdf2", null, null, null)!);
             return Activator.CreateInstance(record, "of13-exit", self, null, 0L, "1.13.0", 0, true, false, list, null)!;
         }
         void Ledger(params string[] names)

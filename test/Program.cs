@@ -67,9 +67,38 @@ partial class Program
 
     // ── Main ──
 
+    // The backend every context of this run is built with (--backend). Auto,
+    // the default, is what a program that names none gets. Umdf2 and Usbip
+    // are the context's own request, so a create, InstallDriver and
+    // IsDriverInstalled answer for that backend.
+    static HMBackend s_backend = HMBackend.Auto;
+
+    // --backend auto|umdf2|usbip, taken out of the arguments wherever it
+    // stands. Returns false with a message for a value outside the three.
+    static bool TakeBackendOption(ref string[] args)
+    {
+        for (int i = 0; i < args.Length; i++)
+        {
+            if (!args[i].Equals("--backend", StringComparison.OrdinalIgnoreCase)) continue;
+            if (i + 1 >= args.Length) { Error("--backend needs auto, umdf2 or usbip"); return false; }
+            switch (args[i + 1].ToLowerInvariant())
+            {
+                case "auto": s_backend = HMBackend.Auto; break;
+                case "umdf2": s_backend = HMBackend.Umdf2; break;
+                case "usbip": s_backend = HMBackend.Usbip; break;
+                default: Error($"--backend {args[i + 1]}: the backend is auto, umdf2 or usbip"); return false;
+            }
+            int at = i;
+            args = args.Where((_, idx) => idx != at && idx != at + 1).ToArray();
+            i = -1;
+        }
+        return true;
+    }
+
     static int Main(string[] args)
     {
         Console.WriteLine("=== HIDMaestro Test Client ===\n");
+        if (!TakeBackendOption(ref args)) return 1;
 
         // Read-only introspection commands run fine without admin. Everything
         // else needs SeLoadDriverPrivilege for device create / driver install /
@@ -78,7 +107,8 @@ partial class Program
             "list" or "search" or "info" or
             "build-descriptor" or "extract-profile" or
             "probe-xusb" or "xusb-vibrate" or "verify-payload" or
-            "make-custom-profile";  // pure file-IO + descriptor synthesis, no PnP
+            "make-custom-profile" or  // pure file-IO + descriptor synthesis, no PnP
+            "backend";  // the backend each profile resolves to, no device
 
         // sdl-list creates its own controllers and refuses on its own without
         // elevation, so a batch run never meets an elevation prompt. It stops
@@ -165,6 +195,10 @@ partial class Program
             Console.WriteLine("  HIDMaestroTest xusb-vibrate <index> [hex9]");
             Console.WriteLine("                                        Send an XUSB rumble to an XInput slot (read-only)");
             Console.WriteLine("  HIDMaestroTest issue6-repro           Reproduce the issue #6 PID-FFB coalescing case");
+            Console.WriteLine("  HIDMaestroTest backend [--profile-dir <path>] [id ...]");
+            Console.WriteLine("                                        The backend Auto picks here, the override, and each id's backend");
+            Console.WriteLine("\n  --backend auto|umdf2|usbip, anywhere on the line, builds every context with that");
+            Console.WriteLine("  backend. Auto, the default, is what a program that names none gets.");
             Console.WriteLine("\nMust run elevated.");
             return 1;
         }
@@ -189,6 +223,7 @@ partial class Program
             "verify-payload" => VerifyPayload(args.Skip(1).ToArray()),
             "sdl-list" => SdlList(args.Skip(1).ToArray()),
             "latency"  => LatencyBench(args.Skip(1).ToArray()),
+            "backend"  => BackendCommand(args.Skip(1).ToArray()),
             _          => Error($"Unknown command: {args[0]}")
         };
     }
@@ -295,13 +330,14 @@ partial class Program
         // around for the post-command [ACK] marker that the harness blocks
         // on, so command-completion signaling still works.
         var s_origConsoleOut = Console.Out;
+        s_slotOut = s_origConsoleOut;
         if (Environment.GetEnvironmentVariable("HIDMAESTRO_QUIET") == "1")
         {
             Console.SetOut(System.IO.TextWriter.Null);
         }
         Console.WriteLine($"  Submission rate: {rateHz} Hz (~{1000 / rateHz} ms/frame)");
 
-        using var ctx = new HMContext();
+        using var ctx = new HMContext(s_backend);
         int loaded = ctx.LoadDefaultProfiles();
         Console.WriteLine($"  Loaded {loaded} profiles (embedded)");
         foreach (var dir in extraProfileDirs)
@@ -311,7 +347,8 @@ partial class Program
         }
 
         Console.Write("  Installing driver... ");
-        ctx.InstallDriver();
+        try { ctx.InstallDriver(); }
+        catch (Exception ex) { return ReportError($"InstallDriver for the {ctx.Backend} backend", ex); }
         Console.WriteLine("OK");
 
         // Phase 1: create all controllers sequentially
@@ -324,7 +361,10 @@ partial class Program
             var perSlotSw = Stopwatch.StartNew();
             Console.WriteLine($"  Creating controller {i}: {profile.Id} ({profile.Name})");
             string? identityKey = identityPrefix != null ? $"{identityPrefix}:{i}" : null;
-            var slot = new RunningController { Ctrl = ctx.CreateController(profile, identityKey) };
+            RunningController slot;
+            try { slot = new RunningController { Ctrl = ctx.CreateController(profile, identityKey) }; }
+            catch (Exception ex) { return ReportError($"create of slot {i} ({profile.Id})", ex); }
+            ReportSlot(i, slot.Ctrl);
             Console.WriteLine($"    -> created in {perSlotSw.ElapsedMilliseconds} ms");
             // Pre-park BEFORE the pattern thread starts so the very first
             // submitted frame is (0, 0), not whatever the circle was at.
@@ -559,6 +599,7 @@ partial class Program
                         try { s.Thread?.Join(2000); } catch { }
                         try { s.Ctrl.Dispose(); } catch { }
                         s.Ctrl = null!;
+                        ReportSlot(rmIdx, null);
                         Console.WriteLine($"  removed slot {rmIdx} in {rmSw.ElapsedMilliseconds} ms: {slots.Count(x => x.Ctrl != null!)} controller(s) remain");
                     }
                 }
@@ -585,7 +626,18 @@ partial class Program
                     continue;
                 }
                 Console.WriteLine($"  === Swapping slot {swapIdx} → {newProfile.Id} ===");
-                LiveSwap(ctx, slots, swapIdx, newProfile);
+                try { LiveSwap(ctx, slots, swapIdx, newProfile); }
+                catch (Exception ex)
+                {
+                    // The old controller is gone and no new one came. The
+                    // slot stays empty, and the battery fails the scenario
+                    // on the error line.
+                    ReportError($"swap of slot {swapIdx} to {newProfile.Id}", ex);
+                    slots[swapIdx] = new RunningController { Ctrl = null! };
+                    ReportSlot(swapIdx, null);
+                    continue;
+                }
+                ReportSlot(swapIdx, slots[swapIdx].Ctrl);
                 continue;
             }
 
@@ -676,7 +728,7 @@ partial class Program
 
     static int EmulateCustom()
     {
-        using var ctx = new HMContext();
+        using var ctx = new HMContext(s_backend);
         int loaded = ctx.LoadDefaultProfiles();
         Console.WriteLine($"  Loaded {loaded} profiles");
 
@@ -791,6 +843,66 @@ partial class Program
             if (line.Trim().Equals("quit", StringComparison.OrdinalIgnoreCase)) break;
         }
         cts.Cancel();
+        return 0;
+    }
+
+    // The regression battery reads these lines from the test app's own
+    // stdout, which HIDMAESTRO_QUIET leaves open for them and [ACK].
+    static TextWriter s_slotOut = Console.Out;
+
+    /// <summary>One line per change of a slot: its profile, the backend
+    /// the create resolved to and the device it made, the devnode instance
+    /// id on UMDF2 and the USB instance id and vhci port on USB/IP. A
+    /// removed slot prints "removed".</summary>
+    static void ReportSlot(int idx, HMController? ctrl)
+    {
+        if (ctrl == null) s_slotOut.WriteLine($"[SLOT] {idx} removed");
+        else
+        {
+            string device = ctrl.Backend == HMBackend.Usbip
+                ? $"usb={ctrl.UsbipHandle?.Device.Descriptors.UsbInstanceId ?? "-"} port={ctrl.UsbipHandle?.VhciPort ?? 0}"
+                : $"instance={ctrl.InstanceId ?? "-"}";
+            s_slotOut.WriteLine($"[SLOT] {idx} {ctrl.Profile.Id} {ctrl.Backend} {device}");
+        }
+        s_slotOut.Flush();
+    }
+
+    /// <summary>A failed step, on the battery's stdout as one [ERROR] line
+    /// and on stderr. Returns the exit code of a failed command.</summary>
+    static int ReportError(string what, Exception ex)
+    {
+        string line = $"[ERROR] {what}: {ex.GetType().Name}: {ex.Message.ReplaceLineEndings(" ")}";
+        s_slotOut.WriteLine(line);
+        s_slotOut.Flush();
+        return Error(line);
+    }
+
+    /// <summary>backend: what Auto resolves to on this machine, the
+    /// HIDMAESTRO_BACKEND override the SDK read, the backend this run asks
+    /// for, and the backend each profile id resolves to under that request,
+    /// or the exception its create would throw. Changes nothing.</summary>
+    static int BackendCommand(string[] args)
+    {
+        var dirs = new List<string>();
+        var ids = new List<string>();
+        for (int i = 0; i < args.Length; i++)
+        {
+            if (args[i] == "--profile-dir" && i + 1 < args.Length) { dirs.Add(args[++i]); continue; }
+            ids.Add(args[i]);
+        }
+        Console.WriteLine($"[BACKEND] machine {HMContext.MachineBackend}");
+        Console.WriteLine($"[BACKEND] override {(BackendSelection.Override is { } o ? o.ToString() : "none")}");
+        Console.WriteLine($"[BACKEND] requested {s_backend}");
+        using var ctx = new HMContext(s_backend);
+        ctx.LoadDefaultProfiles();
+        foreach (var d in dirs) ctx.LoadProfilesFromDirectory(d);
+        foreach (var id in ids)
+        {
+            var p = ctx.GetProfile(id);
+            if (p == null) { Console.WriteLine($"[BACKEND] profile {id} missing"); continue; }
+            try { Console.WriteLine($"[BACKEND] profile {id} {ctx.ResolveBackend(p)}"); }
+            catch (Exception ex) { Console.WriteLine($"[BACKEND] profile {id} refused {ex.GetType().Name}: {ex.Message.ReplaceLineEndings(" ")}"); }
+        }
         return 0;
     }
 
@@ -1066,7 +1178,7 @@ partial class Program
 
     static int ListProfiles()
     {
-        using var ctx = new HMContext();
+        using var ctx = new HMContext(s_backend);
         ctx.LoadDefaultProfiles();
         Console.WriteLine($"-- Controller Profile Database ({ctx.AllProfiles.Count}) --\n");
         foreach (var p in ctx.AllProfiles)
@@ -1079,7 +1191,7 @@ partial class Program
         if (string.IsNullOrEmpty(query))
             return Error("Usage: HIDMaestroTest search <query>");
 
-        using var ctx = new HMContext();
+        using var ctx = new HMContext(s_backend);
         ctx.LoadDefaultProfiles();
         var results = ctx.AllProfiles.Where(p =>
             p.Id.Contains(query, StringComparison.OrdinalIgnoreCase) ||
@@ -1100,7 +1212,7 @@ partial class Program
         if (string.IsNullOrEmpty(id))
             return Error("Usage: HIDMaestroTest info <profile-id>");
 
-        using var ctx = new HMContext();
+        using var ctx = new HMContext(s_backend);
         ctx.LoadDefaultProfiles();
         var p = ctx.GetProfile(id);
         if (p == null)
@@ -1279,7 +1391,7 @@ partial class Program
     // heartbeats. Requires admin.
     static int Issue6ReproCommand()
     {
-        using var ctx = new HMContext();
+        using var ctx = new HMContext(s_backend);
         ctx.LoadDefaultProfiles();
         Console.Write("  Installing driver... ");
         ctx.InstallDriver();
@@ -1462,7 +1574,7 @@ partial class Program
         if (!System.IO.File.Exists(path))
             return Error($"File not found: {path}");
 
-        using var ctx = new HMContext();
+        using var ctx = new HMContext(s_backend);
         string dir = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path))!;
         // HMContext loads all *.json from a directory. Copy the single file
         // to a temp dir so we load exactly what the user specified, not
@@ -1600,7 +1712,7 @@ partial class Program
         string profileId = args.Length > 0 ? args[0] : "dualsense";
         Console.WriteLine("=== HIDMaestro SDK Demo ===\n");
 
-        using var ctx = new HMContext();
+        using var ctx = new HMContext(s_backend);
         int loaded = ctx.LoadDefaultProfiles();
         Console.WriteLine($"  Loaded {loaded} profiles (embedded)");
 
