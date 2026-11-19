@@ -80,7 +80,7 @@ partial class Program
         try { Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.High; } catch { }
         Thread.CurrentThread.Priority = ThreadPriority.Highest;
 
-        using var ctx = new HMContext();
+        using var ctx = new HMContext(s_backend);
         ctx.LoadDefaultProfiles();
         Console.Write("  Installing driver... "); ctx.InstallDriver(); Console.WriteLine("OK");
         var profile = ctx.GetProfile(profileId);

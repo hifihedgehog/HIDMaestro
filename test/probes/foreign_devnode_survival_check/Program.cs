@@ -233,6 +233,12 @@ internal sealed class Program
                 else
                 {
                     using var ctrl = ctx.CreateController(profile);
+                    // The create's sweeps run on either backend. On USB/IP
+                    // the device is a USB device on HIDMaestro's host
+                    // controller, and the ROOT sweeps the foreign node sits
+                    // in front of run all the same.
+                    var resolved = ctx.ResolveBackend(profile);
+                    Check($"{profile.Id} runs on {ctrl.Backend}, the backend its create resolves to here", ctrl.Backend == resolved, $"resolves to {resolved}");
                     System.Threading.Thread.Sleep(500);
                 }
             }

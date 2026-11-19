@@ -17,13 +17,14 @@
 // rumble packets the test client decodes by vendor ID.
 //
 // Beside the SDK's events, each packet's line from the test client's own
-// decode, HIDMaestroTest's DecodeOutputPacket (test/Program.cs:871-910),
+// decode, HIDMaestroTest's DecodeOutputPacket (test/Program.cs),
 // which keys its rumble labels on vendor IDs and report IDs, and, where the
 // test client prints OutputDecoded (its DecodedLine, lane DD-6 on), the
 // line its own HookOutputReceived prints for each OutputDecoded event,
 // caught from the console, so a client that stops subscribing changes the
 // recording. It is loaded
-// from the test client's build (test\bin\Release\<tfm>\win-x64), so that project is
+// from the test client's build for the machine's architecture
+// (test\bin\Release\<tfm>\win-x64 or win-arm64), so that project is
 // built before this case runs. Each gets its output report at every length from empty to two
 // bytes past its size, zeroed, all 0xFF, each byte alone at 0x80 and 0xFF,
 // then random reports, and reports with other IDs and sources, which must
@@ -250,10 +251,16 @@ internal sealed class Case7OutputDecode : IOracleCase
     /// <summary>HIDMaestroTest's DecodeOutputPacket, from the test client's
     /// Release build beside this tree, loaded into the default context so it
     /// binds to the SDK this probe has loaded.</summary>
+    /// <summary>The test client's assembly in the build for this machine's
+    /// architecture, as the battery picks the test app.</summary>
+    static string TestClientDll(string root) =>
+        Path.Combine(root, "test", "bin", "Release", "net10.0-windows10.0.26100.0",
+                     RuntimeInformation.OSArchitecture == Architecture.Arm64 ? "win-arm64" : "win-x64", "HIDMaestroTest.dll");
+
     static Func<HMProfile, HMOutputPacket, string> TestClientDecode()
     {
         string root = Path.GetFullPath(Path.Combine(ProbeDir(), "..", "..", ".."));
-        string dll = Path.Combine(root, "test", "bin", "Release", "net10.0-windows10.0.26100.0", "win-x64", "HIDMaestroTest.dll");
+        string dll = TestClientDll(root);
         if (!File.Exists(dll))
             throw new FileNotFoundException($"{dll} is not built: build test\\HIDMaestroTest.csproj in Release first.");
         // A build older than any file it is built from records or replays
@@ -291,7 +298,7 @@ internal sealed class Case7OutputDecode : IOracleCase
     static Action<HMController, int>? TestClientHook()
     {
         string root = Path.GetFullPath(Path.Combine(ProbeDir(), "..", "..", ".."));
-        string dll = Path.Combine(root, "test", "bin", "Release", "net10.0-windows10.0.26100.0", "win-x64", "HIDMaestroTest.dll");
+        string dll = TestClientDll(root);
         var asm = System.Runtime.Loader.AssemblyLoadContext.Default.LoadFromAssemblyPath(dll);
         var type = asm.GetType("HIDMaestroTest.Program");
         if (type?.GetMethod("DecodedLine", BindingFlags.Static | BindingFlags.NonPublic, new[] { typeof(HMOutputDecodedEventArgs) }) == null)

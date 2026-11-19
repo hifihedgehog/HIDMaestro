@@ -28,6 +28,23 @@
   Path to HIDMaestroTest.exe. Defaults to the Release build relative
   to the repo root.
 
+.PARAMETER Backend
+  Auto (the default), Umdf2 or Usbip: the backend the run asks for.
+  Auto changes nothing, so each create resolves as a program that names
+  no backend does, and an HIDMAESTRO_BACKEND already in the environment
+  stays in force. Umdf2 or Usbip sets HIDMAESTRO_BACKEND for every
+  process the battery starts, which makes Auto resolve to that backend in
+  each probe, and passes --backend to the test app, whose contexts then
+  ask for it. The log starts with what Auto resolves to on this machine,
+  the override in force, and the backend each profile of S01 to S23
+  resolves to.
+
+.PARAMETER BenchLockHeld
+  The caller already holds the machine's bench lock (the named mutex
+  Global\HIDMaestro.Bench) for the whole run. Without it the battery
+  takes the lock itself before the first scenario and keeps it to the
+  end, waiting up to 60 minutes for another holder.
+
 .PARAMETER Filter
   Run only scenarios whose name matches this wildcard. Useful when
   iterating on a specific scenario. Default: '*' (all).
@@ -60,7 +77,9 @@ param(
     [string]$Exe,
     [string]$Filter = '*',
     [switch]$StopOnFailure,
-    [switch]$KeepLogs
+    [switch]$KeepLogs,
+    [ValidateSet('Auto', 'Umdf2', 'Usbip')][string]$Backend = 'Auto',
+    [switch]$BenchLockHeld
 )
 
 $ErrorActionPreference = 'Stop'
@@ -87,6 +106,23 @@ if (-not $Exe) {
     $Exe = Join-Path $scriptDir ('..\bin\Release\net10.0-windows10.0.26100.0\win-' + (Get-MachineArch) + '\HIDMaestroTest.exe')
 }
 
+# The machine a PE image is built for: the Machine field of its file
+# header, 0x8664 for x64, 0xAA64 for ARM64, 0x14C for an AnyCPU assembly.
+function Get-PeMachine {
+    param([string]$Path)
+    $fs = [IO.File]::OpenRead($Path)
+    try {
+        $br = New-Object IO.BinaryReader($fs)
+        $fs.Position = 0x3C
+        $fs.Position = $br.ReadInt32() + 4
+        return [int]$br.ReadUInt16()
+    } finally { $fs.Dispose() }
+}
+function Get-PeMachineName {
+    param([int]$Machine)
+    switch ($Machine) { 0x8664 { 'x64' } 0xAA64 { 'arm64' } 0x14C { 'AnyCPU (x86)' } default { '0x{0:X4}' -f $Machine } }
+}
+
 # ====================================================================
 #  Setup
 # ====================================================================
@@ -103,6 +139,45 @@ if (-not $isAdmin) {
     Write-Error "This script must run elevated. PadForge-style stdin-driven swaps require an already-admin process so the test app does NOT re-launch (which would orphan the stdin pipe). Re-run via 'sudo --inline pwsh -File ...' or an Administrator console."
     exit 2
 }
+
+# The machine's bench lock: one live run at a time on a test machine. The
+# battery holds it from here to its exit, which releases it. -BenchLockHeld
+# is checked: a lock this process takes at once was held by nobody, so the
+# battery keeps it and says so.
+$script:BenchLock = New-Object System.Threading.Mutex($false, 'Global\HIDMaestro.Bench')
+if ($BenchLockHeld) {
+    $free = $false
+    try { $free = $script:BenchLock.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $free = $true }
+    if ($free) {
+        Write-Host '-BenchLockHeld was passed, but nobody held the bench lock (Global\HIDMaestro.Bench): the battery took it and holds it for its run' -ForegroundColor Yellow
+    } else {
+        Write-Host 'Bench lock (Global\HIDMaestro.Bench): held by the caller'
+    }
+} else {
+    $got = $false
+    try {
+        $got = $script:BenchLock.WaitOne(0)
+        if (-not $got) {
+            Write-Host 'waiting for the bench lock (Global\HIDMaestro.Bench), which another run holds'
+            $got = $script:BenchLock.WaitOne([TimeSpan]::FromMinutes(60))
+        }
+    } catch [System.Threading.AbandonedMutexException] { $got = $true }
+    if (-not $got) {
+        Write-Error 'The bench lock (Global\HIDMaestro.Bench) stayed held for 60 minutes: another run holds this machine.'
+        exit 2
+    }
+}
+
+# The backend the run asks for. Umdf2 and Usbip go to every process the
+# battery starts through HIDMAESTRO_BACKEND, which the SDK reads once per
+# process as what Auto resolves to, and to the test app as --backend. The
+# first line says which, so a run on an override never reads as a run on
+# the machine's own backend.
+Write-Host ('Battery backend: ' + $Backend + $(if ($Backend -eq 'Auto') { $(if ($env:HIDMAESTRO_BACKEND) { ', with HIDMAESTRO_BACKEND=' + $env:HIDMAESTRO_BACKEND + ' from the environment' } else { ', the machine''s own' }) } else { ', HIDMAESTRO_BACKEND set to ' + $Backend.ToLowerInvariant() + ' for every process' }))
+if ($Backend -ne 'Auto') {
+    [Environment]::SetEnvironmentVariable('HIDMAESTRO_BACKEND', $Backend.ToLowerInvariant(), 'Process')
+}
+$script:AppBackend = $Backend.ToLowerInvariant()
 
 # CM_Locate P/Invoke. Only reliable way to know if a devnode is actually
 # PRESENT in the PnP tree (vs PHANTOM = registry-only, vs GONE = neither).
@@ -177,6 +252,35 @@ if ($verMatch.Success) {
     } else { $null }
 
     $stale = @()
+    # Each probe built for the target architecture must match this
+    # machine: its app host and its own assembly. PlatformTarget is not an
+    # input of the compile step, so building one tree for x64 and then for
+    # arm64 can leave an x64 assembly beside an arm64 app host. A probe
+    # whose project pins another architecture is not one the battery runs.
+    $wantMachine = if ((Get-MachineArch) -eq 'arm64') { 0xAA64 } else { 0x8664 }
+    $wrongArch = @()
+    foreach ($dir in @(Get-ChildItem -LiteralPath (Join-Path $scriptDir '..\probes') -Directory -ErrorAction SilentlyContinue)) {
+        $proj = Get-ChildItem -LiteralPath $dir.FullName -Filter *.csproj -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $proj) { continue }
+        $text = Get-Content -LiteralPath $proj.FullName -Raw
+        if ($text -notmatch '<PlatformTarget>\$\(HMTargetArchitecture\)</PlatformTarget>') { continue }
+        $asm = if ($text -match '<AssemblyName>([^<]+)</AssemblyName>') { $Matches[1] } else { [IO.Path]::GetFileNameWithoutExtension($proj.Name) }
+        $out = Join-Path $dir.FullName 'bin\Release\net10.0-windows10.0.26100.0'
+        foreach ($f in @("$asm.exe", "$asm.dll")) {
+            $path = Join-Path $out $f
+            if (-not (Test-Path -LiteralPath $path)) { continue }
+            $m = Get-PeMachine $path
+            if ($m -ne $wantMachine) { $wrongArch += [PSCustomObject]@{ Probe = $dir.Name; Path = $path; Machine = $m } }
+        }
+    }
+    if ($wrongArch.Count -gt 0) {
+        Write-Host ('PROBES BUILT FOR ANOTHER ARCHITECTURE: refusing to run on this ' + (Get-MachineArch) + ' machine:') -ForegroundColor Red
+        foreach ($w in $wrongArch) {
+            Write-Host ('  ' + $w.Probe + ': ' + $w.Path + ' is ' + (Get-PeMachineName $w.Machine)) -ForegroundColor Red
+        }
+        Write-Host 'Build each architecture in a tree of its own (test\regression\README.md, "Building for ARM64").' -ForegroundColor Yellow
+        exit 2
+    }
     foreach ($p in $probePaths) {
         $resolved = [System.IO.Path]::GetFullPath($p)
         if (-not (Test-Path $resolved)) {
@@ -249,6 +353,40 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Join-Path $customProfileDir 'padfor
     exit 2
 }
 
+# What this run's creates resolve to, from the test app's own SDK: what
+# Auto picks on this machine, the override in force, and the backend of
+# each profile S01 to S23 create, under the test app's backend and under
+# Auto (S17's USB/IP pass asks for Auto). A profile whose create would be
+# refused prints the exception, and a scenario that creates it fails with
+# that exception.
+function Read-HMBackends {
+    param([string]$AppBackend)
+    $ids = @($Profiles.Values) + @('xbox-360-arcade-stick')
+    # A line on stderr is no error of the run's: under Stop, PowerShell 5.1
+    # would throw it before the check below names what went wrong.
+    $ErrorActionPreference = 'Continue'
+    $all = @(& $Exe backend --backend $AppBackend --profile-dir $customProfileDir @ids 2>&1 | ForEach-Object { "$_" })
+    $lines = @($all | Where-Object { $_ -like '`[BACKEND`]*' })
+    if ($lines.Count -eq 0) { foreach ($l in $all) { Write-Host ('  ' + $l) } }
+    $map = @{}
+    foreach ($l in $lines) {
+        if ($l -match '^\[BACKEND\] profile (\S+) (Umdf2|Usbip)$') { $map[$Matches[1]] = $Matches[2] }
+        elseif ($l -match '^\[BACKEND\] profile (\S+) (.+)$') { $map[$Matches[1]] = $Matches[2] }
+    }
+    return @{ Lines = $lines; Map = $map }
+}
+$script:Resolved = @{}
+$hdr = Read-HMBackends $script:AppBackend
+if ($hdr.Lines.Count -eq 0) {
+    Write-Error "HIDMaestroTest backend printed nothing. Build the test app from this branch first."
+    exit 2
+}
+Write-Host ('Machine: ' + (Get-MachineArch) + ', ' + $env:COMPUTERNAME)
+Write-Host ('Backend asked for: ' + $Backend + ', HIDMAESTRO_BACKEND ' + $(if ($env:HIDMAESTRO_BACKEND) { $env:HIDMAESTRO_BACKEND } else { 'not set' }))
+foreach ($l in $hdr.Lines) { Write-Host ('  ' + $l) }
+$script:Resolved[$script:AppBackend] = $hdr.Map
+if ($script:AppBackend -ne 'auto') { $script:Resolved['auto'] = (Read-HMBackends 'auto').Map }
+
 # ====================================================================
 #  Helpers
 # ====================================================================
@@ -268,17 +406,23 @@ function Get-DevnodeState {
 # enumerator, and what a scenario left of them. devnode_owner_check.ps1
 # checks both offline.
 . (Join-Path $scriptDir 'HMDevnodes.ps1')
+# The owner records' USB instance ids, kept from now to the end of the run
+# (HMDevnodes.ps1).
+[HMDevnodeReader]::StartOwnerWatch()
 
 function Start-HMTestProcess {
     param(
         [string[]]$ProfileIds,
-        [int]$RateHz = 30  # low rate to minimize noise + CPU during regression run
+        [int]$RateHz = 30,  # low rate to minimize noise + CPU during regression run
+        # The test app's --backend: the run's, unless a scenario asks for
+        # Auto for profiles only the USB/IP backend presents.
+        [string]$AppBackend = $script:AppBackend
     )
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $Exe
     # Always pass --profile-dir so the custom profile is loadable in any
     # scenario, whether or not it actually references it.
-    $psi.Arguments = "emulate --rate-hz $RateHz --profile-dir `"$customProfileDir`" " + ($ProfileIds -join ' ')
+    $psi.Arguments = "emulate --backend $AppBackend --rate-hz $RateHz --profile-dir `"$customProfileDir`" " + ($ProfileIds -join ' ')
     $psi.RedirectStandardInput = $true
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
@@ -334,11 +478,123 @@ namespace HMRegression {
     $delegate = [System.Delegate]::CreateDelegate($delegateType, $drain, $miOnLine)
     $proc.add_OutputDataReceived($delegate)
     Add-Member -InputObject $proc -MemberType NoteProperty -Name HMDrain -Value $drain -Force
+    # What the app reports of its slots ([SLOT] lines) and the errors it
+    # reports ([ERROR] lines), read by Receive-HMAppLine.
+    Add-Member -InputObject $proc -MemberType NoteProperty -Name HMSlots -Value @{} -Force
+    Add-Member -InputObject $proc -MemberType NoteProperty -Name HMErrors -Value (New-Object System.Collections.Generic.List[string]) -Force
+    Add-Member -InputObject $proc -MemberType NoteProperty -Name HMExpect -Value $script:Resolved[$AppBackend] -Force
     $null = $proc.Start()
     $proc.BeginOutputReadLine()
     # Stderr async-drain via Task is fine; we don't read stderr.
     $null = $proc.StandardError.ReadToEndAsync()
     return $proc
+}
+
+# One line of the test app's stdout. [ACK] ends a command and returns
+# true. [SLOT] records a slot's profile, backend and device, or its
+# removal, and [ERROR] a step that failed.
+function Receive-HMAppLine {
+    param([System.Diagnostics.Process]$Proc, [string]$Line)
+    $t = $Line.Trim()
+    if ($t -eq '[ACK]') { return $true }
+    if ($null -eq $Proc.HMSlots) { return $false }
+    if ($t -match '^\[SLOT\] (\d+) removed$') {
+        $Proc.HMSlots.Remove([int]$Matches[1])
+    } elseif ($t -match '^\[SLOT\] (\d+) (\S+) (Umdf2|Usbip) ?(.*)$') {
+        $slot = @{ Profile = $Matches[2]; Backend = $Matches[3]; Instance = $null; Usb = $null; Port = 0 }
+        $idx = [int]$Matches[1]
+        foreach ($kv in ($Matches[4] -split ' ')) {
+            $pair = $kv -split '=', 2
+            if ($pair.Count -ne 2 -or $pair[1] -eq '-') { continue }
+            if ($pair[0] -eq 'instance') { $slot.Instance = $pair[1] }
+            elseif ($pair[0] -eq 'usb') { $slot.Usb = $pair[1] }
+            elseif ($pair[0] -eq 'port') { $slot.Port = [int]$pair[1] }
+        }
+        $Proc.HMSlots[$idx] = $slot
+    } elseif ($t.StartsWith('[ERROR] ')) {
+        $Proc.HMErrors.Add($t.Substring(8))
+    }
+    return $false
+}
+
+# Every line the test app has written that no one read yet. Output read
+# asynchronously can still arrive after the process has exited, so for an
+# exited app the read goes on until no line has come for 200 ms, at most
+# 2 s.
+function Read-HMAppLines {
+    param([System.Diagnostics.Process]$Proc)
+    if (-not $Proc.HMDrain) { return }
+    $line = $null
+    while ($Proc.HMDrain.Queue.TryDequeue([ref]$line)) { $null = Receive-HMAppLine -Proc $Proc -Line $line }
+    if (-not $Proc.HasExited) { return }
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $quiet = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($quiet.ElapsedMilliseconds -lt 200 -and $sw.ElapsedMilliseconds -lt 2000) {
+        if ($Proc.HMDrain.Queue.TryDequeue([ref]$line)) { $null = Receive-HMAppLine -Proc $Proc -Line $line; $quiet.Restart() }
+        else { Start-Sleep -Milliseconds 20 }
+    }
+}
+
+# The first error the test app reported, as a scenario failure.
+function Assert-HMNoAppError {
+    param([System.Diagnostics.Process]$Proc)
+    if ($Proc.HMErrors -and $Proc.HMErrors.Count -gt 0) { throw ('HIDMaestroTest: ' + $Proc.HMErrors[0]) }
+}
+
+# What each live slot of the test app presents, against the backend it
+# runs on. The slot runs on the backend this run resolves its profile to.
+# On UMDF2 its devnode is a present HIDMaestro controller devnode, one of
+# the SDK's hardware IDs on it. On USB/IP its USB device is present on the
+# root hub of HIDMaestro's host controller and an owner record names it,
+# by USB instance id or, for a persona that shares its serial, by its vhci
+# port. A device still being enumerated gets the same 120 s, scaled, that
+# the leftover check gives a removal.
+function Assert-HMPresentation {
+    param([System.Diagnostics.Process]$Proc)
+    Assert-HMNoAppError $Proc
+    if (-not $Proc.HMSlots -or $Proc.HMSlots.Count -eq 0) { return }
+    foreach ($idx in @($Proc.HMSlots.Keys | Sort-Object)) {
+        $s = $Proc.HMSlots[$idx]
+        $want = if ($Proc.HMExpect) { $Proc.HMExpect[$s.Profile] } else { $null }
+        if ($want -and $want -ne $s.Backend) {
+            throw ('slot {0}: {1} runs on {2}, and this run resolves it to {3}' -f $idx, $s.Profile, $s.Backend, $want)
+        }
+        $device = if ($s.Backend -eq 'Umdf2') { $s.Instance } else { $s.Usb }
+        if (-not $device -and $s.Backend -eq 'Usbip' -and $s.Port -gt 0) {
+            # A persona that shares its serial has no USB instance id of its
+            # own: its device is the one on its vhci port of the root hub.
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            while (-not ($device = [HMDevnodeReader]::DeviceOnPort($s.Port))) {
+                if ($sw.ElapsedMilliseconds -ge (HMScaleMs 120000)) {
+                    throw ('slot {0}: {1} on Usbip: no present device on vhci port {2} of HIDMaestro''s host controller' -f $idx, $s.Profile, $s.Port)
+                }
+                Start-Sleep -Milliseconds 100
+            }
+        }
+        if (-not $device) {
+            throw ('slot {0}: {1} on {2} reports no device' -f $idx, $s.Profile, $s.Backend)
+        }
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        while (-not ((Get-HMPresentDevnodes) -contains $device)) {
+            if ($sw.ElapsedMilliseconds -ge (HMScaleMs 120000)) {
+                $where = if ($s.Backend -eq 'Umdf2') { 'a present devnode with one of HIDMaestro''s controller hardware IDs' } else { 'a present USB device on HIDMaestro''s host controller that an owner record names' }
+                throw ('slot {0}: {1} on {2}: {3} is not {4}' -f $idx, $s.Profile, $s.Backend, $device, $where)
+            }
+            Start-Sleep -Milliseconds 100
+        }
+    }
+    if ($VerbosePreference -eq 'Continue') {
+        $list = @(foreach ($idx in @($Proc.HMSlots.Keys | Sort-Object)) { '{0}={1}/{2}' -f $idx, $Proc.HMSlots[$idx].Profile, $Proc.HMSlots[$idx].Backend })
+        Write-Verbose ('    [present] ' + ($list -join ' '))
+    }
+}
+
+# The USB instance ids of the test app's USB/IP slots, for the settle's
+# removal wait.
+function Get-HMAppUsbIds {
+    param([System.Diagnostics.Process]$Proc)
+    if (-not $Proc.HMSlots) { return @() }
+    return @(foreach ($s in $Proc.HMSlots.Values) { if ($s.Backend -eq 'Usbip' -and $s.Usb) { $s.Usb } })
 }
 
 function Send-Cmd {
@@ -350,7 +606,9 @@ function Send-Cmd {
     )
     if ($Proc.HasExited) {
         $code = $Proc.ExitCode
-        throw ("Cannot send '" + $Cmd + "': process already exited (code " + $code + ")")
+        Read-HMAppLines $Proc
+        $why = if ($Proc.HMErrors -and $Proc.HMErrors.Count -gt 0) { ', ' + $Proc.HMErrors[0] } else { '' }
+        throw ("Cannot send '" + $Cmd + "': process already exited (code " + $code + ")" + $why)
     }
     # For the next Wait-CascadeSettle's Phase A: the process, whether it
     # has acknowledged the command yet, and under -Verbose the devnodes as
@@ -358,6 +616,12 @@ function Send-Cmd {
     $script:HMSendCmdBaseline = if ($VerbosePreference -eq 'Continue') { Get-HMPresentKey } else { '' }
     $script:HMSendCmdProc = $Proc
     $script:HMSendCmdAcked = $false
+    # The USB/IP devices the app's slots hold before the command, so the
+    # settle can wait for Windows to remove the ones the command took away.
+    # Commands sent before the settle add theirs: the settle waits for every
+    # device any of them took.
+    if ($null -eq $script:HMSendCmdUsbBefore) { $script:HMSendCmdUsbBefore = @() }
+    $script:HMSendCmdUsbBefore = @($script:HMSendCmdUsbBefore) + @(Get-HMAppUsbIds $Proc | Where-Object { $script:HMSendCmdUsbBefore -notcontains $_ })
     $Proc.StandardInput.WriteLine($Cmd)
     if (-not $NoFlush) { $Proc.StandardInput.Flush() }
     if ($VerbosePreference -eq 'Continue') {
@@ -376,7 +640,7 @@ function Send-Cmd {
     while ($true) {
         $line = $null
         if ($drain.Queue.TryDequeue([ref]$line)) {
-            if ($line.Trim() -eq '[ACK]') { $script:HMSendCmdAcked = $true; return }
+            if (Receive-HMAppLine -Proc $Proc -Line $line) { $script:HMSendCmdAcked = $true; return }
             continue
         }
         if ($Proc.HasExited) { $script:HMSendCmdAcked = $true; return }
@@ -459,8 +723,13 @@ function Stop-HMTestProcess {
             try { Send-Cmd -Proc $Proc -Cmd 'quit' -NoWaitAck } catch {}
         }
         Wait-Exit -Proc $Proc -What 'HIDMaestroTest after quit'
+        # An error the app reported before it exited fails the scenario.
+        Read-HMAppLines $Proc
+        Assert-HMNoAppError $Proc
         return 'GRACEFUL'
     }
+    Read-HMAppLines $Proc
+    Assert-HMNoAppError $Proc
     return 'ALREADY_EXITED'
 }
 
@@ -508,7 +777,12 @@ function Wait-CreateBound {
     while ($sw.ElapsedMilliseconds -lt $budget) {
         $present = Get-HMPresentDevnodes
         if ($present.Count -gt 0) { return $true }
-        if ($Proc -and $Proc.HasExited) { return $false }
+        if ($Proc -and $Proc.HasExited) {
+            # An app that exited says why on its [ERROR] line.
+            Read-HMAppLines $Proc
+            Assert-HMNoAppError $Proc
+            return $false
+        }
         Start-Sleep -Milliseconds 250
     }
     return $false
@@ -530,22 +804,30 @@ function Get-HMPresentKey { ((Get-HMPresentDevnodes) | Sort-Object) -join '|' }
 #     process simply had not begun processing the command. On the Atom
 #     (Z8350) the queued-command latency reached 30 s and more during the
 #     initial-batch phase of multi-controller scenarios. The test app
-#     acknowledges a command after running it, and its creates return
-#     once the device has started and its teardowns once the devnodes are
-#     removed, so the acknowledgment marks the command's change as made.
-#     A change in the present set before it does not: the initial batch
-#     changes the set too. Send-Cmd waits for the acknowledgment unless
-#     told not to, so for most commands the phase finds it already there.
-#     For a command sent with -NoWaitAck the phase reads it from the
-#     process's output. Under -Verbose, Send-Cmd also snapshots the
-#     present set before it writes the command, and the phase prints
-#     whether the command changed it.
+#     acknowledges a command after running it. Its creates return once
+#     the device has started, on both backends. A UMDF2 teardown returns
+#     once Windows has removed the devnodes, so on UMDF2 the
+#     acknowledgment marks the command's change as made. A USB/IP
+#     teardown returns once the host controller has unplugged the device,
+#     before Windows removes its devnodes, so the phase then waits for
+#     each USB device the command took from the app's slots to leave the
+#     device tree, up to 120 s scaled, the leftover check's bound for a
+#     removal. A change in the present set before the acknowledgment does
+#     not mark the change as made: the initial batch changes the set too.
+#     Send-Cmd waits for the acknowledgment unless told not to, so for
+#     most commands the phase finds it already there. For a command sent
+#     with -NoWaitAck the phase reads it from the process's output. Under
+#     -Verbose, Send-Cmd also snapshots the present set before it writes
+#     the command, and the phase prints whether the command changed it.
 #
 #   Phase B (stability): once a change is observed, poll until the
 #     present set is stable for two consecutive 200 ms samples. The
-#     SDK's TeardownController blocks on CM_NOTIFY_ACTION_DEVICEINSTANCE-
-#     REMOVED so by the time it returns the kernel has already settled,
+#     SDK's UMDF2 TeardownController blocks on CM_NOTIFY_ACTION_DEVICE-
+#     INSTANCEREMOVED, and Phase A waited for a USB/IP device's removal,
 #     so this is usually one or two polls.
+#
+#   Then, while the test app runs, every slot it reports is checked
+#     against the backend it runs on (Assert-HMPresentation).
 #
 # If Phase A reaches its budget without an acknowledgment, or the test
 # process exits first, Phase B runs from there. Total worst case is the
@@ -571,9 +853,11 @@ function Wait-CascadeSettle {
     $baseline = $script:HMSendCmdBaseline
     $proc     = $script:HMSendCmdProc
     $acked    = $script:HMSendCmdAcked
+    $usbBefore = $script:HMSendCmdUsbBefore
     $script:HMSendCmdBaseline = $null
     $script:HMSendCmdProc     = $null
     $script:HMSendCmdAcked    = $false
+    $script:HMSendCmdUsbBefore = @()
 
     if ($null -ne $baseline) {
         # Phase A: wait until the test process has run the command we sent.
@@ -589,7 +873,7 @@ function Wait-CascadeSettle {
             # The acknowledgment of a command sent without waiting for it.
             $line = $null
             while ($proc.HMDrain -and $proc.HMDrain.Queue.TryDequeue([ref]$line)) {
-                if ($line.Trim() -eq '[ACK]') { $acked = $true; break }
+                if (Receive-HMAppLine -Proc $proc -Line $line) { $acked = $true; break }
             }
             if (-not $acked) { Start-Sleep -Milliseconds 50 }
         }
@@ -597,6 +881,26 @@ function Wait-CascadeSettle {
             $ms = $sw.ElapsedMilliseconds
             $changed = if ((Get-HMPresentKey) -ne $baseline) { 'the devnodes changed' } else { 'the devnodes as before' }
             Write-Verbose ('    [settle] phase A: {0} after {1} ms, {2}' -f $ended, $ms, $changed)
+        }
+        # The USB/IP devices the command took from the app's slots leave
+        # the device tree after the acknowledgment.
+        if ($acked -and $proc -and $usbBefore.Count -gt 0) {
+            $kept = @(Get-HMAppUsbIds $proc)
+            $removed = @($usbBefore | Where-Object { $kept -notcontains $_ })
+            $rsw = [System.Diagnostics.Stopwatch]::StartNew()
+            $devInst = [uint32]0
+            foreach ($id in $removed) {
+                while ([CMxz]::CM_Locate_DevNodeW([ref]$devInst, $id, [uint32]0) -eq 0 -and $rsw.ElapsedMilliseconds -lt (HMScaleMs 120000)) {
+                    Start-Sleep -Milliseconds 20
+                }
+                if ([CMxz]::CM_Locate_DevNodeW([ref]$devInst, $id, [uint32]0) -eq 0) {
+                    # The leftover check fails the scenario if it never goes.
+                    Write-Host ('    settle: {0} is still present {1} s after the command that removed it' -f $id, [int]($rsw.ElapsedMilliseconds / 1000)) -ForegroundColor Yellow
+                }
+            }
+            if ($removed.Count -gt 0 -and $VerbosePreference -eq 'Continue') {
+                Write-Verbose ('    [settle] {0} USB device(s) removed by Windows {1} ms after the acknowledgment' -f $removed.Count, $rsw.ElapsedMilliseconds)
+            }
         }
     }
 
@@ -608,12 +912,20 @@ function Wait-CascadeSettle {
         $cur = Get-HMPresentKey
         if ($cur -eq $prev) {
             $count++
-            if ($count -ge $stableN) { return }
+            if ($count -ge $stableN) { break }
         } else {
             $count = 0
             $prev  = $cur
         }
         Start-Sleep -Milliseconds 200
+    }
+
+    # An error the app reported fails the scenario, whether or not the app
+    # is still running, and while it runs, what its slots present.
+    if ($proc -and $proc.HMSlots) {
+        Read-HMAppLines $proc
+        Assert-HMNoAppError $proc
+        if (-not $proc.HasExited) { Assert-HMPresentation $proc }
     }
 }
 
@@ -681,8 +993,14 @@ function Test-Scenario {
     }
 
     # Scenario should have exited the test process by now; settle window
-    # for any in-flight resurrection attempts.
-    Wait-CascadeSettle
+    # for any in-flight resurrection attempts. The settle checks the error
+    # the app reported for the last command, which can be the scenario's
+    # failure, so it is the scenario's to report, never the run's.
+    try { Wait-CascadeSettle }
+    catch { if (-not $err) { $err = $_ } }
+    $script:HMSendCmdProc = $null
+    $script:HMSendCmdBaseline = $null
+    $script:HMSendCmdUsbBefore = @()
     $after = Get-HMPresentDevnodes
 
     # Anything PRESENT after that was not PRESENT before is a leftover
@@ -797,12 +1115,14 @@ function Wait-ProbeExit {
 }
 
 # The probe's own [SKIP] lines, each the condition the probe found, so a
-# skip in the log reads as what this machine lacks, in the probe's words.
+# skip in the log reads as what this machine lacks, in the probe's words,
+# and its [LIMIT] lines, each a part that reads less on this machine than
+# on another, in the same words.
 function Write-ProbeSkips {
     param([string]$Out)
     if (-not $Out -or -not (Test-Path $Out)) { return }
     foreach ($l in @(Get-Content $Out -ErrorAction SilentlyContinue)) {
-        if ($l -match '\[SKIP\]') { Write-Host ('      ' + $l.Trim()) -ForegroundColor Yellow }
+        if ($l -match '\[SKIP\]|\[LIMIT\]') { Write-Host ('      ' + $l.Trim()) -ForegroundColor Yellow }
     }
 }
 
@@ -932,7 +1252,11 @@ function Scenario-Single-LongCycle {
             $cur = ((Get-HMPresentDevnodes) | Sort-Object) -join '|'
             if ($cur -eq $prev) {
                 $count++
-                if ($count -ge 2) { return }
+                if ($count -ge 2) {
+                    # What each slot presents, as every other settle checks.
+                    if ($script:HMSendCmdProc) { Read-HMAppLines $script:HMSendCmdProc; Assert-HMPresentation $script:HMSendCmdProc }
+                    return
+                }
             } else {
                 $count = 0
                 $prev = $cur
@@ -1239,11 +1563,11 @@ function Scenario-Single-SameVidPid {
 # present when the kill was sent, which shows where it landed.
 function Invoke-KillMidTeardown {
     param([Parameter(Mandatory)][string]$From, [Parameter(Mandatory)][string]$To,
-          [Parameter(Mandatory)][string]$Next)
+          [Parameter(Mandatory)][string]$Next, [string]$AppBackend = $script:AppBackend)
     # Get-HMPresentDevnodes returns its list as one object, so each read
     # is assigned or parenthesized before its devnodes are walked.
     $before = Get-HMPresentDevnodes
-    $proc1 = Start-HMTestProcess -ProfileIds @($From)
+    $proc1 = Start-HMTestProcess -ProfileIds @($From) -AppBackend $AppBackend
     $own = @()
     $sw = $null
     $stillPresent = -1
@@ -1299,7 +1623,7 @@ function Invoke-KillMidTeardown {
 
     # Fresh session should reliably clean up whatever was left in mid-
     # cascade state.
-    $proc2 = Start-HMTestProcess -ProfileIds @($Next)
+    $proc2 = Start-HMTestProcess -ProfileIds @($Next) -AppBackend $AppBackend
     try {
         Wait-Ready -Proc $proc2
     } finally {
@@ -1313,7 +1637,10 @@ function Scenario-ForceKill-MidCascade {
     # for a single-interface persona, and a new process whose first device
     # is that persona again, so it imports at the bus id the killed
     # program's re-attach attempts name.
-    Invoke-KillMidTeardown -From $Profiles.UsbipComposite -To $Profiles.UsbipSingle -Next $Profiles.UsbipSingle
+    # Both are profiles only the USB/IP backend presents, so this pass asks
+    # for Auto when the run asks for UMDF2, as a program would.
+    $usbipPass = if ($script:AppBackend -eq 'umdf2') { 'auto' } else { $script:AppBackend }
+    Invoke-KillMidTeardown -From $Profiles.UsbipComposite -To $Profiles.UsbipSingle -Next $Profiles.UsbipSingle -AppBackend $usbipPass
 }
 
 # S18: Alternating multi-target swap pattern (A->B->A->C->A). Stresses
@@ -1702,9 +2029,15 @@ function Scenario-Trigger-Live-Check {
 # real virtual, publish PidPool, run SetFeature(0x01 Create New Effect)
 # and GetFeature(0x03 Pool) handshake. Both must succeed for dinput8/
 # pid.dll to enumerate FFB on a SideWinder virtual end-to-end.
+#
+# The offline run plays the host over the USB/IP wire against the SDK's own
+# server and checks each answer to a PID request against the UMDF2
+# driver's. It creates no device.
 function Scenario-Sidewinder-Ffb-Check {
     Invoke-Probe -Dir 'sidewinder_ffb_check' -Exe 'SideWinderFfbCheck.exe' `
                  -Message 'SideWinder PID FFB end-to-end regressed (see probe stdout)'
+    Invoke-Probe -Dir 'sidewinder_ffb_check' -Exe 'SideWinderFfbCheck.exe' -Arguments 'offline' -Tag 'offline' `
+                 -Message 'the USB/IP device answered a PID request otherwise than the UMDF2 driver does (see probe stdout)'
 }
 
 # S36: arbitrary-axis addressing: HMAxis enum / ExtraAxes / AvailableAxes /
@@ -2074,16 +2407,19 @@ function Scenario-Xusb-Battery {
                  -Message 'a virtual pad no longer reports a wired, full battery to XInput (see probe stdout)' -SkipCodes 2
 }
 
-# S61: the driver catalog per architecture (issue #63). No device. Stages
-# the x64 and the ARM64 payload with the Inf2Cat tree exactly as
-# EnsureExtracted does and runs the embedded Inf2Cat with the /os value
-# GenerateCatalogs picks for each, requiring one catalog per INF. v1.9.0
-# asked for 10_ARM64, which Inf2Cat rejects, so no ARM64 deploy reached
-# the install. Controls: that value is rejected, and each architecture's
-# INFs are refused under the other's value.
+# S61: the driver catalogs and their signatures (issue #63, release 2.3.0).
+# No device. Writes the catalogs of the x64 and the ARM64 driver package
+# and of a WinUSB package with the SDK's own catalog writer and checks them
+# with the probe's own ASN.1 reader. Where the WDK's Inf2Cat is installed it
+# compares them with Inf2Cat's element for element. Elevated, it signs them
+# and the binaries in process and verifies them, and where the Windows SDK's
+# signtool is installed compares each signature byte for byte. Controls: a
+# changed INF and a changed HWID are caught, a missing certificate throws.
+# Exit 2 when every check passed but the signing part could not run (not
+# elevated, or no certificate).
 function Scenario-Driver-Catalog {
     Invoke-Probe -Dir 'driver_catalog_check' -Exe 'DriverCatalogCheck.exe' `
-                 -Message 'an architecture''s driver INFs no longer catalog with the value GenerateCatalogs passes Inf2Cat (see probe stdout)'
+                 -Message 'a driver catalog or its signature differs from what Inf2Cat and signtool make, or does not verify (see probe stdout)' -SkipCodes 2
 }
 
 # S62: the 2026 Steam Controller persona against Steam's own firmware
@@ -2156,10 +2492,15 @@ function Scenario-Switch2-Composite {
 # claim and release, and a consumer killed with its virtual alive. The
 # probe exits 2, a skip, when another program that embeds HIDMaestro runs
 # or holds an input section open, since its live part would remove that
-# program's virtuals.
+# program's virtuals. A second run, --usb-ledger, follows what a USB/IP
+# persona leaves: the usbflags value Windows keeps for its identity, put
+# back as it was, and the device records it caused, named and removed.
 function Scenario-Registry-Ownership {
     Invoke-Probe -Dir 'registry_ownership_check' -Exe 'RegistryOwnershipCheck.exe' `
                  -Message 'a registry key a real device owns was changed, or a key HIDMaestro wrote outlived its virtual (see probe stdout)' `
+                 -SkipCodes 2
+    Invoke-Probe -Dir 'registry_ownership_check' -Exe 'RegistryOwnershipCheck.exe' -Arguments '--usb-ledger' -Tag 'usb-ledger' `
+                 -Message 'a USB/IP persona left a usbflags value or a device record HIDMaestro did not put back or name (see probe stdout)' `
                  -SkipCodes 2
 }
 
@@ -2216,14 +2557,24 @@ function Scenario-Kbm-Descriptors {
 # Exit 3, a skip: the probe runs in session 0, as over SSH, where Raw Input
 # lists no device. Exit 2, also a skip: another program that embeds
 # HIDMaestro runs, and the probe creates nothing beside it.
+#
+# The --dispose-ack run needs no Raw Input, so it tests keyboards in every
+# session, session 0 included: a disposed keyboard delivers its release
+# frame before the device goes.
 function Scenario-Kbm-Raw-Input {
     Invoke-Probe -Dir 'kbm_live_check' -Exe 'KbmLiveCheck.exe' `
                  -Message 'a virtual keyboard or mouse reached Raw Input wrong, lost input, or did not start (see probe stdout)' -SkipCodes 2, 3
+    Invoke-Probe -Dir 'kbm_live_check' -Exe 'KbmLiveCheck.exe' -Arguments '--dispose-ack 5' -Tag 'dispose-ack' `
+                 -Message 'a disposed keyboard did not deliver its release frame before it went (see probe stdout)' -SkipCodes 2
 }
 
 # S71: programs that embed HIDMaestro, side by side on one machine. Each
 # program is a peer process the probe drives, and the probe judges what
-# they did from outside both. Its header lists every section.
+# they did from outside both. Its header lists every section. On a machine
+# whose backend is USB/IP the sections whose subject is HIDMaestro's driver
+# package or its events print their own condition, J too where Windows
+# refuses the package, and the rest run on the backend each create
+# resolves to.
 function Scenario-Coexistence {
     # About 10.5 minutes on the devbox, so its hang deadline is ten times
     # that, 105, which load or another program cannot reach.
@@ -2240,7 +2591,9 @@ function Scenario-Coexistence {
 # of one that may not be and cannot move, T6 at timeout scales 1, 1.5 and
 # 2, the pin's opens and holds, the deploy's tools running from held files,
 # the refusal of a foreign folder above Staging, the prune's keep-or-delete
-# decision, and diagnostic files written as the user.
+# decision, and diagnostic files written as the user. On a machine whose
+# backend is USB/IP no driver payload is staged, so section I prints its
+# condition there and the offline checks run.
 function Scenario-Protected-Staging {
     Invoke-Probe -Dir 'coexist_check' -Exe 'CoexistCheck.exe' -Arguments 'I' -Tag 'staging' `
                  -Message 'a staged file the elevated SDK runs was writable by a non-administrator or not checked by hash (see probe stdout)' -SkipCodes 2
@@ -2334,7 +2687,7 @@ function Scenario-Pnp-Notify {
 # any machine-wide step, and still run a UMDF2 controller on x64.
 function Scenario-Build-Info {
     Invoke-Probe -Dir 'build_info_check' -Exe 'BuildInfoCheck.exe' -Arguments 'complete' -Tag 'complete' `
-                 -Message 'the release build does not carry every payload, or carries Inf2Cat files Inf2Cat never loads (see probe stdout)'
+                 -Message 'the release build does not carry every payload, or carries a tool from a Windows kit (see probe stdout)'
     Invoke-Probe -Dir 'build_info_check' -Exe 'variant\BuildInfoCheck.exe' -Arguments 'variant' -Tag 'variant' `
                  -Message 'a build without the ARM64, USB/IP or OpenVR payload reported or refused the wrong thing (see probe stdout)' -SkipCodes 2
 }
@@ -2348,7 +2701,9 @@ function Scenario-Build-Info {
 # corrected descriptors and one Full, and the persona's device,
 # configuration, string and report descriptors are a real WUP-028's as the
 # persona serves them, as Windows enumerates them before any driver loads,
-# and as libusb reads them through WinUSB after BindWinUsb.
+# and as libusb reads them through WinUSB after BindWinUsb. On a machine
+# that refuses HIDMaestro's driver package, the persona serves the
+# Microsoft OS string 0xEE after the bind.
 function Scenario-GameCube-Descriptors {
     Invoke-Probe -Dir 'gc_descriptor_check' -Exe 'GcDescriptorCheck.exe' `
                  -Message 'the GameCube adapter persona served a byte a real WUP-028 does not (see probe stdout)' -SkipCodes 2
@@ -2370,9 +2725,13 @@ function Scenario-GameCube-Protocol {
 # after a killed program, flag the instance once its devnode is gone, so
 # the next adapter on it installs by rank. An adapter arrives before the
 # next program's reclaim and after it: one present before keeps WinUSB
-# until it leaves.
+# until it leaves. The package is x64's path. On a machine that refuses
+# HIDMaestro's driver package the binding comes from Microsoft OS
+# descriptors the persona serves, which the probe takes there by itself,
+# and on x64 --os-descriptors runs that path after the package sections.
 function Scenario-GameCube-WinUsb {
-    Invoke-Probe -Dir 'gc_winusb_check' -Exe 'GcWinUsbCheck.exe' `
+    $a = if ((Get-MachineArch) -eq 'x64') { '--os-descriptors' } else { '' }
+    Invoke-Probe -Dir 'gc_winusb_check' -Exe 'GcWinUsbCheck.exe' -Arguments $a `
                  -Message 'the WinUSB binding reached a device it should not, or was not put back (see probe stdout)' -SkipCodes 2
 }
 
@@ -2639,6 +2998,68 @@ function Scenario-Switch-Pro-Sdl3 {
                  -Message 'SDL3''s HIDAPI_DriverSwitch no longer opens the virtual Switch Pro, completes its init, or reads its sticks, buttons and motion (see probe stdout)'
 }
 
+# S108: a Bluetooth identity's USB form (usbForm). Offline the load rule,
+# the presented profile and its USB device, FormOn, the raw-frame rule and
+# the decoded output names. Live, on the backend the run resolves to, the
+# HID interface each of the five presents, with dualsense-composite as the
+# positive control. Then SDL 3.4.18's release DLL for this architecture
+# opens each Sony and Nintendo Bluetooth identity, the USB forms and the
+# Stadia and Luna pads, and on USB/IP the same Bluetooth profiles without
+# usbForm as the control. The release is the official SDL3-3.4.18 zip
+# beside the tree, SDL3-release-3.4.18 on x64 and SDL3-release-3.4.18-arm64
+# on ARM64.
+function Scenario-Bt-Usb-Form {
+    $failed = @()
+    try {
+        Invoke-Probe -Dir 'bt_usb_form_check' -Exe 'BtUsbFormCheck.exe' -Arguments 'offline' -Tag 'offline' `
+                     -Message 'a Bluetooth identity no longer resolves to its USB form, or the form is refused or presented wrong (see probe stdout)'
+    } catch { $failed += $_.Exception.Message }
+    try {
+        Invoke-Probe -Dir 'bt_usb_form_check' -Exe 'BtUsbFormCheck.exe' -Arguments 'live auto' -Tag 'live' `
+                     -Message 'a Bluetooth identity presents the wrong form on this backend (see probe stdout)'
+    } catch { $failed += $_.Exception.Message }
+    $sdl = Join-Path (Split-Path $repoRoot) ('SDL3-release-3.4.18' + $(if ((Get-MachineArch) -eq 'arm64') { '-arm64' } else { '' }))
+    try {
+        Invoke-Probe -Dir 'bt_usb_form_check' -Exe 'BtUsbFormCheck.exe' -Arguments "sdl auto `"$sdl`"" -Tag 'sdl' `
+                     -Message 'SDL 3.4.18 no longer opens, reads or drives a Bluetooth identity in the form this backend presents (see probe stdout)'
+    } catch { $failed += $_.Exception.Message }
+    if ($failed.Count -gt 0) { throw ($failed -join ' AND ') }
+}
+
+# S109: the ten Xbox 360 profiles on each backend the machine runs. Each is
+# created, takes a slot, and reads its capabilities, its HID device and
+# its product string. Where both backends run, XInputGetCapabilities, the
+# XInput state of one input, XInputSetState's packet and the product
+# string are the same on both, and UMDF2's HID device has the layout of
+# the profile's descriptor. On USB/IP xusb22's HID device has that layout
+# too, unless the profile's notes state the difference (R8). Exit 2 when
+# another program that embeds HIDMaestro is running.
+function Scenario-Xusb-Family {
+    Invoke-Probe -Dir 'xusb_persona_check' -Exe 'XusbPersonaCheck.exe' -Arguments 'family' -Tag 'family' `
+                 -Message 'an Xbox 360 profile reads differently on the two backends, or its HID device on USB/IP differs from its descriptor where its notes do not say so (see probe stdout)' -SkipCodes 2
+}
+
+# S110: the battery the pad behind the receiver reports, on the backend
+# Auto resolves to: what xusb22 answers on USB/IP for the receiver's
+# battery status, and the same from the companion on UMDF2.
+function Scenario-Xusb-Battery-Receiver {
+    Invoke-Probe -Dir 'xusb_battery_check' -Exe 'XusbBatteryCheck.exe' -Arguments '--profile xbox-360-wireless' -Tag 'receiver' `
+                 -Message 'the pad behind the receiver no longer reports the battery its profile states (see probe stdout)' -SkipCodes 2
+}
+
+# S111: one WGI device for each of the ten Xbox 360 profiles, three fresh
+# creates each: one RawGameController, and one Gamepad for a pad of the
+# gamepad subtype, none for a wheel, stick, dance pad or guitar.
+function Scenario-Xusb-Wgi-Family {
+    $probe = Resolve-ProbeBinary 'xusb_wgi_single_check' 'XusbWgiSingleCheck.exe'
+    $p = Start-Process -FilePath $probe -ArgumentList '--profiles family' -PassThru -NoNewWindow
+    $null = $p.Handle
+    Wait-Exit -Proc $p -What (Split-Path $probe -Leaf)
+    if ($p.ExitCode -ne 0) {
+        throw ("XusbWgiSingleCheck --profiles family exited " + $p.ExitCode + ": an Xbox 360 profile is not one WGI device, or its Gamepad count is not its subtype's (see probe stdout)")
+    }
+}
+
 # S101: removing HIDMaestro, HIDMaestroUninstall.exe and HMUninstall. On
 # every machine the tool's preview and the API's change nothing, read
 # against a snapshot the probe takes without the SDK. On a machine without
@@ -2691,35 +3112,99 @@ function Scenario-Sinput-Persona {
                  -Message 'an SInput persona no longer answers SDL''s features command as its reference does, decodes the host''s output wrongly, or does not open in SDL3''s SInput driver (see probe stdout)'
 }
 
-# S104: driver signing. HMDriverSigning.Check() against the probe's own read
-# of the code integrity options and against the driver store, the decision
-# over the options the three test machines read, and Windows' own answer
-# for HIDMaestro's installed catalog and for a catalog signed as HIDMaestro
-# signs. On a machine whose Windows installs only Microsoft-signed driver
-# packages and that holds no HIDMaestro package, InstallDriver and a create
-# throw HMDriverSigningException and the machine reads the same after. That
-# part prints [SKIP] where Windows installs HIDMaestro's driver.
+# S104: driver signing and backend resolution. The verdict on HIDMaestro's
+# driver package against the probe's own read of the code integrity options
+# and against the driver store, the decision over the options the test
+# machines read, the backend Auto resolves to and the resolution of a create,
+# and Windows' own answer for HIDMaestro's installed catalog and for a
+# catalog signed as HIDMaestro signs. On a machine whose Windows refuses the
+# package and that holds none, an explicit Umdf2 request throws
+# HMDriverSigningException and writes nothing of the driver, and a program
+# that names no backend installs the USB/IP host controller and creates a
+# controller on it. That part is live and runs under the battery's bench
+# lock. It prints [SKIP] where Windows installs HIDMaestro's driver, and
+# runs on the ARM64 Surface.
 function Scenario-Driver-Signing {
     Invoke-Probe -Dir 'driver_signing_check' -Exe 'DriverSigningCheck.exe' `
-                 -Message 'HMDriverSigning.Check disagrees with the machine, a failed import is blamed on signing where Windows accepts the catalog, or a refused install changed the machine (see probe stdout)'
+                 -Message 'the signing verdict disagrees with the machine, a create resolves to the wrong backend, a failed import is blamed on signing where Windows accepts the catalog, or a refused install changed the machine (see probe stdout)'
 }
 
-# S105: the wired Xbox 360 pad as a USB device on the USB/IP backend
-# (xbox-360-wired-full), which has no HID interface. Offline, the profile's
-# descriptor set is the device [MS-XUSBI] describes, a mis-authored copy is
-# refused at its mistake, and every other USB/IP persona still needs its
-# HID interface and descriptor. A USB/IP client then plays the host: the
-# descriptors, the Microsoft OS compatible ID XUSB10, the stalls
-# [MS-XUSBI] table 29 asks for, the 20-byte input report and the rumble and
-# LED reports, raw and decoded. Live, Windows' inbox xusb22 binds the
-# device, a submitted state reads back through XInputGetState,
-# XInputSetState's motor bytes arrive at the OUT endpoint, a second pad
-# takes a slot of its own, and dualsense-composite beside them reads back
-# over HID as the positive control. Exit 2 when another program that embeds
+# S105: the Xbox 360 profiles on the USB/IP backend as XUSB functions, the
+# USB devices Windows gives its inbox xusb22. Offline, each of the ten
+# XUSB companion profiles presents its function from the XUSB model (a
+# retail wired pad, or for xbox-360-wireless a retail 045E:0719 receiver
+# with the pad on its first slot) with its VID, PID and the subtype the
+# UMDF2 companion answers. Each function's input report reads in XInput as
+# the companion's state does for 20,000 states, its output rules give the
+# companion's packets, an identity xusb22.inf does not list by hardware ID
+# serves the compatible ID XUSB10 (XUSB20 for a receiver), and the
+# identities xinputhid.inf and dc1-controller.inf bind are refused at load,
+# a receiver's xinput.information among them. A USB/IP client then plays
+# the host for both functions: descriptors, strings, stalls, the receiver's
+# announcement, link packet and battery status, its answers to connection
+# requests, the input reports, and the rumble and LED requests as the
+# companion's 5-byte XInput packets. Live, for
+# xbox-360-wired and xbox-360-wireless on USB/IP: xusb22 binds the device,
+# the create returns with the XInput slot taken, a submitted state reads
+# back through XInputGetState, XInputSetState arrives as the companion's
+# packet, a raw frame of another length is refused, a second pad takes a
+# slot of its own, and dualsense-composite beside them reads back over HID
+# as the positive control. Exit 2 when another program that embeds
 # HIDMaestro is running.
 function Scenario-Xusb-Persona {
     Invoke-Probe -Dir 'xusb_persona_check' -Exe 'XusbPersonaCheck.exe' `
-                 -Message 'the wired Xbox 360 pad on USB/IP no longer presents the device [MS-XUSBI] describes, does not bind xusb22, or does not round-trip state and rumble through XInput (see probe stdout)' -SkipCodes 2
+                 -Message 'an Xbox 360 profile on USB/IP no longer presents its XUSB function, does not bind xusb22, or does not round-trip state and rumble through XInput as the companion does (see probe stdout)' -SkipCodes 2
+}
+
+# S106: the wired Xbox One S pad as a USB device on the USB/IP backend
+# (xbox-one-s-full), which has no HID interface and speaks the Gaming Input
+# Protocol. Offline, the profile's descriptor set is the device Microsoft's
+# GIP specification describes, its metadata is Santroller's with the
+# persona's own firmware version, and a mis-authored copy is refused at its
+# mistake. A USB/IP client then plays the host: Hello every 500 ms until
+# answered, the metadata in fragments paced by the host's acknowledgements,
+# Start, Status and the first input report, Guide and Share, and the Direct
+# Motor command on the output ring in the UMDF2 form's shape. Live, Windows'
+# inbox dc1-controller and xboxgip bind the device, xboxgip holds the
+# metadata it served, a submitted state reads back through XInputGetState,
+# Share reads in the XUSB gamepad state, XInputSetState arrives as the Direct
+# Motor command, GameInput's trigger levels are recorded, Windows.Gaming.Input
+# lists the pad once, and dualsense-composite beside it reads back over HID
+# as the positive control. Exit 2 when another program that embeds
+# HIDMaestro is running.
+#
+# The family part creates each xinputhid profile as its GIP form and reads
+# it through XInput, WGI and the HID child's haptics output report.
+function Scenario-Gip-Persona {
+    Invoke-Probe -Dir 'gip_persona_check' -Exe 'GipPersonaCheck.exe' `
+                 -Message 'the wired Xbox One S pad on USB/IP no longer presents the device the GIP specification describes, does not bind Windows'' GIP driver, or does not round-trip state and rumble through XInput (see probe stdout)' -SkipCodes 2
+    Invoke-Probe -Dir 'gip_persona_check' -Exe 'GipPersonaCheck.exe' -Arguments 'family' -Tag 'family' `
+                 -Message 'an xinputhid profile no longer presents its GIP form, or reads differently through XInput, WGI or its haptics output report (see probe stdout)' -SkipCodes 2
+}
+
+# S107: the same profile on both backends. parity creates every deployable
+# profile both backends present on each backend this machine runs (both on
+# x64, USB/IP on a machine that refuses HIDMaestro's driver), each started
+# with no problem code, and where both run, the HID class reads the same
+# attributes, button and value caps of every report type and product
+# string on each, and an output report written to the device reaches the
+# program as the same packet. long reads reports over 64 bytes whole on
+# USB/IP, at the derived speed and pinned to full speed. ports fills the
+# host controller's USB 2.0 ports: the create past the last is refused by
+# name and the rest keep working. start opens each derived device's HID
+# interface the moment its create returns. oem gives the identity's
+# joy.cpl name while a USB/IP controller lives and puts the value before
+# it back after. identity keeps one key's HID interface path across a
+# dispose and a process restart. twoprograms: two programs on one host
+# controller hold their own bus locations, and one's dispose leaves the
+# other's device. Exit 2 when another program that embeds HIDMaestro runs.
+function Scenario-Backend-Parity {
+    $msg = 'a profile presents differently on the two backends, or the USB/IP backend refuses, loses or misplaces a device (see probe stdout)'
+    foreach ($part in @('parity', 'long', 'ports', 'start', 'oem', 'identity first', 'identity second', 'twoprograms')) {
+        Write-Host ('    part ' + $part)
+        Invoke-Probe -Dir 'backend_parity_check' -Exe 'BackendParityCheck.exe' -Arguments $part `
+                     -Tag ($part -replace ' ', '_') -Message $msg -SkipCodes 2
+    }
 }
 
 # ====================================================================
@@ -2830,7 +3315,13 @@ $scenarios = @(
     @{ Name = 'S102_Loop_Containment';           Body = ${function:Scenario-Loop-Containment} },
     @{ Name = 'S103_Sinput_Persona';             Body = ${function:Scenario-Sinput-Persona} },
     @{ Name = 'S104_Driver_Signing';             Body = ${function:Scenario-Driver-Signing} },
-    @{ Name = 'S105_Xusb_Persona';               Body = ${function:Scenario-Xusb-Persona} }
+    @{ Name = 'S105_Xusb_Persona';               Body = ${function:Scenario-Xusb-Persona} },
+    @{ Name = 'S106_Gip_Persona';                Body = ${function:Scenario-Gip-Persona} },
+    @{ Name = 'S107_Backend_Parity';             Body = ${function:Scenario-Backend-Parity} },
+    @{ Name = 'S108_Bt_Usb_Form';                Body = ${function:Scenario-Bt-Usb-Form} },
+    @{ Name = 'S109_Xusb_Family';                Body = ${function:Scenario-Xusb-Family} },
+    @{ Name = 'S110_Xusb_Battery_Receiver';      Body = ${function:Scenario-Xusb-Battery-Receiver} },
+    @{ Name = 'S111_Xusb_Wgi_Family';            Body = ${function:Scenario-Xusb-Wgi-Family} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -2858,7 +3349,13 @@ foreach ($s in $scenarios) {
     if ($s.Name -notlike $Filter) { continue }
     do {
         Wait-NoForeignHM
-        $r = Test-Scenario -Name $s.Name -Body $s.Body
+        try { $r = Test-Scenario -Name $s.Name -Body $s.Body }
+        catch {
+            # Whatever a scenario throws past its own handling is its FAIL,
+            # and the run goes on to its summary.
+            Write-Host ('  [FAIL] ' + $s.Name + ': ' + $_) -ForegroundColor Red
+            $r = [PSCustomObject]@{ Name = $s.Name; Rerun = $false; Pass = $false; DurationMs = 0; Error = $_; Leftovers = @(); BaselineCount = 0; AfterCount = 0 }
+        }
     } while ($r.Rerun)
     $results += $r
     if ($StopOnFailure -and -not $r.Pass) { $stoppedAt = $s.Name; break }

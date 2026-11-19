@@ -12,7 +12,9 @@
 // build\ held no ARM64 driver and no OpenVR driver, and whose Resources\
 // cache still held ARM64 and USB/IP files from a full build. It must carry
 // the x64 driver only, nothing stale, and refuse what it lacks before any
-// machine-wide step. It still creates a UMDF2 controller on x64.
+// machine-wide step. It still creates a UMDF2 controller on x64 where Auto
+// resolves to the driver, and elsewhere its create names the payload the
+// resolved backend lacks.
 //
 // "complete" needs no device and no elevation. "variant" requires
 // elevation for its device check, as the battery runs it.
@@ -203,9 +205,18 @@ internal static class Program
             Check("the refusals took no machine-wide claim and wrote nothing to the owner record",
                   taken.Count == 0, taken.Count == 0 ? "" : "new: " + string.Join(", ", taken));
 
-            if (os == Architecture.Arm64)
+            // A create of a profile both backends present resolves to the
+            // machine's backend. This build carries neither the USB/IP
+            // transport nor the ARM64 driver, so on ARM64, and wherever
+            // HIDMAESTRO_BACKEND makes Auto resolve to USB/IP, the create names
+            // the payload its backend lacks. On x64 it runs on the x64 driver.
+            HMBackend machine = HMContext.MachineBackend;
+            if (os == Architecture.Arm64 || machine == HMBackend.Usbip)
             {
-                ExpectMissing("a UMDF2 controller's create on ARM64", HMPayload.Driver, Architecture.Arm64,
+                var (payload, arch) = machine == HMBackend.Usbip
+                    ? (HMPayload.UsbipTransport, os)
+                    : (HMPayload.Driver, Architecture.Arm64);
+                ExpectMissing($"a dualshock-4-v2 create, which resolves to {machine} on this {os} machine,", payload, arch,
                               () => ctx.CreateController(ctx.GetProfile("dualshock-4-v2")!).Dispose());
             }
             else

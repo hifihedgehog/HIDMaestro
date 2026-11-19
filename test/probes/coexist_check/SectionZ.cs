@@ -103,6 +103,15 @@
 //    part 9 waits for its re-import, and parts 3 and b while part c waits
 //    for its re-import, each after that part when it ends before the wait
 //    or does not run. None of them takes a lock its host's checks wait on.
+//    Where Auto resolves to USB/IP no create passes the UMDF2 deploy gate, so
+//    part 2 prints its own condition there. Where Windows refuses
+//    HIDMaestro's driver package, BindWinUsb binds by the Microsoft OS
+//    descriptors the persona serves and adds no package: part 8 then checks
+//    that the bind does not wait for the deploy lock, and parts 9, e and f,
+//    whose subject is the package's rank against input.inf, the reinstall
+//    flag it leaves and the single-INF install, print their condition.
+//    Parts 1, 4, 5 and 6 test the SDK's pnputil runner and the transport's
+//    install and repair, which run on every machine, and run as written.
 //    "--z-parts=<characters>" after the section letters runs only those
 //    parts. Parts 8, 9, c, d, e and f bind a real adapter and dispose it, which
 //    on an SDK below the departing-devnode rule they were written for
@@ -171,8 +180,24 @@ internal static partial class Program
     static bool ZPart(char part)
     {
         string? arg = Environment.GetCommandLineArgs().FirstOrDefault(a => a.StartsWith("--z-parts=", StringComparison.Ordinal));
-        return arg == null || arg.AsSpan("--z-parts=".Length).Contains(part);
+        if (arg != null && !arg.AsSpan("--z-parts=".Length).Contains(part)) return false;
+        if (ZNotHere(part) is { } condition)
+        {
+            Console.WriteLine($"  [SKIP] Z{part}: {condition}");
+            return false;
+        }
+        return true;
     }
+
+    /// <summary>Why a part of Z has no subject on this machine, or null.</summary>
+    static string? ZNotHere(char part) => part switch
+    {
+        '2' when s_machineBackend == "Usbip" =>
+            "the deploy gate is the one every UMDF2 create passes, and this machine's creates run on USB/IP",
+        '9' or 'e' or 'f' when s_refusesPackage =>
+            "the part tests HIDMaestro's WinUSB package against input.inf, and Windows on this machine refuses the package, so the binding comes from the persona's Microsoft OS descriptors",
+        _ => null,
+    };
 
     /// <summary>A copy of this probe under another name: pnputil.exe hangs
     /// 40 s, longer than the SDK's 30 s pnputil timeouts, or exits at once
@@ -514,8 +539,14 @@ internal static partial class Program
                 // Longer than a first add takes: catalog, signing, pnputil.
                 early = p.Receive("bindwinusb, while the probe holds the deploy lock",
                                   (int)Math.Max(0, 30_000 - held.ElapsedMilliseconds));
-                Check("Z8: BindWinUsb does not add its package while another program holds the deploy lock",
-                      early.StartsWith("ERR timeout", StringComparison.Ordinal), early);
+                // Where Windows refuses the package the bind adds none: it
+                // binds by the persona's OS descriptors, under no deploy lock.
+                if (s_refusesPackage)
+                    Check("Z8: where Windows refuses the package, BindWinUsb binds by OS descriptors while another program holds the deploy lock",
+                          early == "OK bindwinusb Bound", early);
+                else
+                    Check("Z8: BindWinUsb does not add its package while another program holds the deploy lock",
+                          early.StartsWith("ERR timeout", StringComparison.Ordinal), early);
             }
             finally { releasedAt = Stopwatch.GetTimestamp(); deploy.ReleaseMutex(); deploy.Dispose(); }
             string bound = early.StartsWith("ERR timeout", StringComparison.Ordinal) ? p.Receive("bindwinusb, once it is free") : early;

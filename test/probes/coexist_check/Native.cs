@@ -161,9 +161,20 @@ internal static class Native
         return list;
     }
 
-    /// <summary>Neither live nor phantom: what DeviceManager.RemoveDevice ends with.</summary>
-    internal static bool IsGone(string instanceId) =>
-        CM_Locate_DevNodeW(out _, instanceId, 0) != 0 && CM_Locate_DevNodeW(out _, instanceId, 1) != 0;
+    /// <summary>Neither live nor phantom: what DeviceManager.RemoveDevice ends with.
+    /// A USB/IP persona leaves by a bus unplug, after which Windows keeps a
+    /// not-present record of the USB device and each devnode below it, so
+    /// for a devnode of a USB device's tree (<see cref="Subtree"/>) gone means
+    /// not present.</summary>
+    internal static bool IsGone(string instanceId)
+    {
+        if (CM_Locate_DevNodeW(out _, instanceId, 0) == 0) return false;
+        lock (s_usbTree) if (s_usbTree.Contains(instanceId)) return true;
+        return CM_Locate_DevNodeW(out _, instanceId, 1) != 0;
+    }
+
+    // Every devnode Subtree has listed below a USB device.
+    static readonly HashSet<string> s_usbTree = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>A devnode's status flags and problem code, for a check's
     /// detail.</summary>
@@ -206,6 +217,8 @@ internal static class Native
             do { list.Add(DeviceIdOf(cur)); Walk(cur); } while (CM_Get_Sibling(out cur, cur, 0) == 0);
         }
         Walk(di);
+        if (list[0].StartsWith(@"USB\", StringComparison.OrdinalIgnoreCase))
+            lock (s_usbTree) foreach (string id in list) s_usbTree.Add(id);
         return list;
     }
 
@@ -397,6 +410,27 @@ internal static class Native
     /// <summary>The owner records with a controller entry for
     /// <paramref name="token"/>, each with the process id it names, or null
     /// when it names none.</summary>
+    /// <summary>Whether the owner record of process <paramref name="pid"/>
+    /// names <paramref name="usbInstanceId"/> as one of its controllers'
+    /// USB devices (the entry's UsbInstanceId).</summary>
+    internal static bool RecordNamesUsb(int pid, string usbInstanceId)
+    {
+        using var k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestroOwners");
+        if (k == null) return false;
+        foreach (var id in k.GetSubKeyNames())
+        {
+            using var r = k.OpenSubKey(id);
+            if (r?.GetValue("Pid") is not int p || p != pid) continue;
+            using var cs = r.OpenSubKey("Controllers");
+            foreach (var token in cs?.GetSubKeyNames() ?? Array.Empty<string>())
+            {
+                using var c = cs!.OpenSubKey(token);
+                if (string.Equals(c?.GetValue("UsbInstanceId") as string, usbInstanceId, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+        }
+        return false;
+    }
+
     internal static List<(string OwnerId, int? Pid)> RecordsNaming(string token)
     {
         var list = new List<(string, int?)>();

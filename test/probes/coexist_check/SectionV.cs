@@ -152,8 +152,20 @@ internal static partial class Program
     static void VTakenOverPort(HashSet<(int Port, string BusId)> touched)
     {
         using var b = PeerProcess.Start("V1-running");
-        string pad = b.Send("create pad F1C0 -");
-        if (!Ok(pad)) { Check("V1: the running program creates a gamepad", false, pad); return; }
+        // The running program has swept and runs no USB/IP server yet. A
+        // gamepad's create does both on UMDF2. Where the gamepad itself runs
+        // on USB/IP it would start the server and take the port first, so
+        // there the program sweeps without a create.
+        if (s_machineBackend == "Usbip")
+        {
+            string sw = b.Send("sweep");
+            if (!Ok(sw)) { Check("V1: the running program sweeps", false, sw); return; }
+        }
+        else
+        {
+            string pad = b.Send("create pad F1C0 -");
+            if (!Ok(pad)) { Check("V1: the running program creates a gamepad", false, pad); return; }
+        }
 
         int port;
         string busId;
@@ -174,6 +186,9 @@ internal static partial class Program
         if (!Ok(cb)) { Check("V1: the running program creates its first composite", false, cb); return; }
         int bPort = RecordUsbipPort(b.Pid);
         touched.Add((bPort, "1-" + (int.Parse(PeerProcess.Field(cb, "transport")!) + 1)));
+        // A server takes the lowest port of the range no live program holds,
+        // so another program's server on a lower port leaves the killed
+        // program's port the lowest free one all the same.
         Check($"V1: its server takes the killed program's port {port}", bPort == port, $"port {bPort}");
         int left = Vhci.Stop("127.0.0.1", port, busId);
         Check($"V1: no re-attach attempt for {busId} at {port} outlives the takeover", left == 0, $"{left} canceled by the probe");
@@ -246,14 +261,22 @@ internal static partial class Program
         Check("V3: the host controller drops the v1.12.0 imports once the program is killed",
               WaitFor(() => !Vhci.Imported().Any(r => r.Port == port), 10_000));
 
+        // Another program on this SDK that holds transport index 0 (its
+        // claim pipe) keeps it from the new program, whose composite then
+        // takes the lowest index free. The checks follow the bus id it got.
+        bool zeroElsewhere = Native.ClaimExists("HIDMaestro.Index.0");
         using (var nu = PeerProcess.Start("V3-new"))
         {
             string cn = nu.Send("create composite -");
             if (!Ok(cn)) { Check("V3: a program on this SDK creates a composite", false, cn); return; }
             string nuBus = "1-" + (int.Parse(PeerProcess.Field(cn, "transport")!) + 1);
             int nuPort = RecordUsbipPort(nu.Pid);
-            Check($"V3: its server takes the v1.12.0 program's port {port} and its composite bus id 1-1",
-                  nuPort == port && nuBus == "1-1", $"{nuPort}/{nuBus}");
+            if (zeroElsewhere)
+                Check($"V3: its server takes the v1.12.0 program's port {port}, its composite on the lowest bus id another program leaves free",
+                      nuPort == port && nuBus != "1-1", $"{nuPort}/{nuBus}");
+            else
+                Check($"V3: its server takes the v1.12.0 program's port {port} and its composite bus id 1-1",
+                      nuPort == port && nuBus == "1-1", $"{nuPort}/{nuBus}");
             int left1 = Vhci.Stop("127.0.0.1", port, "1-1");
             Check($"V3: no re-attach attempt for 1-1 at {port} outlives the create", left1 == 0, $"{left1} canceled by the probe");
 
@@ -262,7 +285,7 @@ internal static partial class Program
             // one for 1-10 has reached the new server and been answered.
             while (dropped.Elapsed < TimeSpan.FromSeconds(38)) Thread.Sleep(250);
             Check("V3: the new program's composite is still attached",
-                  Vhci.Imported().Any(r => r.Port == port && r.BusId == "1-1"));
+                  Vhci.Imported().Any(r => r.Port == port && r.BusId == nuBus));
         }
 
         // The answered attempt goes out again a first delay later, 30 s
@@ -399,7 +422,9 @@ internal static partial class Program
                 // before v2.0.0 having left no record. Only on one of those does
                 // the comeback check tell a sweep that leaves the program's exports
                 // from one that does not.
-                Check("V5: the composite has bus id 1-1, which the own-port sweep would cancel", bus == "1-1", bus);
+                // 1-1 unless another program runs a composite on index 0.
+                Check("V5: the composite has a bus id from 1-1 to 1-8, which the own-port sweep would cancel",
+                      int.TryParse(bus[2..], out int busN) && busN >= 1 && busN <= 8, bus);
                 if (!Drop("a first time")) return false;
                 dropped5.Start();
                 int recorded = -1;
@@ -449,13 +474,24 @@ internal static partial class Program
                 Check($"V4: its composite {portA}/{busA} is attached", x > 0);
                 if (x <= 0) return false;
 
+                // The other program starts, and runs a gamepad, before the
+                // drop: its first create on USB/IP, where the gamepad runs
+                // there, sets up its server, so the composite it creates
+                // after the drop plugs in at once, ahead of the host
+                // controller's re-attach 30 s after the drop. The gamepad
+                // takes a vhci port while the first program's composite
+                // still holds x.
+                var bWarm = Start("V4-other");
+                string pb = bWarm.Send("create pad F1C4 -");
+                if (!Ok(pb)) { Check("V4: another program creates a gamepad", false, pb); return false; }
+
                 int reset = Tcp.ResetServerEnd(portA, a.Pid);
                 Check("V4: the probe resets the composite's connection", reset == 1, $"{reset} connection(s) reset");
                 Check($"V4: the host controller drops it from vhci port {x}",
                       WaitFor(() => !Vhci.Imported().Any(r => r.Port == portA && r.BusId == busA), 10_000));
                 dropped4.Start();
 
-                var b = Start("V4-other");
+                var b = bWarm;
                 string cb = b.Send("create composite -");
                 if (!Ok(cb)) { Check("V4: another program creates a composite", false, cb); return false; }
                 busB = "1-" + (int.Parse(PeerProcess.Field(cb, "transport")!) + 1);
@@ -545,12 +581,17 @@ internal static partial class Program
             // Bus ids 1-11 to 1-14: past the 1-1 to 1-8 a sweep tries with no
             // record, and clear of part 2's v1.12.0 program, which holds
             // indices 0 and 9 while this part runs in its wait.
+            // A running v1.12.0 program with a controller present moves a
+            // create to 64 plus its slot, or the lowest free index from 64
+            // (HMContext.CreateControllerAt), and part 2's v1.12.0 program
+            // runs beside this part. Either index is past 1-8.
             for (int i = 10; i <= 13; i++)
             {
                 string c = k.Send($"createat {i} composite -");
-                if (!Ok(c) || PeerProcess.Field(c, "transport") != i.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                bool placed = int.TryParse(PeerProcess.Field(c, "transport"), out int t) && (t == i || t >= 64);
+                if (!Ok(c) || !placed)
                 {
-                    Check($"V6: the program to be killed creates a composite at index {i}", false, c);
+                    Check($"V6: the program to be killed creates a composite at index {i}, or from 64 beside a v1.12.0 program", false, c);
                     return;
                 }
                 buses.Add("1-" + (int.Parse(PeerProcess.Field(c, "transport")!) + 1));
@@ -655,6 +696,12 @@ internal static partial class Program
         var held = new List<System.Net.Sockets.TcpListener>();
         try
         {
+            // A port another program uses (its server, or a connection's
+            // local end) is out of a server's reach as much as one the probe
+            // holds: what the part needs is that no port of either range is
+            // free. A port the probe cannot bind for any other reason fails.
+            int inUse = 0;
+            var otherError = new List<string>();
             foreach (int first in new[] { UsbipBasePort, UsbipSecondBasePort })
                 for (int i = 0; i < 16; i++)
                 {
@@ -664,9 +711,15 @@ internal static partial class Program
                         l.Start();
                         held.Add(l);
                     }
-                    catch (System.Net.Sockets.SocketException) { }
+                    catch (System.Net.Sockets.SocketException e) when (e.SocketErrorCode is System.Net.Sockets.SocketError.AddressAlreadyInUse or System.Net.Sockets.SocketError.AccessDenied)
+                    {
+                        inUse++;
+                    }
+                    catch (System.Net.Sockets.SocketException e) { otherError.Add($"{first + i}: {e.SocketErrorCode}"); }
                 }
-            Check("V8: the probe holds both port ranges", held.Count == 32, $"{held.Count} of 32");
+            Check("V8: no port of either range is free: the probe holds every one another program does not use",
+                  held.Count + inUse == 32 && otherError.Count == 0,
+                  $"{held.Count} held by the probe, {inUse} in use by other programs, of 32{(otherError.Count > 0 ? ", " + string.Join(", ", otherError) : "")}");
             bool Outside(int port) => port > 0 && (port < UsbipBasePort || port >= UsbipBasePort + 16)
                 && (port < UsbipSecondBasePort || port >= UsbipSecondBasePort + 16);
 
