@@ -106,7 +106,7 @@ public sealed class HMContext : IDisposable
         // case where the consumer's foreground InstallDriver fires before
         // prewarm completes. Catches per-task so one failure doesn't kill
         // the rest.
-        System.Threading.Tasks.Task.Run(() =>
+        var staging = System.Threading.Tasks.Task.Run(() =>
         {
             try { _ = Internal.EmbeddedManifest.Sha256Hex; } catch { }
             // The backend InstallDriver installs decides what to stage. It is
@@ -146,11 +146,11 @@ public sealed class HMContext : IDisposable
             if (installsDriver)
                 try { Internal.DriverBuilder.IsDriverInstalled(); } catch { }
         });
-        System.Threading.Tasks.Task.Run(() =>
+        var catalog = System.Threading.Tasks.Task.Run(() =>
         {
             try { _ = Internal.ProfileDatabase.LoadEmbedded(); } catch { }
         });
-        System.Threading.Tasks.Task.Run(() =>
+        var service = System.Threading.Tasks.Task.Run(() =>
         {
             // GameInputSvc serves the controllers of both backends: WGI and
             // GameInput read a USB/IP pad through it as they read a UMDF2
@@ -158,7 +158,14 @@ public sealed class HMContext : IDisposable
             try { Internal.DeviceOrchestrator.PrewarmGameInputService(); }
             catch { }
         });
+        Prewarmed = System.Threading.Tasks.Task.WhenAll(staging, catalog, service);
     }
+
+    /// <summary>Completes when the constructor's warm-up tasks have all
+    /// ended. Each catches its own failures, so it never faults.
+    /// driver_signing_check (S104) waits on it before it reads what the
+    /// warm-up left on a machine that refuses the package.</summary>
+    internal System.Threading.Tasks.Task Prewarmed { get; }
 
     /// <summary>The backend this context's creates default to, as it was
     /// given: <see cref="HMBackend.Auto"/> unless the context was built
@@ -168,10 +175,14 @@ public sealed class HMContext : IDisposable
     /// <summary>What <see cref="HMBackend.Auto"/> resolves to on this
     /// machine for a profile both backends present:
     /// <see cref="HMBackend.Umdf2"/> where this build carries the driver for
-    /// the machine's architecture and Windows installs its package, else
-    /// <see cref="HMBackend.Usbip"/> where it carries the USB/IP transport.
+    /// the machine's architecture and Windows installs its package, or this
+    /// build's driver is installed whole already, else
+    /// <see cref="HMBackend.Usbip"/> where the build carries either
+    /// payload. A build that carries the driver alone then names the
+    /// USB/IP transport it lacks rather than a driver Windows refuses.
     /// Windows on ARM64 and Windows in S mode, which do not install
-    /// HIDMaestro's package, read <see cref="HMBackend.Usbip"/>. Needs no
+    /// HIDMaestro's package, read <see cref="HMBackend.Usbip"/> unless this
+    /// build's driver is installed there already. Needs no
     /// elevation and changes nothing. The environment variable
     /// <c>HIDMAESTRO_BACKEND</c>, <c>umdf2</c> or <c>usbip</c>, read once per
     /// process, replaces the answer, for diagnostics.</summary>
@@ -388,9 +399,18 @@ public sealed class HMContext : IDisposable
         if (Internal.BackendSelection.ProcessElevated && !Internal.MachineClaims.ClaimBeforeWrite())
             throw new InvalidOperationException(Internal.MachineClaims.RemovingHereMessage);
         Internal.OwnerSweep.ReclaimDeadOwners();
+        int moves = Internal.Usbip.UsbipDriverInstaller.LegacyMoves;
         Internal.Usbip.UsbipDriverInstaller.EnsureInstalled();
-        LastDriverInstall = present ? HMDriverInstallOutcome.AlreadyCurrent : HMDriverInstallOutcome.Installed;
+        LastDriverInstall = UsbipInstallOutcome(present, moved: Internal.Usbip.UsbipDriverInstaller.LegacyMoves != moves);
     }
+
+    /// <summary>What an install of the USB/IP host controller did:
+    /// <see cref="HMDriverInstallOutcome.Installed"/> when it installed the
+    /// host controller, or moved one already there off an older usbip-win2
+    /// onto the bundled one, else
+    /// <see cref="HMDriverInstallOutcome.AlreadyCurrent"/>.</summary>
+    internal static HMDriverInstallOutcome UsbipInstallOutcome(bool presentBefore, bool moved) =>
+        !presentBefore || moved ? HMDriverInstallOutcome.Installed : HMDriverInstallOutcome.AlreadyCurrent;
 
     /// <summary>What the last <see cref="InstallDriver"/> call on this
     /// context did, or null before the first one.</summary>
@@ -896,6 +916,13 @@ public sealed class HMContext : IDisposable
         // and again for its attach: one open serves both
         // (VhciClient.HoldOpen), closed as this create returns.
         using var vhci = usbip ? Internal.Usbip.VhciClient.HoldOpen() : null;
+        // A host controller whose USB 2.0 ports all hold a device, refused
+        // before the lease and the host controller's install. After the
+        // session sweep, which plugs out what programs that have exited
+        // left on its ports, and inside the create gate: work between the
+        // sweep and the gate lets the phantom cleanup the sweep started
+        // take the gate first, and the create then waits for all of it.
+        if (usbip) Internal.Usbip.UsbipBackend.ThrowIfPortsFull();
         // The record's backend tag is the resolved backend, which the sweeps
         // and the deploy policy read.
         var lease = AcquireLease(slot, identityKey, usbip ? "usbip" : "umdf", profile.Id);
@@ -1005,16 +1032,28 @@ public sealed class HMContext : IDisposable
             // attach, so a failed attach leaves them for the catch below.
             handle = Internal.Usbip.UsbipBackend.CreateDevice(profile.Inner, index, lease.Identity);
             // The USB instance the device's records sit under, in the owner
-            // record, for the start wait and for record cleanup.
+            // record, for record cleanup.
             if (handle.Device.Descriptors.UsbInstanceId is { } usbId)
             {
                 Internal.MachineClaims.SetControllerValue(lease.Identity.Token, "UsbInstanceId", usbId);
                 // A derived device's HID interface is started before the
-                // create returns, as the UMDF2 create's is.
-                if (handle.Device.Derived) Internal.DeviceOrchestrator.AwaitUsbipStart(usbId, index);
+                // create returns, as the UMDF2 create's is. The wait finds
+                // the device on its port, and the record takes the name
+                // Windows gave it when that is not the serial's.
+                if (handle.Device.Derived)
+                {
+                    string named = Internal.DeviceOrchestrator.AwaitUsbipStart(usbId, handle.Device.VhciPort, index);
+                    if (!string.Equals(named, usbId, StringComparison.OrdinalIgnoreCase))
+                        Internal.MachineClaims.SetControllerValue(lease.Identity.Token, "UsbInstanceId", named);
+                }
                 // The GIP function's HID child is started under xinputhid and
                 // its XInput slot taken, as the UMDF2 xinputhid create's.
-                else if (gip) Internal.DeviceOrchestrator.AwaitUsbipGipStart(usbId, index, slotsBefore);
+                else if (gip)
+                {
+                    string named = Internal.DeviceOrchestrator.AwaitUsbipGipStart(usbId, handle.Device.VhciPort, index, slotsBefore);
+                    if (!string.Equals(named, usbId, StringComparison.OrdinalIgnoreCase))
+                        Internal.MachineClaims.SetControllerValue(lease.Identity.Token, "UsbInstanceId", named);
+                }
             }
             var controller = new HMController(this, slot, lease, profile, instanceId: null, handle, lease.Identity.Key);
             try

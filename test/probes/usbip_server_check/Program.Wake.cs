@@ -892,7 +892,7 @@ internal static partial class Program
         using var rig = new HandoffRig(ds, HandoffIndex + 16);
         using var entered = new ManualResetEventSlim();
         using var release = new ManualResetEventSlim();
-        rig.Device.Audio.OutFrames += _ => { entered.Set(); release.Wait(Hang); };
+        AudioOf(rig.Device).OutFrames += _ => { entered.Set(); release.Wait(Hang); };
         uint urb = rig.SubmitIsoOut(0x01, 10, 392);
         bool inHandler = entered.Wait(Hang);
         uint u = rig.NextSeq();
@@ -918,7 +918,7 @@ internal static partial class Program
         using var next = new HandoffRig.Wire($"hm-s43-handoff-{Environment.ProcessId}-{HandoffIndex + 17}-next.sock");
         using var entered = new ManualResetEventSlim();
         using var release = new ManualResetEventSlim();
-        rig.Device.Audio.OutFrames += _ => { entered.Set(); release.Wait(Hang); };
+        AudioOf(rig.Device).OutFrames += _ => { entered.Set(); release.Wait(Hang); };
         uint urb = rig.SubmitIsoOut(0x01, 10, 392);
         bool inHandler = entered.Wait(Hang);
         rig.Device.DetachConnection(rig.Connection);

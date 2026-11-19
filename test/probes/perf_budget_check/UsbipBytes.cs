@@ -140,7 +140,7 @@ internal static partial class Program
                     for (int i = 0; i < 5; i++)
                     {
                         rng.NextBytes(pcm);
-                        device.Audio.SubmitMicSamples(pcm.AsSpan(0, rng.Next(1, pcm.Length + 1)));
+                        AudioOf(device).SubmitMicSamples(pcm.AsSpan(0, rng.Next(1, pcm.Length + 1)));
                         int status = w.WaitFor(w.SubmitIsoIn((uint)(mic & 0x0F), 10, 196));
                         h.AppendData(BitConverter.GetBytes(status));
                         h.AppendData(w.LastData);

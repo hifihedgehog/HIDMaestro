@@ -158,13 +158,26 @@ internal sealed class UsbPresentation
         };
         int packetCap = speed switch { "high" => 1024, "full" => 64, _ => 8 };
         byte defaultInterval = speed switch { "high" => 4, "full" => 1, _ => 10 };
+        // A low-speed interrupt packet carries 8 bytes (USB 2.0 5.7.3), and
+        // a report goes in one packet.
+        if (speed == "low" && Math.Max(longestIn, longestOut) > 8)
+            throw new ProfileDefectException($"{Root}.busSpeed",
+                $"\"low\" carries interrupt packets of 8 bytes (USB 2.0 5.7.3), and this profile has a {Math.Max(longestIn, longestOut)}-byte report.");
 
         // Device descriptor.
         var dev = pins?.Device;
         ushort bcdUsb = HexWord(dev?.BcdUsb, $"{Root}.device.bcdUsb") ?? 0x0200;
+        if (speed == "high" && bcdUsb < 0x0200)
+            throw new ProfileDefectException($"{Root}.device.bcdUsb", $"0x{bcdUsb:X4} is under 0x0200, and a high-speed device reports USB 2.0 (USB 2.0 9.6.1).");
         byte maxPacket0 = dev?.MaxPacketSize0 ?? (byte)(speed == "low" ? 8 : 64);
+        // USB 2.0 5.5.3: 8 at low speed, 64 at high speed, any of the four
+        // at full speed.
         if (maxPacket0 is not (8 or 16 or 32 or 64))
             throw new ProfileDefectException($"{Root}.device.maxPacketSize0", $"{maxPacket0} is not one of 8, 16, 32, 64.");
+        if (speed == "low" && maxPacket0 != 8)
+            throw new ProfileDefectException($"{Root}.device.maxPacketSize0", $"{maxPacket0} is not the 8 bytes a low-speed control endpoint carries (USB 2.0 5.5.3).");
+        if (speed == "high" && maxPacket0 != 64)
+            throw new ProfileDefectException($"{Root}.device.maxPacketSize0", $"{maxPacket0} is not the 64 bytes a high-speed control endpoint carries (USB 2.0 5.5.3).");
         ushort bcdDevice = HexWord(dev?.BcdDevice, $"{Root}.device.bcdDevice") ?? profile.VersionNumber ?? 0x0100;
         byte iManufacturer = string.IsNullOrEmpty(profile.ManufacturerString) ? (byte)0 : (byte)1;
         byte iProduct = string.IsNullOrEmpty(profile.ProductString) ? (byte)0 : (byte)2;
@@ -182,27 +195,39 @@ internal sealed class UsbPresentation
         // The HID interface.
         var hid = pins?.Hid;
         byte interfaceNumber = hid?.InterfaceNumber ?? 0;
+        // The configuration has one interface, and bInterfaceNumber is its
+        // zero-based index (USB 2.0 9.6.5).
+        if (interfaceNumber != 0)
+            throw new ProfileDefectException($"{Root}.hid.interfaceNumber", $"{interfaceNumber} is not 0, the number of the one interface this configuration has (USB 2.0 9.6.5).");
         byte subClass = hid?.SubClass ?? 0;
+        if (subClass > 1)
+            throw new ProfileDefectException($"{Root}.hid.subClass", $"{subClass} is reserved: 0 is no subclass and 1 the boot interface (HID 1.11 4.2).");
         byte protocol = hid?.Protocol ?? 0;
+        if (protocol > 2)
+            throw new ProfileDefectException($"{Root}.hid.protocol", $"{protocol} is reserved: 1 is the keyboard and 2 the mouse (HID 1.11 4.3).");
+        if (protocol != 0 && subClass != 1)
+            throw new ProfileDefectException($"{Root}.hid.protocol", $"{protocol} names a boot protocol, which only a boot interface (subClass 1) carries (HID 1.11 4.3).");
         ushort bcdHid = HexWord(hid?.BcdHid, $"{Root}.hid.bcdHid") ?? 0x0111;
         byte country = hid?.CountryCode ?? 0;
 
-        var inEp = Endpoint(pins?.InEndpoint, $"{Root}.inEndpoint", 0x81, longestIn, packetCap, defaultInterval, wantIn: true);
-        if (inEp == null)
-            throw new ProfileDefectException($"{Root}.inEndpoint", "is null, and a HID interface reports on an interrupt IN endpoint.");
-        var outEp = pins?.OutEndpoint is { None: true } ? null
+        var inEp = Endpoint(pins?.InEndpoint, $"{Root}.inEndpoint", 0x81, longestIn, packetCap, defaultInterval, speed, wantIn: true);
+        // The two addresses differ in their direction bit, so they never
+        // collide.
+        (byte Address, int MaxPacket, byte Interval)? outEp = pins?.OutEndpoint is { None: true } ? null
             : declaresOutput || pins?.OutEndpoint != null
-                ? Endpoint(pins?.OutEndpoint, $"{Root}.outEndpoint", 0x01, Math.Max(1, longestOut), packetCap, defaultInterval, wantIn: false)
+                ? Endpoint(pins?.OutEndpoint, $"{Root}.outEndpoint", 0x01, Math.Max(1, longestOut), packetCap, defaultInterval, speed, wantIn: false)
                 : null;
-        if (outEp != null && (outEp.Value.Address & 0x0F) == (inEp.Value.Address & 0x0F) && outEp.Value.Address == inEp.Value.Address)
-            throw new ProfileDefectException($"{Root}.outEndpoint.address", "is the IN endpoint's address.");
 
         byte attributes = pins?.Attributes ?? 0x80;
         if ((attributes & 0x80) == 0)
             throw new ProfileDefectException($"{Root}.attributes", $"0x{attributes:X2} has bit 7 clear, which USB 2.0 9.6.3 requires set.");
+        if ((attributes & 0x1F) != 0)
+            throw new ProfileDefectException($"{Root}.attributes", $"0x{attributes:X2} sets a reserved bit, D4 to D0, which USB 2.0 9.6.3 requires clear.");
         int milliamps = pins?.MaxPowerMilliamps ?? 500;
         if (milliamps < 0 || milliamps > 510)
             throw new ProfileDefectException($"{Root}.maxPowerMilliamps", $"{milliamps} is outside 0 to 510.");
+        if (milliamps % 2 != 0)
+            throw new ProfileDefectException($"{Root}.maxPowerMilliamps", $"{milliamps} is odd, and bMaxPower counts 2 mA units (USB 2.0 9.6.3).");
         byte configurationValue = pins?.ConfigurationValue ?? 1;
         if (configurationValue == 0)
             throw new ProfileDefectException($"{Root}.configurationValue", "0 is the unconfigured state, which no configuration takes.");
@@ -217,12 +242,12 @@ internal sealed class UsbPresentation
         };
         void AddEndpoint((byte Address, int MaxPacket, byte Interval) e) =>
             config.AddRange(new byte[] { 7, 0x05, e.Address, 0x03, (byte)e.MaxPacket, (byte)(e.MaxPacket >> 8), e.Interval });
-        AddEndpoint(inEp.Value);
+        AddEndpoint(inEp);
         if (outEp != null) AddEndpoint(outEp.Value);
 
         var endpoints = new List<UsbEndpointSpec>
         {
-            new() { Address = inEp.Value.Address, TransferType = "interrupt", MaxPacketSize = inEp.Value.MaxPacket, Interval = inEp.Value.Interval },
+            new() { Address = inEp.Address, TransferType = "interrupt", MaxPacketSize = inEp.MaxPacket, Interval = inEp.Interval },
         };
         if (outEp != null)
             endpoints.Add(new() { Address = outEp.Value.Address, TransferType = "interrupt", MaxPacketSize = outEp.Value.MaxPacket, Interval = outEp.Value.Interval });
@@ -254,12 +279,12 @@ internal sealed class UsbPresentation
     }
 
     /// <summary>One interrupt endpoint: the pins over the address, the
-    /// packet size and the interval, the rest derived. Null when the pin is
-    /// the file's <c>null</c>.</summary>
-    private static (byte Address, int MaxPacket, byte Interval)? Endpoint(
-        UsbEndpointPins? pin, string path, byte defaultAddress, int longest, int packetCap, byte defaultInterval, bool wantIn)
+    /// packet size and the interval, the rest derived. An OUT pin that is
+    /// the file's <c>null</c> is handled before this is called, and
+    /// <c>"inEndpoint": null</c> reads as no pin.</summary>
+    private static (byte Address, int MaxPacket, byte Interval) Endpoint(
+        UsbEndpointPins? pin, string path, byte defaultAddress, int longest, int packetCap, byte defaultInterval, string speed, bool wantIn)
     {
-        if (pin is { None: true }) return null;
         byte address = defaultAddress;
         if (pin?.Address is { } text)
         {
@@ -275,6 +300,12 @@ internal sealed class UsbPresentation
         byte interval = pin?.Interval ?? defaultInterval;
         if (interval == 0)
             throw new ProfileDefectException($"{path}.interval", "0 is no interrupt interval.");
+        // A high-speed interrupt bInterval is an exponent from 1 to 16
+        // (USB 2.0 9.6.6), and a low-speed one 10 to 255 ms (USB 2.0 5.7.4).
+        if (speed == "high" && interval > 16)
+            throw new ProfileDefectException($"{path}.interval", $"{interval} is past 16: at high speed the period is 2^(bInterval-1) microframes, bInterval 1 to 16 (USB 2.0 9.6.6).");
+        if (speed == "low" && interval < 10)
+            throw new ProfileDefectException($"{path}.interval", $"{interval} is under 10, the shortest low-speed interrupt interval in milliseconds (USB 2.0 5.7.4).");
         return (address, maxPacket, interval);
     }
 

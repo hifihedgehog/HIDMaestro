@@ -237,6 +237,9 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     // by _hidLock. _ackSignal: a thread of this SDK waits on the event.
     private bool _ackPending;
     private uint _ackSeq;
+    // The acknowledgement section's generation this device announced on
+    // (SharedMemoryIO.AnnounceDeviceDelivery). Set in the constructor.
+    private long _ackGeneration;
     private readonly bool _ackSignal;
 
     // Device state.
@@ -422,7 +425,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
 
             if (presentation.HasIsochronous)
                 Audio = new UsbAudioEngine(profile, CompleteIsoOnWire, AnswerIsoUnlink);
-            SharedMemoryIO.AnnounceDeviceDelivery(index);
+            _ackGeneration = SharedMemoryIO.AnnounceDeviceDelivery(index);
 
             var input = new Thread(InputPumpLoop)
             {
@@ -921,7 +924,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     else
                         PendingFor(epAddr).Enqueue(cmd.Seqnum);
                 }
-                if (ack) SharedMemoryIO.StoreDeviceDelivered(_index, delivered, _ackSignal);
+                if (ack) SharedMemoryIO.StoreDeviceDelivered(_index, _ackGeneration, delivered, _ackSignal);
                 if (frame.Buffer != null)
                 {
                     // The buffer is this thread's until it goes back.
