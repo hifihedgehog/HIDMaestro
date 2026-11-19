@@ -231,8 +231,8 @@ internal static partial class Program
     }
 
     /// <summary>An output report written to the first collection that has
-    /// one and is not a keyboard's, a keypad's or a mouse's, and the first
-    /// packet OutputReceived raises for it: source, report ID and data.
+    /// one and is not a keyboard's, a keypad's or a mouse's, and the packet
+    /// OutputReceived raises for it: source, report ID and data.
     /// "none" when nothing arrives within a second, "not opened" for a
     /// collection that does not open for writing, and "held by Windows"
     /// when only such a collection has an output report.</summary>
@@ -255,13 +255,29 @@ internal static partial class Program
         var buf = new byte[target.OutputLength];
         buf[0] = map.UsesReportIds ? report.ReportId : (byte)0;
         for (int i = 1; i < buf.Length; i++) buf[i] = (byte)(i * 3 + 1);
-        string? seen = null;
+        // Another program on the machine can write to the same device. On
+        // the laptop on 2026-11-19 one sent the virtual Switch Pro a
+        // subcommand of its own, and the first packet raised was that
+        // program's. So a raw output report counts as this write's only
+        // when it carries this write's bytes, four of the pattern in a row
+        // from its third byte, which the packet's data holds with or without
+        // report IDs. A packet of another kind is the device's own reading
+        // of the write and is taken at once, and a raw report without the
+        // bytes is taken only when nothing else comes within the second.
+        byte[] mark = buf.Length > 2 ? buf.AsSpan(2, Math.Min(4, buf.Length - 2)).ToArray() : Array.Empty<byte>();
+        string? seen = null, other = null;
         var got = new ManualResetEventSlim();
+        var sync = new object();
         void Handler(HMController _, HMOutputPacket pkt)
         {
-            if (got.IsSet) return;
-            seen = $"{pkt.Source} 0x{pkt.ReportId:X2} {Convert.ToHexString(pkt.Data.Span)}";
-            got.Set();
+            string text = $"{pkt.Source} 0x{pkt.ReportId:X2} {Convert.ToHexString(pkt.Data.Span)}";
+            lock (sync)
+            {
+                if (seen != null) return;
+                bool raw = pkt.Source == HMOutputSource.HidOutput;
+                if (!raw || mark.Length == 0 || pkt.Data.Span.IndexOf(mark) >= 0) { seen = text; got.Set(); }
+                else other ??= text;
+            }
         }
         c.OutputReceived += Handler;
         try
@@ -271,7 +287,8 @@ internal static partial class Program
             using var fs = new FileStream(h, FileAccess.Write, 1, isAsync: false);
             try { fs.Write(buf, 0, buf.Length); }
             catch (IOException e) { return $"write failed: {e.Message}"; }
-            return got.Wait(1000) ? seen! : "none";
+            got.Wait(1000);
+            lock (sync) return seen ?? other ?? "none";
         }
         finally { c.OutputReceived -= Handler; }
     }
