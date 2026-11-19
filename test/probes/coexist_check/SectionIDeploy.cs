@@ -2,12 +2,11 @@
 // a deploy prunes, and a %ProgramData%\HIDMaestro that a program that is not
 // elevated made first.
 //
-//   I8   A running program's staged signtool manifest removed and another
-//        staged tool file changed to bytes of the same length. Its next
-//        deploy restores both from the embedded bytes before it runs the
-//        tools. Until v2.0.0 the staging directory was trusted for the
-//        life of the process and only signtool.exe and Inf2Cat.exe were
-//        checked again.
+//   I8   A running program's staged XUSB INF removed and its staged
+//        driver INF changed to bytes of the same length. Its next deploy
+//        restores both from the embedded bytes before it uses them. Until
+//        v2.0.0 the staging directory was trusted for the life of the
+//        process and only two files were checked again.
 //   I9   A deploy's prune paused after it read the owner records, and a
 //        program of another build reaching its staging directory during the
 //        pause. Its staging gives no reply while the prune holds the staging
@@ -89,34 +88,34 @@ internal static partial class Program
         p.Send("install");
         string? dir = StagingPath(p.Send("stagingdir"));
         if (dir == null) { Check("I8: the driver payload stages", false); return; }
-        string manifest = Path.Combine(dir, "signtool.exe.manifest");
-        string ini = Path.Combine(dir, "wintrust.dll.ini");
-        byte[]? manifestGood = ReadEmbedded(NativePrefix + "signtool.exe.manifest");
-        byte[]? iniGood = ReadEmbedded(NativePrefix + "wintrust.dll.ini");
-        if (manifestGood == null || iniGood == null) { Check("I8: the embedded tool files are readable", false); return; }
+        string removed = Path.Combine(dir, "hidmaestro_xusb.inf");
+        string changedInf = Path.Combine(dir, "hidmaestro.inf");
+        byte[]? removedGood = ReadEmbedded(NativePrefix + "hidmaestro_xusb.inf");
+        byte[]? changedGood = ReadEmbedded(NativePrefix + "hidmaestro.inf");
+        if (removedGood == null || changedGood == null) { Check("I8: the embedded INFs are readable", false); return; }
         try
         {
-            File.Delete(manifest);
+            File.Delete(removed);
             // Plain text of the same length, so nothing that reads the file
             // can fail on it in a way that shows a dialog.
-            byte[] changed = Enumerable.Repeat((byte)'x', iniGood.Length).ToArray();
-            File.WriteAllBytes(ini, changed);
-            Check("I8: a staged manifest is removed and a staged file changed to bytes of the same length",
-                  !File.Exists(manifest) && new FileInfo(ini).Length == iniGood.Length && !File.ReadAllBytes(ini).SequenceEqual(iniGood));
+            byte[] changed = Enumerable.Repeat((byte)'x', changedGood.Length).ToArray();
+            File.WriteAllBytes(changedInf, changed);
+            Check("I8: a staged INF is removed and another changed to bytes of the same length",
+                  !File.Exists(removed) && new FileInfo(changedInf).Length == changedGood.Length && !File.ReadAllBytes(changedInf).SequenceEqual(changedGood));
             using (var other = PeerProcess.Start("I8-other"))
                 other.Send("uninstall");
             string r = p.Send("install");
             Check("I8: the program's next deploy runs", PeerProcess.Field(r, "outcome") == "Installed", r);
-            Check("I8: the deploy restored the removed manifest from the embedded bytes",
-                  File.Exists(manifest) && File.ReadAllBytes(manifest).SequenceEqual(manifestGood), manifest);
-            Check("I8: and the changed file", File.ReadAllBytes(ini).SequenceEqual(iniGood), ini);
+            Check("I8: the deploy restored the removed INF from the embedded bytes",
+                  File.Exists(removed) && File.ReadAllBytes(removed).SequenceEqual(removedGood), removed);
+            Check("I8: and the changed file", File.ReadAllBytes(changedInf).SequenceEqual(changedGood), changedInf);
         }
         finally
         {
-            // An SDK that does not restore them leaves the tool tree as this
+            // An SDK that does not restore them leaves the staging as this
             // section changed it. Put the embedded bytes back.
-            try { if (!File.Exists(manifest) || !File.ReadAllBytes(manifest).SequenceEqual(manifestGood)) File.WriteAllBytes(manifest, manifestGood); } catch { }
-            try { if (!File.ReadAllBytes(ini).SequenceEqual(iniGood)) File.WriteAllBytes(ini, iniGood); } catch { }
+            try { if (!File.Exists(removed) || !File.ReadAllBytes(removed).SequenceEqual(removedGood)) File.WriteAllBytes(removed, removedGood); } catch { }
+            try { if (!File.ReadAllBytes(changedInf).SequenceEqual(changedGood)) File.WriteAllBytes(changedInf, changedGood); } catch { }
         }
     }
 
@@ -160,7 +159,7 @@ internal static partial class Program
             string rs = early.StartsWith("ERR timeout", StringComparison.Ordinal) ? again.Receive("stagingdir") : early;
             Check("I9: the deploy finishes", Ok(ri), ri);
             string? dir = StagingPath(rs);
-            string[] want = { "signtool.exe", "wintrust.dll", "Inf2Cat.exe", "Microsoft.UniversalStore.HardwareWorkflow.Catalogs.dll" };
+            string[] want = { "HIDMaestro.dll", "HMXInput.dll", "hidmaestro.inf", "hidmaestro_xusb.inf" };
             string[] missing = dir == null ? want : want.Where(f => !File.Exists(Path.Combine(dir, f))).ToArray();
             Check("I9: the staging the other build's program reached during the prune holds its payload afterward",
                   Ok(rs) && missing.Length == 0, $"{rs}; missing: {(missing.Length == 0 ? "none" : string.Join(", ", missing))}");

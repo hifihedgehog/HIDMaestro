@@ -210,9 +210,14 @@ public sealed partial class HMController : IDisposable
     /// <summary>Issue #39: the audio surfaces of a composite USB persona
     /// (speaker/haptic PCM out, microphone in, volume/mute control
     /// events). Non-null exactly when the controller runs on
-    /// <see cref="HMBackend.Usbip"/> and its USB configuration has an
-    /// isochronous endpoint, as a composite persona's audio interfaces do.
-    /// Null on every other controller.</summary>
+    /// <see cref="HMBackend.Usbip"/> and an alternate setting of an
+    /// interface in its USB configuration declares an isochronous endpoint,
+    /// as a composite persona's audio interfaces do. Null on every other
+    /// controller: every controller on <see cref="HMBackend.Umdf2"/>, every
+    /// derived USB/IP device, and an authored USB/IP profile with no
+    /// isochronous endpoint, such as gamecube-adapter, steam-controller-2
+    /// and xbox-360-wired-full. Before 2.3.0 every USB/IP controller had
+    /// one.</summary>
     public HMUsbAudio? UsbAudio { get; }
 
     // Encoder built once from the profile descriptor at construction time;
@@ -1485,7 +1490,18 @@ public sealed partial class HMController : IDisposable
     /// while the virtual one is gone opens on WinUSB until it is unplugged,
     /// and comes back on WinUSB if it is plugged in again before any of
     /// those has marked the devnode. Requires elevation, as creating the
-    /// controller does.</summary>
+    /// controller does.
+    ///
+    /// <para>On a machine where Windows installs no package signed as
+    /// HIDMaestro's driver is (Windows on ARM64), the
+    /// device asks for Windows' own WinUSB driver instead: from the bind on
+    /// it serves the Microsoft OS 1.0 descriptors that name WinUSB and the
+    /// profile's <c>winUsb.interfaceGuid</c>, and it is plugged in again so
+    /// Windows reads them. No package is installed there. A real device
+    /// serves none of these descriptors, so on such a machine the virtual
+    /// device differs from it from the bind on. The usbflags key in which
+    /// Windows keeps the device's answer is put back as it was when the
+    /// last controller of the identity goes.</para></summary>
     /// <returns><see cref="HMWinUsbBinding.Bound"/>, or
     /// <see cref="HMWinUsbBinding.AlreadyBound"/> when the device already
     /// carries a driver libusb opens, or <see cref="HMWinUsbBinding.OtherDriver"/>
@@ -1493,10 +1509,15 @@ public sealed partial class HMController : IDisposable
     /// alone.</returns>
     /// <exception cref="InvalidOperationException">The profile declares no
     /// winUsb, or no driver Windows has ranks above the package, which would
-    /// let Windows choose the package for real devices.</exception>
+    /// let Windows choose the package for real devices, or the re-plug that
+    /// makes Windows read the Microsoft OS descriptors failed, after which
+    /// the device is plugged in again as it was before the call.</exception>
     /// <exception cref="HMDriverSigningException">Windows on this machine
-    /// does not install HIDMaestro's driver package, and the binding's
-    /// package is signed as HIDMaestro's driver is.</exception>
+    /// does not install HIDMaestro's driver package, its driver store holds
+    /// a HIDMaestro WinUSB package from before, and Windows refuses the
+    /// binding's package, which is signed as HIDMaestro's driver is. Where
+    /// the store holds none, the binding goes by the Microsoft OS
+    /// descriptors and adds no package.</exception>
     public HMWinUsbBinding BindWinUsb()
     {
         ThrowIfDisposed();

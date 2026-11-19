@@ -188,9 +188,11 @@ internal static unsafe partial class Program
         Check("without deviceModel none it would take the Xbox identity default's", dropped.StartsWith("identity:microsoft-xbox-named", StringComparison.Ordinal), dropped);
 
         // The other personas: none takes the new path, and each is held to
-        // the rules it met before.
+        // the rules it met before. A persona that reports on a GIP interface
+        // has no HID interface either, and gip_persona_check holds it.
         Console.WriteLine("\n-- every other USB/IP persona keeps its HID interface --");
-        var others = catalog.Where(x => x.RequiresUsbipBackend && x.Id != ProfileId).OrderBy(x => x.Id, StringComparer.Ordinal).ToList();
+        var others = catalog.Where(x => x.RequiresUsbipBackend && x.Id != ProfileId && !x.ReportsOnGipInterface)
+                            .OrderBy(x => x.Id, StringComparer.Ordinal).ToList();
         Check("the catalog's other USB/IP personas", others.Count >= 8, string.Join(" ", others.Select(x => x.Id)));
         foreach (var other in others)
         {

@@ -517,6 +517,16 @@ public sealed class ControllerProfile
         RequiresUsbipBackend && UsbConfiguration?.Interfaces is { } interfaces
         && interfaces.Exists(x => x?.Function == "xusb");
 
+    /// <summary>True for a USB/IP persona with no HID interface whose
+    /// reports travel on a GIP data interface: one of its interfaces is
+    /// named <c>"gip"</c> (<see cref="UsbInterfaceSpec.Function"/>). Such a
+    /// profile carries no <c>descriptor</c> and builds every message it
+    /// sends from its state block and protocol.</summary>
+    [JsonIgnore]
+    internal bool ReportsOnGipInterface =>
+        RequiresUsbipBackend && UsbConfiguration?.Interfaces is { } interfaces
+        && interfaces.Exists(x => x?.Function == "gip");
+
     /// <summary>v2.0.0: check the profile's port blocks. They fit their
     /// reports, an output report's ports pair with the input report's, every
     /// port field compiles, and a report's own fields leave the blocks to
@@ -853,7 +863,7 @@ public sealed class ControllerProfile
         AnswerModels.Validate(this, global::HIDMaestro.Internal.DeviceModel.OwnOf(this), taken: false, new List<string>());
         if (DeviceModel != null && DeviceModel != "none")
             throw new ProfileDefectException("$.deviceModel", $"\"{DeviceModel}\" is not a value it takes. The one value is \"none\".");
-        if (!HasDescriptor && !ReportsOnXusbInterface)
+        if (!HasDescriptor && !ReportsOnXusbInterface && !ReportsOnGipInterface)
         {
             // A USB/IP persona's HID interface presents the descriptor, so
             // the create's descriptor set would refuse it after the lease.
@@ -864,8 +874,8 @@ public sealed class ControllerProfile
             ValidateExtendedReports();
             return;
         }
-        // A persona that reports on an XUSB interface has no descriptor and
-        // meets every other check a USB/IP persona meets.
+        // A persona that reports on an XUSB or a GIP interface has no
+        // descriptor and meets every other check a USB/IP persona meets.
         ValidateDeviceModel(checkModelGroups);
         _ = GetOrBuildReportBuilder();
     }
@@ -923,7 +933,7 @@ public sealed class ControllerProfile
                 throw new ProfileDefectException("$.usbConfiguration",
                     "is required for this protocol: it names endpoints or USB transfers, and only a usbConfiguration that authors its descriptors has them.");
             if (checkModelGroups) Usbip.CompiledProtocol.Compile(this, derived ? null : descriptors);
-            WinUsbBinding.PackageFor(this, descriptors);
+            WinUsbBinding.PackageFor(this, descriptors, HMBackend.Usbip);
             return;
         }
         // A usbConfiguration on a profile whose default is UMDF2 is the USB

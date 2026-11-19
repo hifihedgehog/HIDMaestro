@@ -129,8 +129,11 @@ public sealed class HMProfile
     public bool RequiresUsbipBackend => Inner.RequiresUsbipBackend;
 
     /// <summary>Whether this profile's data can be presented on
-    /// <paramref name="backend"/>, whatever the machine. True for
-    /// <see cref="HMBackend.Auto"/> when either backend can present it.
+    /// <paramref name="backend"/>. For <see cref="HMBackend.Auto"/> the
+    /// answer is for the backend an Auto create of this profile resolves to
+    /// on this machine: <see cref="HMBackend.Usbip"/> for a profile whose
+    /// backend is "usbip", else <see cref="HMContext.MachineBackend"/>. For
+    /// the other two the machine plays no part.
     /// <see cref="HMBackend.Umdf2"/> needs a HID descriptor and a backend
     /// other than "usbip". <see cref="HMBackend.Usbip"/> takes every profile
     /// with a HID descriptor or a <c>usbConfiguration</c> that authors its
@@ -188,9 +191,10 @@ public sealed class HMProfile
     /// <summary>True if this profile can be deployed as a virtual
     /// controller: it has a HID descriptor, or it is a USB/IP persona with
     /// no HID interface, whose reports travel on an XUSB interface that
-    /// Windows gives its inbox XUSB driver. Some catalog entries are
+    /// Windows gives its inbox XUSB driver or on a GIP data interface that
+    /// Windows gives its inbox GIP driver. Some catalog entries are
     /// placeholders.</summary>
-    public bool IsDeployable => Inner.HasDescriptor || Inner.ReportsOnXusbInterface;
+    public bool IsDeployable => Inner.HasDescriptor || Inner.ReportsOnXusbInterface || Inner.ReportsOnGipInterface;
 
     /// <summary>Input report size in bytes (including Report ID byte if any).
     /// Returns 0 if not specified in the profile.</summary>

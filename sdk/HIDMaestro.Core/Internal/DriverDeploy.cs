@@ -102,6 +102,19 @@ internal static partial class DriverDeploy
         !Machine.Signing().CanInstallDriver
         && !DriverBuilder.PackageInfs.Any(inf => Machine.Stamps(inf).Count > 0);
 
+    /// <summary>True when Auto keeps off the UMDF2 driver on this machine:
+    /// Windows refuses HIDMaestro's package, and this build's driver is not
+    /// already installed whole (<see cref="DeployMachine.FastPath"/>). An
+    /// Auto create never throws <see cref="HMDriverSigningException"/>
+    /// (DESIGN 3.4), and every other state on such a machine leads to an
+    /// import Windows can refuse: a deploy onto an empty store, or this
+    /// build's package added beside an older one, which
+    /// <see cref="DriverSigningPolicy.ThrowIfImportRefused"/> names when it
+    /// does not land. An explicit UMDF2 request still tries those
+    /// (<see cref="SigningStopsDeploy"/>).</summary>
+    internal static bool AutoAvoidsDriver() =>
+        !Machine.Signing().CanInstallDriver && !Machine.FastPath();
+
     /// <summary>Throws <see cref="HMDriverSigningException"/> when
     /// <see cref="SigningStopsDeploy"/>.</summary>
     internal static void ThrowIfSigningStopsDeploy()

@@ -511,7 +511,7 @@ internal static partial class Program
                 var held = Stopwatch.StartNew();
                 p.Post("bindwinusb");
                 inLock?.Invoke();
-                // Longer than a first add takes: inf2cat, signtool, pnputil.
+                // Longer than a first add takes: catalog, signing, pnputil.
                 early = p.Receive("bindwinusb, while the probe holds the deploy lock",
                                   (int)Math.Max(0, 30_000 - held.ElapsedMilliseconds));
                 Check("Z8: BindWinUsb does not add its package while another program holds the deploy lock",

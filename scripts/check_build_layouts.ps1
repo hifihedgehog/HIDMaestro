@@ -20,11 +20,10 @@
 #       the later one after the companion build. A stamp time later than the
 #       clock, earlier than the sources, or naming no time fails the build,
 #       and pre-tag-validate.cmd clears the setting.
-#   M1  SDK project, NuGet WDK: builds, and embeds the package's Inf2Cat set.
-#   M2  SDK project, HM_WDK_ROOT naming a folder without a WDK: fails and
-#       names HMInf2catBin.
-#   M3  SDK project, HM_SDK_ROOT naming a folder without an SDK: fails and
-#       names HMWdkBin.
+#   M1  SDK project, HM_SDK_ROOT and HM_WDK_ROOT naming a folder without a
+#       kit: builds, and embeds no file of the Windows SDK's signtool set or
+#       the WDK's Inf2Cat set. The SDK writes and signs catalogs through
+#       Windows' own wintrust.dll and mssign32.dll.
 #
 # Exit 0 when every case passes, 1 otherwise.
 
@@ -48,7 +47,7 @@ $wdkPackages = @{
 }
 # Every setting a case controls. Each case starts from none of them, so the
 # environment this script runs in cannot leak into a case.
-$layoutVariables = 'HM_SDK_ROOT', 'HM_WDK_ROOT', 'HM_WDK_ROOT_ARM64', 'HM_WDK_VERSION', 'HMWdkBin', 'HMInf2catBin',
+$layoutVariables = 'HM_SDK_ROOT', 'HM_WDK_ROOT', 'HM_WDK_ROOT_ARM64', 'HM_WDK_VERSION',
                    'HMSkipArm64', 'HMSkipUsbip', 'WDKContentRoot', 'WindowsSdkDir', 'Version_Number', 'VSINSTALLDIR',
                    'HM_STAMP_TIME'
 
@@ -200,14 +199,6 @@ Copy-Tree (Join-Path $RepoRoot 'profiles') (Join-Path $sdk 'profiles')
 Copy-Tree (Join-Path $RepoRoot 'scripts') (Join-Path $sdk 'scripts') @('__pycache__')
 Copy-Tree (Join-Path $RepoRoot 'build') (Join-Path $sdk 'build') @('downloads')
 Copy-Item -LiteralPath (Join-Path $RepoRoot 'Directory.Build.props') -Destination $sdk
-# The staged Inf2Cat set comes out of the cache, so each M case copies it
-# from whichever folder its settings name.
-$sdkResources = Join-Path $sdk 'sdk\HIDMaestro.Core\Resources'
-$inf2catSet = 'Inf2Cat.exe', 'WindowsProtectedFiles.xml',
-              'Microsoft.UniversalStore.HardwareWorkflow.Cabinets.dll', 'Microsoft.UniversalStore.HardwareWorkflow.Catalogs.dll',
-              'Microsoft.UniversalStore.HardwareWorkflow.InfReader.dll', 'Microsoft.UniversalStore.HardwareWorkflow.SubmissionBuilder.dll'
-function Clear-StagedInf2Cat { foreach ($f in $inf2catSet + 'inf2cat.exe.manifest', 'Microsoft.Kits.Logger.dll') { Remove-Item -LiteralPath (Join-Path $sdkResources $f) -ErrorAction SilentlyContinue } }
-
 Write-Host "Layouts under $WorkRoot"
 
 # ── N1: native, NuGet WDK, both architectures ──────────────────────────
@@ -301,42 +292,21 @@ if ($clear -lt 0 -or $clear -gt $pretag.IndexOf('call scripts\build_all.cmd')) {
 }
 Report 'N5 every INF of a build carries the one stamp the build took, and a stale or future one is refused' $n5ok ($n5detail -join '; ')
 
-# ── M1 to M3: the SDK project ───────────────────────────────────────────
+# ── M1: the SDK project, no kit ──────────────────────────────────────
 
 $csproj = Join-Path $sdk 'sdk\HIDMaestro.Core\HIDMaestro.Core.csproj'
 $dotnetBuild = 'dotnet build "' + $csproj + '" -c Release --nologo -v:minimal -nodeReuse:false'
 
-Clear-StagedInf2Cat
-$m1 = @{ HM_WDK_ROOT = $nugetX64 }
-$r1 = Invoke-Layout $m1 $dotnetBuild $sdk
-$r2 = if ($r1.ExitCode -eq 0) { Invoke-Layout $m1 $dotnetBuild $sdk } else { $r1 }
-$m1detail = @("exit $($r2.ExitCode)")
-$m1ok = $r2.ExitCode -eq 0
+$r = Invoke-Layout @{ HM_SDK_ROOT = $emptyRoot; HM_WDK_ROOT = $emptyRoot } $dotnetBuild $sdk
+$m1detail = @("exit $($r.ExitCode)")
+$m1ok = $r.ExitCode -eq 0
 if ($m1ok) {
     $built = Join-Path $sdk 'sdk\HIDMaestro.Core\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
     $asm = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes($built))
-    foreach ($f in $inf2catSet) {
-        $s = $asm.GetManifestResourceStream('HIDMaestro.Resources.' + $f)
-        if (!$s) { $m1ok = $false; $m1detail += "$f not embedded"; continue }
-        $sha = [Security.Cryptography.SHA256]::Create()
-        $embedded = [BitConverter]::ToString($sha.ComputeHash($s)).Replace('-', '')
-        $s.Dispose()
-        $package = (Get-FileHash -LiteralPath (Join-Path $nugetX64 "bin\$kitVersion\x86\$f") -Algorithm SHA256).Hash
-        if ($embedded -ne $package) { $m1ok = $false; $m1detail += "$f differs from the package's" }
-    }
-    $extra = @($asm.GetManifestResourceNames() | Where-Object { $_ -match 'Kits\.Logger|inf2cat\.exe\.manifest' })
-    if ($extra.Count) { $m1ok = $false; $m1detail += 'also embedded: ' + ($extra -join ', ') }
+    $kit = @($asm.GetManifestResourceNames() | Where-Object { $_ -match 'signtool|inf2cat|mssign32|wintrust|appxsip|appxpackaging|opcservices|UniversalStore|WindowsProtectedFiles|Kits\.Logger' })
+    if ($kit.Count) { $m1ok = $false; $m1detail += 'embedded: ' + ($kit -join ', ') }
 }
-Report 'M1 SDK build with the NuGet WDK embeds the package''s Inf2Cat set' $m1ok ($m1detail -join '; ')
-
-Clear-StagedInf2Cat
-$r = Invoke-Layout @{ HM_WDK_ROOT = $emptyRoot } $dotnetBuild $sdk
-Report 'M2 SDK build with HM_WDK_ROOT naming no WDK fails and names HMInf2catBin' `
-    ($r.ExitCode -ne 0 -and $r.Output -match 'HMInf2catBin') "exit $($r.ExitCode)"
-
-$r = Invoke-Layout @{ HM_SDK_ROOT = $emptyRoot } $dotnetBuild $sdk
-Report 'M3 SDK build with HM_SDK_ROOT naming no SDK fails and names HMWdkBin' `
-    ($r.ExitCode -ne 0 -and $r.Output -match 'HMWdkBin') "exit $($r.ExitCode)"
+Report 'M1 SDK build with HM_SDK_ROOT and HM_WDK_ROOT naming no kit builds and embeds no kit tool' $m1ok ($m1detail -join '; ')
 
 Write-Host ''
 if ($script:failures -eq 0) {

@@ -64,6 +64,12 @@ internal static partial class Program
 {
     static int s_total, s_failures, s_unhandled;
 
+    /// <summary>The audio engine of a persona with isochronous endpoints,
+    /// which every device these checks build has. A device without them
+    /// has no engine, and the check stops with that cause.</summary>
+    static UsbAudioEngine AudioOf(UsbipEmulatedDevice device) =>
+        device.Audio ?? throw new InvalidOperationException("the device has no isochronous endpoint, so it has no audio engine");
+
     static void Check(string name, bool cond, string detail = "")
     {
         s_total++;
@@ -123,9 +129,9 @@ internal static partial class Program
             server.Register(device);
 
             var outFrames = new MemoryStream();
-            device.Audio.OutFrames += pcm => { lock (outFrames) outFrames.Write(pcm.Span); };
+            AudioOf(device).OutFrames += pcm => { lock (outFrames) outFrames.Write(pcm.Span); };
             var controlWrites = new List<(byte Unit, byte Sel, short Raw)>();
-            device.Audio.ControlChanged += (u, s, c, v) => { lock (controlWrites) controlWrites.Add((u, s, v)); };
+            AudioOf(device).ControlChanged += (u, s, c, v) => { lock (controlWrites) controlWrites.Add((u, s, v)); };
 
             try
             {
@@ -538,7 +544,7 @@ internal static partial class Program
         // once the transfers stop. Nothing has sent SET_INTERFACE yet.
         Console.WriteLine("\n-- Stream state without SET_INTERFACE --");
         var altEvents = new List<(byte Iface, byte Alt)>();
-        device.Audio.AltSettingChanged += (i, a) => { lock (altEvents) altEvents.Add((i, a)); };
+        AudioOf(device).AltSettingChanged += (i, a) => { lock (altEvents) altEvents.Add((i, a)); };
         {
             const int P = 10, B = 392;
             uint o1 = cl.NextSeq(), o2 = cl.NextSeq();
@@ -547,24 +553,24 @@ internal static partial class Program
             cl.ReadRet(o1);
             cl.ReadRet(o2);
             Check("speaker traffic with no SET_INTERFACE opens interface 1",
-                  device.Audio.GetAltSetting(1) == 1 && LastAlt(altEvents, 1) == 1,
-                  $"alt {device.Audio.GetAltSetting(1)}, last event {LastAlt(altEvents, 1)}");
+                  AudioOf(device).GetAltSetting(1) == 1 && LastAlt(altEvents, 1) == 1,
+                  $"alt {AudioOf(device).GetAltSetting(1)}, last event {LastAlt(altEvents, 1)}");
 
             uint i1 = cl.NextSeq();
             cl.SendSubmitIsoIn(i1, 2, 10, 196);
             cl.ReadRet(i1);
             Check("microphone traffic with no SET_INTERFACE opens interface 2",
-                  device.Audio.GetAltSetting(2) == 1 && LastAlt(altEvents, 2) == 1,
-                  $"alt {device.Audio.GetAltSetting(2)}, last event {LastAlt(altEvents, 2)}");
+                  AudioOf(device).GetAltSetting(2) == 1 && LastAlt(altEvents, 2) == 1,
+                  $"alt {AudioOf(device).GetAltSetting(2)}, last event {LastAlt(altEvents, 2)}");
 
             // Polled, so a late idle timer passes and a stream that never
             // closes still fails.
-            WaitUntil(() => device.Audio.GetAltSetting(1) == 0 && device.Audio.GetAltSetting(2) == 0
+            WaitUntil(() => AudioOf(device).GetAltSetting(1) == 0 && AudioOf(device).GetAltSetting(2) == 0
                             && LastAlt(altEvents, 1) == 0 && LastAlt(altEvents, 2) == 0, Hang);
             Check("both streams close once their traffic stops",
-                  device.Audio.GetAltSetting(1) == 0 && device.Audio.GetAltSetting(2) == 0
+                  AudioOf(device).GetAltSetting(1) == 0 && AudioOf(device).GetAltSetting(2) == 0
                   && LastAlt(altEvents, 1) == 0 && LastAlt(altEvents, 2) == 0,
-                  $"alts {device.Audio.GetAltSetting(1)}/{device.Audio.GetAltSetting(2)}, " +
+                  $"alts {AudioOf(device).GetAltSetting(1)}/{AudioOf(device).GetAltSetting(2)}, " +
                   $"last events {LastAlt(altEvents, 1)}/{LastAlt(altEvents, 2)}");
         }
         // The PCM above is not part of the delivery check below.
@@ -614,8 +620,8 @@ internal static partial class Program
         // longer closes it. Only SET_INTERFACE does.
         Thread.Sleep(400);
         Check("after SET_INTERFACE, idle time leaves interface 1 open",
-              device.Audio.GetAltSetting(1) == 1 && LastAlt(altEvents, 1) == 1,
-              $"alt {device.Audio.GetAltSetting(1)}, last event {LastAlt(altEvents, 1)}");
+              AudioOf(device).GetAltSetting(1) == 1 && LastAlt(altEvents, 1) == 1,
+              $"alt {AudioOf(device).GetAltSetting(1)}, last event {LastAlt(altEvents, 1)}");
 
         // ── Isochronous IN: microphone ──────────────────────────────────
         Console.WriteLine("\n-- Isochronous IN --");
@@ -623,7 +629,7 @@ internal static partial class Program
         Check("SET_INTERFACE(2, alt 1) acks", setIf2.Status == 0);
 
         var micPattern = MakePattern(8000, 0x40);
-        device.Audio.SubmitMicSamples(micPattern);
+        AudioOf(device).SubmitMicSamples(micPattern);
 
         const int InPkts = 10, InCap = 196, InPer = 192;
         uint in1 = cl.NextSeq(), in2 = cl.NextSeq();
@@ -666,13 +672,13 @@ internal static partial class Program
 
         // Drain what the underrun check left so the ring starts empty and
         // the byte stream below is entirely ours.
-        while (device.Audio.MicBufferedBytes > 0)
+        while (AudioOf(device).MicBufferedBytes > 0)
         {
             uint dq = cl.NextSeq();
             cl.SendSubmitIsoIn(dq, 2, InPkts, InCap);
             cl.ReadRet(dq);
         }
-        Check("ring empty before alignment test", device.Audio.MicBufferedBytes == 0);
+        Check("ring empty before alignment test", AudioOf(device).MicBufferedBytes == 0);
 
         // Frame k carries its index in bytes 0-1 and a marker in bytes 2-3,
         // so any byte shift moves the marker off the frame boundary.
@@ -691,13 +697,13 @@ internal static partial class Program
 
         // Oversized: forces the truncating path on an empty ring.
         var blockA = MarkedFrames(MicRingBytes / Frame + 1024, 0xA5, 0x5A);
-        int acceptedA = device.Audio.SubmitMicSamples(blockA);
+        int acceptedA = AudioOf(device).SubmitMicSamples(blockA);
         Check("truncating submit accepts a whole number of frames",
               acceptedA % Frame == 0,
               $"accepted {acceptedA} of {blockA.Length} bytes, remainder {acceptedA % Frame}");
         Check("buffered count stays frame-aligned after truncation",
-              device.Audio.MicBufferedBytes % Frame == 0,
-              $"{device.Audio.MicBufferedBytes} bytes buffered");
+              AudioOf(device).MicBufferedBytes % Frame == 0,
+              $"{AudioOf(device).MicBufferedBytes} bytes buffered");
 
         // Drain exactly what is buffered, in whole packets, so the stream
         // we validate never contains underrun silence.
@@ -717,12 +723,12 @@ internal static partial class Program
         // Leave a margin un-drained so the second block lands behind the
         // truncation point with the stream still flowing, exactly as a
         // live capture session does.
-        DrainReal(micStream, device.Audio.MicBufferedBytes - 4096);
+        DrainReal(micStream, AudioOf(device).MicBufferedBytes - 4096);
         var blockB = MarkedFrames(1920 / Frame, 0xC3, 0x3C);
-        int acceptedB = device.Audio.SubmitMicSamples(blockB);
+        int acceptedB = AudioOf(device).SubmitMicSamples(blockB);
         Check("post-truncation submit is accepted whole",
               acceptedB == blockB.Length, $"{acceptedB}/{blockB.Length} bytes");
-        DrainReal(micStream, device.Audio.MicBufferedBytes);
+        DrainReal(micStream, AudioOf(device).MicBufferedBytes);
 
         var micGot = micStream.ToArray();
         int badFrame = -1, firstB = -1, strayA = -1;
@@ -749,7 +755,7 @@ internal static partial class Program
         // may floor, and it has to floor against the ring's fill rather
         // than its own length, or a mid-frame fill still leaves a
         // fragment behind.
-        while (device.Audio.MicBufferedBytes > 0)
+        while (AudioOf(device).MicBufferedBytes > 0)
         {
             uint dq = cl.NextSeq();
             cl.SendSubmitIsoIn(dq, 2, InPkts, InCap);
@@ -761,16 +767,16 @@ internal static partial class Program
         while (fed < blockC.Length)
         {
             int chunk = Math.Min(102, blockC.Length - fed); // deliberately not a frame multiple
-            int got = device.Audio.SubmitMicSamples(blockC.AsSpan(fed, chunk));
+            int got = AudioOf(device).SubmitMicSamples(blockC.AsSpan(fed, chunk));
             if (got != chunk) break;
             fed += got;
         }
         Check("odd-sized chunks of a continuous stream are accepted whole",
-              fed == blockC.Length && device.Audio.MicBufferedBytes == blockC.Length,
-              $"fed {fed}/{blockC.Length}, buffered {device.Audio.MicBufferedBytes}");
+              fed == blockC.Length && AudioOf(device).MicBufferedBytes == blockC.Length,
+              $"fed {fed}/{blockC.Length}, buffered {AudioOf(device).MicBufferedBytes}");
 
         var sinkC = new MemoryStream();
-        DrainReal(sinkC, device.Audio.MicBufferedBytes);
+        DrainReal(sinkC, AudioOf(device).MicBufferedBytes);
         var gotC = sinkC.ToArray();
         Check("frames spanning chunk boundaries arrive byte for byte",
               gotC.Length > 0 && blockC.Take(gotC.Length).SequenceEqual(gotC),
@@ -778,21 +784,21 @@ internal static partial class Program
 
         // Truncate from a mid-frame fill: the cut has to land the ring on
         // a frame boundary, which means flooring against fill + free.
-        while (device.Audio.MicBufferedBytes > 0)
+        while (AudioOf(device).MicBufferedBytes > 0)
         {
             uint dq = cl.NextSeq();
             cl.SendSubmitIsoIn(dq, 2, InPkts, InCap);
             cl.ReadRet(dq);
         }
         var blockD = MarkedFrames(MicRingBytes / Frame + 256, 0x11, 0xEE);
-        device.Audio.SubmitMicSamples(blockD.AsSpan(0, 102)); // fill ends mid-frame
-        device.Audio.SubmitMicSamples(blockD.AsSpan(102));    // truncates
+        AudioOf(device).SubmitMicSamples(blockD.AsSpan(0, 102)); // fill ends mid-frame
+        AudioOf(device).SubmitMicSamples(blockD.AsSpan(102));    // truncates
         Check("truncation from a mid-frame fill lands the ring on a frame boundary",
-              device.Audio.MicBufferedBytes % Frame == 0,
-              $"{device.Audio.MicBufferedBytes} bytes buffered");
+              AudioOf(device).MicBufferedBytes % Frame == 0,
+              $"{AudioOf(device).MicBufferedBytes} bytes buffered");
 
         var sinkD = new MemoryStream();
-        DrainReal(sinkD, device.Audio.MicBufferedBytes);
+        DrainReal(sinkD, AudioOf(device).MicBufferedBytes);
         var gotD = sinkD.ToArray();
         Check("mid-frame truncation still delivers the stream prefix byte for byte",
               gotD.Length > MicRingBytes / 2 && blockD.Take(gotD.Length).SequenceEqual(gotD),
@@ -1452,7 +1458,7 @@ internal static partial class Program
         {
             const int Pkts = 1024, Cap = 196, Per = 192;
             var pcm = MakePattern(Per * 8, 0x21);
-            device.Audio.SubmitMicSamples(pcm);
+            AudioOf(device).SubmitMicSamples(pcm);
             uint seq = cl.NextSeq();
             cl.SendSubmitIsoIn(seq, 2, Pkts, Cap);
             var r = cl.ReadRet(seq);
@@ -1471,7 +1477,7 @@ internal static partial class Program
         {
             const int Pkts = 300, Per = 392;
             var heard = new MemoryStream();
-            device.Audio.OutFrames += f => { lock (heard) heard.Write(f.Span); };
+            AudioOf(device).OutFrames += f => { lock (heard) heard.Write(f.Span); };
             var payload = MakePattern(Pkts * Per, 0x52);
             uint seq = cl.NextSeq();
             cl.SendSubmitIsoOut(seq, 1, payload, Pkts, Per);
@@ -1491,7 +1497,7 @@ internal static partial class Program
         {
             const int Pkts = 20, Per = 392;
             var heard = new MemoryStream();
-            device.Audio.OutFrames += f => { lock (heard) heard.Write(f.Span); };
+            AudioOf(device).OutFrames += f => { lock (heard) heard.Write(f.Span); };
             var payload = MakePattern(Pkts * Per, 0x63);
             uint seq = cl.NextSeq();
             cl.SendSubmitIsoOut(seq, 1, payload, Pkts, Per);
@@ -2064,7 +2070,7 @@ internal static partial class Program
             var (device, cl) = Attach(server, ds);
             bool joined = false;
             using var handled = new ManualResetEventSlim();
-            device.Audio.ControlChanged += (_, _, _, _) =>
+            AudioOf(device).ControlChanged += (_, _, _, _) =>
             {
                 var disposer = new Thread(() => { server.Unregister(device); device.Dispose(); }) { IsBackground = true };
                 disposer.Start();
@@ -2089,7 +2095,7 @@ internal static partial class Program
             var pump = (Thread)typeof(UsbAudioEngine).GetField("_thread", Private)!.GetValue(device.Audio)!;
             using var entered = new ManualResetEventSlim();
             using var release = new ManualResetEventSlim();
-            device.Audio.OutFrames += _ => { entered.Set(); release.Wait(Hang); };
+            AudioOf(device).OutFrames += _ => { entered.Set(); release.Wait(Hang); };
             cl.SendSubmitIsoOut(cl.NextSeq(), 1, new byte[10 * 392], 10, 392);
             bool inHandler = entered.Wait(Hang);
             server.Unregister(device);
