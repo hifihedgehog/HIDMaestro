@@ -859,6 +859,14 @@ public sealed class ControllerProfile
         AnswerModels.Validate(this, global::HIDMaestro.Internal.DeviceModel.OwnOf(this), taken: false, new List<string>());
         if (DeviceModel != null && DeviceModel != "none")
             throw new ProfileDefectException("$.deviceModel", $"\"{DeviceModel}\" is not a value it takes. The one value is \"none\".");
+        // An identity the XUSB function never takes, on either backend, for
+        // a profile whose own xinput block names the companion. The
+        // presentation a model gives is checked at create
+        // (BackendSelection.NotSupportedReason): resolving the model here
+        // would read a registry the load is still building.
+        if (XInputPresentation.OwnBlock(this)?.Via == XInputSpec.ViaXusbCompanion
+            && Usbip.XusbFunction.RefusedIdentity(this, companion: true) is { } refused)
+            throw new ProfileDefectException(refused.Path, refused.Reason);
         if (!HasDescriptor && !ReportsOnXusbInterface && !ReportsOnGipInterface)
         {
             // A USB/IP persona's HID interface presents the descriptor, so

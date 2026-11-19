@@ -1,11 +1,13 @@
-// The live part: one controller of the profile on the USB/IP host
-// controller, read through Windows' own XUSB driver and XInput.
+// The live parts: controllers of the XUSB companion profiles on the USB/IP
+// host controller, read through Windows' own XUSB driver and XInput, and on
+// the UMDF2 driver where the machine runs it, to compare.
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
+using System.Text.Json.Nodes;
 using System.Threading;
 using HIDMaestro;
 using HIDMaestro.Internal;
@@ -13,9 +15,10 @@ using Microsoft.Win32;
 
 internal static unsafe partial class Program
 {
-    static int Live()
+    /// <summary>Elevated, and no other program that embeds HIDMaestro
+    /// running. 2 to skip, 0 to fail, -1 to go on.</summary>
+    static int Preflight()
     {
-        Console.WriteLine("\n=== live: the pad under xusb22 and XInput ===");
         using (var id = WindowsIdentity.GetCurrent())
             if (!new WindowsPrincipal(id).IsInRole(WindowsBuiltInRole.Administrator))
             {
@@ -27,82 +30,108 @@ internal static unsafe partial class Program
             Console.WriteLine($"  SKIP: {other} has HIDMaestro.Core.dll loaded, and two programs that embed HIDMaestro never test at once.");
             return 2;
         }
+        Console.WriteLine($"  {RuntimeInformation.OSArchitecture}, Windows {Environment.OSVersion.Version}, MachineBackend {HMContext.MachineBackend}");
+        return -1;
+    }
+
+    static HMBackend ParseBackend(string name) => name switch
+    {
+        "usbip" => HMBackend.Usbip,
+        "umdf2" => HMBackend.Umdf2,
+        _ => throw new ArgumentException($"--backend {name}: usbip or umdf2"),
+    };
+
+    static int Live(string backendName, string profileId)
+    {
+        var backend = ParseBackend(backendName);
+        Console.WriteLine($"\n=== live: {profileId} on {backend}, read through XInput ===");
+        if (Preflight() is int pre and >= 0) return pre;
 
         // Every control request a host sends the devices, as the device
         // logs each setup packet once per import.
         var controls = new List<string>();
+        var since = System.Diagnostics.Stopwatch.StartNew();
         DeviceOrchestrator.DiagTap = line =>
         {
-            if (line.StartsWith("usbip control", StringComparison.Ordinal)) lock (controls) controls.Add(line);
+            if (line.StartsWith("usbip control", StringComparison.Ordinal) || line.StartsWith("usbip output", StringComparison.Ordinal)
+                || line.StartsWith("usbip message", StringComparison.Ordinal) || line.Contains("start wait", StringComparison.Ordinal))
+                lock (controls) controls.Add($"{since.ElapsedMilliseconds,6} ms  {line}");
         };
 
         uint before = ConnectedSlots();
         Console.WriteLine($"  XInput slots connected before the create: {Slots(before)}");
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
-        var profile = ctx.GetProfile(ProfileId);
+        // "copy:<id>:<VID>:<PID>" is a consumer's copy of a catalog profile
+        // with another identity, as HMProfileBuilder makes it.
+        HMProfile? profile;
+        var parts = profileId.Split(':');
+        if (parts.Length == 4 && parts[0] == "copy" && ctx.GetProfile(parts[1]) is { } basis)
+            profile = new HMProfileBuilder().FromProfile(basis).Id($"probe-{parts[1]}-{parts[2]}-{parts[3]}")
+                .Vid(Convert.ToUInt16(parts[2], 16)).Pid(Convert.ToUInt16(parts[3], 16)).Build();
+        else
+            profile = ctx.GetProfile(profileId);
         Check("the context holds the profile", profile != null);
         if (profile == null) return 0;
 
-        var raw = new List<(byte Id, byte[] Data)>();
-        var decoded = new List<(byte Id, string Fields)>();
+        var packets = new List<(HMOutputSource Source, byte Id, byte[] Data)>();
         HMController? pad = null, second = null, control = null;
+        string? instance = null;
         try
         {
             var clock = System.Diagnostics.Stopwatch.StartNew();
-            pad = ctx.CreateController(profile);
-            pad.OutputReceived += (_, pkt) =>
-            {
-                if (pkt.Source == HMOutputSource.HidOutput) lock (raw) raw.Add((pkt.ReportId, pkt.Data.ToArray()));
-            };
-            pad.OutputDecoded += (_, e) =>
-            {
-                lock (decoded) decoded.Add((e.ReportId, string.Join(" ", e.Fields.OrderBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => $"{kv.Key}={kv.Value}"))));
-            };
-            Console.WriteLine($"  created in {clock.ElapsedMilliseconds} ms, transport index {pad.TransportIndex}");
-            string serial = DeviceIdentity.Resolve(pad.IdentityKey, pad.TransportIndex).SyntheticSerial;
-            string instance = $@"USB\VID_045E&PID_028E\{serial}";
+            pad = ctx.CreateController(profile, null, backend);
+            long createMs = clock.ElapsedMilliseconds;
+            uint atReturn = ConnectedSlots();
+            pad.OutputReceived += (_, pkt) => { lock (packets) packets.Add((pkt.Source, pkt.ReportId, pkt.Data.ToArray())); };
+            Console.WriteLine($"  created in {createMs} ms on {pad.Backend}, transport index {pad.TransportIndex}");
+            Check($"the controller runs on {backend}", pad.Backend == backend);
 
-            Console.WriteLine("\n-- the devnode --");
-            bool started = WaitUntil(() => Node(instance) is { Started: true }, 30_000);
-            var node = Node(instance);
-            Check($"{instance} is present and started, with no problem", started && node is { Problem: 0 },
-                  node == null ? "not present" : $"status 0x{node.Status:X8} problem {node.Problem} after {clock.ElapsedMilliseconds} ms");
-            if (node != null)
+            if (backend == HMBackend.Usbip)
             {
-                Console.WriteLine($"  hardware IDs:   {string.Join(" | ", node.HardwareIds)}");
-                Console.WriteLine($"  compatible IDs: {string.Join(" | ", node.CompatibleIds)}");
-                Console.WriteLine($"  service {node.Service}, INF {node.Inf}, description {node.Description}");
-                Console.WriteLine($"  parents: {string.Join(" <- ", node.Parents)}");
-                Check("its service is xusb22", string.Equals(node.Service, "xusb22", StringComparison.OrdinalIgnoreCase), node.Service);
-                Check("its driver package is the inbox xusb22.inf", string.Equals(node.Inf, "xusb22.inf", StringComparison.OrdinalIgnoreCase), node.Inf);
-                Check(@"it carries the hardware ID USB\VID_045E&PID_028E and the compatible ID USB\MS_COMP_XUSB10",
-                      node.HardwareIds.Contains(@"USB\VID_045E&PID_028E", StringComparer.OrdinalIgnoreCase)
-                      && node.CompatibleIds.Contains(@"USB\MS_COMP_XUSB10", StringComparer.OrdinalIgnoreCase));
-                Check("it sits under the USB/IP host controller's root hub",
-                      node.ParentHardwareIds.Any(h => string.Equals(h, @"ROOT\USBIP_WIN2\UDE", StringComparison.OrdinalIgnoreCase)),
-                      string.Join(" | ", node.ParentHardwareIds));
+                var set = pad.UsbipHandle!.Device.Descriptors;
+                instance = set.UsbInstanceId!;
+                string hardwareId = $@"USB\VID_{set.VendorId:X4}&PID_{set.ProductId:X4}";
+                Console.WriteLine("\n-- the devnode --");
+                var node = Node(instance);
+                Check($"{instance} is present and started with no problem as the create returns", node is { Started: true, Problem: 0 },
+                      node == null ? "not present" : $"status 0x{node.Status:X8} problem {node.Problem}");
+                if (node != null)
+                {
+                    Console.WriteLine($"  hardware IDs:   {string.Join(" | ", node.HardwareIds)}");
+                    Console.WriteLine($"  compatible IDs: {string.Join(" | ", node.CompatibleIds)}");
+                    Console.WriteLine($"  service {node.Service}, INF {node.Inf}, description {node.Description}");
+                    Console.WriteLine($"  parents: {string.Join(" <- ", node.Parents)}");
+                    Check("its service is xusb22", string.Equals(node.Service, "xusb22", StringComparison.OrdinalIgnoreCase), node.Service);
+                    Check("its driver package is the inbox xusb22.inf", string.Equals(node.Inf, "xusb22.inf", StringComparison.OrdinalIgnoreCase), node.Inf);
+                    // An identity xusb22.inf lists by hardware ID serves no
+                    // OS descriptor. Any other serves the compatible ID that
+                    // binds it, which Windows then lists as USB\MS_COMP_<id>.
+                    var compat = set.GetMicrosoftOsFeature(4);
+                    string? msComp = compat is { Length: 40 } ? @"USB\MS_COMP_" + System.Text.Encoding.ASCII.GetString(compat, 18, 8).TrimEnd('\0') : null;
+                    if (msComp == null)
+                        Check($"it carries the hardware ID {hardwareId} and, with no OS descriptor, no MS_COMP compatible ID",
+                              node.HardwareIds.Contains(hardwareId, StringComparer.OrdinalIgnoreCase)
+                              && !node.CompatibleIds.Any(c => c.Contains("MS_COMP", StringComparison.OrdinalIgnoreCase)));
+                    else
+                        Check($"it carries the hardware ID {hardwareId} and the compatible ID {msComp} its OS descriptors give, which xusb22.inf binds",
+                              node.HardwareIds.Contains(hardwareId, StringComparer.OrdinalIgnoreCase)
+                              && node.CompatibleIds.Contains(msComp, StringComparer.OrdinalIgnoreCase), string.Join(" | ", node.CompatibleIds));
+                    Check("it sits under the USB/IP host controller's root hub",
+                          node.ParentHardwareIds.Any(h => string.Equals(h, @"ROOT\USBIP_WIN2\UDE", StringComparison.OrdinalIgnoreCase)),
+                          string.Join(" | ", node.ParentHardwareIds));
+                }
+                Check("the create returned with XInput holding one slot more than before it",
+                      BitCount(atReturn) == BitCount(before) + 1 || BitCount(before) == 4, $"before {Slots(before)}, at return {Slots(atReturn)}");
             }
-            string sys = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "drivers", "xusb22.sys");
-            using (var service = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\xusb22"))
-                Check("xusb22.sys and the xusb22 service exist", File.Exists(sys) && service != null,
-                      $"{sys} {(File.Exists(sys) ? "exists" : "missing")}, service {(service != null ? "exists" : "missing")}");
 
             Console.WriteLine("\n-- XInput --");
-            // The pad's slot: the one that reads the state submitted here.
             var mark = new HMGamepadState
             {
                 Buttons = HMButton.A,
                 Axes = new Dictionary<HMAxis, float> { [HMAxis.X] = 1f, [HMAxis.Y] = 0.5f, [HMAxis.Rx] = 0.5f, [HMAxis.Ry] = 0.5f, [HMAxis.Z] = 0f, [HMAxis.Rz] = 0f },
             };
-            int slot = -1;
-            WaitUntil(() =>
-            {
-                pad.SubmitState(in mark);
-                for (uint i = 0; i < 4; i++)
-                    if (XInputGetState(i, out var s) == 0 && s.Gamepad.wButtons == 0x1000 && s.Gamepad.sThumbLX == 32767) { slot = (int)i; return true; }
-                return false;
-            }, 20_000);
+            int slot = FindSlot(pad, mark);
             Check("XInputGetState returns SUCCESS on a slot that reads the submitted A and left stick", slot >= 0,
                   slot >= 0 ? $"slot {slot}, {clock.ElapsedMilliseconds} ms after the create began" : $"connected now: {Slots(ConnectedSlots())}");
             if (slot >= 0)
@@ -110,9 +139,8 @@ internal static unsafe partial class Program
                 uint s = (uint)slot;
                 Check("the slot was free before the create", (before & (1u << slot)) == 0, Slots(before));
                 if (XInputGetCapabilities(s, 0, out var caps) == 0)
-                    Console.WriteLine($"  capabilities: type {caps.Type} subtype {caps.SubType} flags 0x{caps.Flags:X4} buttons 0x{caps.Gamepad.wButtons:X4} " +
-                                      $"motors {caps.Vibration.wLeftMotorSpeed}/{caps.Vibration.wRightMotorSpeed}");
-                Check("XInputGetCapabilities reads a gamepad", XInputGetCapabilities(s, 0, out caps) == 0 && caps.Type == 1 && caps.SubType == 1,
+                    Console.WriteLine($"  capabilities: {Caps(caps)}");
+                Check("XInputGetCapabilities reads a gamepad, subtype 1", XInputGetCapabilities(s, 0, out caps) == 0 && caps.Type == 1 && caps.SubType == 1,
                       $"type {caps.Type} subtype {caps.SubType}");
 
                 Reads(pad, s, "at rest", new HMGamepadState(), g => g.wButtons == 0 && g.bLeftTrigger == 0 && g.bRightTrigger == 0
@@ -137,48 +165,62 @@ internal static unsafe partial class Program
                 Reads(pad, s, "the right stick: left and up", Axes(0.5f, 0.5f, 0f, 0f, 0f, 0f), g => g.sThumbRX == -32768 && g.sThumbRY == 32767 && g.sThumbLX == 0 && g.sThumbLY == 0);
                 Reads(pad, s, "the right stick: right and down", Axes(0.5f, 0.5f, 1f, 1f, 0f, 0f), g => g.sThumbRX == 32767 && g.sThumbRY == -32768);
                 Reads(pad, s, "back at rest", new HMGamepadState(), g => g.wButtons == 0 && g.sThumbRX == 0 && g.sThumbRY == 0);
-                // SubmitRawReport: the frame is the 20-byte report as the
-                // device sends it. B alone.
-                byte[] rawFrame = { 0x00, 0x14, 0x00, 0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-                XINPUT_STATE rawState = default;
-                bool rawRead = WaitUntil(() =>
+
+                if (backend == HMBackend.Usbip)
                 {
-                    pad.SubmitRawReport(rawFrame);
-                    return XInputGetState(s, out rawState) == 0 && rawState.Gamepad.wButtons == 0x2000;
-                }, 3_000);
-                Check("a raw 20-byte report reads through XInput: B", rawRead, $"buttons 0x{rawState.Gamepad.wButtons:X4}");
-                Reads(pad, s, "and SubmitState takes over again, at rest", new HMGamepadState(), g => g.wButtons == 0);
+                    // SubmitRawReport: the frame is the function's report as
+                    // the device sends it, built here by the model's own
+                    // layout. B alone.
+                    var layout = pad.UsbipHandle!.Device.Presentation.Report!;
+                    int size = layout.Size;
+                    var rawFrame = new byte[size];
+                    var onlyB = new HMGamepadState { Buttons = HMButton.B };
+                    VendorBlobCodec.EncodeInput(layout, in onlyB, 0.5f, 0.5f, 0.5f, 0.5f, 0f, 0f, rawFrame, new VendorBlobCodec.EncoderState());
+                    XINPUT_STATE rawState = default;
+                    bool rawRead = WaitUntil(() =>
+                    {
+                        pad.SubmitRawReport(rawFrame);
+                        return XInputGetState(s, out rawState) == 0 && rawState.Gamepad.wButtons == 0x2000;
+                    }, 3_000);
+                    Check($"a raw {size}-byte report reads through XInput: B", rawRead, $"{Hex(rawFrame)}, buttons 0x{rawState.Gamepad.wButtons:X4}");
+                    foreach (int length in new[] { size - 1, size + 1, size == 20 ? 18 : 20 })
+                    {
+                        string refused = "accepted";
+                        try { pad.SubmitRawReport(new byte[length]); }
+                        catch (ArgumentException e) { refused = e.Message; }
+                        Check($"a raw frame of {length} bytes is refused with a message that names the length",
+                              refused.Contains($"this frame is {length} bytes", StringComparison.Ordinal) && refused.Contains($"{size}-byte", StringComparison.Ordinal), refused);
+                    }
+                    Reads(pad, s, "and SubmitState takes over again, at rest", new HMGamepadState(), g => g.wButtons == 0);
+                }
 
-                Console.WriteLine("\n-- rumble and the LED, at the device's OUT endpoint --");
-                // The slot's LED request, which Windows sends when the pad
-                // takes its slot.
-                bool ledSeen = WaitUntil(() => { lock (raw) return raw.Any(o => o.Id == 0x01); }, 5_000);
-                lock (raw)
-                    foreach (var o in raw.Where(o => o.Id == 0x01))
-                        Console.WriteLine($"  OUT 0x02: 01 {Hex(o.Data)}");
-                string ledDecoded;
-                lock (decoded) ledDecoded = string.Join(", ", decoded.Where(d => d.Id == 0x01).Select(d => d.Fields));
-                Check("the LED request for the slot arrives and decodes as ledPattern", ledSeen && ledDecoded.Contains("ledPattern=", StringComparison.Ordinal), ledDecoded);
-
-                Rumble(s, 0x4000, 0x8000, raw, decoded, 0x40, 0x80);
-                Rumble(s, 0xFFFF, 0x0100, raw, decoded, 0xFF, 0x01);
-                Rumble(s, 0, 0, raw, decoded, 0x00, 0x00);
+                Console.WriteLine("\n-- rumble and the LED, as the companion's packets --");
+                lock (packets)
+                    foreach (var o in packets)
+                        Console.WriteLine($"  before any XInputSetState: {o.Source} 0x{o.Id:X2} {Hex(o.Data)}");
+                Rumble(s, 0x4000, 0x8000, packets, 0x40, 0x80);
+                Rumble(s, 0xFFFF, 0x0100, packets, 0xFF, 0x01);
+                Rumble(s, 0, 0, packets, 0x00, 0x00);
+                // On UMDF2 the companion publishes every SET_STATE buffer a
+                // caller sends, whatever its form, and WGI's own are 9 bytes.
+                // On USB/IP the device publishes the reports xusb22 sends,
+                // each turned into the 5-byte form, and takes the rest.
+                if (backend == HMBackend.Usbip)
+                lock (packets)
+                    Check("every packet the controller raised is the companion's 5-byte XInput packet",
+                          packets.All(o => o.Source == HMOutputSource.XInput && o.Id == 0 && o.Data.Length == 5 && o.Data[0] == 0 && o.Data[4] is 1 or 2),
+                          string.Join(", ", packets.Where(o => !(o.Source == HMOutputSource.XInput && o.Data.Length == 5)).Select(o => $"{o.Source} {Hex(o.Data)}")));
             }
 
-            Console.WriteLine("\n-- the control requests Windows sent the pad --");
+            Console.WriteLine("\n-- what the create and Windows did, from the probe's start --");
             string busId = HIDMaestro.Internal.Usbip.UsbipEmulatedDevice.BusIdFor(pad.TransportIndex);
             lock (controls)
-                foreach (string line in controls.Where(c => c.Contains($" {busId}:", StringComparison.Ordinal)))
+                foreach (string line in controls.Where(c => c.Contains($" {busId}:", StringComparison.Ordinal) || c.Contains("start wait", StringComparison.Ordinal)))
                     Console.WriteLine("  " + line);
 
-            // A second pad of the profile: its own serial, devnode and slot.
+            // A second pad of the profile: its own devnode and slot.
             Console.WriteLine("\n-- a second pad --");
-            second = ctx.CreateController(profile);
-            string secondInstance = $@"USB\VID_045E&PID_028E\{DeviceIdentity.Resolve(second.IdentityKey, second.TransportIndex).SyntheticSerial}";
-            bool secondStarted = WaitUntil(() => Node(secondInstance) is { Started: true, Problem: 0 }, 30_000);
-            Check($"{secondInstance} is present and started under xusb22",
-                  secondStarted && secondInstance != instance && string.Equals(Node(secondInstance)?.Service, "xusb22", StringComparison.OrdinalIgnoreCase),
-                  Node(secondInstance) is { } sn ? $"service {sn.Service}, problem {sn.Problem}" : "not present");
+            second = ctx.CreateController(profile, null, backend);
             if (slot >= 0)
             {
                 var onFirst = new HMGamepadState { Buttons = HMButton.X };
@@ -194,15 +236,12 @@ internal static unsafe partial class Program
                     return secondSlot >= 0 && XInputGetState((uint)slot, out first) == 0 && first.Gamepad.wButtons == 0x4000;
                 }, 20_000);
                 Check("it takes a slot of its own, and each slot reads its own pad: X on the first, Y on the second",
-                      secondSlot >= 0 && first.Gamepad.wButtons == 0x4000,
-                      $"first slot {slot} buttons 0x{first.Gamepad.wButtons:X4}, second slot {secondSlot}");
+                      secondSlot >= 0 && first.Gamepad.wButtons == 0x4000, $"first slot {slot} buttons 0x{first.Gamepad.wButtons:X4}, second slot {secondSlot}");
                 var atRest = new HMGamepadState();
                 pad.SubmitState(in atRest);
             }
             second.Dispose();
             second = null;
-            Check("the second pad's devnode is gone after its Dispose, and the first stays started",
-                  WaitUntil(() => Node(secondInstance) == null, 30_000) && Node(instance) is { Started: true });
 
             Console.WriteLine("\n-- positive control: dualsense-composite beside it --");
             control = ctx.CreateController(ctx.GetProfile("dualsense-composite")!);
@@ -233,9 +272,8 @@ internal static unsafe partial class Program
             control = null;
             pad.Dispose();
             pad = null;
-            bool gone = WaitUntil(() => Node(instance) == null && Node(controlInstance) == null, 30_000);
-            Check("both devnodes are gone after Dispose", gone,
-                  $"{(Node(instance) == null ? "pad gone" : "pad present")}, {(Node(controlInstance) == null ? "control gone" : "control present")}");
+            bool gone = WaitUntil(() => (instance == null || Node(instance) == null) && Node(controlInstance) == null, 30_000);
+            Check("the devnodes are gone after Dispose", gone);
             if (slot >= 0)
                 Check("the XInput slot is free again", WaitUntil(() => XInputGetState((uint)slot, out _) != 0, 10_000), Slots(ConnectedSlots()));
         }
@@ -249,6 +287,206 @@ internal static unsafe partial class Program
             try { second?.Dispose(); } catch { }
             try { pad?.Dispose(); } catch { }
             DeviceOrchestrator.DiagTap = null;
+        }
+        return 0;
+    }
+
+    static int BitCount(uint mask) => System.Numerics.BitOperations.PopCount(mask);
+
+    /// <summary>The slot that reads <paramref name="mark"/>, submitted on
+    /// <paramref name="pad"/>, or -1.</summary>
+    static int FindSlot(HMController pad, HMGamepadState mark)
+    {
+        int slot = -1;
+        WaitUntil(() =>
+        {
+            pad.SubmitState(in mark);
+            for (uint i = 0; i < 4; i++)
+                if (XInputGetState(i, out var s) == 0 && s.Gamepad.wButtons == (ushort)XInputButtons(mark) && (mark.Axes == null || s.Gamepad.sThumbLX == 32767))
+                { slot = (int)i; return true; }
+            return false;
+        }, 20_000);
+        return slot;
+    }
+
+    static int XInputButtons(HMGamepadState s) => s.Buttons switch
+    {
+        HMButton.A => 0x1000,
+        HMButton.B => 0x2000,
+        HMButton.X => 0x4000,
+        HMButton.Y => 0x8000,
+        HMButton.Start => 0x0010,
+        HMButton.Back => 0x0020,
+        _ => -1,
+    };
+
+    static string Caps(XINPUT_CAPABILITIES c) =>
+        $"type {c.Type} subtype 0x{c.SubType:X2} flags 0x{c.Flags:X4} buttons 0x{c.Gamepad.wButtons:X4} triggers {c.Gamepad.bLeftTrigger}/{c.Gamepad.bRightTrigger} " +
+        $"thumbs {c.Gamepad.sThumbLX:X4},{c.Gamepad.sThumbLY:X4},{c.Gamepad.sThumbRX:X4},{c.Gamepad.sThumbRY:X4} motors {c.Vibration.wLeftMotorSpeed}/{c.Vibration.wRightMotorSpeed}";
+
+    // ── family: each profile on each backend ─────────────────────────────
+
+    /// <summary>What one controller of a profile presents.</summary>
+    sealed record Presented(string Caps, string Hid, string Product, string State, string Packet, string Failure, string Layout = "");
+
+    static int FamilyPart(List<string> ids, string backendName)
+    {
+        Console.WriteLine("\n=== family: the XUSB companion profiles on each backend ===");
+        if (Preflight() is int pre and >= 0) return pre;
+        var backends = backendName switch
+        {
+            "" => HMContext.MachineBackend == HMBackend.Umdf2 ? new[] { HMBackend.Umdf2, HMBackend.Usbip } : new[] { HMBackend.Usbip },
+            "both" => new[] { HMBackend.Umdf2, HMBackend.Usbip },
+            _ => new[] { ParseBackend(backendName) },
+        };
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        var list = ids.Count > 0 ? ids : Family.ToList();
+        foreach (var id in list)
+        {
+            var p = ctx.GetProfile(id);
+            if (p == null) { Check($"{id}: in the catalog", false); continue; }
+            Console.WriteLine($"\n-- {id} --");
+            var seen = new Dictionary<HMBackend, Presented>();
+            foreach (var b in backends)
+            {
+                var x = Present(ctx, p, b);
+                seen[b] = x;
+                Console.WriteLine($"  {b,-6} XInputGetCapabilities: {x.Caps}");
+                Console.WriteLine($"  {b,-6} HID collection: {x.Hid}");
+                Console.WriteLine($"  {b,-6} HID product string: {x.Product}");
+                Console.WriteLine($"  {b,-6} XInput state of the probe's input: {x.State}");
+                Console.WriteLine($"  {b,-6} XInputSetState(0x4000, 0x8000): {x.Packet}");
+                Check($"{id} on {b}: created, a slot, capabilities, a HID collection and a packet", x.Failure.Length == 0, x.Failure);
+            }
+            if (seen.TryGetValue(HMBackend.Umdf2, out var u) && seen.TryGetValue(HMBackend.Usbip, out var s))
+            {
+                Check($"{id}: XInputGetCapabilities the same on both backends", u.Caps == s.Caps, $"UMDF2 {u.Caps} | USB/IP {s.Caps}");
+                Check($"{id}: the XInput state of one input the same on both", u.State == s.State, $"UMDF2 {u.State} | USB/IP {s.State}");
+                Check($"{id}: XInputSetState's packet the same on both", u.Packet == s.Packet, $"UMDF2 {u.Packet} | USB/IP {s.Packet}");
+                Check($"{id}: the HID product string the same on both", u.Product == s.Product, $"UMDF2 '{u.Product}' | USB/IP '{s.Product}'");
+                Check($"{id}: UMDF2's HID device has the layout of the profile's descriptor",
+                      p.GetDescriptorBytes() is { } d && u.Layout == DescriptorLayout(d), u.Layout);
+            }
+            if (seen.TryGetValue(HMBackend.Usbip, out var onUsbip) && onUsbip.Failure.Length == 0) R8(p, onUsbip.Layout);
+        }
+        return 0;
+    }
+
+    static readonly HMGamepadState ProbeInput = new()
+    {
+        Buttons = HMButton.A | HMButton.Back | HMButton.RightStick,
+        Hat = HMHat.SouthWest,
+        Axes = new Dictionary<HMAxis, float>
+        {
+            [HMAxis.X] = 0.25f, [HMAxis.Y] = 0.75f, [HMAxis.Rx] = 0.9f, [HMAxis.Ry] = 0.1f, [HMAxis.Z] = 0.3f, [HMAxis.Rz] = 0.6f,
+            [HMAxis.Vx] = 0.3f, [HMAxis.Vy] = 0.6f, [HMAxis.Slider] = 0.4f, [HMAxis.Dial] = 0.2f,
+        },
+    };
+
+    static Presented Present(HMContext ctx, HMProfile p, HMBackend backend)
+    {
+        HMController? c = null;
+        var packets = new List<string>();
+        try
+        {
+            uint before = ConnectedSlots();
+            c = ctx.CreateController(p, "xusbfam:" + p.Id, backend);
+            c.OutputReceived += (_, pkt) => { lock (packets) packets.Add($"{pkt.Source} 0x{pkt.ReportId:X2} {Hex(pkt.Data.Span)}"); };
+            // The new slot: the one connected now that was not before.
+            int slot = -1;
+            WaitUntil(() =>
+            {
+                uint now = ConnectedSlots() & ~before;
+                if (now == 0) return false;
+                slot = System.Numerics.BitOperations.TrailingZeroCount(now);
+                return true;
+            }, 10_000);
+            if (slot < 0) return new("", "", "", "", "", "no new XInput slot");
+            XInputGetCapabilities((uint)slot, 0, out var caps);
+            string capsText = Caps(caps);
+            XINPUT_STATE st = default;
+            string state = "";
+            var input = ProbeInput;
+            WaitUntil(() =>
+            {
+                c.SubmitState(in input);
+                if (XInputGetState((uint)slot, out st) != 0) return false;
+                string now = $"buttons 0x{st.Gamepad.wButtons:X4} LT {st.Gamepad.bLeftTrigger} RT {st.Gamepad.bRightTrigger} L {st.Gamepad.sThumbLX},{st.Gamepad.sThumbLY} R {st.Gamepad.sThumbRX},{st.Gamepad.sThumbRY}";
+                bool same = now == state;
+                state = now;
+                return same && st.Gamepad.wButtons != 0;
+            }, 3_000);
+            lock (packets) packets.Clear();
+            var v = new XINPUT_VIBRATION { wLeftMotorSpeed = 0x4000, wRightMotorSpeed = 0x8000 };
+            uint code = XInputSetState((uint)slot, ref v);
+            string packet = "";
+            WaitUntil(() => { lock (packets) packet = packets.LastOrDefault(x => x.Contains("XInput", StringComparison.Ordinal)) ?? ""; return packet.Length > 0; }, 2_000);
+            packet = $"code {code}, {(packet.Length > 0 ? packet : "nothing")}";
+            v = default;
+            XInputSetState((uint)slot, ref v);
+            // The HID collection under the controller's devnode, a child or
+            // a grandchild: xusb22 makes its HID device under the USB device.
+            string parent = backend == HMBackend.Usbip ? c.UsbipHandle!.Device.Descriptors.UsbInstanceId! : c.InstanceId!;
+            var cols = Collections(parent);
+            string hid = cols.Count == 0 ? "none" : string.Join(" || ", cols.Select(x => x.ParsedKey[x.ParsedKey.IndexOf(" caps", StringComparison.Ordinal)..]));
+            string product = cols.Count == 0 ? "" : string.Join(" | ", cols.Select(x => x.Product ?? "(none)"));
+            string failure = cols.Count == 0 ? "no HID collection" : caps.Type == 0 ? "no capabilities" : packet.Contains("nothing", StringComparison.Ordinal) ? "no packet" : "";
+            return new(capsText, hid, product, state, packet, failure, cols.Count == 1 ? CollectionLayout(cols[0]) : $"{cols.Count} collections");
+        }
+        catch (Exception e) { return new("", "", "", "", "", $"{e.GetType().Name}: {e.Message}"); }
+        finally { c?.Dispose(); }
+    }
+
+    /// <summary>The HID collections under <paramref name="parent"/>, its
+    /// children's or, where a child has no HID interface, its
+    /// grandchildren's.</summary>
+    static List<Collection> Collections(string parent)
+    {
+        var list = new List<Collection>();
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        while (clock.ElapsedMilliseconds < 10_000)
+        {
+            list.Clear();
+            foreach (var child in Hid.Children(parent))
+            {
+                var paths = Hid.Interfaces(child);
+                if (paths.Count == 0)
+                    foreach (var grand in Hid.Children(child)) paths.AddRange(Hid.Interfaces(grand));
+                foreach (var path in paths)
+                    if (Hid.ReadOne(path, out _) is { } col) list.Add(col);
+            }
+            if (list.Count > 0) break;
+            Thread.Sleep(50);
+        }
+        return list;
+    }
+
+    // ── sweep: xusb22's answer for each subtype ──────────────────────────
+
+    static int Sweep(List<string> args)
+    {
+        Console.WriteLine("\n=== sweep: xusb22's capabilities and HID collection for each subtype ===");
+        if (Preflight() is int pre and >= 0) return pre;
+        var subtypes = args.Count > 0 ? args.Select(a => Convert.ToByte(a, 16)).ToList() : Enumerable.Range(1, 0x13).Select(i => (byte)i).ToList();
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        var basis = ctx.GetProfile(ProfileId)!.Inner;
+        foreach (byte sub in subtypes)
+        {
+            var o = Json(basis);
+            o["id"] = $"sweep-subtype-{sub:X2}";
+            o["name"] = $"Subtype 0x{sub:X2}";
+            o["xinput"] = new JsonObject { ["via"] = "xusbCompanion", ["subType"] = $"0x{sub:X2}" };
+            var loaded = ProfileDatabase.LoadTexts(new[] { ($"sweep-{sub:X2}.json", o.ToJsonString()) }, ModelRegistry.Catalog);
+            var copy = loaded.All.SingleOrDefault();
+            if (copy == null) { Check($"subtype 0x{sub:X2}: the copy loads", false, string.Join("; ", loaded.Issues.Select(i => i.Reason))); continue; }
+            var x = Present(ctx, new HMProfile(copy), HMBackend.Usbip);
+            Console.WriteLine($"  0x{sub:X2} XInputGetCapabilities: {x.Caps}");
+            Console.WriteLine($"  0x{sub:X2} HID collection: {x.Hid}");
+            Console.WriteLine($"  0x{sub:X2} HID product string: {x.Product}");
+            Console.WriteLine($"  0x{sub:X2} XInput state of the probe's input: {x.State}");
+            Check($"subtype 0x{sub:X2}: created, a slot, capabilities, a HID collection", x.Failure.Length == 0 || x.Failure == "no packet", x.Failure);
         }
         return 0;
     }
@@ -277,33 +515,25 @@ internal static unsafe partial class Program
         Check(name, ok, $"code {code} buttons 0x{g.wButtons:X4} LT {g.bLeftTrigger} RT {g.bRightTrigger} L {g.sThumbLX},{g.sThumbLY} R {g.sThumbRX},{g.sThumbRY}");
     }
 
-    /// <summary>XInputSetState, then the report at the device's OUT
-    /// endpoint, raw and decoded. XInput's 16-bit speeds reach the device as
-    /// their high bytes.</summary>
-    static void Rumble(uint slot, ushort left, ushort right, List<(byte Id, byte[] Data)> raw, List<(byte Id, string Fields)> decoded, byte wantLeft, byte wantRight)
+    /// <summary>XInputSetState, then the packet the controller raises: the
+    /// companion's 5-byte IOCTL_XUSB_SET_STATE buffer, source XInput, on
+    /// both backends. XInput's 16-bit speeds reach it as their high
+    /// bytes.</summary>
+    static void Rumble(uint slot, ushort left, ushort right, List<(HMOutputSource Source, byte Id, byte[] Data)> packets, byte wantLeft, byte wantRight)
     {
-        int rawFrom, decodedFrom;
-        lock (raw) rawFrom = raw.Count;
-        lock (decoded) decodedFrom = decoded.Count;
+        int from;
+        lock (packets) from = packets.Count;
         var v = new XINPUT_VIBRATION { wLeftMotorSpeed = left, wRightMotorSpeed = right };
         uint code = XInputSetState(slot, ref v);
-        byte[] want = { 0x08, 0x00, wantLeft, wantRight, 0x00, 0x00, 0x00 };
-        byte[]? got = null;
+        byte[] want = { 0x00, 0x00, wantLeft, wantRight, 0x02 };
+        (HMOutputSource Source, byte Id, byte[] Data) got = default;
         bool arrived = WaitUntil(() =>
         {
-            lock (raw) got = raw.Skip(rawFrom).LastOrDefault(o => o.Id == 0x00).Data;
-            return got != null && got.AsSpan().SequenceEqual(want);
+            lock (packets) got = packets.Skip(from).LastOrDefault(o => o.Data.Length == 5 && o.Data[4] == 2);
+            return got.Data != null && got.Source == HMOutputSource.XInput && got.Id == 0 && got.Data.AsSpan().SequenceEqual(want);
         }, 3_000);
-        Console.WriteLine($"  XInputSetState({left}, {right}) returned {code}. OUT 0x02: 00 {(got == null ? "(nothing)" : Hex(got))}");
-        Check($"XInputSetState({left}, {right}) arrives as 00 08 00 {wantLeft:X2} {wantRight:X2} 00 00 00", code == 0 && arrived);
-        string fields = "";
-        bool decodedOk = WaitUntil(() =>
-        {
-            lock (decoded) fields = decoded.Skip(decodedFrom).LastOrDefault(d => d.Id == 0x00).Fields ?? "";
-            var each = fields.Split(' ');
-            return each.Contains($"leftMotor={wantLeft}") && each.Contains($"rightMotor={wantRight}");
-        }, 3_000);
-        Check($"and decodes as leftMotor {wantLeft}, rightMotor {wantRight}", decodedOk, fields);
+        Console.WriteLine($"  XInputSetState({left}, {right}) returned {code}: {(got.Data == null ? "(nothing)" : $"{got.Source} 0x{got.Id:X2} {Hex(got.Data)}")}");
+        Check($"XInputSetState({left}, {right}) arrives as XInput 00 00 {wantLeft:X2} {wantRight:X2} 02", code == 0 && arrived);
     }
 
     static bool WaitUntil(Func<bool> done, int ms)

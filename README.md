@@ -27,11 +27,11 @@
 
 **Virtual game controllers, keyboards and mice that look like real hardware to Windows. No kernel driver. No network. No reboot.**
 
-HIDMaestro creates virtual controllers that present the exact identity of real hardware across the whole Windows input stack at once. Pick from 340 built-in profiles, 103 of them keyboards and mice, or point it at a device you own and clone it. DirectInput, XInput, SDL3, the browser Gamepad API, and WGI/GameInput all see the VID/PID, product name, HID descriptor, axis and button layout, and bus type the profile defines. A virtual keyboard or mouse reaches Raw Input and the desktop as the device it copies.
+HIDMaestro creates virtual controllers that present the exact identity of real hardware across the whole Windows input stack at once. Pick from 339 built-in profiles, 103 of them keyboards and mice, or point it at a device you own and clone it. DirectInput, XInput, SDL3, the browser Gamepad API, and WGI/GameInput all see the VID/PID, product name, HID descriptor, axis and button layout, and bus type the profile defines. A virtual keyboard or mouse reaches Raw Input and the desktop as the device it copies.
 
 It runs entirely in user mode (UMDF2), signed with a locally trusted self-signed certificate. No EV certificate, no `testsigning` boot mode, no kernel driver that can blue-screen the machine.
 
-<p align="center"><b>340</b> device profiles · <b>20+</b> projects shipping it · <b>~35 µs</b> median single-press · <b>0</b> kernel drivers</p>
+<p align="center"><b>339</b> device profiles · <b>20+</b> projects shipping it · <b>~35 µs</b> median single-press · <b>0</b> kernel drivers</p>
 
 ```csharp
 using var ctx = new HMContext();
@@ -66,7 +66,7 @@ bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestroTest.exe emulate xbox-
 # Several controllers at once, any mix of profiles
 HIDMaestroTest.exe emulate xbox-series-xs-bt xbox-360-wired dualsense
 
-# List or search the 340 profiles
+# List or search the 339 profiles
 HIDMaestroTest.exe list
 HIDMaestroTest.exe search thrustmaster
 
@@ -296,6 +296,8 @@ HMBackend where = pad.Backend;                            // Umdf2 or Usbip, nev
 An explicit `Umdf2`, on the context, on a create or through `HIDMAESTRO_BACKEND=umdf2`, where Windows does not install the package throws `HMDriverSigningException`. On a PC whose driver store holds no HIDMaestro package it comes before anything changes: no certificate goes into the stores and nothing is staged. A create or `InstallDriver` under `Auto` never throws it. On such a PC `BindWinUsb` binds by the device's Microsoft OS descriptors and adds no package, unless the driver store holds a HIDMaestro WinUSB package from before: then it adds the binding's package, which is signed as the driver's is, and throws `HMDriverSigningException` when Windows refuses it. A profile with no presentation on the backend asked for throws `HMBackendNotSupportedException`: `Umdf2` for a `usbip` profile, and, in this release, `Usbip` for an Xbox profile that reaches XInput through the XUSB companion or xinputhid. Both derive from `InvalidOperationException` and come before the create takes anything machine-wide.
 
 On `Usbip` a create starts GameInputSvc and claims the joy.cpl name and the GameInput table, as a UMDF2 create does. For a profile with no `usbConfiguration` it returns once Windows has started the HID interface. The USB/IP host controller has 30 USB 2.0 ports unless its `NumberOfUsb20Ports` parameter says otherwise, shared by every program on the machine, and a create past them throws `HMResourceInUseException`. A Bluetooth profile on `Usbip` presents on the USB bus, since no inbox route gives a USB/IP device a Bluetooth devnode. hidapi, and every SDL driver built on it, reads that bus as USB and drives the pad in its USB protocol. So the four Sony Bluetooth pads and `switch-pro` present the USB profile their `usbForm` names, `dualsense`, `dualsense-edge`, `dualshock-4-v2` or `switch-pro-usb`, under their own id and strings: that profile's descriptor, reports, feature answers and protocol, as one HID function. `SubmitState` and the `OutputDecoded` values the two forms share read the same on both backends. Raw frames and `OutputReceived` packets follow the form `HMProfile.FormOn` names, and a raw frame of a length only the Bluetooth form takes throws `ArgumentException`. Every other Bluetooth profile presents its own descriptor and reports on the USB bus.
+
+An Xbox 360 profile, which reaches XInput through the XUSB companion on `Umdf2`, presents on `Usbip` as the USB device Windows' own xusb22 drives: a retail wired pad's descriptors with the profile's subtype, or for `xbox-360-wireless` the 045E:0719 wireless receiver with the pad on its first slot. A copy with an identity xusb22 does not list by hardware ID serves the compatible ID xusb22 binds. The create returns once xusb22 has published the XUSB interface and XInput has a slot for the pad. A raw frame is that device's input report whole, 20 bytes, or 29 for the receiver, and rumble and LED requests reach `OutputReceived` as the companion's 5-byte XInput packets on both backends. xusb22 makes the HID device itself, with no Vx and Vy pair, in the layout its own settings give a pad of the profile's subtype.
 
 Memory integrity plays no part. With it on, in strict mode, the driver installed and ran a controller on the x64 Windows 10 test machine.
 
@@ -551,7 +553,7 @@ The hands hold real SteamVR hand roles, serve SteamVR Input through a full input
 | Installs without test-signing mode | **Yes** | Yes | Yes | Yes | No (ships test-signed) |
 | EV certificate for new builds | **No** | No (uses signed usbip-win2) | Yes ($300+/yr) | Yes | No (OV cert for x64) |
 | Network play | **App layer via consumers (PadForge Remote Link), zero local penalty** | In the driver: +1-5 ms wired, +10-50 ms Wi-Fi | No | No | No |
-| Identity per controller | **Exact, 340 profiles** | 6 fixed device types | 2 fixed types | Fixed "vJoy Device" | 4 presets, or raw descriptor |
+| Identity per controller | **Exact, 339 profiles** | 6 fixed device types | 2 fixed types | Fixed "vJoy Device" | 4 presets, or raw descriptor |
 | Bus type fidelity | **Per-profile, incl. Bluetooth** | USB only (USBIP) | USB only | USB only | USB only |
 | Add a new device | **JSON file, or capture one you own** | Write Go (a few hundred lines/device) | N/A | N/A | Write C, or raw descriptor |
 | Local single-press latency | **~35 µs measured** | 168 µs published (localhost) | N/A | N/A | Not published |
@@ -582,7 +584,7 @@ HIDMaestro is Windows optimized and focused on game controllers, keyboards, mice
 - **Vendor-specific feature reports.** LED control, calibration, and firmware-update reports vary per device. A profile answers the ones its answer table holds, and a report no table holds goes unanswered.
 - **One interface per keyboard or mouse.** A keyboard or mouse profile carries the descriptor of the real device's keyboard or mouse interface. Its other interfaces, including the ones vendor configuration tools use, are not emulated.
 - **Anti-cheat.** Virtual devices are detectable by kernel-level anti-cheat. HIDMaestro does not hide that it is virtual.
-- **Windows on ARM64.** HIDMaestro's own driver does not install on Windows on ARM64 or in S mode, so controllers there run on the USB/IP backend. The Xbox profiles that reach XInput through the XUSB companion or xinputhid have no USB/IP presentation yet, and a Bluetooth profile presents on the USB bus, the Sony pads and the Switch Pro in their USB form: [Where the driver installs](#where-the-driver-installs).
+- **Windows on ARM64.** HIDMaestro's own driver does not install on Windows on ARM64 or in S mode, so controllers there run on the USB/IP backend. The Xbox 360 profiles present the USB devices Windows' own xusb22 drives, the Xbox profiles that reach XInput through xinputhid have no USB/IP presentation yet, and a Bluetooth profile presents on the USB bus, the Sony pads and the Switch Pro in their USB form: [Where the driver installs](#where-the-driver-installs).
 - **Programs built on 1.x.** A program built on HIDMaestro 1.x removes every HIDMaestro device on the machine when it calls `InstallDriver` or first creates a controller, another program's included, and puts its own driver back. Programs on 2.0.0 leave each other's devices alone. Move every program on the machine to 2.0.0.
 
 ## Security and Scope
