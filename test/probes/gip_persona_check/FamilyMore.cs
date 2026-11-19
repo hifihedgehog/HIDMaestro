@@ -1,4 +1,4 @@
-// gip_persona_check, four more live parts of the GIP function on USB/IP:
+// gip_persona_check, five more live parts of the GIP function on USB/IP:
 //   nodriver  A GIP device no INF binds (profiles/gip-no-driver.json): the
 //             create fails and names the device and the compatible ID no
 //             driver bound, and leaves no device.
@@ -11,6 +11,8 @@
 //   reuse     One pad created again under a key used before and under
 //             fresh keys: each create's XInput read and rumble, and the
 //             HID child instance Windows gives it.
+//   guide     XInput reads around two Guide presses, in a session with a
+//             console user, beside the Game Bar processes.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -272,6 +274,46 @@ internal static unsafe partial class Program
                 try { pad?.Controller.Dispose(); } catch { }
                 if (pad != null) WaitUntil(() => Node(pad.Instance) == null, 30_000);
             }
+        }
+        return 0;
+    }
+
+    /// <summary>Guide pressed on a GIP pad in a session with a console user:
+    /// XInput reads before the press, after it, and after a second press.
+    /// The Game Bar processes' start times are printed beside each.</summary>
+    static int Guide()
+    {
+        Console.WriteLine("\n=== guide: XInput reads around a Guide press ===");
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        Pad? pad = null;
+        string GameBar() => string.Join(", ", System.Diagnostics.Process.GetProcesses()
+            .Where(p => p.ProcessName.StartsWith("GameBar", StringComparison.OrdinalIgnoreCase) || p.ProcessName.StartsWith("XboxGameBar", StringComparison.OrdinalIgnoreCase))
+            .Select(p => { try { return $"{p.ProcessName} {p.StartTime:HH:mm:ss}"; } catch { return p.ProcessName; } }));
+        try
+        {
+            uint before = ConnectedSlots();
+            pad = OpenPad(ctx, "xbox-one-s", "gipguide:1");
+            int slot = SlotOf(pad, HMButton.A, 0x1000, before);
+            Console.WriteLine($"  before the press: slot {slot}; Game Bar: {GameBar()}");
+            Check("XInput reads the submitted A before any Guide press", slot >= 0, SlotStates());
+            for (int press = 1; press <= 2; press++)
+            {
+                var guide = new HMGamepadState { Buttons = HMButton.Guide };
+                pad.Controller.SubmitState(in guide);
+                Thread.Sleep(200);
+                pad.Controller.SubmitState(new HMGamepadState());
+                Thread.Sleep(3000);
+                int again = SlotOf(pad, HMButton.B, 0x2000, before);
+                Console.WriteLine($"  after Guide press {press}: slot {again}; {SlotStates()}; Game Bar: {GameBar()}");
+                Check($"after Guide press {press}, XInput reads the submitted B", again >= 0, SlotStates());
+            }
+        }
+        catch (Exception e) { Check("the guide part ran to its end", false, e.Message); }
+        finally
+        {
+            try { pad?.Controller.Dispose(); } catch { }
+            if (pad != null) WaitUntil(() => Node(pad.Instance) == null, 30_000);
         }
         return 0;
     }
