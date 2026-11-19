@@ -928,19 +928,19 @@ internal static partial class Program
     /// wait finds it on the port, and the ledger names the record it caused
     /// under that name. The serial's name has no record, and the removal
     /// drops its entry as absent. The profile is one whose VID and PID have
-    /// no record on the machine, so the record the create makes is new
-    /// whatever port it lands on.</summary>
+    /// no port-named record on the machine (an instance name with '&'), so
+    /// the record the create makes is new whatever port it lands on.</summary>
     static void PortNamed()
     {
         Console.WriteLine("\n-- A derived device Windows names by its port --");
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
         var profile = ctx.AllProfiles.Where(p => p.Type is not ("keyboard" or "mouse") && p.Connection == "usb" && p.Inner.UsbConfiguration == null && p.SupportsBackend(HMBackend.Usbip)
-                                              && UsbRecords.Known(p.VendorId, p.ProductId).Count == 0)
+                                              && UsbRecords.Known(p.VendorId, p.ProductId).All(n => !n.Contains('&')))
                                   .OrderBy(p => p.Id, StringComparer.Ordinal).FirstOrDefault();
         if (profile == null)
         {
-            Console.WriteLine("  [SKIP] every derived profile's VID and PID has a record on this machine");
+            Console.WriteLine("  [SKIP] every derived profile's VID and PID has a port-named record on this machine");
             return;
         }
         const string flags = @"SYSTEM\CurrentControlSet\Control\usbflags";
