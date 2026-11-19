@@ -367,6 +367,12 @@ internal static partial class UsbipDriverInstaller
     // Written under s_lock.
     private static volatile bool s_legacyChecked;
 
+    private static int s_legacyMoves;
+
+    /// <summary>How many times this process moved the host controller off
+    /// an older usbip-win2 onto the bundled one.</summary>
+    internal static int LegacyMoves => Volatile.Read(ref s_legacyMoves);
+
     private static void ReplaceLegacyTransportOnce(Action<string>? progress)
     {
         if (s_legacyChecked) return;
@@ -509,6 +515,7 @@ internal static partial class UsbipDriverInstaller
                 // A host controller HIDMaestro installed stays HIDMaestro's
                 // on its new package.
                 UsbipInstallRecord.RefreshDriver();
+                Interlocked.Increment(ref s_legacyMoves);
                 DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: host controller is {Version} after {sw.ElapsedMilliseconds} ms.");
                 work.Report("USB audio transport ready.");
                 return;
