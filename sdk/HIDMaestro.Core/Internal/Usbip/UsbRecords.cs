@@ -31,14 +31,15 @@ namespace HIDMaestro.Internal.Usbip;
 /// Everything) and the uninstall remove every record the ledger names whose
 /// device has left.</para>
 ///
-/// <para>A record of a device that arrived since Windows started stays until
-/// a restart, as the usbip-win2 removal keeps such records
-/// (UsbipRemoval.RemovePersonaPhantoms): whether the host controller has
+/// <para>Under the full removal a record of a device that arrived since
+/// Windows started stays until a restart: whether the host controller has
 /// carried a device since Windows started is read from those records'
 /// arrival times (UsbipDriverInstaller.HostControllerUsedSinceBoot), and a
 /// host controller that has carries a forced removal or driver change into a
 /// four-minute query-remove timeout that lasts until Windows restarts. A
-/// removal after the restart takes them.</para>
+/// removal after the restart takes them. The uninstall takes them at once
+/// (RemoveCaused with sinceBoot): it reads that state before it removes
+/// anything, and no HIDMaestro code reads the records after it.</para>
 ///
 /// <para>The records below the instance are found by the parent Windows
 /// keeps for each devnode, present or not (DEVPKEY_Device_Parent, which
