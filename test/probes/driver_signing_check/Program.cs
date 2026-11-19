@@ -109,9 +109,8 @@ internal static partial class Program
         bool R(DriverSigningPolicy.Inputs i) => DriverSigningPolicy.Refuses(i);
 
         Check("the Surface's shipped options on ARM64 refuse the package", R(Arm64(Surface)));
-        Check("the Surface with the developer mode for driver signing set refuses it (0x3405, measured 2026-11-18)", R(Arm64(SurfaceRelaxed)));
-        Check("the Surface with Secure Boot off refuses it (0x3405, measured 2026-11-18)", R(Arm64(SurfaceRelaxed)));
-        Check("the Surface with integrity checks off in the boot configuration refuses it (0x3405, measured 2026-11-18)", R(Arm64(SurfaceRelaxed)));
+        Check("the Surface's options 0x3405 on ARM64 refuse it: the same options it read with the developer mode for driver signing set, with Secure Boot off, and with integrity checks off in the boot configuration (2026-11-18)",
+              R(Arm64(SurfaceRelaxed)));
         Check("ARM64 refuses with code integrity on and the test-signing option clear, whatever else the options hold",
               R(Arm64(DriverSigningPolicy.CodeIntegrityEnabled)) && R(Arm64(MeleMemoryIntegrity)));
         Check("the laptop's options on x64 install it", !R(X64(Laptop)));
@@ -134,7 +133,14 @@ internal static partial class Program
         Check("a build with both payloads on a machine that refuses it: Usbip", M(true, true, true) == HMBackend.Usbip);
         Check("a build without the driver for the machine: Usbip", M(false, true, false) == HMBackend.Usbip);
         Check("a build with neither: Umdf2, so the create names the missing driver", M(false, false, false) == HMBackend.Umdf2);
-        Check("a build without the transport on a refusing machine: Umdf2, so the create names it", M(true, false, true) == HMBackend.Umdf2);
+
+        Console.WriteLine();
+        Console.WriteLine("=== What an install of the USB/IP host controller reports ===");
+        Check("a host controller it installed: Installed", HMContext.UsbipInstallOutcome(presentBefore: false, moved: false) == HMDriverInstallOutcome.Installed);
+        Check("one it moved off an older usbip-win2: Installed", HMContext.UsbipInstallOutcome(presentBefore: true, moved: true) == HMDriverInstallOutcome.Installed);
+        Check("one already current: AlreadyCurrent", HMContext.UsbipInstallOutcome(presentBefore: true, moved: false) == HMDriverInstallOutcome.AlreadyCurrent);
+        Check("a build without the transport on a refusing machine: Usbip, so the create names the missing transport rather than a driver Windows refuses",
+              M(true, false, true) == HMBackend.Usbip);
         bool asked = false;
         BackendSelection.MachineRule(false, true, () => { asked = true; return true; });
         Check("the signing question is asked only when the build carries the driver", !asked);
@@ -177,8 +183,12 @@ internal static partial class Program
         Check("SupportsBackend gives the same answers without the exception",
               ctx.GetProfile("dualshock-4-v2")!.SupportsBackend(HMBackend.Usbip) && ctx.GetProfile("dualshock-4-v2")!.SupportsBackend(HMBackend.Umdf2)
               && !ctx.GetProfile("dualsense-composite")!.SupportsBackend(HMBackend.Umdf2)
-              && !ctx.GetProfile("xbox-360-wired")!.SupportsBackend(HMBackend.Usbip)
-              && ctx.GetProfile("xbox-360-wired")!.SupportsBackend(HMBackend.Auto));
+              && !ctx.GetProfile("xbox-360-wired")!.SupportsBackend(HMBackend.Usbip));
+        var autoDisagrees = ctx.AllProfiles.Where(p => p.IsDeployable)
+            .Where(p => p.SupportsBackend(HMBackend.Auto) != (Resolve(p.Inner, HMBackend.Auto, HMContext.MachineBackend) is not ("refused:Umdf2" or "refused:Usbip")))
+            .Select(p => p.Id).ToList();
+        Check($"SupportsBackend(Auto) answers what an Auto create does on this machine, MachineBackend {HMContext.MachineBackend}",
+              autoDisagrees.Count == 0, string.Join(", ", autoDisagrees.Take(6)));
         var refusal = Thrown(() => BackendSelection.ForProfile(composite, HMBackend.Umdf2, () => HMBackend.Umdf2));
         Check("the refusal is an InvalidOperationException naming the profile and the backend",
               refusal is HMBackendNotSupportedException { ProfileId: "dualsense-composite", Backend: HMBackend.Umdf2 } b
@@ -194,7 +204,8 @@ internal static partial class Program
             var explicitUmdf2 = Thrown(() => BackendSelection.ThrowIfMachineRefuses(plain, HMBackend.Umdf2, explicitRequest: true));
             Check("an explicit Umdf2 request throws HMDriverSigningException", explicitUmdf2 is HMDriverSigningException, explicitUmdf2?.GetType().Name ?? "none");
             Check("a Usbip create throws nothing for signing", Thrown(() => BackendSelection.ThrowIfMachineRefuses(plain, HMBackend.Usbip, explicitRequest: true)) is not HMDriverSigningException);
-            Check("the machine rule over this machine reads Usbip", BackendSelection.MachineRule(true, true, DriverDeploy.SigningStopsDeploy) == HMBackend.Usbip);
+            Check("Auto on this machine, options 0xF405, reads Usbip", BackendSelection.Override != null || BackendSelection.Machine == HMBackend.Usbip,
+                  BackendSelection.Machine.ToString());
             if (explicitUmdf2 is HMDriverSigningException e)
             {
                 Check("the exception is an InvalidOperationException with the neutral message",
@@ -202,6 +213,24 @@ internal static partial class Program
                 Check("the message names the backend that runs the controller", e.Message.Contains("HMBackend.Auto", StringComparison.Ordinal)
                       && e.Message.Contains("HMBackend.Usbip", StringComparison.Ordinal));
             }
+        }
+        finally { DriverDeploy.Machine = real; }
+
+        Console.WriteLine();
+        Console.WriteLine("=== Auto where Windows refuses the package ===");
+        try
+        {
+            DriverDeploy.Machine = new EmptyMachine(DriverSigningPolicy.VerdictOf(Arm64(SurfaceRelaxed)));
+            Check("Auto on a machine with options 0x3405 and no package reads Usbip",
+                  BackendSelection.Override != null || BackendSelection.Machine == HMBackend.Usbip, BackendSelection.Machine.ToString());
+            DriverDeploy.Machine = new EmptyMachine(DriverSigningPolicy.VerdictOf(Arm64(Surface)), olderPackage: true);
+            Check("a store holding an older package still lets an explicit Umdf2 request try the deploy",
+                  !DriverDeploy.SigningStopsDeploy());
+            Check("and Auto there reads Usbip: this build's package is not in place, and an import of it would be refused",
+                  BackendSelection.Override != null || BackendSelection.Machine == HMBackend.Usbip, BackendSelection.Machine.ToString());
+            DriverDeploy.Machine = new EmptyMachine(DriverSigningPolicy.VerdictOf(Arm64(Surface)), olderPackage: true, fastPath: true);
+            Check("Auto reads Umdf2 where this build's driver is installed whole and needs no import",
+                  BackendSelection.Override != null || BackendSelection.Machine == HMBackend.Umdf2, BackendSelection.Machine.ToString());
         }
         finally { DriverDeploy.Machine = real; }
 
@@ -221,10 +250,12 @@ internal static partial class Program
 
     /// <summary>A machine of the probe's own: no package in the store, and
     /// the verdict given.</summary>
-    sealed class EmptyMachine(DriverSigningPolicy.Verdict verdict) : DriverDeploy.DeployMachine
+    sealed class EmptyMachine(DriverSigningPolicy.Verdict verdict, bool olderPackage = false, bool fastPath = false) : DriverDeploy.DeployMachine
     {
-        internal override List<DriverDeploy.DriverStamp> Stamps(string infName) => new();
+        internal override List<DriverDeploy.DriverStamp> Stamps(string infName) =>
+            olderPackage ? new() { new(new DateTime(2026, 1, 1), new Version(1, 12, 0, 1)) } : new();
         internal override DriverSigningPolicy.Verdict Signing() => verdict;
+        internal override bool FastPath() => fastPath;
     }
 
     // ── machine ──────────────────────────────────────────────────────────
@@ -482,6 +513,11 @@ internal static partial class Program
             catch (CryptographicException) { }
             s[$"certificates in {storeName}"] = n.ToString();
         }
+        // The folder a deploy stages this build's driver payload in, read
+        // without creating it (ProtectedStaging.DirFor creates it).
+        string driverStaging = Path.Combine(ProtectedStaging.StagingRoot, ProtectedStaging.VersionTag, ProtectedStaging.OperationDriver);
+        s["files staged for this build's driver"] = Directory.Exists(driverStaging)
+            ? Directory.EnumerateFiles(driverStaging, "*", SearchOption.AllDirectories).Count().ToString() : "absent";
         using (var k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestro"))
             s[@"HKLM\SOFTWARE\HIDMaestro"] = k == null ? "absent" : "present";
         string repository = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "DriverStore", "FileRepository");
@@ -522,9 +558,10 @@ internal static partial class Program
         using (var ctx = new HMContext(HMBackend.Umdf2))
         {
             ctx.LoadDefaultProfiles();
-            // The constructor's prewarm runs on other threads. A deploy
-            // would have staged the payload within this time.
-            Thread.Sleep(4000);
+            // The constructor's warm-up runs on other threads, and a deploy
+            // would stage the payload there. Its end is the signal, bounded
+            // by the scaled hang limit.
+            Check("the constructor's warm-up ends", ctx.Prewarmed.Wait(TimeoutScale.Apply(30000)));
             install = Expect(() => ctx.InstallDriver());
             create = Expect(() => { using var c = ctx.CreateController(ctx.GetProfile("dualshock-4-v2")!, "driver-signing-check"); });
             Check("IsDriverInstalled on Umdf2 answers false", !ctx.IsDriverInstalled);

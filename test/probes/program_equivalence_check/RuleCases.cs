@@ -200,5 +200,6 @@ internal static partial class RuleChecks
         foreach (var c in ProtocolCases()) yield return c;
         foreach (var c in StreamCases()) yield return c;
         foreach (var c in BoundsCases()) yield return c;
+        foreach (var c in MessageCases()) yield return c;
     }
 }

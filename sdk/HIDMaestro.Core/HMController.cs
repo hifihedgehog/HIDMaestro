@@ -112,9 +112,14 @@ public sealed partial class HMController : IDisposable
     /// <summary>Issue #39: the audio surfaces of a composite USB persona
     /// (speaker/haptic PCM out, microphone in, volume/mute control
     /// events). Non-null exactly when the controller runs on
-    /// <see cref="HMBackend.Usbip"/> and its USB configuration has an
-    /// isochronous endpoint, as a composite persona's audio interfaces do.
-    /// Null on every other controller.</summary>
+    /// <see cref="HMBackend.Usbip"/> and an alternate setting of an
+    /// interface in its USB configuration declares an isochronous endpoint,
+    /// as a composite persona's audio interfaces do. Null on every other
+    /// controller: every controller on <see cref="HMBackend.Umdf2"/>, every
+    /// derived USB/IP device, and an authored USB/IP profile with no
+    /// isochronous endpoint, such as gamecube-adapter, steam-controller-2
+    /// and xbox-360-wired-full. Before 2.3.0 every USB/IP controller had
+    /// one.</summary>
     public HMUsbAudio? UsbAudio { get; }
 
     // Encoder built once from the profile descriptor at construction time;
@@ -1377,7 +1382,9 @@ public sealed partial class HMController : IDisposable
     /// let Windows choose the package for real devices.</exception>
     /// <exception cref="HMDriverSigningException">Windows on this machine
     /// does not install HIDMaestro's driver package, and the binding's
-    /// package is signed as HIDMaestro's driver is.</exception>
+    /// package is signed as HIDMaestro's driver is. Thrown whatever backend
+    /// the controller runs on, <see cref="HMBackend.Auto"/>'s included,
+    /// when the driver store holds no HIDMaestro package.</exception>
     public HMWinUsbBinding BindWinUsb()
     {
         ThrowIfDisposed();
