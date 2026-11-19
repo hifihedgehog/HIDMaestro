@@ -127,7 +127,7 @@ User feedback (2026-04-30): consumers reporting ~30 s for 3-controller add/remov
 | Bus driver class | Yes. It IS the bus, and publishes PDOs directly | No. UMDF2 cannot be a bus driver (memory: project-umdf2-cannot-be-bus-driver.md). Each virtual is a ROOT or SWD root devnode with a separate UMDF2 host attached | +inherent kernel-PnP cost |
 | Per-virtual create call | KMDF child-PDO publish (~10–50 ms kernel) | SetupDi[CreateDeviceInfo + SetRegistryProperty + CallClassInstaller(DIF_REGISTERDEVICE) + UpdateDriverForPlugAndPlayDevices] OR SwDeviceCreate via hmswd.exe helper, blocking on driver-bind callback | +200–400 ms per virtual |
 | XInput compatibility | Native XUSB-class sub-device, no companion needed | XUSB companion (HMXInput.dll) at `SWD\HIDMAESTRO\<identity token>` per Xbox-VID virtual | +50 ms create + +14 ms slot-claim wait |
-| Driver install pipeline | One-time kmdf bus driver install (`devcon install` style) | DriverStore + signtool + inf2cat + pnputil: fortunately one-time, gated by SHA-256 manifest hash | +0 once cached, full pipeline on cold install |
+| Driver install pipeline | One-time kmdf bus driver install (`devcon install` style) | DriverStore + in-process catalog and signing + pnputil: fortunately one-time, gated by SHA-256 manifest hash | +0 once cached, full pipeline on cold install |
 | Teardown: Xbox 360 wired | Bus driver removes child PDO (~10 ms) | DIF_REMOVE on ROOT\VID_*&IG_00 + cascade to HID child + SwDeviceClose on XUSB companion + 5–7 s WUDFHost release | +5–7 s |
 | Teardown: Xbox Series BT | n/a (different code path) | xinputhid filter unbind + SwDeviceClose + 5–11 s kernel cascade | +5–11 s |
 | Multi-controller serialization | Optional (kernel synchronizes itself) | Mandatory (memory: feedback-no-parallel-controller-create.md): DirectInput / XInput / WGI / Browser / RawInput all anchor to creation order | sequential, can't parallelize |
@@ -192,7 +192,7 @@ Every wall-clock budget that could trip on slow hardware. Categories from the au
 
 | ID | Site | Current | Cat | Action | Status | Notes |
 |---|---|---|---|---|---|---|
-| T1-01 | `DriverBuilder.Run` default | 60 000 ms | a | Wrap with TimeoutScale.Apply | done | signtool / inf2cat / pnputil |
+| T1-01 | `DriverBuilder.Run` default | 60 000 ms | a | Wrap with TimeoutScale.Apply | done | pnputil (signtool and Inf2Cat until 2.3.0) |
 | T1-02 | `DriverBuilder.InstallDrivers` pnputil call | 30 000 ms | a | Wrap with TimeoutScale.Apply | done | tightest pipeline budget |
 | T1-03 | `PnputilHelper.Run` default | 30 000 ms | a | Wrap with TimeoutScale.Apply | done | covers /enum-drivers + /delete-driver |
 | T1-04 | `DeviceManager` devcon WaitForExit (lines 525, 528, 571, 574) | 5 000 / 2 000 ms | a | Wrap with TimeoutScale.Apply | done | DIF_REMOVE drain |
@@ -244,7 +244,7 @@ Every wall-clock budget that could trip on slow hardware. Categories from the au
 | T7-03 | 7 | `HMContext.LoadDefaultProfiles`: `Parallel.ForEach` JSON parse over 231 profiles | 50–150 ms saved on cold launch | low | done | no shared state during parse |
 | T7-04 | 7 | `CreateController` Step 4: coalesce FriendlyName + BusReportedDesc into single registry transaction per devnode | ~50 ms per controller | low | done | shares the same Device Parameters key |
 | T7-05 | 7 | hmswd.exe: keep one persistent helper process, dispatch commands via stdin, eliminate per-call spawn cost | 50–100 ms per SwDeviceCreate | medium | pending | requires hmswd protocol change; defer if scope grows |
-| T7-06 | 7 | `EnsureExtracted`: extract resources in parallel (signtool deps + driver bins) | 200–500 ms saved on cold first run | low | pending |  |
+| T7-06 | 7 | `EnsureExtracted`: extract resources in parallel (driver bins) | 200–500 ms saved on cold first run | low | pending |  |
 | T7-07 | 7 | Pre-trigger `EnsureExtracted` from `HMContext` ctor on a background thread so it's done by the time `InstallDriver` is called | 200–500 ms hidden in user think time | low | done | non-blocking warm-up |
 | T7-08 | 7 | `Registry.LocalMachine.OpenSubKey` chains in DeviceProperties: replace with single P/Invoke `RegOpenKeyExW` to keep handle through several SetValue calls | ~10–30 ms per controller cumulative | low | done | covered by T5-01 (SetAllNamingProperties) |
 | T8-01 | 8 | `EnsureExtracted` thread-safety lock | n/a | low | done | ctor pre-warm + foreground InstallDriver could race |

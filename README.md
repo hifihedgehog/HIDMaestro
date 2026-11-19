@@ -85,18 +85,16 @@ If you want to use HIDMaestro through a UI instead of code, install [PadForge](h
 
 ### Build settings
 
-`scripts\build_all.cmd` builds everything an official release carries: the UMDF2 driver, XUSB companion and SWD helper for x64 and ARM64, the OpenVR driver, and the SDK with usbip-win2's host controller driver for both architectures. Each setting below is an environment variable, which MSBuild reads as a property, so one setting reaches the native scripts and the SDK project alike. Each the SDK project reads also works as `-p:` on a `dotnet build` of the SDK. `HM_WDK_ROOT_ARM64` and `HM_STAMP_TIME` are read by the native scripts only.
+`scripts\build_all.cmd` builds everything an official release carries: the UMDF2 driver, XUSB companion and SWD helper for x64 and ARM64, the OpenVR driver, and the SDK with usbip-win2's host controller driver for both architectures. Each setting below is an environment variable, which MSBuild reads as a property, so one setting reaches the native scripts and the SDK project alike. `HMSkipArm64` and `HMSkipUsbip` also work as `-p:` on a `dotnet build` of the SDK. The kit settings and `HM_STAMP_TIME` are read by the native scripts only. The SDK project takes nothing from a Windows kit: the SDK writes and signs the driver's catalogs at install time through Windows' own `wintrust.dll` and `mssign32.dll`, so it carries neither signtool nor Inf2Cat.
 
 | Setting | Effect | Default |
 |--|--|--|
 | `HMSkipArm64=true` | Builds and embeds the x64 driver, companion and helper only, and leaves out the ARM64 usbip-win2 host controller. | unset |
 | `HMSkipUsbip=true` | Leaves out the USB/IP transport: the host controller files, and the installers they are unpacked from. Nothing is downloaded, hashed or unpacked for it. | unset |
-| `HM_SDK_ROOT` | The Windows SDK: the `um` and `shared` headers, the `um` libraries, `rc.exe` and the signtool set the SDK embeds. | `WindowsSdkDir` when a Visual Studio or EWDK prompt set it, otherwise `%ProgramFiles(x86)%\Windows Kits\10` |
-| `HM_WDK_ROOT` | The WDK: the `km` headers, the UMDF 2.15 headers and stub library, and Inf2Cat. | `WDKContentRoot` when an EWDK prompt set it, otherwise `HM_SDK_ROOT` |
+| `HM_SDK_ROOT` | The Windows SDK: the `um` and `shared` headers, the `um` libraries and `rc.exe`. | `WindowsSdkDir` when a Visual Studio or EWDK prompt set it, otherwise `%ProgramFiles(x86)%\Windows Kits\10` |
+| `HM_WDK_ROOT` | The WDK: the `km` headers and the UMDF 2.15 headers and stub library. | `WDKContentRoot` when an EWDK prompt set it, otherwise `HM_SDK_ROOT` |
 | `HM_WDK_ROOT_ARM64` | The WDK for the ARM64 build. | `HM_WDK_ROOT` |
 | `HM_WDK_VERSION` | The kits' version folder. | `Version_Number` when an EWDK prompt set it, otherwise `10.0.26100.0` |
-| `HMWdkBin` | The folder whose `x64` and `arm64` folders hold the signtool set. | `HM_SDK_ROOT\bin\<version>\` |
-| `HMInf2catBin` | The folder whose `x86` folder holds Inf2Cat. | `HM_WDK_ROOT\bin\<version>\` |
 | `HM_STAMP_TIME` | The build's `DriverVer` stamp, `yyyy-MM-ddTHH:mm`. Every INF of a build carries the one stamp. Read by the native scripts only, so `-p:` does nothing. A time later than the clock, or earlier than the newest file under `driver\`, stops the build. | the time `build_all.cmd` starts, or the time `build.cmd` or `build_companion.cmd` starts when run alone |
 
 The native scripts compile the driver, the companion and the OpenVR driver at `/W4` and hmswd at `/W3`, with the UMDF headers and Valve's `openvr_driver.h` marked external (`/external:I`, `/external:W0`), so warnings in those headers stay off and every warning in HIDMaestro's own sources prints. A full build prints none. No `/WX` is set, so a new warning does not stop the build. The driver and the companion compile at `/Ox /Os`, the WDK's release setting for a driver, the OpenVR driver at `/O2` and hmswd at `/O1`. Through v1.12.0 the driver and the companion had no `/O` switch, so cl.exe compiled them `/Od`.
