@@ -696,6 +696,12 @@ internal static partial class Program
         var held = new List<System.Net.Sockets.TcpListener>();
         try
         {
+            // A port another program uses (its server, or a connection's
+            // local end) is out of a server's reach as much as one the probe
+            // holds: what the part needs is that no port of either range is
+            // free. A port the probe cannot bind for any other reason fails.
+            int inUse = 0;
+            var otherError = new List<string>();
             foreach (int first in new[] { UsbipBasePort, UsbipSecondBasePort })
                 for (int i = 0; i < 16; i++)
                 {
@@ -705,18 +711,15 @@ internal static partial class Program
                         l.Start();
                         held.Add(l);
                     }
-                    catch (System.Net.Sockets.SocketException) { }
+                    catch (System.Net.Sockets.SocketException e) when (e.SocketErrorCode is System.Net.Sockets.SocketError.AddressAlreadyInUse or System.Net.Sockets.SocketError.AccessDenied)
+                    {
+                        inUse++;
+                    }
+                    catch (System.Net.Sockets.SocketException e) { otherError.Add($"{first + i}: {e.SocketErrorCode}"); }
                 }
-            // A port another program's server listens on is out of reach
-            // too: what the part needs is no free port in either range.
-            var listening = System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties()
-                .GetActiveTcpListeners().Select(e => e.Port).ToHashSet();
-            int others = 0;
-            foreach (int first in new[] { UsbipBasePort, UsbipSecondBasePort })
-                for (int i = 0; i < 16; i++)
-                    if (!held.Any(l => ((System.Net.IPEndPoint)l.LocalEndpoint).Port == first + i) && listening.Contains(first + i)) others++;
-            Check("V8: no port of either range is free: the probe holds the rest of what other programs' servers hold",
-                  held.Count + others == 32, $"{held.Count} held by the probe, {others} by other programs, of 32");
+            Check("V8: no port of either range is free: the probe holds every one another program does not use",
+                  held.Count + inUse == 32 && otherError.Count == 0,
+                  $"{held.Count} held by the probe, {inUse} in use by other programs, of 32{(otherError.Count > 0 ? ", " + string.Join(", ", otherError) : "")}");
             bool Outside(int port) => port > 0 && (port < UsbipBasePort || port >= UsbipBasePort + 16)
                 && (port < UsbipSecondBasePort || port >= UsbipSecondBasePort + 16);
 
