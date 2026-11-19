@@ -184,8 +184,9 @@ internal static partial class Program
             _ = new HIDMaestro.Internal.Usbip.UsbDescriptorSet(p);
 
             // The raw frames only the Bluetooth form takes.
-            var lengths = (int[]?)typeof(HMController).GetMethod("OtherFormRawLengths",
+            var table = (bool[]?)typeof(HMController).GetMethod("OtherFormRawLengths",
                 System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.Invoke(null, new object[] { bt, p });
+            var lengths = table == null ? null : Enumerable.Range(0, table.Length).Where(i => table[i]).ToArray();
             var takes = RawLengths(p);
             Console.WriteLine($"  raw lengths refused: {string.Join(",", lengths ?? Array.Empty<int>())}, the form's: {string.Join(",", takes)}");
             if (bt.StateBlock != null)
@@ -250,6 +251,48 @@ internal static partial class Program
         Check("a copy with another descriptor drops usbForm", ReferenceEquals(redrawn.FormOn(HMBackend.Usbip), redrawn));
         var moved = new HMProfileBuilder().FromProfile(dsbtHm).Id("my-ds-bt3").Connection("usb").Build();
         Check("a copy with another connection drops usbForm", ReferenceEquals(moved.FormOn(HMBackend.Usbip), moved));
+        // On USB/IP the form's model, answers, driver PID and maps replace
+        // the copy's own, so a copy that changes one is no longer the form's
+        // device.
+        CopyDrops(dsbtHm, "a button map", b => b.ButtonMap(new[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13 }));
+        CopyDrops(dsbtHm, "an axis map", b => b.AxisMap(new Dictionary<string, string> { ["0x30"] = "leftStickX", ["0x31"] = "leftStickY" }));
+        CopyDrops(dsbtHm, "a driver PID", b => b.DriverPid("0x0B13"));
+        CopyDrops(dsbtHm, "feature answers", b => b.FeatureAnswers("{}"));
+        CopyDrops(dsbtHm, "a device model by name", b => b.DeviceModelFrom("dualshock-4-v2-bt"));
+        // A copy of a directory's Bluetooth profile keeps the form the
+        // directory resolved, which the catalog does not hold.
+        string copied;
+        try
+        {
+            var xbtCopy = new HMProfileBuilder().FromProfile(new HMProfile(xbt!)).Id("x-bt-copy").Build();
+            copied = xbtCopy.FormOn(HMBackend.Usbip).Id;
+        }
+        catch (HMProfileException e) { copied = e.Message; }
+        Check("a copy of a directory's Bluetooth profile presents the directory's USB form", copied == "x-usb", copied);
+
+        Console.WriteLine("\n-- SubmitState reads the sticks and triggers by the consumer's profile on both backends --");
+        foreach (var (btId, _) in Forms)
+        {
+            var hm = new HMProfile(byId[btId]);
+            var (umdf2, _) = SlotsOf(hm, hm, 7910);
+            var (usbip, c) = SlotsOf(hm, hm.FormOn(HMBackend.Usbip), 7911);
+            Check($"{btId}: the slots on USB/IP are the slots on UMDF2", umdf2 == usbip, $"UMDF2 [{umdf2}] USB/IP [{usbip}]");
+            // The descriptor path reads the state by axis key, so a form
+            // that puts a stick elsewhere gets the keys moved to its own.
+            var formOn = hm.FormOn(HMBackend.Usbip);
+            var given = HMGamepadStateHelpers.StandardAxes(hm, 0.5f, 0.5f, 1.0f, 0.25f, 0f, 0f);
+            const System.Reflection.BindingFlags Own = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+            bool moves = typeof(HMController).GetField("_formAxisMoves", Own)!.GetValue(c) != null;
+            var read = moves ? (Dictionary<HMAxis, float>)typeof(HMController).GetMethod("FormAxes", Own)!.Invoke(c, new object?[] { given })! : given;
+            if (hm.Sticks.Count > 1 && formOn.Sticks.Count > 1)
+            {
+                var (fx, fy) = (formOn.Sticks[1].XAxis, formOn.Sticks[1].YAxis);
+                bool same = hm.Sticks[1].XAxis == fx && hm.Sticks[1].YAxis == fy;
+                Check($"{btId}: the descriptor path reads the right stick at {formOn.Id}'s {fx}/{fy}" + (same ? ", the axes it was given" : ""),
+                    read.TryGetValue(fx, out float x) && x == 1.0f && read.TryGetValue(fy, out float y) && y == 0.25f,
+                    string.Join(" ", read.OrderBy(k => k.Key.ToString()).Select(k => $"{k.Key}={k.Value}")));
+            }
+        }
 
         Console.WriteLine("\n-- The Bluetooth profiles that name no USB form --");
         foreach (var p in db.All.Where(p => string.Equals(p.Connection, "bluetooth", StringComparison.OrdinalIgnoreCase) && p.UsbForm == null)
@@ -259,11 +302,51 @@ internal static partial class Program
             bool xinput = p.UsesXinputhid;
             string why = BackendSelection.NotSupportedReason(p, HMBackend.Usbip) ?? "";
             if (xinput)
-                Console.WriteLine($"  [INFO] {p.Id}: an xinputhid profile, the GIP function's (lane GIP). USB/IP here: {(why.Length > 0 ? why : "presentable")}");
+                Console.WriteLine($"  [INFO] {p.Id}: reaches XInput through xinputhid, which the GIP function presents on USB/IP. USB/IP here: {(why.Length > 0 ? why : "presentable")}");
             else
                 Check($"{p.Id}: presents its own Bluetooth-format descriptor on USB/IP", hm.SupportsBackend(HMBackend.Usbip)
                     && ReferenceEquals(hm.FormOn(HMBackend.Usbip), hm), why);
         }
+    }
+
+    static void CopyDrops(HMProfile source, string what, Func<HMProfileBuilder, HMProfileBuilder> change)
+    {
+        string got;
+        try
+        {
+            var copy = change(new HMProfileBuilder().FromProfile(source).Id("my-copy")).Build();
+            got = ReferenceEquals(copy.FormOn(HMBackend.Usbip), copy) ? "own" : copy.FormOn(HMBackend.Usbip).Id;
+        }
+        catch (HMProfileException e) { got = e.Message; }
+        Check($"a copy with {what} of its own drops usbForm", got == "own", got);
+    }
+
+    /// <summary>The axes a controller of <paramref name="profile"/> that
+    /// presents <paramref name="presented"/> reads the state's sticks and
+    /// triggers from, built offline on a buffer of this probe's as
+    /// device_oracle_check's case 1 builds one: no section, event or driver
+    /// is created.</summary>
+    static (string Slots, HMController Controller) SlotsOf(HMProfile profile, HMProfile presented, int index)
+    {
+        const System.Reflection.BindingFlags Instance = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var view = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_INPUT_SIZE);
+        Marshal.Copy(new byte[SharedMemoryIO.SHARED_INPUT_SIZE], 0, view, SharedMemoryIO.SHARED_INPUT_SIZE);
+        Dictionary<int, IntPtr> Cache(string field) => (Dictionary<int, IntPtr>)typeof(SharedMemoryIO)
+            .GetField(field, System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!.GetValue(null)!;
+        var inputs = Cache("s_inputViews");
+        lock (inputs) inputs[index] = view;
+        var outputs = Cache("s_outputViews");
+        lock (outputs) outputs[index] = IntPtr.Zero;
+        var ctor = typeof(HMController).GetConstructor(Instance, new[]
+        {
+            typeof(HMContext), typeof(int), typeof(HMProfile), typeof(string),
+            typeof(HIDMaestro.Internal.Usbip.UsbipBackendHandle), typeof(string), typeof(HMProfile),
+        }) ?? throw new MissingMethodException("HMController's private constructor changed.");
+        var context = (HMContext)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(HMContext));
+        var c = (HMController)ctor.Invoke(new object?[] { context, index, profile, null, null, null, presented });
+        string Field(string name) => typeof(HMController).GetField(name, Instance)!.GetValue(c)!.ToString()!;
+        return (string.Join(" ", new[] { "_slotLx", "_slotLy", "_slotRx", "_slotRy", "_slotLtField", "_slotRtField", "_canonicalLt", "_canonicalRt" }
+            .Select(n => $"{n.TrimStart('_')}={Field(n)}")), c);
     }
 
     static string CatalogFile(string dir, string file)
@@ -294,13 +377,19 @@ internal static partial class Program
     static string JsonOf(ExtendedReportSpec? s) =>
         s == null ? "" : System.Text.Json.JsonSerializer.Serialize(s, HMJsonContext.Default.ExtendedReportSpec);
 
-    /// <summary>The raw-frame lengths a profile's form takes, as the SDK
-    /// counts them.</summary>
+    /// <summary>The raw-frame lengths a profile's form takes, read from
+    /// its descriptor's input reports and its own keys rather than from the
+    /// SDK's count: each input report with and without its ID, the extended
+    /// report with and without its ID, and the state block.</summary>
     static int[] RawLengths(ControllerProfile p)
     {
         var set = new SortedSet<int>();
-        int n = DeviceOrchestrator.DriverInputReport(p).Length;
-        set.Add(n); set.Add(n - 1);
+        foreach (var r in p.GetOrBuildReportMap().Reports.Where(r => r.Kind == HidReportKind.Input))
+        {
+            set.Add(r.FrameBytes);
+            set.Add(r.FrameBytes - (r.ReportId != 0 ? 1 : 0));
+        }
+        if (p.InputReportSize is int size and > 0) { set.Add(size); set.Add(size - 1); }
         if (p.ExtendedReport is { Size: > 0 } e) { set.Add(e.Size); set.Add(e.Size - 1); }
         if (p.StateBlock is { Size: > 0 } b) set.Add(b.Size);
         set.Remove(0);

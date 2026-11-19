@@ -97,10 +97,14 @@ internal static partial class Program
             Array.Copy(output, wire, Math.Min(output.Length, wire.Length));
             bool wrote = WriteFile(h, wire, (uint)wire.Length, out uint n, IntPtr.Zero);
             Check($"output report 0x{wire[0]:X2} of {form.Id} writes", wrote && n == wire.Length, wrote ? "" : $"error {Marshal.GetLastWin32Error()}");
-            bool seen = Wait(() => { lock (decoded) return decoded.Any(f => Num(f, "leftMotor") > 0 || Num(f, "rightMotor") > 0); }, 5000);
+            // The values the report carries, each motor on its own: the
+            // Sony report sets right 200 and left 100, the Switch report
+            // the left motor's top amplitude and the right neutral.
+            var (wantLeft, wantRight) = form.HasExtendedOutput ? (100, 200) : (255, 0);
+            bool seen = Wait(() => { lock (decoded) return decoded.Any(f => Num(f, "leftMotor") == wantLeft && Num(f, "rightMotor") == wantRight); }, 5000);
             string last;
             lock (decoded) last = decoded.Count == 0 ? "none" : string.Join(" ", decoded[^1].Where(k => k.Key.EndsWith("Motor")).Select(k => $"{k.Key}={k.Value}"));
-            Check("OutputDecoded raises leftMotor and rightMotor", seen, last);
+            Check($"OutputDecoded raises leftMotor {wantLeft} and rightMotor {wantRight}", seen, last);
         }
 
         // Raw frames follow the presented form.

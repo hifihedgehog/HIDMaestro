@@ -190,10 +190,11 @@ internal static class Program
     }
 
     /// <summary>The reports the pad sends on its own. A 0x21 answers a
-    /// subcommand, and before phase 3 only another program (a browser or
-    /// Steam handshaking the new pad) writes one.</summary>
+    /// subcommand and a 0x81 a USB 0x80 command, and before phase 3 only
+    /// another program (a browser, Steam or any SDL program setting up the
+    /// new pad) writes one.</summary>
     static System.Collections.Generic.List<byte[]> Own(System.Collections.Generic.List<byte[]> frames)
-        => frames.Where(f => f[0] != 0x21).ToList();
+        => frames.Where(f => f[0] != 0x21 && f[0] != 0x81).ToList();
 
     static string Ids(System.Collections.Generic.List<byte[]> frames)
         => frames.Count == 0 ? "none" : string.Join(",", frames.Select(f => f[0].ToString("X2")));
@@ -319,8 +320,30 @@ internal static class Program
             // ── Phase 1, USB form: nothing before the protocol ──────────
             Console.WriteLine("\n-- Phase 1: the USB form sends nothing before a host speaks the protocol --");
             HidD_FlushQueue(s_hid);
-            var quiet = Own(Collect(600));
-            Check("no report at rest", quiet.Count == 0, Ids(quiet));
+            // The positive control, in the same window as each silence
+            // read: the read path delivers what the pad does send, here the
+            // 81 01 that answers an 80 01 this probe writes
+            // (SDL_hidapi_switch.c:673-683). The held copy sets no
+            // protocolSeen, so the command starts no stream.
+            void Control(string before)
+            {
+                var status = new byte[64]; status[0] = 0x80; status[1] = 0x01;
+                bool wrote = HidWrite(status);
+                var answered = ReadUntil(0x81, 5000, r => r[1] == 0x01);
+                Check($"the read path delivers the pad's 81 01 answer to an 80 01, before {before} (positive control)",
+                      wrote && answered != null, wrote ? (answered == null ? "no 81 01" : "") : "write failed");
+            }
+            Control("the rest read");
+            // What another program setting up the pad sends, an 80 02 left
+            // unread: its 81 02 reply lands in the rest read, and is no
+            // report of the pad's own.
+            var other = new byte[64]; other[0] = 0x80; other[1] = 0x02;
+            HidWrite(other);
+            var rest = Collect(600);
+            Check("an 80 02 like another program's draws its 81 02 in the rest read", rest.Any(f => f[0] == 0x81 && f[1] == 0x02), Ids(rest));
+            var quiet = Own(rest);
+            Check("no report of its own at rest", quiet.Count == 0, Ids(quiet));
+            Control("the press read");
             lock (pumpLock) pumpState = new HMGamepadState { Buttons = (HMButton)(1u << 1) };
             var onPress = Own(Collect(400));
             lock (pumpLock) pumpState = new HMGamepadState();

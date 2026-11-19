@@ -313,7 +313,7 @@ internal static class Program
 
             // The BT descriptor carries no 0x80 output / 0x81 input reports.
             // SDL's BTrySetupUSB writes 0x80 0x02 at the 64-byte USB size
-            // (SDL_hidapi_switch.c:689-711); under this descriptor the write
+            // (SDL_hidapi_switch.c:689-711). Under this descriptor the write
             // must fail at HidClass, or at minimum no 0x81 ack can surface
             // (an input report ID absent from the descriptor is dropped).
             // Either way SDL concludes Bluetooth and uses subcommand init.

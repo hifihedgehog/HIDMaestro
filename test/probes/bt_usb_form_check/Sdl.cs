@@ -51,6 +51,8 @@ internal static partial class Program
         [DllImport(L)] static extern IntPtr SDL_GetGamepadStringForType(int type);
         [DllImport(L)] static extern int SDL_GetJoystickConnectionState(IntPtr j);
         [DllImport(L)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_GetGamepadButton(IntPtr g, int button);
+        [DllImport(L)] static extern short SDL_GetGamepadAxis(IntPtr g, int axis);
+        const int AXIS_LEFTX = 0, AXIS_LEFTY = 1, AXIS_RIGHTX = 2, AXIS_RIGHTY = 3, AXIS_LEFT_TRIGGER = 4, AXIS_RIGHT_TRIGGER = 5;
         [DllImport(L)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_RumbleGamepad(IntPtr g, ushort low, ushort high, uint ms);
         [DllImport(L)] [return: MarshalAs(UnmanagedType.U1)] static extern bool SDL_SetGamepadLED(IntPtr g, byte r, byte gr, byte b);
 
@@ -262,14 +264,53 @@ internal static partial class Program
                 // declaration order. A descriptor that declares its button
                 // usages out of order (stadia: 0x12 first) puts A where a
                 // reader by usage or by bit finds another button, on both
-                // backends alike. That is finding F1 of lane BTFORM's
-                // report, outside the USB form, and its line is recorded.
+                // backends alike, so its line is recorded.
                 var usages = form.Inner.GetOrBuildReportBuilder().Buttons.Where(b => b.UsagePage == 0x09).Select(b => (int)b.Usage).ToList();
                 bool outOfOrder = usages.Zip(usages.Skip(1), (x, y) => y < x).Any(t => t);
                 if (outOfOrder && !record)
-                    Console.WriteLine($"  [INFO] a face button submitted with SubmitState reads back through SDL: {(pressed ? "yes" : "no")}  the descriptor declares its button usages out of order ({string.Join(",", usages.Take(4).Select(u => "0x" + u.ToString("X2")))}...), finding F1");
+                    Console.WriteLine($"  [INFO] a face button submitted with SubmitState reads back through SDL: {(pressed ? "yes" : "no")}  the descriptor declares its button usages out of order ({string.Join(",", usages.Take(4).Select(u => "0x" + u.ToString("X2")))}...), the SDK places buttons in declaration order");
                 else
                     Expect("a face button submitted with SubmitState reads back through SDL", pressed);
+                setState(new HMGamepadState());
+
+                // The sticks and triggers, filled for the profile the
+                // consumer created, read back through SDL in the form the
+                // device presents: the right stick hard right, the left
+                // stick at rest, the right trigger pulled and the left
+                // released. A form whose stick or trigger axes differ from
+                // its Bluetooth identity's (switch-pro's right stick is
+                // Rx/Ry, switch-pro-usb's Z/Rz) shows here. A pad with
+                // digital triggers pulls ZR, layout button 7.
+                bool digitalTriggers = profile.Triggers.Count == 0;
+                var standard = HMGamepadStateHelpers.StandardAxes(profile, 0.5f, 0.5f, 1.0f, 0.5f, 0f, 1.0f);
+                // A pad with no trigger layout gets its triggers written at
+                // the canonical trigger axes, and a pad whose right stick sits
+                // on those axes (switch-pro-usb's Z/Rz) then loses the stick
+                // to them. Its stick is written again here, as a consumer
+                // filling the layout's axes does, and the line says so.
+                var held = profile.Sticks.SelectMany(s => new[] { s.XAxis, s.YAxis }).ToHashSet();
+                var canonLt = HMController.ResolveCanonicalAxis(profile.Inner.AxisMap, "lefttrigger", HMAxis.Z);
+                var canonRt = HMController.ResolveCanonicalAxis(profile.Inner.AxisMap, "righttrigger", HMAxis.Rz);
+                if (digitalTriggers && profile.Sticks.Count > 1 && (held.Contains(canonLt) || held.Contains(canonRt)))
+                {
+                    Console.WriteLine($"  [INFO] StandardAxes writes the triggers at {canonLt}/{canonRt}, which this pad's sticks use: the stick axes are written again");
+                    standard[profile.Sticks[0].XAxis] = 0.5f; standard[profile.Sticks[0].YAxis] = 0.5f;
+                    standard[profile.Sticks[1].XAxis] = 1.0f; standard[profile.Sticks[1].YAxis] = 0.5f;
+                }
+                setState(new HMGamepadState
+                {
+                    Axes = standard,
+                    Buttons = digitalTriggers ? (HMButton)(1u << 7) : HMButton.None,
+                });
+                bool moved = WaitPump(() => SDL_GetGamepadAxis(pad, AXIS_RIGHTX) > 25000 && SDL_GetGamepadAxis(pad, AXIS_RIGHT_TRIGGER) > 25000, 5000);
+                short rx = SDL_GetGamepadAxis(pad, AXIS_RIGHTX), ry = SDL_GetGamepadAxis(pad, AXIS_RIGHTY);
+                short lx = SDL_GetGamepadAxis(pad, AXIS_LEFTX), ly = SDL_GetGamepadAxis(pad, AXIS_LEFTY);
+                short lt = SDL_GetGamepadAxis(pad, AXIS_LEFT_TRIGGER), rt = SDL_GetGamepadAxis(pad, AXIS_RIGHT_TRIGGER);
+                string axesNow = $"LX {lx} LY {ly} RX {rx} RY {ry} LT {lt} RT {rt}";
+                Expect("the right stick submitted hard right reads back on SDL's right stick X, and nowhere else",
+                    rx > 25000 && Math.Abs(ry) < 8000 && Math.Abs(lx) < 8000 && Math.Abs(ly) < 8000, axesNow);
+                Expect("the right trigger submitted pulled reads back on SDL's right trigger, the left released",
+                    rt > 25000 && lt < 8000, axesNow);
                 setState(new HMGamepadState());
 
                 lock (decoded) decoded.Clear();
