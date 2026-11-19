@@ -21,7 +21,16 @@ internal enum SendRule : byte
 internal enum CounterEvent : byte { Report, Frame, Clock, Read }
 
 /// <summary>A layout, compiled: its program in the validated form.</summary>
-internal sealed record LayoutForm(string Name, int ReportId, int Size, Condition? While, SendRule Send, ValidProgram Program);
+internal sealed record LayoutForm(string Name, int ReportId, int Size, Condition? While, SendRule Send, ValidProgram Program)
+{
+    /// <summary>The message stream the layout belongs to, null for the
+    /// device's one unnamed stream.</summary>
+    public string? Stream { get; init; }
+
+    /// <summary>A layout of a named stream sent on change whose first report
+    /// after it becomes selected is kept as sent, not sent.</summary>
+    public bool SkipFirst { get; init; }
+}
 
 /// <summary>A decoder, compiled: the reports it applies to, the bytes it needs
 /// and the names of the values its program writes, one byte each.</summary>
@@ -65,6 +74,9 @@ internal sealed class CompiledModel
     public required CounterEvent[] CounterOn { get; init; }
     public required double[] CounterPeriodUs { get; init; }
     public required uint[] CounterInitial { get; init; }
+    /// <summary>Per counter, true when it never holds 0. Empty when no
+    /// counter skips it.</summary>
+    public bool[] CounterSkipZero { get; init; } = Array.Empty<bool>();
     public required int StateSize { get; init; }
     public required LayoutForm[] Layouts { get; init; }
     public required DecoderForm[] Decoders { get; init; }
@@ -98,7 +110,7 @@ internal static class ModelCompiler
     public static CompiledModel Compile(DeviceModelGroups g)
     {
         var regs = Registers(g.Protocol);
-        var (counterNames, counterBits, counterOn, counterPeriod, counterInitial) = Counters(g.Protocol);
+        var (counterNames, counterBits, counterOn, counterPeriod, counterInitial, counterSkipZero) = Counters(g.Protocol);
 
         int stateSize = 0;
         ValidProgram? stateProgram = null;
@@ -146,7 +158,23 @@ internal static class ModelCompiler
                 };
                 var when = spec.While == null ? null : ConditionParser.Parse(spec.While, regs, path + ".while");
                 var program = Program(spec.Name, spec.Size, stateSize, regs, counterNames, spec.Program, path + ".program", path + ".size", reportId: id);
-                layouts.Add(new LayoutForm(spec.Name, id, spec.Size, when, send, program));
+                // A named stream goes out beside the others on its own clock
+                // tick or change. A submit layout goes out on SubmitState,
+                // where one report is built, so it stays in the unnamed one.
+                if (spec.Stream != null)
+                {
+                    if (!IsName(spec.Stream)) throw new FormException(path + ".stream", $"'{spec.Stream}' is not a stream name: letters, digits and _, starting with a letter");
+                    if (send == SendRule.Submit) throw new FormException(path + ".send", "a layout of a named stream goes out on the clock or on change, beside the other streams. A submit layout stays in the unnamed stream");
+                }
+                bool skipFirst = spec.First switch
+                {
+                    null or "send" => false,
+                    "skip" => true,
+                    _ => throw new FormException(path + ".first", $"\"{spec.First}\" is not one of send, skip"),
+                };
+                if (spec.First != null && (spec.Stream == null || send != SendRule.Change))
+                    throw new FormException(path + ".first", "first goes with a layout of a named stream sent on change, whose first report after it becomes selected it decides");
+                layouts.Add(new LayoutForm(spec.Name, id, spec.Size, when, send, program) { Stream = spec.Stream, SkipFirst = skipFirst });
             }
             // Two layouts on one report ID may share it only when their
             // conditions cannot hold together.
@@ -181,7 +209,7 @@ internal static class ModelCompiler
                 }
                 int state = rule.MinLength ?? 0;
                 if (state < 1) throw new FormException($"$.protocol.commands.rules[{i}].minLength", "a rule that emits a report reads its command, so it needs a minLength");
-                int id = ByteValue(e.ReportId, path + ".reportId");
+                int id = e.ReportId == null ? -1 : ByteValue(e.ReportId, path + ".reportId");
                 emits.Add(new EmitForm(id, e.Size, Program("emit", e.Size, state, regs, counterNames, e.Program, path + ".program", path + ".size", reportId: id)));
             }
         }
@@ -211,6 +239,7 @@ internal static class ModelCompiler
         {
             Registers = regs,
             CounterNames = counterNames, CounterBits = counterBits, CounterOn = counterOn, CounterPeriodUs = counterPeriod, CounterInitial = counterInitial,
+            CounterSkipZero = counterSkipZero,
             StateSize = stateSize,
             Layouts = layouts.ToArray(),
             Decoders = decoders.ToArray(),
@@ -285,10 +314,10 @@ internal static class ModelCompiler
         return new RegisterTable(names, bits, initial, keep);
     }
 
-    static (string[], int[], CounterEvent[], double[], uint[]) Counters(ProtocolSpec? protocol)
+    static (string[], int[], CounterEvent[], double[], uint[], bool[]) Counters(ProtocolSpec? protocol)
     {
         var list = protocol?.Counters;
-        if (list == null) return (Array.Empty<string>(), Array.Empty<int>(), Array.Empty<CounterEvent>(), Array.Empty<double>(), Array.Empty<uint>());
+        if (list == null) return (Array.Empty<string>(), Array.Empty<int>(), Array.Empty<CounterEvent>(), Array.Empty<double>(), Array.Empty<uint>(), Array.Empty<bool>());
         if (list.Count > ProgramForm.MaxCounters)
             throw new FormException("$.protocol.counters", $"{list.Count} counters is past the {ProgramForm.MaxCounters} a device has");
         var names = new string[list.Count];
@@ -296,6 +325,7 @@ internal static class ModelCompiler
         var on = new CounterEvent[list.Count];
         var period = new double[list.Count];
         var initial = new uint[list.Count];
+        var skipZero = new bool[list.Count];
         for (int i = 0; i < list.Count; i++)
         {
             string path = $"$.protocol.counters[{i}]";
@@ -322,8 +352,13 @@ internal static class ModelCompiler
             initial[i] = c.Initial?.Value ?? 0;
             uint mask = bits[i] == 32 ? uint.MaxValue : (1u << bits[i]) - 1;
             if ((initial[i] & ~mask) != 0) throw new FormException(path + ".initial", $"0x{initial[i]:X} does not fit {bits[i]} bits");
+            skipZero[i] = c.SkipZero ?? false;
+            // A clock counter is computed from the time on every write, so no
+            // step of its own advances it past 0.
+            if (skipZero[i] && on[i] == CounterEvent.Clock) throw new FormException(path + ".skipZero", "a clock counter is the time over its period, which no step of its own advances");
+            if (skipZero[i] && initial[i] == 0) initial[i] = 1;
         }
-        return (names, bits, on, period, initial);
+        return (names, bits, on, period, initial, skipZero);
     }
 
     static bool IsName(string? s)

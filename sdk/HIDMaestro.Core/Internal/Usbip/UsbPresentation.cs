@@ -92,7 +92,7 @@ internal sealed class UsbPresentation
         if (xi.XusbCompanion)
             return "it reaches XInput through the XUSB companion, and the USB/IP backend has no XUSB function for it yet.";
         if (xi.Xinputhid)
-            return "it reaches XInput through xinputhid, and the USB/IP backend has no GIP function for it yet.";
+            return "it reaches XInput through xinputhid, and the USB/IP backend's GIP function needs the device's GIP metadata and messages, which this profile does not carry yet.";
         return null;
     }
 
