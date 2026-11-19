@@ -17,6 +17,8 @@
 //                    counters arrive (lost) or one does not follow its
 //                    predecessor by one (swapped).
 //   --dispose-ack N  A keyboard holds F24 and is disposed, N times. The
+//                    keyboard must hold the LED state Windows sends it,
+//                    decoded from its output report. The
 //                    delivery acknowledgement must carry the last frame the
 //                    controller wrote, and that frame must be the release
 //                    (the keyboard report with no key), before the device
@@ -30,7 +32,11 @@
 //                    this program's keyboard hook see it, before the kill and
 //                    for three seconds after it, with each repeat the hook
 //                    sees and when Raw Input stops listing the keyboard.
-//                    Needs a session with input.
+//                    Fails unless the child's control key reached the hook
+//                    and Left Shift read down before the kill, and then, on
+//                    UMDF2, Left Shift goes up with no repeat after it, or on
+//                    USB/IP, the keyboard leaves Raw Input with no repeat
+//                    after that. Needs a session with input.
 
 using System;
 using System.Collections.Concurrent;
@@ -149,7 +155,7 @@ internal static class Bench
                 foreach (var p in pads) p.SubmitMouse(new HMMouseState());
             }
             int deviceRounds = rounds * 4;
-            Console.WriteLine($"=== R3 {pads[0].Backend}: {deviceRounds} device-rounds, {lostRounds} with a lost report, " +
+            Console.WriteLine($"=== Report order, {pads[0].Backend}: {deviceRounds} device-rounds, {lostRounds} with a lost report, " +
                               $"{swappedRounds} with a counter out of order, longest submit {longest:F1} ms ===");
             return lostRounds == 0 && swappedRounds == 0 ? 0 : 1;
         }
@@ -210,6 +216,9 @@ internal static class Bench
             // state then. Up to 15 s for that, then a report goes out.
             var sw = Stopwatch.StartNew();
             while (k.KeyboardLeds == null && sw.ElapsedMilliseconds < 15000) Thread.Sleep(10);
+            // The LED state Windows sends a keyboard it opens, decoded from
+            // the output report the device publishes, on either backend.
+            var leds = k.KeyboardLeds;
             k.SubmitKeyboard(HMKeyModifiers.None, new[] { HMKey.F24 });
             k.SubmitKeyboard(HMKeyModifiers.None, new[] { HMKey.F24 });
             bool delivers = k.DeliversEveryReport;
@@ -235,8 +244,8 @@ internal static class Bench
                 var frame = new byte[Math.Clamp(extSize, 0, SharedMemoryIO.EXTENDED_DATA_CAPACITY)];
                 Marshal.Copy(input + SharedMemoryIO.EXTENDED_DATA_OFFSET, frame, 0, frame.Length);
                 bool release = frame.Length > 0 && frame.All(b => b == 0);
-                ok = delivers && delivered == written && release;
-                detail = $"delivers every report {delivers}, last frame written {written}, delivered {delivered}, " +
+                ok = leds != null && delivers && delivered == written && release;
+                detail = $"LED state {(leds == null ? "never sent" : leds.ToString())}, delivers every report {delivers}, last frame written {written}, delivered {delivered}, " +
                          $"last frame [{Convert.ToHexString(frame)}], Dispose {disposeMs} ms";
             }
             if (input != IntPtr.Zero) UnmapViewOfFile(input);
@@ -246,13 +255,18 @@ internal static class Bench
             if (ok) passed++;
             Console.WriteLine($"  case {i}: {(ok ? "PASS" : "FAIL")}, {detail}");
         }
-        Console.WriteLine($"=== R5 {ctx.ResolveBackend(profile)}: {passed}/{cases} cases delivered the release frame before the device went ===");
+        Console.WriteLine($"=== Dispose acknowledgement, {ctx.ResolveBackend(profile)}: {passed}/{cases} cases held the LED state Windows sent and delivered the release frame before the device went ===");
         return passed == cases ? 0 : 1;
     }
 
     // ── --held-on-kill ──────────────────────────────────────────────────
 
     const int VK_LSHIFT = 0xA0;
+
+    /// <summary>The run's timeout scale, HIDMAESTRO_TIMEOUT_SCALE, at least 1.</summary>
+    static readonly double Scale = Math.Max(1.0,
+        double.TryParse(Environment.GetEnvironmentVariable("HIDMAESTRO_TIMEOUT_SCALE"),
+            System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double scale) ? scale : 1.0);
 
     /// <summary>The child: Left Shift held on a keyboard until it is
     /// killed.</summary>
@@ -287,6 +301,7 @@ internal static class Bench
         while ((line = child.StandardOutput.ReadLine()) != null && !line.StartsWith("HELD")) { }
         if (line == null) { Console.WriteLine("  [FAIL] the child exited before it held Left Shift"); return 1; }
         Console.WriteLine($"  child: {line}");
+        bool usbip = line.Contains(" backend Usbip ");
         var kb = RawInputSink.Devices().FirstOrDefault(d => d.Type == RawInputSink.RIM_TYPEKEYBOARD && !before.Contains(d.Name)
                                                            && RawInputSink.Attributes(d.Name) is { Vid: 0xBEEF, Pid: 0xF0CA });
         Console.WriteLine($"  Raw Input lists the keyboard: {(kb.Name != null ? kb.Name : "no")}");
@@ -309,24 +324,32 @@ internal static class Bench
         child.Kill();
         child.WaitForExit();
         long killed = clock.ElapsedMilliseconds;
-        long upAt = -1, goneAt = -1;
+        long upAt = -1, goneAt = -1, upTicks = 0, goneTicks = 0;
         while (clock.ElapsedMilliseconds < 3000 + killed)
         {
-            if (upAt < 0 && (GetAsyncKeyState(VK_LSHIFT) & 0x8000) == 0) upAt = clock.ElapsedMilliseconds;
+            if (upAt < 0 && (GetAsyncKeyState(VK_LSHIFT) & 0x8000) == 0) { upAt = clock.ElapsedMilliseconds; upTicks = Stopwatch.GetTimestamp(); }
             if (goneAt < 0 && kb.Name != null && !RawInputSink.Devices().Any(d => string.Equals(d.Name, kb.Name, StringComparison.OrdinalIgnoreCase)))
-                goneAt = clock.ElapsedMilliseconds;
+            { goneAt = clock.ElapsedMilliseconds; goneTicks = Stopwatch.GetTimestamp(); }
             Thread.Sleep(10);
         }
+        // A repeat the hook took before the key went up or the device went,
+        // which its thread can stamp late on a loaded machine, is not
+        // counted: only a down after the mark plus a drain of 250 ms at the
+        // run's timeout scale.
+        long mark = usbip ? goneTicks : upTicks;
+        long after = mark == 0 ? long.MaxValue : mark + (long)(Stopwatch.Frequency * 0.25 * Scale);
         var hook = sink.HookKeys.Where(k => k.VKey == VK_LSHIFT).ToList();
         var raw = kb.Name == null ? new List<RawInputSink.Key>() : sink.Keys.Where(k => k.Device == kb.Handle).ToList();
         Console.WriteLine($"  killed at {killed} ms; GetAsyncKeyState(VK_LSHIFT) up at {(upAt < 0 ? "never in 3 s" : upAt + " ms")}; " +
                           $"Raw Input stopped listing the keyboard at {(goneAt < 0 ? "never in 3 s" : goneAt + " ms")}");
         Console.WriteLine($"  hook after the kill: {(hook.Count == 0 ? "nothing" : string.Join(" ", hook.Select(k => ((k.Flags & 0x80) != 0 ? "up" : "down") + ((k.Flags & 0x10) != 0 ? "(injected)" : ""))))}");
         Console.WriteLine($"  Raw Input from the keyboard after the kill: {(raw.Count == 0 ? "nothing" : string.Join(" ", raw.Select(k => $"vk 0x{k.VKey:X2} {((k.Flags & 1) != 0 ? "break" : "make")}")))}");
-        int repeats = hook.Count(k => (k.Flags & 0x80) == 0);
-        Console.WriteLine($"=== R4: control {(control ? "seen" : "NOT seen")}; Left Shift {(downBefore ? "down" : "up")} before the kill, " +
-                          $"{(upAt >= 0 ? "up" : "still down")} after it, {repeats} repeats after it ===");
-        return control && downBefore ? 0 : 1;
+        int repeats = hook.Count(k => (k.Flags & 0x80) == 0 && k.Ticks > after);
+        bool ok = control && downBefore && repeats == 0 && (usbip ? goneAt >= 0 : upAt >= 0);
+        Console.WriteLine($"=== Held key on kill, {(usbip ? "Usbip" : "Umdf2")}: {(ok ? "PASS" : "FAIL")}; control {(control ? "seen" : "NOT seen")}; " +
+                          $"Left Shift {(downBefore ? "down" : "up")} before the kill, {(upAt >= 0 ? "up" : "still down")} after it, " +
+                          $"{(usbip ? (goneAt >= 0 ? "the keyboard gone" : "the keyboard still listed") : "")}, {repeats} repeats after {(usbip ? "it went" : "the up")} ===");
+        return ok ? 0 : 1;
     }
 
     [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);

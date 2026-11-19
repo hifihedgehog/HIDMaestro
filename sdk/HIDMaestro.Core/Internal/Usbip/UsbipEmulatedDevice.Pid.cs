@@ -37,14 +37,15 @@ internal sealed partial class UsbipEmulatedDevice
     // answers no PID report.
     private readonly bool[]? _pidCandidate;
 
-    // GET_REPORT(Feature) on the Pool report the device stalled because the
-    // program has published no Pool, where the driver fails it with
+    // GET_REPORT(Feature) on the Pool report the device stalled because no
+    // published Pool could be read: none published, or no snapshot of the
+    // section held still in four tries. The driver fails both with
     // STATUS_NO_SUCH_DEVICE. A check reads it to see whether DirectInput
     // asks again.
     private int _pidPoolRefusals;
 
     /// <summary>Pool reads the device stalled for want of a published Pool
-    /// (<see cref="HMController.PublishPidPool"/>).</summary>
+    /// (<see cref="HMController.PublishPidPool"/>) it could read.</summary>
     internal int PidPoolRefusals => Volatile.Read(ref _pidPoolRefusals);
 
     /// <summary>True when the device serves the PID block.</summary>
@@ -215,7 +216,9 @@ internal sealed partial class UsbipEmulatedDevice
     /// everything else fails.</summary>
     private void AnswerPidFeature(uint seqnum, byte reportId, ushort wLength)
     {
-        if (!_pidCandidate![reportId]) { SendError(seqnum, -UsbipProtocol.EPipe); return; }
+        // A request for no bytes fails first, as the driver's outSize < 1
+        // does (STATUS_BUFFER_TOO_SMALL).
+        if (wLength < 1 || !_pidCandidate![reportId]) { SendError(seqnum, -UsbipProtocol.EPipe); return; }
         Span<byte> reply = stackalloc byte[5];
         int n = -1;
         bool poolRefused = false;

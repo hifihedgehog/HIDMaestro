@@ -157,6 +157,14 @@ internal static class Offline
             g = cl.ControlOut(0x21, 0x09, 0x031B, 0, new byte[] { 0x1B, 0x02 });
             Check("SET_REPORT(Feature Block Free, EBI 2) frees it", Bitmap(view) == (0u, 0u), Show(view));
 
+            // Requests HID class never sends, answered as the driver answers
+            // them: an empty SET_FEATURE is report 0 there, and a GET for no
+            // bytes fails STATUS_BUFFER_TOO_SMALL.
+            g = cl.ControlOut(0x21, 0x09, 0x0311, 0, Array.Empty<byte>());
+            Check("an empty SET_REPORT(Feature) on Create New Effect's ID allocates nothing", Bitmap(view) == (0u, 0u), Show(view));
+            g = cl.GetFeature(0x11, 0);
+            Check("GET Create New Effect for no bytes stalls", g.Status == -UsbipProtocol.EPipe, Ret(g));
+
             cl.ControlOut(0x21, 0x09, 0x0311, 0, new byte[] { 0x11, 0x01, 0x00, 0x00 });
             g = cl.ControlOut(0x21, 0x09, 0x021C, 0, new byte[] { 0x1C, 0x03 });
             Check("Device Control 3 (Stop All) resets nothing", Bitmap(view) == (1u, 1u), Show(view));
@@ -175,7 +183,6 @@ internal static class Offline
             g = cl.GetFeature(0x15, 8);
             Check("GET on an ID no PID report arrives on stalls", g.Status == -UsbipProtocol.EPipe, Ret(g));
 
-            // Feature reads and writes still reach the program's ring.
             Check("Pool reads refused stay at 2 once a Pool is published", device.PidPoolRefusals == 2, $"{device.PidPoolRefusals}");
         }
         finally

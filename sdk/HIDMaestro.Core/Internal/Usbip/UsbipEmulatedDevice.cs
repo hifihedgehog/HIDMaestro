@@ -43,8 +43,10 @@ namespace HIDMaestro.Internal.Usbip;
 /// reads the configuration's bmAttributes, and a protocol runs in the
 /// controller's protocol host, not here.</para>
 ///
-/// <para>A descriptor that declares the PID usage page gets the UMDF2
-/// driver's PID block (UsbipEmulatedDevice.Pid.cs).</para>
+/// <para>The UMDF2 driver's PID block runs here too
+/// (UsbipEmulatedDevice.Pid.cs): on a derived device by the driver's own
+/// rule, on any descriptor, and on an authored one only when its
+/// descriptor declares the PID usage page.</para>
 ///
 /// <para>Isochronous endpoints route to <see cref="UsbAudioEngine"/>;
 /// completions come back on the pacing thread and are serialized onto the
@@ -1404,7 +1406,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 if (reportType == 0x03) _stubs?.OnSetFeature(reportId, payload);
                 // The PID block acts on the report before it is published,
                 // as the driver acts on it before PublishOutput.
-                if (_pidCandidate != null) PidOnSetReport(reportType, rid, data);
+                // The driver reads ID 0 for an empty buffer (driver.c, the
+                // IOCTL_UMDF_HID_SET_FEATURE case), where rid falls back to
+                // the request's ID.
+                if (_pidCandidate != null) PidOnSetReport(reportType, payload.Length > 0 ? rid : (byte)0, data);
                 // After the answer table has read the write, the command goes
                 // to the ring as every protocol's commands do: as the host
                 // sent it, as the report its rule emits, or not at all when
