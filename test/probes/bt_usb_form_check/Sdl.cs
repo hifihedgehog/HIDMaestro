@@ -167,9 +167,9 @@ internal static partial class Program
             var sw = Stopwatch.StartNew();
             while (ownPath == null && sw.ElapsedMilliseconds < 15000)
             {
-                // The presented form's PID: the Genesis pad carries another on USB.
-                ownPath = HMDeviceExtractor.ListDevices().FirstOrDefault(d => d.VendorId == form.VendorId
-                    && d.ProductId == form.ProductId && d.SerialNumberString == serial)?.DevicePath;
+                // The presented form's PID: the Genesis pad carries another
+                // on USB, and a Joy-Con is the charging grip.
+                ownPath = OwnInterface(form, serial)?.DevicePath;
                 if (ownPath == null) Thread.Sleep(50);
             }
             Check("the HID interface enumerates", ownPath != null, ownPath ?? "");

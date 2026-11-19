@@ -268,15 +268,27 @@ public sealed class ControllerProfile
     /// <summary>2.3.0: for a Bluetooth identity, the id of the profile whose
     /// USB form the device takes on a USB bus, the USB/IP backend: that
     /// profile's descriptor, reports, feature answers and protocol, under
-    /// this profile's id and strings. The named profile has this profile's
-    /// VID and PID, a USB connection and no usbForm of its own, and the
-    /// USB/IP backend presents it as a single HID function. No inbox route
+    /// this profile's id. The named profile has a USB connection, no usbForm
+    /// of its own and this profile's VID. It has this profile's PID and is
+    /// presented as a single HID function under this profile's strings,
+    /// unless it names this profile in its <see cref="FormOfIds"/> (usbFormOf): then it
+    /// may carry another PID (the Genesis pad for Nintendo Switch Online,
+    /// 057E:2017 over Bluetooth and 057E:201E over USB) or a configuration
+    /// of its own (a Joy-Con reaches USB only through the charging grip),
+    /// and the device keeps its strings. No inbox route
     /// gives a USB/IP device a Bluetooth devnode, so hidapi, and with it
     /// SDL, reads such a device as USB and drives it in its USB protocol,
     /// which only the USB form answers. The UMDF2 backend does not read the
     /// key (<see cref="UsbFormOf"/>).</summary>
     [JsonPropertyName("usbForm")]
     public string? UsbForm { get; set; }
+
+    /// <summary>2.3.0: for a USB form, the ids of the Bluetooth identities
+    /// whose <see cref="UsbForm"/> names it, so a form that differs from
+    /// its identity in PID or configuration is accepted only where it says
+    /// whose form it is. Each named profile names this one as its usbForm.</summary>
+    [JsonPropertyName("usbFormOf")]
+    public List<string>? FormOfIds { get; set; }
 
     /// <summary>The profile <see cref="UsbForm"/> names, set by the load
     /// that checked it (<see cref="CheckUsbForm"/>), or found again on first
@@ -295,14 +307,20 @@ public sealed class ControllerProfile
         if (string.Equals(form.Connection, "bluetooth", StringComparison.OrdinalIgnoreCase))
             return $"names '{form.Id}', which is a Bluetooth identity itself. The USB form is the profile with the USB connection.";
         if (form.UsbForm != null) return $"names '{form.Id}', which names a USB form of its own. A USB form is a profile with a USB connection, not a chain.";
-        // The PID may differ: the Sega Genesis controller for Nintendo Switch
-        // Online reports 057E:2017 over Bluetooth and 057E:201E over USB
-        // (hid-nintendo.c joycon_read_info), and the device presents the
-        // form's.
-        if (form.VendorId != p.VendorId)
-            return $"names '{form.Id}', whose VID {form.VendorId:X4} is not this profile's {p.VendorId:X4}. The USB form is the same device on another bus.";
-        if (form.RequiresUsbipBackend)
-            return $"names '{form.Id}', whose backend is \"usbip\": a composite would give the device interfaces the caller did not ask for. Name the single-HID profile.";
+        // A form that names its Bluetooth identities in usbFormOf is that
+        // device's own USB presentation: it may carry another PID (the
+        // Genesis pad for Nintendo Switch Online, 057E:2017 over Bluetooth
+        // and 057E:201E over USB, hid-nintendo.c joycon_read_info) or a
+        // configuration of its own (the Joy-Con's charging grip). A form
+        // that names others is not this profile's.
+        bool sibling = form.FormOfIds != null
+            && form.FormOfIds.Exists(id => string.Equals(id, p.Id, StringComparison.OrdinalIgnoreCase));
+        if (form.FormOfIds != null && !sibling)
+            return $"names '{form.Id}', whose usbFormOf names {string.Join(", ", form.FormOfIds)} and not this profile.";
+        if (form.VendorId != p.VendorId || (!sibling && form.ProductId != p.ProductId))
+            return $"names '{form.Id}', whose VID and PID {form.VendorId:X4}:{form.ProductId:X4} are not this profile's {p.VendorId:X4}:{p.ProductId:X4}. The USB form is the same device on another bus, and a form with another PID names this profile in its usbFormOf.";
+        if (form.RequiresUsbipBackend && !sibling)
+            return $"names '{form.Id}', whose backend is \"usbip\": a composite would give the device interfaces the caller did not ask for. Name the single-HID profile, or a composite that names this profile in its usbFormOf.";
         if (Usbip.UsbPresentation.NotPresentableReason(form) is { } reason)
             return $"names '{form.Id}', which the USB/IP backend cannot present: {reason}";
         return null;
@@ -336,7 +354,8 @@ public sealed class ControllerProfile
     /// <summary>The profile a device of this profile runs on
     /// <paramref name="backend"/>: this one, or on the USB/IP backend the USB
     /// form <see cref="UsbForm"/> names, as a copy that takes this profile's
-    /// id, name, vendor, strings, device description and serial string and
+    /// id, name, vendor and serial string, its strings and device
+    /// description unless the form names this profile in its usbFormOf, and
     /// the form's every other key. Resolved and checked as a create checks a
     /// profile, and kept until the next create resolves this profile
     /// again (<see cref="ResolveForCreate"/>).</summary>
@@ -349,9 +368,15 @@ public sealed class ControllerProfile
         p.Id = Id;
         p.Name = Name;
         p.Vendor = Vendor;
-        p.ProductString = ProductString;
-        p.ManufacturerString = ManufacturerString;
-        p.DeviceDescription = DeviceDescription;
+        // A form that names this profile in its usbFormOf is the device's
+        // own USB presentation and keeps the strings it serves on USB: a
+        // Joy-Con on USB is the charging grip, "Joy-Con Charging Grip".
+        if (form.FormOfIds?.Exists(id => string.Equals(id, Id, StringComparison.OrdinalIgnoreCase)) != true)
+        {
+            p.ProductString = ProductString;
+            p.ManufacturerString = ManufacturerString;
+            p.DeviceDescription = DeviceDescription;
+        }
         p.SerialString = SerialString;
         p.Registry = form.Registry;
         p.OutsideCatalog = form.OutsideCatalog;
@@ -2136,6 +2161,27 @@ public sealed class ProfileDatabase
                 }
                 _issues.Add(new HIDMaestro.HMProfileLoadIssue(r.ProblemFile ?? p.SourceFile ?? p.Id, p.Id, path,
                     r.Problem, HIDMaestro.HMProfileLoadIssueKind.ModelProblem));
+            }
+        }
+        // A form's usbFormOf names Bluetooth identities whose usbForm names
+        // the form. One that does not is refused at its path.
+        foreach (var p in _profiles)
+        {
+            if (p.FormOfIds == null || refused.Contains(p)) continue;
+            for (int i = 0; i < p.FormOfIds.Count; i++)
+            {
+                string id = p.FormOfIds[i];
+                var bt = _profiles.FirstOrDefault(x => !refused.Contains(x) && string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase))
+                         ?? registry.FindProfile(id);
+                if (bt != null && string.Equals(bt.UsbForm, p.Id, StringComparison.OrdinalIgnoreCase)) continue;
+                string path = $"$.usbFormOf[{i}]";
+                if (_texts.TryGetValue(p, out var text)) path = ProfileDefects.Spell(text, path);
+                _issues.Add(new HIDMaestro.HMProfileLoadIssue(p.SourceFile ?? p.Id, p.Id, path,
+                    bt == null ? $"names '{id}', which no loaded profile or catalog profile holds."
+                               : $"names '{id}', whose usbForm is not this profile.",
+                    HIDMaestro.HMProfileLoadIssueKind.Refused));
+                refused.Add(p);
+                break;
             }
         }
         // A Bluetooth identity's USB form: a profile of this load, else one

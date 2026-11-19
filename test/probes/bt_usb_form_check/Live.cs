@@ -46,9 +46,9 @@ internal static partial class Program
         var sw = Stopwatch.StartNew();
         while (info == null && sw.ElapsedMilliseconds < 15000)
         {
-            // The presented form's PID: the Genesis pad carries another on USB.
-            info = HMDeviceExtractor.ListDevices().FirstOrDefault(d => d.VendorId == form.VendorId
-                && d.ProductId == form.ProductId && d.SerialNumberString == serial);
+            // The presented form's PID: the Genesis pad carries another on
+            // USB, and a Joy-Con is the charging grip.
+            info = OwnInterface(form, serial);
             if (info == null) Thread.Sleep(50);
         }
         Check($"the HID interface enumerates (serial {serial})", info != null, info?.DevicePath ?? "");
@@ -74,7 +74,9 @@ internal static partial class Program
         Check($"output report length is {form.Id}'s", caps.Out == wantOut, $"{caps.Out}, want {wantOut}");
         ushort wantVersion = form.Inner.VersionNumber ?? 0x0100;
         Check($"version is {form.Id}'s", info.VersionNumber == wantVersion, $"0x{info.VersionNumber:X4}, want 0x{wantVersion:X4}");
-        Check("the product string is the profile's", info.ProductString == profile.ProductString, $"'{info.ProductString}'");
+        string wantProduct = form.Inner.FormOfIds?.Contains(profile.Id) == true ? form.ProductString : profile.ProductString;
+        Check($"the product string is '{wantProduct}'", info.ProductString == wantProduct, $"'{info.ProductString}'");
+        if (profile.Id == "joycon-l" && ctrl.Backend == HMBackend.Umdf2) JoyConArrows(ctrl, info.DevicePath);
 
         // A feature report of the form: the calibration SDL reads first, 0x05
         // on a DualSense and on a DualShock 4 over Bluetooth, 0x02 on a
@@ -176,6 +178,21 @@ internal static partial class Program
     }
 
     /// <summary>The serial the controller's HID device serves.</summary>
+    /// <summary>The HID interface of <paramref name="form"/> that carries
+    /// its reports: the one interface of a single-HID device, or on the
+    /// charging grip the docked pad's, whose path names its interface
+    /// number (mi_01 for the left slot).</summary>
+    internal static HMHidDeviceInfo? OwnInterface(HMProfile form, string serial)
+    {
+        var all = HMDeviceExtractor.ListDevices().Where(d => d.VendorId == form.VendorId
+            && d.ProductId == form.ProductId && d.SerialNumberString == serial).ToList();
+        if (all.Count <= 1) return all.FirstOrDefault();
+        var hid = form.Inner.UsbConfiguration?.Interfaces?.FirstOrDefault(i => i.Function == "hid");
+        if (hid == null) return all[0];
+        string mi = $"&mi_{hid.InterfaceNumber:D2}";
+        return all.FirstOrDefault(d => d.DevicePath.Contains(mi, StringComparison.OrdinalIgnoreCase));
+    }
+
     internal static string SerialOf(HMController c) =>
         c.Backend == HMBackend.Usbip ? c.UsbipHandle!.Device.Descriptors.SerialString! : DeviceOrchestrator.DriverSerial(c.TransportIndex);
 

@@ -199,36 +199,45 @@ internal static class Program
     /// and byte 12 of its 0x30 report, its 0x3F report at rest, and each
     /// button as HMButton bit, 0x30 byte and mask, and 0x3F button bit
     /// (dekuNukem bluetooth_hid_notes.md, BlueRetro sw.c, hid-nintendo.c
-    /// button mappings).</summary>
+    /// button mappings). Info is the device info a real pad of the kind
+    /// sends, its address left out, where a capture holds one (darthcloud
+    /// bt_traces, dekuNukem's Joy-Con sample). Arrows says how SubmitState's
+    /// hat reaches the 0x3F report: "buttons" for the Joy-Con (L), whose
+    /// arrows are its buttons 1 to 4 as left, down, up and right
+    /// (SDL_hidapi_switch.c HandleCombinedSimpleControllerStateL, BlueRetro
+    /// sw.c sw_jc_btns_mask), "hat" for the NSO pads, and "none" for the
+    /// Joy-Con (R). UsbType is what 81 01 says on USB, and UsbProduct the
+    /// form's product string: the charging grip's for a Joy-Con.</summary>
     sealed record Pad(string Id, ushort Pid, string Product, byte Type, ushort UsbPid, bool Imu, byte Battery, byte Motor,
-                      string Rest3F, (int Bit, int Byte, byte Mask, int Simple)[] Buttons);
+                      string Rest3F, (int Bit, int Byte, byte Mask, int Simple)[] Buttons,
+                      string? Info = null, string Arrows = "hat", byte? UsbType = null, string? UsbProduct = null);
 
     static readonly Pad[] Pads =
     {
-        new("joycon-l", 0x2006, "Joy-Con (L)", 0x01, 0x2006, true, 0x8E, 0xB0, "3F0000080080008000800080", new[]
+        new("joycon-l", 0x2006, "Joy-Con (L)", 0x01, 0x200E, true, 0x8E, 0xB0, "3F0000080080008000800080", new[]
         {
             (4, 5, (byte)0x20, 4), (5, 5, (byte)0x10, 5), (8, 4, (byte)0x01, 8), (10, 4, (byte)0x08, 10),
             (13, 4, (byte)0x20, 13), (14, 5, (byte)0x40, 14), (15, 5, (byte)0x80, 15),
-        }),
-        new("joycon-r", 0x2007, "Joy-Con (R)", 0x02, 0x2007, true, 0x8E, 0xB0, "3F0000080080008000800080", new[]
+        }, Info: "03480102|0101", Arrows: "buttons", UsbProduct: "Joy-Con Charging Grip"),
+        new("joycon-r", 0x2007, "Joy-Con (R)", 0x02, 0x200E, true, 0x8E, 0x0A, "3F0000080080008000800080", new[]
         {
             (0, 3, (byte)0x08, 0), (1, 3, (byte)0x02, 1), (2, 3, (byte)0x04, 2), (3, 3, (byte)0x01, 3),
             (4, 3, (byte)0x20, 4), (5, 3, (byte)0x10, 5), (9, 4, (byte)0x02, 9), (11, 4, (byte)0x04, 11),
             (12, 4, (byte)0x10, 12), (14, 3, (byte)0x40, 14), (15, 3, (byte)0x80, 15),
-        }),
+        }, Arrows: "none", UsbProduct: "Joy-Con Charging Grip"),
         new("snes-nso", 0x2017, "SNES Controller", 0x0B, 0x2017, false, 0x80, 0x00, "3F0000080080008000800080", new[]
         {
             (0, 3, (byte)0x04, 0), (1, 3, (byte)0x08, 1), (2, 3, (byte)0x01, 2), (3, 3, (byte)0x02, 3),
             (4, 5, (byte)0x40, 4), (5, 3, (byte)0x40, 5), (6, 5, (byte)0x80, 6), (15, 3, (byte)0x80, 15),
             (8, 4, (byte)0x01, 8), (9, 4, (byte)0x02, 9),
-        }),
+        }, Info: "03B80B02|0002"),
         new("n64-nso", 0x2019, "N64 Controller", 0x0C, 0x2019, false, 0x80, 0x08, "3F00000800800080" + "00806F5C", new[]
         {
             (0, 3, (byte)0x04, 0), (1, 3, (byte)0x08, 1), (2, 3, (byte)0x01, 2), (3, 3, (byte)0x02, 3),
             (4, 5, (byte)0x40, 4), (5, 3, (byte)0x40, 5), (6, 5, (byte)0x80, 6), (7, 3, (byte)0x80, 7),
             (8, 4, (byte)0x01, 8), (9, 4, (byte)0x02, 9), (10, 4, (byte)0x08, 10), (12, 4, (byte)0x10, 12),
             (13, 4, (byte)0x20, 13),
-        }),
+        }, Info: "04110C02|0002", UsbType: 0x03),
         new("genesis-nso", 0x2017, "MD/Gen Control Pad", 0x0D, 0x201E, false, 0x80, 0x00, "3F0000080080008000800080", new[]
         {
             (0, 3, (byte)0x04, 0), (1, 3, (byte)0x08, 1), (5, 3, (byte)0x40, 5), (7, 3, (byte)0x80, 7),
@@ -301,6 +310,8 @@ internal static class Program
         }
         e.SetStateBlock(p.StateBlockAtRest());
         Check($"{pad.Id}: each button on its own 0x3F button", miss.Count == 0, string.Join(" ", miss));
+        Arrows3F(pad, runner, build, spec);
+        e.SetStateBlock(p.StateBlockAtRest());
 
         // SDL 3.4.18's Bluetooth open (SDL_hidapi_switch.c BReadDeviceInfo,
         // LoadStickCalibration, LoadIMUCalibration for the Joy-Cons only,
@@ -331,6 +342,12 @@ internal static class Program
         Check($"{pad.Id}: the device info carries device type {pad.Type:X2} and the address",
               info.Length == 49 && info[15 + 2] == pad.Type && info.AsSpan(19, 5).SequenceEqual(new byte[] { 0x98, 0xB6, 0xE9, 0x48, 0x4D }) && info[24] == 0x30 + index,
               info.Length == 49 ? Convert.ToHexString(info.AsSpan(13, 14)) : "");
+        if (pad.Info != null)
+        {
+            var parts = pad.Info.Split('|');
+            string got = info.Length == 49 ? Convert.ToHexString(info.AsSpan(15, 4)) + "|" + Convert.ToHexString(info.AsSpan(25, 2)) : "none";
+            Check($"{pad.Id}: the device info is the captured pad's: {parts[0]}, the address, {parts[1]}", got == pad.Info, got);
+        }
         var cal = sent[2].Reply;
         Check($"{pad.Id}: the stick calibration read echoes 0x603D and 18 bytes, as SDL requires",
               cal.Length == 49 && cal[13] == 0x90 && cal.AsSpan(15, 5).SequenceEqual(Spi(0x603D, 0x12)),
@@ -359,6 +376,62 @@ internal static class Program
             if (!only) miss.Add($"#{b.Bit}->{(m == 49 ? Convert.ToHexString(build.Buffer.AsSpan(3, 3)) : "none")}");
         }
         Check($"{pad.Id}: each button on the 0x30 bit the real pad sends it on", miss.Count == 0, string.Join(" ", miss));
+
+        // The arrows in the 0x30 report: byte 5, Down 01, Up 02, Right 04,
+        // Left 08 (dekuNukem bluetooth_hid_notes.md, SDL
+        // HandleFullControllerState), on every pad with arrows.
+        var wrong = new List<string>();
+        foreach (var (hat, mask) in new[] { (HMHat.West, 0x08), (HMHat.South, 0x01), (HMHat.North, 0x02), (HMHat.East, 0x04) })
+        {
+            int m = VisitWith(runner, build, ArrowBlock(spec, hat));
+            int want = pad.Arrows == "none" ? 0 : mask;
+            if (m != 49 || build.Buffer[5] != want || build.Buffer[3] != 0 || build.Buffer[4] != 0)
+                wrong.Add($"{hat}->{(m == 49 ? Convert.ToHexString(build.Buffer.AsSpan(3, 3)) : "none")}");
+        }
+        Check(pad.Arrows == "none" ? $"{pad.Id}: SubmitState's hat sets no bit of the 0x30 report, which has no arrows"
+                                   : $"{pad.Id}: each arrow on its 0x30 bit", wrong.Count == 0, string.Join(" ", wrong));
+    }
+
+    static byte[] ArrowBlock(ExtendedReportSpec spec, HMHat hat)
+    {
+        var block = new byte[spec.Size];
+        VendorBlobCodec.EncodeInput(spec, new HMGamepadState { Hat = hat }, 0.5f, 0.5f, 0.5f, 0.5f, 0f, 0f, block,
+                                    new VendorBlobCodec.EncoderState());
+        return block;
+    }
+
+    static int VisitWith(LayoutRunner runner, Build build, byte[] block)
+    {
+        build.Engine.SetStateBlock(block);
+        return runner.Visit(build);
+    }
+
+    /// <summary>Each arrow in the 0x3F report: the Joy-Con (L) sends left,
+    /// down, up and right on buttons 1 to 4, the NSO pads send the D-pad as
+    /// the hat (0 up, 2 right, 4 down, 6 left), and the Joy-Con (R) has
+    /// none, so its report keeps the rest state.</summary>
+    static void Arrows3F(Pad pad, LayoutRunner runner, Build build, ExtendedReportSpec spec)
+    {
+        var wrong = new List<string>();
+        foreach (var (hat, bit, hatValue) in new[] { (HMHat.West, 0, 6), (HMHat.South, 1, 4), (HMHat.North, 2, 0), (HMHat.East, 3, 2) })
+        {
+            VisitWith(runner, build, ArrowBlock(spec, HMHat.None));
+            int m = VisitWith(runner, build, ArrowBlock(spec, hat));
+            string got = m == 12 ? Convert.ToHexString(build.Buffer.AsSpan(0, 4)) : $"{m} bytes";
+            bool ok = pad.Arrows switch
+            {
+                "buttons" => m == 12 && build.Buffer[1] == 1 << bit && build.Buffer[2] == 0 && build.Buffer[3] == 8,
+                "hat" => m == 12 && build.Buffer[1] == 0 && build.Buffer[2] == 0 && build.Buffer[3] == hatValue,
+                _ => m == 0 || (m == 12 && build.Buffer[1] == 0 && build.Buffer[2] == 0 && build.Buffer[3] == 8),
+            };
+            if (!ok) wrong.Add($"{hat}->{got}");
+        }
+        Check(pad.Arrows switch
+        {
+            "buttons" => $"{pad.Id}: the arrows on 0x3F buttons 1 to 4 as left, down, up and right",
+            "hat" => $"{pad.Id}: the D-pad as the 0x3F hat, 0 up, 2 right, 4 down, 6 left",
+            _ => $"{pad.Id}: SubmitState's hat changes nothing in the 0x3F report, which has no arrows",
+        }, wrong.Count == 0, string.Join(" ", wrong));
     }
 
     static void CheckUsbForm(Pad pad, ControllerProfile p, Dictionary<string, ControllerProfile> byId)
@@ -368,8 +441,26 @@ internal static class Program
         if (!byId.TryGetValue(formId, out var f)) { Check($"{formId}: in the catalog", false); return; }
         Check($"{formId}: 057E:{pad.UsbPid:X4} on USB", f.VendorId == 0x057E && f.ProductId == pad.UsbPid
               && string.Equals(f.Connection, "usb", StringComparison.OrdinalIgnoreCase), $"{f.VendorId:X4}:{f.ProductId:X4} {f.Connection}");
+        Check($"{formId}: names {pad.Id} in its usbFormOf", f.FormOfIds?.Contains(pad.Id) == true,
+              f.FormOfIds == null ? "none" : string.Join(",", f.FormOfIds));
+        string wantProduct = pad.UsbProduct ?? pad.Product;
+        Check($"{formId}: the product string \"{wantProduct}\"", f.ProductString == wantProduct, f.ProductString ?? "none");
+        if (pad.UsbProduct != null)
+        {
+            // The charging grip: two HID interfaces, interface 1 the left
+            // slot and 0 the right (SDL_hidapi_switch.c
+            // CalculateControllerType), the docked pad's interface first.
+            var ifaces = f.UsbConfiguration?.Interfaces;
+            int slot = pad.Type == 0x01 ? 1 : 0;
+            Check($"{formId}: the grip's two HID interfaces, the pad on interface {slot}",
+                  ifaces != null && ifaces.Count == 2 && ifaces[0].InterfaceNumber == slot && ifaces[0].Function == "hid"
+                  && ifaces[1].InterfaceNumber == 1 - slot && f.RequiresUsbipBackend,
+                  ifaces == null ? "none" : string.Join(" ", ifaces.Select(i => $"{i.InterfaceNumber}:{i.Function}")));
+        }
         CompiledProtocol? proto = null;
-        try { f.ValidateDeviceModel(); proto = CompiledProtocol.Compile(f, null); }
+        // The charging grip runs its protocol on its own endpoints, the
+        // USB/IP backend's form of a protocol.
+        try { f.ValidateDeviceModel(); proto = CompiledProtocol.Compile(f, f.RequiresUsbipBackend ? new UsbDescriptorSet(f) : null); }
         catch (Exception ex) { Check($"{formId}: its protocol compiles", false, ex.Message); }
         if (proto == null) return;
         const int index = 1;
@@ -382,8 +473,9 @@ internal static class Program
         e.HandleCommand(status, Stopwatch.GetTimestamp());
         var r = new byte[64];
         int k = e.TakeReply(r.Length, r);
-        Check($"{formId}: 80 01 answers 81 01 00 {pad.Type:X2} and the address",
-              k == 64 && r[0] == 0x81 && r[1] == 0x01 && r[2] == 0x00 && r[3] == pad.Type && r[4] == 0x30 + index && r[5] == 0x4D,
+        byte usbType = pad.UsbType ?? pad.Type;
+        Check($"{formId}: 80 01 answers 81 01 00 {usbType:X2} and the address",
+              k == 64 && r[0] == 0x81 && r[1] == 0x01 && r[2] == 0x00 && r[3] == usbType && r[4] == 0x30 + index && r[5] == 0x4D,
               k > 0 ? Convert.ToHexString(r.AsSpan(0, 10)) : "none");
         byte number = 0;
         e.HandleCommand(Subcommand(ref number, 0x02, 64), Stopwatch.GetTimestamp());
