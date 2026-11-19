@@ -983,6 +983,30 @@ internal static class Program
             {
                 var whole = DriveUntil(c, rd, Rest(0.5f), r => r[0] == 0x01 && S16(r, accelAt) == 8192, 3000);
                 Check($"{prof.Id}: report 0x01 carries SubmitState's accelerometer at byte {accelAt}", whole != null);
+
+                // A raw frame of the whole report, its report id included,
+                // keeps the profile's fixed bytes on their wire offsets: the
+                // Edge's activeProfile 0x80 at byte 49, which dualsense-tester
+                // reads (inputDefaults), with the caller's 0 there.
+                var fixedBytes = prof.Inner.InputDefaults;
+                if (fixedBytes is { Count: > 0 })
+                {
+                    var frame = new byte[prof.Inner.ExtendedReport!.Size];
+                    frame[0] = 0x01;
+                    frame[1] = 0xFF; // a stick hard over, the marker the read waits for
+                    byte[]? got = null;
+                    var sw = Stopwatch.StartNew();
+                    while (got == null && sw.ElapsedMilliseconds < 3000)
+                    {
+                        c.SubmitRawReport(frame);
+                        var r = rd.Read(60);
+                        if (r != null && r[0] == 0x01 && r[1] == 0xFF) got = r;
+                    }
+                    string want = string.Join(" ", fixedBytes.Select(d => $"{d.Byte}={d.Value:X2}"));
+                    string seen = got == null ? "none" : string.Join(" ", fixedBytes.Select(d => $"{d.Byte}={got[d.Byte]:X2}"));
+                    Check($"{prof.Id}: a {frame.Length}-byte raw frame keeps the fixed bytes on their offsets ({want})",
+                          got != null && fixedBytes.All(d => got[d.Byte] == d.Value), seen);
+                }
             }
 
             bool acc = SDL_SetGamepadSensorEnabled(gp, SENSOR_ACCEL, true);
