@@ -216,8 +216,10 @@ internal static unsafe partial class Program
         Refused("a HID persona that names an interface xusb and keeps its descriptor", withHid,
                 o => Usb(o)["interfaces"]![0]!["function"] = "xusb",
                 "$.descriptor", "no HID interface");
+        // dualsense-composite sends its whole report from the start
+        // (alwaysArmed), so the case sets it back to false.
         Refused("a HID persona that names an interface xusb and drops its descriptor", withHid,
-                o => { Usb(o)["interfaces"]![0]!["function"] = "xusb"; o.Remove("descriptor"); },
+                o => { Usb(o)["interfaces"]![0]!["function"] = "xusb"; o.Remove("descriptor"); o["extendedReport"]!["alwaysArmed"] = false; },
                 "$.extendedReport.alwaysArmed", "must be true on a device with no HID interface");
         Refused("the same with its extended report always armed", withHid,
                 o => { Usb(o)["interfaces"]![0]!["function"] = "xusb"; o.Remove("descriptor"); o["extendedReport"]!["alwaysArmed"] = true; },

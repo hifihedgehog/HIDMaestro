@@ -30,8 +30,19 @@
 //    dualshock-4-v2's form (usbForm): no arming, report 0x01 at 64 bytes in
 //    the USB layout, which B reads there in place of 0x11.
 //
-// B and C need elevation. Exit 0 PASS, 1 FAIL, 2 when everything that ran
-// passed and C was skipped for want of a stock SDL3.dll.
+// D. Live, stock SDL3, the USB Sony profiles: dualshock-4-v2, dualshock-4-v1,
+//    dualshock-4-v1-full, dualsense and dualsense-edge on the run's backend
+//    and the three composites on USB/IP. A pad on USB streams its whole
+//    report 0x01 from power-on, so SDL reads SubmitState's accelerometer,
+//    gyro, touch and battery with no arming, and report 0x01 carries the
+//    accelerometer at the report map's offset. The left stick is the
+//    positive control.
+//
+// B, C and D need elevation. Exit 0 PASS, 1 FAIL, 2 when everything that ran
+// passed and C and D were skipped for want of a stock SDL3.dll.
+//
+// "Ds4ReportCheck --usb [SDL3 dir]" runs part D alone, with the SDL3.dll in
+// that directory or the stock build part C finds.
 //
 // "Ds4ReportCheck --control <profiles dir> <profile id>" runs part C alone
 // against a profile loaded from that directory. Aimed at the v1.9.2 map
@@ -663,8 +674,12 @@ internal static class Program
             Console.WriteLine("         SDL3-build/build-stock/Release build of upstream libsdl-org/SDL.");
             return false;
         }
-        NativeLibrary.SetDllImportResolver(typeof(Program).Assembly,
-            (name, asm, path) => name == SDL ? NativeLibrary.Load(dll) : IntPtr.Zero);
+        if (!s_resolverSet)
+        {
+            NativeLibrary.SetDllImportResolver(typeof(Program).Assembly,
+                (name, asm, path) => name == SDL ? NativeLibrary.Load(dll) : IntPtr.Zero);
+            s_resolverSet = true;
+        }
         Console.WriteLine($"  SDL3.dll: {dll}");
 
         // HIDAPI only, so SDL's PS4 driver is the one that can claim the
@@ -840,6 +855,16 @@ internal static class Program
             return s_failures > 0 ? 1 : ran ? 0 : 2;
         }
 
+        if (args.Length >= 1 && args[0] == "--usb")
+        {
+            ctx.InstallDriver();
+            PartD(ctx, args.Length >= 2 ? args[1] : null);
+            try { HMContext.RemoveAllVirtualControllers(preserveInstall: true); } catch { }
+            Console.WriteLine();
+            Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");
+            return s_failures > 0 ? 1 : 0;
+        }
+
         PartA(ctx);
 
         bool elevated;
@@ -857,6 +882,7 @@ internal static class Program
             ctx.InstallDriver();
             PartB(ctx);
             sdlRan = PartC(ctx);
+            if (sdlRan) PartD(ctx, null);
             try { HMContext.RemoveAllVirtualControllers(preserveInstall: true); } catch { }
         }
 
@@ -864,5 +890,136 @@ internal static class Program
         Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");
         if (s_failures > 0) return 1;
         return elevated && sdlRan ? 0 : 2;
+    }
+
+    // ── D. Live, stock SDL3: the USB Sony profiles ──────────────────────
+
+    const int SDL_GAMEPAD_TYPE_PS5 = 6;
+
+    /// <summary>The Sony profiles on USB: the pad streams its whole report
+    /// 0x01 from power-on, sensors, touch and battery included, so
+    /// SubmitState's motion, touch and battery reach SDL with no arming.
+    /// The composites run on USB/IP, which they need.</summary>
+    static readonly string[] UsbProfiles =
+    {
+        "dualshock-4-v2", "dualshock-4-v1", "dualshock-4-v1-full", "dualsense", "dualsense-edge",
+        "dualshock-4-v2-composite", "dualsense-composite", "dualsense-edge-composite",
+    };
+
+    static void PartD(HMContext ctx, string? sdlDir)
+    {
+        Console.WriteLine();
+        Console.WriteLine("--- D. The USB Sony profiles' whole report through stock SDL3 ---");
+        string? dll = sdlDir != null ? System.IO.Path.Combine(sdlDir, "SDL3.dll") : FindStockSdl();
+        if (dll == null || !System.IO.File.Exists(dll))
+        {
+            Console.WriteLine("  [SKIP] no stock SDL3.dll; this part needs a release SDL3.dll directory or the sibling");
+            Console.WriteLine("         SDL3-build/build-stock/Release build of upstream libsdl-org/SDL.");
+            return;
+        }
+        if (!s_resolverSet)
+        {
+            NativeLibrary.SetDllImportResolver(typeof(Program).Assembly,
+                (name, asm, path) => name == SDL ? NativeLibrary.Load(dll) : IntPtr.Zero);
+            s_resolverSet = true;
+        }
+        Console.WriteLine($"  SDL3.dll: {dll}");
+        SDL_SetHint("SDL_JOYSTICK_HIDAPI", "1");
+        SDL_SetHint("SDL_JOYSTICK_HIDAPI_PS4", "1");
+        SDL_SetHint("SDL_JOYSTICK_HIDAPI_PS5", "1");
+        SDL_SetHint("SDL_JOYSTICK_RAWINPUT", "0");
+        SDL_SetHint("SDL_JOYSTICK_THREAD", "1");
+        foreach (var id in UsbProfiles)
+        {
+            var prof = ctx.GetProfile(id);
+            if (prof == null) { Check($"{id}: in the catalog", false); continue; }
+            var backend = prof.Inner.RequiresUsbipBackend ? HMBackend.Usbip : HMContext.MachineBackend;
+            UsbOne(ctx, prof, backend);
+        }
+    }
+
+    static bool s_resolverSet;
+
+    static void UsbOne(HMContext ctx, HMProfile prof, HMBackend backend)
+    {
+        Console.WriteLine();
+        Console.WriteLine($"  {prof.Id} on {backend}");
+        bool ps5 = prof.ProductId is 0x0CE6 or 0x0DF2;
+        if (!SDL_Init(SDL_INIT_GAMEPAD)) { Check($"{prof.Id}: SDL_Init", false, Err()); return; }
+        var pre = Present(prof.VendorId, prof.ProductId);
+        HMController? c = null;
+        IntPtr gp = IntPtr.Zero;
+        try
+        {
+            c = ctx.CreateController(prof, null, backend);
+            var dev = WaitForNew(prof.VendorId, prof.ProductId, pre, 15000);
+            Check($"{prof.Id}: the HID interface appears", dev != null);
+            if (dev == null) return;
+            gp = WaitForGamepad(prof.VendorId, prof.ProductId, dev.DevicePath, 20);
+            Check($"{prof.Id}: SDL's HIDAPI driver opens it", gp != IntPtr.Zero, gp == IntPtr.Zero ? Err() : "");
+            if (gp == IntPtr.Zero) return;
+            int type = SDL_GetGamepadType(gp);
+            Check($"{prof.Id}: SDL types it as a {(ps5 ? "PS5" : "PS4")} controller", type == (ps5 ? SDL_GAMEPAD_TYPE_PS5 : SDL_GAMEPAD_TYPE_PS4), $"type {type}");
+
+            HMGamepadState Rest(float lx) => new()
+            {
+                Axes = HMGamepadStateHelpers.StandardAxes(prof, lx, 0.5f, 0.5f, 0.5f, 0f, 0f),
+                AccelY = 8192,
+                TouchpadFinger0Active = true, TouchpadFinger0X = 960, TouchpadFinger0Y = 460, TouchpadFinger0Id = 3,
+                TouchpadFinger1Active = false, TouchpadFinger1Id = 4,
+                BatteryLevel = 7, BatteryCharging = true,
+            };
+
+            // The positive control: the stick, which the descriptor's own
+            // fields carried before as well.
+            Drive(c, Rest(1.0f), () => SDL_GetGamepadAxis(gp, AXIS_LEFTX) >= 30000);
+            short lx = SDL_GetGamepadAxis(gp, AXIS_LEFTX);
+            Check($"{prof.Id}: SDL reads the left stick hard right", lx >= 30000, $"LEFTX {lx}");
+
+            // The report itself, read through a second handle: report 0x01
+            // with the accelerometer at the report map's offset.
+            int accelAt = prof.Inner.ExtendedReport!.Fields.First(f => f.Semantic == "accelY").Byte!.Value;
+            using (var rd = new HidReader(dev.DevicePath, Math.Max(dev.InputReportByteLength, (ushort)64)))
+            {
+                var whole = DriveUntil(c, rd, Rest(0.5f), r => r[0] == 0x01 && S16(r, accelAt) == 8192, 3000);
+                Check($"{prof.Id}: report 0x01 carries SubmitState's accelerometer at byte {accelAt}", whole != null);
+            }
+
+            bool acc = SDL_SetGamepadSensorEnabled(gp, SENSOR_ACCEL, true);
+            bool gyr = SDL_SetGamepadSensorEnabled(gp, SENSOR_GYRO, true);
+            Check($"{prof.Id}: SDL enables the accelerometer and the gyro", acc && gyr, acc && gyr ? "" : Err());
+
+            var a = new float[3];
+            var g = new float[3];
+            Drive(c, Rest(0.5f), () => SDL_GetGamepadSensorData(gp, SENSOR_ACCEL, a, 3) && Math.Abs(a[1] - StandardGravity) < 0.01f);
+            SDL_GetGamepadSensorData(gp, SENSOR_ACCEL, a, 3);
+            Check($"{prof.Id}: at rest SDL reads the accelerometer as 1 g",
+                  Math.Abs(a[0]) < 0.001f && Math.Abs(a[1] - StandardGravity) < 0.001f && Math.Abs(a[2]) < 0.001f,
+                  $"[{a[0]:F4}, {a[1]:F4}, {a[2]:F4}] m/s2");
+            var yaw = Rest(0.5f);
+            yaw.GyroYaw = 1440; // 90 degrees/second at 16 per degree/second
+            Drive(c, yaw, () => SDL_GetGamepadSensorData(gp, SENSOR_GYRO, g, 3) && Math.Abs(g[1]) > 0.5f);
+            SDL_GetGamepadSensorData(gp, SENSOR_GYRO, g, 3);
+            Check($"{prof.Id}: SDL reads a 90 degree/second yaw as pi/2 rad/s on its own axis",
+                  Math.Abs(g[0]) < 0.002f && Math.Abs(g[1] - MathF.PI / 2) < 0.002f && Math.Abs(g[2]) < 0.002f,
+                  $"[{g[0]:F4}, {g[1]:F4}, {g[2]:F4}] rad/s");
+
+            Check($"{prof.Id}: SDL publishes the touchpad", SDL_GetNumGamepadTouchpads(gp) >= 1);
+            SDL_GetGamepadTouchpadFinger(gp, 0, 0, out bool d0, out float x0, out float y0, out _);
+            // SDL's touchpad scale: 1920 by 920 on the PS4 driver, 1920 by
+            // 1070 on the PS5 driver (SDL_hidapi_ps4.c, SDL_hidapi_ps5.c).
+            float wantY = 460f / (ps5 ? 1070f : 920f);
+            Check($"{prof.Id}: SDL reads the first finger down at (960, 460)",
+                  d0 && Math.Abs(x0 - 0.5f) < 0.002f && Math.Abs(y0 - wantY) < 0.002f, $"down {d0} ({x0:F4}, {y0:F4})");
+            int ps = SDL_GetGamepadPowerInfo(gp, out int pct);
+            Check($"{prof.Id}: SDL reads the battery as charging at 75%", ps == PowerCharging && pct == 75, $"state {ps}, {pct}%");
+        }
+        catch (Exception ex) { Check($"{prof.Id}: ran without throwing", false, ex.Message); }
+        finally
+        {
+            if (gp != IntPtr.Zero) SDL_CloseGamepad(gp);
+            SDL_Quit();
+            c?.Dispose();
+        }
     }
 }
