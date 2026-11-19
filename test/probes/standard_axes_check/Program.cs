@@ -157,7 +157,9 @@ internal static class Program
                 using var rd = new HidReader(dev.DevicePath, Math.Max((int)dev.InputReportByteLength, 64));
                 Check($"{id}: the interface opens for reading", rd.IsOpen, rd.OpenError);
                 if (!rd.IsOpen) continue;
-                int idBits = rb.InputReportId != 0 ? 8 : 0;
+                // A HID read puts the report ID first, and 0 there for a
+                // descriptor that declares none.
+                const int idBits = 8;
                 var st = new HMGamepadState { Axes = HMGamepadStateHelpers.StandardAxes(p, 0.5f, 0.5f, 1.0f, 0.5f, 0f, 0f) };
                 double Norm(byte[] r, HidReportBuilder.InputField f)
                 {
@@ -171,7 +173,7 @@ internal static class Program
                 {
                     c.SubmitState(st);
                     var r = rd.Read(60);
-                    if (r != null && (rb.InputReportId == 0 || r[0] == rb.InputReportId) && Norm(r, rb.RightStickX) > 0.95) got = r;
+                    if (r != null && r[0] == rb.InputReportId && Norm(r, rb.RightStickX) > 0.95) got = r;
                 }
                 string seen = got != null ? Convert.ToHexString(got.AsSpan(0, Math.Min(16, got.Length))) : "none";
                 Check($"{id}: the right stick submitted hard right reads back hard right on {(HMAxis)((rb.RightStickX.UsagePage << 8) | rb.RightStickX.Usage)} in the HID report", got != null, seen);

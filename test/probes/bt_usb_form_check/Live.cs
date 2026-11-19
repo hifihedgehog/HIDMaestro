@@ -101,7 +101,7 @@ internal static partial class Program
             // The values the report carries, each motor on its own: the
             // Sony report sets right 200 and left 100, the Switch report
             // the left motor's top amplitude and the right neutral.
-            var (wantLeft, wantRight) = form.HasExtendedOutput ? (100, 200) : (255, 0);
+            var (wantLeft, wantRight) = form.HasExtendedOutput ? (100, 200) : DecodesLeft(form) ? (255, 0) : (0, 255);
             bool seen = Wait(() => { lock (decoded) return decoded.Any(f => Num(f, "leftMotor") == wantLeft && Num(f, "rightMotor") == wantRight); }, 5000);
             string last;
             lock (decoded) last = decoded.Count == 0 ? "none" : string.Join(" ", decoded[^1].Where(k => k.Key.EndsWith("Motor")).Select(k => $"{k.Key}={k.Value}"));
@@ -153,10 +153,17 @@ internal static partial class Program
             // [id, counter, left 4 bytes, right 4 bytes]: left at the high
             // band's top amplitude 0xC8, right neutral 00 01 40 40
             // (SDL_hidapi_switch.c EncodeRumbleHighAmplitude, SetNeutralRumble).
-            return new byte[] { 0x10, 0x01, 0x00, 0xC8, 0x60, 0x00, 0x00, 0x01, 0x40, 0x40 };
+            // A pad whose one motor reads the right half (joycon-r) gets the
+            // two halves the other way round.
+            return DecodesLeft(form)
+                ? new byte[] { 0x10, 0x01, 0x00, 0xC8, 0x60, 0x00, 0x00, 0x01, 0x40, 0x40 }
+                : new byte[] { 0x10, 0x01, 0x00, 0x01, 0x40, 0x40, 0x00, 0xC8, 0x60, 0x00 };
         }
         return null;
     }
+
+    static bool DecodesLeft(HMProfile form) =>
+        form.Inner.GetOrCompileModel().Decoders.Any(d => d.Semantics.Contains("leftMotor"));
 
     static int Num(IReadOnlyDictionary<string, object> f, string key) =>
         f.TryGetValue(key, out var v) && v is IConvertible c ? c.ToInt32(null) : 0;
