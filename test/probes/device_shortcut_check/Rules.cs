@@ -191,7 +191,7 @@ internal static class Rules
         new(new[] { "SteamVrPathRegValue", "FindSteamVR", "SetSteamVRPathHint", "IsSteamVRInstalled", "IsSteamVRRunning", "steamVrDir", "steamVr" },
             new[] { @"sdk\HIDMaestro.Core\Internal\VrDriverBuilder.cs" },
             "SteamVR, the OpenVR host HIDMaestro's own VR controller runs under, not an impersonated device"),
-        new(new[] { "UsbMicrosoftOsSpec", "MicrosoftOs" }, new[] { @"sdk\HIDMaestro.Core\Internal\UsbConfigurationSpec.cs" },
+        new(new[] { "UsbMicrosoftOsSpec", "MicrosoftOs" }, new[] { @"sdk\HIDMaestro.Core\Internal\UsbConfigurationSpec.cs", @"sdk\HIDMaestro.Core\Internal\Usbip\XusbFunction.cs" },
             "Microsoft OS descriptors, a USB descriptor standard any device may serve, which the profile's data holds and the persona serves verbatim (UsbDescriptorSet.cs)"),
         new(new[] { "CheckMicrosoftOsFeature", "GetMicrosoftOsFeature" }, new[] { @"sdk\HIDMaestro.Core\Internal\Usbip\UsbDescriptorSet.cs" },
             "Microsoft OS descriptors, a USB descriptor standard any device may serve, which the profile's data holds and the persona serves verbatim"),
@@ -294,7 +294,7 @@ internal static class Rules
 
     const string XInputIds = "the IDs and flags an XUSB companion reports apart from its HID child's (PresentationPlan, XusbAnswers.Compile), for any pad behind a receiver: xbox-360-wireless today, and every wireless XUSB device PlasticBand captured (ProductId 0 with WIRELESS, the receiver's 045E:0719 in GET_INFORMATION), the Microsoft Wireless Racing Wheel among them (Microsoft Wireless Racing Wheel.txt:1-17)";
 
-    const string XInputBattery = "the battery an XUSB companion answers in GET_BATTERY_INFORMATION (XInputPresentation.BatteryBytes, the XUSB model's battery fields), for any XUSB pad that is not wired and full: xbox-360-wireless today, which reads unknown and full as xusb22 answers for the pad behind the receiver, and any wireless XUSB device on batteries";
+    const string XInputBattery = "the battery an XUSB companion answers in GET_BATTERY_INFORMATION (XInputPresentation.BatteryBytes, the XUSB model's battery fields), for any XUSB pad that is not wired and full: xbox-360-wireless today, which reads alkaline and medium as xusb22 answers for the pad behind the receiver, and any wireless XUSB device on batteries";
 
     // Discriminators of rule C's per-kind count (Profiles.cs), as
     // Type.Prop: a key on an object of one kind is counted apart from the
