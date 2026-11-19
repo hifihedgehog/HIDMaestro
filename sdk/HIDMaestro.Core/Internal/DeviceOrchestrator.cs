@@ -1187,11 +1187,12 @@ internal static partial class DeviceOrchestrator
     /// and slot waits for the USB device: xusb22 publishes the XUSB interface
     /// on the device's own instance, then XInput lists one slot more than
     /// <paramref name="slotsBefore"/>, read before the attach, then the HID
-    /// device xusb22 makes for the pad starts. A failed
-    /// start throws as the UMDF2 create's does. A wait that runs out is
-    /// logged and the create goes on, as there: the controller still reaches
-    /// XInput on a consumer's next poll. Returns the name Windows gave the
-    /// device, found on its port as the derived device's wait finds it.</summary>
+    /// collection xusb22 makes for the pad starts and publishes its
+    /// interface. A failed start throws as the UMDF2 create's does. A wait
+    /// that runs out is logged and the create goes on, as there: the
+    /// controller still reaches XInput on a consumer's next poll. Returns
+    /// the name Windows gave the device, found on its port as the derived
+    /// device's wait finds it.</summary>
     internal static string AwaitUsbipXusbStart(string serialInstanceId, int vhciPort, int controllerIndex, int slotsBefore)
     {
         var sw = Stopwatch.StartNew();
@@ -1216,29 +1217,21 @@ internal static partial class DeviceOrchestrator
                 Thread.Sleep(10);
             }
         }
-        // xusb22 makes the pad's HID device itself, a child of the USB
-        // device. On Windows 10 it comes after the XInput slot is taken
-        // (S77 on the Celeron, 2026-11-19: the child was announced after the
-        // create had returned), so the wait goes on to the child's start,
-        // and a program that lists HID or DirectInput devices as the create
-        // returns finds the pad, as after the UMDF2 create. A wait that runs
-        // out is logged and the create goes on: XInput has the pad already.
-        string? hidChild = null;
-        bool childStarted = false;
-        if (arrived)
-        {
-            var childClock = Stopwatch.StartNew();
-            int childBudget = TimeoutScale.Apply(2000);
-            while (true)
-            {
-                hidChild ??= HidChildOf(usbInstanceId);
-                if (hidChild != null && DevnodeStatus(hidChild) is (true, var childStatus, _) && (childStatus & DN_STARTED) != 0) { childStarted = true; break; }
-                if (childClock.ElapsedMilliseconds >= childBudget) break;
-                Thread.Sleep(10);
-            }
-        }
+        // xusb22 makes the pad's HID device itself: a node of its own under
+        // the USB device (USB\VID_vvvv&PID_pppp&IG_00), and the HID
+        // collection under that node. Both come after the XInput slot is
+        // taken (S77, 2026-11-19: on the Celeron the collection was
+        // announced after the create had returned, and on the Surface a wait
+        // for the node above it returned before the collection was there).
+        // So the wait goes on until the collection has started and published
+        // its interface, as the derived device's wait does, and a program
+        // that lists HID or DirectInput devices as the create returns finds
+        // the pad, as after the UMDF2 create. A wait that runs out is logged
+        // and the create goes on: XInput has the pad already.
+        int hidOpen = -1;
+        if (arrived) hidOpen = AwaitHidCollections(usbInstanceId, controllerIndex, 1, 2000, nodeFailureThrows: false);
         LogDiag($"    usbip xusb start wait {usbInstanceId} on port {vhciPort}{(onPort == null ? " (not found on the port)" : "")}: interface {(arrived ? "arrived" : "TIMEOUT")} in {interfaceMs}ms, " +
-                $"XInput slots before={slotsBefore} after={slotsAfter}, HID child {hidChild ?? "(none)"} {(childStarted ? "started" : "not started")} in {sw.ElapsedMilliseconds}ms");
+                $"XInput slots before={slotsBefore} after={slotsAfter}{(hidOpen < 0 ? "" : hidOpen > 0 ? ", HID collection open" : ", HID collection not open")} in {sw.ElapsedMilliseconds}ms");
         return usbInstanceId;
     }
 
