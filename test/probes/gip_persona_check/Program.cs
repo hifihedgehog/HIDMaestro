@@ -85,7 +85,7 @@ internal static unsafe partial class Program
         Environment.SetEnvironmentVariable("HIDMAESTRO_DIAG", "1");
         if (args.Contains("capture")) return Capture();
         bool all = !args.Contains("model") && !args.Contains("wire") && !args.Contains("live") && !args.Contains("umdf2") && !args.Contains("family")
-                   && !args.Contains("nodriver") && !args.Contains("pair") && !args.Contains("restart") && !args.Contains("reuse") && !args.Contains("guide") && !args.Contains("guideonce");
+                   && !args.Contains("nodriver") && !args.Contains("pair") && !args.Contains("restart") && !args.Contains("reuse") && !args.Contains("guide") && !args.Contains("guideonce") && !args.Contains("restartunread");
         int skip = 0;
         if (all || args.Contains("model")) Model();
         if (all || args.Contains("model")) FamilyModel();
@@ -102,7 +102,7 @@ internal static unsafe partial class Program
         }
         // Three more live parts of the GIP function run only when named
         // (FamilyMore.cs).
-        foreach (var (name, part) in new (string, Func<int>)[] { ("nodriver", NoDriver), ("pair", Pair), ("restart", Restart), ("reuse", Reuse), ("guide", Guide), ("guideonce", GuideOnce) })
+        foreach (var (name, part) in new (string, Func<int>)[] { ("nodriver", NoDriver), ("pair", Pair), ("restart", Restart), ("reuse", Reuse), ("guide", Guide), ("guideonce", GuideOnce), ("restartunread", RestartUnread) })
             if (args.Contains(name)) skip = Math.Max(skip, LiveGuard() ?? part());
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
         if (s_failures != 0) return 1;

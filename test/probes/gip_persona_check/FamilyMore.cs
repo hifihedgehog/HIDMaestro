@@ -11,6 +11,7 @@
 //   reuse     One pad created again under a key used before and under
 //             fresh keys: each create's XInput read and rumble, and the
 //             HID child instance Windows gives it.
+//   restartunread  The restart with no XInput read before it.
 //   guide     XInput reads around two Guide presses, in a session with a
 //             console user, beside the Game Bar processes.
 using System;
@@ -180,18 +181,28 @@ internal static unsafe partial class Program
     [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
     static extern uint CM_Enable_DevNode(uint devInst, uint flags);
 
-    static int Restart()
+    static int Restart() => Restart(readFirst: true);
+
+    /// <summary>The restart with no XInput call in this process before it,
+    /// so no XInput handle of this process is open on the pad.</summary>
+    static int RestartUnread() => Restart(readFirst: false);
+
+    static int Restart(bool readFirst)
     {
-        Console.WriteLine("\n=== restart: the driver stack restarted with no port reset ===");
+        Console.WriteLine($"\n=== restart: the driver stack restarted with no port reset{(readFirst ? "" : ", no XInput read before it")} ===");
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
         Pad? pad = null;
         try
         {
-            uint before = ConnectedSlots();
+            uint before = readFirst ? ConnectedSlots() : 0;
             pad = OpenPad(ctx, "xbox-series-xs-bt", "giprestart:1");
-            int slot = SlotOf(pad, HMButton.A, 0x1000, before);
-            Check("the pad reads in XInput before the restart", slot >= 0, $"slot {slot}");
+            int slot = -1;
+            if (readFirst)
+            {
+                slot = SlotOf(pad, HMButton.A, 0x1000, before);
+                Check("the pad reads in XInput before the restart", slot >= 0, $"slot {slot}");
+            }
             int from = pad.Engine.SnapshotLog().Count;
             var veto = new System.Text.StringBuilder(260);
             int vetoType = 0;
