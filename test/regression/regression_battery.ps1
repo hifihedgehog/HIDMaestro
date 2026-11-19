@@ -3244,7 +3244,7 @@ function Scenario-Gip-Persona {
 # other's device. Exit 2 when another program that embeds HIDMaestro runs.
 function Scenario-Backend-Parity {
     $msg = 'a profile presents differently on the two backends, or the USB/IP backend refuses, loses or misplaces a device (see probe stdout)'
-    foreach ($part in @('parity', 'long', 'ports', 'start', 'oem', 'identity first', 'identity second', 'twoprograms')) {
+    foreach ($part in @('parity', 'long', 'ports', 'start', 'oem', 'identity first', 'identity second', 'twoprograms', 'killedattach')) {
         Write-Host ('    part ' + $part)
         Invoke-Probe -Dir 'backend_parity_check' -Exe 'BackendParityCheck.exe' -Arguments $part `
                      -Tag ($part -replace ' ', '_') -Message $msg -SkipCodes 2

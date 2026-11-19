@@ -98,6 +98,7 @@ internal static partial class Program
         var rest = list.Skip(1).ToList();
 
         if (part == "listener") return Listener(int.Parse(rest[0]));
+        if (part == "attachhang") return AttachHang(int.Parse(rest[0]));
         if (part is "liveness" or "ackgen" or "portrule" or "longlist")
         {
             if (part == "liveness") Liveness();
@@ -136,6 +137,7 @@ internal static partial class Program
                 case "oem": Oem(); break;
                 case "identity": Identity(rest.Count > 0 ? rest[0] : "first"); break;
                 case "twoprograms": TwoPrograms(); break;
+                case "killedattach": KilledAttach(); break;
                 case "child": return Child(rest);
                 case "ignoreserial": IgnoreSerial(); break;
                 case "firstcreate": FirstCreate(rest.Count > 0 ? int.Parse(rest[0]) : 30); break;

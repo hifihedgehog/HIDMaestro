@@ -119,7 +119,105 @@ internal static partial class TcpConnectionOwner
     // (MIB_TCPROW_OWNER_PID dwLocalPort, dwRemotePort).
     private static int Port(uint value) => (int)(((value & 0xFF) << 8) | ((value >> 8) & 0xFF));
 
+    // 127.0.0.1 as the table stores an address: its four bytes in memory.
+    private const uint Loopback = 0x0100007F;
+    private const uint MIB_TCP_STATE_DELETE_TCB = 12;
+    private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+    private const uint STILL_ACTIVE = 259;
+
+    /// <summary>Ends each connection the host controller still holds to a
+    /// USB/IP server whose process has exited, and returns how many. The
+    /// host controller's attach request waits, with no timeout, on the
+    /// import handshake over a connection it opens to the server. A program
+    /// killed inside that handshake leaves the request waiting, and the
+    /// request runs on a thread of the killed program, so the program never
+    /// finishes exiting, its end of the connection never closes, and the
+    /// host controller attaches nothing more for any program on the machine.
+    /// S17 on the ARM64 test PC, 2026-11-19: a program killed 60 ms into a
+    /// swap stayed listed with one thread in a kernel wait, the kernel held
+    /// an established connection to its port, and the next program's attach
+    /// waited until that connection was ended, when both went on at once.
+    /// Ending the kernel's end fails the handshake, the request returns and
+    /// the program finishes exiting. A connection is ended only when all of
+    /// these hold: the System process owns one end, the other end is a
+    /// loopback port <paramref name="isServerPort"/> accepts, and the
+    /// process that owns that end has an exit code. A live program's
+    /// handshake is never touched. Never throws.</summary>
+    public static unsafe int EndConnectionsToExitedServers(Func<int, bool> isServerPort)
+    {
+        void* table = null;
+        try
+        {
+            uint size = Volatile.Read(ref s_lastSize);
+            if (size > 0) table = NativeMemory.Alloc(size);
+            for (int attempt = 0; ; attempt++)
+            {
+                uint err = GetExtendedTcpTable(table, ref size, false, AF_INET, TCP_TABLE_OWNER_PID_CONNECTIONS, 0);
+                if (err == 0)
+                {
+                    Volatile.Write(ref s_lastSize, size + SlackRows * RowSize);
+                    break;
+                }
+                if (err != ERROR_INSUFFICIENT_BUFFER || attempt == MaxReads) return 0;
+                NativeMemory.Free(table);
+                table = null;
+                size += SlackRows * RowSize;
+                table = NativeMemory.Alloc(size);
+            }
+            if (table == null) return 0;
+            uint count = *(uint*)table;
+            byte* rows = (byte*)table + 4;
+            int ended = 0;
+            // MIB_TCPROW is a row's first five DWORDs (tcpmib.h).
+            uint* row = stackalloc uint[5];
+            for (uint i = 0; i < count; i++)
+            {
+                uint* k = (uint*)(rows + i * RowSize);
+                if (k[0] != MIB_TCP_STATE_ESTAB || k[5] != SystemProcessId || k[3] != Loopback || !isServerPort(Port(k[4]))) continue;
+                // The server's end of the same connection names its process.
+                uint serverPid = 0;
+                for (uint j = 0; j < count; j++)
+                {
+                    uint* s = (uint*)(rows + j * RowSize);
+                    if (s[1] == k[3] && s[2] == k[4] && s[3] == k[1] && s[4] == k[2]) { serverPid = s[5]; break; }
+                }
+                if (serverPid <= SystemProcessId || !HasExitCode(serverPid)) continue;
+                row[0] = MIB_TCP_STATE_DELETE_TCB; row[1] = k[1]; row[2] = k[2]; row[3] = k[3]; row[4] = k[4];
+                uint rc = SetTcpEntry(row);
+                DeviceOrchestrator.LogDiag($"    usbip: the host controller held a connection to port {Port(k[4])}, whose program (PID {serverPid}) had exited. Ending it returned {rc}.");
+                if (rc == 0) ended++;
+            }
+            return ended;
+        }
+        catch { return 0; }
+        finally { NativeMemory.Free(table); }
+    }
+
+    /// <summary>True for a process that still exists and has an exit code:
+    /// one that was ended and has not finished exiting.</summary>
+    private static bool HasExitCode(uint pid)
+    {
+        IntPtr h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+        if (h == IntPtr.Zero) return false;
+        try { return GetExitCodeProcess(h, out uint code) && code != STILL_ACTIVE; }
+        finally { CloseHandle(h); }
+    }
+
     [LibraryImport("iphlpapi.dll")]
     private static unsafe partial uint GetExtendedTcpTable(void* table, ref uint size,
         [MarshalAs(UnmanagedType.Bool)] bool order, uint af, int tableClass, uint reserved);
+
+    [LibraryImport("iphlpapi.dll")]
+    private static unsafe partial uint SetTcpEntry(uint* row);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial IntPtr OpenProcess(uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, uint pid);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool CloseHandle(IntPtr handle);
 }

@@ -641,7 +641,7 @@ internal static class UsbipBackend
     }
 
     /// <summary>A port of one of the SDK's two ranges (<see cref="UsbipServer"/>).</summary>
-    private static bool IsOurPort(int port) =>
+    internal static bool IsOurPort(int port) =>
         (port >= UsbipServer.BasePort && port < UsbipServer.BasePort + UsbipServer.PortRange)
         || (port >= UsbipServer.SecondBasePort && port < UsbipServer.SecondBasePort + UsbipServer.PortRange);
 }

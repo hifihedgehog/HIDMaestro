@@ -569,6 +569,123 @@ internal static partial class Program
         return 0;
     }
 
+    // ── A program killed inside its attach ───────────────────────────────
+
+    /// <summary>The next program's create after a program was killed inside
+    /// the host controller's attach request. The child listens on a port of
+    /// the SDK's range, answers nothing, and attaches a device there, so the
+    /// host controller's request waits on the import handshake on a thread
+    /// of the child. Killed then, the child cannot finish exiting while that
+    /// thread is in the request, and the kernel keeps its connection to the
+    /// child's port: the state S17 met on the ARM64 test PC on 2026-11-19,
+    /// where every later attach on the machine waited. The create that
+    /// follows must complete, and the connection must go.</summary>
+    static void KilledAttach()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== A create after a program killed inside its attach ===");
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        var pad = ctx.GetProfile("dualshock-4-v2")!;
+        // One whole life first, so the host controller is installed and the
+        // child's request reaches its handshake.
+        using (ctx.CreateController(pad, "killed:first", HMBackend.Usbip)) { }
+        int port = 0;
+        for (int p = HIDMaestro.Internal.Usbip.UsbipServer.SecondBasePort + HIDMaestro.Internal.Usbip.UsbipServer.PortRange - 1;
+             p >= HIDMaestro.Internal.Usbip.UsbipServer.SecondBasePort && port == 0; p--)
+        {
+            try
+            {
+                var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, p);
+                probe.Start();
+                probe.Stop();
+                port = p;
+            }
+            catch (System.Net.Sockets.SocketException) { }
+        }
+        Check("a port of the SDK's range is free for the child", port != 0);
+        if (port == 0) return;
+        static int Held(int port) => System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpConnections()
+            .Count(c => c.State == System.Net.NetworkInformation.TcpState.Established && c.RemoteEndPoint.Port == port
+                        && System.Net.IPAddress.IsLoopback(c.RemoteEndPoint.Address));
+        static bool Until(Func<bool> done, int ms)
+        {
+            var sw = Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < ms) { if (done()) return true; Thread.Sleep(20); }
+            return done();
+        }
+        var child = Process.Start(new ProcessStartInfo(Environment.ProcessPath!, $"attachhang {port}")
+            { RedirectStandardOutput = true, UseShellExecute = false })!;
+        try
+        {
+            string? line = null;
+            var reading = System.Threading.Tasks.Task.Run(() => child.StandardOutput.ReadLine());
+            if (reading.Wait(30000)) line = reading.Result;
+            Check("the child starts its attach", line == "ATTACHING", line ?? "no answer in 30 s");
+            if (line != "ATTACHING") return;
+            bool waiting = Until(() => Held(port) > 0, 10000);
+            Check("the host controller connects to the child's port and waits on the handshake", waiting && !child.HasExited,
+                  $"connections {Held(port)}, child {(child.HasExited ? "exited" : "running")}");
+            if (!waiting || child.HasExited) return;
+            child.Kill();
+            Thread.Sleep(1000);
+            // A program that has finished exiting holds no connection: the
+            // one still there a second after the kill is the held state.
+            int heldAfterKill = Held(port);
+            Check("the positive control: a second after the kill the host controller still holds its connection to the child's port",
+                  heldAfterKill > 0, $"connections {heldAfterKill}");
+            HMController? made = null;
+            Exception? thrown = null;
+            var clock = Stopwatch.StartNew();
+            var create = System.Threading.Tasks.Task.Run(() =>
+            {
+                try { made = ctx.CreateController(pad, "killed:next", HMBackend.Usbip); }
+                catch (Exception e) { thrown = e; }
+            });
+            bool done = create.Wait(15000);
+            long ms = clock.ElapsedMilliseconds;
+            Check("the next create completes", done && made != null,
+                  !done ? "still waiting after 15 s" : thrown != null ? $"{thrown.GetType().Name}: {thrown.Message}" : $"{ms} ms");
+            Check("the connection to the killed child's port is gone",
+                  Until(() => Held(port) == 0, 5000), $"connections {Held(port)}");
+            if (!done)
+            {
+                // Leave no machine held behind a failed check.
+                HIDMaestro.Internal.Usbip.TcpConnectionOwner.EndConnectionsToExitedServers(p => p == port);
+                create.Wait(15000);
+            }
+            made?.Dispose();
+        }
+        finally
+        {
+            try { if (!child.HasExited) child.Kill(); } catch { }
+        }
+    }
+
+    /// <summary>The child of <see cref="KilledAttach"/>: a listener that
+    /// accepts and answers nothing, and an attach at its port, which the
+    /// host controller's request waits on until the parent kills this
+    /// process.</summary>
+    static int AttachHang(int port)
+    {
+        var l = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, port);
+        l.Start();
+        var held = new List<System.Net.Sockets.Socket>();
+        new Thread(() => { while (true) { try { held.Add(l.AcceptSocket()); } catch { return; } } }) { IsBackground = true }.Start();
+        Console.WriteLine("ATTACHING");
+        Console.Out.Flush();
+        try { HIDMaestro.Internal.Usbip.VhciClient.Attach("127.0.0.1", port, "1-1"); }
+        catch (Exception e)
+        {
+            Console.WriteLine($"RETURNED {e.GetType().Name}: {e.Message}");
+            Console.Out.Flush();
+            return 3;
+        }
+        Console.WriteLine("RETURNED attached");
+        Console.Out.Flush();
+        return 4;
+    }
+
     // ── The first create of a process ────────────────────────────────────
 
     /// <summary>n fresh processes, each creating one dualshock-4-v2 on the

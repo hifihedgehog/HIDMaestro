@@ -259,6 +259,10 @@ internal static partial class VhciClient
     /// plugged the UDE device in. Returns the vhci port for detach.</summary>
     public static int Attach(string host, int port, string busid)
     {
+        // A program killed inside an earlier attach's handshake holds the
+        // host controller's attach path until its connection ends, and this
+        // request would wait behind it (TcpConnectionOwner).
+        TcpConnectionOwner.EndConnectionsToExitedServers(UsbipBackend.IsOurPort);
         using var h = Open();
         // The kept layout, which the create's census found, goes first. The
         // driver refuses a request of another layout's size before it acts
