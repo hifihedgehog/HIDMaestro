@@ -382,7 +382,9 @@ internal static partial class Program
                 Check("record removal: the owner record names the instance", string.Equals(entry.UsbInstanceId, id, StringComparison.OrdinalIgnoreCase));
                 Check("record removal: the ledger of records HIDMaestro caused names it, since the create found none", LedgerNames(id));
             }
-            foreach (string r in again) Check($"record removal: the dispose leaves {r} for the identity's next life", UsbRecords.Exists(r) && !UsbRecords.Present(r));
+            WaitGone(again, "the first life");
+            foreach (string r in again) Check($"record removal: the dispose leaves {r} for the identity's next life", UsbRecords.Exists(r) && !UsbRecords.Present(r),
+                                              $"exists {UsbRecords.Exists(r)}, present {UsbRecords.Present(r)}");
             Check("record removal: and the ledger still names it", LedgerNames(id));
 
             // The identity across lives at this key: the next life has the same USB instance and
@@ -395,6 +397,7 @@ internal static partial class Program
                       UsbRecords.Present(id) && third.OrderBy(x => x).SequenceEqual(again.OrderBy(x => x), StringComparer.OrdinalIgnoreCase),
                       string.Join(" ; ", third));
             }
+            WaitGone(again, "the second life");
         }
 
         // The full removal takes every record the ledger names whose device
@@ -403,7 +406,8 @@ internal static partial class Program
         sw.Restart();
         HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall: true);
         Console.WriteLine($"  RemoveAllVirtualControllers(Everything) in {sw.ElapsedMilliseconds} ms");
-        foreach (string r in again) Check($"record removal: the full removal keeps {r}, whose device arrived since Windows started", UsbRecords.Exists(r) && !UsbRecords.Present(r));
+        foreach (string r in again) Check($"record removal: the full removal keeps {r}, whose device arrived since Windows started", UsbRecords.Exists(r) && !UsbRecords.Present(r),
+                                          $"exists {UsbRecords.Exists(r)}, present {UsbRecords.Present(r)}");
         Check("record removal: and the ledger still names it for a removal after a restart", LedgerNames(id));
         var end = ReadMachine();
         Check("record removal: after the full removal the host controller reads as before", end.HostController == before.HostController,
@@ -414,6 +418,18 @@ internal static partial class Program
         var end2 = OwnAdded(end.Records.Except(after.Records, StringComparer.OrdinalIgnoreCase).Except(again, StringComparer.OrdinalIgnoreCase),
                             r => IsOwnRecord(r, id)).ToList();
         Check("record removal: no other record of the run is left", end2.Count == 0, string.Join(" ; ", end2));
+    }
+
+    /// <summary>Waits up to 10 s, as the positive control does at its
+    /// dispose, for every record in <paramref name="records"/> to leave the
+    /// device tree, and prints how long that took. A USB/IP dispose unplugs
+    /// the device and returns, and Windows takes it out of the tree after
+    /// that.</summary>
+    static void WaitGone(IReadOnlyCollection<string> records, string life)
+    {
+        var sw = Stopwatch.StartNew();
+        while (records.Any(UsbRecords.Present) && sw.ElapsedMilliseconds < 10000) Thread.Sleep(50);
+        Console.WriteLine($"  {life}: its device left the device tree {sw.ElapsedMilliseconds} ms after the dispose returned");
     }
 
     static string Indent(string s) => string.Join("\n", s.TrimEnd('\n').Split('\n').Select(l => "    " + l)) + "\n";
