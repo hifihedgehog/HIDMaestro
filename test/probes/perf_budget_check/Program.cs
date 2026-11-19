@@ -234,6 +234,12 @@ internal static partial class Program
 {
     const BindingFlags Any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
 
+    /// <summary>The audio engine of a persona with isochronous endpoints,
+    /// which every device these measurements build has. A device without
+    /// them has no engine, and the measurement stops with that cause.</summary>
+    static UsbAudioEngine AudioOf(UsbipEmulatedDevice device) =>
+        device.Audio ?? throw new InvalidOperationException("the device has no isochronous endpoint, so it has no audio engine");
+
     const string Ds4 = "dualshock-4-v2";
     const string Xbox360 = "xbox-360-wired";
     const string XboxSeries = "xbox-series-xs-bt";
@@ -2049,7 +2055,7 @@ internal static partial class Program
         var device = new UsbipEmulatedDevice(profile, UsbipIndex);
         server.Register(device);
         int heard = 0;
-        device.Audio.OutFrames += _ => heard++;
+        AudioOf(device).OutFrames += _ => heard++;
         try
         {
             using var w = new UsbipWire(server.Port, device.BusId);
