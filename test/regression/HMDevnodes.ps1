@@ -32,12 +32,19 @@
 # controller's entry): by its USB instance id (UsbInstanceId), which the
 # create writes for every persona whose serial names it, or, for an entry
 # without one (a persona that shares its serial, which Windows names by
-# port), by its vhci port, which is its port on the root hub. The device's
-# interfaces, HID collections and audio endpoints are HIDMaestro's with
-# it. A program's record goes when it exits, so the battery keeps every
-# USB instance id a record has named since the battery started
-# (HMDevnodeReader.StartOwnerWatch reads the records every 100 ms), and a
-# persona a program left behind still counts after its record is gone.
+# port), by its vhci port, which is its port on the root hub, while that
+# record lives. The ledger of USB records HIDMaestro caused
+# (HKLM\SOFTWARE\HIDMaestroUsbRecords, an InstanceId per subkey) names
+# instances too, after their programs are gone. The device's interfaces,
+# HID collections and audio endpoints are HIDMaestro's with it. A
+# program's record goes when it exits, so the battery keeps every USB
+# instance id a record or the ledger has named since the battery started,
+# and the instance id of every device it found on a recorded port
+# (HMDevnodeReader.StartOwnerWatch reads them every 100 ms). A persona a
+# program left behind therefore still counts after its record is gone,
+# whether it was named by instance or by port, as long as the watch saw
+# it while its record lived. A real device another program attached is
+# named by none of them and never counts.
 # The host controller and its root hub are the transport, present from its
 # install on, and no controller a scenario creates, so they are left out.
 # Nothing below a host controller without the stamp counts.
@@ -82,6 +89,8 @@ public static class HMDevnodeReader {
     // The owner records (MachineClaims.RecordsRoot) and every USB instance
     // id they have named since StartOwnerWatch.
     const string OwnerRecordsRoot = @"SOFTWARE\HIDMaestroOwners";
+    // The ledger of USB records HIDMaestro caused (UsbRecords.LedgerRoot).
+    const string UsbRecordsRoot = @"SOFTWARE\HIDMaestroUsbRecords";
     static readonly HashSet<string> s_seenUsbIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     static readonly object s_seenLock = new object();
     static System.Threading.Timer s_watch;
@@ -121,11 +130,60 @@ public static class HMDevnodeReader {
                 }
             }
         }
+        try {
+            using (RegistryKey ledger = Registry.LocalMachine.OpenSubKey(UsbRecordsRoot)) {
+                if (ledger != null)
+                    foreach (string name in ledger.GetSubKeyNames()) {
+                        using (RegistryKey e = ledger.OpenSubKey(name)) {
+                            string id = e == null ? null : e.GetValue("InstanceId") as string;
+                            if (!string.IsNullOrEmpty(id)) owned.UsbInstanceIds.Add(id);
+                        }
+                    }
+            }
+        } catch { }
+        // A device on a port a live record names is remembered by its
+        // instance id, so it still counts once the record is gone.
+        if (owned.Ports.Count > 0) {
+            foreach (int port in owned.Ports) {
+                string id = DeviceOnPort(port);
+                if (id != null) owned.UsbInstanceIds.Add(id);
+            }
+        }
         lock (s_seenLock) {
             foreach (string id in owned.UsbInstanceIds) s_seenUsbIds.Add(id);
             foreach (string id in s_seenUsbIds) owned.UsbInstanceIds.Add(id);
         }
         return owned;
+    }
+
+    // The present device on vhci port <port> of a present host controller
+    // that carries UsbipOwnerHardwareId, or null: the root hub's child whose
+    // CM_DRP_ADDRESS is the port.
+    public static string DeviceOnPort(int port) {
+        using (RegistryKey rootKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT\USB")) {
+            if (rootKey == null) return null;
+            foreach (string name in rootKey.GetSubKeyNames()) {
+                string id = @"ROOT\USB\" + name;
+                string[] hw = HardwareIdsOf(id);
+                if (!HasId(hw, UsbipOwnerHardwareId)) continue;
+                uint hc;
+                if (CM_Locate_DevNodeW(out hc, id, 0) != 0) continue;
+                uint hub;
+                if (CM_Get_Child(out hub, hc, 0) != 0) continue;
+                uint child;
+                if (CM_Get_Child(out child, hub, 0) != 0) continue;
+                while (true) {
+                    if (AddressOf(child) == port) {
+                        var sb = new StringBuilder(512);
+                        if (CM_Get_Device_IDW(child, sb, sb.Capacity, 0) == 0) return sb.ToString();
+                    }
+                    uint next;
+                    if (CM_Get_Sibling(out next, child, 0) != 0) break;
+                    child = next;
+                }
+            }
+        }
+        return null;
     }
 
     // The hardware ID the SDK stamps on the usbip-win2 host controller it
