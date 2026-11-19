@@ -110,8 +110,9 @@ internal static unsafe partial class Program
             return;
         }
         bool stated = R8Stated.TryGetValue(p.Id, out var s);
+        bool inNotes = stated && (p.Notes ?? "").Contains(s.Note, StringComparison.Ordinal);
         Check($"{p.Id}: R8, xusb22's HID device on USB/IP differs from the profile's descriptor as the profile's notes state",
-              stated && s.Layout == usbip && (p.Notes ?? "").Contains(s.Note, StringComparison.Ordinal),
-              !stated ? "a difference the notes do not state" : s.Layout != usbip ? $"the table's layout is {s.Layout}" : $"the notes lack \"{s.Note}\"");
+              stated && s.Layout == usbip && inNotes,
+              !stated ? "a difference the notes do not state" : s.Layout != usbip ? $"the table's layout is {s.Layout}" : inNotes ? "" : $"the notes lack \"{s.Note}\"");
     }
 }
