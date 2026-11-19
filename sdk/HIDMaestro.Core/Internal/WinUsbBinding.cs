@@ -64,13 +64,15 @@ internal static partial class WinUsbBinding
     /// <summary>The package for <paramref name="profile"/>, once its device
     /// is shown to take one: a device with one interface and no device
     /// class, and a GUID to register. Null when the profile declares no
-    /// winUsb.</summary>
-    internal static Package? PackageFor(ControllerProfile profile, Usbip.UsbDescriptorSet d)
+    /// winUsb. <paramref name="backend"/> is the backend the controller
+    /// resolved to, which decides, not the profile's default: the binding is
+    /// for a device the SDK serves on the USB/IP backend.</summary>
+    internal static Package? PackageFor(ControllerProfile profile, Usbip.UsbDescriptorSet d, HMBackend backend)
     {
         var spec = profile.UsbConfiguration?.WinUsb;
         if (spec == null) return null;
         string at = $"Profile '{profile.Id}': usbConfiguration.winUsb";
-        if (!profile.RequiresUsbipBackend)
+        if (backend != HMBackend.Usbip)
             throw new InvalidOperationException($"{at} applies to the usbip backend only.");
         if (!Guid.TryParse(spec.InterfaceGuid, out var guid) || guid == Guid.Empty)
             throw new InvalidOperationException($"{at}.interfaceGuid \"{spec.InterfaceGuid}\" is not a GUID.");
@@ -297,6 +299,23 @@ DeviceName = ""{deviceName}""
             keeper.Phase = BindPhase.Binding;
             keeper.Missed = false;
         }
+        // A machine that refuses the package: the device asks for WinUSB
+        // itself, and keeps asking on every import after a drop, so no
+        // re-bind is kept.
+        if (BindsByOsDescriptors())
+        {
+            try
+            {
+                var bound = BindByOsDescriptors(controller, handle, keeper);
+                lock (keeper.Gate) keeper.Phase = BindPhase.Kept;
+                return bound;
+            }
+            catch
+            {
+                lock (keeper.Gate) keeper.Phase = BindPhase.Refused;
+                throw;
+            }
+        }
         // Set before the bind, so a drop and re-import while it runs is
         // bound once it returns. The server's port tracker reports each port
         // on a thread that holds the device's port lock, so the bind runs
@@ -419,7 +438,7 @@ DeviceName = ""{deviceName}""
     {
         left = null;
         var d = handle.Device.Descriptors;
-        var package = PackageFor(controller.Profile.Inner, d)
+        var package = PackageFor(controller.Profile.Inner, d, controller.Backend)
             ?? throw new InvalidOperationException(
                 $"Profile '{controller.Profile.Id}' declares no usbConfiguration.winUsb, so its device takes no WinUSB binding.");
         string? published = null;
@@ -431,6 +450,9 @@ DeviceName = ""{deviceName}""
             instanceId = WaitForDevnode(handle, d.VendorId, d.ProductId, remaining, keeper)
                 ?? throw new InvalidOperationException(
                     $"The device at 127.0.0.1:{handle.ServerPort} bus id {handle.Device.BusId} did not appear within 10 s.");
+            // A device Windows names by its port is named in the owner
+            // record once found (Usbip.UsbRecords).
+            handle.ResolveRecord(instanceId);
             WaitInstalled(instanceId, TimeoutScale.Apply(10_000), keeper);
 
             bool needPackage = false, retry = false;
@@ -726,6 +748,11 @@ DeviceName = ""{deviceName}""
             if (priorInf == null) return false;
             if (priorInf.Length > 0) return HasLeft(instanceId) && FlagForNextArrival(instanceId);
         }
+        // Windows' own winusb.inf, on a devnode whose claim recorded another
+        // driver: the device asked for it with its Microsoft OS descriptors
+        // (BindByOsDescriptors). Flagged as a package bind is, so the next
+        // arrival, which serves no such descriptors, installs by rank.
+        if (IsOsDescriptorBinding(inf, priorInf)) return HasLeft(instanceId) && FlagForNextArrival(instanceId);
         switch (IsOurPackage(inf))
         {
             case false:
@@ -1191,6 +1218,20 @@ DeviceName = ""{deviceName}""
 
     // ── Finding the devnode ──────────────────────────────────────────────
 
+    /// <summary>Name the USB instance of a device Windows names by its port,
+    /// while it is still on that port, so the records its create caused can
+    /// go after it leaves (<see cref="Usbip.UsbipBackendHandle.ResolveRecord"/>).
+    /// A device named by its serial was named at its create.</summary>
+    internal static void ResolveRecord(Usbip.UsbipBackendHandle handle)
+    {
+        var d = handle.Device.Descriptors;
+        if (d.UsbInstanceId != null) return;
+        int port = Usbip.VhciClient.FindLocation("127.0.0.1", handle.ServerPort, handle.Device.BusId);
+        if (port > 0 && FindDevnode(port, d.VendorId, d.ProductId) is { } id
+            && Usbip.VhciClient.FindLocation("127.0.0.1", handle.ServerPort, handle.Device.BusId) == port)
+            handle.ResolveRecord(id);
+    }
+
     /// <summary>The present devnode with this VID and PID on usbip-win2's
     /// host controller at the given vhci port. For a full-speed or
     /// high-speed device the vhci plugs the device in at the root hub port
@@ -1379,6 +1420,15 @@ DeviceName = ""{deviceName}""
     /// <summary>No driver, or one that ships with Windows. The driver store
     /// publishes every third-party INF under an oem name, so an INF with any
     /// other name is an inbox one (Microsoft Learn, "Driver Store").</summary>
+    /// <summary>True when a devnode runs Windows' own winusb.inf while its
+    /// claim recorded another driver INF: the binding by Microsoft OS
+    /// descriptors put it there. registry_ownership_check's offline part
+    /// checks it.</summary>
+    internal static bool IsOsDescriptorBinding(string? inf, string? priorInf) =>
+        string.Equals(Path.GetFileName(inf ?? ""), "winusb.inf", StringComparison.OrdinalIgnoreCase)
+        && !string.IsNullOrEmpty(priorInf)
+        && !string.Equals(Path.GetFileName(priorInf), "winusb.inf", StringComparison.OrdinalIgnoreCase);
+
     private static bool IsInboxOrNone(string? inf) =>
         string.IsNullOrEmpty(inf)
         || !Path.GetFileName(inf).StartsWith("oem", StringComparison.OrdinalIgnoreCase);

@@ -1021,22 +1021,16 @@ public sealed class HMContext : IDisposable
             // The device emulator maps the index's sections before its
             // attach, so a failed attach leaves them for the catch below.
             handle = Internal.Usbip.UsbipBackend.CreateDevice(profile.Inner, index, lease.Identity);
-            // The USB instance the device's records sit under, in the owner
-            // record, for record cleanup.
-            if (handle.Device.Descriptors.UsbInstanceId is { } usbId)
-            {
-                Internal.MachineClaims.SetControllerValue(lease.Identity.Token, "UsbInstanceId", usbId);
-                // A derived device's HID interface is started before the
-                // create returns, as the UMDF2 create's is. The wait finds
-                // the device on its port, and the record takes the name
-                // Windows gave it when that is not the serial's.
-                if (handle.Device.Derived)
-                {
-                    string named = Internal.DeviceOrchestrator.AwaitUsbipStart(usbId, handle.Device.VhciPort, index);
-                    if (!string.Equals(named, usbId, StringComparison.OrdinalIgnoreCase))
-                        Internal.MachineClaims.SetControllerValue(lease.Identity.Token, "UsbInstanceId", named);
-                }
-            }
+            // The USB instance the device's records sit under is in the owner
+            // record, and in the ledger of records HIDMaestro caused when it
+            // had none, from before the attach (UsbipBackend.CreateDevice). A
+            // derived device's HID interface is started before the create
+            // returns, as the UMDF2 create's is. The wait finds the device on
+            // its port, and when Windows named it by its port, not its
+            // serial, the owner record and the ledger take that name
+            // (UsbipBackendHandle.ResolveRecord).
+            if (handle.Device.Descriptors.UsbInstanceId is { } usbId && handle.Device.Derived)
+                handle.ResolveRecord(Internal.DeviceOrchestrator.AwaitUsbipStart(usbId, handle.Device.VhciPort, index));
             var controller = new HMController(this, slot, lease, profile, instanceId: null, handle, lease.Identity.Key);
             try
             {
@@ -1227,10 +1221,15 @@ public sealed class HMContext : IDisposable
                 // No WinUSB bind after a re-import lands once the ledger
                 // below has released the controller's holds.
                 try { Internal.WinUsbBinding.StopKeeping(controller); } catch { }
+                // A device Windows names by its port is found on that port
+                // while it is still there, so the ledger names its record.
+                try { Internal.WinUsbBinding.ResolveRecord(controller.UsbipHandle); } catch { }
                 try { controller.UsbipHandle.Dispose(); } catch { }
                 try { Internal.SharedMemoryIO.DestroyController(controller.Index); } catch { }
-                // A WinUSB binding (HMController.BindWinUsb) goes back once
-                // the device is gone.
+                // A WinUSB binding (HMController.BindWinUsb) and the usbflags
+                // claim go back once the device is gone. The device's records
+                // stay, so its next life has the same USB instance and HID
+                // paths. The full removal and the uninstall remove them.
                 try { Internal.RegistryLedger.Release(controller.Index); } catch { }
                 return;
             }
