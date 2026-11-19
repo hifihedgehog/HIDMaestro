@@ -352,6 +352,15 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     private static readonly string? DiagPath =
         Environment.GetEnvironmentVariable("HIDMAESTRO_DIAG_READS");
     private readonly Dictionary<byte, long> _readsPerEp = new();
+    private int _diagLastId = -1;
+
+    /// <summary>One line of the read diagnostic, with the time to the
+    /// millisecond.</summary>
+    private void DiagLine(string text)
+    {
+        try { UserLog.Append(DiagPath!, $"[{DateTime.Now:HH:mm:ss.fff}] {BusId} {text}{Environment.NewLine}"); }
+        catch { }
+    }
     private readonly Dictionary<byte, long> _completionsPerEp = new();
     private long _diagLastDump;
 
@@ -682,6 +691,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                                 sb.Append($"  queued={_frameQueue.Count}");
                                 foreach (var kv in _pendingInterruptIn)
                                     sb.Append($" parked[0x{kv.Key:X2}]={kv.Value.Count}");
+                                // A reply waiting beside a parked read is one
+                                // the device owes and has not sent.
+                                if (_engine != null)
+                                    sb.Append($"  replyWaiting={_engine.ReplyWaiting} reportOwed={_reportOwed}");
                                 line = sb.ToString();
                             }
                             // Written as the user: the path comes from the
@@ -754,6 +767,11 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                         _inputReportLength[slot] = length;
                     }
                     var pending = _primaryPending;
+                    if (DiagPath != null && extended && length > 0 && report[0] != _diagLastId)
+                    {
+                        _diagLastId = report[0];
+                        DiagLine($"pump: frame seq {_lastSharedSeqNo} starts {Convert.ToHexString(report[..Math.Min(2, length)])}, {(pending.Count > 0 ? "answers a parked read" : _frameQueue.Count > 0 ? "replaces the frame no read took" : "waits for a read")}");
+                    }
                     if (pending.Count > 0)
                     {
                         seq = pending.Dequeue();
@@ -902,6 +920,11 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         } while ((seq1 != seq2 || (seq1 & 1) != 0) && --retries > 0);
         if (seq1 != seq2 || (seq1 & 1) != 0) { length = 0; return false; }
         if (seq1 == _lastSharedSeqNo) { length = 0; return false; } // no new frame
+        // The section holds one frame, so a frame written over before this
+        // pump read it is gone. With the read diagnostic on, each one is
+        // named: a writer adds 2 to the sequence number for each frame.
+        if (DiagPath != null && _lastSharedSeqNo != 0 && seq1 - _lastSharedSeqNo > 2)
+            DiagLine($"pump: {(seq1 - _lastSharedSeqNo) / 2 - 1} frame(s) written over unread, between seq {_lastSharedSeqNo} and {seq1}");
         _lastSharedSeqNo = seq1;
         return true;
     }
@@ -1751,7 +1774,12 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     {
         if (c == null) return;
         try { c.SendRetSubmitNonIso(seqnum, status, actualLength, inPayload); }
-        catch { }
+        catch (Exception e)
+        {
+            // The read's answer is lost with the connection that failed.
+            // Logged, so a host that waits on it has a cause on record.
+            DeviceOrchestrator.LogDiag($"usbip send: the answer to read {seqnum} was not sent: {e.GetType().Name}: {e.Message}");
+        }
         finally { c.ExitSend(); }
     }
 

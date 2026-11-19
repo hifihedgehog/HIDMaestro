@@ -278,6 +278,13 @@ internal sealed unsafe class ProtocolHost : IDisposable
         }
         if (waitMs == 0) return false;
         _misses++;
+        // The next message goes out over one the driver has not delivered,
+        // which the section's one frame then loses. Logged, so a host that
+        // never saw a reply has the cause on record: the three misses, and
+        // the fourth, from which the host no longer waits. Later ones are
+        // the same fact and stay out of the log.
+        if (_misses <= 4 && DeviceOrchestrator.DiagEnabled)
+            DeviceOrchestrator.LogDiag($"protocol host {Protocol.ProfileId}: seq {seq} was not acknowledged {(_misses > 3 ? "and the host no longer waits" : $"within {waitMs} ms")}, miss {_misses}");
         pending = false;
         return true;
     }
