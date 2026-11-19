@@ -190,17 +190,35 @@ internal static partial class Program
                     var got = new ManualResetEventSlim();
                     int gotLength = -1;
                     byte gotFirst = 0;
+                    // Another program on the machine can write to the same
+                    // device. On the laptop on 2026-11-19 one sent this
+                    // Joy-Con shape a report 0x01 of its own before this
+                    // write, with the same ID and length. The packet counted
+                    // is the one that carries this write's bytes, four of the
+                    // pattern from its start, and any other is noted.
+                    byte[] mark = w.AsSpan(1, Math.Min(4, w.Length - 1)).ToArray();
+                    int others = 0;
+                    string? otherFirst = null;
                     c.OutputReceived += (_, pkt) =>
                     {
                         if (pkt.ReportId != report.ReportId || got.IsSet) return;
-                        gotLength = pkt.Data.Length;
-                        gotFirst = pkt.Data.Length > 0 ? pkt.Data.Span[0] : (byte)0;
+                        var d = pkt.Data.Span;
+                        if (d.Length < mark.Length || !d[..mark.Length].SequenceEqual(mark))
+                        {
+                            if (Interlocked.Increment(ref others) == 1) otherFirst = Convert.ToHexString(d[..Math.Min(12, d.Length)]);
+                            return;
+                        }
+                        gotLength = d.Length;
+                        gotFirst = d[0];
                         got.Set();
                     };
                     try { fs.Write(w, 0, w.Length); fs.Flush(); }
                     catch (Exception e) { Note($"{name}: WriteFile {e.GetType().Name}: {e.Message}"); }
                     int expect = Math.Min(report.FrameBytes - (report.ReportId != 0 ? 1 : 0), SharedMemoryIO.DATA_CAPACITY);
-                    if (got.Wait(3000))
+                    bool arrived = got.Wait(3000);
+                    if (others > 0)
+                        Note($"{name}: another program wrote output report 0x{report.ReportId:X2} to the device first, {others} time(s), starting {otherFirst}");
+                    if (arrived)
                         Check($"{name}: output report 0x{report.ReportId:X2} of {report.FrameBytes} bytes arrives whole, as far as the output section holds it",
                               gotLength == expect && gotFirst == w[1], $"{gotLength} of {expect} bytes");
                     else if (p.Inner.Protocol != null)
