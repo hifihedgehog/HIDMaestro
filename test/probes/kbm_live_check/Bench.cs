@@ -348,7 +348,7 @@ internal static class Bench
         bool ok = control && downBefore && repeats == 0 && (usbip ? goneAt >= 0 : upAt >= 0);
         Console.WriteLine($"=== Held key on kill, {(usbip ? "Usbip" : "Umdf2")}: {(ok ? "PASS" : "FAIL")}; control {(control ? "seen" : "NOT seen")}; " +
                           $"Left Shift {(downBefore ? "down" : "up")} before the kill, {(upAt >= 0 ? "up" : "still down")} after it, " +
-                          $"{(usbip ? (goneAt >= 0 ? "the keyboard gone" : "the keyboard still listed") : "")}, {repeats} repeats after {(usbip ? "it went" : "the up")} ===");
+                          $"{(usbip ? (goneAt >= 0 ? "the keyboard gone, " : "the keyboard still listed, ") : "")}{repeats} repeats after {(usbip ? "it went" : "the up")} ===");
         return ok ? 0 : 1;
     }
 
