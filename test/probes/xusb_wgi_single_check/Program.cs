@@ -466,8 +466,12 @@ static class XusbWgiSingleCheck
     {
         Vid = prof.VendorId;
         Pid = prof.ProductId;
-        bool onUsbip = backend == HMBackend.Usbip || (backend == HMBackend.Auto && HMContext.MachineBackend == HMBackend.Usbip);
-        WgiPid = onUsbip && prof.Connection == "wireless-adapter" ? (ushort)0 : Pid;
+        // WGI lists the controller under the product ID XInput's
+        // capabilities give, on both backends: 0 for the pad behind a
+        // receiver, which the companion answers from the profile and xusb22
+        // from the receiver's link control packet.
+        string? capsPid = prof.XInput?.Capabilities?.Pid;
+        WgiPid = capsPid == null ? Pid : Convert.ToUInt16(capsPid, 16);
         // WGI lists a Gamepad only for an XInput pad of the gamepad subtype,
         // as for the retail pads: an arcade stick, a dance pad, a flight
         // stick, a guitar or a wheel is a RawGameController alone.
