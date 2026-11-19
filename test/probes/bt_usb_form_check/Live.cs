@@ -46,8 +46,9 @@ internal static partial class Program
         var sw = Stopwatch.StartNew();
         while (info == null && sw.ElapsedMilliseconds < 15000)
         {
-            info = HMDeviceExtractor.ListDevices().FirstOrDefault(d => d.VendorId == profile.VendorId
-                && d.ProductId == profile.ProductId && d.SerialNumberString == serial);
+            // The presented form's PID: the Genesis pad carries another on USB.
+            info = HMDeviceExtractor.ListDevices().FirstOrDefault(d => d.VendorId == form.VendorId
+                && d.ProductId == form.ProductId && d.SerialNumberString == serial);
             if (info == null) Thread.Sleep(50);
         }
         Check($"the HID interface enumerates (serial {serial})", info != null, info?.DevicePath ?? "");

@@ -16,6 +16,21 @@
 //     2, down-left 3, left 4, up-left 5, and the center and a push inside
 //     the profile's dead zone 8
 //
+// Then the catalog's Joy-Con (L), Joy-Con (R), SNES, N64 and Genesis
+// controllers for Nintendo Switch Online, each on the same mechanisms:
+//
+//   - the captured identity (the Genesis reports 057E:2017 over Bluetooth)
+//     and the captured 170-byte Bluetooth descriptor
+//   - the captured 0x3F report at rest, and each button on the 0x3F button
+//     and the 0x30 bit the real pad sends it on (dekuNukem, BlueRetro
+//     sw.c, hid-nintendo.c button mappings)
+//   - SDL 3.4.18's Bluetooth open gets an acknowledged 0x21 reply to every
+//     subcommand, the device info carries the pad's device type, and the
+//     stick calibration read echoes its address, without which SDL's open
+//     fails (SDL_hidapi_switch.c LoadStickCalibration)
+//   - the USB form each names answers SDL's USB setup with the device type
+//     and sends the 64-byte 0x30 report after it
+//
 // Exit 0 PASS, 1 FAIL.
 using System;
 using System.Collections.Generic;
@@ -67,6 +82,7 @@ internal static class Program
 
         Hat(p, proto);
         Open(p, proto);
+        Catalog();
         return Done();
     }
 
@@ -165,5 +181,217 @@ internal static class Program
         Check("the device info is nxbt's for a Joy-Con (L): 82 02 03 8B 01 02, the address, 01 01",
               info.Length == 49 && info.AsSpan(13, want.Length).SequenceEqual(want), Convert.ToHexString(info.AsSpan(13, Math.Min(14, Math.Max(0, info.Length - 13)))));
         Check("the reply's battery and connection byte is nxbt's 9E for a Joy-Con", info.Length > 2 && info[2] == 0x9E, info.Length > 2 ? $"{info[2]:X2}" : "");
+    }
+
+    // ── The catalog's five Bluetooth-only Nintendo pads and their USB forms ──
+
+    /// <summary>The 170-byte Bluetooth descriptor every Switch Bluetooth
+    /// pad serves, as captured from Joy-Con (L), Joy-Con (R), SNES, N64 and
+    /// Genesis controllers (darthcloud bt_traces, Nefarius.Utilities.Bluetooth
+    /// Dumps, switchbrew Joy-Con revisions 153 and 154).</summary>
+    const string BtDescriptor =
+        "05010905a1010601ff8521092175089530810285300930750895308102853109317508966901810285320932750896690181028533093375089669018102853f05091901291015002501750195108102050109391500250775049501814205097504950181010501093009310933093416000027ffff00007510950481020601ff85010901750895309102851009107508953091028511091175089530910285120912750895309102c0";
+
+    /// <summary>One pad: its Bluetooth identity, the device type it reports
+    /// (SDL_hidapi_nintendo.h, hid-nintendo.c), the PID of its USB form,
+    /// whether SDL reads its six-axis calibration (SDL_hidapi_switch.c
+    /// HIDAPI_DriverSwitch_OpenJoystick skips it for the NSO pads), byte 2
+    /// and byte 12 of its 0x30 report, its 0x3F report at rest, and each
+    /// button as HMButton bit, 0x30 byte and mask, and 0x3F button bit
+    /// (dekuNukem bluetooth_hid_notes.md, BlueRetro sw.c, hid-nintendo.c
+    /// button mappings).</summary>
+    sealed record Pad(string Id, ushort Pid, string Product, byte Type, ushort UsbPid, bool Imu, byte Battery, byte Motor,
+                      string Rest3F, (int Bit, int Byte, byte Mask, int Simple)[] Buttons);
+
+    static readonly Pad[] Pads =
+    {
+        new("joycon-l", 0x2006, "Joy-Con (L)", 0x01, 0x2006, true, 0x8E, 0xB0, "3F0000080080008000800080", new[]
+        {
+            (4, 5, (byte)0x20, 4), (5, 5, (byte)0x10, 5), (8, 4, (byte)0x01, 8), (10, 4, (byte)0x08, 10),
+            (13, 4, (byte)0x20, 13), (14, 5, (byte)0x40, 14), (15, 5, (byte)0x80, 15),
+        }),
+        new("joycon-r", 0x2007, "Joy-Con (R)", 0x02, 0x2007, true, 0x8E, 0xB0, "3F0000080080008000800080", new[]
+        {
+            (0, 3, (byte)0x08, 0), (1, 3, (byte)0x02, 1), (2, 3, (byte)0x04, 2), (3, 3, (byte)0x01, 3),
+            (4, 3, (byte)0x20, 4), (5, 3, (byte)0x10, 5), (9, 4, (byte)0x02, 9), (11, 4, (byte)0x04, 11),
+            (12, 4, (byte)0x10, 12), (14, 3, (byte)0x40, 14), (15, 3, (byte)0x80, 15),
+        }),
+        new("snes-nso", 0x2017, "SNES Controller", 0x0B, 0x2017, false, 0x80, 0x00, "3F0000080080008000800080", new[]
+        {
+            (0, 3, (byte)0x04, 0), (1, 3, (byte)0x08, 1), (2, 3, (byte)0x01, 2), (3, 3, (byte)0x02, 3),
+            (4, 5, (byte)0x40, 4), (5, 3, (byte)0x40, 5), (6, 5, (byte)0x80, 6), (15, 3, (byte)0x80, 15),
+            (8, 4, (byte)0x01, 8), (9, 4, (byte)0x02, 9),
+        }),
+        new("n64-nso", 0x2019, "N64 Controller", 0x0C, 0x2019, false, 0x80, 0x08, "3F00000800800080" + "00806F5C", new[]
+        {
+            (0, 3, (byte)0x04, 0), (1, 3, (byte)0x08, 1), (2, 3, (byte)0x01, 2), (3, 3, (byte)0x02, 3),
+            (4, 5, (byte)0x40, 4), (5, 3, (byte)0x40, 5), (6, 5, (byte)0x80, 6), (7, 3, (byte)0x80, 7),
+            (8, 4, (byte)0x01, 8), (9, 4, (byte)0x02, 9), (10, 4, (byte)0x08, 10), (12, 4, (byte)0x10, 12),
+            (13, 4, (byte)0x20, 13),
+        }),
+        new("genesis-nso", 0x2017, "MD/Gen Control Pad", 0x0D, 0x201E, false, 0x80, 0x00, "3F0000080080008000800080", new[]
+        {
+            (0, 3, (byte)0x04, 0), (1, 3, (byte)0x08, 1), (5, 3, (byte)0x40, 5), (7, 3, (byte)0x80, 7),
+            (9, 4, (byte)0x02, 9), (12, 4, (byte)0x10, 12), (13, 4, (byte)0x20, 13),
+        }),
+    };
+
+    static void Catalog()
+    {
+        Console.WriteLine();
+        Console.WriteLine("--- The catalog's Bluetooth-only Nintendo pads and their USB forms ---");
+        var db = ProfileDatabase.LoadEmbedded();
+        var byId = db.All.ToDictionary(q => q.Id, StringComparer.OrdinalIgnoreCase);
+        foreach (var pad in Pads)
+        {
+            Console.WriteLine($"  {pad.Id}");
+            if (!byId.TryGetValue(pad.Id, out var p)) { Check($"{pad.Id}: in the catalog", false); continue; }
+            Check($"{pad.Id}: 057E:{pad.Pid:X4} \"{pad.Product}\" over Bluetooth",
+                  p.VendorId == 0x057E && p.ProductId == pad.Pid && p.ProductString == pad.Product
+                  && string.Equals(p.Connection, "bluetooth", StringComparison.OrdinalIgnoreCase),
+                  $"{p.VendorId:X4}:{p.ProductId:X4} \"{p.ProductString}\" {p.Connection}");
+            Check($"{pad.Id}: the captured 170-byte Bluetooth descriptor",
+                  string.Equals(p.Descriptor, BtDescriptor, StringComparison.OrdinalIgnoreCase), $"{(p.Descriptor?.Length ?? 0) / 2} bytes");
+            CompiledProtocol? proto = null;
+            try { p.ValidateDeviceModel(); proto = CompiledProtocol.Compile(p, null); }
+            catch (Exception e) { Check($"{pad.Id}: its protocol compiles", false, e.Message); }
+            if (proto == null) { Check($"{pad.Id}: carries a protocol", false); continue; }
+            CheckPad(pad, p, proto);
+            CheckUsbForm(pad, p, byId);
+        }
+    }
+
+    static byte[] Subcommand(ref byte number, byte id, int length, params byte[] data)
+    {
+        var pkt = new byte[length];
+        pkt[0] = 0x01;
+        pkt[1] = number;
+        number = (byte)((number + 1) & 0xF);
+        new byte[] { 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40 }.CopyTo(pkt, 2);
+        pkt[10] = id;
+        data.CopyTo(pkt, 11);
+        return pkt;
+    }
+
+    static byte[] Spi(uint a, byte len) => new[] { (byte)a, (byte)(a >> 8), (byte)(a >> 16), (byte)(a >> 24), len };
+
+    static void CheckPad(Pad pad, ControllerProfile p, CompiledProtocol proto)
+    {
+        const int index = 2;
+        var (e, runner) = Engine(p, proto, index);
+        var build = new Build { Engine = e };
+        var spec = p.StateBlockSpecForCodec();
+
+        // At rest, before a host speaks the protocol: the captured 0x3F report.
+        int n = runner.Visit(build);
+        string rest = n > 0 ? Convert.ToHexString(build.Buffer.AsSpan(0, n)) : "none";
+        Check($"{pad.Id}: before the handshake, the captured 0x3F report at rest", rest == pad.Rest3F, rest);
+
+        // Each button in the 0x3F report, before the handshake.
+        var miss = new List<string>();
+        foreach (var b in pad.Buttons)
+        {
+            var block = new byte[spec.Size];
+            VendorBlobCodec.EncodeInput(spec, new HMGamepadState { Buttons = (HMButton)(1u << b.Bit) },
+                0.5f, 0.5f, 0.5f, 0.5f, 0f, 0f, block, new VendorBlobCodec.EncoderState());
+            e.SetStateBlock(block);
+            int m = runner.Visit(build);
+            int word = m == 12 ? build.Buffer[1] | (build.Buffer[2] << 8) : -1;
+            if (word != 1 << b.Simple) miss.Add($"#{b.Bit}->{(word < 0 ? "none" : "0x" + word.ToString("X4"))}");
+        }
+        e.SetStateBlock(p.StateBlockAtRest());
+        Check($"{pad.Id}: each button on its own 0x3F button", miss.Count == 0, string.Join(" ", miss));
+
+        // SDL 3.4.18's Bluetooth open (SDL_hidapi_switch.c BReadDeviceInfo,
+        // LoadStickCalibration, LoadIMUCalibration for the Joy-Cons only,
+        // SetVibrationEnabled, UpdateSlotLED, the Joy-Cons' home LED,
+        // SetInputMode), then hid-nintendo's extra calibration reads.
+        byte number = 0;
+        var sent = new List<(string Name, byte[] Reply)>();
+        void Sub(string name, byte id, params byte[] data)
+        {
+            e.HandleCommand(Subcommand(ref number, id, 49, data), Stopwatch.GetTimestamp());
+            var r = new byte[64];
+            int k = e.TakeReply(r.Length, r);
+            sent.Add((name, r[..Math.Max(0, k)]));
+        }
+        Sub("02", 0x02);
+        Sub("10 8010", 0x10, Spi(0x8010, 0x16));
+        Sub("10 603D", 0x10, Spi(0x603D, 0x12));
+        if (pad.Imu) { Sub("10 6020", 0x10, Spi(0x6020, 0x18)); Sub("10 8026", 0x10, Spi(0x8026, 0x14)); }
+        Sub("48", 0x48, 0x01);
+        Sub("30", 0x30, 0x01);
+        if (pad.Imu) { Sub("38", 0x38, 0x0F, 0xF0, 0x00); Sub("40", 0x40, 0x01); }
+        Sub("10 6086", 0x10, Spi(0x6086, 0x12));
+        Sub("03", 0x03, 0x30);
+        var bad = sent.Where(s => s.Reply.Length != 49 || s.Reply[0] != 0x21 || (s.Reply[13] & 0x80) == 0 || s.Reply[14] != byte.Parse(s.Name[..2], System.Globalization.NumberStyles.HexNumber))
+                      .Select(s => $"{s.Name}:{(s.Reply.Length > 14 ? Convert.ToHexString(s.Reply.AsSpan(13, 2)) : "none")}").ToList();
+        Check($"{pad.Id}: every subcommand of SDL's open gets a 49-byte 0x21 reply that acknowledges it", bad.Count == 0, string.Join(" ", bad));
+        var info = sent[0].Reply;
+        Check($"{pad.Id}: the device info carries device type {pad.Type:X2} and the address",
+              info.Length == 49 && info[15 + 2] == pad.Type && info.AsSpan(19, 5).SequenceEqual(new byte[] { 0x98, 0xB6, 0xE9, 0x48, 0x4D }) && info[24] == 0x30 + index,
+              info.Length == 49 ? Convert.ToHexString(info.AsSpan(13, 14)) : "");
+        var cal = sent[2].Reply;
+        Check($"{pad.Id}: the stick calibration read echoes 0x603D and 18 bytes, as SDL requires",
+              cal.Length == 49 && cal[13] == 0x90 && cal.AsSpan(15, 5).SequenceEqual(Spi(0x603D, 0x12)),
+              cal.Length == 49 ? Convert.ToHexString(cal.AsSpan(13, 7)) : "");
+        Check($"{pad.Id}: the reply's byte 2 is {pad.Battery:X2} and byte 12 {pad.Motor:X2}",
+              info.Length == 49 && info[2] == pad.Battery && info[12] == pad.Motor, info.Length == 49 ? $"{info[2]:X2} {info[12]:X2}" : "");
+        var typeAt = new byte[1];
+        e.ReadMemory(0, 0x6012, typeAt);
+        Check($"{pad.Id}: SPI 0x6012 holds the device type", typeAt[0] == pad.Type, $"{typeAt[0]:X2}");
+
+        // After the handshake: the 0x30 report and each button on its bit.
+        n = runner.Visit(build);
+        Check($"{pad.Id}: after the handshake the 49-byte 0x30 report, byte 2 {pad.Battery:X2} and byte 12 {pad.Motor:X2}",
+              n == 49 && build.Buffer[0] == 0x30 && build.Buffer[2] == pad.Battery && build.Buffer[12] == pad.Motor,
+              n > 12 ? Convert.ToHexString(build.Buffer.AsSpan(0, 13)) : $"{n} bytes");
+        miss.Clear();
+        foreach (var b in pad.Buttons)
+        {
+            var block = new byte[spec.Size];
+            VendorBlobCodec.EncodeInput(spec, new HMGamepadState { Buttons = (HMButton)(1u << b.Bit) },
+                0.5f, 0.5f, 0.5f, 0.5f, 0f, 0f, block, new VendorBlobCodec.EncoderState());
+            e.SetStateBlock(block);
+            int m = runner.Visit(build);
+            bool only = m == 49 && build.Buffer[b.Byte] == b.Mask
+                        && Enumerable.Range(3, 3).All(i => i == b.Byte || build.Buffer[i] == 0);
+            if (!only) miss.Add($"#{b.Bit}->{(m == 49 ? Convert.ToHexString(build.Buffer.AsSpan(3, 3)) : "none")}");
+        }
+        Check($"{pad.Id}: each button on the 0x30 bit the real pad sends it on", miss.Count == 0, string.Join(" ", miss));
+    }
+
+    static void CheckUsbForm(Pad pad, ControllerProfile p, Dictionary<string, ControllerProfile> byId)
+    {
+        string formId = pad.Id + "-usb";
+        Check($"{pad.Id}: names {formId} as its USB form", p.UsbForm == formId, p.UsbForm ?? "none");
+        if (!byId.TryGetValue(formId, out var f)) { Check($"{formId}: in the catalog", false); return; }
+        Check($"{formId}: 057E:{pad.UsbPid:X4} on USB", f.VendorId == 0x057E && f.ProductId == pad.UsbPid
+              && string.Equals(f.Connection, "usb", StringComparison.OrdinalIgnoreCase), $"{f.VendorId:X4}:{f.ProductId:X4} {f.Connection}");
+        CompiledProtocol? proto = null;
+        try { f.ValidateDeviceModel(); proto = CompiledProtocol.Compile(f, null); }
+        catch (Exception ex) { Check($"{formId}: its protocol compiles", false, ex.Message); }
+        if (proto == null) return;
+        const int index = 1;
+        var (e, runner) = Engine(f, proto, index);
+        // SDL's USB setup (SDL_hidapi_switch.c BTrySetupUSB, BReadDeviceInfo
+        // on a USB bus): 80 01 answers 81 01 00 with the device type and the
+        // address least significant byte first.
+        var status = new byte[64];
+        status[0] = 0x80; status[1] = 0x01;
+        e.HandleCommand(status, Stopwatch.GetTimestamp());
+        var r = new byte[64];
+        int k = e.TakeReply(r.Length, r);
+        Check($"{formId}: 80 01 answers 81 01 00 {pad.Type:X2} and the address",
+              k == 64 && r[0] == 0x81 && r[1] == 0x01 && r[2] == 0x00 && r[3] == pad.Type && r[4] == 0x30 + index && r[5] == 0x4D,
+              k > 0 ? Convert.ToHexString(r.AsSpan(0, 10)) : "none");
+        byte number = 0;
+        e.HandleCommand(Subcommand(ref number, 0x02, 64), Stopwatch.GetTimestamp());
+        k = e.TakeReply(r.Length, r);
+        Check($"{formId}: the device info subcommand answers in a 64-byte 0x21 reply with type {pad.Type:X2}",
+              k == 64 && r[0] == 0x21 && r[13] == 0x82 && r[14] == 0x02 && r[17] == pad.Type, k > 14 ? Convert.ToHexString(r.AsSpan(13, 6)) : "none");
+        var build = new Build { Engine = e };
+        int n = runner.Visit(build);
+        Check($"{formId}: after the handshake the 64-byte 0x30 report", n == 64 && build.Buffer[0] == 0x30, $"{n} bytes");
     }
 }

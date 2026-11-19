@@ -79,6 +79,11 @@ internal static class ChildPaths
         ["switch-pro-usb"] = ("Root", "HIDClass"),
         ["sinput"] = ("Root", "HIDClass"),
         ["xbox-360-wired-full"] = ("Usbip", "-"),
+        ["joycon-l-usb"] = ("Root", "HIDClass"),
+        ["joycon-r-usb"] = ("Root", "HIDClass"),
+        ["snes-nso-usb"] = ("Root", "HIDClass"),
+        ["n64-nso-usb"] = ("Root", "HIDClass"),
+        ["genesis-nso-usb"] = ("Root", "HIDClass"),
     };
 
     internal static void Run(Action<string, bool, string> check)

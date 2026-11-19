@@ -295,8 +295,12 @@ public sealed class ControllerProfile
         if (string.Equals(form.Connection, "bluetooth", StringComparison.OrdinalIgnoreCase))
             return $"names '{form.Id}', which is a Bluetooth identity itself. The USB form is the profile with the USB connection.";
         if (form.UsbForm != null) return $"names '{form.Id}', which names a USB form of its own. A USB form is a profile with a USB connection, not a chain.";
-        if (form.VendorId != p.VendorId || form.ProductId != p.ProductId)
-            return $"names '{form.Id}', whose VID and PID {form.VendorId:X4}:{form.ProductId:X4} are not this profile's {p.VendorId:X4}:{p.ProductId:X4}. The USB form is the same device on another bus.";
+        // The PID may differ: the Sega Genesis controller for Nintendo Switch
+        // Online reports 057E:2017 over Bluetooth and 057E:201E over USB
+        // (hid-nintendo.c joycon_read_info), and the device presents the
+        // form's.
+        if (form.VendorId != p.VendorId)
+            return $"names '{form.Id}', whose VID {form.VendorId:X4} is not this profile's {p.VendorId:X4}. The USB form is the same device on another bus.";
         if (form.RequiresUsbipBackend)
             return $"names '{form.Id}', whose backend is \"usbip\": a composite would give the device interfaces the caller did not ask for. Name the single-HID profile.";
         if (Usbip.UsbPresentation.NotPresentableReason(form) is { } reason)

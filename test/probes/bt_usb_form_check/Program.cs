@@ -55,6 +55,11 @@ internal static partial class Program
         ("dualsense-edge-bt", "dualsense-edge"),
         ("dualshock-4-v2-bt", "dualshock-4-v2"),
         ("switch-pro", "switch-pro-usb"),
+        ("joycon-l", "joycon-l-usb"),
+        ("joycon-r", "joycon-r-usb"),
+        ("snes-nso", "snes-nso-usb"),
+        ("n64-nso", "n64-nso-usb"),
+        ("genesis-nso", "genesis-nso-usb"),
     };
 
     static int Main(string[] args)
@@ -207,7 +212,7 @@ internal static partial class Program
 
         Console.WriteLine("\n-- The load refuses what is no USB form --");
         string dsbt = System.IO.File.ReadAllText(CatalogFile("sony", "dualsense-bt.json"));
-        Refused("a form with another PID", Variant(dsbt, "x-bt", "dualshock-4-v2"), "VID and PID");
+        Refused("a form with another VID", Variant(dsbt, "x-bt", "switch-pro-usb"), "whose VID");
         var plainBt = ProfileDatabase.LoadTexts(new[]
         {
             ("x-bt.json", Variant(dsbt, "x-bt", "x-bt-plain")),
