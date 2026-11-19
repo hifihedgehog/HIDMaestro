@@ -290,8 +290,11 @@ internal static class VrDriverBuilder
         // removal, that removal takes the registration.
         if (!MachineClaims.ClaimBeforeWrite()) return;
         OpenVrPathRegistry.RemoveDriver(ExtractRoot);
-        using var k = Registry.LocalMachine.CreateSubKey(RegKeyPath);
-        k.DeleteValue(VrManifestRegValue, throwOnMissingValue: false);
+        // The gate lives in the key a registration writes. A machine with no
+        // such key has no gate to clear, and an unregister leaves it without
+        // one.
+        using var k = Registry.LocalMachine.OpenSubKey(RegKeyPath, writable: true);
+        k?.DeleteValue(VrManifestRegValue, throwOnMissingValue: false);
     }
 
     private static string HashPayload(Assembly asm, string[] names)

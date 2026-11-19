@@ -406,9 +406,26 @@ internal static class Program
         const string Key = @"SOFTWARE\HIDMaestro";
         const string Gate = "InstalledVrManifestSha256";
         const string Marker = UnregisterMarker;
+        bool keyExisted = KeyExists(Key);
+        byte[] seed = Apply(null, "adddriver", ExtractRoot) ?? Array.Empty<byte>();
+        // With no key, as on ARM64, where HIDMaestro's driver never makes it,
+        // an unregister has no gate to clear and makes no key.
+        if (keyExisted)
+            Console.WriteLine($@"  [SKIP] an unregister with no HKLM\{Key}: the key is there");
+        else
+        {
+            string bare = Path.Combine(root, "unreg-nokey", "openvrpaths.vrpath");
+            Directory.CreateDirectory(Path.GetDirectoryName(bare)!);
+            File.WriteAllBytes(bare, seed);
+            Environment.SetEnvironmentVariable("VR_PATHREG_OVERRIDE", bare);
+            string thrown = "";
+            try { HMVR.UnregisterDriver(); }
+            catch (Exception e) { thrown = e.GetType().Name + ": " + e.Message; }
+            Check($@"an unregister with no HKLM\{Key} returns and makes no key", thrown.Length == 0 && !KeyExists(Key),
+                  thrown.Length > 0 ? thrown : KeyExists(Key) ? "the key is there now" : "");
+        }
         using var k = Registry.LocalMachine.CreateSubKey(Key);
         object? savedGate = k.GetValue(Gate);
-        byte[] seed = Apply(null, "adddriver", ExtractRoot) ?? Array.Empty<byte>();
         try
         {
             string held = Path.Combine(root, "unreg-held", "openvrpaths.vrpath");
@@ -453,6 +470,28 @@ internal static class Program
             if (savedGate != null) k.SetValue(Gate, savedGate); else k.DeleteValue(Gate, throwOnMissingValue: false);
         }
         Check("the HKLM gate is back as it was", Equals(k.GetValue(Gate), savedGate));
+        DropKeyIfMade(Key, keyExisted);
+    }
+
+    static bool KeyExists(string key)
+    {
+        using var k = Registry.LocalMachine.OpenSubKey(key);
+        return k != null;
+    }
+
+    /// <summary>The key goes when this run made it and it holds nothing, so
+    /// a machine that had no HKLM\SOFTWARE\HIDMaestro ends without one. On
+    /// ARM64, where HIDMaestro's driver never makes it, S104 reads its
+    /// absence.</summary>
+    static void DropKeyIfMade(string key, bool existed)
+    {
+        if (!existed)
+        {
+            bool empty;
+            using (var k = Registry.LocalMachine.OpenSubKey(key)) empty = k != null && k.ValueCount == 0 && k.SubKeyCount == 0;
+            if (empty) Registry.LocalMachine.DeleteSubKey(key, throwOnMissingSubKey: false);
+        }
+        Check($@"HKLM\{key} is back as it was ({(existed ? "present" : "absent")})", KeyExists(key) == existed);
     }
 
     static void UnregisterRefused(string what, RegistryKey k, string gate, string marker)
@@ -488,6 +527,7 @@ internal static class Program
             ? golden.Expect
             : Apply(golden.Seed, "adddriver", ExtractRoot) ?? Array.Empty<byte>();
 
+        bool keyExisted = KeyExists(Key);
         using var k = Registry.LocalMachine.CreateSubKey(Key);
         object? savedHint = k.GetValue(Hint);
         object? savedGate = k.GetValue(Gate);
@@ -522,6 +562,7 @@ internal static class Program
               Equals(k.GetValue(Hint), savedHint) && Equals(k.GetValue(Gate), savedGate));
         Check("the driver folder is as it was before the run", Directory.Exists(ExtractRoot) == hadDriver,
               hadDriver ? "it was there" : "it was not there");
+        DropKeyIfMade(Key, keyExisted);
     }
 
     /// <summary>The elevated half of a split token writes the user's file
