@@ -261,11 +261,10 @@ internal static partial class Program
         Check("V3: the host controller drops the v1.12.0 imports once the program is killed",
               WaitFor(() => !Vhci.Imported().Any(r => r.Port == port), 10_000));
 
-        // Another program running a composite on transport index 0, bus id
-        // 1-1 at its own port, keeps index 0 from the new program, whose
-        // composite then takes the lowest index free. The checks follow the
-        // bus id it got.
-        bool zeroElsewhere = Vhci.Imported().Any(r => r.BusId == "1-1" && r.Port != port);
+        // Another program on this SDK that holds transport index 0 (its
+        // claim pipe) keeps it from the new program, whose composite then
+        // takes the lowest index free. The checks follow the bus id it got.
+        bool zeroElsewhere = Native.ClaimExists("HIDMaestro.Index.0");
         using (var nu = PeerProcess.Start("V3-new"))
         {
             string cn = nu.Send("create composite -");
