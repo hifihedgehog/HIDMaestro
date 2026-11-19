@@ -429,8 +429,35 @@ internal static unsafe partial class Program
                 o => { Usb(o)["interfaces"]![0]!["function"] = "vendor"; o["descriptor"] = "05010905a101c0"; },
                 "$.usbConfiguration.configurationDescriptor", "has no HID interface");
 
+        // A copy outside the catalog: the profile says it takes no model, so
+        // the identity default for Microsoft's Xbox pads, which gives an
+        // XUSB companion's presentation, gives it nothing. The same copy
+        // without that key shows the default would otherwise apply.
+        Console.WriteLine("\n-- a copy outside the catalog --");
+        string Presentation(Action<JsonObject>? edit)
+        {
+            var o = JsonNode.Parse(JsonSerializer.Serialize(p, HMJsonContext.Default.ControllerProfile))!.AsObject();
+            o["id"] = "user-" + p.Id;
+            edit?.Invoke(o);
+            try
+            {
+                var copy = ProfileDatabase.LoadTexts(new[] { ("user.json", o.ToJsonString()) }, ModelRegistry.Catalog).All.Single();
+                string source = copy.Resolved.Sources.TryGetValue("presentation", out var s) ? s : "absent";
+                return $"{source}, deployable {new HMProfile(copy).IsDeployable}, problem {copy.Resolved.Problem ?? "none"}";
+            }
+            catch (Exception e) { return e.Message; }
+        }
+        string kept = Presentation(null), dropped = Presentation(o => o.Remove("deviceModel"));
+        Check("it loads, is deployable and takes no presentation from its identity", kept == "none, deployable True, problem none", kept);
+        Check("without deviceModel none it would take the Xbox identity default's", dropped.StartsWith("identity:microsoft-xbox-named", StringComparison.Ordinal), dropped);
+
+        // The other personas: none takes the new path, and each is held to
+        // the rules it met before. A persona that reports on a GIP interface
+        // has no HID interface either, and gip_persona_check holds it.
         Console.WriteLine("\n-- every other USB/IP persona keeps its HID interface --");
-        var others = catalog.Where(x => x.RequiresUsbipBackend && !x.ReportsOnXusbInterface).OrderBy(x => x.Id, StringComparer.Ordinal).ToList();
+        var others = catalog.Where(x => x.RequiresUsbipBackend && !x.ReportsOnXusbInterface && !x.ReportsOnGipInterface)
+                            .OrderBy(x => x.Id, StringComparer.Ordinal).ToList();
+        Check("the catalog's other USB/IP personas", others.Count >= 8, string.Join(" ", others.Select(x => x.Id)));
         foreach (var other in others)
         {
             string why = "";

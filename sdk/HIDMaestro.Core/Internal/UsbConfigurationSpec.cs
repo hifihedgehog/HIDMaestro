@@ -273,7 +273,7 @@ public sealed class UsbMicrosoftOsSpec
     /// <summary>The extended properties descriptor, feature index 5. It
     /// carries registry values for the interface's device key, such as the
     /// <c>DeviceInterfaceGUID</c> WinUSB registers. Required, except on a
-    /// device that reports on an <c>"xusb"</c> interface
+    /// device that reports on an <c>"xusb"</c> or a <c>"gip"</c> interface
     /// (<see cref="UsbInterfaceSpec.Function"/>), which may leave it out and
     /// then stalls the request.</summary>
     [JsonPropertyName("extendedProperties")]
@@ -337,7 +337,7 @@ public sealed class UsbInterfaceSpec
     /// than for the wire: <c>"hid"</c>, <c>"audioControl"</c>,
     /// <c>"audioStreamingOut"</c>, <c>"audioStreamingIn"</c>,
     /// <c>"vendor"</c> for a class 0xFF interface whose protocol the backend
-    /// answers itself (issue #66), or <c>"xusb"</c>. The wire
+    /// answers itself (issue #66), <c>"xusb"</c> or <c>"gip"</c>. The wire
     /// values live in <see cref="UsbAltSettingSpec"/>. The HID interface
     /// keeps serving the profile's existing report descriptor and codec
     /// unchanged, which is why a composite persona reuses everything the
@@ -355,8 +355,20 @@ public sealed class UsbInterfaceSpec
     /// requests the interface answers GET_REPORT(Input) and
     /// SET_REPORT(Output) and stalls the rest, and the device may leave
     /// <c>microsoftOs.extendedProperties</c> out ([MS-XUSBI] 2.2.8.1 and
-    /// 2.2.4.6). A profile that names no interface <c>"xusb"</c> is held
-    /// to a HID interface and a <c>descriptor</c>.</para></summary>
+    /// 2.2.4.6). A profile that names no interface <c>"xusb"</c> or
+    /// <c>"gip"</c> is held to a HID interface and a <c>descriptor</c>.</para>
+    ///
+    /// <para><c>"gip"</c> marks a device with no HID interface whose
+    /// messages travel on a GIP data interface, class 0xFF, subclass 0x47,
+    /// protocol 0xD0 (Microsoft's GIP specification H001419, table 36), which
+    /// Windows gives its inbox GIP driver. The profile carries no
+    /// <c>descriptor</c> and builds every message it sends from its state
+    /// block and protocol: its <c>protocol.input.endpoint</c> is the
+    /// interface's interrupt IN endpoint and its commands come from the
+    /// interface's interrupt OUT endpoint. The interface stalls every class
+    /// request, and the device may leave
+    /// <c>microsoftOs.extendedProperties</c> out, as the specification has
+    /// a GIP device stall that request.</para></summary>
     [JsonPropertyName("function")]
     public string Function { get; set; } = "";
 

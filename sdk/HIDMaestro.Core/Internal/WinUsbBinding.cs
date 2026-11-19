@@ -1054,6 +1054,11 @@ DeviceName = ""{deviceName}""
         return (rc, output);
     }
 
+    /// <summary>The refusal's message: the binding's package is signed as
+    /// HIDMaestro's driver is, and Windows here installs neither.</summary>
+    internal const string RefusedMessage =
+        "Windows on this PC does not install the WinUSB binding's driver package, which is signed as HIDMaestro's own driver is.";
+
     /// <summary>The add itself. The caller holds the deploy lock.
     ///
     /// <para>The package is signed as the driver's is, so a Windows that
@@ -1063,11 +1068,6 @@ DeviceName = ""{deviceName}""
     /// the staging. Otherwise it is tried, and a failed one is named as a
     /// signing refusal when Windows' own check of the catalog says
     /// so.</para></summary>
-    /// <summary>The refusal's message: the binding's package is signed as
-    /// HIDMaestro's driver is, and Windows here installs neither.</summary>
-    internal const string RefusedMessage =
-        "Windows on this PC does not install the WinUSB binding's driver package, which is signed as HIDMaestro's own driver is.";
-
     private static string AddPackage(Package p)
     {
         if (DriverDeploy.SigningStopsDeploy() && OurPackages().Count == 0)

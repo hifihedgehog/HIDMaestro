@@ -1,6 +1,6 @@
 {
   "id": "user-xusb-authored",
-  "name": "Authored XUSB device (probe fixture)",
+  "name": "Authored Xbox 360 XUSB device (probe fixture)",
   "vendor": "Microsoft",
   "vid": "0x045E",
   "pid": "0x028E",

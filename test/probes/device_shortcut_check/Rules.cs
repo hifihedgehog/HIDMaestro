@@ -353,6 +353,8 @@ internal static class Rules
         new("UsbConfigurationSpec.OtherSpeedConfigurationDescriptorHex", "a descriptor served verbatim (UsbDescriptorSet.cs:155)"),
         new("UsbConfigurationSpec.MicrosoftOs", "Microsoft OS descriptors served verbatim (UsbDescriptorSet.cs)"),
         new("UsbMicrosoftOsSpec.*", "Microsoft OS descriptors served verbatim (UsbDescriptorSet.cs)"),
+        new("UsbInterfaceSpec.Function=gip", "the GIP data interface, a USB interface class Microsoft documents in its GIP specification H001419 (class 0xFF, subclass 0x47, protocol 0xD0, table 36), on a device with no HID interface (UsbDescriptorSet.cs). It names a class every GIP device carries, whatever its maker or type. xbox-one-s-full sets it, and every Xbox One and Series pad, wheel, arcade stick and flight stick on USB speaks GIP on the same interface (H001419's tables 34 to 38 and its device type documents)"),
+        new("ControllerProfile.DeviceModel*", "a profile's statement that it takes no model by name or by identity (ModelRegistry.Resolve), which any profile may make. xbox-one-s-full makes it: Windows' own GIP driver binds its device, which takes no model's presentation"),
         new("ControllerProfile.ConfigurationString", "the configuration's string descriptor, served verbatim (UsbDescriptorSet.cs:201)"),
         new("ControllerProfile.DataReportId", "the input report a profile's data frames fill, any input report its descriptor declares, checked against the descriptor at load (ControllerProfile.ValidateDataReport). One catalog profile sets it today"),
         new("ControllerProfile.SdlMapping", "a mapping string handed to programs (HMProfile.cs:202), read by no device code"),

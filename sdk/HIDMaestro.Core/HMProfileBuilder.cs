@@ -195,11 +195,11 @@ public sealed class HMProfileBuilder
     {
         // Null clears the descriptor, as before v2.0.0, and a cleared
         // descriptor governs no report format either. A copy of a profile
-        // that reports on an XUSB interface holds a report format with no
-        // descriptor, the interface's, and a descriptor replaces it.
+        // that reports on an XUSB or a GIP interface holds a report format
+        // with no descriptor, the interface's, and a descriptor replaces it.
         bool replaces = _descriptorHex != null
             ? hex == null || !SameBytes(_descriptorHex, hex)
-            : hex != null && _copy is { ReportsOnXusbInterface: true };
+            : hex != null && (_copy is { ReportsOnXusbInterface: true } || _copy is { ReportsOnGipInterface: true });
         if (replaces) DropReportFormat();
         _descriptorHex = hex;
     }

@@ -22,7 +22,7 @@ driver, unmodified: usbip2_ude.inf, usbip2_ude.sys and usbip2_ude.cat,
 unpacked at build time from usbip-win2's signed installers. The x64 files
 come from the v.0.9.8.1 release asset. The ARM64 files come from the same
 tag's build that the project's signing service (ossign.org) published in
-usbip-win2 issue #13, with drivers attestation-signed by Microsoft.
+usbip-win2 issue #13, its drivers signed as the project ships them.
 HIDMaestro installs the one matching the machine's architecture. It does
 not redistribute the installers or the root-hub filter driver.
 
