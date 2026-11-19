@@ -29,7 +29,7 @@
 
 HIDMaestro creates virtual controllers that present the exact identity of real hardware across the whole Windows input stack at once. Pick from 344 built-in profiles, 103 of them keyboards and mice, or point it at a device you own and clone it. DirectInput, XInput, SDL3, the browser Gamepad API, and WGI/GameInput all see the VID/PID, product name, HID descriptor, axis and button layout, and bus type the profile defines. A virtual keyboard or mouse reaches Raw Input and the desktop as the device it copies.
 
-On x64 it runs entirely in user mode (UMDF2), signed with a locally trusted self-signed certificate. No EV certificate, no `testsigning` boot mode, no kernel driver that can blue-screen the machine. Windows on ARM64 does not install that driver, so there each controller is a USB device that HIDMaestro's user-mode code serves through usbip-win2's host controller, a kernel-mode driver from its own project that HIDMaestro carries and installs.
+HIDMaestro has two drivers. On x64 the default is the UMDF2 driver, which runs entirely in user mode and is signed on the machine with a locally trusted self-signed certificate. No EV certificate, no `testsigning` boot mode, no kernel driver that can blue-screen the machine. Windows on ARM64 does not install a driver signed on the machine, so there every controller runs on the USB/IP driver: a USB device that HIDMaestro's user-mode code serves through the usbip-win2 host controller, a kernel-mode driver from the usbip-win2 project that HIDMaestro carries and installs.
 
 <p align="center"><b>344</b> device profiles · <b>20+</b> projects shipping it · <b>~35 µs</b> median single-press · <b>0</b> kernel drivers of its own</p>
 
@@ -266,14 +266,14 @@ A UMDF2 `CreateController` checks the installed set under the same lock, after i
 
 ### Where the driver installs
 
-HIDMaestro signs its driver package on the machine, with a certificate it creates there and adds to the machine's Trusted Root and Trusted Publishers stores. Windows on x64 installs a package signed that way. Windows on ARM64 and Windows in S mode do not. On the ARM64 test PC, Windows 11 build 28000, the package was refused with 0xE0000243 with Secure Boot on, with Secure Boot off, with the developer mode for driver signing set and with integrity checks turned off in the boot configuration.
+HIDMaestro signs its UMDF2 driver package on the machine, with a certificate it creates there and adds to the machine's Trusted Root and Trusted Publishers stores. Windows on x64 installs a package signed that way. Windows on ARM64 and Windows in S mode do not. On the ARM64 test PC, Windows 11 build 28000, the package was refused with 0xE0000243 with Secure Boot on, with Secure Boot off, with the developer mode for driver signing set and with integrity checks turned off in the boot configuration.
 
 A controller runs on one of two backends (`HMBackend`):
 
 | Backend | What Windows sees |
 |--|--|
-| `Umdf2` | HIDMaestro's own UMDF2 driver: a HID device on the root enumerator, with the XUSB companion or the xinputhid filter an Xbox profile asks for |
-| `Usbip` | A USB device on the USB/IP host controller `HIDMaestro.Core.dll` carries, bound by Windows' own class drivers. A profile with no `usbConfiguration` presents one HID interface built from its own descriptor, VID, PID, version and strings |
+| `Umdf2` | HIDMaestro's UMDF2 driver: a HID device on the root enumerator, with the XUSB companion or the xinputhid filter an Xbox profile asks for |
+| `Usbip` | HIDMaestro's USB/IP driver: a USB device on the usbip-win2 host controller `HIDMaestro.Core.dll` carries, bound by Windows' own class drivers. A profile with no `usbConfiguration` presents one HID interface built from its own descriptor, VID, PID, version and strings |
 
 Every context and every create defaults to `HMBackend.Auto`. A profile whose `backend` is `usbip`, such as a composite persona with audio interfaces, runs on `Usbip` everywhere. Every other profile runs on `HMContext.MachineBackend`: `Umdf2` where Windows installs the package, `Usbip` where it does not. So a program written before 2.3.0, which calls `new HMContext()`, `InstallDriver()` and `CreateController(profile)`, runs on ARM64 unchanged. There `InstallDriver` installs the USB/IP host controller, `IsDriverInstalled` reports it, and every controller is a USB device.
 
@@ -448,7 +448,7 @@ And there is the matter of what USBIP can represent at all. USB/IP transports US
 
 - **No kernel driver, no test-signing.** Pure user-mode UMDF2, loaded by a locally trusted self-signed certificate. No test-signing boot mode, no purchased certificate, no reboot, and a bug cannot blue-screen the machine. It installs on an ordinary user's PC, not just a developer box.
 - **No kernel driver.** UMDF2 runs the driver in a normal user-mode process. A bug cannot blue-screen the machine. Self-signed certificate trusted by the local machine is enough.
-- **One third-party transport, where it is needed.** Windows on ARM64 does not install HIDMaestro's driver, so there every controller is a USB device on usbip-win2's host controller, a kernel-mode driver HIDMaestro carries and installs. The composite personas use it on x64 too, and so does any controller a program puts on `HMBackend.Usbip`. Every device behavior stays in HIDMaestro's own user-mode code.
+- **A second driver, where it is needed.** Windows on ARM64 does not install a driver signed on the machine, as the UMDF2 driver is, so there every controller runs on the USB/IP driver: a USB device on the usbip-win2 host controller, a kernel-mode driver HIDMaestro carries and installs. The composite personas use it on x64 too, and so does any controller a program puts on `HMBackend.Usbip`. Every device behavior stays in HIDMaestro's own user-mode code.
 
 ### How it works
 
@@ -573,7 +573,7 @@ The hands hold real SteamVR hand roles, serve SteamVR Input through a full input
 
 </details>
 
-VIIPER describes itself as running entirely in userspace. On Windows that holds only for its device code: the USB/IP transport is a third-party kernel-mode driver, and VIIPER makes you go install it. HIDMaestro's own driver is user-mode UMDF2, and it rides the host that already ships with Windows, so the "no kernel driver" row above is literal for everything the standard profiles do on x64. Two cases ride the same usbip-win2 transport VIIPER does. The composite USB personas need it, because a Windows audio endpoint requires a driver-backed USB device and no user-mode API can create one. Windows on ARM64 needs it for every controller, because it does not install HIDMaestro's driver. The difference is what the user has to do about it: HIDMaestro ships that transport inside its own DLL and deploys it on demand, so a composite persona is a profile you pick, not a prerequisite you chase, and an ARM64 PC needs no setup step. On x64, use any other profile on the default backend and no kernel-mode component is ever installed.
+VIIPER describes itself as running entirely in userspace. On Windows that holds only for its device code: the USB/IP transport is a third-party kernel-mode driver, and VIIPER makes you go install it. HIDMaestro's default driver on x64 is user-mode UMDF2, and it rides the host that already ships with Windows, so the "no kernel driver" row above is literal for everything the standard profiles do on x64. Two cases ride the same usbip-win2 transport VIIPER does. The composite USB personas need it, because a Windows audio endpoint requires a driver-backed USB device and no user-mode API can create one. Windows on ARM64 needs it for every controller, because it does not install a driver signed on the machine, as the UMDF2 driver is. The difference is what the user has to do about it: HIDMaestro ships that transport inside its own DLL and deploys it on demand, so a composite persona is a profile you pick, not a prerequisite you chase, and an ARM64 PC needs no setup step. On x64, use any other profile on the default backend and no kernel-mode component is ever installed.
 
 HIDMaestro is Windows optimized and focused on game controllers, keyboards, mice and other HID game devices. Within that scope it gives you exact hardware identity with no kernel driver, no network layer, and no per-device code. That combination is what HIDMaestro is built for, and nothing else on this list delivers it.
 
@@ -594,7 +594,7 @@ HIDMaestro is Windows optimized and focused on game controllers, keyboards, mice
 - **Vendor-specific feature reports.** LED control, calibration, and firmware-update reports vary per device. A profile answers the ones its answer table holds, and a report no table holds goes unanswered.
 - **One interface per keyboard or mouse.** A keyboard or mouse profile carries the descriptor of the real device's keyboard or mouse interface. Its other interfaces, including the ones vendor configuration tools use, are not emulated.
 - **Anti-cheat.** Virtual devices are detectable by kernel-level anti-cheat. HIDMaestro does not hide that it is virtual.
-- **Windows on ARM64.** HIDMaestro's own driver does not install on Windows on ARM64 or in S mode, so controllers there run on the USB/IP backend. The Xbox 360 profiles present the USB devices Windows' own xusb22 drives, the Xbox One and Series profiles present the wired GIP device Windows' own Xbox drivers bind, and a Bluetooth profile presents on the USB bus, the Sony pads, the Switch Pro and the Bluetooth-only Nintendo pads in their USB form. A keyboard or mouse a killed consumer held a key on leaves that key down until it is pressed again: [Where the driver installs](#where-the-driver-installs).
+- **Windows on ARM64.** Windows on ARM64 and Windows in S mode do not install a driver signed on the machine, so the UMDF2 driver does not install there and every controller runs on the USB/IP driver. The Xbox 360 profiles present the USB devices Windows' own xusb22 drives, the Xbox One and Series profiles present the wired GIP device Windows' own Xbox drivers bind, and a Bluetooth profile presents on the USB bus, the Sony pads, the Switch Pro and the Bluetooth-only Nintendo pads in their USB form. A keyboard or mouse a killed consumer held a key on leaves that key down until it is pressed again: [Where the driver installs](#where-the-driver-installs).
 - **Programs built on 1.x.** A program built on HIDMaestro 1.x removes every HIDMaestro device on the machine when it calls `InstallDriver` or first creates a controller, another program's included, and puts its own driver back. Programs on 2.0.0 leave each other's devices alone. Move every program on the machine to 2.0.0.
 
 ## Security and Scope
