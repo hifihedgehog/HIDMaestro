@@ -257,11 +257,12 @@ internal static partial class Program
         foreach (var p in profiles)
         {
             string key = "parity:" + p.Id;
-            // A Bluetooth identity with a USB form (usbForm) presents that
-            // form on USB/IP (HMProfile.FormOn). The same presentation on
-            // UMDF2 is the form itself, so the UMDF2 side creates it, and
-            // the descriptor and attributes owed are the form's.
-            var shown = p.FormOn(HMBackend.Usbip);
+            // A Bluetooth identity with a USB form (usbForm) presents on
+            // USB/IP the form under its own id and strings
+            // (ControllerProfile.UsbFormOf). The UMDF2 side creates that same
+            // presentation, and the descriptor and attributes owed are its.
+            // HMProfile.FormOn gives the form itself, with the form's strings.
+            var shown = p.Inner.UsbForm != null ? new HMProfile(p.Inner.UsbFormOf(HMBackend.Usbip)) : p;
             var verdict = WindowsParser.Parse(shown.Inner.GetDescriptorBytes()!);
             bool accepts = verdict.Ok;
             if (accepts) accepted++;
@@ -309,7 +310,7 @@ internal static partial class Program
                 else matched++;
             }
             string line = problems.Count == 0 ? (accepts ? "ok" : $"ok, Code 10 as Windows' parser predicts ({verdict})") : string.Join(" | ", problems);
-            if (p.Inner.UsbForm is { } formId) line += $" (its USB form {formId} on both)";
+            if (p.Inner.UsbForm is { } formId) line += $" (its USB form {formId} under its own strings, on both)";
             Console.WriteLine($"  {p.Id,-44} {line}" +
                 (s != null ? $"  usbip {s.CreateMs} ms{(s.OpenAtReturn ? "" : $", ready {s.ReadyMs} ms")}" : "") +
                 (u != null ? $"  umdf2 {u.CreateMs} ms" : ""));

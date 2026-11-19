@@ -484,11 +484,12 @@ internal static class Program
     /// <summary>The model the identity of the device <paramref name="p"/>
     /// presents on <paramref name="backend"/> gives it, which is what the
     /// extractor reads back: the profile's own on UMDF2, and on USB/IP the
-    /// identity of the form it presents there (HMProfile.FormOn) on the USB
-    /// bus, the bus every USB/IP device is on.</summary>
+    /// identity of what it presents there on the USB bus, the bus every
+    /// USB/IP device is on: its USB form under its own id and strings
+    /// (ControllerProfile.UsbFormOf), or itself.</summary>
     static (string? Model, string Bus) PresentedIdentityModel(HMProfile p, HMBackend backend)
     {
-        var shown = p.FormOn(backend).Inner;
+        var shown = p.Inner.UsbFormOf(backend);
         if (backend != HMBackend.Usbip || string.IsNullOrEmpty(shown.Connection) || shown.Connection == "usb")
             return (shown.Resolved.IdentityModel, string.IsNullOrEmpty(shown.Connection) ? "usb" : shown.Connection);
         var onUsb = shown.Clone();
