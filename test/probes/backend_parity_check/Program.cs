@@ -15,7 +15,7 @@
 //                  parsed fields and the product string must match. Whether
 //                  the HID interface opened the moment the create returned is
 //                  recorded for each.
-//   long           Reports over 64 bytes (dualsense-bt, switch-pro,
+//   long           Reports over 64 bytes (amazon-luna-ble, joycon-l,
 //                  apple-magic-keyboard-a1644) on USB/IP at the derived speed
 //                  and pinned to full speed: one ReadFile returns one whole
 //                  input report, and one output report written arrives whole.
@@ -97,10 +97,11 @@ internal static partial class Program
         var rest = list.Skip(1).ToList();
 
         if (part == "listener") return Listener(int.Parse(rest[0]));
-        if (part is "liveness" or "ackgen" or "portrule")
+        if (part is "liveness" or "ackgen" or "portrule" or "longlist")
         {
             if (part == "liveness") Liveness();
             else if (part == "ackgen") AckGeneration();
+            else if (part == "longlist") LongList();
             else PortRule();
             Console.WriteLine();
             Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");

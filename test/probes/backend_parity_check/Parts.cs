@@ -15,16 +15,44 @@ internal static partial class Program
 {
     // ── long ─────────────────────────────────────────────────────────────
 
+    /// <summary>The catalog profiles whose form on USB/IP has an input or
+    /// output report over 64 bytes, with each one's widest of each.</summary>
+    static void LongList()
+    {
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        foreach (var p in ctx.AllProfiles.Where(x => x.IsDeployable && x.SupportsBackend(HMBackend.Usbip)).OrderBy(x => x.Id, StringComparer.Ordinal))
+        {
+            var form = p.FormOn(HMBackend.Usbip);
+            var map = form.Inner.GetOrBuildReportMap();
+            int input = map.Reports.Where(r => r.Kind == HidReportKind.Input).Select(r => r.FrameBytes).DefaultIfEmpty(0).Max();
+            int output = map.Reports.Where(r => r.Kind == HidReportKind.Output).Select(r => r.FrameBytes).DefaultIfEmpty(0).Max();
+            if (input > 64 || output > 64)
+                Console.WriteLine($"  {p.Id,-40} form {form.Id,-34} input {input,4} output {output,4} own {form.BuildsItsOwnReports || form.Inner.Protocol != null} usbConfiguration {form.Inner.UsbConfiguration != null}");
+        }
+    }
+
     static void Long()
     {
         Console.WriteLine();
         Console.WriteLine("=== Reports over 64 bytes on USB/IP ===");
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
-        foreach (string id in new[] { "dualsense-bt", "switch-pro", "apple-magic-keyboard-a1644" })
+        // Each presents itself on USB/IP, with no USB form (usbForm), and has
+        // an input report over 64 bytes there: amazon-luna-ble's 81-byte
+        // report from raw frames, joycon-l's 362-byte report, which the
+        // device builds from SubmitState, and the keyboard's 65-byte one.
+        // dualsense-bt and switch-pro were the first two until 2.3.0, when
+        // they took the 64-byte reports of their USB forms on USB/IP.
+        foreach (string id in new[] { "amazon-luna-ble", "joycon-l", "apple-magic-keyboard-a1644" })
         {
             var source = ctx.GetProfile(id);
             if (source == null) { Check($"{id} is in the catalog", false); continue; }
+            if (source.Inner.UsbForm is { } form)
+            {
+                Check($"{id} presents itself on USB/IP, not a USB form", false, $"its usbForm names {form}");
+                continue;
+            }
             foreach (string? speed in new string?[] { null, "full" })
             {
                 HMProfile p = source;
