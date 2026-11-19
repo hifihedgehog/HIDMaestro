@@ -202,7 +202,8 @@ internal static partial class Program
     {
         var target = collections.FirstOrDefault(x => x.OutputLength > 0);
         if (target == null) return "";
-        var map = p.Inner.GetOrBuildReportMap();
+        // The reports of the form the device presents on its backend.
+        var map = p.FormOn(c.Backend).Inner.GetOrBuildReportMap();
         var report = map.Reports.Where(r => r.Kind == HidReportKind.Output).OrderBy(r => r.ReportId).FirstOrDefault();
         if (report == null) return "";
         var buf = new byte[target.OutputLength];
@@ -256,10 +257,15 @@ internal static partial class Program
         foreach (var p in profiles)
         {
             string key = "parity:" + p.Id;
-            var verdict = WindowsParser.Parse(p.Inner.GetDescriptorBytes()!);
+            // A Bluetooth identity with a USB form (usbForm) presents that
+            // form on USB/IP (HMProfile.FormOn). The same presentation on
+            // UMDF2 is the form itself, so the UMDF2 side creates it, and
+            // the descriptor and attributes owed are the form's.
+            var shown = p.FormOn(HMBackend.Usbip);
+            var verdict = WindowsParser.Parse(shown.Inner.GetDescriptorBytes()!);
             bool accepts = verdict.Ok;
             if (accepts) accepted++;
-            Snapshot? u = umdf2Here ? Take(ctx, p, HMBackend.Umdf2, key) : null;
+            Snapshot? u = umdf2Here ? Take(ctx, shown, HMBackend.Umdf2, key) : null;
             Snapshot? s = usbipHere ? Take(ctx, p, HMBackend.Usbip, key) : null;
             var problems = new List<string>();
             // A descriptor Windows refuses owes a start that fails with Code
@@ -287,7 +293,7 @@ internal static partial class Program
             foreach (var x in new[] { u, s })
                 if (x != null && x.Failure == null)
                     foreach (var c in x.Collections)
-                        if (c.Vid != p.VendorId || c.Pid != p.ProductId || c.Version != (p.Inner.VersionNumber ?? 0x0100))
+                        if (c.Vid != shown.VendorId || c.Pid != shown.ProductId || c.Version != (shown.Inner.VersionNumber ?? 0x0100))
                             problems.Add($"{x.Backend} attributes {c.Vid:X4}:{c.Pid:X4}:{c.Version:X4}");
             if (!accepts && u != null && s != null && Code10(u) && Code10(s)) matched++;
             else if (u != null && s != null && u.Failure == null && s.Failure == null)
@@ -303,6 +309,7 @@ internal static partial class Program
                 else matched++;
             }
             string line = problems.Count == 0 ? (accepts ? "ok" : $"ok, Code 10 as Windows' parser predicts ({verdict})") : string.Join(" | ", problems);
+            if (p.Inner.UsbForm is { } formId) line += $" (its USB form {formId} on both)";
             Console.WriteLine($"  {p.Id,-44} {line}" +
                 (s != null ? $"  usbip {s.CreateMs} ms{(s.OpenAtReturn ? "" : $", ready {s.ReadyMs} ms")}" : "") +
                 (u != null ? $"  umdf2 {u.CreateMs} ms" : ""));
