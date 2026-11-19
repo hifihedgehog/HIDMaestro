@@ -48,7 +48,7 @@ body:
       label: Exception / stack trace
       description: |
         Full text of any thrown exception, including inner exceptions and any output from
-        the underlying tool (pnputil, signtool, devcon, etc.) that the SDK surfaced.
+        the underlying tool (pnputil, devcon, etc.) that the SDK surfaced.
       render: text
 
   - type: input

@@ -3123,6 +3123,18 @@ internal static partial class DeviceOrchestrator
         Usbip.UsbipBackend.DetachAllOwned();
         Phase("usbip-detach");
 
+        // Then the device records those personas caused, each named in the
+        // ledger of records HIDMaestro caused (Usbip.UsbRecords). A record
+        // whose device is still present stays, and so does its entry.
+        // The uninstall takes a record whose device arrived since Windows
+        // started too: it read the host controller's since-boot state before
+        // it removed anything. RemoveAllVirtualControllers(Everything)
+        // leaves HIDMaestro installed and keeps such a record until a
+        // restart.
+        int usbRecordsLeft = Usbip.UsbRecords.RemoveCaused(TimeoutScale.Apply(Usbip.UsbRecords.LeaveWaitMs), sinceBoot: forUninstall);
+        if (usbRecordsLeft > 0) LogDiag($"    {usbRecordsLeft} USB record(s) the ledger names stay");
+        Phase("usb-records");
+
         // Walk ROOT + SWD enumerators and remove HIDMaestro-owned devices.
         // Enumerators we always own: VID_*, XnaComposite, HIDMAESTRO, HID_IG_00
         // Shared enumerators (HIDCLASS, SYSTEM): verify hardware ID contains "HIDMaestro"

@@ -8,8 +8,9 @@
 // force-driver), disables, starts or
 // re-enumerates one, writes a property on one, or plugs a USB/IP import in or
 // out, must sit in a method that takes the lock before it, or in one of the
-// three helpers that only run under it (DifRemoveDevice, DisableAndUninstall,
-// RemoveDeviceLocked), whose own calls are held to the same rule. A call of
+// helpers that only run under it (DifRemoveDevice, DisableAndUninstall,
+// RemoveDeviceLocked, AddWithInstall, RemoveRecordLocked), whose own calls
+// are held to the same rule. A call of
 // RestartDevice, which disables and enables a devnode and takes no lock
 // itself, must sit inside a hold: a `using var` take whose block is open, or
 // a `using (...)` take whose statement it is. Its calls on a controller's own
@@ -44,7 +45,7 @@ internal static class LockCoverage
         "SetupDiCreateDeviceInfoW(", "SetupDiCallClassInstaller(", "SwdDeviceFactory.Create(",
         "SetupDiRemoveDevice(", "CM_Uninstall_DevNode(", "DIF_REMOVE,", "SwdDeviceFactory.Remove(",
         "/remove-device", "remove \\\"@",
-        "DifRemoveDevice(", "DisableAndUninstall(", "RemoveDeviceLocked(", "AddWithInstall(",
+        "DifRemoveDevice(", "DisableAndUninstall(", "RemoveDeviceLocked(", "AddWithInstall(", "RemoveRecordLocked(",
         " /install\"", "DiInstallDevice(", "DiInstallNullDriver(", "\"force-driver\"",
         "CM_Disable_DevNode(", "CM_Enable_DevNode(", "CM_Setup_DevNode(", "CM_Reenumerate_DevNode(",
         "CM_Query_And_Remove_SubTreeW(", "/uninstall /force",
@@ -57,7 +58,7 @@ internal static class LockCoverage
     /// in the caller is not enough: the call must sit inside the hold.</summary>
     static readonly string[] HeldCalls = { "RestartDevice(" };
 
-    static readonly HashSet<string> UnderLockOnly = new() { "DifRemoveDevice", "DisableAndUninstall", "RemoveDeviceLocked", "AddWithInstall" };
+    static readonly HashSet<string> UnderLockOnly = new() { "DifRemoveDevice", "DisableAndUninstall", "RemoveDeviceLocked", "AddWithInstall", "RemoveRecordLocked" };
 
     // A call passed as a delegate to a helper that runs it under the lock
     // it takes itself: RemovePhantom runs each phantom's uninstall, and
