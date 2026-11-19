@@ -288,10 +288,9 @@ public static class DriverBuilder
     public static void EnsureTestCertificate() => EnsureTestCertificate(CertFriendlyName);
 
     /// <summary>The same for a certificate of another name. Coexistence
-    /// probe section Z calls this through reflection with a name that does
-    /// not contain HIDMaestroTestCert, which the store's subject search and
-    /// <see cref="AuthenticodeSigner.SelectCertificate"/> both match as a
-    /// substring.</summary>
+    /// probe section Z calls this through reflection with a name of its
+    /// own, which <see cref="AuthenticodeSigner.CanSign"/> tells apart from
+    /// HIDMaestroTestCert by the whole subject.</summary>
     internal static void EnsureTestCertificate(string name)
     {
         // Present, as it is after the first deploy on a machine: no lock.
@@ -310,12 +309,16 @@ public static class DriverBuilder
     {
         using var lmMy = new X509Store(StoreName.My, StoreLocation.LocalMachine);
         lmMy.Open(OpenFlags.ReadOnly);
-        // Only a copy with its private key can sign. One without it, left by
-        // a removal cut short between the store and the key, does not count,
-        // so a new certificate is made.
+        // Only a copy the signing can use counts (AuthenticodeSigner.CanSign):
+        // the exact subject, its private key, valid now. One without its key,
+        // left by a removal cut short between the store and the key, or one
+        // past its validity, does not, so a new certificate is made. Until
+        // 2.3.0 any copy whose subject held the name and had a key counted,
+        // and a deploy then failed at the signing until the copy was gone.
         bool usable = false;
-        foreach (var c in lmMy.Certificates.Find(X509FindType.FindBySubjectName, name, false))
-            using (c) usable |= c.HasPrivateKey;
+        DateTime now = DateTime.Now;
+        foreach (var c in lmMy.Certificates)
+            using (c) usable |= AuthenticodeSigner.CanSign(c, name, now);
         return usable;
     }
 

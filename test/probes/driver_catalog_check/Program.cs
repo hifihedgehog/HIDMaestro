@@ -21,16 +21,29 @@
 //      differ on every run, are left out.
 //   4. With elevation and a HIDMaestroTestCert with its private key in
 //      LocalMachine\My (any machine HIDMaestro installed on): the binaries
-//      and catalogs signed, and each signature verified by WinVerifyTrust.
-//      Where the Windows SDK's signtool is installed, the same files signed
-//      by it and compared byte for byte.
-//   5. Controls that prove the checks can fail: an INF changed after its
+//      and catalogs of both architectures signed, and each signature
+//      verified by WinVerifyTrust. Where the Windows SDK's signtool is
+//      installed, the same files signed by it and compared byte for byte.
+//      The certificate is chosen by its exact subject: a name that is part
+//      of HIDMaestroTestCert's selects nothing.
+//   5. Refusals Inf2Cat makes: INFs with no models section decorated for
+//      the target architecture (each architecture's INFs under the other),
+//      and a member that resolves outside the package folder. The hardware
+//      IDs kept as Inf2Cat keeps them, and an INF without a byte-order mark
+//      read in the ANSI code page, as Inf2Cat reads it.
+//   6. Controls that prove the checks can fail: an INF changed after its
 //      catalog was written no longer matches its tag, a changed HWID breaks
 //      the comparison, and a certificate name with no certificate throws.
-//   6. The assembly carries no resource whose name holds signtool or
+//   7. The assembly carries no resource whose name holds signtool or
 //      Inf2Cat.
 //
-// Exit 0 PASS / 1 FAIL.
+// The reference runs of Inf2Cat and signtool start at normal priority and
+// are stopped only by a hang detector of ten minutes, scaled by
+// HIDMAESTRO_TIMEOUT_SCALE.
+//
+// Exit 0 PASS, 1 FAIL, 2 when every check passed and the signing part did
+// not run (not elevated, or no HIDMaestroTestCert with its key), which it
+// prints as its own condition.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -57,6 +70,9 @@ internal static class Program
     }
 
     static void Note(string text) => Console.WriteLine($"  [NOTE] {text}");
+
+    // Set when the signing part did not run: the condition it printed.
+    static string? s_signingSkipped;
 
     const string Kit = @"C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0";
     static string Inf2CatExe => Path.Combine(Kit, "x86", "Inf2Cat.exe");
@@ -106,7 +122,7 @@ internal static class Program
                 var written = DriverCatalog.Write(dir, arch);
                 foreach (var p in plan) CheckCatalog(arch.ToString(), p, os);
                 if (oracle) CompareWithInf2Cat(arch, dir, written);
-                if (arch == RuntimeInformation.OSArchitecture) Signing(dir, written);
+                Signing(arch.ToString(), dir, written);
             }
 
             Console.WriteLine("\n-- A WinUSB binding package --");
@@ -131,8 +147,11 @@ internal static class Program
                 var written = DriverCatalog.Write(dir, arch);
                 if (plan.Count == 1) CheckCatalog($"{arch} WinUSB", plan[0], arch == Architecture.Arm64 ? "_v100_ARM64_RS3" : "_v100_X64");
                 if (oracle) CompareWithInf2Cat(arch, dir, written);
-                if (arch == RuntimeInformation.OSArchitecture) Signing(dir, written);
+                Signing(arch + " WinUSB", dir, written);
             }
+
+            Console.WriteLine("\n-- Refusals and reading rules Inf2Cat has --");
+            Refusals();
 
             Console.WriteLine("\n-- Controls: the checks can fail --");
             Controls(oracle);
@@ -149,6 +168,11 @@ internal static class Program
                 try { Directory.Delete(d, true); } catch { }
         }
 
+        if (s_failures == 0 && s_signingSkipped != null)
+        {
+            Console.WriteLine($"\n=== {s_total}/{s_total} checks passed. The signing part did not run: {s_signingSkipped} ===");
+            return 2;
+        }
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} {(s_failures == 0 ? "PASS" : "FAIL")} ===");
         return s_failures == 0 ? 0 : 1;
     }
@@ -261,21 +285,36 @@ internal static class Program
 
     // ── 4. Signing ───────────────────────────────────────────────────────
 
-    static void Signing(string dir, IReadOnlyList<string> catalogs)
+    static void Signing(string label, string dir, IReadOnlyList<string> catalogs)
     {
         bool elevated = new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
-        if (!elevated) { Note("not elevated: the signing part needs the private key in LocalMachine\\My and does not run"); return; }
+        if (!elevated)
+        {
+            s_signingSkipped = "not elevated, and the signing needs the private key in LocalMachine\\My";
+            Console.WriteLine($"  [SKIP] {label} signing: {s_signingSkipped}");
+            return;
+        }
         System.Security.Cryptography.X509Certificates.X509Certificate2 cert;
         try { cert = AuthenticodeSigner.SelectCertificate(DriverBuilder.CertFriendlyName); }
-        catch (InvalidOperationException e) { Note($"no signing certificate on this machine ({e.Message}): the signing part does not run"); return; }
+        catch (InvalidOperationException e)
+        {
+            s_signingSkipped = $"no signing certificate on this machine ({e.Message.TrimEnd('.')})";
+            Console.WriteLine($"  [SKIP] {label} signing: {s_signingSkipped}");
+            return;
+        }
         using var _ = cert;
+        Check($"{label}: the certificate selected is CN={DriverBuilder.CertFriendlyName} exactly",
+              cert.Subject == "CN=" + DriverBuilder.CertFriendlyName, cert.Subject);
+        string part = DriverBuilder.CertFriendlyName[..^4];
+        Check($"{label}: {part}, only part of the name, selects no certificate",
+              Refused(() => AuthenticodeSigner.SelectCertificate(part).Dispose()) != null);
         bool signtool = File.Exists(SignToolExe);
         var files = catalogs.ToList();
         files.AddRange(Directory.GetFiles(dir, "*.dll"));
         foreach (string file in files)
         {
-            string name = Path.GetFileName(file);
-            string ours = Path.Combine(dir, "ours_" + name), theirs = Path.Combine(dir, "theirs_" + name);
+            string name = $"{label} {Path.GetFileName(file)}";
+            string ours = Path.Combine(dir, "ours_" + Path.GetFileName(file)), theirs = Path.Combine(dir, "theirs_" + Path.GetFileName(file));
             File.Copy(file, ours, true);
             File.Copy(file, theirs, true);
             try
@@ -301,7 +340,94 @@ internal static class Program
         return Math.Min(a.Length, b.Length);
     }
 
-    // ── 5. Controls ──────────────────────────────────────────────────────
+    // ── 5. Refusals and reading rules ────────────────────────────────────
+
+    static void Refusals()
+    {
+        // Each architecture's INFs under the other. Inf2Cat's
+        // FindARMModelDecorations and Find64BitModelDecorations refuse an INF
+        // whose [Manufacturer] names no models section decorated for the
+        // target.
+        foreach (var (infs, target, decoration) in new[]
+                 { (Architecture.X64, Architecture.Arm64, "NTARM64"), (Architecture.Arm64, Architecture.X64, "NTAMD64") })
+        {
+            string? dir = StageDriver(infs);
+            if (dir == null) continue;
+            string? error = Refused(() => DriverCatalog.Plan(dir, target));
+            Check($"the {infs} INFs are refused for {target}: no {decoration} models section",
+                  error != null && error.Contains(decoration, StringComparison.Ordinal), error ?? "a plan came back");
+            string? write = Refused(() => DriverCatalog.Write(dir, target));
+            Check($"and no catalog is written for {target}", write != null && Directory.GetFiles(dir, "*.cat").Length == 0,
+                  write ?? string.Join(", ", Directory.GetFiles(dir, "*.cat").Select(Path.GetFileName)));
+        }
+
+        // A member outside the package folder: SourceDisksNames points one
+        // folder up, where a file of the name the INF copies waits.
+        string pkg = NewDir("o");
+        string outside = pkg + "-outside";
+        Directory.CreateDirectory(outside);
+        s_dirs.Add(outside);
+        File.WriteAllBytes(Path.Combine(outside, "escape.dll"), new byte[] { 0x4D, 0x5A });
+        string up = "..\\" + Path.GetFileName(outside);
+        File.WriteAllText(Path.Combine(pkg, "escape.inf"), string.Join("\r\n", new[]
+        {
+            "[Version]", "Signature = \"$WINDOWS NT$\"", "Class = HIDClass", "ClassGuid = {745a17a0-74d3-11d0-b6fe-00a0c90f57da}",
+            "Provider = %P%", "CatalogFile = escape.cat", "DriverVer = 11/18/2026,2.3.0.0",
+            "[SourceDisksNames]", "1 = %P%,,," + up, "[SourceDisksFiles]", "escape.dll = 1",
+            "[DestinationDirs]", "DefaultDestDir = 13", "[Manufacturer]", "%P% = M,NTamd64,NTarm64",
+            "[M.NTamd64]", "%P% = I, root\\escape", "[M.NTarm64]", "%P% = I, root\\escape",
+            "[I.NT]", "CopyFiles = F", "[F]", "escape.dll", "[Strings]", "P = \"Escape\"",
+        }));
+        string? escaped = Refused(() => DriverCatalog.Plan(pkg, RuntimeInformation.OSArchitecture));
+        Check("a member that resolves outside the package folder is refused",
+              escaped != null && escaped.Contains("outside", StringComparison.Ordinal), escaped ?? "a plan came back");
+
+        // The hardware IDs Inf2Cat writes (IsHardwareIdValid): every ID but
+        // a six-character PnP ID, or a PnP ID under ACPI or BIOS, unless it
+        // is one of the legacy keyboard, mouse and serial IDs, matched whole.
+        foreach (var (id, kept) in new[]
+        {
+            (@"root\hidmaestro", true), (@"usb\vid_057e&pid_0337", true), ("pnp0f13", true), (@"acpi\pnp0f13", true),
+            (@"acpi\pnp0c0a", false), (@"bios\pnp0c0a", false), (@"acpi\pnp03", false), (@"acpi\int3400", true), ("pnp030", false),
+        })
+            Check($"hardware ID {id} is {(kept ? "kept" : "left out")}", DriverCatalog.InfFile.IsHardwareIdKept(id) == kept);
+
+        // No byte-order mark: Inf2Cat converts the bytes from
+        // Encoding.Default, the ANSI code page on .NET Framework
+        // (InfReader.ForceMissingBOMToUnicode).
+        byte[] bytes = { 0x80, 0xE9, 0x41 };
+        string ansi = Ansi(bytes);
+        string read = DriverCatalog.InfFile.Decode(bytes);
+        Check($"an INF without a byte-order mark reads in the ANSI code page ({GetACP()})", read == ansi,
+              $"{Hex(read)} against {Hex(ansi)}");
+    }
+
+    static string Hex(string s) => string.Join(" ", s.Select(c => ((int)c).ToString("X4")));
+
+    static string? Refused(Action a)
+    {
+        try { a(); return null; }
+        catch (InvalidOperationException e) { return e.Message; }
+    }
+
+    static unsafe string Ansi(byte[] bytes)
+    {
+        fixed (byte* b = bytes)
+        {
+            int n = MultiByteToWideChar(0, 0, b, bytes.Length, null, 0);
+            var chars = new char[n];
+            fixed (char* c = chars) MultiByteToWideChar(0, 0, b, bytes.Length, c, n);
+            return new string(chars);
+        }
+    }
+
+    [DllImport("kernel32.dll")]
+    static extern uint GetACP();
+
+    [DllImport("kernel32.dll")]
+    static extern unsafe int MultiByteToWideChar(uint codePage, uint flags, byte* mb, int cb, char* wide, int cch);
+
+    // ── 6. Controls ──────────────────────────────────────────────────────
 
     static void Controls(bool oracle)
     {
@@ -364,18 +490,35 @@ internal static class Program
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        using var p = Process.Start(psi)!;
+        // A child takes an idle or below-normal priority class from its
+        // parent (CreateProcess), and the battery can run a probe at idle
+        // priority under load, so the reference tools start at normal
+        // priority. The bound is a hang detector, not a time budget.
+        Process p;
+        using (var self = Process.GetCurrentProcess())
+        {
+            var before = self.PriorityClass;
+            self.PriorityClass = ProcessPriorityClass.Normal;
+            try { p = Process.Start(psi)!; }
+            finally { self.PriorityClass = before; }
+        }
+        using var owned = p;
         var stdout = p.StandardOutput.ReadToEndAsync();
         var stderr = p.StandardError.ReadToEndAsync();
-        if (!p.WaitForExit(120_000))
+        int bound = TimeoutScale.Apply(ToolHangMs);
+        if (!p.WaitForExit(bound))
         {
             try { p.Kill(true); } catch { }
-            return (-999, "(timed out after 120 s)");
+            return (-999, $"(stopped after {bound} ms, the hang detector at scale {TimeoutScale.Factor})");
         }
         Task.WaitAll(new Task[] { stdout, stderr }, 10_000);
         return (p.ExitCode, (stdout.IsCompletedSuccessfully ? stdout.Result : "")
                           + (stderr.IsCompletedSuccessfully ? stderr.Result : ""));
     }
+
+    /// <summary>The reference runs' hang detector before scaling: ten
+    /// minutes, against about 2 s for Inf2Cat unloaded.</summary>
+    const int ToolHangMs = 600_000;
 
     static string LastLine(string output) =>
         output.Split('\n').Select(l => l.Trim()).LastOrDefault(l => l.Length > 0) ?? "";

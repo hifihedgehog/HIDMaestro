@@ -11,8 +11,10 @@ namespace HIDMaestro.Internal;
 ///
 /// <para>Through v2.2.0 the SDK carried signtool from the Windows SDK and ran
 /// <c>signtool sign /a /sm /s My /n HIDMaestroTestCert /fd SHA256</c> on the
-/// driver binaries and each catalog. This class makes the same signature:
-/// the certificate that command selects, a SHA-256 digest, RSA PKCS#1 v1.5,
+/// driver binaries and each catalog. This class makes the same signature
+/// with the same certificate, found by its exact subject where that command
+/// matched the name anywhere in the subject (<see cref="SelectCertificate"/>):
+/// a SHA-256 digest, RSA PKCS#1 v1.5,
 /// the certificate chain in the signature, the authenticated attributes
 /// SpcSpOpusInfo (empty) and SpcStatementType (individual), no signing time
 /// and no timestamp. Probe driver_catalog_check compares the two signatures
@@ -78,25 +80,25 @@ internal static unsafe partial class AuthenticodeSigner
         }
     }
 
-    /// <summary>The certificate <c>signtool sign /a /sm /s My /n
-    /// <paramref name="name"/></c> selects: in LocalMachine\My, of the
-    /// certificates whose subject contains <paramref name="name"/>, that have
-    /// a private key, are within their validity period and allow code
-    /// signing, the one valid for the longest time ("SignTool", on Learn:
-    /// "selects the one that is valid for the longest time"). The caller
-    /// disposes it.</summary>
+    /// <summary>The certificate HIDMaestro signs with: in LocalMachine\My,
+    /// of the certificates whose subject is exactly <c>CN=</c>
+    /// <paramref name="name"/> and that can sign (<see cref="CanSign"/>),
+    /// the one valid for the longest time. The subject is the one
+    /// <see cref="DriverBuilder.EnsureTestCertificate()"/> creates and the
+    /// removal takes, compared as the removal compares it. Through v2.2.0
+    /// <c>signtool sign /a /sm /s My /n</c> chose, which matches the name
+    /// anywhere in the subject, so another certificate whose subject held
+    /// the name and expired later won. The caller disposes it.</summary>
     /// <exception cref="InvalidOperationException">No certificate qualifies.</exception>
     internal static X509Certificate2 SelectCertificate(string name)
     {
         using var store = new X509Store(StoreName.My, StoreLocation.LocalMachine);
         store.Open(OpenFlags.ReadOnly | OpenFlags.OpenExistingOnly);
-        var found = store.Certificates.Find(X509FindType.FindBySubjectName, name, false);
         X509Certificate2? best = null;
         DateTime now = DateTime.Now;
-        foreach (var c in found)
+        foreach (var c in store.Certificates)
         {
-            if (c.HasPrivateKey && c.NotBefore <= now && now <= c.NotAfter && AllowsCodeSigning(c)
-                && (best == null || c.NotAfter > best.NotAfter))
+            if (CanSign(c, name, now) && (best == null || c.NotAfter > best.NotAfter))
             {
                 best?.Dispose();
                 best = c;
@@ -104,8 +106,16 @@ internal static unsafe partial class AuthenticodeSigner
             else c.Dispose();
         }
         return best ?? throw new InvalidOperationException(
-            $"No certificate in LocalMachine\\My named {name} has a private key, is valid now and allows code signing.");
+            $"No certificate in LocalMachine\\My with the subject CN={name} has a private key, is valid now and allows code signing.");
     }
+
+    /// <summary>Whether <paramref name="c"/> is a certificate HIDMaestro can
+    /// sign with: subject exactly <c>CN=</c><paramref name="name"/>, its
+    /// private key present, within its validity period at
+    /// <paramref name="now"/>, and code signing allowed.</summary>
+    internal static bool CanSign(X509Certificate2 c, string name, DateTime now) =>
+        string.Equals(c.Subject, "CN=" + name, StringComparison.Ordinal)
+        && c.HasPrivateKey && c.NotBefore <= now && now <= c.NotAfter && AllowsCodeSigning(c);
 
     // A certificate with no enhanced key usage extension allows every use.
     private static bool AllowsCodeSigning(X509Certificate2 c)

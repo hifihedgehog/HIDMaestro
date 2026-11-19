@@ -48,7 +48,9 @@ namespace HIDMaestro.Internal;
 /// install sections and SourceDisksFiles/SourceDisksNames. A file the INF
 /// copies from a compressed name (ending in an underscore) or a package
 /// with INFs below its top folder is refused, since Inf2Cat expands and
-/// walks those and this class does not.</para>
+/// walks those and this class does not. As in Inf2Cat, an INF with no
+/// models section decorated for the target architecture is refused, and so
+/// is a member outside the package folder.</para>
 /// </summary>
 internal static unsafe partial class DriverCatalog
 {
@@ -123,6 +125,15 @@ internal static unsafe partial class DriverCatalog
                 if (!hwids.Contains(id, StringComparer.Ordinal)) hwids.Add(id);
 
         string decoration = arch == Architecture.Arm64 ? "ntarm64" : "ntamd64";
+        // Inf2Cat refuses a driver INF whose [Manufacturer] names no models
+        // section decorated for the target architecture
+        // (FindARMModelDecorations, Find64BitModelDecorations), and writes no
+        // catalog at all. Without the refusal an x64 INF under ARM64 would
+        // get a catalog of its x64 binaries through its .NT install section.
+        foreach (var (path, inf) in infs)
+            if (!inf.HasModelsDecoratedFor(decoration))
+                throw new InvalidOperationException(
+                    $"{System.IO.Path.GetFileName(path)} does not have {decoration.ToUpperInvariant()} decorated model sections, so it has no catalog for {arch}.");
         var catalogs = new List<(string Path, List<(string File, string Name)> Members)>();
         foreach (var (path, inf) in infs)
         {
@@ -252,14 +263,31 @@ internal static unsafe partial class DriverCatalog
         internal static InfFile Read(string path) => Parse(Decode(File.ReadAllBytes(path)));
 
         /// <summary>UTF-16 with its byte-order mark, UTF-8 with its mark, or
-        /// with no mark the system's ANSI code page, the forms Windows reads
-        /// an INF in.</summary>
+        /// with no mark the system's ANSI code page. Inf2Cat converts an INF
+        /// without a mark from Encoding.Default, which on .NET Framework is
+        /// that code page (InfReader.ForceMissingBOMToUnicode), and
+        /// MultiByteToWideChar with CP_ACP is the same conversion.</summary>
         internal static string Decode(byte[] bytes)
         {
             if (bytes.Length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE) return System.Text.Encoding.Unicode.GetString(bytes, 2, bytes.Length - 2);
             if (bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF) return System.Text.Encoding.BigEndianUnicode.GetString(bytes, 2, bytes.Length - 2);
             if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) return System.Text.Encoding.UTF8.GetString(bytes, 3, bytes.Length - 3);
-            return System.Text.Encoding.Latin1.GetString(bytes);
+            return Ansi(bytes);
+        }
+
+        private static string Ansi(byte[] bytes)
+        {
+            if (bytes.Length == 0) return "";
+            fixed (byte* b = bytes)
+            {
+                int n = MultiByteToWideChar(CP_ACP, 0, b, bytes.Length, null, 0);
+                if (n <= 0) throw new InvalidOperationException($"The INF could not be read in the ANSI code page (error {Marshal.GetLastPInvokeError()}).");
+                var chars = new char[n];
+                fixed (char* c = chars)
+                    if (MultiByteToWideChar(CP_ACP, 0, b, bytes.Length, c, n) != n)
+                        throw new InvalidOperationException($"The INF could not be read in the ANSI code page (error {Marshal.GetLastPInvokeError()}).");
+                return new string(chars);
+            }
         }
 
         internal static InfFile Parse(string text)
@@ -438,18 +466,23 @@ internal static unsafe partial class DriverCatalog
             return ids;
         }
 
-        // The legacy PnP IDs of keyboards, mice and serial devices, which
-        // Inf2Cat leaves out of the catalog attributes.
-        private const string LegacyPnpIds =
-            "pnp0300,pnp0301,pnp0302,pnp0303,pnp0304,pnp0305,pnp0306,pnp0307,pnp0308,pnp0309,pnp030a,pnp0320,pnp0321,pnp0322,pnp0323,pnp0324,pnp0325,pnp0326,pnp0327,pnp0340,pnp0341,pnp0342,pnp0343,pnp0343,pnp0344,pnp0f00,pnp0f01,pnp0f02,pnp0f03,pnp0f04,pnp0f05,pnp0f06,pnp0f07,pnp0f08,pnp0f09,pnp0f0a,pnp0f0b,pnp0f0c,pnp0f0d,pnp0f0e,pnp0f0f,pnp0f10,pnp0f11,pnp0f12,pnp0f13,pnp0f14,pnp0f15,pnp0f16,pnp0f17,pnp0f18,pnp0f19,pnp0f1a,pnp0f1b,pnp0f1c,pnp0f1d,pnp0f1e,pnp0f1f,pnp0f20,pnp0f21,pnp0f22,pnp0f23";
+        // The legacy PnP IDs of keyboards, mice and serial devices: the only
+        // bare or ACPI and BIOS PnP IDs Inf2Cat writes as HWIDn attributes.
+        private static readonly HashSet<string> LegacyPnpIds = new(
+            "pnp0300,pnp0301,pnp0302,pnp0303,pnp0304,pnp0305,pnp0306,pnp0307,pnp0308,pnp0309,pnp030a,pnp0320,pnp0321,pnp0322,pnp0323,pnp0324,pnp0325,pnp0326,pnp0327,pnp0340,pnp0341,pnp0342,pnp0343,pnp0343,pnp0344,pnp0f00,pnp0f01,pnp0f02,pnp0f03,pnp0f04,pnp0f05,pnp0f06,pnp0f07,pnp0f08,pnp0f09,pnp0f0a,pnp0f0b,pnp0f0c,pnp0f0d,pnp0f0e,pnp0f0f,pnp0f10,pnp0f11,pnp0f12,pnp0f13,pnp0f14,pnp0f15,pnp0f16,pnp0f17,pnp0f18,pnp0f19,pnp0f1a,pnp0f1b,pnp0f1c,pnp0f1d,pnp0f1e,pnp0f1f,pnp0f20,pnp0f21,pnp0f22,pnp0f23".Split(','), StringComparer.OrdinalIgnoreCase);
 
-        /// <summary>Whether Inf2Cat writes an ID as a HWIDn attribute: every
-        /// ID but a bare PnP ID, or one under ACPI or BIOS, outside the
-        /// legacy list.</summary>
+        /// <summary>Whether an ID is written as a HWIDn attribute: every ID
+        /// but a six-character PnP ID, or a PnP ID under ACPI or BIOS, unless
+        /// it is one of the legacy IDs, matched whole. Inf2Cat's
+        /// IsHardwareIdValid makes the same choice, except that it finds a
+        /// legacy ID by searching the joined list, so a fragment of one
+        /// (pnp03) also counts as legacy there. Its test of a seven-character
+        /// ID starting with *pnp never fires, since the asterisks are gone
+        /// before it, and is left out here.</summary>
         internal static bool IsHardwareIdKept(string id)
         {
             if (id.Length == 0) return false;
-            if (LegacyPnpIds.Contains(id, StringComparison.OrdinalIgnoreCase)) return true;
+            if (LegacyPnpIds.Contains(id)) return true;
             int slash = id.IndexOf('\\');
             if (slash > -1)
             {
@@ -457,17 +490,23 @@ internal static unsafe partial class DriverCatalog
                 if (bus is "acpi" or "bios")
                 {
                     string rest = slash + 1 < id.Length ? id[(slash + 1)..] : "";
-                    return !rest.StartsWith("pnp", StringComparison.OrdinalIgnoreCase)
-                        || LegacyPnpIds.Contains(rest, StringComparison.OrdinalIgnoreCase);
+                    return !rest.StartsWith("pnp", StringComparison.OrdinalIgnoreCase) || LegacyPnpIds.Contains(rest);
                 }
                 return true;
             }
-            return id.Length switch
-            {
-                7 => !id.StartsWith("*pnp", StringComparison.OrdinalIgnoreCase),
-                6 => !id.StartsWith("pnp", StringComparison.OrdinalIgnoreCase),
-                _ => true,
-            };
+            return !(id.Length == 6 && id.StartsWith("pnp", StringComparison.OrdinalIgnoreCase));
+        }
+
+        /// <summary>Whether a manufacturer line names a models section
+        /// decorated for the architecture (its decoration, such as ntarm64 or
+        /// ntamd64.10.0...16299, starts with <paramref name="decoration"/>),
+        /// the test Inf2Cat makes before it catalogs an INF. An INF with no
+        /// [Manufacturer] lines passes, as there.</summary>
+        internal bool HasModelsDecoratedFor(string decoration)
+        {
+            var lines = Section("manufacturer").ToList();
+            if (lines.Count == 0) return true;
+            return lines.Any(l => l.Fields.Skip(1).Any(d => Resolve(d).StartsWith(decoration, StringComparison.OrdinalIgnoreCase)));
         }
 
         /// <summary>The variant of an install section Windows uses on the
@@ -554,7 +593,13 @@ internal static unsafe partial class DriverCatalog
             {
                 if (name.EndsWith('_'))
                     throw new InvalidOperationException($"The INF copies {dest} from the compressed {name}. HIDMaestro catalogs uncompressed files only.");
-                string file = System.IO.Path.Combine(dir, name);
+                string file = System.IO.Path.GetFullPath(System.IO.Path.Combine(dir, name));
+                // Inf2Cat matches a member only among the files under the
+                // package folder (its cache of the folder) and flags a path
+                // with ".." as a directory excursion. A file outside is never
+                // a member.
+                if (!file.StartsWith(root.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException($"The INF copies {dest} from {file}, outside the package folder {root}.");
                 if (File.Exists(file)) return file;
             }
             throw new InvalidOperationException($"The INF copies {dest}, which is not in {dir}.");
@@ -674,6 +719,14 @@ internal static unsafe partial class DriverCatalog
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool CryptSIPRetrieveSubjectGuidForCatalogFile(string FileName, IntPtr hFileIn, Guid* pgSubject);
+
+    // winnls.h
+    private const uint CP_ACP = 0;
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static partial int MultiByteToWideChar(uint CodePage, uint dwFlags, byte* lpMultiByteStr, int cbMultiByte,
+        char* lpWideCharStr, int cchWideChar);
 
     [LibraryImport("crypt32.dll", SetLastError = true)]
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
