@@ -163,8 +163,11 @@ internal static unsafe partial class Program
         return 0;
     }
 
+    // cfgmgr32.h: CM_REMOVE_UI_NOT_OK 0x1 and CM_REMOVE_DISABLE 0x4. The
+    // query and the removal of the subtree, which leaves the device
+    // disabled, name the program or driver that vetoes it.
     [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
-    static extern uint CM_Disable_DevNode(uint devInst, uint flags);
+    static extern uint CM_Query_And_Remove_SubTreeW(uint devInst, out int vetoType, System.Text.StringBuilder vetoName, int nameLength, uint flags);
 
     [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
     static extern uint CM_Enable_DevNode(uint devInst, uint flags);
@@ -182,8 +185,11 @@ internal static unsafe partial class Program
             int slot = SlotOf(pad, HMButton.A, 0x1000, before);
             Check("the pad reads in XInput before the restart", slot >= 0, $"slot {slot}");
             int from = pad.Engine.SnapshotLog().Count;
-            uint disabled = CM_Locate_DevNodeW(out uint dev, pad.Instance, 0) == 0 ? CM_Disable_DevNode(dev, 0x4 /* CM_DISABLE_UI_NOT_OK */) : 0xFFFF;
-            Check("the USB device is disabled, which stops its driver stack and leaves the port alone", disabled == 0, $"CM_Disable_DevNode {disabled}");
+            var veto = new System.Text.StringBuilder(260);
+            int vetoType = 0;
+            uint disabled = CM_Locate_DevNodeW(out uint dev, pad.Instance, 0) == 0 ? CM_Query_And_Remove_SubTreeW(dev, out vetoType, veto, veto.Capacity, 0x1 | 0x4) : 0xFFFF;
+            Check("the USB device is disabled, which stops its driver stack and leaves the port alone", disabled == 0,
+                  $"CM_Query_And_Remove_SubTree {disabled}, veto type {vetoType} by {veto}");
             bool stopped = WaitUntil(() => Node(pad.Instance) is { Started: false }, 10_000);
             Check("it stops", stopped, Node(pad.Instance) is { } n0 ? $"problem {n0.Problem}" : "gone");
             Check("its XInput slot goes", WaitUntil(() => slot < 0 || XInputGetState((uint)slot, out _) != 0, 10_000));
@@ -192,6 +198,8 @@ internal static unsafe partial class Program
             bool started = WaitUntil(() => Node(pad.Instance) is { Started: true, Problem: 0 }, 20_000);
             Check("it starts again under dc1-controller", started && Node(pad.Instance) is { } n1 && string.Equals(n1.Service, "dc1-controller", StringComparison.OrdinalIgnoreCase));
             int again = SlotOf(pad, HMButton.B, 0x2000, before);
+            string tree = string.Join(", ", Descendants(pad.Instance).Select(d => $"{d.Id} started {d.Info.Started} problem {d.Info.Problem} {d.Info.Service}"));
+            Console.WriteLine($"  the device's tree after the restart: {tree}");
             var log = pad.Engine.SnapshotLog().Skip(from).Select(x => Hex(x.Command)).ToList();
             Console.WriteLine($"  host messages after the restart: {string.Join(" ", log.Take(16))}");
             Check("the pad reads in XInput again", again >= 0, $"slot {again}");
