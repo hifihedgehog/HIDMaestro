@@ -281,7 +281,13 @@ internal static unsafe partial class Program
     /// <summary>Guide pressed on a GIP pad in a session with a console user:
     /// XInput reads before the press, after it, and after a second press.
     /// The Game Bar processes' start times are printed beside each.</summary>
-    static int Guide()
+    static int Guide() => GuidePresses(2);
+
+    /// <summary>One Guide press, then the read: what a second run sees after
+    /// the first left the Game Bar open or closed.</summary>
+    static int GuideOnce() => GuidePresses(1);
+
+    static int GuidePresses(int presses)
     {
         Console.WriteLine("\n=== guide: XInput reads around a Guide press ===");
         using var ctx = new HMContext();
@@ -297,7 +303,7 @@ internal static unsafe partial class Program
             int slot = SlotOf(pad, HMButton.A, 0x1000, before);
             Console.WriteLine($"  before the press: slot {slot}; Game Bar: {GameBar()}");
             Check("XInput reads the submitted A before any Guide press", slot >= 0, SlotStates());
-            for (int press = 1; press <= 2; press++)
+            for (int press = 1; press <= presses; press++)
             {
                 var guide = new HMGamepadState { Buttons = HMButton.Guide };
                 pad.Controller.SubmitState(in guide);
