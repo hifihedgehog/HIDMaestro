@@ -62,16 +62,12 @@ internal static partial class UsbipRemoval
     /// <exception cref="InvalidOperationException">The calling thread holds
     /// the PnP lock or runs transport work, and <paramref name="preview"/> is
     /// false.</exception>
-    internal static IReadOnlyList<UninstallEntry> Remove(bool preview, bool includeUnproven) =>
-        Remove(preview, includeUnproven, usedSinceBoot: null);
-
-    /// <summary>The same, deciding the host controller's removal from
-    /// <paramref name="usedSinceBoot"/>, the uninstall's one reading of
-    /// whether it has carried a device since Windows started, taken before
-    /// the uninstall removed anything (null for a reading made here: the
-    /// reason when it has, or no reason). The uninstall removes the records
-    /// that reading came from before this step runs.</summary>
-    internal static IReadOnlyList<UninstallEntry> Remove(bool preview, bool includeUnproven, (bool Used, string Why)? usedSinceBoot)
+    /// <param name="usedSinceBoot">The uninstall's one reading of whether
+    /// the host controller has carried a device since Windows started, with
+    /// the reason when it has, taken before the uninstall removed anything:
+    /// the devices step removes the records it is read from before this
+    /// step runs. The host controller's removal is decided by it.</param>
+    internal static IReadOnlyList<UninstallEntry> Remove(bool preview, bool includeUnproven, (bool Used, string Why) usedSinceBoot)
     {
         if (!preview && DeviceManager.PnpGateHeldHere)
             throw new InvalidOperationException("UsbipRemoval.Remove was called with the PnP lock held. Its own thread takes that lock, so the call would never return.");
@@ -92,7 +88,7 @@ internal static partial class UsbipRemoval
         return entries;
     }
 
-    private static void Run(List<UninstallEntry> entries, bool preview, bool includeUnproven, (bool Used, string Why)? reading)
+    private static void Run(List<UninstallEntry> entries, bool preview, bool includeUnproven, (bool Used, string Why) reading)
     {
         // ── HIDMaestro's own imports ──────────────────────────────────────
         var imports = UsbipBackend.ClassifiedImports();
@@ -137,11 +133,7 @@ internal static partial class UsbipRemoval
         // off an older host controller, would take the controller for one
         // that is safe to remove.
         string? used = null;
-        if (controllers.Exists(c => c.Present))
-        {
-            if (reading is { } r) { if (r.Used) used = r.Why; }
-            else if (UsbipDriverInstaller.UsedSinceBoot(out string why)) used = why;
-        }
+        if (controllers.Exists(c => c.Present) && reading.Used) used = reading.Why;
 
         // ── Persona phantoms, before the hubs they name go ────────────────
         // The uninstall read the since-boot state before it removed anything
@@ -149,7 +141,7 @@ internal static partial class UsbipRemoval
         // code reads these records after it, so every record the ledger
         // names goes, a device that arrived since Windows started or not.
         var hubs = UsbHubsOf(controllers);
-        RemovePersonaPhantoms(entries, hubs, preview, keepReason: null);
+        RemovePersonaPhantoms(entries, hubs, preview);
 
         // ── Host controllers ──────────────────────────────────────────────
         var targets = new List<(string Id, bool Present)>();
@@ -477,32 +469,23 @@ internal static partial class UsbipRemoval
         return hubs;
     }
 
-    /// <summary>Uninstall the records of composite personas HIDMaestro
-    /// plugged in through usbip-win2 and that have left: a USB device that
-    /// is not present, whose last parent is a usbip-win2 root hub, and whose
-    /// serial is one the SDK makes up, with every record below it. A real
-    /// device of the same VID, PID and serial would share the instance id,
-    /// and only a made-up serial rules that out. A persona with a captured
-    /// serial is reported and left, and so is every persona while
-    /// <paramref name="keepReason"/> says why.</summary>
     /// <summary>Whether the removal takes a not-present record below a
     /// host controller's root hub, and why it keeps one. One rule for every
     /// record, the GameCube adapter's serial-named one included: the ledger
     /// of records HIDMaestro's creates caused (UsbRecords) decides. A record
-    /// it names goes, unless its device arrived since Windows started
-    /// (<paramref name="keepReason"/>). A record it does not name stays: a
-    /// real device's, one that was there before HIDMaestro's create took
-    /// its instance, and one an SDK before this ledger made.
+    /// it names goes, whenever its device arrived. A record it does not name
+    /// stays: a real device's, one that was there before HIDMaestro's create
+    /// took its instance, and one an SDK before this ledger made.
     /// registry_ownership_check's offline part checks it.</summary>
-    internal static (bool Take, string? Reason) PersonaVerdict(string instanceId, bool caused, string? keepReason)
-    {
-        if (!caused)
-            return (false, "no record of HIDMaestro's shows its create made it: a real device of that VID, PID and serial can share it, or it was there before.");
-        if (keepReason != null) return (false, keepReason);
-        return (true, null);
-    }
+    internal static (bool Take, string? Reason) PersonaVerdict(string instanceId, bool caused) =>
+        caused ? (true, null)
+               : (false, "no record of HIDMaestro's shows its create made it: a real device of that VID, PID and serial can share it, or it was there before.");
 
-    private static void RemovePersonaPhantoms(List<UninstallEntry> entries, List<(string Hub, string Controller)> hubs, bool preview, string? keepReason)
+    /// <summary>Uninstall the records of devices HIDMaestro plugged in
+    /// through usbip-win2 that have left: a USB device that is not present,
+    /// whose last parent is a usbip-win2 root hub, and that the ledger names
+    /// (<see cref="PersonaVerdict"/>), with every record below it.</summary>
+    private static void RemovePersonaPhantoms(List<UninstallEntry> entries, List<(string Hub, string Controller)> hubs, bool preview)
     {
         if (hubs.Count == 0) return;
         var hubIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -518,7 +501,7 @@ internal static partial class UsbipRemoval
             if (UsbipDriverInstaller.IsPresent(id)) continue;
             string? parent = UsbipDriverInstaller.ParentOf(id);
             if (parent == null || !hubIds.Contains(parent)) continue;
-            var (take, reason) = PersonaVerdict(id, caused.Contains(id), keepReason);
+            var (take, reason) = PersonaVerdict(id, caused.Contains(id));
             if (take) personas.Add(id);
             else entries.Add(new("devnode", id, UninstallOutcome.Kept, reason));
         }

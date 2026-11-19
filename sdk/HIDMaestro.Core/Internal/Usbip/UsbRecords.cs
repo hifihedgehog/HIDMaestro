@@ -205,13 +205,11 @@ internal static partial class UsbRecords
     /// device has left, waiting up to <paramref name="leaveWaitMs"/> (already
     /// scaled) for each to leave, and drop each settled one from the ledger.
     /// One read of the machine's records serves them all. Returns how many
-    /// stay. The full removal calls it once every import is detached.</summary>
-    internal static int RemoveCaused(int leaveWaitMs) => RemoveCaused(leaveWaitMs, sinceBoot: false);
-
-    /// <summary>The same, with <paramref name="sinceBoot"/> for the uninstall,
-    /// which takes a record of a device that arrived since Windows started
-    /// too: it read the host controller's since-boot state before it removed
-    /// anything, and no HIDMaestro code reads these records after it.</summary>
+    /// stay. The full removal calls it once every import is detached, with
+    /// <paramref name="sinceBoot"/> true for the uninstall, which takes a
+    /// record of a device that arrived since Windows started too: it read
+    /// the host controller's since-boot state before it removed anything,
+    /// and no HIDMaestro code reads these records after it.</summary>
     internal static int RemoveCaused(int leaveWaitMs, bool sinceBoot)
     {
         var ids = Caused();

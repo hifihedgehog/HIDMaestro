@@ -717,15 +717,13 @@ internal static partial class Program
         Console.WriteLine("\n== Offline: the usbip-win2 removal takes a record by the ledger's proof alone ==");
         const string adapter = @"USB\VID_057E&PID_0337\15/07/2014";
         const string synthetic = @"USB\VID_054C&PID_09CC\HM0123456789AB";
-        var a = UsbipRemoval.PersonaVerdict(adapter, caused: true, keepReason: null);
+        var a = UsbipRemoval.PersonaVerdict(adapter, caused: true);
         Check("a ledgered record with a serial real units share (the GameCube adapter's) goes", a.Take, a.Reason ?? "");
-        var b = UsbipRemoval.PersonaVerdict(synthetic, caused: false, keepReason: null);
+        var b = UsbipRemoval.PersonaVerdict(synthetic, caused: false);
         Check("a record with HIDMaestro's serial form that the ledger does not name stays", !b.Take, b.Reason ?? "taken");
-        var c = UsbipRemoval.PersonaVerdict(adapter, caused: false, keepReason: null);
+        var c = UsbipRemoval.PersonaVerdict(adapter, caused: false);
         Check("the GameCube adapter's record the ledger does not name stays", !c.Take, c.Reason ?? "taken");
-        var d = UsbipRemoval.PersonaVerdict(synthetic, caused: true, keepReason: "since boot");
-        Check("a ledgered record whose device arrived since Windows started stays, with that reason", !d.Take && d.Reason == "since boot", d.Reason ?? "taken");
-        var e = UsbipRemoval.PersonaVerdict(synthetic, caused: true, keepReason: null);
+        var e = UsbipRemoval.PersonaVerdict(synthetic, caused: true);
         Check("a ledgered record with HIDMaestro's serial form goes", e.Take, e.Reason ?? "");
     }
 }
@@ -876,7 +874,7 @@ internal static partial class Program
         var r = UsbRecords.Remove(foreign, 0, null);
         Check("B1: the removal reports it a real device's and removes nothing", r.Outcome == UsbRecords.Outcome.Foreign && r.Removed.Count == 0,
               $"{r.Outcome}, {r.Detail}");
-        UsbRecords.RemoveCaused(0);
+        UsbRecords.RemoveCaused(0, sinceBoot: false);
         foreach (string x in subtree) Check($"B1: {x} is still on the machine", UsbRecords.Exists(x));
         Check("B1: the ledger names it no more", !LedgerNames(foreign));
     }
