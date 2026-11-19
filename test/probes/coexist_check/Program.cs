@@ -144,7 +144,8 @@
 // install and upgrade policy or the driver's own events (E, F, I, M, N, O,
 // P, Q, R, S, T, Y) print their own condition there and run nothing. J
 // needs a v1.12.0 program, which runs only on HIDMaestro's UMDF2 driver,
-// and prints its condition where Windows refuses the package. Every other
+// and prints its condition where Windows refuses the package, as do W5, W6
+// and W11 to W13 for their v1.12.0 and v1.11.0 programs. Every other
 // section runs on whichever backend each create resolves to.
 //
 // "child-paths" [sandbox] checks the 0xCA invariant, no two HID children
@@ -392,6 +393,15 @@ internal static partial class Program
         Console.WriteLine($"  backend: Auto resolves to {s_machineBackend} on this machine{(s_backendOverridden ? ", by HIDMAESTRO_BACKEND" : "")}");
     }
 
+    /// <summary>Why the v1.12.0 and v1.11.0 peers cannot run here, or null
+    /// when they can: they run only on HIDMaestro's UMDF2 driver, which
+    /// Windows on a machine whose backend is USB/IP without the override
+    /// does not install.</summary>
+    static string? LegacyPeersHaveNoDriver() =>
+        s_machineBackend == "Usbip" && !s_backendOverridden
+            ? "the v1.12.0 and v1.11.0 programs run only on HIDMaestro's UMDF2 driver, which Windows on this machine does not install"
+            : null;
+
     /// <summary>The condition under which a section has no subject on this
     /// machine, or null when it runs.</summary>
     static string? NotOnThisBackend(char id)
@@ -408,8 +418,8 @@ internal static partial class Program
                 return $"the section installs, removes or upgrades HIDMaestro's driver packages, and {Driver}";
             case 'R': return $"a deploy keeps the driver staging a running program's record names, and {Driver}";
             case 'Y': return $"the section tests the events HIDMaestro's UMDF2 driver opens, and {Driver}";
-            case 'J' when !s_backendOverridden:
-                return "a v1.12.0 program runs only on HIDMaestro's UMDF2 driver, which Windows on this machine does not install";
+            case 'J':
+                return LegacyPeersHaveNoDriver();
             default: return null;
         }
     }

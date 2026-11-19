@@ -128,7 +128,7 @@ driven over SSH.
 | Windows Sandbox available, or `HIDMAESTRO_UNINSTALL_FIXTURE` not 1 | the fixture part of `S101_Uninstall` | skips | runs with the variable set | skips |
 | SteamVR not installed | phase 2 of `S50_Vr_Controller_Smoke` | runs | runs | skips |
 | Windows installs HIDMaestro's driver package | the refusing-machine part of `S104_Driver_Signing` | skips | skips | runs |
-| The machine's backend is USB/IP, where this SDK installs no driver package (the Surface, or `-Backend Usbip`) | sections E, F, M, N, O, P, Q, R, S, T and Y of `S71_Coexistence`, section I of `S72_Protected_Staging`, and section J of S71 where Windows refuses the package | runs | runs, skips with `-Backend Usbip` (J runs) | skips |
+| The machine's backend is USB/IP, where this SDK installs no driver package (the Surface, or `-Backend Usbip`) | sections E, F, M, N, O, P, Q, R, S, T and Y of `S71_Coexistence`, section I of `S72_Protected_Staging`, and section J and parts W5, W6 and W11 to W13 of S71 where Windows refuses the package | runs | runs, skips with `-Backend Usbip` (J and the W parts run) | skips |
 
 Any other skip on these machines is a fault of the machine's setup or of
 the scenario, and is read and fixed like a failure.

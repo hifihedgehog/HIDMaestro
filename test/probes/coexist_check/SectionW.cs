@@ -83,7 +83,9 @@ internal static partial class Program
         Clean();
         SectionWReclaim("W4", 0xF203, "-");
         Clean();
-        if (!File.Exists(Path.Combine(AppContext.BaseDirectory, "legacy", "v1.12.0", "CoexistPeer.exe")))
+        if (LegacyPeersHaveNoDriver() is { } noV112)
+            Console.WriteLine($"  [SKIP] W5, W6: {noV112}");
+        else if (!File.Exists(Path.Combine(AppContext.BaseDirectory, "legacy", "v1.12.0", "CoexistPeer.exe")))
             Check("W5: the v1.12.0 peer is built", false, "build CoexistCheck.csproj");
         else
         {
@@ -100,7 +102,9 @@ internal static partial class Program
         Clean();
         SectionWExitThenDispose();
         Clean();
-        if (!File.Exists(Path.Combine(AppContext.BaseDirectory, "legacy", "v1.11.0", "CoexistPeer.exe")))
+        if (LegacyPeersHaveNoDriver() is { } noV111)
+            Console.WriteLine($"  [SKIP] W11, W12, W13: {noV111}");
+        else if (!File.Exists(Path.Combine(AppContext.BaseDirectory, "legacy", "v1.11.0", "CoexistPeer.exe")))
             Check("W11: the v1.11.0 peer is built", false, "build CoexistCheck.csproj");
         else
         {
