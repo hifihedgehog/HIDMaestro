@@ -15,7 +15,7 @@
 //      cases (PresentationPlanCheck.cs) equals presentation-plan.txt but
 //      for the changes presentation-plan-changes.txt lists.
 //   6. Every profile's Button-page buttons are numbered by usage, so
-//      HMButton bit n writes the button DirectInput numbers n, and the
+//      HMButton bit n writes the button the layout numbers n, and the
 //      Stadia pads' A, B, X, Y and Capture land on the bits SDL reads.
 //
 // This probe runs against the in-process catalog only: no driver
@@ -249,7 +249,7 @@ internal static class Program
         // Buttons by usage: HMButton bit n writes the Button-page button with
         // the n-th lowest usage, whatever order the descriptor declares them
         // in (HidReportBuilder.OrderButtonsByUsage), which is the number
-        // DirectInput and the profile's layout give it. stadia-controller-bt
+        // the profile's layout gives it. stadia-controller-bt
         // and -usb declare 0x12 first, and vader-4-pro declares 0x14 down to
         // 0x01 after a Consumer button.
         Console.WriteLine();
@@ -284,7 +284,7 @@ internal static class Program
         if (vader != null)
         {
             var rb = vader.Inner.GetOrBuildReportBuilder();
-            Check("vader-4-pro: HMButton bit 0 writes usage 0x01, the button DirectInput numbers 0",
+            Check("vader-4-pro: HMButton bit 0 writes usage 0x01, the button its layout numbers 0",
                   rb.Buttons.Count > 0 && rb.Buttons[0].UsagePage == 0x09 && rb.Buttons[0].Usage == 0x01,
                   rb.Buttons.Count > 0 ? $"page 0x{rb.Buttons[0].UsagePage:X2} usage 0x{rb.Buttons[0].Usage:X2}" : "none");
         }

@@ -845,9 +845,9 @@ public class HidReportBuilder
 
     /// <summary>Button index n is the Button-page button with the n-th
     /// lowest usage, then the other pages' buttons in the order the
-    /// descriptor declares them. DirectInput and a profile's layout number a
-    /// device's buttons by usage, and a reader that tests report bits finds
-    /// each button where the device sends it, so a descriptor that declares
+    /// descriptor declares them. A profile's layout numbers a device's
+    /// buttons by usage, and a reader that tests report bits finds each
+    /// button where the device sends it, so a descriptor that declares
     /// its usages out of order (the Stadia controller declares 0x12 first)
     /// still gets HMButton bit n on button n. A descriptor that declares its
     /// buttons in usage order keeps its order. Runs once per parse.</summary>
