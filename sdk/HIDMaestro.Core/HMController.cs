@@ -97,16 +97,16 @@ public sealed partial class HMController : IDisposable
     /// (<see cref="HMProfile.FormOn"/>).</summary>
     internal HMProfile Presented { get; }
 
-    // The lengths of a raw frame that only the Bluetooth form of Profile
-    // takes, when the device presents its USB form. Null otherwise, which is
-    // every other controller.
-    private readonly int[]? _otherFormRaw;
+    // Indexed by a raw frame's length: true for a length only the Bluetooth
+    // form of Profile takes, when the device presents its USB form. Built
+    // once at create. Null otherwise, which is every other controller.
+    private readonly bool[]? _otherFormRaw;
 
     /// <summary>The raw-frame lengths <paramref name="own"/>'s form takes
     /// and <paramref name="presented"/>'s does not: the data-lane report
     /// with and without its ID, the extended report with and without its
     /// ID, and the state block.</summary>
-    private static int[]? OtherFormRawLengths(ControllerProfile own, ControllerProfile presented)
+    private static bool[]? OtherFormRawLengths(ControllerProfile own, ControllerProfile presented)
     {
         static HashSet<int> Lengths(ControllerProfile p)
         {
@@ -125,9 +125,52 @@ public sealed partial class HMController : IDisposable
         var only = Lengths(own);
         only.ExceptWith(Lengths(presented));
         if (only.Count == 0) return null;
-        var list = new List<int>(only);
-        list.Sort();
-        return list.ToArray();
+        int max = 0;
+        foreach (int n in only) max = Math.Max(max, n);
+        var table = new bool[max + 1];
+        foreach (int n in only) table[n] = true;
+        return table;
+    }
+
+    /// <summary>The axis keys a state built for <paramref name="own"/>
+    /// carries and <paramref name="form"/> reads elsewhere: the sticks' X
+    /// and Y and the triggers, slot by slot. Null when they agree.</summary>
+    private static (HMAxis From, HMAxis To)[]? FormAxisMoves(HMProfile own, HMProfile form)
+    {
+        var moves = new List<(HMAxis, HMAxis)>();
+        void Pair(HMAxis from, HMAxis to)
+        {
+            if (from != HMAxis.None && to != HMAxis.None && from != to) moves.Add((from, to));
+        }
+        var (os, fs) = (own.Sticks, form.Sticks);
+        for (int i = 0; i < Math.Min(os.Count, fs.Count); i++)
+        {
+            Pair(os[i].XAxis, fs[i].XAxis);
+            Pair(os[i].YAxis, fs[i].YAxis);
+        }
+        var (ot, ft) = (own.Triggers, form.Triggers);
+        for (int i = 0; i < Math.Min(ot.Count, ft.Count); i++) Pair(ot[i].Axis, ft[i].Axis);
+        return moves.Count == 0 ? null : moves.ToArray();
+    }
+
+    // The keys the presented form reads elsewhere (FormAxisMoves), and the
+    // dictionary the descriptor path reads in their place.
+    private readonly (HMAxis From, HMAxis To)[]? _formAxisMoves;
+    private readonly Dictionary<HMAxis, float> _formAxes = new();
+
+    /// <summary>The state's axes with each key the presented form reads
+    /// elsewhere moved to the form's key. Caller holds _submitLock.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private Dictionary<HMAxis, float>? FormAxes(Dictionary<HMAxis, float>? axes)
+    {
+        if (axes == null) return null;
+        var moved = _formAxes;
+        moved.Clear();
+        foreach (var kv in axes) moved[kv.Key] = kv.Value;
+        foreach (var (from, _) in _formAxisMoves!) moved.Remove(from);
+        foreach (var (from, to) in _formAxisMoves!)
+            if (axes.TryGetValue(from, out float v)) moved[to] = v;
+        return moved;
     }
 
     /// <summary>Refuses a raw frame of a length only the Bluetooth form
@@ -137,7 +180,6 @@ public sealed partial class HMController : IDisposable
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private void ThrowIfOtherForm(int length)
     {
-        if (Array.IndexOf(_otherFormRaw!, length) < 0) return;
         throw new ArgumentException(
             $"Profile '{Profile.Id}' runs on the USB/IP backend in the USB form of '{Profile.Inner.UsbForm}', " +
             $"and a {length}-byte raw frame is a report of its Bluetooth form. Build raw frames in the USB form " +
@@ -675,9 +717,13 @@ public sealed partial class HMController : IDisposable
         _keptAxes = _reportBuilder.KeepsLookups ? new float[HidReportBuilder.MaxKeptWrites] : null;
 
         // Snapshot the layout projections once (audit 1n): see the field
-        // declarations. Profile.Sticks/Triggers allocate per access.
-        _cachedSticks = presented.Sticks;
-        _cachedTriggers = presented.Triggers;
+        // declarations. Profile.Sticks/Triggers allocate per access. The
+        // slots are the profile's the consumer fills the state for,
+        // Profile, whose layout can differ from the presented form's
+        // (switch-pro's right stick is Rx/Ry, switch-pro-usb's Z/Rz). The
+        // presented form encodes what the slots read.
+        _cachedSticks = profile.Sticks;
+        _cachedTriggers = profile.Triggers;
         _slotLx = _cachedSticks.Count > 0 ? _cachedSticks[0].XAxis : HMAxis.X;
         _slotLy = _cachedSticks.Count > 0 ? _cachedSticks[0].YAxis : HMAxis.Y;
         _slotRightDeclared = _cachedSticks.Count > 1;
@@ -690,8 +736,14 @@ public sealed partial class HMController : IDisposable
 
         // Resolve the canonical trigger axes once (issue #34): axisMap-
         // declared override wins, else the Z/Rz defaults PadForge writes.
-        _canonicalLt = ResolveCanonicalAxis(presented.Inner.AxisMap, "lefttrigger", HMAxis.Z);
-        _canonicalRt = ResolveCanonicalAxis(presented.Inner.AxisMap, "righttrigger", HMAxis.Rz);
+        _canonicalLt = ResolveCanonicalAxis(profile.Inner.AxisMap, "lefttrigger", HMAxis.Z);
+        _canonicalRt = ResolveCanonicalAxis(profile.Inner.AxisMap, "righttrigger", HMAxis.Rz);
+        // The descriptor path reads the state's axes by key itself
+        // (BuildReportInto), so a presented form that puts a stick or trigger
+        // on other axes than Profile gets the keys moved to its own, once per
+        // frame, into a dictionary of its own. Null for every other
+        // controller.
+        if (!ReferenceEquals(presented, profile)) _formAxisMoves = FormAxisMoves(profile, presented);
 
         // Only a controller with an XUSB companion (HMXInput.dll) has a
         // reader of the GIP-format slice, on IOCTL_XUSB_GET_STATE. An
@@ -1159,7 +1211,7 @@ public sealed partial class HMController : IDisposable
             // _keptAxes holds the lookups the trigger passes reread, and is
             // null, an empty span, for a profile whose passes read none.
             _reportBuilder.BuildReportInto(_reportBuffer,
-                axes: state.Axes,
+                axes: _formAxisMoves == null ? state.Axes : FormAxes(state.Axes),
                 kept: _keptAxes,
                 hatValue: (int)state.Hat,
                 buttonMask: (uint)state.Buttons,
@@ -1493,7 +1545,7 @@ public sealed partial class HMController : IDisposable
     public void SubmitRawReport(ReadOnlySpan<byte> report)
     {
         ThrowIfDisposed();
-        if (_otherFormRaw != null) ThrowIfOtherForm(report.Length);
+        if (_otherFormRaw is { } other && (uint)report.Length < (uint)other.Length && other[report.Length]) ThrowIfOtherForm(report.Length);
         if (_stateBlockSpec != null && SubmitRawStateBlock(report)) return;
         if ((uint)(report.Length - 1) >= SharedMemoryIO.DATA_CAPACITY)
             ThrowReportLength(report.Length, SharedMemoryIO.DATA_CAPACITY, "shared section payload");
@@ -1631,7 +1683,7 @@ public sealed partial class HMController : IDisposable
     public void SubmitRawExtendedReport(ReadOnlySpan<byte> report)
     {
         ThrowIfDisposed();
-        if (_otherFormRaw != null) ThrowIfOtherForm(report.Length);
+        if (_otherFormRaw is { } other && (uint)report.Length < (uint)other.Length && other[report.Length]) ThrowIfOtherForm(report.Length);
         if (_stateBlockSpec != null && SubmitRawStateBlock(report)) return;
         // The extended lane carries the whole frame in an 80-byte field. The
         // writer used to cut a longer one there without a word.
