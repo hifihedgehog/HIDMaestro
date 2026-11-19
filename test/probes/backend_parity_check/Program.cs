@@ -200,7 +200,9 @@ internal static partial class Program
     {
         var target = collections.FirstOrDefault(x => x.OutputLength > 0);
         if (target == null) return "";
-        var map = p.Inner.GetOrBuildReportMap();
+        // The report the device's own descriptor declares: on USB/IP that is
+        // the form's (FormParity.cs).
+        var map = p.FormOn(c.Backend).Inner.GetOrBuildReportMap();
         var report = map.Reports.Where(r => r.Kind == HidReportKind.Output).OrderBy(r => r.ReportId).FirstOrDefault();
         if (report == null) return "";
         var buf = new byte[target.OutputLength];
@@ -271,6 +273,7 @@ internal static partial class Program
             if (accepts) accepted++;
             Snapshot? u = umdf2Here ? Take(ctx, p, HMBackend.Umdf2, key) : null;
             Snapshot? s = usbipHere ? Take(ctx, p, HMBackend.Usbip, key) : null;
+            var form = p.FormOn(HMBackend.Usbip);
             var problems = new List<string>();
             // A descriptor Windows refuses owes a start that fails with Code
             // 10 and nothing else.
@@ -297,9 +300,14 @@ internal static partial class Program
             foreach (var x in new[] { u, s })
                 if (x != null && x.Failure == null)
                     foreach (var c in x.Collections)
-                        if (c.Vid != p.VendorId || c.Pid != p.ProductId || c.Version != (p.Inner.VersionNumber ?? 0x0100))
+                        if (x.Backend == HMBackend.Usbip ? c.Vid != form.VendorId || c.Pid != form.ProductId || c.Version != (form.Inner.VersionNumber ?? 0x0100)
+                            : c.Vid != p.VendorId || c.Pid != p.ProductId || c.Version != (p.Inner.VersionNumber ?? 0x0100))
                             problems.Add($"{x.Backend} attributes {c.Vid:X4}:{c.Pid:X4}:{c.Version:X4}");
-            if (!accepts && u != null && s != null && Code10(u) && Code10(s)) matched++;
+            if (!ReferenceEquals(form, p))
+            {
+                if (FormMatches(ctx, p, form, u, s, key, problems)) matched++;
+            }
+            else if (!accepts && u != null && s != null && Code10(u) && Code10(s)) matched++;
             else if (u != null && s != null && u.Failure == null && s.Failure == null)
             {
                 var uk = u.Collections.Select(c => c.ParsedKey).ToList();
