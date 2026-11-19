@@ -284,9 +284,10 @@ public sealed class ControllerProfile
     public string? UsbForm { get; set; }
 
     /// <summary>2.3.0: for a USB form, the ids of the Bluetooth identities
-    /// whose <see cref="UsbForm"/> names it, so a form that differs from
-    /// its identity in PID or configuration is accepted only where it says
-    /// whose form it is. Each named profile names this one as its usbForm.</summary>
+    /// it is the form of, so a form that differs from its identity in PID or
+    /// configuration is accepted only for those identities and their copies
+    /// (the same VID, PID and descriptor under another id). Each entry names
+    /// a Bluetooth profile.</summary>
     [JsonPropertyName("usbFormOf")]
     public List<string>? FormOfIds { get; set; }
 
@@ -295,6 +296,31 @@ public sealed class ControllerProfile
     /// use for a profile no load resolved.</summary>
     [JsonIgnore]
     internal ControllerProfile? UsbFormProfile { get; set; }
+
+    /// <summary>The Bluetooth identities <see cref="FormOfIds"/> names, as
+    /// the load that checked them found them, or found again on first use.</summary>
+    [JsonIgnore]
+    internal List<ControllerProfile>? FormOfProfiles { get; set; }
+
+    /// <summary>Whether this USB form names <paramref name="p"/> in its
+    /// usbFormOf: by id, or as a copy of a named identity, the same VID,
+    /// PID and descriptor under another id.</summary>
+    internal bool IsFormOf(ControllerProfile p)
+    {
+        if (FormOfIds == null) return false;
+        if (FormOfIds.Exists(id => string.Equals(id, p.Id, StringComparison.OrdinalIgnoreCase))) return true;
+        var named = FormOfProfiles;
+        if (named == null)
+        {
+            var find = (Registry ?? ModelRegistry.Catalog).FindProfile;
+            named = new List<ControllerProfile>();
+            foreach (var id in FormOfIds)
+                if (!string.IsNullOrWhiteSpace(id) && find(id) is { } bt) named.Add(bt);
+            FormOfProfiles = named;
+        }
+        return named.Exists(b => b.VendorId == p.VendorId && b.ProductId == p.ProductId
+            && string.Equals(b.Descriptor, p.Descriptor, StringComparison.OrdinalIgnoreCase));
+    }
 
     /// <summary>Why <paramref name="form"/> cannot be the USB form of
     /// <paramref name="p"/>, or null when it can. Null
@@ -313,10 +339,9 @@ public sealed class ControllerProfile
         // and 057E:201E over USB, hid-nintendo.c joycon_read_info) or a
         // configuration of its own (the Joy-Con's charging grip). A form
         // that names others is not this profile's.
-        bool sibling = form.FormOfIds != null
-            && form.FormOfIds.Exists(id => string.Equals(id, p.Id, StringComparison.OrdinalIgnoreCase));
+        bool sibling = form.IsFormOf(p);
         if (form.FormOfIds != null && !sibling)
-            return $"names '{form.Id}', whose usbFormOf names {string.Join(", ", form.FormOfIds)} and not this profile.";
+            return $"names '{form.Id}', whose usbFormOf names {string.Join(", ", form.FormOfIds)} and not this profile or a copy of one.";
         if (form.VendorId != p.VendorId || (!sibling && form.ProductId != p.ProductId))
             return $"names '{form.Id}', whose VID and PID {form.VendorId:X4}:{form.ProductId:X4} are not this profile's {p.VendorId:X4}:{p.ProductId:X4}. The USB form is the same device on another bus, and a form with another PID names this profile in its usbFormOf.";
         if (form.RequiresUsbipBackend && !sibling)
@@ -371,7 +396,7 @@ public sealed class ControllerProfile
         // A form that names this profile in its usbFormOf is the device's
         // own USB presentation and keeps the strings it serves on USB: a
         // Joy-Con on USB is the charging grip, "Joy-Con Charging Grip".
-        if (form.FormOfIds?.Exists(id => string.Equals(id, Id, StringComparison.OrdinalIgnoreCase)) != true)
+        if (!form.IsFormOf(this))
         {
             p.ProductString = ProductString;
             p.ManufacturerString = ManufacturerString;
@@ -2171,26 +2196,31 @@ public sealed class ProfileDatabase
                     r.Problem, HIDMaestro.HMProfileLoadIssueKind.ModelProblem));
             }
         }
-        // A form's usbFormOf names Bluetooth identities whose usbForm names
-        // the form. One that does not is refused at its path.
+        // A form's usbFormOf names the Bluetooth identities it is the form
+        // of. An entry that names no Bluetooth profile is refused at its path.
         foreach (var p in _profiles)
         {
             if (p.FormOfIds == null || refused.Contains(p)) continue;
+            var found = new List<ControllerProfile>();
             for (int i = 0; i < p.FormOfIds.Count; i++)
             {
-                string id = p.FormOfIds[i];
-                var bt = _profiles.FirstOrDefault(x => !refused.Contains(x) && string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase))
-                         ?? registry.FindProfile(id);
-                if (bt != null && string.Equals(bt.UsbForm, p.Id, StringComparison.OrdinalIgnoreCase)) continue;
+                string? id = p.FormOfIds[i];
+                var bt = string.IsNullOrWhiteSpace(id) ? null
+                    : _profiles.FirstOrDefault(x => !refused.Contains(x) && string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase))
+                      ?? registry.FindProfile(id);
+                if (bt != null && string.Equals(bt.Connection, "bluetooth", StringComparison.OrdinalIgnoreCase)) { found.Add(bt); continue; }
                 string path = $"$.usbFormOf[{i}]";
                 if (_texts.TryGetValue(p, out var text)) path = ProfileDefects.Spell(text, path);
                 _issues.Add(new HIDMaestro.HMProfileLoadIssue(p.SourceFile ?? p.Id, p.Id, path,
-                    bt == null ? $"names '{id}', which no loaded profile or catalog profile holds."
-                               : $"names '{id}', whose usbForm is not this profile.",
+                    string.IsNullOrWhiteSpace(id) ? "is empty. Name the Bluetooth identity this profile is the USB form of."
+                    : bt == null ? $"names '{id}', which no loaded profile or catalog profile holds."
+                    : $"names '{id}', which is not a Bluetooth identity.",
                     HIDMaestro.HMProfileLoadIssueKind.Refused));
                 refused.Add(p);
+                found = null;
                 break;
             }
+            p.FormOfProfiles = found;
         }
         // A Bluetooth identity's USB form: a profile of this load, else one
         // the registry's names can take. Every model is resolved by now, so

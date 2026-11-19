@@ -223,11 +223,20 @@ internal static partial class Program
         Refused("a form with another PID that names no usbFormOf", Variant(dsbt, "x-bt", "dualshock-4-v2"), "VID and PID");
         Refused("a form whose usbFormOf names another identity", Variant(dsbt, "x-bt", "genesis-nso-usb"), "and not this profile");
         string gen = System.IO.File.ReadAllText(CatalogFile("nintendo", "genesis-nso.json"));
-        Refused("a Nintendo form whose usbFormOf names another identity",
-            gen.Replace("\"id\":\"genesis-nso\"", "\"id\":\"x-gen\""), "and not this profile");
+        string jcl = System.IO.File.ReadAllText(CatalogFile("nintendo", "joycon-l.json"));
+        Refused("a Nintendo pad naming another pad's form",
+            jcl.Replace("\"id\":\"joycon-l\"", "\"id\":\"x-jcl\"").Replace("\"usbForm\":\"joycon-l-usb\"", "\"usbForm\":\"genesis-nso-usb\""),
+            "and not this profile or a copy of one");
         string genUsb = System.IO.File.ReadAllText(CatalogFile("nintendo", "genesis-nso-usb.json"));
-        Refused("a usbFormOf whose identity does not name the form",
-            genUsb.Replace("\"id\":\"genesis-nso-usb\"", "\"id\":\"x-gen-usb\""), "whose usbForm is not this profile", "$.usbFormOf[0]");
+        Refused("a usbFormOf that names a profile with no Bluetooth connection",
+            genUsb.Replace("\"id\":\"genesis-nso-usb\"", "\"id\":\"x-gen-usb\"").Replace("\"usbFormOf\":[\"genesis-nso\"]", "\"usbFormOf\":[\"snes-nso-usb\"]"),
+            "is not a Bluetooth identity", "$.usbFormOf[0]");
+        // A copy of a named identity, its VID, PID and descriptor under
+        // another id, takes the form.
+        var copy = ProfileDatabase.LoadTexts(new[] { ("x.json", gen.Replace("\"id\":\"genesis-nso\"", "\"id\":\"x-gen-copy\"")) }, ModelRegistry.Catalog);
+        Check("a copy of genesis-nso under another id takes its USB form",
+            copy.All.Any(q => q.Id == "x-gen-copy") && !copy.Issues.Any(i => i.Kind == HMProfileLoadIssueKind.Refused),
+            string.Join("; ", copy.Issues.Select(i => $"{i.JsonPath} {i.Reason}")));
         var plainBt = ProfileDatabase.LoadTexts(new[]
         {
             ("x-bt.json", Variant(dsbt, "x-bt", "x-bt-plain")),

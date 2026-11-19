@@ -79,8 +79,13 @@ internal static partial class Program
         }
 
         var xusb = deployable.Where(p => XInputPresentation.Resolve(p.Inner).XusbCompanion && p.Inner.UsbConfiguration == null).ToList();
-        var derived = deployable.Where(p => p.SupportsBackend(HMBackend.Usbip) && p.Inner.UsbConfiguration == null && !xusb.Contains(p)).ToList();
-        var authored = deployable.Where(p => p.Inner.UsbConfiguration is { IsAuthored: true }).ToList();
+        // A Bluetooth identity whose USB form authors its configuration (a
+        // Joy-Con presents the charging grip) presents that, not a derived
+        // device.
+        static bool AuthoredOnUsbip(HMProfile p) =>
+            p.SupportsBackend(HMBackend.Usbip) && p.FormOn(HMBackend.Usbip).Inner.UsbConfiguration is { IsAuthored: true };
+        var derived = deployable.Where(p => p.SupportsBackend(HMBackend.Usbip) && p.Inner.UsbConfiguration == null && !xusb.Contains(p) && !AuthoredOnUsbip(p)).ToList();
+        var authored = deployable.Where(p => p.Inner.UsbConfiguration is { IsAuthored: true } || (p.Inner.UsbConfiguration == null && AuthoredOnUsbip(p))).ToList();
         Console.WriteLine($"  [note] {derived.Count} derive their presentation, {xusb.Count} present the XUSB function, {authored.Count} author it");
         Check("every UMDF2-default profile with a descriptor and no XInput stack of its own derives one",
               derived.Count + xusb.Count + refused.Count + authored.Count == deployable.Count,
@@ -135,8 +140,11 @@ internal static partial class Program
         var notOwn = new List<string>();
         foreach (var p in authored)
         {
-            var pr = UsbPresentation.Resolve(p.Inner);
-            if (!ReferenceEquals(pr.Spec, p.Inner.UsbConfiguration) || pr.Derived)
+            // A Bluetooth identity whose usbForm authors a configuration
+            // presents that form on the USB/IP backend.
+            var inner = p.FormOn(HMBackend.Usbip).Inner;
+            var pr = UsbPresentation.Resolve(inner);
+            if (!ReferenceEquals(pr.Spec, inner.UsbConfiguration) || pr.Derived)
                 notOwn.Add(p.Id);
         }
         Check($"the {authored.Count} authored personas present their own usbConfiguration, not a derived one", notOwn.Count == 0,
