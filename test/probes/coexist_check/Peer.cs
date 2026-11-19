@@ -470,7 +470,13 @@ internal static class Peer
                         // What Auto resolves to on this machine, read by
                         // reflection, since an SDK before 2.3.0 has none.
                         var machine = typeof(HMContext).GetProperty("MachineBackend", BindingFlags.Public | BindingFlags.Static);
-                        Reply($"OK backend machine={machine?.GetValue(null)?.ToString() ?? "none"}");
+                        // Whether Windows here refuses HIDMaestro's driver
+                        // package and the store holds none, the SDK's own
+                        // answer (DriverDeploy.SigningStopsDeploy).
+                        var stops = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.DriverDeploy")
+                            ?.GetMethod("SigningStopsDeploy", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static, Type.EmptyTypes);
+                        string refuses = stops == null ? "unknown" : ((bool)stops.Invoke(null, null)! ? "true" : "false");
+                        Reply($"OK backend machine={machine?.GetValue(null)?.ToString() ?? "none"} refuses={refuses}");
                         break;
                     }
                     case "alive":

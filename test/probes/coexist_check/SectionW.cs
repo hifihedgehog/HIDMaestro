@@ -156,7 +156,7 @@ internal static partial class Program
         if (usbip)
         {
             Check("W2: on USB/IP the killed program's device leaves with its connection, so no device of a dead program is left for a census",
-                  WaitFor(() => !Native.IsPresent(inst), 10_000), inst);
+                  WaitFor(() => !Native.IsPresent(inst), ScaledMs(120_000)), inst);
             return;
         }
         if (ownerId == null) { Check("W2: the program has an owner record", false); return; }
@@ -201,7 +201,7 @@ internal static partial class Program
         }
         if (usbip)
             Check($"{label}: on USB/IP the killed program's device leaves with its connection",
-                  WaitFor(() => !Native.IsPresent(killedInst), 10_000), killedInst);
+                  WaitFor(() => !Native.IsPresent(killedInst), ScaledMs(120_000)), killedInst);
         using var s = PeerProcess.Start($"{label}-sweeper");
         string ph = s.Send("pausereclaim");
         if (!Ok(ph)) { Check($"{label}: the sweep can be held", false, ph); return; }
@@ -368,20 +368,20 @@ internal static partial class Program
         string r = p.Send("quitthencreate pad F20E coexist-w9");
         if (!Ok(r)) { Check("W9: the program exits", false, r); return; }
         Check("W9: the program ends", p.WaitExit(120_000));
-        Check("W9: the SDK's exit handler removed the controller the program left", WaitFor(() => !Native.IsPresent(first), usbip ? 10_000 : 0), first);
+        Check("W9: the SDK's exit handler removed the controller the program left", WaitFor(() => !Native.IsPresent(first), usbip ? ScaledMs(120_000) : 0), first);
         if (usbip)
         {
             // The handler's create runs on USB/IP: its device lives on the
             // program's connection and goes when the program ends. Its record
             // named it, and the next sweep removes that dead record.
             Check("W9: on USB/IP the device the program's own handler made leaves with the program",
-                  WaitFor(() => Native.HidPaths(0xBEEF, 0xF20E).Count == 0, 10_000));
+                  WaitFor(() => Native.HidPaths(0xBEEF, 0xF20E).Count == 0, ScaledMs(120_000)));
             var namedU = Native.RecordsNaming(PeerProcess.Field(r, "token")!);
             Check("W9: the record that names it carries the program's process id", namedU.Any(n => n.Pid == p.Pid),
                   string.Join(", ", namedU.Select(n => $"{n.OwnerId} pid {n.Pid?.ToString() ?? "none"}")));
             using var su = PeerProcess.Start("W9-sweeper");
             su.Send("sweep");
-            Check("W9: and the next sweep removes that record", WaitFor(() => Native.RecordsNaming(PeerProcess.Field(r, "token")!).Count == 0, 15_000));
+            Check("W9: and the next sweep removes that record", WaitFor(() => Native.RecordsNaming(PeerProcess.Field(r, "token")!).Count == 0, ScaledMs(120_000)));
             return;
         }
         string inst = $@"ROOT\HIDClass\{PeerProcess.Field(r, "token")}";

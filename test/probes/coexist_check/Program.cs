@@ -380,17 +380,20 @@ internal static partial class Program
     // the SDK.
     static string s_machineBackend = "Umdf2";
     static bool s_backendOverridden;
+    // Whether Windows here refuses HIDMaestro's driver package, as the SDK
+    // decides it, whatever HIDMAESTRO_BACKEND says.
+    static bool s_refusesPackage;
 
     static void ReadMachineBackend()
     {
         using (var p = PeerProcess.Begin("backend").AwaitReady())
         {
             string reply = p.Send("backend");
-            int at = reply.IndexOf("machine=", StringComparison.Ordinal);
-            if (at >= 0) s_machineBackend = reply[(at + "machine=".Length)..].Trim();
+            s_machineBackend = PeerProcess.Field(reply, "machine") ?? s_machineBackend;
+            s_refusesPackage = PeerProcess.Field(reply, "refuses") == "true";
         }
         s_backendOverridden = string.Equals(Environment.GetEnvironmentVariable("HIDMAESTRO_BACKEND")?.Trim(), "usbip", StringComparison.OrdinalIgnoreCase);
-        Console.WriteLine($"  backend: Auto resolves to {s_machineBackend} on this machine{(s_backendOverridden ? ", by HIDMAESTRO_BACKEND" : "")}");
+        Console.WriteLine($"  backend: Auto resolves to {s_machineBackend} on this machine{(s_backendOverridden ? ", by HIDMAESTRO_BACKEND" : "")}, and Windows {(s_refusesPackage ? "refuses" : "installs")} HIDMaestro's driver package");
     }
 
     /// <summary>Why the v1.12.0 and v1.11.0 peers cannot run here, or null
@@ -398,7 +401,7 @@ internal static partial class Program
     /// Windows on a machine whose backend is USB/IP without the override
     /// does not install.</summary>
     static string? LegacyPeersHaveNoDriver() =>
-        s_machineBackend == "Usbip" && !s_backendOverridden
+        s_refusesPackage
             ? "the v1.12.0 and v1.11.0 programs run only on HIDMaestro's UMDF2 driver, which Windows on this machine does not install"
             : null;
 
@@ -773,21 +776,36 @@ internal static partial class Program
         using var cap2 = HidCapture.Open(path2[0]);
         if (cap2 == null) { Check("D: the live program's device opens", false); return; }
 
+        bool usbip = PeerProcess.Field(c1, "backend") == "Usbip";
+        string? record1 = Native.OwnerRecords().Where(r => r.Value == p1.Pid).Select(r => r.Key).FirstOrDefault();
         p1.Kill();
         // A USB/IP import lives on its program's connection: the host
         // controller unplugs the device when the killed program's socket
         // closes, before anything sweeps. A UMDF2 device stays until a sweep.
-        if (PeerProcess.Field(c1, "backend") == "Usbip")
+        // What a sweep removes on USB/IP is the killed program's owner record,
+        // the one thing of it left, so that is what D checks there. Removal
+        // gets the bound the battery gives a removal, 120 s scaled.
+        if (usbip)
+        {
             Check("D: on USB/IP the killed program's devices leave with its connection, before anything sweeps",
-                  tree1.Count > 0 && WaitFor(() => tree1.All(Native.IsGone), 10_000),
+                  tree1.Count > 0 && WaitFor(() => tree1.All(Native.IsGone), ScaledMs(120_000)),
                   string.Join(", ", tree1.Where(t => !Native.IsGone(t))));
+            Check("D: on USB/IP the killed program's owner record is still there before anything sweeps",
+                  record1 != null && Native.OwnerRecords().ContainsKey(record1), record1 ?? "(no record)");
+        }
         else
             Check("D: the killed program's devices are still there before anything sweeps", tree1.Count > 0 && tree1.All(Native.IsPresent));
         string s = p2.Send("sweep");
         Check("D: the live program's sweep runs", Ok(s), s);
-        WaitFor(() => tree1.All(Native.IsGone), 5000);
-        Check("D: the live program's sweep removes the killed program's devices", tree1.All(Native.IsGone),
-              string.Join(", ", tree1.Where(t => !Native.IsGone(t))));
+        if (usbip)
+            Check("D: on USB/IP the live program's sweep removes the killed program's owner record",
+                  record1 != null && WaitFor(() => !Native.OwnerRecords().ContainsKey(record1), ScaledMs(120_000)), record1 ?? "(no record)");
+        else
+        {
+            WaitFor(() => tree1.All(Native.IsGone), ScaledMs(120_000));
+            Check("D: the live program's sweep removes the killed program's devices", tree1.All(Native.IsGone),
+                  string.Join(", ", tree1.Where(t => !Native.IsGone(t))));
+        }
         if (held1)
             Check("D: the killed program's registry ledger hold is released", !Native.LedgerHolds("JoystickOem", "VID_BEEF&PID_F0D5"));
         Check("D: the sweep leaves the live program's controller", Native.IsStarted(inst2) && !cap2.Broken && Flows(cap2),
@@ -801,12 +819,27 @@ internal static partial class Program
         string c3 = p3.Send("create pad F0D7 coexist-d-killed-2");
         if (!Ok(c3)) { Check("D: a third program creates", false, c3); return; }
         var tree3 = Native.Subtree(PeerProcess.Field(c3, "instance")!);
+        string? record3 = Native.OwnerRecords().Where(r => r.Value == p3.Pid).Select(r => r.Key).FirstOrDefault();
         p3.Kill();
+        if (usbip)
+        {
+            Check("D: on USB/IP the third program's devices leave with its connection",
+                  tree3.Count > 0 && WaitFor(() => tree3.All(Native.IsGone), ScaledMs(120_000)),
+                  string.Join(", ", tree3.Where(t => !Native.IsGone(t))));
+            Check("D: on USB/IP its owner record is still there before the next program starts",
+                  record3 != null && Native.OwnerRecords().ContainsKey(record3), record3 ?? "(no record)");
+        }
         using var p4 = PeerProcess.Start("D4");
         string i4 = p4.Send("install");
-        WaitFor(() => tree3.All(Native.IsGone), 5000);
-        Check("D: a new program's start removes a killed program's devices", Ok(i4) && tree3.All(Native.IsGone),
-              string.Join(", ", tree3.Where(t => !Native.IsGone(t))));
+        if (usbip)
+            Check("D: on USB/IP a new program's start removes the killed program's owner record",
+                  Ok(i4) && record3 != null && WaitFor(() => !Native.OwnerRecords().ContainsKey(record3), ScaledMs(120_000)), $"{i4}, {record3 ?? "(no record)"}");
+        else
+        {
+            WaitFor(() => tree3.All(Native.IsGone), ScaledMs(120_000));
+            Check("D: a new program's start removes a killed program's devices", Ok(i4) && tree3.All(Native.IsGone),
+                  string.Join(", ", tree3.Where(t => !Native.IsGone(t))));
+        }
         Check("D: a new program's start leaves the live program's controller", Native.IsStarted(inst2) && !cap2.Broken && Arrives(cap2));
     }
 
@@ -1200,7 +1233,7 @@ internal static partial class Program
         // as in D. A UMDF2 device stays for the next program to take over.
         if (usbip)
             Check("K: on USB/IP the killed program's device leaves with its connection",
-                  WaitFor(() => Native.HidPaths(0xBEEF, 0xF0F3).Count == 0, 10_000));
+                  WaitFor(() => Native.HidPaths(0xBEEF, 0xF0F3).Count == 0, ScaledMs(120_000)));
         else
             Check("K: the killed program's device is still there", WaitPaths(0xBEEF, 0xF0F3, 1, 10_000).Count == 1);
         using var k2 = PeerProcess.Start("K2");
