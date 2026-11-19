@@ -144,11 +144,18 @@ internal static class Program
     // of the report's wire size (0x3F = 12, 0x21/0x30 = 49); a live BT
     // Pro reads identically (2026-07-22 capture). Track the completed
     // length so shape asserts can guard descriptor drift.
+    // HID class fills a read with every queued report that fits, and this
+    // probe takes one report from each read, so a read asks for one: the
+    // form's InputReportByteLength, as hidapi reads (hid.c, hid_read_timeout
+    // reads input_report_length). A 362-byte read on the USB form's 64-byte
+    // reports came back with a stream report and a reply behind it, and the
+    // reply went unseen (S98 on the ARM64 Surface, 2026-11-19: "80 02
+    // handshake answers 81 02" failed in 1 run of 8).
     static byte[]? HidRead(int timeoutMs)
     {
         var buf = GC.AllocateArray<byte>(362, pinned: true);
         var ov = new NativeOverlapped { EventHandle = s_readEvent };
-        if (!ReadFile(s_hid, buf, 362, IntPtr.Zero, ref ov)
+        if (!ReadFile(s_hid, buf, (uint)InLen, IntPtr.Zero, ref ov)
             && Marshal.GetLastWin32Error() != 997)
             return null;
         if (!GetOverlappedResultEx(s_hid, ref ov, out uint read, (uint)timeoutMs, false))

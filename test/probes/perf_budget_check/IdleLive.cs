@@ -93,7 +93,13 @@ internal static class IdleLive
         }) { IsBackground = true };
         input.Start();
         long count = 0;
-        var buffer = new byte[256];
+        // One report of InputReportByteLength to a read. HID class fills a
+        // larger buffer with every queued report that fits, and the count
+        // is of reads.
+        int length = 0;
+        using (var caps = Program.HidDevice.Open(path)) length = caps?.InputLength ?? 0;
+        if (length == 0) { Console.WriteLine("-1"); return 1; }
+        var buffer = new byte[length];
         while (Volatile.Read(ref marks) < 2)
         {
             try

@@ -150,18 +150,21 @@ internal static partial class Program
     }
 
     /// <summary>The reader: input reports read as fast as the device gives
-    /// them on one thread, on a handle opened as hidapi opens it, and the
-    /// count so far printed for each line on stdin. Ends when stdin closes,
-    /// with a read still pending.</summary>
+    /// them on one thread, on a handle opened as hidapi opens it and read as
+    /// hidapi reads it, one report of InputReportByteLength to a read, and
+    /// the count so far printed for each line on stdin. HID class fills a
+    /// larger buffer with every queued report that fits, so a count of such
+    /// reads misses each report a late read took with another. Ends when
+    /// stdin closes, with a read still pending.</summary>
     public static int RateReader(string path)
     {
-        var h = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
-        if (h.IsInvalid) { Console.WriteLine("-1"); return 1; }
+        var dev = HidDevice.Open(path);
+        if (dev == null || dev.InputLength == 0) { Console.WriteLine("-1"); return 1; }
         long count = 0;
         var t = new Thread(() =>
         {
-            var buffer = new byte[4096];
-            while (ReadFile(h, buffer, buffer.Length, out _, IntPtr.Zero)) Interlocked.Increment(ref count);
+            var buffer = new byte[dev.InputLength];
+            while (ReadFile(dev.Handle, buffer, buffer.Length, out _, IntPtr.Zero)) Interlocked.Increment(ref count);
         }) { IsBackground = true };
         t.Start();
         while (Console.ReadLine() is not null)

@@ -177,7 +177,7 @@ internal static partial class Program
 
     /// <summary>One opened HID interface and the report lengths HID class
     /// gives it (HIDP_CAPS).</summary>
-    sealed class HidDevice : IDisposable
+    internal sealed class HidDevice : IDisposable
     {
         public readonly string Path;
         public readonly SafeFileHandle Handle;
