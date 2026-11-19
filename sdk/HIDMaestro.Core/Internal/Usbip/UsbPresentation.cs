@@ -38,8 +38,10 @@ namespace HIDMaestro.Internal.Usbip;
 /// Windows a controller identity with another device's answers, which
 /// Windows remembers per identity. A profile whose presentation is the XUSB
 /// companion presents the XUSB function instead
-/// (<see cref="XusbFunction"/>), the USB device Windows gives xusb22. The
-/// xinputhid family has none yet (<see cref="NotPresentableReason"/>).</para>
+/// (<see cref="XusbFunction"/>), the USB device Windows gives xusb22. A profile
+/// that reaches XInput through xinputhid presents the GIP function
+/// (<see cref="GipFunction"/>), the USB device Windows gives its GIP
+/// stack, whose HID child xinputhid binds.</para>
 /// </summary>
 internal sealed class UsbPresentation
 {
@@ -124,6 +126,15 @@ internal sealed class UsbPresentation
         }
         if (NotPresentableReason(profile) is { } reason)
             throw new HMBackendNotSupportedException(profile.Id, HMBackend.Usbip, reason);
+        if (XInputPresentation.Resolve(profile).Xinputhid)
+        {
+            // The GIP function is the model's device. A usbConfiguration of
+            // pins has no derived HID device to pin.
+            if (cfg != null)
+                throw new ProfileDefectException(Root,
+                    "pins a derived HID device, and this profile presents the GIP function, whose descriptors are the GIP model's.");
+            return Resolve(GipFunction.FormOf(profile));
+        }
         if (XInputPresentation.Resolve(profile).XusbCompanion)
         {
             // The XUSB function is the model's device. A usbConfiguration of
@@ -156,8 +167,7 @@ internal sealed class UsbPresentation
         // child and its descriptor.
         if (xi.XusbCompanion) return XusbFunction.RefusedIdentityReason(profile);
         if (!profile.HasDescriptor) return "it has no HID descriptor.";
-        if (xi.Xinputhid)
-            return "it reaches XInput through xinputhid, and the USB/IP backend's GIP function needs the device's GIP metadata and messages, which this profile does not carry yet.";
+        if (xi.Xinputhid) return GipFunction.RefusedReason(profile);
         return null;
     }
 

@@ -161,7 +161,31 @@ internal static partial class Program
 
     sealed record Snapshot(HMBackend Backend, string? Parent, bool OpenAtReturn, long CreateMs, long ReadyMs,
                            List<Collection> Collections, List<string> Errors, (bool Present, bool Started, uint Problem) State, string? Failure,
-                           string Output = "");
+                           string Output = "", (ushort Vid, ushort Pid, ushort Version) Attributes = default, string? Product = null);
+
+    /// <summary>The VID, PID and version Windows gives the controller's HID
+    /// collections, as it gives them a real device of that kind. On USB/IP a
+    /// device whose presented form is a GIP device has its HID collection on
+    /// the child Windows' GIP driver makes, which carries that driver's own
+    /// VID, PID and version (the GIP model's hidChild) whatever the device
+    /// announces, and a Bluetooth identity with a USB form presents the
+    /// form's (FormParity.cs). Every other device, on either backend,
+    /// presents the profile's own VID, PID and version.</summary>
+    static (ushort Vid, ushort Pid, ushort Version) AttributesOf(HMController c, HMProfile p)
+    {
+        if (c.Backend != HMBackend.Usbip) return (p.VendorId, p.ProductId, p.Inner.VersionNumber ?? 0x0100);
+        if (c.Presented.Inner.ReportsOnGipInterface) return HIDMaestro.Internal.Usbip.GipFunction.HidChild;
+        var form = p.FormOn(HMBackend.Usbip);
+        return (form.VendorId, form.ProductId, form.Inner.VersionNumber ?? 0x0100);
+    }
+
+    /// <summary>The product string Windows gives the HID collection of a
+    /// device whose presented form is a GIP device on USB/IP: the GIP
+    /// driver's own (the GIP model's hidChild), whatever the device serves.
+    /// Null for every other device, whose product string is the one the
+    /// two backends compare.</summary>
+    static string? ProductOf(HMController c) =>
+        c.Backend == HMBackend.Usbip && c.Presented.Inner.ReportsOnGipInterface ? HIDMaestro.Internal.Usbip.GipFunction.HidChildProduct : null;
 
     static Snapshot Take(HMContext ctx, HMProfile p, HMBackend backend, string key)
     {
@@ -188,7 +212,7 @@ internal static partial class Program
                 if (collections.Count > 0 && errors.Count == 0) { readyMs = sw.ElapsedMilliseconds; break; }
             }
             return new(c.Backend, parent, openAtReturn, createMs, readyMs, collections, errors, Hid.Status(parent), null,
-                       OutputOf(c, p, collections));
+                       OutputOf(c, p, collections), AttributesOf(c, p), ProductOf(c));
         }
         finally { c.Dispose(); }
     }
@@ -267,6 +291,7 @@ internal static partial class Program
         using var log = output != null ? new StreamWriter(output, append: false) : null;
         int matched = 0, umdf2Up = 0, usbipUp = 0, openAtReturn = 0, accepted = 0;
         var bad = new List<string>();
+        var attributesOff = new HashSet<string>();
         foreach (var p in profiles)
         {
             string key = "parity:" + p.Id;
@@ -302,21 +327,34 @@ internal static partial class Program
             foreach (var x in new[] { u, s })
                 if (x != null && x.Failure == null)
                     foreach (var c in x.Collections)
-                        if (x.Backend == HMBackend.Usbip ? c.Vid != form.VendorId || c.Pid != form.ProductId || c.Version != (form.Inner.VersionNumber ?? 0x0100)
-                            : c.Vid != p.VendorId || c.Pid != p.ProductId || c.Version != (p.Inner.VersionNumber ?? 0x0100))
-                            problems.Add($"{x.Backend} attributes {c.Vid:X4}:{c.Pid:X4}:{c.Version:X4}");
-            if (!ReferenceEquals(form, p))
+                        if (c.Vid != x.Attributes.Vid || c.Pid != x.Attributes.Pid || c.Version != x.Attributes.Version)
+                        {
+                            problems.Add($"{x.Backend} attributes {c.Vid:X4}:{c.Pid:X4}:{c.Version:X4}, Windows gives this kind of device {x.Attributes.Vid:X4}:{x.Attributes.Pid:X4}:{x.Attributes.Version:X4}");
+                            attributesOff.Add(p.Id);
+                        }
+                        else if (x.Product != null && c.Product != x.Product)
+                        {
+                            problems.Add($"{x.Backend} product string {c.Product}, Windows gives this kind of device {x.Product}");
+                            attributesOff.Add(p.Id);
+                        }
+            // A Bluetooth identity's USB form presents another descriptor,
+            // compared against that form on UMDF2. A GIP form is compared
+            // as any other profile is, its product string checked above.
+            if (!ReferenceEquals(form, p) && !form.Inner.ReportsOnGipInterface)
             {
                 if (FormMatches(ctx, p, form, u, s, key, problems)) matched++;
             }
             else if (!accepts && u != null && s != null && Code10(u) && Code10(s)) matched++;
             else if (u != null && s != null && u.Failure == null && s.Failure == null)
             {
-                var uk = u.Collections.Select(c => c.ParsedKey).ToList();
-                var sk = s.Collections.Select(c => c.ParsedKey).ToList();
+                var uk = u.Collections.Select(c => c.FieldsKey).ToList();
+                var sk = s.Collections.Select(c => c.FieldsKey).ToList();
                 if (!uk.SequenceEqual(sk))
-                    problems.Add($"parsed fields differ: UMDF2 {uk.Count} collection(s), USB/IP {sk.Count}");
-                else if (!u.Collections.Select(c => c.Product).SequenceEqual(s.Collections.Select(c => c.Product)))
+                    problems.Add($"parsed fields differ: UMDF2 {uk.Count} collection(s), USB/IP {sk.Count}" +
+                                 (uk.Count > 0 && sk.Count > 0 ? $", UMDF2 {uk[0]} against USB/IP {sk[0]}" : ""));
+                // A GIP form's product string is the GIP driver's, checked
+                // above against the model, so only the others compare.
+                else if (s.Product == null && !u.Collections.Select(c => c.Product).SequenceEqual(s.Collections.Select(c => c.Product)))
                     problems.Add($"product string {u.Collections[0].Product} against {s.Collections[0].Product}");
                 else if (u.Output != s.Output)
                     problems.Add($"output packet UMDF2 '{u.Output}' against USB/IP '{s.Output}'");
@@ -345,6 +383,8 @@ internal static partial class Program
                   matched == profiles.Count, $"{matched} of {profiles.Count}");
         if (usbipHere)
             Check("on USB/IP the HID interface opens the moment the create returns, for every descriptor Windows' parser accepts", openAtReturn == accepted, $"{openAtReturn} of {accepted}");
+        Check("every HID collection carries the attributes Windows gives that kind of device, and a GIP form's the product string Windows' GIP driver gives, on each backend here",
+              attributesOff.Count == 0, string.Join(", ", attributesOff));
         if (bad.Count > 0) Note("differ or failed: " + string.Join(", ", bad));
     }
 

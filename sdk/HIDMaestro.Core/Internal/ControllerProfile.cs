@@ -265,6 +265,13 @@ public sealed class ControllerProfile
     [JsonPropertyName("usbConfiguration")]
     public UsbConfigurationSpec? UsbConfiguration { get; set; }
 
+    /// <summary>The identity of the catalog's GIP model this profile
+    /// presents on the USB/IP backend when it reaches XInput through
+    /// xinputhid (<see cref="Usbip.GipFunction"/>). The UMDF2 backend does
+    /// not read it.</summary>
+    [JsonPropertyName("gip")]
+    public Usbip.GipSpec? Gip { get; set; }
+
     /// <summary>2.3.0: for a Bluetooth identity, the id of the profile whose
     /// USB form the device takes on a USB bus, the USB/IP backend: that
     /// profile's descriptor, reports, feature answers and protocol, under
@@ -846,6 +853,7 @@ public sealed class ControllerProfile
     {
         _cachedKbmPacker = null;
         UsbPresentationCache = null;
+        GipFormCache = null;
         _usbFormPresented = null;
         _cachedReportMap = null;
         _cachedDescriptor = null;
@@ -993,6 +1001,21 @@ public sealed class ControllerProfile
             if (checkModelGroups) Usbip.CompiledProtocol.Compile(this, derived ? null : descriptors);
             WinUsbBinding.PackageFor(this, descriptors, HMBackend.Usbip);
             return;
+        }
+        // The GIP function's form of an xinputhid profile, built here for the
+        // same reason when the profile names an identity: a model value that
+        // does not fit the profile is refused at load.
+        // A check at load reads the profile's own keys: a presentation it
+        // takes from a model is checked when a create resolves it.
+        if (Gip != null && XInputPresentation.OwnBlock(this) is { } own)
+        {
+            if (own.Via != XInputSpec.ViaXinputhid)
+                throw new ProfileDefectException("$.gip", "names a GIP identity, and this profile does not reach XInput through xinputhid, the presentation the GIP function serves.");
+            if (Usbip.GipFunction.IdentityDefect(Gip) is { } defect)
+                throw new ProfileDefectException("$.gip.identity", defect);
+            if (cfg != null)
+                throw new ProfileDefectException("$.gip", "names a GIP identity, and this profile's usbConfiguration describes its USB device itself, which the GIP function then does not present.");
+            if (checkModelGroups && cfg == null) _ = Usbip.GipFunction.FormOf(this);
         }
         // A usbConfiguration on a profile whose default is UMDF2 is the USB
         // device it presents on the USB/IP backend: authored, or pins over
@@ -1150,6 +1173,11 @@ public sealed class ControllerProfile
     /// (<see cref="Usbip.UsbPresentation.Resolve"/>).</summary>
     [JsonIgnore]
     internal Usbip.UsbPresentation? UsbPresentationCache;
+
+    /// <summary>The USB/IP form of an xinputhid profile, built once
+    /// (<see cref="Usbip.GipFunction.FormOf"/>).</summary>
+    [JsonIgnore]
+    internal ControllerProfile? GipFormCache;
 
     /// <summary>The keyboard, mouse and consumer-control packer for this
     /// profile's descriptor, built once.</summary>

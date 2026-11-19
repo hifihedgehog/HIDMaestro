@@ -181,10 +181,13 @@ public sealed partial class HMController : IDisposable
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private void ThrowIfOtherForm(int length)
     {
-        throw new ArgumentException(
-            $"Profile '{Profile.Id}' runs on the USB/IP backend in the USB form of '{Profile.Inner.UsbForm}', " +
-            $"and a {length}-byte raw frame is a report of its Bluetooth form. Build raw frames in the USB form " +
-            $"(HMProfile.FormOn(HMBackend.Usbip) gives that profile), or submit with SubmitState, which both forms take.",
+        throw new ArgumentException(!Presented.Inner.ReportsOnGipInterface
+            ? $"Profile '{Profile.Id}' runs on the USB/IP backend in the USB form of '{Profile.Inner.UsbForm}', " +
+              $"and a {length}-byte raw frame is a report of its Bluetooth form. Build raw frames in the USB form " +
+              $"(HMProfile.FormOn(HMBackend.Usbip) gives that profile), or submit with SubmitState, which both forms take."
+            : $"Profile '{Profile.Id}' runs on the USB/IP backend as its GIP form, whose raw frame is its " +
+              $"{Presented.Inner.StateBlock?.Size}-byte state block, and a {length}-byte raw frame is a report of its HID form. " +
+              $"Build raw frames for the GIP form (HMProfile.FormOn(HMBackend.Usbip) gives that profile), or submit with SubmitState, which both forms take.",
             "report");
     }
 
