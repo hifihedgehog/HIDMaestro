@@ -47,23 +47,39 @@ internal static class XusbFunction
     /// the values written into them for each device.</summary>
     internal sealed record Message(byte[] Template, (int At, string Value)[] Fields);
 
-    /// <summary>One output report the device answers: a report that starts
-    /// with <see cref="Match"/>, at least <see cref="MinLength"/> bytes
-    /// long, on one of <see cref="Interfaces"/> (null for the interface the
+    /// <summary>One output report the device answers: a report whose first
+    /// bytes, each ANDed with <see cref="MatchMask"/>'s, are
+    /// <see cref="Match"/>'s, at least <see cref="MinLength"/> bytes long,
+    /// on one of <see cref="Interfaces"/> (null for the interface the
     /// reports travel on). <see cref="Replies"/> go out on that interface's
     /// IN endpoint, then <see cref="Packet"/>, when there is one, goes to the
     /// output ring under <see cref="Source"/> with <see cref="Copies"/> taken
     /// from the report, each byte ANDed with its mask. A rule with no packet
     /// and no replies drops the report.</summary>
-    internal sealed record OutputPacket(string Name, byte[] Match, int MinLength, byte[]? Interfaces, byte Source, byte[]? Packet,
-                                        (int From, int To, byte Mask)[] Copies, Message[] Replies);
+    internal sealed record OutputPacket(string Name, byte[] Match, byte[] MatchMask, int MinLength, byte[]? Interfaces, byte Source, byte[]? Packet,
+                                        (int From, int To, byte Mask)[] Copies, Message[] Replies)
+    {
+        /// <summary>Whether <paramref name="report"/>'s first bytes are the
+        /// rule's under its mask.</summary>
+        public bool Matches(ReadOnlySpan<byte> report)
+        {
+            if (report.Length < Match.Length) return false;
+            for (int i = 0; i < Match.Length; i++)
+                if ((report[i] & MatchMask[i]) != Match[i]) return false;
+            return true;
+        }
+    }
 
-    /// <summary>One function, parsed and checked once.</summary>
+    /// <summary>One function, parsed and checked once.
+    /// <see cref="InboxIds"/> are the identities Windows' xusb22.inf binds by
+    /// hardware ID. A device of any other identity serves
+    /// <see cref="MicrosoftOs"/>, whose compatible ID binds it.</summary>
     internal sealed record Function(
         string Name, string? WhenConnection,
         byte[] DeviceDescriptor, byte[] ConfigurationDescriptor, UsbConfigurationSpec Configuration,
         IReadOnlyDictionary<byte, string> Strings, (string Descriptor, int At, string Value)[] Fields,
-        ExtendedReportSpec Report, OutputPacket[] OutputPackets, Message[] StartMessages);
+        ExtendedReportSpec Report, OutputPacket[] OutputPackets, Message[] StartMessages,
+        (ushort Vid, ushort Pid)[] InboxIds, UsbMicrosoftOsSpec? MicrosoftOs);
 
     /// <summary>The model's functions and the identities none takes.</summary>
     internal sealed record Compiled(Function[] Functions, IReadOnlyList<(string Inf, ushort Vid, ushort Pid)> RefusedIds);
@@ -123,17 +139,25 @@ internal static class XusbFunction
         {
             string at = $"{source}: $.usbFunction.refusedIds[{i}]";
             string inf = lists[i].Inf ?? throw new InvalidOperationException($"{at}.inf is missing.");
-            foreach (var id in lists[i].Ids ?? new List<string>())
-            {
-                var parts = id.Split(':');
-                if (parts.Length != 2
-                    || !ushort.TryParse(parts[0], NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out ushort v)
-                    || !ushort.TryParse(parts[1], NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out ushort pid))
-                    throw new InvalidOperationException($"{at}.ids: \"{id}\" is not a VID:PID pair such as \"045E:02EA\".");
+            foreach (var (v, pid) in Ids(lists[i].Ids, $"{at}.ids"))
                 refused.Add((inf, v, pid));
-            }
         }
         return new Compiled(compiled, refused);
+    }
+
+    static (ushort Vid, ushort Pid)[] Ids(List<string>? ids, string at)
+    {
+        var list = new List<(ushort, ushort)>();
+        foreach (var id in ids ?? new List<string>())
+        {
+            var parts = id.Split(':');
+            if (parts.Length != 2
+                || !ushort.TryParse(parts[0], NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out ushort v)
+                || !ushort.TryParse(parts[1], NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out ushort pid))
+                throw new InvalidOperationException($"{at}: \"{id}\" is not a VID:PID pair such as \"045E:02EA\".");
+            list.Add((v, pid));
+        }
+        return list.ToArray();
     }
 
     static Message CompileMessage(XusbMessageSpec? m, string at)
@@ -209,6 +233,12 @@ internal static class XusbFunction
             var p = spec.OutputPackets![i];
             string pat = $"outputPackets[{i}]";
             byte[] match = Hex(p.Match, At($"{pat}.match"));
+            byte[] matchMask = p.MatchMask == null ? Enumerable.Repeat((byte)0xFF, match.Length).ToArray() : Hex(p.MatchMask, At($"{pat}.matchMask"));
+            if (matchMask.Length != match.Length)
+                throw new InvalidOperationException(At($"{pat}.matchMask is {matchMask.Length} bytes and match {match.Length}: each byte of the match has its mask."));
+            for (int m = 0; m < match.Length; m++)
+                if ((match[m] & ~matchMask[m]) != 0)
+                    throw new InvalidOperationException(At($"{pat}.match byte {m} sets bits its mask clears, so no report can match it."));
             byte[]? packet = p.Packet == null ? null : Hex(p.Packet, At($"{pat}.packet"));
             byte sourceByte = p.Packet == null ? (byte)0 : p.Source switch
             {
@@ -244,7 +274,7 @@ internal static class XusbFunction
             }
             var replies = new Message[(p.Replies ?? new List<XusbMessageSpec>()).Count];
             for (int r = 0; r < replies.Length; r++) replies[r] = CompileMessage(p.Replies![r], At($"{pat}.replies[{r}]"));
-            packets[i] = new OutputPacket(p.Name ?? pat, match, min, on, sourceByte, packet, copies, replies);
+            packets[i] = new OutputPacket(p.Name ?? pat, match, matchMask, min, on, sourceByte, packet, copies, replies);
         }
 
         var start = new Message[(spec.StartMessages ?? new List<XusbMessageSpec>()).Count];
@@ -253,6 +283,12 @@ internal static class XusbFunction
         string? when = spec.When?.Connection;
         if (spec.When != null && when == null)
             throw new InvalidOperationException(At("when names no condition. The one it takes is connection."));
+
+        var inbox = Ids(spec.InboxHardwareIds, At("inboxHardwareIds"));
+        if (spec.MicrosoftOs == null && spec.InboxHardwareIds != null)
+            throw new InvalidOperationException(At("microsoftOs is missing: a device of an identity inboxHardwareIds does not list needs the compatible ID that binds it."));
+        if (cfg.MicrosoftOs != null && spec.MicrosoftOs != null)
+            throw new InvalidOperationException(At("usbConfiguration.microsoftOs and microsoftOs are both given. The function serves its microsoftOs by identity."));
 
         // The configuration's structure, with the blobs written without
         // spaces, as the descriptor set reads them.
@@ -267,7 +303,16 @@ internal static class XusbFunction
             Interfaces = cfg.Interfaces,
             MicrosoftOs = cfg.MicrosoftOs,
         };
-        return new Function(name, when, device, configuration, configuration0, strings, fields, report, packets, start);
+        // The blobs written without spaces, as the descriptor set reads
+        // them, each checked as hex here.
+        UsbMicrosoftOsSpec? os = spec.MicrosoftOs == null ? null : new UsbMicrosoftOsSpec
+        {
+            StringHex = Convert.ToHexString(Hex(spec.MicrosoftOs.StringHex, At("microsoftOs.string"))),
+            ExtendedCompatIdHex = Convert.ToHexString(Hex(spec.MicrosoftOs.ExtendedCompatIdHex, At("microsoftOs.extendedCompatId"))),
+            ExtendedPropertiesHex = spec.MicrosoftOs.ExtendedPropertiesHex == null ? null
+                : Convert.ToHexString(Hex(spec.MicrosoftOs.ExtendedPropertiesHex, At("microsoftOs.extendedProperties"))),
+        };
+        return new Function(name, when, device, configuration, configuration0, strings, fields, report, packets, start, inbox, os);
     }
 
     /// <summary>The function <paramref name="profile"/> presents: the first
@@ -295,22 +340,19 @@ internal static class XusbFunction
     {
         var device = (byte[])f.DeviceDescriptor.Clone();
         var configuration = (byte[])f.ConfigurationDescriptor.Clone();
-        var info = XInputPresentation.Resolve(profile).Spec?.Information;
+        var spec = XInputPresentation.Resolve(profile).Spec;
         foreach (var (descriptor, at, value) in f.Fields)
         {
-            uint v = value switch
-            {
-                "vid" => profile.VendorId,
-                "pid" => profile.ProductId,
-                "subType" => SubType(profile),
-                "information.vid" => info?.Vid is { } iv ? XInputPresentation.ParseId(iv, "$.xinput.information.vid") : profile.VendorId,
-                "information.pid" => info?.Pid is { } ip ? XInputPresentation.ParseId(ip, "$.xinput.information.pid") : profile.ProductId,
-                _ => throw new InvalidOperationException($"The XUSB function names the value \"{value}\", which has no source."),
-            };
+            uint v = Value(profile, spec, value, () => SubType(profile));
             var target = descriptor == "device" ? device : configuration;
             for (int b = 0; b < ValueWidths[value]; b++)
                 target[at + b] = (byte)(v >> (8 * b));
         }
+        // xusb22.inf binds the retail identities by hardware ID, and every
+        // other through the compatible ID of the Microsoft OS descriptors,
+        // as a third-party pad carries it.
+        ushort vid = (ushort)(device[8] | (device[9] << 8)), pid = (ushort)(device[10] | (device[11] << 8));
+        var os = Array.IndexOf(f.InboxIds, (vid, pid)) >= 0 ? null : f.MicrosoftOs;
         var c = f.Configuration;
         return new UsbConfigurationSpec
         {
@@ -321,8 +363,39 @@ internal static class XusbFunction
             DeviceDescriptorHex = Convert.ToHexString(device),
             ConfigurationDescriptorHex = Convert.ToHexString(configuration),
             Interfaces = c.Interfaces,
-            MicrosoftOs = c.MicrosoftOs,
+            MicrosoftOs = os,
         };
+    }
+
+    /// <summary>The value a field names, from the profile and its XInput
+    /// block <paramref name="spec"/>. A receiver's identity is the block's
+    /// <c>information</c>, the pad's own where it gives none.</summary>
+    static uint Value(ControllerProfile profile, XInputSpec? spec, string value, Func<byte> subType) => value switch
+    {
+        "vid" => profile.VendorId,
+        "pid" => profile.ProductId,
+        "subType" => subType(),
+        "information.vid" => spec?.Information?.Vid is { } iv ? XInputPresentation.ParseId(iv, "$.xinput.information.vid") : profile.VendorId,
+        "information.pid" => spec?.Information?.Pid is { } ip ? XInputPresentation.ParseId(ip, "$.xinput.information.pid") : profile.ProductId,
+        _ => throw new InvalidOperationException($"The XUSB function names the value \"{value}\", which has no source."),
+    };
+
+    /// <summary>The VID and PID the device of <paramref name="profile"/>'s
+    /// function presents, read from the fields that write the device
+    /// descriptor's bytes 8 to 11, with <paramref name="spec"/> its XInput
+    /// block.</summary>
+    internal static (ushort Vid, ushort Pid) PresentedIdentity(ControllerProfile profile, Function f, XInputSpec? spec)
+    {
+        ushort vid = (ushort)(f.DeviceDescriptor[8] | (f.DeviceDescriptor[9] << 8));
+        ushort pid = (ushort)(f.DeviceDescriptor[10] | (f.DeviceDescriptor[11] << 8));
+        foreach (var (descriptor, at, value) in f.Fields)
+        {
+            if (descriptor != "device" || value == "subType") continue;
+            ushort v = (ushort)Value(profile, spec, value, () => 0);
+            if (at == 8) vid = v;
+            else if (at == 10) pid = v;
+        }
+        return (vid, pid);
     }
 
     /// <summary>The bytes of <paramref name="m"/> for one device: its serial
@@ -351,15 +424,30 @@ internal static class XusbFunction
     /// model gives it: on UMDF2 the companion's &amp;IG_00 HID child of that
     /// identity takes xinputhid, which publishes the XUSB interface a second
     /// time.</summary>
-    internal static string? RefusedIdentityReason(ControllerProfile profile, bool companion = false)
+    internal static string? RefusedIdentityReason(ControllerProfile profile, bool companion = false) => RefusedIdentity(profile, companion)?.Reason;
+
+    /// <summary><see cref="RefusedIdentityReason"/> with the JSON path of
+    /// the identity: <c>$.pid</c> for the profile's, and
+    /// <c>$.xinput.information</c> for the one a receiver's device presents
+    /// from it.</summary>
+    internal static (string Path, string Reason)? RefusedIdentity(ControllerProfile profile, bool companion = false)
     {
-        // The identity first, which is cheap, then the presentation, which
-        // resolves the profile's device model unless the caller knows it.
-        ushort vid = profile.VendorId, pid = profile.ProductId;
-        var infs = Model.RefusedIds.Where(r => r.Vid == vid && r.Pid == pid).Select(r => r.Inf).Distinct().ToList();
-        if (infs.Count == 0 || !(companion || XInputPresentation.Resolve(profile).XusbCompanion)) return null;
-        return $"{vid:X4}:{pid:X4} is an identity Windows' {string.Join(" and ", infs)} {(infs.Count == 1 ? "binds" : "bind")}, and an XUSB companion's controller " +
-               "takes xusb22 alone: with that identity Windows would give the one controller a second XInput provider or its GIP driver in xusb22's place.";
+        // The presentation: at load the profile's own block, as no model is
+        // read there, and at create the resolved one. Then the profile's
+        // identity and the one its USB/IP device presents, which for a
+        // receiver is the block's xinput.information.
+        XInputSpec? spec = companion ? XInputPresentation.OwnBlock(profile) : XInputPresentation.Resolve(profile).Spec;
+        if (spec?.Via != XInputSpec.ViaXusbCompanion) return null;
+        var presented = PresentedIdentity(profile, For(profile), spec);
+        foreach (var (vid, pid, what, path) in new[] { (profile.VendorId, profile.ProductId, "the profile's", "$.pid"),
+                                                       (presented.Vid, presented.Pid, "its USB device's", "$.xinput.information") })
+        {
+            var infs = Model.RefusedIds.Where(r => r.Vid == vid && r.Pid == pid).Select(r => r.Inf).Distinct().ToList();
+            if (infs.Count == 0) continue;
+            return (path, $"{vid:X4}:{pid:X4}, {what} identity, is one Windows' {string.Join(" and ", infs)} {(infs.Count == 1 ? "binds" : "bind")}, and an XUSB companion's controller " +
+                   "takes xusb22 alone: with that identity Windows would give the one controller a second XInput provider or its GIP driver in xusb22's place.");
+        }
+        return null;
     }
 }
 
@@ -414,6 +502,17 @@ internal sealed class XusbFunctionSpec
 
     [JsonPropertyName("outputPackets")]
     public List<XusbOutputPacketSpec>? OutputPackets { get; set; }
+
+    /// <summary>The VID:PID pairs Windows' xusb22.inf binds by hardware ID.
+    /// A device of any other identity serves <see cref="MicrosoftOs"/>.</summary>
+    [JsonPropertyName("inboxHardwareIds")]
+    public List<string>? InboxHardwareIds { get; set; }
+
+    /// <summary>The Microsoft OS 1.0 descriptors, whose compatible ID binds
+    /// xusb22 to a device of an identity <see cref="InboxHardwareIds"/> does
+    /// not list.</summary>
+    [JsonPropertyName("microsoftOs")]
+    public UsbMicrosoftOsSpec? MicrosoftOs { get; set; }
 }
 
 /// <summary>What a profile's data must hold for a function to be its.</summary>
@@ -462,6 +561,11 @@ internal sealed class XusbOutputPacketSpec
     /// <summary>The bytes the report starts with, hex.</summary>
     [JsonPropertyName("match")]
     public string? Match { get; set; }
+
+    /// <summary>The bits of each match byte that are compared, hex, all
+    /// when absent.</summary>
+    [JsonPropertyName("matchMask")]
+    public string? MatchMask { get; set; }
 
     [JsonPropertyName("minLength")]
     public int MinLength { get; set; }

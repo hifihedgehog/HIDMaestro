@@ -742,8 +742,8 @@ public sealed class ControllerProfile
         // (BackendSelection.NotSupportedReason): resolving the model here
         // would read a registry the load is still building.
         if (XInputPresentation.OwnBlock(this)?.Via == XInputSpec.ViaXusbCompanion
-            && Usbip.XusbFunction.RefusedIdentityReason(this, companion: true) is { } refused)
-            throw new ProfileDefectException("$.pid", refused);
+            && Usbip.XusbFunction.RefusedIdentity(this, companion: true) is { } refused)
+            throw new ProfileDefectException(refused.Path, refused.Reason);
         if (!HasDescriptor && !ReportsOnXusbInterface && !ReportsOnGipInterface)
         {
             // A USB/IP persona's HID interface presents the descriptor, so

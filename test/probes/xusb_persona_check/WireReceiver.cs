@@ -57,6 +57,10 @@ internal static unsafe partial class Program
             Check("the next is the link control packet: the capture's bytes, the serial's last eight hex digits at byte 10, subtype 1 at byte 25",
                   second.Length == 29 && second.AsSpan().SequenceEqual(link) && second[10] == Convert.ToByte(serial[^8..^6], 16) && second[25] == 0x01,
                   Hex(second));
+            var third = ReadIn(cl, 1);
+            var battery = new byte[29];
+            battery[3] = 0x13; battery[4] = 0xA2;
+            Check("then the battery status 00 00 00 13 A2, zero-filled, as the capture's third report", third.AsSpan().SequenceEqual(battery), Hex(third));
 
             Console.WriteLine("\n-- connection requests --");
             byte[] request = { 0x08, 0x00, 0x0F, 0xC0, 0, 0, 0, 0, 0, 0, 0, 0 };
@@ -105,6 +109,8 @@ internal static unsafe partial class Program
                    new byte[] { 0x00, 0x01, 0x0F, 0xC0, 0x00, 0x40, 0x80, 0, 0, 0, 0, 0 }, new byte[] { 0, 0, 0x40, 0x80, 2 });
             Packet("the LED 00 00 08 46 is XInput 00 06 00 00 01",
                    new byte[] { 0x00, 0x00, 0x08, 0x46, 0, 0, 0, 0, 0, 0, 0, 0 }, new byte[] { 0, 6, 0, 0, 1 });
+            Packet("00 00 08 86, whose request ID bits are not the LED's 01, is no LED request and carried nowhere",
+                   new byte[] { 0x00, 0x00, 0x08, 0x86, 0, 0, 0, 0, 0, 0, 0, 0 }, null);
             Packet("power off 00 00 08 C0 is taken and carried nowhere",
                    new byte[] { 0x00, 0x00, 0x08, 0xC0, 0, 0, 0, 0, 0, 0, 0, 0 }, null);
             Packet("a header-only controller request 00 00 00 40 is taken and carried nowhere",

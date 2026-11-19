@@ -86,7 +86,9 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     // Messages waiting for a read on an IN endpoint, by its address: an
     // answer goes out ahead of any report. Null for a device with none.
     // Guarded by _hidLock.
-    private readonly Dictionary<byte, Queue<byte[]>>? _messages;
+    // The messages waiting on each IN endpoint, by endpoint number, made at
+    // create for a function that sends any.
+    private readonly Queue<byte[]>?[]? _messages;
 
     /// <summary>The vhci port this device is attached on, 0 while it is
     /// not. The server sets it on every import, the driver's own re-attach
@@ -360,7 +362,12 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             }
             _startMessages = new byte[function.StartMessages.Length][];
             for (int m = 0; m < _startMessages.Length; m++) _startMessages[m] = XusbFunction.Bytes(function.StartMessages[m], serial, subType);
-            if (_startMessages.Length > 0 || replies) _messages = new Dictionary<byte, Queue<byte[]>>();
+            if (_startMessages.Length > 0 || replies)
+            {
+                _messages = new Queue<byte[]>?[16];
+                foreach (var kv in Descriptors.Endpoints)
+                    if (kv.Value is { TransferType: 3, IsIn: true } e) _messages[e.Address & 0x0F] = new Queue<byte[]>();
+            }
         }
         BusId = BusIdFor(index);
         // Before any section or thread exists, so a profile whose protocol
@@ -522,7 +529,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         ResetProtocolState();
         if (_messages != null)
         {
-            lock (_hidLock) _messages.Clear();
+            lock (_hidLock) foreach (var q in _messages) q?.Clear();
             // A function that announces itself, as a receiver announces the
             // pad on its first slot, sends its start messages on the
             // reporting interface's first reads. Windows reads that
@@ -862,7 +869,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             var rule = rules[i];
             bool here = rule.Interfaces == null ? interfaceNumber == Descriptors.HidInterfaceNumber
                                                 : Array.IndexOf(rule.Interfaces, interfaceNumber) >= 0;
-            if (!here || report.Length < rule.MinLength || !report.StartsWith(rule.Match)) continue;
+            if (!here || report.Length < rule.MinLength || !rule.Matches(report)) continue;
             if (DeviceOrchestrator.DiagEnabled)
                 DeviceOrchestrator.LogDiag($"usbip output {BusId}: interface {interfaceNumber} {Convert.ToHexString(report)} rule {rule.Name}");
             if (_ruleReplies is { } replies && replies[i].Length > 0)
@@ -913,7 +920,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             }
             else
             {
-                if (!_messages.TryGetValue(endpoint, out var q)) _messages[endpoint] = q = new Queue<byte[]>();
+                if (_messages[endpoint & 0x0F] is not { } q) return;
                 q.Enqueue(message);
                 if (DeviceOrchestrator.DiagEnabled)
                     DeviceOrchestrator.LogDiag($"usbip message {BusId}: endpoint 0x{endpoint:X2} {Convert.ToHexString(message)} waits for a read");
@@ -1057,7 +1064,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                         _readsPerEp[epAddr] = _readsPerEp.TryGetValue(epAddr, out var rc) ? rc + 1 : 1;
                     // A message the device answers with goes ahead of any
                     // report (XusbFunction's replies and start messages).
-                    if (_messages != null && _messages.TryGetValue(epAddr, out var waiting) && waiting.Count > 0)
+                    if (_messages?[epAddr & 0x0F] is { Count: > 0 } waiting)
                     {
                         message = waiting.Dequeue();
                         conn = HoldSendLocked();

@@ -62,7 +62,15 @@ internal static unsafe partial class Program
         Console.WriteLine($"  XInput slots connected before the create: {Slots(before)}");
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
-        var profile = ctx.GetProfile(profileId);
+        // "copy:<id>:<VID>:<PID>" is a consumer's copy of a catalog profile
+        // with another identity, as HMProfileBuilder makes it.
+        HMProfile? profile;
+        var parts = profileId.Split(':');
+        if (parts.Length == 4 && parts[0] == "copy" && ctx.GetProfile(parts[1]) is { } basis)
+            profile = new HMProfileBuilder().FromProfile(basis).Id($"probe-{parts[1]}-{parts[2]}-{parts[3]}")
+                .Vid(Convert.ToUInt16(parts[2], 16)).Pid(Convert.ToUInt16(parts[3], 16)).Build();
+        else
+            profile = ctx.GetProfile(profileId);
         Check("the context holds the profile", profile != null);
         if (profile == null) return 0;
 
@@ -96,9 +104,19 @@ internal static unsafe partial class Program
                     Console.WriteLine($"  parents: {string.Join(" <- ", node.Parents)}");
                     Check("its service is xusb22", string.Equals(node.Service, "xusb22", StringComparison.OrdinalIgnoreCase), node.Service);
                     Check("its driver package is the inbox xusb22.inf", string.Equals(node.Inf, "xusb22.inf", StringComparison.OrdinalIgnoreCase), node.Inf);
-                    Check($"it carries the hardware ID {hardwareId} and, with no OS descriptor, no MS_COMP compatible ID",
-                          node.HardwareIds.Contains(hardwareId, StringComparer.OrdinalIgnoreCase)
-                          && !node.CompatibleIds.Any(c => c.Contains("MS_COMP", StringComparison.OrdinalIgnoreCase)));
+                    // An identity xusb22.inf lists by hardware ID serves no
+                    // OS descriptor. Any other serves the compatible ID that
+                    // binds it, which Windows then lists as USB\MS_COMP_<id>.
+                    var compat = set.GetMicrosoftOsFeature(4);
+                    string? msComp = compat is { Length: 40 } ? @"USB\MS_COMP_" + System.Text.Encoding.ASCII.GetString(compat, 18, 8).TrimEnd('\0') : null;
+                    if (msComp == null)
+                        Check($"it carries the hardware ID {hardwareId} and, with no OS descriptor, no MS_COMP compatible ID",
+                              node.HardwareIds.Contains(hardwareId, StringComparer.OrdinalIgnoreCase)
+                              && !node.CompatibleIds.Any(c => c.Contains("MS_COMP", StringComparison.OrdinalIgnoreCase)));
+                    else
+                        Check($"it carries the hardware ID {hardwareId} and the compatible ID {msComp} its OS descriptors give, which xusb22.inf binds",
+                              node.HardwareIds.Contains(hardwareId, StringComparer.OrdinalIgnoreCase)
+                              && node.CompatibleIds.Contains(msComp, StringComparer.OrdinalIgnoreCase), string.Join(" | ", node.CompatibleIds));
                     Check("it sits under the USB/IP host controller's root hub",
                           node.ParentHardwareIds.Any(h => string.Equals(h, @"ROOT\USBIP_WIN2\UDE", StringComparison.OrdinalIgnoreCase)),
                           string.Join(" | ", node.ParentHardwareIds));
@@ -309,7 +327,7 @@ internal static unsafe partial class Program
     // ── family: each profile on each backend ─────────────────────────────
 
     /// <summary>What one controller of a profile presents.</summary>
-    sealed record Presented(string Caps, string Hid, string Product, string State, string Packet, string Failure);
+    sealed record Presented(string Caps, string Hid, string Product, string State, string Packet, string Failure, string Layout = "");
 
     static int FamilyPart(List<string> ids, string backendName)
     {
@@ -346,10 +364,11 @@ internal static unsafe partial class Program
                 Check($"{id}: XInputGetCapabilities the same on both backends", u.Caps == s.Caps, $"UMDF2 {u.Caps} | USB/IP {s.Caps}");
                 Check($"{id}: the XInput state of one input the same on both", u.State == s.State, $"UMDF2 {u.State} | USB/IP {s.State}");
                 Check($"{id}: XInputSetState's packet the same on both", u.Packet == s.Packet, $"UMDF2 {u.Packet} | USB/IP {s.Packet}");
-                // Not a pass condition: the HID child is the profile's
-                // descriptor on UMDF2 and xusb22's own on USB/IP (R8).
-                Console.WriteLine($"  [R8] HID collection {(u.Hid == s.Hid ? "the same" : "differs")}, product string {(u.Product == s.Product ? "the same" : $"'{u.Product}' against '{s.Product}'")}");
+                Check($"{id}: the HID product string the same on both", u.Product == s.Product, $"UMDF2 '{u.Product}' | USB/IP '{s.Product}'");
+                Check($"{id}: UMDF2's HID device has the layout of the profile's descriptor",
+                      p.GetDescriptorBytes() is { } d && u.Layout == DescriptorLayout(d), u.Layout);
             }
+            if (seen.TryGetValue(HMBackend.Usbip, out var onUsbip) && onUsbip.Failure.Length == 0) R8(p, onUsbip.Layout);
         }
         return 0;
     }
@@ -413,7 +432,7 @@ internal static unsafe partial class Program
             string hid = cols.Count == 0 ? "none" : string.Join(" || ", cols.Select(x => x.ParsedKey[x.ParsedKey.IndexOf(" caps", StringComparison.Ordinal)..]));
             string product = cols.Count == 0 ? "" : string.Join(" | ", cols.Select(x => x.Product ?? "(none)"));
             string failure = cols.Count == 0 ? "no HID collection" : caps.Type == 0 ? "no capabilities" : packet.Contains("nothing", StringComparison.Ordinal) ? "no packet" : "";
-            return new(capsText, hid, product, state, packet, failure);
+            return new(capsText, hid, product, state, packet, failure, cols.Count == 1 ? CollectionLayout(cols[0]) : $"{cols.Count} collections");
         }
         catch (Exception e) { return new("", "", "", "", "", $"{e.GetType().Name}: {e.Message}"); }
         finally { c?.Dispose(); }

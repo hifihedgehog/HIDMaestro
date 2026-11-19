@@ -186,8 +186,15 @@ internal static unsafe partial class Program
         var wantLink = (byte[])CapturedLink.Clone();
         wantLink[10] = 0x45; wantLink[11] = 0x67; wantLink[12] = 0x89; wantLink[13] = 0xAB;
         Check("once configured the receiver sends 08 80, then the captured link packet with the serial's last eight hex digits at byte 10",
-              rx.StartMessages.Length == 2 && rx.StartMessages[0].Template.SequenceEqual(new byte[] { 0x08, 0x80 })
+              rx.StartMessages.Length >= 2 && rx.StartMessages[0].Template.SequenceEqual(new byte[] { 0x08, 0x80 })
               && linkBytes.AsSpan().SequenceEqual(wantLink), Hex(linkBytes));
+        // tattiebogle.net's capture of a retail pad connecting: 0880, the
+        // link packet, then the battery status 00000013A2, zero-filled.
+        var battery = new byte[29];
+        battery[3] = 0x13; battery[4] = 0xA2;
+        Check("then the captured battery status, 00 00 00 13 A2 zero-filled to 29 bytes, the third report the capture shows",
+              rx.StartMessages.Length == 3 && rx.StartMessages[2].Template.SequenceEqual(battery) && rx.StartMessages[2].Fields.Length == 0,
+              rx.StartMessages.Length == 3 ? Hex(rx.StartMessages[2].Template) : $"{rx.StartMessages.Length} start messages");
         Check("the model's descriptors are the retail pad's", m.DeviceDescriptor.AsSpan().SequenceEqual(RetailDevice)
               && m.ConfigurationDescriptor.AsSpan().SequenceEqual(RetailConfiguration), Hex(m.ConfigurationDescriptor));
         Check("the model's strings are the retail pad's: 1 the manufacturer, 2 the product, 4 the security interface's",
@@ -259,10 +266,32 @@ internal static unsafe partial class Program
               && rr[1].Match.SequenceEqual(new byte[] { 0x08 }) && rr[1].Replies.Length == 1 && rr[1].Interfaces == null
               && rr[2].Interfaces!.SequenceEqual(new byte[] { 2, 4, 6 }) && rr[2].Replies[0].Template.SequenceEqual(new byte[] { 0x08, 0x00 })
               && rr[3].Match.SequenceEqual(new byte[] { 0x00, 0x00, 0x08, 0xC0 }) && rr[3].Packet == null && rr[3].Replies.Length == 0
+              && rr[4].Match.SequenceEqual(new byte[] { 0x00, 0x00, 0x08, 0x40 }) && rr[4].MatchMask.SequenceEqual(new byte[] { 0xFF, 0xFF, 0xFF, 0xC0 })
               && rr[4].Packet!.SequenceEqual(new byte[] { 0, 0, 0, 0, 1 }) && rr[4].Copies.SequenceEqual(new[] { (3, 1, (byte)0x0F) })
               && rr[5].Match.SequenceEqual(new byte[] { 0x00, 0x00 }) && rr[5].Packet == null && rr[5].Replies.Length == 0
               && rr[6].Match.SequenceEqual(new byte[] { 0x01 }) && rr[6].Packet == null && rr[6].Replies.Length == 0
               && rr[7].Match.SequenceEqual(new byte[] { 0x00, 0x01, 0x0F, 0xC0 }) && rr[7].Copies.SequenceEqual(new[] { (5, 2, (byte)0xFF), (6, 3, (byte)0xFF) }));
+
+        // [MS-XUSBI] table 118: byte 3's top two bits are the request ID,
+        // 01 for the LED and 11 for power off.
+        Check("the receiver's LED rule takes 00 00 08 40 to 4F only: 00 00 08 46 is the LED, 00 00 08 C0 and 00 00 08 86 are not",
+              rr[4].Matches(new byte[] { 0x00, 0x00, 0x08, 0x46 }) && !rr[4].Matches(new byte[] { 0x00, 0x00, 0x08, 0xC0 })
+              && !rr[4].Matches(new byte[] { 0x00, 0x00, 0x08, 0x86 }) && !rr[4].Matches(new byte[] { 0x00, 0x00, 0x08, 0x06 }));
+
+        Console.WriteLine("\n-- an identity xusb22.inf binds by hardware ID, and one it binds by compatible ID --");
+        var wiredP = catalog.First(x => x.Id == ProfileId);
+        var wirelessP = catalog.First(x => x.Id == "xbox-360-wireless");
+        Check("xusb22.inf's hardware IDs, as the functions list them: 045E:028E and 045E:028F for the pad, 045E:0719 for the receiver",
+              m.InboxIds.SequenceEqual(new (ushort, ushort)[] { (0x045E, 0x028E), (0x045E, 0x028F) })
+              && rx.InboxIds.SequenceEqual(new (ushort, ushort)[] { (0x045E, 0x0719) }));
+        string got = OsDescriptors(wiredP, o => { o["vid"] = "0x0E6F"; o["pid"] = "0x0213"; });
+        Check("a third-party identity, 0E6F:0213, serves the MSFT100 string with vendor code 0x20 and the compatible ID XUSB10 on interface 0, "
+              + "as Santroller's XInput device does, so xusb22.inf binds it by USB\\MS_COMP_XUSB10", got == "MSFT100 vendor 0x20, XUSB10 on interface 0", got);
+        got = OsDescriptors(wiredP, o => o["pid"] = "0x028F");
+        Check("045E:028F, which xusb22.inf lists by hardware ID, serves none", got == "none", got);
+        got = OsDescriptors(wirelessP, o => o["xinput"]!.AsObject().Remove("information"));
+        Check("a wireless-adapter copy with no xinput.information presents the pad's 045E:02A1 and serves the compatible ID XUSB20",
+              got == "MSFT100 vendor 0x20, XUSB20 on interface 0", got);
 
         Console.WriteLine("\n-- refusals --");
         var wired = catalog.First(x => x.Id == ProfileId);
@@ -284,6 +313,9 @@ internal static unsafe partial class Program
         Check("pins over a derived HID device on an XUSB companion profile are refused at $.usbConfiguration",
               pinned.StartsWith("$.usbConfiguration:", StringComparison.Ordinal) && pinned.Contains("XUSB function", StringComparison.Ordinal), pinned);
         Check("an identity no INF of the two lists loads: 045E:028E, 045E:02A1", RefusedWhy(wired, "0x028E") == null && RefusedWhy(wired, "0x02A1") == null);
+        var wireless = catalog.First(x => x.Id == "xbox-360-wireless");
+        Refused("a wireless-adapter copy whose xinput.information is 045E:02EA, the identity its USB device would present", wireless,
+                o => o["xinput"]!["information"]!["pid"] = "0x02EA", "$.xinput.information", "its USB device's identity");
 
         Authored(catalog);
     }
@@ -305,6 +337,27 @@ internal static unsafe partial class Program
             if (code == 0x8000E004 && min == 0) return blob[arena + offset + 3];
         }
         throw new InvalidOperationException("no GET_CAPABILITIES answer");
+    }
+
+    /// <summary>The Microsoft OS descriptors the USB/IP device of a copy of
+    /// <paramref name="basis"/>, edited, serves: "none", or the string's
+    /// signature and vendor code and the compatible ID's interface.</summary>
+    static string OsDescriptors(ControllerProfile basis, Action<JsonObject> edit)
+    {
+        try
+        {
+            var o = Json(basis);
+            edit(o);
+            var copy = ControllerProfile.Parse(Encoding.UTF8.GetBytes(o.ToJsonString()))!;
+            var set = new UsbDescriptorSet(copy);
+            var s = set.GetDescriptor(0x03, 0xEE, 0);
+            var c = set.GetMicrosoftOsFeature(4);
+            if (s == null && c == null) return "none";
+            string sig = s is { Length: 18 } && Encoding.Unicode.GetString(s, 2, 14) == "MSFT100" ? $"MSFT100 vendor 0x{s[16]:X2}" : "string " + (s == null ? "none" : Hex(s));
+            string id = c is { Length: 40 } ? $"{Encoding.ASCII.GetString(c, 18, 8).TrimEnd('\0')} on interface {c[16]}" : "compatible ID " + (c == null ? "none" : Hex(c));
+            return $"{sig}, {id}";
+        }
+        catch (Exception e) { return $"{e.GetType().Name}: {e.Message}"; }
     }
 
     static string? RefusedWhy(ControllerProfile basis, string pid)

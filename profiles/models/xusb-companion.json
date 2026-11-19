@@ -251,8 +251,18 @@
               { "at": 10, "value": "serialHex" },
               { "at": 25, "value": "subType" }
             ]
+          },
+          {
+            "comment": "The battery status: a header-only report (type 0x00, the adapter protocol's table 75) whose header is 13 A2, the third report tattiebogle.net captured from a retail pad as it connects (00 00 00 13 A2, zero-filled to the 29 bytes of a report). xboxdrv's Xbox360WirelessController reads such a report (00 00 00 13) as the battery status, the byte at offset 4, with the level in its low two bits (xbox360_wireless_controller.cpp), and 360Controller's WirelessHIDDevice::receivedUpdate takes the byte after type 0x13 as the battery level.",
+            "bytes": "00 00 00 13 A2 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
           }
         ],
+        "inboxHardwareIds": [ "045E:0719" ],
+        "microsoftOs": {
+          "comment": "Served by a device of an identity inboxHardwareIds does not list, which xusb22.inf binds by the compatible ID USB\\MS_COMP_XUSB20 (a third-party receiver's form). The string is MSFT100 with vendor code 0x20 and the compatible ID descriptor names XUSB20 on interface 0, the form Santroller's XInput device answers (src/emulation/usb/xinput_device.cpp, compatible_section_descriptor). The retail devices serve neither and stall the requests.",
+          "string": "12 03 4D 00 53 00 46 00 54 00 31 00 30 00 30 00 20 00",
+          "extendedCompatId": "28 00 00 00 00 01 04 00 01 00 00 00 00 00 00 00 00 01 58 55 53 42 32 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+        },
         "outputPackets": [
           {
             "name": "data link connection request, first slot",
@@ -290,7 +300,8 @@
           { "name": "power off", "match": "00 00 08 C0", "minLength": 4 },
           {
             "name": "LED",
-            "match": "00 00 08",
+            "match": "00 00 08 40",
+            "matchMask": "FF FF FF C0",
             "minLength": 4,
             "source": "xinput",
             "packet": "00 00 00 00 01",
@@ -414,6 +425,12 @@
             { "byte": 10, "type": "int16-axis", "semantic": "rightStickX", "min": -32768, "max": 32767 },
             { "byte": 12, "type": "int16-axis", "semantic": "rightStickY", "min": -32768, "max": 32767, "invert": true }
           ]
+        },
+        "inboxHardwareIds": [ "045E:028E", "045E:028F" ],
+        "microsoftOs": {
+          "comment": "Served by a device of an identity inboxHardwareIds does not list, which xusb22.inf binds by the compatible ID USB\\MS_COMP_XUSB10 (a third-party pad's form). The string is MSFT100 with vendor code 0x20 and the compatible ID descriptor names XUSB10 on interface 0, the form Santroller's XInput device answers (src/emulation/usb/xinput_device.cpp, compatible_section_descriptor). The retail devices serve neither and stall the requests.",
+          "string": "12 03 4D 00 53 00 46 00 54 00 31 00 30 00 30 00 20 00",
+          "extendedCompatId": "28 00 00 00 00 01 04 00 01 00 00 00 00 00 00 00 00 01 58 55 53 42 31 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
         },
         "outputPackets": [
           {
