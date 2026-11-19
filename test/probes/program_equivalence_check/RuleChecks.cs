@@ -429,7 +429,13 @@ internal static partial class RuleChecks
                 // alone. A defect is theirs when the same file without its
                 // groups loads from a folder: the built-in load accepts it,
                 // and refuses every other as a folder load does.
-                bool groupsFind = ProfileDatabase.Parse(c.Base + ".json", WithoutGroups(text)).Issue == null;
+                // A base whose functions need its groups (a gip interface
+                // needs inputReports) is refused without them, unedited: the
+                // edit is the groups' when the file without its groups is
+                // refused no otherwise than the base without them.
+                var bare = ProfileDatabase.Parse(c.Base + ".json", WithoutGroups(text)).Issue;
+                var baseBare = ProfileDatabase.Parse(c.Base + ".json", WithoutGroups(BaseText(c.Base))).Issue;
+                bool groupsFind = bare == null || (baseBare != null && bare.JsonPath == baseBare.JsonPath && bare.Reason == baseBare.Reason);
                 if (groupsFind && builtIn.Issue != null)
                     Fail($"{c.Rule}: the built-in catalog's load checks the groups and refuses at {builtIn.Issue.JsonPath}: {builtIn.Issue.Reason}");
                 if (!groupsFind && builtIn.Issue == null)

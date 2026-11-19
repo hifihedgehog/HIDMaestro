@@ -71,7 +71,7 @@ internal static partial class Program
                     {
                         if (isIn)
                         {
-                            device.Audio.SubmitMicSamples(mic);
+                            AudioOf(device).SubmitMicSamples(mic);
                             w.SubmitIsoIn(2, Packets, MicPacket);
                         }
                         else

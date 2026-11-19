@@ -37,11 +37,25 @@ internal static class UsbipBackend
 
         var server = UsbipServer.GetOrStart();
         SweepStaleOnce(server);
-        ThrowIfPortsFull();
 
         var device = new UsbipEmulatedDevice(profile, index, identity);
         if (identity != null)
             device.VhciPortChanged = port => MachineClaims.SetControllerValue(identity.Token, "VhciPort", port);
+        // Before the attach, the USB instance the device takes goes into the
+        // owner record, marked when Windows has no record of it yet, so the
+        // records the attach causes are named even if the program dies right
+        // after it (UsbRecords). Windows can name the device by its port
+        // instead: always for a device with no serial, and for one whose
+        // identity a usbflags IgnoreHWSerNum value names. The instance names
+        // already there are kept, and the one the device takes is told
+        // apart from them once it is found (UsbipBackendHandle.ResolveRecord).
+        var known = UsbRecords.Known(device.Descriptors.VendorId, device.Descriptors.ProductId);
+        if (device.Descriptors.UsbInstanceId is { } usbId)
+            UsbRecords.Note(identity?.Token, usbId, created: !UsbRecords.Exists(usbId));
+        // The usbflags claim of the device's identity before Windows asks
+        // it for string 0xEE (RegistryLedger.ClaimUsbFlags).
+        RegistryLedger.ClaimUsbFlags(device.Descriptors.VendorId, device.Descriptors.ProductId,
+                                     device.Descriptors.BcdDevice, index);
         server.Register(device);
         try
         {
@@ -54,7 +68,7 @@ internal static class UsbipBackend
                 ThrowIfPortsFull();
                 throw;
             }
-            return new UsbipBackendHandle(server, device);
+            return new UsbipBackendHandle(server, device, identity?.Token, known);
         }
         catch
         {
@@ -72,36 +86,72 @@ internal static class UsbipBackend
         }
     }
 
-    /// <summary>The USB 2.0 ports the host controller has: its
-    /// <c>NumberOfUsb20Ports</c> parameter, 30 when not set, held to 1 to
-    /// 254, as usbip-win2 0.9.8.1 reads it (drivers/ude/vhci.cpp,
-    /// get_usb_ports_cnt and set_usb_ports_cnt). Every device the SDK
+    /// <summary>The USB 2.0 ports the host controller runs with: the count
+    /// its root hub reports (<see cref="VhciClient.Usb20PortsFromRootHub"/>),
+    /// which is the one the driver loaded. When the hub does not answer,
+    /// the driver's own rule over its parameters
+    /// (<see cref="Usb20PortsFromParameters"/>). Every device the SDK
     /// attaches is full or high speed and takes one of them.</summary>
-    internal static int Usb20Ports()
+    internal static int Usb20Ports() => VhciClient.Usb20PortsFromRootHub() ?? Usb20PortsFromParameters();
+
+    /// <summary>usbip-win2 0.9.8.1's count of USB 2.0 ports from its
+    /// <c>NumberOfUsb20Ports</c> and <c>NumberOfUsb30Ports</c> parameters
+    /// (drivers/ude/vhci.cpp, query_usb_ports_cnt and set_usb_ports_cnt):
+    /// each 30 when not set and held to 1 to 254, USB 3 first, and the
+    /// USB 2.0 count then cut to the 255 ports the two may take together.
+    /// The values read now, which a change since the driver loaded makes
+    /// differ from the driver's own.</summary>
+    internal static int Usb20PortsFromParameters()
     {
+        int usb2 = 30, usb3 = 30;
         try
         {
             using var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\usbip2_ude\Parameters");
-            if (k?.GetValue("NumberOfUsb20Ports") is int n) return Math.Clamp(n, 1, 254);
+            if (k?.GetValue("NumberOfUsb20Ports") is int n2) usb2 = n2;
+            if (k?.GetValue("NumberOfUsb30Ports") is int n3) usb3 = n3;
         }
         catch { }
-        return 30;
+        return Usb20PortsRule(usb2, usb3);
     }
 
-    /// <summary>True when the host controller lists as many imports as it
-    /// has USB 2.0 ports, every program's counted.</summary>
+    /// <summary>set_usb_ports_cnt over the two parameter values.</summary>
+    internal static int Usb20PortsRule(int usb2, int usb3)
+    {
+        usb3 = Math.Clamp(usb3, 1, 254);
+        return Math.Min(Math.Clamp(usb2, 1, 254), 255 - usb3);
+    }
+
+    /// <summary>The imports on USB 2.0 ports among <paramref name="speeds"/>,
+    /// the speed of every import the host controller lists, every
+    /// program's. A SuperSpeed import sits on a USB 3 port (vhci.cpp
+    /// get_port_range).</summary>
+    internal static int Usb20PortsUsed(IEnumerable<int> speeds)
+    {
+        int used = 0;
+        foreach (int speed in speeds)
+            if (speed < VhciClient.UsbSpeedSuper) used++;
+        return used;
+    }
+
+    /// <summary>True when every USB 2.0 port of the host controller holds
+    /// an import, every program's counted.</summary>
     private static bool PortsFull(out int ports, out int used)
     {
         ports = Usb20Ports();
         used = 0;
-        try { used = VhciClient.GetImportedDevices().Count; } catch { return false; }
+        try { used = Usb20PortsUsed(VhciClient.GetImportedSpeeds()); } catch { return false; }
         return used >= ports;
     }
 
     /// <summary>The named refusal of a create past the host controller's
-    /// ports, before the device is registered, so nothing is undone.</summary>
-    private static void ThrowIfPortsFull()
+    /// USB 2.0 ports. A create calls it before its lease and before
+    /// anything else machine-wide (HMContext.CreateAtSlot), and nothing is
+    /// asked of a machine whose host controller is not installed: it has
+    /// no import. The attach asks again when it fails, since another
+    /// program can take the last port in between.</summary>
+    internal static void ThrowIfPortsFull()
     {
+        if (!VhciClient.IsAvailable()) return;
         if (!PortsFull(out int ports, out int used)) return;
         throw new HMResourceInUseException(
             $"Every one of the USB/IP host controller's {ports} USB 2.0 ports holds a device ({used} attached, "
@@ -192,7 +242,19 @@ internal static class UsbipBackend
             view ??= new SweepView();
             int own = UsbipServer.Current?.Port ?? 0;
             var recorded = RecordedPorts();
-            foreach (var row in VhciClient.GetImportedDevices())
+            var rows = VhciClient.GetImportedDevices();
+            // Every port whose answer decides a detach or a cancel below,
+            // asked together: an import's, a dead record's, and each range
+            // port for the bus ids a server before v2.0.0 canceled itself.
+            var ask = new HashSet<int>();
+            foreach (var row in rows)
+                if (IsOurLocation(row.Host, row.Service, recorded, out int port)) ask.Add(port);
+            foreach (var rec in MachineClaims.ReadAll())
+                if (!rec.Live && rec.UsbipPort > 0) ask.Add(rec.UsbipPort);
+            for (int port = UsbipServer.BasePort; port < UsbipServer.BasePort + UsbipServer.PortRange; port++) ask.Add(port);
+            ask.Remove(own);
+            view.Probe(ask);
+            foreach (var row in rows)
             {
                 if (!IsOurLocation(row.Host, row.Service, recorded, out int port)) continue;
                 if (port == own || view.IsListening(port)) continue;
@@ -266,24 +328,59 @@ internal static class UsbipBackend
     /// locations the sweep checks there.</summary>
     internal sealed class SweepView
     {
-        private HashSet<int>? _listening;
         private readonly Dictionary<int, HashSet<string>?> _exports = new();
-
-        public HashSet<int> Listening => _listening ??= ListeningLoopbackPorts();
-
-        // Ports the listener table left out, each asked once by a connect.
         private readonly Dictionary<int, bool> _answered = new();
 
-        /// <summary>Whether a server listens on the loopback port: the TCP
-        /// listener table lists it, or a connect to it succeeds. The table
-        /// alone is not enough: on the ARM64 test PC on 2026-11-18 it left a
-        /// live program's listening port out of one sweep in two, and that
-        /// sweep plugged out the program's devices as a dead server's.</summary>
+        /// <summary>Whether a server listens on the loopback port: a connect
+        /// to it succeeds. The TCP listener table is not read. On the ARM64
+        /// test PC on 2026-11-18 it listed no live loopback listener of
+        /// another process in the Listen state, in 2,500 reads of 2,500,
+        /// while netstat showed the port listening, and a sweep that trusted
+        /// it plugged out a live program's devices as a dead server's. Asked
+        /// once per port per view.</summary>
         public bool IsListening(int port)
         {
-            if (Listening.Contains(port)) return true;
-            if (!_answered.TryGetValue(port, out bool live)) _answered[port] = live = Connects(port);
+            if (!_answered.TryGetValue(port, out bool live))
+            {
+                Probe(new[] { port });
+                live = _answered[port];
+            }
             return live;
+        }
+
+        /// <summary>Ask every port in <paramref name="ports"/> this view has
+        /// not asked yet, all at once. A connect to a closed port fails as
+        /// soon as its reset comes back (<see cref="NewProbeSocket"/>), so a
+        /// probe of a range of closed ports takes a few milliseconds. The
+        /// whole probe is held to the device-list exchange's deadline.</summary>
+        public void Probe(IEnumerable<int> ports)
+        {
+            var pending = new List<(int Port, System.Net.Sockets.Socket Socket, System.Threading.Tasks.Task Connect)>();
+            try
+            {
+                foreach (int port in ports)
+                {
+                    if (port <= 0 || _answered.ContainsKey(port) || pending.Exists(p => p.Port == port)) continue;
+                    var socket = NewProbeSocket();
+                    System.Threading.Tasks.Task connect;
+                    try { connect = socket.ConnectAsync(System.Net.IPAddress.Loopback, port); }
+                    catch (Exception e) { connect = System.Threading.Tasks.Task.FromException(e); }
+                    pending.Add((port, socket, connect));
+                }
+                if (pending.Count == 0) return;
+                try { System.Threading.Tasks.Task.WaitAll(pending.ConvertAll(p => p.Connect).ToArray(), ExportsDeadlineMs); }
+                catch (AggregateException) { /* a refused port: its task says so below */ }
+                foreach (var (port, socket, connect) in pending)
+                    _answered[port] = connect.IsCompletedSuccessfully && socket.Connected;
+            }
+            finally
+            {
+                foreach (var (port, socket, _) in pending)
+                {
+                    _answered.TryAdd(port, false);
+                    socket.Dispose();
+                }
+            }
         }
 
         public HashSet<string>? ExportsOf(int port)
@@ -399,29 +496,29 @@ internal static class UsbipBackend
         catch { return false; }
     }
 
-    /// <summary>True when a TCP connect to the loopback port succeeds
-    /// within the device-list exchange's deadline. A port nothing listens on
-    /// is refused at once.</summary>
-    private static bool Connects(int port)
-    {
-        try
-        {
-            using var socket = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork,
-                System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp);
-            var connect = socket.ConnectAsync(System.Net.IPAddress.Loopback, port);
-            return connect.Wait(ExportsDeadlineMs) && socket.Connected;
-        }
-        catch { return false; }
-    }
+    // SIO_TCP_INITIAL_RTO (mstcpip.h, _WSAIOW(IOC_VENDOR, 17)) with its
+    // TCP_INITIAL_RTO_PARAMETERS: Rtt TCP_INITIAL_RTO_UNSPECIFIED_RTT
+    // (0xFFFF, the stack's own), MaxSynRetransmissions
+    // TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS (0xFE).
+    private const int SioTcpInitialRto = unchecked((int)0x98000011);
+    private static readonly byte[] s_noSynRetransmissions = { 0xFF, 0xFF, 0xFE, 0x00 };
 
-    /// <summary>Loopback TCP ports something listens on.</summary>
-    private static HashSet<int> ListeningLoopbackPorts()
+    /// <summary>A TCP socket for a liveness connect. Windows sends the SYN
+    /// to a closed port again after the reset, for about 2 s, before it
+    /// fails the connect: 2,006 to 2,034 ms on the x64 and the ARM64 test
+    /// PCs on 2026-11-18. With SYN retransmissions turned off the same
+    /// connect fails in under a millisecond, and a connect to a server that
+    /// accepts still succeeds, 2,000 of 2,000 on each PC. A server whose
+    /// accept backlog is full resets the SYN as well, and reads as gone.
+    /// The SDK's server accepts each connection as it comes
+    /// (UsbipServer's accept loop).</summary>
+    private static System.Net.Sockets.Socket NewProbeSocket()
     {
-        var set = new HashSet<int>();
-        foreach (var ep in System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners())
-            if (System.Net.IPAddress.IsLoopback(ep.Address) || ep.Address.Equals(System.Net.IPAddress.Any))
-                set.Add(ep.Port);
-        return set;
+        var socket = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork,
+            System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp);
+        try { socket.IOControl(SioTcpInitialRto, s_noSynRetransmissions, null); }
+        catch (System.Net.Sockets.SocketException) { /* the plain connect, held to the deadline */ }
+        return socket;
     }
 
     /// <summary>This process's composites: stop the emulated devices, then
@@ -559,11 +656,114 @@ internal sealed class UsbipBackendHandle : IDisposable
     public int ServerPort => _server.Port;
     private int _disposed;
 
-    internal UsbipBackendHandle(UsbipServer server, UsbipEmulatedDevice device)
+    internal UsbipBackendHandle(UsbipServer server, UsbipEmulatedDevice device, string? token = null,
+                                HashSet<string>? known = null)
     {
         _server = server;
         Device = device;
+        _token = token;
+        _known = known;
+        _instance = device.Descriptors.UsbInstanceId;
     }
+
+    private readonly string? _token;
+    // The instance names Windows kept for the device's VID and PID before
+    // its attach. Null for a handle made without them.
+    private readonly HashSet<string>? _known;
+    // The device's USB instance now, once known. Guarded by the handle.
+    private string? _instance;
+
+    /// <summary>Name the instance of a device Windows names by its port once
+    /// it is found (<paramref name="instanceId"/>): written to the owner
+    /// record, and to the ledger of records HIDMaestro caused when its name
+    /// was not among those listed before the first attach. For a device
+    /// Windows named by its serial, as the create noted before the attach,
+    /// this does nothing.</summary>
+    public void ResolveRecord(string instanceId)
+    {
+        lock (this)
+        {
+            if (_known == null || string.Equals(_instance, instanceId, StringComparison.OrdinalIgnoreCase)) return;
+            _instance = instanceId;
+            UsbRecords.Note(_token, instanceId, UsbRecords.CreatedBy(instanceId, _known));
+        }
+    }
+
+    /// <summary>Unplug the device and plug it in again on this server's
+    /// location, so Windows enumerates it anew: the hub reads its
+    /// descriptors again, the Microsoft OS string among them. Waits up to
+    /// <paramref name="leaveWaitMs"/> (already scaled) for the devnode
+    /// <paramref name="instanceId"/> to leave the device tree before the
+    /// attach, and runs <paramref name="whileAway"/> between the two.
+    /// Returns the vhci port of the new import.</summary>
+    public int Replug(string instanceId, int leaveWaitMs, Action? whileAway = null, Action? undo = null)
+    {
+        if (Volatile.Read(ref _disposed) != 0) throw new ObjectDisposedException(nameof(UsbipBackendHandle));
+        using (VhciClient.HoldOpen())
+        {
+            VhciClient.DetachLocation("127.0.0.1", _server.Port, Device.BusId);
+            VhciClient.StopAttachAttempts("127.0.0.1", _server.Port, Device.BusId);
+        }
+        try
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (UsbRecords.Present(instanceId) && sw.ElapsedMilliseconds < leaveWaitMs) Thread.Sleep(20);
+            if (UsbRecords.Present(instanceId))
+                throw new InvalidOperationException($"{instanceId} did not leave within {leaveWaitMs / 1000} s of its unplug.");
+            whileAway?.Invoke();
+            // The device's reader sees the old connection end, and the device
+            // takes the next import of its bus id (UsbipEmulatedDevice.TryClaim).
+            return AttachWithin(leaveWaitMs, AttachForProbe);
+        }
+        catch (Exception failed)
+        {
+            // Never a controller with no device: what the re-plug changed is
+            // put back (undo), and the device is plugged in again as it was.
+            try { undo?.Invoke(); }
+            catch (Exception ex) { DeviceOrchestrator.LogDiag($"    replug: the undo failed: {ex.GetType().Name}: {ex.Message}"); }
+            try
+            {
+                if (VhciClient.FindLocation("127.0.0.1", _server.Port, Device.BusId) <= 0)
+                    AttachWithin(2 * leaveWaitMs, attach: null);
+            }
+            catch (Exception again)
+            {
+                throw new InvalidOperationException(
+                    $"The re-plug of {instanceId} failed ({failed.Message}), and plugging the device in again failed too ({again.Message}).", failed);
+            }
+            throw new InvalidOperationException(
+                $"The re-plug of {instanceId} failed, and the device is plugged in again as it was: {failed.Message}", failed);
+        }
+    }
+
+    /// <summary>Attach the device's location, retrying while the device
+    /// still holds its old connection, for up to <paramref name="waitMs"/>.
+    /// <paramref name="attach"/> stands in for the attach when a probe sets
+    /// it.</summary>
+    private int AttachWithin(int waitMs, Func<int>? attach)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (true)
+        {
+            try
+            {
+                int port = attach?.Invoke() ?? VhciClient.Attach("127.0.0.1", _server.Port, Device.BusId);
+                Device.SetVhciPortIfAttached(port);
+                return port;
+            }
+            catch (System.ComponentModel.Win32Exception) when (sw.ElapsedMilliseconds < waitMs)
+            {
+                // The device still holds the old connection for a moment
+                // after the unplug, and refuses an import while it does.
+                Thread.Sleep(50);
+            }
+        }
+    }
+
+    /// <summary>Set by gc_winusb_check to stand in for the re-plug's attach
+    /// and fail it, so its run reaches the path that plugs the device in
+    /// again. Null outside the probe.</summary>
+    internal static Func<int>? AttachForProbe;
 
     public void Dispose()
     {

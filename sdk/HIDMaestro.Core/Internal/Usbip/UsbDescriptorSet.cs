@@ -76,9 +76,12 @@ internal sealed class UsbDescriptorSet
     // Issue #66. Microsoft OS 1.0 descriptors, null unless the profile
     // declares them. A device without them stalls string 0xEE and every
     // vendor request, as the Sony and Valve pads do.
-    private readonly byte[]? _msOsString;
-    private readonly byte[]? _msOsCompatId;
-    private readonly byte[]? _msOsProperties;
+    // A device bound to WinUSB by these descriptors gets them after its
+    // construction (ServeWinUsb), the string last, since Windows asks for it
+    // before the two features.
+    private volatile byte[]? _msOsString;
+    private volatile byte[]? _msOsCompatId;
+    private volatile byte[]? _msOsProperties;
 
     /// <summary>Endpoint table parsed from the configuration blob. Keyed
     /// by bEndpointAddress (direction bit included).</summary>
@@ -96,11 +99,17 @@ internal sealed class UsbDescriptorSet
     private readonly byte[]? _hidClassDescriptor;
 
     /// <summary>False for a device whose profile names an interface
-    /// <c>"xusb"</c> (<see cref="UsbInterfaceSpec.Function"/>): it has no
-    /// HID interface and serves no HID descriptor, and its reports travel
-    /// on that interface's interrupt endpoints. True for every other
+    /// <c>"xusb"</c> or <c>"gip"</c> (<see cref="UsbInterfaceSpec.Function"/>):
+    /// it has no HID interface and serves no HID descriptor, and its reports
+    /// travel on that interface's interrupt endpoints. True for every other
     /// persona.</summary>
     public bool HasHidInterface { get; }
+
+    /// <summary>The function of the interface a device with no HID
+    /// interface reports on: <c>"xusb"</c> or <c>"gip"</c>
+    /// (<see cref="UsbInterfaceSpec.Function"/>). Null on every device with a
+    /// HID interface.</summary>
+    public string? ReportFunction { get; }
 
     /// <summary>Issue #56. Secondary HID interfaces, keyed by interface
     /// number: the class descriptor found in the blob paired with the
@@ -191,6 +200,13 @@ internal sealed class UsbDescriptorSet
         // descriptor. Every other persona is held to both.
         int xusbAt = cfg.Interfaces.FindIndex(x => x.Function == "xusb");
         string xusbPath = $"$.usbConfiguration.interfaces[{xusbAt}].function";
+        // A device whose messages travel on a GIP data interface has no HID
+        // interface either, and builds every message from its state block
+        // and protocol. One interface carries a device's reports.
+        int gipAt = cfg.Interfaces.FindIndex(x => x.Function == "gip");
+        string gipPath = $"$.usbConfiguration.interfaces[{gipAt}].function";
+        if (gipAt >= 0 && xusbAt >= 0)
+            throw new ProfileDefectException(gipPath, $"\"gip\" and {xusbPath} \"xusb\" each mark the one interface a device with no HID interface reports on.");
         if (xusbAt >= 0 && profile.HasDescriptor)
             throw new ProfileDefectException("$.descriptor",
                 $"has no interface to present it: {xusbPath} \"xusb\" marks a device with no HID interface.");
@@ -202,8 +218,14 @@ internal sealed class UsbDescriptorSet
         if (xusbAt >= 0 && !profile.ExtendedReport!.AlwaysArmed)
             throw new ProfileDefectException("$.extendedReport.alwaysArmed",
                 "must be true on a device with no HID interface, which has no other report to send.");
+        if (gipAt >= 0 && profile.HasDescriptor)
+            throw new ProfileDefectException("$.descriptor",
+                $"has no interface to present it: {gipPath} \"gip\" marks a device with no HID interface.");
+        if (gipAt >= 0 && !profile.BuildsItsOwnReports)
+            throw new ProfileDefectException("$.inputReports",
+                "is required for a device that reports on a GIP interface: it builds every message it sends from its state block.");
         ReportDescriptor = profile.GetDescriptorBytes()
-            ?? (xusbAt >= 0 ? Array.Empty<byte>()
+            ?? (xusbAt >= 0 || gipAt >= 0 ? Array.Empty<byte>()
                 : throw new ProfileDefectException("$.descriptor", "is required for the usbip backend: the HID interface presents it."));
 
         if (DeviceDescriptor.Length != 18 || DeviceDescriptor[0] != 18 || DeviceDescriptor[1] != 0x01)
@@ -306,6 +328,8 @@ internal sealed class UsbDescriptorSet
         var classByIface = new Dictionary<byte, byte[]>();
         // Each interface's class and subclass, from its first descriptor.
         var classOf = new Dictionary<byte, (byte Class, byte SubClass)>();
+        // The same with the protocol, for an interface named "gip".
+        var protocolOf = new Dictionary<byte, (byte Class, byte SubClass, byte Protocol)>();
         // Every endpoint descriptor, alternate settings included. _endpoints
         // keeps one per address, the last one written.
         var everyEndpoint = new List<EndpointInfo>();
@@ -320,6 +344,7 @@ internal sealed class UsbDescriptorSet
                 curIface = blob[off + 2];
                 curAlt = blob[off + 3];
                 classOf.TryAdd(curIface, (blob[off + 5], blob[off + 6]));
+                protocolOf.TryAdd(curIface, (blob[off + 5], blob[off + 6], blob[off + 7]));
                 if (blob[off + 5] == 0x03 && hidIface == 0xFF) hidIface = curIface;
                 if (!sawInterface)
                 {
@@ -366,6 +391,30 @@ internal sealed class UsbDescriptorSet
                 throw new ProfileDefectException(xusbPath,
                     $"\"xusb\" names interface {number}, which has no interrupt IN endpoint to report on.");
             HidInterfaceNumber = number;
+            ReportFunction = "xusb";
+        }
+        else if (gipAt >= 0)
+        {
+            // The GIP data interface: vendor class 0xFF, subclass 0x47 and
+            // protocol 0xD0, with an interrupt IN and an interrupt OUT
+            // endpoint (Microsoft's GIP specification, tables 36 to 38).
+            byte number = cfg.Interfaces[gipAt].InterfaceNumber;
+            if (hidIface != 0xFF)
+                throw new ProfileDefectException(gipPath,
+                    $"\"gip\" marks a device with no HID interface, and interface {hidIface} of the configuration descriptor is one.");
+            if (!protocolOf.TryGetValue(number, out var kind))
+                throw new ProfileDefectException(gipPath,
+                    $"\"gip\" names interface {number}, which the configuration descriptor lacks.");
+            if (kind.Class != 0xFF || kind.SubClass != 0x47 || kind.Protocol != 0xD0)
+                throw new ProfileDefectException(gipPath,
+                    $"\"gip\" names interface {number}, whose class, subclass and protocol are 0x{kind.Class:X2}, 0x{kind.SubClass:X2} " +
+                    $"and 0x{kind.Protocol:X2} in the configuration descriptor. A GIP data interface is class 0xFF, subclass 0x47, protocol 0xD0.");
+            if (!everyEndpoint.Exists(e => e.InterfaceNumber == number && e.TransferType == 3 && e.IsIn)
+                || !everyEndpoint.Exists(e => e.InterfaceNumber == number && e.TransferType == 3 && !e.IsIn))
+                throw new ProfileDefectException(gipPath,
+                    $"\"gip\" names interface {number}, which lacks the interrupt IN and interrupt OUT endpoints a GIP data interface carries.");
+            HidInterfaceNumber = number;
+            ReportFunction = "gip";
         }
         else
         {
@@ -509,16 +558,17 @@ internal sealed class UsbDescriptorSet
         // device that answers the string and then stalls a feature request
         // leaves its interface with no driver. Each blob states its own
         // length, so a mis-authored one is refused here. A device that
-        // reports on an XUSB interface may leave the extended properties
-        // out: Windows matches its driver on the compatible ID alone, and
-        // such a device stalls every other feature request ([MS-XUSBI]
-        // 2.2.4.6).
+        // reports on an XUSB or a GIP interface may leave the extended
+        // properties out: Windows matches its driver on the compatible ID
+        // alone, and such a device stalls every other feature request
+        // ([MS-XUSBI] 2.2.4.6, and the GIP specification's "Extended
+        // Properties Request being STALLed").
         var os = cfg.MicrosoftOs;
         if (os != null)
         {
             _msOsString = FromHex(os.StringHex, "microsoftOs.string");
             _msOsCompatId = FromHex(os.ExtendedCompatIdHex, "microsoftOs.extendedCompatId");
-            _msOsProperties = xusbAt >= 0 && os.ExtendedPropertiesHex == null
+            _msOsProperties = (xusbAt >= 0 || gipAt >= 0) && os.ExtendedPropertiesHex == null
                 ? null
                 : FromHex(os.ExtendedPropertiesHex, "microsoftOs.extendedProperties");
 
@@ -544,6 +594,85 @@ internal sealed class UsbDescriptorSet
             throw new InvalidOperationException(
                 $"microsoftOs.{field} declares length {declared} and index {featureIndex}, " +
                 $"but is {blob.Length} bytes and must carry index {index}.");
+    }
+
+    /// <summary>True when the device serves the Microsoft OS descriptors
+    /// <see cref="ServeWinUsb"/> builds.</summary>
+    public bool ServesWinUsb { get; private set; }
+
+    /// <summary>The vendor code the Microsoft OS string names, which Windows
+    /// then puts in its feature requests. The device answers a feature by
+    /// its wIndex alone (<see cref="GetMicrosoftOsFeature"/>), so any code
+    /// would do.</summary>
+    internal const byte WinUsbVendorCode = 0x01;
+
+    /// <summary>Serve, from the next enumeration on, the Microsoft OS 1.0
+    /// descriptors that make Windows bind its own WinUSB driver to the
+    /// device with no INF: string 0xEE, the extended compatible ID
+    /// <c>WINUSB</c> for interface 0 and the extended property
+    /// <c>DeviceInterfaceGUID</c>, the interface WinUSB registers, which
+    /// libusb opens (Microsoft OS 1.0 Descriptors Specification; Microsoft
+    /// Learn, "WinUSB Device"). The layouts are those the Switch 2 Pro
+    /// persona's vendor interface serves (switch2-pro-composite.json), with
+    /// interface 0 and this GUID. For a device with one interface: Windows
+    /// reads the compatible ID of a device that is not composite for the
+    /// device itself.</summary>
+    internal void ServeWinUsb(Guid interfaceGuid)
+    {
+        byte[] str = new byte[18];
+        str[0] = 18; str[1] = 0x03;
+        Encoding.Unicode.GetBytes("MSFT100").CopyTo(str, 2);
+        str[16] = WinUsbVendorCode;
+
+        byte[] compat = new byte[40];
+        compat[0] = 40;                     // dwLength
+        compat[5] = 0x01;                   // bcdVersion 1.00
+        compat[6] = 0x04;                   // wIndex 4
+        compat[8] = 1;                      // bCount
+        compat[16] = 0;                     // bFirstInterfaceNumber
+        compat[17] = 0x01;                  // reserved, 1 as the specification writes it
+        Encoding.ASCII.GetBytes("WINUSB").CopyTo(compat, 18);
+
+        byte[] name = Encoding.Unicode.GetBytes("DeviceInterfaceGUID\0");
+        byte[] data = Encoding.Unicode.GetBytes(interfaceGuid.ToString("B").ToUpperInvariant() + "\0");
+        int section = 4 + 4 + 2 + name.Length + 4 + data.Length;
+        byte[] props = new byte[10 + section];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(props, (uint)props.Length);
+        props[5] = 0x01;                    // bcdVersion 1.00
+        props[6] = 0x05;                    // wIndex 5
+        props[8] = 1;                       // wCount
+        int at = 10;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(props.AsSpan(at), (uint)section); at += 4;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(props.AsSpan(at), 1); at += 4;   // REG_SZ
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(props.AsSpan(at), (ushort)name.Length); at += 2;
+        name.CopyTo(props, at); at += name.Length;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(props.AsSpan(at), (uint)data.Length); at += 4;
+        data.CopyTo(props, at);
+
+        CheckMicrosoftOsFeature(compat, 4, 16, "extendedCompatId");
+        CheckMicrosoftOsFeature(props, 5, 10, "extendedProperties");
+        _priorOs ??= (_msOsString, _msOsCompatId, _msOsProperties);
+        _msOsCompatId = compat;
+        _msOsProperties = props;
+        _msOsString = str;
+        ServesWinUsb = true;
+    }
+
+    // What the device served before ServeWinUsb, for StopServingWinUsb.
+    private (byte[]? String, byte[]? CompatId, byte[]? Properties)? _priorOs;
+
+    /// <summary>Serve again what the device served before
+    /// <see cref="ServeWinUsb"/>, the string first, so Windows asks for no
+    /// feature the device no longer names. A bind whose re-plug failed puts
+    /// the device back as it was with this.</summary>
+    internal void StopServingWinUsb()
+    {
+        if (_priorOs is not { } prior) return;
+        _msOsString = prior.String;
+        _msOsCompatId = prior.CompatId;
+        _msOsProperties = prior.Properties;
+        ServesWinUsb = false;
+        _priorOs = null;
     }
 
     /// <summary>The Microsoft OS 1.0 feature descriptor a vendor request
