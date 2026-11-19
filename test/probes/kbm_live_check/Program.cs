@@ -150,6 +150,11 @@ internal static class Program
     /// minute at the run's timeout scale. Windows lists a device, reads it
     /// and delivers its input in well under a second, but a loaded machine
     /// can take far longer with no defect.</summary>
+    /// <summary>The run's timeout scale, HIDMAESTRO_TIMEOUT_SCALE, at least 1.</summary>
+    static readonly double Scale = Math.Max(1.0,
+        double.TryParse(Environment.GetEnvironmentVariable("HIDMAESTRO_TIMEOUT_SCALE"),
+            System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double scale) ? scale : 1.0);
+
     static readonly int HangMs = (int)(60_000 * Math.Max(1.0,
         double.TryParse(Environment.GetEnvironmentVariable("HIDMAESTRO_TIMEOUT_SCALE"),
             System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double scale) ? scale : 1.0));
@@ -1387,27 +1392,46 @@ internal static class Program
         while (heldFor.ElapsedMilliseconds < 1500 && Repeats() < 3) Thread.Sleep(20);
         int repeats = Repeats();
         long heldMs = heldFor.ElapsedMilliseconds;
+        // The same window's controls, on either backend: Raw Input lists all
+        // three devices, and F24 repeats there while the child holds it. A
+        // check below that sees nothing after the kill means nothing without
+        // them.
+        Check("before the kill, Raw Input lists the keyboard, the vendor collection and the pointer",
+              hk != IntPtr.Zero && hv != IntPtr.Zero && hp != IntPtr.Zero,
+              $"keyboard {(hk != IntPtr.Zero ? "listed" : "not listed")}, vendor {(hv != IntPtr.Zero ? "listed" : "not listed")}, pointer {(hp != IntPtr.Zero ? "listed" : "not listed")}");
+        Check("before the kill, F24 repeats at Raw Input while the child holds it", repeats >= 1, $"{repeats} in {heldMs} ms");
         sink.Clear();
+        var listedAtKill = RawInputSink.Devices().Select(d => d.Handle).ToHashSet();
+        bool allListedAtKill = hk != IntPtr.Zero && hv != IntPtr.Zero && hp != IntPtr.Zero
+                               && listedAtKill.Contains(hk) && listedAtKill.Contains(hv) && listedAtKill.Contains(hp);
         var clock = Stopwatch.StartNew();
         child.Kill();
         child.WaitForExit();
-        long killedAt = Stopwatch.GetTimestamp();
         // On UMDF2 the driver's release frames: F24 up, button 6 up and the
         // pointer where it was. On USB/IP the three devices leave with the
         // consumer and nothing sends a frame: Windows keeps F24 down (measured
         // with --held-on-kill, 2026-11-18) and its repeat stops with the
         // device. Then 500 ms, ten of Windows' key repeats, for a key that
         // goes down again or a pointer that moves after them.
-        long released = -1;
+        // On USB/IP a repeat made before the device went can reach this
+        // program's message pump late on a loaded machine. The window for
+        // "nothing after the kill" opens a drain of 250 ms at the run's
+        // timeout scale after Raw Input stops listing the devices.
+        long drainMs = (long)(250 * Scale);
+        long released = -1, quietFrom = long.MaxValue;
         while (clock.ElapsedMilliseconds < HangMs)
         {
             bool done = usbipChild
-                ? !RawInputSink.Devices().Any(d => d.Handle == hk || d.Handle == hv || d.Handle == hp)
+                ? allListedAtKill && !RawInputSink.Devices().Any(d => d.Handle == hk || d.Handle == hv || d.Handle == hp)
                 : sink.Keys.Any(k => k.Device == hk && k.VKey == 0x87 && (k.Flags & 1) == 1)
                   && sink.Reports.Any(r => r.Device == hv && Convert.ToHexString(r.Report) == "0200")
                   && sink.Mice.Any(x => x.Device == hp);
-            if (released < 0 && done) released = clock.ElapsedMilliseconds;
-            if (released >= 0 && clock.ElapsedMilliseconds - released >= 500) break;
+            if (released < 0 && done)
+            {
+                released = clock.ElapsedMilliseconds;
+                quietFrom = Stopwatch.GetTimestamp() + drainMs * Stopwatch.Frequency / 1000;
+            }
+            if (released >= 0 && clock.ElapsedMilliseconds - released >= (usbipChild ? drainMs : 0) + 500) break;
             Thread.Sleep(20);
         }
         var keys = sink.Keys.Where(k => k.Device == hk && k.VKey == 0x87).ToList();
@@ -1416,11 +1440,12 @@ internal static class Program
         var vendor = sink.Reports.Where(r => r.Device == hv).Select(r => Convert.ToHexString(r.Report)).ToList();
         if (usbipChild)
         {
-            Check("the three devices leave Raw Input with the consumer", released >= 0,
-                  released >= 0 ? $"{released} ms after the kill" : "still listed");
-            Check("F24 stops repeating once the device is gone, with no frame after the kill",
-                  !keys.Any(k => k.Ticks > killedAt) && vendor.Count == 0,
-                  $"{keys.Count(k => k.Ticks > killedAt)} F24 messages after the kill, vendor [{string.Join(",", vendor)}]");
+            Check("the three devices, listed at the kill, leave Raw Input with the consumer", released >= 0,
+                  !allListedAtKill ? "not all listed at the kill" : released >= 0 ? $"{released} ms after the kill" : "still listed");
+            int late = keys.Count(k => k.Ticks > quietFrom) + sink.Reports.Count(r => r.Device == hv && r.Ticks > quietFrom);
+            Check("no F24 and no vendor report once the devices are gone",
+                  released >= 0 && late == 0,
+                  released < 0 ? "the devices did not go" : $"{late} after the devices went and {drainMs} ms more, {keys.Count} F24 messages since the kill");
         }
         else
         {
@@ -1445,7 +1470,10 @@ internal static class Program
             Thread.Sleep(100);
             left = held.Where(id => !Removed(id)).ToList();
         }
-        Check("the cleanup removes the dead consumer's keyboard and both mice",
+        // On USB/IP the host controller removed the three with the consumer,
+        // before the cleanup ran, so the check states what it sees.
+        Check(usbipChild ? "the dead consumer's keyboard and both mice, present before the kill, are gone after the cleanup"
+                         : "the cleanup removes the dead consumer's keyboard and both mice",
               held.Count == 3 && left.Count == 0,
               left.Count > 0 ? "left: " + string.Join(", ", left) : $"{held.Count} devices, {cleanupMs} ms");
         WaitGone(Tag(0xBEEF, 0xF0B6), 10000);
