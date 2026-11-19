@@ -764,7 +764,15 @@ internal static partial class Program
         if (cap2 == null) { Check("D: the live program's device opens", false); return; }
 
         p1.Kill();
-        Check("D: the killed program's devices are still there before anything sweeps", tree1.Count > 0 && tree1.All(Native.IsPresent));
+        // A USB/IP import lives on its program's connection: the host
+        // controller unplugs the device when the killed program's socket
+        // closes, before anything sweeps. A UMDF2 device stays until a sweep.
+        if (PeerProcess.Field(c1, "backend") == "Usbip")
+            Check("D: on USB/IP the killed program's devices leave with its connection, before anything sweeps",
+                  tree1.Count > 0 && WaitFor(() => tree1.All(Native.IsGone), 10_000),
+                  string.Join(", ", tree1.Where(t => !Native.IsGone(t))));
+        else
+            Check("D: the killed program's devices are still there before anything sweeps", tree1.Count > 0 && tree1.All(Native.IsPresent));
         string s = p2.Send("sweep");
         Check("D: the live program's sweep runs", Ok(s), s);
         WaitFor(() => tree1.All(Native.IsGone), 5000);
@@ -1169,14 +1177,22 @@ internal static partial class Program
     static void SectionK()
     {
         string transport;
+        bool usbip;
         using (var k1 = PeerProcess.Start("K1"))
         {
             string c1 = k1.Send("create pad F0F3 -");
             if (!Ok(c1)) { Check("K: the program creates", false, c1); return; }
             transport = PeerProcess.Field(c1, "transport")!;
+            usbip = PeerProcess.Field(c1, "backend") == "Usbip";
             k1.Kill();
         }
-        Check("K: the killed program's device is still there", WaitPaths(0xBEEF, 0xF0F3, 1, 10_000).Count == 1);
+        // On USB/IP the device leaves with the killed program's connection,
+        // as in D. A UMDF2 device stays for the next program to take over.
+        if (usbip)
+            Check("K: on USB/IP the killed program's device leaves with its connection",
+                  WaitFor(() => Native.HidPaths(0xBEEF, 0xF0F3).Count == 0, 10_000));
+        else
+            Check("K: the killed program's device is still there", WaitPaths(0xBEEF, 0xF0F3, 1, 10_000).Count == 1);
         using var k2 = PeerProcess.Start("K2");
         string c2 = k2.Send("create pad F0F3 -");
         Check("K: started again, it creates", Ok(c2), c2);

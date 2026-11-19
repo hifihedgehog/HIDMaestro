@@ -229,7 +229,7 @@ internal static class Peer
                         lock (s_live) s_live.Add(c);
                         string index = Get(c, "Index") ?? "?";
                         Reply($"OK create index={index} transport={Get(c, "TransportIndex") ?? index} " +
-                              $"instance={DeviceIdOf(c) ?? "none"} key={c.IdentityKey} ms={ms}");
+                              $"instance={DeviceIdOf(c) ?? "none"} key={c.IdentityKey} ms={ms} backend={Get(c, "Backend") ?? "Umdf2"}");
                         break;
                     }
                     case "createat":
