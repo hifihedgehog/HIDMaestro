@@ -124,6 +124,7 @@ public sealed partial class HMController : IDisposable
         }
         var only = Lengths(own);
         only.ExceptWith(Lengths(presented));
+        only.RemoveWhere(n => n <= 0);
         if (only.Count == 0) return null;
         int max = 0;
         foreach (int n in only) max = Math.Max(max, n);
