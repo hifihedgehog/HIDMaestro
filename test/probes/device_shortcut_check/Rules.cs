@@ -191,7 +191,7 @@ internal static class Rules
         new(new[] { "SteamVrPathRegValue", "FindSteamVR", "SetSteamVRPathHint", "IsSteamVRInstalled", "IsSteamVRRunning", "steamVrDir", "steamVr" },
             new[] { @"sdk\HIDMaestro.Core\Internal\VrDriverBuilder.cs" },
             "SteamVR, the OpenVR host HIDMaestro's own VR controller runs under, not an impersonated device"),
-        new(new[] { "UsbMicrosoftOsSpec", "MicrosoftOs" }, new[] { @"sdk\HIDMaestro.Core\Internal\UsbConfigurationSpec.cs" },
+        new(new[] { "UsbMicrosoftOsSpec", "MicrosoftOs" }, new[] { @"sdk\HIDMaestro.Core\Internal\UsbConfigurationSpec.cs", @"sdk\HIDMaestro.Core\Internal\Usbip\XusbFunction.cs" },
             "Microsoft OS descriptors, a USB descriptor standard any device may serve, which the profile's data holds and the persona serves verbatim (UsbDescriptorSet.cs)"),
         new(new[] { "CheckMicrosoftOsFeature", "GetMicrosoftOsFeature" }, new[] { @"sdk\HIDMaestro.Core\Internal\Usbip\UsbDescriptorSet.cs" },
             "Microsoft OS descriptors, a USB descriptor standard any device may serve, which the profile's data holds and the persona serves verbatim"),
@@ -294,6 +294,8 @@ internal static class Rules
 
     const string XInputIds = "the IDs and flags an XUSB companion reports apart from its HID child's (PresentationPlan, XusbAnswers.Compile), for any pad behind a receiver: xbox-360-wireless today, and every wireless XUSB device PlasticBand captured (ProductId 0 with WIRELESS, the receiver's 045E:0719 in GET_INFORMATION), the Microsoft Wireless Racing Wheel among them (Microsoft Wireless Racing Wheel.txt:1-17)";
 
+    const string XInputBattery = "the battery an XUSB companion answers in GET_BATTERY_INFORMATION (XInputPresentation.BatteryBytes, the XUSB model's battery fields), for any XUSB pad that is not wired and full: xbox-360-wireless today, which reads alkaline and medium as xusb22 answers for the pad behind the receiver, and any wireless XUSB device on batteries";
+
     // Discriminators of rule C's per-kind count (Profiles.cs), as
     // Type.Prop: a key on an object of one kind is counted apart from the
     // same key on another.
@@ -355,9 +357,8 @@ internal static class Rules
         new("UsbConfigurationSpec.OtherSpeedConfigurationDescriptorHex", "a descriptor served verbatim (UsbDescriptorSet.cs:155)"),
         new("UsbConfigurationSpec.MicrosoftOs", "Microsoft OS descriptors served verbatim (UsbDescriptorSet.cs)"),
         new("UsbMicrosoftOsSpec.*", "Microsoft OS descriptors served verbatim (UsbDescriptorSet.cs)"),
-        new("UsbInterfaceSpec.Function=xusb", "the XUSB game controller interface, a USB interface class Microsoft documents in [MS-XUSBI] (class 0xFF, subclass 0x5D, 2.2.4.3), on a device with no HID interface (UsbDescriptorSet.cs). It names a class every XUSB device carries, whatever its maker or subtype. xbox-360-wired-full sets it, and the catalog's other wired Xbox 360 devices are the second: the wheel, arcade stick, flight stick, dance pad and guitars differ from the pad in the subtype byte of the same interface descriptor ([MS-XUSBI] 2.2.2.1.1, table 3)"),
         new("UsbInterfaceSpec.Function=gip", "the GIP data interface, a USB interface class Microsoft documents in its GIP specification H001419 (class 0xFF, subclass 0x47, protocol 0xD0, table 36), on a device with no HID interface (UsbDescriptorSet.cs). It names a class every GIP device carries, whatever its maker or type. xbox-one-s-full sets it, and every Xbox One and Series pad, wheel, arcade stick and flight stick on USB speaks GIP on the same interface (H001419's tables 34 to 38 and its device type documents)"),
-        new("ControllerProfile.DeviceModel*", "a profile's statement that it takes no model by name or by identity (ModelRegistry.Resolve), which any profile may make. xbox-360-wired-full makes it: Windows' own XUSB driver binds its device, and the microsoft-xbox-named identity default would give a copy outside the catalog an XUSB companion's presentation"),
+        new("ControllerProfile.DeviceModel*", "a profile's statement that it takes no model by name or by identity (ModelRegistry.Resolve), which any profile may make. xbox-one-s-full makes it: Windows' own GIP driver binds its device, which takes no model's presentation"),
         new("ControllerProfile.ConfigurationString", "the configuration's string descriptor, served verbatim (UsbDescriptorSet.cs:201)"),
         new("ControllerProfile.DataReportId", "the input report a profile's data frames fill, any input report its descriptor declares, checked against the descriptor at load (ControllerProfile.ValidateDataReport). One catalog profile sets it today"),
         new("ControllerProfile.SdlMapping", "a mapping string handed to programs (HMProfile.cs:202), read by no device code"),
@@ -365,6 +366,8 @@ internal static class Rules
         new("XInputSpec.Capabilities", XInputIds),
         new("XInputIdSpec.*", XInputIds),
         new("XInputCapabilitiesSpec.*", XInputIds),
+        new("XInputSpec.Battery", XInputBattery),
+        new("XInputBatterySpec.*", XInputBattery),
         new("ControllerProfile.BluetoothVendorIdSource", "the Device ID's vendor ID source in a Bluetooth device's hardware IDs (PresentationPlan.BluetoothIds), for any Bluetooth device whose VID the Bluetooth SIG assigned: the Luna's 0x0171 today, and Apple's Bluetooth keyboards and mice under 0x004C (Linux hid-ids.h:98, hid-apple.c:1084)"),
         new("FieldSpec.Resolution", "a parameter of the u10be codec op, for any 10-bit sensor (VendorBlobProgram.cs:363)"),
         new("FieldSpec.SourceResolution", "a parameter of the u10be codec op, for any 10-bit sensor (VendorBlobProgram.cs:363)"),

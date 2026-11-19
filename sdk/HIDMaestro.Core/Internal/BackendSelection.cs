@@ -136,7 +136,10 @@ internal static class BackendSelection
             case HMBackend.Umdf2:
                 if (profile.RequiresUsbipBackend)
                     return "its backend is \"usbip\": it has interfaces only the USB/IP backend presents.";
-                return profile.HasDescriptor ? null : "it has no HID descriptor.";
+                if (!profile.HasDescriptor) return "it has no HID descriptor.";
+                // The identity check the XUSB function makes on USB/IP holds
+                // for the companion too: xinputhid would bind its HID child.
+                return Usbip.XusbFunction.RefusedIdentityReason(profile);
             case HMBackend.Usbip:
                 return Usbip.UsbPresentation.NotPresentableReason(profile);
             default:

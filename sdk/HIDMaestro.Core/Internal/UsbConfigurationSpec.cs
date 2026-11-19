@@ -259,6 +259,10 @@ internal sealed class UsbEndpointPinsConverter : JsonConverter<UsbEndpointPins>
 /// request carrying the code the string named.</summary>
 public sealed class UsbMicrosoftOsSpec
 {
+    /// <summary>A note for the reader of the model or profile.</summary>
+    [JsonPropertyName("comment")]
+    public string? Comment { get; set; }
+
     /// <summary>String descriptor 0xEE: 18 bytes, <c>MSFT100</c> in UTF-16
     /// then the vendor code and a pad byte.</summary>
     [JsonPropertyName("string")]

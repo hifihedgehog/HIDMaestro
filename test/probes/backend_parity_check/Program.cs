@@ -202,7 +202,8 @@ internal static partial class Program
     {
         var target = collections.FirstOrDefault(x => x.OutputLength > 0);
         if (target == null) return "";
-        // The reports of the form the device presents on its backend.
+        // The report the device's own descriptor declares: on USB/IP that is
+        // the form's (FormParity.cs).
         var map = p.FormOn(c.Backend).Inner.GetOrBuildReportMap();
         var report = map.Reports.Where(r => r.Kind == HidReportKind.Output).OrderBy(r => r.ReportId).FirstOrDefault();
         if (report == null) return "";
@@ -243,6 +244,18 @@ internal static partial class Program
         var profiles = (ids.Count > 0 ? ids.Select(i => ctx.GetProfile(i) ?? throw new ArgumentException($"no profile {i}")) : ctx.AllProfiles)
             .Where(p => p.IsDeployable && p.SupportsBackend(HMBackend.Usbip) && p.SupportsBackend(HMBackend.Umdf2))
             .OrderBy(p => p.Id, StringComparer.Ordinal).ToList();
+        // A profile whose USB/IP presentation is an XUSB function reaches
+        // Windows through xusb22, which makes the HID device itself from the
+        // subtype, so its HID collection is xusb22's and not the profile's
+        // descriptor. xusb_persona_check's family part compares those
+        // profiles across backends where they meet: XInput's capabilities,
+        // state and packets.
+        var xusb = profiles.Where(p => HIDMaestro.Internal.Usbip.UsbPresentation.Resolve(p.Inner).Kind == HIDMaestro.Internal.Usbip.UsbPresentationKind.XusbFunction).ToList();
+        if (xusb.Count > 0)
+        {
+            Note($"{xusb.Count} present an XUSB function on USB/IP and are compared by xusb_persona_check family: {string.Join(", ", xusb.Select(p => p.Id))}");
+            profiles = profiles.Except(xusb).ToList();
+        }
         Note($"{profiles.Count} profiles, UMDF2 {(umdf2Here ? "on" : "off")}, USB/IP {(usbipHere ? "on" : "off")}");
         // HID class hands the descriptor to hidparse.sys when the device
         // starts, and a status other than success fails the start with Code
@@ -257,17 +270,12 @@ internal static partial class Program
         foreach (var p in profiles)
         {
             string key = "parity:" + p.Id;
-            // A Bluetooth identity with a USB form (usbForm) presents on
-            // USB/IP the form under its own id and strings
-            // (ControllerProfile.UsbFormOf). The UMDF2 side creates that same
-            // presentation, and the descriptor and attributes owed are its.
-            // HMProfile.FormOn gives the form itself, with the form's strings.
-            var shown = p.Inner.UsbForm != null ? new HMProfile(p.Inner.UsbFormOf(HMBackend.Usbip)) : p;
-            var verdict = WindowsParser.Parse(shown.Inner.GetDescriptorBytes()!);
+            var verdict = WindowsParser.Parse(p.Inner.GetDescriptorBytes()!);
             bool accepts = verdict.Ok;
             if (accepts) accepted++;
-            Snapshot? u = umdf2Here ? Take(ctx, shown, HMBackend.Umdf2, key) : null;
+            Snapshot? u = umdf2Here ? Take(ctx, p, HMBackend.Umdf2, key) : null;
             Snapshot? s = usbipHere ? Take(ctx, p, HMBackend.Usbip, key) : null;
+            var form = p.FormOn(HMBackend.Usbip);
             var problems = new List<string>();
             // A descriptor Windows refuses owes a start that fails with Code
             // 10 and nothing else.
@@ -294,9 +302,14 @@ internal static partial class Program
             foreach (var x in new[] { u, s })
                 if (x != null && x.Failure == null)
                     foreach (var c in x.Collections)
-                        if (c.Vid != shown.VendorId || c.Pid != shown.ProductId || c.Version != (shown.Inner.VersionNumber ?? 0x0100))
+                        if (x.Backend == HMBackend.Usbip ? c.Vid != form.VendorId || c.Pid != form.ProductId || c.Version != (form.Inner.VersionNumber ?? 0x0100)
+                            : c.Vid != p.VendorId || c.Pid != p.ProductId || c.Version != (p.Inner.VersionNumber ?? 0x0100))
                             problems.Add($"{x.Backend} attributes {c.Vid:X4}:{c.Pid:X4}:{c.Version:X4}");
-            if (!accepts && u != null && s != null && Code10(u) && Code10(s)) matched++;
+            if (!ReferenceEquals(form, p))
+            {
+                if (FormMatches(ctx, p, form, u, s, key, problems)) matched++;
+            }
+            else if (!accepts && u != null && s != null && Code10(u) && Code10(s)) matched++;
             else if (u != null && s != null && u.Failure == null && s.Failure == null)
             {
                 var uk = u.Collections.Select(c => c.ParsedKey).ToList();
@@ -310,7 +323,6 @@ internal static partial class Program
                 else matched++;
             }
             string line = problems.Count == 0 ? (accepts ? "ok" : $"ok, Code 10 as Windows' parser predicts ({verdict})") : string.Join(" | ", problems);
-            if (p.Inner.UsbForm is { } formId) line += $" (its USB form {formId} under its own strings, on both)";
             Console.WriteLine($"  {p.Id,-44} {line}" +
                 (s != null ? $"  usbip {s.CreateMs} ms{(s.OpenAtReturn ? "" : $", ready {s.ReadyMs} ms")}" : "") +
                 (u != null ? $"  umdf2 {u.CreateMs} ms" : ""));
