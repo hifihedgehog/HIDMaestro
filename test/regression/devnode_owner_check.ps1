@@ -121,6 +121,14 @@ Check 'a device another program attached through HIDMaestro''s host controller i
 Check 'that device''s HID child is not counted either' (-not ($present -contains 'HID\VID_1209&PID_0001\8&55667788&0&0000'))
 $noRecords = Select-HMOwnedDevnodes $nodes (New-Object HMOwnedUsb)
 Check 'a persona no owner record names is not counted' (-not ($noRecords -contains 'USB\VID_054C&PID_0CE6\HM0001'))
+# The shared-serial persona after its program's record is gone: the watch
+# kept the instance id of the device it found on the record's port, so the
+# id alone still names it.
+$remembered = New-Object HMOwnedUsb
+[void]$remembered.UsbInstanceIds.Add('USB\VID_057E&PID_0337\5&2C3D4E5F&0&2')
+$afterExit = Select-HMOwnedDevnodes $nodes $remembered
+Check 'a shared-serial persona the watch saw on a recorded port still counts once the record is gone' ($afterExit -contains 'USB\VID_057E&PID_0337\5&2C3D4E5F&0&2')
+Check 'and a device on that hub no record or ledger named does not' (-not ($afterExit -contains 'USB\VID_1209&PID_0001\FOREIGN2'))
 Check "the present set has exactly $($expected.Count) entries" ($present.Count -eq $expected.Count)
 
 # The same tree with the host controller not present: a phantom record
