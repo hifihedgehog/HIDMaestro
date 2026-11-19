@@ -159,7 +159,22 @@ internal static partial class Program
 
     sealed record Snapshot(HMBackend Backend, string? Parent, bool OpenAtReturn, long CreateMs, long ReadyMs,
                            List<Collection> Collections, List<string> Errors, (bool Present, bool Started, uint Problem) State, string? Failure,
-                           string Output = "");
+                           string Output = "", (ushort Vid, ushort Pid) Attributes = default);
+
+    /// <summary>The VID and PID Windows gives the controller's HID
+    /// collections, as it gives them a real device of that kind: on the
+    /// UMDF2 driver the PID the driver reports (the profile's resolved
+    /// driverPid, else its PID, PresentationPlan.Of). On USB/IP a device
+    /// whose presented form is a GIP device has its HID collection on the
+    /// child Windows' GIP driver makes, which carries that driver's own VID
+    /// and PID (the GIP model's hidChild) whatever the device announces.
+    /// Every other USB/IP device presents its own VID and PID.</summary>
+    static (ushort Vid, ushort Pid) AttributesOf(HMController c, HMProfile p)
+    {
+        if (c.Backend == HMBackend.Usbip)
+            return c.Presented.Inner.ReportsOnGipInterface ? HIDMaestro.Internal.Usbip.GipFunction.HidChild : (p.VendorId, p.ProductId);
+        return (p.VendorId, p.Inner.ResolvedDriverPid is { } d ? Convert.ToUInt16(d, 16) : p.ProductId);
+    }
 
     static Snapshot Take(HMContext ctx, HMProfile p, HMBackend backend, string key)
     {
@@ -186,7 +201,7 @@ internal static partial class Program
                 if (collections.Count > 0 && errors.Count == 0) { readyMs = sw.ElapsedMilliseconds; break; }
             }
             return new(c.Backend, parent, openAtReturn, createMs, readyMs, collections, errors, Hid.Status(parent), null,
-                       OutputOf(c, p, collections));
+                       OutputOf(c, p, collections), AttributesOf(c, p));
         }
         finally { c.Dispose(); }
     }
@@ -285,8 +300,8 @@ internal static partial class Program
             foreach (var x in new[] { u, s })
                 if (x != null && x.Failure == null)
                     foreach (var c in x.Collections)
-                        if (c.Vid != p.VendorId || c.Pid != p.ProductId || c.Version != (p.Inner.VersionNumber ?? 0x0100))
-                            problems.Add($"{x.Backend} attributes {c.Vid:X4}:{c.Pid:X4}:{c.Version:X4}");
+                        if (c.Vid != x.Attributes.Vid || c.Pid != x.Attributes.Pid || c.Version != (p.Inner.VersionNumber ?? 0x0100))
+                            problems.Add($"{x.Backend} attributes {c.Vid:X4}:{c.Pid:X4}:{c.Version:X4}, Windows gives this kind of device {x.Attributes.Vid:X4}:{x.Attributes.Pid:X4}:{p.Inner.VersionNumber ?? 0x0100:X4}");
             if (!accepts && u != null && s != null && Code10(u) && Code10(s)) matched++;
             else if (u != null && s != null && u.Failure == null && s.Failure == null)
             {

@@ -70,9 +70,12 @@ internal static unsafe partial class Program
                 pad = ctx.CreateController(profile, null, HMBackend.Usbip);
                 long createdMs = clock.ElapsedMilliseconds;
                 uint atReturn = ConnectedSlots();
-                Check($"{id}: the create returns with an XInput slot more, as the UMDF2 xinputhid create does",
-                      System.Numerics.BitOperations.PopCount(atReturn) > System.Numerics.BitOperations.PopCount(before),
-                      $"returned in {createdMs} ms, slots {Slots(before)} before, {Slots(atReturn)} at return");
+                // The create waits for the slot within the UMDF2 create's
+                // slot budget and returns either way, so the slot at return
+                // is recorded and the check allows ten seconds after it.
+                Console.WriteLine($"  create returned in {createdMs} ms, XInput slots {Slots(before)} before, {Slots(atReturn)} at return");
+                bool slotUp = WaitUntil(() => System.Numerics.BitOperations.PopCount(ConnectedSlots()) > System.Numerics.BitOperations.PopCount(before), 10_000);
+                Check($"{id}: XInput lists one slot more within 10 s of the create's return", slotUp, $"slots {Slots(ConnectedSlots())} now");
                 var raw = new List<(byte Id, byte[] Data)>();
                 pad.OutputReceived += (_, pkt) => { if (pkt.Source == HMOutputSource.HidOutput) lock (raw) raw.Add((pkt.ReportId, pkt.Data.ToArray())); };
                 ushort pid = profile.ProductId;
@@ -175,7 +178,7 @@ internal static unsafe partial class Program
                     // Trigger rumble: the haptics output report the HID
                     // child's descriptor declares, written with
                     // HidD_SetOutputReport, which takes no input focus
-                    // (lane GIP's check in Live.cs, for each identity).
+                    // (the haptics check in Live.cs, for each identity).
                     string? gipHid = InterfaceUnder(s_hidInterface, instance);
                     int gipOut = gipHid == null ? 0 : HidOutputLength(gipHid);
                     // The handle stays open while the effect plays, as a

@@ -35,6 +35,12 @@
 // driver and prints the vibration OutputReceived raises there, beside the
 // GIP form's. "capture" prints the arrival and metadata xboxgip holds for
 // every GIP device, a real pad on a cable included, through \\.\XboxGIP.
+// The GIP function of the twelve xinputhid profiles has four more live
+// parts, each run only when named: "family" with profile ids (all twelve
+// with none) creates each as its GIP form (FamilyLive.cs), and
+// "nodriver", "pair" and "restart" create a GIP device no INF binds, two
+// GIP pads at once, and a pad whose driver stack restarts with no port
+// reset (FamilyMore.cs).
 // Exit 0 PASS, 1 FAIL, 2 SKIP when another program that embeds HIDMaestro
 // is running (live part only).
 using System;
@@ -78,7 +84,8 @@ internal static unsafe partial class Program
         // request a host sends it, which the live part prints.
         Environment.SetEnvironmentVariable("HIDMAESTRO_DIAG", "1");
         if (args.Contains("capture")) return Capture();
-        bool all = !args.Contains("model") && !args.Contains("wire") && !args.Contains("live") && !args.Contains("umdf2") && !args.Contains("family");
+        bool all = !args.Contains("model") && !args.Contains("wire") && !args.Contains("live") && !args.Contains("umdf2") && !args.Contains("family")
+                   && !args.Contains("nodriver") && !args.Contains("pair") && !args.Contains("restart");
         int skip = 0;
         if (all || args.Contains("model")) Model();
         if (all || args.Contains("model")) FamilyModel();
@@ -93,6 +100,10 @@ internal static unsafe partial class Program
             var ids = args.SkipWhile(a => a != "family").Skip(1).ToList();
             skip = Math.Max(skip, FamilyLive(ids.Count > 0 ? ids : Family.Select(f => f.Id).ToList()));
         }
+        // Three more live parts of the GIP function run only when named
+        // (FamilyMore.cs).
+        foreach (var (name, part) in new (string, Func<int>)[] { ("nodriver", NoDriver), ("pair", Pair), ("restart", Restart) })
+            if (args.Contains(name)) skip = Math.Max(skip, LiveGuard() ?? part());
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
         if (s_failures != 0) return 1;
         return skip;
