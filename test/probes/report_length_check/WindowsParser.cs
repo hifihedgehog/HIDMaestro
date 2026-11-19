@@ -85,8 +85,11 @@ internal static unsafe class WindowsParser
         ushort sections = BitConverter.ToUInt16(d, pe + 6);
         ushort optSize = BitConverter.ToUInt16(d, pe + 20);
         int opt = pe + 24;
-        // IMAGE_FILE_MACHINE_AMD64 and PE32+, the form this process runs.
-        if (machine != 0x8664 || BitConverter.ToUInt16(d, opt) != 0x20B || RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        // PE32+ for the architecture this process runs: IMAGE_FILE_MACHINE_AMD64
+        // in an x64 process, IMAGE_FILE_MACHINE_ARM64 in an ARM64 one.
+        bool runs = (machine == 0x8664 && RuntimeInformation.ProcessArchitecture == Architecture.X64)
+                 || (machine == 0xAA64 && RuntimeInformation.ProcessArchitecture == Architecture.Arm64);
+        if (!runs || BitConverter.ToUInt16(d, opt) != 0x20B)
         {
             why = $"machine 0x{machine:X4} beside a {RuntimeInformation.ProcessArchitecture} process";
             return false;
@@ -143,6 +146,10 @@ internal static unsafe class WindowsParser
                 *(IntPtr*)(image + a) = Bind(name, ntdll);
             }
         }
+
+        // ARM64 fetches instructions through a cache the writes above did
+        // not reach (Learn, FlushInstructionCache).
+        FlushInstructionCache(GetCurrentProcess(), (IntPtr)image, imageSize);
 
         var (exportAt, _) = Dir(0);
         uint count = *(uint*)(image + exportAt + 24);
@@ -203,6 +210,12 @@ internal static unsafe class WindowsParser
         }
         return new Result((uint)status, desc.ErrorCode, desc.Args[0]);
     }
+
+    [DllImport("kernel32.dll")]
+    static extern bool FlushInstructionCache(IntPtr process, IntPtr address, nuint size);
+
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentProcess();
 
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern IntPtr VirtualAlloc(IntPtr address, nuint size, uint allocationType, uint protect);

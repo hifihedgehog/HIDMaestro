@@ -3,8 +3,12 @@
 // test machine, never on the development laptop.
 //
 //   parity [ids]   Every deployable profile both backends present (or the ids
-//                  given): created on each backend the machine runs, its
-//                  devnode started with no problem, and every HID collection
+//                  given): created on each backend the machine runs, with the
+//                  outcome Windows' own HID parser (hidparse.sys, run in this
+//                  process as report_length_check does) predicts from the
+//                  profile's descriptor: a descriptor it refuses fails the
+//                  start with Code 10, as a real device with it does, and one
+//                  it accepts starts with no problem, every HID collection
 //                  under it read through the HID class: HidD_GetAttributes,
 //                  HidP_GetCaps, the button and value caps of every report
 //                  type, and the three strings. Where both backends run, the
@@ -237,18 +241,38 @@ internal static partial class Program
             .Where(p => p.IsDeployable && p.SupportsBackend(HMBackend.Usbip) && p.SupportsBackend(HMBackend.Umdf2))
             .OrderBy(p => p.Id, StringComparer.Ordinal).ToList();
         Note($"{profiles.Count} profiles, UMDF2 {(umdf2Here ? "on" : "off")}, USB/IP {(usbipHere ? "on" : "off")}");
+        // HID class hands the descriptor to hidparse.sys when the device
+        // starts, and a status other than success fails the start with Code
+        // 10 (WindowsParser.cs). The same parser, run here on each profile's
+        // descriptor, says which outcome each backend owes.
+        bool parser = WindowsParser.TryLoad(out string why);
+        Check($"Windows' HID parser loads in this process from {WindowsParser.ImagePath}", parser, why);
+        if (!parser) return;
         using var log = output != null ? new StreamWriter(output, append: false) : null;
-        int matched = 0, umdf2Up = 0, usbipUp = 0, openAtReturn = 0;
+        int matched = 0, umdf2Up = 0, usbipUp = 0, openAtReturn = 0, accepted = 0;
         var bad = new List<string>();
         foreach (var p in profiles)
         {
             string key = "parity:" + p.Id;
+            var verdict = WindowsParser.Parse(p.Inner.GetDescriptorBytes()!);
+            bool accepts = verdict.Ok;
+            if (accepts) accepted++;
             Snapshot? u = umdf2Here ? Take(ctx, p, HMBackend.Umdf2, key) : null;
             Snapshot? s = usbipHere ? Take(ctx, p, HMBackend.Usbip, key) : null;
             var problems = new List<string>();
+            // A descriptor Windows refuses owes a start that fails with Code
+            // 10 and nothing else.
+            static bool Code10(Snapshot x) =>
+                x.Failure != null && System.Text.RegularExpressions.Regex.IsMatch(x.Failure, @"problem code 10\b");
             void Up(Snapshot? x, ref int count)
             {
                 if (x == null) return;
+                if (!accepts)
+                {
+                    if (Code10(x)) count++;
+                    else problems.Add($"{x.Backend}: Windows' parser refuses the descriptor ({verdict}), so the start owes Code 10, and it gave {x.Failure ?? $"devnode {x.State}"}");
+                    return;
+                }
                 if (x.Failure != null) problems.Add($"{x.Backend} create: {x.Failure}");
                 else if (!x.State.Present || !x.State.Started || x.State.Problem != 0) problems.Add($"{x.Backend} devnode {x.State}");
                 else if (x.Collections.Count == 0) problems.Add($"{x.Backend} no HID collection ({string.Join("; ", x.Errors)})");
@@ -257,13 +281,14 @@ internal static partial class Program
             }
             Up(u, ref umdf2Up);
             Up(s, ref usbipUp);
-            if (s is { OpenAtReturn: true }) openAtReturn++;
+            if (accepts && s is { OpenAtReturn: true }) openAtReturn++;
             foreach (var x in new[] { u, s })
                 if (x != null && x.Failure == null)
                     foreach (var c in x.Collections)
                         if (c.Vid != p.VendorId || c.Pid != p.ProductId || c.Version != (p.Inner.VersionNumber ?? 0x0100))
                             problems.Add($"{x.Backend} attributes {c.Vid:X4}:{c.Pid:X4}:{c.Version:X4}");
-            if (u != null && s != null && u.Failure == null && s.Failure == null)
+            if (!accepts && u != null && s != null && Code10(u) && Code10(s)) matched++;
+            else if (u != null && s != null && u.Failure == null && s.Failure == null)
             {
                 var uk = u.Collections.Select(c => c.ParsedKey).ToList();
                 var sk = s.Collections.Select(c => c.ParsedKey).ToList();
@@ -275,25 +300,29 @@ internal static partial class Program
                     problems.Add($"output packet UMDF2 '{u.Output}' against USB/IP '{s.Output}'");
                 else matched++;
             }
-            string line = problems.Count == 0 ? "ok" : string.Join(" | ", problems);
+            string line = problems.Count == 0 ? (accepts ? "ok" : $"ok, Code 10 as Windows' parser predicts ({verdict})") : string.Join(" | ", problems);
             Console.WriteLine($"  {p.Id,-44} {line}" +
                 (s != null ? $"  usbip {s.CreateMs} ms{(s.OpenAtReturn ? "" : $", ready {s.ReadyMs} ms")}" : "") +
                 (u != null ? $"  umdf2 {u.CreateMs} ms" : ""));
             if (problems.Count > 0) bad.Add(p.Id);
             log?.WriteLine(JsonSerializer.Serialize(new Dictionary<string, object?>
             {
-                ["id"] = p.Id, ["problems"] = problems,
+                ["id"] = p.Id, ["problems"] = problems, ["windowsParser"] = verdict.ToString(),
                 ["umdf2"] = Summary(u), ["usbip"] = Summary(s),
             }));
             log?.Flush();
         }
-        if (umdf2Here) Check($"every profile starts on UMDF2 and enumerates its HID collections", umdf2Up == profiles.Count, $"{umdf2Up} of {profiles.Count}");
-        if (usbipHere) Check($"every profile starts on USB/IP and enumerates its HID collections", usbipUp == profiles.Count, $"{usbipUp} of {profiles.Count}");
+        Note($"Windows' parser accepts {accepted} of {profiles.Count} descriptors");
+        Check("the parser made no call this process does not bind, so its verdicts are Windows' own", WindowsParser.UnexpectedCalls == 0, $"{WindowsParser.UnexpectedCalls}");
+        if (umdf2Here) Check("every profile reaches the outcome Windows' parser predicts on UMDF2: it starts and enumerates its HID collections, or fails with Code 10 where the parser refuses its descriptor",
+                             umdf2Up == profiles.Count, $"{umdf2Up} of {profiles.Count}");
+        if (usbipHere) Check("every profile reaches the outcome Windows' parser predicts on USB/IP: it starts and enumerates its HID collections, or fails with Code 10 where the parser refuses its descriptor",
+                             usbipUp == profiles.Count, $"{usbipUp} of {profiles.Count}");
         if (umdf2Here && usbipHere)
-            Check("the HID class parses the same attributes, caps and product string on both, and an output report reaches the program as the same packet",
+            Check("both backends reach the same outcome: Code 10 on both, or the same attributes, caps and product string, and an output report that reaches the program as the same packet",
                   matched == profiles.Count, $"{matched} of {profiles.Count}");
         if (usbipHere)
-            Check("on USB/IP the HID interface opens the moment the create returns", openAtReturn == profiles.Count, $"{openAtReturn} of {profiles.Count}");
+            Check("on USB/IP the HID interface opens the moment the create returns, for every descriptor Windows' parser accepts", openAtReturn == accepted, $"{openAtReturn} of {accepted}");
         if (bad.Count > 0) Note("differ or failed: " + string.Join(", ", bad));
     }
 
