@@ -170,6 +170,9 @@ internal static unsafe partial class Program
     static extern uint CM_Query_And_Remove_SubTreeW(uint devInst, out int vetoType, System.Text.StringBuilder vetoName, int nameLength, uint flags);
 
     [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    static extern uint CM_Disable_DevNode(uint devInst, uint flags);
+
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
     static extern uint CM_Enable_DevNode(uint devInst, uint flags);
 
     static int Restart()
@@ -188,8 +191,14 @@ internal static unsafe partial class Program
             var veto = new System.Text.StringBuilder(260);
             int vetoType = 0;
             uint disabled = CM_Locate_DevNodeW(out uint dev, pad.Instance, 0) == 0 ? CM_Query_And_Remove_SubTreeW(dev, out vetoType, veto, veto.Capacity, 0x1 | 0x4) : 0xFFFF;
-            Check("the USB device is disabled, which stops its driver stack and leaves the port alone", disabled == 0,
-                  $"CM_Query_And_Remove_SubTree {disabled}, veto type {vetoType} by {veto}");
+            // A handle open on the HID child vetoes the query (veto type 5,
+            // PNP_VetoOutstandingOpen, measured on the Surface). The disable
+            // then goes ahead without asking the drivers (CM_DISABLE_ABSOLUTE),
+            // and the open handles see the device go.
+            Console.WriteLine($"  the query and removal: CM_Query_And_Remove_SubTree {disabled}, veto type {vetoType}{(veto.Length > 0 ? $" by {veto}" : "")}");
+            if (disabled == 0x17 /* CR_REMOVE_VETOED */)
+                disabled = CM_Disable_DevNode(dev, 0x1 /* CM_DISABLE_ABSOLUTE */ | 0x4 /* CM_DISABLE_UI_NOT_OK */);
+            Check("the USB device is disabled, which stops its driver stack and leaves the port alone", disabled == 0, $"{disabled}");
             bool stopped = WaitUntil(() => Node(pad.Instance) is { Started: false }, 10_000);
             Check("it stops", stopped, Node(pad.Instance) is { } n0 ? $"problem {n0.Problem}" : "gone");
             Check("its XInput slot goes", WaitUntil(() => slot < 0 || XInputGetState((uint)slot, out _) != 0, 10_000));
