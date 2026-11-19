@@ -19,7 +19,9 @@ namespace HIDMaestro.Internal.Usbip;
 /// section, and builds the wire report exactly as driver.c does: the
 /// report is InputReportByteLength bytes, zero-filled, with
 /// FirstInputReportId prepended on the legacy path and the extended
-/// buffer passed through verbatim when ExtendedReportSize is set.</item>
+/// buffer passed through verbatim when ExtendedReportSize is set, and on a
+/// device with an HID interface only at its report's declared length. A
+/// read gets no more than its URB asked for.</item>
 /// <item>Output: interrupt-OUT transfers and SET_REPORT writes publish to
 /// the Global\HIDMaestroOutput&lt;N&gt; ring with driver.c's discipline
 /// (reserve Head atomically, fill the slot, fence, publish slot.SeqNo,
@@ -182,6 +184,13 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     private readonly int[] _inputReportLength;
     private readonly int[] _inputSlot = new int[256];
     private readonly bool _inputReportIds;
+    // Each input report's declared length by report ID, 0 for an ID with
+    // none, the driver's InputLengths (driver.c ExtendedFrameDeclared), or
+    // null for a device with no HID interface, whose frame sizes its own
+    // report. _declaredUsesIds: the descriptor's report IDs, as the driver's
+    // UsesReportIds.
+    private readonly int[]? _declaredInputLength;
+    private readonly bool _declaredUsesIds;
     private uint _lastSharedSeqNo;
 
     // On a device with no HID interface, the length of its extended report,
@@ -285,6 +294,24 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     // HandleUnlink looks.
     private readonly System.Collections.Generic.Dictionary<uint, int> _parkedBulkLength = new();
     private int _bulkReadsCanceled;
+
+    // Buffer lengths of parked interrupt IN reads, by seqnum: an answer
+    // carries at most the bytes its URB asked for. Guarded by _hidLock.
+    private readonly Dictionary<uint, int> _parkedInLength = new();
+
+    /// <summary>An interrupt IN read parked on its endpoint, with the
+    /// length its URB asked for. Caller holds <see cref="_hidLock"/>.</summary>
+    private void ParkInLocked(byte epAddr, uint seqnum, int transferLength)
+    {
+        PendingFor(epAddr).Enqueue(seqnum);
+        _parkedInLength[seqnum] = Math.Max(0, transferLength);
+    }
+
+    /// <summary>How much of a <paramref name="length"/>-byte answer the
+    /// parked read <paramref name="seqnum"/> takes: no more than its URB
+    /// asked for. Caller holds <see cref="_hidLock"/>.</summary>
+    private int TakeInLengthLocked(uint seqnum, int length) =>
+        _parkedInLength.Remove(seqnum, out int want) ? Math.Min(length, want) : length;
 
     /// <summary>Bulk IN reads a host gave up on before a reply came. Under
     /// usbip-win2 such a read is trouble for the host, not for this device:
@@ -400,6 +427,12 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             _inputReportLength[r] = Math.Clamp(declared[r].ByteSize, 1, _reportCapacity);
             _inputSlot[declared[r].Id] = r;
         }
+        if (Descriptors.HasHidInterface && _builder.InputReports.Count > 0)
+        {
+            _declaredInputLength = new int[256];
+            foreach (var (id, size) in _builder.InputReports) _declaredInputLength[id] = size;
+            _declaredUsesIds = profile.GetOrBuildReportMap().UsesReportIds;
+        }
         // A device with no HID interface answers GET_REPORT(Input) with its
         // report from the first request ([MS-XUSBI] 2.2.8.2), so until a
         // frame comes its slot holds the extended report of a pad at rest,
@@ -502,6 +535,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         lock (_hidLock)
         {
             foreach (var q in _pendingInterruptIn.Values) q.Clear();
+            _parkedInLength.Clear();
             ClearFrameQueue();
             _ackPending = false;
         }
@@ -595,11 +629,11 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     }
                 }
                 int length;
-                bool fresh;
+                bool fresh, extended;
                 lock (_lifetimeLock)
                 {
                     if (_stop) break;
-                    fresh = TryReadInputFrame(_pumpReport, out length);
+                    fresh = TryReadInputFrame(_pumpReport, out length, out extended);
                 }
                 if (!fresh) continue;
                 var report = new ReadOnlySpan<byte>(_pumpReport, 0, length);
@@ -637,7 +671,13 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     continue;
                 }
 
+                // The last report stands for the reads and for
+                // GET_REPORT(Input) when an extended frame is not sent.
+                if (extended && !SendsExtendedFrame(report[0], length))
+                    continue;
+
                 uint seq = 0;
+                int send = length;
                 bool answer = false;
                 UsbipServer.Connection? conn = null;
                 lock (_hidLock)
@@ -652,6 +692,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     if (pending.Count > 0)
                     {
                         seq = pending.Dequeue();
+                        send = TakeInLengthLocked(seq, length);
                         answer = true;
                         CountPrimaryCompletionLocked();
                         NoteCarriedLocked(_lastSharedSeqNo);
@@ -670,7 +711,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                         _frameQueue.Enqueue(new QueuedFrame(buffer, length, _lastSharedSeqNo));
                     }
                 }
-                if (answer) SendHeld(conn, seq, 0, length, report);
+                if (answer) SendHeld(conn, seq, 0, send, report[..send]);
             }
             catch (Exception e)
             {
@@ -683,6 +724,18 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             }
         }
     }
+
+    /// <summary>Whether an extended frame of <paramref name="length"/> bytes
+    /// whose first byte is <paramref name="firstByte"/> goes out: on a device
+    /// with an HID interface only at the declared length of the input report
+    /// that byte names, or without report IDs of the one input report, as
+    /// driver.c ExtendedFrameDeclared lets one out. A device that builds its
+    /// reports, or sends the SDK's report on a declared protocol's endpoint,
+    /// takes the frame as its state and sends what its protocol says.</summary>
+    internal bool SendsExtendedFrame(byte firstByte, int length) =>
+        _engine is { Protocol.BuildsReports: true } or { Protocol.InputEndpoint: > 0 }
+        || _declaredInputLength is not { } declared
+        || declared[_declaredUsesIds ? firstByte : 0] == length;
 
     /// <summary>A read is answered with the frame written with
     /// <paramref name="seq"/>. Its acknowledgement waits for the host's
@@ -712,9 +765,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     /// report build, mirroring driver.c ReadSharedInput + the report
     /// assembly in its worker (driver.c:1240-1296). The report goes into
     /// <paramref name="report"/>, <see cref="_reportCapacity"/> bytes long.</summary>
-    private unsafe bool TryReadInputFrame(Span<byte> report, out int length)
+    private unsafe bool TryReadInputFrame(Span<byte> report, out int length, out bool extended)
     {
         length = 0;
+        extended = false;
         IntPtr view = _inputView;
         if (view == IntPtr.Zero) return false;
 
@@ -751,9 +805,11 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             {
                 new ReadOnlySpan<byte>((byte*)view + SharedMemoryIO.EXTENDED_DATA_OFFSET, extSize).CopyTo(report);
                 length = extSize;
+                extended = true;
             }
             else
             {
+                extended = false;
                 int dataLen = Unsafe.ReadUnaligned<int>((byte*)view + 4);
                 if (dataLen > maxData) dataLen = maxData;
                 if (dataLen > SharedMemoryIO.DATA_CAPACITY) dataLen = SharedMemoryIO.DATA_CAPACITY;
@@ -890,7 +946,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             {
                 if (_engine is { Protocol.BuildsReports: true } && epAddr == _engine.Protocol.InputEndpoint)
                 {
-                    SubmitLayoutRead(cmd.Seqnum);
+                    SubmitLayoutRead(cmd.Seqnum, cmd.TransferBufferLength);
                     return;
                 }
                 if (_engine != null && epAddr == _engine.Protocol.InputEndpoint)
@@ -928,13 +984,15 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                         conn = HoldSendLocked();
                     }
                     else
-                        PendingFor(epAddr).Enqueue(cmd.Seqnum);
+                        ParkInLocked(epAddr, cmd.Seqnum, cmd.TransferBufferLength);
                 }
                 if (ack) SharedMemoryIO.StoreDeviceDelivered(_index, _ackGeneration, delivered, _ackSignal);
                 if (frame.Buffer != null)
                 {
-                    // The buffer is this thread's until it goes back.
-                    SendHeld(conn, cmd.Seqnum, 0, frame.Length, frame.Buffer.AsSpan(0, frame.Length));
+                    // The buffer is this thread's until it goes back, and the
+                    // read takes no more of it than its URB asked for.
+                    int send = Math.Min(frame.Length, Math.Max(0, cmd.TransferBufferLength));
+                    SendHeld(conn, cmd.Seqnum, 0, send, frame.Buffer.AsSpan(0, send));
                     lock (_hidLock) _spareFrames.Push(frame.Buffer);
                 }
                 return;
@@ -1023,6 +1081,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                         if (s != victimSeqnum) keep.Add(s);
                         else removed = true;
                     }
+                    _parkedInLength.Remove(victimSeqnum);
                     foreach (var s in keep) holder.Enqueue(s);
                 }
                 if (_parkedBulkLength.Remove(victimSeqnum)) _bulkReadsCanceled++;
@@ -1455,6 +1514,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         lock (_hidLock)
         {
             foreach (var q in _pendingInterruptIn.Values) q.Clear();
+            _parkedInLength.Clear();
             ClearFrameQueue();
             _ackPending = false;
         }

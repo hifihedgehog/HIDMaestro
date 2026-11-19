@@ -45,6 +45,8 @@ internal static class Offline
             ctx.LoadDefaultProfiles();
             Served(ctx);
             Wire();
+            InterruptIn();
+            ExtendedLengths(ctx);
         }
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
@@ -293,6 +295,136 @@ internal static class Offline
         Check("and SET Create New Effect allocates EBI 1", Bitmap(view) == (1u, 1u), Show(view));
     }
 
+    // ── Interrupt IN answers ────────────────────────────────────────────
+
+    /// <summary>An interrupt IN read gets at most the bytes its URB asked
+    /// for, and an extended frame goes out only at its report's declared
+    /// length, as driver.c ExtendedFrameDeclared lets one out. Any other is
+    /// not sent and the last report stands, for the reads and for
+    /// GET_REPORT(Input).</summary>
+    static void InterruptIn()
+    {
+        Console.WriteLine("\n-- Interrupt IN answers and the URB's length --");
+        const int index = Index + 1;
+        var profile = new HMProfileBuilder().Id("in-offline").Name("IN Offline").Vendor("HIDMaestro")
+            .Vid(0xBEEF).Pid(0xF00D).ProductString("HIDMaestro IN Offline").ManufacturerString("HIDMaestro")
+            .Type("joystick").Connection("usb")
+            .FromDescriptorBuilder(new HidDescriptorBuilder().Joystick().AddStick("Left", 16).AddButtons(8).AddPidFfbBlock())
+            .Build().Inner;
+        var server = UsbipServer.GetOrStart();
+        var device = new UsbipEmulatedDevice(profile, index);
+        server.Register(device);
+        try
+        {
+            using var cl = new Client(server.Port, index);
+            cl.SendImport(device.BusId);
+            var op = cl.ReadExactly(8);
+            cl.ReadExactly(312);
+            Check("the import is accepted", BinaryPrimitives.ReadUInt32BigEndian(op.AsSpan(4)) == 0);
+            byte inEp = 0;
+            foreach (var kv in device.Descriptors.Endpoints)
+                if (kv.Value.TransferType == 3 && kv.Value.IsIn) inEp = kv.Value.Address;
+            var (id, length, _) = DeviceOrchestrator.DriverInputReport(profile);
+            int declared = 0;
+            foreach (var r in profile.GetOrBuildReportBuilder().InputReports)
+                if (r.Id == id) declared = r.ByteSize;
+            Check("the input report's declared length is the one the device sends", declared == length && length > 3,
+                  $"report 0x{id:X2}, {length} bytes, declared {declared}");
+
+            IntPtr view = SharedMemoryIO.EnsureInputMapping(index);
+            IntPtr ev = SharedMemoryIO.GetInputEvent(index);
+            uint seq = 0;
+            int off = id != 0 ? 1 : 0;
+            void Data(byte fill)
+            {
+                var d = new byte[length - off];
+                Array.Fill(d, fill);
+                SharedMemoryIO.WriteInputFrame(view, ev, ref seq, d, d.Length, null);
+            }
+            void Extended(byte fill, int size)
+            {
+                var x = new byte[size];
+                Array.Fill(x, fill);
+                if (id != 0) x[0] = id;
+                SharedMemoryIO.WriteInputFrame(view, ev, ref seq, default, 0, null, 0, x, x.Length);
+            }
+
+            uint read = cl.SubmitIn(inEp, 64);
+            Data(0x11);
+            var g = cl.Read(read);
+            Check($"positive control: a read for 64 bytes gets the {length}-byte report", g.Status == 0 && g.ActualLength == length, Ret(g));
+            read = cl.SubmitIn(inEp, 3);
+            Data(0x22);
+            g = cl.Read(read);
+            Check("a parked read for 3 bytes gets 3 of the next report", g.Status == 0 && g.ActualLength == 3, Ret(g));
+            Data(0x33);
+            System.Threading.Thread.Sleep(100);   // the frame queued with no read parked
+            read = cl.SubmitIn(inEp, 2);
+            g = cl.Read(read);
+            Check("a read for 2 bytes that finds the report queued gets 2", g.Status == 0 && g.ActualLength == 2, Ret(g));
+
+            read = cl.SubmitIn(inEp, 64);
+            Extended(0x44, length + 3);
+            var late = cl.TryRead(read, 300);
+            Check($"an extended frame of {length + 3} bytes, not the declared {length}, is not sent", late == null,
+                  late is { } l ? Ret(l) : "");
+            var got = cl.ControlIn(0xA1, 0x01, (ushort)(0x0100 | id), 0, 64);
+            Check("and GET_REPORT(Input) still answers the last report sent", got.Status == 0 && got.ActualLength == length
+                  && got.Data[length - 1] == 0x33, Ret(got));
+            Extended(0x55, length);
+            g = late == null ? cl.Read(read) : cl.Read(cl.SubmitIn(inEp, 64));
+            Check("positive control: one at the declared length goes to the parked read", g.Status == 0 && g.ActualLength == length
+                  && g.Data[length - 1] == 0x55, Ret(g));
+        }
+        finally
+        {
+            server.Unregister(device);
+            device.Dispose();
+            SharedMemoryIO.DestroyController(index);
+        }
+    }
+
+    /// <summary>Every catalog profile whose SubmitState fills an extended
+    /// report: its USB/IP device sends that report at the size SubmitState
+    /// fills it, and refuses it three bytes longer where the device has a
+    /// declared length to hold it to. A profile that builds its reports from
+    /// a state block fills each of those instead, at its own size, when the
+    /// program's protocol host builds them.</summary>
+    static void ExtendedLengths(HMContext ctx)
+    {
+        Console.WriteLine("\n-- Catalog extended reports on the USB/IP device --");
+        const int index = Index + 2;
+        int count = 0, held = 0;
+        var off = new List<string>();
+        foreach (var p in ctx.AllProfiles)
+        {
+            var inner = p.Inner;
+            var sizes = new List<(byte Id, int Size)>();
+            if (inner.InputReports is { Count: > 0 } built)
+                foreach (var r in built) sizes.Add((r.ReportId != null ? ReportIds.Parse(r.ReportId) : (byte)0, r.Size));
+            else if (inner.ExtendedReport is { Size: > 0 } ext)
+                sizes.Add((ext.ReportIdByte, ext.Size));
+            if (sizes.Count == 0) continue;
+            count++;
+            try
+            {
+                using var d = new UsbipEmulatedDevice(inner, index);
+                bool refuses = false;
+                foreach (var (id, size) in sizes)
+                {
+                    if (!d.SendsExtendedFrame(id, size)) off.Add($"{inner.Id} 0x{id:X2} {size}");
+                    if (!d.SendsExtendedFrame(id, size + 3)) refuses = true;
+                }
+                if (refuses) held++;
+            }
+            catch (Exception e) { off.Add($"{inner.Id}: {e.GetType().Name} {e.Message}"); }
+            finally { SharedMemoryIO.DestroyController(index); }
+        }
+        Check($"each of the {count} profiles with an extended report sends it at the size SubmitState fills",
+              count > 0 && off.Count == 0, string.Join(", ", off));
+        Check($"and {held} of them refuse it three bytes longer", held > 0, $"{held}");
+    }
+
     static (uint Bitmap, uint Count) Bitmap(IntPtr view) =>
         ((uint)Marshal.ReadInt32(view, SharedMemoryIO.PID_OFFSET_EBI_BITMAP), (uint)Marshal.ReadInt32(view, SharedMemoryIO.PID_OFFSET_EBI_COUNT));
 
@@ -414,6 +546,22 @@ internal static class Offline
             _s.Write(data);
             return Read(seq, isIn: false);
         }
+
+        /// <summary>An interrupt IN read sent, its answer left for
+        /// <see cref="Read(uint)"/> or <see cref="TryRead"/>.</summary>
+        public uint SubmitIn(byte endpoint, int length)
+        {
+            uint seq = _seq++;
+            SendHeader(seq, 1, (uint)(endpoint & 0x0F), length, 0);
+            return seq;
+        }
+
+        public Ret Read(uint want) => Read(want, isIn: true);
+
+        /// <summary>The answer to <paramref name="want"/>, or null when none
+        /// arrives within <paramref name="ms"/>.</summary>
+        public Ret? TryRead(uint want, int ms) =>
+            _tcp.Client.Poll(ms * 1000, SelectMode.SelectRead) ? Read(want, isIn: true) : null;
 
         public Ret InterruptOut(byte endpoint, byte[] data)
         {
