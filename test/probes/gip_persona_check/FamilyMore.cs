@@ -1,4 +1,4 @@
-// gip_persona_check, three more live parts of the GIP function on USB/IP:
+// gip_persona_check, four more live parts of the GIP function on USB/IP:
 //   nodriver  A GIP device no INF binds (profiles/gip-no-driver.json): the
 //             create fails and names the device and the compatible ID no
 //             driver bound, and leaves no device.
@@ -8,6 +8,9 @@
 //   restart   The host's driver stack restarted on the pad's USB device with
 //             no port reset (the device disabled and enabled): the pad comes
 //             back in XInput and reads again.
+//   reuse     One pad created again under a key used before and under
+//             fresh keys: each create's XInput read and rumble, and the
+//             HID child instance Windows gives it.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -226,6 +229,49 @@ internal static unsafe partial class Program
         {
             try { pad?.Controller.Dispose(); } catch { }
             if (pad != null) Check("its devnode is gone after Dispose", WaitUntil(() => Node(pad.Instance) == null, 30_000), pad.Instance);
+        }
+        return 0;
+    }
+
+    /// <summary>The same GIP pad created again and again, under a key used
+    /// before and under keys no create has used: each create's XInput read
+    /// and rumble, and the device instance Windows gives its HID child.</summary>
+    static int Reuse()
+    {
+        Console.WriteLine("\n=== reuse: one pad's identity used again against fresh ones ===");
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        var keys = new List<(string Label, string? Key)>
+        {
+            ("the default key", null), ("the default key again", null),
+            ("a fresh key", "gipreuse:" + Guid.NewGuid().ToString("N")), ("another fresh key", "gipreuse:" + Guid.NewGuid().ToString("N")),
+            ("the default key once more", null),
+        };
+        foreach (var (label, key) in keys)
+        {
+            Pad? pad = null;
+            try
+            {
+                uint before = ConnectedSlots();
+                var profile = ctx.GetProfile("xbox-one-s")!;
+                var c = ctx.CreateController(profile, key, HMBackend.Usbip);
+                string serial = DeviceIdentity.Resolve(c.IdentityKey, c.TransportIndex).SyntheticSerial;
+                pad = new Pad("xbox-one-s", c, $@"USB\VID_045E&PID_02EA\{serial}", BitConverter.ToUInt64(ExpectedDeviceId(serial), 0), c.UsbipHandle!.Device.Protocol!);
+                string hid = string.Join(" ", Descendants(pad.Instance).Where(d => d.Id.StartsWith("HID", StringComparison.OrdinalIgnoreCase)).Select(d => d.Id));
+                int slot = SlotOf(pad, HMButton.A, 0x1000, before);
+                Console.WriteLine($"  {label}: serial {serial}, HID child {hid}, slot {slot}{(slot < 0 ? "; " + SlotStates() : "")}");
+                Check($"{label}: XInput reads the submitted A", slot >= 0, $"slot {slot}");
+                if (slot >= 0)
+                    Motor(pad.Engine, $"{label}: XInputSetState(16384, 32768)",
+                          () => { var v = new XINPUT_VIBRATION { wLeftMotorSpeed = 16384, wRightMotorSpeed = 32768 }; return XInputSetState((uint)slot, ref v); },
+                          cmd => cmd[8] is >= 24 and <= 26 && cmd[9] is >= 49 and <= 51);
+            }
+            catch (Exception e) { Check($"{label}: the create ran to its end", false, e.Message); }
+            finally
+            {
+                try { pad?.Controller.Dispose(); } catch { }
+                if (pad != null) WaitUntil(() => Node(pad.Instance) == null, 30_000);
+            }
         }
         return 0;
     }
