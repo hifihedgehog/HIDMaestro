@@ -996,8 +996,8 @@ internal static partial class Program
     /// failure that reads as "recognized but never moves".</summary>
     static void StreamCheck(string hidPath, HMController c)
     {
-        IntPtr fh = OpenPath(hidPath);
-        if (fh == INVALID_HANDLE_VALUE) { Console.WriteLine("  stream: cannot open"); return; }
+        using var reader = new BoundedHidReader(hidPath, 65);
+        if (!reader.IsOpen) { Console.WriteLine("  stream: cannot open"); return; }
         using var stop = new ManualResetEventSlim(false);
         int n = 0;
         var pump = new Thread(() =>
@@ -1022,12 +1022,13 @@ internal static partial class Program
         pump.Start();
         try
         {
-            var buf = new byte[65];
             uint first = 0, last = 0;
             var sw = System.Diagnostics.Stopwatch.StartNew();
             while (sw.ElapsedMilliseconds < 1000)
             {
-                if (!ReadFile(fh, buf, buf.Length, out int read, IntPtr.Zero) || read <= 0) break;
+                // Each read waits only for what is left of the second.
+                var buf = reader.Read((int)Math.Max(1, 1000 - sw.ElapsedMilliseconds));
+                if (buf == null || buf.Length < 9) break;
                 uint pn = BitConverter.ToUInt32(buf, 5);   // +1 for the stripped report id
                 if (n == 0) first = pn;
                 last = pn; n++;
@@ -1035,7 +1036,7 @@ internal static partial class Program
             Console.WriteLine($"  stream: {n} reports in 1 s, packetNum {first} -> {last}");
             Console.WriteLine(n > 50 ? "  STREAM OK: continuous" : "  STREAM STALLED: not a live stream");
         }
-        finally { stop.Set(); Thread.Sleep(50); CloseHandle(fh); }
+        finally { stop.Set(); Thread.Sleep(50); }
     }
 
 
@@ -1096,11 +1097,13 @@ internal static partial class Program
 
     static byte[]? ReadOneInterruptReport(string path, int reportLen, HMController c, in HMGamepadState state)
     {
-        IntPtr fh = OpenPath(path);
-        if (fh == INVALID_HANDLE_VALUE) return null;
-        try
+        using var reader = new BoundedHidReader(path, reportLen);
+        if (!reader.IsOpen) return null;
+        // The battery's HIDMAESTRO_TIMEOUT_SCALE stretches the bound on a
+        // slower or loaded machine.
+        double scale = double.TryParse(Environment.GetEnvironmentVariable("HIDMAESTRO_TIMEOUT_SCALE"),
+                           System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double sc) && sc >= 1 ? sc : 1;
         {
-            var buf = new byte[reportLen];
             // Prime fresh frames so a parked read completes promptly. The
             // pump must stop before this method returns: letting it outlive
             // the read means it can still be calling SubmitState while the
@@ -1131,14 +1134,17 @@ internal static partial class Program
                 // returns the previous neutral frame (lsx=128) and the check
                 // fails intermittently on timing alone. A real consumer reads
                 // until it sees the state it expects, which is what this does,
-                // bounded so a genuinely dead endpoint still fails fast.
+                // bounded so a genuinely dead endpoint still fails fast: each
+                // read waits only for the time left (BoundedHidReader).
                 byte[]? last = null;
-                var deadline = DateTime.UtcNow.AddSeconds(3);
-                while (DateTime.UtcNow < deadline)
+                var deadline = DateTime.UtcNow.AddSeconds(3 * scale);
+                while (true)
                 {
-                    if (!ReadFile(fh, buf, buf.Length, out int read, IntPtr.Zero) || read <= 0)
-                        break;
-                    last = (byte[])buf.Clone();
+                    int left = (int)(deadline - DateTime.UtcNow).TotalMilliseconds;
+                    if (left <= 0) break;
+                    var report = reader.Read(left);
+                    if (report == null) break;
+                    last = report;
                     if (last[0] == 0x01 && last[1] == 255) return last;
                 }
                 return last; // never matched: hand back the last frame seen so the failure names it
@@ -1149,7 +1155,6 @@ internal static partial class Program
                 pump.Join(2000);
             }
         }
-        finally { CloseHandle(fh); }
     }
 
     static byte[]? GetCurrentInputReport(string path, int reportLen, byte reportId)
