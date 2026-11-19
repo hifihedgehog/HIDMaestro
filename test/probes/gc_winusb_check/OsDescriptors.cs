@@ -56,6 +56,8 @@ internal static partial class Program
         var packagesBefore = OurPackages();
         Console.WriteLine($"  usbflags 057E03370100 before: {flagsBefore}");
         string? first, bound = null;
+        var steps = new List<string>();
+        WinUsbBinding.StepForProbe = s => { lock (steps) steps.Add(s); };
         using (var a = ctx.CreateController(gc))
         {
             first = Arrived(a);
@@ -88,7 +90,12 @@ internal static partial class Program
                 Flags().Contains("osvc=0101"), Flags());
             Probe.Check("the ledger holds the devnode", RegistryLedger.HeldWinUsbDevnodes().Contains(bound, StringComparer.OrdinalIgnoreCase));
             Probe.Check("a second BindWinUsb finds it already bound", a.BindWinUsb() == HMWinUsbBinding.AlreadyBound);
+            List<string> order;
+            lock (steps) order = steps.Where(x => x is "unplugged" or "usbflags cleared").ToList();
+            Probe.Check("the usbflags key is cleared while the device is unplugged, not before",
+                order.Count == 2 && order[0] == "unplugged" && order[1] == "usbflags cleared", string.Join(", ", order));
         }
+        WinUsbBinding.StepForProbe = null;
         Console.WriteLine("-- dispose");
         Probe.Check("its devnode leaves", Probe.WaitFor(() => !Devnodes.IsPresent(bound!), Probe.HangMs()));
         Probe.Check("no WinUSB hold is left", Probe.WaitFor(() => RegistryLedger.HeldWinUsbDevnodes().Count == 0, Probe.HangMs()),
@@ -141,5 +148,38 @@ internal static partial class Program
         }
         Step("disposed");
         return 0;
+    }
+}
+
+internal static partial class Program
+{
+    /// <summary>A re-plug whose attach fails: the device is plugged in again
+    /// as it was, on input.inf with no Microsoft OS descriptors, and
+    /// BindWinUsb throws. A later bind binds.</summary>
+    static void ReplugFails(HMContext ctx, HMProfile gc)
+    {
+        Console.WriteLine("-- a re-plug whose attach fails");
+        using var a = ctx.CreateController(gc);
+        string? first = Arrived(a);
+        Probe.Check("the adapter arrives", first != null, first ?? "");
+        if (first == null) return;
+        Probe.WaitFor(() => Devnodes.Status(first) is { Problem: 10 } || Devnodes.Service(first) != null, Probe.HangMs(InstallBoundMs));
+        HIDMaestro.Internal.Usbip.UsbipBackendHandle.AttachForProbe = () => throw new System.ComponentModel.Win32Exception(31, "the probe fails the attach");
+        Exception? thrown = null;
+        try { a.BindWinUsb(); }
+        catch (Exception ex) { thrown = ex; }
+        finally { HIDMaestro.Internal.Usbip.UsbipBackendHandle.AttachForProbe = null; }
+        Probe.Check("BindWinUsb throws and names the failed re-plug", thrown is InvalidOperationException && thrown.Message.Contains("plugged in again as it was"),
+            thrown?.Message ?? "no exception");
+        string? back = Arrived(a);
+        Probe.Check("the device is plugged in again", back != null, back ?? "none");
+        if (back == null) return;
+        Probe.WaitFor(() => Devnodes.Status(back) is { Problem: 10 } || Devnodes.Service(back) == "WINUSB", Probe.HangMs(InstallBoundMs));
+        Probe.Check("as it was: on input.inf, with no WINUSB compatible ID", Devnodes.Service(back) == "HidUsb"
+            && !Devnodes.CompatibleIds(back).Exists(c => c.Contains("MS_COMP", StringComparison.OrdinalIgnoreCase)),
+            $"{Devnodes.Service(back)} {string.Join(" ", Devnodes.CompatibleIds(back))}");
+        Probe.Check("and no WinUSB hold of the failed bind is left", !RegistryLedger.HeldWinUsbDevnodes().Contains(first, StringComparer.OrdinalIgnoreCase));
+        var bound = a.BindWinUsb();
+        Probe.Check("a bind after it binds", bound == HMWinUsbBinding.Bound, $"{bound}");
     }
 }

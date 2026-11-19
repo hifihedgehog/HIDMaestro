@@ -615,7 +615,7 @@ internal sealed class UsbipBackendHandle : IDisposable
     /// <paramref name="instanceId"/> to leave the device tree before the
     /// attach, and runs <paramref name="whileAway"/> between the two.
     /// Returns the vhci port of the new import.</summary>
-    public int Replug(string instanceId, int leaveWaitMs, Action? whileAway = null)
+    public int Replug(string instanceId, int leaveWaitMs, Action? whileAway = null, Action? undo = null)
     {
         if (Volatile.Read(ref _disposed) != 0) throw new ObjectDisposedException(nameof(UsbipBackendHandle));
         using (VhciClient.HoldOpen())
@@ -623,23 +623,54 @@ internal sealed class UsbipBackendHandle : IDisposable
             VhciClient.DetachLocation("127.0.0.1", _server.Port, Device.BusId);
             VhciClient.StopAttachAttempts("127.0.0.1", _server.Port, Device.BusId);
         }
+        try
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (UsbRecords.Present(instanceId) && sw.ElapsedMilliseconds < leaveWaitMs) Thread.Sleep(20);
+            if (UsbRecords.Present(instanceId))
+                throw new InvalidOperationException($"{instanceId} did not leave within {leaveWaitMs / 1000} s of its unplug.");
+            whileAway?.Invoke();
+            // The device's reader sees the old connection end, and the device
+            // takes the next import of its bus id (UsbipEmulatedDevice.TryClaim).
+            return AttachWithin(leaveWaitMs, AttachForProbe);
+        }
+        catch (Exception failed)
+        {
+            // Never a controller with no device: what the re-plug changed is
+            // put back (undo), and the device is plugged in again as it was.
+            try { undo?.Invoke(); }
+            catch (Exception ex) { DeviceOrchestrator.LogDiag($"    replug: the undo failed: {ex.GetType().Name}: {ex.Message}"); }
+            try
+            {
+                if (VhciClient.FindLocation("127.0.0.1", _server.Port, Device.BusId) <= 0)
+                    AttachWithin(2 * leaveWaitMs, attach: null);
+            }
+            catch (Exception again)
+            {
+                throw new InvalidOperationException(
+                    $"The re-plug of {instanceId} failed ({failed.Message}), and plugging the device in again failed too ({again.Message}).", failed);
+            }
+            throw new InvalidOperationException(
+                $"The re-plug of {instanceId} failed, and the device is plugged in again as it was: {failed.Message}", failed);
+        }
+    }
+
+    /// <summary>Attach the device's location, retrying while the device
+    /// still holds its old connection, for up to <paramref name="waitMs"/>.
+    /// <paramref name="attach"/> stands in for the attach when a probe sets
+    /// it.</summary>
+    private int AttachWithin(int waitMs, Func<int>? attach)
+    {
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        while (UsbRecords.Present(instanceId) && sw.ElapsedMilliseconds < leaveWaitMs) Thread.Sleep(20);
-        if (UsbRecords.Present(instanceId))
-            throw new InvalidOperationException($"{instanceId} did not leave within {leaveWaitMs / 1000} s of its unplug.");
-        whileAway?.Invoke();
-        // The device's reader sees the old connection end, and the device
-        // takes the next import of its bus id (UsbipEmulatedDevice.TryClaim).
-        sw.Restart();
         while (true)
         {
             try
             {
-                int port = VhciClient.Attach("127.0.0.1", _server.Port, Device.BusId);
+                int port = attach?.Invoke() ?? VhciClient.Attach("127.0.0.1", _server.Port, Device.BusId);
                 Device.SetVhciPortIfAttached(port);
                 return port;
             }
-            catch (System.ComponentModel.Win32Exception) when (sw.ElapsedMilliseconds < leaveWaitMs)
+            catch (System.ComponentModel.Win32Exception) when (sw.ElapsedMilliseconds < waitMs)
             {
                 // The device still holds the old connection for a moment
                 // after the unplug, and refuses an import while it does.
@@ -647,6 +678,11 @@ internal sealed class UsbipBackendHandle : IDisposable
             }
         }
     }
+
+    /// <summary>Set by gc_winusb_check to stand in for the re-plug's attach
+    /// and fail it, so its run reaches the path that plugs the device in
+    /// again. Null outside the probe.</summary>
+    internal static Func<int>? AttachForProbe;
 
     public void Dispose()
     {

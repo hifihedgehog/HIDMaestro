@@ -119,7 +119,8 @@ internal static partial class Uninstaller
                 $"could not be read: {ex.GetType().Name}: {ex.Message}"));
         }
         entries.AddRange(Scan());
-        entries.AddRange(Safely("usbip-win2", () => UsbipRemoval.Remove(preview: true, includeUnproven: options.IncludeUsbip)));
+        var used = UsedSinceBootReading();
+        entries.AddRange(Safely("usbip-win2", () => UsbipRemoval.Remove(preview: true, includeUnproven: options.IncludeUsbip, used)));
         KeepWhatWinUsbRecordsKeep(entries);
         // A preview that could not read part of the machine is not one a
         // removal can be judged by.
@@ -187,6 +188,11 @@ internal static partial class Uninstaller
         var clock = Stopwatch.StartNew();
         var before = Scan();
         var told = new Told();
+        // Whether usbip-win2's host controller has carried a device since
+        // Windows started, read once, before anything is removed: the
+        // devices step removes the records it is read from, and the
+        // usbip-win2 step decides the host controller by this reading.
+        var used = UsedSinceBootReading();
 
         // Each part of the device step is a step of its own, so one that
         // throws, such as a phantom pass that waited out the PnP lock's
@@ -213,7 +219,7 @@ internal static partial class Uninstaller
         // the PnP nor the transport lock, as UsbipRemoval requires.
         Step(told, "usbip-win2", () =>
         {
-            foreach (var e in UsbipRemoval.Remove(preview: false, includeUnproven: options.IncludeUsbip)) told.Add(e);
+            foreach (var e in UsbipRemoval.Remove(preview: false, includeUnproven: options.IncludeUsbip, used)) told.Add(e);
         });
 
         // The driver, its staging and the certificate it is signed with go
@@ -532,17 +538,20 @@ internal static partial class Uninstaller
         // names (Usbip.UsbRecords).
         foreach (string id in Usbip.UsbRecords.Caused())
             if (Usbip.UsbRecords.Exists(id) && seen.Add(id))
-                list.Add(Usbip.UsbRecords.Present(id) ? Keep(KindDevnode, id, UsbRecordPresentReason)
-                    : Usbip.UsbRecords.ArrivedSinceBoot(id) ? Keep(KindDevnode, id, UsbRecordSinceBootReason)
-                    : Would(KindDevnode, id));
+                list.Add(Usbip.UsbRecords.Present(id) ? Keep(KindDevnode, id, UsbRecordPresentReason) : Would(KindDevnode, id));
+    }
+
+    /// <summary>The host controller's since-boot state, read once. A
+    /// reading that throws counts as used, the side that keeps the host
+    /// controller.</summary>
+    private static (bool Used, string Why) UsedSinceBootReading()
+    {
+        try { return UsbipDriverInstaller.UsedSinceBoot(out string why) ? (true, why) : (false, ""); }
+        catch (Exception ex) { return (true, $"its records could not be read: {ex.GetType().Name}"); }
     }
 
     private const string UsbRecordPresentReason =
         "the USB/IP device it records is plugged in. Its program's removal unplugs it, and a removal after that takes the record";
-
-    private const string UsbRecordSinceBootReason =
-        "its device arrived since Windows started, and whether the USB/IP host controller has carried a device since then is read from such records. " +
-        "It stays until a restart, and a removal after it takes it";
 
     private static bool IsUsbipHostController(string instanceId)
     {
@@ -1396,7 +1405,7 @@ internal static partial class Uninstaller
         int usbLeft = Usbip.UsbRecords.Caused().Count;
         if (usbLeft > 0)
             told.Add(new UninstallEntry(KindRegistryKey, $@"HKLM\{Usbip.UsbRecords.LedgerRoot}", UninstallOutcome.Kept,
-                $"it names {usbLeft} USB device record(s) HIDMaestro caused that stay, and is their only proof of being HIDMaestro's. A removal after a restart takes them and it"));
+                $"it names {usbLeft} USB device record(s) HIDMaestro caused that stay, their devices plugged in, and is their only proof of being HIDMaestro's. A removal after they are unplugged takes them and it"));
         else
             try { Registry.LocalMachine.DeleteSubKeyTree(Usbip.UsbRecords.LedgerRoot, throwOnMissingSubKey: false); }
             catch (Exception ex) { Fail(Usbip.UsbRecords.LedgerRoot, ex.Message); }

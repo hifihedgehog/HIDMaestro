@@ -79,6 +79,11 @@ internal static partial class UsbRecords
         /// <summary>A removal failed or the id is not a USB instance. What
         /// was not removed stays.</summary>
         Failed,
+        /// <summary>The record's device last arrived on a hub that is no
+        /// usbip-win2 root hub: a real device has taken the instance, and
+        /// its record is not HIDMaestro's to remove. Nothing was
+        /// removed.</summary>
+        Foreign,
     }
 
     /// <summary>One removal's result: the outcome and the records it
@@ -88,6 +93,10 @@ internal static partial class UsbRecords
         /// <summary>True when nothing of the instance is left: the ledger
         /// entry that names it may go.</summary>
         public bool Settled => Outcome is Outcome.Removed or Outcome.Absent;
+
+        /// <summary>True when the ledger stops naming the instance: nothing
+        /// of it is left, or a real device holds the record now.</summary>
+        public bool DropsEntry => Settled || Outcome == Outcome.Foreign;
     }
 
     /// <summary>True when Windows keeps a record of the instance, present or
@@ -197,7 +206,13 @@ internal static partial class UsbRecords
     /// scaled) for each to leave, and drop each settled one from the ledger.
     /// One read of the machine's records serves them all. Returns how many
     /// stay. The full removal calls it once every import is detached.</summary>
-    internal static int RemoveCaused(int leaveWaitMs)
+    internal static int RemoveCaused(int leaveWaitMs) => RemoveCaused(leaveWaitMs, sinceBoot: false);
+
+    /// <summary>The same, with <paramref name="sinceBoot"/> for the uninstall,
+    /// which takes a record of a device that arrived since Windows started
+    /// too: it read the host controller's since-boot state before it removed
+    /// anything, and no HIDMaestro code reads these records after it.</summary>
+    internal static int RemoveCaused(int leaveWaitMs, bool sinceBoot)
     {
         var ids = Caused();
         if (ids.Count == 0) return 0;
@@ -209,11 +224,11 @@ internal static partial class UsbRecords
             try
             {
                 tree ??= Tree.Read();
-                r = Remove(id, leaveWaitMs, tree);
+                r = Remove(id, leaveWaitMs, tree, sinceBoot);
             }
             catch (Exception e) { r = new Result(Outcome.Failed, Array.Empty<string>(), $"{e.GetType().Name}: {e.Message}"); }
             DeviceOrchestrator.LogDiag($"    usb records of {id}: {r.Outcome}, {r.Detail}");
-            if (r.Settled) Forget(id);
+            if (r.DropsEntry) Forget(id);
             else left++;
         }
         return left;
@@ -241,6 +256,13 @@ internal static partial class UsbRecords
         while (Present(instanceId) && until.ElapsedMilliseconds < leaveWaitMs) Thread.Sleep(25);
         if (Present(instanceId)) return new Result(Outcome.Present, removed, $"{instanceId} is in the device tree");
         if (!Exists(instanceId)) return new Result(Outcome.Absent, removed, $"{instanceId} has no record");
+        // A real device that takes the instance, as every real Wii U
+        // GameCube adapter takes 15/07/2014, leaves its own record under a
+        // physical hub. Only a record whose device last arrived on a
+        // usbip-win2 root hub is HIDMaestro's to remove.
+        if (!MayRemove(instanceId, ParentOf, UsbipDriverInstaller.HardwareIdsOf))
+            return new Result(Outcome.Foreign, removed,
+                $"{instanceId} last arrived on {ParentOf(instanceId) ?? "no hub it names"}, which no usbip-win2 host controller carries");
 
         // Each record below the instance must be out of the tree too: a
         // composite's interfaces and collections leave with it, and one that
@@ -271,6 +293,25 @@ internal static partial class UsbRecords
         return new Result(Outcome.Removed, removed, $"{removed.Count} record(s)");
     }
 
+    /// <summary>True when a record's last parent is a root hub whose own
+    /// parent is a usbip-win2 host controller (hardware ID
+    /// <c>ROOT\USBIP_WIN2\UDE</c>), the test
+    /// UsbipRemoval.RemovePersonaPhantoms makes through its hub list.
+    /// registry_ownership_check's offline part feeds it a parent map of its
+    /// own.</summary>
+    internal static bool MayRemove(string instanceId, Func<string, string?> parentOf, Func<string, string[]> hardwareIdsOf)
+    {
+        string? hub = parentOf(instanceId);
+        if (hub == null || !hub.StartsWith(@"USB\ROOT_HUB", StringComparison.OrdinalIgnoreCase)) return false;
+        string? host = parentOf(hub);
+        return host != null && hardwareIdsOf(host).Any(h => h.Equals(@"ROOT\USBIP_WIN2\UDE", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>Set by registry_ownership_check to a boot time of its own, so
+    /// its run can reach the removal a restart allows without restarting the
+    /// test machine. Null outside the probe.</summary>
+    internal static Func<DateTime>? BootTimeForProbe;
+
     /// <summary>True when the device of a record arrived after Windows
     /// started, or its arrival cannot be read: the test
     /// UsbipDriverInstaller.HostControllerUsedSinceBoot makes of each record
@@ -285,7 +326,7 @@ internal static partial class UsbRecords
             || type != DEVPROP_TYPE_FILETIME || size != 8)
             return true;
         DateTime arrived = DateTime.FromFileTimeUtc(BitConverter.ToInt64(buffer, 0));
-        DateTime bootUtc = DateTime.UtcNow - TimeSpan.FromMilliseconds(Environment.TickCount64);
+        DateTime bootUtc = BootTimeForProbe?.Invoke() ?? DateTime.UtcNow - TimeSpan.FromMilliseconds(Environment.TickCount64);
         return arrived >= bootUtc;
     }
 
@@ -295,8 +336,12 @@ internal static partial class UsbRecords
     internal static bool IsUsbInstance(string instanceId)
     {
         string[] parts = instanceId.Split('\\');
+        // An interface record (&MI_xx) is a composite's child, not a device
+        // a create names. It goes with its device's subtree and never alone,
+        // as RemovePersonaPhantoms skips it.
         return parts.Length == 3 && parts[0].Equals("USB", StringComparison.OrdinalIgnoreCase)
             && parts[1].StartsWith("VID_", StringComparison.OrdinalIgnoreCase)
+            && !parts[1].Contains("&MI_", StringComparison.OrdinalIgnoreCase)
             && !parts[1].StartsWith("ROOT_HUB", StringComparison.OrdinalIgnoreCase)
             && parts[2].Length > 0;
     }

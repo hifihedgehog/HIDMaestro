@@ -57,7 +57,7 @@ using System.Threading;
 using HIDMaestro;
 using Microsoft.Win32;
 
-internal static class Program
+internal static partial class Program
 {
     // dualshock-4-v2's identity, so the override and the controller's own
     // joy.cpl key meet, as they do in a program that names its controller.
@@ -82,6 +82,7 @@ internal static class Program
         if (args.Length >= 2 && args[0] == "--hold-one") return Hold(args[1], one: true);
         if (args.Length >= 4 && args[0] == "--late") return Late(args[1], args[2], args[3]);
         if (args.Length >= 3 && args[0] == "--only") return OnlyOne(args[1], args[2]);
+        if (args.Length >= 1 && args[0] == "--offline") return Offline();
         string part = args.Length > 0 ? args[0].ToLowerInvariant() : "all";
         int code;
         switch (part)
@@ -504,6 +505,9 @@ internal static class Program
         // blocked run's comparison would see them arrive.
         Note($"before the snapshot, device installation {(CMP_WaitNoPendingInstallEvents(120_000) == 0 ? "settled" : "still pending after 120 s")}");
         var before = Inventory.Take();
+        var ledgeredFlags = before.LedgeredUsbFlags.ToList();
+        Note(ledgeredFlags.Count == 0 ? "the registry ledger holds no usbflags claim: the setup created no USB/IP controller"
+                                      : $"usbflags entries HIDMaestro claimed: {string.Join(", ", ledgeredFlags)}");
         Record("the machine holds HIDMaestro: devices, packages and the certificate (positive control)",
                before.HidMaestroDevnodes().Count > 0 && before.Packages.Count > 0 && before.Certificates.Count > 0,
                $"{before.HidMaestroDevnodes().Count} device record(s), {before.Packages.Count} package(s), {before.Certificates.Count} certificate(s)");
@@ -576,11 +580,14 @@ internal static class Program
         Record("removal: the OEM name targets hold what they held before HIDMaestro", oemAfter == oemBefore,
                oemAfter == oemBefore ? "" : $"before [{oemBefore}] after [{oemAfter}]");
         // usbflags keeps Windows' answers to string 0xEE per VID, PID and
-        // revision. The USB/IP personas' answers go with the removal, and the
-        // key reads as it did before HIDMaestro.
-        string flagsAfter = Inventory.Dump(@"HKLM\SYSTEM\CurrentControlSet\Control\usbflags");
-        Record("removal: usbflags holds what it held before HIDMaestro",
-               flagsAfter == clean.Keys[@"HKLM\SYSTEM\CurrentControlSet\Control\usbflags"], flagsAfter);
+        // revision. Each entry HIDMaestro claimed, by the registry ledger,
+        // reads as it did before HIDMaestro. Windows' entries for other
+        // devices are not HIDMaestro's to compare.
+        var flagsAfter = Inventory.Take().UsbFlags;
+        var flagsChanged = Inventory.ChangedUsbFlags(clean.UsbFlags, flagsAfter, ledgeredFlags);
+        if (ledgeredFlags.Count > 0)
+            Record("removal: each usbflags entry HIDMaestro claimed holds what it held before HIDMaestro", flagsChanged.Count == 0,
+                   string.Join(" ; ", flagsChanged.Select(n => $"{n}: {(flagsAfter.TryGetValue(n, out var d) ? d.Replace("\n", " ") : "absent")}")));
         if (gi)
         {
             var giEntry = parsed?.Entries.FirstOrDefault(e => e.Kind == "service setting");
@@ -1398,5 +1405,31 @@ internal static class Program
         }
         string apps = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Microsoft", "WindowsApps", exe);
         return File.Exists(apps) ? apps : null;
+    }
+}
+
+internal static partial class Program
+{
+    /// <summary>"--offline": the usbflags comparison, on readings made
+    /// here. An entry another device's arrival wrote is no change of
+    /// HIDMaestro's, and a claimed entry left changed is.</summary>
+    static int Offline()
+    {
+        int fails = 0;
+        void Expect(string name, bool ok, string detail = "")
+        {
+            Console.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] {name}{(detail.Length > 0 ? "  (" + detail + ")" : "")}");
+            if (!ok) fails++;
+        }
+        var clean = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["045E028E0114"] = "[]\nosvc=Binary:00\n" };
+        var after = new Dictionary<string, string>(clean, StringComparer.OrdinalIgnoreCase) { ["046DC52B1201"] = "[]\nosvc=Binary:00\n" };
+        var own = new[] { "054C09CC0100" };
+        var changed = Inventory.ChangedUsbFlags(clean, after, own);
+        Expect("an entry a real device's arrival wrote is not HIDMaestro's change", changed.Count == 0, string.Join(", ", changed));
+        after["054C09CC0100"] = "[]\nosvc=Binary:0101\n";
+        changed = Inventory.ChangedUsbFlags(clean, after, own);
+        Expect("an entry HIDMaestro claimed and left changed is (positive control)", changed.SequenceEqual(own), string.Join(", ", changed));
+        Console.WriteLine(fails == 0 ? "offline: all passed" : $"offline: {fails} failed");
+        return fails == 0 ? 0 : 1;
     }
 }

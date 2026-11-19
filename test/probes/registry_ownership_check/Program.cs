@@ -372,16 +372,13 @@ internal static partial class Program
         if (args.Length >= 2 && args[0] == "--child-create-usbip") return ChildCreateUsbip(args[1]);
         if (args.Length >= 2 && args[0] == "--remove-listed") return RemoveListed(args[1]);
         if (args.Length >= 1 && args[0] == "--uninstall") return UninstallKeepingUsbip();
-        if (args.Length >= 3 && args[0] == "--child-hold-usbip") return ChildHoldUsbip(args[1], args[2]);
-        if (args.Length >= 2 && args[0] == "--child-create-usbip") return ChildCreateUsbip(args[1]);
-        if (args.Length >= 2 && args[0] == "--remove-listed") return RemoveListed(args[1]);
-        if (args.Length >= 1 && args[0] == "--uninstall") return UninstallKeepingUsbip();
         Console.WriteLine("=== Registry keys shared with real devices (foundation-sunshine #1138) ===");
         bool offlineOnly = args.Contains("--offline");
         Offline();
         UsbLedgerOffline();
         OsBindingOffline();
         PersonaRuleOffline();
+        ReviewFixesOffline();
         bool ranLive = false;
         if (args.Contains("--usb-ledger"))
             ranLive = UsbLedgerLive(args.Contains("--r13-only"));

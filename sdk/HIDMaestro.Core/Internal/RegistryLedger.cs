@@ -704,10 +704,11 @@ internal static partial class RegistryLedger
             if (!held)
             {
                 // Recorded before the device attaches, so Windows' write
-                // comes after it.
+                // comes after it. The prior values go in first and the
+                // KeyExisted marker last: an entry a crash cut short has no
+                // marker, and its restore changes nothing (RestoreUsbFlagsIn).
                 using var entry = hive.CreateSubKey(entryPath);
                 using var flags = hive.OpenSubKey($@"{flagsRoot}\{name}");
-                entry.SetValue(V_KeyExisted, flags != null ? 1 : 0, RegistryValueKind.DWord);
                 if (flags != null)
                 {
                     using var prior = entry.CreateSubKey(PriorValuesKey);
@@ -715,6 +716,7 @@ internal static partial class RegistryLedger
                         prior.SetValue(v, flags.GetValue(v, null, RegistryValueOptions.DoNotExpandEnvironmentNames)!,
                                        flags.GetValueKind(v));
                 }
+                entry.SetValue(V_KeyExisted, flags != null ? 1 : 0, RegistryValueKind.DWord);
             }
             using var holders = hive.CreateSubKey($@"{entryPath}\{HoldersKey}");
             holders.SetValue(holder, 1, RegistryValueKind.DWord);
@@ -732,21 +734,34 @@ internal static partial class RegistryLedger
     /// key is only changed while the ledger records what it held.</summary>
     internal static bool ClearHeldUsbFlags(ushort vid, ushort pid, ushort bcdDevice, int controllerIndex)
     {
-        string name = UsbFlagsName(vid, pid, bcdDevice);
         using var m = Acquire();
         try
         {
-            using (var h = Registry.LocalMachine.OpenSubKey($@"{Root}\{UsbFlagsKind}\{name}\{HoldersKey}"))
-                if (h?.GetValue(HolderName(controllerIndex)) == null) return false;
-            Registry.LocalMachine.DeleteSubKeyTree($@"{UsbFlagsRoot}\{name}", throwOnMissingSubKey: false);
-            return true;
+            return ClearHeldUsbFlagsIn(Registry.LocalMachine, Root, UsbFlagsRoot, UsbFlagsName(vid, pid, bcdDevice),
+                                       HolderName(controllerIndex));
         }
         catch (Exception ex)
         {
-            DeviceOrchestrator.LogDiag($"    ledger: the usbflags key {name} was not cleared: {ex.GetType().Name}: {ex.Message}");
+            DeviceOrchestrator.LogDiag($"    ledger: the usbflags key {UsbFlagsName(vid, pid, bcdDevice)} was not cleared: {ex.GetType().Name}: {ex.Message}");
             return false;
         }
         finally { m.ReleaseMutex(); }
+    }
+
+    /// <summary>The clear, in <paramref name="hive"/>: the key's values go
+    /// when <paramref name="holder"/> holds its entry, and its subkeys stay,
+    /// since the claim records values alone and the restore writes back only
+    /// what it recorded. The caller holds the ledger's lock.
+    /// registry_ownership_check's offline part passes scratch keys of
+    /// HKCU.</summary>
+    internal static bool ClearHeldUsbFlagsIn(RegistryKey hive, string root, string flagsRoot, string name, string holder)
+    {
+        using (var h = hive.OpenSubKey($@"{root}\{UsbFlagsKind}\{name}\{HoldersKey}"))
+            if (h?.GetValue(holder) == null) return false;
+        using var flags = hive.OpenSubKey($@"{flagsRoot}\{name}", writable: true);
+        if (flags != null)
+            foreach (string v in flags.GetValueNames()) flags.DeleteValue(v, throwOnMissingValue: false);
+        return true;
     }
 
     /// <summary>Put a usbflags key back as its entry recorded it: deleted
@@ -756,7 +771,10 @@ internal static partial class RegistryLedger
     internal static void RestoreUsbFlagsIn(RegistryKey hive, string flagsRoot, string name, RegistryKey entry)
     {
         string target = $@"{flagsRoot}\{name}";
-        bool existed = entry.GetValue(V_KeyExisted) is int ke && ke == 1;
+        // No marker: the claim was cut short before its device attached, so
+        // the key holds nothing of HIDMaestro's, and it stays as it is.
+        if (entry.GetValue(V_KeyExisted) is not int marker) return;
+        bool existed = marker == 1;
         if (!existed)
         {
             using (var k = hive.OpenSubKey(target))

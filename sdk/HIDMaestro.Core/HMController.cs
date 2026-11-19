@@ -1369,7 +1369,7 @@ public sealed partial class HMController : IDisposable
     /// controller does.
     ///
     /// <para>On a machine where Windows installs no package signed as
-    /// HIDMaestro's driver is (Windows on ARM64, Windows in S mode), the
+    /// HIDMaestro's driver is (Windows on ARM64), the
     /// device asks for Windows' own WinUSB driver instead: from the bind on
     /// it serves the Microsoft OS 1.0 descriptors that name WinUSB and the
     /// profile's <c>winUsb.interfaceGuid</c>, and it is plugged in again so
@@ -1385,7 +1385,9 @@ public sealed partial class HMController : IDisposable
     /// alone.</returns>
     /// <exception cref="InvalidOperationException">The profile declares no
     /// winUsb, or no driver Windows has ranks above the package, which would
-    /// let Windows choose the package for real devices.</exception>
+    /// let Windows choose the package for real devices, or the re-plug that
+    /// makes Windows read the Microsoft OS descriptors failed, after which
+    /// the device is plugged in again as it was before the call.</exception>
     public HMWinUsbBinding BindWinUsb()
     {
         ThrowIfDisposed();

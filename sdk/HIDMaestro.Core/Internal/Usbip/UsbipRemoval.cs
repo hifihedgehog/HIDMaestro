@@ -62,7 +62,16 @@ internal static partial class UsbipRemoval
     /// <exception cref="InvalidOperationException">The calling thread holds
     /// the PnP lock or runs transport work, and <paramref name="preview"/> is
     /// false.</exception>
-    internal static IReadOnlyList<UninstallEntry> Remove(bool preview, bool includeUnproven)
+    internal static IReadOnlyList<UninstallEntry> Remove(bool preview, bool includeUnproven) =>
+        Remove(preview, includeUnproven, usedSinceBoot: null);
+
+    /// <summary>The same, deciding the host controller's removal from
+    /// <paramref name="usedSinceBoot"/>, the uninstall's one reading of
+    /// whether it has carried a device since Windows started, taken before
+    /// the uninstall removed anything (null for a reading made here: the
+    /// reason when it has, or no reason). The uninstall removes the records
+    /// that reading came from before this step runs.</summary>
+    internal static IReadOnlyList<UninstallEntry> Remove(bool preview, bool includeUnproven, (bool Used, string Why)? usedSinceBoot)
     {
         if (!preview && DeviceManager.PnpGateHeldHere)
             throw new InvalidOperationException("UsbipRemoval.Remove was called with the PnP lock held. Its own thread takes that lock, so the call would never return.");
@@ -71,10 +80,10 @@ internal static partial class UsbipRemoval
         var entries = new List<UninstallEntry>();
         try
         {
-            if (preview) Run(entries, preview: true, includeUnproven);
+            if (preview) Run(entries, preview: true, includeUnproven, usedSinceBoot);
             // Under the transport lock, so no program installs or repairs
             // the transport while it is taken apart.
-            else UsbipDriverInstaller.TransportWork.Run(_ => { Run(entries, preview: false, includeUnproven); return true; }, null);
+            else UsbipDriverInstaller.TransportWork.Run(_ => { Run(entries, preview: false, includeUnproven, usedSinceBoot); return true; }, null);
         }
         catch (Exception ex)
         {
@@ -83,7 +92,7 @@ internal static partial class UsbipRemoval
         return entries;
     }
 
-    private static void Run(List<UninstallEntry> entries, bool preview, bool includeUnproven)
+    private static void Run(List<UninstallEntry> entries, bool preview, bool includeUnproven, (bool Used, string Why)? reading)
     {
         // ── HIDMaestro's own imports ──────────────────────────────────────
         var imports = UsbipBackend.ClassifiedImports();
@@ -128,13 +137,19 @@ internal static partial class UsbipRemoval
         // off an older host controller, would take the controller for one
         // that is safe to remove.
         string? used = null;
-        if (controllers.Exists(c => c.Present) && UsbipDriverInstaller.UsedSinceBoot(out string why)) used = why;
+        if (controllers.Exists(c => c.Present))
+        {
+            if (reading is { } r) { if (r.Used) used = r.Why; }
+            else if (UsbipDriverInstaller.UsedSinceBoot(out string why)) used = why;
+        }
 
         // ── Persona phantoms, before the hubs they name go ────────────────
+        // The uninstall read the since-boot state before it removed anything
+        // and decides the host controller by that reading, and no HIDMaestro
+        // code reads these records after it, so every record the ledger
+        // names goes, a device that arrived since Windows started or not.
         var hubs = UsbHubsOf(controllers);
-        RemovePersonaPhantoms(entries, hubs, preview, used == null ? null :
-            "a host controller has carried a device since Windows started, which these records show. They stay until a restart, " +
-            "and a removal after it takes them.");
+        RemovePersonaPhantoms(entries, hubs, preview, keepReason: null);
 
         // ── Host controllers ──────────────────────────────────────────────
         var targets = new List<(string Id, bool Present)>();

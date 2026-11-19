@@ -601,10 +601,28 @@ internal sealed class UsbDescriptorSet
 
         CheckMicrosoftOsFeature(compat, 4, 16, "extendedCompatId");
         CheckMicrosoftOsFeature(props, 5, 10, "extendedProperties");
+        _priorOs ??= (_msOsString, _msOsCompatId, _msOsProperties);
         _msOsCompatId = compat;
         _msOsProperties = props;
         _msOsString = str;
         ServesWinUsb = true;
+    }
+
+    // What the device served before ServeWinUsb, for StopServingWinUsb.
+    private (byte[]? String, byte[]? CompatId, byte[]? Properties)? _priorOs;
+
+    /// <summary>Serve again what the device served before
+    /// <see cref="ServeWinUsb"/>, the string first, so Windows asks for no
+    /// feature the device no longer names. A bind whose re-plug failed puts
+    /// the device back as it was with this.</summary>
+    internal void StopServingWinUsb()
+    {
+        if (_priorOs is not { } prior) return;
+        _msOsString = prior.String;
+        _msOsCompatId = prior.CompatId;
+        _msOsProperties = prior.Properties;
+        ServesWinUsb = false;
+        _priorOs = null;
     }
 
     /// <summary>The Microsoft OS 1.0 feature descriptor a vendor request

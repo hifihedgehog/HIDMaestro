@@ -5,7 +5,7 @@ namespace HIDMaestro.Internal;
 
 /// <summary>WinUSB on a machine that refuses HIDMaestro's package (2.3.0).
 ///
-/// <para>Windows on ARM64, and Windows in S mode, install no package signed
+/// <para>Windows on ARM64 installs no package signed
 /// as HIDMaestro's driver is, the WinUSB binding's package among them. The
 /// device itself can ask for WinUSB instead, as a device built for WinUSB
 /// does: it serves the Microsoft OS 1.0 string, the extended compatible ID
@@ -89,22 +89,33 @@ internal static partial class WinUsbBinding
                 finally { devnodes.ReleaseMutex(); }
             }
             d.ServeWinUsb(package.InterfaceGuid);
-            if (!RegistryLedger.ClearHeldUsbFlags(d.VendorId, d.ProductId, d.BcdDevice, controller.Index))
-                throw new InvalidOperationException(
-                    $"The usbflags key {RegistryLedger.UsbFlagsName(d.VendorId, d.ProductId, d.BcdDevice)} is not this controller's to change: " +
-                    "its claim, taken at the create, is not in the registry ledger.");
             ThrowIfStopped(keeper);
-            // The devnode's driver from its first arrival stays unless it is
-            // flagged: Windows installs a returning devnode again only when
-            // asked to. Flagged while it is away, so the arrival installs by
-            // rank.
+            // While the device is unplugged: the identity's usbflags key is
+            // cleared, so no device of the same identity that arrives while
+            // this one is still plugged in can leave its answer there first,
+            // and the devnode is flagged, since Windows installs a returning
+            // devnode again only when asked to, so the arrival installs by
+            // rank. A re-plug that fails puts the device back as it was.
             string away = instanceId;
             handle.Replug(away, waitMs, () =>
             {
+                StepForProbe?.Invoke("unplugged");
+                if (!RegistryLedger.ClearHeldUsbFlags(d.VendorId, d.ProductId, d.BcdDevice, controller.Index))
+                    throw new InvalidOperationException(
+                        $"The usbflags key {RegistryLedger.UsbFlagsName(d.VendorId, d.ProductId, d.BcdDevice)} is not this controller's to change: " +
+                        "its claim, taken at the create, is not in the registry ledger.");
+                StepForProbe?.Invoke("usbflags cleared");
                 var until = Environment.TickCount64 + waitMs;
                 while (!HasLeft(away) && Environment.TickCount64 < until) Thread.Sleep(20);
                 if (!FlagForNextArrival(away))
                     DeviceOrchestrator.LogDiag($"    winusb: {away} was not flagged before its re-plug");
+            }, undo: () =>
+            {
+                d.StopServingWinUsb();
+                using var devnodes = AcquireDevnodeLock();
+                try { RegistryLedger.UnclaimWinUsb(away, controller.Index, ClaimTimeoutMs); }
+                finally { devnodes.ReleaseMutex(); }
+                lock (keeper.Gate) if (string.Equals(keeper.InstanceId, away, StringComparison.OrdinalIgnoreCase)) keeper.InstanceId = null;
             });
             string again = WaitForDevnode(handle, d.VendorId, d.ProductId, waitMs, keeper)
                 ?? throw new InvalidOperationException(

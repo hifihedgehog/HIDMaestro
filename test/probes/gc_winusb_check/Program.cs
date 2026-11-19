@@ -90,6 +90,7 @@ internal static partial class Program
         {
             Console.WriteLine("  Windows here installs no package signed as HIDMaestro's driver is: the binding goes by Microsoft OS descriptors");
             OsDescriptorBinding(ctx, gc);
+            ReplugFails(ctx, gc);
             Probe.Check("no WinUSB hold left in the ledger", RegistryLedger.HeldWinUsbDevnodes().Count == 0,
                 string.Join(", ", RegistryLedger.HeldWinUsbDevnodes()));
             return Probe.Finish("S81");
@@ -105,7 +106,7 @@ internal static partial class Program
         if (args.Contains("--os-descriptors"))
         {
             WinUsbBinding.OsDescriptorsForProbe = true;
-            try { OsDescriptorBinding(ctx, gc); }
+            try { OsDescriptorBinding(ctx, gc); ReplugFails(ctx, gc); }
             finally { WinUsbBinding.OsDescriptorsForProbe = false; }
         }
 

@@ -135,8 +135,15 @@ internal static partial class Program
         var tree = UsbRecords.Tree.Read();
         long ms = sw.ElapsedMilliseconds;
         Console.WriteLine($"  this machine: {all.Count} device records, the parent walk took {ms} ms");
-        Check("the device id list holds the records of devices that are not present too",
-              all.Any(id => UsbRecords.Exists(id) && !UsbRecords.Present(id)) || all.All(UsbRecords.Present));
+        // Positive control: every record SetupAPI lists as not present, an
+        // independent read of the same store, is in the device id list.
+        var phantoms = NonPresentBySetupApi();
+        if (phantoms.Count == 0)
+            Console.WriteLine("  [SKIP] SetupAPI lists no record of a device that is not present on this machine");
+        else
+            Check("the device id list holds every record SetupAPI lists as not present",
+                  phantoms.All(id => all.Contains(id, StringComparer.OrdinalIgnoreCase)),
+                  $"{phantoms.Count} not present, {phantoms.Count(id => !all.Contains(id, StringComparer.OrdinalIgnoreCase))} missing");
         string? hub = all.FirstOrDefault(id => id.StartsWith(@"USB\ROOT_HUB", StringComparison.OrdinalIgnoreCase) && UsbRecords.Present(id));
         if (hub != null)
         {
@@ -233,6 +240,8 @@ internal static partial class Program
         R19();
         DeadProgram(everything: false);
         DeadProgram(everything: true);
+        ForeignRecord();
+        AfterRestart();
         PositiveControl("after");
         return true;
     }
@@ -398,7 +407,11 @@ internal static partial class Program
         var end = ReadMachine();
         Check("R13: after the full removal the host controller reads as before", end.HostController == before.HostController,
               end.HostController == before.HostController ? "" : Indent(end.HostController));
-        var end2 = end.Records.Except(after.Records, StringComparer.OrdinalIgnoreCase).Except(again, StringComparer.OrdinalIgnoreCase).ToList();
+        // Only HIDMaestro's own records count, by the ledger and this run's
+        // identity: a real device that arrives meanwhile is no record of the
+        // run's.
+        var end2 = OwnAdded(end.Records.Except(after.Records, StringComparer.OrdinalIgnoreCase).Except(again, StringComparer.OrdinalIgnoreCase),
+                            r => IsOwnRecord(r, id)).ToList();
         Check("R13: no other record of the run is left", end2.Count == 0, string.Join(" ; ", end2));
     }
 
@@ -467,8 +480,9 @@ internal static partial class Program
     }
 
     /// <summary>A program killed with a USB/IP controller alive. The next
-    /// program's first create, or the full removal, removes the records the
-    /// dead create caused and puts the usbflags key back.</summary>
+    /// program's first create, or the full removal, puts the usbflags key
+    /// back, and both keep the records the dead create caused, whose device
+    /// arrived since Windows started, with the ledger naming them.</summary>
     static void DeadProgram(bool everything)
     {
         string how = everything ? "RemoveAllVirtualControllers(Everything)" : "the next program's first create";
@@ -623,6 +637,25 @@ internal static partial class Program
             Console.WriteLine($"  [SKIP] {consumer} is running");
             return 2;
         }
+        // A record of a device that arrived since Windows started, which the
+        // ledger names: the uninstall takes it, the since-boot rule
+        // notwithstanding, and decides the host controller from its one
+        // reading taken before it removed anything.
+        string made;
+        using (var ctx = new HMContext())
+        {
+            ctx.LoadDefaultProfiles();
+            var prof = ctx.GetProfile("dualshock-4-v2")!;
+            using (var pad = ctx.CreateController(prof, "ledger-uninstall", HMBackend.Usbip))
+            {
+                Feed(pad, prof);
+                made = pad.UsbipHandle!.Device.Descriptors.UsbInstanceId!;
+            }
+        }
+        Check("a record the ledger names and whose device arrived since Windows started is on the machine",
+              LedgerNames(made) && UsbRecords.Exists(made) && UsbRecords.ArrivedSinceBoot(made), made);
+        bool usedBefore = UsbipDriverInstaller.UsedSinceBoot(out string usedWhy);
+        Console.WriteLine($"  the host controller before the removal: {(usedBefore ? "used since Windows started, " + usedWhy : "not used since Windows started")}");
         object? recorded;
         using (var k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestroGameInputSvc")) recorded = k?.GetValue("Start");
         object? before;
@@ -643,6 +676,18 @@ internal static partial class Program
             Check("and its record is gone", k == null);
         using (var k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestroRegistryLedger"))
             Check("the registry ledger is gone", k == null);
+        Check("the uninstall removed the record whose device arrived since Windows started", !UsbRecords.Exists(made), made);
+        using (var k = Registry.LocalMachine.OpenSubKey(UsbRecords.LedgerRoot))
+            Check("and the ledger of USB records is gone", k == null, k == null ? "" : $"{k.SubKeyCount} entr(ies) left");
+        var keptForRestart = report.Entries.Where(e => e.Outcome == HMUninstallOutcome.Kept
+            && (e.Reason ?? "").Contains("restart", StringComparison.OrdinalIgnoreCase)
+            && (e.Location.StartsWith(@"USB\", StringComparison.OrdinalIgnoreCase) || e.Location.Contains("HIDMaestroUsbRecords"))).ToList();
+        Check("no USB record and no ledger key is kept for a restart", keptForRestart.Count == 0,
+              string.Join(" ; ", keptForRestart.Select(e => e.Location)));
+        var host = report.Entries.FirstOrDefault(e => e.Kind == "devnode" && e.Location.StartsWith(@"ROOT\USB\", StringComparison.OrdinalIgnoreCase));
+        if (usedBefore && host != null)
+            Check("the host controller was decided by the reading taken before the removal: kept as used since Windows started",
+                  host.Outcome == HMUninstallOutcome.Kept && (host.Reason ?? "").Contains("since Windows started"), $"{host.Outcome}: {host.Reason}");
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
     }
@@ -682,5 +727,193 @@ internal static partial class Program
         Check("a ledgered record whose device arrived since Windows started stays, with that reason", !d.Take && d.Reason == "since boot", d.Reason ?? "taken");
         var e = UsbipRemoval.PersonaVerdict(synthetic, caused: true, keepReason: null);
         Check("a ledgered record with HIDMaestro's serial form goes", e.Take, e.Reason ?? "");
+    }
+}
+
+internal static partial class Program
+{
+    /// <summary>The records a run added that are HIDMaestro's own. A record
+    /// any other device added meanwhile is not the run's.</summary>
+    static IEnumerable<string> OwnAdded(IEnumerable<string> added, Func<string, bool> isOwn) => added.Where(isOwn);
+
+    /// <summary>A record of the run's identity or of an instance the ledger
+    /// names, or below one, by the parent chain Windows keeps.</summary>
+    static bool IsOwnRecord(string record, string identity)
+    {
+        var owned = new HashSet<string>(UsbRecords.Caused(), StringComparer.OrdinalIgnoreCase) { identity };
+        for (string? r = record; r != null; r = UsbRecords.ParentOf(r))
+            if (owned.Contains(r)) return true;
+        return false;
+    }
+
+    static List<string> NonPresentBySetupApi()
+    {
+        var list = new List<string>();
+        Guid none = Guid.Empty;
+        IntPtr set = SetupDiGetClassDevsW(ref none, null, IntPtr.Zero, 0x4 /* DIGCF_ALLCLASSES */);
+        if (set == new IntPtr(-1)) return list;
+        try
+        {
+            var data = new SP_DEVINFO_DATA { cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<SP_DEVINFO_DATA>() };
+            var buf = new char[512];
+            for (uint i = 0; SetupDiEnumDeviceInfo(set, i, ref data); i++)
+                if (SetupDiGetDeviceInstanceIdW(set, ref data, buf, (uint)buf.Length, out uint n))
+                {
+                    string id = new string(buf, 0, (int)n - 1);
+                    if (!UsbRecords.Present(id)) list.Add(id);
+                }
+        }
+        finally { SetupDiDestroyDeviceInfoList(set); }
+        return list;
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    struct SP_DEVINFO_DATA { public uint cbSize; public Guid ClassGuid; public uint DevInst; public IntPtr Reserved; }
+
+    [System.Runtime.InteropServices.DllImport("setupapi.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr SetupDiGetClassDevsW(ref Guid classGuid, string? enumerator, IntPtr hwnd, uint flags);
+    [System.Runtime.InteropServices.DllImport("setupapi.dll", SetLastError = true)]
+    static extern bool SetupDiEnumDeviceInfo(IntPtr set, uint index, ref SP_DEVINFO_DATA data);
+    [System.Runtime.InteropServices.DllImport("setupapi.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    static extern bool SetupDiGetDeviceInstanceIdW(IntPtr set, ref SP_DEVINFO_DATA data, char[] id, uint size, out uint required);
+    [System.Runtime.InteropServices.DllImport("setupapi.dll")]
+    static extern bool SetupDiDestroyDeviceInfoList(IntPtr set);
+
+    /// <summary>The review's findings, each against the rule it asks for.</summary>
+    static void ReviewFixesOffline()
+    {
+        Console.WriteLine("\n== Offline: the review's fixes ==");
+        // B1: a record whose device last arrived on a physical hub is not
+        // HIDMaestro's to remove, whatever the ledger says.
+        var parents = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            [@"USB\VID_057E&PID_0337\15/07/2014"] = @"USB\ROOT_HUB30\4&4223c81&0&0",
+            [@"USB\ROOT_HUB30\4&4223c81&0&0"] = @"PCI\VEN_8086&DEV_31A8&SUBSYS_72708086&REV_06\3&11583659&0&A0",
+            [@"USB\VID_054C&PID_09CC\HM0123456789AB"] = @"USB\ROOT_HUB30\1&2b53a856&0&0",
+            [@"USB\ROOT_HUB30\1&2b53a856&0&0"] = @"ROOT\USB\0000",
+        };
+        var hwids = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
+        {
+            [@"PCI\VEN_8086&DEV_31A8&SUBSYS_72708086&REV_06\3&11583659&0&A0"] = new[] { @"PCI\VEN_8086&DEV_31A8&SUBSYS_72708086&REV_06" },
+            [@"ROOT\USB\0000"] = new[] { @"ROOT\USBIP_WIN2\UDE", @"ROOT\HIDMAESTRO_UDE" },
+        };
+        string? Parent(string id) => parents.TryGetValue(id, out var p) ? p : null;
+        string[] Hw(string id) => hwids.TryGetValue(id, out var h) ? h : Array.Empty<string>();
+        Check("B1: a record whose device last arrived on a physical hub may not be removed",
+              !UsbRecords.MayRemove(@"USB\VID_057E&PID_0337\15/07/2014", Parent, Hw));
+        Check("B1: a record whose device last arrived on a usbip-win2 root hub may",
+              UsbRecords.MayRemove(@"USB\VID_054C&PID_09CC\HM0123456789AB", Parent, Hw));
+        Check("B1: a record with no parent Windows names may not", !UsbRecords.MayRemove(@"USB\VID_1234&PID_5678\X", Parent, Hw));
+
+        // &MI_: an interface record is no device a create names.
+        Check("an interface record (&MI_03) is not one the removal takes",
+              !UsbRecords.IsUsbInstance(@"USB\VID_054C&PID_0CE6&MI_03\3&1&0&0003"));
+
+        // usbflags: the clear keeps subkeys, which the restore never writes
+        // back, and changes nothing for a holder that holds no entry.
+        var hive = Registry.CurrentUser;
+        string ledger = ScratchRoot + @"\ledger", flags = ScratchRoot + @"\usbflags", name = "057E03370100";
+        hive.DeleteSubKeyTree(ScratchRoot, false);
+        try
+        {
+            RegistryLedger.ClaimUsbFlagsIn(hive, ledger, flags, name, "1-A-0", () => () => { });
+            using (var k = hive.CreateSubKey($@"{flags}\{name}"))
+            {
+                k.SetValue("osvc", new byte[] { 0x00, 0x00 }, RegistryValueKind.Binary);
+                using (k.CreateSubKey("Other")) { }
+            }
+            Check("a holder that holds no entry clears nothing", !RegistryLedger.ClearHeldUsbFlagsIn(hive, ledger, flags, name, "9-Z-0")
+                  && Dump(hive, $@"{flags}\{name}")!.Contains("osvc"));
+            bool cleared = RegistryLedger.ClearHeldUsbFlagsIn(hive, ledger, flags, name, "1-A-0");
+            using (var k = hive.OpenSubKey($@"{flags}\{name}"))
+                Check("the clear takes the values and keeps the subkey", cleared && k != null && k.ValueCount == 0 && k.SubKeyCount == 1,
+                      k == null ? "the key is gone" : $"{k.ValueCount} value(s), {k.SubKeyCount} subkey(s)");
+
+            // A claim cut short before its marker: the restore leaves the key.
+            hive.DeleteSubKeyTree(ScratchRoot, false);
+            using (var k = hive.CreateSubKey($@"{flags}\{name}")) k.SetValue("osvc", new byte[] { 0x01, 0x01 }, RegistryValueKind.Binary);
+            string? live = Dump(hive, $@"{flags}\{name}");
+            using (var e = hive.CreateSubKey($@"{ledger}\UsbFlags\{name}"))
+            using (var prior = e.CreateSubKey("Prior")) prior.SetValue("osvc", new byte[] { 0x01, 0x01 }, RegistryValueKind.Binary);
+            using (var e = hive.OpenSubKey($@"{ledger}\UsbFlags\{name}"))
+                RegistryLedger.RestoreUsbFlagsIn(hive, flags, name, e!);
+            Check("an entry a crash left before its KeyExisted marker changes nothing at its restore",
+                  Dump(hive, $@"{flags}\{name}") == live, OneLine(Dump(hive, $@"{flags}\{name}")));
+        }
+        finally { hive.DeleteSubKeyTree(ScratchRoot, false); }
+
+        // R13 and uninstall_check count only HIDMaestro's own records.
+        var added = new[] { @"HID\VID_054C&PID_09CC\3&1fbe0dcc&7&0000", @"USB\VID_046D&PID_C52B\5&3a&0&2" };
+        var own = OwnAdded(added, r => r.Contains("VID_054C", StringComparison.OrdinalIgnoreCase)).ToList();
+        Check("a real device's record added during a run is not the run's", own.Count == 1, string.Join(" ; ", own));
+    }
+}
+
+internal static partial class Program
+{
+    /// <summary>B1 live: a record whose device last arrived on a physical
+    /// hub, put in the ledger as a persona's record would be once a real
+    /// device has taken its instance. The full removal's path drops the
+    /// entry and leaves the record. Run only once the gate itself refuses
+    /// the record, so a gate that is wrong removes nothing here.</summary>
+    static void ForeignRecord()
+    {
+        Console.WriteLine("\n-- B1: a ledgered record a real device has taken stays --");
+        string? foreign = UsbRecords.AllDeviceIds().FirstOrDefault(id => UsbRecords.IsUsbInstance(id) && UsbRecords.Exists(id)
+            && !UsbRecords.Present(id) && UsbRecords.ParentOf(id) is { } hub
+            && hub.StartsWith(@"USB\ROOT_HUB", StringComparison.OrdinalIgnoreCase) && !IsUsbipRootHub(hub));
+        if (foreign == null)
+        {
+            Console.WriteLine("  [SKIP] no record of a device that is not present and last arrived on a physical hub");
+            return;
+        }
+        Console.WriteLine($"  the record: {foreign}, last on {UsbRecords.ParentOf(foreign)}");
+        bool gate = UsbRecords.MayRemove(foreign, UsbRecords.ParentOf, UsbipDriverInstaller.HardwareIdsOf);
+        Check("B1: the gate refuses a record whose device last arrived on a physical hub", !gate);
+        if (gate) return;
+        var subtree = UsbRecords.Tree.Read().Subtree(foreign);
+        UsbRecords.NoteCaused(foreign);
+        var r = UsbRecords.Remove(foreign, 0, null);
+        Check("B1: the removal reports it a real device's and removes nothing", r.Outcome == UsbRecords.Outcome.Foreign && r.Removed.Count == 0,
+              $"{r.Outcome}, {r.Detail}");
+        UsbRecords.RemoveCaused(0);
+        foreach (string x in subtree) Check($"B1: {x} is still on the machine", UsbRecords.Exists(x));
+        Check("B1: the ledger names it no more", !LedgerNames(foreign));
+    }
+
+    /// <summary>The removal a restart allows, through the probe's boot-time
+    /// seam: every arrival counts as before Windows started. Run only while
+    /// another record of a device that arrived since Windows started, which
+    /// the ledger does not name, stays below the host controller, so the
+    /// host controller's own since-boot test reads the same after.</summary>
+    static void AfterRestart()
+    {
+        Console.WriteLine("\n-- The removal a restart allows (boot-time seam) --");
+        var caused = UsbRecords.Caused().Where(id => UsbRecords.Exists(id) && !UsbRecords.Present(id)).ToList();
+        if (caused.Count == 0)
+        {
+            Console.WriteLine("  [SKIP] the ledger names no record that is not present");
+            return;
+        }
+        var ledgered = new HashSet<string>(UsbRecords.Caused(), StringComparer.OrdinalIgnoreCase);
+        var hubKids = UsbRecords.AllDeviceIds().Where(IsUsbipRootHub).SelectMany(h => UsbRecords.Tree.Read().Subtree(h).Skip(1)).ToList();
+        string? witness = hubKids.FirstOrDefault(r => UsbRecords.IsUsbInstance(r) && !ledgered.Contains(r)
+                                                      && !UsbRecords.Present(r) && UsbRecords.ArrivedSinceBoot(r));
+        if (witness == null)
+        {
+            Console.WriteLine("  [SKIP] no record the ledger does not name, of a device that arrived since Windows started, stays below the host controller");
+            return;
+        }
+        Console.WriteLine($"  {caused.Count} ledgered record(s), witness {witness}");
+        var subtrees = caused.SelectMany(id => UsbRecords.Tree.Read().Subtree(id)).ToList();
+        UsbRecords.BootTimeForProbe = () => DateTime.UtcNow.AddMinutes(1);
+        try { HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall: true); }
+        finally { UsbRecords.BootTimeForProbe = null; }
+        var left = subtrees.Where(UsbRecords.Exists).ToList();
+        Check("after a restart, the full removal removes every record the ledger names", left.Count == 0, string.Join(" ; ", left));
+        Check("drops every entry", UsbRecords.Caused().Count == 0, string.Join(" ; ", UsbRecords.Caused()));
+        using (var k = Registry.LocalMachine.OpenSubKey(UsbRecords.LedgerRoot))
+            Check("and deletes the ledger's key", k == null);
+        Check("the host controller still reads as used since Windows started", UsbipDriverInstaller.UsedSinceBoot(out string why), why);
     }
 }
