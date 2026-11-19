@@ -81,6 +81,19 @@ loaded. A process the battery started stays its own after its parent
 exits, so one a crashed probe leaves running fails the scenario that left
 it and is stopped, instead of holding the battery back.
 
+Xbox Game Bar is the other exception. Where a controller's Xbox button
+opens it for the user signed in at the console, the scenarios' presses of
+that button on virtual Xbox controllers bring up its controller bar, and
+while the bar is up no other program reads input from the controllers.
+The battery checks this when it starts and stops with the command that
+turns the button off, run as that user:
+
+```
+reg add HKCU\Software\Microsoft\GameBar /v UseNexusForGameBarEnabled /t REG_DWORD /d 0 /f
+```
+
+A machine with no one signed in at the console runs no Game Bar.
+
 Every step ends at a deadline: a probe's run, the test app's answer to a
 command, and the test app's exit after quit get 3600 s, S71 6300 s and S73
 2700 s from its start, all scaled by `HIDMAESTRO_TIMEOUT_SCALE`. A step

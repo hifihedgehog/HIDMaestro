@@ -140,6 +140,32 @@ if (-not $isAdmin) {
     exit 2
 }
 
+# Xbox Game Bar on the console desktop. The battery presses the Xbox button
+# of virtual Xbox controllers, and where that button opens Game Bar, its
+# controller bar comes up and holds the controllers' input until it closes:
+# other programs then read none, and every input check fails until some
+# later press closes the bar. Only a signed-in console user runs Game Bar,
+# and UseNexusForGameBarEnabled = 0 in that user's GameBar key keeps the
+# button from opening it.
+function Get-GameBarButtonUser {
+    $console = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName
+    if (-not $console) { return $null }
+    try { $sid = (New-Object System.Security.Principal.NTAccount($console)).Translate([System.Security.Principal.SecurityIdentifier]).Value }
+    catch { return $null }
+    $key = Get-ItemProperty -LiteralPath "Registry::HKEY_USERS\$sid\Software\Microsoft\GameBar" -ErrorAction SilentlyContinue
+    if ($key -and ($key.PSObject.Properties.Name -contains 'UseNexusForGameBarEnabled') -and $key.UseNexusForGameBarEnabled -eq 0) { return $null }
+    if (-not (Get-AppxPackage -User $sid -Name Microsoft.XboxGamingOverlay -ErrorAction SilentlyContinue)) { return $null }
+    return $console
+}
+$gameBarUser = Get-GameBarButtonUser
+if ($gameBarUser) {
+    Write-Host "XBOX GAME BAR OPENS ON A CONTROLLER'S XBOX BUTTON for $gameBarUser, the console user: refusing to run." -ForegroundColor Red
+    Write-Host 'The battery presses that button on virtual Xbox controllers. While the Game Bar controller bar it opens is up, other programs read no input from the controllers, and the input checks fail.' -ForegroundColor Red
+    Write-Host "Turn the button off for that user, then run again. Signed in as $gameBarUser`:" -ForegroundColor Yellow
+    Write-Host '  reg add HKCU\Software\Microsoft\GameBar /v UseNexusForGameBarEnabled /t REG_DWORD /d 0 /f' -ForegroundColor Yellow
+    exit 2
+}
+
 # The machine's bench lock: one live run at a time on a test machine. The
 # battery holds it from here to its exit, which releases it. -BenchLockHeld
 # is checked: a lock this process takes at once was held by nobody, so the
