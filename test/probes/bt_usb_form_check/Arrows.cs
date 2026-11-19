@@ -1,8 +1,17 @@
 // The Joy-Con (L)'s arrows in its 0x3F report, live: before a host speaks
-// the protocol the pad sends left, down, up and right as buttons 1 to 4
-// (SDL_hidapi_switch.c HandleCombinedSimpleControllerStateL, BlueRetro sw.c
-// sw_jc_btns_mask). Read off the HID stack on the backend that presents the
-// Bluetooth form.
+// the protocol, and in input mode 0x3F after one has, the pad sends left,
+// down, up and right as buttons 1 to 4 (SDL_hidapi_switch.c
+// HandleCombinedSimpleControllerStateL, BlueRetro sw.c sw_jc_btns_mask).
+// Read off the HID stack on the backend that presents the Bluetooth form.
+//
+// Another program can speak the protocol to the pad before this check reads
+// it. A Chromium browser handshakes every new Nintendo pad within
+// milliseconds, as it does real hardware (switch_descriptor_idle_check),
+// and the pad then sends its 0x30 report and no 0x3F: on the laptop on
+// 2026-11-19 all four arrows read "none". A host that wants 0x3F asks for
+// it, subcommand 0x03 with mode 0x3F, and so does this check whenever it
+// reads a 0x30. It then lets the queued reports drain before each press,
+// so a report read after a press is that press's.
 
 using System;
 using System.Diagnostics;
@@ -20,21 +29,64 @@ internal static partial class Program
         using var rd = new HidReader(path, 362);
         Check("the 0x3F reader opens", rd.IsOpen, rd.OpenError);
         if (!rd.IsOpen) return;
+        int asked = 0, full = 0;
+        byte counter = 0;
+        var lastAsk = Stopwatch.StartNew();
+        // Asks for input mode 0x3F when the report read is the pad's 0x30 or
+        // 0x31: SDL's ConstructSubcommand shape, packet type 0x01, a counter,
+        // neutral rumble for each side, subcommand 0x03 and the mode.
+        bool AskIfFull(byte[]? r)
+        {
+            if (r == null || r.Length == 0 || r[0] is not (0x30 or 0x31)) return false;
+            full++;
+            if (asked > 0 && lastAsk.ElapsedMilliseconds < 100) return true;
+            var cmd = new byte[49];
+            cmd[0] = 0x01;
+            cmd[1] = (byte)(counter++ & 0x0F);
+            new byte[] { 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40 }.CopyTo(cmd, 2);
+            cmd[10] = 0x03;
+            cmd[11] = 0x3F;
+            if (rd.Write(cmd)) asked++;
+            lastAsk.Restart();
+            return true;
+        }
+        // Reads until two reads in a row return nothing: the queue is empty
+        // and the pad is not streaming.
+        void Settle()
+        {
+            var sw = Stopwatch.StartNew();
+            int quiet = 0;
+            while (quiet < 2 && sw.ElapsedMilliseconds < 2000)
+            {
+                var r = rd.Read(40);
+                if (r == null) { quiet++; continue; }
+                quiet = 0;
+                AskIfFull(r);
+            }
+        }
         foreach (var (hat, name, bit) in new[] { (HMHat.West, "left", 0), (HMHat.South, "down", 1), (HMHat.North, "up", 2), (HMHat.East, "right", 3) })
         {
             byte[]? got = null;
             var sw = Stopwatch.StartNew();
-            while (got == null && sw.ElapsedMilliseconds < 3000)
+            while (got == null && sw.ElapsedMilliseconds < 5000)
             {
                 ctrl.SubmitState(new HMGamepadState());
-                rd.Read(30);
+                Settle();
                 ctrl.SubmitState(new HMGamepadState { Hat = hat });
-                var r = rd.Read(100);
-                if (r != null && r.Length >= 4 && r[0] == 0x3F && (r[1] | r[2]) != 0) got = r;
+                var press = Stopwatch.StartNew();
+                while (got == null && press.ElapsedMilliseconds < 300)
+                {
+                    var r = rd.Read(100);
+                    // The mode changed under the press: settle and press again.
+                    if (AskIfFull(r)) break;
+                    if (r != null && r.Length >= 4 && r[0] == 0x3F && (r[1] | r[2]) != 0) got = r;
+                }
             }
             Check($"the {name} arrow arrives as 0x3F button {bit + 1}", got != null && got[1] == 1 << bit && got[2] == 0,
                   got == null ? "none" : Convert.ToHexString(got, 0, 4));
         }
+        if (full > 0)
+            Console.WriteLine($"  [NOTE] another program had spoken the protocol to the pad: {full} report(s) 0x30 read, input mode 0x3F asked for {asked} time(s)");
         ctrl.SubmitState(new HMGamepadState());
     }
 
@@ -98,6 +150,40 @@ internal static partial class Program
             var r = new byte[n];
             Marshal.Copy(_buf, r, 0, n);
             return r;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool WriteFile(SafeFileHandle h, IntPtr buf, int len, IntPtr written, IntPtr overlapped);
+
+        /// <summary>One output report, written whole within a second.</summary>
+        public bool Write(byte[] report)
+        {
+            if (!IsOpen) return false;
+            IntPtr buf = Marshal.AllocHGlobal(report.Length);
+            IntPtr ov = Marshal.AllocHGlobal(Marshal.SizeOf<NativeOverlapped>());
+            IntPtr ev = CreateEventW(IntPtr.Zero, true, false, IntPtr.Zero);
+            try
+            {
+                Marshal.Copy(report, 0, buf, report.Length);
+                Marshal.StructureToPtr(new NativeOverlapped { EventHandle = ev }, ov, false);
+                if (!WriteFile(_h, buf, report.Length, IntPtr.Zero, ov))
+                {
+                    if (Marshal.GetLastWin32Error() != ERROR_IO_PENDING) return false;
+                    if (WaitForSingleObject(ev, 1000) != 0)
+                    {
+                        CancelIoEx(_h, ov);
+                        GetOverlappedResult(_h, ov, out _, true);
+                        return false;
+                    }
+                }
+                return GetOverlappedResult(_h, ov, out int n, false) && n == report.Length;
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buf);
+                Marshal.FreeHGlobal(ov);
+                if (ev != IntPtr.Zero) CloseHandle(ev);
+            }
         }
 
         public void Dispose()
