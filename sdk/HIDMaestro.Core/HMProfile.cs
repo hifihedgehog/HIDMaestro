@@ -163,6 +163,9 @@ public sealed class HMProfile
     /// resolves to.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="backend"/>
     /// is not one of the three values.</exception>
+    /// <exception cref="HMProfileException">The USB form this profile names
+    /// does not resolve: no loaded or catalog profile holds the name, or the
+    /// profile it names is no USB form of this one.</exception>
     public HMProfile FormOn(HMBackend backend)
     {
         if (backend == HMBackend.Auto)

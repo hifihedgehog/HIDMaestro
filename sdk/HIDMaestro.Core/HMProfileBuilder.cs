@@ -70,6 +70,9 @@ public sealed class HMProfileBuilder
     // The registry the copied profile resolved under, so a copy of a
     // directory's profile still finds the directory's models.
     private ModelRegistry? _registry;
+    // The USB form the copied profile resolved, which a directory's profile
+    // finds in its own directory and the registry does not hold.
+    private ControllerProfile? _usbFormProfile;
 
     /// <summary>Set the profile ID slug (must be unique if registered with a context).</summary>
     public HMProfileBuilder Id(string id) { _id = id; return this; }
@@ -378,6 +381,7 @@ public sealed class HMProfileBuilder
     {
         _copy = source.Inner.Clone();
         _registry = source.Inner.Registry;
+        _usbFormProfile = source.Inner.UsbFormProfile;
         _deviceModelFrom = source.Inner.DeviceModelFrom;
         _deviceModel = source.Inner.DeviceModel;
         _driverPid = source.Inner.DriverPid;
@@ -425,6 +429,34 @@ public sealed class HMProfileBuilder
         d[8] = (byte)vid; d[9] = (byte)(vid >> 8);
         d[10] = (byte)pid; d[11] = (byte)(pid >> 8);
         p.UsbConfiguration.DeviceDescriptorHex = Convert.ToHexString(d).ToLowerInvariant();
+    }
+
+    /// <summary>Whether a built profile describes the device its source
+    /// copy did: the same descriptor, IDs, connection, device model, feature
+    /// answers, driver PID, button map and axis map.</summary>
+    private bool SameDeviceAsCopy(ControllerProfile built, ControllerProfile copy)
+    {
+        static bool Same(string? a, string? b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+        static string Json<T>(T? value) where T : class => value == null ? "" : System.Text.Json.JsonSerializer.Serialize(value,
+            (System.Text.Json.Serialization.Metadata.JsonTypeInfo<T>)HMJsonContext.Default.GetTypeInfo(typeof(T))!);
+        static bool SameMap(Dictionary<string, string>? a, Dictionary<string, string>? b)
+        {
+            if (a == null || b == null) return a == b;
+            if (a.Count != b.Count) return false;
+            foreach (var kv in a)
+                if (!b.TryGetValue(kv.Key, out var v) || !string.Equals(v, kv.Value, StringComparison.Ordinal)) return false;
+            return true;
+        }
+        return Same(built.Descriptor, copy.Descriptor)
+            && copy.VendorId == _vid && copy.ProductId == _pid
+            && Same(built.Connection, copy.Connection)
+            && string.Equals(built.DeviceModelFrom, copy.DeviceModelFrom, StringComparison.Ordinal)
+            && string.Equals(built.DeviceModel, copy.DeviceModel, StringComparison.Ordinal)
+            && Same(built.DriverPid, copy.DriverPid)
+            && Json(built.FeatureStubs) == Json(copy.FeatureStubs)
+            && (built.ButtonMap ?? Array.Empty<int>()).AsSpan().SequenceEqual(copy.ButtonMap ?? Array.Empty<int>())
+            && (built.ButtonMap == null) == (copy.ButtonMap == null)
+            && SameMap(built.AxisMap, copy.AxisMap);
     }
 
     /// <summary>A value read again from its JSON, so the profile and the
@@ -482,14 +514,15 @@ public sealed class HMProfileBuilder
         inner.DriverPid = _driverPid;
         inner.FeatureStubs = _featureStubs == null ? null : CopyOf(_featureStubs);
         inner.ValueSources = _valueSources == null ? null : CopyOf(_valueSources);
-        // A copy keeps its source's USB form only as the same device: a new
-        // descriptor, ID or connection is a device the form does not
-        // describe, and it then presents its own data on both backends.
-        if (inner.UsbForm != null && (_copy == null || !string.Equals(inner.Descriptor, _copy.Descriptor, StringComparison.OrdinalIgnoreCase)
-            || _copy.VendorId != _vid || _copy.ProductId != _pid
-            || !string.Equals(inner.Connection, _copy.Connection, StringComparison.OrdinalIgnoreCase)))
+        // A copy keeps its source's USB form only as the same device. On
+        // USB/IP the form's descriptor, device model, feature answers, driver
+        // PID and maps replace the copy's own, so a copy that changes any of
+        // them, or its ID or connection, is a device the form does not
+        // describe, and it then presents its own data on both backends. A
+        // copy that keeps the form keeps the form its source resolved.
+        if (inner.UsbForm != null && (_copy == null || !SameDeviceAsCopy(inner, _copy)))
             inner.UsbForm = null;
-        inner.UsbFormProfile = null;
+        inner.UsbFormProfile = inner.UsbForm != null ? _usbFormProfile : null;
         inner.SourceFile = null;
         inner.MarkBuiltInCode(true);
         StampDeviceDescriptor(inner, _vid.Value, _pid.Value);
