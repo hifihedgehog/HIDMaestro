@@ -132,6 +132,11 @@ internal static class Program
         public string[] Interfaces { get; set; } = Array.Empty<string>();
         public string Companion { get; set; } = "";
         public string[] CompanionInterfaces { get; set; } = Array.Empty<string>();
+        /// <summary>An XUSB function on the USB/IP backend: xusb22 binds the
+        /// USB device and makes its HID child itself, so the child's
+        /// instance and interface path, and the DirectInput instance on it,
+        /// are xusb22's to name, not this controller's.</summary>
+        public bool ChildIsXusb22s { get; set; }
         public string DiGuid { get; set; } = "";
         public string SdlPath { get; set; } = "";
         public string UsbSerial { get; set; } = "";
@@ -253,13 +258,26 @@ internal static class Program
                 for (int i = 1; i < lives.Count; i++)
                 {
                     var diff = IdentityRecord.Differences(lives[0], lives[i]);
+                    if (lives[0].ChildIsXusb22s)
+                    {
+                        // The USB device, its XUSB interface, the XInput slot
+                        // and SDL's path are compared. xusb22's HID child is
+                        // printed: Windows 11 28000's xusb22 named it IG_00
+                        // in one life and IG_02 in the next, in one process
+                        // and across a restart, with the USB device
+                        // unchanged.
+                        var xusb22 = diff.Where(d => d.StartsWith("children") || d.StartsWith("interfaces") || d.StartsWith("dinput")).ToArray();
+                        if (xusb22.Length > 0) Console.WriteLine($"  life {i + 1} ({lives[i].Life}), xusb22's HID child: {string.Join("; ", xusb22)}");
+                        diff = diff.Except(xusb22).ToArray();
+                    }
                     if (diff.Length > 0)
                     {
                         allSame = false;
                         Console.WriteLine($"  life {i + 1} ({lives[i].Life}) differs: {string.Join("; ", diff)}");
                     }
                 }
-                Check($"{fam.Id}: every identity value identical across all {lives.Count} lives", allSame);
+                Check($"{fam.Id}: every identity value identical across all {lives.Count} lives" +
+                      (lives[0].ChildIsXusb22s ? ", xusb22's HID child aside" : ""), allSame);
                 baseline.Add(lives[0]);
             }
         }
@@ -274,9 +292,12 @@ internal static class Program
             // can hold index 0, so the first life takes the lowest free
             // index, and the second, after the first is gone, takes it
             // again. Each life is held to its own index's token.
+            // On USB/IP the index's identity is the USB device its serial
+            // names.
             static bool OwnToken(IdentityRecord r) =>
                 r.Key.StartsWith("index:", StringComparison.Ordinal) && int.TryParse(r.Key.AsSpan(6), out int n)
-                && r.Parent.EndsWith($@"\HM_{n:D4}", StringComparison.OrdinalIgnoreCase);
+                && (r.Parent.EndsWith($@"\HM_{n:D4}", StringComparison.OrdinalIgnoreCase)
+                    || (r.UsbSerial != "n/a" && r.Parent.EndsWith(@"\" + r.UsbSerial, StringComparison.OrdinalIgnoreCase)));
             Check("default key: index identity is stable across two lives",
                   a != null && b != null && OwnToken(a) && a.Key == b.Key
                   && IdentityRecord.Differences(a, b).Length == 0,
@@ -438,6 +459,17 @@ internal static class Program
             rec.Parent = $@"USB\VID_{vid:X4}&PID_{pid:X4}\{identity.SyntheticSerial}";
             for (int i = 0; i < 100 && CM_Locate_DevNodeW(out _, rec.Parent, 0) != 0; i++) Thread.Sleep(100);
         }
+        else if (c.Backend == HMBackend.Usbip)
+        {
+            // Any other family on the USB/IP backend, as every family runs
+            // where Windows does not install HIDMaestro's driver: the USB
+            // device the host controller carries is the parent, as the
+            // controller's USB/IP handle names it, and its HID children are
+            // Windows' own drivers' (HidUsb's, xusb22's, or the GIP
+            // driver's).
+            rec.UsbSerial = identity.SyntheticSerial;
+            rec.Parent = c.UsbipHandle?.Device.Descriptors.UsbInstanceId ?? "";
+        }
         else
         {
             rec.Parent = c.InstanceId ?? "";
@@ -460,7 +492,10 @@ internal static class Program
 
         if (fam.Id == "xbox-360-wired")
         {
-            rec.Companion = $@"SWD\HIDMAESTRO\{identity.Token}";
+            // On UMDF2 the XUSB companion publishes the XUSB interface. On
+            // USB/IP xusb22 binds the USB device and publishes it there.
+            rec.Companion = c.Backend == HMBackend.Usbip ? rec.Parent : $@"SWD\HIDMAESTRO\{identity.Token}";
+            rec.ChildIsXusb22s = c.Backend == HMBackend.Usbip;
             rec.CompanionInterfaces = InterfaceList(XusbGuid, rec.Companion).ToArray();
         }
 
@@ -493,7 +528,7 @@ internal static class Program
         Check($"{tag}: parent started", IsStarted(rec.Parent));
         Check($"{tag}: HID interface published", rec.Interfaces.Length > 0);
         if (fam.Id == "xbox-360-wired")
-            Check($"{tag}: XUSB interface published on the companion", rec.CompanionInterfaces.Length == 1,
+            Check($"{tag}: XUSB interface published on the {(c.Backend == HMBackend.Usbip ? "USB device xusb22 binds" : "companion")}", rec.CompanionInterfaces.Length == 1,
                   $"{rec.CompanionInterfaces.Length}");
 
         int outputs = 0;
@@ -754,8 +789,21 @@ internal static class Program
                 r1 = Measure(c1, fam, ds5, "dualsense");
             using var c2 = ctx.CreateController(ds4, key);
             var r2 = Measure(c2, fam, ds4, "dualshock-4-v2 at the same key");
-            var diff = IdentityRecord.Differences(r1, r2).Where(d => !d.StartsWith("dinput") && !d.StartsWith("sdl")).ToArray();
-            Check("profile change: parent, prefix, children and interfaces unchanged", diff.Length == 0, string.Join("; ", diff));
+            if (c2.Backend == HMBackend.Usbip)
+            {
+                // On USB/IP the VID and PID are the USB device's own, so the
+                // new profile is a new USB device, as another real device
+                // would be. The identity's serial stays with the key.
+                Check("profile change on USB/IP: a new USB device under the key's serial",
+                      r1.UsbSerial == r2.UsbSerial && r1.Parent != r2.Parent
+                      && r2.Parent.EndsWith(@"\" + r2.UsbSerial, StringComparison.OrdinalIgnoreCase),
+                      $"{r1.Parent} -> {r2.Parent}");
+            }
+            else
+            {
+                var diff = IdentityRecord.Differences(r1, r2).Where(d => !d.StartsWith("dinput") && !d.StartsWith("sdl")).ToArray();
+                Check("profile change: parent, prefix, children and interfaces unchanged", diff.Length == 0, string.Join("; ", diff));
+            }
             string? path = r2.Interfaces.FirstOrDefault();
             var attr = path != null ? HidAttributes(path) : null;
             Check("profile change: the HID attributes are the new profile's",
