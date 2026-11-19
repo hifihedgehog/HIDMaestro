@@ -1018,8 +1018,33 @@ internal static class Program
     struct POINT { public int X, Y; }
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
     const int VK_SCROLL = 0x91, VK_NUMLOCK = 0x90, VK_CAPITAL = 0x14;
     static bool ScrollLockOn() => (GetKeyState(VK_SCROLL) & 1) != 0;
+
+    /// <summary>The modifiers Windows holds down on this desktop, from any
+    /// keyboard, a removed one included.</summary>
+    static HMKeyModifiers HeldModifiers()
+    {
+        (int Vk, HMKeyModifiers Mod)[] map =
+        {
+            (0xA2, HMKeyModifiers.LeftControl), (0xA0, HMKeyModifiers.LeftShift), (0xA4, HMKeyModifiers.LeftAlt), (0x5B, HMKeyModifiers.LeftGui),
+            (0xA3, HMKeyModifiers.RightControl), (0xA1, HMKeyModifiers.RightShift), (0xA5, HMKeyModifiers.RightAlt), (0x5C, HMKeyModifiers.RightGui),
+        };
+        var held = HMKeyModifiers.None;
+        foreach (var (vk, mod) in map)
+            if ((GetAsyncKeyState(vk) & 0x8000) != 0) held |= mod;
+        return held;
+    }
+
+    /// <summary>Every virtual key Windows holds down on this desktop.</summary>
+    static string HeldKeys()
+    {
+        var down = new List<string>();
+        for (int vk = 1; vk < 256; vk++)
+            if ((GetAsyncKeyState(vk) & 0x8000) != 0) down.Add($"0x{vk:X2}");
+        return down.Count == 0 ? "none" : string.Join(" ", down);
+    }
 
     /// <summary>The lock LEDs Windows holds right now.</summary>
     static HMKeyboardLeds LockState() =>
@@ -1104,6 +1129,24 @@ internal static class Program
                   k1.KeyboardLeds == held && k2.KeyboardLeds == held,
                   $"{k1.KeyboardLeds?.ToString() ?? "null"}, {k2.KeyboardLeds?.ToString() ?? "null"}");
 
+            // A key a keyboard left down when its program ended stays down
+            // for every keyboard, and with Ctrl down Scroll Lock reads as
+            // Break and toggles nothing. Keyboard 1 lets go of the modifiers
+            // Windows holds, as a key-up from any keyboard does.
+            string keysBefore = HeldKeys();
+            var stale = HeldModifiers();
+            if (stale != HMKeyModifiers.None)
+            {
+                k1.SubmitKeyboard(stale, ReadOnlySpan<HMKey>.Empty);
+                k1.SubmitKeyboard(HMKeyModifiers.None, ReadOnlySpan<HMKey>.Empty);
+                var mw = Stopwatch.StartNew();
+                while (mw.ElapsedMilliseconds < 2000 && HeldModifiers() != HMKeyModifiers.None) Thread.Sleep(20);
+            }
+            Check("Windows holds no modifier down before the Scroll Lock press",
+                  HeldModifiers() == HMKeyModifiers.None,
+                  stale == HMKeyModifiers.None ? $"keys down: {keysBefore}"
+                      : $"keys down: {keysBefore}, {stale} let go, {HeldModifiers()} still down");
+
             // Scroll Lock pressed on keyboard 1: Windows toggles the lock and
             // sends the new state to every keyboard. Pressed twice, so the
             // state ends where it began.
@@ -1118,15 +1161,24 @@ internal static class Program
             Check($"Scroll Lock {(initial ? "off" : "on")}: the keyboard with Report ID 2 reads {want}",
                   got2 && k2.KeyboardLeds == want, w2.Seen);
 
-            w1.Clear();
-            w2.Clear();
-            PressScrollLock(k1);
-            bool back1 = WaitLeds(w1.Leds, initial, HangMs), back2 = WaitLeds(w2.Leds, initial, HangMs);
-            var rw = Stopwatch.StartNew();
-            while (rw.ElapsedMilliseconds < HangMs && ScrollLockOn() != initial) Thread.Sleep(20);
-            Check($"pressing it again restores Scroll Lock {(initial ? "on" : "off")} on both",
-                  back1 && back2 && ScrollLockOn() == initial && k1.KeyboardLeds == held && k2.KeyboardLeds == held,
-                  $"{w1.Seen} | {w2.Seen}");
+            // A first press that brought no LED report toggled nothing, so a
+            // second one would leave the lock toggled. It is not sent, and
+            // the run does not wait out three more bounds.
+            if (got1 || got2)
+            {
+                w1.Clear();
+                w2.Clear();
+                PressScrollLock(k1);
+                bool back1 = WaitLeds(w1.Leds, initial, HangMs), back2 = WaitLeds(w2.Leds, initial, HangMs);
+                var rw = Stopwatch.StartNew();
+                while (rw.ElapsedMilliseconds < HangMs && ScrollLockOn() != initial) Thread.Sleep(20);
+                Check($"pressing it again restores Scroll Lock {(initial ? "on" : "off")} on both",
+                      back1 && back2 && ScrollLockOn() == initial && k1.KeyboardLeds == held && k2.KeyboardLeds == held,
+                      $"{w1.Seen} | {w2.Seen}");
+            }
+            else
+                Check($"pressing it again restores Scroll Lock {(initial ? "on" : "off")} on both", false,
+                      $"not pressed: the first press brought neither keyboard an LED report, keys down: {HeldKeys()}");
         }
         k1.Dispose();
         k2.Dispose();
