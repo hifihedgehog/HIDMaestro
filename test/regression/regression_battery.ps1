@@ -3060,6 +3060,24 @@ function Scenario-Xusb-Wgi-Family {
     }
 }
 
+# S112: HMGamepadStateHelpers.StandardAxes keeps every stick's axes
+# when a profile's layout declares no triggers (switch-pro-usb,
+# dualshock-3, hori-horipad-switch, logitech-f310, logitech-f710). Offline
+# every catalog profile with a stick, live the right stick in the HID
+# report on the backend the run resolves to, then through SDL 3.4.18's
+# release DLL for this architecture beside the tree, as S108 reads it.
+function Scenario-Standard-Axes {
+    $failed = @()
+    foreach ($a in @('offline'), @('live', 'auto')) {
+        try { Invoke-Probe -Dir 'standard_axes_check' -Exe 'StandardAxesCheck.exe' -Arguments ($a -join ' ') -Tag $a[0] `
+                           -Message 'a stick lost its value to the trigger values (see probe stdout)' } catch { $failed += $_.Exception.Message }
+    }
+    $sdl = Join-Path (Split-Path $repoRoot) ('SDL3-release-3.4.18' + $(if ((Get-MachineArch) -eq 'arm64') { '-arm64' } else { '' }))
+    try { Invoke-Probe -Dir 'standard_axes_check' -Exe 'StandardAxesCheck.exe' -Arguments "sdl auto `"$sdl`"" -Tag 'sdl' `
+                       -Message 'SDL reads a right stick that StandardAxes filled elsewhere (see probe stdout)' } catch { $failed += $_.Exception.Message }
+    if ($failed.Count -gt 0) { throw ($failed -join ' AND ') }
+}
+
 # S101: removing HIDMaestro, HIDMaestroUninstall.exe and HMUninstall. On
 # every machine the tool's preview and the API's change nothing, read
 # against a snapshot the probe takes without the SDK. On a machine without
@@ -3321,7 +3339,8 @@ $scenarios = @(
     @{ Name = 'S108_Bt_Usb_Form';                Body = ${function:Scenario-Bt-Usb-Form} },
     @{ Name = 'S109_Xusb_Family';                Body = ${function:Scenario-Xusb-Family} },
     @{ Name = 'S110_Xusb_Battery_Receiver';      Body = ${function:Scenario-Xusb-Battery-Receiver} },
-    @{ Name = 'S111_Xusb_Wgi_Family';            Body = ${function:Scenario-Xusb-Wgi-Family} }
+    @{ Name = 'S111_Xusb_Wgi_Family';            Body = ${function:Scenario-Xusb-Wgi-Family} },
+    @{ Name = 'S112_Standard_Axes';              Body = ${function:Scenario-Standard-Axes} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
