@@ -766,9 +766,13 @@ internal static class Program
             .GetMethod("ResetDeviceState", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(device, null);
         Probe.Check("a port reset clears the stop", !proto.GetState("halted") && !proto.GetState("polling") && !proto.GetState("stalled"));
-        Probe.WaitFor(() => controller.Ports[0].GetOutput("rumble") == 0, 2000);
+        // The port's value is set before its change event is raised
+        // (HMPortSet.SetOutput), so the wait is for both: a look at the event
+        // queue the moment the value reads zero can come before the event.
+        Probe.WaitFor(() => controller.Ports[0].GetOutput("rumble") == 0 && s_outputs.Contains((1, "rumble", 0)), 2000);
         Probe.Check("and returns every motor command to zero", controller.Ports[0].GetOutput("rumble") == 0
-            && s_outputs.Contains((1, "rumble", 0)));
+            && s_outputs.Contains((1, "rumble", 0)),
+            $"rumble reads {controller.Ports[0].GetOutput("rumble")}, its change event {(s_outputs.Contains((1, "rumble", 0)) ? "arrived" : "did not arrive within 2 s")}");
         s_usb.ResetPipe(In);
         s_usb.ResetPipe(Out);
         Probe.Check("no report until 0x13 again", Read(150) == null && s_lastError == ERROR_SEM_TIMEOUT, $"error {s_lastError}");
