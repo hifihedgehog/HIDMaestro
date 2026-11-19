@@ -98,8 +98,8 @@ internal static partial class Program
         // wants to exercise. CreateController below installs it.
         bool preInstalled = HMContext.IsUsbipBackendAvailable;
         Console.WriteLine(preInstalled
-            ? "  [note] transport already installed; exercising the steady-state path."
-            : "  [note] transport NOT installed; exercising the first-run self-deploy path.");
+            ? "  [note] transport already installed: this run tests the steady-state path."
+            : "  [note] transport not installed: this run tests the first-run self-deploy path.");
 
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
@@ -852,8 +852,8 @@ internal static partial class Program
 
     /// <summary>Name of another running process that has the SDK loaded, or
     /// null when this probe has the sections to itself. Matching on the
-    /// loaded module rather than a process-name list catches any consumer,
-    /// not just the ones we thought to enumerate.</summary>
+    /// loaded module, rather than a list of process names, catches every
+    /// consumer, including ones no list names.</summary>
     static string? FindLiveSdkConsumer()
     {
         // Signal 1: a process with the SDK loaded. Misses a consumer that

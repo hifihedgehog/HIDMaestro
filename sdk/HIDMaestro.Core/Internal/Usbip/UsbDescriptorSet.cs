@@ -433,8 +433,8 @@ internal sealed class UsbDescriptorSet
             if (classByIface.Count == 0 || hidIface == 0xFF)
                 throw new ProfileDefectException(ConfigurationPath, "has no HID interface.");
 
-            // A spec-declared "hid" function wins; otherwise the first HID
-            // interface in the blob, which is the pre-#56 rule verbatim.
+            // The spec's "hid" function names the HID interface. Without one
+            // it is the first HID interface in the blob, the rule before #56.
             if (declaredPrimary != 0xFF && classByIface.ContainsKey(declaredPrimary))
                 hidIface = declaredPrimary;
             byte[] hidClass = classByIface[hidIface];

@@ -268,8 +268,9 @@ internal static unsafe partial class Program
                     var rest = new HMGamepadState();
                     pad.SubmitState(in rest);
                     // Vibration, like a reading, reaches the pad for a program
-                    // the session gives input to. Where readings arrive the
-                    // trigger levels must; elsewhere the result is recorded.
+                    // the session gives input to. Where readings arrive, the
+                    // trigger levels must arrive too. Elsewhere the result is
+                    // only recorded.
                     Motor(engine, "Gamepad.Vibration with trigger levels (left 1.0, right 0.5, left trigger 1.0, right trigger 0.5)", () =>
                     {
                         gp.Vibration = new Windows.Gaming.Input.GamepadVibration { LeftMotor = 1.0, RightMotor = 0.5, LeftTrigger = 1.0, RightTrigger = 0.5 };
