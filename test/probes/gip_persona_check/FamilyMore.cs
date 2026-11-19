@@ -129,7 +129,7 @@ internal static unsafe partial class Program
                       string.Join(" ", held.Where(m => m.Command == 0x02).Select(m => m.DeviceId.ToString("X16"))));
                 int s1 = SlotOf(p1, HMButton.A, 0x1000, before);
                 int s2 = SlotOf(p2, HMButton.B, 0x2000, before | (s1 >= 0 ? 1u << s1 : 0));
-                Check($"{a} and {b}: each reads its own submitted button in its own XInput slot", s1 >= 0 && s2 >= 0 && s1 != s2, $"slots {s1} and {s2}");
+                Check($"{a} and {b}: each reads its own submitted button in its own XInput slot", s1 >= 0 && s2 >= 0 && s1 != s2, $"slots {s1} and {s2}; {SlotStates()}");
                 if (s1 >= 0 && s2 >= 0)
                 {
                     // Each pad's state stays its own while the other's changes.

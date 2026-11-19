@@ -14,6 +14,12 @@ using HIDMaestro.Internal;
 
 internal static unsafe partial class Program
 {
+    /// <summary>What XInput reads on each connected slot: the packet
+    /// number, buttons and left stick.</summary>
+    static string SlotStates() => string.Join("; ", Enumerable.Range(0, 4).Select(i =>
+        XInputGetState((uint)i, out var st) == 0 ? $"slot {i} packet {st.dwPacketNumber} buttons 0x{st.Gamepad.wButtons:X4} LX {st.Gamepad.sThumbLX} LY {st.Gamepad.sThumbLY}" : null)
+        .Where(x => x != null));
+
     static int FamilyLive(IReadOnlyList<string> ids)
     {
         Console.WriteLine("\n=== family live: each xinputhid profile as the GIP function on USB/IP ===");
@@ -134,7 +140,7 @@ internal static unsafe partial class Program
                     return false;
                 }, 30_000);
                 Check($"{id}: an XInput slot that was free reads the submitted A and left stick", slot >= 0,
-                      slot >= 0 ? $"slot {slot}, {clock.ElapsedMilliseconds} ms after the create began" : $"connected: {Slots(ConnectedSlots())}");
+                      slot >= 0 ? $"slot {slot}, {clock.ElapsedMilliseconds} ms after the create began" : $"connected: {Slots(ConnectedSlots())}; {SlotStates()}");
                 if (slot >= 0)
                 {
                     uint s = (uint)slot;
