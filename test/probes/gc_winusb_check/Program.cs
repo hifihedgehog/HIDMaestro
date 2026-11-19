@@ -47,7 +47,7 @@ using System.Threading;
 using HIDMaestro;
 using HIDMaestro.Internal;
 
-internal static class Program
+internal static partial class Program
 {
     const uint CONFIGFLAG_REINSTALL = 0x20;
 
@@ -69,6 +69,15 @@ internal static class Program
     {
         if (args.Length > 0 && args[0] == "child")
             return Probe.RefuseWithoutDepartingRule("S81's child") ? 1 : Child();
+        if (args.Length > 0 && args[0] == "--bind-timing") return BindTiming();
+        // An argument this build does not know runs nothing it names, so it
+        // is refused rather than read as the default run.
+        var unknown = args.Where(a => a != "--os-descriptors").ToList();
+        if (unknown.Count > 0)
+        {
+            Console.WriteLine($"GcWinUsbCheck: unknown argument {string.Join(", ", unknown)}. Known: --os-descriptors, --bind-timing, child.");
+            return 64;
+        }
 
         Console.WriteLine("=== S81: the WinUSB binding of the GameCube adapter persona ===");
         if (Probe.OtherSdkRunning()) return 2;
@@ -81,6 +90,20 @@ internal static class Program
         ctx.LoadDefaultProfiles();
         var gc = ctx.GetProfile("gamecube-adapter")!;
 
+        // Where Windows installs no package signed as HIDMaestro's driver
+        // is, the device asks for WinUSB with its own Microsoft OS
+        // descriptors, and the package's rank, reclaim and lock order have
+        // no subject there (OsDescriptors.cs).
+        if (WinUsbBinding.BindsByOsDescriptors())
+        {
+            Console.WriteLine("  Windows here installs no package signed as HIDMaestro's driver is: the binding goes by Microsoft OS descriptors");
+            OsDescriptorBinding(ctx, gc);
+            ReplugFails(ctx, gc);
+            Probe.Check("no WinUSB hold left in the ledger", RegistryLedger.HeldWinUsbDevnodes().Count == 0,
+                string.Join(", ", RegistryLedger.HeldWinUsbDevnodes()));
+            return Probe.Finish("S81");
+        }
+
         BindAndRank(ctx, gc);
         Cycles(ctx, gc);
         LockOrder(ctx, gc);
@@ -88,6 +111,12 @@ internal static class Program
         Crash(ctx, gc, reclaimFirst: false);
         Crash(ctx, gc, reclaimFirst: true);
         Crash(ctx, gc, reclaimFirst: false, bindArrival: true);
+        if (args.Contains("--os-descriptors"))
+        {
+            WinUsbBinding.OsDescriptorsForProbe = true;
+            try { OsDescriptorBinding(ctx, gc); ReplugFails(ctx, gc); }
+            finally { WinUsbBinding.OsDescriptorsForProbe = false; }
+        }
 
         Console.WriteLine("-- afterward");
         Probe.Check("no WinUSB hold left in the ledger", RegistryLedger.HeldWinUsbDevnodes().Count == 0,

@@ -24,7 +24,7 @@
     <RootNamespace>HIDMaestro</RootNamespace>
     <Description>HIDMaestro UMDF2 virtual HID controller engine: embed in your app to create exact-fidelity virtual game controllers.</Description>
 
-    <!-- Pack everything (driver DLLs, INFs, signing/catalog tools, profile JSONs)
+    <!-- Pack everything (driver DLLs, INFs, profile JSONs)
          inside the assembly as embedded resources so single-file publishing in
          the consuming app picks them up automatically: no sibling files, no
          WDK install required on the user's machine. -->
@@ -35,40 +35,18 @@
     <HMBuildDir>$(HMRepoRoot)build\</HMBuildDir>
   </PropertyGroup>
 
-  <!-- What the build carries, and where the kits come from. MSBuild reads
-       environment variables as properties, so each setting works as an
-       environment variable for scripts\build_all.cmd and this project alike,
-       or as -p: on this project. docs/design/coexistence.md ("Building from
-       source") has the table. Official releases set none of them.
+  <!-- What the build carries. MSBuild reads environment variables as
+       properties, so each setting works as an environment variable for
+       scripts\build_all.cmd and this project alike, or as -p: on this
+       project. docs/design/coexistence.md ("Building from source") has the
+       table. Official releases set neither. The SDK carries no tool from a
+       Windows kit: it writes and signs the driver catalogs through Windows'
+       own wintrust.dll and mssign32.dll when it installs the driver.
          HMSkipArm64=true  the x64 payload only, and no ARM64 usbip-win2
                            host controller files.
          HMSkipUsbip=true  no USB/IP transport: no host controller files,
-                           and no installer downloaded to unpack them.
-         HM_SDK_ROOT       the Windows SDK. Default WindowsSdkDir, which a
-                           Visual Studio or EWDK prompt sets, else the
-                           installed kit.
-         HM_WDK_ROOT       the WDK. Default WDKContentRoot, which an EWDK
-                           prompt sets, else HM_SDK_ROOT.
-         HM_WDK_VERSION    the kits' version folder. Default Version_Number,
-                           which an EWDK prompt sets, else 10.0.26100.0.
-         HMWdkBin          the folder whose x64\ and arm64\ hold the signtool
-                           set. Default bin\<version>\ under HM_SDK_ROOT.
-         HMInf2catBin      the folder whose x86\ holds Inf2Cat. Default
-                           bin\<version>\ under HM_WDK_ROOT. -->
+                           and no installer downloaded to unpack them. -->
   <PropertyGroup>
-    <HMKitVersion>$(HM_WDK_VERSION)</HMKitVersion>
-    <HMKitVersion Condition="'$(HMKitVersion)' == ''">$(Version_Number)</HMKitVersion>
-    <HMKitVersion Condition="'$(HMKitVersion)' == ''">10.0.26100.0</HMKitVersion>
-    <HMSdkRoot>$(HM_SDK_ROOT)</HMSdkRoot>
-    <HMSdkRoot Condition="'$(HMSdkRoot)' == ''">$(WindowsSdkDir)</HMSdkRoot>
-    <HMSdkRoot Condition="'$(HMSdkRoot)' == ''">$(MSBuildProgramFiles32)\Windows Kits\10</HMSdkRoot>
-    <HMWdkRoot>$(HM_WDK_ROOT)</HMWdkRoot>
-    <HMWdkRoot Condition="'$(HMWdkRoot)' == ''">$(WDKContentRoot)</HMWdkRoot>
-    <HMWdkRoot Condition="'$(HMWdkRoot)' == ''">$(HMSdkRoot)</HMWdkRoot>
-    <HMWdkBin Condition="'$(HMWdkBin)' == ''">$([MSBuild]::EnsureTrailingSlash('$(HMSdkRoot)'))bin\$(HMKitVersion)\</HMWdkBin>
-    <HMInf2catBin Condition="'$(HMInf2catBin)' == ''">$([MSBuild]::EnsureTrailingSlash('$(HMWdkRoot)'))bin\$(HMKitVersion)\</HMInf2catBin>
-    <_HMSignDir>$([MSBuild]::EnsureTrailingSlash('$(HMWdkBin)'))</_HMSignDir>
-    <_HMInf2catDir>$([MSBuild]::EnsureTrailingSlash('$(HMInf2catBin)'))</_HMInf2catDir>
     <_HMWithArm64 Condition="'$(HMSkipArm64)' != 'true'">true</_HMWithArm64>
     <_HMWithUsbip Condition="'$(HMSkipUsbip)' != 'true'">true</_HMWithUsbip>
     <_HMUsbipArchs>x64</_HMUsbipArchs>
@@ -91,8 +69,8 @@
 
          The ARM64 installer: the 0.9.8.1 release page carries the x64
          installer only. This is the ARM64 build of the same tag that the
-         project's signer posted in usbip-win2 issue #13, with drivers
-         attestation-signed by Microsoft. -->
+         project's signer posted in usbip-win2 issue #13, its drivers
+         signed as the project ships them. -->
     <HMUsbipVersion>0.9.8.1</HMUsbipVersion>
     <HMUsbipAsset>USBip-$(HMUsbipVersion)-x64.exe</HMUsbipAsset>
     <HMUsbipSha256>38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a</HMUsbipSha256>
@@ -123,64 +101,19 @@
          Embedded here so single-file deployment still has it. -->
     <_HMDriverName Include="hmswd.exe" />
 
-    <!-- signtool.exe + its SXS dep tree, from the Windows SDK -->
-    <_HMSignName Include="signtool.exe" />
-    <_HMSignName Include="signtool.exe.manifest" />
-    <_HMSignName Include="mssign32.dll" />
-    <_HMSignName Include="Microsoft.Windows.Build.Signing.mssign32.dll.manifest" />
-    <_HMSignName Include="wintrust.dll" />
-    <_HMSignName Include="wintrust.dll.ini" />
-    <_HMSignName Include="Microsoft.Windows.Build.Signing.wintrust.dll.manifest" />
-    <_HMSignName Include="appxsip.dll" />
-    <_HMSignName Include="Microsoft.Windows.Build.Appx.AppxSip.dll.manifest" />
-    <_HMSignName Include="appxpackaging.dll" />
-    <_HMSignName Include="Microsoft.Windows.Build.Appx.AppxPackaging.dll.manifest" />
-    <_HMSignName Include="opcservices.dll" />
-    <_HMSignName Include="Microsoft.Windows.Build.Appx.OpcServices.dll.manifest" />
-
     <!-- One payload set per target architecture. Driver, XUSB
-         companion, SWD helper, both stamped INFs and the signing
-         tool tree all differ by architecture, and the machine that
-         installs them is the one that runs them. -->
+         companion, SWD helper and both stamped INFs all differ by
+         architecture, and the machine that installs them is the one
+         that runs them. -->
     <_HMNative Include="@(_HMDriverName->'$(HMBuildDir)%(Identity)')">
       <StagedPath>$(_HMResources)x64\%(Filename)%(Extension)</StagedPath>
       <LogicalName>HIDMaestro.Native.x64.%(Filename)%(Extension)</LogicalName>
-    </_HMNative>
-    <_HMNative Include="@(_HMSignName->'$(_HMSignDir)x64\%(Identity)')">
-      <StagedPath>$(_HMResources)x64\%(Filename)%(Extension)</StagedPath>
-      <LogicalName>HIDMaestro.Native.x64.%(Filename)%(Extension)</LogicalName>
-      <Kit>HMWdkBin</Kit>
     </_HMNative>
     <_HMNative Include="@(_HMDriverName->'$(HMBuildDir)arm64\%(Identity)')" Condition="'$(_HMWithArm64)' == 'true'">
       <StagedPath>$(_HMResources)arm64\%(Filename)%(Extension)</StagedPath>
       <LogicalName>HIDMaestro.Native.arm64.%(Filename)%(Extension)</LogicalName>
     </_HMNative>
-    <_HMNative Include="@(_HMSignName->'$(_HMSignDir)arm64\%(Identity)')" Condition="'$(_HMWithArm64)' == 'true'">
-      <StagedPath>$(_HMResources)arm64\%(Filename)%(Extension)</StagedPath>
-      <LogicalName>HIDMaestro.Native.arm64.%(Filename)%(Extension)</LogicalName>
-      <Kit>HMWdkBin</Kit>
-    </_HMNative>
 
-    <!-- Inf2Cat.exe and the files it loads or reads, from the WDK's x86
-         folder. Inf2Cat.exe and its UniversalStore libraries are AMD64 .NET
-         assemblies, so one copy serves both targets. apivalidator.exe,
-         microsoft.kits.drivers.apivalidator.dll and
-         Microsoft.Extensions.CommandLineUtils.dll were tested and are NOT
-         required for /os:10_X64 catalog generation. inf2cat.exe.manifest
-         and Microsoft.Kits.Logger.dll, carried until v2.0.0, do nothing:
-         no assembly here references the logger, Inf2Cat.exe's embedded
-         manifest takes precedence over an external one, and the NuGet WDK
-         carries neither (docs/design/coexistence.md). -->
-    <_HMNeutral Include="$(_HMInf2catDir)x86\Inf2Cat.exe;
-                         $(_HMInf2catDir)x86\WindowsProtectedFiles.xml;
-                         $(_HMInf2catDir)x86\Microsoft.UniversalStore.HardwareWorkflow.Cabinets.dll;
-                         $(_HMInf2catDir)x86\Microsoft.UniversalStore.HardwareWorkflow.Catalogs.dll;
-                         $(_HMInf2catDir)x86\Microsoft.UniversalStore.HardwareWorkflow.InfReader.dll;
-                         $(_HMInf2catDir)x86\Microsoft.UniversalStore.HardwareWorkflow.SubmissionBuilder.dll">
-      <StagedPath>$(_HMResources)%(Filename)%(Extension)</StagedPath>
-      <LogicalName>HIDMaestro.Resources.%(Filename)%(Extension)</LogicalName>
-      <Kit>HMInf2catBin</Kit>
-    </_HMNeutral>
     <!-- The notices for usbip-win2 and DsHidMini, written beside
          usbip-win2 when HIDMaestro installs it. -->
     <_HMNeutral Include="$(MSBuildThisFileDirectory)THIRD-PARTY-NOTICES.txt">
@@ -217,27 +150,19 @@
   </ItemGroup>
 
   <!-- Pre-build: stage the payload above into Resources/ (gitignored) from
-       build/, the kits and the pinned downloads, then embed exactly what
+       build/ and the pinned downloads, then embed exactly what
        was staged. This runs once per `dotnet build`, so the embedded bytes
        always reflect the latest driver binaries. -->
   <Target Name="PackResources" BeforeTargets="BeforeBuild">
     <MakeDir Directories="$(_HMResources)" />
 
-    <!-- Every source is checked before anything is copied, so a missing
-         native build or a wrong kit root stops the build with the setting
-         to change. -->
+    <!-- The native build is checked before anything is copied, so a
+         missing one stops the build with the step
+         to run. -->
     <Error Condition="!Exists('$(HMBuildDir)HIDMaestro.dll')"
            Text="No x64 driver in $(HMBuildDir). Run scripts\build_all.cmd, which builds the native payloads before this project." />
     <Error Condition="'$(_HMWithArm64)' == 'true' and !Exists('$(HMBuildDir)arm64\HIDMaestro.dll')"
            Text="No ARM64 driver in $(HMBuildDir)arm64\. Run scripts\build_all.cmd, which builds both architectures before this project, or set HMSkipArm64=true for an x64-only build." />
-    <ItemGroup>
-      <_HMSignMissing Include="@(_HMNative)" Condition="'%(_HMNative.Kit)' == 'HMWdkBin' and !Exists('%(_HMNative.FullPath)')" />
-      <_HMInf2catMissing Include="@(_HMNeutral)" Condition="'%(_HMNeutral.Kit)' == 'HMInf2catBin' and !Exists('%(_HMNeutral.FullPath)')" />
-    </ItemGroup>
-    <Error Condition="'@(_HMSignMissing)' != ''"
-           Text="The signtool set is not under HMWdkBin, $(_HMSignDir). Missing: @(_HMSignMissing->'%(FullPath)', '; '). HMWdkBin defaults to bin\$(HMKitVersion)\ under HM_SDK_ROOT, here $(HMSdkRoot). Set HM_SDK_ROOT to a Windows SDK root, or HMWdkBin to a folder whose x64\ and arm64\ hold the set." />
-    <Error Condition="'@(_HMInf2catMissing)' != ''"
-           Text="Inf2Cat is not under HMInf2catBin, $(_HMInf2catDir)x86\. Missing: @(_HMInf2catMissing->'%(Filename)%(Extension)', ', '). HMInf2catBin defaults to bin\$(HMKitVersion)\ under HM_WDK_ROOT, here $(HMWdkRoot). Set HM_WDK_ROOT to a WDK root (an installed WDK, the EWDK's Program Files\Windows Kits\10, or the c folder of the Microsoft.Windows.WDK.x64 NuGet package), or HMInf2catBin to a folder whose x86\ holds Inf2Cat." />
 
     <Copy SourceFiles="@(_HMNative)" DestinationFiles="@(_HMNative->'%(StagedPath)')" SkipUnchangedFiles="true" />
     <Copy SourceFiles="@(_HMNeutral)" DestinationFiles="@(_HMNeutral->'%(StagedPath)')" SkipUnchangedFiles="true" />

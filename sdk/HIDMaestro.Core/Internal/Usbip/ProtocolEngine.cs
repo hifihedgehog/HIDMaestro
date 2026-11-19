@@ -37,6 +37,8 @@ internal sealed unsafe class ProtocolEngine
     // chunk at a time, and _headOffset is how much of it has gone out.
     private readonly byte[][] _replyBuf;
     private readonly int[] _replyLen;
+    // Per queued reply: the timer that queued it, or -1 for a rule's.
+    private readonly int[] _replyOrigin;
     private int _replyHead, _replyCount, _headOffset;
 
     // The command log: the last commands with their arrival times.
@@ -57,6 +59,27 @@ internal sealed unsafe class ProtocolEngine
     // Per layout, the frame counters its program writes. A frame counter
     // advances on a message that carries it.
     private readonly uint[] _framesWritten;
+    // Per counter, whether it skips 0 as it advances.
+    private readonly bool[] _skipZero;
+    // The message streams: each one's layouts in declaration order, the
+    // layout each stream selected last, and where the next build starts
+    // looking, so a stream that always has a report cannot keep the others
+    // waiting. A device without named streams has one stream of every layout.
+    private readonly int[][] _streams;
+    private readonly bool[] _streamNamed;
+    private readonly int[] _streamSelected;
+    private int _streamCursor;
+    // The unnamed stream, which holds the layouts sent on submit, or -1.
+    private readonly int _unnamedStream;
+    // Per layout, the bytes a change test compares: all but the ones its
+    // counters write, which number each message and differ on every one.
+    private readonly bool[]?[] _changeIgnores;
+    // Timers: whether each runs, when it is next due, and where it is in its
+    // schedule (-1 before its first message).
+    private readonly bool[] _timerOn;
+    private readonly long[] _timerDue;
+    private readonly int[] _timerStep;
+    private readonly int[] _timerLeft;
     private bool _inputOpen;
     private long _inputOpenedAt;
     private long _clockOrigin = Stopwatch.GetTimestamp();
@@ -133,12 +156,24 @@ internal sealed unsafe class ProtocolEngine
                     _values[part] = CompiledProtocol.ValueBytes(part.ValueSource!, part.Encoding, part.Width, part.Add, serial, index);
         }
         Values(protocol.ReplyPrefix);
-        foreach (var r in protocol.Rules) Values(r.Reply);
+        foreach (var r in protocol.Rules)
+        {
+            Values(r.Reply);
+            if (r.Packets != null) foreach (var packet in r.Packets) Values(packet);
+        }
+        foreach (var t in protocol.Timers) Values(t.Reply);
+        _skipZero = new bool[_m.CounterNames.Length];
+        for (int i = 0; i < _skipZero.Length && i < _m.CounterSkipZero.Length; i++) _skipZero[i] = _m.CounterSkipZero[i];
+        _timerOn = new bool[protocol.Timers.Length];
+        _timerDue = new long[protocol.Timers.Length];
+        _timerStep = new int[protocol.Timers.Length];
+        _timerLeft = new int[protocol.Timers.Length];
 
         int reply = Math.Max(1, protocol.MaxReplyLength);
         _replyBuf = new byte[protocol.PendingReplies][];
         for (int i = 0; i < _replyBuf.Length; i++) _replyBuf[i] = new byte[reply];
         _replyLen = new int[protocol.PendingReplies];
+        _replyOrigin = new int[protocol.PendingReplies];
 
         _logTicks = new long[protocol.LogCapacity];
         _logBuf = new byte[protocol.LogCapacity][];
@@ -169,6 +204,39 @@ internal sealed unsafe class ProtocolEngine
         _framesWritten = new uint[_m.Layouts.Length];
         for (int i = 0; i < _framesWritten.Length; i++)
             _framesWritten[i] = CountersWritten(_m.Layouts[i].Program.Spec.Ops);
+        var order = new List<string?>();
+        var members = new List<List<int>>();
+        for (int i = 0; i < _m.Layouts.Length; i++)
+        {
+            int s = order.IndexOf(_m.Layouts[i].Stream);
+            if (s < 0) { s = order.Count; order.Add(_m.Layouts[i].Stream); members.Add(new List<int>()); }
+            members[s].Add(i);
+        }
+        if (order.Count == 0) { order.Add(null); members.Add(new List<int>()); }
+        _streams = members.ConvertAll(l => l.ToArray()).ToArray();
+        _streamNamed = order.ConvertAll(n => n != null).ToArray();
+        _streamSelected = new int[_streams.Length];
+        Array.Fill(_streamSelected, -1);
+        _unnamedStream = order.IndexOf(null);
+        _changeIgnores = new bool[]?[_m.Layouts.Length];
+        for (int i = 0; i < _m.Layouts.Length; i++)
+        {
+            var form = _m.Layouts[i];
+            if (form.Send != SendRule.Change || form.Stream == null) continue;
+            var ignore = new bool[form.Size];
+            bool any = false;
+            void Mark(Op[] ops)
+            {
+                foreach (var op in ops)
+                {
+                    if (op is CounterOp k)
+                        for (int b = k.Dst; b < k.Dst + k.Width && b < ignore.Length; b++) { ignore[b] = true; any = true; }
+                    else if (op is WhenOp w) Mark(w.Ops);
+                }
+            }
+            Mark(form.Program.Spec.Ops);
+            if (any) _changeIgnores[i] = ignore;
+        }
 
         int capacity = Math.Max(protocol.ReportSize,
             Math.Max(SharedMemoryIO.EXTENDED_DATA_CAPACITY, SharedMemoryIO.DATA_CAPACITY + 1));
@@ -215,6 +283,21 @@ internal sealed unsafe class ProtocolEngine
         Array.Clear(_counters);
         _m.CounterInitial.CopyTo(_counters, 0);
         _inputOpen = _p.InputWhile == null || _p.InputWhile.Holds(_regs);
+        // Every stream selects afresh and every timer's schedule starts
+        // again from its condition. The constructor runs this before the
+        // arrays exist.
+        if (_streamSelected != null) Array.Fill(_streamSelected, -1);
+        _streamCursor = 0;
+        if (_timerOn != null) Array.Clear(_timerOn);
+    }
+
+    /// <summary>A counter one step on: it wraps at its width, and a counter
+    /// that skips 0 goes from its largest value to 1.</summary>
+    private void AdvanceLocked(int c)
+    {
+        uint v = (_counters[c] + 1) & _counterMask[c];
+        if (v == 0 && _skipZero[c]) v = 1;
+        _counters[c] = v;
     }
 
     /// <summary>The report a device with nothing submitted sends: the report
@@ -428,16 +511,28 @@ internal sealed unsafe class ProtocolEngine
         {
             LogLocked(command, timestamp);
             if (HaltedLocked() || command.Length == 0) return NoRule;
-            int ri = MatchLocked(command);
+            int ri = MatchLocked(command, 0);
             if (ri < 0) return NoRule;
-            var rule = _p.Rules[ri];
 
             var effect = Effect.None;
-            if (rule.Reply != null && EnqueueReplyLocked(rule, command)) effect |= Effect.Reply;
-
             Span<uint> before = stackalloc uint[_m.Registers.Names.Length];
             _regs.AsSpan(0, before.Length).CopyTo(before);
-            ApplyLocked(rule, command);
+            bool consume = false;
+            var rule = _p.Rules[ri];
+            // A rule marked continue applies, and the rules after it are
+            // tried on the same command, each reply built before that rule
+            // sets anything. The last rule that applies is the command's own.
+            while (true)
+            {
+                rule = _p.Rules[ri];
+                if ((rule.Reply != null || rule.Packets != null) && EnqueueReplyLocked(rule, command)) effect |= Effect.Reply;
+                ApplyLocked(rule, command);
+                consume |= rule.Consume;
+                if (!rule.Continue) break;
+                int next = MatchLocked(command, ri + 1);
+                if (next < 0) break;
+                ri = next;
+            }
             if (!before.SequenceEqual(_regs.AsSpan(0, before.Length))) effect |= Effect.StateChanged;
 
             if (HaltedLocked())
@@ -445,7 +540,7 @@ internal sealed unsafe class ProtocolEngine
                 _replyHead = _replyCount = _headOffset = 0;
                 _messageLength = 0;
                 _messageOffset = 0;
-                return new CommandResult(effect | Effect.Halted, ri, rule.Consume, rule.Emit, rule.Decode);
+                return new CommandResult(effect | Effect.Halted, ri, consume, rule.Emit, rule.Decode);
             }
             bool open = _p.InputWhile == null || _p.InputWhile.Holds(_regs);
             if (open && !_inputOpen)
@@ -458,7 +553,7 @@ internal sealed unsafe class ProtocolEngine
             }
             else if (!open && _inputOpen) effect |= Effect.InputClosed;
             _inputOpen = open;
-            return new CommandResult(effect, ri, rule.Consume, rule.Emit, rule.Decode);
+            return new CommandResult(effect, ri, consume, rule.Emit, rule.Decode);
         }
     }
 
@@ -467,16 +562,29 @@ internal sealed unsafe class ProtocolEngine
     /// the rule the device ran.</summary>
     public int Match(ReadOnlySpan<byte> command)
     {
-        lock (_sync) return MatchLocked(command);
+        lock (_sync)
+        {
+            // Past the rules marked continue to the command's own rule, the
+            // last that applies, whose decode is the command's.
+            int ri = MatchLocked(command, 0);
+            while (ri >= 0 && _p.Rules[ri].Continue)
+            {
+                int next = MatchLocked(command, ri + 1);
+                if (next < 0) break;
+                ri = next;
+            }
+            return ri;
+        }
     }
 
-    private int MatchLocked(ReadOnlySpan<byte> command)
+    private int MatchLocked(ReadOnlySpan<byte> command, int from)
     {
         var rules = _p.Rules;
-        for (int i = 0; i < rules.Length; i++)
+        for (int i = from; i < rules.Length; i++)
         {
             var r = rules[i];
             if (command.Length < r.MinLength || command.Length > r.MaxLength) continue;
+            if (r.While != null && !r.While.Holds(_regs)) continue;
             int end = r.At + r.Match.Length;
             if (command.Length < end) continue;
             bool hit = true;
@@ -543,6 +651,18 @@ internal sealed unsafe class ProtocolEngine
     /// Returns false when it was dropped.</summary>
     private bool EnqueueReplyLocked(CompiledProtocol.Rule rule, ReadOnlySpan<byte> cmd)
     {
+        if (rule.Packets == null) return EnqueueLocked(rule, rule.Reply!, cmd, prefix: true);
+        // Each reply a message of its own, in order. One the queue drops
+        // leaves the rest.
+        bool any = false;
+        foreach (var packet in rule.Packets) any |= EnqueueLocked(rule, packet, cmd, prefix: false);
+        return any;
+    }
+
+    /// <summary>Queue one message built from <paramref name="parts"/>, with
+    /// the protocol's prefix when the rule takes it.</summary>
+    private bool EnqueueLocked(CompiledProtocol.Rule? rule, CompiledProtocol.Part[] parts, ReadOnlySpan<byte> cmd, bool prefix, int origin = -1)
+    {
         if (_replyCount >= _p.PendingReplies)
         {
             switch (_p.Overflow)
@@ -562,18 +682,19 @@ internal sealed unsafe class ProtocolEngine
             }
         }
         int slot = (_replyHead + _replyCount) % _replyBuf.Length;
-        _replyLen[slot] = BuildReplyLocked(rule, cmd, _replyBuf[slot]);
+        _replyLen[slot] = BuildReplyLocked(rule, parts, cmd, _replyBuf[slot], prefix);
+        _replyOrigin[slot] = origin;
         _replyCount++;
         return true;
     }
 
-    private int BuildReplyLocked(CompiledProtocol.Rule rule, ReadOnlySpan<byte> cmd, byte[] dst)
+    private int BuildReplyLocked(CompiledProtocol.Rule? rule, CompiledProtocol.Part[] parts, ReadOnlySpan<byte> cmd, byte[] dst, bool prefix)
     {
         int at = 0;
-        if (rule.UsePrefix && _p.ReplyPrefix != null)
+        if (prefix && rule is { UsePrefix: true } && _p.ReplyPrefix != null)
             foreach (var part in _p.ReplyPrefix) at = WritePartLocked(part, rule, cmd, dst, at);
-        foreach (var part in rule.Reply!) at = WritePartLocked(part, rule, cmd, dst, at);
-        if (rule.ReplyLength > at)
+        foreach (var part in parts) at = WritePartLocked(part, rule, cmd, dst, at);
+        if (prefix && rule != null && rule.ReplyLength > at)
         {
             dst.AsSpan(at, rule.ReplyLength - at).Clear();
             at = rule.ReplyLength;
@@ -581,7 +702,76 @@ internal sealed unsafe class ProtocolEngine
         return at;
     }
 
-    private int WritePartLocked(CompiledProtocol.Part part, CompiledProtocol.Rule rule, ReadOnlySpan<byte> cmd, byte[] dst, int at)
+    // ── Timers ───────────────────────────────────────────────────────────
+
+    /// <summary>Queue each timed message due at <paramref name="nowTicks"/>,
+    /// a Stopwatch time. A timer whose condition holds and did not before
+    /// starts its schedule now, and one whose condition stops holding stops.
+    /// A message that comes due queues after the replies waiting, unless the
+    /// timer's last message still waits or the queue is full: then it is not
+    /// queued, and its schedule moves on. A timer that fires sets its
+    /// registers. A timer that fell more than a period behind fires once and
+    /// skips the points it passed. Returns true when a message was queued.</summary>
+    public bool RunTimers(long nowTicks)
+    {
+        var timers = _p.Timers;
+        if (timers.Length == 0) return false;
+        bool queued = false;
+        lock (_sync)
+        {
+            if (HaltedLocked()) return false;
+            for (int i = 0; i < timers.Length; i++)
+            {
+                var t = timers[i];
+                if (t.While != null && !t.While.Holds(_regs))
+                {
+                    _timerOn[i] = false;
+                    continue;
+                }
+                if (!_timerOn[i])
+                {
+                    _timerOn[i] = true;
+                    _timerDue[i] = nowTicks + t.FirstTicks;
+                    _timerStep[i] = -1;
+                    _timerLeft[i] = 0;
+                }
+                if (nowTicks < _timerDue[i]) continue;
+                foreach (var (reg, value) in t.Sets) _regs[reg] = value;
+                if (t.Reply != null && _replyCount < _p.PendingReplies && !WaitingFromLocked(i)
+                    && EnqueueLocked(null, t.Reply, ReadOnlySpan<byte>.Empty, prefix: false, origin: i)) queued = true;
+                // The next point, past now: each step's count in turn, the
+                // last step repeating.
+                do
+                {
+                    if (_timerStep[i] < 0)
+                    {
+                        _timerStep[i] = 0;
+                        _timerLeft[i] = t.Steps[0].Count;
+                    }
+                    else if (t.Steps[_timerStep[i]].Count > 0 && --_timerLeft[i] == 0)
+                    {
+                        _timerStep[i]++;
+                        _timerLeft[i] = t.Steps[_timerStep[i]].Count;
+                    }
+                    _timerDue[i] += Math.Max(1, t.Steps[_timerStep[i]].PeriodTicks);
+                } while (_timerDue[i] <= nowTicks);
+            }
+        }
+        return queued;
+    }
+
+    /// <summary>Whether a message timer <paramref name="timer"/> queued still waits.</summary>
+    private bool WaitingFromLocked(int timer)
+    {
+        for (int k = 0; k < _replyCount; k++)
+            if (_replyOrigin[(_replyHead + k) % _replyOrigin.Length] == timer) return true;
+        return false;
+    }
+
+    /// <summary>True when the protocol declares timers.</summary>
+    public bool HasTimers => _p.Timers.Length > 0;
+
+    private int WritePartLocked(CompiledProtocol.Part part, CompiledProtocol.Rule? rule, ReadOnlySpan<byte> cmd, byte[] dst, int at)
     {
         int length = part.FixedLength >= 0 ? part.FixedLength : (int)part.Length.Read(cmd);
         var span = dst.AsSpan(at, length);
@@ -616,7 +806,7 @@ internal sealed unsafe class ProtocolEngine
                 int c = part.Index;
                 WriteNumber(span, _counters[c], part.BigEndian);
                 var on = _m.CounterOn[c];
-                if (on is CounterEvent.Read or CounterEvent.Frame) _counters[c] = (_counters[c] + 1) & _counterMask[c];
+                if (on is CounterEvent.Read or CounterEvent.Frame) AdvanceLocked(c);
                 break;
             }
             case CompiledProtocol.PartKind.Memory:
@@ -640,7 +830,7 @@ internal sealed unsafe class ProtocolEngine
                 _values[part].CopyTo(span);
                 break;
             case CompiledProtocol.PartKind.Status:
-                span[0] = rule.Status;
+                span[0] = rule?.Status ?? _p.DefaultStatus;
                 break;
         }
         return at + length;
@@ -804,15 +994,50 @@ internal sealed unsafe class ProtocolEngine
     /// holds, or -1.</summary>
     public int SelectedLayout
     {
-        get { lock (_sync) return SelectLocked(); }
+        get { lock (_sync) return PickLocked(_unnamedStream >= 0 ? _unnamedStream : 0); }
     }
 
-    private int SelectLocked()
+    /// <summary>The unnamed stream's layout, or with none the first stream's.</summary>
+    private int SelectLocked() => SelectStreamLocked(_unnamedStream >= 0 ? _unnamedStream : 0);
+
+    /// <summary>The layout stream <paramref name="stream"/> selects now: the
+    /// first of its layouts whose condition holds, or -1. A layout of a named
+    /// stream that becomes selected forgets the bytes it last sent.</summary>
+    private int SelectStreamLocked(int stream)
     {
+        int pick = PickLocked(stream);
+        if (pick != _streamSelected[stream])
+        {
+            if (_streamNamed[stream] && pick >= 0) _sentOnce[pick] = false;
+            _streamSelected[stream] = pick;
+        }
+        return pick;
+    }
+
+    /// <summary>The first layout of stream <paramref name="stream"/> whose
+    /// condition holds, or -1, with nothing recorded: what a read-only
+    /// question about the selection reads.</summary>
+    private int PickLocked(int stream)
+    {
+        var members = _streams[stream];
         var layouts = _m.Layouts;
-        for (int i = 0; i < layouts.Length; i++)
+        for (int k = 0; k < members.Length; k++)
+        {
+            int i = members[k];
             if (layouts[i].While == null || layouts[i].While!.Holds(_regs)) return i;
+        }
         return -1;
+    }
+
+    /// <summary>Whether a change layout's bytes are the ones it last sent,
+    /// apart from the bytes its counters write.</summary>
+    private bool SameAsSentLocked(int layout, ReadOnlySpan<byte> built)
+    {
+        var last = _lastSent[layout];
+        if (_changeIgnores[layout] is not { } ignore) return built.SequenceEqual(last);
+        for (int b = 0; b < built.Length; b++)
+            if (!ignore[b] && built[b] != last[b]) return false;
+        return true;
     }
 
     /// <summary>Build the report a tick of the device clock sends and count
@@ -859,7 +1084,7 @@ internal sealed unsafe class ProtocolEngine
         {
             lock (_sync)
             {
-                int layout = SelectLocked();
+                int layout = PickLocked(_unnamedStream >= 0 ? _unnamedStream : 0);
                 return layout >= 0 && _m.Layouts[layout].Send == SendRule.Submit;
             }
         }
@@ -874,7 +1099,27 @@ internal sealed unsafe class ProtocolEngine
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int BuildLocked<TSet>(ref TSet set, Span<byte> dst, SendRule occasion, bool commit, out int layout) where TSet : struct, IReportSet
     {
-        layout = SelectLocked();
+        int n = _streams.Length;
+        if (n == 1) return BuildStreamLocked(ref set, dst, 0, occasion, commit, out layout);
+        // Several streams: the first, from the cursor on, with a report to
+        // send, and the cursor moves past a stream that sent one.
+        for (int k = 0; k < n; k++)
+        {
+            int stream = (_streamCursor + k) % n;
+            int length = BuildStreamLocked(ref set, dst, stream, occasion, commit, out layout);
+            if (length == 0) continue;
+            if (commit) _streamCursor = (stream + 1) % n;
+            return length;
+        }
+        layout = -1;
+        return 0;
+    }
+
+    /// <summary><see cref="BuildLocked"/> for one stream.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private int BuildStreamLocked<TSet>(ref TSet set, Span<byte> dst, int stream, SendRule occasion, bool commit, out int layout) where TSet : struct, IReportSet
+    {
+        layout = SelectStreamLocked(stream);
         if (layout < 0) return 0;
         var form = _m.Layouts[layout];
         var send = form.Send;
@@ -891,7 +1136,15 @@ internal sealed unsafe class ProtocolEngine
         if (send == SendRule.Change)
         {
             var built = dst[..size];
-            if (_sentOnce[layout] && built.SequenceEqual(_lastSent[layout])) return 0;
+            if (_sentOnce[layout] && SameAsSentLocked(layout, built)) return 0;
+            if (!_sentOnce[layout] && form.SkipFirst)
+            {
+                // The state the layout became selected in is kept as sent,
+                // whether this build would have sent it or only looked.
+                built.CopyTo(_lastSent[layout]);
+                _sentOnce[layout] = true;
+                return 0;
+            }
             if (commit)
             {
                 built.CopyTo(_lastSent[layout]);
@@ -946,7 +1199,7 @@ internal sealed unsafe class ProtocolEngine
         for (int i = 0; i < _counterMask.Length; i++)
             if (_m.CounterOn[i] == CounterEvent.Report
                 || (_m.CounterOn[i] == CounterEvent.Frame && (written & (1u << i)) != 0))
-                _counters[i] = (_counters[i] + 1) & _counterMask[i];
+                AdvanceLocked(i);
     }
 
     /// <summary>The counter slots a program's ops write, its conditional

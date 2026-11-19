@@ -160,6 +160,10 @@ internal static partial class SharedMemoryIO
     private static readonly Dictionary<int, IntPtr> s_inputAckHandles = new();
     private static readonly Dictionary<int, IntPtr> s_inputAckViews   = new();
     private static readonly Dictionary<int, IntPtr> s_inputAckEvents  = new();
+    // Which mapping of an index's acknowledgement section is current: each
+    // new mapping takes the next number. Same lock.
+    private static readonly Dictionary<int, long> s_inputAckGenerations = new();
+    private static long s_lastAckGeneration;
     // The remove request and the driver's answer (driver.c, protocol 5):
     // made with the input mapping, released with it.
     private static readonly Dictionary<int, IntPtr> s_removeEvents    = new();
@@ -645,6 +649,7 @@ internal static partial class SharedMemoryIO
                 Marshal.Copy(new byte[INPUT_ACK_SIZE], 0, av, INPUT_ACK_SIZE);
                 s_inputAckHandles[controllerIndex] = ah;
                 s_inputAckViews[controllerIndex] = av;
+                s_inputAckGenerations[controllerIndex] = ++s_lastAckGeneration;
                 s_inputAckEvents[controllerIndex] = CreateNamedEvent($@"Global\HIDMaestroInputAckEvent{controllerIndex}");
                 // Before the input event, which the worker opens them with.
                 s_removeEvents[controllerIndex] = CreateNamedEvent($@"Global\HIDMaestroRemoveEvent{controllerIndex}");
@@ -1085,13 +1090,16 @@ internal static partial class SharedMemoryIO
     /// half the driver plays for a UMDF2 controller (driver.c
     /// TryOpenInputAck): it announces that it stores delivered sequence
     /// numbers. The release bit stays clear, since no driver watches the
-    /// owner pipe.</summary>
-    internal static unsafe void AnnounceDeviceDelivery(int controllerIndex)
+    /// owner pipe. Returns the mapping's generation, which the device passes
+    /// to <see cref="StoreDeviceDelivered"/>, or 0 when the index has no
+    /// acknowledgement section.</summary>
+    internal static unsafe long AnnounceDeviceDelivery(int controllerIndex)
     {
         lock (s_inputViews)
         {
-            if (s_inputAckViews.TryGetValue(controllerIndex, out IntPtr v) && v != IntPtr.Zero)
-                Interlocked.Or(ref *(int*)(v + INPUT_ACK_OFFSET_CAPS), INPUT_ACK_CAP_DELIVERED);
+            if (!s_inputAckViews.TryGetValue(controllerIndex, out IntPtr v) || v == IntPtr.Zero) return 0;
+            Interlocked.Or(ref *(int*)(v + INPUT_ACK_OFFSET_CAPS), INPUT_ACK_CAP_DELIVERED);
+            return s_inputAckGenerations.TryGetValue(controllerIndex, out long generation) ? generation : 0;
         }
     }
 
@@ -1100,12 +1108,18 @@ internal static partial class SharedMemoryIO
     /// it, and the event set when a thread of this SDK waits on it
     /// (<paramref name="signal"/>, the driver's AckSignal). Under the lock
     /// the teardown unmaps the section under, so a late call after the
-    /// controller's teardown writes nothing.</summary>
-    internal static unsafe void StoreDeviceDelivered(int controllerIndex, uint seqNo, bool signal)
+    /// controller's teardown writes nothing. <paramref name="generation"/>
+    /// is the one <see cref="AnnounceDeviceDelivery"/> returned to the
+    /// device: a reader thread of a device already torn down can get here
+    /// after this process made the index again, and its sequence number
+    /// is not the new controller's, so a call for another mapping writes
+    /// nothing either.</summary>
+    internal static unsafe void StoreDeviceDelivered(int controllerIndex, long generation, uint seqNo, bool signal)
     {
         lock (s_inputViews)
         {
             if (!s_inputAckViews.TryGetValue(controllerIndex, out IntPtr v) || v == IntPtr.Zero) return;
+            if (!s_inputAckGenerations.TryGetValue(controllerIndex, out long current) || current != generation) return;
             Interlocked.Exchange(ref *(int*)(v + INPUT_ACK_OFFSET_DELIVERED), (int)seqNo);
             if (signal && s_inputAckEvents.TryGetValue(controllerIndex, out IntPtr ev) && ev != IntPtr.Zero)
                 SetEvent(ev);
@@ -1512,6 +1526,7 @@ internal static partial class SharedMemoryIO
         // a recreate of this index makes a new one.
         if (s_companionInputEvents.Remove(controllerIndex, out IntPtr cev) && cev != IntPtr.Zero)
             CloseHandle(cev);
+        s_inputAckGenerations.Remove(controllerIndex);
         if (s_inputAckViews.Remove(controllerIndex, out IntPtr av) && av != IntPtr.Zero)
             UnmapViewOfFile(av);
         if (s_inputAckHandles.Remove(controllerIndex, out IntPtr ah) && ah != IntPtr.Zero)

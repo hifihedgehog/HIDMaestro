@@ -26,6 +26,10 @@
 //    rest, a 90 degree/second yaw, the touchpad, the battery, and a
 //    near-zero trigger that must not read as a full pull.
 //
+//    On the USB/IP backend the persona is on the USB bus and presents
+//    dualshock-4-v2's form (usbForm): no arming, report 0x01 at 64 bytes in
+//    the USB layout, which B reads there in place of 0x11.
+//
 // B and C need elevation. Exit 0 PASS, 1 FAIL, 2 when everything that ran
 // passed and C was skipped for want of a stock SDL3.dll.
 //
@@ -325,14 +329,18 @@ internal static class Program
 
     /// <summary>The stamp of the second of two reports, the first taken at
     /// the clock's origin, must equal the time between them in 16/3 us
-    /// ticks. a0..a1 and b0..b1 bracket the two encodes.</summary>
-    static void CheckElapsed(string who, ushort first, ushort second, long a0, long a1, long b0, long b1)
+    /// ticks. a0..a1 and b0..b1 bracket the two encodes. With
+    /// <paramref name="origin"/> false the clock started at an earlier
+    /// report, the first the device sent without a consumer timestamp, and
+    /// only the step between the two is checked.</summary>
+    static void CheckElapsed(string who, ushort first, ushort second, long a0, long a1, long b0, long b1, bool origin = true)
     {
         double f = 1_000_000.0 / Stopwatch.Frequency;
         double minUs = (b0 - a1) * f, maxUs = (b1 - a0) * f;
         int lo = (int)Math.Floor(minUs * 3 / 16) - 1, hi = (int)Math.Ceiling(maxUs * 3 / 16) + 1;
         int delta = (ushort)(second - first);
-        Check($"{who}: the first stamp is the clock's origin, 0", first == 0, $"0x{first:X4}");
+        if (origin) Check($"{who}: the first stamp is the clock's origin, 0", first == 0, $"0x{first:X4}");
+        else Console.WriteLine($"  {who}: the clock started at the device's first report without a consumer timestamp, and the first stamp here is 0x{first:X4}");
         Check($"{who}: the next one advances by the elapsed time in 16/3 us ticks",
               delta >= lo && delta <= hi, $"{delta} ticks, bound {lo}..{hi} ({minUs:F0}-{maxUs:F0} us)");
     }
@@ -349,11 +357,21 @@ internal static class Program
         try
         {
             c = ctx.CreateController(prof);
+            // The form the persona presents: Bluetooth on the UMDF2 backend,
+            // dualshock-4-v2's USB form on the USB/IP backend (usbForm).
+            bool usb = !ReferenceEquals(prof.FormOn(c.Backend), prof);
+            Console.WriteLine($"  backend {c.Backend}, presents {prof.FormOn(c.Backend).Id}");
+            byte rid = usb ? (byte)0x01 : (byte)0x11;
+            int b = usb ? 1 : 3;
             var dev = WaitForNew(0x054C, 0x09CC, pre, 15000);
             Check("the persona's HID interface appears", dev != null, dev?.DevicePath ?? "");
             if (dev == null) return;
-            Check("its input length is the descriptor's longest report, 0x19 at 547 bytes",
-                  dev.InputReportByteLength == 547, $"{dev.InputReportByteLength}");
+            if (usb)
+                Check("its input length is the USB form's report 0x01 at 64 bytes",
+                      dev.InputReportByteLength == 64, $"{dev.InputReportByteLength}");
+            else
+                Check("its input length is the descriptor's longest report, 0x19 at 547 bytes",
+                      dev.InputReportByteLength == 547, $"{dev.InputReportByteLength}");
             using var rd = new HidReader(dev.DevicePath, Math.Max(dev.InputReportByteLength, (ushort)78));
             Check("the interface opens for reading", rd.IsOpen, rd.OpenError);
             if (!rd.IsOpen) return;
@@ -371,10 +389,10 @@ internal static class Program
 
             var st = LayoutState();
             st.Axes = HMGamepadStateHelpers.StandardAxes(prof, LX, LY, RX, RY, LT, RT);
-            var r11 = DriveUntil(c, rd, st, r => r[0] == 0x11 && r[3] == 64, 3000);
-            Check("after arming, report 0x11 arrives", r11 != null);
+            var r11 = DriveUntil(c, rd, st, r => r[0] == rid && r[b] == 64, 3000);
+            Check(usb ? "the USB form's report 0x01 carries the state" : "after arming, report 0x11 arrives", r11 != null);
             if (r11 == null) return;
-            CheckLayout("live", r11, bt: true);
+            CheckLayout("live", r11, bt: !usb);
 
             // The clock stands in when the consumer sets no timestamp. One
             // submit per stamp, bracketed, each found by its stick marker.
@@ -383,13 +401,15 @@ internal static class Program
             var s1 = LayoutState(); s1.SensorTimestamp = 0;
             s1.Axes = HMGamepadStateHelpers.StandardAxes(prof, 1.0f, LY, RX, RY, LT, RT);
             long a0 = Stopwatch.GetTimestamp(); c.SubmitState(s0); long a1 = Stopwatch.GetTimestamp();
-            var ra = ReadUntil(rd, r => r[0] == 0x11 && r[3] == 0, 2000);
+            var ra = ReadUntil(rd, r => r[0] == rid && r[b] == 0, 2000);
             Thread.Sleep(50);
             long b0 = Stopwatch.GetTimestamp(); c.SubmitState(s1); long b1 = Stopwatch.GetTimestamp();
-            var rb = ReadUntil(rd, r => r[0] == 0x11 && r[3] == 255, 2000);
+            var rb = ReadUntil(rd, r => r[0] == rid && r[b] == 255, 2000);
             Check("both timestamp reports arrive", ra != null && rb != null);
             if (ra != null && rb != null)
-                CheckElapsed("live, no consumer timestamp", U16(ra, 12), U16(rb, 12), a0, a1, b0, b1);
+                // The USB form sends its whole report from the start, so its
+                // clock started at part B's first report, the positive control.
+                CheckElapsed("live, no consumer timestamp", U16(ra, b + OffTimestamp), U16(rb, b + OffTimestamp), a0, a1, b0, b1, origin: !usb);
         }
         catch (Exception ex) { Check("part B ran without throwing", false, ex.Message); }
         finally
@@ -708,10 +728,22 @@ internal static class Program
             // the calibration read can still go out as report 0x01. Read the
             // device through a second handle until report 0x11 shows, so the
             // stick check below cannot pass on a stale pre-arm frame.
+            // On the USB/IP backend the persona presents dualshock-4-v2's USB
+            // form (usbForm), which sends its whole state in report 0x01 from
+            // the start, as a pad on USB does: there is nothing to arm.
+            bool usbForm = !ReferenceEquals(prof.FormOn(c.Backend), prof);
             using (var rd = new HidReader(dev.DevicePath, Math.Max(dev.InputReportByteLength, (ushort)78)))
             {
-                var armed = DriveUntil(c, rd, Rest(0.5f), r => r[0] == 0x11, 3000);
-                Check("the persona now sends report 0x11 (SDL's calibration read armed it)", armed != null);
+                if (usbForm)
+                {
+                    var whole = DriveUntil(c, rd, Rest(0.5f), r => r[0] == 0x01 && S16(r, 1 + OffAccel + 2) == 8192, 3000);
+                    Check("the USB form sends report 0x01 with the accelerometer from the start", whole != null);
+                }
+                else
+                {
+                    var armed = DriveUntil(c, rd, Rest(0.5f), r => r[0] == 0x11, 3000);
+                    Check("the persona now sends report 0x11 (SDL's calibration read armed it)", armed != null);
+                }
             }
 
             // The regression itself: input keeps arriving once armed.
@@ -719,8 +751,11 @@ internal static class Program
             short lx1 = SDL_GetGamepadAxis(gp, AXIS_LEFTX);
             Check("after arming SDL still reads input (left stick hard right)", lx1 >= 30000, $"LEFTX {lx1}");
 
-            // SDL reads touch and battery only from report 0x11, after it has
-            // seen one (enhanced_reports), so these show 0x11 was accepted.
+            // Over Bluetooth SDL reads touch and battery only from report
+            // 0x11, after it has seen one (enhanced_reports), so these show
+            // 0x11 was accepted. On a USB bus SDL turns enhanced reports on
+            // itself and reads them from the 64-byte report 0x01
+            // (SDL_hidapi_ps4.c:340-342, 808-810).
             Check("SDL publishes the touchpad", SDL_GetNumGamepadTouchpads(gp) >= 1);
             SDL_GetGamepadTouchpadFinger(gp, 0, 0, out bool d0, out float x0, out float y0, out _);
             Check("SDL reads the first finger at the center of the pad",

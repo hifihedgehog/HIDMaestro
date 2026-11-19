@@ -9,8 +9,8 @@ using Microsoft.Win32.SafeHandles;
 namespace HIDMaestro.Internal;
 
 /// <summary>
-/// The one place every file the elevated SDK runs, or hands to pnputil,
-/// signtool, inf2cat or hmswd, is written and read.
+/// The one place every file the elevated SDK runs, signs, or hands to
+/// pnputil or hmswd, is written and read.
 ///
 /// <para>Through v1.12.0 these went into <c>%TEMP%</c>: the driver payload
 /// into <c>%TEMP%\HIDMaestro_&lt;hash&gt;</c>, <c>hmswd.exe</c> into a shared
@@ -87,9 +87,9 @@ namespace HIDMaestro.Internal;
 /// its handle. Each file HIDMaestro ships is held for reading with read
 /// sharing only, which no write, rename or delete can get past, and checked
 /// against its SHA-256 through the hold (<see cref="Pinned.Hold"/>). A
-/// driver binary cannot be held while signtool rewrites it: it is checked
+/// driver binary cannot be held while the signing rewrites it: it is checked
 /// right before, and held once signed. A catalog is held once signed. The
-/// pin lasts until the use is over. The signing tools, the driver package, the SWD helper
+/// pin lasts until the use is over. The driver package, the SWD helper
 /// (<c>SwdDeviceFactory.PinHelper</c>), usbip-win2's host controller package
 /// and each WinUSB package take one. The OpenVR
 /// extraction, which writes files for SteamVR and runs none, takes a pin
@@ -178,7 +178,7 @@ internal static partial class ProtectedStaging
     /// driver for SteamVR.
     ///
     /// <para>Invariant: nothing the elevated SDK runs, loads or hands to
-    /// pnputil, signtool or inf2cat may live under this root. A program
+    /// pnputil may live under this root. A program
     /// without elevation can create it, or a folder under it, first, and it
     /// may be reset where it is (<see cref="Repair.InPlace"/>), which a pin
     /// does not make up for: a pin blocks a rename or delete, not a change of
@@ -256,8 +256,7 @@ internal static partial class ProtectedStaging
     /// sc.exe, which DeviceOrchestrator.RunProcess starts with the
     /// process's own environment. With
     /// <paramref name="protectedDir"/> it uses that folder, the child's own
-    /// staging directory (hmswd, signtool and
-    /// Inf2Cat run from one). Without it the folder is
+    /// staging directory (hmswd runs from one). Without it the folder is
     /// <see cref="ChildTempDir"/>, for a child that has none of its own
     /// (pnputil, devcon). A process that is not elevated starts no elevated
     /// child: TEMP is left as it is and nothing is tried, since an unelevated
@@ -404,7 +403,7 @@ internal static partial class ProtectedStaging
 
         /// <summary>Hold <paramref name="file"/> (<see cref="HoldFile"/>) and
         /// return its SHA-256, read through the hold. For a file this use
-        /// itself just wrote, such as a binary signtool signed.</summary>
+        /// itself just wrote, such as a binary it signed.</summary>
         internal string HoldAndHash(string file)
         {
             var h = HoldFile(file, out string sha);

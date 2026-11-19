@@ -32,6 +32,10 @@ internal static partial class Program
 {
     const string GoldenName = "derived-presentations.txt";
 
+    /// <summary>A catalog profile whose input reports fit one low-speed
+    /// packet and which declares no output report.</summary>
+    const string LowSpeedId = "daemonbite-nes";
+
     static void CheckDerived(HMContext ctx, string repoRoot, bool write)
     {
         Console.WriteLine("\n-- Derived USB presentations --");
@@ -43,8 +47,16 @@ internal static partial class Program
               placeholders.All(p => !p.Inner.HasDescriptor && !p.SupportsBackend(HMBackend.Umdf2)
                                     && !p.SupportsBackend(HMBackend.Usbip) && !p.SupportsBackend(HMBackend.Auto)),
               string.Join(", ", placeholders.Where(p => p.Inner.HasDescriptor || p.SupportsBackend(HMBackend.Auto)).Select(p => p.Id)));
-        Check("every deployable profile runs on Auto", deployable.All(p => p.SupportsBackend(HMBackend.Auto)),
-              string.Join(", ", deployable.Where(p => !p.SupportsBackend(HMBackend.Auto)).Select(p => p.Id)));
+        // SupportsBackend(Auto) answers for the backend Auto resolves to on
+        // this machine: on a USB/IP machine the profiles that backend does
+        // not present are refused, and on a UMDF2 machine none is.
+        var autoRefused = deployable.Where(p => !p.SupportsBackend(HMBackend.Auto)).Select(p => p.Id).ToList();
+        var autoExpected = HMContext.MachineBackend == HMBackend.Usbip
+            ? deployable.Where(p => !p.SupportsBackend(HMBackend.Usbip)).Select(p => p.Id).ToList()
+            : new List<string>();
+        Check($"Auto refuses exactly the deployable profiles the machine's backend, {HMContext.MachineBackend}, does not present ({autoExpected.Count})",
+              autoRefused.SequenceEqual(autoExpected),
+              $"refused {string.Join(", ", autoRefused.Take(6))}; expected {string.Join(", ", autoExpected.Take(6))}");
 
         var refused = deployable.Where(p => !p.SupportsBackend(HMBackend.Usbip)).ToList();
         var xbox = refused.Where(p =>
@@ -138,6 +150,9 @@ internal static partial class Program
         catch (Exception e) { return $"{e.GetType().Name}: {e.Message}"; }
         if (!presentation.Derived) return "not derived";
         if (presentation.HasIsochronous) return "has an isochronous endpoint";
+        // A Bluetooth identity with a USB form derives the form's device
+        // (usbForm): every field below is the form's.
+        p = p.FormOn(HMBackend.Usbip);
         var d = set.DeviceDescriptor;
         var c = set.ConfigurationDescriptor;
         if (set.VendorId != p.VendorId || set.ProductId != p.ProductId) return "VID or PID";
@@ -197,35 +212,71 @@ internal static partial class Program
             Attributes = 0xC0,
             MaxPowerMilliamps = 100,
             Device = new UsbDevicePins { BcdDevice = "0x0200", MaxPacketSize0 = 64 },
-            Hid = new UsbHidPins { InterfaceNumber = 3, CountryCode = 0 },
+            Hid = new UsbHidPins { InterfaceNumber = 0, CountryCode = 33 },
             InEndpoint = new UsbEndpointPins { Address = "0x84", MaxPacketSize = 64, Interval = 6 },
             OutEndpoint = new UsbEndpointPins { Address = "0x03", MaxPacketSize = 64, Interval = 6 },
         }), 0);
         Check("the pins land in their fields",
               pinned.Speed == 3 && pinned.BcdDevice == 0x0200 && pinned.ConfigurationDescriptor[7] == 0xC0 && pinned.ConfigurationDescriptor[8] == 50
-              && pinned.HidInterfaceNumber == 3 && pinned.Endpoints[0x84].Interval == 6 && pinned.Endpoints[0x03].MaxPacketSize == 64,
+              && pinned.GetHidDescriptor(0x21, 0)![4] == 33 && pinned.Endpoints[0x84].Interval == 6 && pinned.Endpoints[0x03].MaxPacketSize == 64,
               Convert.ToHexString(pinned.ConfigurationDescriptor));
         Check("the fields no pin names stay derived",
               pinned.VendorId == plain.VendorId && pinned.ProductId == plain.ProductId
-              && pinned.GetHidDescriptor(0x21, 3)![7] == plain.GetHidDescriptor(0x21, 0)![7]);
+              && pinned.GetHidDescriptor(0x21, 0)![7] == plain.GetHidDescriptor(0x21, 0)![7]);
         var none = new UsbDescriptorSet(With(new UsbConfigurationSpec { OutEndpoint = new UsbEndpointPins { None = true } }), 0);
         Check("outEndpoint null pins a device with no OUT endpoint", none.Endpoints.Count == 1 && plain.Endpoints.Count == 2);
 
-        Check("a pin that does not fit is refused at its path",
-              Defect(new UsbConfigurationSpec { BusSpeed = "super" }) == "$.usbConfiguration.busSpeed"
-              && Defect(new UsbConfigurationSpec { InEndpoint = new UsbEndpointPins { Address = "0x01" } }) == "$.usbConfiguration.inEndpoint.address"
-              && Defect(new UsbConfigurationSpec { InEndpoint = new UsbEndpointPins { MaxPacketSize = 65 } }) == "$.usbConfiguration.inEndpoint.maxPacketSize"
-              && Defect(new UsbConfigurationSpec { Device = new UsbDevicePins { MaxPacketSize0 = 12 } }) == "$.usbConfiguration.device.maxPacketSize0"
-              && Defect(new UsbConfigurationSpec { Attributes = 0x40 }) == "$.usbConfiguration.attributes"
-              && Defect(new UsbConfigurationSpec { InEndpoint = new UsbEndpointPins { None = true } }) == "$.usbConfiguration.inEndpoint",
-              string.Join(", ", new[]
-              {
-                  Defect(new UsbConfigurationSpec { BusSpeed = "super" }),
-                  Defect(new UsbConfigurationSpec { InEndpoint = new UsbEndpointPins { Address = "0x01" } }),
-              }));
-        var low = new UsbDescriptorSet(With(new UsbConfigurationSpec { BusSpeed = "low" }), 0);
-        Check("a low-speed pin gives an 8-byte control endpoint, 8-byte interrupt packets and a 10 ms interval",
-              low.Speed == 1 && low.DeviceDescriptor[7] == 8 && low.Endpoints.Values.All(e => e.MaxPacketSize == 8 && e.Interval == 10));
+        // Each pin that contradicts USB 2.0, HID 1.11 or the bus speed is
+        // refused at its own JSON path, one row per rule.
+        void Refused(string rule, UsbConfigurationSpec cfg, string path)
+        {
+            string? got = Defect(cfg);
+            Check($"refused at {path}: {rule}", got == path, got ?? "accepted");
+        }
+        Refused("a speed that is not high, full or low", new UsbConfigurationSpec { BusSpeed = "super" }, "$.usbConfiguration.busSpeed");
+        Refused("an IN pin with an OUT address", new UsbConfigurationSpec { InEndpoint = new UsbEndpointPins { Address = "0x01" } }, "$.usbConfiguration.inEndpoint.address");
+        Refused("a full-speed interrupt packet over 64 bytes (USB 2.0 5.7.3)", new UsbConfigurationSpec { InEndpoint = new UsbEndpointPins { MaxPacketSize = 65 } }, "$.usbConfiguration.inEndpoint.maxPacketSize");
+        Refused("a control packet size that is not 8, 16, 32 or 64 (USB 2.0 5.5.3)", new UsbConfigurationSpec { Device = new UsbDevicePins { MaxPacketSize0 = 12 } }, "$.usbConfiguration.device.maxPacketSize0");
+        Refused("bmAttributes with D7 clear (USB 2.0 9.6.3)", new UsbConfigurationSpec { Attributes = 0x40 }, "$.usbConfiguration.attributes");
+        Refused("bmAttributes with a reserved bit D4..D0 set (USB 2.0 9.6.3)", new UsbConfigurationSpec { Attributes = 0x81 }, "$.usbConfiguration.attributes");
+        Refused("a current bMaxPower cannot carry: it counts 2 mA units (USB 2.0 9.6.3)", new UsbConfigurationSpec { MaxPowerMilliamps = 101 }, "$.usbConfiguration.maxPowerMilliamps");
+        Refused("high speed with a control packet under 64 bytes (USB 2.0 5.5.3)", new UsbConfigurationSpec { BusSpeed = "high", Device = new UsbDevicePins { MaxPacketSize0 = 8 } }, "$.usbConfiguration.device.maxPacketSize0");
+        Refused("high speed with bcdUSB under 0x0200 (USB 2.0 9.6.1)", new UsbConfigurationSpec { BusSpeed = "high", Device = new UsbDevicePins { BcdUsb = "0x0110" } }, "$.usbConfiguration.device.bcdUsb");
+        Refused("a high-speed interrupt interval past 16 (USB 2.0 9.6.6)", new UsbConfigurationSpec { BusSpeed = "high", InEndpoint = new UsbEndpointPins { Interval = 17 } }, "$.usbConfiguration.inEndpoint.interval");
+        Refused("the same on the OUT endpoint (USB 2.0 9.6.6)", new UsbConfigurationSpec { BusSpeed = "high", OutEndpoint = new UsbEndpointPins { Interval = 255 } }, "$.usbConfiguration.outEndpoint.interval");
+        Refused("low speed with reports over 8 bytes (USB 2.0 5.7.3)", new UsbConfigurationSpec { BusSpeed = "low" }, "$.usbConfiguration.busSpeed");
+        Refused("an interface number past the one interface the configuration has (USB 2.0 9.6.5)", new UsbConfigurationSpec { Hid = new UsbHidPins { InterfaceNumber = 3 } }, "$.usbConfiguration.hid.interfaceNumber");
+        Refused("a reserved HID subclass (HID 1.11 4.2)", new UsbConfigurationSpec { Hid = new UsbHidPins { SubClass = 2 } }, "$.usbConfiguration.hid.subClass");
+        Refused("a boot protocol on an interface that is no boot interface (HID 1.11 4.3)", new UsbConfigurationSpec { Hid = new UsbHidPins { Protocol = 1 } }, "$.usbConfiguration.hid.protocol");
+        Refused("a reserved boot protocol (HID 1.11 4.3)", new UsbConfigurationSpec { Hid = new UsbHidPins { SubClass = 1, Protocol = 3 } }, "$.usbConfiguration.hid.protocol");
+
+        // A device whose reports fit one low-speed packet takes a low-speed
+        // pin whole.
+        var lowSource = ctx.GetProfile(LowSpeedId)!.Inner;
+        var low = new UsbDescriptorSet(WithLow(new UsbConfigurationSpec { BusSpeed = "low" }), 0);
+        Check($"a low-speed pin on {LowSpeedId}, whose reports fit 8 bytes, gives an 8-byte control endpoint, 8-byte interrupt packets and a 10 ms interval",
+              low.Speed == 1 && low.DeviceDescriptor[7] == 8 && low.Endpoints.Values.All(e => e.MaxPacketSize <= 8 && e.Interval == 10),
+              Convert.ToHexString(low.ConfigurationDescriptor));
+
+        ControllerProfile WithLow(UsbConfigurationSpec cfg)
+        {
+            var p = lowSource.Clone();
+            p.UsbConfiguration = cfg;
+            return p;
+        }
+        string? DefectOf(ControllerProfile p)
+        {
+            try { _ = new UsbDescriptorSet(p, 0); return null; }
+            catch (ProfileDefectException e) { return e.JsonPath; }
+            catch (Exception e) { return $"{e.GetType().Name}: {e.Message}"; }
+        }
+        void RefusedLow(string rule, UsbConfigurationSpec cfg, string path)
+        {
+            string? got = DefectOf(WithLow(cfg));
+            Check($"refused at {path}: {rule}", got == path, got ?? "accepted");
+        }
+        RefusedLow("low speed with a 64-byte control packet (USB 2.0 5.5.3)", new UsbConfigurationSpec { BusSpeed = "low", Device = new UsbDevicePins { MaxPacketSize0 = 64 } }, "$.usbConfiguration.device.maxPacketSize0");
+        RefusedLow("a low-speed interrupt interval under 10 ms (USB 2.0 5.7.4)", new UsbConfigurationSpec { BusSpeed = "low", InEndpoint = new UsbEndpointPins { Interval = 4 } }, "$.usbConfiguration.inEndpoint.interval");
 
         var composite = ctx.GetProfile("dualsense-composite")!.Inner.Clone();
         composite.UsbConfiguration!.Hid = new UsbHidPins { InterfaceNumber = 1 };
