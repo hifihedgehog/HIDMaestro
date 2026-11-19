@@ -234,6 +234,35 @@ internal static partial class Program
         var personaKey = $"045E:02EA {Hex(Bytes("484D3002"))}";
         Check("xbox-one-s-full's cache key is no form's", !cacheKeys.ContainsKey(personaKey), personaKey);
 
+        Console.WriteLine("\n-- the model's text, and many threads at once --");
+        var noTypes = (JsonObject)GipFunction.Model.DeepClone();
+        noTypes.Remove("preferredTypes");
+        string typesRefused = "";
+        try { GipFunction.BuildJson(catalog.First(x => x.Id == "xbox-series-xs"), noTypes, "test model"); }
+        catch (ProfileDefectException e) { typesRefused = e.Message; }
+        Check("a model with no preferredTypes is refused at that key: the metadata's preferred type is the model's",
+              typesRefused.Contains("preferredTypes", StringComparison.Ordinal), typesRefused);
+        Check("the model's preferred type is Windows.Xbox.Input.Gamepad, as every real pad's metadata names it",
+              GipFunction.Model["preferredTypes"] is JsonArray pt && pt.Count == 1 && (string?)pt[0] == "Windows.Xbox.Input.Gamepad");
+        Check("the model names the HID child Windows' GIP driver makes, 045E:02FF", GipFunction.HidChild == (0x045E, 0x02FF), $"{GipFunction.HidChild}");
+        // Every thread builds the forms of its own copies of the profiles at
+        // once, the first reads of the model among them.
+        var copies = Enumerable.Range(0, 16).Select(_ => Family.Select(f => catalog.First(x => x.Id == f.Id).Clone()).ToList()).ToList();
+        var results = new string[copies.Count];
+        var errorsSeen = new System.Collections.Concurrent.ConcurrentBag<string>();
+        var start = new System.Threading.ManualResetEventSlim();
+        var threads = copies.Select((set, n) => new System.Threading.Thread(() =>
+        {
+            start.Wait();
+            try { results[n] = string.Join("|", set.Select(c => Canonical(GipFunction.BuildJson(c, GipFunction.Model, "catalog")))); }
+            catch (Exception e) { errorsSeen.Add(e.Message); }
+        })).ToList();
+        foreach (var t in threads) t.Start();
+        start.Set();
+        foreach (var t in threads) t.Join();
+        Check("16 threads build all twelve forms at once with no error, and every thread gets the same bytes",
+              errorsSeen.IsEmpty && results.All(r => r == results[0]), errorsSeen.FirstOrDefault() ?? "");
+
         Console.WriteLine("\n-- refusals --");
         var one = catalog.First(x => x.Id == "xbox-series-xs");
         var none = one.Clone(); none.Gip = null;

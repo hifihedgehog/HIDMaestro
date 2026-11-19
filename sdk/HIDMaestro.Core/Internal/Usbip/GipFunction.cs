@@ -59,19 +59,44 @@ internal static class GipFunction
     /// generatePacket cuts them (xgip_protocol.cpp, GIP_MAX_CHUNK_SIZE).</summary>
     private const int ChunkSize = 0x3A;
 
-    static readonly Lazy<(JsonObject Function, string Source)> s_model = new(() => LoadModel(ModelResourceName),
+    // The model as its text and as an immutable document, read once. A
+    // JsonObject fills its property table on first access, so one shared
+    // between threads is written by its readers. The lookups read the
+    // JsonDocument, whose elements are safe to read from any thread, and
+    // each build parses a JsonObject of its own from the text.
+    static readonly Lazy<(string Json, JsonDocument Doc, string Source)> s_model = new(() => LoadModel(ModelResourceName),
         System.Threading.LazyThreadSafetyMode.ExecutionAndPublication);
 
-    /// <summary>The catalog model's <c>gipFunction</c>. Callers clone what
-    /// they change.</summary>
-    internal static JsonObject Model => s_model.Value.Function;
+    /// <summary>The catalog model's <c>gipFunction</c>, a tree the caller
+    /// owns: each call parses a new one.</summary>
+    internal static JsonObject Model => JsonNode.Parse(s_model.Value.Json)!.AsObject();
 
-    static (JsonObject, string) LoadModel(string resource)
+    static JsonElement Root => s_model.Value.Doc.RootElement;
+
+    static (string, JsonDocument, string) LoadModel(string resource)
     {
         using Stream? s = typeof(GipFunction).Assembly.GetManifestResourceStream(resource)
             ?? throw new InvalidOperationException($"The SDK carries no {resource}.");
         using var reader = new StreamReader(s);
-        return (FunctionOf(reader.ReadToEnd(), resource), resource);
+        string json = FunctionOf(reader.ReadToEnd(), resource).ToJsonString();
+        return (json, JsonDocument.Parse(json), resource);
+    }
+
+    /// <summary>The model's identity of that name, or false.</summary>
+    static bool HasIdentity(string name) =>
+        Root.TryGetProperty("identities", out var ids) && ids.ValueKind == JsonValueKind.Object && ids.TryGetProperty(name, out _);
+
+    /// <summary>The VID and PID of the HID child Windows' GIP driver makes
+    /// for a GIP device, from the model's <c>hidChild</c>: the device under
+    /// whose XInput child xinputhid sits.</summary>
+    internal static (ushort Vid, ushort Pid) HidChild
+    {
+        get
+        {
+            var c = Root.GetProperty("hidChild");
+            return (ModelRegistry.ParseId(c.GetProperty("vid").GetString()!, "$.gipFunction.hidChild.vid"),
+                    ModelRegistry.ParseId(c.GetProperty("pid").GetString()!, "$.gipFunction.hidChild.pid"));
+        }
     }
 
     /// <summary>A model file's <c>gipFunction</c>, read through the
@@ -93,7 +118,8 @@ internal static class GipFunction
 
     /// <summary>The identities the catalog's model holds.</summary>
     internal static IReadOnlyList<string> Identities =>
-        Model["identities"] is JsonObject ids ? ids.Select(kv => kv.Key).ToList() : Array.Empty<string>();
+        Root.TryGetProperty("identities", out var ids) && ids.ValueKind == JsonValueKind.Object
+            ? ids.EnumerateObject().Select(p => p.Name).ToList() : Array.Empty<string>();
 
     /// <summary>True when <paramref name="profile"/> presents the GIP
     /// function on the USB/IP backend: it reaches XInput through xinputhid
@@ -105,7 +131,7 @@ internal static class GipFunction
     /// when the model holds it.</summary>
     internal static string? IdentityDefect(GipSpec gip) =>
         string.IsNullOrEmpty(gip.Identity) ? "is required: the identity of the GIP model the profile presents."
-        : Model["identities"]?[gip.Identity] == null ? $"\"{gip.Identity}\" is not one of the GIP model's identities ({string.Join(", ", Identities)})."
+        : !HasIdentity(gip.Identity) ? $"\"{gip.Identity}\" is not one of the GIP model's identities ({string.Join(", ", Identities)})."
         : null;
 
     /// <summary>Why the GIP function cannot present
@@ -115,7 +141,7 @@ internal static class GipFunction
         string? id = profile.Gip?.Identity;
         if (string.IsNullOrEmpty(id))
             return "it reaches XInput through xinputhid, and it names no GIP identity (gip.identity) for the USB/IP backend's GIP function to present.";
-        if (Model["identities"]?[id] == null)
+        if (!HasIdentity(id))
             return $"its gip.identity \"{id}\" is not one of the GIP model's identities ({string.Join(", ", Identities)}).";
         return null;
     }
@@ -305,7 +331,7 @@ internal static class GipFunction
             throw new ProfileDefectException($"{at}.interfaces",
                 $"lists no {SecurityOptOut}: without the security opt-out Windows' GIP driver challenges the device and starts no XInput pad.");
         var types = (identity["preferredTypes"] ?? function["preferredTypes"])?.AsArray().Select(n => n!.GetValue<string>()).ToList()
-            ?? new List<string> { "Windows.Xbox.Input.Gamepad" };
+            ?? throw new ProfileDefectException($"{source}: $.gipFunction.preferredTypes", "is required: the metadata's PreferredTypes.");
         byte[] inSystem = HexBytes(function["systemMessages"]?["in"], $"{source}: $.gipFunction.systemMessages.in");
         byte[] outSystem = HexBytes(function["systemMessages"]?["out"], $"{source}: $.gipFunction.systemMessages.out");
 
