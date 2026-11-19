@@ -370,7 +370,7 @@ internal static partial class Program
             var p = ControllerProfile.Parse(Encoding.UTF8.GetBytes(CatalogJson("switch-pro")))!;
             p.ValidateDeviceModel();
             var context = (HMContext)RuntimeHelpers.GetUninitializedObject(typeof(HMContext));
-            try { create.Invoke(context, new object?[] { 0, new HMProfile(p), null }); }
+            try { create.Invoke(context, new object?[] { 0, new HMProfile(p), null, HMBackend.Umdf2 }); }
             catch (TargetInvocationException e) { thrown = e.InnerException; }
         }
         finally

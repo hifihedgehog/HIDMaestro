@@ -283,7 +283,7 @@ internal static partial class UsbRecords
         {
             string id = subtree[i];
             if (!Exists(id)) continue;
-            if (!RemoveRecord(id, out int error) || Exists(id))
+            if (!RemoveRecordLocked(id, out int error) || Exists(id))
                 return new Result(Outcome.Failed, removed, $"the record of {id} was not removed: error {error}");
             removed.Add(id);
         }
@@ -416,8 +416,10 @@ internal static partial class UsbRecords
     }
 
     /// <summary>SetupDiRemoveDevice on one record, opened by its id in a set
-    /// of no class, which opens a non-present devnode of any class.</summary>
-    private static bool RemoveRecord(string instanceId, out int error)
+    /// of no class, which opens a non-present devnode of any class. The
+    /// caller holds the PnP lock, as for every helper whose name ends in
+    /// Locked.</summary>
+    private static bool RemoveRecordLocked(string instanceId, out int error)
     {
         error = 0;
         IntPtr set = SetupDiCreateDeviceInfoList(IntPtr.Zero, IntPtr.Zero);
