@@ -293,11 +293,24 @@ internal static partial class Program
         // usbip-win2 is removed, so a hub that is gone is noted, not judged.
         foreach (string h in gone) note($"{p}: root hub {h} is no longer present");
 
+        // A removal that keeps the host controller because it carried a
+        // device since Windows started has removed the device records that
+        // show it. It notes the fact in a key Windows drops at the next
+        // restart, so the preview below, and a second removal, read it too.
+        const string SinceBoot = "has carried a device since Windows started";
+        bool keptForUse = report.Entries.Any(e => e.Kind == "devnode" && e.Outcome == "Kept" && (e.Reason ?? "").Contains(SinceBoot, StringComparison.Ordinal));
+        if (keptForUse)
+            check($@"{p}: the removal noted the host controller's use for the rest of the Windows session", Inventory.KeyExists(@"HKLM\SOFTWARE\HIDMaestroUsbipSession"));
+
         HMUninstallReport? again = null;
         try { again = HMUninstall.Preview(); } catch (Exception ex) { note($"{p}: the preview after the removal threw {ex.Message}"); }
         var still = again?.Entries.Where(e => e.Outcome != HMUninstallOutcome.Kept).ToList() ?? new List<HMUninstallEntry>();
         check($"{p}: a preview after the removal finds nothing but kept items", again != null && still.Count == 0,
               string.Join("; ", still.Take(6)));
+        if (keptForUse)
+            check($"{p}: and keeps the host controller for the same reason, with the device records gone",
+                  again != null && again.Entries.Any(e => e.Kind == "devnode" && e.Outcome == HMUninstallOutcome.Kept && (e.Reason ?? "").Contains(SinceBoot, StringComparison.Ordinal)),
+                  again == null ? "" : string.Join("; ", again.Entries.Where(e => e.Kind == "devnode").Take(3)));
     }
 
     /// <summary>A package left after the removal is accepted only when the

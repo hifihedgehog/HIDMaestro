@@ -191,8 +191,11 @@ internal static partial class Uninstaller
         // Whether usbip-win2's host controller has carried a device since
         // Windows started, read once, before anything is removed: the
         // devices step removes the records it is read from, and the
-        // usbip-win2 step decides the host controller by this reading.
+        // usbip-win2 step decides the host controller by this reading. A
+        // reading of used is noted for the rest of the Windows session, so
+        // a second removal, with those records gone, reads it too.
         var used = UsedSinceBootReading();
+        if (used.Used) UsbipDriverInstaller.NoteCarriedThisSession(used.Why);
 
         // Each part of the device step is a step of its own, so one that
         // throws, such as a phantom pass that waited out the PnP lock's

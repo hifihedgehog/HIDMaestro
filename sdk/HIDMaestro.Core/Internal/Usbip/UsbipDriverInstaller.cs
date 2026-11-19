@@ -574,6 +574,10 @@ internal static partial class UsbipDriverInstaller
                 if (arrived == null) { why = $"{id} has no arrival time"; return true; }
                 if (arrived.Value >= bootUtc) { why = $"{id} arrived at {arrived.Value:HH:mm:ss}Z, after Windows started"; return true; }
             }
+            // An uninstall that kept the host controller for this reason
+            // removed the records above and left a note for the rest of the
+            // Windows session (NoteCarriedThisSession).
+            if (CarriedThisSession() is { } noted) { why = noted; return true; }
             why = "";
             return false;
         }
@@ -582,6 +586,55 @@ internal static partial class UsbipDriverInstaller
             why = $"could not be determined ({ex.GetType().Name})";
             return true;
         }
+    }
+
+    /// <summary>The volatile key that notes a host controller carried a
+    /// device in this Windows session. Windows drops a volatile key at the
+    /// next restart, which is when the note stops being true.</summary>
+    internal const string CarriedThisSessionKey = @"SOFTWARE\HIDMaestroUsbipSession";
+    private const string CarriedValue = "Carried";
+
+    /// <summary>Note that a host controller carried a device since Windows
+    /// started, with the reading's reason. The uninstall writes it before
+    /// it removes anything: it keeps such a host controller until a restart
+    /// and removes the device records <see cref="HostControllerUsedSinceBoot"/>
+    /// reads, and without the note a second removal in the same session, or
+    /// the move off an older host controller, would take the controller for
+    /// one that is safe to remove.</summary>
+    internal static void NoteCarriedThisSession(string why)
+    {
+        try
+        {
+            using var k = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(CarriedThisSessionKey,
+                Microsoft.Win32.RegistryKeyPermissionCheck.Default, Microsoft.Win32.RegistryOptions.Volatile);
+            // The first reason stands: a later reading is this note's own.
+            if (k.GetValue(CarriedValue) == null) k.SetValue(CarriedValue, why);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException)
+        {
+            DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: the session note was not written: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>The note's reason, or null when no note stands.</summary>
+    internal static string? CarriedThisSession()
+    {
+        try
+        {
+            using var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(CarriedThisSessionKey);
+            if (k == null) return null;
+            return k.GetValue(CarriedValue) as string is { Length: > 0 } why ? why : "noted by a removal earlier in this Windows session";
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException) { return null; }
+    }
+
+    /// <summary>Delete the note, once no host controller is left for it to
+    /// describe. True when no note stands afterward.</summary>
+    internal static bool ClearCarriedThisSession()
+    {
+        try { Microsoft.Win32.Registry.LocalMachine.DeleteSubKeyTree(CarriedThisSessionKey, throwOnMissingSubKey: false); }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException) { }
+        return CarriedThisSession() == null;
     }
 
     private static string? GetStringProperty(uint devInst, DEVPROPKEY key)

@@ -128,17 +128,21 @@ internal static partial class UsbipRemoval
 
         // Whether a host controller has carried a device since Windows
         // started is read from the records of the devices it carried
-        // (HostControllerUsedSinceBoot). While one has, those records stay
-        // until a restart: without them a second removal, or the SDK's move
-        // off an older host controller, would take the controller for one
-        // that is safe to remove.
+        // (HostControllerUsedSinceBoot). Without them a second removal, or
+        // the SDK's move off an older host controller, would take the
+        // controller for one that is safe to remove, so the uninstall notes
+        // a reading of used for the rest of the Windows session before it
+        // removes anything (UsbipDriverInstaller.NoteCarriedThisSession).
         string? used = null;
         if (controllers.Exists(c => c.Present) && reading.Used) used = reading.Why;
+        // Noted here too, before this step removes the records, for a
+        // removal that runs this step alone.
+        if (!preview && used != null) UsbipDriverInstaller.NoteCarriedThisSession(used);
 
         // ── Persona phantoms, before the hubs they name go ────────────────
         // The uninstall read the since-boot state before it removed anything
-        // and decides the host controller by that reading, and no HIDMaestro
-        // code reads these records after it, so every record the ledger
+        // and decides the host controller by that reading, and the session
+        // note carries it to any later reading, so every record the ledger
         // names goes, a device that arrived since Windows started or not.
         var hubs = UsbHubsOf(controllers);
         RemovePersonaPhantoms(entries, hubs, preview);
@@ -326,6 +330,22 @@ internal static partial class UsbipRemoval
                 UsbipInstallRecord.Delete();
                 entries.Add(new("registry key", where, UsbipInstallRecord.Exists() ? UninstallOutcome.Failed : UninstallOutcome.Removed));
             }
+        }
+
+        // ── The note of this session's use ────────────────────────────────
+        // It stands while a host controller is present for it to describe.
+        // Windows drops it at the next restart, which is when a removal can
+        // take that host controller.
+        if (UsbipDriverInstaller.CarriedThisSession() != null)
+        {
+            string where = $@"HKLM\{UsbipDriverInstaller.CarriedThisSessionKey}";
+            if (stayed.Count > 0)
+                entries.Add(new("registry key", where, UninstallOutcome.Kept,
+                    "it notes that a host controller that stays carried a device since Windows started. Windows drops it at the next restart."));
+            else if (preview) entries.Add(new("registry key", where, UninstallOutcome.WouldRemove));
+            else
+                entries.Add(new("registry key", where,
+                    UsbipDriverInstaller.ClearCarriedThisSession() ? UninstallOutcome.Removed : UninstallOutcome.Failed));
         }
 
         // ── HIDMaestro's own usbip folders ────────────────────────────────

@@ -28,10 +28,23 @@ internal static partial class Program
     /// HMUninstall calls it, its entries read back as text.</summary>
     static List<Entry> Remove(string label, bool preview, bool includeUnproven)
     {
-        var type = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.Usbip.UsbipRemoval", throwOnError: true)!;
-        var method = type.GetMethod("Remove", BindingFlags.NonPublic | BindingFlags.Static, new[] { typeof(bool), typeof(bool) })!;
+        var sdk = typeof(HMContext).Assembly;
+        var type = sdk.GetType("HIDMaestro.Internal.Usbip.UsbipRemoval", throwOnError: true)!;
+        // Remove takes the uninstall's one reading of whether the host
+        // controller carried a device since Windows started, and the
+        // uninstaller's own method takes it here, before each removal. A
+        // method this lookup does not find is named, so a changed signature
+        // fails with its cause.
+        var method = type.GetMethods(BindingFlags.NonPublic | BindingFlags.Static)
+                         .SingleOrDefault(m => m.Name == "Remove" && m.GetParameters() is { Length: 3 } p
+                                               && p[0].ParameterType == typeof(bool) && p[1].ParameterType == typeof(bool)
+                                               && p[2].ParameterType == typeof((bool, string)))
+                     ?? throw new InvalidOperationException("UsbipRemoval.Remove(bool, bool, (bool, string)) is not in this SDK.");
+        var reading = sdk.GetType("HIDMaestro.Internal.Uninstall.Uninstaller", throwOnError: true)!
+                         .GetMethod("UsedSinceBootReading", BindingFlags.NonPublic | BindingFlags.Static, Type.EmptyTypes)
+                      ?? throw new InvalidOperationException("Uninstaller.UsedSinceBootReading() is not in this SDK.");
         var sw = Stopwatch.StartNew();
-        var list = (System.Collections.IEnumerable)method.Invoke(null, new object[] { preview, includeUnproven })!;
+        var list = (System.Collections.IEnumerable)method.Invoke(null, new object[] { preview, includeUnproven, reading.Invoke(null, null)! })!;
         var entries = new List<Entry>();
         foreach (object e in list)
         {
@@ -469,11 +482,15 @@ internal static partial class Program
                Has(used, "devnode", l => l.StartsWith(hc + " "), "Kept", "since Windows started") && Pnp.Present(hc));
         Record("remove: its package and the install record stay with it",
                UdePackages().Contains(oem!, StringComparer.OrdinalIgnoreCase) && KeyExists(RecordKey));
-        // The persona's records are what show the host controller carried a
-        // device, so they stay with it until a restart.
-        Record("remove: the persona's records stay until a restart, and say so",
-               Has(used, "devnode", l => l == persona, "Kept", "since Windows started") && subtree.All(Pnp.Known),
-               string.Join(", ", subtree.Where(id => !Pnp.Known(id))));
+        // The persona's records go with the removal. They are what showed
+        // that the host controller carried a device, so the removal first
+        // notes that use in a key Windows drops at the next restart, and the
+        // second removal below reads the note.
+        const string SessionKey = @"SOFTWARE\HIDMaestroUsbipSession";
+        Record("remove: the persona's records go, and the host controller's use is noted for the rest of the Windows session",
+               subtree.All(id => !Pnp.Known(id)) && KeyExists(SessionKey)
+               && Has(used, "registry key", l => l.EndsWith(SessionKey, StringComparison.OrdinalIgnoreCase), "Kept", "next restart"),
+               $"records left: {string.Join(", ", subtree.Where(Pnp.Known))}; note {(KeyExists(SessionKey) ? "written" : "missing")}");
         Record("remove: HIDMaestro's stamp is off the host controller that stays",
                Pnp.HardwareIds(hc).SequenceEqual(new[] { UdeHardwareId }, StringComparer.OrdinalIgnoreCase), string.Join(";", Pnp.HardwareIds(hc)));
         Record("remove: no step failed", used.All(e => e.Outcome != "Failed"), string.Join("; ", used.Where(e => e.Outcome == "Failed")));
