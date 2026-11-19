@@ -888,7 +888,7 @@ function Wait-CascadeSettle {
     if ($null -ne $baseline) {
         # Phase A: wait until the test process has run the command we sent.
         # Critical on slow boxes where stdin commands can queue behind an
-        # in-progress initial-batch creation; without this, stability-only
+        # in-progress initial-batch creation. Without this, stability-only
         # would exit on the first poll because the test process simply
         # hadn't started processing yet.
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
