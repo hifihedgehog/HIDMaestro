@@ -17,6 +17,10 @@
 //     CRC-32 hid-playstation.c and RPCS3 check (seed 0xA3), and the DS4's
 //     0x05 is in its Bluetooth field order, which DS4Windows reads without
 //     absolute values (issue #64).
+//     On the USB/IP backend the two pads are on the USB bus and present
+//     their USB forms, dualsense and dualshock-4-v2 (usbForm): there the
+//     reports are the USB answers, with no CRC, as SDL and hid-playstation
+//     read them over USB.
 //   - heusinkveld-ultimate-pedals (VID 30B7): a NON-Sony profile whose
 //     descriptor declares Feature report 0x02 (HidClass only forwards a
 //     GetFeature for a report ID the descriptor declares, so the profile
@@ -464,7 +468,9 @@ internal static class Program
         using (var h = Open(dsBt.VendorId, dsBt.ProductId))
         {
             Check("dualsense-bt HID opens", h != null);
-            if (h != null)
+            if (h != null && !ReferenceEquals(dsBt.FormOn(btCtrl.Backend), dsBt))
+                UsbFormDualSense(h, btCtrl.Backend);
+            else if (h != null)
             {
                 var c05 = GetFeature(h, 0x05, 41);
                 Check("dualsense-bt 0x05 carries the DualSense-order calibration",
@@ -490,7 +496,9 @@ internal static class Program
         using (var h = Open(ds4Bt.VendorId, ds4Bt.ProductId))
         {
             Check("dualshock-4-v2-bt HID opens", h != null);
-            if (h != null)
+            if (h != null && !ReferenceEquals(ds4Bt.FormOn(d4BtCtrl.Backend), ds4Bt))
+                UsbFormDualShock4(h, d4BtCtrl.Backend);
+            else if (h != null)
             {
                 var c05 = GetFeature(h, 0x05, 41);
                 Check("dualshock-4-v2-bt 0x05 carries the DS4 Bluetooth-order calibration",
@@ -531,6 +539,42 @@ internal static class Program
         try { HMContext.RemoveAllVirtualControllers(); } catch { }
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
+    }
+
+    /// <summary>dualsense-bt on the USB bus answers as dualsense does over
+    /// USB: the calibration with no CRC after it, the MAC, and the firmware
+    /// report byte for byte.</summary>
+    static void UsbFormDualSense(SafeFileHandle h, HMBackend backend)
+    {
+        Console.WriteLine($"  dualsense-bt on {backend} presents dualsense: its USB answers");
+        var c05 = GetFeature(h, 0x05, 41);
+        Check("dualsense-bt 0x05 carries the DualSense-order calibration", Carries(c05, SonyCalibration));
+        Check("dualsense-bt 0x05 carries no Bluetooth CRC over USB (bytes 35..40 zero)",
+              c05 != null && c05.Skip(35).Take(6).All(b => b == 0),
+              c05 == null ? "read failed" : string.Join(" ", c05.Skip(35).Take(6).Select(b => b.ToString("X2"))));
+        var c09 = GetFeature(h, 0x09, 20);
+        Check("dualsense-bt 0x09 carries the locally administered MAC",
+              c09 != null && (c09[1] & 0x02) != 0 && c09[2] == 0x48 && c09[3] == 0x4D,
+              c09 == null ? "read failed" : string.Join(":", c09.Skip(1).Take(6).Select(b => b.ToString("X2"))));
+        var c20 = GetFeature(h, 0x20, 64);
+        Check("dualsense-bt 0x20 keeps the firmware fields (version 0x0630 at 44, fwType 3)",
+              c20 != null && (c20[44] | (c20[45] << 8)) == 0x0630 && (c20[20] | (c20[21] << 8)) == 3);
+        Check("dualsense-bt 0x20 is not a Bluetooth report: its CRC slot holds no CRC",
+              c20 != null && !FeatureCrcValid(c20, 64, out _));
+    }
+
+    /// <summary>dualshock-4-v2-bt on the USB bus answers as dualshock-4-v2
+    /// does over USB: 0x02 in the USB order and the 0x12 pairing read SDL's
+    /// ReadWiredSerial takes on a USB bus (SDL_hidapi_ps4.c:340-342).</summary>
+    static void UsbFormDualShock4(SafeFileHandle h, HMBackend backend)
+    {
+        Console.WriteLine($"  dualshock-4-v2-bt on {backend} presents dualshock-4-v2: its USB answers");
+        Check("dualshock-4-v2-bt 0x02 answers with the USB-order calibration", IsSonyCalibration(h, 0x02, 41));
+        var pair = GetFeature(h, 0x12, 16);
+        Check("dualshock-4-v2-bt 0x12 is served, with a non-zero locally administered MAC",
+              pair != null && (pair[1] & 0x02) != 0 && (pair[1] | pair[2] | pair[3] | pair[4] | pair[5] | pair[6]) != 0,
+              pair == null ? "read failed" : string.Join(":", pair.Skip(1).Take(6).Select(b => b.ToString("X2"))));
+        Check("dualshock-4-v2-bt does not answer DS5's 0x20", GetFeature(h, 0x20, 64) == null);
     }
 
     // ── record: the feature matrix for device_oracle_check ──────────────

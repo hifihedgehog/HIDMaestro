@@ -67,7 +67,8 @@ internal static class Resolve
         c.Check("one on USB with the USB descriptor takes switch-pro-usb's",
                 Source(usb) == "identity:nintendo-switch-pro-usb" && usb.GetOrCompileModel().Layouts.Single().Size == 64,
                 Source(usb));
-        var mixed = Load(Text("switch-pro", o => o["connection"] = "usb"));
+        // A profile on USB names no USB form (usbForm is a Bluetooth identity's).
+        var mixed = Load(Text("switch-pro", o => { o["connection"] = "usb"; o.Remove("usbForm"); }));
         c.Check("one on USB with the Bluetooth descriptor takes no protocol, and names the misfit",
                 Source(mixed) == "none" && mixed.Protocol == null && mixed.Resolved.Problem?.Contains("switch-pro-usb", StringComparison.Ordinal) == true,
                 $"{Source(mixed)}: {mixed.Resolved.Problem}");
