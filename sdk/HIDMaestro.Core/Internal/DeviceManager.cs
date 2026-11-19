@@ -392,6 +392,28 @@ public static partial class DeviceManager
         return present;
     }
 
+    /// <summary>The HID device interface class (GUID_DEVINTERFACE_HID,
+    /// hidclass.h).</summary>
+    internal static readonly Guid HidInterfaceClass = new("4d1e55b2-f16f-11cf-88cb-001111000030");
+
+    /// <summary>Waits until <paramref name="ready"/> holds: checked at once,
+    /// again on every HID device interface Windows publishes, and every
+    /// 25 ms besides. False when <paramref name="timeoutMs"/>, scaled, runs
+    /// out first. What <paramref name="ready"/> throws ends the wait and
+    /// reaches the caller.</summary>
+    public static bool WaitOnHidInterfaces(Func<bool> ready, int timeoutMs)
+    {
+        if (ready()) return true;
+        using var signal = new AutoResetEvent(false);
+        CM_NOTIFY_CALLBACK callback = (hNotify, context, action, data, size) =>
+        {
+            if (action == CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL) signal.Set();
+            return 0u;
+        };
+        return WithNotification(cb => RegisterInterfaceEvents(HidInterfaceClass, cb), callback,
+            () => WaitUntil(ready, signal, timeoutMs, 25));
+    }
+
     static bool HasInterface(string instanceId, Guid interfaceGuid)
     {
         // Quick check via registry

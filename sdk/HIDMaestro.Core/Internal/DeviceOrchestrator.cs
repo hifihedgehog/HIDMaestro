@@ -1006,7 +1006,7 @@ internal static partial class DeviceOrchestrator
     /// usbflags key says to ignore its serial. Returns the instance id
     /// Windows gave it, <paramref name="serialInstanceId"/> when none was
     /// found in time.</summary>
-    internal static string AwaitUsbipStart(string serialInstanceId, int vhciPort, int controllerIndex)
+    internal static string AwaitUsbipStart(string serialInstanceId, int vhciPort, int controllerIndex, int hidCollections)
     {
         var sw = Stopwatch.StartNew();
         string? onPort = FindOnPort(serialInstanceId, vhciPort, sw);
@@ -1019,87 +1019,101 @@ internal static partial class DeviceOrchestrator
             ? WaitForDeviceStarted(childId, usbInstanceId, controllerIndex, timeoutMs: 10000)
             : StartWait.TimedOut;
         if (started == StartWait.Failed) throw StartError(usbInstanceId, controllerIndex, childId);
-        // A driver package that names the device's VID and PID can bind it
-        // as a composite, as Logitech's binds usbccgp to its mice and
-        // keyboards, and the HID collection then sits under an interface
-        // node (USB\...&MI_nn), as for the real device. The wait goes on to
-        // that collection's start.
-        int deep = -1;
-        if (started == StartWait.Done && !childId!.StartsWith(@"HID\", StringComparison.OrdinalIgnoreCase))
-        {
-            int deepBudget = TimeoutScale.Apply(10000);
-            var deepClock = Stopwatch.StartNew();
-            while ((deep = StartedHidInterfaces(usbInstanceId, controllerIndex, nodeFailureThrows: false)) < 1
-                   && deepClock.ElapsedMilliseconds < deepBudget)
-                Thread.Sleep(25);
-        }
+        // A started devnode is not yet an interface a program can open:
+        // Windows publishes a collection's HID interface a moment after its
+        // devnode starts, and starts a descriptor's further collections one
+        // by one (measured 2026-11-19: 3 to 12 of 223 creates returned
+        // before it). A driver package that names the device's VID and PID
+        // can also bind it as a composite, as Logitech's binds usbccgp to
+        // its mice and keyboards, and the collections then sit under an
+        // interface node (USB\...&MI_nn). So the wait goes on until every
+        // collection the descriptor declares has started and published its
+        // interface, wherever under the device it sits. One that runs out is
+        // logged and the create goes on.
+        int ready = -1;
+        if (started == StartWait.Done)
+            ready = AwaitHidCollections(usbInstanceId, controllerIndex, hidCollections, 2000, nodeFailureThrows: false);
         LogDiag($"    usbip start wait {usbInstanceId} on port {vhciPort}{(onPort == null ? " (not found on the port)" : "")}: child {childId ?? "(none)"} {child}, start {started}" +
-                $"{(deep < 0 ? "" : deep > 0 ? ", HID collection under it started" : ", no HID collection under it started")} in {sw.ElapsedMilliseconds}ms");
+                $"{(ready < 0 ? "" : $", {ready} of {hidCollections} HID collections open")} in {sw.ElapsedMilliseconds}ms");
         return usbInstanceId;
     }
 
     /// <summary>The start wait of a form that a profile which runs on UMDF2
     /// presents on USB/IP from authored descriptors, as a Joy-Con presents
     /// the Joy-Con Charging Grip: the USB device appears on the host
-    /// controller's port, as <see cref="AwaitUsbipStart"/> finds it, and a
-    /// started HID collection appears for each of its
-    /// <paramref name="hidInterfaces"/> HID interfaces, under the device
-    /// itself or, on a device with more than one interface, under that
-    /// interface's own node. A program that opens a HID interface as the
-    /// create returns then finds it, as after the profile's UMDF2 create. A
-    /// failed start throws as the derived wait's does. A wait that runs out,
-    /// in the derived wait's two 10 s budgets, is logged and the create goes
-    /// on, as there. Returns the instance id Windows gave the device,
-    /// <paramref name="serialInstanceId"/> when none was found in
-    /// time.</summary>
-    internal static string AwaitUsbipFormStart(string serialInstanceId, int vhciPort, int controllerIndex, int hidInterfaces)
+    /// controller's port, as <see cref="AwaitUsbipStart"/> finds it, and
+    /// each of the <paramref name="hidCollections"/> HID collections its
+    /// HID interfaces declare starts and publishes its interface, under the
+    /// device itself or, on a device with more than one interface, under
+    /// that interface's own node. A program that opens a HID interface as
+    /// the create returns then finds it, as after the profile's UMDF2
+    /// create. A failed start throws as the derived wait's does. A wait
+    /// that runs out, in the derived wait's two 10 s budgets, is logged and
+    /// the create goes on, as there. Returns the instance id Windows gave
+    /// the device, <paramref name="serialInstanceId"/> when none was found
+    /// in time.</summary>
+    internal static string AwaitUsbipFormStart(string serialInstanceId, int vhciPort, int controllerIndex, int hidCollections)
     {
         var sw = Stopwatch.StartNew();
         string? onPort = FindOnPort(serialInstanceId, vhciPort, sw);
         string usbInstanceId = onPort ?? serialInstanceId;
-        int budget = TimeoutScale.Apply(20000);
-        int started;
-        while (true)
-        {
-            started = StartedHidInterfaces(usbInstanceId, controllerIndex, nodeFailureThrows: true);
-            if (started >= hidInterfaces) break;
-            if (StartFailed(usbInstanceId, controllerIndex)) throw StartError(usbInstanceId, controllerIndex);
-            if (sw.ElapsedMilliseconds >= budget) break;
-            Thread.Sleep(25);
-        }
+        int left = (int)Math.Max(0, 20000 - sw.ElapsedMilliseconds / TimeoutScale.Factor);
+        int ready = AwaitHidCollections(usbInstanceId, controllerIndex, hidCollections, left, nodeFailureThrows: true);
         LogDiag($"    usbip form start wait {usbInstanceId} on port {vhciPort}{(onPort == null ? " (not found on the port)" : "")}: " +
-                $"{started} of {hidInterfaces} HID interfaces started in {sw.ElapsedMilliseconds}ms");
+                $"{ready} of {hidCollections} HID collections open in {sw.ElapsedMilliseconds}ms");
         return usbInstanceId;
     }
 
-    /// <summary>How many of the USB device's HID interfaces have a started
-    /// HID collection: one for the device when its collections sit directly
-    /// under it, and one for each interface node (<c>USB\...&amp;MI_nn</c>)
-    /// that has one. A HID collection whose start failed throws, naming the
-    /// device, and so does a failed interface node when
-    /// <paramref name="nodeFailureThrows"/>: a form's interface nodes are its
-    /// HID interfaces, where a node another driver package adds beside a
-    /// derived device's HID interface is not this create's.</summary>
-    private static int StartedHidInterfaces(string usbInstanceId, int controllerIndex, bool nodeFailureThrows)
+    /// <summary>Waits until <paramref name="expected"/> HID collections
+    /// under the USB device are open to a program
+    /// (<see cref="OpenHidCollections"/>), waking on each HID interface
+    /// Windows publishes and every 25 ms. A failed start throws, as
+    /// <see cref="StartError"/> names it: a collection's, the device's own
+    /// and, with <paramref name="nodeFailureThrows"/>, an interface node's.
+    /// Returns how many were open when the wait ended, fewer than
+    /// <paramref name="expected"/> when <paramref name="timeoutMs"/>, scaled,
+    /// ran out.</summary>
+    private static int AwaitHidCollections(string usbInstanceId, int controllerIndex, int expected, int timeoutMs, bool nodeFailureThrows)
     {
-        int count = 0;
-        bool direct = false;
+        int open = 0;
+        DeviceManager.WaitOnHidInterfaces(() =>
+        {
+            open = OpenHidCollections(usbInstanceId, controllerIndex, nodeFailureThrows);
+            if (open >= expected) return true;
+            if (nodeFailureThrows && StartFailed(usbInstanceId, controllerIndex)) throw StartError(usbInstanceId, controllerIndex);
+            return false;
+        }, timeoutMs);
+        return open;
+    }
+
+    /// <summary>How many HID collections under the USB device a program can
+    /// open now: started, with the HID interface published. They sit
+    /// directly under a device HidUsb binds, and under an interface node
+    /// (<c>USB\...&amp;MI_nn</c>) of a composite. A collection whose start
+    /// failed throws, naming the device, and so does a failed interface
+    /// node when <paramref name="nodeFailureThrows"/>: a form's interface
+    /// nodes are its HID interfaces, where a node another driver package
+    /// adds beside a derived device's HID interface is not this
+    /// create's.</summary>
+    private static int OpenHidCollections(string usbInstanceId, int controllerIndex, bool nodeFailureThrows)
+    {
+        int open = 0;
         foreach (string child in DeviceManager.GetChildIds(usbInstanceId))
         {
-            if (IsHidCollection(child)) { direct |= HidCollectionStarted(child, usbInstanceId, controllerIndex); continue; }
+            if (IsHidCollection(child)) { if (HidCollectionOpen(child, usbInstanceId, controllerIndex)) open++; continue; }
             if (nodeFailureThrows && StartFailed(child, controllerIndex)) throw StartError(usbInstanceId, controllerIndex, child);
             foreach (string hid in DeviceManager.GetChildIds(child))
-                if (IsHidCollection(hid) && HidCollectionStarted(hid, usbInstanceId, controllerIndex)) { count++; break; }
+                if (IsHidCollection(hid) && HidCollectionOpen(hid, usbInstanceId, controllerIndex)) open++;
         }
-        return direct ? count + 1 : count;
+        return open;
 
         static bool IsHidCollection(string id) => id.StartsWith(@"HID\", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static bool HidCollectionStarted(string hid, string usbInstanceId, int controllerIndex)
+    private static bool HidCollectionOpen(string hid, string usbInstanceId, int controllerIndex)
     {
         var (present, status, _) = DevnodeStatus(hid);
-        if (present && (status & DN_STARTED) != 0) return true;
+        if (present && (status & DN_STARTED) != 0) return Usbip.VhciClient.HasPresentInterface(hid, DeviceManager.HidInterfaceClass);
         if (StartFailed(hid, controllerIndex)) throw StartError(usbInstanceId, controllerIndex, hid);
         return false;
     }
@@ -1172,7 +1186,8 @@ internal static partial class DeviceOrchestrator
     /// <summary>The XUSB function's start wait, the UMDF2 create's companion
     /// and slot waits for the USB device: xusb22 publishes the XUSB interface
     /// on the device's own instance, then XInput lists one slot more than
-    /// <paramref name="slotsBefore"/>, read before the attach. A failed
+    /// <paramref name="slotsBefore"/>, read before the attach, then the HID
+    /// device xusb22 makes for the pad starts. A failed
     /// start throws as the UMDF2 create's does. A wait that runs out is
     /// logged and the create goes on, as there: the controller still reaches
     /// XInput on a consumer's next poll. Returns the name Windows gave the
@@ -1201,8 +1216,29 @@ internal static partial class DeviceOrchestrator
                 Thread.Sleep(10);
             }
         }
+        // xusb22 makes the pad's HID device itself, a child of the USB
+        // device. On Windows 10 it comes after the XInput slot is taken
+        // (S77 on the Celeron, 2026-11-19: the child was announced after the
+        // create had returned), so the wait goes on to the child's start,
+        // and a program that lists HID or DirectInput devices as the create
+        // returns finds the pad, as after the UMDF2 create. A wait that runs
+        // out is logged and the create goes on: XInput has the pad already.
+        string? hidChild = null;
+        bool childStarted = false;
+        if (arrived)
+        {
+            var childClock = Stopwatch.StartNew();
+            int childBudget = TimeoutScale.Apply(2000);
+            while (true)
+            {
+                hidChild ??= HidChildOf(usbInstanceId);
+                if (hidChild != null && DevnodeStatus(hidChild) is (true, var childStatus, _) && (childStatus & DN_STARTED) != 0) { childStarted = true; break; }
+                if (childClock.ElapsedMilliseconds >= childBudget) break;
+                Thread.Sleep(10);
+            }
+        }
         LogDiag($"    usbip xusb start wait {usbInstanceId} on port {vhciPort}{(onPort == null ? " (not found on the port)" : "")}: interface {(arrived ? "arrived" : "TIMEOUT")} in {interfaceMs}ms, " +
-                $"XInput slots before={slotsBefore} after={slotsAfter} in {sw.ElapsedMilliseconds}ms");
+                $"XInput slots before={slotsBefore} after={slotsAfter}, HID child {hidChild ?? "(none)"} {(childStarted ? "started" : "not started")} in {sw.ElapsedMilliseconds}ms");
         return usbInstanceId;
     }
 

@@ -122,6 +122,51 @@ internal sealed class UsbDescriptorSet
     /// <summary>Interface numbers of the secondary HID interfaces.</summary>
     public IReadOnlyCollection<byte> SecondaryHidInterfaces => _secondaryHid.Keys;
 
+    /// <summary>The HID collections Windows makes for this device: HID
+    /// class makes one device for each top-level collection of an
+    /// interface's report descriptor. At least 1 for a device with a HID
+    /// interface, 0 for one without.</summary>
+    public int HidCollectionCount
+    {
+        get
+        {
+            if (!HasHidInterface) return 0;
+            int n = TopLevelCollections(ReportDescriptor);
+            foreach (var sec in _secondaryHid.Values) n += TopLevelCollections(sec.ReportDescriptor);
+            return Math.Max(1, n);
+        }
+    }
+
+    /// <summary>The Collection items at depth 0 of a report descriptor.
+    /// A short item's prefix holds its data size in bits 0 and 1, where 3
+    /// means 4 bytes, and its type and tag above them: Collection is
+    /// 1010 00 nn and End Collection 1100 00 nn (HID 1.11, 6.2.2.2 and
+    /// 6.2.2.4). A long item is 0xFE, its data size, its tag and its data
+    /// (6.2.2.3).</summary>
+    internal static int TopLevelCollections(ReadOnlySpan<byte> descriptor)
+    {
+        int depth = 0, count = 0;
+        for (int i = 0; i < descriptor.Length;)
+        {
+            byte prefix = descriptor[i];
+            if (prefix == 0xFE)
+            {
+                if (i + 1 >= descriptor.Length) break;
+                i += 3 + descriptor[i + 1];
+                continue;
+            }
+            if ((prefix & 0xFC) == 0xA0)
+            {
+                if (depth == 0) count++;
+                depth++;
+            }
+            else if ((prefix & 0xFC) == 0xC0 && depth > 0) depth--;
+            int size = prefix & 0x03;
+            i += 1 + (size == 3 ? 4 : size);
+        }
+        return count;
+    }
+
     internal readonly struct EndpointInfo
     {
         public EndpointInfo(byte address, byte attributes, ushort maxPacketSize, byte interval,

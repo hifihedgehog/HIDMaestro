@@ -45,16 +45,27 @@ internal static partial class Program
         // the probe's own with dualsense-bt's descriptor, whose 78-byte
         // report 0x31 goes as raw frames, the widest the extended lane takes.
         // dualsense-bt itself carried that report until 2.3.0, and on USB/IP
-        // it now presents its USB form's 64-byte report. joycon-l's 362-byte
-        // report the device builds from SubmitState, as switch-pro's was
-        // before it took switch-pro-usb's form, and the keyboard's 65-byte
-        // report goes as raw frames.
+        // it now presents its USB form's 64-byte report. long-device-built
+        // is joycon-l's Bluetooth profile under the probe's own id with no
+        // usbForm: its 362-byte report the device builds from SubmitState.
+        // joycon-l itself presents the Charging Grip on USB/IP since 2.3.0,
+        // as switch-pro presents switch-pro-usb, and no catalog profile
+        // that builds its reports is left with one over 64 bytes there.
+        // The keyboard's 65-byte report goes as raw frames.
         var btShape = ctx.GetProfile("dualsense-bt");
+        HMProfile? deviceBuilt = null;
+        if (ctx.GetProfile("joycon-l") is { } joycon)
+        {
+            var inner = joycon.Inner.Clone();
+            inner.Id = "long-device-built";
+            inner.UsbForm = null;
+            deviceBuilt = new HMProfile(inner);
+        }
         var subjects = new List<(string Id, HMProfile? Profile)>
         {
             ("long-bt-shape", btShape == null ? null
                 : new HMProfileBuilder().Id("long-bt-shape").Vid(0xBEEF).Pid(0xF0D8).DescriptorHex(btShape.DescriptorHex!).Build()),
-            ("joycon-l", ctx.GetProfile("joycon-l")),
+            ("long-device-built", deviceBuilt),
             ("apple-magic-keyboard-a1644", ctx.GetProfile("apple-magic-keyboard-a1644")),
         };
         foreach (var (id, source) in subjects)
@@ -127,13 +138,24 @@ internal static partial class Program
                 for (int i = 1; i < carried; i++) pattern[i] = (byte)(i * 7 + 3);
                 pattern[carried - 1] = 0xA5;
                 // The device may send other reports first, an idle repeat
-                // among them: read until the report submitted arrives.
+                // among them: read until the report submitted arrives. A
+                // device that builds its own reports may send one only when
+                // its input changes, as a Joy-Con sends 0x3F, and the one its
+                // first clock tick sends can go out before this handle is
+                // open, which HID class then gives no reader. So each submit
+                // here differs from the one before it, and a report follows
+                // the open whatever the device's rule.
                 var sw = Stopwatch.StartNew();
+                bool held = false;
                 while (sw.ElapsedMilliseconds < 3000)
                 {
                     try
                     {
-                        if (own) c.SubmitState(new HMGamepadState());
+                        if (own)
+                        {
+                            held = !held;
+                            c.SubmitState(held ? new HMGamepadState { Buttons = HMButton.A | HMButton.LeftBumper, Hat = HMHat.West } : new HMGamepadState());
+                        }
                         else c.SubmitRawExtendedReport(pattern);
                     }
                     catch (Exception e) { Note($"{name}: submit {e.GetType().Name}: {e.Message}"); break; }

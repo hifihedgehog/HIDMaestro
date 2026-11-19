@@ -1048,7 +1048,8 @@ public sealed class HMContext : IDisposable
             // serial, the owner record and the ledger take that name
             // (UsbipBackendHandle.ResolveRecord).
             if (handle.Device.Descriptors.UsbInstanceId is { } usbId && handle.Device.Derived)
-                handle.ResolveRecord(Internal.DeviceOrchestrator.AwaitUsbipStart(usbId, handle.Device.VhciPort, index));
+                handle.ResolveRecord(Internal.DeviceOrchestrator.AwaitUsbipStart(usbId, handle.Device.VhciPort, index,
+                    handle.Device.Descriptors.HidCollectionCount));
             // The XUSB function's XUSB interface is there and its XInput slot
             // taken before the create returns, as the UMDF2 create's companion
             // is, the device found and named the same way.
@@ -1067,7 +1068,7 @@ public sealed class HMContext : IDisposable
             else if (handle.Device.Descriptors.UsbInstanceId is { } formId && !ReferenceEquals(presented, profile)
                      && handle.Device.Descriptors.HasHidInterface)
                 handle.ResolveRecord(Internal.DeviceOrchestrator.AwaitUsbipFormStart(formId, handle.Device.VhciPort, index,
-                    1 + handle.Device.Descriptors.SecondaryHidInterfaces.Count));
+                    handle.Device.Descriptors.HidCollectionCount));
             var controller = new HMController(this, slot, lease, profile, instanceId: null, handle, lease.Identity.Key, presented);
             try
             {

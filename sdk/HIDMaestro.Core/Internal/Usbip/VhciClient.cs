@@ -601,6 +601,13 @@ internal static partial class VhciClient
 
     private const uint CM_GET_DEVICE_INTERFACE_LIST_PRESENT = 0;
 
+    /// <summary>True when the devnode has an interface of the class that a
+    /// program can open now: one Windows lists as present, which a
+    /// registered interface of a device that has left, or of one that has
+    /// not finished starting, is not.</summary>
+    internal static bool HasPresentInterface(string instanceId, Guid interfaceClass) =>
+        CM_Get_Device_Interface_List_SizeW(out uint len, ref interfaceClass, instanceId, CM_GET_DEVICE_INTERFACE_LIST_PRESENT) == 0 && len > 1;
+
     [LibraryImport("cfgmgr32.dll", StringMarshalling = StringMarshalling.Utf16)]
     private static partial uint CM_Get_Device_Interface_List_SizeW(out uint len, ref Guid interfaceClassGuid, string? deviceId, uint flags);
 
