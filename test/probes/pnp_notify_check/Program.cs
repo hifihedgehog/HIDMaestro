@@ -24,6 +24,18 @@
 // all. A DualShock 4 and an Xbox 360 wired are timed, each in a window of
 // its own.
 //
+// A controller on the USB/IP backend leaves by plug-out: its Dispose
+// unplugs the device from the host controller, and Windows removes the USB
+// device and its children with no SDK removal and no PnP lock of the
+// SDK's. There the window judges what plug-out means: each devnode in the
+// USB device's tree, listed before the dispose, gets its own
+// DEVICEINSTANCEREMOVED through the held-open registration within the
+// bound after Dispose returns and is gone after it, and the same
+// registration delivered each one's ENUMERATED during the create, the
+// positive control in the same window. The SDK's removal test and the
+// PnP-lock timing print their condition there. A profile with no
+// presentation on the backend Auto resolves to prints its condition.
+//
 // Requires elevation. Exit 0 PASS, 1 FAIL, 2 when another program that embeds
 // HIDMaestro is running.
 //
@@ -175,6 +187,96 @@ internal static class Program
         Check($"{profile}: each child's own REMOVED came before RemoveDevice let the PnP lock go, timed through the held-open registration against its parent's",
               judged.Ok, judged.Detail);
 
+    /// <summary>How long after a USB/IP Dispose returns each devnode of
+    /// its tree gets for its own DEVICEINSTANCEREMOVED, at the timeout
+    /// scale: the SDK's bound for a removal's notification
+    /// (DeviceManager.RemovedBoundMs).</summary>
+    internal static int UsbipRemovedBoundMs => TimeoutScale.Apply(DeviceManager.RemovedBoundMs);
+
+    /// <summary>Whether a USB/IP controller's plug-out removed its tree, from
+    /// the events the held-open all-instances registration received:
+    /// each devnode in <paramref name="tree"/>, the USB device and every
+    /// devnode below it as listed before the dispose, got its own REMOVED
+    /// through that registration no earlier than the dispose began and no
+    /// later than <paramref name="boundMs"/> after Dispose returned, and is
+    /// gone (<paramref name="isPresent"/>). The positive control, in the
+    /// same window: that registration delivered each one's ENUMERATED
+    /// during the create. Without it, or without a registration made before
+    /// the create and open until the bound ended or every REMOVED came, the
+    /// check fails as not judged, naming each missing control.</summary>
+    internal static (bool Ok, string Detail) UsbipTreeRemoved((double Ms, IntPtr Registration, uint Action, string Id)[] events,
+                                                              HeldRegistration? window, IReadOnlyList<string> tree,
+                                                              double createAt, double disposeAt, double disposeEndAt, double boundMs,
+                                                              Func<string, bool> isPresent)
+    {
+        var causes = new List<string>();
+        var heard = new List<(double Ms, uint Action, string Id)>();
+        if (window is not { } w) causes.Add("the held-open wait made no registration");
+        else if (w.Handle == IntPtr.Zero) causes.Add("Windows refused the held-open registration");
+        else
+        {
+            heard.AddRange(events.Where(e => e.Registration == w.Handle && e.Ms >= w.OpenedAt && e.Ms <= w.ClosedAt)
+                                 .Select(e => (e.Ms, e.Action, e.Id)));
+            if (w.OpenedAt > createAt) causes.Add($"the held-open registration was made {w.OpenedAt - createAt:0.0} ms after the create began");
+        }
+        if (tree.Count == 0) causes.Add("the controller had no USB instance id");
+        double? Seen(uint action, string id, Func<double, bool> when) =>
+            heard.Where(e => e.Action == action && when(e.Ms) && string.Equals(e.Id, id, StringComparison.OrdinalIgnoreCase))
+                 .Select(e => (double?)e.Ms).Min();
+        double end = disposeEndAt + boundMs;
+        var removed = tree.Select(id => (Id: id, At: Seen(Removed, id, ms => ms >= disposeAt))).ToList();
+        if (window is { Handle: var h } open && h != IntPtr.Zero)
+        {
+            foreach (string id in tree)
+                if (Seen(Enumerated, id, ms => ms >= createAt && ms < disposeAt) == null)
+                    causes.Add($"no ENUMERATED for {id} through the held-open registration during the create");
+            if (open.ClosedAt < end && removed.Any(r => r.At == null))
+                causes.Add($"the held-open registration closed {end - open.ClosedAt:0.0} ms before the bound ended");
+        }
+
+        var parts = new List<string>();
+        if (causes.Count > 0) parts.Add("not judged: " + string.Join(", ", causes));
+        parts.Add($"Dispose returned {disposeEndAt - disposeAt:0.0} ms into the dispose, bound {boundMs:0} ms after it");
+        bool ok = causes.Count == 0;
+        foreach (var (id, at) in removed)
+        {
+            bool present = isPresent(id);
+            ok &= !present;
+            if (at is double t)
+            {
+                bool inTime = t <= end;
+                ok &= inTime;
+                parts.Add($"{id}: its own REMOVED {t - disposeAt:0.0} ms into the dispose, {t - disposeEndAt:+0.0;-0.0;0.0} ms from Dispose's return"
+                          + (inTime ? "" : $", {t - end:0.0} ms past the bound") + (present ? ", still present" : ", gone"));
+            }
+            else
+            {
+                ok = false;
+                parts.Add($"{id}: no REMOVED of its own through the held-open registration" + (present ? ", still present" : ", gone"));
+            }
+        }
+        return (ok, string.Join(" | ", parts));
+    }
+
+    static void CheckUsbipTreeRemoved(string profile, (bool Ok, string Detail) judged) =>
+        Check($"{profile}: on USB/IP, the plug-out removed the USB device and each devnode below it, each on its own DEVICEINSTANCEREMOVED through the held-open registration within the bound, each ENUMERATED through it during the create",
+              judged.Ok, judged.Detail);
+
+    /// <summary>The UMDF2-only checks, as conditions on USB/IP.</summary>
+    static void SkipUmdf2Only(string profile)
+    {
+        Console.WriteLine($"  [SKIP] {profile}: the SDK's removal test: on USB/IP the Dispose unplugs the device, and Windows removes its tree with no removal of the SDK's to test");
+        Console.WriteLine($"  [SKIP] {profile}: a child's REMOVED before RemoveDevice let the PnP lock go: on USB/IP no RemoveDevice runs and the SDK takes no PnP lock for the removal");
+    }
+
+    /// <summary>The USB device of a USB/IP controller and every devnode
+    /// below it, each after its parent, or none when the controller has no
+    /// USB instance id.</summary>
+    static IReadOnlyList<string> UsbTreeOf(HMController c) =>
+        c.UsbipHandle?.Device.Descriptors.UsbInstanceId is { } usb
+            ? HIDMaestro.Internal.Usbip.UsbRecords.SubtreeOf(usb, id => DeviceManager.GetAllHidChildIds(id))
+            : Array.Empty<string>();
+
     const string NoSuchDevice = @"ROOT\HIDMAESTRO\PNP_NOTIFY_CHECK_NO_SUCH_DEVICE";
 
     /// <summary>A parent's children as TeardownController captures them
@@ -206,7 +308,7 @@ internal static class Program
         bool _registered;
         IntPtr _handle;
         readonly ManualResetEventSlim _close = new();
-        double _openedAt, _closedAt = double.NaN, _createAt, _disposeAt, _lockReleasedAt = double.NaN;
+        double _openedAt, _closedAt = double.NaN, _createAt, _disposeAt, _disposeEndAt, _lockReleasedAt = double.NaN;
         string? _parentId;
         IReadOnlyList<string> _children = Array.Empty<string>();
 
@@ -282,6 +384,30 @@ internal static class Program
             _children = children;
             _disposeAt = Now;
         }
+
+        /// <summary>Dispose has returned.</summary>
+        internal void DisposeEnded() => _disposeEndAt = Now;
+
+        /// <summary>Waits until each of <paramref name="ids"/> has its own
+        /// REMOVED through the window's registration since the dispose
+        /// began, or <paramref name="boundMs"/> has passed since Dispose
+        /// returned, whichever comes first.</summary>
+        internal void WaitRemoved(IReadOnlyList<string> ids, double boundMs)
+        {
+            while (Now < _disposeEndAt + boundMs)
+            {
+                var handle = _handle;
+                var seen = _events.Where(e => e.Registration == handle && e.Action == Removed && e.Ms >= _disposeAt)
+                                  .Select(e => e.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                if (ids.All(seen.Contains)) return;
+                Thread.Sleep(10);
+            }
+        }
+
+        /// <summary>The USB/IP judgment, once the held-open wait's task has
+        /// ended.</summary>
+        internal (bool Ok, string Detail) JudgeUsbip(IReadOnlyList<string> tree, double boundMs) =>
+            UsbipTreeRemoved(_events.ToArray(), Window, tree, _createAt, _disposeAt, _disposeEndAt, boundMs, DeviceManager.IsPresent);
 
         /// <summary>The timing, once the held-open wait's task has
         /// ended.</summary>
@@ -380,15 +506,19 @@ internal static class Program
         long createMs = sw.ElapsedMilliseconds;
         long afterCreate = DeviceManager.NotificationsDelivered;
         long interfaceAfterCreate = DeviceManager.InterfaceNotificationsDelivered;
+        bool usbip = c.Backend == HMBackend.Usbip;
+        var usbTree = usbip ? UsbTreeOf(c) : Array.Empty<string>();
         timing.DisposeStarting(c.InstanceId, ChildrenOf(c.InstanceId));
         sw.Restart();
         c.Dispose();
         long disposeMs = sw.ElapsedMilliseconds;
+        timing.DisposeEnded();
+        if (usbip) timing.WaitRemoved(usbTree, UsbipRemovedBoundMs);
         timing.Close();
         closeInterfaceWindow.Set();
         bool found = window.Result;
         bool interfaceFound = interfaceWindow.Result;
-        var timed = timing.Judge();
+        var timed = usbip ? timing.JudgeUsbip(usbTree, UsbipRemovedBoundMs) : timing.Judge();
         timing.Dispose();
         long after = DeviceManager.NotificationsDelivered;
         long interfaceAfter = DeviceManager.InterfaceNotificationsDelivered;
@@ -401,8 +531,17 @@ internal static class Program
         Check("device-interface notifications arrive through the interface filter", interfaceAfter > interfaceBefore,
               $"{interfaceAfter - interfaceBefore} delivered: {interfaceAfterCreate - interfaceBefore} by the end of the create, " +
               $"{interfaceAfter - interfaceAfterCreate} after it, through the dispose");
-        CheckRemovals("dualshock-4-v2", removalsBefore);
-        CheckChildRemoved("dualshock-4-v2", timed);
+        Console.WriteLine($"  dualshock-4-v2 ran on {c.Backend}");
+        if (usbip)
+        {
+            CheckUsbipTreeRemoved("dualshock-4-v2", timed);
+            SkipUmdf2Only("dualshock-4-v2");
+        }
+        else
+        {
+            CheckRemovals("dualshock-4-v2", removalsBefore);
+            CheckChildRemoved("dualshock-4-v2", timed);
+        }
 
         // The removal test waits for DEVICEINSTANCEREMOVED for every devnode
         // in the tree when its removal starts, a child removed while its
@@ -417,17 +556,41 @@ internal static class Program
         // device's children are removed after its software close: one still
         // in the tree at its call counts gone without a notification, or not
         // gone, and CheckRemovals fails on either.
+        //
+        // On USB/IP each is timed in a window of its own, as the DualShock 4
+        // is there.
         foreach (string id in new[] { "xbox-360-wired", "xbox-series-xs-bt" })
         {
+            var p = ctx.GetProfile(id)!;
+            HMBackend backend;
+            try { backend = ctx.ResolveBackend(p); }
+            catch (HMBackendNotSupportedException e)
+            {
+                Console.WriteLine($"  [SKIP] {id}: no presentation on the backend Auto resolves to here: {e.Message}");
+                continue;
+            }
+            bool onUsbip = backend == HMBackend.Usbip;
             var r0 = Removals();
-            var timedHere = id == "xbox-360-wired" ? new ChildTiming() : null;
+            var timedHere = id == "xbox-360-wired" || onUsbip ? new ChildTiming() : null;
             var held = timedHere?.Hold();
             if (held != null) timedHere!.WaitRegistered(held);
             timedHere?.CreateStarting();
-            var more = ctx.CreateController(ctx.GetProfile(id)!, "pnp-notify-check-" + id);
+            var more = ctx.CreateController(p, "pnp-notify-check-" + id);
+            var tree = onUsbip ? UsbTreeOf(more) : Array.Empty<string>();
             timedHere?.DisposeStarting(more.InstanceId, ChildrenOf(more.InstanceId));
             more.Dispose();
+            timedHere?.DisposeEnded();
+            if (onUsbip) timedHere!.WaitRemoved(tree, UsbipRemovedBoundMs);
             timedHere?.Close();
+            Console.WriteLine($"  {id} ran on {backend}");
+            if (onUsbip)
+            {
+                held!.Wait();
+                CheckUsbipTreeRemoved(id, timedHere!.JudgeUsbip(tree, UsbipRemovedBoundMs));
+                SkipUmdf2Only(id);
+                timedHere.Dispose();
+                continue;
+            }
             CheckRemovals(id, r0);
             if (timedHere != null)
             {

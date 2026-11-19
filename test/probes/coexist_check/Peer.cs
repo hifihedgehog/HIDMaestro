@@ -724,6 +724,17 @@ internal static class Peer
                     case "census":
                         Reply(Census());
                         break;
+                    case "serial":
+                    {
+                        // "serial <index>": the USB serial a USB/IP device of
+                        // the index's default identity serves
+                        // (DeviceIdentity.SyntheticSerial).
+                        var type = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.DeviceIdentity");
+                        object? identity = type?.GetMethod("ForIndex", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
+                            ?.Invoke(null, new object[] { int.Parse(a[1]) });
+                        Reply(identity == null ? "ERR serial no DeviceIdentity.ForIndex" : $"OK serial serial={Get(identity, "SyntheticSerial")}");
+                        break;
+                    }
                     case "outputs":
                         if (a.Length > 1 && a[1] == "on")
                         {

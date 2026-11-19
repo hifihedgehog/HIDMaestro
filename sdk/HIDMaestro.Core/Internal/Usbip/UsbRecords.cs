@@ -245,7 +245,7 @@ internal static partial class UsbRecords
     /// <paramref name="sinceBoot"/> a record of a device that arrived since
     /// Windows started is removed too, which only a caller that has shown
     /// another such record stays on the host controller may ask
-    /// (registry_ownership_check's R13).</summary>
+    /// (registry_ownership_check's record removal).</summary>
     internal static Result Remove(string instanceId, int leaveWaitMs, Tree? tree, bool sinceBoot = false)
     {
         var removed = new List<string>();

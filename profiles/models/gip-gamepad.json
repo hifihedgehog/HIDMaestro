@@ -1,0 +1,699 @@
+{
+  "id": "gip-gamepad",
+  "comment": "The GIP function: the USB device every profile whose xinput.via is xinputhid presents on the USB/IP backend, a gamepad that speaks the Gaming Input Protocol on one vendor interface and that Windows gives its own GIP stack (dc1-controller.sys with xboxgip.sys above it), whose HID child xinputhid.sys gives an XInput slot. gipFunction holds the device as one profile would: usbConfiguration, stateBlock, inputReports and protocol, the persona profiles/microsoft/xbox-one-s-full.json carries, with each identity's bytes left as slots the SDK fills (GipFunction.cs). A profile names its identity in gip.identity, and its own VID and PID go into the device descriptor and the Hello. The slots: the device descriptor's idVendor, idProduct and bcdDevice; @helloIdentity, the Hello's VID, PID, firmware and hardware versions and protocol versions; @metadataFirst, @metadataRest and @metadataComplete, the fragments of the identity's metadata as GP2040-CE's generatePacket cuts them (src/drivers/shared/xgip_protocol.cpp), with @metadataFirstEnd and @metadataEnd, the byte counts the host's acknowledgements carry; @inputSize and the input report program's ops past the 14-byte gamepad report; @guideBits, where the Guide message carries the button. Metadata is built in the layout Microsoft's GIP Metadata Compiler writes (MetadataHeader, DeviceMetadata, MessageMetadata), checked byte for byte against a real 1697's dump (PlasticBand, Docs/Descriptor Dumps/Xbox One/Microsoft 1st Revision Gamepad.txt). Every identity announces firmware major.minor 0x4D48.0x0300, which no real pad announces, because Windows caches metadata by VID, PID and firmware version until it restarts, and carries the security opt-out interface (7a34ce77-7de2-45c6-8ca4-0042c08bd94a, [MS-GIPUSB] 5196-5200), without which Windows sends a security challenge and starts no XInput pad. The system message lists, SupportedInSystemCommands and SupportedOutSystemCommands as the compiler names them, are the ones the device answers, 01 02 03 04 06 07 and 01 04 05 06 0A: a real pad's lists add 0x0C and 0x1E (Extended Commands, which require answers within 300 ms, [MS-GIPUSB] 3.1.5.5.10), which the device does not emulate.",
+  "gipFunction": {
+    "firmware": {
+      "major": "0x4D48",
+      "minor": "0x0300"
+    },
+    "systemMessages": {
+      "in": "01 02 03 04 06 07",
+      "out": "01 04 05 06 0A"
+    },
+    "guideBits": [
+      [
+        113,
+        32
+      ]
+    ],
+    "strings": {
+      "manufacturer": "Microsoft",
+      "product": "Controller"
+    },
+    "preferredTypes": [
+      "Windows.Xbox.Input.Gamepad"
+    ],
+    "hidChild": {
+      "comment": "The HID device Windows' GIP driver makes under a GIP gamepad, whatever the Hello's PID: xboxgip names the device's XInput child USB\\VID_045E&PID_02FF&IG_00, and its HID child HID\\VID_045E&PID_02FF&IG_00 is the one xinputhid.inf binds as \"XINPUT compatible HID device\" (xinputhid.inf line 86, under the comment \"From xboxgip default appears with an GIP software PID\", line 78). A real wired 1914 shows the same chain (DsHidMini docs/XINPUTHID.md 150-154), and SDL names 045E:02FF \"Microsoft Xbox One Controller with XBOXGIP driver on Windows\" (controller_list.h 341). Its HID attributes carry version 0x0000, as HidD_GetAttributes read it on Windows 10 19044 x64 and Windows 11 28000 ARM64 for all twelve identities, and its product string is \"Controller (Xbox One For Windows)\", read by HidD_GetProductString on Windows 10 19044 x64 and Windows 11 28000 ARM64 for all twelve whatever product string the device serves (backend_parity_check, 2026-11-18).",
+      "vid": "0x045E",
+      "pid": "0x02FF",
+      "version": "0x0000",
+      "product": "Controller (Xbox One For Windows)"
+    },
+    "messages": [
+      {
+        "type": "0x20",
+        "length": "input",
+        "dataType": 1,
+        "flags": "0x00000010"
+      },
+      {
+        "type": "0x09",
+        "length": 60,
+        "dataType": 1,
+        "flags": "0x00000008"
+      }
+    ],
+    "layout": {
+      "kind": "unspecified",
+      "note": "The device has no HID interface, so no descriptor declares axes or buttons for a layout to reference. The input report's shape is in stateBlock and inputReports, and SubmitState resolves its sticks and triggers canonically: X and Y, Rx and Ry, Z and Rz.",
+      "source": "Microsoft GIP specification H001419, Table 468, Typical Gamepad Input Report"
+    },
+    "usbConfiguration": {
+      "configurationValue": 1,
+      "attributes": 160,
+      "maxPowerMilliamps": 500,
+      "busSpeed": "full",
+      "deviceDescriptor": "12010002ff47d0405e04ea02000101020301",
+      "configurationDescriptor": "09022000010100a0fa0904000002ff47d0000705810340000407050103400004",
+      "interfaces": [
+        {
+          "interfaceNumber": 0,
+          "function": "gip",
+          "altSettings": [
+            {
+              "altSetting": 0,
+              "interfaceClass": 255,
+              "interfaceSubClass": 71,
+              "interfaceProtocol": 208,
+              "endpoints": [
+                {
+                  "address": 129,
+                  "transferType": "interrupt",
+                  "maxPacketSize": 64,
+                  "interval": 4
+                },
+                {
+                  "address": 1,
+                  "transferType": "interrupt",
+                  "maxPacketSize": 64,
+                  "interval": 4
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "microsoftOs": {
+        "string": "12034d005300460054003100300030009000",
+        "extendedCompatId": "28000000000104000100000000000000000158474950313000000000000000000000000000000000"
+      }
+    },
+    "stateBlock": {
+      "size": 15,
+      "fields": [
+        {
+          "byte": 0,
+          "type": "button-mask",
+          "buttons": [
+            "_",
+            "_",
+            "Start",
+            "Back",
+            "A",
+            "B",
+            "X",
+            "Y"
+          ]
+        },
+        {
+          "byte": 1,
+          "type": "button-mask",
+          "buttons": [
+            "DPAD_UP",
+            "DPAD_DOWN",
+            "DPAD_LEFT",
+            "DPAD_RIGHT",
+            "LeftBumper",
+            "RightBumper",
+            "LeftStick",
+            "RightStick"
+          ]
+        },
+        {
+          "byte": 2,
+          "type": "uint16-trigger",
+          "semantic": "leftTrigger",
+          "max": 1023
+        },
+        {
+          "byte": 4,
+          "type": "uint16-trigger",
+          "semantic": "rightTrigger",
+          "max": 1023
+        },
+        {
+          "byte": 6,
+          "type": "int16-axis",
+          "semantic": "leftStickX",
+          "min": -32768,
+          "max": 32767
+        },
+        {
+          "byte": 8,
+          "type": "int16-axis",
+          "semantic": "leftStickY",
+          "min": -32768,
+          "max": 32767,
+          "invert": true
+        },
+        {
+          "byte": 10,
+          "type": "int16-axis",
+          "semantic": "rightStickX",
+          "min": -32768,
+          "max": 32767
+        },
+        {
+          "byte": 12,
+          "type": "int16-axis",
+          "semantic": "rightStickY",
+          "min": -32768,
+          "max": 32767,
+          "invert": true
+        },
+        {
+          "byte": 14,
+          "type": "button-mask",
+          "buttons": [
+            "Share",
+            "Guide"
+          ]
+        }
+      ]
+    },
+    "inputReports": [
+      {
+        "name": "input",
+        "reportId": "0x20",
+        "size": "@inputSize",
+        "stream": "input",
+        "while": "started",
+        "send": "change",
+        "program": [
+          {
+            "const": {
+              "0": "20",
+              "1": "00",
+              "3": "@inputLength"
+            }
+          },
+          {
+            "counter": "inputSeq",
+            "at": 2,
+            "width": 8
+          },
+          {
+            "copy": "0-13",
+            "to": 4
+          }
+        ]
+      },
+      {
+        "name": "guide",
+        "reportId": "0x07",
+        "size": 6,
+        "stream": "guide",
+        "while": "started",
+        "send": "change",
+        "first": "skip",
+        "program": [
+          {
+            "const": {
+              "0": "07",
+              "1": "20",
+              "3": "02",
+              "5": "5B"
+            }
+          },
+          {
+            "counter": "globalSeq",
+            "at": 2,
+            "width": 8
+          },
+          "@guideBits"
+        ]
+      }
+    ],
+    "protocol": {
+      "state": [
+        {
+          "name": "started"
+        },
+        {
+          "name": "answered"
+        },
+        {
+          "name": "metaWait",
+          "bits": 2
+        }
+      ],
+      "counters": [
+        {
+          "name": "globalSeq",
+          "bits": 8,
+          "on": "frame",
+          "skipZero": true
+        },
+        {
+          "name": "inputSeq",
+          "bits": 8,
+          "on": "frame",
+          "skipZero": true
+        }
+      ],
+      "input": {
+        "endpoint": "0x81",
+        "clock": {
+          "periodMs": 4,
+          "origin": "attach",
+          "missedTick": "owe"
+        }
+      },
+      "commands": {
+        "endpoint": "0x01",
+        "rules": [
+          {
+            "match": ".. 30/B0",
+            "minLength": 4,
+            "continue": true,
+            "reply": [
+              {
+                "hex": "0120"
+              },
+              {
+                "echo": "2"
+              },
+              {
+                "hex": "0900"
+              },
+              {
+                "echo": "0"
+              },
+              {
+                "hex": "20"
+              },
+              {
+                "echo": "3"
+              },
+              {
+                "hex": "0000000000"
+              }
+            ]
+          },
+          {
+            "match": ".. 10/B0",
+            "minLength": 4,
+            "continue": true,
+            "reply": [
+              {
+                "hex": "0120"
+              },
+              {
+                "echo": "2"
+              },
+              {
+                "hex": "0900"
+              },
+              {
+                "echo": "0"
+              },
+              {
+                "hex": "00"
+              },
+              {
+                "echo": "3"
+              },
+              {
+                "hex": "0000000000"
+              }
+            ]
+          },
+          {
+            "match": "04 20/EF .. 00",
+            "minLength": 4,
+            "set": {
+              "answered": 1,
+              "metaWait": 1
+            },
+            "consume": true,
+            "reply": "@metadataFirst"
+          },
+          {
+            "match": "01 20/EF .. 09 00 04 20 @metadataFirstEnd",
+            "minLength": 13,
+            "while": "metaWait==1",
+            "set": {
+              "metaWait": 2
+            },
+            "consume": true,
+            "replies": "@metadataRest"
+          },
+          {
+            "match": "01 20/EF .. 09 00 04 20 @metadataEnd 00 00",
+            "minLength": 13,
+            "set": {
+              "metaWait": 0
+            },
+            "consume": true,
+            "reply": "@metadataComplete"
+          },
+          {
+            "match": "01",
+            "consume": true
+          },
+          {
+            "match": "05 20/EF .. 01 00",
+            "minLength": 5,
+            "set": {
+              "started": 1,
+              "answered": 1,
+              "metaWait": 0
+            },
+            "consume": true
+          },
+          {
+            "match": "05 20/EF .. 01 01",
+            "minLength": 5,
+            "set": {
+              "started": 0
+            },
+            "consume": true
+          },
+          {
+            "match": "05 20/EF .. 01 04",
+            "minLength": 5,
+            "set": {
+              "started": 0
+            },
+            "consume": true,
+            "reply": [
+              {
+                "hex": "0320"
+              },
+              {
+                "counter": "globalSeq"
+              },
+              {
+                "hex": "0400000000"
+              }
+            ]
+          },
+          {
+            "match": "05 20/EF .. 01 07",
+            "minLength": 5,
+            "set": {
+              "started": 0,
+              "answered": 0,
+              "metaWait": 0
+            },
+            "consume": true,
+            "reply": [
+              {
+                "hex": "0320"
+              },
+              {
+                "counter": "globalSeq"
+              },
+              {
+                "hex": "0400000000"
+              }
+            ]
+          },
+          {
+            "match": "05 20/EF .. 01 05",
+            "minLength": 5,
+            "emitOutput": {
+              "size": 8,
+              "program": [
+                {
+                  "const": {
+                    "0": "0F",
+                    "1": "00",
+                    "2": "00",
+                    "3": "00",
+                    "4": "00",
+                    "5": "00",
+                    "6": "00",
+                    "7": "00"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "match": "05",
+            "consume": true
+          },
+          {
+            "match": "09 00/EF .. 09 00",
+            "minLength": 13,
+            "emitOutput": {
+              "size": 8,
+              "program": [
+                {
+                  "copy": "5-12",
+                  "to": 0
+                }
+              ]
+            }
+          },
+          {
+            "match": "..",
+            "consume": true
+          }
+        ]
+      },
+      "replies": {
+        "channel": "input",
+        "pending": 8
+      },
+      "timers": [
+        {
+          "name": "hello",
+          "while": "!answered",
+          "firstMs": 500,
+          "periods": [
+            {
+              "periodMs": 500
+            }
+          ],
+          "reply": [
+            {
+              "hex": "0220"
+            },
+            {
+              "counter": "globalSeq"
+            },
+            {
+              "hex": "1C"
+            },
+            {
+              "value": "serial",
+              "encoding": "hex-le",
+              "length": {
+                "value": 4
+              }
+            },
+            {
+              "hex": "FBFF0000"
+            },
+            {
+              "hex": "@helloIdentity"
+            }
+          ]
+        },
+        {
+          "name": "status",
+          "while": "started",
+          "firstMs": 0,
+          "periods": [
+            {
+              "periodMs": 1000,
+              "count": 10
+            },
+            {
+              "periodMs": 20000
+            }
+          ],
+          "reply": [
+            {
+              "hex": "0320"
+            },
+            {
+              "counter": "globalSeq"
+            },
+            {
+              "hex": "0480000000"
+            }
+          ]
+        },
+        {
+          "name": "metadataAck",
+          "while": "metaWait==1",
+          "firstMs": 1000,
+          "periods": [
+            {
+              "periodMs": 1000
+            }
+          ],
+          "set": {
+            "answered": 0,
+            "metaWait": 0
+          }
+        },
+        {
+          "name": "metadataLastAck",
+          "while": "metaWait==2",
+          "firstMs": 1000,
+          "periods": [
+            {
+              "periodMs": 1000
+            }
+          ],
+          "set": {
+            "answered": 0,
+            "metaWait": 0
+          }
+        }
+      ],
+      "getStatus": "descriptor",
+      "log": 256
+    },
+    "identities": {
+      "xbox-one-1537": {
+        "comment": "The first Xbox One controller, model 1537. bcdDevice 0x0203: ControllersInfo's descriptor dump of a 1537 (xboxone/DescriptorDump_Controller (Xbox One Model 1537).txt). Hello firmware build 400, revision 6 and hardware bytes 01 00 01 00 01 00 01 00: a real 1537's announce in OpenJoystickDriver issue 18 (7EED828A09370000 5E04D102 0100 0100 9001 0600 0100 0100 0100 0100). Metadata: the launch pad's interface set IController, IGamepad and INavigationController and the 14-byte input report, as the public first fragment of a 1537's 186-byte metadata gives its offsets (kylelemons/xbox XBOXONE line 22: three interfaces, two messages) and as the 1697's full dump lists them. The interface GUIDs and message entries of a 1537 past that fragment are the 1697's: no public source shows them.",
+        "bcdDevice": "0x0203",
+        "firmware": {
+          "build": 400,
+          "revision": 6
+        },
+        "hardware": "0100010001000100",
+        "interfaces": [
+          "9776ff56-9bfd-4581-ad45-b645bba526d6",
+          "082e402c-07df-45e1-a5ab-a3127af197b5",
+          "b8f31fe7-7386-40e9-a9f8-2f21263acfb7",
+          "7a34ce77-7de2-45c6-8ca4-0042c08bd94a"
+        ],
+        "inputSize": 18,
+        "inputProgram": []
+      },
+      "xbox-one-1697": {
+        "comment": "The Xbox One controller with the 3.5 mm jack, model 1697. Hello firmware build 2385, revision 0 and hardware bytes 02 01 01 00 01 00 01 00, and the metadata's interfaces and messages: a real 1697's arrival and metadata dump (PlasticBand, Docs/Descriptor Dumps/Xbox One/Microsoft 1st Revision Gamepad.txt): IController, IGamepad and INavigationController, message 0x20 of 14 bytes and 0x09 of 60. bcdDevice 0x0203 is the 1537's and the 1698's (ControllersInfo): no public dump gives a 1697's device descriptor.",
+        "bcdDevice": "0x0203",
+        "firmware": {
+          "build": 2385,
+          "revision": 0
+        },
+        "hardware": "0201010001000100",
+        "interfaces": [
+          "9776ff56-9bfd-4581-ad45-b645bba526d6",
+          "082e402c-07df-45e1-a5ab-a3127af197b5",
+          "b8f31fe7-7386-40e9-a9f8-2f21263acfb7",
+          "7a34ce77-7de2-45c6-8ca4-0042c08bd94a"
+        ],
+        "inputSize": 18,
+        "inputProgram": []
+      },
+      "xbox-one-s-1708": {
+        "comment": "The Xbox One S controller, model 1708. bcdDevice 0x0408: ControllersInfo's dump of a 1708. Hello firmware build 1221, revision 0 and hardware bytes 04 05 01 00 01 00 01 00, and the metadata's interfaces and messages: a real 1708's announce and metadata as xone's debug log prints them (dlundqvist/xone issue 109: firmware 3.1.1221.0, hardware 1284.1.1.1, IController, IGamepad and INavigationController, message 0x20 of 14 bytes and 0x09 of 60). The pad has no Share button. Its Bluetooth identity, 02FD, takes this data with its own PID: a Bluetooth pad speaks HID over the air, never GIP.",
+        "bcdDevice": "0x0408",
+        "firmware": {
+          "build": 1221,
+          "revision": 0
+        },
+        "hardware": "0405010001000100",
+        "interfaces": [
+          "9776ff56-9bfd-4581-ad45-b645bba526d6",
+          "082e402c-07df-45e1-a5ab-a3127af197b5",
+          "b8f31fe7-7386-40e9-a9f8-2f21263acfb7",
+          "7a34ce77-7de2-45c6-8ca4-0042c08bd94a"
+        ],
+        "inputSize": 18,
+        "inputProgram": []
+      },
+      "xbox-series-1914": {
+        "comment": "The Xbox Series X|S controller, model 1914. bcdDevice 0x0503: ControllersInfo's dump of a 1914. Hello firmware build 6, revision 0 and hardware bytes 08 04 01 00 01 00 01 00, and the metadata's interfaces and messages: a real 1914's announce and metadata as xone's debug log prints them (dlundqvist/xone issue 143: firmware 5.23.6.0, hardware 1032.1.1.1; interfaces IController, IGamepad, INavigationController, IConsoleFunctionMap, DynamicLatencyInput, IExtendedDeviceFlags, the security opt-out and ea96c8c0-b216-448b-be80-7e5deb0698e2, in that order; message 0x20 of 44 bytes, 0x09 of 60, and 0x1E of 64, the Extended Command this device does not emulate and leaves out). The 44-byte input report: the 14-byte gamepad report, four bytes no public source names (sent as 0), the 18-byte console function map at byte 18 with Share as 0x01 in its first byte ([MS-GIPUSB] Tables 471 and 472; SDL_hidapi_gip.c finds the map 26 bytes from the end when DynamicLatencyInput is listed), and the 8 DynamicLatencyInput bytes (xone driver/gamepad.c, two 32-bit counters, sent as 0). Its Bluetooth identity, 0B13, takes this data with its own PID.",
+        "bcdDevice": "0x0503",
+        "firmware": {
+          "build": 6,
+          "revision": 0
+        },
+        "hardware": "0804010001000100",
+        "interfaces": [
+          "9776ff56-9bfd-4581-ad45-b645bba526d6",
+          "082e402c-07df-45e1-a5ab-a3127af197b5",
+          "b8f31fe7-7386-40e9-a9f8-2f21263acfb7",
+          "ecddd2fe-d387-4294-bd96-1a712e3dc77d",
+          "87f2e56b-c3bb-49b1-8265-fffff37799ee",
+          "34ad9b1e-36ad-4fb5-8ac7-17234c9f546f",
+          "7a34ce77-7de2-45c6-8ca4-0042c08bd94a",
+          "ea96c8c0-b216-448b-be80-7e5deb0698e2"
+        ],
+        "inputSize": 48,
+        "inputProgram": [
+          {
+            "bits": [
+              [
+                112,
+                176
+              ]
+            ]
+          }
+        ]
+      },
+      "xbox-elite-1698": {
+        "comment": "The Xbox One Elite controller, model 1698. bcdDevice 0x0203: ControllersInfo's dump of a 1698. The input report is 29 bytes as SDL, xpad and xow read it: the 14-byte gamepad report, the same 14 bytes before any button remap (xow controller/gip.cpp 126-128, SDL compares bytes 0-1 with 14-15), and byte 28, the paddles in its low four bits and the profile in bit 4 (SDL_hidapi_xboxone.c 1167-1170, xpad.c 1164-1176). The paddles and the profile are always 0: HIDMaestro emits no paddle signal. No public source gives a 1698's Hello or metadata: its firmware build and revision, its hardware bytes (the 1697's are used) and its interface list are not confirmed. The metadata lists IController, IGamepad and INavigationController, and no console function map, which SDL filters out for this pad (SDL_hidapi_gip.c 355-358).",
+        "bcdDevice": "0x0203",
+        "firmware": {
+          "build": 2385,
+          "revision": 0
+        },
+        "hardware": "0201010001000100",
+        "interfaces": [
+          "9776ff56-9bfd-4581-ad45-b645bba526d6",
+          "082e402c-07df-45e1-a5ab-a3127af197b5",
+          "b8f31fe7-7386-40e9-a9f8-2f21263acfb7",
+          "7a34ce77-7de2-45c6-8ca4-0042c08bd94a"
+        ],
+        "inputSize": 33,
+        "inputProgram": [
+          {
+            "copy": "0-13",
+            "to": 18
+          }
+        ]
+      },
+      "xbox-elite-series-2-1797": {
+        "comment": "The Xbox Elite Series 2 controller, model 1797. bcdDevice 0x0407: ControllersInfo's dump of a 1797. Firmware build 3146: a 1797's firmware 5.13.3146.0 read over Bluetooth (hifihedgehog/SDL issue 28). The input report is 47 bytes, the layout of firmware 5.17 and later, which SDL's Xbox One driver tells by its length (SDL_hidapi_xboxone.c 1179-1183): the 14-byte gamepad report, the paddles at byte 14 and the profile at byte 20, both always 0 (HIDMaestro emits no paddle signal), and the rest 0. No public source gives a 1797's Hello or metadata: its hardware bytes (the 1914's are used) and its interface list are not confirmed, and the bytes of the 47 past 14, 15 and 20 are not named by any source. The metadata lists IController, IGamepad and INavigationController and none of the interfaces SDL adds for this pad by its PID (SDL_hidapi_gip.c 360-363), so Windows reads the gamepad report alone. Its Bluetooth identities, 0B05 and 0B22, take this data with their own PIDs.",
+        "bcdDevice": "0x0407",
+        "firmware": {
+          "build": 3146,
+          "revision": 0
+        },
+        "hardware": "0804010001000100",
+        "interfaces": [
+          "9776ff56-9bfd-4581-ad45-b645bba526d6",
+          "082e402c-07df-45e1-a5ab-a3127af197b5",
+          "b8f31fe7-7386-40e9-a9f8-2f21263acfb7",
+          "7a34ce77-7de2-45c6-8ca4-0042c08bd94a"
+        ],
+        "inputSize": 51,
+        "inputProgram": []
+      },
+      "xbox-adaptive-1835": {
+        "comment": "The Xbox Adaptive Controller, model 1835. Its Guide message sets bit 1 where other pads set bit 0 (xpad.c 1058, which reads both). Its input report carries the profile, 0 to 3, at byte 30 (xpad.c 1157-1159), sent as profile 0, so the report is 31 bytes: the 14-byte gamepad report and 17 bytes no public source names, sent as 0. No public source gives a 1835's device descriptor (bcdDevice 0x0100 is Santroller's), Hello (the firmware build and hardware bytes are the 1914's) or metadata (IController, IGamepad and INavigationController are listed), or the report's length.",
+        "bcdDevice": "0x0100",
+        "firmware": {
+          "build": 6,
+          "revision": 0
+        },
+        "hardware": "0804010001000100",
+        "interfaces": [
+          "9776ff56-9bfd-4581-ad45-b645bba526d6",
+          "082e402c-07df-45e1-a5ab-a3127af197b5",
+          "b8f31fe7-7386-40e9-a9f8-2f21263acfb7",
+          "7a34ce77-7de2-45c6-8ca4-0042c08bd94a"
+        ],
+        "inputSize": 35,
+        "inputProgram": [],
+        "guideBits": [
+          [
+            113,
+            33
+          ]
+        ]
+      }
+    }
+  }
+}

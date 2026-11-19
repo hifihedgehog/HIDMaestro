@@ -64,7 +64,7 @@ internal static partial class Live
     }
 
     /// <summary>Three controllers up at once, read in one window. The
-    /// dualshock-4-v2 control's report did not change. genesis-nso's 0x3F
+    /// dualshock-4-v2 control's report did not change. joycon-charging-grip's 0x3F
     /// goes out only under the InputReportId the SDK wrote, where the
     /// driver scanned 0x21 before. microsoft-designer-keyboard's data-only
     /// frame goes out as its dataReportId 0x01, the keyboard report, where
@@ -77,7 +77,7 @@ internal static partial class Live
     static void SameWindow(HMContext ctx, RawInputSink sink)
     {
         var ds4p = ctx.GetProfile("dualshock-4-v2")!;
-        var nsop = ctx.GetProfile("genesis-nso")!;
+        var nsop = ctx.GetProfile("joycon-charging-grip")!;
         var kbp = ctx.GetProfile("microsoft-designer-keyboard")!;
         HMController? ds4 = null, nso = null, kb = null;
         HidReader? ds4r = null, nsor = null;
@@ -171,8 +171,8 @@ internal static partial class Live
                 }
             }
             Check("dualshock-4-v2, the control, in the same window: report 0x01 with left stick X 0xFF", ds4Ok);
-            Check("genesis-nso: report 0x3F with the button pressed", nsoOk);
-            Check("genesis-nso: no report 0x21 arrived, which the driver sent before InputReportId", seen21 == 0, $"{seen21} seen");
+            Check("joycon-charging-grip: report 0x3F with the button pressed", nsoOk);
+            Check("joycon-charging-grip: no report 0x21 arrived, which the driver sent before InputReportId", seen21 == 0, $"{seen21} seen");
             if (rawInput)
             {
                 Check("microsoft-designer-keyboard, its control: F23 in a full frame reaches this program", ctlOk,

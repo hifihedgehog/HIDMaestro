@@ -15,16 +15,56 @@ internal static partial class Program
 {
     // ── long ─────────────────────────────────────────────────────────────
 
+    /// <summary>The catalog profiles whose form on USB/IP has an input or
+    /// output report over 64 bytes, with each one's widest of each.</summary>
+    static void LongList()
+    {
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        foreach (var p in ctx.AllProfiles.Where(x => x.IsDeployable && x.SupportsBackend(HMBackend.Usbip)).OrderBy(x => x.Id, StringComparer.Ordinal))
+        {
+            var form = p.FormOn(HMBackend.Usbip);
+            var map = form.Inner.GetOrBuildReportMap();
+            int input = map.Reports.Where(r => r.Kind == HidReportKind.Input).Select(r => r.FrameBytes).DefaultIfEmpty(0).Max();
+            int output = map.Reports.Where(r => r.Kind == HidReportKind.Output).Select(r => r.FrameBytes).DefaultIfEmpty(0).Max();
+            if (input > 64 || output > 64)
+                Console.WriteLine($"  {p.Id,-40} form {form.Id,-34} input {input,4} output {output,4} own {form.BuildsItsOwnReports || form.Inner.Protocol != null} usbConfiguration {form.Inner.UsbConfiguration != null}");
+            if (input > 64 || output > 64)
+                Console.WriteLine("      " + string.Join(" ", map.Reports.Select(r => $"{r.Kind}:0x{r.ReportId:X2}:{r.FrameBytes}")));
+        }
+    }
+
     static void Long()
     {
         Console.WriteLine();
         Console.WriteLine("=== Reports over 64 bytes on USB/IP ===");
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
-        foreach (string id in new[] { "dualsense-bt", "switch-pro", "apple-magic-keyboard-a1644" })
+        // Each presents itself on USB/IP, with no USB form (usbForm), and has
+        // an input report over 64 bytes there. long-bt-shape is a profile of
+        // the probe's own with dualsense-bt's descriptor, whose 78-byte
+        // report 0x31 goes as raw frames, the widest the extended lane takes.
+        // dualsense-bt itself carried that report until 2.3.0, and on USB/IP
+        // it now presents its USB form's 64-byte report. joycon-l's 362-byte
+        // report the device builds from SubmitState, as switch-pro's was
+        // before it took switch-pro-usb's form, and the keyboard's 65-byte
+        // report goes as raw frames.
+        var btShape = ctx.GetProfile("dualsense-bt");
+        var subjects = new List<(string Id, HMProfile? Profile)>
         {
-            var source = ctx.GetProfile(id);
+            ("long-bt-shape", btShape == null ? null
+                : new HMProfileBuilder().Id("long-bt-shape").Vid(0xBEEF).Pid(0xF0D8).DescriptorHex(btShape.DescriptorHex!).Build()),
+            ("joycon-l", ctx.GetProfile("joycon-l")),
+            ("apple-magic-keyboard-a1644", ctx.GetProfile("apple-magic-keyboard-a1644")),
+        };
+        foreach (var (id, source) in subjects)
+        {
             if (source == null) { Check($"{id} is in the catalog", false); continue; }
+            if (source.Inner.UsbForm is { } form)
+            {
+                Check($"{id} presents itself on USB/IP, not a USB form", false, $"its usbForm names {form}");
+                continue;
+            }
             foreach (string? speed in new string?[] { null, "full" })
             {
                 HMProfile p = source;
@@ -114,7 +154,11 @@ internal static partial class Program
                 }
 
                 // Output: the longest output report, written whole.
-                var outs = p.Inner.GetOrBuildReportMap().Reports.Where(r => r.Kind == HidReportKind.Output).OrderByDescending(r => r.FrameBytes).ToList();
+                // The collection's own: HID class takes a write of the
+                // collection's output length, and its longest output report
+                // is that length, report ID included.
+                var outs = p.Inner.GetOrBuildReportMap().Reports.Where(r => r.Kind == HidReportKind.Output && r.FrameBytes + (r.ReportId == 0 ? 1 : 0) == widest.OutputLength)
+                            .OrderByDescending(r => r.FrameBytes).ToList();
                 if (outs.Count > 0 && widest.OutputLength > 0)
                 {
                     var report = outs[0];

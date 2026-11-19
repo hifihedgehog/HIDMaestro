@@ -303,8 +303,17 @@ public static class HMGamepadStateHelpers
             axes[sticks[1].XAxis] = rightStickX;
             if (sticks[1].YAxis != HMAxis.None) axes[sticks[1].YAxis] = rightStickY;
         }
-        if (triggers.Count > 0) axes[triggers[0].Axis] = leftTrigger;
-        if (triggers.Count > 1) axes[triggers[1].Axis] = rightTrigger;
+        // A trigger value never lands on an axis a stick holds: a profile
+        // whose layout declares no triggers and whose right stick sits on
+        // the canonical trigger axes (switch-pro-usb, dualshock-3,
+        // logitech-f310: Z and Rz) keeps its right stick, and the trigger
+        // values go nowhere.
+        void Trigger(HMAxis axis, float value)
+        {
+            if (axis != HMAxis.None) axes.TryAdd(axis, value);
+        }
+        if (triggers.Count > 0) Trigger(triggers[0].Axis, leftTrigger);
+        if (triggers.Count > 1) Trigger(triggers[1].Axis, rightTrigger);
         // A profile whose descriptor is an opaque vendor blob declares no
         // sticks or triggers at all (every Valve state packet), so the loops
         // above write nothing and the caller submits an empty dict. The
@@ -323,8 +332,8 @@ public static class HMGamepadStateHelpers
         // (issue #66).
         if (triggers.Count == 0)
         {
-            axes[HMController.ResolveCanonicalAxis(profile.Inner.AxisMap, "lefttrigger", HMAxis.Z)]  = leftTrigger;
-            axes[HMController.ResolveCanonicalAxis(profile.Inner.AxisMap, "righttrigger", HMAxis.Rz)] = rightTrigger;
+            Trigger(HMController.ResolveCanonicalAxis(profile.Inner.AxisMap, "lefttrigger", HMAxis.Z), leftTrigger);
+            Trigger(HMController.ResolveCanonicalAxis(profile.Inner.AxisMap, "righttrigger", HMAxis.Rz), rightTrigger);
         }
         return axes;
     }

@@ -374,9 +374,9 @@ internal static partial class Program
         if (args.Length >= 1 && args[0] == "--uninstall") return UninstallKeepingUsbip();
         // An argument this build does not know runs nothing it names, so it
         // is refused rather than read as the default run.
-        string[] known = { "--offline", "--usb-ledger", "--r13-only", "--winusb-note" };
+        string[] known = { "--offline", "--usb-ledger", "--record-removal-only", "--winusb-note" };
         var unknown = args.Where(a => !known.Contains(a)).ToList();
-        if (args.Contains("--r13-only") && !args.Contains("--usb-ledger")) unknown.Add("--r13-only (it goes with --usb-ledger)");
+        if (args.Contains("--record-removal-only") && !args.Contains("--usb-ledger")) unknown.Add("--record-removal-only (it goes with --usb-ledger)");
         if (unknown.Count > 0)
         {
             Console.WriteLine($"RegistryOwnershipCheck: unknown argument {string.Join(", ", unknown)}. Known: {string.Join(" ", known)}, " +
@@ -392,7 +392,7 @@ internal static partial class Program
         ReviewFixesOffline();
         bool ranLive = false;
         if (args.Contains("--usb-ledger"))
-            ranLive = UsbLedgerLive(args.Contains("--r13-only"));
+            ranLive = UsbLedgerLive(args.Contains("--record-removal-only"));
         else if (args.Contains("--winusb-note"))
         {
             WinUsbNoteLive();

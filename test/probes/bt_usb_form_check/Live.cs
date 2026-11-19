@@ -46,8 +46,9 @@ internal static partial class Program
         var sw = Stopwatch.StartNew();
         while (info == null && sw.ElapsedMilliseconds < 15000)
         {
-            info = HMDeviceExtractor.ListDevices().FirstOrDefault(d => d.VendorId == profile.VendorId
-                && d.ProductId == profile.ProductId && d.SerialNumberString == serial);
+            // The presented form's PID: the Genesis pad carries another on
+            // USB, and a Joy-Con is the charging grip.
+            info = OwnInterface(form, serial);
             if (info == null) Thread.Sleep(50);
         }
         Check($"the HID interface enumerates (serial {serial})", info != null, info?.DevicePath ?? "");
@@ -73,7 +74,9 @@ internal static partial class Program
         Check($"output report length is {form.Id}'s", caps.Out == wantOut, $"{caps.Out}, want {wantOut}");
         ushort wantVersion = form.Inner.VersionNumber ?? 0x0100;
         Check($"version is {form.Id}'s", info.VersionNumber == wantVersion, $"0x{info.VersionNumber:X4}, want 0x{wantVersion:X4}");
-        Check("the product string is the profile's", info.ProductString == profile.ProductString, $"'{info.ProductString}'");
+        string wantProduct = form.Inner.FormOfIds?.Contains(profile.Id) == true ? form.ProductString : profile.ProductString;
+        Check($"the product string is '{wantProduct}'", info.ProductString == wantProduct, $"'{info.ProductString}'");
+        if (profile.Id == "joycon-l" && ctrl.Backend == HMBackend.Umdf2) JoyConArrows(ctrl, info.DevicePath);
 
         // A feature report of the form: the calibration SDL reads first, 0x05
         // on a DualSense and on a DualShock 4 over Bluetooth, 0x02 on a
@@ -100,7 +103,7 @@ internal static partial class Program
             // The values the report carries, each motor on its own: the
             // Sony report sets right 200 and left 100, the Switch report
             // the left motor's top amplitude and the right neutral.
-            var (wantLeft, wantRight) = form.HasExtendedOutput ? (100, 200) : (255, 0);
+            var (wantLeft, wantRight) = form.HasExtendedOutput ? (100, 200) : DecodesLeft(form) ? (255, 0) : (0, 255);
             bool seen = Wait(() => { lock (decoded) return decoded.Any(f => Num(f, "leftMotor") == wantLeft && Num(f, "rightMotor") == wantRight); }, 5000);
             string last;
             lock (decoded) last = decoded.Count == 0 ? "none" : string.Join(" ", decoded[^1].Where(k => k.Key.EndsWith("Motor")).Select(k => $"{k.Key}={k.Value}"));
@@ -152,10 +155,17 @@ internal static partial class Program
             // [id, counter, left 4 bytes, right 4 bytes]: left at the high
             // band's top amplitude 0xC8, right neutral 00 01 40 40
             // (SDL_hidapi_switch.c EncodeRumbleHighAmplitude, SetNeutralRumble).
-            return new byte[] { 0x10, 0x01, 0x00, 0xC8, 0x60, 0x00, 0x00, 0x01, 0x40, 0x40 };
+            // A pad whose one motor reads the right half (joycon-r) gets the
+            // two halves the other way round.
+            return DecodesLeft(form)
+                ? new byte[] { 0x10, 0x01, 0x00, 0xC8, 0x60, 0x00, 0x00, 0x01, 0x40, 0x40 }
+                : new byte[] { 0x10, 0x01, 0x00, 0x01, 0x40, 0x40, 0x00, 0xC8, 0x60, 0x00 };
         }
         return null;
     }
+
+    static bool DecodesLeft(HMProfile form) =>
+        form.Inner.GetOrCompileModel().Decoders.Any(d => d.Semantics.Contains("leftMotor"));
 
     static int Num(IReadOnlyDictionary<string, object> f, string key) =>
         f.TryGetValue(key, out var v) && v is IConvertible c ? c.ToInt32(null) : 0;
@@ -168,6 +178,21 @@ internal static partial class Program
     }
 
     /// <summary>The serial the controller's HID device serves.</summary>
+    /// <summary>The HID interface of <paramref name="form"/> that carries
+    /// its reports: the one interface of a single-HID device, or on the
+    /// charging grip the docked pad's, whose path names its interface
+    /// number (mi_01 for the left slot).</summary>
+    internal static HMHidDeviceInfo? OwnInterface(HMProfile form, string serial)
+    {
+        var all = HMDeviceExtractor.ListDevices().Where(d => d.VendorId == form.VendorId
+            && d.ProductId == form.ProductId && d.SerialNumberString == serial).ToList();
+        if (all.Count <= 1) return all.FirstOrDefault();
+        var hid = form.Inner.UsbConfiguration?.Interfaces?.FirstOrDefault(i => i.Function == "hid");
+        if (hid == null) return all[0];
+        string mi = $"&mi_{hid.InterfaceNumber:D2}";
+        return all.FirstOrDefault(d => d.DevicePath.Contains(mi, StringComparison.OrdinalIgnoreCase));
+    }
+
     internal static string SerialOf(HMController c) =>
         c.Backend == HMBackend.Usbip ? c.UsbipHandle!.Device.Descriptors.SerialString! : DeviceOrchestrator.DriverSerial(c.TransportIndex);
 

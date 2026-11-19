@@ -22,8 +22,13 @@ internal sealed record Collection(
 
     /// <summary>Every field the HID class parses from the descriptor, the
     /// path and the strings aside.</summary>
-    public string ParsedKey =>
-        $"{Vid:X4}:{Pid:X4}:{Version:X4} caps {Convert.ToHexString(Caps)} ib {Convert.ToHexString(InputButtons)} iv {Convert.ToHexString(InputValues)} " +
+    public string ParsedKey => $"{Vid:X4}:{Pid:X4}:{Version:X4} {FieldsKey}";
+
+    /// <summary>The fields the HID class parses from the descriptor, without
+    /// the attributes, which the parity part checks against what Windows
+    /// gives each backend's device.</summary>
+    public string FieldsKey =>
+        $"caps {Convert.ToHexString(Caps)} ib {Convert.ToHexString(InputButtons)} iv {Convert.ToHexString(InputValues)} " +
         $"ob {Convert.ToHexString(OutputButtons)} ov {Convert.ToHexString(OutputValues)} fb {Convert.ToHexString(FeatureButtons)} fv {Convert.ToHexString(FeatureValues)}";
 }
 
@@ -78,13 +83,30 @@ internal static partial class Hid
         return new string(buf).Split('\0', StringSplitOptions.RemoveEmptyEntries).ToList();
     }
 
-    /// <summary>Every HID collection under a parent: its children's
-    /// interfaces, read. Null for a path that does not open.</summary>
+    /// <summary>The instance ids of every devnode under a parent, children
+    /// first, then theirs. A HID child can sit one level down (a HID
+    /// interface, the UMDF2 parent's child) or two (Windows' GIP driver
+    /// makes the device's XInput child, and the HID device sits under
+    /// that).</summary>
+    public static List<string> Descendants(string parentId)
+    {
+        var all = new List<string>();
+        var level = Children(parentId);
+        while (level.Count > 0)
+        {
+            all.AddRange(level);
+            level = level.SelectMany(Children).ToList();
+        }
+        return all;
+    }
+
+    /// <summary>Every HID collection under a parent, at any depth, read.
+    /// Null for a path that does not open.</summary>
     public static List<Collection> Read(string parentId, out List<string> errors)
     {
         errors = new();
         var list = new List<Collection>();
-        foreach (string child in Children(parentId))
+        foreach (string child in Descendants(parentId))
             foreach (string path in Interfaces(child))
             {
                 var c = ReadOne(path, out string? error);

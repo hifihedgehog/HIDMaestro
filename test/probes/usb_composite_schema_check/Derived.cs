@@ -61,30 +61,31 @@ internal static partial class Program
               $"refused {string.Join(", ", autoRefused.Take(6))}; expected {string.Join(", ", autoExpected.Take(6))}");
 
         var refused = deployable.Where(p => !p.SupportsBackend(HMBackend.Usbip)).ToList();
-        var xbox = refused.Where(p => XInputPresentation.Resolve(p.Inner).Xinputhid).ToList();
-        Console.WriteLine($"  [note] {refused.Count} deployable profiles the USB/IP backend does not present yet: {string.Join(", ", refused.Select(p => p.Id))}");
-        Check("the USB/IP backend refuses only the Xbox profiles that reach XInput through xinputhid",
-              refused.Count == xbox.Count && refused.Count > 0,
-              string.Join(", ", refused.Except(xbox).Select(p => p.Id)));
-        Check("none of the Xbox profiles it refuses has a usbConfiguration", refused.All(p => p.Inner.UsbConfiguration == null));
-        foreach (var p in refused)
-        {
-            try { _ = UsbPresentation.Resolve(p.Inner); Check($"{p.Id}: the presentation refuses", false); }
-            catch (HMBackendNotSupportedException e)
-            {
-                if (p == refused[0])
-                    Check("the refusal names the profile, the backend and the reason",
-                          e.ProfileId == p.Id && e.Backend == HMBackend.Usbip && e.Message.Contains("XInput", StringComparison.Ordinal), e.Message);
-            }
-        }
+        Console.WriteLine($"  [note] {refused.Count} deployable profiles the USB/IP backend does not present: {string.Join(", ", refused.Select(p => p.Id))}");
+        Check("the USB/IP backend presents every deployable profile, the Xbox profiles as their XUSB or GIP function",
+              refused.Count == 0, string.Join(", ", refused.Select(p => p.Id)));
 
+        // A profile that reaches XInput through xinputhid presents the GIP
+        // function, the GIP model's device (gip_persona_check's family
+        // part checks each one).
+        var gip = deployable.Where(p => p.SupportsBackend(HMBackend.Usbip) && p.Inner.UsbConfiguration == null
+                                        && XInputPresentation.Resolve(p.Inner).Xinputhid).ToList();
+        Check("every profile that reaches XInput through xinputhid presents the GIP function, authored from the GIP model",
+              gip.Count > 0 && gip.All(p => UsbPresentation.Resolve(p.Inner) is { Derived: false } pr
+                                             && pr.Spec.Interfaces is { Count: 1 } ifs && ifs[0].Function == "gip"),
+              $"{gip.Count}: {string.Join(", ", gip.Select(p => p.Id))}");
         var xusb = deployable.Where(p => XInputPresentation.Resolve(p.Inner).XusbCompanion && p.Inner.UsbConfiguration == null).ToList();
-        var derived = deployable.Where(p => p.SupportsBackend(HMBackend.Usbip) && p.Inner.UsbConfiguration == null && !xusb.Contains(p)).ToList();
-        var authored = deployable.Where(p => p.Inner.UsbConfiguration is { IsAuthored: true }).ToList();
-        Console.WriteLine($"  [note] {derived.Count} derive their presentation, {xusb.Count} present the XUSB function, {authored.Count} author it");
+        // A Bluetooth identity whose USB form authors its configuration (a
+        // Joy-Con presents the charging grip) presents that, not a derived
+        // device. A GIP function counts once, as the GIP function.
+        static bool AuthoredOnUsbip(HMProfile p) =>
+            p.SupportsBackend(HMBackend.Usbip) && p.FormOn(HMBackend.Usbip).Inner.UsbConfiguration is { IsAuthored: true };
+        var derived = deployable.Where(p => p.SupportsBackend(HMBackend.Usbip) && p.Inner.UsbConfiguration == null && !xusb.Contains(p) && !gip.Contains(p) && !AuthoredOnUsbip(p)).ToList();
+        var authored = deployable.Where(p => p.Inner.UsbConfiguration is { IsAuthored: true } || (p.Inner.UsbConfiguration == null && !gip.Contains(p) && AuthoredOnUsbip(p))).ToList();
+        Console.WriteLine($"  [note] {derived.Count} derive their presentation, {xusb.Count} present the XUSB function, {gip.Count} the GIP function, {authored.Count} author it");
         Check("every UMDF2-default profile with a descriptor and no XInput stack of its own derives one",
-              derived.Count + xusb.Count + refused.Count + authored.Count == deployable.Count,
-              $"{derived.Count} + {xusb.Count} + {refused.Count} + {authored.Count} of {deployable.Count}");
+              derived.Count + xusb.Count + gip.Count + refused.Count + authored.Count == deployable.Count,
+              $"{derived.Count} + {xusb.Count} + {gip.Count} + {refused.Count} + {authored.Count} of {deployable.Count}");
 
         var golden = new StringBuilder();
         golden.AppendLine("# The device and configuration descriptors each profile with no usbConfiguration presents on the USB/IP backend.");
@@ -135,8 +136,11 @@ internal static partial class Program
         var notOwn = new List<string>();
         foreach (var p in authored)
         {
-            var pr = UsbPresentation.Resolve(p.Inner);
-            if (!ReferenceEquals(pr.Spec, p.Inner.UsbConfiguration) || pr.Derived)
+            // A Bluetooth identity whose usbForm authors a configuration
+            // presents that form on the USB/IP backend.
+            var inner = p.FormOn(HMBackend.Usbip).Inner;
+            var pr = UsbPresentation.Resolve(inner);
+            if (!ReferenceEquals(pr.Spec, inner.UsbConfiguration) || pr.Derived)
                 notOwn.Add(p.Id);
         }
         Check($"the {authored.Count} authored personas present their own usbConfiguration, not a derived one", notOwn.Count == 0,

@@ -868,6 +868,11 @@ public sealed class HMContext : IDisposable
             try
             {
                 if (profile.Inner.UsbForm != null) presented = new HMProfile(profile.Inner.UsbFormOf(HMBackend.Usbip));
+                // A profile that reaches XInput through xinputhid presents its
+                // GIP form, the GIP model's device with the profile's identity
+                // (Internal.Usbip.GipFunction).
+                else if (Internal.Usbip.GipFunction.Applies(profile.Inner))
+                    presented = new HMProfile(Internal.Usbip.GipFunction.FormOf(profile.Inner));
                 _ = Internal.Usbip.UsbPresentation.Resolve(presented.Inner);
             }
             catch (Exception e) when (e is not HMBackendNotSupportedException && Internal.ProfileDefects.IsDefect(e))
@@ -1025,10 +1030,12 @@ public sealed class HMContext : IDisposable
         try
         {
             Internal.DeviceOrchestrator.PrepareUsbipController(index, presented.Inner);
-            // The XUSB function's start wait ends when XInput has one slot
-            // more than before the attach, as the UMDF2 create's slot wait.
+            // The XUSB and GIP functions' start waits end when XInput has one
+            // slot more than before the attach, as the UMDF2 create's slot
+            // wait and its xinputhid create's.
             bool xusb = Internal.Usbip.UsbPresentation.Resolve(presented.Inner).Kind == Internal.Usbip.UsbPresentationKind.XusbFunction;
-            int slotsBefore = xusb ? Internal.DeviceOrchestrator.ConnectedXInputSlots() : -1;
+            bool gip = presented.Inner.ReportsOnGipInterface;
+            int slotsBefore = xusb || gip ? Internal.DeviceOrchestrator.ConnectedXInputSlots() : -1;
             // The device emulator maps the index's sections before its
             // attach, so a failed attach leaves them for the catch below.
             handle = Internal.Usbip.UsbipBackend.CreateDevice(presented.Inner, index, lease.Identity);
@@ -1047,6 +1054,12 @@ public sealed class HMContext : IDisposable
             // is, the device found and named the same way.
             else if (handle.Device.Descriptors.UsbInstanceId is { } xusbId && xusb)
                 handle.ResolveRecord(Internal.DeviceOrchestrator.AwaitUsbipXusbStart(xusbId, handle.Device.VhciPort, index, slotsBefore));
+            // The GIP function's HID child is started under xinputhid and its
+            // XInput slot taken, as the UMDF2 xinputhid create's, and the
+            // records take the name Windows gave the device the same way.
+            else if (handle.Device.Descriptors.UsbInstanceId is { } gipId && gip)
+                handle.ResolveRecord(Internal.DeviceOrchestrator.AwaitUsbipGipStart(gipId, handle.Device.VhciPort, index, slotsBefore,
+                    Internal.Usbip.GipFunction.CompatibleIdOf(presented.Inner)));
             var controller = new HMController(this, slot, lease, profile, instanceId: null, handle, lease.Identity.Key, presented);
             try
             {

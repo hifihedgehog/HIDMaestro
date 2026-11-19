@@ -55,6 +55,11 @@ internal static partial class Program
         ("dualsense-edge-bt", "dualsense-edge"),
         ("dualshock-4-v2-bt", "dualshock-4-v2"),
         ("switch-pro", "switch-pro-usb"),
+        ("joycon-l", "joycon-l-usb"),
+        ("joycon-r", "joycon-r-usb"),
+        ("snes-nso", "snes-nso-usb"),
+        ("n64-nso", "n64-nso-usb"),
+        ("genesis-nso", "genesis-nso-usb"),
     };
 
     static int Main(string[] args)
@@ -114,7 +119,7 @@ internal static partial class Program
         Console.WriteLine("\n-- The catalog's USB forms --");
         var named = db.All.Where(p => p.UsbForm != null).Select(p => p.Id).OrderBy(x => x, StringComparer.Ordinal).ToArray();
         var want = Forms.Select(f => f.Bt).OrderBy(x => x, StringComparer.Ordinal).ToArray();
-        Check("the catalog names a USB form on exactly the four Sony Bluetooth pads and switch-pro",
+        Check("the catalog names a USB form on exactly the four Sony Bluetooth pads, switch-pro and the five Nintendo Bluetooth-only pads",
             named.SequenceEqual(want), string.Join(", ", named));
         Check("the catalog load refused no profile", !db.Issues.Any(i => i.Kind == HMProfileLoadIssueKind.Refused),
             string.Join("; ", db.Issues.Select(i => $"{i.ProfileId} {i.JsonPath} {i.Reason}")));
@@ -139,9 +144,12 @@ internal static partial class Program
 
             var p = bt.UsbFormOf(HMBackend.Usbip);
             Check("UsbFormOf(Umdf2) is the profile itself", ReferenceEquals(bt.UsbFormOf(HMBackend.Umdf2), bt));
-            Check("the presented profile keeps the Bluetooth id, name and strings",
-                p.Id == bt.Id && p.Name == bt.Name && p.ProductString == bt.ProductString
-                && p.ManufacturerString == bt.ManufacturerString && p.DeviceDescription == bt.DeviceDescription,
+            // A form that names its identity in usbFormOf is the device's own
+            // USB presentation and keeps its strings (the charging grip).
+            var strings = form.FormOfIds?.Contains(bt.Id) == true ? form : bt;
+            Check($"the presented profile keeps the Bluetooth id and name, and {(ReferenceEquals(strings, form) ? "the form's" : "the Bluetooth")} strings",
+                p.Id == bt.Id && p.Name == bt.Name && p.ProductString == strings.ProductString
+                && p.ManufacturerString == strings.ManufacturerString && p.DeviceDescription == strings.DeviceDescription,
                 $"'{p.Id}' '{p.ProductString}' '{p.ManufacturerString}'");
             Check("the presented profile has the form's descriptor, connection and version",
                 p.Descriptor == form.Descriptor && p.Connection == form.Connection && p.VersionNumber == form.VersionNumber,
@@ -176,7 +184,11 @@ internal static partial class Program
 
             var pres = HIDMaestro.Internal.Usbip.UsbPresentation.Resolve(bt);
             var formPres = HIDMaestro.Internal.Usbip.UsbPresentation.Resolve(form);
-            Check("the USB device is derived", pres.Derived);
+            // A form with a configuration of its own (the charging grip)
+            // keeps it, and any other form is the derived single HID function.
+            bool authored = form.UsbConfiguration?.IsAuthored == true;
+            Check(authored ? "the USB device is the form's own configuration" : "the USB device is derived",
+                  pres.Derived == !authored);
             Check("the USB device is the form's: device descriptor", pres.Spec.DeviceDescriptorHex == formPres.Spec.DeviceDescriptorHex,
                 pres.Spec.DeviceDescriptorHex ?? "");
             Check("the USB device is the form's: configuration", pres.Spec.ConfigurationDescriptorHex == formPres.Spec.ConfigurationDescriptorHex,
@@ -207,7 +219,24 @@ internal static partial class Program
 
         Console.WriteLine("\n-- The load refuses what is no USB form --");
         string dsbt = System.IO.File.ReadAllText(CatalogFile("sony", "dualsense-bt.json"));
-        Refused("a form with another PID", Variant(dsbt, "x-bt", "dualshock-4-v2"), "VID and PID");
+        Refused("a form with another VID", Variant(dsbt, "x-bt", "switch-pro-usb"), "VID and PID");
+        Refused("a form with another PID that names no usbFormOf", Variant(dsbt, "x-bt", "dualshock-4-v2"), "VID and PID");
+        Refused("a form whose usbFormOf names another identity", Variant(dsbt, "x-bt", "genesis-nso-usb"), "and not this profile");
+        string gen = System.IO.File.ReadAllText(CatalogFile("nintendo", "genesis-nso.json"));
+        string jcl = System.IO.File.ReadAllText(CatalogFile("nintendo", "joycon-l.json"));
+        Refused("a Nintendo pad naming another pad's form",
+            jcl.Replace("\"id\":\"joycon-l\"", "\"id\":\"x-jcl\"").Replace("\"usbForm\":\"joycon-l-usb\"", "\"usbForm\":\"genesis-nso-usb\""),
+            "and not this profile or a copy of one");
+        string genUsb = System.IO.File.ReadAllText(CatalogFile("nintendo", "genesis-nso-usb.json"));
+        Refused("a usbFormOf that names a profile with no Bluetooth connection",
+            genUsb.Replace("\"id\":\"genesis-nso-usb\"", "\"id\":\"x-gen-usb\"").Replace("\"usbFormOf\":[\"genesis-nso\"]", "\"usbFormOf\":[\"snes-nso-usb\"]"),
+            "is not a Bluetooth identity", "$.usbFormOf[0]");
+        // A copy of a named identity, its VID, PID and descriptor under
+        // another id, takes the form.
+        var copy = ProfileDatabase.LoadTexts(new[] { ("x.json", gen.Replace("\"id\":\"genesis-nso\"", "\"id\":\"x-gen-copy\"")) }, ModelRegistry.Catalog);
+        Check("a copy of genesis-nso under another id takes its USB form",
+            copy.All.Any(q => q.Id == "x-gen-copy") && !copy.Issues.Any(i => i.Kind == HMProfileLoadIssueKind.Refused),
+            string.Join("; ", copy.Issues.Select(i => $"{i.JsonPath} {i.Reason}")));
         var plainBt = ProfileDatabase.LoadTexts(new[]
         {
             ("x-bt.json", Variant(dsbt, "x-bt", "x-bt-plain")),
@@ -363,11 +392,11 @@ internal static partial class Program
     static string Variant(string text, string id, string form) =>
         text.Replace("\"id\":\"dualsense-bt\"", $"\"id\":\"{id}\"").Replace("\"usbForm\":\"dualsense\"", $"\"usbForm\":\"{form}\"");
 
-    static void Refused(string what, string text, string reason)
+    static void Refused(string what, string text, string reason, string path = "$.usbForm")
     {
         var db = ProfileDatabase.LoadTexts(new[] { ("x.json", text) }, ModelRegistry.Catalog);
         var issue = db.Issues.FirstOrDefault(i => i.Kind == HMProfileLoadIssueKind.Refused);
-        Check($"{what} is refused at $.usbForm", issue != null && issue.JsonPath == "$.usbForm" && issue.Reason.Contains(reason),
+        Check($"{what} is refused at {path}", issue != null && issue.JsonPath == path && issue.Reason.Contains(reason),
             issue == null ? $"loaded {db.All.Count}" : $"{issue.JsonPath}: {issue.Reason}");
     }
 

@@ -140,6 +140,32 @@ if (-not $isAdmin) {
     exit 2
 }
 
+# Xbox Game Bar on the console desktop. The battery presses the Xbox button
+# of virtual Xbox controllers, and where that button opens Game Bar, its
+# controller bar comes up and holds the controllers' input until it closes:
+# other programs then read none, and every input check fails until some
+# later press closes the bar. Only a signed-in console user runs Game Bar,
+# and UseNexusForGameBarEnabled = 0 in that user's GameBar key keeps the
+# button from opening it.
+function Get-GameBarButtonUser {
+    $console = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName
+    if (-not $console) { return $null }
+    try { $sid = (New-Object System.Security.Principal.NTAccount($console)).Translate([System.Security.Principal.SecurityIdentifier]).Value }
+    catch { return $null }
+    $key = Get-ItemProperty -LiteralPath "Registry::HKEY_USERS\$sid\Software\Microsoft\GameBar" -ErrorAction SilentlyContinue
+    if ($key -and ($key.PSObject.Properties.Name -contains 'UseNexusForGameBarEnabled') -and $key.UseNexusForGameBarEnabled -eq 0) { return $null }
+    if (-not (Get-AppxPackage -User $sid -Name Microsoft.XboxGamingOverlay -ErrorAction SilentlyContinue)) { return $null }
+    return $console
+}
+$gameBarUser = Get-GameBarButtonUser
+if ($gameBarUser) {
+    Write-Host "XBOX GAME BAR OPENS ON A CONTROLLER'S XBOX BUTTON for $gameBarUser, the console user: refusing to run." -ForegroundColor Red
+    Write-Host 'The battery presses that button on virtual Xbox controllers. While the Game Bar controller bar it opens is up, other programs read no input from the controllers, and the input checks fail.' -ForegroundColor Red
+    Write-Host "Turn the button off for that user, then run again. Signed in as $gameBarUser`:" -ForegroundColor Yellow
+    Write-Host '  reg add HKCU\Software\Microsoft\GameBar /v UseNexusForGameBarEnabled /t REG_DWORD /d 0 /f' -ForegroundColor Yellow
+    exit 2
+}
+
 # The machine's bench lock: one live run at a time on a test machine. The
 # battery holds it from here to its exit, which releases it. -BenchLockHeld
 # is checked: a lock this process takes at once was held by nobody, so the
@@ -3060,6 +3086,24 @@ function Scenario-Xusb-Wgi-Family {
     }
 }
 
+# S112: HMGamepadStateHelpers.StandardAxes keeps every stick's axes
+# when a profile's layout declares no triggers (switch-pro-usb,
+# dualshock-3, hori-horipad-switch, logitech-f310, logitech-f710). Offline
+# every catalog profile with a stick, live the right stick in the HID
+# report on the backend the run resolves to, then through SDL 3.4.18's
+# release DLL for this architecture beside the tree, as S108 reads it.
+function Scenario-Standard-Axes {
+    $failed = @()
+    foreach ($a in @('offline'), @('live', 'auto')) {
+        try { Invoke-Probe -Dir 'standard_axes_check' -Exe 'StandardAxesCheck.exe' -Arguments ($a -join ' ') -Tag $a[0] `
+                           -Message 'a stick lost its value to the trigger values (see probe stdout)' } catch { $failed += $_.Exception.Message }
+    }
+    $sdl = Join-Path (Split-Path $repoRoot) ('SDL3-release-3.4.18' + $(if ((Get-MachineArch) -eq 'arm64') { '-arm64' } else { '' }))
+    try { Invoke-Probe -Dir 'standard_axes_check' -Exe 'StandardAxesCheck.exe' -Arguments "sdl auto `"$sdl`"" -Tag 'sdl' `
+                       -Message 'SDL reads a right stick that StandardAxes filled elsewhere (see probe stdout)' } catch { $failed += $_.Exception.Message }
+    if ($failed.Count -gt 0) { throw ($failed -join ' AND ') }
+}
+
 # S101: removing HIDMaestro, HIDMaestroUninstall.exe and HMUninstall. On
 # every machine the tool's preview and the API's change nothing, read
 # against a snapshot the probe takes without the SDK. On a machine without
@@ -3321,7 +3365,8 @@ $scenarios = @(
     @{ Name = 'S108_Bt_Usb_Form';                Body = ${function:Scenario-Bt-Usb-Form} },
     @{ Name = 'S109_Xusb_Family';                Body = ${function:Scenario-Xusb-Family} },
     @{ Name = 'S110_Xusb_Battery_Receiver';      Body = ${function:Scenario-Xusb-Battery-Receiver} },
-    @{ Name = 'S111_Xusb_Wgi_Family';            Body = ${function:Scenario-Xusb-Wgi-Family} }
+    @{ Name = 'S111_Xusb_Wgi_Family';            Body = ${function:Scenario-Xusb-Wgi-Family} },
+    @{ Name = 'S112_Standard_Axes';              Body = ${function:Scenario-Standard-Axes} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

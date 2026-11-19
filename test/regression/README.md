@@ -1,6 +1,6 @@
 # regression_battery.ps1: the regression battery
 
-Runs 110 scenarios and verifies every one leaves zero HIDMaestro PnP
+Runs 111 scenarios and verifies every one leaves zero HIDMaestro PnP
 devnodes in the `PRESENT` state. S01 to S23 drive `HIDMaestroTest.exe`
 through single- and multi-controller create/swap/remove/force-kill
 sequences, and S24 and up run the probe programs under `test/probes`.
@@ -80,6 +80,19 @@ process outside the battery's own process tree with `HIDMaestro.Core.dll`
 loaded. A process the battery started stays its own after its parent
 exits, so one a crashed probe leaves running fails the scenario that left
 it and is stopped, instead of holding the battery back.
+
+Xbox Game Bar is the other exception. Where a controller's Xbox button
+opens it for the user signed in at the console, the scenarios' presses of
+that button on virtual Xbox controllers bring up its controller bar, and
+while the bar is up no other program reads input from the controllers.
+The battery checks this when it starts and stops with the command that
+turns the button off, run as that user:
+
+```
+reg add HKCU\Software\Microsoft\GameBar /v UseNexusForGameBarEnabled /t REG_DWORD /d 0 /f
+```
+
+A machine with no one signed in at the console runs no Game Bar.
 
 Every step ends at a deadline: a probe's run, the test app's answer to a
 command, and the test app's exit after quit get 3600 s, S71 6300 s and S73
@@ -255,6 +268,7 @@ not run elevated.
 | `S109_Xusb_Family`                | The ten Xbox 360 profiles on each backend | Each profile is created on each backend the machine runs and takes a slot. Where both run, XInputGetCapabilities, one input's XInput state, XInputSetState's packet and the product string are the same on both, and UMDF2's HID device has the layout of the profile's descriptor. On USB/IP, xusb22's HID device has that layout too unless the profile's notes state the difference. Live, elevated |
 | `S110_Xusb_Battery_Receiver`      | The battery of the pad behind the receiver | `xusb_battery_check --profile xbox-360-wireless`: the battery the profile states, which is xusb22's answer for the receiver's battery status on USB/IP and the companion's on UMDF2. Live, elevated |
 | `S111_Xusb_Wgi_Family`            | One WGI device for each Xbox 360 profile | `xusb_wgi_single_check --profiles family`: three fresh creates of each of the ten, one RawGameController each, one Gamepad for a pad of the gamepad subtype and none for the others. Live, elevated |
+| `S112_Standard_Axes`              | A stick's axes when the layout declares no triggers | `offline`: every catalog profile with a stick keeps each stick axis's value through `StandardAxes`, and `switch-pro-usb`, `dualshock-3`, `hori-horipad-switch`, `logitech-f310` and `logitech-f710` keep their right stick. `live auto`: the right stick read back in the HID report of `dualshock-3`, `hori-horipad-switch`, `logitech-f310` and `logitech-f710`. `sdl auto`: the right stick through SDL 3.4.18's release DLL for `switch-pro-usb`, `hori-horipad-switch` and `dualshock-3`, with SDL's PS3 hint on. Live, elevated |
 
 ## What "PASS" means
 

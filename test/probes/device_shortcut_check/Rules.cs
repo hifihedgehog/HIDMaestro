@@ -153,6 +153,8 @@ internal static class Rules
         {
             "adv", "alt", "iii", "rev", "com", "con", "esp", "sem", "sli", "wan", "rap", "kai", "kay", "mcp", "lcm",
             "mpg", "srw", "srws", "tpr", "vrc", "vrs", "dsv", "ffg", "brd", "blu", "cuh", "zct", "csr", "nxt", "dfp",
+            // MD/Gen Control Pad, the Genesis pad's Bluetooth name. In code gen is a generation counter.
+            "gen",
         }),
         new("a part of a name the catalog writes with a capital inside, matched whole (BigBen, ShanWan, NicoHood, GamaKay, IntelliMouse)", new[]
         {

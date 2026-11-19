@@ -2040,6 +2040,62 @@ internal static class Offline
                   unjudgedWrong.Count == 0,
                   string.Join(" || ", (unjudgedWrong.Count > 0 ? unjudgedWrong : unjudged.Take(1).ToList()).Select(u => Show(u.Name, u.R))));
 
+            // S77's USB/IP judgment, on made-up events: a USB device and its HID
+            // child enumerated at 10 and 12 through the window's registration,
+            // the dispose from 90, Dispose's return at 95, the bound 2,000 ms
+            // after it, each own REMOVED at 120 and 118, both gone after.
+            const string UsbDevice = @"USB\VID_054C&PID_09CC\HMC1D2E3F4A5B6", UsbChild = @"HID\VID_054C&PID_09CC\9&1A2B3C4D&0&0000";
+            (bool Ok, string Detail) Plugged(double? usbRemoved = 120, double? childRemoved = 118, bool childEnumerated = true,
+                                             bool childThroughWindow = true, bool registered = true, bool refused = false,
+                                             double openedAt = -200, double closedAt = 2200, string[]? tree = null,
+                                             string? stillPresent = null, double? childBeforeDispose = null)
+            {
+                var e = new List<(double Ms, IntPtr Registration, uint Action, string Id)>();
+                e.Add((10, held, 7, UsbDevice));
+                if (childEnumerated) e.Add((12, held, 7, UsbChild));
+                e.Add((40, held, 7, Stranger));
+                if (childBeforeDispose is double early) e.Add((early, held, 9, UsbChild));
+                if (usbRemoved is double u) e.Add((u, held, 9, UsbDevice));
+                if (childRemoved is double c) e.Add((c, childThroughWindow ? held : sdkWatch, 9, UsbChild));
+                Program.HeldRegistration? window = registered ? new Program.HeldRegistration(refused ? IntPtr.Zero : held, openedAt, closedAt) : null;
+                return Program.UsbipTreeRemoved(e.ToArray(), window, tree ?? new[] { UsbDevice, UsbChild },
+                                                createAt: 0, disposeAt: 90, disposeEndAt: 95, boundMs: 2000,
+                                                isPresent: id => string.Equals(id, stillPresent, StringComparison.OrdinalIgnoreCase));
+            }
+
+            var plugged = Plugged();
+            Check("S77's USB/IP judgment: passes on each devnode's own REMOVED through the held-open registration within the bound after Dispose returned, each enumerated through it during the create and gone after, another device enumerated in the window counting for nothing",
+                  plugged.Ok && plugged.Detail.Contains(UsbChild + ": its own REMOVED 28.0 ms into the dispose, +23.0 ms from Dispose's return, gone"),
+                  Show("plugged", plugged));
+            var pluggedJudged = new (string Name, (bool Ok, string Detail) R, string Says)[]
+            {
+                ("the child's REMOVED past the bound", Plugged(childRemoved: 2100), UsbChild + ": its own REMOVED 2010.0 ms into the dispose, +2005.0 ms from Dispose's return, 5.0 ms past the bound"),
+                ("no REMOVED for the child", Plugged(childRemoved: null), UsbChild + ": no REMOVED of its own through the held-open registration"),
+                ("the child's REMOVED only before the dispose", Plugged(childRemoved: null, childBeforeDispose: 50), UsbChild + ": no REMOVED of its own through the held-open registration"),
+                ("the child's REMOVED only through another registration", Plugged(childThroughWindow: false), UsbChild + ": no REMOVED of its own through the held-open registration"),
+                ("the USB device still present", Plugged(stillPresent: UsbDevice), UsbDevice + ": its own REMOVED 30.0 ms into the dispose, +25.0 ms from Dispose's return, still present"),
+            };
+            var pluggedJudgedWrong = pluggedJudged.Where(j => j.R.Ok || !j.R.Detail.Contains(j.Says) || j.R.Detail.Contains("not judged")).ToList();
+            Check("S77's USB/IP judgment: fails, judged, on a devnode's REMOVED past the bound, on none, on one only from before the dispose, on one only through another registration, and on a devnode still present",
+                  pluggedJudgedWrong.Count == 0,
+                  string.Join(" || ", (pluggedJudgedWrong.Count > 0 ? pluggedJudgedWrong : pluggedJudged.Take(1).ToList()).Select(j => Show(j.Name, j.R))));
+            var pluggedUnjudged = new (string Name, (bool Ok, string Detail) R, string Cause)[]
+            {
+                ("refused", Plugged(refused: true), "Windows refused the held-open registration"),
+                ("never made", Plugged(registered: false), "the held-open wait made no registration"),
+                ("made late", Plugged(openedAt: 20), "the held-open registration was made 20.0 ms after the create began"),
+                ("no ENUMERATED for the child", Plugged(childEnumerated: false), "no ENUMERATED for " + UsbChild + " through the held-open registration during the create"),
+                ("closed before the bound with a REMOVED missing", Plugged(childRemoved: null, closedAt: 1000), "the held-open registration closed 1095.0 ms before the bound ended"),
+                ("no USB instance id", Plugged(tree: Array.Empty<string>()), "the controller had no USB instance id"),
+            };
+            var pluggedUnjudgedWrong = pluggedUnjudged.Where(u => u.R.Ok || !u.R.Detail.StartsWith("not judged: ") || !u.R.Detail.Contains(u.Cause)).ToList();
+            Check("S77's USB/IP judgment: fails as not judged, naming the cause, when the held-open registration was refused, never made or made after the create began, carried no ENUMERATED for a devnode, closed before the bound with a REMOVED missing, or the controller had no USB instance id",
+                  pluggedUnjudgedWrong.Count == 0,
+                  string.Join(" || ", (pluggedUnjudgedWrong.Count > 0 ? pluggedUnjudgedWrong : pluggedUnjudged.Take(1).ToList()).Select(u => Show(u.Name, u.R))));
+            var closedEarlyAllSeen = Plugged(closedAt: 130);
+            Check("S77's USB/IP judgment: a window closed once every REMOVED came, before the bound ended, passes",
+                  closedEarlyAllSeen.Ok, Show("closed at 130", closedEarlyAllSeen));
+
             // S77's two lookups. The window's registration is the one made on
             // the held-open wait's own thread while it runs: a registration made
             // on another thread first, and a second one on the wait's thread,

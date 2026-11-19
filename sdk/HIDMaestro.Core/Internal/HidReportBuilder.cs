@@ -839,6 +839,42 @@ public class HidReportBuilder
                 runEnd += 1;
             }
         }
+
+        OrderButtonsByUsage(Buttons);
+    }
+
+    /// <summary>Button index n is the Button-page button with the n-th
+    /// lowest usage, then the other pages' buttons in the order the
+    /// descriptor declares them. A profile's layout numbers a device's
+    /// buttons by usage, and a reader that tests report bits finds each
+    /// button where the device sends it, so a descriptor that declares
+    /// its usages out of order (the Stadia controller declares 0x12 first)
+    /// still gets HMButton bit n on button n. A descriptor that declares its
+    /// buttons in usage order keeps its order. Runs once per parse.</summary>
+    private static void OrderButtonsByUsage(List<InputField> buttons)
+    {
+        bool ordered = true;
+        int lastUsage = -1;
+        bool otherSeen = false;
+        foreach (var f in buttons)
+        {
+            if (f.UsagePage != 0x09) { otherSeen = true; continue; }
+            if (otherSeen || f.Usage < lastUsage) { ordered = false; break; }
+            lastUsage = f.Usage;
+        }
+        if (ordered) return;
+        var page = new List<InputField>(buttons.Count);
+        var others = new List<InputField>();
+        foreach (var f in buttons)
+            (f.UsagePage == 0x09 ? page : others).Add(f);
+        // List.Sort is not stable: the declaration index breaks ties, so
+        // two fields on one usage keep their declared order.
+        var index = new Dictionary<InputField, int>(ReferenceEqualityComparer.Instance);
+        for (int i = 0; i < page.Count; i++) index[page[i]] = i;
+        page.Sort((a, b) => a.Usage != b.Usage ? a.Usage.CompareTo(b.Usage) : index[a].CompareTo(index[b]));
+        buttons.Clear();
+        buttons.AddRange(page);
+        buttons.AddRange(others);
     }
 
     /// <summary>v1.3.9: single-source axis-dict encoder. Caller writes
@@ -865,8 +901,11 @@ public class HidReportBuilder
         if (LeftStickY  != null) d[Key(LeftStickY)]  = (float)leftY;
         if (RightStickX != null) d[Key(RightStickX)] = (float)rightX;
         if (RightStickY != null) d[Key(RightStickY)] = (float)rightY;
-        if (LeftTrigger != null) d[Key(LeftTrigger)] = (float)leftTrigger;
-        if (RightTrigger!= null) d[Key(RightTrigger)]= (float)rightTrigger;
+        // A trigger value never lands on a field a stick holds, so a
+        // descriptor whose trigger slot resolves to a stick's axis keeps
+        // the stick.
+        if (LeftTrigger != null) d.TryAdd(Key(LeftTrigger), (float)leftTrigger);
+        if (RightTrigger!= null) d.TryAdd(Key(RightTrigger), (float)rightTrigger);
         return d;
     }
 

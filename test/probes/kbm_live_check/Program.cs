@@ -25,10 +25,12 @@
 //   J. Dispose with a key held sends the key up first. A consumer killed
 //      while holding F24, mouse button 6 and an absolute pointer leaves
 //      F24 and button 6 up and the pointer where it was, through the
-//      release frames the driver sends when the consumer's owner pipe
-//      closes. A child process of this probe is the consumer. The cleanup
-//      that follows removes all three of its devices, the keyboard
-//      included, which Windows will not disable.
+//      release frames the UMDF2 driver sends when the consumer's owner pipe
+//      closes. On USB/IP the devices go with the consumer's process and no
+//      frame follows: they leave Raw Input and F24 stops repeating. A child
+//      process of this probe is the consumer. The cleanup that follows
+//      removes all three of its devices, the keyboard included, which
+//      Windows will not disable.
 //
 // The burst moves the cursor 300 counts and back, and D puts it at the
 // center of the screen. The probe puts the cursor back at the end. No
@@ -39,6 +41,9 @@
 //
 // --leds-diag prints a timeline of the LED reports two keyboards receive,
 // with each one's output ring read from its first slot, read or not.
+// --owner-exit runs section J's killed consumer alone.
+// --order N, --dispose-ack N and --held-on-kill are measurements on
+// either backend, described in Bench.cs. The first two need no Raw Input.
 
 using System;
 using System.Collections.Generic;
@@ -110,6 +115,28 @@ internal static class Program
     static bool DeviceGone(string instanceId) =>
         CM_Locate_DevNodeW(out _, instanceId, 0) != 0 && CM_Locate_DevNodeW(out _, instanceId, 1) != 0;
 
+    /// <summary>The devices of this VID and PID either backend presents,
+    /// live or phantom: the UMDF2 driver's root devices under
+    /// ROOT\HIDCLASS, and a USB/IP persona's USB device,
+    /// USB\VID_v&amp;PID_p\&lt;serial&gt;.</summary>
+    static List<string> PresentedDevices(string tag)
+    {
+        var ids = RootDevices(tag);
+        using var key = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\USB\{tag}");
+        if (key != null)
+            foreach (var inst in key.GetSubKeyNames()) ids.Add($@"USB\{tag}\{inst}");
+        return ids;
+    }
+
+    /// <summary>The device is gone as its backend removes it: a UMDF2 root
+    /// device neither live nor phantom, a USB/IP persona's USB device no
+    /// longer present. A USB device keeps its record once unplugged, as a
+    /// real one's does.</summary>
+    static bool Removed(string instanceId) =>
+        instanceId.StartsWith(@"USB\", StringComparison.OrdinalIgnoreCase)
+            ? CM_Locate_DevNodeW(out _, instanceId, 0) != 0
+            : DeviceGone(instanceId);
+
     /// <summary>A Raw Input device of this VID and PID. Plain HID profiles
     /// sit under the HIDClass enumerator, so the path does not carry them.</summary>
     static bool Is(string path, string tag)
@@ -123,6 +150,11 @@ internal static class Program
     /// minute at the run's timeout scale. Windows lists a device, reads it
     /// and delivers its input in well under a second, but a loaded machine
     /// can take far longer with no defect.</summary>
+    /// <summary>The run's timeout scale, HIDMAESTRO_TIMEOUT_SCALE, at least 1.</summary>
+    static readonly double Scale = Math.Max(1.0,
+        double.TryParse(Environment.GetEnvironmentVariable("HIDMAESTRO_TIMEOUT_SCALE"),
+            System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double scale) ? scale : 1.0);
+
     static readonly int HangMs = (int)(60_000 * Math.Max(1.0,
         double.TryParse(Environment.GetEnvironmentVariable("HIDMAESTRO_TIMEOUT_SCALE"),
             System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double scale) ? scale : 1.0));
@@ -425,12 +457,26 @@ internal static class Program
         bool fourOnly = Environment.GetCommandLineArgs().Contains("--four-mice");
         // The --hold-diag child runs beside its own parent, which has the SDK
         // loaded.
-        string? consumer = Environment.GetCommandLineArgs().Contains("--hold-child") ? null : FindLiveSdkConsumer();
+        string[] argv = Environment.GetCommandLineArgs();
+        string? consumer = argv.Contains("--hold-child") || argv.Contains("--held-shift-child") ? null : FindLiveSdkConsumer();
         if (consumer != null)
         {
             Console.WriteLine($"  [SKIP] {consumer} is running and shares the SDK's devices.");
             return 2;
         }
+        int orderAt = Array.IndexOf(argv, "--order"), ackAt = Array.IndexOf(argv, "--dispose-ack");
+        if (orderAt > 0 || ackAt > 0 || argv.Contains("--held-shift-child"))
+        {
+            int at = orderAt > 0 ? orderAt : ackAt;
+            int count = at > 0 && at + 1 < argv.Length && int.TryParse(argv[at + 1], out int c) ? c : 1;
+            using var bctx = new HMContext();
+            bctx.LoadDefaultProfiles();
+            bctx.InstallDriver();
+            return orderAt > 0 ? Bench.Order(bctx, count)
+                 : ackAt > 0 ? Bench.DisposeAck(bctx, count)
+                 : Bench.HoldShiftChild(bctx);
+        }
+
         // Every check here reads Raw Input. Exit 3, which the battery reads as
         // a skip, unlike the running consumer's 2.
         if (RawInputSink.NoRawInputHere(out string why))
@@ -438,6 +484,8 @@ internal static class Program
             Console.WriteLine($"  [SKIP] {why}.");
             return 3;
         }
+
+        if (argv.Contains("--held-on-kill")) return Bench.HeldOnKill();
 
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
@@ -523,7 +571,7 @@ internal static class Program
             k.SubmitKeyboard(HMKeyModifiers.None, new[] { HMKey.F24 });
             m.SubmitMouse(new HMMouseState { Buttons = HMMouseButtons.Button6 });
             a.SubmitMouse(new HMMouseState { X = 16384, Y = 16384 });
-            Console.WriteLine($"HELD release-on-exit {(k.ReleasesOnConsumerExit ? "on" : "off")}");
+            Console.WriteLine($"HELD release-on-exit {(k.ReleasesOnConsumerExit ? "on" : "off")} backend {k.Backend}");
             Console.Out.Flush();
             Thread.Sleep(Timeout.Infinite);
             return 0;
@@ -664,6 +712,15 @@ internal static class Program
                 Console.WriteLine($"Move {mx},{my}: sum {ev.Sum(x => x.X)},{ev.Sum(x => x.Y)} in {ev.Count} messages");
             }
             return 0;
+        }
+
+        if (argv.Contains("--owner-exit"))
+        {
+            // Section J's killed consumer alone.
+            using var osink = new RawInputSink(true, (0x01, 0x02), (0x01, 0x06), (0xFF00, 0x01), (0x0C, 0x01));
+            OwnerExit(ctx, osink);
+            Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
+            return s_failures == 0 ? 0 : 1;
         }
 
         using var sink = new RawInputSink(true, (0x01, 0x02), (0x01, 0x06), (0xFF00, 0x01), (0x0C, 0x01));
@@ -961,8 +1018,33 @@ internal static class Program
     struct POINT { public int X, Y; }
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
     const int VK_SCROLL = 0x91, VK_NUMLOCK = 0x90, VK_CAPITAL = 0x14;
     static bool ScrollLockOn() => (GetKeyState(VK_SCROLL) & 1) != 0;
+
+    /// <summary>The modifiers Windows holds down on this desktop, from any
+    /// keyboard, a removed one included.</summary>
+    static HMKeyModifiers HeldModifiers()
+    {
+        (int Vk, HMKeyModifiers Mod)[] map =
+        {
+            (0xA2, HMKeyModifiers.LeftControl), (0xA0, HMKeyModifiers.LeftShift), (0xA4, HMKeyModifiers.LeftAlt), (0x5B, HMKeyModifiers.LeftGui),
+            (0xA3, HMKeyModifiers.RightControl), (0xA1, HMKeyModifiers.RightShift), (0xA5, HMKeyModifiers.RightAlt), (0x5C, HMKeyModifiers.RightGui),
+        };
+        var held = HMKeyModifiers.None;
+        foreach (var (vk, mod) in map)
+            if ((GetAsyncKeyState(vk) & 0x8000) != 0) held |= mod;
+        return held;
+    }
+
+    /// <summary>Every virtual key Windows holds down on this desktop.</summary>
+    static string HeldKeys()
+    {
+        var down = new List<string>();
+        for (int vk = 1; vk < 256; vk++)
+            if ((GetAsyncKeyState(vk) & 0x8000) != 0) down.Add($"0x{vk:X2}");
+        return down.Count == 0 ? "none" : string.Join(" ", down);
+    }
 
     /// <summary>The lock LEDs Windows holds right now.</summary>
     static HMKeyboardLeds LockState() =>
@@ -1047,6 +1129,24 @@ internal static class Program
                   k1.KeyboardLeds == held && k2.KeyboardLeds == held,
                   $"{k1.KeyboardLeds?.ToString() ?? "null"}, {k2.KeyboardLeds?.ToString() ?? "null"}");
 
+            // A key a keyboard left down when its program ended stays down
+            // for every keyboard, and with Ctrl down Scroll Lock reads as
+            // Break and toggles nothing. Keyboard 1 lets go of the modifiers
+            // Windows holds, as a key-up from any keyboard does.
+            string keysBefore = HeldKeys();
+            var stale = HeldModifiers();
+            if (stale != HMKeyModifiers.None)
+            {
+                k1.SubmitKeyboard(stale, ReadOnlySpan<HMKey>.Empty);
+                k1.SubmitKeyboard(HMKeyModifiers.None, ReadOnlySpan<HMKey>.Empty);
+                var mw = Stopwatch.StartNew();
+                while (mw.ElapsedMilliseconds < 2000 && HeldModifiers() != HMKeyModifiers.None) Thread.Sleep(20);
+            }
+            Check("Windows holds no modifier down before the Scroll Lock press",
+                  HeldModifiers() == HMKeyModifiers.None,
+                  stale == HMKeyModifiers.None ? $"keys down: {keysBefore}"
+                      : $"keys down: {keysBefore}, {stale} let go, {HeldModifiers()} still down");
+
             // Scroll Lock pressed on keyboard 1: Windows toggles the lock and
             // sends the new state to every keyboard. Pressed twice, so the
             // state ends where it began.
@@ -1061,15 +1161,24 @@ internal static class Program
             Check($"Scroll Lock {(initial ? "off" : "on")}: the keyboard with Report ID 2 reads {want}",
                   got2 && k2.KeyboardLeds == want, w2.Seen);
 
-            w1.Clear();
-            w2.Clear();
-            PressScrollLock(k1);
-            bool back1 = WaitLeds(w1.Leds, initial, HangMs), back2 = WaitLeds(w2.Leds, initial, HangMs);
-            var rw = Stopwatch.StartNew();
-            while (rw.ElapsedMilliseconds < HangMs && ScrollLockOn() != initial) Thread.Sleep(20);
-            Check($"pressing it again restores Scroll Lock {(initial ? "on" : "off")} on both",
-                  back1 && back2 && ScrollLockOn() == initial && k1.KeyboardLeds == held && k2.KeyboardLeds == held,
-                  $"{w1.Seen} | {w2.Seen}");
+            // A first press that brought no LED report toggled nothing, so a
+            // second one would leave the lock toggled. It is not sent, and
+            // the run does not wait out three more bounds.
+            if (got1 || got2)
+            {
+                w1.Clear();
+                w2.Clear();
+                PressScrollLock(k1);
+                bool back1 = WaitLeds(w1.Leds, initial, HangMs), back2 = WaitLeds(w2.Leds, initial, HangMs);
+                var rw = Stopwatch.StartNew();
+                while (rw.ElapsedMilliseconds < HangMs && ScrollLockOn() != initial) Thread.Sleep(20);
+                Check($"pressing it again restores Scroll Lock {(initial ? "on" : "off")} on both",
+                      back1 && back2 && ScrollLockOn() == initial && k1.KeyboardLeds == held && k2.KeyboardLeds == held,
+                      $"{w1.Seen} | {w2.Seen}");
+            }
+            else
+                Check($"pressing it again restores Scroll Lock {(initial ? "on" : "off")} on both", false,
+                      $"not pressed: the first press brought neither keyboard an LED report, keys down: {HeldKeys()}");
         }
         k1.Dispose();
         k2.Dispose();
@@ -1314,8 +1423,15 @@ internal static class Program
             Check("the child holds its input", false, "it exited first");
             return;
         }
-        Check("the driver watches the consumer's exit", line.EndsWith(" on"), line);
-        var held = new[] { 0xF0B6, 0xF0B8, 0xF0B9 }.SelectMany(p => RootDevices(Tag(0xBEEF, (ushort)p)))
+        // On UMDF2 the driver watches the consumer's owner pipe and sends the
+        // release frames when it closes. On USB/IP the device runs in the
+        // consumer's process and goes with it: the host controller unplugs
+        // it, and nothing is left to send a frame.
+        bool usbipChild = line.EndsWith(" backend Usbip");
+        Check(usbipChild ? "the device goes with the consumer, so nothing announces a release on exit"
+                         : "the driver watches the consumer's exit",
+              line.StartsWith(usbipChild ? "HELD release-on-exit off" : "HELD release-on-exit on"), line);
+        var held = new[] { 0xF0B6, 0xF0B8, 0xF0B9 }.SelectMany(p => PresentedDevices(Tag(0xBEEF, (ushort)p)))
                                                    .Where(id => CM_Locate_DevNodeW(out _, id, 0) == 0).ToList();
         var devs = RawInputSink.Devices();
         IntPtr Find(uint type, ushort pid) => devs.FirstOrDefault(d => d.Type == type && Is(d.Name, Tag(0xBEEF, pid))).Handle;
@@ -1328,31 +1444,67 @@ internal static class Program
         while (heldFor.ElapsedMilliseconds < 1500 && Repeats() < 3) Thread.Sleep(20);
         int repeats = Repeats();
         long heldMs = heldFor.ElapsedMilliseconds;
+        // The same window's controls, on either backend: Raw Input lists all
+        // three devices, and F24 repeats there while the child holds it. A
+        // check below that sees nothing after the kill means nothing without
+        // them.
+        Check("before the kill, Raw Input lists the keyboard, the vendor collection and the pointer",
+              hk != IntPtr.Zero && hv != IntPtr.Zero && hp != IntPtr.Zero,
+              $"keyboard {(hk != IntPtr.Zero ? "listed" : "not listed")}, vendor {(hv != IntPtr.Zero ? "listed" : "not listed")}, pointer {(hp != IntPtr.Zero ? "listed" : "not listed")}");
+        Check("before the kill, F24 repeats at Raw Input while the child holds it", repeats >= 1, $"{repeats} in {heldMs} ms");
         sink.Clear();
+        var listedAtKill = RawInputSink.Devices().Select(d => d.Handle).ToHashSet();
+        bool allListedAtKill = hk != IntPtr.Zero && hv != IntPtr.Zero && hp != IntPtr.Zero
+                               && listedAtKill.Contains(hk) && listedAtKill.Contains(hv) && listedAtKill.Contains(hp);
         var clock = Stopwatch.StartNew();
         child.Kill();
         child.WaitForExit();
-        // The driver's release frames: F24 up, button 6 up and the pointer
-        // where it was. Then 500 ms, ten of Windows' key repeats, for a key
-        // that goes down again or a pointer that moves after them.
-        long released = -1;
+        // On UMDF2 the driver's release frames: F24 up, button 6 up and the
+        // pointer where it was. On USB/IP the three devices leave with the
+        // consumer and nothing sends a frame: Windows keeps F24 down (measured
+        // with --held-on-kill, 2026-11-18) and its repeat stops with the
+        // device. Then 500 ms, ten of Windows' key repeats, for a key that
+        // goes down again or a pointer that moves after them.
+        // On USB/IP a repeat made before the device went can reach this
+        // program's message pump late on a loaded machine. The window for
+        // "nothing after the kill" opens a drain of 250 ms at the run's
+        // timeout scale after Raw Input stops listing the devices.
+        long drainMs = (long)(250 * Scale);
+        long released = -1, quietFrom = long.MaxValue;
         while (clock.ElapsedMilliseconds < HangMs)
         {
-            if (released < 0
-                && sink.Keys.Any(k => k.Device == hk && k.VKey == 0x87 && (k.Flags & 1) == 1)
-                && sink.Reports.Any(r => r.Device == hv && Convert.ToHexString(r.Report) == "0200")
-                && sink.Mice.Any(x => x.Device == hp))
+            bool done = usbipChild
+                ? allListedAtKill && !RawInputSink.Devices().Any(d => d.Handle == hk || d.Handle == hv || d.Handle == hp)
+                : sink.Keys.Any(k => k.Device == hk && k.VKey == 0x87 && (k.Flags & 1) == 1)
+                  && sink.Reports.Any(r => r.Device == hv && Convert.ToHexString(r.Report) == "0200")
+                  && sink.Mice.Any(x => x.Device == hp);
+            if (released < 0 && done)
+            {
                 released = clock.ElapsedMilliseconds;
-            if (released >= 0 && clock.ElapsedMilliseconds - released >= 500) break;
+                quietFrom = Stopwatch.GetTimestamp() + drainMs * Stopwatch.Frequency / 1000;
+            }
+            if (released >= 0 && clock.ElapsedMilliseconds - released >= (usbipChild ? drainMs : 0) + 500) break;
             Thread.Sleep(20);
         }
         var keys = sink.Keys.Where(k => k.Device == hk && k.VKey == 0x87).ToList();
         int up = keys.FindIndex(k => (k.Flags & 1) == 1);
         Console.WriteLine($"  held: {repeats} F24 repeats in {heldMs} ms; after the kill: {string.Join(" ", keys.Select(k => (k.Flags & 1) == 1 ? "up" : "down"))}");
-        Check("F24 goes up when the consumer is killed, and stops repeating",
-              up >= 0 && keys.Skip(up + 1).All(k => (k.Flags & 1) == 1), $"{keys.Count} F24 messages");
         var vendor = sink.Reports.Where(r => r.Device == hv).Select(r => Convert.ToHexString(r.Report)).ToList();
-        Check("button 6 goes up (vendor report 2, 0x00)", vendor.Contains("0200"), string.Join(",", vendor));
+        if (usbipChild)
+        {
+            Check("the three devices, listed at the kill, leave Raw Input with the consumer", released >= 0,
+                  !allListedAtKill ? "not all listed at the kill" : released >= 0 ? $"{released} ms after the kill" : "still listed");
+            int late = keys.Count(k => k.Ticks > quietFrom) + sink.Reports.Count(r => r.Device == hv && r.Ticks > quietFrom);
+            Check("no F24 and no vendor report once the devices are gone",
+                  released >= 0 && late == 0,
+                  released < 0 ? "the devices did not go" : $"{late} after the devices went and {drainMs} ms more, {keys.Count} F24 messages since the kill");
+        }
+        else
+        {
+            Check("F24 goes up when the consumer is killed, and stops repeating",
+                  up >= 0 && keys.Skip(up + 1).All(k => (k.Flags & 1) == 1), $"{keys.Count} F24 messages");
+            Check("button 6 goes up (vendor report 2, 0x00)", vendor.Contains("0200"), string.Join(",", vendor));
+        }
         var moves = sink.Mice.Where(x => x.Device == hp).ToList();
         Check("the absolute pointer stays where it was",
               moves.All(x => Math.Abs(x.X - 32768) < 64 && Math.Abs(x.Y - 32768) < 64),
@@ -1364,13 +1516,16 @@ internal static class Program
         var cleanup = Stopwatch.StartNew();
         HMContext.RemoveAllVirtualControllers();
         long cleanupMs = cleanup.ElapsedMilliseconds;
-        var left = held.Where(id => !DeviceGone(id)).ToList();
+        var left = held.Where(id => !Removed(id)).ToList();
         while (left.Count > 0 && cleanup.ElapsedMilliseconds < cleanupMs + HangMs)
         {
             Thread.Sleep(100);
-            left = held.Where(id => !DeviceGone(id)).ToList();
+            left = held.Where(id => !Removed(id)).ToList();
         }
-        Check("the cleanup removes the dead consumer's keyboard and both mice",
+        // On USB/IP the host controller removed the three with the consumer,
+        // before the cleanup ran, so the check states what it sees.
+        Check(usbipChild ? "the dead consumer's keyboard and both mice, present before the kill, are gone after the cleanup"
+                         : "the cleanup removes the dead consumer's keyboard and both mice",
               held.Count == 3 && left.Count == 0,
               left.Count > 0 ? "left: " + string.Join(", ", left) : $"{held.Count} devices, {cleanupMs} ms");
         WaitGone(Tag(0xBEEF, 0xF0B6), 10000);
