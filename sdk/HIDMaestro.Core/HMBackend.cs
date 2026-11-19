@@ -5,11 +5,15 @@ namespace HIDMaestro;
 /// <summary>
 /// The way a virtual controller is presented to Windows.
 ///
-/// <para>Every profile with a HID descriptor runs on either backend. A
-/// profile whose <see cref="HMProfile.Backend"/> is <c>"usbip"</c> has
-/// interfaces only the USB/IP backend presents, and runs there on every
-/// machine. <see cref="HMContext.MachineBackend"/> says what
-/// <see cref="Auto"/> picks on this machine for every other profile.</para>
+/// <para>A profile whose <see cref="HMProfile.Backend"/> is <c>"usbip"</c>
+/// has interfaces only the USB/IP backend presents, and runs there on every
+/// machine. Every other profile with a HID descriptor runs on the UMDF2
+/// driver, and on the USB/IP backend too unless it is an Xbox controller
+/// that reaches XInput through the XUSB companion or xinputhid, which the
+/// USB/IP backend does not present. <see cref="HMContext.MachineBackend"/>
+/// says what <see cref="Auto"/> picks on this machine for every profile not
+/// bound to USB/IP, and <see cref="HMProfile.SupportsBackend"/> says
+/// whether a profile runs on a backend.</para>
 /// </summary>
 public enum HMBackend
 {
@@ -39,8 +43,9 @@ public enum HMBackend
 /// controller that reaches XInput through its own driver stack. Derived
 /// from <see cref="InvalidOperationException"/>, and thrown before the
 /// create takes anything machine-wide.
-/// <see cref="HMProfile.SupportsBackend"/> gives the same answer without
-/// the exception.
+/// <see cref="HMProfile.SupportsBackend"/> answers without the exception:
+/// for <see cref="HMBackend.Auto"/>, about the backend Auto resolves to on
+/// this machine.
 /// </summary>
 public sealed class HMBackendNotSupportedException : InvalidOperationException
 {

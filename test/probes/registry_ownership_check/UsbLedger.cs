@@ -241,6 +241,7 @@ internal static partial class Program
         DeadProgram(everything: false);
         DeadProgram(everything: true);
         ForeignRecord();
+        PortNamed();
         AfterRestart();
         PositiveControl("after");
         return true;
@@ -909,9 +910,63 @@ internal static partial class Program
         finally { UsbRecords.BootTimeForProbe = null; }
         var left = subtrees.Where(UsbRecords.Exists).ToList();
         Check("after a restart, the full removal removes every record the ledger names", left.Count == 0, string.Join(" ; ", left));
+        if (s_portNamed != null)
+            Check("the port-named record the ledger took is among them", !UsbRecords.Exists(s_portNamed), s_portNamed);
         Check("drops every entry", UsbRecords.Caused().Count == 0, string.Join(" ; ", UsbRecords.Caused()));
         using (var k = Registry.LocalMachine.OpenSubKey(UsbRecords.LedgerRoot))
             Check("and deletes the ledger's key", k == null);
         Check("the host controller still reads as used since Windows started", UsbipDriverInstaller.UsedSinceBoot(out string why), why);
+    }
+}
+
+internal static partial class Program
+{
+    static string? s_portNamed;
+
+    /// <summary>Item 8: a derived device Windows names by its root hub port
+    /// (usbflags IgnoreHWSerNum for its VID and PID). The create's start
+    /// wait finds it on the port, and the ledger names the record it caused
+    /// under that name. The serial's name has no record, and the removal
+    /// drops its entry as absent.</summary>
+    static void PortNamed()
+    {
+        Console.WriteLine("\n-- A derived device Windows names by its port --");
+        const string flags = @"SYSTEM\CurrentControlSet\Control\usbflags";
+        const string value = "IgnoreHWSerNum054C09CC";
+        object? prior;
+        using (var k = Registry.LocalMachine.OpenSubKey(flags)) prior = k?.GetValue(value);
+        var known = UsbRecords.Known(0x054C, 0x09CC);
+        using (var k = Registry.LocalMachine.CreateSubKey(flags))
+            k.SetValue(value, new byte[] { 1 }, RegistryValueKind.Binary);
+        try
+        {
+            using var ctx = new HMContext();
+            ctx.LoadDefaultProfiles();
+            string serialId, onPort;
+            using (var pad = ctx.CreateController(ctx.GetProfile("dualshock-4-v2")!, "ledger-portnamed", HMBackend.Usbip))
+            {
+                serialId = pad.UsbipHandle!.Device.Descriptors.UsbInstanceId!;
+                onPort = VhciClient.DeviceOnRootHubPort(pad.UsbipHandle.Device.VhciPort) ?? "";
+                Check("Windows named the device by its port, not its serial (positive control for the flag)",
+                      onPort.Length > 0 && !string.Equals(onPort, serialId, StringComparison.OrdinalIgnoreCase), $"{serialId} on the port: {onPort}");
+                if (onPort.Length == 0 || string.Equals(onPort, serialId, StringComparison.OrdinalIgnoreCase)) return;
+                bool created = UsbRecords.CreatedBy(onPort, known);
+                Console.WriteLine($"  {onPort}: {(created ? "new, the create caused it" : "there before the create")}");
+                if (created)
+                {
+                    s_portNamed = onPort;
+                    Check("the ledger names the port-named record the create caused", LedgerNames(onPort), onPort);
+                }
+                else
+                    Check("the ledger does not name a port-named record that was there before the create", !LedgerNames(onPort), onPort);
+                Check("the serial's name has no record", !UsbRecords.Exists(serialId), serialId);
+            }
+        }
+        finally
+        {
+            using var k = Registry.LocalMachine.OpenSubKey(flags, writable: true);
+            if (prior != null) k?.SetValue(value, prior, RegistryValueKind.Binary);
+            else k?.DeleteValue(value, throwOnMissingValue: false);
+        }
     }
 }

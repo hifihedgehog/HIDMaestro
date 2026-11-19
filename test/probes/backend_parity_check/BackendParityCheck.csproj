@@ -14,5 +14,7 @@
   <ItemGroup>
     <!-- Another running program with HIDMaestro.Core.dll loaded. -->
     <Compile Include="..\probe_common\SdkConsumers.cs" Link="SdkConsumers.cs" />
+    <!-- Windows' own HID report descriptor parser, run in this process. -->
+    <Compile Include="..\report_length_check\WindowsParser.cs" Link="WindowsParser.cs" />
   </ItemGroup>
 </Project>
