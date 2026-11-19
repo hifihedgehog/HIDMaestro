@@ -185,6 +185,8 @@ internal static partial class Program
                   && BinaryPrimitives.ReadUInt16LittleEndian(set.DeviceDescriptor.AsSpan(8)) == 0x045E
                   && BinaryPrimitives.ReadUInt16LittleEndian(set.DeviceDescriptor.AsSpan(10)) == pid
                   && Hex(set.DeviceDescriptor.AsSpan(4, 3)) == "FF47D0", Hex(set.DeviceDescriptor));
+            Check($"{id}: its compatible ID is XGIP10, which the create's no-driver error names",
+                  GipFunction.CompatibleIdOf(form) == "XGIP10", GipFunction.CompatibleIdOf(form) ?? "null");
 
             var compiled = CompiledProtocol.Compile(form, set)!;
             var engine = new ProtocolEngine(compiled, "HM0123456789AB", 0, ProgramBinder.BindLayouts(compiled.Model));
@@ -282,5 +284,17 @@ internal static partial class Program
         catch (Exception e) { notXinputhid = e.Message; }
         Check("a gip block on a profile that does not reach XInput through xinputhid is refused at $.gip",
               notXinputhid.StartsWith("$.gip:", StringComparison.Ordinal), notXinputhid);
+        string ownDevice = "";
+        try
+        {
+            var o = JsonNode.Parse(Source(catalog.First(x => x.Id == "xbox-series-xs")))!.AsObject();
+            var wired = JsonNode.Parse(Source(catalog.First(x => x.Id == "xbox-one-s-full")))!.AsObject();
+            o["id"] = "user-gip-own-device"; o["usbConfiguration"] = wired["usbConfiguration"]!.DeepClone();
+            var db = ProfileDatabase.LoadTexts(new[] { ("user.json", o.ToJsonString()) }, ModelRegistry.Catalog);
+            ownDevice = db.All.Count == 0 && db.Issues.Count == 1 ? $"{db.Issues[0].JsonPath}: {db.Issues[0].Reason}" : $"loaded {db.All.Count}";
+        }
+        catch (Exception e) { ownDevice = e.Message; }
+        Check("a gip block beside the profile's own usbConfiguration is refused at $.gip",
+              ownDevice.StartsWith("$.gip:", StringComparison.Ordinal) && ownDevice.Contains("usbConfiguration", StringComparison.Ordinal), ownDevice);
     }
 }

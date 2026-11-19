@@ -951,6 +951,8 @@ public sealed class ControllerProfile
                 throw new ProfileDefectException("$.gip", "names a GIP identity, and this profile does not reach XInput through xinputhid, the presentation the GIP function serves.");
             if (Usbip.GipFunction.IdentityDefect(Gip) is { } defect)
                 throw new ProfileDefectException("$.gip.identity", defect);
+            if (cfg != null)
+                throw new ProfileDefectException("$.gip", "names a GIP identity, and this profile's usbConfiguration describes its USB device itself, which the GIP function then does not present.");
             if (checkModelGroups && cfg == null) _ = Usbip.GipFunction.FormOf(this);
         }
         // A usbConfiguration on a profile whose default is UMDF2 is the USB

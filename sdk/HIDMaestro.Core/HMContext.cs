@@ -1051,7 +1051,8 @@ public sealed class HMContext : IDisposable
             // XInput slot taken, as the UMDF2 xinputhid create's, and the
             // records take the name Windows gave the device the same way.
             else if (handle.Device.Descriptors.UsbInstanceId is { } gipId && gip)
-                handle.ResolveRecord(Internal.DeviceOrchestrator.AwaitUsbipGipStart(gipId, handle.Device.VhciPort, index, slotsBefore));
+                handle.ResolveRecord(Internal.DeviceOrchestrator.AwaitUsbipGipStart(gipId, handle.Device.VhciPort, index, slotsBefore,
+                    Internal.Usbip.GipFunction.CompatibleIdOf(presented.Inner)));
             var controller = new HMController(this, slot, lease, profile, instanceId: null, handle, lease.Identity.Key, presented);
             try
             {

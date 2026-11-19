@@ -121,6 +121,17 @@ internal static class GipFunction
         Root.TryGetProperty("identities", out var ids) && ids.ValueKind == JsonValueKind.Object
             ? ids.EnumerateObject().Select(p => p.Name).ToList() : Array.Empty<string>();
 
+    /// <summary>The Microsoft OS compatible ID a GIP device serves, from its
+    /// extended compatible ID descriptor (8 bytes at offset 18), or null.
+    /// Windows matches it as <c>USB\MS_COMP_</c> and the ID.</summary>
+    internal static string? CompatibleIdOf(ControllerProfile form)
+    {
+        string? hex = form.UsbConfiguration?.MicrosoftOs?.ExtendedCompatIdHex;
+        if (string.IsNullOrEmpty(hex) || hex.Length < 52) return null;
+        try { return Encoding.ASCII.GetString(Convert.FromHexString(hex.Substring(36, 16))).TrimEnd('\0'); }
+        catch (FormatException) { return null; }
+    }
+
     /// <summary>True when <paramref name="profile"/> presents the GIP
     /// function on the USB/IP backend: it reaches XInput through xinputhid
     /// and authors no USB device of its own.</summary>

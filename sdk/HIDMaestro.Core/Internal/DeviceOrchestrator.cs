@@ -1032,11 +1032,18 @@ internal static partial class DeviceOrchestrator
     /// the UMDF2 create's slot budget. A failed
     /// start throws as the UMDF2 create's does. A wait that runs out is
     /// logged and the create goes on, as there: the controller still reaches
-    /// XInput on a consumer's next poll. The device is found on its port as
+    /// XInput on a consumer's next poll. A device that still has a problem
+    /// code when the wait ends, with no install pending on the machine,
+    /// fails the create: no INF bound to its
+    /// hardware IDs or its compatible ID <paramref name="compatibleId"/>
+    /// (problem code 28, CM_PROB_FAILED_INSTALL), or its driver did not
+    /// start, and either way it has no XInput slot. A device that bound
+    /// and made no HID child in time is logged and the create goes on, as
+    /// the derived device's wait does. The device is found on its port as
     /// <see cref="AwaitUsbipStart"/> finds it. Returns the instance id
     /// Windows gave it, <paramref name="serialInstanceId"/> when none was
     /// found in time.</summary>
-    internal static string AwaitUsbipGipStart(string serialInstanceId, int vhciPort, int controllerIndex, int slotsBefore)
+    internal static string AwaitUsbipGipStart(string serialInstanceId, int vhciPort, int controllerIndex, int slotsBefore, string? compatibleId = null)
     {
         var sw = Stopwatch.StartNew();
         string usbInstanceId = UsbInstanceOnPort(serialInstanceId, vhciPort, TimeoutScale.Apply(10000), sw) ?? serialInstanceId;
@@ -1049,11 +1056,25 @@ internal static partial class DeviceOrchestrator
             if (StartFailed(usbInstanceId, controllerIndex)) throw StartError(usbInstanceId, controllerIndex, child);
             Thread.Sleep(25);
         }
+        // An install still pending, of this device or another, leaves the
+        // verdict open: the create goes on, as a wait that runs out does.
+        if (hid == null && StartFailed(usbInstanceId, controllerIndex, final: true) && !DeviceManager.InstallsPending())
+        {
+            var (_, _, problem) = DevnodeStatus(usbInstanceId);
+            if (problem == CM_PROB_FAILED_INSTALL)
+                throw new InvalidOperationException(
+                    $"The GIP device {usbInstanceId} has no driver: problem code 28 (CM_PROB_FAILED_INSTALL). No INF on this machine " +
+                    $"binds its hardware IDs or its compatible ID USB\\MS_COMP_{compatibleId ?? "(none)"}, so Windows' GIP driver did not start it " +
+                    "and it has no XInput slot. The create removed it.");
+            throw StartError(usbInstanceId, controllerIndex, child);
+        }
         var started = hid != null ? WaitForDeviceStarted(hid, child!, controllerIndex, timeoutMs: 10000) : StartWait.TimedOut;
         if (started == StartWait.Failed) throw StartError(usbInstanceId, controllerIndex, hid);
         long hidMs = sw.ElapsedMilliseconds;
         int slotsAfter = slotsBefore;
-        if (started == StartWait.Done)
+        // Four slots taken leave none for this pad, as the UMDF2 wait reads
+        // them (xinputFull).
+        if (started == StartWait.Done && slotsBefore < 4)
         {
             var slotClock = Stopwatch.StartNew();
             int slotBudget = TimeoutScale.Apply(500);
@@ -2073,6 +2094,7 @@ internal static partial class DeviceOrchestrator
     // cfg.h:77, 98, 104, 106 and 110: a failed start, add or DriverEntry, a
     // driver that did not load, and one that failed after it started, as a
     // crashed UMDF host leaves its device.
+    private const uint CM_PROB_FAILED_INSTALL = 28;
     private const uint CM_PROB_FAILED_START = 10, CM_PROB_FAILED_ADD = 31, CM_PROB_FAILED_DRIVER_ENTRY = 37,
         CM_PROB_DRIVER_FAILED_LOAD = 39, CM_PROB_FAILED_POST_START = 43;
 
