@@ -138,7 +138,14 @@ echo.
 rem 3. Run the full regression battery
 echo [2/3] Running regression battery (107 scenarios)...
 echo.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "test\regression\regression_battery.ps1" -StopOnFailure
+rem    The gate runs on the machine's own backend unless the caller names
+rem    one in HM_GATE_BACKEND (Auto, Umdf2 or Usbip). An HIDMAESTRO_BACKEND
+rem    left in the environment would make an x64 gate a USB/IP-only run, so
+rem    it is cleared here, and the battery prints the backend it runs first.
+set "HIDMAESTRO_BACKEND="
+if not defined HM_GATE_BACKEND set "HM_GATE_BACKEND=Auto"
+echo        Backend: %HM_GATE_BACKEND%
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "test\regression\regression_battery.ps1" -StopOnFailure -Backend %HM_GATE_BACKEND%
 set BATTERY_EXIT=%ERRORLEVEL%
 echo.
 
@@ -154,7 +161,7 @@ if %BATTERY_EXIT% neq 0 (
 echo [3/3] Validation complete.
 echo.
 echo ====================================================================
-echo  [PASS] 106/107 scenarios passed. Safe to:
+echo  [PASS] 107/107 scenarios passed. Safe to:
 echo         git tag vX.Y.Z
 echo         git push origin master vX.Y.Z
 echo         gh release create vX.Y.Z ...
