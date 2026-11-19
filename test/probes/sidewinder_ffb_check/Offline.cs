@@ -389,7 +389,11 @@ internal static class Offline
     /// fills it, and refuses it three bytes longer where the device has a
     /// declared length to hold it to. A profile that builds its reports from
     /// a state block fills each of those instead, at its own size, when the
-    /// program's protocol host builds them.</summary>
+    /// program's protocol host builds them. The device and the sizes are the
+    /// profile's form on USB/IP, which a create presents there
+    /// (HMContext.CreateUsbipController builds the device from it): a
+    /// Bluetooth identity's USB form, or the GIP form of a profile that
+    /// reaches XInput through xinputhid.</summary>
     static void ExtendedLengths(HMContext ctx)
     {
         Console.WriteLine("\n-- Catalog extended reports on the USB/IP device --");
@@ -398,7 +402,8 @@ internal static class Offline
         var off = new List<string>();
         foreach (var p in ctx.AllProfiles)
         {
-            var inner = p.Inner;
+            if (!p.IsDeployable || !p.SupportsBackend(HMBackend.Usbip)) continue;
+            var inner = p.FormOn(HMBackend.Usbip).Inner;
             var sizes = new List<(byte Id, int Size)>();
             if (inner.InputReports is { Count: > 0 } built)
                 foreach (var r in built) sizes.Add((r.ReportId != null ? ReportIds.Parse(r.ReportId) : (byte)0, r.Size));
@@ -412,18 +417,22 @@ internal static class Offline
                 bool refuses = false;
                 foreach (var (id, size) in sizes)
                 {
-                    if (!d.SendsExtendedFrame(id, size)) off.Add($"{inner.Id} 0x{id:X2} {size}");
+                    if (!d.SendsExtendedFrame(id, size)) off.Add($"{Named(p, inner)} 0x{id:X2} {size}");
                     if (!d.SendsExtendedFrame(id, size + 3)) refuses = true;
                 }
                 if (refuses) held++;
             }
-            catch (Exception e) { off.Add($"{inner.Id}: {e.GetType().Name} {e.Message}"); }
+            catch (Exception e) { off.Add($"{Named(p, inner)}: {e.GetType().Name} {e.Message}"); }
             finally { SharedMemoryIO.DestroyController(index); }
         }
         Check($"each of the {count} profiles with an extended report sends it at the size SubmitState fills",
               count > 0 && off.Count == 0, string.Join(", ", off));
         Check($"and {held} of them refuse it three bytes longer", held > 0, $"{held}");
     }
+
+    /// <summary>A profile's id, and the form it presents on USB/IP when that
+    /// is another profile.</summary>
+    static string Named(HMProfile p, ControllerProfile form) => form.Id == p.Id ? p.Id : $"{p.Id} as {form.Id}";
 
     static (uint Bitmap, uint Count) Bitmap(IntPtr view) =>
         ((uint)Marshal.ReadInt32(view, SharedMemoryIO.PID_OFFSET_EBI_BITMAP), (uint)Marshal.ReadInt32(view, SharedMemoryIO.PID_OFFSET_EBI_COUNT));
