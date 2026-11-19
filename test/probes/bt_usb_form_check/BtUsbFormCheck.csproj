@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- bt_usb_form_check: a Bluetooth identity's USB form on the USB/IP
+       backend (usbForm). offline: the load checks, the presented form and
+       its USB device, FormOn, the raw-frame rule, the decoded output names.
+       live <backend>: the HID interface each Bluetooth identity presents.
+       sdl <backend> <dir>: what SDL opens, through the SDL3.dll in <dir>. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <PlatformTarget>$(HMTargetArchitecture)</PlatformTarget>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>BtUsbFormCheck</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
+  </ItemGroup>
+</Project>

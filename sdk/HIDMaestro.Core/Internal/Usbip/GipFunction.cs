@@ -95,6 +95,12 @@ internal static class GipFunction
     internal static IReadOnlyList<string> Identities =>
         Model["identities"] is JsonObject ids ? ids.Select(kv => kv.Key).ToList() : Array.Empty<string>();
 
+    /// <summary>True when <paramref name="profile"/> presents the GIP
+    /// function on the USB/IP backend: it reaches XInput through xinputhid
+    /// and authors no USB device of its own.</summary>
+    internal static bool Applies(ControllerProfile profile) =>
+        profile.UsbConfiguration == null && XInputPresentation.Resolve(profile).Xinputhid;
+
     /// <summary>What is wrong with a <c>gip</c> block's identity, or null
     /// when the model holds it.</summary>
     internal static string? IdentityDefect(GipSpec gip) =>

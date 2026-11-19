@@ -44,7 +44,12 @@ internal static partial class RegistryLedger
     private const string JoystickOemKind = "JoystickOem";
     // v2.0.0: a devnode HIDMaestro bound WinUSB to (WinUsbBinding).
     private const string WinUsbKind = "WinUsb";
-    private static readonly string[] AllKinds = { GameInputKind, JoystickOemKind, WinUsbKind };
+    // v2.3.0: the usbflags key of a USB/IP device's identity, where Windows
+    // keeps its answer to string 0xEE (ClaimUsbFlags).
+    private const string UsbFlagsKind = "UsbFlags";
+    private static readonly string[] AllKinds = { GameInputKind, JoystickOemKind, UsbFlagsKind, WinUsbKind };
+    internal const string UsbFlagsRoot = @"SYSTEM\CurrentControlSet\Control\usbflags";
+    private const string PriorValuesKey = "Prior";
     private const string V_InstanceId = "InstanceId";
     private const string V_PriorService = "PriorService";
     private const string V_PriorInf = "PriorInf";
@@ -368,7 +373,7 @@ internal static partial class RegistryLedger
     {
         string prefix = $"{Environment.ProcessId}-{s_selfStart:X}-";
         var names = new HashSet<string>(StringComparer.Ordinal);
-        foreach (string kind in new[] { JoystickOemKind, GameInputKind })
+        foreach (string kind in new[] { JoystickOemKind, GameInputKind, UsbFlagsKind })
         {
             try
             {
@@ -646,6 +651,173 @@ internal static partial class RegistryLedger
             return true;
         }
         catch { return false; }
+    }
+
+    // ── usbflags ─────────────────────────────────────────────────────────
+
+    /// <summary>The usbflags key name of a device identity: VID, PID and
+    /// bcdDevice as twelve hex digits.</summary>
+    internal static string UsbFlagsName(ushort vid, ushort pid, ushort bcdDevice) =>
+        $"{vid:X4}{pid:X4}{bcdDevice:X4}";
+
+    /// <summary>Record the state of
+    /// <c>HKLM\SYSTEM\CurrentControlSet\Control\usbflags\&lt;VID&gt;&lt;PID&gt;&lt;REV&gt;</c>
+    /// before a USB/IP device of that identity attaches, with the controller
+    /// as holder. Windows asks a device for string 0xEE once per VID, PID and
+    /// revision and keeps the answer there (<c>osvc</c>), and keeps more under
+    /// the same key (<c>SkipContainerIdQuery</c>, <c>NewInterfaceUsage</c>).
+    /// A real device of that identity is not asked again while the answer
+    /// stands, so a virtual device's answer would decide which driver the
+    /// real one gets. When the last holder goes the key is put back as it
+    /// was: absent stays absent, and each value it had comes back byte for
+    /// byte with its type. A holder whose process is gone counts as
+    /// released, so a crash leaves a claim the next sweep settles.</summary>
+    internal static void ClaimUsbFlags(ushort vid, ushort pid, ushort bcdDevice, int controllerIndex) =>
+        ClaimUsbFlagsIn(Registry.LocalMachine, Root, UsbFlagsRoot, UsbFlagsName(vid, pid, bcdDevice),
+                        HolderName(controllerIndex), TakeLedgerLock);
+
+    private static Action TakeLedgerLock()
+    {
+        var m = Acquire();
+        return () =>
+        {
+            m.ReleaseMutex();
+            m.Dispose();
+        };
+    }
+
+    /// <summary>The claim, in <paramref name="hive"/> with the ledger at
+    /// <paramref name="root"/> and the usbflags keys under
+    /// <paramref name="flagsRoot"/>, under the lock <paramref name="takeLock"/>
+    /// takes. The SDK passes HKLM and the ledger's lock.
+    /// registry_ownership_check's offline part passes scratch keys of
+    /// HKCU.</summary>
+    internal static void ClaimUsbFlagsIn(RegistryKey hive, string root, string flagsRoot, string name, string holder,
+                                         Func<Action> takeLock)
+    {
+        Action release = takeLock();
+        try
+        {
+            string entryPath = $@"{root}\{UsbFlagsKind}\{name}";
+            bool held;
+            using (var e = hive.OpenSubKey(entryPath)) held = e != null;
+            if (!held)
+            {
+                // Recorded before the device attaches, so Windows' write
+                // comes after it. The prior values go in first and the
+                // KeyExisted marker last: an entry a crash cut short has no
+                // marker, and its restore changes nothing (RestoreUsbFlagsIn).
+                using var entry = hive.CreateSubKey(entryPath);
+                using var flags = hive.OpenSubKey($@"{flagsRoot}\{name}");
+                if (flags != null)
+                {
+                    using var prior = entry.CreateSubKey(PriorValuesKey);
+                    foreach (string v in flags.GetValueNames())
+                        prior.SetValue(v, flags.GetValue(v, null, RegistryValueOptions.DoNotExpandEnvironmentNames)!,
+                                       flags.GetValueKind(v));
+                }
+                entry.SetValue(V_KeyExisted, flags != null ? 1 : 0, RegistryValueKind.DWord);
+            }
+            using var holders = hive.CreateSubKey($@"{entryPath}\{HoldersKey}");
+            holders.SetValue(holder, 1, RegistryValueKind.DWord);
+        }
+        catch (Exception ex)
+        {
+            DeviceOrchestrator.LogDiag($"    ledger: the usbflags claim of {name} was not recorded: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally { release(); }
+    }
+
+    /// <summary>Clear the usbflags key of an identity this program holds, so
+    /// Windows asks the device for string 0xEE at its next arrival. False
+    /// when no claim of this process holds it, and nothing changes then: the
+    /// key is only changed while the ledger records what it held.</summary>
+    internal static bool ClearHeldUsbFlags(ushort vid, ushort pid, ushort bcdDevice, int controllerIndex)
+    {
+        using var m = Acquire();
+        try
+        {
+            return ClearHeldUsbFlagsIn(Registry.LocalMachine, Root, UsbFlagsRoot, UsbFlagsName(vid, pid, bcdDevice),
+                                       HolderName(controllerIndex));
+        }
+        catch (Exception ex)
+        {
+            DeviceOrchestrator.LogDiag($"    ledger: the usbflags key {UsbFlagsName(vid, pid, bcdDevice)} was not cleared: {ex.GetType().Name}: {ex.Message}");
+            return false;
+        }
+        finally { m.ReleaseMutex(); }
+    }
+
+    /// <summary>The clear, in <paramref name="hive"/>: the key's values go
+    /// when <paramref name="holder"/> holds its entry, and its subkeys stay,
+    /// since the claim records values alone and the restore writes back only
+    /// what it recorded. The caller holds the ledger's lock.
+    /// registry_ownership_check's offline part passes scratch keys of
+    /// HKCU.</summary>
+    internal static bool ClearHeldUsbFlagsIn(RegistryKey hive, string root, string flagsRoot, string name, string holder)
+    {
+        using (var h = hive.OpenSubKey($@"{root}\{UsbFlagsKind}\{name}\{HoldersKey}"))
+            if (h?.GetValue(holder) == null) return false;
+        using var flags = hive.OpenSubKey($@"{flagsRoot}\{name}", writable: true);
+        if (flags != null)
+            foreach (string v in flags.GetValueNames()) flags.DeleteValue(v, throwOnMissingValue: false);
+        return true;
+    }
+
+    /// <summary>Put a usbflags key back as its entry recorded it: deleted
+    /// when it did not exist, and otherwise each recorded value written back
+    /// with its type and every other value deleted. A subkey of the key is
+    /// left alone. The caller holds the ledger's lock.</summary>
+    internal static void RestoreUsbFlagsIn(RegistryKey hive, string flagsRoot, string name, RegistryKey entry)
+    {
+        string target = $@"{flagsRoot}\{name}";
+        // No marker: the claim was cut short before its device attached, so
+        // the key holds nothing of HIDMaestro's, and it stays as it is.
+        if (entry.GetValue(V_KeyExisted) is not int marker) return;
+        bool existed = marker == 1;
+        if (!existed)
+        {
+            using (var k = hive.OpenSubKey(target))
+                if (k == null || k.SubKeyCount > 0)
+                {
+                    if (k != null)
+                        foreach (string v in k.GetValueNames())
+                            using (var w = hive.OpenSubKey(target, writable: true)) w?.DeleteValue(v, throwOnMissingValue: false);
+                    return;
+                }
+            hive.DeleteSubKey(target, throwOnMissingSubKey: false);
+            return;
+        }
+        using var flags = hive.CreateSubKey(target);
+        using var prior = entry.OpenSubKey(PriorValuesKey);
+        var keep = new HashSet<string>(prior?.GetValueNames() ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase);
+        foreach (string v in flags.GetValueNames())
+            if (!keep.Contains(v)) flags.DeleteValue(v, throwOnMissingValue: false);
+        if (prior != null)
+            foreach (string v in prior.GetValueNames())
+                flags.SetValue(v, prior.GetValue(v, null, RegistryValueOptions.DoNotExpandEnvironmentNames)!, prior.GetValueKind(v));
+    }
+
+    /// <summary>A scratch-hive release of one holder of usbflags entries,
+    /// with the restore of every entry left with no holder:
+    /// registry_ownership_check's offline part runs the claim, the release
+    /// and the restore in HKCU with this.</summary>
+    internal static void ReleaseUsbFlagsIn(RegistryKey hive, string root, string flagsRoot, string holder)
+    {
+        using var kindKey = hive.OpenSubKey($@"{root}\{UsbFlagsKind}", writable: true);
+        if (kindKey == null) return;
+        foreach (string name in kindKey.GetSubKeyNames())
+        {
+            bool restore;
+            using (var holders = kindKey.OpenSubKey($@"{name}\{HoldersKey}", writable: true))
+            {
+                holders?.DeleteValue(holder, throwOnMissingValue: false);
+                restore = holders == null || holders.GetValueNames().Length == 0;
+            }
+            if (!restore) continue;
+            using (var entry = kindKey.OpenSubKey(name)) if (entry != null) RestoreUsbFlagsIn(hive, flagsRoot, name, entry);
+            kindKey.DeleteSubKeyTree(name, throwOnMissingSubKey: false);
+        }
     }
 
     // ── WinUSB on one devnode ────────────────────────────────────────────
@@ -1072,6 +1244,9 @@ internal static partial class RegistryLedger
         {
             if (kind == GameInputKind)
                 RestoreGameInput(name);
+            else if (kind == UsbFlagsKind)
+                using (var entry = kindKey.OpenSubKey(name))
+                    { if (entry != null) RestoreUsbFlagsIn(Registry.LocalMachine, UsbFlagsRoot, name, entry); }
             else
                 using (var entry = kindKey.OpenSubKey(name))
                     if (entry != null) RestoreJoystickOem(name, entry);

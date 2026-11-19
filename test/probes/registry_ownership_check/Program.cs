@@ -20,6 +20,9 @@
 // Everything planted is removed at the end, and anything that was there
 // before is put back from a copy taken first.
 //
+// "--usb-ledger" runs the offline part and then, in place of the live part,
+// the USB/IP persona's usbflags key and device records (UsbLedger.cs).
+//
 // "--winusb-note" runs the offline part and then, in place of the live
 // part, the WinUSB package note's, which belongs in a sandbox (WinUsbNote.cs).
 //
@@ -365,11 +368,32 @@ internal static partial class Program
         if (args.Length >= 2 && args[0] == "--child-hold") return ChildHold(args[1]);
         if (args.Length >= 2 && args[0] == "--child-create") return ChildCreate(args[1]);
         if (args.Length >= 1 && args[0] == "--child-bindgc") return ChildBindGc("");
+        if (args.Length >= 3 && args[0] == "--child-hold-usbip") return ChildHoldUsbip(args[1], args[2]);
+        if (args.Length >= 2 && args[0] == "--child-create-usbip") return ChildCreateUsbip(args[1]);
+        if (args.Length >= 2 && args[0] == "--remove-listed") return RemoveListed(args[1]);
+        if (args.Length >= 1 && args[0] == "--uninstall") return UninstallKeepingUsbip();
+        // An argument this build does not know runs nothing it names, so it
+        // is refused rather than read as the default run.
+        string[] known = { "--offline", "--usb-ledger", "--r13-only", "--winusb-note" };
+        var unknown = args.Where(a => !known.Contains(a)).ToList();
+        if (args.Contains("--r13-only") && !args.Contains("--usb-ledger")) unknown.Add("--r13-only (it goes with --usb-ledger)");
+        if (unknown.Count > 0)
+        {
+            Console.WriteLine($"RegistryOwnershipCheck: unknown argument {string.Join(", ", unknown)}. Known: {string.Join(" ", known)}, " +
+                              "--remove-listed <file>, --uninstall.");
+            return 64;
+        }
         Console.WriteLine("=== Registry keys shared with real devices (foundation-sunshine #1138) ===");
         bool offlineOnly = args.Contains("--offline");
         Offline();
+        UsbLedgerOffline();
+        OsBindingOffline();
+        PersonaRuleOffline();
+        ReviewFixesOffline();
         bool ranLive = false;
-        if (args.Contains("--winusb-note"))
+        if (args.Contains("--usb-ledger"))
+            ranLive = UsbLedgerLive(args.Contains("--r13-only"));
+        else if (args.Contains("--winusb-note"))
         {
             WinUsbNoteLive();
             ranLive = true;

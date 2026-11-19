@@ -31,6 +31,37 @@ internal sealed class Inventory
     /// length and last write time.</summary>
     public SortedSet<string> Files { get; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>Each usbflags entry, by its VID, PID and revision name,
+    /// dumped. Windows writes entries for every USB device it meets, so only
+    /// the entries HIDMaestro claimed count (<see cref="ChangedUsbFlags"/>).</summary>
+    public SortedDictionary<string, string> UsbFlags { get; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>The usbflags entries the registry ledger holds a claim
+    /// on.</summary>
+    public SortedSet<string> LedgeredUsbFlags { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    internal const string UsbFlagsKey = @"HKLM\SYSTEM\CurrentControlSet\Control\usbflags";
+    internal const string LedgerUsbFlagsKey = @"HKLM\SOFTWARE\HIDMaestroRegistryLedger\UsbFlags";
+
+    /// <summary>The entries among <paramref name="names"/> that differ
+    /// between two readings of usbflags. An entry another device's arrival
+    /// wrote is not among them.</summary>
+    internal static List<string> ChangedUsbFlags(IReadOnlyDictionary<string, string> a, IReadOnlyDictionary<string, string> b, IEnumerable<string> names) =>
+        names.Distinct(StringComparer.OrdinalIgnoreCase)
+            .Where(n => (a.TryGetValue(n, out var x) ? x : "absent") != (b.TryGetValue(n, out var y) ? y : "absent")).ToList();
+
+    private void ReadUsbFlags()
+    {
+        foreach (string n in SubKeyNames(UsbFlagsKey)) UsbFlags[n] = Dump($@"{UsbFlagsKey}\{n}");
+        foreach (string n in SubKeyNames(LedgerUsbFlagsKey)) LedgeredUsbFlags.Add(n);
+    }
+
+    internal static string[] SubKeyNames(string path)
+    {
+        var (hive, sub) = Split(path);
+        try { using var k = hive.OpenSubKey(sub); return k?.GetSubKeyNames() ?? Array.Empty<string>(); }
+        catch { return Array.Empty<string>(); }
+    }
+
     internal static readonly string[] WatchedKeys =
     {
         @"HKLM\SOFTWARE\HIDMaestro",
@@ -39,6 +70,7 @@ internal sealed class Inventory
         @"HKLM\SOFTWARE\HIDMaestroPackagesLeft",
         @"HKLM\SOFTWARE\HIDMaestroOemOverrides",
         @"HKLM\SOFTWARE\HIDMaestroGameInputSvc",
+        @"HKLM\SOFTWARE\HIDMaestroUsbRecords",
         @"HKLM\SYSTEM\CurrentControlSet\Control\DeviceOverrides",
         @"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\WUDF\Services\HIDMaestro",
         @"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\WUDF\Services\HMXInput",
@@ -76,6 +108,7 @@ internal sealed class Inventory
         inv.ReadPackages();
         inv.ReadCertificates();
         foreach (string k in WatchedKeys) inv.Keys[k] = Dump(k);
+        inv.ReadUsbFlags();
         inv.ReadFiles(ProgramFilesFolder);
         inv.ReadFiles(ProgramDataFolder);
         foreach (string temp in TempRoots())
@@ -114,6 +147,8 @@ internal sealed class Inventory
         }
         foreach (var (k, v) in Keys)
             if (!later.Keys.TryGetValue(k, out var w) || w != v) yield return $"registry key changed: {k}";
+        foreach (string n in ChangedUsbFlags(UsbFlags, later.UsbFlags, LedgeredUsbFlags.Union(later.LedgeredUsbFlags, StringComparer.OrdinalIgnoreCase)))
+            yield return $"usbflags entry changed: {n}";
     }
 
     // ── Devices ──────────────────────────────────────────────────────────

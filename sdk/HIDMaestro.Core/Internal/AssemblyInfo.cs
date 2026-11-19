@@ -75,6 +75,8 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("DriverSigningCheck")]
 [assembly: InternalsVisibleTo("BackendParityCheck")]
 [assembly: InternalsVisibleTo("SinputCheck")]
+[assembly: InternalsVisibleTo("BtUsbFormCheck")]
+[assembly: InternalsVisibleTo("SwitchProSdl3Check")]
 // The profile check tool in the release ZIP runs a profile's programs on the
 // interpreter to measure them (tools\HIDMaestroProfileCheck).
 [assembly: InternalsVisibleTo("HIDMaestroProfileCheck")]

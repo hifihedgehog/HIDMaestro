@@ -80,7 +80,7 @@ internal static unsafe partial class Program
                 string serial = DeviceIdentity.Resolve(pad.IdentityKey, pad.TransportIndex).SyntheticSerial;
                 instance = $@"USB\VID_045E&PID_{pid:X4}\{serial}";
                 left.Add(instance);
-                Check($"{id}: the create runs on USB/IP as the GIP form", pad.Backend == HMBackend.Usbip && pad.Profile.Inner.ReportsOnGipInterface,
+                Check($"{id}: the create runs on USB/IP as the GIP form, and the controller keeps the profile it was given", pad.Backend == HMBackend.Usbip && pad.Presented.Inner.ReportsOnGipInterface && ReferenceEquals(pad.Profile, profile) && profile.FormOn(HMBackend.Usbip).Inner.ReportsOnGipInterface,
                       $"backend {pad.Backend}, {clock.ElapsedMilliseconds} ms");
 
                 bool started = WaitUntil(() => Node(instance) is { Started: true }, 30_000);
@@ -106,7 +106,7 @@ internal static unsafe partial class Program
                 Check($"{id}: xboxgip holds the arrival, 045E:{pid:X4} firmware 4D48.0300",
                       arrival != null && arrival.Data.Length >= 16 && Hex(arrival.Data.AsSpan(8, 8)) == $"5E04{pid & 0xFF:X2}{pid >> 8:X2}484D0003",
                       arrival == null ? $"{held.Count} messages" : Hex(arrival.Data));
-                var served = ServedMetadata(pad.Profile.Inner, out _);
+                var served = ServedMetadata(pad.Presented.Inner, out _);
                 var descriptor = held.FirstOrDefault(m => m.Command == 0x04);
                 Check($"{id}: and the {served.Length} bytes of metadata as served",
                       descriptor != null && descriptor.Data.Length >= 4 + served.Length && descriptor.Data.AsSpan(4, served.Length).SequenceEqual(served),
@@ -145,7 +145,7 @@ internal static unsafe partial class Program
                     Reads(pad, s, $"{id}: at rest", new HMGamepadState(), g => g.wButtons == 0 && g.bLeftTrigger == 0 && g.sThumbRX == 0);
 
                     // Share where the form carries the console function map.
-                    bool hasShare = FormMapsShare(pad.Profile.Inner);
+                    bool hasShare = FormMapsShare(pad.Presented.Inner);
                     string? xusb = InterfaceUnder(s_xusbInterface, instance);
                     if (hasShare && xusb != null)
                     {

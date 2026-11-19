@@ -33,11 +33,11 @@
 //        the root renames and the file opens for writing (the controls).
 //        The check Pin makes through each handle refuses a folder its user
 //        owns and passes this machine's %ProgramData%\HIDMaestro.
-//   OF6  The deploy's tools run from held files: the driver staging set
-//        written to a scratch directory as EnsureExtracted writes it, every
-//        file held, Inf2Cat run through DriverBuilder.Run as
-//        GenerateCatalogs runs it writes a catalog per INF, and signtool
-//        loads its libraries and reads a held binary.
+//   OF6  The deploy's catalog step runs over held files: the driver
+//        staging set written to a scratch directory as EnsureExtracted
+//        writes it, every file held, DriverCatalog.Write as GenerateCatalogs
+//        calls it writes a catalog per INF, and WinVerifyTrust reads a held
+//        binary (an unsigned one: no signature found).
 //   OF7  Pin's choice of levels to hold (ProtectedStaging.HoldsLevel):
 //        Staging and every level below it, and nothing above it, beside it
 //        or under the OpenVR root. On a machine with the OpenVR folders,
@@ -414,17 +414,15 @@ internal static partial class Program
         var asm = typeof(HIDMaestro.HMContext).Assembly;
         var builder = asm.GetType("HIDMaestro.Internal.DriverBuilder");
         var payload = builder?.GetMethod("PayloadFor", BindingFlags.NonPublic | BindingFlags.Static);
-        var run = builder?.GetMethod("Run", BindingFlags.NonPublic | BindingFlags.Static);
-        var catalogOs = builder?.GetMethod("CatalogOsFor", BindingFlags.NonPublic | BindingFlags.Static);
+        var write = asm.GetType("HIDMaestro.Internal.DriverCatalog")?.GetMethod("Write", BindingFlags.NonPublic | BindingFlags.Static);
+        var verify = asm.GetType("HIDMaestro.Internal.DriverSigningPolicy")?.GetMethod("Verify", BindingFlags.NonPublic | BindingFlags.Static);
         var holdFile = asm.GetType("HIDMaestro.Internal.ProtectedStaging")?.GetMethod("HoldFile", BindingFlags.NonPublic | BindingFlags.Static);
-        if (payload == null || run == null || catalogOs == null || holdFile == null)
+        if (payload == null || write == null || verify == null || holdFile == null)
         {
-            Check("OF6: DriverBuilder.PayloadFor, Run, CatalogOsFor and ProtectedStaging.HoldFile exist", false);
+            Check("OF6: DriverBuilder.PayloadFor, DriverCatalog.Write, DriverSigningPolicy.Verify and ProtectedStaging.HoldFile exist", false);
             return;
         }
         var arch = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture;
-        // Short: Inf2Cat is a .NET Framework program and fails on a library
-        // path of 260 characters (driver_catalog_check).
         string dir = Path.Combine(Path.GetTempPath(), "hmof" + Guid.NewGuid().ToString("N")[..6]);
         Directory.CreateDirectory(dir);
         var handles = new List<IDisposable>();
@@ -438,23 +436,27 @@ internal static partial class Program
                 handles.Add(Call<IDisposable>(holdFile, new object?[] { Path.Combine(dir, file), null }));
             }
             Check("OF6: every file of the staging set is written and held", handles.Count > 0, $"{handles.Count} files");
-            string os = Call<string>(catalogOs, new object[] { arch });
-            // Inf2Cat and signtool take this process's priority class when it
-            // is idle or below normal (CreateProcess), and a probe run at idle
-            // priority under load shared the cores with every spinning
-            // thread: Inf2Cat passed the 60 s bound this check gave it in 2 of
-            // 2 runs under 128 idle-priority spinners. They start at normal
-            // priority, and each run's bound is a hang detector load alone
-            // does not reach (ToolHangMs).
             var clock = System.Diagnostics.Stopwatch.StartNew();
-            var r = AtNormalPriority(() => Call<ValueTuple<int, string>>(run, new object?[] { Path.Combine(dir, "Inf2Cat.exe"), $"/driver:\"{dir}\" /os:{os}", dir, ToolHangMs }));
-            long catalogMs = clock.ElapsedMilliseconds;
-            var s = AtNormalPriority(() => Call<ValueTuple<int, string>>(run, new object?[] { Path.Combine(dir, "signtool.exe"), "verify /pa \"" + Path.Combine(dir, "HIDMaestro.dll") + "\"", dir, ToolHangMs }));
-            int infs = Directory.GetFiles(dir, "*.inf").Length, cats = Directory.GetFiles(dir, "*.cat").Length;
-            Check("OF6: Inf2Cat run from held files catalogs the held INFs and binaries",
-                  r.Item1 == 0 && cats == infs && infs > 0, $"exit {r.Item1} after {catalogMs} ms, {infs} INFs, {cats} catalogs: {Last(r.Item2)}");
-            Check("OF6: signtool run from held files loads and reads a held binary (an unsigned one: no signature found)",
-                  s.Item2.Contains("No signature found", StringComparison.Ordinal), $"exit {s.Item1}: {Last(s.Item2)}");
+            string detail;
+            int cats;
+            try
+            {
+                var written = Call<IReadOnlyList<string>>(write, new object[] { dir, arch });
+                cats = written.Count;
+                detail = $"{clock.ElapsedMilliseconds} ms";
+            }
+            catch (Exception e)
+            {
+                cats = -1;
+                detail = (e.InnerException ?? e).Message;
+            }
+            int infs = Directory.GetFiles(dir, "*.inf").Length;
+            Check("OF6: the catalog step over held files catalogs the held INFs and binaries",
+                  cats == infs && infs > 0 && Directory.GetFiles(dir, "*.cat").Length == infs, $"{infs} INFs, {cats} catalogs, {detail}");
+            // TRUST_E_NOSIGNATURE: read through the hold, and unsigned.
+            int trust = Call<int>(verify, new object[] { Path.Combine(dir, "HIDMaestro.dll"), false });
+            Check("OF6: WinVerifyTrust reads a held binary (an unsigned one: no signature found)",
+                  trust == unchecked((int)0x800B0100), $"0x{trust:X8}");
         }
         finally
         {
@@ -463,12 +465,10 @@ internal static partial class Program
         }
     }
 
-    /// <summary>OF6's bound on each tool run, a hang detector. Unloaded,
-    /// Inf2Cat catalogs the staging set in about 2 s (1,992 ms on the
-    /// development laptop, 2026-10-26). At normal priority only threads of
-    /// its class or above share the cores with it, and ten minutes is 300
-    /// times that. Scaled by the SDK's run (TimeoutScale). OF5 and OF10 wait
-    /// as long for a process of their own to end.</summary>
+    /// <summary>The bound on a process this check starts, a hang detector
+    /// load alone does not reach: ten minutes. Scaled by the SDK's run
+    /// (TimeoutScale). OF5 and OF10 wait this long for a process of their
+    /// own to end.</summary>
     const int ToolHangMs = 600_000;
 
     /// <summary>Runs <paramref name="start"/>, which starts a process, with

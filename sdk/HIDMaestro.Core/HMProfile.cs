@@ -138,11 +138,69 @@ public sealed class HMProfile
     /// other than "usbip". <see cref="HMBackend.Usbip"/> takes every profile
     /// with a HID descriptor or a <c>usbConfiguration</c> that authors its
     /// descriptors, except an Xbox profile that reaches XInput through the
-    /// XUSB companion or xinputhid, which the USB/IP backend has no function
-    /// for yet. A create on a backend this answers false for throws
+    /// XUSB companion, which the USB/IP backend has no function for yet,
+    /// and a profile that reaches XInput through xinputhid and names no
+    /// GIP identity. A create on a backend this answers false for throws
     /// <see cref="HMBackendNotSupportedException"/>.</summary>
     public bool SupportsBackend(HMBackend backend) =>
         IsDeployable && Internal.BackendSelection.NotSupportedReason(Inner, backend) == null;
+
+    private HMProfile? _usbForm;
+
+    /// <summary>The profile whose descriptor, reports, feature answers and
+    /// protocol a controller of this profile presents on
+    /// <paramref name="backend"/>. That is this profile, except a Bluetooth
+    /// identity on <see cref="HMBackend.Usbip"/> that names a USB form
+    /// (<c>usbForm</c> in its file): a USB/IP device sits on the USB bus,
+    /// where hidapi and SDL drive the pad in its USB protocol, so it
+    /// presents the named USB profile, such as <c>dualsense</c> for
+    /// <c>dualsense-bt</c>, under this profile's id and strings, and a
+    /// profile that reaches XInput through xinputhid on
+    /// <see cref="HMBackend.Usbip"/>, which presents its GIP form: the GIP
+    /// model's device (<c>profiles/models/gip-gamepad.json</c>) with the
+    /// identity <c>gip.identity</c> names and this profile's VID and PID,
+    /// whose raw frame is its state block. Raw frames
+    /// (<see cref="HMController.SubmitRawReport"/>) and
+    /// <see cref="HMController.OutputReceived"/> packets follow the profile
+    /// this returns. <see cref="HMController.SubmitState"/> and the
+    /// <see cref="HMController.OutputDecoded"/> values the two forms share
+    /// read the same on both backends. Pass a controller's
+    /// <see cref="HMController.Backend"/>.</summary>
+    /// <exception cref="ArgumentException"><paramref name="backend"/> is
+    /// <see cref="HMBackend.Auto"/>, which names no presentation:
+    /// <see cref="HMContext.ResolveBackend"/> gives what a create
+    /// resolves to.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="backend"/>
+    /// is not one of the three values.</exception>
+    /// <exception cref="HMProfileException">The USB form this profile names
+    /// does not resolve: no loaded or catalog profile holds the name, or the
+    /// profile it names is no USB form of this one.</exception>
+    public HMProfile FormOn(HMBackend backend)
+    {
+        if (backend == HMBackend.Auto)
+            throw new ArgumentException("Auto names no presentation. Pass HMController.Backend, or what HMContext.ResolveBackend returns.", nameof(backend));
+        if (backend is not (HMBackend.Umdf2 or HMBackend.Usbip))
+            throw new ArgumentOutOfRangeException(nameof(backend), backend, "Not a backend.");
+        if (backend == HMBackend.Umdf2) return this;
+        if (Inner.UsbForm == null)
+        {
+            if (!Internal.Usbip.GipFunction.Applies(Inner)) return this;
+            if (_usbForm is { } gipForm) return gipForm;
+            try { return _usbForm = new HMProfile(Internal.Usbip.GipFunction.FormOf(Inner)); }
+            catch (Exception e) when (e is not HMBackendNotSupportedException && Internal.ProfileDefects.IsDefect(e))
+            {
+                throw Internal.ProfileDefects.ToProfileException(Inner, e);
+            }
+        }
+        if (_usbForm is { } known) return known;
+        Internal.ControllerProfile form;
+        try { form = Inner.ResolveUsbForm()!; }
+        catch (Exception e) when (Internal.ProfileDefects.IsDefect(e))
+        {
+            throw Internal.ProfileDefects.ToProfileException(Inner, e);
+        }
+        return _usbForm = new HMProfile(form);
+    }
 
     // ── HID descriptor ───────────────────────────────────────────────────
 

@@ -175,6 +175,10 @@ internal static partial class Program
             catch (Exception e) { Check($"{id}: its GIP form builds", false, e.Message); continue; }
             Check($"{id}: names {identity}, and its form builds and meets every load check on USB/IP",
                   p.Gip?.Identity == identity && form.RequiresUsbipBackend && form.ReportsOnGipInterface && !form.HasDescriptor && !form.UsesXinputhid);
+            var hm = new HMProfile(p);
+            Check($"{id}: FormOn(Usbip) gives the GIP form and FormOn(Umdf2) the profile itself",
+                  hm.FormOn(HMBackend.Usbip).Inner.ReportsOnGipInterface && hm.FormOn(HMBackend.Usbip).Id == id
+                  && ReferenceEquals(hm.FormOn(HMBackend.Umdf2), hm));
             Check($"{id}: the USB/IP presentation is the form's, authored", UsbPresentation.Resolve(p) is { Derived: false } pr && pr.Spec.DeviceDescriptorHex == form.UsbConfiguration!.DeviceDescriptorHex);
             var set = new UsbDescriptorSet(form);
             Check($"{id}: device descriptor 045E:{pid:X4}, class FF/47/D0", set.DeviceDescriptor.Length == 18

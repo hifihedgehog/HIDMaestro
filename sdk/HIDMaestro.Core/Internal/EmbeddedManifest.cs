@@ -19,9 +19,10 @@ namespace HIDMaestro.Internal;
 /// <para>Cost: SHA-256 over ~6 MB at first access, ~30 ms on a fast box,
 /// ~150 ms on Atom. Cached as a static field, so subsequent calls are
 /// free. Hashed-into set is the canonical install payload (not the SDK
-/// resource manifest as a whole) so changes to e.g. signtool.exe: which
-/// affects HOW we install but not WHAT we install: don't invalidate
-/// the cache.</para>
+/// resource manifest as a whole), so a change to how the SDK installs,
+/// such as the in-process catalog writer and signer that replaced signtool
+/// and Inf2Cat in 2.3.0, does not invalidate the cache. Only a change to
+/// what it installs does.</para>
 /// </summary>
 internal static class EmbeddedManifest
 {

@@ -1067,7 +1067,7 @@ internal static class HeldRemoval
             setupField.SetValue(null, (Func<int, ControllerProfile, DeviceIdentity?, Action<string>?, string?>)((i, p, identity, created) => setup(created)));
             teardownField.SetValue(null, (Action<int, string?>)((i, instanceId) => teardown(instanceId)));
             var context = (HMContext)RuntimeHelpers.GetUninitializedObject(typeof(HMContext));
-            try { create.Invoke(context, new object?[] { 0, Dualshock4(), null, HMBackend.Umdf2 }); }
+            try { var profile = Dualshock4(); create.Invoke(context, new object?[] { 0, profile, profile, null, HMBackend.Umdf2 }); }
             catch (TargetInvocationException e) { thrown = e.InnerException; }
         }
         finally
