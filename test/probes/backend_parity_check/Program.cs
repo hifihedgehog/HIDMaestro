@@ -339,6 +339,7 @@ internal static partial class Program
         // no HID collection, so the USB/IP checks leave them out and name
         // them.
         var foreign = new List<string>();
+        var ownForms = new List<string>();
         int foreignAccepted = 0;
         foreach (var p in profiles)
         {
@@ -400,21 +401,40 @@ internal static partial class Program
             // A GIP form and a Bluetooth HID form are compared as any other
             // profile is: xinputhid gives programs the same HID device on
             // both backends. A GIP form's product string is checked above.
+            // One difference is the profile's own. A Bluetooth pad's
+            // descriptor can declare top-level collections its UMDF2 form's
+            // does not, as the Elite Series 2's declares a keyboard. On
+            // USB/IP the device presents the pad's own descriptor, and
+            // Windows starts those collections from build 26100. So USB/IP
+            // may show up to that many more, beside the ones both forms
+            // share, which must read the same. identity_fidelity_check
+            // (S115) pins each such collection by its usage.
             if (!accepts && u != null && s != null && Code10(u) && Code10(s)) matched++;
             else if (u != null && s != null && u.Failure == null && s.Failure == null)
             {
                 var uk = u.Collections.Select(c => c.FieldsKey).ToList();
                 var sk = s.Collections.Select(c => c.FieldsKey).ToList();
-                if (!uk.SequenceEqual(sk))
+                int own = p.Inner.PresentsBluetoothHid
+                    ? HIDMaestro.Internal.Usbip.UsbDescriptorSet.TopLevelCollections(p.Inner.BluetoothHidForm().GetDescriptorBytes()!)
+                      - HIDMaestro.Internal.Usbip.UsbDescriptorSet.TopLevelCollections(p.Inner.GetDescriptorBytes()!)
+                    : 0;
+                var beyond = new List<Collection>(s.Collections);
+                bool shared = u.Collections.All(c => beyond.Remove(beyond.FirstOrDefault(d => d.FieldsKey == c.FieldsKey && (s.Product != null || d.Product == c.Product))!));
+                bool ownMore = own > 0 && shared && beyond.Count > 0 && beyond.Count <= own;
+                if (!uk.SequenceEqual(sk) && !ownMore)
                     problems.Add($"parsed fields differ: UMDF2 {uk.Count} collection(s), USB/IP {sk.Count}" +
                                  (uk.Count > 0 && sk.Count > 0 ? $", UMDF2 {uk[0]} against USB/IP {sk[0]}" : ""));
                 // A GIP form's product string is the GIP driver's, checked
                 // above against the model, so only the others compare.
-                else if (s.Product == null && !u.Collections.Select(c => c.Product).SequenceEqual(s.Collections.Select(c => c.Product)))
+                else if (!ownMore && s.Product == null && !u.Collections.Select(c => c.Product).SequenceEqual(s.Collections.Select(c => c.Product)))
                     problems.Add($"product string {u.Collections[0].Product} against {s.Collections[0].Product}");
                 else if (u.Output != s.Output)
                     problems.Add($"output packet UMDF2 '{u.Output}' against USB/IP '{s.Output}'");
-                else matched++;
+                else
+                {
+                    matched++;
+                    if (ownMore) ownForms.Add($"{p.Id} ({string.Join(", ", beyond.Select(c => $"{c.UsagePage:X4}:{c.Usage:X4}"))})");
+                }
             }
             string line = problems.Count == 0 ? (accepts ? "ok" : $"ok, Code 10 as Windows' parser predicts ({verdict})") : string.Join(" | ", problems);
             Console.WriteLine($"  {p.Id,-44} {line}" +
@@ -432,6 +452,8 @@ internal static partial class Program
         Note($"Windows' parser accepts {accepted} of {profiles.Count} descriptors");
         if (foreign.Count > 0)
             Note($"{foreign.Count} USB/IP device(s) bound by a driver package on this machine in place of HID class, left out of the USB/IP checks: {string.Join(", ", foreign)}");
+        if (ownForms.Count > 0)
+            Note($"{ownForms.Count} Bluetooth pad(s) show on USB/IP the collections their own descriptor declares beyond the UMDF2 form's: {string.Join(", ", ownForms)}");
         Check("the parser made no call this process does not bind, so its verdicts are Windows' own", WindowsParser.UnexpectedCalls == 0, $"{WindowsParser.UnexpectedCalls}");
         if (umdf2Here) Check("every profile reaches the outcome Windows' parser predicts on UMDF2: it starts and enumerates its HID collections, or fails with Code 10 where the parser refuses its descriptor",
                              umdf2Up == profiles.Count, $"{umdf2Up} of {profiles.Count}");

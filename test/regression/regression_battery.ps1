@@ -3293,8 +3293,11 @@ function Scenario-Gip-Persona {
 # with no problem code, and where both run, the HID class reads the same
 # attributes, button and value caps of every report type and product
 # string on each, and an output report written to the device reaches the
-# program as the same packet. long reads reports over 64 bytes whole on
-# USB/IP, at the derived speed and pinned to full speed. ports fills the
+# program as the same packet. A Bluetooth pad whose own descriptor declares
+# a collection its UMDF2 form's does not, the Elite Series 2's keyboard,
+# shows it on USB/IP beside the ones both share, which read the same. long
+# reads reports over 64 bytes whole on USB/IP, at the derived speed and
+# pinned to full speed. ports fills the
 # host controller's USB 2.0 ports: the create past the last is refused by
 # name and the rest keep working. start opens each derived device's HID
 # interface the moment its create returns. oem gives the identity's
