@@ -184,6 +184,15 @@ public sealed class HMProfile
         if (backend == HMBackend.Umdf2) return this;
         if (Inner.UsbForm == null)
         {
+            if (Inner.PresentsBluetoothHid)
+            {
+                if (_usbForm is { } hidForm) return hidForm;
+                try { return _usbForm = new HMProfile(Inner.BluetoothHidForm()); }
+                catch (Exception e) when (e is not HMBackendNotSupportedException && Internal.ProfileDefects.IsDefect(e))
+                {
+                    throw Internal.ProfileDefects.ToProfileException(Inner, e);
+                }
+            }
             if (!Internal.Usbip.GipFunction.Applies(Inner)) return this;
             if (_usbForm is { } gipForm) return gipForm;
             try { return _usbForm = new HMProfile(Internal.Usbip.GipFunction.FormOf(Inner)); }

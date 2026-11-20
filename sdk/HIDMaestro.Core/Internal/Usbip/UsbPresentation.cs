@@ -38,10 +38,15 @@ namespace HIDMaestro.Internal.Usbip;
 /// Windows a controller identity with another device's answers, which
 /// Windows remembers per identity. A profile whose presentation is the XUSB
 /// companion presents the XUSB function instead
-/// (<see cref="XusbFunction"/>), the USB device Windows gives xusb22. A profile
-/// that reaches XInput through xinputhid presents the GIP function
+/// (<see cref="XusbFunction"/>), the USB device Windows gives xusb22. A wired
+/// pad that reaches XInput through xinputhid presents the GIP function
 /// (<see cref="GipFunction"/>), the USB device Windows gives its GIP
-/// stack, whose HID child xinputhid binds.</para>
+/// stack, whose HID child xinputhid binds. A Bluetooth pad that reaches
+/// XInput through xinputhid speaks HID over the air, and presents that HID
+/// device, its <c>bluetoothHid</c> block, derived as any HID profile's is,
+/// with xinputhid on the device's transport node as Windows installs it
+/// for the pad (<see cref="ControllerProfile.BluetoothHidForm"/>,
+/// <see cref="UsbNodeStamp"/>).</para>
 /// </summary>
 internal sealed class UsbPresentation
 {
@@ -126,6 +131,17 @@ internal sealed class UsbPresentation
         }
         if (NotPresentableReason(profile) is { } reason)
             throw new HMBackendNotSupportedException(profile.Id, HMBackend.Usbip, reason);
+        // A Bluetooth pad that reaches XInput through xinputhid presents the
+        // HID device it is over the air, with xinputhid on the device's
+        // transport node as Windows installs it for the pad
+        // (ControllerProfile.BluetoothHidForm, UsbNodeStamp).
+        if (profile.PresentsBluetoothHid)
+        {
+            if (cfg != null)
+                throw new ProfileDefectException(Root,
+                    "pins a derived HID device, and this profile presents its bluetoothHid device, whose descriptor is that block's.");
+            return Resolve(profile.BluetoothHidForm());
+        }
         if (XInputPresentation.Resolve(profile).Xinputhid)
         {
             // The GIP function is the model's device. A usbConfiguration of
@@ -167,6 +183,11 @@ internal sealed class UsbPresentation
         // child and its descriptor.
         if (xi.XusbCompanion) return XusbFunction.RefusedIdentityReason(profile);
         if (!profile.HasDescriptor) return "it has no HID descriptor.";
+        // A pad speaks HID over Bluetooth and GIP only on a cable, so a
+        // Bluetooth identity presents its own HID device or nothing.
+        if (xi.Xinputhid && profile.IsBluetooth)
+            return profile.BluetoothHid != null ? null
+                : "it is a Bluetooth pad that reaches XInput through xinputhid, and it carries no bluetoothHid, the HID device the pad is over Bluetooth, for the USB/IP backend to present.";
         if (xi.Xinputhid) return GipFunction.RefusedReason(profile);
         return null;
     }

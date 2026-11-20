@@ -868,7 +868,12 @@ public sealed class HMContext : IDisposable
             try
             {
                 if (profile.Inner.UsbForm != null) presented = new HMProfile(profile.Inner.UsbFormOf(HMBackend.Usbip));
-                // A profile that reaches XInput through xinputhid presents its
+                // A Bluetooth pad that reaches XInput through xinputhid
+                // presents the HID device it is over the air, its
+                // bluetoothHid block (ControllerProfile.BluetoothHidForm).
+                else if (profile.Inner.PresentsBluetoothHid)
+                    presented = new HMProfile(profile.Inner.BluetoothHidForm());
+                // A wired pad that reaches XInput through xinputhid presents its
                 // GIP form, the GIP model's device with the profile's identity
                 // (Internal.Usbip.GipFunction).
                 else if (Internal.Usbip.GipFunction.Applies(profile.Inner))
@@ -1035,7 +1040,10 @@ public sealed class HMContext : IDisposable
             // wait and its xinputhid create's.
             bool xusb = Internal.Usbip.UsbPresentation.Resolve(presented.Inner).Kind == Internal.Usbip.UsbPresentationKind.XusbFunction;
             bool gip = presented.Inner.ReportsOnGipInterface;
-            int slotsBefore = xusb || gip ? Internal.DeviceOrchestrator.ConnectedXInputSlots() : -1;
+            // A Bluetooth pad's HID form takes its slot through xinputhid on
+            // the device's transport node.
+            bool bluetoothHid = presented.Inner.XinputhidOnTransport;
+            int slotsBefore = xusb || gip || bluetoothHid ? Internal.DeviceOrchestrator.ConnectedXInputSlots() : -1;
             // The device emulator maps the index's sections before its
             // attach, so a failed attach leaves them for the catch below.
             handle = Internal.Usbip.UsbipBackend.CreateDevice(presented.Inner, index, lease.Identity);
@@ -1047,7 +1055,10 @@ public sealed class HMContext : IDisposable
             // its port, and when Windows named it by its port, not its
             // serial, the owner record and the ledger take that name
             // (UsbipBackendHandle.ResolveRecord).
-            if (handle.Device.Descriptors.UsbInstanceId is { } usbId && handle.Device.Derived)
+            if (handle.Device.Descriptors.UsbInstanceId is { } padId && bluetoothHid)
+                handle.ResolveRecord(Internal.DeviceOrchestrator.AwaitUsbipBluetoothHidStart(padId, handle.Device.VhciPort, index, slotsBefore,
+                    handle.Device.Descriptors.HidCollectionCount, () => handle.Device.StampSettling));
+            else if (handle.Device.Descriptors.UsbInstanceId is { } usbId && handle.Device.Derived)
                 handle.ResolveRecord(Internal.DeviceOrchestrator.AwaitUsbipStart(usbId, handle.Device.VhciPort, index,
                     handle.Device.Descriptors.HidCollectionCount));
             // The XUSB function's XUSB interface is there and its XInput slot

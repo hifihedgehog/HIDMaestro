@@ -78,6 +78,7 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("BackendParityCheck")]
 [assembly: InternalsVisibleTo("SinputCheck")]
 [assembly: InternalsVisibleTo("BtUsbFormCheck")]
+[assembly: InternalsVisibleTo("BluetoothHidCheck")]
 [assembly: InternalsVisibleTo("StandardAxesCheck")]
 [assembly: InternalsVisibleTo("SwitchProSdl3Check")]
 // The profile check tool in the release ZIP runs a profile's programs on the

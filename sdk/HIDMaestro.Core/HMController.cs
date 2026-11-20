@@ -733,6 +733,14 @@ public sealed partial class HMController : IDisposable
         // re-parsing the descriptor on every ctor.
         _reportBuilder = presented.Inner.GetOrBuildReportBuilder();
         _reportBuffer = new byte[_reportBuilder.InputReportByteSize];
+        // A USB/IP device built from the descriptor sends the report a pad
+        // carries its Guide button in, when the descriptor declares one
+        // outside the layout report.
+        // A button map that places the button in the layout report says
+        // where this pad sends it.
+        if (usbipHandle is { Device.Derived: true }
+            && !(presented.Inner.ButtonMap is { Length: > 10 } map && map[10] >= 0))
+            _guideReport = _reportBuilder.GuideReport;
         _keptAxes = _reportBuilder.KeepsLookups ? new float[HidReportBuilder.MaxKeptWrites] : null;
 
         // Snapshot the layout projections once (audit 1n): see the field
@@ -1059,6 +1067,22 @@ public sealed partial class HMController : IDisposable
     /// out. The report rate is the device's whatever rate this is called
     /// at, and the state reaches the wire up to one period later, half a
     /// period on average.</para></summary>
+    // The report the pad sends its Guide button in, outside the layout
+    // report, and the button as that report last carried it. Written under
+    // _submitLock.
+    private readonly (byte ReportId, int FrameBytes, int BitOffset)? _guideReport;
+    private bool _guideReportDown;
+
+    private void SubmitGuideReport((byte ReportId, int FrameBytes, int BitOffset) guide, bool down)
+    {
+        if (down == _guideReportDown) return;
+        _guideReportDown = down;
+        var report = new byte[guide.FrameBytes];
+        report[0] = guide.ReportId;
+        if (down) report[1 + guide.BitOffset / 8] |= (byte)(1 << (guide.BitOffset % 8));
+        UsbipHandle!.Device.SendGuideReport(report, down);
+    }
+
     public void SubmitState(in HMGamepadState state)
     {
         ThrowIfDisposed();
@@ -1085,6 +1109,7 @@ public sealed partial class HMController : IDisposable
             AwaitPreviousDelivery();
             micros = SubmitStateCore(in state, timed: latency != null);
             NoteFrameWritten();
+            if (_guideReport is { } guide) SubmitGuideReport(guide, (state.Buttons & HMButton.Guide) != 0);
             if (_idleThread != null)
             {
                 // Remembered for the idle pump, its axes copied, and the

@@ -94,6 +94,34 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     // create for a function that sends any.
     private readonly Queue<byte[]>?[]? _messages;
 
+    // What the device's own transport node carries (UsbNodeStamp): for a
+    // derived device, whose one HID interface HidUsb runs on the device's
+    // node. An authored device's nodes are its own.
+    private readonly UsbNodeStamp.Plan _stamp;
+    // An output report goes to the ring without its report ID, as the
+    // profile's own descriptor, which numbers no reports, has it
+    // (ControllerProfile.UnnumberedOutputs).
+    private readonly bool _unnumberedOutputs;
+    // The device sends an input report when it differs from the last one,
+    // as a Bluetooth pad does, where every other derived device sends each
+    // frame it is given. xinputhid releases a pad's Guide button at each
+    // layout report (SendGuideReport), so a pad that repeated its layout
+    // report would never hold it.
+    private readonly bool _reportsOnChange;
+    // How often the device was re-plugged to bring the node's xinputhid
+    // values in line, so a node that will not take them is started as it
+    // is, and whether a re-plug is under way.
+    private int _stampReplugs;
+    private int _stampWorker;
+    private volatile bool _stampSettling;
+
+    /// <summary>True from the start the device refused because its node's
+    /// xinputhid values did not match the profile until the start it then
+    /// answers: the device is re-plugged with the values written in between
+    /// (<see cref="TransportReady"/>), so a failed start in that time is no
+    /// verdict on the device.</summary>
+    internal bool StampSettling => _stampSettling;
+
     /// <summary>The vhci port this device is attached on, 0 while it is
     /// not. The server sets it on every import, the driver's own re-attach
     /// included, which lands on a new port. Detaching goes by location,
@@ -383,6 +411,9 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         var presentation = UsbPresentation.Resolve(profile);
         Presentation = presentation;
         _derived = presentation.Derived;
+        _stamp = _derived ? UsbNodeStamp.For(profile) : default;
+        _unnumberedOutputs = _derived && profile.UnnumberedOutputs;
+        _reportsOnChange = _derived && profile.XinputhidOnTransport;
         _outputPackets = presentation.OutputPackets;
         Descriptors = new UsbDescriptorSet(profile, index, identity);
         if (presentation.Function is { } function)
@@ -443,6 +474,14 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         Devid = (1u << 16) | (uint)(index + 1);
 
         _builder = profile.GetOrBuildReportBuilder();
+        // A derived device whose descriptor sends the Guide button in a
+        // report of its own queues that report on its IN endpoint
+        // (SendGuideReport).
+        if (_derived && _messages == null && _builder.GuideReport != null && _primaryInEndpoint != 0)
+        {
+            _messages = new Queue<byte[]>?[16];
+            _messages[_primaryInEndpoint & 0x0F] = new Queue<byte[]>();
+        }
         // As DeviceOrchestrator.WaitsOnDelivery decides it for the HID path.
         _deliverEvery = profile.HasDescriptor && profile.DeliversEveryReport(profile.GetOrBuildKeyboardMousePacker());
         if (_derived)
@@ -757,10 +796,16 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 uint seq = 0;
                 int send = length;
                 bool answer = false;
+                bool followed = false;
                 UsbipServer.Connection? conn = null;
                 lock (_hidLock)
                 {
                     int slot = _inputSlot[_inputReportIds && length > 0 ? report[0] : 0];
+                    // A pad that reports on change sends a report once: a
+                    // frame equal to the last one is not sent again.
+                    if (_reportsOnChange && slot >= 0 && _inputReportLength[slot] == length
+                        && report[..length].SequenceEqual(_inputReports[slot].AsSpan(0, length)))
+                        continue;
                     if (slot >= 0)
                     {
                         report.CopyTo(_inputReports[slot]);
@@ -780,6 +825,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                         CountPrimaryCompletionLocked();
                         NoteCarriedLocked(_lastSharedSeqNo);
                         conn = HoldSendLocked();
+                        followed = FollowWithGuideLocked();
                     }
                     else
                     {
@@ -795,6 +841,9 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     }
                 }
                 if (answer) SendHeld(conn, seq, 0, send, report[..send]);
+                // The Guide report queued behind this layout report goes to
+                // the other read Windows keeps parked.
+                if (followed) DeliverMessages(_primaryInEndpoint);
             }
             catch (Exception e)
             {
@@ -987,34 +1036,86 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         return 0;
     }
 
+    /// <summary>Sends the report a pad carries its Guide button in
+    /// (<see cref="HidReportBuilder.GuideReport"/>), whole and with its
+    /// report ID, to the host's next read, and while the button is
+    /// <paramref name="down"/> again after every layout report. xinputhid
+    /// holds the button from that report until the pad's next layout
+    /// report, which carries no Guide button and reads as released
+    /// (measured on 19044 with the One S pad's descriptor: held through 60
+    /// reads after the report alone, released at the next layout
+    /// report).</summary>
+    internal void SendGuideReport(byte[] report, bool down)
+    {
+        lock (_hidLock) _guideHeld = down ? report : null;
+        QueueMessage(_primaryInEndpoint, report);
+    }
+
+    // The Guide report to send again after each layout report, while the
+    // button is down. Guarded by _hidLock.
+    private byte[]? _guideHeld;
+
+    /// <summary>Called under _hidLock as a layout report goes to the host:
+    /// while the button is down the Guide report is queued behind it. True
+    /// when it was, and the caller then calls <see cref="DeliverMessages"/>
+    /// once it has left the lock and sent the layout report.</summary>
+    private bool FollowWithGuideLocked()
+    {
+        if (_guideHeld is not { } held || _messages?[_primaryInEndpoint & 0x0F] is not { } q) return false;
+        q.Enqueue(held);
+        return true;
+    }
+
     /// <summary>Send <paramref name="message"/> on IN endpoint
     /// <paramref name="endpoint"/>: to a read parked there now, or to the
-    /// next read, ahead of any report.</summary>
+    /// next read, ahead of any report and behind the messages that already
+    /// wait.</summary>
     private void QueueMessage(byte endpoint, byte[] message)
     {
-        if (endpoint == 0 || _messages == null) return;
-        uint seq = 0;
-        UsbipServer.Connection? conn = null;
-        lock (_hidLock)
+        if (endpoint == 0 || _messages?[endpoint & 0x0F] is not { } q) return;
+        lock (_hidLock) q.Enqueue(message);
+        DeliverMessages(endpoint);
+    }
+
+    /// <summary>Gives the reads parked on IN endpoint
+    /// <paramref name="endpoint"/> the messages that wait for it, oldest
+    /// first. Every message goes through the endpoint's queue, so none
+    /// passes an older one: Windows keeps two reads parked on a HID
+    /// interrupt endpoint, and a message handed straight to the second
+    /// would arrive before one queued a moment earlier for the read
+    /// after.</summary>
+    private void DeliverMessages(byte endpoint)
+    {
+        if (_messages?[endpoint & 0x0F] is not { } q) return;
+        while (true)
         {
-            var parked = PendingFor(endpoint);
-            if (parked.Count > 0)
+            uint seq;
+            int send, parkedAfter, waitingAfter;
+            byte[] message;
+            UsbipServer.Connection? conn;
+            lock (_hidLock)
             {
+                if (q.Count == 0) return;
+                var parked = PendingFor(endpoint);
+                if (parked.Count == 0)
+                {
+                    if (DeviceOrchestrator.DiagEnabled)
+                        DeviceOrchestrator.LogDiag($"usbip message {BusId}: endpoint 0x{endpoint:X2}, {q.Count} wait for a read, the oldest {Convert.ToHexString(q.Peek())}");
+                    return;
+                }
                 seq = parked.Dequeue();
+                message = q.Dequeue();
+                // No more than the read's URB asked for, as a message the
+                // next read takes.
+                send = TakeInLengthLocked(seq, message.Length);
+                parkedAfter = parked.Count;
+                waitingAfter = q.Count;
                 conn = HoldSendLocked();
             }
-            else
-            {
-                if (_messages[endpoint & 0x0F] is not { } q) return;
-                q.Enqueue(message);
-                if (DeviceOrchestrator.DiagEnabled)
-                    DeviceOrchestrator.LogDiag($"usbip message {BusId}: endpoint 0x{endpoint:X2} {Convert.ToHexString(message)} waits for a read");
-                return;
-            }
+            SendHeld(conn, seq, 0, send, message.AsSpan(0, send));
+            if (DeviceOrchestrator.DiagEnabled)
+                DeviceOrchestrator.LogDiag($"usbip message {BusId}: endpoint 0x{endpoint:X2} {Convert.ToHexString(message)} sent to a parked read, {parkedAfter} more parked, {waitingAfter} messages wait");
         }
-        SendHeld(conn, seq, 0, message.Length, message);
-        if (DeviceOrchestrator.DiagEnabled)
-            DeviceOrchestrator.LogDiag($"usbip message {BusId}: endpoint 0x{endpoint:X2} {Convert.ToHexString(message)} sent");
     }
 
     private void PublishOutput(byte source, byte reportId, ReadOnlySpan<byte> data)
@@ -1130,6 +1231,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 UsbipServer.Connection? conn = null;
                 uint delivered = 0;
                 bool ack = false;
+                bool followed = false;
                 lock (_hidLock)
                 {
                     // The host's next read on the endpoint: the report the
@@ -1158,6 +1260,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     {
                         frame = _frameQueue.Dequeue();
                         NoteCarriedLocked(frame.Seq);
+                        followed = FollowWithGuideLocked();
                         // In order with the frames the input pump answers.
                         conn = HoldSendLocked();
                     }
@@ -1166,7 +1269,11 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 }
                 if (ack) SharedMemoryIO.StoreDeviceDelivered(_index, _ackGeneration, delivered, _ackSignal);
                 if (message != null)
+                {
                     SendHeld(conn, cmd.Seqnum, 0, Math.Min(message.Length, cmd.TransferBufferLength), message.AsSpan(0, Math.Min(message.Length, cmd.TransferBufferLength)));
+                    if (DeviceOrchestrator.DiagEnabled)
+                        DeviceOrchestrator.LogDiag($"usbip message {BusId}: endpoint 0x{epAddr:X2} {Convert.ToHexString(message)} sent to the next read");
+                }
                 if (frame.Buffer != null)
                 {
                     // The buffer is this thread's until it goes back, and the
@@ -1174,6 +1281,8 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     int send = Math.Min(frame.Length, Math.Max(0, cmd.TransferBufferLength));
                     SendHeld(conn, cmd.Seqnum, 0, send, frame.Buffer.AsSpan(0, send));
                     lock (_hidLock) _spareFrames.Push(frame.Buffer);
+                    // As after a layout report the input pump sends.
+                    if (followed) DeliverMessages(_primaryInEndpoint);
                 }
                 return;
             }
@@ -1203,9 +1312,13 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 return;
             }
             {
-                byte rid = payload.Length > 0 ? payload[0] : (byte)0;
+                // The ring's packet, which for a form that hands on the
+                // profile's unnumbered report starts after the report ID.
+                // The transfer's own length is the whole report's.
+                var packet = _unnumberedOutputs && payload.Length > 1 ? payload[1..] : payload;
+                byte rid = packet.Length > 0 ? packet[0] : (byte)0;
                 PublishOutput(SourceHidOutput, rid,
-                    payload.Length > 0 ? payload[1..] : ReadOnlySpan<byte>.Empty);
+                    packet.Length > 0 ? packet[1..] : ReadOnlySpan<byte>.Empty);
             }
             SendRetSubmit(cmd.Seqnum, 0, payload.Length, null);
             return;
@@ -1292,6 +1405,76 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             DeviceOrchestrator.LogDiag($"usbip unlink {BusId}: {victimSeqnum} {(removed ? "was parked" : "had already been answered")}");
     }
 
+    // ── The transport node ───────────────────────────────────────────────
+
+    /// <summary>The instance Windows gave the device: the one its serial
+    /// names, or the one on its port where Windows names it by the port.
+    /// Null when neither is there yet.</summary>
+    private string? NodeId()
+    {
+        if (Descriptors.UsbInstanceId is { } bySerial && DeviceManager.IsPresent(bySerial)) return bySerial;
+        // The create's attach returns the port as the host starts to
+        // enumerate, so a start can ask before the port is known here.
+        int port = VhciPort;
+        for (int i = 0; port <= 0 && i < 40; i++) { Thread.Sleep(5); port = VhciPort; }
+        return port > 0 ? VhciClient.DeviceOnRootHubPort(port) : null;
+    }
+
+    /// <summary>Called on the control path when the host asks for the HID
+    /// report descriptor, which HidUsb does each time it starts the device
+    /// and before any HID collection exists. Writes the bus marker of a
+    /// Bluetooth identity, which Windows drops at every start
+    /// (<see cref="UsbNodeStamp.EnsureMarker"/>). Then compares the node's
+    /// xinputhid values with the profile's. Windows reads them when it
+    /// builds the node's stack, before this start, so values that differ
+    /// mean this stack is the wrong one: the request is refused, and every
+    /// repeat of it, so the start fails with no HID collection made, and
+    /// the device is unplugged, the values written on its record while it
+    /// is away, and plugged in again (<see cref="UsbipBackend.ReplugForStamp"/>),
+    /// off this thread. The values change only while the device is away, so
+    /// no request of a start is answered from values its stack was not
+    /// built with. Returns false to refuse. A record's first start under a
+    /// profile is the one that differs, and a record another profile of the
+    /// same VID, PID and serial left behind.</summary>
+    private bool TransportReady()
+    {
+        string? id = NodeId();
+        if (id == null) { _stampSettling = false; return true; }
+        if (_stamp.BusMarker is { } marker) UsbNodeStamp.EnsureMarker(id, marker);
+        else UsbNodeStamp.ClearMarker(id);
+        if (UsbNodeStamp.XinputhidOn(id) == _stamp.Xinputhid)
+        {
+            _stampSettling = false;
+            return true;
+        }
+        if (Interlocked.CompareExchange(ref _stampWorker, 1, 0) != 0) return false;
+        if (++_stampReplugs > 2)
+        {
+            // Two re-plugs did not bring the values in: the node is started
+            // as it is, and the create's wait reports what it then finds.
+            if (DeviceOrchestrator.DiagEnabled)
+                DeviceOrchestrator.LogDiag($"usbip node stamp {id}: xinputhid values still differ after two re-plugs, starting the node as it is");
+            Volatile.Write(ref _stampWorker, 0);
+            _stampSettling = false;
+            return true;
+        }
+        _stampSettling = true;
+        bool wanted = _stamp.Xinputhid;
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            bool plugged = false;
+            try { plugged = UsbipBackend.ReplugForStamp(this, id, wanted); }
+            catch (Exception e)
+            {
+                if (DeviceOrchestrator.DiagEnabled) DeviceOrchestrator.LogDiag($"usbip node stamp {id}: {e.GetType().Name}: {e.Message}");
+            }
+            finally { Volatile.Write(ref _stampWorker, 0); }
+            // No start follows, so none will clear the flag.
+            if (!plugged) _stampSettling = false;
+        });
+        return false;
+    }
+
     // ── Control transfers ────────────────────────────────────────────────
 
     private void HandleControl(in UsbipProtocol.CommandHeader cmd, ReadOnlySpan<byte> outPayload)
@@ -1337,6 +1520,16 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 {
                     byte descType = (byte)(wValue >> 8);
                     byte descIndex = (byte)(wValue & 0xFF);
+                    // HidUsb asks for the report descriptor while it starts
+                    // the device, before the HID collections exist: the
+                    // moment to bring the device's transport node in line
+                    // (TransportReady). A refusal fails that start, and the
+                    // restart that follows asks again.
+                    if (recipient == 1 && descType == 0x22 && _derived && !TransportReady())
+                    {
+                        SendError(cmd.Seqnum, -UsbipProtocol.EPipe);
+                        return;
+                    }
                     byte[]? d = recipient == 1
                         ? Descriptors.GetHidDescriptor(descType, (byte)(wIndex & 0xFF))
                         : Descriptors.GetDescriptor(descType, descIndex, wIndex);
@@ -1670,6 +1863,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 // the rule or the protocol consumes it. It keeps its kind.
                 byte source = reportType == 0x03 ? SourceHidFeature : SourceHidOutput;
                 if (command is { } c && payload.Length > 0) PublishCommand(c, payload, source);
+                else if (reportType == 0x02 && _unnumberedOutputs && payload.Length > 1) PublishOutput(source, payload[1], payload[2..]);
                 else if (reportType != 0x02 || !ApplyOutputRule(Descriptors.HidInterfaceNumber, payload)) PublishOutput(source, rid, data);
                 // What the command did, as on the OUT endpoint and the
                 // SET_REPORT(Output) path: a halt fails the parked reads, and
@@ -1712,6 +1906,21 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             _parkedInLength.Clear();
             ClearFrameQueue();
             _ackPending = false;
+            // A pad that reports on change has sent the host nothing since
+            // the reset, and sends nothing more until its state changes: the
+            // report it last sent goes to the host's first read, as a pad
+            // reports its state when it connects.
+            if (_reportsOnChange)
+            {
+                int slot = _inputSlot[_inputReportIds ? _dataReportId : 0];
+                if (slot >= 0 && _inputReportLength[slot] > 0)
+                {
+                    int length = _inputReportLength[slot];
+                    byte[] buffer = _spareFrames.Count > 0 ? _spareFrames.Pop() : new byte[_reportCapacity];
+                    _inputReports[slot].AsSpan(0, length).CopyTo(buffer);
+                    _frameQueue.Enqueue(new QueuedFrame(buffer, length, _lastSharedSeqNo));
+                }
+            }
         }
         ResetLayoutState();
         ResetProtocolState(portReset: true);

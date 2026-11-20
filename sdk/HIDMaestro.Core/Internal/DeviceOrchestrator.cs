@@ -1183,6 +1183,101 @@ internal static partial class DeviceOrchestrator
         return usbInstanceId;
     }
 
+    /// <summary>The start wait of a Bluetooth pad's HID form, the UMDF2
+    /// create's xinputhid wait for the USB device: HidUsb starts the device
+    /// with xinputhid on its transport node, xinputhid names the pad's game
+    /// controller collection with <c>&amp;IG_</c> and publishes the XUSB
+    /// interface on it, and XInput lists one slot more than
+    /// <paramref name="slotsBefore"/>, read before the attach. A record's
+    /// first start under the profile is refused and the device plugged in
+    /// again once the xinputhid values are on its record
+    /// (<see cref="Usbip.UsbipEmulatedDevice"/>), so while
+    /// <paramref name="settling"/> answers true a failed start is no
+    /// verdict. A failed start outside that throws as the UMDF2 create's
+    /// does, and a wait that runs out is logged and the create goes on, as
+    /// there. The device is found on its port as
+    /// <see cref="FindOnPort"/> finds it. Returns the instance id Windows
+    /// gave it, <paramref name="serialInstanceId"/> when none was found in
+    /// time.</summary>
+    internal static string AwaitUsbipBluetoothHidStart(string serialInstanceId, int vhciPort, int controllerIndex, int slotsBefore,
+                                                       int hidCollections, Func<bool> settling)
+    {
+        var sw = Stopwatch.StartNew();
+        string usbInstanceId = FindOnPort(serialInstanceId, vhciPort, sw) ?? serialInstanceId;
+        string? pad = null;
+        int budget = TimeoutScale.Apply(20000);
+        while (sw.ElapsedMilliseconds < budget)
+        {
+            pad = XinputCollectionOf(usbInstanceId);
+            if (pad != null) break;
+            if (!settling() && StartFailed(usbInstanceId, controllerIndex)) throw StartError(usbInstanceId, controllerIndex);
+            Thread.Sleep(25);
+        }
+        if (pad == null && !settling() && StartFailed(usbInstanceId, controllerIndex, final: true) && !DeviceManager.InstallsPending())
+            throw StartError(usbInstanceId, controllerIndex);
+        var started = pad != null ? WaitForDeviceStarted(pad, usbInstanceId, controllerIndex, timeoutMs: 10000) : StartWait.TimedOut;
+        if (started == StartWait.Failed) throw StartError(usbInstanceId, controllerIndex, pad);
+        long padMs = sw.ElapsedMilliseconds;
+        // The descriptor's other collections settle too, each started with
+        // its interface published or failed. A failed one is no verdict on
+        // the pad: Windows starts the game controller collection through
+        // xinputhid, and what it does with a collection beside it, a pad's
+        // keyboard collection, is the same on the pad itself.
+        int ready = -1, failed = 0;
+        if (started == StartWait.Done)
+        {
+            var settle = Stopwatch.StartNew();
+            int settleBudget = TimeoutScale.Apply(2000);
+            while (true)
+            {
+                ready = 0; failed = 0;
+                foreach (string child in DeviceManager.GetChildIds(usbInstanceId))
+                {
+                    if (!child.StartsWith(@"HID\", StringComparison.OrdinalIgnoreCase)) continue;
+                    var (present, status, _) = DevnodeStatus(child);
+                    if (present && (status & DN_STARTED) != 0)
+                    {
+                        if (Usbip.VhciClient.HasPresentInterface(child, DeviceManager.HidInterfaceClass)) ready++;
+                    }
+                    else if (StartFailed(child, controllerIndex)) failed++;
+                }
+                if (ready + failed >= hidCollections || settle.ElapsedMilliseconds >= settleBudget) break;
+                Thread.Sleep(25);
+            }
+        }
+        int slotsAfter = slotsBefore;
+        // Four slots taken leave none for this pad, as the UMDF2 wait reads
+        // them (xinputFull).
+        if (started == StartWait.Done && slotsBefore < 4)
+        {
+            var slotClock = Stopwatch.StartNew();
+            int slotBudget = TimeoutScale.Apply(500);
+            while (slotClock.ElapsedMilliseconds < slotBudget)
+            {
+                slotsAfter = CountConnectedXInputSlots();
+                if (slotsAfter > slotsBefore) break;
+                Thread.Sleep(10);
+            }
+        }
+        LogDiag($"    usbip bluetooth hid start wait {usbInstanceId} on port {vhciPort}: pad {pad ?? "(none)"} {started} at {padMs}ms" +
+                $"{(ready < 0 ? "" : $", {ready} of {hidCollections} HID collections open{(failed > 0 ? $" and {failed} not started" : "")}")}, " +
+                $"XInput slots {slotsBefore} to {slotsAfter} in {sw.ElapsedMilliseconds}ms");
+        return usbInstanceId;
+    }
+
+    /// <summary>The pad's game controller collection under the device: the
+    /// HID child xinputhid named with <c>&amp;IG_</c> and published the XUSB
+    /// interface on. Null while there is none. A descriptor's other
+    /// collections carry <c>&amp;IG_</c> too and no XUSB interface.</summary>
+    private static string? XinputCollectionOf(string usbInstanceId)
+    {
+        foreach (string child in DeviceManager.GetChildIds(usbInstanceId))
+            if (child.StartsWith(@"HID\", StringComparison.OrdinalIgnoreCase) && child.Contains("&IG_", StringComparison.OrdinalIgnoreCase)
+                && Usbip.VhciClient.HasPresentInterface(child, XusbInterfaceGuid))
+                return child;
+        return null;
+    }
+
     /// <summary>The XUSB function's start wait, the UMDF2 create's companion
     /// and slot waits for the USB device: xusb22 publishes the XUSB interface
     /// on the device's own instance, then XInput lists one slot more than

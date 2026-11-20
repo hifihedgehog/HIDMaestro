@@ -296,6 +296,15 @@ public class HidReportBuilder
     /// work via <see cref="ButtonMap"/>.</summary>
     public InputField? SystemMainMenu { get; private set; }
 
+    /// <summary>The input report that carries the Guide button alone, for a
+    /// descriptor that declares it outside the layout report: its report
+    /// ID, its length with the ID, and the button's bit after the ID. An
+    /// Xbox One S pad sends the Xbox button so over Bluetooth, as System
+    /// Main Menu in report 2 (SDL_hidapi_xboxone.c,
+    /// HIDAPI_DriverXboxOneBluetooth_HandleGuidePacket). Null when the
+    /// layout report carries the button or the descriptor has none.</summary>
+    public (byte ReportId, int FrameBytes, int BitOffset)? GuideReport { get; private set; }
+
     /// <summary>Every analog input field whose HID usage maps to a known
     /// <see cref="HMAxis"/>. Populated during ResolveSemantics from BOTH
     /// Generic Desktop (page 0x01) and Simulation Controls (page 0x02).
@@ -645,6 +654,22 @@ public class HidReportBuilder
             InputReportId = inputs[chosen].Layout.ReportId;
             InputFields.AddRange(inputs[chosen].Fields);
             InputReportBitSize = inputs[chosen].Layout.Bits;
+        }
+        // A pad can send its Guide button in an input report of its own:
+        // System Main Menu (0x01, 0x85) or AC Home (0x0C, 0x0223) as a
+        // 1-bit field of another numbered report. The first such field
+        // names the report, which the device sends when the button changes
+        // (GuideReport).
+        for (int r = 0; r < inputs.Count && GuideReport == null; r++)
+        {
+            if (r == chosen || inputs[r].Layout.ReportId == 0) continue;
+            foreach (var f in inputs[r].Fields)
+                if (!f.IsConstant && f.BitSize == 1
+                    && ((f.UsagePage == 0x01 && f.Usage == 0x85) || (f.UsagePage == 0x0C && f.Usage == 0x0223)))
+                {
+                    GuideReport = (inputs[r].Layout.ReportId, inputs[r].Layout.FrameBytes, f.BitOffset);
+                    break;
+                }
         }
         var reports = new (byte Id, int ByteSize)[inputs.Count];
         for (int r = 0; r < reports.Length; r++)

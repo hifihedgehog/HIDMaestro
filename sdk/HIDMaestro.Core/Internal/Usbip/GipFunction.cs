@@ -138,10 +138,12 @@ internal static class GipFunction
     }
 
     /// <summary>True when <paramref name="profile"/> presents the GIP
-    /// function on the USB/IP backend: it reaches XInput through xinputhid
-    /// and authors no USB device of its own.</summary>
+    /// function on the USB/IP backend: it reaches XInput through xinputhid,
+    /// authors no USB device of its own and is no Bluetooth identity. A pad
+    /// speaks GIP on a cable and HID over Bluetooth, so a Bluetooth identity
+    /// presents its HID device (<see cref="ControllerProfile.BluetoothHidForm"/>).</summary>
     internal static bool Applies(ControllerProfile profile) =>
-        profile.UsbConfiguration == null && XInputPresentation.Resolve(profile).Xinputhid;
+        profile.UsbConfiguration == null && !profile.IsBluetooth && XInputPresentation.Resolve(profile).Xinputhid;
 
     /// <summary>What is wrong with a <c>gip</c> block's identity, or null
     /// when the model holds it.</summary>

@@ -97,6 +97,42 @@ internal static class UsbipBackend
         }
     }
 
+    /// <summary>Unplugs <paramref name="device"/>, writes or clears the
+    /// xinputhid values on its record <paramref name="instanceId"/> while it
+    /// is away (<see cref="UsbNodeStamp"/>), and plugs it in again, so
+    /// Windows builds the node's stack from them. The device's own start
+    /// asks for this, off its control thread, when the values it finds
+    /// differ from its profile's (<see cref="UsbipEmulatedDevice"/>). True
+    /// when the device is plugged in again with the values written.</summary>
+    internal static bool ReplugForStamp(UsbipEmulatedDevice device, string instanceId, bool xinputhid)
+    {
+        var server = UsbipServer.GetOrStart();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        using (VhciClient.HoldOpen())
+        {
+            VhciClient.DetachLocation("127.0.0.1", server.Port, device.BusId);
+            VhciClient.StopAttachAttempts("127.0.0.1", server.Port, device.BusId);
+        }
+        int leave = TimeoutScale.Apply(10000);
+        while (UsbRecords.Present(instanceId) && sw.ElapsedMilliseconds < leave) Thread.Sleep(20);
+        long awayMs = sw.ElapsedMilliseconds;
+        bool wrote = !UsbRecords.Present(instanceId)
+                     && (xinputhid ? UsbNodeStamp.WriteXinputhid(instanceId) : UsbNodeStamp.ClearXinputhid(instanceId));
+        // Plugged in again whether or not the write landed: never a
+        // controller with no device. The device holds its old connection for
+        // a moment after the unplug and refuses an import while it does.
+        int port;
+        while (true)
+        {
+            try { port = VhciClient.Attach("127.0.0.1", server.Port, device.BusId); break; }
+            catch (System.ComponentModel.Win32Exception) when (sw.ElapsedMilliseconds < 2 * leave) { Thread.Sleep(50); }
+        }
+        device.SetVhciPortIfAttached(port);
+        if (DeviceOrchestrator.DiagEnabled)
+            DeviceOrchestrator.LogDiag($"usbip node stamp {instanceId}: away after {awayMs}ms, xinputhid values {(wrote ? (xinputhid ? "written" : "cleared") : "NOT written")}, plugged in on port {port} after {sw.ElapsedMilliseconds}ms");
+        return wrote;
+    }
+
     /// <summary>The USB 2.0 ports the host controller runs with: the count
     /// its root hub reports (<see cref="VhciClient.Usb20PortsFromRootHub"/>),
     /// which is the one the driver loaded. When the hub does not answer,

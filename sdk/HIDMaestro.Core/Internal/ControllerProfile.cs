@@ -272,6 +272,89 @@ public sealed class ControllerProfile
     [JsonPropertyName("gip")]
     public Usbip.GipSpec? Gip { get; set; }
 
+    /// <summary>The HID device a Bluetooth pad that reaches XInput through
+    /// xinputhid is over the air (<see cref="BluetoothHidSpec"/>), which the
+    /// profile presents on the USB/IP backend with xinputhid on the device's
+    /// transport node. The UMDF2 backend does not read it.</summary>
+    [JsonPropertyName("bluetoothHid")]
+    public BluetoothHidSpec? BluetoothHid { get; set; }
+
+    /// <summary>True for a Bluetooth identity
+    /// (<c>connection: "bluetooth"</c>).</summary>
+    [JsonIgnore]
+    internal bool IsBluetooth => string.Equals(Connection, "bluetooth", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>True for a Bluetooth identity whose transport is Bluetooth
+    /// LE (<c>bluetoothTransport: "le"</c>), false for classic, the
+    /// default.</summary>
+    [JsonIgnore]
+    internal bool IsBluetoothLe => IsBluetooth && string.Equals(BluetoothTransport, "le", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>True when the profile presents its
+    /// <see cref="BluetoothHid"/> device on the USB/IP backend: a Bluetooth
+    /// identity that reaches XInput through xinputhid, carries the block and
+    /// authors no USB device of its own.</summary>
+    [JsonIgnore]
+    internal bool PresentsBluetoothHid =>
+        BluetoothHid != null && IsBluetooth && UsbConfiguration == null && XInputPresentation.Resolve(this).Xinputhid;
+
+    /// <summary>Set on the form <see cref="BluetoothHidForm"/> builds: the
+    /// device takes xinputhid on its transport node, as Windows installs it
+    /// for a Bluetooth pad (<see cref="Usbip.UsbNodeStamp"/>). The form
+    /// itself names no XInput presentation, so every other reader sees a
+    /// plain HID device.</summary>
+    [JsonIgnore]
+    internal bool XinputhidOnTransport { get; private set; }
+
+    /// <summary>Set on the form <see cref="BluetoothHidForm"/> builds when
+    /// the profile's own descriptor numbers no reports and the Bluetooth
+    /// one does: a program reads the profile's output report, the rumble
+    /// xinputhid writes, with the first payload byte as the packet's ID, and
+    /// <see cref="HIDMaestro.HMController.OutputReceived"/> hands it the same
+    /// packet from this form, the report without its Bluetooth report
+    /// ID.</summary>
+    [JsonIgnore]
+    internal bool UnnumberedOutputs { get; private set; }
+
+    private ControllerProfile? _bluetoothHidForm;
+
+    /// <summary>The profile a device of this profile runs on the USB/IP
+    /// backend when it presents its <see cref="BluetoothHid"/> device: a
+    /// copy with that block's descriptor, button and axis maps, version and
+    /// product string in place of the profile's own, no XInput presentation
+    /// of its own and <see cref="XinputhidOnTransport"/> set. Checked as a
+    /// profile load checks one, and kept.</summary>
+    internal ControllerProfile BluetoothHidForm()
+    {
+        if (_bluetoothHidForm is { } built) return built;
+        var block = BluetoothHid ?? throw new ProfileDefectException("$.bluetoothHid", "is required for the Bluetooth HID form.");
+        var p = Clone();
+        p.Descriptor = block.Descriptor;
+        p.ButtonMap = (int[]?)block.ButtonMap?.Clone();
+        p.AxisMap = block.AxisMap == null ? null : new Dictionary<string, string>(block.AxisMap, StringComparer.Ordinal);
+        if (block.VersionNumber is { } version) p.VersionNumber = version;
+        if (block.ProductString != null) p.ProductString = block.ProductString;
+        // The form is the pad's HID device and nothing else: the size and
+        // layout of the profile's own descriptor do not describe it, and the
+        // GIP identity and driver PID belong to presentations it is not.
+        p.InputReportSize = null;
+        p.Layout = null;
+        p.TriggerMode = null;
+        p.NativeDescriptor = null;
+        p.DriverMode = null;
+        p.DriverPid = null;
+        p.Gip = null;
+        p.BluetoothHid = null;
+        p.XInput = new XInputSpec();
+        p.XinputhidOnTransport = true;
+        p.UnnumberedOutputs = HasDescriptor && !GetOrBuildReportMap().UsesReportIds;
+        p.Registry = Registry;
+        p.OutsideCatalog = OutsideCatalog;
+        p.ValidateAtLoad();
+        p.ResolveForCreate();
+        return _bluetoothHidForm = p;
+    }
+
     /// <summary>2.3.0: for a Bluetooth identity, the id of the profile whose
     /// USB form the device takes on a USB bus, the USB/IP backend: that
     /// profile's descriptor, reports, feature answers and protocol, under
@@ -838,8 +921,9 @@ public sealed class ControllerProfile
     {
         ResolvedCache = ModelRegistry.Resolve(this, Registry ?? ModelRegistry.Catalog, OutsideCatalog);
         // The USB form is built again from what this profile and its form
-        // hold now, for the same reason.
+        // hold now, for the same reason, and so is the Bluetooth HID form.
         _usbFormPresented = null;
+        _bluetoothHidForm = null;
     }
 
     /// <summary>Drops everything compiled from the profile's keys: the
@@ -855,6 +939,7 @@ public sealed class ControllerProfile
         UsbPresentationCache = null;
         GipFormCache = null;
         _usbFormPresented = null;
+        _bluetoothHidForm = null;
         _cachedReportMap = null;
         _cachedDescriptor = null;
         _descriptorCached = false;
@@ -1015,7 +1100,24 @@ public sealed class ControllerProfile
                 throw new ProfileDefectException("$.gip.identity", defect);
             if (cfg != null)
                 throw new ProfileDefectException("$.gip", "names a GIP identity, and this profile's usbConfiguration describes its USB device itself, which the GIP function then does not present.");
+            if (IsBluetooth)
+                throw new ProfileDefectException("$.gip", "names a GIP identity, and this profile is a Bluetooth pad: a pad speaks HID over Bluetooth and GIP only on a cable, so the USB/IP backend presents its bluetoothHid device.");
             if (checkModelGroups && cfg == null) _ = Usbip.GipFunction.FormOf(this);
+        }
+        // The Bluetooth HID form of an xinputhid profile, built here for the
+        // same reason: a descriptor or a map that does not fit is refused at
+        // load.
+        if (BluetoothHid is { } bluetoothHid)
+        {
+            if (!IsBluetooth)
+                throw new ProfileDefectException("$.bluetoothHid", "describes the HID device a pad is over Bluetooth, and this profile's connection is not \"bluetooth\".");
+            if (XInputPresentation.OwnBlock(this) is not { Via: XInputSpec.ViaXinputhid })
+                throw new ProfileDefectException("$.bluetoothHid", "describes the HID device xinputhid reads on a Bluetooth pad's transport node, and this profile does not reach XInput through xinputhid.");
+            if (cfg != null)
+                throw new ProfileDefectException("$.bluetoothHid", "describes the profile's device on the USB/IP backend, and this profile's usbConfiguration describes its USB device itself.");
+            if (string.IsNullOrWhiteSpace(bluetoothHid.Descriptor))
+                throw new ProfileDefectException("$.bluetoothHid.descriptor", "is required: the pad's own report descriptor over Bluetooth.");
+            if (checkModelGroups) _ = BluetoothHidForm();
         }
         // A usbConfiguration on a profile whose default is UMDF2 is the USB
         // device it presents on the USB/IP backend: authored, or pins over
