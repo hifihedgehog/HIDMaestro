@@ -393,7 +393,7 @@ A 114-scenario [regression battery](test/regression/regression_battery.ps1) driv
 | MeLE PCG02 GLE, fanless stick PC | Intel Celeron J4125, 4 cores, 4 threads | 8 GB LPDDR4-2133 | Intel UHD Graphics 600 | Windows 10 IoT Enterprise LTSC, version 21H2, build 19044 |
 | Microsoft Surface Pro for Business, 12-inch (2nd Edition), tablet | Qualcomm Snapdragon X2 Plus, 6 cores, 6 threads | 24 GB LPDDR5x-9523 | Qualcomm Adreno X2-45 | Windows 11 Pro, version 26H1, build 28000 |
 
-On the Legion Pro 7 the 2.3.0 build passed all 114 scenarios in 55 minutes. On the PCG02 GLE, the low end of the performance and OS spectrum, 110 passed and 4 skipped in 75 minutes on the UMDF2 driver, installed from nothing, leaving out the checks that need a Steam client, a desktop session or Windows Sandbox. On the Surface Pro, where every controller runs on USB/IP, 110 passed and 4 skipped in 28 minutes.
+On the Legion Pro 7 the 2.3.0 build passed all 114 scenarios in 55 minutes. On the PCG02 GLE, the low end of the performance and OS spectrum, 110 passed and 4 skipped in 75 minutes on the UMDF2 driver, installed from nothing, and again in 44 minutes with every controller on USB/IP, leaving out the checks that need a Steam client, a desktop session or Windows Sandbox. On the Surface Pro, where every controller runs on USB/IP, 110 passed and 4 skipped in 28 minutes.
 
 Full device-tree dumps, HIDAPI enumeration logs, per-profile results, and startup/teardown timing are in [docs/INTERNALS.md](docs/INTERNALS.md#validation-results).
 
