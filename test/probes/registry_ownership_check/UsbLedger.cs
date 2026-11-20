@@ -911,7 +911,12 @@ internal static partial class Program
             return;
         }
         var ledgered = new HashSet<string>(UsbRecords.Caused(), StringComparer.OrdinalIgnoreCase);
-        var hubKids = UsbRecords.AllDeviceIds().Where(IsUsbipRootHub).SelectMany(h => UsbRecords.Tree.Read().Subtree(h).Skip(1)).ToList();
+        // One read of the machine's records serves the hubs and every ledgered
+        // record, as UsbRecords.RemoveCaused reads it once: nothing between
+        // here and the removal changes the device tree. A read per record took
+        // 114 s on the PCG02 GLE with 319 records in the ledger.
+        var tree = UsbRecords.Tree.Read();
+        var hubKids = UsbRecords.AllDeviceIds().Where(IsUsbipRootHub).SelectMany(h => tree.Subtree(h).Skip(1)).ToList();
         string? witness = hubKids.FirstOrDefault(r => UsbRecords.IsUsbInstance(r) && !ledgered.Contains(r)
                                                       && !UsbRecords.Present(r) && UsbRecords.ArrivedSinceBoot(r));
         if (witness == null)
@@ -920,7 +925,7 @@ internal static partial class Program
             return;
         }
         Console.WriteLine($"  {caused.Count} ledgered record(s), witness {witness}");
-        var subtrees = caused.SelectMany(id => UsbRecords.Tree.Read().Subtree(id)).ToList();
+        var subtrees = caused.SelectMany(id => tree.Subtree(id)).ToList();
         UsbRecords.BootTimeForProbe = () => DateTime.UtcNow.AddMinutes(1);
         try { HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall: true); }
         finally { UsbRecords.BootTimeForProbe = null; }
