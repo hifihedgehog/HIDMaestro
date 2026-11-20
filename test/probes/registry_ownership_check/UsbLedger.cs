@@ -927,7 +927,28 @@ internal static partial class Program
         Console.WriteLine($"  {caused.Count} ledgered record(s), witness {witness}");
         var subtrees = caused.SelectMany(id => tree.Subtree(id)).ToList();
         UsbRecords.BootTimeForProbe = () => DateTime.UtcNow.AddMinutes(1);
-        try { HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall: true); }
+        try
+        {
+            // The removal takes about 0.2 s a record on the PCG02 GLE, over two
+            // minutes for a ledger of hundreds. A line each time the ledger has
+            // shrunk shows it moving. A removal that stops moving goes silent,
+            // as a hang must for the battery's watch. The wait on the handle
+            // leaves an exception from the removal to GetResult, as it was.
+            var removal = System.Threading.Tasks.Task.Run(() => HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall: true));
+            int shown = caused.Count;
+            while (!((IAsyncResult)removal).AsyncWaitHandle.WaitOne(TimeSpan.FromSeconds(30)))
+            {
+                int now;
+                try { now = UsbRecords.Caused().Count; }
+                catch (Exception) { continue; }
+                if (now < shown)
+                {
+                    Console.WriteLine($"  the removal goes on: {now} ledgered record(s) left");
+                    shown = now;
+                }
+            }
+            removal.GetAwaiter().GetResult();
+        }
         finally { UsbRecords.BootTimeForProbe = null; }
         var left = subtrees.Where(UsbRecords.Exists).ToList();
         Check("after a restart, the full removal removes every record the ledger names", left.Count == 0, string.Join(" ; ", left));
