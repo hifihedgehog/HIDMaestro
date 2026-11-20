@@ -212,16 +212,26 @@ internal static partial class Program
     /// <summary>The HID interface of <paramref name="profile"/> that carries
     /// its reports: the one interface of a single-HID device, or on the
     /// charging grip the docked pad's, whose path names its interface
-    /// number (mi_01 for the left slot).</summary>
+    /// number (mi_01 for the left slot). Of several collections, the game
+    /// controller's is taken: Windows lists a device's collections in no set
+    /// order, and on the ARM64 test system (2026-11-20) amazon-luna-ble's
+    /// vendor collection, col02, came first, which SDL lists as no
+    /// joystick.</summary>
     internal static HMHidDeviceInfo? OwnInterface(HMProfile profile, string serial)
     {
         var all = Collections(profile, serial);
         if (all.Count <= 1) return all.FirstOrDefault();
         var hid = profile.Inner.UsbConfiguration?.Interfaces?.FirstOrDefault(i => i.Function == "hid");
-        if (hid == null) return all[0];
-        string mi = $"&mi_{hid.InterfaceNumber:D2}";
-        return all.FirstOrDefault(d => d.DevicePath.Contains(mi, StringComparison.OrdinalIgnoreCase));
+        string? mi = hid == null ? null : $"&mi_{hid.InterfaceNumber:D2}";
+        var candidates = mi == null ? all : all.Where(d => d.DevicePath.Contains(mi, StringComparison.OrdinalIgnoreCase)).ToList();
+        return candidates.FirstOrDefault(IsGameController) ?? candidates.FirstOrDefault();
     }
+
+    /// <summary>A Generic Desktop joystick, gamepad or multi-axis controller
+    /// collection (HID Usage Tables, Generic Desktop Page 0x01, usages 0x04,
+    /// 0x05 and 0x08): the collections SDL opens as joysticks.</summary>
+    static bool IsGameController(HMHidDeviceInfo d) =>
+        d.TopLevelUsagePage == 0x01 && d.TopLevelUsage is 0x04 or 0x05 or 0x08;
 
     /// <summary>The serial the controller's HID device serves.</summary>
     internal static string SerialOf(HMController c) =>
