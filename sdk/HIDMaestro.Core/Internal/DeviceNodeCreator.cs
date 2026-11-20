@@ -600,6 +600,69 @@ internal static partial class DeviceNodeCreator
         return published.Length == 0 ? null : published;
     }
 
+    /// <summary>True when the drivers loaded on a present devnode include
+    /// every filter its record names: the filters an INF declares with
+    /// AddFilter, which Windows keeps as value names under the record's
+    /// Filters key, and the UpperFilters and LowerFilters values. An
+    /// install that adds a filter to a started device restarts the device
+    /// to load it, so a record that names a filter its stack does not hold
+    /// is a device whose restart is still to come, and one whose stack
+    /// holds them all has had it. Measured 2026-11-20 on a HID game
+    /// controller collection, Windows 11 26200: Filters\*Upper names
+    /// hidgamepad, which hidgamepad.inf adds, and the stack reads
+    /// \Driver\HidHide, \Driver\hidgamepad, \Driver\HidUsb. A first
+    /// install on 26100 wrote the configuration and had restarted the
+    /// device 16 ms later (setupapi.dev.log, "Configuring device" to
+    /// "Restarting device completed"). False when the record or the stack
+    /// cannot be read.</summary>
+    internal static bool LoadedStackHoldsRecordedFilters(string instId)
+    {
+        if (CM_Locate_DevNodeW(out uint dev, instId, 0) != 0) return false;
+        var filters = RecordedFilters(instId);
+        if (filters == null) return false;
+        if (filters.Count == 0) return true;
+        var key = DEVPKEY_Device_Stack;
+        uint len = 0;
+        CM_Get_DevNode_PropertyW(dev, ref key, out _, null, ref len, 0);
+        if (len == 0) return false;
+        var buf = new byte[len];
+        if (CM_Get_DevNode_PropertyW(dev, ref key, out _, buf, ref len, 0) != 0) return false;
+        // A string list, one driver object's name each: \Driver\<service>.
+        string[] loaded = Encoding.Unicode.GetString(buf, 0, (int)Math.Min(len, (uint)buf.Length))
+            .Split('\0', StringSplitOptions.RemoveEmptyEntries);
+        foreach (string filter in filters)
+        {
+            string name = @"\Driver\" + filter;
+            if (!Array.Exists(loaded, d => d.Equals(name, StringComparison.OrdinalIgnoreCase))) return false;
+        }
+        return true;
+    }
+
+    /// <summary>The filter services a devnode's record names, or null when
+    /// the record cannot be read.</summary>
+    private static System.Collections.Generic.List<string>? RecordedFilters(string instId)
+    {
+        var names = new System.Collections.Generic.List<string>();
+        try
+        {
+            using var record = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{instId}");
+            if (record == null) return null;
+            foreach (string value in new[] { "UpperFilters", "LowerFilters" })
+                if (record.GetValue(value) is string[] list)
+                    foreach (string s in list) if (s.Length > 0) names.Add(s);
+            using var declared = record.OpenSubKey("Filters");
+            if (declared != null)
+                foreach (string position in declared.GetSubKeyNames())
+                {
+                    using var at = declared.OpenSubKey(position);
+                    if (at == null) continue;
+                    foreach (string s in at.GetValueNames()) if (s.Length > 0) names.Add(s);
+                }
+        }
+        catch (Exception e) when (e is System.Security.SecurityException or UnauthorizedAccessException or System.IO.IOException) { return null; }
+        return names;
+    }
+
     /// <summary>DiInstallDevice of the one driver a driver list built from
     /// <paramref name="inf"/> alone gives the device, in a device information
     /// set of its own, so the create's set keeps its installation parameters
@@ -671,6 +734,14 @@ internal static partial class DeviceNodeCreator
     private const uint DIIDFLAG_NOFINISHINSTALLUI = 0x00000002;
     private const uint DI_ENUMSINGLEINF = 0x00010000;
     private const uint SPDIT_COMPATDRIVER = 2;
+
+    // devpkey.h: DEVPKEY_Device_Stack, {540b947e-8b40-45bc-a8a2-6a0b894cbda2}, 14,
+    // a string list.
+    private static readonly DEVPROPKEY DEVPKEY_Device_Stack = new()
+    {
+        fmtid = new Guid("540b947e-8b40-45bc-a8a2-6a0b894cbda2"),
+        pid = 14,
+    };
 
     // devpkey.h: DEVPKEY_Device_DriverInfPath, {a8b865dd-2e3d-4094-ad97-e593a70c75d6}, 5.
     private static readonly DEVPROPKEY DEVPKEY_Device_DriverInfPath = new()

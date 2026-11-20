@@ -1113,10 +1113,16 @@ internal static partial class DeviceOrchestrator
     /// work.</para>
     ///
     /// <para>The queue is the machine's, and the install that holds it can
-    /// be any device's. So collections that stay installed and open for
-    /// <see cref="InstalledHoldMs"/> with the queue busy are taken as they
-    /// are: the restart follows the INF's recording within the same install
-    /// (115 ms in the measured run). With the queue quiet for a second and
+    /// be any device's, such as a controller Windows is installing for the
+    /// first time. So with the queue busy the collections are taken once
+    /// each one's loaded stack holds every filter its record names, on two
+    /// looks in a row
+    /// (<see cref="DeviceNodeCreator.LoadedStackHoldsRecordedFilters"/>):
+    /// the install that restarts a started collection writes its filter
+    /// first, so a record and a stack that agree have no restart to come.
+    /// Collections that stay installed and open for
+    /// <see cref="InstalledHoldMs"/> are taken as they are in any case, for
+    /// a stack that cannot be read. With the queue quiet for a second and
     /// a collection still not installed and open, no install is coming, and
     /// <see cref="OpenHidCollections"/> gives the verdict on what is there,
     /// a failed start thrown as before. The whole wait is the registration
@@ -1129,26 +1135,32 @@ internal static partial class DeviceOrchestrator
         long until = Environment.TickCount64 + TimeoutScale.Apply(DeviceManager.InstallQueueWaitMs);
         int quietMs = TimeoutScale.Apply(1000), holdMs = TimeoutScale.Apply(InstalledHoldMs);
         long quietSince = -1, heldSince = -1;
+        int loadedLooks = 0, last = int.MaxValue;
         while (true)
         {
-            bool idle = DeviceManager.InstallsSettle((int)Math.Clamp(until - Environment.TickCount64, 0, 250));
-            int installed = InstalledHidCollections(deviceInstanceId);
+            // The first look, and every look at collections that are
+            // installed, asks the queue without waiting. While one is still
+            // to install, a look waits on the queue up to a quarter second.
+            bool idle = DeviceManager.InstallsSettle(last >= expected ? 0 : (int)Math.Clamp(until - Environment.TickCount64, 0, 250));
+            int installed = last = InstalledHidCollections(deviceInstanceId, out bool loaded);
             bool quiet = idle && !DeviceManager.InstallsPending();
             long now = Environment.TickCount64;
             if (installed >= expected)
             {
                 if (heldSince < 0) heldSince = now;
-                if (quiet || now - heldSince >= holdMs)
+                loadedLooks = loaded ? loadedLooks + 1 : 0;
+                if (quiet || loadedLooks >= 2 || now - heldSince >= holdMs)
                 {
-                    if (sw.ElapsedMilliseconds >= 50)
+                    if (sw.ElapsedMilliseconds >= 50 || !quiet)
                         LogDiag($"    {deviceInstanceId}: {sw.ElapsedMilliseconds}ms for Windows' device installs, {installed} of {expected} HID collections installed and open" +
-                                $"{(quiet ? "" : ", an install of another device still pending")}");
+                                $"{(quiet ? "" : loadedLooks >= 2 ? ", each with its filters loaded while another device's install is pending" : ", an install of another device still pending")}");
                     return installed;
                 }
             }
             else
             {
                 heldSince = -1;
+                loadedLooks = 0;
                 if (!quiet) quietSince = -1;
                 else if (quietSince < 0) quietSince = now;
                 else if (now - quietSince >= quietMs) break;
@@ -1163,23 +1175,27 @@ internal static partial class DeviceOrchestrator
     }
 
     /// <summary>How long a device's collections stay installed and open,
-    /// with the machine's install queue busy, before a wait takes them as
-    /// settled.</summary>
+    /// with the machine's install queue busy and a stack that does not show
+    /// its filters loaded, before a wait takes them as settled.</summary>
     private const int InstalledHoldMs = 3000;
 
     /// <summary>How many HID collections under the device are open to a
     /// program and installed: started, with the HID interface published and
     /// an INF recorded. They sit where <see cref="OpenHidCollections"/>
-    /// finds them. Throws nothing.</summary>
-    private static int InstalledHidCollections(string deviceInstanceId)
+    /// finds them. <paramref name="loaded"/> is true when there is one and
+    /// each one's loaded stack holds the filters its record names. Throws
+    /// nothing.</summary>
+    private static int InstalledHidCollections(string deviceInstanceId, out bool loaded)
     {
         int installed = 0;
+        bool all = true;
         foreach (string child in DeviceManager.GetChildIds(deviceInstanceId))
         {
-            if (IsHidCollection(child)) { if (Installed(child)) installed++; continue; }
+            if (IsHidCollection(child)) { if (Installed(child)) { installed++; all &= DeviceNodeCreator.LoadedStackHoldsRecordedFilters(child); } continue; }
             foreach (string hid in DeviceManager.GetChildIds(child))
-                if (IsHidCollection(hid) && Installed(hid)) installed++;
+                if (IsHidCollection(hid) && Installed(hid)) { installed++; all &= DeviceNodeCreator.LoadedStackHoldsRecordedFilters(hid); }
         }
+        loaded = installed > 0 && all;
         return installed;
 
         static bool IsHidCollection(string id) => id.StartsWith(@"HID\", StringComparison.OrdinalIgnoreCase);
@@ -1428,34 +1444,49 @@ internal static partial class DeviceOrchestrator
     /// <para>A named collection with no INF recorded yet is waited on: its
     /// install is still to come, and that install is what restarts it. The
     /// queue is the machine's, and the install that holds it can be any
-    /// device's, so a named collection that stays installed for
-    /// <see cref="InstalledHoldMs"/> with the queue busy is Kept, as
-    /// <see cref="AwaitCollectionInstalls"/> takes one, and so is one still
-    /// there when the wait runs out. The wait is the registration gate's
-    /// (<see cref="DeviceManager.InstallQueueWaitMs"/>).</para></summary>
+    /// device's. So with the queue busy the collection is judged once its
+    /// loaded stack holds every filter its record names on two looks in a
+    /// row, as <see cref="AwaitCollectionInstalls"/> takes one: Kept with
+    /// the name, Lost without it. A named collection that stays installed
+    /// for <see cref="InstalledHoldMs"/> is Kept in any case, and so is one
+    /// still there when the wait runs out. The wait is the registration
+    /// gate's (<see cref="DeviceManager.InstallQueueWaitMs"/>).</para></summary>
     private static (CollectionInstall Left, string? Pad) SettledXinputCollection(string usbInstanceId)
     {
         long until = Environment.TickCount64 + TimeoutScale.Apply(DeviceManager.InstallQueueWaitMs);
         int quietMs = TimeoutScale.Apply(1000), holdMs = TimeoutScale.Apply(InstalledHoldMs);
         long quietSince = -1, heldSince = -1;
-        string? held = null;
+        string? held = null, loadedOn = null;
+        int loadedLooks = 0;
+        bool waits = false;
         while (true)
         {
-            bool idle = DeviceManager.InstallsSettle((int)Math.Clamp(until - Environment.TickCount64, 0, 250));
-            string? named = null, raw = null;
-            bool unnamed = false;
+            // The first look, and every look that found a collection to
+            // judge, asks the queue without waiting.
+            bool idle = DeviceManager.InstallsSettle(waits ? (int)Math.Clamp(until - Environment.TickCount64, 0, 250) : 0);
+            string? named = null, raw = null, plain = null;
             foreach (string child in DeviceManager.GetChildIds(usbInstanceId))
             {
                 if (!child.StartsWith(@"HID\", StringComparison.OrdinalIgnoreCase)) continue;
                 var (present, status, _) = DevnodeStatus(child);
                 if (!present || (status & DN_STARTED) == 0) continue;
-                if (!child.Contains("&IG_", StringComparison.OrdinalIgnoreCase)) unnamed = true;
+                if (!child.Contains("&IG_", StringComparison.OrdinalIgnoreCase)) plain ??= child;
                 else if (Usbip.VhciClient.HasPresentInterface(child, XusbInterfaceGuid))
                 {
                     if (DeviceNodeCreator.PublishedInfOf(child) != null) named = child;
                     else raw = child;
                 }
             }
+            // The collection this look would judge: the named one, or with
+            // none named and none awaiting its install, one without the name.
+            string? judged = named ?? (raw == null ? plain : null);
+            waits = judged == null;
+            if (judged != null && DeviceNodeCreator.PublishedInfOf(judged) != null && DeviceNodeCreator.LoadedStackHoldsRecordedFilters(judged))
+            {
+                loadedLooks = string.Equals(judged, loadedOn, StringComparison.OrdinalIgnoreCase) ? loadedLooks + 1 : 1;
+                loadedOn = judged;
+            }
+            else { loadedLooks = 0; loadedOn = null; }
             long now = Environment.TickCount64;
             if (named == null || !string.Equals(named, held, StringComparison.OrdinalIgnoreCase)) { held = named; heldSince = now; }
             if (idle && !DeviceManager.InstallsPending())
@@ -1463,7 +1494,7 @@ internal static partial class DeviceOrchestrator
                 if (named != null) return (CollectionInstall.Kept, named);
                 if (raw == null)
                 {
-                    if (unnamed) return (CollectionInstall.Lost, null);
+                    if (plain != null) return (CollectionInstall.Lost, null);
                     if (quietSince < 0) quietSince = now;
                     else if (now - quietSince >= quietMs) return (CollectionInstall.Lost, null);
                 }
@@ -1472,7 +1503,8 @@ internal static partial class DeviceOrchestrator
             else
             {
                 quietSince = -1;
-                if (named != null && now - heldSince >= holdMs) return (CollectionInstall.Kept, named);
+                if (named != null && (loadedLooks >= 2 || now - heldSince >= holdMs)) return (CollectionInstall.Kept, named);
+                if (named == null && raw == null && plain != null && loadedLooks >= 2) return (CollectionInstall.Lost, null);
             }
             if (Environment.TickCount64 >= until)
                 return (named ?? raw) is { } there ? (CollectionInstall.Kept, there) : (CollectionInstall.Unsettled, null);
