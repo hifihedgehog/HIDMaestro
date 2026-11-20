@@ -30,6 +30,15 @@ internal static partial class TcpConnectionOwner
     private const uint MIB_TCP_STATE_ESTAB = 5;
     private const int SlackRows = 64;
     private const int MaxReads = 8;
+    // How many reads of the table a lookup makes before it answers that
+    // the connection has no owner.
+    private const int Lookups = 3;
+
+    /// <summary>How often a read of the table ran out of room on every
+    /// try, and how often a read held no ESTABLISHED row for both ends of
+    /// the connection asked for. A check that sees a lookup miss prints
+    /// them, so the miss says which it was.</summary>
+    internal static int ReadsOutOfRoom, ReadsWithoutConnection;
 
     /// <summary>The PID that owns the client end of a connection this
     /// process accepted, or -1 when the table holds no ESTABLISHED row for
@@ -69,7 +78,27 @@ internal static partial class TcpConnectionOwner
     // a call that only asks the size would walk the table first.
     private static uint s_lastSize;
 
-    private static unsafe int Find(uint localAddr, int localPort, uint remoteAddr, int remotePort)
+    // The table is read while other programs open and close connections.
+    // On 2026-11-20 two of 100 lookups of a connection that stayed open
+    // answered "no owner" while sixteen threads opened and closed loopback
+    // connections beside them (S43, Windows 10 19044, 4 cores), where
+    // 4,000 lookups in forty later runs of the same check missed none.
+    // Whether those two reads ran out of room or lacked the row was not
+    // recorded, and the two counters record it from now on. A lookup that
+    // finds no owner reads the table again, up to Lookups times, so a
+    // connection that is there has three reads to show in, and one whose
+    // peer has closed costs two more reads of a few milliseconds.
+    private static int Find(uint localAddr, int localPort, uint remoteAddr, int remotePort)
+    {
+        for (int look = 0; look < Lookups; look++)
+        {
+            int pid = FindOnce(localAddr, localPort, remoteAddr, remotePort);
+            if (pid >= 0) return pid;
+        }
+        return -1;
+    }
+
+    private static unsafe int FindOnce(uint localAddr, int localPort, uint remoteAddr, int remotePort)
     {
         uint size = Volatile.Read(ref s_lastSize);
         void* table = size > 0 ? NativeMemory.Alloc(size) : null;
@@ -77,8 +106,10 @@ internal static partial class TcpConnectionOwner
         {
             // The size the call asks for is the table's size at that call,
             // and connections opened anywhere on the machine before the next
-            // one grow it. Each read gets room for SlackRows more rows than
-            // asked, and a read that still falls short asks again.
+            // one grow it. Each read gets room for more rows than asked, and
+            // a read that still falls short asks again with twice the room
+            // to spare: 64 rows, then 128, up to 8,192 on the last try.
+            uint slack = SlackRows * RowSize;
             for (int attempt = 0; ; attempt++)
             {
                 uint err = GetExtendedTcpTable(table, ref size, false, AF_INET, TCP_TABLE_OWNER_PID_CONNECTIONS, 0);
@@ -87,10 +118,15 @@ internal static partial class TcpConnectionOwner
                     Volatile.Write(ref s_lastSize, size + SlackRows * RowSize);
                     break;
                 }
-                if (err != ERROR_INSUFFICIENT_BUFFER || attempt == MaxReads) return -1;
+                if (err != ERROR_INSUFFICIENT_BUFFER || attempt == MaxReads)
+                {
+                    if (err == ERROR_INSUFFICIENT_BUFFER) Interlocked.Increment(ref ReadsOutOfRoom);
+                    return -1;
+                }
                 NativeMemory.Free(table);
                 table = null;
-                size += SlackRows * RowSize;
+                size += slack;
+                slack *= 2;
                 table = NativeMemory.Alloc(size);
             }
             if (table == null) return -1;
@@ -110,6 +146,7 @@ internal static partial class TcpConnectionOwner
                 else if (r[1] == remoteAddr && Port(r[2]) == remotePort && r[3] == localAddr && Port(r[4]) == localPort)
                     serverEnd = true;
             }
+            if (!serverEnd || pid < 0) Interlocked.Increment(ref ReadsWithoutConnection);
             return serverEnd ? pid : -1;
         }
         finally { NativeMemory.Free(table); }
@@ -150,6 +187,8 @@ internal static partial class TcpConnectionOwner
         {
             uint size = Volatile.Read(ref s_lastSize);
             if (size > 0) table = NativeMemory.Alloc(size);
+            // Twice the room to spare on each try, as FindOnce reads it.
+            uint slack = SlackRows * RowSize;
             for (int attempt = 0; ; attempt++)
             {
                 uint err = GetExtendedTcpTable(table, ref size, false, AF_INET, TCP_TABLE_OWNER_PID_CONNECTIONS, 0);
@@ -161,7 +200,8 @@ internal static partial class TcpConnectionOwner
                 if (err != ERROR_INSUFFICIENT_BUFFER || attempt == MaxReads) return 0;
                 NativeMemory.Free(table);
                 table = null;
-                size += SlackRows * RowSize;
+                size += slack;
+                slack *= 2;
                 table = NativeMemory.Alloc(size);
             }
             if (table == null) return 0;

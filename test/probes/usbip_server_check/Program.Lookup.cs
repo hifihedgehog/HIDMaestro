@@ -82,6 +82,7 @@ internal static partial class Program
             th.Start();
         }
         int runs = 0, wrong = 0;
+        int outOfRoom = TcpConnectionOwner.ReadsOutOfRoom, absent = TcpConnectionOwner.ReadsWithoutConnection;
         var clock = Stopwatch.StartNew();
         try
         {
@@ -97,8 +98,12 @@ internal static partial class Program
             acceptor.Join(5000);
             lock (held) foreach (var s in held) s.Dispose();
         }
+        // A lookup reads the table up to three times. The counts say how
+        // single reads failed, whether or not a lookup missed.
+        outOfRoom = TcpConnectionOwner.ReadsOutOfRoom - outOfRoom;
+        absent = TcpConnectionOwner.ReadsWithoutConnection - absent;
         Check("under a flood of loopback connections every lookup still finds the owner", wrong == 0,
-              $"{wrong} of {runs} lookups missed, {clock.ElapsedMilliseconds} ms");
+              $"{wrong} of {runs} lookups missed, {clock.ElapsedMilliseconds} ms, single reads out of room {outOfRoom}, without the connection {absent}");
 
         // The peer closes: its end leaves ESTABLISHED, and a connection
         // that is closing is no one's to import over.

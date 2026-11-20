@@ -89,6 +89,7 @@ internal static partial class Program
         if (args.Length >= 2 && args[0] == "--throwing") return ThrowingChild(args[1]);
         if (args.Length >= 1 && args[0] == "--held-pump") return HeldPumpChild();
         if (args.Length >= 1 && args[0] == "--offline") return Offline();
+        if (args.Length >= 1 && args[0] == "--lookup") return LookupOnly(args.Length >= 2 && int.TryParse(args[1], out int times) && times > 0 ? times : 1);
 
         Console.WriteLine("=== USB/IP server protocol (issue #39) ===");
         // An exception that escapes a connection thread ends the process.
@@ -1235,6 +1236,17 @@ internal static partial class Program
         OwnerLookup();
         LocationMatch();
 
+        Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
+        return s_failures == 0 ? 0 : 1;
+    }
+
+    /// <summary>"--lookup N": the connection owner lookup's checks alone,
+    /// N times. The flood makes a miss a matter of chance, so a lookup that
+    /// misses once in some thousand calls shows only over many runs. No
+    /// elevation and no device.</summary>
+    static int LookupOnly(int times)
+    {
+        for (int i = 0; i < times; i++) OwnerLookup();
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
     }
