@@ -370,7 +370,7 @@ DirectInput, XInput, SDL3, the browser Gamepad API, and WGI/GameInput all see on
 - **Reports at rest, as the hardware sends them.** A device that reports on its own clock repeats its last frame at rest: 21 catalog profiles, the DualSense and DualShock 4 families, the Steam personas, OpenFFBoard and five Thrustmaster wheels, each at its real period, from 1 ms to 250 ms. A profile's `stream` key sets it.
 - **Hot-plug.** Create and remove controllers with no reboot. Live-swap a controller's profile mid-session. A warm single-controller create takes about 220 ms: a DualShock 4 in 217 ms at the median of 30, against 467 ms on v1.12.0 on the same machine.
 - **A throwing handler stays contained.** An exception a handler throws on one of the SDK's own threads is dropped and the next handler runs. The nine events covered are `OutputReceived`, `OutputDecoded` and `KeyboardLedsChanged`, a port's `OutputChanged`, the USB audio events and `HapticReceived`. Set `HIDMAESTRO_DIAG=1` to log each dropped exception.
-- **Validated across every API and both ends of the spectrum.** A 111-scenario regression battery checks DirectInput, XInput, SDL3/HIDAPI, the browser Gamepad API, WGI and Raw Input on every change. It runs on a Lenovo Legion Pro 7 16AFR10H laptop on Windows 11, a MeLE PCG02 GLE stick PC on Windows 10 and an ARM64 Microsoft Surface Pro on Windows 11, with each system's hardware and the latest results under the battery below.
+- **Validated across every API and both ends of the spectrum.** A 114-scenario regression battery checks DirectInput, XInput, SDL3/HIDAPI, the browser Gamepad API, WGI and Raw Input on every change. It runs on a Lenovo Legion Pro 7 16AFR10H laptop on Windows 11, a MeLE PCG02 GLE stick PC on Windows 10 and an ARM64 Microsoft Surface Pro on Windows 11, with each system's hardware and the latest results under the battery below.
 
 ### Validation
 
@@ -393,7 +393,7 @@ A 114-scenario [regression battery](test/regression/regression_battery.ps1) driv
 | MeLE PCG02 GLE, fanless stick PC | Intel Celeron J4125, 4 cores, 4 threads | 8 GB LPDDR4-2133 | Intel UHD Graphics 600 | Windows 10 IoT Enterprise LTSC, version 21H2, build 19044 |
 | Microsoft Surface Pro for Business, 12-inch (2nd Edition), tablet | Qualcomm Snapdragon X2 Plus, 6 cores, 6 threads | 24 GB LPDDR5x-9523 | Qualcomm Adreno X2-45 | Windows 11 Pro, version 26H1, build 28000 |
 
-On the Legion Pro 7 the 2.3.0 build passed all 111 scenarios in 42 minutes. On the PCG02 GLE, the low end of the performance and OS spectrum, 107 passed and 4 skipped in 63 minutes on the UMDF2 driver, installed from nothing, and again in 41 minutes with every controller on USB/IP, leaving out the checks that need a Steam client, a desktop session or Windows Sandbox. On the Surface Pro, where every controller runs on USB/IP, 107 passed and 4 skipped in 24 minutes.
+On the Legion Pro 7 the 2.3.0 build passed all 114 scenarios in 55 minutes. On the PCG02 GLE, the low end of the performance and OS spectrum, 110 passed and 4 skipped in 75 minutes on the UMDF2 driver, installed from nothing, leaving out the checks that need a Steam client, a desktop session or Windows Sandbox. On the Surface Pro, where every controller runs on USB/IP, 110 passed and 4 skipped in 28 minutes.
 
 Full device-tree dumps, HIDAPI enumeration logs, per-profile results, and startup/teardown timing are in [docs/INTERNALS.md](docs/INTERNALS.md#validation-results).
 
