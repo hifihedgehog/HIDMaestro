@@ -176,9 +176,10 @@ internal static partial class Program
     /// device whose presented form is a GIP device has its HID collection on
     /// the child Windows' GIP driver makes, which carries that driver's own
     /// VID, PID and version (the GIP model's hidChild) whatever the device
-    /// announces, and a Bluetooth identity with a USB form presents the
-    /// form's (FormParity.cs). Every other device, on either backend,
-    /// presents the profile's own VID, PID and version.</summary>
+    /// announces, and a Bluetooth pad that reaches XInput through xinputhid
+    /// presents its Bluetooth HID form's version (bluetoothHid). Every other
+    /// device, on either backend, presents the profile's own VID, PID and
+    /// version.</summary>
     static (ushort Vid, ushort Pid, ushort Version) AttributesOf(HMController c, HMProfile p)
     {
         if (c.Backend != HMBackend.Usbip) return (p.VendorId, p.ProductId, p.Inner.VersionNumber ?? 0x0100);
@@ -250,7 +251,7 @@ internal static partial class Program
         var target = collections.FirstOrDefault(x => x.OutputLength > 0 && !HeldByWindows(x));
         if (target == null) return collections.Any(x => x.OutputLength > 0) ? "held by Windows" : "";
         // The report the device's own descriptor declares: on USB/IP that is
-        // the form's (FormParity.cs).
+        // the presented form's (HMProfile.FormOn).
         var map = p.FormOn(c.Backend).Inner.GetOrBuildReportMap();
         var report = map.Reports.Where(r => r.Kind == HidReportKind.Output).OrderBy(r => r.ReportId).FirstOrDefault();
         if (report == null) return "";
@@ -347,7 +348,6 @@ internal static partial class Program
             if (accepts) accepted++;
             Snapshot? u = umdf2Here ? Take(ctx, p, HMBackend.Umdf2, key) : null;
             Snapshot? s = usbipHere ? Take(ctx, p, HMBackend.Usbip, key) : null;
-            var form = p.FormOn(HMBackend.Usbip);
             var problems = new List<string>();
             // A descriptor Windows refuses owes a start that fails with Code
             // 10 and nothing else.
@@ -397,14 +397,10 @@ internal static partial class Program
                             problems.Add($"{x.Backend} product string {c.Product}, Windows gives this kind of device {x.Product}");
                             attributesOff.Add(p.Id);
                         }
-            // A Bluetooth identity's USB form presents another descriptor,
-            // compared against that form on UMDF2. A GIP form is compared
-            // as any other profile is, its product string checked above.
-            if (!ReferenceEquals(form, p) && !form.Inner.ReportsOnGipInterface)
-            {
-                if (FormMatches(ctx, p, form, u, s, key, problems)) matched++;
-            }
-            else if (!accepts && u != null && s != null && Code10(u) && Code10(s)) matched++;
+            // A GIP form and a Bluetooth HID form are compared as any other
+            // profile is: xinputhid gives programs the same HID device on
+            // both backends. A GIP form's product string is checked above.
+            if (!accepts && u != null && s != null && Code10(u) && Code10(s)) matched++;
             else if (u != null && s != null && u.Failure == null && s.Failure == null)
             {
                 var uk = u.Collections.Select(c => c.FieldsKey).ToList();

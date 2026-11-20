@@ -77,7 +77,7 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("DriverSigningCheck")]
 [assembly: InternalsVisibleTo("BackendParityCheck")]
 [assembly: InternalsVisibleTo("SinputCheck")]
-[assembly: InternalsVisibleTo("BtUsbFormCheck")]
+[assembly: InternalsVisibleTo("BluetoothIdentityCheck")]
 [assembly: InternalsVisibleTo("BluetoothHidCheck")]
 [assembly: InternalsVisibleTo("StandardAxesCheck")]
 [assembly: InternalsVisibleTo("SwitchProSdl3Check")]

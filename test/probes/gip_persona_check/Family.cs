@@ -14,13 +14,13 @@
 //     only place the identities differ from the persona proven live;
 //   - each catalog profile's form: its identity in the device descriptor and
 //     the Hello, its metadata through the engine, reassembled, with the
-//     security opt-out and the input report's length, the input report's
-//     size, and a Bluetooth identity's data equal to its USB sibling's;
+//     security opt-out and the input report's length, and the input
+//     report's size;
 //   - no two forms, xbox-one-s-full among them, share a VID, PID and
 //     firmware version with different metadata, since Windows caches
 //     metadata by those;
-//   - a profile with no identity, an unknown one or one that does not reach
-//     XInput through xinputhid is refused.
+//   - a profile with no identity, an unknown one, one that does not reach
+//     XInput through xinputhid or a Bluetooth one is refused.
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -55,22 +55,19 @@ internal static partial class Program
         return e;
     }
 
-    /// <summary>The catalog's twelve xinputhid profiles and the identity
-    /// each names.</summary>
-    static readonly (string Id, string Identity, ushort Pid, string? Sibling)[] Family =
+    /// <summary>The catalog's seven wired xinputhid profiles and the
+    /// identity each names. A pad speaks GIP only on a cable: the five
+    /// Bluetooth xinputhid profiles present the HID device they are over
+    /// Bluetooth (bluetooth_hid_check).</summary>
+    static readonly (string Id, string Identity, ushort Pid)[] Family =
     {
-        ("xbox-one-original", "xbox-one-1537", 0x02D1, null),
-        ("xbox-one-rev1", "xbox-one-1697", 0x02DD, null),
-        ("xbox-one-s", "xbox-one-s-1708", 0x02EA, null),
-        ("xbox-one-s-bt", "xbox-one-s-1708", 0x02FD, "xbox-one-s"),
-        ("xbox-one-s-bt-full", "xbox-one-s-1708", 0x02FD, "xbox-one-s"),
-        ("xbox-series-xs", "xbox-series-1914", 0x0B12, null),
-        ("xbox-series-xs-bt", "xbox-series-1914", 0x0B13, "xbox-series-xs"),
-        ("xbox-elite-v1", "xbox-elite-1698", 0x02E3, null),
-        ("xbox-elite-v2", "xbox-elite-series-2-1797", 0x0B00, null),
-        ("xbox-elite-v2-bt", "xbox-elite-series-2-1797", 0x0B05, "xbox-elite-v2"),
-        ("xbox-elite-v2-bt-v2", "xbox-elite-series-2-1797", 0x0B22, "xbox-elite-v2"),
-        ("xbox-adaptive", "xbox-adaptive-1835", 0x0B0A, null),
+        ("xbox-one-original", "xbox-one-1537", 0x02D1),
+        ("xbox-one-rev1", "xbox-one-1697", 0x02DD),
+        ("xbox-one-s", "xbox-one-s-1708", 0x02EA),
+        ("xbox-series-xs", "xbox-series-1914", 0x0B12),
+        ("xbox-elite-v1", "xbox-elite-1698", 0x02E3),
+        ("xbox-elite-v2", "xbox-elite-series-2-1797", 0x0B00),
+        ("xbox-adaptive", "xbox-adaptive-1835", 0x0B0A),
     };
 
     /// <summary>The metadata the form's engine serves: the fragments a
@@ -160,13 +157,15 @@ internal static partial class Program
 
         Console.WriteLine("\n-- each catalog profile's form --");
         var catalog = ProfileDatabase.LoadEmbedded().All;
-        var xinputhid = catalog.Where(x => x.UsesXinputhid).Select(x => x.Id).OrderBy(x => x, StringComparer.Ordinal).ToList();
-        Check("the catalog's xinputhid profiles are the twelve this part knows",
+        var xinputhid = catalog.Where(x => x.UsesXinputhid && !x.IsBluetooth).Select(x => x.Id).OrderBy(x => x, StringComparer.Ordinal).ToList();
+        Check("the catalog's wired xinputhid profiles are the seven this part knows",
               xinputhid.SequenceEqual(Family.Select(f => f.Id).OrderBy(x => x, StringComparer.Ordinal)), string.Join(" ", xinputhid));
+        var overBluetooth = catalog.Where(x => x.UsesXinputhid && x.IsBluetooth).ToList();
+        Check("no Bluetooth xinputhid profile takes the GIP function", overBluetooth.Count > 0 && overBluetooth.All(x => !GipFunction.Applies(x) && x.Gip == null),
+              string.Join(" ", overBluetooth.Where(x => GipFunction.Applies(x) || x.Gip != null).Select(x => x.Id)));
         var pins = Pins();
-        var served = new Dictionary<string, (byte[] Metadata, byte[] Hello, ControllerProfile Form)>();
         var cacheKeys = new Dictionary<string, (string Id, byte[] Metadata)>();
-        foreach (var (id, identity, pid, sibling) in Family)
+        foreach (var (id, identity, pid) in Family)
         {
             var p = catalog.FirstOrDefault(x => x.Id == id);
             if (p == null) { Check($"{id}: in the catalog", false); continue; }
@@ -226,12 +225,6 @@ internal static partial class Program
                 else cacheKeys[key] = (id, meta);
             }
             Check($"{id}: its metadata matches the pin for its cache key in metadata-pins.txt", PinMismatch(form, pins) == null, PinMismatch(form, pins) ?? "");
-            served[id] = (meta, h, form);
-            if (sibling != null && served.TryGetValue(sibling, out var usb))
-                Check($"{id}: takes {sibling}'s metadata and input report with its own PID",
-                      usb.Metadata.AsSpan().SequenceEqual(meta)
-                      && usb.Form.InputReports!.First(r => r.Name == "input").Size == input.Size
-                      && usb.Hello.AsSpan(16).SequenceEqual(h.AsSpan(16)));
         }
         var personaKey = $"045E:02EA {Hex(Bytes("484D3002"))}";
         Check("xbox-one-s-full's cache key is no form's", !cacheKeys.ContainsKey(personaKey), personaKey);
@@ -264,7 +257,7 @@ internal static partial class Program
         foreach (var t in threads) t.Start();
         start.Set();
         foreach (var t in threads) t.Join();
-        Check("16 threads build all twelve forms at once with no error, and every thread gets the same bytes",
+        Check("16 threads build all seven forms at once with no error, and every thread gets the same bytes",
               errorsSeen.IsEmpty && results.All(r => r == results[0]), errorsSeen.FirstOrDefault() ?? "");
 
         Console.WriteLine("\n-- refusals --");

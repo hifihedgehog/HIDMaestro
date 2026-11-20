@@ -859,7 +859,8 @@ public sealed class HMContext : IDisposable
         // here, before the lease.
         var resolved = ResolveFor(profile, backend);
         // The profile the device runs: the one asked for, or on the USB/IP
-        // backend the USB form a Bluetooth identity names (usbForm).
+        // backend the form a pad that reaches XInput through xinputhid
+        // presents there (HMProfile.FormOn).
         var presented = profile;
         if (resolved == HMBackend.Usbip)
         {
@@ -867,11 +868,10 @@ public sealed class HMContext : IDisposable
             // is refused with nothing to undo.
             try
             {
-                if (profile.Inner.UsbForm != null) presented = new HMProfile(profile.Inner.UsbFormOf(HMBackend.Usbip));
                 // A Bluetooth pad that reaches XInput through xinputhid
                 // presents the HID device it is over the air, its
                 // bluetoothHid block (ControllerProfile.BluetoothHidForm).
-                else if (profile.Inner.PresentsBluetoothHid)
+                if (profile.Inner.PresentsBluetoothHid)
                     presented = new HMProfile(profile.Inner.BluetoothHidForm());
                 // A wired pad that reaches XInput through xinputhid presents its
                 // GIP form, the GIP model's device with the profile's identity

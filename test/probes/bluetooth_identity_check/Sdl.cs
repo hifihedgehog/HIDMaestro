@@ -3,12 +3,12 @@
 // names (SDL_CreateJoystickGUID: bytes 0-1 the bus, byte 14 the driver,
 // 'h' for HIDAPI), the gamepad type, the connection state, a face button,
 // rumble and the LEDs, each read back through the controller's
-// OutputDecoded or OutputReceived. dualsense-composite runs first as the
-// positive control. The Joy-Cons, the SNES, N64 and Genesis pads, their USB
-// forms and the two Stadia pads have each of their controls checked on the
-// joystick button or axis SDL's driver for the pad sends it on. On USB/IP
-// the plain copies, the Bluetooth profiles with no usbForm, print what SDL
-// does as the control for the rule.
+// OutputDecoded or OutputReceived. A Bluetooth profile reads as Bluetooth
+// and wireless on either backend, and a USB profile as USB and wired:
+// dualsense-composite and each pad's USB profile are the USB controls of the
+// same run. The Joy-Cons, the SNES, N64 and Genesis pads, each one's USB
+// profile and the two Stadia pads have each of their controls checked on the
+// joystick button or axis SDL's driver for the pad sends it on.
 
 using System;
 using System.Collections.Generic;
@@ -68,6 +68,7 @@ internal static partial class Program
         {
             "dualsense-composite",
             "dualsense-bt", "dualsense-bt-full", "dualsense-edge-bt", "dualshock-4-v2-bt",
+            "dualsense", "dualsense-edge", "dualshock-4-v2",
             "switch-pro", "switch-pro-usb",
             "joycon-l", "joycon-r", "snes-nso", "n64-nso", "genesis-nso",
             "joycon-l-usb", "joycon-r-usb", "snes-nso-usb", "n64-nso-usb", "genesis-nso-usb",
@@ -91,57 +92,19 @@ internal static partial class Program
             using var ctx = new HMContext(backend);
             ctx.LoadDefaultProfiles();
             ctx.InstallDriver();
-            var list = ids.Length > 0 ? ids : backend == HMBackend.Usbip ? s_default.Concat(s_plain).ToArray() : s_default;
-            string? plainDir = list.Any(i => i.StartsWith("plain:", StringComparison.Ordinal)) ? PlainCopies(ctx, list) : null;
-            foreach (var id in list)
+            foreach (var id in ids.Length > 0 ? ids : s_default)
             {
-                var p = ctx.GetProfile(id.StartsWith("plain:", StringComparison.Ordinal) ? id.Substring(6) + "-plain" : id);
+                var p = ctx.GetProfile(id);
                 if (p == null) { Check($"{id} is in the catalog", false); continue; }
                 One(ctx, p, p.RequiresUsbipBackend ? HMBackend.Usbip : backend);
             }
-            if (plainDir != null)
-            {
-                try { Directory.Delete(plainDir, true); }
-                catch (IOException) { }
-                catch (UnauthorizedAccessException) { }
-            }
-        }
-
-        // The control for the rule itself: the same Bluetooth profile with
-        // no usbForm, which presents its Bluetooth form on the USB bus, as
-        // every Bluetooth profile did before usbForm.
-        static readonly string[] s_plain = { "plain:dualsense-bt", "plain:dualshock-4-v2-bt", "plain:switch-pro", "plain:joycon-l" };
-
-        /// <summary>Loads "&lt;id&gt;-plain", a catalog profile's file with
-        /// no usbForm, for each plain: entry, from a directory of its own.</summary>
-        static string PlainCopies(HMContext ctx, string[] list)
-        {
-            string dir = Path.Combine(Path.GetTempPath(), $"hm-btform-plain-{Environment.ProcessId}");
-            Directory.CreateDirectory(dir);
-            var asm = typeof(HMContext).Assembly;
-            foreach (var entry in list.Where(i => i.StartsWith("plain:", StringComparison.Ordinal)))
-            {
-                string id = entry.Substring(6);
-                foreach (var res in asm.GetManifestResourceNames().Where(n => n.StartsWith("HIDMaestro.Profiles.", StringComparison.Ordinal)))
-                {
-                    using var st = asm.GetManifestResourceStream(res)!;
-                    string t = new StreamReader(st, System.Text.Encoding.UTF8).ReadToEnd();
-                    if (System.Text.Json.Nodes.JsonNode.Parse(t) is not System.Text.Json.Nodes.JsonObject o || (string?)o["id"] != id) continue;
-                    o["id"] = id + "-plain";
-                    o.Remove("usbForm");
-                    File.WriteAllText(Path.Combine(dir, id + "-plain.json"), o.ToJsonString());
-                }
-            }
-            ctx.LoadProfilesFromDirectory(dir);
-            return dir;
         }
 
         static void One(HMContext ctx, HMProfile profile, HMBackend backend)
         {
             Console.WriteLine($"\n-- {profile.Id} on {backend} --");
             using var ctrl = ctx.CreateController(profile, null, backend);
-            var form = profile.FormOn(ctrl.Backend);
-            Console.WriteLine($"  presents {form.Id}");
+            Check("it presents its own form", ReferenceEquals(profile.FormOn(ctrl.Backend), profile), profile.FormOn(ctrl.Backend).Id);
             var decoded = new List<IReadOnlyDictionary<string, object>>();
             var packets = new List<(byte Id, byte[] Data, HMOutputSource Source)>();
             ctrl.OutputDecoded += (_, e) => { lock (decoded) decoded.Add(e.Fields); };
@@ -167,16 +130,14 @@ internal static partial class Program
             var sw = Stopwatch.StartNew();
             while (ownPath == null && sw.ElapsedMilliseconds < 15000)
             {
-                // The presented form's PID: the Genesis pad carries another
-                // on USB, and a Joy-Con is the charging grip.
-                ownPath = OwnInterface(form, serial)?.DevicePath;
+                ownPath = OwnInterface(profile, serial)?.DevicePath;
                 if (ownPath == null) Thread.Sleep(50);
             }
             Check("the HID interface enumerates", ownPath != null, ownPath ?? "");
             Check("SDL_Init(GAMEPAD)", SDL_Init(SDL_INIT_GAMEPAD));
             try
             {
-                if (ownPath != null) Drive(profile, form, ctrl, ownPath, decoded, packets, stateLock, s => { lock (stateLock) state = s; });
+                if (ownPath != null) Drive(profile, ctrl, ownPath, decoded, packets, stateLock, s => { lock (stateLock) state = s; });
             }
             finally
             {
@@ -186,7 +147,7 @@ internal static partial class Program
             }
         }
 
-        static void Drive(HMProfile profile, HMProfile form, HMController ctrl, string ownPath,
+        static void Drive(HMProfile profile, HMController ctrl, string ownPath,
             List<IReadOnlyDictionary<string, object>> decoded, List<(byte Id, byte[] Data, HMOutputSource Source)> packets,
             object stateLock, Action<HMGamepadState> setState)
         {
@@ -206,24 +167,11 @@ internal static partial class Program
                 if (list != IntPtr.Zero) SDL_free(list);
                 if (jid == 0) Thread.Sleep(50);
             }
-            // A plain copy is the control the rule is measured against: what
-            // SDL does with it is recorded, not asserted.
-            bool plain = profile.Id.EndsWith("-plain", StringComparison.Ordinal);
-            bool record = plain;
-            void Expect(string name, bool cond, string detail = "")
-            {
-                if (record) Console.WriteLine($"  [INFO] {name}: {(cond ? "yes" : "no")}{(detail.Length > 0 ? "  " + detail : "")}");
-                else Check(name, cond, detail);
-            }
+            static void Expect(string name, bool cond, string detail = "") => Check(name, cond, detail);
             if (jid == 0)
             {
                 string err = Marshal.PtrToStringUTF8(SDL_GetError()) ?? "";
-                if (plain)
-                {
-                    Console.WriteLine($"  [INFO] SDL lists no joystick for the pad after {sw.ElapsedMilliseconds} ms. SDL_GetError: '{err}'");
-                    return;
-                }
-                Expect("SDL lists a joystick for the pad's HID interface", false, $"SDL_GetError '{err}'");
+                Expect("SDL lists a joystick for the pad's HID interface", false, $"after {sw.ElapsedMilliseconds} ms, SDL_GetError '{err}'");
                 return;
             }
             var guid = SDL_GetJoystickGUIDForID(jid);
@@ -235,7 +183,8 @@ internal static partial class Program
             string name = Marshal.PtrToStringUTF8(SDL_GetJoystickNameForID(jid)) ?? "";
             Console.WriteLine($"  joystick {jid} '{name}' guid {Convert.ToHexString(g)} bus 0x{bus:X2} driver '{driver}' gamepad {SDL_IsGamepad(jid)}");
             Expect("SDL's HIDAPI backend drives the pad (GUID driver 'h')", driver == 'h', $"'{driver}'");
-            bool wantBt = ctrl.Backend == HMBackend.Umdf2 && profile.Connection == "bluetooth";
+            // The profile's own bus on either backend.
+            bool wantBt = profile.Connection == "bluetooth";
             Expect($"SDL reads the bus as {(wantBt ? "Bluetooth (0x05)" : "USB (0x03)")}", bus == (wantBt ? 0x05 : 0x03), $"0x{bus:X2}");
 
             SDL_ClearError();
@@ -243,16 +192,10 @@ internal static partial class Program
             if (pad == IntPtr.Zero)
             {
                 string err = Marshal.PtrToStringUTF8(SDL_GetError()) ?? "";
-                if (plain)
-                {
-                    Console.WriteLine($"  [INFO] SDL does not open the pad: '{err}'");
-                    return;
-                }
                 Expect("SDL opens the pad", false, $"SDL_GetError '{err}'");
                 return;
             }
-            if (plain) Console.WriteLine("  [INFO] SDL opens the pad");
-            else Expect("SDL opens the pad", true);
+            Expect("SDL opens the pad", true);
             try
             {
                 int type = SDL_GetGamepadType(pad);
@@ -285,13 +228,9 @@ internal static partial class Program
                     Expect("a face button submitted with SubmitState reads back through SDL", pressed);
                     setState(new HMGamepadState());
 
-                    // The sticks and triggers, filled for the profile the
-                    // consumer created, read back through SDL in the form the
-                    // device presents: the right stick hard right, the left
-                    // stick at rest, the right trigger pulled and the left
-                    // released. A form whose stick or trigger axes differ from
-                    // its Bluetooth identity's (switch-pro's right stick is
-                    // Rx/Ry, switch-pro-usb's Z/Rz) shows here. A pad with
+                    // The sticks and triggers read back through SDL: the
+                    // right stick hard right, the left stick at rest, the
+                    // right trigger pulled and the left released. A pad with
                     // digital triggers pulls ZR, layout button 7.
                     bool digitalTriggers = profile.Triggers.Count == 0;
                     var standard = HMGamepadStateHelpers.StandardAxes(profile, 0.5f, 0.5f, 1.0f, 0.5f, 0f, 1.0f);
@@ -318,8 +257,8 @@ internal static partial class Program
                 bool rumbled = SDL_RumbleGamepad(pad, 0xFFFF, 0x8000, 1000);
                 // A profile that decodes its motors raises them. Any other
                 // shows SDL's rumble write as the output report it is.
-                bool decodes = form.Inner.ExtendedOutputReport?.Fields?.Any(f => f.Semantic is "leftMotor" or "rightMotor") == true
-                    || form.Inner.GetOrCompileModel().Decoders.Any(d => d.Semantics.Contains("leftMotor"));
+                bool decodes = profile.Inner.ExtendedOutputReport?.Fields?.Any(f => f.Semantic is "leftMotor" or "rightMotor") == true
+                    || profile.Inner.GetOrCompileModel().Decoders.Any(d => d.Semantics.Contains("leftMotor"));
                 if (decodes)
                 {
                     bool reached = rumbled && WaitPump(() => { lock (decoded) return decoded.Any(f => Num(f, "leftMotor") > 0 || Num(f, "rightMotor") > 0); }, 5000);
@@ -332,10 +271,10 @@ internal static partial class Program
                     bool wrote = rumbled && WaitPump(() => { lock (packets) return packets.Count(p => p.Source == HMOutputSource.HidOutput) > sentBefore; }, 5000);
                     string what;
                     lock (packets) what = string.Join(" ", packets.Where(p => p.Source == HMOutputSource.HidOutput).Skip(sentBefore).Take(2).Select(p => $"0x{p.Id:X2}:{Convert.ToHexString(p.Data)}"));
-                    Expect($"SDL_RumbleGamepad's write reaches OutputReceived ({form.Id} decodes no motors)", wrote, $"rumble call {rumbled}, {(what.Length > 0 ? what : "none")}");
+                    Expect($"SDL_RumbleGamepad's write reaches OutputReceived ({profile.Id} decodes no motors)", wrote, $"rumble call {rumbled}, {(what.Length > 0 ? what : "none")}");
                 }
 
-                if (form.Inner.ExtendedOutputReport?.Fields?.Any(f => f.Semantic == "lightbar") == true)
+                if (profile.Inner.ExtendedOutputReport?.Fields?.Any(f => f.Semantic == "lightbar") == true)
                 {
                     lock (decoded) decoded.Clear();
                     bool set = SDL_SetGamepadLED(pad, 0xFF, 0x00, 0x00);
@@ -344,7 +283,7 @@ internal static partial class Program
                     lock (decoded) bar = decoded.Count == 0 ? "none" : decoded[^1].TryGetValue("lightbar", out var lb) ? Show(lb) : "no lightbar";
                     Expect("SDL_SetGamepadLED reaches OutputDecoded lightbar", lit, $"call {set}, {bar}");
                 }
-                else if (form.Inner.Protocol != null)
+                else if (profile.Inner.Protocol != null)
                 {
                     // The player LEDs: SDL sends subcommand 0x30 on open
                     // (UpdateSlotLED, SDL_hidapi_switch.c:777-788).
@@ -409,7 +348,7 @@ internal static partial class Program
         /// R), and L, ZL, R and ZR are its paddles. The SNES, N64 and Genesis
         /// pads take the Pro Controller's reading, with the N64's and the
         /// Genesis's face buttons by label (AlwaysUsesLabels, RemapButton).
-        /// A USB form is checked as the pad it is the form of.</summary>
+        /// A pad's USB profile is checked as the pad.</summary>
         static Control[]? PadChecks(string id) => (id.EndsWith("-nso-usb", StringComparison.Ordinal) || id.StartsWith("joycon-", StringComparison.Ordinal) && id.EndsWith("-usb", StringComparison.Ordinal) ? id[..^4] : id) switch
         {
             "joycon-l" => new[]

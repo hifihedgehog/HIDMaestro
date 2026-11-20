@@ -272,22 +272,6 @@ internal static class Program
     /// device and no elevation.</summary>
     static void Selftest()
     {
-        // The model the extract part expects: a Bluetooth identity's own on
-        // UMDF2, its USB form's on USB/IP, and for a Bluetooth profile with
-        // no USB form, its identity on the USB bus.
-        using (var ctx = new HMContext())
-        {
-            ctx.LoadDefaultProfiles();
-            var bt = ctx.GetProfile("dualsense-bt")!;
-            var onUmdf2 = PresentedIdentityModel(bt, HMBackend.Umdf2);
-            var onUsbip = PresentedIdentityModel(bt, HMBackend.Usbip);
-            Check("selftest: dualsense-bt presents sony-dualsense-bt on UMDF2 and its USB form's sony-dualsense on USB/IP",
-                  onUmdf2 == ("sony-dualsense-bt", "bluetooth") && onUsbip == ("sony-dualsense", "usb"), $"{onUmdf2}, {onUsbip}");
-            var remote = ctx.GetProfile("ps3-remote")!;
-            var remoteOnUsb = PresentedIdentityModel(remote, HMBackend.Usbip);
-            Check("selftest: ps3-remote, Bluetooth with no USB form, presents on the USB bus on USB/IP, where its identity gives the USB model",
-                  remoteOnUsb.Bus == "usb" && remoteOnUsb.Model != remote.Inner.Resolved.IdentityModel, $"{remoteOnUsb}, own {remote.Inner.Resolved.IdentityModel}");
-        }
         string prefix = $@"Local\HMContractLiveSelftest{Environment.ProcessId}_";
         (IntPtr H, IntPtr V) Make(int n, int protocol)
         {
@@ -481,24 +465,6 @@ internal static class Program
         return reports.Select(r => h == null ? null : Get(h, r, 65)).ToList();
     }
 
-    /// <summary>The model the identity of the device <paramref name="p"/>
-    /// presents on <paramref name="backend"/> gives it, which is what the
-    /// extractor reads back: the profile's own on UMDF2, and on USB/IP the
-    /// identity of what it presents there on the USB bus, the bus every
-    /// USB/IP device is on: its USB form under its own id and strings
-    /// (ControllerProfile.UsbFormOf), or itself.</summary>
-    static (string? Model, string Bus) PresentedIdentityModel(HMProfile p, HMBackend backend)
-    {
-        var shown = p.Inner.UsbFormOf(backend);
-        if (backend != HMBackend.Usbip || string.IsNullOrEmpty(shown.Connection) || shown.Connection == "usb")
-            return (shown.Resolved.IdentityModel, string.IsNullOrEmpty(shown.Connection) ? "usb" : shown.Connection);
-        var onUsb = shown.Clone();
-        onUsb.Connection = "usb";
-        onUsb.BluetoothTransport = null;
-        onUsb.ResolvedCache = null;
-        return (onUsb.Resolved.IdentityModel, "usb");
-    }
-
     static void Extract(HMContext ctx)
     {
         foreach (var p in ctx.AllProfiles.Where(x => !x.Inner.RequiresUsbipBackend && x.HasDeviceModel && x.Inner.Resolved.Model.FeatureStubs != null)
@@ -517,10 +483,14 @@ internal static class Program
                 x = HMDeviceExtractor.Extract(d);
                 device = Answers(c, reports);
             }
-            var (want, bus) = PresentedIdentityModel(p, backend);
-            Check($"{p.Id}: the extracted profile names the model the identity of the device it presents gives it",
-                  x.Inner.DeviceModelFrom != null && x.Inner.DeviceModelFrom == want,
-                  $"{x.Inner.DeviceModelFrom ?? "none"}, {x.Connection} (on {backend} the device presents on the {bus} bus, where its identity gives {want ?? "none"})");
+            // The profile's own on both backends: a Bluetooth identity on
+            // USB/IP carries a Bluetooth marker as its first compatible ID,
+            // and the extractor reads the bus from there as hidapi does.
+            string? want = p.Inner.Resolved.IdentityModel;
+            string bus = string.IsNullOrEmpty(p.Inner.Connection) ? "usb" : p.Inner.Connection;
+            Check($"{p.Id}: the extracted profile names the model the profile's identity gives it, read on the profile's bus",
+                  x.Inner.DeviceModelFrom != null && x.Inner.DeviceModelFrom == want && x.Connection == bus,
+                  $"{x.Inner.DeviceModelFrom ?? "none"}, {x.Connection} (on {backend}, the profile is on the {bus} bus, where its identity gives {want ?? "none"})");
             using (var c = Create(ctx, 0, x, $"{p.Id}: the extracted profile"))
             {
                 if (c == null) continue;

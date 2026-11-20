@@ -3024,31 +3024,36 @@ function Scenario-Switch-Pro-Sdl3 {
                  -Message 'SDL3''s HIDAPI_DriverSwitch no longer opens the virtual Switch Pro, completes its init, or reads its sticks, buttons and motion (see probe stdout)'
 }
 
-# S108: a Bluetooth identity's USB form (usbForm). Offline the load rule,
-# the presented profile and its USB device, FormOn, the raw-frame rule and
-# the decoded output names. Live, on the backend the run resolves to, the
-# HID interface each of the five presents, with dualsense-composite as the
-# positive control. Then SDL 3.4.18's release DLL for this architecture
-# opens each Sony and Nintendo Bluetooth identity, the USB forms and the
-# Stadia and Luna pads, and on USB/IP the same Bluetooth profiles without
-# usbForm as the control. The release is the official SDL3-3.4.18 zip
-# beside the tree, SDL3-release-3.4.18 on x64 and SDL3-release-3.4.18-arm64
-# on ARM64.
-function Scenario-Bt-Usb-Form {
+# S108: a Bluetooth profile presents its own form on every backend, and a
+# program reads it on the Bluetooth bus. Offline: what each of the catalog's
+# Bluetooth profiles presents on each backend, its USB device, the marker of
+# its transport and the bus hidapi's rule reads from the node. Then, on each
+# backend the machine runs, UMDF2 and USB/IP on x64 and USB/IP on ARM64:
+# every Bluetooth profile but the Xbox pads is created and its node read as
+# hidapi reads it, with its version, product string and reports, and SDL
+# 3.4.18's release DLL for this architecture opens each Sony, Nintendo,
+# Stadia and Luna pad and each one's USB profile. A Bluetooth pad must read
+# as Bluetooth and wireless on both, and a USB one as USB and wired. The
+# release is the official SDL3-3.4.18 zip beside the tree,
+# SDL3-release-3.4.18 on x64 and SDL3-release-3.4.18-arm64 on ARM64.
+function Scenario-Bluetooth-Identity {
     $failed = @()
     try {
-        Invoke-Probe -Dir 'bt_usb_form_check' -Exe 'BtUsbFormCheck.exe' -Arguments 'offline' -Tag 'offline' `
-                     -Message 'a Bluetooth identity no longer resolves to its USB form, or the form is refused or presented wrong (see probe stdout)'
+        Invoke-Probe -Dir 'bluetooth_identity_check' -Exe 'BluetoothIdentityCheck.exe' -Arguments 'offline' -Tag 'offline' `
+                     -Message 'a Bluetooth profile no longer presents its own form, its USB device or the marker of its transport (see probe stdout)'
     } catch { $failed += $_.Exception.Message }
-    try {
-        Invoke-Probe -Dir 'bt_usb_form_check' -Exe 'BtUsbFormCheck.exe' -Arguments 'live auto' -Tag 'live' `
-                     -Message 'a Bluetooth identity presents the wrong form on this backend (see probe stdout)'
-    } catch { $failed += $_.Exception.Message }
+    $backends = if ((Get-MachineArch) -eq 'arm64' -or $env:HIDMAESTRO_BACKEND -eq 'usbip') { @('usbip') } else { @('umdf2', 'usbip') }
     $sdl = Join-Path (Split-Path $repoRoot) ('SDL3-release-3.4.18' + $(if ((Get-MachineArch) -eq 'arm64') { '-arm64' } else { '' }))
-    try {
-        Invoke-Probe -Dir 'bt_usb_form_check' -Exe 'BtUsbFormCheck.exe' -Arguments "sdl auto `"$sdl`"" -Tag 'sdl' `
-                     -Message 'SDL 3.4.18 no longer opens, reads or drives a Bluetooth identity in the form this backend presents (see probe stdout)'
-    } catch { $failed += $_.Exception.Message }
+    foreach ($backend in $backends) {
+        try {
+            Invoke-Probe -Dir 'bluetooth_identity_check' -Exe 'BluetoothIdentityCheck.exe' -Arguments "live $backend" -Tag "live-$backend" `
+                         -Message "a Bluetooth profile does not read as Bluetooth on $backend, or its version, product string or reports are not its own (see probe stdout)"
+        } catch { $failed += $_.Exception.Message }
+        try {
+            Invoke-Probe -Dir 'bluetooth_identity_check' -Exe 'BluetoothIdentityCheck.exe' -Arguments "sdl $backend `"$sdl`"" -Tag "sdl-$backend" `
+                         -Message "SDL 3.4.18 no longer opens, reads or drives a Bluetooth pad as a Bluetooth pad on $backend (see probe stdout)"
+        } catch { $failed += $_.Exception.Message }
+    }
     if ($failed.Count -gt 0) { throw ($failed -join ' AND ') }
 }
 
@@ -3198,6 +3203,36 @@ function Scenario-Driver-Signing {
 function Scenario-Xusb-Persona {
     Invoke-Probe -Dir 'xusb_persona_check' -Exe 'XusbPersonaCheck.exe' `
                  -Message 'an Xbox 360 profile on USB/IP no longer presents its XUSB function, does not bind xusb22, or does not round-trip state and rumble through XInput as the companion does (see probe stdout)' -SkipCodes 2
+}
+
+# S113: the five Bluetooth Xbox pads on the USB/IP backend, each as the HID
+# device it is over Bluetooth with xinputhid on the device's node, as Windows
+# installs it for a real pad. Offline: each form's descriptor, version and
+# button, stick, trigger and hat positions against SDL's and xpadneo's
+# parsers. Live: the device tree, XInput control by control, what XInput and
+# Windows.Gaming.Input report the pad as, the rumble packet, a second create
+# and a plain profile on the same record. Then the Xbox button of a pad that
+# sends it in a report of its own, held through a moved stick and pressed
+# fifty times. Exit 2 when another program that embeds HIDMaestro is running.
+function Scenario-Bluetooth-Xbox-Hid {
+    $failed = @()
+    try {
+        Invoke-Probe -Dir 'bluetooth_hid_check' -Exe 'BluetoothHidCheck.exe' -Arguments 'offline' -Tag 'offline' `
+                     -Message 'a Bluetooth Xbox pad''s HID form, its node values or a load rule changed (see probe stdout)'
+    } catch { $failed += $_.Exception.Message }
+    try {
+        Invoke-Probe -Dir 'bluetooth_hid_check' -Exe 'BluetoothHidCheck.exe' -Arguments 'live' -Tag 'live' -SkipCodes @(2) `
+                     -Message 'a Bluetooth Xbox pad on USB/IP no longer starts with xinputhid on its node, or XInput or Windows.Gaming.Input read it wrong (see probe stdout)'
+    } catch { $failed += $_.Exception.Message }
+    try {
+        Invoke-Probe -Dir 'bluetooth_hid_check' -Exe 'BluetoothHidCheck.exe' -Arguments 'hold xbox-one-s-bt' -Tag 'hold' -SkipCodes @(2) `
+                     -Message 'the Xbox button of a pad that sends it in its own report does not stay down while held, or stays down after its release (see probe stdout)'
+    } catch { $failed += $_.Exception.Message }
+    try {
+        Invoke-Probe -Dir 'bluetooth_hid_check' -Exe 'BluetoothHidCheck.exe' -Arguments 'guide xbox-one-s-bt 50' -Tag 'guide' -SkipCodes @(2) `
+                     -Message 'XInput missed a press or a release of the Xbox button (see probe stdout)'
+    } catch { $failed += $_.Exception.Message }
+    if ($failed.Count -gt 0) { throw ($failed -join ' AND ') }
 }
 
 # S106: the wired Xbox One S pad as a USB device on the USB/IP backend
@@ -3362,11 +3397,12 @@ $scenarios = @(
     @{ Name = 'S105_Xusb_Persona';               Body = ${function:Scenario-Xusb-Persona} },
     @{ Name = 'S106_Gip_Persona';                Body = ${function:Scenario-Gip-Persona} },
     @{ Name = 'S107_Backend_Parity';             Body = ${function:Scenario-Backend-Parity} },
-    @{ Name = 'S108_Bt_Usb_Form';                Body = ${function:Scenario-Bt-Usb-Form} },
+    @{ Name = 'S108_Bluetooth_Identity';         Body = ${function:Scenario-Bluetooth-Identity} },
     @{ Name = 'S109_Xusb_Family';                Body = ${function:Scenario-Xusb-Family} },
     @{ Name = 'S110_Xusb_Battery_Receiver';      Body = ${function:Scenario-Xusb-Battery-Receiver} },
     @{ Name = 'S111_Xusb_Wgi_Family';            Body = ${function:Scenario-Xusb-Wgi-Family} },
-    @{ Name = 'S112_Standard_Axes';              Body = ${function:Scenario-Standard-Axes} }
+    @{ Name = 'S112_Standard_Axes';              Body = ${function:Scenario-Standard-Axes} },
+    @{ Name = 'S113_Bluetooth_Xbox_Hid';         Body = ${function:Scenario-Bluetooth-Xbox-Hid} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

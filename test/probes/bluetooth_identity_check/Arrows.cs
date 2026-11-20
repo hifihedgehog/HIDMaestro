@@ -2,7 +2,7 @@
 // the protocol, and in input mode 0x3F after one has, the pad sends left,
 // down, up and right as buttons 1 to 4 (SDL_hidapi_switch.c
 // HandleCombinedSimpleControllerStateL, BlueRetro sw.c sw_jc_btns_mask).
-// Read off the HID stack on the backend that presents the Bluetooth form.
+// Read off the HID stack on either backend.
 //
 // Another program can speak the protocol to the pad before this check reads
 // it. A Chromium browser handshakes every new Nintendo pad within

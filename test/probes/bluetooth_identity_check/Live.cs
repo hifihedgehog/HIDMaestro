@@ -1,6 +1,6 @@
-// live <backend>: the HID interface each Bluetooth identity with a USB form
-// presents on <backend>, with dualsense-composite on the USB/IP backend as
-// the positive control in the same run.
+// live <backend> [ids]: each Bluetooth profile but the Xbox pads on
+// <backend>, with dualsense on <backend> and dualsense-composite on USB/IP as
+// the USB controls of the same run.
 
 using System;
 using System.Collections.Generic;
@@ -16,18 +16,45 @@ using Microsoft.Win32.SafeHandles;
 
 internal static partial class Program
 {
-    static void Live(HMBackend backend)
+    static void Live(HMBackend backend, string[] ids)
     {
         using var ctx = new HMContext(backend);
         ctx.LoadDefaultProfiles();
         ctx.InstallDriver();
         Console.WriteLine($"  context backend {backend}, machine backend {HMContext.MachineBackend}");
 
-        foreach (var (btId, formId) in Forms)
-            LiveOne(ctx, ctx.GetProfile(btId)!, backend);
-        // The positive control: a USB persona the USB/IP backend has always
-        // presented, in the same run.
+        foreach (string id in ids.Length > 0 ? ids : Bluetooth.Select(b => b.Id).ToArray())
+        {
+            var p = ctx.GetProfile(id);
+            if (p == null) { Check($"{id} is in the catalog", false); continue; }
+            // A pad that reaches XInput through xinputhid is read through
+            // xinputhid: bluetooth_hid_check has those.
+            if (p.Inner.UsesXinputhid) continue;
+            LiveOne(ctx, p, backend);
+        }
+        if (ids.Length > 0) return;
+        // The USB controls: the same pad's USB profile on this backend, and
+        // a USB persona the USB/IP backend has always presented.
+        LiveOne(ctx, ctx.GetProfile("dualsense")!, backend);
         LiveOne(ctx, ctx.GetProfile("dualsense-composite")!, HMBackend.Usbip);
+    }
+
+    /// <summary>The bus hidapi reads from a node's compatible IDs: each ID
+    /// in order, upper-cased, and in each the tests in hidapi's order (SDL
+    /// 3.4.18 src/hidapi/windows/hid.c:769-807). The first ID that passes
+    /// one decides.</summary>
+    internal static string HidapiBus(IEnumerable<string> compatibleIds)
+    {
+        foreach (string id in compatibleIds)
+        {
+            string up = id.ToUpperInvariant();
+            if (up.Contains("USB", StringComparison.Ordinal)) return "usb";
+            if (up.Contains("BTHENUM", StringComparison.Ordinal)) return "bluetooth";
+            if (up.Contains("BTHLEDEVICE", StringComparison.Ordinal)) return "bluetooth";
+            if (up.Contains("PNP0C50", StringComparison.Ordinal)) return "i2c";
+            if (up.Contains("PNP0C51", StringComparison.Ordinal)) return "spi";
+        }
+        return "unknown";
     }
 
     static void LiveOne(HMContext ctx, HMProfile profile, HMBackend backend)
@@ -35,51 +62,61 @@ internal static partial class Program
         Console.WriteLine($"\n-- {profile.Id} on {backend} --");
         using var ctrl = ctx.CreateController(profile, null, backend);
         Check("the controller runs on the backend asked for", ctrl.Backend == backend, ctrl.Backend.ToString());
-        var form = profile.FormOn(ctrl.Backend);
-        Console.WriteLine($"  presents {form.Id}");
+        Check("it presents its own form", ReferenceEquals(profile.FormOn(ctrl.Backend), profile), profile.FormOn(ctrl.Backend).Id);
 
         var decoded = new List<IReadOnlyDictionary<string, object>>();
         ctrl.OutputDecoded += (_, e) => { lock (decoded) decoded.Add(e.Fields); };
 
         string serial = SerialOf(ctrl);
-        HMHidDeviceInfo? info = null;
+        var all = new List<HMHidDeviceInfo>();
         var sw = Stopwatch.StartNew();
-        while (info == null && sw.ElapsedMilliseconds < 15000)
+        while (all.Count == 0 && sw.ElapsedMilliseconds < 15000)
         {
-            // The presented form's PID: the Genesis pad carries another on
-            // USB, and a Joy-Con is the charging grip.
-            info = OwnInterface(form, serial);
-            if (info == null) Thread.Sleep(50);
+            all = Collections(profile, serial);
+            if (all.Count == 0) Thread.Sleep(50);
         }
-        Check($"the HID interface enumerates (serial {serial})", info != null, info?.DevicePath ?? "");
-        if (info == null) return;
+        Check($"its HID collections enumerate (serial {serial})", all.Count > 0, $"{all.Count}");
+        if (all.Count == 0) return;
 
-        // The bus hidapi reads: the compatible IDs of the HID devnode's
-        // parent, USB tested first (SDL 3.4.18 hid.c:759-793).
-        var compat = ParentCompatibleIds(info.DevicePath);
-        string bus = compat.Any(c => c.Contains("USB", StringComparison.OrdinalIgnoreCase)) ? "usb"
-            : compat.Any(c => c.Contains("BTHENUM", StringComparison.OrdinalIgnoreCase) || c.Contains("BTHLEDEVICE", StringComparison.OrdinalIgnoreCase)) ? "bluetooth" : "unknown";
-        bool wantBt = ctrl.Backend == HMBackend.Umdf2 && string.Equals(profile.Connection, "bluetooth", StringComparison.OrdinalIgnoreCase);
-        Check($"hidapi reads the bus as {(wantBt ? "bluetooth" : "usb")}", bus == (wantBt ? "bluetooth" : "usb"),
-            $"parent compatible IDs: {string.Join(" | ", compat)}");
+        // The bus hidapi reads. A Bluetooth profile reads as Bluetooth on
+        // either backend. A USB control reads as USB on USB/IP, and on UMDF2,
+        // where its root-enumerated node carries no compatible IDs, as no
+        // bus at all, which SDL takes as not Bluetooth
+        // (SDL_hidapijoystick.c:937).
+        bool wantBt = string.Equals(profile.Connection, "bluetooth", StringComparison.OrdinalIgnoreCase);
+        var buses = all.Select(c => (c.DevicePath, Ids: ParentCompatibleIds(c.DevicePath))).ToList();
+        var read = buses.Select(b => HidapiBus(b.Ids)).Distinct().ToArray();
+        Check(wantBt ? $"hidapi reads the bus as Bluetooth for each of its {all.Count} collection(s)"
+                     : $"hidapi reads no Bluetooth bus for its {all.Count} collection(s), the USB control",
+            read.All(r => (r == "bluetooth") == wantBt), $"read {string.Join(", ", read)}. Parent compatible IDs: {string.Join(" | ", buses[0].Ids)}");
 
+        ushort wantVersion = profile.Inner.VersionNumber ?? 0x0100;
+        var offVersion = all.Where(c => c.VersionNumber != wantVersion).Select(c => $"0x{c.VersionNumber:X4}").Distinct().ToArray();
+        Check($"the version is the profile's 0x{wantVersion:X4}", offVersion.Length == 0, string.Join(", ", offVersion));
+        var offProduct = all.Where(c => c.ProductString != profile.ProductString).Select(c => $"'{c.ProductString}'").Distinct().ToArray();
+        Check($"the product string is '{profile.ProductString}'", offProduct.Length == 0, string.Join(", ", offProduct));
+
+        // The rest reads a pad's one collection. Windows holds a keyboard's
+        // and a mouse's for itself, and S107 compares every collection's caps.
+        static bool HeldByWindows(HMHidDeviceInfo c) => c.TopLevelUsagePage == 0x01 && c.TopLevelUsage is 0x02 or 0x06 or 0x07;
+        if (all.Count != 1 || HeldByWindows(all[0])) return;
+        var info = all[0];
         using var h = OpenHid(info.DevicePath);
-        Check("the HID interface opens read/write", !h.IsInvalid, $"error {Marshal.GetLastWin32Error()}");
+        Check("the HID collection opens read/write", !h.IsInvalid, $"error {Marshal.GetLastWin32Error()}");
         if (h.IsInvalid) return;
         var caps = Caps(h);
-        var map = form.Inner.GetOrBuildReportMap();
-        int wantIn = map.Reports.Where(r => r.Kind == HidReportKind.Input).Max(r => r.FrameBytes);
-        int wantOut = map.Reports.Where(r => r.Kind == HidReportKind.Output).Select(r => r.FrameBytes).DefaultIfEmpty(0).Max();
-        Check($"input report length is {form.Id}'s", caps.In == wantIn, $"{caps.In}, want {wantIn}");
-        Check($"output report length is {form.Id}'s", caps.Out == wantOut, $"{caps.Out}, want {wantOut}");
-        ushort wantVersion = form.Inner.VersionNumber ?? 0x0100;
-        Check($"version is {form.Id}'s", info.VersionNumber == wantVersion, $"0x{info.VersionNumber:X4}, want 0x{wantVersion:X4}");
-        string wantProduct = form.Inner.FormOfIds?.Contains(profile.Id) == true ? form.ProductString : profile.ProductString;
-        Check($"the product string is '{wantProduct}'", info.ProductString == wantProduct, $"'{info.ProductString}'");
-        if (profile.Id == "joycon-l" && ctrl.Backend == HMBackend.Umdf2) JoyConArrows(ctrl, info.DevicePath);
+        var map = profile.Inner.GetOrBuildReportMap();
+        // Windows counts a report ID byte in each length, with or without
+        // report IDs in the descriptor.
+        int idByte = map.UsesReportIds ? 0 : 1;
+        int wantIn = map.Reports.Where(r => r.Kind == HidReportKind.Input).Max(r => r.FrameBytes) + idByte;
+        int wantOut = map.Reports.Where(r => r.Kind == HidReportKind.Output).Select(r => r.FrameBytes + idByte).DefaultIfEmpty(0).Max();
+        Check("the input report length is the profile's", caps.In == wantIn, $"{caps.In}, want {wantIn}");
+        Check("the output report length is the profile's", caps.Out == wantOut, $"{caps.Out}, want {wantOut}");
+        if (profile.Id == "joycon-l") JoyConArrows(ctrl, info.DevicePath);
 
-        // A feature report of the form: the calibration SDL reads first, 0x05
-        // on a DualSense and on a DualShock 4 over Bluetooth, 0x02 on a
+        // A feature report: the calibration SDL reads first, 0x05 on a
+        // DualSense and on a DualShock 4 over Bluetooth, 0x02 on a
         // DualShock 4 over USB (SDL_hidapi_ps4.c:494-510).
         var feature = new byte[] { 0x05, 0x02 }.Select(id => map.Reports.FirstOrDefault(r => r.Kind == HidReportKind.Feature && r.ReportId == id))
             .FirstOrDefault(r => r != null);
@@ -88,84 +125,73 @@ internal static partial class Program
             var buf = new byte[caps.Feature];
             buf[0] = feature.ReportId;
             bool got = HidD_GetFeature(h, buf, buf.Length);
-            Check($"feature report 0x{feature.ReportId:X2} of {form.Id} answers", got, got ? Convert.ToHexString(buf, 0, Math.Min(16, buf.Length)) : $"error {Marshal.GetLastWin32Error()}");
+            Check($"feature report 0x{feature.ReportId:X2} answers", got, got ? Convert.ToHexString(buf, 0, Math.Min(16, buf.Length)) : $"error {Marshal.GetLastWin32Error()}");
         }
 
-        // An output report of the form reaches OutputDecoded with the values
-        // it carries.
-        byte[]? output = OutputOf(form);
+        // An output report reaches OutputDecoded with the values it carries.
+        byte[]? output = OutputOf(profile);
         if (output != null)
         {
             var wire = new byte[caps.Out];
             Array.Copy(output, wire, Math.Min(output.Length, wire.Length));
             bool wrote = WriteFile(h, wire, (uint)wire.Length, out uint n, IntPtr.Zero);
-            Check($"output report 0x{wire[0]:X2} of {form.Id} writes", wrote && n == wire.Length, wrote ? "" : $"error {Marshal.GetLastWin32Error()}");
+            Check($"output report 0x{wire[0]:X2} writes", wrote && n == wire.Length, wrote ? "" : $"error {Marshal.GetLastWin32Error()}");
             // The values the report carries, each motor on its own: the
             // Sony report sets right 200 and left 100, the Switch report
             // the left motor's top amplitude and the right neutral.
-            var (wantLeft, wantRight) = form.HasExtendedOutput ? (100, 200) : DecodesLeft(form) ? (255, 0) : (0, 255);
+            var (wantLeft, wantRight) = profile.HasExtendedOutput ? (100, 200) : DecodesLeft(profile) ? (255, 0) : (0, 255);
             bool seen = Wait(() => { lock (decoded) return decoded.Any(f => Num(f, "leftMotor") == wantLeft && Num(f, "rightMotor") == wantRight); }, 5000);
             string last;
             lock (decoded) last = decoded.Count == 0 ? "none" : string.Join(" ", decoded[^1].Where(k => k.Key.EndsWith("Motor")).Select(k => $"{k.Key}={k.Value}"));
             Check($"OutputDecoded raises leftMotor {wantLeft} and rightMotor {wantRight}", seen, last);
         }
 
-        // Raw frames follow the presented form.
-        bool other = !ReferenceEquals(form, profile);
-        if (profile.Inner.ExtendedReport is { } ext && profile.Inner.StateBlock == null && !ReferenceEquals(form.Inner.ExtendedReport, null))
+        // Raw frames are the profile's own on either backend.
+        if (profile.Inner.ExtendedReport is { } ext && profile.Inner.StateBlock == null)
         {
-            var btFrame = new byte[ext.Size];
-            btFrame[0] = ext.ReportIdByte;
+            var frame = new byte[ext.Size];
+            frame[0] = ext.ReportIdByte;
             Exception? thrown = null;
-            try { ctrl.SubmitRawExtendedReport(btFrame); } catch (Exception e) { thrown = e; }
-            if (other)
-                Check($"a {ext.Size}-byte Bluetooth-form raw frame is refused with the form named",
-                    thrown is ArgumentException a && a.Message.Contains(form.Id), thrown?.Message ?? "accepted");
-            else
-                Check($"a {ext.Size}-byte raw frame of its own form is taken", thrown == null, thrown?.Message ?? "");
-            var own = new byte[form.Inner.ExtendedReport!.Size];
-            own[0] = form.Inner.ExtendedReport.ReportIdByte;
-            thrown = null;
-            try { ctrl.SubmitRawExtendedReport(own); } catch (Exception e) { thrown = e; }
-            Check($"a {own.Length}-byte raw frame of {form.Id} is taken", thrown == null, thrown?.Message ?? "");
+            try { ctrl.SubmitRawExtendedReport(frame); } catch (Exception e) { thrown = e; }
+            Check($"a {ext.Size}-byte raw frame of its extended report is taken", thrown == null, thrown?.Message ?? "");
         }
         if (profile.Inner.StateBlock is { } block)
         {
             Exception? thrown = null;
             try { ctrl.SubmitRawReport(new byte[block.Size]); } catch (Exception e) { thrown = e; }
-            Check($"a {block.Size}-byte state block, the same in both forms, is taken", thrown == null, thrown?.Message ?? "");
+            Check($"a {block.Size}-byte state block is taken", thrown == null, thrown?.Message ?? "");
         }
         Exception? submit = null;
         try { ctrl.SubmitState(new HMGamepadState { Buttons = (HMButton)1 }); } catch (Exception e) { submit = e; }
         Check("SubmitState is taken", submit == null, submit?.Message ?? "");
     }
 
-    /// <summary>An output report of <paramref name="form"/> that sets the
-    /// motors: its extendedOutputReport encoded, or the Switch rumble report
-    /// 0x10 the decoder reads.</summary>
-    static byte[]? OutputOf(HMProfile form)
+    /// <summary>An output report of <paramref name="profile"/> that sets
+    /// the motors: its extendedOutputReport encoded, or the Switch rumble
+    /// report 0x10 the decoder reads.</summary>
+    static byte[]? OutputOf(HMProfile profile)
     {
-        if (form.HasExtendedOutput)
-            return HMOutputEncoder.Encode(form, new Dictionary<string, object>
+        if (profile.HasExtendedOutput)
+            return HMOutputEncoder.Encode(profile, new Dictionary<string, object>
             {
                 ["validFlag0"] = (byte)0x03, ["rightMotor"] = (byte)200, ["leftMotor"] = (byte)100,
             });
-        if (form.Inner.GetOrCompileModel().Decoders.Any(d => d.Reports.Contains((byte)0x10)))
+        if (profile.Inner.GetOrCompileModel().Decoders.Any(d => d.Reports.Contains((byte)0x10)))
         {
             // [id, counter, left 4 bytes, right 4 bytes]: left at the high
             // band's top amplitude 0xC8, right neutral 00 01 40 40
             // (SDL_hidapi_switch.c EncodeRumbleHighAmplitude, SetNeutralRumble).
             // A pad whose one motor reads the right half (joycon-r) gets the
             // two halves the other way round.
-            return DecodesLeft(form)
+            return DecodesLeft(profile)
                 ? new byte[] { 0x10, 0x01, 0x00, 0xC8, 0x60, 0x00, 0x00, 0x01, 0x40, 0x40 }
                 : new byte[] { 0x10, 0x01, 0x00, 0x01, 0x40, 0x40, 0x00, 0xC8, 0x60, 0x00 };
         }
         return null;
     }
 
-    static bool DecodesLeft(HMProfile form) =>
-        form.Inner.GetOrCompileModel().Decoders.Any(d => d.Semantics.Contains("leftMotor"));
+    static bool DecodesLeft(HMProfile profile) =>
+        profile.Inner.GetOrCompileModel().Decoders.Any(d => d.Semantics.Contains("leftMotor"));
 
     static int Num(IReadOnlyDictionary<string, object> f, string key) =>
         f.TryGetValue(key, out var v) && v is IConvertible c ? c.ToInt32(null) : 0;
@@ -177,22 +203,27 @@ internal static partial class Program
         return cond();
     }
 
-    /// <summary>The serial the controller's HID device serves.</summary>
-    /// <summary>The HID interface of <paramref name="form"/> that carries
+    /// <summary>Every HID collection of the device with
+    /// <paramref name="profile"/>'s VID and PID and this serial.</summary>
+    internal static List<HMHidDeviceInfo> Collections(HMProfile profile, string serial) =>
+        HMDeviceExtractor.ListDevices().Where(d => d.VendorId == profile.VendorId
+            && d.ProductId == profile.ProductId && d.SerialNumberString == serial).ToList();
+
+    /// <summary>The HID interface of <paramref name="profile"/> that carries
     /// its reports: the one interface of a single-HID device, or on the
     /// charging grip the docked pad's, whose path names its interface
     /// number (mi_01 for the left slot).</summary>
-    internal static HMHidDeviceInfo? OwnInterface(HMProfile form, string serial)
+    internal static HMHidDeviceInfo? OwnInterface(HMProfile profile, string serial)
     {
-        var all = HMDeviceExtractor.ListDevices().Where(d => d.VendorId == form.VendorId
-            && d.ProductId == form.ProductId && d.SerialNumberString == serial).ToList();
+        var all = Collections(profile, serial);
         if (all.Count <= 1) return all.FirstOrDefault();
-        var hid = form.Inner.UsbConfiguration?.Interfaces?.FirstOrDefault(i => i.Function == "hid");
+        var hid = profile.Inner.UsbConfiguration?.Interfaces?.FirstOrDefault(i => i.Function == "hid");
         if (hid == null) return all[0];
         string mi = $"&mi_{hid.InterfaceNumber:D2}";
         return all.FirstOrDefault(d => d.DevicePath.Contains(mi, StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>The serial the controller's HID device serves.</summary>
     internal static string SerialOf(HMController c) =>
         c.Backend == HMBackend.Usbip ? c.UsbipHandle!.Device.Descriptors.SerialString! : DeviceOrchestrator.DriverSerial(c.TransportIndex);
 
@@ -251,7 +282,8 @@ internal static partial class Program
     static readonly DEVPROPKEY s_compatibleIds = new() { fmtid = new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"), pid = 4 };
 
     /// <summary>The compatible IDs of the parent of the devnode behind a HID
-    /// interface path, the property hidapi reads for the bus.</summary>
+    /// interface path, the property hidapi reads for the bus, in the order
+    /// Windows holds them.</summary>
     internal static string[] ParentCompatibleIds(string path)
     {
         var key = s_instanceId;

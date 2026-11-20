@@ -227,9 +227,10 @@ internal sealed class UsbDescriptorSet
     /// is what every caller before the identity existed got.</summary>
     public UsbDescriptorSet(ControllerProfile profile, int index = 0, DeviceIdentity? identity = null)
     {
-        // A Bluetooth identity with a USB form is that form on the USB bus
-        // (ControllerProfile.UsbFormOf), descriptor and strings alike.
-        profile = profile.UsbFormOf(HMBackend.Usbip);
+        // A Bluetooth pad that reaches XInput through xinputhid is its
+        // Bluetooth HID form here, descriptor and version alike
+        // (ControllerProfile.BluetoothHidForm), as its presentation is.
+        if (profile.PresentsBluetoothHid) profile = profile.BluetoothHidForm();
         identity ??= DeviceIdentity.ForIndex(index);
         SerialVariant = identity.SerialVariant;
         // The authored blobs, or the ones the presentation derives from the

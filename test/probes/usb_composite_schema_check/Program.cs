@@ -57,7 +57,7 @@ internal static partial class Program
         // The three Valve personas (issue #56), the Switch 2 Pro Controller
         // (issue #66), the Wii U GameCube adapter (5903c059), and the wired
         // Xbox One S pad as a USB device, and the Joy-Con Charging Grip with a
-        // Joy-Con in either slot, the two Joy-Cons' USB forms, ride the same
+        // Joy-Con in either slot, the two Joy-Cons on USB, ride the same
         // backend and are pinned by their own probes. This list is the guard
         // against a profile acquiring the backend by accident.
         Check("exactly the eleven personas require the backend",

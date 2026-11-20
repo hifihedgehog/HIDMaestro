@@ -391,9 +391,9 @@ internal static class Offline
     /// a state block fills each of those instead, at its own size, when the
     /// program's protocol host builds them. The device and the sizes are the
     /// profile's form on USB/IP, which a create presents there
-    /// (HMContext.CreateUsbipController builds the device from it): a
-    /// Bluetooth identity's USB form, or the GIP form of a profile that
-    /// reaches XInput through xinputhid.</summary>
+    /// (HMContext.CreateUsbipController builds the device from it): the
+    /// Bluetooth HID form or the GIP form of a profile that reaches XInput
+    /// through xinputhid, and the profile itself otherwise.</summary>
     static void ExtendedLengths(HMContext ctx)
     {
         Console.WriteLine("\n-- Catalog extended reports on the USB/IP device --");

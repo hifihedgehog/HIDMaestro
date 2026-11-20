@@ -65,24 +65,28 @@ internal static partial class Program
         Check("the USB/IP backend presents every deployable profile, the Xbox profiles as their XUSB or GIP function",
               refused.Count == 0, string.Join(", ", refused.Select(p => p.Id)));
 
-        // A profile that reaches XInput through xinputhid presents the GIP
-        // function, the GIP model's device (gip_persona_check's family
+        // A wired profile that reaches XInput through xinputhid presents the
+        // GIP function, the GIP model's device (gip_persona_check's family
         // part checks each one).
-        var gip = deployable.Where(p => p.SupportsBackend(HMBackend.Usbip) && p.Inner.UsbConfiguration == null
-                                        && XInputPresentation.Resolve(p.Inner).Xinputhid).ToList();
-        Check("every profile that reaches XInput through xinputhid presents the GIP function, authored from the GIP model",
+        var xinputhid = deployable.Where(p => p.SupportsBackend(HMBackend.Usbip) && p.Inner.UsbConfiguration == null
+                                              && XInputPresentation.Resolve(p.Inner).Xinputhid).ToList();
+        var gip = xinputhid.Where(p => !p.Inner.IsBluetooth).ToList();
+        Check("every wired profile that reaches XInput through xinputhid presents the GIP function, authored from the GIP model",
               gip.Count > 0 && gip.All(p => UsbPresentation.Resolve(p.Inner) is { Derived: false } pr
                                              && pr.Spec.Interfaces is { Count: 1 } ifs && ifs[0].Function == "gip"),
               $"{gip.Count}: {string.Join(", ", gip.Select(p => p.Id))}");
+        // A Bluetooth one presents the HID device the pad is over Bluetooth,
+        // its bluetoothHid block, derived as any HID profile's device is
+        // (bluetooth_hid_check checks each one).
+        var bluetoothHid = xinputhid.Where(p => p.Inner.IsBluetooth).ToList();
+        Check("every Bluetooth profile that reaches XInput through xinputhid presents its Bluetooth HID form, a derived HID device",
+              bluetoothHid.Count > 0 && bluetoothHid.All(p => p.FormOn(HMBackend.Usbip).Inner.XinputhidOnTransport
+                                                              && UsbPresentation.Resolve(p.Inner) is { Kind: UsbPresentationKind.DerivedHid }),
+              $"{bluetoothHid.Count}: {string.Join(", ", bluetoothHid.Select(p => p.Id))}");
         var xusb = deployable.Where(p => XInputPresentation.Resolve(p.Inner).XusbCompanion && p.Inner.UsbConfiguration == null).ToList();
-        // A Bluetooth identity whose USB form authors its configuration (a
-        // Joy-Con presents the charging grip) presents that, not a derived
-        // device. A GIP function counts once, as the GIP function.
-        static bool AuthoredOnUsbip(HMProfile p) =>
-            p.SupportsBackend(HMBackend.Usbip) && p.FormOn(HMBackend.Usbip).Inner.UsbConfiguration is { IsAuthored: true };
-        var derived = deployable.Where(p => p.SupportsBackend(HMBackend.Usbip) && p.Inner.UsbConfiguration == null && !xusb.Contains(p) && !gip.Contains(p) && !AuthoredOnUsbip(p)).ToList();
-        var authored = deployable.Where(p => p.Inner.UsbConfiguration is { IsAuthored: true } || (p.Inner.UsbConfiguration == null && !gip.Contains(p) && AuthoredOnUsbip(p))).ToList();
-        Console.WriteLine($"  [note] {derived.Count} derive their presentation, {xusb.Count} present the XUSB function, {gip.Count} the GIP function, {authored.Count} author it");
+        var derived = deployable.Where(p => p.SupportsBackend(HMBackend.Usbip) && p.Inner.UsbConfiguration == null && !xusb.Contains(p) && !gip.Contains(p)).ToList();
+        var authored = deployable.Where(p => p.Inner.UsbConfiguration is { IsAuthored: true }).ToList();
+        Console.WriteLine($"  [note] {derived.Count} derive their presentation, {bluetoothHid.Count} of them from their Bluetooth HID form, {xusb.Count} present the XUSB function, {gip.Count} the GIP function, {authored.Count} author it");
         Check("every UMDF2-default profile with a descriptor and no XInput stack of its own derives one",
               derived.Count + xusb.Count + gip.Count + refused.Count + authored.Count == deployable.Count,
               $"{derived.Count} + {xusb.Count} + {gip.Count} + {refused.Count} + {authored.Count} of {deployable.Count}");
@@ -136,9 +140,7 @@ internal static partial class Program
         var notOwn = new List<string>();
         foreach (var p in authored)
         {
-            // A Bluetooth identity whose usbForm authors a configuration
-            // presents that form on the USB/IP backend.
-            var inner = p.FormOn(HMBackend.Usbip).Inner;
+            var inner = p.Inner;
             var pr = UsbPresentation.Resolve(inner);
             if (!ReferenceEquals(pr.Spec, inner.UsbConfiguration) || pr.Derived)
                 notOwn.Add(p.Id);
@@ -196,8 +198,8 @@ internal static partial class Program
         catch (Exception e) { return $"{e.GetType().Name}: {e.Message}"; }
         if (!presentation.Derived) return "not derived";
         if (presentation.HasIsochronous) return "has an isochronous endpoint";
-        // A Bluetooth identity with a USB form derives the form's device
-        // (usbForm): every field below is the form's.
+        // A Bluetooth pad that reaches XInput through xinputhid derives its
+        // Bluetooth HID form's device: every field below is the form's.
         p = p.FormOn(HMBackend.Usbip);
         var d = set.DeviceDescriptor;
         var c = set.ConfigurationDescriptor;

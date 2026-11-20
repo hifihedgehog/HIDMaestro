@@ -40,42 +40,22 @@ internal static partial class Program
         Console.WriteLine("=== Reports over 64 bytes on USB/IP ===");
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
-        // Each presents itself on USB/IP, with no USB form (usbForm), and has
-        // an input report over 64 bytes there. long-bt-shape is a profile of
-        // the probe's own with dualsense-bt's descriptor, whose 78-byte
-        // report 0x31 goes as raw frames, the widest the extended lane takes.
-        // dualsense-bt itself carried that report until 2.3.0, and on USB/IP
-        // it now presents its USB form's 64-byte report. long-device-built
-        // is joycon-l's Bluetooth profile under the probe's own id with no
-        // usbForm: its 362-byte report the device builds from SubmitState.
-        // joycon-l itself presents the Charging Grip on USB/IP since 2.3.0,
-        // as switch-pro presents switch-pro-usb, and no catalog profile
-        // that builds its reports is left with one over 64 bytes there.
-        // The keyboard's 65-byte report goes as raw frames.
+        // Each has an input report over 64 bytes on USB/IP. long-bt-shape is
+        // a profile of the probe's own with dualsense-bt's descriptor, whose
+        // 78-byte report 0x31 goes as raw frames, the widest the extended
+        // lane takes. joycon-l's 362-byte report the device builds from
+        // SubmitState. The keyboard's 65-byte report goes as raw frames.
         var btShape = ctx.GetProfile("dualsense-bt");
-        HMProfile? deviceBuilt = null;
-        if (ctx.GetProfile("joycon-l") is { } joycon)
-        {
-            var inner = joycon.Inner.Clone();
-            inner.Id = "long-device-built";
-            inner.UsbForm = null;
-            deviceBuilt = new HMProfile(inner);
-        }
         var subjects = new List<(string Id, HMProfile? Profile)>
         {
             ("long-bt-shape", btShape == null ? null
                 : new HMProfileBuilder().Id("long-bt-shape").Vid(0xBEEF).Pid(0xF0D8).DescriptorHex(btShape.DescriptorHex!).Build()),
-            ("long-device-built", deviceBuilt),
+            ("joycon-l", ctx.GetProfile("joycon-l")),
             ("apple-magic-keyboard-a1644", ctx.GetProfile("apple-magic-keyboard-a1644")),
         };
         foreach (var (id, source) in subjects)
         {
             if (source == null) { Check($"{id} is in the catalog", false); continue; }
-            if (source.Inner.UsbForm is { } form)
-            {
-                Check($"{id} presents itself on USB/IP, not a USB form", false, $"its usbForm names {form}");
-                continue;
-            }
             foreach (string? speed in new string?[] { null, "full" })
             {
                 HMProfile p = source;

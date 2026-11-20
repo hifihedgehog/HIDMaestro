@@ -92,14 +92,13 @@ public sealed partial class HMController : IDisposable
 
     /// <summary>The profile whose descriptor, reports, feature answers and
     /// protocol the device runs: <see cref="Profile"/>, or on the USB/IP
-    /// backend the USB form a Bluetooth identity names, under
-    /// <see cref="Profile"/>'s id and strings
-    /// (<see cref="HMProfile.FormOn"/>).</summary>
+    /// backend the form a pad that reaches XInput through xinputhid presents
+    /// there (<see cref="HMProfile.FormOn"/>).</summary>
     internal HMProfile Presented { get; }
 
-    // Indexed by a raw frame's length: true for a length only the Bluetooth
-    // form of Profile takes, when the device presents its USB form. Built
-    // once at create. Null otherwise, which is every other controller.
+    // Indexed by a raw frame's length: true for a length only Profile's own
+    // form takes, when the device presents another form. Built once at
+    // create. Null otherwise, which is every other controller.
     private readonly bool[]? _otherFormRaw;
 
     /// <summary>The raw-frame lengths <paramref name="own"/>'s form takes
@@ -174,16 +173,16 @@ public sealed partial class HMController : IDisposable
         return moved;
     }
 
-    /// <summary>Refuses a raw frame of a length only the Bluetooth form
-    /// takes. No data maps one form's raw bytes onto the other's: the
-    /// reports differ in IDs, offsets, lengths and checksums, so the frame
-    /// would go out as the wrong report.</summary>
+    /// <summary>Refuses a raw frame of a length only the profile's own form
+    /// takes, on a device that presents another form. No data maps one
+    /// form's raw bytes onto the other's: the reports differ in IDs, offsets
+    /// and lengths, so the frame would go out as the wrong report.</summary>
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private void ThrowIfOtherForm(int length)
     {
         throw new ArgumentException(!Presented.Inner.ReportsOnGipInterface
-            ? $"Profile '{Profile.Id}' runs on the USB/IP backend in the USB form of '{Profile.Inner.UsbForm}', " +
-              $"and a {length}-byte raw frame is a report of its Bluetooth form. Build raw frames in the USB form " +
+            ? $"Profile '{Profile.Id}' runs on the USB/IP backend as the HID device the pad is over Bluetooth, its bluetoothHid block, " +
+              $"and a {length}-byte raw frame is a report of the form it has on the UMDF2 backend. Build raw frames for the Bluetooth HID form " +
               $"(HMProfile.FormOn(HMBackend.Usbip) gives that profile), or submit with SubmitState, which both forms take."
             : $"Profile '{Profile.Id}' runs on the USB/IP backend as its GIP form, whose raw frame is its " +
               $"{Presented.Inner.StateBlock?.Size}-byte state block, and a {length}-byte raw frame is a report of its HID form. " +

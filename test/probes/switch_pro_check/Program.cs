@@ -10,10 +10,9 @@
 // as on real BT hardware. Wire sizes are the BT ones: writes are
 // exactly 49 bytes; reads complete padded to InputReportByteLength 362
 // (HidClass behavior, verified identical on a live BT Pro).
-// On the USB/IP backend the pad is on the USB bus, where SDL reads the bus
-// as USB and sets the pad up with the 0x80 handshake, so switch-pro
-// presents switch-pro-usb's form there (usbForm): phase 1 asserts the
-// handshake's answers, and every write is 64 bytes and every read 64.
+// switch-pro-usb, the pad on USB, then runs the same phases in USB framing.
+// SDL sets a pad on a USB bus up with the 0x80 handshake, so phase 1 asserts
+// the handshake's answers, and every write is 64 bytes and every read 64.
 // Every wire byte asserted here is quoted from SDL_hidapi_switch.c (the
 // client), nxbt protocol.py (the device-side reference), or the
 // dekuNukem notes; file:line cites sit next to each phase.
@@ -91,11 +90,11 @@ internal static class Program
 
     static int s_lastReadLen;
 
-    // The form the pad presents: the Bluetooth descriptor on the UMDF2
-    // backend, and on the USB/IP backend, where the pad is on the USB bus,
-    // switch-pro-usb's (usbForm). OutputReportByteLength is 49 (48 vendor
-    // bytes + ID) on Bluetooth and 64 on USB, and HidClass completes every
-    // read at InputReportByteLength, 362 on Bluetooth and 64 on USB.
+    // The framing of the profile under test: switch-pro's Bluetooth
+    // descriptor or switch-pro-usb's USB one. OutputReportByteLength is 49
+    // (48 vendor bytes + ID) on Bluetooth and 64 on USB, and HidClass
+    // completes every read at InputReportByteLength, 362 on Bluetooth and 64
+    // on USB.
     static bool s_usb;
     static int OutLen => s_usb ? 64 : 49;
     static int InLen => s_usb ? 64 : 362;
@@ -146,8 +145,8 @@ internal static class Program
     // length so shape asserts can guard descriptor drift.
     // HID class fills a read with every queued report that fits, and this
     // probe takes one report from each read, so a read asks for one: the
-    // form's InputReportByteLength, as hidapi reads (hid.c, hid_read_timeout
-    // reads input_report_length). A 362-byte read on the USB form's 64-byte
+    // profile's InputReportByteLength, as hidapi reads (hid.c, hid_read_timeout
+    // reads input_report_length). A 362-byte read on the USB profile's 64-byte
     // reports came back with a stream report and a reply behind it, and the
     // reply went unseen (S98 on the ARM64 Surface, 2026-11-19: "80 02
     // handshake answers 81 02" failed in 1 run of 8).
@@ -225,14 +224,12 @@ internal static class Program
 
     static int Main(string[] args)
     {
-        if (args.Length == 0) return Checks();
         if (args.Length == 2 && args[0] == "record") return Record(args[1]);
-        Console.WriteLine("usage: SwitchProCheck [record <out dir>]");
-        return 2;
-    }
-
-    static int Checks()
-    {
+        if (args.Length != 0)
+        {
+            Console.WriteLine("usage: SwitchProCheck [record <out dir>]");
+            return 2;
+        }
         Console.WriteLine("=== Switch Pro protocol responder check (issues #33/#36/#37) ===");
 
         using (var identity = System.Security.Principal.WindowsIdentity.GetCurrent())
@@ -249,13 +246,21 @@ internal static class Program
         ctx.LoadDefaultProfiles();
         ctx.InstallDriver();
 
-        var profile = ctx.GetProfile("switch-pro")
-            ?? throw new InvalidOperationException("switch-pro profile missing");
-        Console.WriteLine("  Creating switch-pro virtual controller...");
+        // The pad over Bluetooth, then the pad on USB.
+        Checks(ctx, "switch-pro");
+        Checks(ctx, "switch-pro-usb");
+        Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
+        return s_failures == 0 ? 0 : 1;
+    }
+
+    static void Checks(HMContext ctx, string id)
+    {
+        var profile = ctx.GetProfile(id)
+            ?? throw new InvalidOperationException($"{id} profile missing");
+        s_usb = !string.Equals(profile.Connection, "bluetooth", StringComparison.OrdinalIgnoreCase);
+        Console.WriteLine($"\n=== {id}: {(s_usb ? "USB" : "Bluetooth")} framing, writes {OutLen}, reads {InLen} ===");
         using var ctrl = ctx.CreateController(profile);
-        var form = profile.FormOn(ctrl.Backend);
-        s_usb = !ReferenceEquals(form, profile);
-        Console.WriteLine($"  backend {ctrl.Backend}, presents {form.Id}: {(s_usb ? "USB" : "Bluetooth")} framing, writes {OutLen}, reads {InLen}");
+        Console.WriteLine($"  backend {ctrl.Backend}");
 
         // Every 0x01 subcommand carries (neutral) rumble bytes, so
         // OutputDecoded fires throughout phase 2 with 0/0. Phase 5 keys
@@ -303,7 +308,7 @@ internal static class Program
             if (path == null) Thread.Sleep(100);
         }
         Check($"virtual HID interface enumerates (VID 057E PID 2009, serial {serial})", path != null, path ?? "");
-        if (path == null) return Fail(ref pumpStop, pump);
+        if (path == null) { Fail(ref pumpStop, pump); return; }
 
         s_readEvent = CreateEventW(IntPtr.Zero, true, false, IntPtr.Zero);
         s_writeEvent = CreateEventW(IntPtr.Zero, true, false, IntPtr.Zero);
@@ -311,7 +316,7 @@ internal static class Program
                             IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, IntPtr.Zero);
         if (!s_hid.IsInvalid) HidD_SetNumInputBuffers(s_hid, 512);
         Check("CreateFile read/write", !s_hid.IsInvalid);
-        if (s_hid.IsInvalid) return Fail(ref pumpStop, pump);
+        if (s_hid.IsInvalid) { Fail(ref pumpStop, pump); return; }
 
         if (!s_usb)
         {
@@ -333,7 +338,7 @@ internal static class Program
         else
         {
             // ── Phase 1: the 0x80 USB handshake (USB form) ─────────────
-            Console.WriteLine("\n-- Phase 1: 0x80 USB handshake (switch-pro-usb's form on the USB bus) --");
+            Console.WriteLine("\n-- Phase 1: 0x80 USB handshake (the pad on USB) --");
             // SDL's USB setup: 80 01 status (BReadDeviceInfo,
             // SDL_hidapi_switch.c:673-683), then 80 02 handshake, 80 03 high
             // speed, 80 02 again and 80 04 force USB with no reply
@@ -363,7 +368,7 @@ internal static class Program
         // bytes. Verified byte-identical on a live BT Pro on this stack
         // (2026-07-22 capture). Guards descriptor drift, not driver-side
         // completion length (invisible from user mode).
-        Check($"reads complete at {InLen} (InputReportByteLength, the form's)",
+        Check($"reads complete at {InLen} (the profile's InputReportByteLength)",
               info != null && s_lastReadLen == InLen, $"{s_lastReadLen}");
         Check("device info ACK 0x82 (nxbt :300)", info != null && info[13] == 0x82);
         Check("device info type Pro (payload[2]=0x03)", info != null && info[17] == 0x03);
@@ -460,7 +465,7 @@ internal static class Program
         }
         cadence.Stop();
         Check($"{streamFrames} consecutive 0x30 frames", frames == streamFrames, $"got {frames}");
-        Check($"0x30 frames complete at {InLen} (the form's InputReportByteLength)", frames > 0 && allLen362);
+        Check($"0x30 frames complete at {InLen} (the profile's InputReportByteLength)", frames > 0 && allLen362);
         gaps.Sort();
         double medianGap = gaps.Count > 0 ? gaps[gaps.Count / 2] : 0;
         double msPerFrame = cadence.Elapsed.TotalMilliseconds / Math.Max(1, frames);
@@ -525,7 +530,7 @@ internal static class Program
 
         // Output 0x10: [id, counter, rumbleL 4B, rumbleR 4B]. Left at max
         // HF amplitude (0xC8, EncodeRumbleHighAmplitude table tail), right
-        // neutral (00 01 40 40), at the form's output length like every write.
+        // neutral (00 01 40 40), at the profile's output length like every write.
         var rumble = new byte[OutLen];
         rumble[0] = 0x10; rumble[1] = 0x01;
         rumble[2] = 0x00; rumble[3] = 0xC8; rumble[4] = 0x60; rumble[5] = 0x00;
@@ -539,20 +544,19 @@ internal static class Program
         Check("leftMotor = 255 (HF amp 0xC8)", decodedLeft == 255, $"got {decodedLeft}");
         Check("rightMotor = 0 (neutral)", decodedRight == 0, $"got {decodedRight}");
 
+        // The pump stops before the controller goes: a submit to a disposed
+        // controller throws on the pump's thread.
+        Fail(ref pumpStop, pump);
         s_hid.Dispose();
         if (s_readEvent != IntPtr.Zero) CloseHandle(s_readEvent);
         if (s_writeEvent != IntPtr.Zero) CloseHandle(s_writeEvent);
-
-        Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
-        return s_failures == 0 ? 0 : 1;
+        s_readEvent = s_writeEvent = IntPtr.Zero;
     }
 
-    static int Fail(ref bool pumpStop, Thread pump)
+    static void Fail(ref bool pumpStop, Thread pump)
     {
         Volatile.Write(ref pumpStop, true);
         pump.Join(500);
-        Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
-        return 1;
     }
 
     // ── record: the init and the stream for device_oracle_check ─────────
@@ -677,14 +681,6 @@ internal static class Program
             var profile = ctx.GetProfile("switch-pro")
                 ?? throw new InvalidOperationException("switch-pro profile missing");
             using var ctrl = ctx.CreateController(profile);
-            // The record is the Bluetooth form's exchange, which
-            // compare-live replays against the engine. On the USB/IP backend
-            // the pad presents switch-pro-usb's form instead.
-            if (!ReferenceEquals(profile.FormOn(ctrl.Backend), profile))
-            {
-                Console.WriteLine($"  record writes the Bluetooth form's exchange, and on {ctrl.Backend} switch-pro presents {profile.FormOn(ctrl.Backend).Id}. Run it on the UMDF2 backend.");
-                return 2;
-            }
             string head = $"switch-pro/index{ctrl.TransportIndex}";
 
             var neutral = new HMGamepadState();

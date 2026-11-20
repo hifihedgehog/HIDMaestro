@@ -145,21 +145,19 @@ public sealed class HMProfile
     public bool SupportsBackend(HMBackend backend) =>
         IsDeployable && Internal.BackendSelection.NotSupportedReason(Inner, backend) == null;
 
-    private HMProfile? _usbForm;
+    private HMProfile? _usbipForm;
 
     /// <summary>The profile whose descriptor, reports, feature answers and
     /// protocol a controller of this profile presents on
-    /// <paramref name="backend"/>. That is this profile, except a Bluetooth
-    /// identity on <see cref="HMBackend.Usbip"/> that names a USB form
-    /// (<c>usbForm</c> in its file): a USB/IP device sits on the USB bus,
-    /// where hidapi and SDL drive the pad in its USB protocol, so it
-    /// presents the named USB profile, such as <c>dualsense</c> for
-    /// <c>dualsense-bt</c>, under this profile's id and strings, and a
-    /// profile that reaches XInput through xinputhid on
-    /// <see cref="HMBackend.Usbip"/>, which presents its GIP form: the GIP
-    /// model's device (<c>profiles/models/gip-gamepad.json</c>) with the
-    /// identity <c>gip.identity</c> names and this profile's VID and PID,
-    /// whose raw frame is its state block. Raw frames
+    /// <paramref name="backend"/>. That is this profile, with two
+    /// exceptions on <see cref="HMBackend.Usbip"/>, both for a profile that
+    /// reaches XInput through xinputhid. A Bluetooth pad presents the HID
+    /// device it is over Bluetooth (<c>bluetoothHid</c> in its file): that
+    /// descriptor, button order and device version under this profile's VID
+    /// and PID. A wired pad presents its GIP form: the GIP model's device
+    /// (<c>profiles/models/gip-gamepad.json</c>) with the identity
+    /// <c>gip.identity</c> names and this profile's VID and PID, whose raw
+    /// frame is its state block. Raw frames
     /// (<see cref="HMController.SubmitRawReport"/>) and
     /// <see cref="HMController.OutputReceived"/> packets follow the profile
     /// this returns. <see cref="HMController.SubmitState"/> and the
@@ -172,9 +170,8 @@ public sealed class HMProfile
     /// resolves to.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="backend"/>
     /// is not one of the three values.</exception>
-    /// <exception cref="HMProfileException">The USB form this profile names
-    /// does not resolve: no loaded or catalog profile holds the name, or the
-    /// profile it names is no USB form of this one.</exception>
+    /// <exception cref="HMProfileException">The form does not resolve from
+    /// this profile's keys.</exception>
     public HMProfile FormOn(HMBackend backend)
     {
         if (backend == HMBackend.Auto)
@@ -182,33 +179,17 @@ public sealed class HMProfile
         if (backend is not (HMBackend.Umdf2 or HMBackend.Usbip))
             throw new ArgumentOutOfRangeException(nameof(backend), backend, "Not a backend.");
         if (backend == HMBackend.Umdf2) return this;
-        if (Inner.UsbForm == null)
+        bool bluetoothHid = Inner.PresentsBluetoothHid;
+        if (!bluetoothHid && !Internal.Usbip.GipFunction.Applies(Inner)) return this;
+        if (_usbipForm is { } known) return known;
+        try
         {
-            if (Inner.PresentsBluetoothHid)
-            {
-                if (_usbForm is { } hidForm) return hidForm;
-                try { return _usbForm = new HMProfile(Inner.BluetoothHidForm()); }
-                catch (Exception e) when (e is not HMBackendNotSupportedException && Internal.ProfileDefects.IsDefect(e))
-                {
-                    throw Internal.ProfileDefects.ToProfileException(Inner, e);
-                }
-            }
-            if (!Internal.Usbip.GipFunction.Applies(Inner)) return this;
-            if (_usbForm is { } gipForm) return gipForm;
-            try { return _usbForm = new HMProfile(Internal.Usbip.GipFunction.FormOf(Inner)); }
-            catch (Exception e) when (e is not HMBackendNotSupportedException && Internal.ProfileDefects.IsDefect(e))
-            {
-                throw Internal.ProfileDefects.ToProfileException(Inner, e);
-            }
+            return _usbipForm = new HMProfile(bluetoothHid ? Inner.BluetoothHidForm() : Internal.Usbip.GipFunction.FormOf(Inner));
         }
-        if (_usbForm is { } known) return known;
-        Internal.ControllerProfile form;
-        try { form = Inner.ResolveUsbForm()!; }
-        catch (Exception e) when (Internal.ProfileDefects.IsDefect(e))
+        catch (Exception e) when (e is not HMBackendNotSupportedException && Internal.ProfileDefects.IsDefect(e))
         {
             throw Internal.ProfileDefects.ToProfileException(Inner, e);
         }
-        return _usbForm = new HMProfile(form);
     }
 
     // ── HID descriptor ───────────────────────────────────────────────────

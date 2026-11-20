@@ -118,7 +118,7 @@ internal static unsafe partial class Program
         Console.WriteLine("\n=== pair: two GIP pads at once ===");
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
-        foreach (var (a, b) in new[] { ("xbox-series-xs-bt", "xbox-one-s"), ("xbox-series-xs-bt", "xbox-series-xs-bt") })
+        foreach (var (a, b) in new[] { ("xbox-series-xs", "xbox-one-s"), ("xbox-series-xs", "xbox-series-xs") })
         {
             Console.WriteLine($"\n-- {a} and {b} --");
             uint before = ConnectedSlots();
@@ -196,7 +196,7 @@ internal static unsafe partial class Program
         try
         {
             uint before = readFirst ? ConnectedSlots() : 0;
-            pad = OpenPad(ctx, "xbox-series-xs-bt", "giprestart:1");
+            pad = OpenPad(ctx, "xbox-series-xs", "giprestart:1");
             int slot = -1;
             if (readFirst)
             {

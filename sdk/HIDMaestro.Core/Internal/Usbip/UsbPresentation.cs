@@ -115,14 +115,6 @@ internal sealed class UsbPresentation
 
     private static UsbPresentation Build(ControllerProfile profile)
     {
-        // A Bluetooth identity with a USB form presents that form, under its
-        // own id and strings (ControllerProfile.UsbFormOf).
-        if (profile.UsbForm != null)
-        {
-            if (NotPresentableReason(profile) is { } why)
-                throw new HMBackendNotSupportedException(profile.Id, HMBackend.Usbip, why);
-            return Resolve(profile.UsbFormOf(HMBackend.Usbip));
-        }
         var cfg = profile.UsbConfiguration;
         if (cfg != null && cfg.IsAuthored)
         {
@@ -170,13 +162,6 @@ internal sealed class UsbPresentation
     /// alone decides.</summary>
     public static string? NotPresentableReason(ControllerProfile profile)
     {
-        if (profile.UsbForm != null)
-        {
-            ControllerProfile? form;
-            try { form = profile.ResolveUsbForm(); }
-            catch (Exception e) when (ProfileDefects.IsDefect(e)) { return "its usbForm " + ProfileDefects.LocateAny(e).Reason; }
-            return form == null ? "its usbForm names no profile." : NotPresentableReason(form);
-        }
         if (profile.UsbConfiguration is { IsAuthored: true }) return null;
         var xi = XInputPresentation.Resolve(profile);
         // The XUSB function needs no HID descriptor: xusb22 makes the HID

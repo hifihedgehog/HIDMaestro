@@ -498,10 +498,6 @@ internal sealed class ModelRegistry
         return v;
     }
 
-    /// <summary>The catalog profile with this id, or null: the profiles a
-    /// name can take.</summary>
-    internal ControllerProfile? FindProfile(string id) => _profiles(id);
-
     /// <summary>A model by name: a named model, else a catalog profile's
     /// resolved model. Null when nothing holds the name. The files are the
     /// file each group came from: the named model's for every group, or,

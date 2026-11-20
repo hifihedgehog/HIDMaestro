@@ -28,8 +28,9 @@
 //     subcommand, the device info carries the pad's device type, and the
 //     stick calibration read echoes its address, without which SDL's open
 //     fails (SDL_hidapi_switch.c LoadStickCalibration)
-//   - the USB form each names answers SDL's USB setup with the device type
-//     and sends the 64-byte 0x30 report after it
+//   - the catalog's profile of each pad on USB (the id with -usb) answers
+//     SDL's USB setup with the device type and sends the 64-byte 0x30 report
+//     after it
 //
 // Exit 0 PASS, 1 FAIL.
 using System;
@@ -183,7 +184,7 @@ internal static class Program
         Check("the reply's battery and connection byte is nxbt's 9E for a Joy-Con", info.Length > 2 && info[2] == 0x9E, info.Length > 2 ? $"{info[2]:X2}" : "");
     }
 
-    // ── The catalog's five Bluetooth-only Nintendo pads and their USB forms ──
+    // ── The catalog's five Bluetooth-only Nintendo pads and each on USB ─────
 
     /// <summary>The 170-byte Bluetooth descriptor every Switch Bluetooth
     /// pad serves, as captured from Joy-Con (L), Joy-Con (R), SNES, N64 and
@@ -193,7 +194,7 @@ internal static class Program
         "05010905a1010601ff8521092175089530810285300930750895308102853109317508966901810285320932750896690181028533093375089669018102853f05091901291015002501750195108102050109391500250775049501814205097504950181010501093009310933093416000027ffff00007510950481020601ff85010901750895309102851009107508953091028511091175089530910285120912750895309102c0";
 
     /// <summary>One pad: its Bluetooth identity, the device type it reports
-    /// (SDL_hidapi_nintendo.h, hid-nintendo.c), the PID of its USB form,
+    /// (SDL_hidapi_nintendo.h, hid-nintendo.c), the PID it has on USB,
     /// whether SDL reads its six-axis calibration (SDL_hidapi_switch.c
     /// HIDAPI_DriverSwitch_OpenJoystick skips it for the NSO pads), byte 2
     /// and byte 12 of its 0x30 report, its 0x3F report at rest, and each
@@ -248,7 +249,7 @@ internal static class Program
     static void Catalog()
     {
         Console.WriteLine();
-        Console.WriteLine("--- The catalog's Bluetooth-only Nintendo pads and their USB forms ---");
+        Console.WriteLine("--- The catalog's Bluetooth-only Nintendo pads and each on USB ---");
         var db = ProfileDatabase.LoadEmbedded();
         var byId = db.All.ToDictionary(q => q.Id, StringComparer.OrdinalIgnoreCase);
         foreach (var pad in Pads)
@@ -266,7 +267,7 @@ internal static class Program
             catch (Exception e) { Check($"{pad.Id}: its protocol compiles", false, e.Message); }
             if (proto == null) { Check($"{pad.Id}: carries a protocol", false); continue; }
             CheckPad(pad, p, proto);
-            CheckUsbForm(pad, p, byId);
+            CheckOnUsb(pad, byId);
         }
     }
 
@@ -434,15 +435,15 @@ internal static class Program
         }, wrong.Count == 0, string.Join(" ", wrong));
     }
 
-    static void CheckUsbForm(Pad pad, ControllerProfile p, Dictionary<string, ControllerProfile> byId)
+    /// <summary>The catalog's profile of <paramref name="pad"/> on USB, the
+    /// pad's id with -usb: a profile of its own, which a create of the
+    /// Bluetooth pad never presents.</summary>
+    static void CheckOnUsb(Pad pad, Dictionary<string, ControllerProfile> byId)
     {
         string formId = pad.Id + "-usb";
-        Check($"{pad.Id}: names {formId} as its USB form", p.UsbForm == formId, p.UsbForm ?? "none");
         if (!byId.TryGetValue(formId, out var f)) { Check($"{formId}: in the catalog", false); return; }
         Check($"{formId}: 057E:{pad.UsbPid:X4} on USB", f.VendorId == 0x057E && f.ProductId == pad.UsbPid
               && string.Equals(f.Connection, "usb", StringComparison.OrdinalIgnoreCase), $"{f.VendorId:X4}:{f.ProductId:X4} {f.Connection}");
-        Check($"{formId}: names {pad.Id} in its usbFormOf", f.FormOfIds?.Contains(pad.Id) == true,
-              f.FormOfIds == null ? "none" : string.Join(",", f.FormOfIds));
         string wantProduct = pad.UsbProduct ?? pad.Product;
         Check($"{formId}: the product string \"{wantProduct}\"", f.ProductString == wantProduct, f.ProductString ?? "none");
         if (pad.UsbProduct != null)

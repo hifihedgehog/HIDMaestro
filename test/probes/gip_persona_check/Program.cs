@@ -35,8 +35,8 @@
 // driver and prints the vibration OutputReceived raises there, beside the
 // GIP form's. "capture" prints the arrival and metadata xboxgip holds for
 // every GIP device, a real pad on a cable included, through \\.\XboxGIP.
-// The GIP function of the twelve xinputhid profiles has four more live
-// parts, each run only when named: "family" with profile ids (all twelve
+// The GIP function of the seven wired xinputhid profiles has four more live
+// parts, each run only when named: "family" with profile ids (all seven
 // with none) creates each as its GIP form (FamilyLive.cs), and
 // "nodriver", "pair" and "restart" create a GIP device no INF binds, two
 // GIP pads at once, and a pad whose driver stack restarts with no port
@@ -94,7 +94,7 @@ internal static unsafe partial class Program
         // The UMDF2 comparison runs only when asked: it needs the driver.
         if (args.Contains("umdf2")) skip = Math.Max(skip, Umdf2Rumble());
         // The family's live part runs only when asked: "family", then the
-        // profile ids, or none for all twelve.
+        // profile ids, or none for all seven.
         if (args.Contains("family"))
         {
             var ids = args.SkipWhile(a => a != "family").Skip(1).ToList();

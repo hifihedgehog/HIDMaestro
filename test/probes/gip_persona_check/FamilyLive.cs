@@ -1,5 +1,5 @@
 // gip_persona_check, the family live part ("family" with profile ids, or
-// all twelve): each xinputhid profile created on the USB/IP backend as its
+// all seven): each wired xinputhid profile created on the USB/IP backend as its
 // GIP form, one at a time, read through Windows' own GIP stack, XInput and
 // Windows.Gaming.Input. dualsense-composite is created first as the
 // positive control and read over HID in the same window.
