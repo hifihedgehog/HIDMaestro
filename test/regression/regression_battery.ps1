@@ -3312,6 +3312,38 @@ function Scenario-Backend-Parity {
     }
 }
 
+# S115: what the programs that name a controller read for every deployable
+# profile, on each backend the machine runs, UMDF2 and USB/IP on x64 and
+# USB/IP on ARM64, against identity-pins.txt: the HID class with the bus
+# hidapi's rule reads, XInput, Windows.Gaming.Input, SDL 3.4.18 with its
+# default hints, and the id Chrome builds, computed with Chromium's own rules
+# and tables. A pinned line holds for both backends unless it names one, and
+# on every Windows unless it names the build it holds from. A line that
+# names either follows a comment that says why. A profile whose device a
+# driver package from outside Windows and HIDMaestro drives on the machine
+# is named and not compared. Offline: the pins cover every deployable
+# profile, no reader is pinned to another device's IDs without a reason, and
+# the USB/IP pins read what the real devices on record read
+# (real-devices.txt). The SDL release is the official SDL3-3.4.18 zip beside
+# the tree, as S108 loads it.
+# Exit 2 when another program that embeds HIDMaestro is running.
+function Scenario-Identity-Fidelity {
+    $failed = @()
+    try {
+        Invoke-Probe -Dir 'identity_fidelity_check' -Exe 'IdentityFidelityCheck.exe' -Arguments 'offline' -Tag 'offline' `
+                     -Message 'the identity pins no longer cover every deployable profile, a line that names a backend or a Windows build carries no reason, a reader is pinned to another device''s IDs without one, or the USB/IP pins differ from a real device''s reading (see probe stdout)'
+    } catch { $failed += $_.Exception.Message }
+    $backends = if ((Get-MachineArch) -eq 'arm64' -or $env:HIDMAESTRO_BACKEND -eq 'usbip') { @('usbip') } else { @('umdf2', 'usbip') }
+    $sdl = Join-Path (Split-Path $repoRoot) ('SDL3-release-3.4.18' + $(if ((Get-MachineArch) -eq 'arm64') { '-arm64' } else { '' }))
+    foreach ($backend in $backends) {
+        try {
+            Invoke-Probe -Dir 'identity_fidelity_check' -Exe 'IdentityFidelityCheck.exe' -Arguments "live $backend `"$sdl`"" -Tag "live-$backend" -SkipCodes @(2) `
+                         -Message "a profile on $backend no longer reads to the HID class, XInput, Windows.Gaming.Input, SDL or Chrome as its pins say (see probe stdout)"
+        } catch { $failed += $_.Exception.Message }
+    }
+    if ($failed.Count -gt 0) { throw ($failed -join ' AND ') }
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -3432,38 +3464,6 @@ $scenarios = @(
     @{ Name = 'S114_Create_Stands';              Body = ${function:Scenario-Create-Stands} },
     @{ Name = 'S115_Identity_Fidelity';          Body = ${function:Scenario-Identity-Fidelity} }
 )
-
-# S115: what the programs that name a controller read for every deployable
-# profile, on each backend the machine runs, UMDF2 and USB/IP on x64 and
-# USB/IP on ARM64, against identity-pins.txt: the HID class with the bus
-# hidapi's rule reads, XInput, Windows.Gaming.Input, SDL 3.4.18 with its
-# default hints, and the id Chrome builds, computed with Chromium's own rules
-# and tables. A pinned line holds for both backends unless it names one, and
-# on every Windows unless it names the build it holds from. A line that
-# names either follows a comment that says why. A profile whose device a
-# driver package from outside Windows and HIDMaestro drives on the machine
-# is named and not compared. Offline: the pins cover every deployable
-# profile, no reader is pinned to another device's IDs without a reason, and
-# the USB/IP pins read what the real devices on record read
-# (real-devices.txt). The SDL release is the official SDL3-3.4.18 zip beside
-# the tree, as S108 loads it.
-# Exit 2 when another program that embeds HIDMaestro is running.
-function Scenario-Identity-Fidelity {
-    $failed = @()
-    try {
-        Invoke-Probe -Dir 'identity_fidelity_check' -Exe 'IdentityFidelityCheck.exe' -Arguments 'offline' -Tag 'offline' `
-                     -Message 'the identity pins no longer cover every deployable profile, a line that names a backend or a Windows build carries no reason, a reader is pinned to another device''s IDs without one, or the USB/IP pins differ from a real device''s reading (see probe stdout)'
-    } catch { $failed += $_.Exception.Message }
-    $backends = if ((Get-MachineArch) -eq 'arm64' -or $env:HIDMAESTRO_BACKEND -eq 'usbip') { @('usbip') } else { @('umdf2', 'usbip') }
-    $sdl = Join-Path (Split-Path $repoRoot) ('SDL3-release-3.4.18' + $(if ((Get-MachineArch) -eq 'arm64') { '-arm64' } else { '' }))
-    foreach ($backend in $backends) {
-        try {
-            Invoke-Probe -Dir 'identity_fidelity_check' -Exe 'IdentityFidelityCheck.exe' -Arguments "live $backend `"$sdl`"" -Tag "live-$backend" -SkipCodes @(2) `
-                         -Message "a profile on $backend no longer reads to the HID class, XInput, Windows.Gaming.Input, SDL or Chrome as its pins say (see probe stdout)"
-        } catch { $failed += $_.Exception.Message }
-    }
-    if ($failed.Count -gt 0) { throw ($failed -join ' AND ') }
-}
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
 
