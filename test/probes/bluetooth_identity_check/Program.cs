@@ -16,8 +16,8 @@
 //   offline            every Bluetooth profile of the catalog: what it
 //                      presents on each backend, its USB device, the marker
 //                      of its transport, the bus hidapi's rule reads from
-//                      the node's IDs, and the two keys of 2.3.0 a load no
-//                      longer takes. No device.
+//                      the node's IDs, and the usbForm and usbFormOf keys,
+//                      which a load refuses. No device.
 //   live <backend> [ids]
 //                      each Bluetooth profile but the Xbox pads, which
 //                      bluetooth_hid_check has, created on <backend> (umdf2,
@@ -211,7 +211,7 @@ internal static partial class Program
             if (byId.TryGetValue(id, out var usb))
                 Check($"{id}, a USB profile, gets no marker", UsbNodeStamp.For(usb).BusMarker == null, UsbNodeStamp.For(usb).BusMarker ?? "");
 
-        Console.WriteLine("\n-- The keys of 2.3.0 a load no longer takes --");
+        Console.WriteLine("\n-- usbForm and usbFormOf, which a load refuses --");
         // The catalog as the SDK carries it: each profile file's text.
         var texts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var asm = typeof(HMContext).Assembly;

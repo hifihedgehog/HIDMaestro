@@ -1,0 +1,8 @@
+# What a real device read, where a record of one exists. A line is a reader's
+# line as identity-pins.txt writes it, with * for a field the record does not
+# hold, under a comment that says where it was read.
+xbox-series-xs-bt
+  # Windows.Gaming.Input on the development laptop, 2026-04-21, an Xbox Series pad (model 1914) over Bluetooth LE.
+  wgi "HID-compliant game controller" 045E:0B13 wireless gamepad yes buttons 14 axes 6 switches 0
+  # The same pad's Bluetooth node carries the revision in its hardware IDs (REV&0523), its HID child's path carries IG_, and its parent is a BTHLEDevice node.
+  hid 045E:0B13 version 0523 usage * product * bus Bluetooth LE IG_

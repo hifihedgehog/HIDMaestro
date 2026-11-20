@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- identity_fidelity_check: what the programs that name a controller read
+       for each profile on each backend, against identity-pins.txt: the HID
+       class and hidapi, XInput, Windows.Gaming.Input, SDL, and the id Chrome
+       builds, computed with Chromium's own rules and tables
+       (chromium-gamepad-ids.txt, written by make-chromium-tables.py).
+       offline: the pins cover every deployable profile, and the USB/IP
+       pins read what the real devices on record read
+       (real-devices.txt). live <backend>
+       <SDL3 dir>: each profile created, read and compared. record: the same
+       creates written as a pins file. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <PlatformTarget>$(HMTargetArchitecture)</PlatformTarget>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>IdentityFidelityCheck</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Another running program with HIDMaestro.Core.dll loaded. -->
+    <Compile Include="..\probe_common\SdkConsumers.cs" Link="SdkConsumers.cs" />
+    <!-- Windows.Gaming.Input objects stay referenced until the probe exits. -->
+    <Compile Include="..\probe_common\WgiPins.cs" Link="WgiPins.cs" />
+    <!-- The HID collections under a devnode, read through the HID class. -->
+    <Compile Include="..\backend_parity_check\Hid.cs" Link="Hid.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="identity-pins.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="real-devices.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="chromium-gamepad-ids.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

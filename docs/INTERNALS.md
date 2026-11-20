@@ -116,6 +116,19 @@ A create stamps the bus type GUID only on the parent it made, by its connection:
 
 On the USB/IP backend a Bluetooth profile's device sits on a USB port, and a reader that takes the bus from the device tree would read USB. hidapi reads the compatible IDs of the HID devnode's parent and takes the first that names a bus (`hid_internal_detect_bus_type`), and SDL's PlayStation and Switch drivers pick the pad's Bluetooth or USB protocol from the answer. `UsbNodeStamp` writes one ID ahead of the USB ones Windows gives the node: `BTHENUM\{00001124-...}_HIDMAESTRO` for a classic identity and `BTHLEDevice\{00001812-...}_HIDMAESTRO` for an LE one. The suffix keeps the ID from matching hidbth.inf or hidbthle.inf, which match the bare service ID. Windows writes the node's compatible IDs again at every start, so the device writes the marker while it answers its own HID report descriptor request, before the HID child exists (`UsbipEmulatedDevice.TransportReady`). The profile presents its own descriptor, reports, feature answers and protocol on both backends, and bluetooth_identity_check (S108) reads each Bluetooth profile on each backend as hidapi and SDL do.
 
+### Identity Readings per Backend
+
+`test/probes/identity_fidelity_check/identity-pins.txt` holds what five readers name each of the 247 deployable profiles on each backend: the HID class with the bus hidapi's rule gives, XInput, Windows.Gaming.Input, SDL 3.4.18 with its default hints, and the id Chrome builds, computed with Chromium's own rules and tables. The readings were recorded in Windows Sandbox on build 26100. identity_fidelity_check (S115) creates every profile on each backend the machine runs and compares. A pinned line holds for both backends unless it names one, and on every Windows unless it names the build it holds from. A line that names either follows a comment that says why.
+
+On USB/IP Windows' own drivers bind the device as they bind the real one, and the USB/IP pins equal a real device's reading where a record of one exists (`real-devices.txt`, the Xbox Series pad over Bluetooth LE). UMDF2 reads differently in six ways:
+
+- hidapi names no bus for the 192 USB profiles. The UMDF2 node is root-enumerated and carries no USB compatible ID. SDL reports those pads as USB on both backends.
+- Windows.Gaming.Input shows the profile's product name for 92 profiles. The SDK gives the UMDF2 HID child that name, where a USB device's child keeps Windows' own description.
+- SDL's DirectInput name of 55 profiles carries no manufacturer. The UMDF2 driver answers a manufacturer string request with the product string.
+- The ten Xbox 360 profiles read HID version 0100 and XInput revision 0110. On USB/IP xusb22 makes the HID device, with version 0000, the revision of the pad's own descriptor and xusb22.inf's name.
+- The seven wired Xbox One and Series profiles keep their own IDs and name on the HID device. On USB/IP Windows' GIP driver makes it 045E:02FF, as for a real pad on a cable.
+- The five Bluetooth Xbox profiles read wired to XInput and Windows.Gaming.Input. On UMDF2 xinputhid sits on the HID child, the arrangement of a pad on a cable. On USB/IP it sits on the device's own node, as on a real Bluetooth pad's, and both report the pad wireless. A program that needs the wireless reading on x64 creates the controller with `HMBackend.Usbip`.
+
 ### &IG_ Enumerator Trick
 
 By using `VID_*&PID_*&IG_00` as the device enumerator, the HID child's device path contains `&IG_`. This has three simultaneous effects:
@@ -936,7 +949,7 @@ VID=0x045E PID=0x028E
 
 ```
 VID=0x045E PID=0x0B13
-  Product: HID-compliant game controller
+  Product: Xbox Wireless Controller
   Bus type: 2 (Bluetooth)
   &IG_ in path: True
 ```
