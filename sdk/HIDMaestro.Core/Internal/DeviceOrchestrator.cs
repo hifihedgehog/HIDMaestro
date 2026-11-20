@@ -1070,9 +1070,10 @@ internal static partial class DeviceOrchestrator
     /// Windows publishes and every 25 ms. A failed start throws, as
     /// <see cref="StartError"/> names it: a collection's, the device's own
     /// and, with <paramref name="nodeFailureThrows"/>, an interface node's.
-    /// Returns how many were open when the wait ended, fewer than
-    /// <paramref name="expected"/> when <paramref name="timeoutMs"/>, scaled,
-    /// ran out.</summary>
+    /// Once they are open their first install is waited out
+    /// (<see cref="AwaitCollectionInstalls"/>). Returns how many were open
+    /// when the wait ended, fewer than <paramref name="expected"/> when
+    /// <paramref name="timeoutMs"/>, scaled, ran out.</summary>
     private static int AwaitHidCollections(string usbInstanceId, int controllerIndex, int expected, int timeoutMs, bool nodeFailureThrows)
     {
         int open = 0;
@@ -1083,7 +1084,112 @@ internal static partial class DeviceOrchestrator
             if (nodeFailureThrows && StartFailed(usbInstanceId, controllerIndex)) throw StartError(usbInstanceId, controllerIndex);
             return false;
         }, timeoutMs);
+        return open >= expected ? AwaitCollectionInstalls(usbInstanceId, controllerIndex, expected, nodeFailureThrows) : open;
+    }
+
+    /// <summary>Waits out the first install of the HID collections under a
+    /// device. Windows starts a HID collection raw and installs it
+    /// afterward, and an install it could not finish before that start
+    /// restarts the collection, so a collection a program opened goes away
+    /// and comes back. It happens to the first game controller a Windows
+    /// ever installs once that Windows carries hidgamepad.inf, an extension
+    /// INF (driver version 10.0.26100.9549) that puts the hidgamepad filter
+    /// on every HID game controller: the filter's service does not exist
+    /// until that install creates it. Measured 2026-11-19 in Windows
+    /// Sandbox on 26100.9711 with a DualSense profile as that first
+    /// controller: sc qc hidgamepad answered 1060 before the create and the
+    /// service after it, Windows logged the collection as requiring further
+    /// installation, the create returned 339 ms after it began with the
+    /// install pending, the collection stopped 25 ms later and a handle
+    /// opened at the return answered 1167. Every later collection on that
+    /// Windows was configured before its start and started once.
+    ///
+    /// <para>So the wait goes on until Windows has no device installation
+    /// pending and <paramref name="expected"/> collections are open with an
+    /// INF recorded, read between two looks at the install queue so no
+    /// install ran across the read, the way WinUsbBinding's WaitInstalled
+    /// reads a devnode's driver. A collection in the middle of that restart
+    /// is not judged: nothing here throws while an install can still be at
+    /// work.</para>
+    ///
+    /// <para>The queue is the machine's, and the install that holds it can
+    /// be any device's. So collections that stay installed and open for
+    /// <see cref="InstalledHoldMs"/> with the queue busy are taken as they
+    /// are: the restart follows the INF's recording within the same install
+    /// (115 ms in the measured run). With the queue quiet for a second and
+    /// a collection still not installed and open, no install is coming, and
+    /// <see cref="OpenHidCollections"/> gives the verdict on what is there,
+    /// a failed start thrown as before. The whole wait is the registration
+    /// gate's (<see cref="DeviceManager.InstallQueueWaitMs"/>), and one that
+    /// runs out ends the same way. Returns how many collections are
+    /// open.</para></summary>
+    private static int AwaitCollectionInstalls(string deviceInstanceId, int controllerIndex, int expected, bool nodeFailureThrows)
+    {
+        var sw = Stopwatch.StartNew();
+        long until = Environment.TickCount64 + TimeoutScale.Apply(DeviceManager.InstallQueueWaitMs);
+        int quietMs = TimeoutScale.Apply(1000), holdMs = TimeoutScale.Apply(InstalledHoldMs);
+        long quietSince = -1, heldSince = -1;
+        while (true)
+        {
+            bool idle = DeviceManager.InstallsSettle((int)Math.Clamp(until - Environment.TickCount64, 0, 250));
+            int installed = InstalledHidCollections(deviceInstanceId);
+            bool quiet = idle && !DeviceManager.InstallsPending();
+            long now = Environment.TickCount64;
+            if (installed >= expected)
+            {
+                if (heldSince < 0) heldSince = now;
+                if (quiet || now - heldSince >= holdMs)
+                {
+                    if (sw.ElapsedMilliseconds >= 50)
+                        LogDiag($"    {deviceInstanceId}: {sw.ElapsedMilliseconds}ms for Windows' device installs, {installed} of {expected} HID collections installed and open" +
+                                $"{(quiet ? "" : ", an install of another device still pending")}");
+                    return installed;
+                }
+            }
+            else
+            {
+                heldSince = -1;
+                if (!quiet) quietSince = -1;
+                else if (quietSince < 0) quietSince = now;
+                else if (now - quietSince >= quietMs) break;
+            }
+            if (now >= until) break;
+            Thread.Sleep(20);
+        }
+        int open = OpenHidCollections(deviceInstanceId, controllerIndex, nodeFailureThrows);
+        LogDiag($"    {deviceInstanceId}: {sw.ElapsedMilliseconds}ms for Windows' device installs, ended with {open} of {expected} HID collections open" +
+                $"{(DeviceManager.InstallsPending() ? " and an install pending" : "")}");
         return open;
+    }
+
+    /// <summary>How long a device's collections stay installed and open,
+    /// with the machine's install queue busy, before a wait takes them as
+    /// settled.</summary>
+    private const int InstalledHoldMs = 3000;
+
+    /// <summary>How many HID collections under the device are open to a
+    /// program and installed: started, with the HID interface published and
+    /// an INF recorded. They sit where <see cref="OpenHidCollections"/>
+    /// finds them. Throws nothing.</summary>
+    private static int InstalledHidCollections(string deviceInstanceId)
+    {
+        int installed = 0;
+        foreach (string child in DeviceManager.GetChildIds(deviceInstanceId))
+        {
+            if (IsHidCollection(child)) { if (Installed(child)) installed++; continue; }
+            foreach (string hid in DeviceManager.GetChildIds(child))
+                if (IsHidCollection(hid) && Installed(hid)) installed++;
+        }
+        return installed;
+
+        static bool IsHidCollection(string id) => id.StartsWith(@"HID\", StringComparison.OrdinalIgnoreCase);
+
+        static bool Installed(string hid)
+        {
+            var (present, status, _) = DevnodeStatus(hid);
+            return present && (status & DN_STARTED) != 0 && Usbip.VhciClient.HasPresentInterface(hid, DeviceManager.HidInterfaceClass)
+                && DeviceNodeCreator.PublishedInfOf(hid) != null;
+        }
     }
 
     /// <summary>How many HID collections under the USB device a program can
@@ -1164,6 +1270,8 @@ internal static partial class DeviceOrchestrator
         }
         var started = hid != null ? WaitForDeviceStarted(hid, child!, controllerIndex, timeoutMs: 10000) : StartWait.TimedOut;
         if (started == StartWait.Failed) throw StartError(usbInstanceId, controllerIndex, hid);
+        // The HID child's first install, as the derived device's wait.
+        if (started == StartWait.Done) AwaitCollectionInstalls(usbInstanceId, controllerIndex, 1, nodeFailureThrows: false);
         long hidMs = sw.ElapsedMilliseconds;
         int slotsAfter = slotsBefore;
         // Four slots taken leave none for this pad, as the UMDF2 wait reads
@@ -1198,9 +1306,26 @@ internal static partial class DeviceOrchestrator
     /// there. The device is found on its port as
     /// <see cref="FindOnPort"/> finds it. Returns the instance id Windows
     /// gave it, <paramref name="serialInstanceId"/> when none was found in
-    /// time.</summary>
+    /// time.
+    ///
+    /// <para>The pad collection's first install is waited out, as
+    /// <see cref="AwaitCollectionInstalls"/> waits one out, and it costs
+    /// this pad more than a restart. The first game controller a Windows
+    /// ever installs is restarted by that install, and this pad's
+    /// collection comes back from the restart without xinputhid's name and
+    /// XUSB interface. The pad then sits in no XInput slot until the device
+    /// is plugged in again, when the collection is installed already and
+    /// starts once. Measured 2026-11-19 in Windows Sandbox on 26100.9711, a
+    /// Windows that never had a game controller:
+    /// HID\VID_045E&amp;PID_0B13&amp;IG_00 configured,
+    /// HID\VID_045E&amp;PID_0B13 started 130 ms later, XInputGetState 1167
+    /// from then on, and the next create's plug-in gave the pad its slot.
+    /// So the wait reads what the installs left
+    /// (<see cref="SettledXinputCollection"/>) and plugs the device in again
+    /// through <paramref name="replug"/> when the collection lost the
+    /// name.</para></summary>
     internal static string AwaitUsbipBluetoothHidStart(string serialInstanceId, int vhciPort, int controllerIndex, int slotsBefore,
-                                                       int hidCollections, Func<bool> settling)
+                                                       int hidCollections, Func<bool> settling, Func<bool> replug)
     {
         var sw = Stopwatch.StartNew();
         string usbInstanceId = FindOnPort(serialInstanceId, vhciPort, sw) ?? serialInstanceId;
@@ -1217,6 +1342,20 @@ internal static partial class DeviceOrchestrator
             throw StartError(usbInstanceId, controllerIndex);
         var started = pad != null ? WaitForDeviceStarted(pad, usbInstanceId, controllerIndex, timeoutMs: 10000) : StartWait.TimedOut;
         if (started == StartWait.Failed) throw StartError(usbInstanceId, controllerIndex, pad);
+        int replugs = 0;
+        var left = CollectionInstall.Kept;
+        while (started == StartWait.Done)
+        {
+            (left, string? settled) = SettledXinputCollection(usbInstanceId);
+            if (left == CollectionInstall.Kept) { pad = settled; break; }
+            if (left == CollectionInstall.Unsettled || replugs >= 2 || !replug()) { started = StartWait.TimedOut; break; }
+            replugs++;
+            pad = null;
+            var again = Stopwatch.StartNew();
+            while (again.ElapsedMilliseconds < budget && (pad = XinputCollectionOf(usbInstanceId)) == null) Thread.Sleep(25);
+            started = pad != null ? WaitForDeviceStarted(pad, usbInstanceId, controllerIndex, timeoutMs: 10000) : StartWait.TimedOut;
+            if (started == StartWait.Failed) throw StartError(usbInstanceId, controllerIndex, pad);
+        }
         long padMs = sw.ElapsedMilliseconds;
         // The descriptor's other collections settle too, each started with
         // its interface published or failed. A failed one is no verdict on
@@ -1260,9 +1399,85 @@ internal static partial class DeviceOrchestrator
             }
         }
         LogDiag($"    usbip bluetooth hid start wait {usbInstanceId} on port {vhciPort}: pad {pad ?? "(none)"} {started} at {padMs}ms" +
+                $"{(replugs > 0 ? $", plugged in again {replugs} time(s) after the collection's first install" : "")}" +
+                $"{(left != CollectionInstall.Kept ? $", Windows' installs left the collection {left}" : "")}" +
                 $"{(ready < 0 ? "" : $", {ready} of {hidCollections} HID collections open{(failed > 0 ? $" and {failed} not started" : "")}")}, " +
                 $"XInput slots {slotsBefore} to {slotsAfter} in {sw.ElapsedMilliseconds}ms");
         return usbInstanceId;
+    }
+
+    /// <summary>What Windows' installs left of a pad's game controller
+    /// collection (<see cref="SettledXinputCollection"/>).</summary>
+    private enum CollectionInstall { Kept, Lost, Unsettled }
+
+    /// <summary>The pad's game controller collection under
+    /// <paramref name="usbInstanceId"/> as Windows' installs left it, read
+    /// once the PnP manager has no installation pending, the way
+    /// WinUsbBinding's WaitInstalled reads a devnode's driver. The device's
+    /// HID collections are read between two looks at the install queue, so
+    /// no install ran across the read.
+    ///
+    /// <para>Kept: a started collection with xinputhid's name and XUSB
+    /// interface, and an INF recorded on it. Lost: a started HID collection
+    /// without the name and none with it, the state the first install's
+    /// restart leaves (every collection of a descriptor carries the name
+    /// under xinputhid), or no named collection for a second with the queue
+    /// quiet. Unsettled: installs still pending when the wait ran out, and
+    /// no named collection.</para>
+    ///
+    /// <para>A named collection with no INF recorded yet is waited on: its
+    /// install is still to come, and that install is what restarts it. The
+    /// queue is the machine's, and the install that holds it can be any
+    /// device's, so a named collection that stays installed for
+    /// <see cref="InstalledHoldMs"/> with the queue busy is Kept, as
+    /// <see cref="AwaitCollectionInstalls"/> takes one, and so is one still
+    /// there when the wait runs out. The wait is the registration gate's
+    /// (<see cref="DeviceManager.InstallQueueWaitMs"/>).</para></summary>
+    private static (CollectionInstall Left, string? Pad) SettledXinputCollection(string usbInstanceId)
+    {
+        long until = Environment.TickCount64 + TimeoutScale.Apply(DeviceManager.InstallQueueWaitMs);
+        int quietMs = TimeoutScale.Apply(1000), holdMs = TimeoutScale.Apply(InstalledHoldMs);
+        long quietSince = -1, heldSince = -1;
+        string? held = null;
+        while (true)
+        {
+            bool idle = DeviceManager.InstallsSettle((int)Math.Clamp(until - Environment.TickCount64, 0, 250));
+            string? named = null, raw = null;
+            bool unnamed = false;
+            foreach (string child in DeviceManager.GetChildIds(usbInstanceId))
+            {
+                if (!child.StartsWith(@"HID\", StringComparison.OrdinalIgnoreCase)) continue;
+                var (present, status, _) = DevnodeStatus(child);
+                if (!present || (status & DN_STARTED) == 0) continue;
+                if (!child.Contains("&IG_", StringComparison.OrdinalIgnoreCase)) unnamed = true;
+                else if (Usbip.VhciClient.HasPresentInterface(child, XusbInterfaceGuid))
+                {
+                    if (DeviceNodeCreator.PublishedInfOf(child) != null) named = child;
+                    else raw = child;
+                }
+            }
+            long now = Environment.TickCount64;
+            if (named == null || !string.Equals(named, held, StringComparison.OrdinalIgnoreCase)) { held = named; heldSince = now; }
+            if (idle && !DeviceManager.InstallsPending())
+            {
+                if (named != null) return (CollectionInstall.Kept, named);
+                if (raw == null)
+                {
+                    if (unnamed) return (CollectionInstall.Lost, null);
+                    if (quietSince < 0) quietSince = now;
+                    else if (now - quietSince >= quietMs) return (CollectionInstall.Lost, null);
+                }
+                else quietSince = -1;
+            }
+            else
+            {
+                quietSince = -1;
+                if (named != null && now - heldSince >= holdMs) return (CollectionInstall.Kept, named);
+            }
+            if (Environment.TickCount64 >= until)
+                return (named ?? raw) is { } there ? (CollectionInstall.Kept, there) : (CollectionInstall.Unsettled, null);
+            Thread.Sleep(20);
+        }
     }
 
     /// <summary>The pad's game controller collection under the device: the
@@ -2060,6 +2275,16 @@ internal static partial class DeviceOrchestrator
                 {
                     if (WaitForDeviceStarted(hidChildId, parentId, controllerIndex, timeoutMs: 5000) == StartWait.Failed)
                         throw StartError(parentId, controllerIndex, hidChildId);
+                    // The child's first install, before the names below are
+                    // written again and the controller is handed over: the
+                    // install that follows a raw start restarts the child
+                    // (AwaitCollectionInstalls). Measured 2026-11-19 in
+                    // Windows Sandbox on 26100.9711 with a DualSense profile
+                    // as that Windows' first game controller: the child
+                    // required further installation 1 ms after its parent
+                    // started and was configured and started again 75 ms on,
+                    // while this create was still at work.
+                    AwaitCollectionInstalls(parentId, controllerIndex, 1, nodeFailureThrows: false);
 
                     // Write ControllerIndex directly to the HID child's HW key
                     // so any future HID-child filter can read it without having

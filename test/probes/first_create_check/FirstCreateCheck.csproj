@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- first_create_check: what a create hands back stays as it is. Each
+       profile created on a backend while another thread reads XInput, then
+       watched for four seconds from the create's return: the devnodes under
+       the device, the handles opened on its HID collections, the reports a
+       read delivers, the XInput slot. Meant for a Windows that never had the
+       devices, where Windows installs each collection for the first time:
+       usbip_install_check's part F runs it in Windows Sandbox. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <PlatformTarget>$(HMTargetArchitecture)</PlatformTarget>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>FirstCreateCheck</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Another running program with HIDMaestro.Core.dll loaded. -->
+    <Compile Include="..\probe_common\SdkConsumers.cs" Link="SdkConsumers.cs" />
+    <!-- The devnodes and HID collections under a device. -->
+    <Compile Include="..\backend_parity_check\Hid.cs" Link="Hid.cs" />
+  </ItemGroup>
+</Project>

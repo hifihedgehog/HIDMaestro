@@ -1475,6 +1475,37 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         return false;
     }
 
+    /// <summary>Unplugs the device and plugs it in again with its node's
+    /// values as its profile has them. The create's wait asks for this when
+    /// the pad's game controller collection lost xinputhid's name to its
+    /// first install (<see cref="DeviceOrchestrator.AwaitUsbipBluetoothHidStart"/>).
+    /// False when the device has no node to name, another re-plug runs, or
+    /// the device could not be plugged in again.</summary>
+    internal bool Replug()
+    {
+        string? id = NodeId();
+        if (id == null || Interlocked.CompareExchange(ref _stampWorker, 1, 0) != 0) return false;
+        // A start that fails while the device is away is no verdict.
+        _stampSettling = true;
+        bool plugged = false;
+        try
+        {
+            UsbipBackend.ReplugForStamp(this, id, _stamp.Xinputhid);
+            plugged = true;
+        }
+        catch (Exception e)
+        {
+            if (DeviceOrchestrator.DiagEnabled) DeviceOrchestrator.LogDiag($"usbip re-plug {id}: {e.GetType().Name}: {e.Message}");
+        }
+        finally
+        {
+            Volatile.Write(ref _stampWorker, 0);
+            // No start follows a failed plug-in, so none will clear the flag.
+            if (!plugged) _stampSettling = false;
+        }
+        return plugged;
+    }
+
     // ── Control transfers ────────────────────────────────────────────────
 
     private void HandleControl(in UsbipProtocol.CommandHeader cmd, ReadOnlySpan<byte> outPayload)

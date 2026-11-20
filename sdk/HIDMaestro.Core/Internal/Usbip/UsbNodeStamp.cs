@@ -22,7 +22,10 @@ namespace HIDMaestro.Internal.Usbip;
 /// same three values (GIPDocumentation, "Custom Driver Stacks", the sample
 /// INF's USB_Input_Device sections). <see cref="WriteXinputhid"/> writes
 /// them on the device's node, and Windows builds that stack at the node's
-/// next start.</para>
+/// next start. The service the filter names is part of Windows: a Windows
+/// 11 that never had an Xbox pad has it registered with its driver file
+/// in place (Windows Sandbox, 26100.9711, 2026-11-19), so nothing is
+/// installed for it.</para>
 ///
 /// <para><b>The bus a reader takes from the parent.</b> hidapi reads a HID
 /// device's bus from the compatible IDs of its parent, the first that names
@@ -185,17 +188,4 @@ internal static class UsbNodeStamp
 
     private static bool IsMarker(string id) =>
         string.Equals(id, ClassicMarker, StringComparison.OrdinalIgnoreCase) || string.Equals(id, LeMarker, StringComparison.OrdinalIgnoreCase);
-
-    /// <summary>True when Windows has the xinputhid service, which a node's
-    /// <c>UpperFilters</c> names. Windows registers it when xinputhid.inf
-    /// first installs on a device.</summary>
-    internal static bool ServiceRegistered()
-    {
-        try
-        {
-            using var key = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\" + Service);
-            return key?.GetValue("ImagePath") != null;
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException) { return false; }
-    }
 }

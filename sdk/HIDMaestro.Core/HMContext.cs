@@ -1057,7 +1057,7 @@ public sealed class HMContext : IDisposable
             // (UsbipBackendHandle.ResolveRecord).
             if (handle.Device.Descriptors.UsbInstanceId is { } padId && bluetoothHid)
                 handle.ResolveRecord(Internal.DeviceOrchestrator.AwaitUsbipBluetoothHidStart(padId, handle.Device.VhciPort, index, slotsBefore,
-                    handle.Device.Descriptors.HidCollectionCount, () => handle.Device.StampSettling));
+                    handle.Device.Descriptors.HidCollectionCount, () => handle.Device.StampSettling, () => handle.Device.Replug()));
             else if (handle.Device.Descriptors.UsbInstanceId is { } usbId && handle.Device.Derived)
                 handle.ResolveRecord(Internal.DeviceOrchestrator.AwaitUsbipStart(usbId, handle.Device.VhciPort, index,
                     handle.Device.Descriptors.HidCollectionCount));

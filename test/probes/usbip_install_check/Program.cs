@@ -28,6 +28,19 @@
 //               stream, so the audio PCM's content is not checked there:
 //               S45's microphone energy check is a skip, and its render check
 //               counts bytes.
+//   F. first    A profile as the first game controller a Windows ever
+//               installs, a fresh sandbox for each profile. Windows starts
+//               that controller's HID collection before it can install it
+//               and restarts it at the install, and a Bluetooth Xbox pad on
+//               USB/IP comes back from the restart without its XInput slot.
+//               first_create_check's self-contained copy creates the
+//               profile with another thread reading XInput, checks that
+//               Windows logged the first install, and watches what the
+//               create handed back for four seconds: on USB/IP a plain HID
+//               pad, the XUSB function, the GIP function and two Bluetooth
+//               Xbox pads, one of them with a second collection, and on a
+//               machine that runs the UMDF2 driver a plain HID pad, an
+//               xinputhid pad and the XUSB companion there too.
 //   R. remove   The usbip-win2 part of a full removal (UsbipRemoval.Remove):
 //               a driver install that timed out and bound afterward (a
 //               removal proves it, and the next create records its package),
@@ -86,9 +99,10 @@
 // and E share one sandbox: B plants its entry, C installs on that machine,
 // A's checks read C's install and a composite created over it, and E runs
 // the two probes over the same install. R runs in a sandbox of its own, and
-// so does each of N and V's runs. Inside, the programs run as self-contained
-// copies published beside this one (sandbox\, sandbox-e2e\ and
-// sandbox-switch2\), since the sandbox has no .NET runtime. Run with
+// so does each of F's profiles and of N and V's runs. Inside, the programs
+// run as self-contained copies published beside this one (sandbox\,
+// sandbox-e2e\, sandbox-switch2\ and sandbox-first\), since the sandbox has
+// no .NET runtime. Run with
 // /VERYSILENT as its first argument, it is the planted uninstaller of
 // scenario B and only leaves a marker.
 //
@@ -156,7 +170,7 @@ internal static partial class Program
             return Preview();
         int at = Array.IndexOf(args, "--diag");
         if (at >= 0 && at + 1 < args.Length) s_diagDir = Path.GetFullPath(args[at + 1]);
-        return Host(args.Length > 0 && !args[0].StartsWith("--", StringComparison.Ordinal) ? args[0].ToUpperInvariant() : "ABCER");
+        return Host(args.Length > 0 && !args[0].StartsWith("--", StringComparison.Ordinal) ? args[0].ToUpperInvariant() : "ABCEFR");
     }
 
     // ── Host ───────────────────────────────────────────────────────────
@@ -189,6 +203,20 @@ internal static partial class Program
             Console.WriteLine("B, C, A, E. an uninstall entry without the driver package, two programs' first composites at the same moment, a clean install's checks, then S45's and S65's probes over it");
             try { RunInSandbox(wsb, publish, only.Contains('E') ? "all" : "all-no-e2e"); }
             catch (Exception ex) { Check("B, C, A ran to the end", false, $"{ex.GetType().Name}: {ex.Message}"); }
+        }
+        if (only.Contains('F'))
+        {
+            Console.WriteLine();
+            Console.WriteLine("F. a profile as the first game controller a Windows installs, a fresh sandbox for each");
+            string first = Path.Combine(AppContext.BaseDirectory, "sandbox-first");
+            if (!File.Exists(Path.Combine(first, "FirstCreateCheck.exe")))
+                Check("first_create_check's self-contained copy for the sandbox was published", false, first);
+            else
+                foreach (string subject in FirstSubjects())
+                {
+                    try { RunInSandbox(wsb, publish, subject); }
+                    catch (Exception ex) { Check($"{subject} ran to the end", false, $"{ex.GetType().Name}: {ex.Message}"); }
+                }
         }
         if (only.Contains('R'))
         {
@@ -231,9 +259,27 @@ internal static partial class Program
     static readonly string SandboxIdFile = Path.Combine(Path.GetTempPath(), "HIDMaestro", "usbip_install_check.sandbox");
     static readonly string UninstallCheckIdFile = Path.Combine(Path.GetTempPath(), "HIDMaestro_uninstall_check.sandbox");
 
+    /// <summary>F's runs, each "first:backend:profile": one profile of
+    /// each way a HID collection comes to be under a controller. The UMDF2
+    /// ones run where the machine runs HIDMaestro's UMDF2 driver, which an
+    /// ARM64 machine does not.</summary>
+    static string[] FirstSubjects()
+    {
+        var subjects = new List<string>
+        {
+            "first:usbip:dualsense", "first:usbip:xbox-360-wired", "first:usbip:xbox-series-xs",
+            "first:usbip:xbox-series-xs-bt", "first:usbip:xbox-elite-v2-bt",
+        };
+        if (System.Runtime.InteropServices.RuntimeInformation.OSArchitecture != System.Runtime.InteropServices.Architecture.Arm64)
+            subjects.AddRange(new[] { "first:umdf2:dualsense", "first:umdf2:xbox-series-xs-bt", "first:umdf2:xbox-360-wired" });
+        return subjects.ToArray();
+    }
+
     static void RunInSandbox(string wsb, string publish, string scenario)
     {
-        string results = Path.Combine(Path.GetTempPath(), $"HIDMaestro_sandbox_{scenario}_{Guid.NewGuid():N}");
+        // F's scenario names carry colons, which a folder name cannot.
+        string folder = scenario.Replace(':', '-');
+        string results = Path.Combine(Path.GetTempPath(), $"HIDMaestro_sandbox_{folder}_{Guid.NewGuid():N}");
         Directory.CreateDirectory(results);
         if (scenario == "remove") CopyForeignPackage(Path.Combine(results, "foreign"));
         string? id = null;
@@ -251,6 +297,10 @@ internal static partial class Program
                 if (scenario == "all" && Directory.Exists(host))
                     mapped += $"<MappedFolder><HostFolder>{Xml(host)}</HostFolder><SandboxFolder>{inside}</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder>";
             }
+            // first_create_check, for F.
+            bool firstCreate = scenario.StartsWith("first:", StringComparison.Ordinal);
+            if (firstCreate)
+                mapped += $"<MappedFolder><HostFolder>{Xml(Path.Combine(AppContext.BaseDirectory, "sandbox-first"))}</HostFolder><SandboxFolder>C:\\probe-first</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder>";
             string config = "<Configuration><Networking>Disable</Networking><MappedFolders>" + mapped + "</MappedFolders></Configuration>";
             // Windows Sandbox runs one instance at a time, and a run killed
             // before its finally leaves its sandbox running, so the next
@@ -291,6 +341,12 @@ internal static partial class Program
             if (!ready) { Check($"{scenario}: the sandbox accepts a command", false); return; }
 
             step.Restart();
+            if (firstCreate)
+            {
+                FirstCreate(wsb, id, results, scenario);
+                runS = step.Elapsed.TotalSeconds;
+                return;
+            }
             var ran = Run(wsb, 1_800_000, "exec", "--id", id, "-c",
                 $"C:\\probe\\UsbipInstallCheck.exe --in-sandbox {scenario} C:\\results{(s_diagDir != null ? " diag" : "")}", "-r", "System", "--raw");
             runS = step.Elapsed.TotalSeconds;
@@ -321,7 +377,7 @@ internal static partial class Program
                 $"  [NOTE] {scenario}: the sandbox started in {startS:F1} s, took its first command {readyS:F1} s later after {tries} tries, ran the probe in {runS:F1} s and stopped in {stop.Elapsed.TotalSeconds:F1} s"));
             if (s_diagDir != null)
             {
-                string kept = Path.Combine(s_diagDir, $"{scenario}-{DateTime.Now:yyyyMMdd-HHmmss}");
+                string kept = Path.Combine(s_diagDir, $"{folder}-{DateTime.Now:yyyyMMdd-HHmmss}");
                 try
                 {
                     foreach (string f in Directory.GetFiles(results, "*", SearchOption.AllDirectories))
@@ -336,6 +392,43 @@ internal static partial class Program
             }
             try { Directory.Delete(results, true); } catch { }
         }
+    }
+
+    /// <summary>F: first_create_check's self-contained copy, started in the
+    /// sandbox with the scenario's profile as the first game controller that
+    /// Windows installs (--first, so a run where it was not fails). Each of
+    /// its check lines is a check here under the backend, and its notes are
+    /// notes. With --diag the SDK's log, Windows' device install log and
+    /// its Kernel-PnP configuration events are kept beside them.</summary>
+    static void FirstCreate(string wsb, string id, string results, string scenario)
+    {
+        string[] parts = scenario.Split(':');
+        string backend = parts[1], profile = parts[2], name = $"first {backend}";
+        string diag = s_diagDir != null ? "set HIDMAESTRO_DIAG=1&& " : "";
+        var ran = Run(wsb, 600_000, "exec", "--id", id, "-c",
+            $"cmd.exe /c {diag}C:\\probe-first\\FirstCreateCheck.exe live {backend} --first {profile} > C:\\results\\first.txt 2>&1", "-r", "System", "--raw");
+        int? exit = JsonInt(ran.Output, "ExitCode");
+        if (s_diagDir != null)
+        {
+            // .NET takes a SYSTEM process's temporary folder from GetTempPath2.
+            Run(wsb, 120_000, "exec", "--id", id, "-c",
+                "cmd.exe /c copy /y C:\\Windows\\SystemTemp\\HIDMaestro\\teardown_diag.log C:\\results\\first-diag.log & " +
+                "copy /y C:\\Windows\\INF\\setupapi.dev.log C:\\results\\setupapi.dev.log & " +
+                "wevtutil qe Microsoft-Windows-Kernel-PnP/Configuration /f:text /c:400 /rd:true > C:\\results\\pnp-events.txt 2>&1", "-r", "System", "--raw");
+        }
+        string file = Path.Combine(results, "first.txt");
+        if (!File.Exists(file)) { Check($"{name} {profile}: first_create_check ran in the sandbox", false, ran.Output.Trim()); return; }
+        int pass = 0, fail = 0;
+        foreach (string raw in File.ReadAllLines(file))
+        {
+            string line = raw.Trim();
+            if (line.StartsWith("[PASS]", StringComparison.Ordinal)) { pass++; Check($"{name}: {line[6..].Trim()}", true); }
+            else if (line.StartsWith("[FAIL]", StringComparison.Ordinal)) { fail++; Check($"{name}: {line[6..].Trim()}", false); }
+            else if (line.StartsWith("[NOTE]", StringComparison.Ordinal)) Console.WriteLine($"  [NOTE] {name}: {line[6..].Trim()}");
+            else if (line.Contains("SKIP", StringComparison.Ordinal) || line.Contains("refused", StringComparison.Ordinal)) Console.WriteLine($"  [NOTE] {name}: {line}");
+        }
+        Check($"{name} {profile}: first_create_check ran to its end and passed what it ran", exit == 0 && pass > 0 && fail == 0,
+              $"exit {exit}, {pass} passed, {fail} failed");
     }
 
     /// <summary>R01's other release: the host controller files the probe's

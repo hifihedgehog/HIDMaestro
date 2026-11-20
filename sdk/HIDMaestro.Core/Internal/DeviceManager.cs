@@ -1312,6 +1312,10 @@ public static partial class DeviceManager
     /// never holds back a verdict.</summary>
     internal static bool InstallsPending() => InstallQueue(0) == WAIT_TIMEOUT;
 
+    /// <summary>Waits up to <paramref name="timeoutMs"/> for Windows to have
+    /// no device installation pending. False when one still is.</summary>
+    internal static bool InstallsSettle(int timeoutMs) => InstallQueue((uint)timeoutMs) != WAIT_TIMEOUT;
+
     /// <summary>Waits up to <paramref name="installWaitMs"/> for Windows to
     /// have no device install pending, the registration gate's wait outside
     /// the lock.

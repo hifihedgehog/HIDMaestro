@@ -18,6 +18,8 @@
 //                    read through XInputGetStateEx. Elevated.
 //   hold <id>        the Xbox button held through further submits and a moved
 //                    stick. Elevated.
+//   polled <id> [n]  guide, with another thread reading XInput from before
+//                    the create, as a running game does. Elevated.
 //   live [ids]       each profile created on USB/IP: the device tree, XInput
 //                    control by control, what XInput and
 //                    Windows.Gaming.Input report it as, the rumble packet a
@@ -124,12 +126,12 @@ internal static partial class Program
                     int holdCode = Hold(args[1]);
                     if (holdCode != 0) return holdCode;
                     break;
-                case "guide" when args.Length >= 2:
-                    int guideCode = Guide(args[1], args.Length > 2 ? int.Parse(args[2]) : 50);
+                case "guide" or "polled" when args.Length >= 2:
+                    int guideCode = Guide(args[1], args.Length > 2 ? int.Parse(args[2]) : 50, polled: mode == "polled");
                     if (guideCode != 0) return guideCode;
                     break;
                 default:
-                    Console.WriteLine("usage: BluetoothHidCheck offline | live [profile ids] | guide <profile id> [presses] | hold <profile id>");
+                    Console.WriteLine("usage: BluetoothHidCheck offline | live [profile ids] | guide <profile id> [presses] | polled <profile id> [presses] | hold <profile id>");
                     return 2;
             }
         }

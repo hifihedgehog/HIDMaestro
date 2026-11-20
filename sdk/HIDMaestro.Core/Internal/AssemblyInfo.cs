@@ -78,6 +78,7 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("BackendParityCheck")]
 [assembly: InternalsVisibleTo("SinputCheck")]
 [assembly: InternalsVisibleTo("BluetoothIdentityCheck")]
+[assembly: InternalsVisibleTo("FirstCreateCheck")]
 [assembly: InternalsVisibleTo("BluetoothHidCheck")]
 [assembly: InternalsVisibleTo("StandardAxesCheck")]
 [assembly: InternalsVisibleTo("SwitchProSdl3Check")]

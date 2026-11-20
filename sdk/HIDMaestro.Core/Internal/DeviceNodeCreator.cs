@@ -578,6 +578,17 @@ internal static partial class DeviceNodeCreator
     /// devnode, or null when it cannot be read.</summary>
     private static string? StoreInfOf(string instId)
     {
+        if (PublishedInfOf(instId) is not { } published) return null;
+        try { return PnputilHelper.DriverStorePathOf(published); }
+        catch (InvalidOperationException) { return null; }
+    }
+
+    /// <summary>The published name of the INF Windows installed on a present
+    /// devnode (DEVPKEY_Device_DriverInfPath), or null while it has
+    /// installed none: a raw HID collection starts before its
+    /// install.</summary>
+    internal static string? PublishedInfOf(string instId)
+    {
         if (CM_Locate_DevNodeW(out uint dev, instId, 0) != 0) return null;
         var key = DEVPKEY_Device_DriverInfPath;
         uint len = 0;
@@ -586,9 +597,7 @@ internal static partial class DeviceNodeCreator
         var buf = new byte[len];
         if (CM_Get_DevNode_PropertyW(dev, ref key, out _, buf, ref len, 0) != 0) return null;
         string published = Encoding.Unicode.GetString(buf, 0, (int)Math.Min(len, (uint)buf.Length)).TrimEnd('\0');
-        if (published.Length == 0) return null;
-        try { return PnputilHelper.DriverStorePathOf(published); }
-        catch (InvalidOperationException) { return null; }
+        return published.Length == 0 ? null : published;
     }
 
     /// <summary>DiInstallDevice of the one driver a driver list built from

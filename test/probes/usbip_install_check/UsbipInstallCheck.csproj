@@ -35,13 +35,15 @@
   <!-- Windows Sandbox has no .NET runtime, so the copy that runs inside it
        is published self-contained into sandbox\ beside the probe, and so
        are S45's and S65's probes, which scenario E runs inside it, into
-       sandbox-e2e\ and sandbox-switch2\, each for the architecture the probe
-       is built for: the sandbox runs Windows of the machine's own
+       sandbox-e2e\ and sandbox-switch2\, and first_create_check, which
+       scenario F runs, into sandbox-first\, each for the architecture the
+       probe is built for: the sandbox runs Windows of the machine's own
        architecture. The nested publish passes HMSandboxPublish so it does
        not publish again. -->
   <Target Name="PublishForSandbox" AfterTargets="Build" Condition="'$(HMSandboxPublish)' != 'true'">
     <Exec Command="dotnet publish &quot;$(MSBuildProjectFullPath)&quot; -c $(Configuration) -r win-$(HMTargetArchitecture) --self-contained true -p:HMSandboxPublish=true -o &quot;$(OutDir)sandbox&quot; --nologo -v:quiet" />
     <Exec Command="dotnet publish &quot;$(MSBuildProjectDirectory)\..\usbip_e2e_check\UsbipE2ECheck.csproj&quot; -c $(Configuration) -r win-$(HMTargetArchitecture) --self-contained true -p:HMSandboxPublish=true -o &quot;$(OutDir)sandbox-e2e&quot; --nologo -v:quiet" />
     <Exec Command="dotnet publish &quot;$(MSBuildProjectDirectory)\..\switch2_composite_check\Switch2CompositeCheck.csproj&quot; -c $(Configuration) -r win-$(HMTargetArchitecture) --self-contained true -p:HMSandboxPublish=true -o &quot;$(OutDir)sandbox-switch2&quot; --nologo -v:quiet" />
+    <Exec Command="dotnet publish &quot;$(MSBuildProjectDirectory)\..\first_create_check\FirstCreateCheck.csproj&quot; -c $(Configuration) -r win-$(HMTargetArchitecture) --self-contained true -p:HMSandboxPublish=true -o &quot;$(OutDir)sandbox-first&quot; --nologo -v:quiet" />
   </Target>
 </Project>

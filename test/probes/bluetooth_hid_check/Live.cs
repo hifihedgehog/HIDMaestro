@@ -52,9 +52,33 @@ internal static partial class Program
     /// times on one device. A pad that sends the button in a report of its
     /// own sends that report once per change, so one lost report is one
     /// press XInput never reads.</summary>
-    static int Guide(string id, int presses)
+    /// <param name="polled">Another thread reads XInput's four slots every
+    /// millisecond from before the create, as a running game does. XInput
+    /// then opens the pad's collection the moment it appears, which on a
+    /// machine that installs the collection for the first time is during
+    /// that install, the case the create's wait plugs the device in again
+    /// for.</param>
+    static int Guide(string id, int presses, bool polled = false)
     {
-        Console.WriteLine($"=== guide: {id}, the Xbox button {presses} times ===");
+        Console.WriteLine($"=== {(polled ? "polled" : "guide")}: {id}, the Xbox button {presses} times{(polled ? ", XInput read from before the create" : "")} ===");
+        bool stopPolling = false;
+        if (polled)
+        {
+            new Thread(() =>
+            {
+                while (!Volatile.Read(ref stopPolling))
+                {
+                    for (uint i = 0; i < 4; i++) XInputGetStateEx(i, out _);
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true }.Start();
+        }
+        try { return GuideRun(id, presses); }
+        finally { Volatile.Write(ref stopPolling, true); }
+    }
+
+    static int GuideRun(string id, int presses)
+    {
         using (var who = WindowsIdentity.GetCurrent())
             if (!new WindowsPrincipal(who).IsInRole(WindowsBuiltInRole.Administrator)) { Console.WriteLine("  refused: guide needs elevation"); return 3; }
         if (SdkConsumers.Find() is { } other) { Console.WriteLine($"  SKIP: {other} has HIDMaestro.Core.dll loaded."); return 2; }

@@ -2636,13 +2636,17 @@ function Scenario-Protected-Staging {
 # install and its uninstaller never runs. Two programs whose first composites
 # arrive together install once. S45's and S65's probes then run in the same
 # sandbox with no filter on the machine, all but audio content, which the
-# sandbox's audio engine silences, and a second sandbox runs the usbip-win2
-# part of a full removal, an install cut short among its cases. Exit 2 when Windows Sandbox is not
+# sandbox's audio engine silences. Then a fresh sandbox for each of eight
+# profiles, five on ARM64, has that profile be the first game controller its
+# Windows installs: Windows restarts that controller's HID collection at its
+# install, and first_create_check checks that what the create handed back
+# stays as it is. A last sandbox runs the usbip-win2 part of a full removal,
+# an install cut short among its cases. Exit 2 when Windows Sandbox is not
 # available. The sandboxes are machines of their own, so the battery starts
 # this probe before S01 and the slot collects its result.
 function Scenario-Usbip-Clean-Install {
-    $message = 'the usbip-win2 host controller install left a filter, Apps entry, folder, task or shortcut, broke a composite, ran a planted uninstaller, installed twice for two programs at once, or the usbip-win2 removal took the wrong thing (see probe stdout)'
-    # About a minute and a half, so a deadline of 45 minutes is far past
+    $message = 'the usbip-win2 host controller install left a filter, Apps entry, folder, task or shortcut, broke a composite, ran a planted uninstaller, installed twice for two programs at once, a controller that was its Windows'' first game controller went away, restarted or lost its XInput slot after its create returned, or the usbip-win2 removal took the wrong thing (see probe stdout)'
+    # About two and a half minutes, so a deadline of 45 minutes is far past
     # anything load or another program can cause.
     if ($script:S73Run) {
         $run = $script:S73Run
@@ -3235,6 +3239,28 @@ function Scenario-Bluetooth-Xbox-Hid {
     if ($failed.Count -gt 0) { throw ($failed -join ' AND ') }
 }
 
+# S114: what a create hands back stays as it is, on each backend the machine
+# runs, UMDF2 and USB/IP on x64 and USB/IP on ARM64. One profile of each way
+# a controller reaches Windows is created while another thread reads XInput
+# as a running game does. From the create's return and for four seconds the
+# devnodes under the device are the same ones and started, the handles
+# opened on its HID collections at the return answer, a plain pad's read
+# keeps delivering reports, and an XInput pad holds its slot on every read.
+# S73's part F runs the same check with each profile as its Windows' first
+# game controller, the case where Windows restarts the collection at its
+# install. Exit 2 when another program that embeds HIDMaestro is running.
+function Scenario-Create-Stands {
+    $failed = @()
+    $backends = if ((Get-MachineArch) -eq 'arm64' -or $env:HIDMAESTRO_BACKEND -eq 'usbip') { @('usbip') } else { @('umdf2', 'usbip') }
+    foreach ($backend in $backends) {
+        try {
+            Invoke-Probe -Dir 'first_create_check' -Exe 'FirstCreateCheck.exe' -Arguments "live $backend" -Tag "live-$backend" -SkipCodes @(2) `
+                         -Message "a controller on $backend went away, restarted or lost its XInput slot after its create returned (see probe stdout)"
+        } catch { $failed += $_.Exception.Message }
+    }
+    if ($failed.Count -gt 0) { throw ($failed -join ' AND ') }
+}
+
 # S106: the wired Xbox One S pad as a USB device on the USB/IP backend
 # (xbox-one-s-full), which has no HID interface and speaks the Gaming Input
 # Protocol. Offline, the profile's descriptor set is the device Microsoft's
@@ -3402,15 +3428,16 @@ $scenarios = @(
     @{ Name = 'S110_Xusb_Battery_Receiver';      Body = ${function:Scenario-Xusb-Battery-Receiver} },
     @{ Name = 'S111_Xusb_Wgi_Family';            Body = ${function:Scenario-Xusb-Wgi-Family} },
     @{ Name = 'S112_Standard_Axes';              Body = ${function:Scenario-Standard-Axes} },
-    @{ Name = 'S113_Bluetooth_Xbox_Hid';         Body = ${function:Scenario-Bluetooth-Xbox-Hid} }
+    @{ Name = 'S113_Bluetooth_Xbox_Hid';         Body = ${function:Scenario-Bluetooth-Xbox-Hid} },
+    @{ Name = 'S114_Create_Stands';              Body = ${function:Scenario-Create-Stands} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
 
-# S73 runs in Windows Sandbox, two sandboxes one after the other, for about
-# a minute and a half. The sandboxes add no devnode to this machine and its
-# probe loads no HIDMaestro.Core.dll here, so it starts now, beside S01 to
-# S72, and its slot collects the result.
+# S73 runs in Windows Sandbox, ten sandboxes one after the other, seven on
+# ARM64, for about two and a half minutes. The sandboxes add no devnode to
+# this machine and its probe loads no HIDMaestro.Core.dll here, so it starts
+# now, beside S01 to S72, and its slot collects the result.
 $script:S73Run = $null
 if ('S73_Usbip_Clean_Install' -like $Filter) {
     $script:S73Run = Start-BackgroundProbe -Dir 'usbip_install_check' -Exe 'UsbipInstallCheck.exe'
