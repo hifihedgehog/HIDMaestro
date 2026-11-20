@@ -515,9 +515,28 @@ internal static partial class Program
 
         // The composite's HID functions arrive after its create returns, so
         // the snapshot waits for Windows to finish installing devices, or the
-        // blocked run's comparison would see them arrive.
+        // blocked run's comparison would see them arrive. Windows goes on
+        // past that: a HID record and Windows' own values in the composite's
+        // usbflags entry arrived with no installation pending (2026-10-21,
+        // 2026-11-20). So the snapshot is the first reading that a second
+        // one, a second later, repeats.
         Note($"before the snapshot, device installation {(CMP_WaitNoPendingInstallEvents(120_000) == 0 ? "settled" : "still pending after 120 s")}");
         var before = Inventory.Take();
+        int readings = 1;
+        bool repeated = false;
+        while (!repeated && readings < 60)
+        {
+            Thread.Sleep(1000);
+            CMP_WaitNoPendingInstallEvents(120_000);
+            var again = Inventory.Take();
+            var moved = before.Diff(again).ToList();
+            repeated = moved.Count == 0;
+            if (!repeated) Note($"reading {readings + 1} differs from reading {readings}: {string.Join("; ", moved.Take(4))}");
+            before = again;
+            readings++;
+        }
+        Note(repeated ? $"the snapshot is reading {readings}, the first that repeated the one before it"
+                      : $"the snapshot is reading {readings}: none of them repeated the one before it");
         var ledgeredFlags = before.LedgeredUsbFlags.ToList();
         Note(ledgeredFlags.Count == 0 ? "the registry ledger holds no usbflags claim: the setup created no USB/IP controller"
                                       : $"usbflags entries HIDMaestro claimed: {string.Join(", ", ledgeredFlags)}");
@@ -533,11 +552,16 @@ internal static partial class Program
                $"holder {holder.Id}, listed {string.Join(", ", blocked?.Programs ?? new List<int>())}");
         // A device record that appears is the composite's own late
         // enumeration: one HID record of it arrived after device installation
-        // had settled (2026-10-21), and no removal adds a record. Everything
-        // else counts.
+        // had settled (2026-10-21), and no removal adds a record. A claimed
+        // usbflags entry that only gained lines is the same enumeration:
+        // Windows wrote the composite's entry after the snapshot
+        // (2026-11-20), and a removal puts an entry back to the ledger's
+        // record (Inventory.UsbFlagsLine). Everything else counts.
+        static bool Late(string d) => d.StartsWith("devnode new:", StringComparison.Ordinal)
+                                      || d.StartsWith("usbflags entry gained:", StringComparison.Ordinal);
         var diff = before.Diff(Inventory.Take()).ToList();
-        foreach (string d in diff.Where(d => d.StartsWith("devnode new:", StringComparison.Ordinal))) Note($"while blocked: {d}");
-        diff = diff.Where(d => !d.StartsWith("devnode new:", StringComparison.Ordinal)).ToList();
+        foreach (string d in diff.Where(Late)) Note($"while blocked: {d}");
+        diff = diff.Where(d => !Late(d)).ToList();
         Record("and changes nothing", diff.Count == 0, string.Join("; ", diff.Take(6)));
 
         // The certificate's private key, by its CNG name, before and after.
@@ -1442,6 +1466,20 @@ internal static partial class Program
         after["054C09CC0100"] = "[]\nosvc=Binary:0101\n";
         changed = Inventory.ChangedUsbFlags(clean, after, own);
         Expect("an entry HIDMaestro claimed and left changed is (positive control)", changed.SequenceEqual(own), string.Join(", ", changed));
+        // What Windows adds to an entry while it enumerates the device, told
+        // from what a removal does to one.
+        const string asked = "[]\nosvc=Binary:0000\n", both = "[]\nNewInterfaceUsage=DWord:0\nosvc=Binary:0000\n";
+        Expect("an entry that keeps its lines and gains one reads as gained", Inventory.Gained(asked, both) == "NewInterfaceUsage=DWord:0",
+               Inventory.Gained(asked, both) ?? "null");
+        Expect("an entry that appears reads as gained", Inventory.Gained("absent", asked) != null);
+        Expect("an entry that loses a line, holds other data or is gone does not (positive control)",
+               Inventory.Gained(both, asked) == null && Inventory.Gained(asked, "[]\nosvc=Binary:0101\n") == null && Inventory.Gained(asked, "absent") == null);
+        Expect("a gain on an entry the ledger recorded as absent is reported as gained",
+               Inventory.UsbFlagsLine("054C0CE60100", asked, both, "absent").StartsWith("usbflags entry gained: 054C0CE60100", StringComparison.Ordinal));
+        Expect("a gain that reads as the ledger's record is a change: a removal put the entry back (positive control)",
+               Inventory.UsbFlagsLine("054C0CE60100", "[]\n", asked, asked) == "usbflags entry changed: 054C0CE60100");
+        Expect("an entry gone is a change (positive control)",
+               Inventory.UsbFlagsLine("054C0CE60100", asked, "absent", "absent") == "usbflags entry changed: 054C0CE60100");
         Console.WriteLine(fails == 0 ? "offline: all passed" : $"offline: {fails} failed");
         return fails == 0 ? 0 : 1;
     }

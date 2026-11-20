@@ -38,6 +38,10 @@ internal sealed class Inventory
     /// <summary>The usbflags entries the registry ledger holds a claim
     /// on.</summary>
     public SortedSet<string> LedgeredUsbFlags { get; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>For each claimed usbflags entry, what the registry ledger
+    /// recorded it held before HIDMaestro, dumped, or "absent": the state a
+    /// removal puts the entry back to.</summary>
+    public SortedDictionary<string, string> LedgerPrior { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     internal const string UsbFlagsKey = @"HKLM\SYSTEM\CurrentControlSet\Control\usbflags";
     internal const string LedgerUsbFlagsKey = @"HKLM\SOFTWARE\HIDMaestroRegistryLedger\UsbFlags";
@@ -49,10 +53,48 @@ internal sealed class Inventory
         names.Distinct(StringComparer.OrdinalIgnoreCase)
             .Where(n => (a.TryGetValue(n, out var x) ? x : "absent") != (b.TryGetValue(n, out var y) ? y : "absent")).ToList();
 
+    /// <summary>What a later reading of a usbflags entry holds beyond an
+    /// earlier one, when it holds every line of the earlier one and more.
+    /// Null otherwise: a line gone, a line with other data, the entry gone
+    /// or a reading that failed.</summary>
+    internal static string? Gained(string earlier, string later)
+    {
+        if (later == "absent" || later.StartsWith("unreadable", StringComparison.Ordinal)
+            || earlier.StartsWith("unreadable", StringComparison.Ordinal)) return null;
+        string[] had = earlier == "absent" ? Array.Empty<string>() : earlier.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        string[] has = later.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        var more = has.Except(had, StringComparer.Ordinal).ToList();
+        return more.Count > 0 && had.All(line => has.Contains(line, StringComparer.Ordinal)) ? string.Join(", ", more) : null;
+    }
+
+    /// <summary>How a claimed usbflags entry that differs between two
+    /// readings is reported. Windows writes a device's entry in steps while
+    /// it enumerates the device: osvc, its answer to string 0xEE, and
+    /// NewInterfaceUsage after it for a composite. A removal puts the entry
+    /// back to what the ledger recorded (<paramref name="prior"/>). So an
+    /// entry that only gained lines, and whose values do not read as that
+    /// record, is Windows' write and is reported as gained. Everything else
+    /// is a change.</summary>
+    internal static string UsbFlagsLine(string name, string was, string now, string prior) =>
+        Gained(was, now) is { } more && RootValues(now) != RootValues(prior)
+            ? $"usbflags entry gained: {name} ({more})"
+            : $"usbflags entry changed: {name}";
+
+    // A dump's first block: the key's own values, without its subkeys.
+    private static string RootValues(string dump)
+    {
+        int next = dump.IndexOf("\n[", StringComparison.Ordinal);
+        return next < 0 ? dump : dump[..(next + 1)];
+    }
+
     private void ReadUsbFlags()
     {
         foreach (string n in SubKeyNames(UsbFlagsKey)) UsbFlags[n] = Dump($@"{UsbFlagsKey}\{n}");
-        foreach (string n in SubKeyNames(LedgerUsbFlagsKey)) LedgeredUsbFlags.Add(n);
+        foreach (string n in SubKeyNames(LedgerUsbFlagsKey))
+        {
+            LedgeredUsbFlags.Add(n);
+            LedgerPrior[n] = Dump($@"{LedgerUsbFlagsKey}\{n}\Prior");
+        }
     }
 
     internal static string[] SubKeyNames(string path)
@@ -148,7 +190,9 @@ internal sealed class Inventory
         foreach (var (k, v) in Keys)
             if (!later.Keys.TryGetValue(k, out var w) || w != v) yield return $"registry key changed: {k}";
         foreach (string n in ChangedUsbFlags(UsbFlags, later.UsbFlags, LedgeredUsbFlags.Union(later.LedgeredUsbFlags, StringComparer.OrdinalIgnoreCase)))
-            yield return $"usbflags entry changed: {n}";
+            yield return UsbFlagsLine(n, UsbFlags.TryGetValue(n, out var was) ? was : "absent",
+                                      later.UsbFlags.TryGetValue(n, out var now) ? now : "absent",
+                                      later.LedgerPrior.TryGetValue(n, out var prior) ? prior : "absent");
     }
 
     // ── Devices ──────────────────────────────────────────────────────────
