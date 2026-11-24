@@ -254,17 +254,17 @@ internal static partial class UsbipDriverInstaller
 
     /// <summary>The name, in <see cref="AdminNamespace"/>, of the machine-wide
     /// gate between a root hub's restart and the attaches. A restart holds it
-    /// from its last check that no device sits on the hub to its end. An
-    /// attach holds it across its plugin request (VhciClient.Attach), and a
-    /// replug across its unplug and plug (UsbipBackend.ReplugForStamp,
-    /// UsbipBackendHandle.Replug). So no device lands on a hub that a restart
-    /// takes away.</summary>
+    /// from its last check that no device sits on the hub to its end, and an
+    /// attach holds it across its plugin request (VhciClient.Attach), so no
+    /// device lands on a hub that a restart takes away. A replug holds it
+    /// only for its attach: a restart between its unplug and its plug finds
+    /// the hub empty, takes nothing, and the plug waits for it.</summary>
     internal const string HubRestartGateObject = "UsbipHubRestart";
 
     /// <summary>Hold the hub restart gate until the scope ends, waiting up to
-    /// 30 s for a restart in any program to end. An abandoned gate is taken.
-    /// Throws when a restart holds it past that. Dispose the scope on the
-    /// thread that made it.</summary>
+    /// 30 s for a restart or another attach in any program to end. An
+    /// abandoned gate is taken. Throws when one holds it past that. Dispose
+    /// the scope on the thread that made it.</summary>
     internal static IDisposable HoldHubRestartGate()
     {
         var m = new Mutex(false, AdminNamespace.Name(HubRestartGateObject));
@@ -274,7 +274,7 @@ internal static partial class UsbipDriverInstaller
         if (held) return new GateHold(m);
         m.Dispose();
         throw new InvalidOperationException(
-            "HIDMaestro's USB/IP root hub is restarting and has not come back in 30 s, so no device can be plugged into it yet.");
+            "A USB/IP root hub restart or another program's attach held HIDMaestro's attach gate for 30 s, so the device was not plugged in.");
     }
 
     private sealed class GateHold : IDisposable
@@ -305,7 +305,9 @@ internal static partial class UsbipDriverInstaller
     /// the hub's stack after the call. Waiting when the hub lists HIDMaestro's
     /// and loads it at its next start: devices are attached, Windows refused
     /// the hub's restart, or a restart was tried this Windows session.
-    /// Unavailable while the service is marked for deletion. Failed when this
+    /// Unavailable when the filter cannot run on the hub: its service is
+    /// marked for deletion, or the host controller runs a usbip-win2 release
+    /// other than the pinned one. Failed when this
     /// pin's filter failed on the hub, now or before. NotChecked when a lock
     /// or the gate was held elsewhere, the hub is down for another reason, a
     /// restart still runs, or a step failed.
@@ -348,16 +350,16 @@ internal static partial class UsbipDriverInstaller
                     try { held = gate.WaitOne(0); }
                     catch (AbandonedMutexException) { held = true; }
                     if (!held) return;
-                    // A running hub restarts only with no device on it. A hub
-                    // that is down has none started.
-                    if (removeFirst && (CM_Get_Child(out _, target, 0) == CR_SUCCESS || VhciClient.GetImportedDevices().Count > 0))
-                        return;
+                    // Every removal is of a hub with no device on it and no
+                    // import on its host controller, checked under the gate.
+                    bool Empty() => CM_Get_Child(out _, target, 0) != CR_SUCCESS && VhciClient.GetImportedDevices().Count == 0;
+                    if (removeFirst && !Empty()) return;
                     NoteHubRestartTried(id);
                     tried = 1;
                     if (!removeFirst)
                     {
                         start = CM_Setup_DevNode(target, CM_SETUP_DEVNODE_READY);
-                        if (start == CR_SUCCESS) return;
+                        if (start == CR_SUCCESS || !Empty()) return;
                     }
                     remove = CM_Query_And_Remove_SubTreeW(target, out veto, IntPtr.Zero, 0, CM_REMOVE_UI_OK);
                     if (remove != CR_SUCCESS) return;
@@ -453,6 +455,23 @@ internal static partial class UsbipDriverInstaller
                 DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: {id} {(vendorLoaded ? "runs usbip-win2's own filter" : "had HIDMaestro's filter fail")}; HIDMaestro's left its UpperFilters (CR {cr}).");
             }
             return vendorLoaded ? HubFilterState.Loaded : HubFilterState.Failed;
+        }
+
+        // The filter goes only over the host controller release it ships
+        // with. An older usbip2_ude reads the filter's markers in its own
+        // form (docs/INTERNALS.md, Composite Stream State Without
+        // SET_INTERFACE), and every installer that puts one there adds
+        // usbip-win2's own filter, which the branch above keeps.
+        if (!IsPinnedPackage(GetStringProperty(controller, DEVPKEY_Device_DriverInfPath) ?? ""))
+        {
+            if (listed)
+            {
+                string[] rest = Array.FindAll(upper, f => !IsOwnFilter(f));
+                byte[] restValue = MultiSzToBytes(rest);
+                int cr = CM_Set_DevNode_Registry_PropertyW(hub, CM_DRP_UPPERFILTERS, rest.Length == 0 ? null : restValue, rest.Length == 0 ? 0u : (uint)restValue.Length, 0);
+                DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: {id}'s host controller runs another usbip-win2 release; HIDMaestro's filter left its UpperFilters (CR {cr}).");
+            }
+            return HubFilterState.Unavailable;
         }
 
         var service = EnsureHubFilterService();
