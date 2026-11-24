@@ -797,9 +797,11 @@ internal static partial class UsbipRemoval
     /// <summary>HIDMaestro's run of usbip-win2's filter on its own root hub
     /// (UsbipDriverInstaller's HubFilterService): its name in each hub
     /// record's UpperFilters first, so a hub that starts later does not look
-    /// for a service that is gone, then the service, then each image. A
-    /// service a running hub still holds is marked for deletion, and its
-    /// image goes when Windows next starts.</summary>
+    /// for a service that is gone, then the service, then each image, then
+    /// the note of this session's hub restarts. A service a running hub
+    /// still holds is marked for deletion, and its image goes when Windows
+    /// next starts. While a hub still lists the filter, its service and
+    /// images stay: the hub would not start without them.</summary>
     private static void OwnHubFilter(List<UninstallEntry> entries, bool preview)
     {
         string service = UsbipDriverInstaller.HubFilterService;
@@ -807,15 +809,33 @@ internal static partial class UsbipRemoval
         var hubs = UsbipDriverInstaller.HubsListingFilter();
         bool serviceExists = KeyExists(serviceKey);
         var images = UsbipDriverInstaller.HubFilterImages();
-        if (hubs.Count == 0 && !serviceExists && images.Count == 0) return;
+        bool restartNote = KeyExists(UsbipDriverInstaller.HubRestartKey);
+        if (hubs.Count == 0 && !serviceExists && images.Count == 0 && !restartNote) return;
 
+        if (restartNote)
+        {
+            string where = $@"HKLM\{UsbipDriverInstaller.HubRestartKey}";
+            if (preview) entries.Add(new("registry key", where, UninstallOutcome.WouldRemove));
+            else entries.Add(new("registry key", where,
+                UsbipDriverInstaller.ClearHubRestartNote() ? UninstallOutcome.Removed : UninstallOutcome.Failed));
+        }
+
+        bool unlisted = true;
         foreach (string hub in hubs)
         {
             string where = $"{hub}, UpperFilters {service}";
             if (preview) { entries.Add(new("upper filter", where, UninstallOutcome.WouldRemove)); continue; }
             bool ok = UsbipDriverInstaller.UnlistHubFilter(hub);
+            unlisted &= ok;
             entries.Add(new("upper filter", where, ok ? UninstallOutcome.Removed : UninstallOutcome.Failed,
                 ok ? "the hub runs without it from its next start" : "the hub's UpperFilters could not be written"));
+        }
+        if (!unlisted)
+        {
+            const string why = "a hub still lists the filter and would not start without it, so a later removal takes it";
+            if (serviceExists) entries.Add(new("service", service, UninstallOutcome.Kept, why));
+            foreach (string image in images) entries.Add(new("file", image, UninstallOutcome.Kept, why));
+            return;
         }
 
         if (serviceExists)

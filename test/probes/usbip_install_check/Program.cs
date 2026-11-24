@@ -1,17 +1,21 @@
 // usbip-win2's host controller on a clean machine, in Windows Sandbox: the
-// SDK's install with no vendor installer, the composite with no root-hub
-// filter, and the usbip-win2 part of a full removal.
+// SDK's install with no vendor installer, the composite with usbip-win2's
+// root hub filter on its own hub alone, and the usbip-win2 part of a full
+// removal.
 //
 //   A. clean    A composite create on a machine without usbip-win2 installs
 //               the host controller from the package HIDMaestro.Core carries
 //               (C's creates install it when A runs with B and C, and A's
 //               checks read that install). One ROOT\USBIP_WIN2\UDE devnode
 //               with HIDMaestro's stamp after usbip-win2's id, the package
-//               in the driver store, and an install record naming both. No
+//               in the driver store, and an install record naming both.
+//               HIDMaestro's HIDMaestroUsbipFilter service, whose image is
+//               the pinned usbip2_filter.sys, listed and running on that
+//               host controller's root hub and listed on no other. No
 //               usbip2_filter package or service, no Apps entry, program
 //               folder, scheduled task, Start menu folder or shortcut, and no
-//               KMDF debug values. The composite enumerates and carries input
-//               with no filter on its root hub.
+//               KMDF debug values. The composite enumerates and carries
+//               input.
 //   B. record   A machine holds usbip-win2's uninstall entry, pointing at an
 //               uninstaller that exists, but not its driver package. The
 //               install goes ahead from the SDK's own package, the planted
@@ -23,8 +27,8 @@
 //   E. e2e      With A's install, S45's probe (usbip_e2e_check: HID input,
 //               output, feature, audio render and the microphone stream) and
 //               S65's (switch2_composite_check: a HID and WinUSB composite, its
-//               bulk commands and rumble) run inside the sandbox with no filter
-//               on the root hub. The sandbox's audio engine silences every
+//               bulk commands and rumble) run inside the sandbox with that
+//               filter on the root hub. The sandbox's audio engine silences every
 //               stream, so the audio PCM's content is not checked there:
 //               S45's microphone energy check is a skip, and its render check
 //               counts bytes.
@@ -123,6 +127,9 @@ internal static partial class Program
     const string UninstallKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{199505b0-b93d-4521-a8c7-897818e0205a}_is1";
     const string RecordKey = @"SOFTWARE\HIDMaestroUsbip";
     const string UdeHardwareId = @"ROOT\USBIP_WIN2\UDE";
+    // UsbipDriverInstaller.HubFilterService: the service HIDMaestro runs
+    // usbip-win2's root hub filter under.
+    const string OwnFilter = "HIDMaestroUsbipFilter";
     const string StampHardwareId = @"ROOT\HIDMAESTRO_UDE";
     const string WdfKey = @"SYSTEM\CurrentControlSet\Services\usbip2_ude\Parameters\Wdf";
     const string DetachTask = "USBip Detach All On Reboot Or Shutdown";
@@ -577,10 +584,34 @@ internal static partial class Program
                    wantVer != "" && k?.GetValue("DriverVer") as string == wantVer, $"record {k?.GetValue("DriverVer") ?? "none"}, package {wantVer}");
         }
 
-        // The filter: neither its package nor its service, so no root hub,
-        // the host controller's own included, has it in its stack.
+        // usbip-win2's filter: neither its package nor its service, so no
+        // root hub lists usbip2_filter.
         Record($"{p} no usbip2_filter package in the driver store", !DriverPackagePresent("usbip2_filter"));
         Record($"{p} no usbip2_filter service", !KeyExists(@"SYSTEM\CurrentControlSet\Services\usbip2_filter"));
+
+        // HIDMaestro runs the same filter as a service of its own on this
+        // host controller's root hub, and on no other hub (issue #76).
+        string? hub = Pnp.RootHubs().FirstOrDefault(id => Pnp.Present(id) && string.Equals(Pnp.Parent(id), hc.Id, StringComparison.OrdinalIgnoreCase));
+        using (var svc = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Services\{OwnFilter}"))
+        {
+            string? image = svc?.GetValue("ImagePath", null, RegistryValueOptions.DoNotExpandEnvironmentNames) as string;
+            string path = image == null ? "" : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+                image.Replace(@"\SystemRoot\", "", StringComparison.OrdinalIgnoreCase));
+            string want = (string)Installer.GetMethod("PinnedHubFilterHash", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.Invoke(null, null)!;
+            string got = File.Exists(path) ? Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(path))) : "no file";
+            Record($"{p} {OwnFilter} is an on-demand kernel driver service whose image is the pinned usbip2_filter.sys",
+                   svc != null && svc.GetValue("Type") is int type && type == 1 && svc.GetValue("Start") is int start && start == 3
+                   && got.Equals(want, StringComparison.OrdinalIgnoreCase),
+                   $"{image ?? "no service"}, {got}");
+        }
+        Record($"{p} no driver package for {OwnFilter} in the driver store", !DriverPackagePresent(OwnFilter));
+        Record($"{p} the host controller's root hub lists {OwnFilter} and runs it",
+               hub != null && Pnp.UpperFilters(hub).Contains(OwnFilter, StringComparer.OrdinalIgnoreCase)
+               && Pnp.Stack(hub).Contains(@"\Driver\" + OwnFilter, StringComparer.OrdinalIgnoreCase),
+               hub == null ? "no root hub" : $"{hub}: UpperFilters {string.Join(";", Pnp.UpperFilters(hub))}, stack {string.Join(" <- ", Pnp.Stack(hub))}");
+        var others = Pnp.RootHubs().Where(id => !id.Equals(hub, StringComparison.OrdinalIgnoreCase)
+                                               && Pnp.UpperFilters(id).Contains(OwnFilter, StringComparer.OrdinalIgnoreCase)).ToList();
+        Record($"{p} no other root hub lists {OwnFilter}", others.Count == 0, string.Join(", ", others));
 
         // What usbip-win2's installer adds and this install does not.
         Record($"{p} no usbip-win2 Apps entry", UninstallerPath() == null && !KeyExists(UninstallKey));

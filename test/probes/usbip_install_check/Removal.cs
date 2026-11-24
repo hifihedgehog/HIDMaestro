@@ -309,6 +309,19 @@ internal static partial class Program
         Record("remove: the transport no longer answers", !HMContext.IsUsbipBackendAvailable);
         Record("remove: the filter was never there and is not now", !DriverPackagePresent("usbip2_filter") && !KeyExists(@"SYSTEM\CurrentControlSet\Services\usbip2_filter"));
 
+        // HIDMaestro's own run of that filter goes too: no hub record lists
+        // it, and its service, images and restart note are gone. The host
+        // controller's hub left first, so nothing holds the driver.
+        string ownKey = $@"SYSTEM\CurrentControlSet\Services\{OwnFilter}";
+        Record($"remove: the preview named the {OwnFilter} service for removal", Has(preview, "service", l => l == OwnFilter, "WouldRemove"));
+        Record($"remove: the {OwnFilter} service is gone", !KeyExists(ownKey) && Has(removed, "service", l => l == OwnFilter, "Removed"),
+               string.Join("; ", removed.Where(e => e.Location == OwnFilter)));
+        var ownImages = Directory.EnumerateFiles(Path.Combine(Environment.SystemDirectory, "drivers"), OwnFilter + "_*").ToList();
+        Record($"remove: its images are gone", ownImages.Count == 0, string.Join(", ", ownImages));
+        var stillListing = Pnp.RootHubs().Where(id => Pnp.UpperFilters(id).Contains(OwnFilter, StringComparer.OrdinalIgnoreCase)).ToList();
+        Record($"remove: no root hub record lists {OwnFilter}", stillListing.Count == 0, string.Join(", ", stillListing));
+        Record("remove: the hub restart note is gone", !KeyExists(@"SOFTWARE\HIDMaestroUsbipHubRestart"));
+
         // A removal this process starts after a create's claim, before the
         // create takes the transport lock: the install under the lock sees it
         // and writes nothing. The create's transport step is called past the

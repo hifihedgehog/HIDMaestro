@@ -259,6 +259,9 @@ internal static partial class VhciClient
     /// plugged the UDE device in. Returns the vhci port for detach.</summary>
     public static int Attach(string host, int port, string busid)
     {
+        // Never onto a root hub that a restart for its filter is taking away
+        // (UsbipDriverInstaller.HoldHubRestartGate).
+        using var gate = UsbipDriverInstaller.HoldHubRestartGate();
         // A program killed inside an earlier attach's handshake holds the
         // host controller's attach path until its connection ends, and this
         // request would wait behind it (TcpConnectionOwner).

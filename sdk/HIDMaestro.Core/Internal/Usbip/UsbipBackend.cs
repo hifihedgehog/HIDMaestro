@@ -107,6 +107,9 @@ internal static class UsbipBackend
     internal static bool ReplugForStamp(UsbipEmulatedDevice device, string instanceId, bool xinputhid)
     {
         var server = UsbipServer.GetOrStart();
+        // The hub has one device fewer from the unplug to the plug, and a
+        // root hub restart must not take that span for an empty hub.
+        using var gate = UsbipDriverInstaller.HoldHubRestartGate();
         var sw = System.Diagnostics.Stopwatch.StartNew();
         using (VhciClient.HoldOpen())
         {
@@ -746,6 +749,9 @@ internal sealed class UsbipBackendHandle : IDisposable
     public int Replug(string instanceId, int leaveWaitMs, Action? whileAway = null, Action? undo = null)
     {
         if (Volatile.Read(ref _disposed) != 0) throw new ObjectDisposedException(nameof(UsbipBackendHandle));
+        // The hub has one device fewer from the unplug to the plug, and a
+        // root hub restart must not take that span for an empty hub.
+        using var gate = UsbipDriverInstaller.HoldHubRestartGate();
         using (VhciClient.HoldOpen())
         {
             VhciClient.DetachLocation("127.0.0.1", _server.Port, Device.BusId);

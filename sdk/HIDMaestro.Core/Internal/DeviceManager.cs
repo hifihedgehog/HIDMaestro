@@ -1431,8 +1431,9 @@ public static partial class DeviceManager
     /// back.</item>
     /// <item>The part of the root hub filter's restart of HIDMaestro's own
     /// USB/IP root hub that outlasts its create's wait. The restart runs on a
-    /// thread of its own, and the create's hold ends with the wait. The hub
-    /// has no device on it.</item>
+    /// thread of its own, and the create's hold ends with the wait. The
+    /// thread holds the hub restart gate, which every attach waits for, so
+    /// the hub has no device on it.</item>
     /// <item>The host controller's hardware id stamp and a WinUSB restore's
     /// CONFIGFLAG_REINSTALL, written on a devnode that has left. Neither is
     /// a HIDClass devnode.</item>

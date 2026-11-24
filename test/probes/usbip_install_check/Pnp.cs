@@ -193,6 +193,38 @@ internal static class Pnp
     /// <summary>True when the devnode is in the tree.</summary>
     internal static bool Present(string id) => CM_Locate_DevNodeW(out _, id, 0) == CR_SUCCESS;
 
+    // devpkey.h: DEVPKEY_Device_Stack {540b947e-...},14, a
+    // DEVPROP_TYPE_STRING_LIST of the stack's drivers, top first.
+    static readonly DEVPROPKEY StackKey = new() { fmtid = new Guid("540b947e-8b40-45bc-a8a2-6a0b894cbda2"), pid = 14 };
+
+    /// <summary>The drivers of a present devnode's stack, top first, empty
+    /// when it is not started.</summary>
+    internal static string[] Stack(string id)
+    {
+        if (CM_Locate_DevNodeW(out uint dev, id, 0) != CR_SUCCESS) return Array.Empty<string>();
+        var key = StackKey;
+        uint size = 0;
+        CM_Get_DevNode_PropertyW(dev, ref key, out _, null, ref size, 0);
+        if (size == 0) return Array.Empty<string>();
+        var buf = new byte[size];
+        if (CM_Get_DevNode_PropertyW(dev, ref key, out uint type, buf, ref size, 0) != CR_SUCCESS || type != DEVPROP_TYPE_STRING_LIST)
+            return Array.Empty<string>();
+        return Encoding.Unicode.GetString(buf, 0, (int)size).Split('\0', StringSplitOptions.RemoveEmptyEntries);
+    }
+
+    /// <summary>A devnode's UpperFilters, present or not, from its
+    /// record.</summary>
+    internal static string[] UpperFilters(string id)
+    {
+        using var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{id}");
+        return k?.GetValue("UpperFilters") as string[] ?? Array.Empty<string>();
+    }
+
+    /// <summary>The USB 3 root hubs Windows holds a record of, present or
+    /// not.</summary>
+    internal static List<string> RootHubs() =>
+        IdList("USB").Where(id => id.StartsWith(@"USB\ROOT_HUB30\", StringComparison.OrdinalIgnoreCase)).ToList();
+
     static string? StringProperty(string id, DEVPROPKEY key)
     {
         if (CM_Locate_DevNodeW(out uint dev, id, CM_LOCATE_DEVNODE_PHANTOM) != CR_SUCCESS) return null;
