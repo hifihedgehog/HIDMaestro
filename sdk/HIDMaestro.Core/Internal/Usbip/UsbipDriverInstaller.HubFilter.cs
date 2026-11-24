@@ -133,7 +133,11 @@ internal static partial class UsbipDriverInstaller
     /// create.</summary>
     private static void RunHubFilterPass(string? list)
     {
+        long from = Stopwatch.GetTimestamp();
         var (hubs, filtered, waiting, unchecked_) = AttachHubFilters();
+        if (DeviceOrchestrator.DiagEnabled)
+            DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: root hub filter pass: {hubs} hub(s), {filtered} filtered, {waiting} waiting, " +
+                $"{unchecked_} not checked, {Stopwatch.GetElapsedTime(from).TotalMilliseconds:F1} ms.");
         Volatile.Write(ref s_passHubs, hubs);
         Volatile.Write(ref s_passFiltered, filtered);
         Volatile.Write(ref s_passWaiting, waiting);
