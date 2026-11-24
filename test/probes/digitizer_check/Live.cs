@@ -121,7 +121,7 @@ internal static unsafe partial class Program
         ctx.LoadProfilesFromDirectory(dir);
         LiveTouch(ctx, backend, hover);
         LivePen(ctx, backend, hover);
-        if (backend == HMBackend.Usbip) LivePad(ctx, hover);
+        LivePad(ctx, backend, hover);
         Metrics("after every dispose");
         Console.WriteLine();
         Console.WriteLine($"=== {s_checks - s_fails}/{s_checks} checks passed ===");
@@ -232,16 +232,16 @@ internal static unsafe partial class Program
     // The ITE 06CB:2968 precision touchpad, a USB device.
     const string PadDescriptor = "05010902a10185020901a10005091901290215002501750195028102950681010501093009311581257f750895028106c0c0050d0905a10185030922a10215002501094709429502750181029501750325050951810275019503810305011500261b047510550e651109303500466c039501810246db01263b0209318102050dc0550c66011047ffff000027ffff000075109501095681020954257f95017508810205090901250175019501810295078103050d85080955095975049502250fb102850d09607501950115002501b1029507b10385070600ff09c5150026ff007508960001b102c0050d090ea10185040922a10209521500250a75089501b102c00922a100850609570958750195022501b1029506b103c0c00600ff0901a10185090902150026ff00750895149102850a0903150026ff00750895149102850b0904150026ff007508951a8102850c0905150026ff007508951a8102850f0906150026ff0075089501b102850e0907150026ff0075089501b102c0";
 
-    static void LivePad(HMContext ctx, bool hover)
+    static void LivePad(HMContext ctx, HMBackend backend, bool hover)
     {
         var profile = ctx.GetProfile("spike-touchpad");
-        Check("the spike touchpad loads, on USB/IP alone", profile is { RequiresUsbipBackend: true }, profile == null ? "did not load" : "");
+        Check("the spike touchpad loads", profile != null, profile == null ? "did not load" : "");
         if (profile == null) return;
         var t = profile.Touch;
         Check("its layout: a touchpad, 1 contact per report as Windows' hybrid form takes it, button 1", t is { IsTouchpad: true, ContactsPerReport: 1, Buttons: HMMouseButtons.Left },
               t == null ? "no touch layout" : $"{t.ContactsPerReport} per report, buttons {t.Buttons}");
         if (t == null) return;
-        using var c = ctx.CreateController(profile, null, HMBackend.Usbip);
+        using var c = ctx.CreateController(profile, null, backend);
         var waited = Stopwatch.StartNew();
         while (c.TouchDeviceMode != 3 && waited.ElapsedMilliseconds < 8000) Thread.Sleep(20);
         Check("Windows took it for a precision touchpad: it wrote Device Mode 3 after reading the capabilities and the 257-byte certification report",
@@ -251,6 +251,16 @@ internal static unsafe partial class Program
         if (pad == null) return;
         ushort[] fingers = Enumerable.Range(0, pad.Links.Length).Where(i => pad.Links[i].LinkUsagePage == 0x0D && pad.Links[i].LinkUsage == 0x22)
                                      .Select(i => (ushort)i).ToArray();
+        if (hover) return;
+        // The UMDF2 driver answers GET_INPUT_REPORT for report 1 alone
+        // (driver.c, IOCTL_UMDF_HID_GET_INPUT_REPORT), and this touchpad
+        // reports on 3, so only USB/IP reads the slide back. Windows reads
+        // a touchpad's reports from its interrupt reads either way.
+        if (backend != HMBackend.Usbip)
+        {
+            Console.WriteLine("  info: the slide is read back on USB/IP only: the UMDF2 driver answers an input report read for report 1 alone");
+            return;
+        }
         // One contact that slides and lifts, never a tap, in the middle.
         int y = At(t.Y, 2);
         byte[]? r = null;
@@ -286,7 +296,7 @@ internal static unsafe partial class Program
             Profile("spike-touchscreen", "HIDMaestro spike touchscreen", "0x0007", TouchDescriptor, touchStubs, "touchscreen"));
         System.IO.File.WriteAllText(System.IO.Path.Combine(dir, "spike-pen.json"),
             Profile("spike-pen", "HIDMaestro spike pen", "0x0008", PenDescriptor, null, "pen"));
-        // A precision touchpad on USB/IP alone, from the ITE 06CB:2968's
+        // A precision touchpad from the ITE 06CB:2968's
         // descriptor (hid-tools tests_kernel test_multitouch.py): device
         // capabilities 5 contacts and a click pad, Microsoft's default
         // certification blob (257 bytes with the ID), and the rest zero.
@@ -295,7 +305,6 @@ internal static unsafe partial class Program
             ("0x08", "0805"), ("0x07", "07" + PtpBlob), ("0x0D", "0D00"), ("0x04", "0400"), ("0x06", "0603"), ("0x0F", "0F00"), ("0x0E", "0E00"),
         }.Select(e => $"{{ \"id\": \"{e.Item1}\", \"size\": {e.Item2.Length / 2}, \"data\": \"{e.Item2}\", \"notify\": true }}")) + " ] }";
         string pad = Profile("spike-touchpad", "HIDMaestro spike touchpad", "0x0009", PadDescriptor, padStubs, "touchpad");
-        pad = pad.Replace("  \"type\": \"touchpad\",", "  \"type\": \"touchpad\",\n  \"backend\": \"usbip\",");
         System.IO.File.WriteAllText(System.IO.Path.Combine(dir, "spike-touchpad.json"), pad);
         return dir;
     }
