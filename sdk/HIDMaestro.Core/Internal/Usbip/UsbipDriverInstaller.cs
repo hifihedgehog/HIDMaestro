@@ -34,22 +34,26 @@ namespace HIDMaestro.Internal.Usbip;
 /// idempotent: a host controller that answers short-circuits to a no-op.
 /// The SDK registers the host controller devnode and puts the package on
 /// it, the two steps usbip-win2's devnode.exe takes
-/// (<see cref="InstallHostController"/>), and nothing else. It never runs
-/// usbip-win2's installer and never installs the root-hub filter, whose
-/// install restarts every USB root hub. It adds no Apps entry, program
-/// folder, scheduled task, Start menu folder or shortcut, and it records
-/// what it installed (<see cref="UsbipInstallRecord"/>) so a removal can
-/// tell its install from another program's.</para></summary>
+/// (<see cref="InstallHostController"/>). It never runs usbip-win2's
+/// installer, whose filter install restarts every USB 3 root hub on the
+/// machine. It runs the same filter as a service of its own on its host
+/// controller's root hub alone (<see cref="AttachHubFilterOnChange"/>). It
+/// adds no Apps entry, program folder, scheduled task, Start menu folder or
+/// shortcut, and it records what it installed
+/// (<see cref="UsbipInstallRecord"/>) so a removal can tell its install
+/// from another program's.</para></summary>
 internal static partial class UsbipDriverInstaller
 {
     public const string Version = "0.9.8.1";
 
-    /// <summary>The host controller files' embedded resource names for an
-    /// architecture.</summary>
+    /// <summary>The transport's embedded resource names for an
+    /// architecture: the host controller files and the root hub
+    /// filter.</summary>
     internal static IEnumerable<string> UdeResourcesFor(Architecture arch)
     {
         string a = arch == Architecture.Arm64 ? "arm64" : "x64";
         foreach (string file in UdeFiles) yield return $"HIDMaestro.Usbip.{a}.{file}";
+        yield return $"HIDMaestro.Usbip.{a}.{HubFilterFile}";
     }
 
     private const string NoticeFile = "THIRD-PARTY-NOTICES.txt";
@@ -75,7 +79,12 @@ internal static partial class UsbipDriverInstaller
             ReplaceLegacyTransportOnce(progress);
             ClearStaleVerifierOnce();
             CompleteRecordOnce();
-            StampOwnerHardwareIdOnChange();
+            // One read of the host controllers' interface list for both
+            // passes, each passed over while the list is the one it last
+            // finished for.
+            string? list = VhciClient.InterfaceList();
+            StampOwnerHardwareIdOnChange(list);
+            AttachHubFilterOnChange(list);
             return true;
         }
 
@@ -92,7 +101,12 @@ internal static partial class UsbipDriverInstaller
             {
                 if (IsInstalled) return true;
                 ThrowIfRemovingHere();
-                return InstallLocked(work);
+                bool ok = InstallLocked(work);
+                // In the install's own work, under its transport lock: the
+                // new root hub carries no device yet, so the filter loads
+                // before this create attaches its device.
+                if (ok) HubFilterPassInInstall();
+                return ok;
             }, progress);
         }
     }
@@ -986,10 +1000,11 @@ internal static partial class UsbipDriverInstaller
     /// (<see cref="WithTransportLockNow"/>). When another program holds it,
     /// or this process's own removal runs, which takes the stamp off,
     /// nothing is written and the list is not kept, so a later create runs
-    /// the pass. A lock that cannot be opened is the same.</para></summary>
-    private static void StampOwnerHardwareIdOnChange()
+    /// the pass. A lock that cannot be opened is the same.
+    /// <paramref name="list"/> is the create's one read of the interface
+    /// list, which the root hub filter's pass shares.</para></summary>
+    private static void StampOwnerHardwareIdOnChange(string? list)
     {
-        string? list = VhciClient.InterfaceList();
         if (list != null && string.Equals(list, Volatile.Read(ref s_stampedFor), StringComparison.Ordinal)) return;
         int stamped = 0;
         try

@@ -1390,7 +1390,9 @@ public static partial class DeviceManager
     /// and each phantom of <see cref="RemoveAccumulatedHmPhantoms"/>. Also
     /// held by the usbip-win2 host controller's registration (its
     /// DIF_REGISTERDEVICE, and its DIF_REMOVE when its driver install
-    /// failed), the host controller stamp's removal, and each step of a full
+    /// failed), the root hub filter's attach (the write of its own root hub's
+    /// UpperFilters, and that hub's restart while no device sits on it) and
+    /// the removal's unlisting of it, the host controller stamp's removal, and each step of a full
     /// removal's usbip-win2 part that registers, removes or writes a
     /// devnode (Usbip.UsbipRemoval). Also
     /// held by a full driver deploy's pnputil /add-driver /install, which

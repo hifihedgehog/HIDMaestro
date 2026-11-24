@@ -401,6 +401,37 @@ internal static partial class Program
                           new[] { "speakerLeft", "speakerRight", "hapticLeft", "hapticRight" }));
             }
 
+            // ── The speaker's drain cadence (issue #76) ─────────────────
+            Console.WriteLine("\n-- Speaker drain cadence --");
+            if (render != null)
+            {
+                // The reporter's measurement. A paired drain reads a full
+                // buffer at every other event, a steady one at none.
+                var drain = DrainCadence(render, TimeSpan.FromSeconds(8));
+                Console.WriteLine($"  [diag] drain: buffer {drain.Buffer} frames, {drain.Events} events, padding {drain.Histogram}");
+                Check("Windows takes the speaker stream one period at a time, not in 20 ms pairs",
+                      drain.Steady >= 200 && drain.Full * 20 <= drain.Steady,
+                      $"full buffer at {drain.Full} of {drain.Steady} events");
+            }
+
+            // ── The USB/IP root hub filter (issue #76) ──────────────────
+            Console.WriteLine("\n-- USB/IP root hub filter --");
+            {
+                var hubs = RootHubs();
+                foreach (var h in hubs)
+                    Console.WriteLine($"  [diag] {h.Id} under {h.Parent}: {string.Join(" <- ", h.Stack)}{(h.Upper.Length > 0 ? ", UpperFilters " + string.Join(",", h.Upper) : "")}");
+                var usbip = hubs.Where(h => h.UnderUsbip).ToList();
+                Check("the USB/IP root hub runs usbip-win2's filter",
+                      usbip.Count > 0 && usbip.All(h => h.Stack.Any(d => d.Equals(@"\Driver\HIDMaestroUsbipFilter", StringComparison.OrdinalIgnoreCase)
+                                                                   || d.Equals(@"\Driver\usbip2_filter", StringComparison.OrdinalIgnoreCase))),
+                      $"{usbip.Count} USB/IP root hub(s)");
+                var others = hubs.Where(h => !h.UnderUsbip).ToList();
+                Check("no other USB 3 root hub lists or runs HIDMaestro's filter",
+                      others.All(h => !h.Upper.Contains("HIDMaestroUsbipFilter", StringComparer.OrdinalIgnoreCase)
+                                   && !h.Stack.Contains(@"\Driver\HIDMaestroUsbipFilter", StringComparer.OrdinalIgnoreCase)),
+                      $"{others.Count} other root hub(s)");
+            }
+
             // ── Microphone capture ──────────────────────────────────────
             Console.WriteLine("\n-- Microphone capture --");
             if (capture != null)

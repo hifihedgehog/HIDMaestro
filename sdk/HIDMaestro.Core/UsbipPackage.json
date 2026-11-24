@@ -9,7 +9,8 @@
       "files": {
         "usbip2_ude.inf": "1ae9e8dc497929de1a6be1291ae1dca6a19e7fd6c0351e8c266f65dd91f15073",
         "usbip2_ude.sys": "abd4fc43dce40e027e4acc884cbfe92433e026206f6565c5ee5284a39441169a",
-        "usbip2_ude.cat": "84dd6cc5985857adf1514a9ee202210ff3ee1384c9be40fd49d6810e23e25f3a"
+        "usbip2_ude.cat": "84dd6cc5985857adf1514a9ee202210ff3ee1384c9be40fd49d6810e23e25f3a",
+        "usbip2_filter.sys": "b93a5fc3c23d56f9b49634742374e32f269e53f764caa2d5fcb43e3259f7eced"
       }
     },
     "arm64": {
@@ -19,7 +20,8 @@
       "files": {
         "usbip2_ude.inf": "04b6ac34874198fc73b6bb11c003fc89f87df9d504f78109eb2b500d05ef09c1",
         "usbip2_ude.sys": "38c64546938ea99b6c3ec69f3e5169ad79afc47a59faceb51cfb35d038e249a2",
-        "usbip2_ude.cat": "14c2aa313740e362256d4da721e18751f0ecf0dc19b5c5f3887f084145a6af78"
+        "usbip2_ude.cat": "14c2aa313740e362256d4da721e18751f0ecf0dc19b5c5f3887f084145a6af78",
+        "usbip2_filter.sys": "29734c76f96a33dcfdfbaf633997deb8af98df5b8f5c11195e5ac955f0a97399"
       }
     }
   }

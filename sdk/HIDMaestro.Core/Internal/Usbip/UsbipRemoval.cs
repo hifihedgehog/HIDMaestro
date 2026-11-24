@@ -306,6 +306,12 @@ internal static partial class UsbipRemoval
         // controllers and their package.
         RootHubFilter(entries, preview, vendor, vendorKept);
 
+        // ── HIDMaestro's root hub filter ──────────────────────────────────
+        // HIDMaestro's alone by its service name, so it goes whatever else
+        // stays. A hub that keeps running keeps it loaded until its next
+        // start, which no longer looks for it.
+        OwnHubFilter(entries, preview);
+
         // ── HIDMaestro's stamp on host controllers that stay ──────────────
         foreach (string id in stayed)
         {
@@ -787,6 +793,69 @@ internal static partial class UsbipRemoval
                     : new("service", "usbip2_filter", UninstallOutcome.Failed, $"sc delete returned {rc}: {output.Trim()}"));
         }
     }
+
+    /// <summary>HIDMaestro's run of usbip-win2's filter on its own root hub
+    /// (UsbipDriverInstaller's HubFilterService): its name in each hub
+    /// record's UpperFilters first, so a hub that starts later does not look
+    /// for a service that is gone, then the service, then each image. A
+    /// service a running hub still holds is marked for deletion, and its
+    /// image goes when Windows next starts.</summary>
+    private static void OwnHubFilter(List<UninstallEntry> entries, bool preview)
+    {
+        string service = UsbipDriverInstaller.HubFilterService;
+        string serviceKey = $@"SYSTEM\CurrentControlSet\Services\{service}";
+        var hubs = UsbipDriverInstaller.HubsListingFilter();
+        bool serviceExists = KeyExists(serviceKey);
+        var images = UsbipDriverInstaller.HubFilterImages();
+        if (hubs.Count == 0 && !serviceExists && images.Count == 0) return;
+
+        foreach (string hub in hubs)
+        {
+            string where = $"{hub}, UpperFilters {service}";
+            if (preview) { entries.Add(new("upper filter", where, UninstallOutcome.WouldRemove)); continue; }
+            bool ok = UsbipDriverInstaller.UnlistHubFilter(hub);
+            entries.Add(new("upper filter", where, ok ? UninstallOutcome.Removed : UninstallOutcome.Failed,
+                ok ? "the hub runs without it from its next start" : "the hub's UpperFilters could not be written"));
+        }
+
+        if (serviceExists)
+        {
+            if (preview) entries.Add(new("service", service, UninstallOutcome.WouldRemove));
+            else
+            {
+                var (rc, output) = RunSystemTool("sc.exe", "delete " + service);
+                // 1060: no such service, 1072: marked for deletion already.
+                entries.Add(rc == 1060 || (rc == 0 && !KeyExists(serviceKey))
+                    ? new("service", service, UninstallOutcome.Removed)
+                    : rc == 0 || rc == 1072
+                        ? new("service", service, UninstallOutcome.RemovedAtRestart, "marked for deletion; a hub that runs the filter lets it go at its next start")
+                        : new("service", service, UninstallOutcome.Failed, $"sc delete returned {rc}: {output.Trim()}"));
+            }
+        }
+
+        foreach (string image in images)
+        {
+            if (preview) { entries.Add(new("file", image, UninstallOutcome.WouldRemove)); continue; }
+            try
+            {
+                File.Delete(image);
+                entries.Add(new("file", image, UninstallOutcome.Removed));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // A hub still runs the filter from it.
+                entries.Add(MoveFileExW(image, null, MOVEFILE_DELAY_UNTIL_REBOOT)
+                    ? new("file", image, UninstallOutcome.RemovedAtRestart, "a running hub holds it; Windows deletes it when it next starts")
+                    : new("file", image, UninstallOutcome.Failed, $"{ex.GetType().Name}: {ex.Message}"));
+            }
+        }
+    }
+
+    private const uint MOVEFILE_DELAY_UNTIL_REBOOT = 0x00000004; // WinBase.h
+
+    [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool MoveFileExW(string lpExistingFileName, string? lpNewFileName, uint dwFlags);
 
     /// <summary>The USB 3 root hubs, present or not, whose records name
     /// usbip2_filter in Filters\*Upper while no reinstall is pending

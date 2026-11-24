@@ -139,11 +139,11 @@
          from each installer. PackResources fetches and checks the
          installers where they sit in Resources\, and embeds only the
          files unpacked from them. The SDK never runs an installer. -->
-    <_HMUsbipPayload Include="$(_HMResources)usbip\x64\usbip2_ude.inf;$(_HMResources)usbip\x64\usbip2_ude.sys;$(_HMResources)usbip\x64\usbip2_ude.cat"
+    <_HMUsbipPayload Include="$(_HMResources)usbip\x64\usbip2_ude.inf;$(_HMResources)usbip\x64\usbip2_ude.sys;$(_HMResources)usbip\x64\usbip2_ude.cat;$(_HMResources)usbip\x64\usbip2_filter.sys"
                      Condition="'$(_HMWithUsbip)' == 'true'">
       <LogicalName>HIDMaestro.Usbip.x64.%(Filename)%(Extension)</LogicalName>
     </_HMUsbipPayload>
-    <_HMUsbipPayload Include="$(_HMResources)usbip\arm64\usbip2_ude.inf;$(_HMResources)usbip\arm64\usbip2_ude.sys;$(_HMResources)usbip\arm64\usbip2_ude.cat"
+    <_HMUsbipPayload Include="$(_HMResources)usbip\arm64\usbip2_ude.inf;$(_HMResources)usbip\arm64\usbip2_ude.sys;$(_HMResources)usbip\arm64\usbip2_ude.cat;$(_HMResources)usbip\arm64\usbip2_filter.sys"
                      Condition="'$(_HMWithUsbip)' == 'true' and '$(_HMWithArm64)' == 'true'">
       <LogicalName>HIDMaestro.Usbip.arm64.%(Filename)%(Extension)</LogicalName>
     </_HMUsbipPayload>
