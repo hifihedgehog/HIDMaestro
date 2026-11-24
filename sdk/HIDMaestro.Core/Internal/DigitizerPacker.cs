@@ -405,6 +405,45 @@ internal sealed class DigitizerPacker
 
     // ── Release ──────────────────────────────────────────────────────────
 
+    /// <summary>The frames that lift every contact the last touch submit left
+    /// down or in range, each where it was, in the hybrid form a frame of
+    /// that many contacts takes: the first report with the whole count, the
+    /// rest with 0, one Scan Time past the last. Empty when no contact is
+    /// down. A hybrid frame's last report carries Contact Count 0, so a
+    /// release built from that report alone would lift nothing
+    /// (<see cref="ReleaseOf"/>).</summary>
+    public List<byte[]> LiftFrames(DigitizerBuffers s)
+    {
+        var frames = new List<byte[]>();
+        if (TouchReport == null || s.Down.Count == 0) return frames;
+        var r = TouchReport;
+        int per = _fingers.Count;
+        var down = new List<HMTouchContact>(s.Down.Values);
+        int scan = 0;
+        if (_touchLevel.First(U(PageDigitizer, ScanTime)) is { } f)
+        {
+            long modulus = (long)f.LogicalMax - f.LogicalMin + 1;
+            scan = modulus > 1 ? (int)(f.LogicalMin + (s.LastScan + 1) % modulus) : f.LogicalMin;
+        }
+        for (int n = 0; n * per < down.Count; n++)
+        {
+            var frame = new byte[r.FrameBytes];
+            if (r.ReportId != 0) frame[0] = r.ReportId;
+            for (int k = 0; k < per && n * per + k < down.Count; k++)
+                PutContact(frame, _fingers[k], down[n * per + k], lift: true);
+            _touchLevel.Put(frame, U(PageDigitizer, ContactCount), n == 0 ? down.Count : 0);
+            _touchLevel.Put(frame, U(PageDigitizer, ScanTime), scan);
+            frames.Add(frame);
+        }
+        return frames;
+    }
+
+    /// <summary>True when <paramref name="frame"/> is a report of the touch
+    /// collection.</summary>
+    public bool IsTouchFrame(ReadOnlySpan<byte> frame, bool withIds) =>
+        TouchReport != null && frame.Length >= TouchReport.FrameBytes
+        && (!withIds || frame[0] == TouchReport.ReportId);
+
     /// <summary>The report that lets go of what a touch or pen
     /// <paramref name="frame"/> holds, written to <paramref name="release"/>:
     /// each contact lifted where it was, with its identifier and the frame's

@@ -1985,6 +1985,13 @@ public sealed partial class HMController : IDisposable
     {
         if (_kbm == null) return;
         var b = _kbmBuffers ??= new KeyboardMouseBuffers();
+        // A touch report's release lifts every contact SubmitTouch left down,
+        // in as many reports as they take (DigitizerPacker.LiftFrames).
+        if (b.Digitizer is { } touch && _kbm.Digitizer.IsTouchFrame(frame, _kbm.Map.UsesReportIds))
+        {
+            NoteTouchRelease(_kbm.Digitizer.LiftFrames(touch), _kbm.Map.UsesReportIds ? frame[0] : (byte)0);
+            return;
+        }
         int length = _kbm.ReleaseOf(frame, b);
         if (length < 0) return;
         var release = b.Release.AsSpan(0, length);
@@ -2004,6 +2011,27 @@ public sealed partial class HMController : IDisposable
         {
             if (_releaseFrames.Count >= SharedMemoryIO.RELEASE_SLOTS) return;
             _releaseFrames.Add(release.ToArray());
+        }
+        SharedMemoryIO.WriteReleaseFrames(Index, _releaseFrames);
+    }
+
+    /// <summary>Make the touch report's release frames
+    /// <paramref name="lifts"/>, in place of the ones kept for it, and hand
+    /// the set to the driver when it changed. None when no contact is down.
+    /// Caller holds _submitLock.</summary>
+    private void NoteTouchRelease(List<byte[]> lifts, byte reportId)
+    {
+        bool withIds = _kbm!.Map.UsesReportIds;
+        bool Touch(byte[] f) => !withIds || f[0] == reportId;
+        var kept = _releaseFrames.FindAll(Touch);
+        bool same = kept.Count == lifts.Count;
+        for (int i = 0; same && i < kept.Count; i++) same = kept[i].AsSpan().SequenceEqual(lifts[i]);
+        if (same) return;
+        _releaseFrames.RemoveAll(Touch);
+        foreach (var lift in lifts)
+        {
+            if (_releaseFrames.Count >= SharedMemoryIO.RELEASE_SLOTS) break;
+            _releaseFrames.Add(lift);
         }
         SharedMemoryIO.WriteReleaseFrames(Index, _releaseFrames);
     }
