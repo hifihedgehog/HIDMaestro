@@ -121,6 +121,7 @@ internal static unsafe partial class Program
         ctx.LoadProfilesFromDirectory(dir);
         LiveTouch(ctx, backend, hover);
         LivePen(ctx, backend, hover);
+        if (backend == HMBackend.Usbip) LivePad(ctx, hover);
         Metrics("after every dispose");
         Console.WriteLine();
         Console.WriteLine($"=== {s_checks - s_fails}/{s_checks} checks passed ===");
@@ -224,6 +225,56 @@ internal static unsafe partial class Program
         Metrics("with the pen");
     }
 
+    // Microsoft's default certification blob (Windows Precision Touchpad
+    // collection page), as mac-precision-touchpad's Hid.h carries it.
+    const string PtpBlob = "fc28fe8440cb9a870dbe573cb670098807972d2be33834b66cedb0f7e59cf6c22e841be8b45178431f284b7c2d53affc47701b596f7443c4f34718531aa2a171c7950e315521d3b51ee90cbaecb889193eb3af75819d53b94157f46d3925297c87d9b498457da7269c653b856889d73bbdff1467f22bf02a4154f0fd2c667cf8c08f331303f1d3c10b89d91b62cd51b780b8af3a10c18a5be88a56f08caafa35e942c4d855c338cc2b535c6952d5c87302387c73b641e7ff05d82b799ae234608fa3321f097862bc80e30fbd65200813c1e2ee532d867ea75ac5d37d98be31481ffbdaafa2a86a89d6bff2d3322a9ae4cf17b7b8f4e13308248bc443a5e524c2";
+
+    // The ITE 06CB:2968 precision touchpad, a USB device.
+    const string PadDescriptor = "05010902a10185020901a10005091901290215002501750195028102950681010501093009311581257f750895028106c0c0050d0905a10185030922a10215002501094709429502750181029501750325050951810275019503810305011500261b047510550e651109303500466c039501810246db01263b0209318102050dc0550c66011047ffff000027ffff000075109501095681020954257f95017508810205090901250175019501810295078103050d85080955095975049502250fb102850d09607501950115002501b1029507b10385070600ff09c5150026ff007508960001b102c0050d090ea10185040922a10209521500250a75089501b102c00922a100850609570958750195022501b1029506b103c0c00600ff0901a10185090902150026ff00750895149102850a0903150026ff00750895149102850b0904150026ff007508951a8102850c0905150026ff007508951a8102850f0906150026ff0075089501b102850e0907150026ff0075089501b102c0";
+
+    static void LivePad(HMContext ctx, bool hover)
+    {
+        var profile = ctx.GetProfile("spike-touchpad");
+        Check("the spike touchpad loads, on USB/IP alone", profile is { RequiresUsbipBackend: true }, profile == null ? "did not load" : "");
+        if (profile == null) return;
+        var t = profile.Touch;
+        Check("its layout: a touchpad, 1 contact per report as Windows' hybrid form takes it, button 1", t is { IsTouchpad: true, ContactsPerReport: 1, Buttons: HMMouseButtons.Left },
+              t == null ? "no touch layout" : $"{t.ContactsPerReport} per report, buttons {t.Buttons}");
+        if (t == null) return;
+        using var c = ctx.CreateController(profile, null, HMBackend.Usbip);
+        var waited = Stopwatch.StartNew();
+        while (c.TouchDeviceMode != 3 && waited.ElapsedMilliseconds < 8000) Thread.Sleep(20);
+        Check("Windows took it for a precision touchpad: it wrote Device Mode 3 after reading the capabilities and the 257-byte certification report",
+              c.TouchDeviceMode == 3, $"TouchDeviceMode {c.TouchDeviceMode?.ToString() ?? "never written"} after {waited.ElapsedMilliseconds} ms");
+        using var pad = OpenChild("VID_1209&PID_0009", "0005");
+        Check("its touch pad collection opens", pad != null, pad?.How ?? "none");
+        if (pad == null) return;
+        ushort[] fingers = Enumerable.Range(0, pad.Links.Length).Where(i => pad.Links[i].LinkUsagePage == 0x0D && pad.Links[i].LinkUsage == 0x22)
+                                     .Select(i => (ushort)i).ToArray();
+        // One contact that slides and lifts, never a tap, in the middle.
+        int y = At(t.Y, 2);
+        byte[]? r = null;
+        for (int step = 0; step <= 6; step++)
+        {
+            int x = t.X.Minimum + (int)((long)(t.X.Maximum - t.X.Minimum) * (40 + step * 3) / 100);
+            c.SubmitTouch(new[] { new HMTouchContact { Id = 1, X = x, Y = y } });
+            Thread.Sleep(50);
+            if (step == 6) r = pad.Input(0x03);
+        }
+        int want = t.X.Minimum + (int)((long)(t.X.Maximum - t.X.Minimum) * 58 / 100);
+        Check("a sliding contact reads back through HidP: id 1, tip and confidence on, its place, Contact Count 1",
+              r != null && pad.Value(r, 0x0D, 0, 0x54) == 1 && fingers.Length == t.ContactsPerReport
+              && pad.Value(r, 0x0D, fingers[0], 0x51) == 1 && pad.On(r, 0x0D, fingers[0], 0x42) && pad.On(r, 0x0D, fingers[0], 0x47)
+              && pad.Value(r, 0x01, fingers[0], 0x30) == want && pad.Value(r, 0x01, fingers[0], 0x31) == y,
+              r == null ? $"HidD_GetInputReport failed, Win32 {Marshal.GetLastPInvokeError()}"
+                        : $"count {pad.Value(r, 0x0D, 0, 0x54)}, id {pad.Value(r, 0x0D, fingers[0], 0x51)} tip {pad.On(r, 0x0D, fingers[0], 0x42)} confidence {pad.On(r, 0x0D, fingers[0], 0x47)} ({pad.Value(r, 0x01, fingers[0], 0x30)},{pad.Value(r, 0x01, fingers[0], 0x31)}) scan {pad.Value(r, 0x0D, 0, 0x56)}");
+        c.SubmitTouch(ReadOnlySpan<HMTouchContact>.Empty);
+        Thread.Sleep(50);
+        r = pad.Input(0x03);
+        Check("the lift reads tip off with id 1 kept", r != null && !pad.On(r, 0x0D, fingers[0], 0x42) && pad.Value(r, 0x0D, fingers[0], 0x51) == 1,
+              r == null ? "no read" : $"tip {pad.On(r, 0x0D, fingers[0], 0x42)} id {pad.Value(r, 0x0D, fingers[0], 0x51)}");
+    }
+
     /// <summary>The spike's two profiles in a folder of their own.</summary>
     static string SpikeProfiles()
     {
@@ -235,6 +286,17 @@ internal static unsafe partial class Program
             Profile("spike-touchscreen", "HIDMaestro spike touchscreen", "0x0007", TouchDescriptor, touchStubs, "touchscreen"));
         System.IO.File.WriteAllText(System.IO.Path.Combine(dir, "spike-pen.json"),
             Profile("spike-pen", "HIDMaestro spike pen", "0x0008", PenDescriptor, null, "pen"));
+        // A precision touchpad on USB/IP alone, from the ITE 06CB:2968's
+        // descriptor (hid-tools tests_kernel test_multitouch.py): device
+        // capabilities 5 contacts and a click pad, Microsoft's default
+        // certification blob (257 bytes with the ID), and the rest zero.
+        string padStubs = "{ \"reports\": [ " + string.Join(", ", new[]
+        {
+            ("0x08", "0805"), ("0x07", "07" + PtpBlob), ("0x0D", "0D00"), ("0x04", "0400"), ("0x06", "0603"), ("0x0F", "0F00"), ("0x0E", "0E00"),
+        }.Select(e => $"{{ \"id\": \"{e.Item1}\", \"size\": {e.Item2.Length / 2}, \"data\": \"{e.Item2}\", \"notify\": true }}")) + " ] }";
+        string pad = Profile("spike-touchpad", "HIDMaestro spike touchpad", "0x0009", PadDescriptor, padStubs, "touchpad");
+        pad = pad.Replace("  \"type\": \"touchpad\",", "  \"type\": \"touchpad\",\n  \"backend\": \"usbip\",");
+        System.IO.File.WriteAllText(System.IO.Path.Combine(dir, "spike-touchpad.json"), pad);
         return dir;
     }
 }

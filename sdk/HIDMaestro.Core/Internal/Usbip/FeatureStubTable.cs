@@ -35,6 +35,11 @@ internal sealed class FeatureStubTable
     // disagree, and a model past a limit is refused at load.
     internal const int MaxEntries = 64;
     internal const int MaxData = 64;
+    /// <summary>The longest answer a profile whose backend is
+    /// <c>usbip</c> serves. The SDK answers on USB/IP itself, past the
+    /// driver's <see cref="MaxData"/>: a precision touchpad's certification
+    /// report is 257 bytes with its ID, and so is a touchscreen's.</summary>
+    internal const int UsbipMaxData = 1024;
     internal const int MaxPages = 16;
     internal const int MaxOnReports = 4;
     internal const int MaxArena = 16384;
@@ -96,7 +101,7 @@ internal sealed class FeatureStubTable
     private readonly bool _usesReportIds;
     // Each answer is assembled here and handed out as a slice: no
     // allocation per GET.
-    private readonly byte[] _scratch = new byte[MaxData];
+    private readonly byte[] _scratch;
     private readonly object _lock = new();
 
     internal IReadOnlyList<Entry> Entries => _entries;
@@ -108,6 +113,9 @@ internal sealed class FeatureStubTable
         _onReports = onReports;
         _values = values;
         _usesReportIds = usesReportIds;
+        int largest = MaxData;
+        foreach (var e in entries) largest = Math.Max(largest, e.Size);
+        _scratch = new byte[largest];
         _kept = new byte[onReports.Length][];
         for (int i = 0; i < _kept.Length; i++) _kept[i] = new byte[MaxData];
         _keptLength = new int[onReports.Length];
@@ -249,6 +257,11 @@ internal sealed class FeatureStubTable
     /// Throws <see cref="ProfileDefectException"/> with the JSON path.</summary>
     internal static void Validate(FeatureStubSpec? spec, Dictionary<string, ValueSourceSpec>? sources, bool usbip)
     {
+        static string SizeRefusal(int size, bool usbip) => usbip
+            ? $"{size} is not a size from 1 to {UsbipMaxData}."
+            : size > MaxData && size <= UsbipMaxData
+                ? $"{size} bytes is past the {MaxData} the UMDF2 driver serves. A profile whose backend is \"usbip\" serves up to {UsbipMaxData}."
+                : $"{size} is not a size from 1 to {MaxData}.";
         if (spec != null)
         {
             if (spec.Match != null && spec.Match is not ("lastMessage" or "reportId"))
@@ -268,10 +281,14 @@ internal sealed class FeatureStubTable
                 string at = $"$.featureStubs.reports[{i}]";
                 byte id = Hex(r.Id, at + ".id");
                 var data = HexBytes(r.Data, at + ".data");
-                if (r.Size is < 0 or > MaxData) throw new ProfileDefectException(at + ".size", $"{r.Size} is not a size from 1 to {MaxData}.");
+                // A UMDF2 profile's answers are the driver's, and a USB/IP
+                // profile's the SDK's own (UsbipMaxData).
+                int most = usbip ? UsbipMaxData : MaxData;
+                if (r.Size is < 0 || r.Size > most) throw new ProfileDefectException(at + ".size", SizeRefusal(r.Size, usbip));
                 var sizes = r.Sizes ?? new List<int>();
                 if (sizes.Count > MaxSizes) throw new ProfileDefectException(at + ".sizes", $"{sizes.Count} sizes, past the {MaxSizes} the driver holds.");
                 foreach (int s in sizes)
+                    // Each size is a byte in the table, on either backend.
                     if (s is < 1 or > MaxData) throw new ProfileDefectException(at + ".sizes", $"{s} is not a size from 1 to {MaxData}.");
                 if (sizes.Distinct().Count() != sizes.Count) throw new ProfileDefectException(at + ".sizes", "names a size twice.");
                 int size = sizes.Count > 0 ? Math.Max(sizes.Max(), r.Size) : r.Size > 0 ? r.Size : data.Length;
@@ -289,8 +306,8 @@ internal sealed class FeatureStubTable
                     if (size == 0) size = page.Length;
                     if (page.Length > size) throw new ProfileDefectException($"{at}.pages[{k}]", $"{page.Length} bytes exceed the {size}-byte report size.");
                 }
-                if (size is < 1 or > MaxData)
-                    throw new ProfileDefectException(at + ".size", $"the answer is {size} bytes, not 1 to {MaxData}.");
+                if (size < 1 || size > most)
+                    throw new ProfileDefectException(at + ".size", SizeRefusal(size, usbip));
                 if (data.Length > size)
                     throw new ProfileDefectException(at + ".data", $"{data.Length} bytes of data exceed the declared {size}-byte report size.");
                 if (r.MinLength is { } min && (min < 0 || min > size))
@@ -616,6 +633,11 @@ internal sealed class FeatureStubTable
     /// the same layout.</summary>
     internal byte[] ToBlob()
     {
+        // Only a USB/IP profile's table holds an answer past the driver's
+        // limit, and the driver never serves such a profile.
+        foreach (var e in _entries)
+            if (e.Size > MaxData)
+                throw new InvalidOperationException($"The feature answer 0x{e.Id:X2} is {e.Size} bytes, past the {MaxData} the UMDF2 driver serves.");
         int arena = 0;
         foreach (var e in _entries) arena += e.Value.Length + e.Sizes.Length + e.Pages.Length * e.Size;
         var blob = new byte[BlobHeader + _entries.Length * BlobEntry + arena];
