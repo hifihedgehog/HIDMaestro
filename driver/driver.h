@@ -46,8 +46,17 @@
  * An echo entry has no page and answers with the last SET on its report.
  *
  * The SDK carries the same limits (FeatureStubTable.Max*) and refuses a
- * model past one at load. A blob past one fails the start. */
+ * model past one at load. A blob past one fails the start.
+ *
+ * 2.4.0: format 5 is the same blob with each entry's Size and MinLength
+ * 16 bits wide (HM_FEATURE_ENTRY_WIDE), for answers past 64 bytes up to
+ * HM_FEATURE_MAX_ANSWER: a precision touchpad's certification report is 257
+ * bytes with its ID (Microsoft, Windows Precision Touchpad collection). The
+ * SDK writes format 5 only when an answer is that long, so a table that
+ * fits format 4 reads the same to every driver. */
 #define HM_FEATURE_FORMAT           4
+#define HM_FEATURE_FORMAT_WIDE      5
+#define HM_FEATURE_MAX_ANSWER       1024
 #define HM_FEATURE_HEADER           16
 #define HM_FEATURE_ENTRY_SIZE       16
 #define HM_FEATURE_MAX_ENTRIES      64
@@ -84,6 +93,43 @@ typedef struct _HM_FEATURE_ENTRY {
 } HM_FEATURE_ENTRY;
 #pragma pack(pop)
 C_ASSERT(sizeof(HM_FEATURE_ENTRY) == HM_FEATURE_ENTRY_SIZE);
+
+/* 2.4.0: a format 5 entry, 16 bytes: the same fields, with Size and
+ * MinLength 16 bits wide after SizeCount. */
+#pragma pack(push, 1)
+typedef struct _HM_FEATURE_ENTRY_WIDE {
+    UCHAR   Id;
+    UCHAR   Flags;
+    UCHAR   OnSlot;
+    UCHAR   At;
+    UCHAR   ValueLength;
+    UCHAR   ParamAt;
+    UCHAR   ParamValue;
+    UCHAR   PageCount;
+    UCHAR   SizeCount;
+    UCHAR   Reserved1;
+    USHORT  Size;           /* each page's length, up to HM_FEATURE_MAX_ANSWER */
+    USHORT  MinLength;
+    USHORT  ArenaOffset;
+} HM_FEATURE_ENTRY_WIDE;
+#pragma pack(pop)
+C_ASSERT(sizeof(HM_FEATURE_ENTRY_WIDE) == HM_FEATURE_ENTRY_SIZE);
+
+/* An entry as the driver keeps it, read from either format. */
+typedef struct _HM_FEATURE_SLOT {
+    UCHAR   Id;
+    UCHAR   Flags;
+    UCHAR   OnSlot;
+    UCHAR   At;
+    UCHAR   ValueLength;
+    UCHAR   ParamAt;
+    UCHAR   ParamValue;
+    UCHAR   PageCount;
+    UCHAR   SizeCount;
+    USHORT  Size;
+    USHORT  MinLength;
+    USHORT  ArenaOffset;
+} HM_FEATURE_SLOT;
 
 /* v2.0.0: CachedInputReportIds, REG_BINARY beside it: the input report IDs
  * whose frames the polled GET_INPUT_REPORT answers from. Empty caches every
@@ -216,7 +262,7 @@ typedef struct _DEVICE_CONTEXT {
     ULONG   FeatureCount;
     ULONG   FeatureOnReportCount;
     UCHAR   FeatureOnReports[HM_FEATURE_MAX_ONREPORTS];
-    HM_FEATURE_ENTRY FeatureEntries[HM_FEATURE_MAX_ENTRIES];
+    HM_FEATURE_SLOT FeatureEntries[HM_FEATURE_MAX_ENTRIES];
     UCHAR   FeatureArena[HM_FEATURE_MAX_ARENA];
     ULONG   FeatureArenaSize;
     UCHAR   FeatureKept[HM_FEATURE_MAX_ONREPORTS][HM_FEATURE_MAX_DATA];

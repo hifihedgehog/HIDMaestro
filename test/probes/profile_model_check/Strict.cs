@@ -297,7 +297,7 @@ internal static class Strict
             new("i-send-clock-keyboard.json", Catalog("8bitdo/retro-mechanical-keyboard.json", "user-send-clock-keyboard",
                 o => o["extendedReport"] = JsonNode.Parse("{\"reportId\":\"0x01\",\"size\":8,\"idleFrameIntervalMs\":4,\"send\":\"clock\",\"fields\":[]}")),
                 "user-send-clock-keyboard",
-                "Refused", "$.extendedReport.send", "keyboard or mouse"),
+                "Refused", "$.extendedReport.send", "keyboard, mouse"),
             new("i-send-output.json", WithId("user-send-output", o => o["extendedOutputReport"] = JsonNode.Parse(
                 "{\"reportId\":\"0x01\",\"size\":8,\"send\":\"clock\",\"fields\":[]}")), "user-send-output",
                 "Refused", "$.extendedOutputReport.send", "belongs to extendedReport"),

@@ -291,15 +291,31 @@ LoadFeatureAnswers(_In_ PDEVICE_CONTEXT ctx, _In_ HKEY hKey)
     ULONG format = *(ULONG UNALIGNED *)&blob[4];
     ULONG count = *(USHORT UNALIGNED *)&blob[8];
     ULONG onCount = blob[10];
-    if (length != size || format != HM_FEATURE_FORMAT || count > HM_FEATURE_MAX_ENTRIES
-        || onCount > HM_FEATURE_MAX_ONREPORTS)
+    if (length != size || (format != HM_FEATURE_FORMAT && format != HM_FEATURE_FORMAT_WIDE)
+        || count > HM_FEATURE_MAX_ENTRIES || onCount > HM_FEATURE_MAX_ONREPORTS)
         return FALSE;
+    /* Format 4 answers are up to HM_FEATURE_MAX_DATA bytes, format 5 up to
+     * HM_FEATURE_MAX_ANSWER. */
+    ULONG most = format == HM_FEATURE_FORMAT_WIDE ? HM_FEATURE_MAX_ANSWER : HM_FEATURE_MAX_DATA;
     ULONG arenaStart = HM_FEATURE_HEADER + count * HM_FEATURE_ENTRY_SIZE;
     if (arenaStart > size || size - arenaStart > HM_FEATURE_MAX_ARENA) return FALSE;
     ULONG arenaSize = size - arenaStart;
     for (ULONG i = 0; i < count; i++) {
-        HM_FEATURE_ENTRY e;
-        RtlCopyMemory(&e, &blob[HM_FEATURE_HEADER + i * HM_FEATURE_ENTRY_SIZE], sizeof(e));
+        const UCHAR *raw = &blob[HM_FEATURE_HEADER + i * HM_FEATURE_ENTRY_SIZE];
+        HM_FEATURE_SLOT e;
+        if (format == HM_FEATURE_FORMAT_WIDE) {
+            HM_FEATURE_ENTRY_WIDE w;
+            RtlCopyMemory(&w, raw, sizeof(w));
+            e.Id = w.Id; e.Flags = w.Flags; e.OnSlot = w.OnSlot; e.At = w.At; e.ValueLength = w.ValueLength;
+            e.ParamAt = w.ParamAt; e.ParamValue = w.ParamValue; e.PageCount = w.PageCount; e.SizeCount = w.SizeCount;
+            e.Size = w.Size; e.MinLength = w.MinLength; e.ArenaOffset = w.ArenaOffset;
+        } else {
+            HM_FEATURE_ENTRY n;
+            RtlCopyMemory(&n, raw, sizeof(n));
+            e.Id = n.Id; e.Flags = n.Flags; e.OnSlot = n.OnSlot; e.At = n.At; e.ValueLength = n.ValueLength;
+            e.ParamAt = n.ParamAt; e.ParamValue = n.ParamValue; e.PageCount = n.PageCount; e.SizeCount = n.SizeCount;
+            e.Size = n.Size; e.MinLength = n.MinLength; e.ArenaOffset = n.ArenaOffset;
+        }
         BOOLEAN message = (e.Flags & HM_FEATURE_FLAG_MESSAGE) != 0;
         BOOLEAN echo = (e.Flags & HM_FEATURE_FLAG_ECHO) != 0;
         if (e.Flags & ~HM_FEATURE_FLAGS_KNOWN) return FALSE;
@@ -312,7 +328,7 @@ LoadFeatureAnswers(_In_ PDEVICE_CONTEXT ctx, _In_ HKEY hKey)
         }
         if ((e.Flags & HM_FEATURE_FLAG_PARAM) && e.ParamAt >= HM_FEATURE_MAX_DATA) return FALSE;
         if (echo ? e.PageCount != 0 : (e.PageCount == 0 || e.PageCount > HM_FEATURE_MAX_PAGES)) return FALSE;
-        if (e.Size == 0 || e.Size > HM_FEATURE_MAX_DATA || e.MinLength > e.Size || e.SizeCount > HM_FEATURE_MAX_SIZES)
+        if (e.Size == 0 || e.Size > most || e.MinLength > e.Size || e.SizeCount > HM_FEATURE_MAX_SIZES)
             return FALSE;
         ULONG need = (ULONG)e.ValueLength + e.SizeCount + (ULONG)e.PageCount * e.Size;
         if ((ULONG)e.ArenaOffset + need > arenaSize) return FALSE;
@@ -579,7 +595,7 @@ FindFeatureEntry(_In_ PDEVICE_CONTEXT ctx, _In_ UCHAR id)
 {
     LONG noParam = -1, plain = -1;
     for (ULONG i = 0; i < ctx->FeatureCount; i++) {
-        const HM_FEATURE_ENTRY *e = &ctx->FeatureEntries[i];
+        const HM_FEATURE_SLOT *e = &ctx->FeatureEntries[i];
         if (e->Id != id) continue;
         if (!(e->Flags & HM_FEATURE_FLAG_MESSAGE)) { if (plain < 0) plain = (LONG)i; continue; }
         ULONG len = ctx->FeatureKeptLength[e->OnSlot];
@@ -601,7 +617,7 @@ static BOOLEAN
 ServeFeature(_In_ PDEVICE_CONTEXT ctx, _In_ UCHAR requestId, _Out_writes_(outSize) UCHAR *out, _In_ ULONG outSize,
              _Out_ ULONG *written, _Out_ BOOLEAN *notify, _Out_ NTSTATUS *status)
 {
-    UCHAR full[HM_FEATURE_MAX_DATA];
+    UCHAR full[HM_FEATURE_MAX_ANSWER];
     UCHAR id = ctx->UsesReportIds ? requestId : 0;
     *written = 0;
     *notify = FALSE;
@@ -609,7 +625,7 @@ ServeFeature(_In_ PDEVICE_CONTEXT ctx, _In_ UCHAR requestId, _Out_writes_(outSiz
     AcquireSRWLockExclusive(&ctx->FeatureLock);
     LONG at = FindFeatureEntry(ctx, id);
     if (at < 0) { ReleaseSRWLockExclusive(&ctx->FeatureLock); return FALSE; }
-    const HM_FEATURE_ENTRY *e = &ctx->FeatureEntries[at];
+    const HM_FEATURE_SLOT *e = &ctx->FeatureEntries[at];
     const UCHAR *arena = ctx->FeatureArena + e->ArenaOffset;
     const UCHAR *sizes = arena + e->ValueLength;
     ULONG n = 0;

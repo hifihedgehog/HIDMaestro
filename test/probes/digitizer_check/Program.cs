@@ -64,6 +64,7 @@ internal static unsafe partial class Program
     static int Main(string[] args)
     {
         if (args.Length > 0 && args[0] == "offline") return Offline();
+        if (args.Length > 0 && args[0] == "catalog") return Catalog();
         if (args.Length > 1 && args[0] == "live" && Enum.TryParse<HMBackend>(args[1], true, out var liveOn))
             return Live(liveOn, args.Length > 2 && args[2] == "hover");
         if (args.Length < 2 || args[0] != "spike" || !Enum.TryParse<HMBackend>(args[1], true, out var backend))

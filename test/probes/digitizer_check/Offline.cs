@@ -39,6 +39,30 @@ internal static partial class Program
         ["TestHuion_Kamvas_Pro_19_256c_006b"] = "screen+pen", ["TestWacom_2d1f_014b"] = "pen",
     };
 
+    /// <summary>catalog: every shipped profile with a touch or pen
+    /// collection, which now delivers every report and lifts its contacts
+    /// when its program dies, and the delivery it had before.</summary>
+    static int Catalog()
+    {
+        Console.WriteLine("=== Shipped profiles with a touch or pen collection ===");
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        int seen = 0, found = 0;
+        foreach (var profile in ctx.AllProfiles)
+        {
+            var inner = profile.Inner;
+            if (!inner.HasDescriptor) continue;
+            seen++;
+            var kbm = inner.GetOrBuildKeyboardMousePacker();
+            if (!kbm.HasTouch && !kbm.HasPen) continue;
+            found++;
+            bool before = inner.IsKeyboardOrMouse || (string.Equals(inner.Type, "other", StringComparison.OrdinalIgnoreCase) && (kbm.HasMouse || kbm.HasKeyboard));
+            Console.WriteLine($"  {profile.Id}: type {inner.Type}, touch {kbm.HasTouch}, pen {kbm.HasPen}, every report delivered before {before}, now {inner.DeliversEveryReport(kbm)}");
+        }
+        Console.WriteLine($"  {found} of {seen} profiles with a descriptor carry a touch or pen collection");
+        return 0;
+    }
+
     static int Offline()
     {
         Console.WriteLine("=== The touch and pen packer over real descriptors ===");

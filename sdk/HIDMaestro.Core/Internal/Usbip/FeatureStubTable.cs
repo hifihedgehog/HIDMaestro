@@ -35,11 +35,16 @@ internal sealed class FeatureStubTable
     // disagree, and a model past a limit is refused at load.
     internal const int MaxEntries = 64;
     internal const int MaxData = 64;
-    /// <summary>The longest answer a profile whose backend is
-    /// <c>usbip</c> serves. The SDK answers on USB/IP itself, past the
-    /// driver's <see cref="MaxData"/>: a precision touchpad's certification
-    /// report is 257 bytes with its ID, and so is a touchscreen's.</summary>
-    internal const int UsbipMaxData = 1024;
+    /// <summary>2.4.0: the longest answer, on either backend. A precision
+    /// touchpad's certification report is 257 bytes with its ID, and so is
+    /// a touchscreen's. <see cref="MaxData"/> stays the limit of the SET a
+    /// message entry follows, and of every answer in a format 4 blob.</summary>
+    internal const int MaxAnswer = 1024;
+    /// <summary>2.4.0: the blob format whose entries carry Size and
+    /// MinLength 16 bits wide (driver.h HM_FEATURE_ENTRY_WIDE), written only
+    /// when an answer passes <see cref="MaxData"/>, so every table that fits
+    /// format 4 reads the same to every driver.</summary>
+    internal const uint BlobFormatWide = 5;
     internal const int MaxPages = 16;
     internal const int MaxOnReports = 4;
     internal const int MaxArena = 16384;
@@ -257,11 +262,7 @@ internal sealed class FeatureStubTable
     /// Throws <see cref="ProfileDefectException"/> with the JSON path.</summary>
     internal static void Validate(FeatureStubSpec? spec, Dictionary<string, ValueSourceSpec>? sources, bool usbip)
     {
-        static string SizeRefusal(int size, bool usbip) => usbip
-            ? $"{size} is not a size from 1 to {UsbipMaxData}."
-            : size > MaxData && size <= UsbipMaxData
-                ? $"{size} bytes is past the {MaxData} the UMDF2 driver serves. A profile whose backend is \"usbip\" serves up to {UsbipMaxData}."
-                : $"{size} is not a size from 1 to {MaxData}.";
+        static string SizeRefusal(int size) => $"{size} is not a size from 1 to {MaxAnswer}.";
         if (spec != null)
         {
             if (spec.Match != null && spec.Match is not ("lastMessage" or "reportId"))
@@ -281,10 +282,7 @@ internal sealed class FeatureStubTable
                 string at = $"$.featureStubs.reports[{i}]";
                 byte id = Hex(r.Id, at + ".id");
                 var data = HexBytes(r.Data, at + ".data");
-                // A UMDF2 profile's answers are the driver's, and a USB/IP
-                // profile's the SDK's own (UsbipMaxData).
-                int most = usbip ? UsbipMaxData : MaxData;
-                if (r.Size is < 0 || r.Size > most) throw new ProfileDefectException(at + ".size", SizeRefusal(r.Size, usbip));
+                if (r.Size is < 0 or > MaxAnswer) throw new ProfileDefectException(at + ".size", SizeRefusal(r.Size));
                 var sizes = r.Sizes ?? new List<int>();
                 if (sizes.Count > MaxSizes) throw new ProfileDefectException(at + ".sizes", $"{sizes.Count} sizes, past the {MaxSizes} the driver holds.");
                 foreach (int s in sizes)
@@ -306,8 +304,8 @@ internal sealed class FeatureStubTable
                     if (size == 0) size = page.Length;
                     if (page.Length > size) throw new ProfileDefectException($"{at}.pages[{k}]", $"{page.Length} bytes exceed the {size}-byte report size.");
                 }
-                if (size < 1 || size > most)
-                    throw new ProfileDefectException(at + ".size", SizeRefusal(size, usbip));
+                if (size is < 1 or > MaxAnswer)
+                    throw new ProfileDefectException(at + ".size", SizeRefusal(size));
                 if (data.Length > size)
                     throw new ProfileDefectException(at + ".data", $"{data.Length} bytes of data exceed the declared {size}-byte report size.");
                 if (r.MinLength is { } min && (min < 0 || min > size))
@@ -633,17 +631,15 @@ internal sealed class FeatureStubTable
     /// the same layout.</summary>
     internal byte[] ToBlob()
     {
-        // Only a USB/IP profile's table holds an answer past the driver's
-        // limit, and the driver never serves such a profile.
-        foreach (var e in _entries)
-            if (e.Size > MaxData)
-                throw new InvalidOperationException($"The feature answer 0x{e.Id:X2} is {e.Size} bytes, past the {MaxData} the UMDF2 driver serves.");
+        // Format 5 only when an answer needs it (BlobFormatWide).
+        bool wide = false;
+        foreach (var e in _entries) wide |= e.Size > MaxData;
         int arena = 0;
         foreach (var e in _entries) arena += e.Value.Length + e.Sizes.Length + e.Pages.Length * e.Size;
         var blob = new byte[BlobHeader + _entries.Length * BlobEntry + arena];
         var s = blob.AsSpan();
         BinaryPrimitives.WriteUInt32LittleEndian(s, (uint)blob.Length);
-        BinaryPrimitives.WriteUInt32LittleEndian(s[4..], BlobFormat);
+        BinaryPrimitives.WriteUInt32LittleEndian(s[4..], wide ? BlobFormatWide : BlobFormat);
         BinaryPrimitives.WriteUInt16LittleEndian(s[8..], (ushort)_entries.Length);
         s[10] = (byte)_onReports.Length;
         _onReports.CopyTo(s[12..]);
@@ -661,10 +657,22 @@ internal sealed class FeatureStubTable
             h[5] = (byte)e.ParamAt;
             h[6] = e.ParamValue;
             h[7] = (byte)e.Pages.Length;
-            h[8] = (byte)e.Size;
-            h[9] = (byte)e.MinLength;
-            h[10] = (byte)e.Sizes.Length;
-            BinaryPrimitives.WriteUInt16LittleEndian(h[12..], (ushort)at);
+            if (wide)
+            {
+                // HM_FEATURE_ENTRY_WIDE: SizeCount at 8, Size, MinLength and
+                // ArenaOffset as 16-bit values from 10.
+                h[8] = (byte)e.Sizes.Length;
+                BinaryPrimitives.WriteUInt16LittleEndian(h[10..], (ushort)e.Size);
+                BinaryPrimitives.WriteUInt16LittleEndian(h[12..], (ushort)e.MinLength);
+                BinaryPrimitives.WriteUInt16LittleEndian(h[14..], (ushort)at);
+            }
+            else
+            {
+                h[8] = (byte)e.Size;
+                h[9] = (byte)e.MinLength;
+                h[10] = (byte)e.Sizes.Length;
+                BinaryPrimitives.WriteUInt16LittleEndian(h[12..], (ushort)at);
+            }
             e.Value.CopyTo(s[(arenaStart + at)..]);
             at += e.Value.Length;
             e.Sizes.CopyTo(s[(arenaStart + at)..]);
