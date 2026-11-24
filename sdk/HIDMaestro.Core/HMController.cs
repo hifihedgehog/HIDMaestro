@@ -796,15 +796,16 @@ public sealed partial class HMController : IDisposable
         // counts itself nowhere, so its frames always signal.
         _signalView = usbipHandle == null ? SharedMemoryIO.GetSignalView(index) : IntPtr.Zero;
 
-        // Issue #67. A keyboard or mouse profile gets every frame delivered,
-        // and so does an "other" profile whose descriptor is a mouse or a
-        // keyboard, the shape a consumer built before the types existed. On
-        // either backend: a USB/IP device acknowledges delivery from its side
-        // as the UMDF2 driver does (UsbipEmulatedDevice, NoteCarriedLocked).
+        // Issue #67. A keyboard, mouse or digitizer profile gets every frame
+        // delivered, and so does an "other" profile whose descriptor has
+        // such a collection, the shape a consumer built before the types
+        // existed. On either backend: a USB/IP device acknowledges delivery
+        // from its side as the UMDF2 driver does (UsbipEmulatedDevice,
+        // NoteCarriedLocked).
         if (presented.Inner.HasDescriptor)
         {
             var kbm = presented.Inner.GetOrBuildKeyboardMousePacker();
-            if (kbm.HasMouse || kbm.HasKeyboard || kbm.HasConsumer) _kbm = kbm;
+            if (kbm.HasAny) _kbm = kbm;
             _deliverEvery = presented.Inner.DeliversEveryReport(kbm);
             _kbmDataReportId = presented.Inner.KeyboardMouseDataReportId(kbm);
         }
@@ -1897,6 +1898,57 @@ public sealed partial class HMController : IDisposable
 
     private KeyboardMousePacker KbmPacker() =>
         _kbm ??= Presented.Inner.GetOrBuildKeyboardMousePacker();
+
+    /// <summary>Report the contacts on a touchscreen or touchpad: every
+    /// contact down or in range now, in the profile's own descriptor
+    /// (<see cref="HMProfile.Touch"/>). A contact the last submit carried and
+    /// this one does not is lifted where it was. An empty span lifts them
+    /// all. More contacts than one report carries go out as several reports,
+    /// the first with the whole count, as Windows' hybrid mode reads them.
+    /// <paramref name="buttons"/> are a touchpad's buttons, Button 1 the
+    /// click. Every report is delivered in order, and the submit returns once
+    /// the previous one has been, as a keyboard or mouse submit does. If the
+    /// program goes away with a contact down, the driver lifts it.</summary>
+    /// <exception cref="InvalidOperationException">The profile's descriptor
+    /// declares no touchscreen or touchpad collection.</exception>
+    /// <exception cref="ArgumentException">More contacts than
+    /// <see cref="HMTouchLayout.MaxContacts"/>, one identifier twice, or an
+    /// identifier past <see cref="HMTouchLayout.MaxContactId"/>.</exception>
+    public void SubmitTouch(ReadOnlySpan<HMTouchContact> contacts, HMMouseButtons buttons = HMMouseButtons.None)
+    {
+        ThrowIfDisposed();
+        ThrowIfDeviceBuildsReports();
+        var packer = KbmPacker();
+        lock (_submitLock)
+        {
+            ThrowIfDisposed();
+            var buffers = _kbmBuffers ??= new KeyboardMouseBuffers();
+            var frames = packer.Digitizer.PackTouch(contacts, buttons, buffers.Digitizer ??= new DigitizerBuffers());
+            for (int i = 0; i < frames.Count; i++)
+                WriteKbmFrame(frames[i]);
+        }
+    }
+
+    /// <summary>Report the pen (<see cref="HMProfile.Pen"/>): in range or
+    /// not, the tip, its buttons, position, pressure and tilt. A pen out of
+    /// range reports every switch off at its last position. The report is
+    /// delivered in order as <see cref="SubmitTouch"/>'s are, and if the
+    /// program goes away with the pen in range, the driver takes it out of
+    /// range.</summary>
+    /// <exception cref="InvalidOperationException">The profile's descriptor
+    /// declares no pen collection.</exception>
+    public void SubmitPen(in HMPenState state)
+    {
+        ThrowIfDisposed();
+        ThrowIfDeviceBuildsReports();
+        var packer = KbmPacker();
+        lock (_submitLock)
+        {
+            ThrowIfDisposed();
+            var buffers = _kbmBuffers ??= new KeyboardMouseBuffers();
+            WriteKbmFrame(packer.Digitizer.PackPen(in state, buffers.Digitizer ??= new DigitizerBuffers()));
+        }
+    }
 
     /// <summary>A whole frame, report ID included, through the extended
     /// lane, which sends it at its own length. Caller holds _submitLock.</summary>

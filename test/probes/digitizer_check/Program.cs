@@ -1,5 +1,6 @@
 // digitizer_check: touchscreens, pens and touchpads.
 //
+//   offline              Offline.cs: the packer over real descriptors.
 //   spike <umdf2|usbip>  A two-finger touchscreen and a pen, each created as
 //                        a custom profile on the backend named, with no
 //                        contacts sent. The touchscreen takes vmulti's finger
@@ -61,9 +62,10 @@ internal static unsafe partial class Program
 
     static int Main(string[] args)
     {
+        if (args.Length > 0 && args[0] == "offline") return Offline();
         if (args.Length < 2 || args[0] != "spike" || !Enum.TryParse<HMBackend>(args[1], true, out var backend))
         {
-            Console.WriteLine("usage: DigitizerCheck spike <umdf2|usbip>");
+            Console.WriteLine("usage: DigitizerCheck offline | spike <umdf2|usbip>");
             return 2;
         }
         if (!new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator))

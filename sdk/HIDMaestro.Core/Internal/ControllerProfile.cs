@@ -622,8 +622,8 @@ public sealed class ControllerProfile
             throw new ProfileDefectException(at, "\"clock\" does not go with a state block: the device builds its reports on its protocol's clock already.");
         if (Protocol?.Input != null)
             throw new ProfileDefectException(at, "\"clock\" does not go with protocol.input, which sends the device's reports.");
-        if (IsKeyboardOrMouse || (HasDescriptor && DeliversEveryReport(GetOrBuildKeyboardMousePacker())))
-            throw new ProfileDefectException(at, "\"clock\" does not go with a keyboard or mouse, which delivers every report in order. A clock sends the latest.");
+        if (IsNoJoystick || (HasDescriptor && DeliversEveryReport(GetOrBuildKeyboardMousePacker())))
+            throw new ProfileDefectException(at, "\"clock\" does not go with a keyboard, mouse, touchscreen, touchpad or pen, which delivers every report in order. A clock sends the latest.");
     }
 
     private void CheckExtendedReport(ExtendedReportSpec? spec, string name, bool output)
@@ -1095,6 +1095,18 @@ public sealed class ControllerProfile
         string.Equals(Type, "keyboard", StringComparison.OrdinalIgnoreCase)
         || string.Equals(Type, "mouse", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>A touchscreen, touchpad or pen profile. Like a keyboard or a
+    /// mouse it is no joystick, and every report it sends is delivered.</summary>
+    [JsonIgnore]
+    public bool IsDigitizer =>
+        string.Equals(Type, "touchscreen", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(Type, "touchpad", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(Type, "pen", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>A keyboard, mouse or digitizer: no joy.cpl entry.</summary>
+    [JsonIgnore]
+    public bool IsNoJoystick => IsKeyboardOrMouse || IsDigitizer;
+
     [JsonIgnore]
     private KeyboardMousePacker? _cachedKbmPacker;
 
@@ -1126,9 +1138,9 @@ public sealed class ControllerProfile
     /// mouse or a keyboard, the shape a consumer built before the types
     /// existed.</summary>
     internal bool DeliversEveryReport(KeyboardMousePacker kbm) =>
-        IsKeyboardOrMouse
+        IsKeyboardOrMouse || IsDigitizer
         || (string.Equals(Type, "other", StringComparison.OrdinalIgnoreCase)
-            && (kbm.HasMouse || kbm.HasKeyboard));
+            && (kbm.HasMouse || kbm.HasKeyboard || kbm.HasTouch || kbm.HasPen));
 
     /// <summary>The report a keyboard or mouse that gets every report
     /// delivered sends a data-only frame as: its dataReportId, else the

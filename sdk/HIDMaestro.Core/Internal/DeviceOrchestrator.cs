@@ -949,9 +949,9 @@ internal static partial class DeviceOrchestrator
         // device of the same identity (foundation-sunshine #1138): the
         // ledger records it before the write and puts it back when the last
         // virtual holding it goes. OEMData and Axes belong to the device and
-        // are no longer deleted. A keyboard or mouse is no joystick and gets
-        // no joy.cpl entry (issue #67).
-        if (!profile.IsKeyboardOrMouse)
+        // are no longer deleted. A keyboard, mouse or digitizer is no joystick
+        // and gets no joy.cpl entry (issue #67).
+        if (!profile.IsNoJoystick)
             RegistryLedger.ClaimJoystickOem(profile.VendorId, profile.ProductId, displayName, controllerIndex);
 
         WriteIdentityEntry(identity.Token, controllerIndex);
@@ -963,14 +963,14 @@ internal static partial class DeviceOrchestrator
     /// and GameInput their controllers, the GameInput table of a profile
     /// built in code, and the joy.cpl name of the identity, which the ledger
     /// records first and puts back when the last virtual holding it goes. A
-    /// keyboard or mouse is no joystick and takes no joy.cpl name.
+    /// keyboard, mouse or digitizer is no joystick and takes no joy.cpl name.
     /// <see cref="RegistryLedger.Release"/> of the index gives the holds
     /// back.</summary>
     internal static void PrepareUsbipController(int controllerIndex, ControllerProfile profile)
     {
         EnsureGameInputService();
         ApplyGameInputMapping(controllerIndex, profile);
-        if (!profile.IsKeyboardOrMouse)
+        if (!profile.IsNoJoystick)
             RegistryLedger.ClaimJoystickOem(profile.VendorId, profile.ProductId,
                 profile.DeviceDescription ?? profile.ProductString ?? "HIDMaestro Controller", controllerIndex);
     }
@@ -4153,7 +4153,7 @@ internal static partial class DeviceOrchestrator
         byte id;
         int declared;
         var kbm = profile.GetOrBuildKeyboardMousePacker();
-        if ((kbm.HasMouse || kbm.HasKeyboard || kbm.HasConsumer) && profile.DeliversEveryReport(kbm))
+        if (kbm.HasAny && profile.DeliversEveryReport(kbm))
         {
             id = profile.KeyboardMouseDataReportId(kbm);
             declared = kbm.Map.Find(HidReportKind.Input, id)?.FrameBytes ?? 0;

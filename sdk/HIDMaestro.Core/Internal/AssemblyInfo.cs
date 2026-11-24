@@ -57,6 +57,7 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("KbmOfflineCheck")]
 [assembly: InternalsVisibleTo("ReportLengthCheck")]
 [assembly: InternalsVisibleTo("KbmLiveCheck")]
+[assembly: InternalsVisibleTo("DigitizerCheck")]
 [assembly: InternalsVisibleTo("BuildInfoCheck")]
 [assembly: InternalsVisibleTo("InteropDeclCheck")]
 [assembly: InternalsVisibleTo("GcDescriptorCheck")]

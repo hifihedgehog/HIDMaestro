@@ -14,6 +14,8 @@ internal sealed class KeyboardMouseBuffers
     internal readonly List<byte[]> Frames = new();
     internal readonly List<byte[]> Motion = new();
     internal byte[]? Extra, Keyboard, Consumer, Release, RawFrame;
+    /// <summary>The touch and pen state, made at the first such submit.</summary>
+    internal DigitizerBuffers? Digitizer;
     internal uint[] Usages = new uint[16], Rest = new uint[16], Fits = new uint[16];
     internal bool[] Flags = new bool[16];
 
@@ -89,6 +91,14 @@ internal sealed class KeyboardMousePacker
     public bool HasMouse => _mouseReports.Count > 0;
     public bool HasKeyboard => _keyboardReport != null;
     public bool HasConsumer => _consumerReport != null;
+    /// <summary>The touchscreen, touchpad and pen collections, packed by
+    /// <see cref="DigitizerPacker"/> over the same parse.</summary>
+    public readonly DigitizerPacker Digitizer;
+    public bool HasTouch => Digitizer.HasTouch;
+    public bool HasPen => Digitizer.HasPen;
+    /// <summary>True when any collection here takes a submit of its own:
+    /// mouse, keyboard, consumer control, touch or pen.</summary>
+    public bool HasAny => HasMouse || HasKeyboard || HasConsumer || HasTouch || HasPen;
     public bool HasKeyboardLeds => _keyboardLedReport != null;
     /// <summary>Highest button number SubmitMouse can reach.</summary>
     public int ButtonCount => _mouseButtonMax + _extraButtons.Count;
@@ -100,6 +110,7 @@ internal sealed class KeyboardMousePacker
     public KeyboardMousePacker(HidReportMap map)
     {
         Map = map;
+        Digitizer = new DigitizerPacker(map);
 
         var mouse = Map.FirstCollection(PageGenericDesktop, 0x02);
         if (mouse != null)
@@ -468,6 +479,10 @@ internal sealed class KeyboardMousePacker
         var r = Map.Find(HidReportKind.Input, id);
         if (r == null || frame.Length < r.FrameBytes) return -1;
         var release = b.Release ??= new byte[_maxInputFrameBytes];
+        // A touch report lifts its contacts by identifier, and a pen report
+        // goes out of range (DigitizerPacker.ReleaseOf).
+        int lifted = Digitizer.ReleaseOf(frame, release, r);
+        if (lifted >= 0) return lifted;
         frame[..r.FrameBytes].CopyTo(release);
         foreach (var f in r.Fields)
         {

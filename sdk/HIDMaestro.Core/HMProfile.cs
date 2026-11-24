@@ -77,6 +77,18 @@ public sealed class HMProfile
     /// "separate" (independent LT/RT), or null (non-gamepad).</summary>
     public string? TriggerMode => Inner.TriggerMode;
 
+    // ── Touch and pen ────────────────────────────────────────────────────
+
+    /// <summary>The descriptor's touchscreen or touchpad collection, which
+    /// <see cref="HMController.SubmitTouch"/> fills, or null when it has
+    /// none.</summary>
+    public HMTouchLayout? Touch => Inner.HasDescriptor ? Inner.GetOrBuildKeyboardMousePacker().Digitizer.TouchLayout : null;
+
+    /// <summary>The descriptor's pen collection, which
+    /// <see cref="HMController.SubmitPen"/> fills, or null when it has
+    /// none.</summary>
+    public HMPenLayout? Pen => Inner.HasDescriptor ? Inner.GetOrBuildKeyboardMousePacker().Digitizer.PenLayout : null;
+
     // ── Device model ─────────────────────────────────────────────────────
 
     /// <summary>True when the profile runs with a device model: feature

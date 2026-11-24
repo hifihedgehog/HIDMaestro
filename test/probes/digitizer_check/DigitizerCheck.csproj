@@ -20,4 +20,8 @@
     <!-- Another running program with HIDMaestro.Core.dll loaded. -->
     <Compile Include="..\probe_common\SdkConsumers.cs" Link="SdkConsumers.cs" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Real descriptors from the kernel's HID tests, hid-tools tests_kernel. -->
+    <None Include="data\*.json" CopyToOutputDirectory="PreserveNewest" LinkBase="data" />
+  </ItemGroup>
 </Project>
