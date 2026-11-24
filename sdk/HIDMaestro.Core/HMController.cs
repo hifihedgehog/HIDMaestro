@@ -1827,6 +1827,19 @@ public sealed partial class HMController : IDisposable
     }
     private volatile int _keyboardLeds = -1;
 
+    /// <summary>The Device Mode the host last wrote to this touchscreen's or
+    /// touchpad's configuration collection (Digitizer, Device Configuration),
+    /// or null until it writes one: 2 for a touchscreen's multiple input, 3
+    /// when Windows reads a touchpad's own reports, 0 for its mouse
+    /// collection. Windows writes it while the device starts, so the SDK
+    /// keeps it from the first write, before a program can subscribe to
+    /// <see cref="OutputReceived"/>.</summary>
+    public int? TouchDeviceMode
+    {
+        get { int v = _touchDeviceMode; return v < 0 ? null : v; }
+    }
+    private volatile int _touchDeviceMode = -1;
+
     /// <summary>Send one mouse report, built from the profile's own mouse
     /// collection. Buttons past the ones that collection declares go to the
     /// profile's second, non-system collection when it has one (the
@@ -2333,6 +2346,13 @@ public sealed partial class HMController : IDisposable
                         _keyboardLeds = (int)leds;
                         EventRaise.Each(KeyboardLedsChanged, this, leds, nameof(KeyboardLedsChanged));
                     }
+
+                    // The Device Mode Windows writes to a touchscreen's or
+                    // touchpad's configuration collection, usually while the
+                    // device starts.
+                    if (_kbm is { } dk && (HMOutputSource)source == HMOutputSource.HidFeature
+                        && dk.Digitizer.DecodeDeviceMode(reportId, data.Span) is int mode)
+                        _touchDeviceMode = mode;
 
                     // v1.3.5: vendor-blob output decode. When the profile
                     // declares an extendedOutputReport with a matching

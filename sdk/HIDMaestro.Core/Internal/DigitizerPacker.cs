@@ -111,6 +111,22 @@ internal sealed class DigitizerPacker
     public bool HasTouch => TouchReport != null;
     public bool HasPen => PenReport != null;
 
+    // The Device Configuration collection's Device Mode (Digitizer 0x0E,
+    // usage 0x52), which Windows writes with SET_FEATURE: 2 for a
+    // touchscreen's multiple input, 3 for a touchpad's own reports and 0 for
+    // its mouse collection (Microsoft, touchscreen and touchpad
+    // configuration collections). Windows' inbox MTConfig driver holds the
+    // collection, and a program's own write to it never reaches the device.
+    private readonly (HidField F, int E)? _deviceMode;
+
+    /// <summary>The Device Mode a host's feature write sets, or null when the
+    /// write is not the configuration collection's.</summary>
+    public int? DecodeDeviceMode(byte reportId, ReadOnlySpan<byte> data)
+    {
+        if (_deviceMode is not { } at || at.F.ReportId != reportId) return null;
+        return HidReportMap.ReadData(data, at.F, at.E);
+    }
+
     public DigitizerPacker(HidReportMap map)
     {
         var touch = map.FirstCollection(PageDigitizer, UsageTouchScreen) ?? map.FirstCollection(PageDigitizer, UsageTouchPad);
@@ -179,6 +195,16 @@ internal sealed class DigitizerPacker
                 };
             }
         }
+
+        var config = map.FirstCollection(PageDigitizer, 0x0E);
+        if (config != null)
+            foreach (var r in map.ReportsOf(config, HidReportKind.Feature))
+                foreach (var f in r.Fields)
+                {
+                    if (f.Collection != config.Index || f.Constant || !f.Variable) continue;
+                    for (int e = 0; e < f.Count && _deviceMode == null; e++)
+                        if (f.UsageAt(e) == U(PageDigitizer, 0x52)) _deviceMode = (f, e);
+                }
 
         var pen = map.FirstCollection(PageDigitizer, UsagePen) ?? map.FirstCollection(PageDigitizer, UsageDigitizer);
         if (pen != null)

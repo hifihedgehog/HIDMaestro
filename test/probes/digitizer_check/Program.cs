@@ -1,6 +1,7 @@
 // digitizer_check: touchscreens, pens and touchpads.
 //
 //   offline              Offline.cs: the packer over real descriptors.
+//   live <backend> [hover]  Live.cs: contacts and pen states read back through HidP.
 //   spike <umdf2|usbip>  A two-finger touchscreen and a pen, each created as
 //                        a custom profile on the backend named, with no
 //                        contacts sent. The touchscreen takes vmulti's finger
@@ -50,12 +51,12 @@ internal static unsafe partial class Program
         "0501093075109501a4550d651335004" + "63a2026f8528102" + "0931462c18266c3e8102" + "b4" +
         "050d093026ff008102" + "7508093d1581257f8102" + "093e1581257f8102" + "c0c0";
 
-    static string Profile(string id, string name, string pid, string descriptor, string? stubs) =>
+    static string Profile(string id, string name, string pid, string descriptor, string? stubs, string type = "other") =>
         "{\n" +
         $"  \"id\": \"{id}\",\n  \"name\": \"{name}\",\n  \"vendor\": \"HIDMaestro\",\n" +
         $"  \"vid\": \"0x1209\",\n  \"pid\": \"{pid}\",\n" +
         $"  \"productString\": \"{name}\",\n  \"manufacturerString\": \"HIDMaestro\",\n" +
-        "  \"type\": \"other\",\n  \"connection\": \"usb\",\n" +
+        $"  \"type\": \"{type}\",\n  \"connection\": \"usb\",\n" +
         $"  \"descriptor\": \"{descriptor}\"" +
         (stubs == null ? "\n" : $",\n  \"featureStubs\": {stubs}\n") +
         "}\n";
@@ -63,9 +64,11 @@ internal static unsafe partial class Program
     static int Main(string[] args)
     {
         if (args.Length > 0 && args[0] == "offline") return Offline();
+        if (args.Length > 1 && args[0] == "live" && Enum.TryParse<HMBackend>(args[1], true, out var liveOn))
+            return Live(liveOn, args.Length > 2 && args[2] == "hover");
         if (args.Length < 2 || args[0] != "spike" || !Enum.TryParse<HMBackend>(args[1], true, out var backend))
         {
-            Console.WriteLine("usage: DigitizerCheck offline | spike <umdf2|usbip>");
+            Console.WriteLine("usage: DigitizerCheck offline | spike <umdf2|usbip> | live <umdf2|usbip> [hover]");
             return 2;
         }
         if (!new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator))
