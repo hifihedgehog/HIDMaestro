@@ -124,15 +124,53 @@ internal static partial class UsbipDriverInstaller
     }
 
     /// <summary>One pass and its bookkeeping. The caller holds the transport
-    /// lock.</summary>
+    /// lock. A pass whose every hub reached a state no later create in this
+    /// process changes (the filter loaded, waiting for the hub's next start,
+    /// its service marked for deletion until Windows next starts, or this
+    /// pin's filter failed on the hub) keeps the list, so creates pass over
+    /// it. A hub not checked, because a lock was held elsewhere, the hub was
+    /// down for another reason or a step failed, leaves it for the next
+    /// create.</summary>
     private static void RunHubFilterPass(string? list)
     {
-        var (hubs, filtered, waiting) = AttachHubFilters();
+        var (hubs, filtered, waiting, unchecked_) = AttachHubFilters();
         Volatile.Write(ref s_passHubs, hubs);
         Volatile.Write(ref s_passFiltered, filtered);
         Volatile.Write(ref s_passWaiting, waiting);
-        if (list != null && hubs > 0 && filtered == hubs)
+        if (list != null && hubs > 0 && unchecked_ == 0)
             Volatile.Write(ref s_hubFilteredFor, list);
+    }
+
+    // ── One restart a Windows session ────────────────────────────────────
+
+    /// <summary>A volatile key under the session note, which Windows drops
+    /// when it next starts: a value for each root hub the filter's restart
+    /// was tried on since then. A hub that Windows refused to restart, or
+    /// whose restart is still running, is not tried again until then.</summary>
+    private const string HubRestartKey = CarriedThisSessionKey + @"\HubFilterRestart";
+
+    private static bool HubRestartTried(string hubId)
+    {
+        try
+        {
+            using var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(HubRestartKey);
+            return k?.GetValue(hubId) != null;
+        }
+        catch { return false; }
+    }
+
+    private static void NoteHubRestartTried(string hubId)
+    {
+        try
+        {
+            using var k = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(HubRestartKey,
+                Microsoft.Win32.RegistryKeyPermissionCheck.Default, Microsoft.Win32.RegistryOptions.Volatile);
+            k.SetValue(hubId, DateTime.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture), Microsoft.Win32.RegistryValueKind.String);
+        }
+        catch (Exception ex)
+        {
+            DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: the hub restart not noted: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     // ── A filter that failed ─────────────────────────────────────────────
@@ -169,61 +207,130 @@ internal static partial class UsbipDriverInstaller
 
     /// <summary>One pass over the driven host controllers. The caller holds
     /// the transport lock.</summary>
-    private static (int Hubs, int Filtered, int Waiting) AttachHubFilters()
+    private static (int Hubs, int Filtered, int Waiting, int Unchecked) AttachHubFilters()
     {
-        int hubs = 0, filtered = 0, waiting = 0;
+        int hubs = 0, filtered = 0, waiting = 0, unchecked_ = 0;
         foreach (uint controller in DrivenHostControllerNodes())
         {
             uint hub = WaitForRootHub(controller);
-            if (hub == 0) continue;
+            if (hub == 0) { unchecked_++; continue; }
             hubs++;
             switch (AttachHubFilter(controller, hub))
             {
                 case HubFilterState.Loaded: filtered++; break;
                 case HubFilterState.Waiting: waiting++; break;
+                case HubFilterState.Unavailable:
+                case HubFilterState.Failed: break;
+                default: unchecked_++; break;
             }
         }
-        return (hubs, filtered, waiting);
+        return (hubs, filtered, waiting, unchecked_);
     }
 
-    private enum HubFilterState { Loaded, Waiting, NotChecked }
+    private enum HubFilterState { Loaded, Waiting, Unavailable, Failed, NotChecked }
+
+    /// <summary>A hub restart's outcome: the hub back as asked within the
+    /// budget, the removal refused with the hub left as it was, the hub
+    /// removed and not back as asked, or the restart still running when the
+    /// budget ran out.</summary>
+    private enum HubRestart { Back, Refused, NotBack, Running }
 
     /// <summary>The filter on one root hub. Loaded when a usbip filter is in
     /// the hub's stack after the call. Waiting when the hub lists HIDMaestro's
-    /// and devices are attached, so it loads at the hub's next start.
-    /// NotChecked when the PnP lock was held elsewhere.
+    /// and loads it at its next start: devices are attached, Windows refused
+    /// the hub's restart or is still running it, or a restart was tried this
+    /// Windows session. Unavailable while the service is marked for deletion.
+    /// Failed when this pin's filter failed on the hub, now or before.
+    /// NotChecked when a lock was held elsewhere, the hub is down for another
+    /// reason, or a step failed.
     ///
-    /// <para>Every devnode write and the hub's restart run under the PnP
-    /// lock taken with no wait, after the transport lock: the order every
-    /// transport deploy takes them in.</para></summary>
+    /// <para>Every devnode write runs under the PnP lock taken with no wait,
+    /// after the transport lock: the order every transport deploy takes them
+    /// in. The hub's restart runs on a thread of its own, as the host
+    /// controller's repair does (<see cref="TryRestartHostController(TransportWork)"/>):
+    /// CfgMgr can block while Plug and Play is held elsewhere, so the create
+    /// waits for the outcome only up to a budget, with the PnP lock held. A
+    /// restart that outlasts the budget runs on after the hold ends. The hub
+    /// has no device on it, so no HIDClass devnode goes or comes with it.
+    /// Each hub is restarted for the filter at most once each Windows session
+    /// (<see cref="HubRestartKey"/>).</para></summary>
     private static HubFilterState AttachHubFilter(uint controller, uint hub)
     {
         string id = DeviceIdOf(hub);
         using var pnp = DeviceManager.TryHoldPnpLock(0, out _);
         if (pnp == null) return HubFilterState.NotChecked;
 
+        // The restart of a hub with no device on it, on its own thread.
+        // Back when the controller's root hub returns with HIDMaestro's
+        // filter in its stack (withFilter), or started (not withFilter).
+        HubRestart Restart(uint target, bool withFilter)
+        {
+            NoteHubRestartTried(id);
+            var sw = Stopwatch.StartNew();
+            int remove = int.MinValue, start = int.MinValue;
+            uint veto = 0;
+            var worker = new Thread(() =>
+            {
+                try
+                {
+                    remove = CM_Query_And_Remove_SubTreeW(target, out veto, IntPtr.Zero, 0, CM_REMOVE_UI_OK);
+                    if (remove != CR_SUCCESS) return;
+                    start = CM_Setup_DevNode(target, CM_SETUP_DEVNODE_READY);
+                    // The hub's record may be gone with the removal. Its
+                    // parent enumerates it again.
+                    if (start != CR_SUCCESS) CM_Reenumerate_DevNode(controller, 0);
+                }
+                catch { /* the outcome below is the verdict */ }
+            }) { IsBackground = true, Name = "HMUsbipHubRestart" };
+            worker.Start();
+            int budget = TimeoutScale.Apply(15_000);
+            HubRestart outcome;
+            if (!worker.Join(budget)) outcome = HubRestart.Running;
+            else if (remove != CR_SUCCESS) outcome = HubRestart.Refused;
+            else outcome = HubBack(controller, withFilter, Math.Max(TimeoutScale.Apply(5_000), budget - (int)sw.ElapsedMilliseconds))
+                ? HubRestart.Back : HubRestart.NotBack;
+            DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: {id} restarted {(withFilter ? "for" : "without")} the root hub filter " +
+                $"(remove CR {Volatile.Read(ref remove)}, veto {Volatile.Read(ref veto)}, setup CR {Volatile.Read(ref start)}): {outcome} after {sw.ElapsedMilliseconds} ms.");
+            return outcome;
+        }
+
+        // A hub that stays down with a driver failure while it lists
+        // HIDMaestro's filter has the filter as its suspect. The filter
+        // leaves the list, the hub starts without it, and no pass adds this
+        // pin again (HubFilterFailed). A hub still starting, at sign-in for
+        // one, gets five seconds first. True when the filter was the
+        // suspect.
+        bool UnlistFailed()
+        {
+            if (HubRunning(controller)) return false;
+            if (CM_Get_Child(out uint down, controller, 0) != CR_SUCCESS
+                || CM_Get_DevNode_Status(out _, out uint problem, down, 0) != CR_SUCCESS
+                || !FilterFailure(problem))
+                return false;
+            string[] listedNow = GetMultiSz(down, CM_DRP_UPPERFILTERS);
+            if (!Array.Exists(listedNow, IsOwnFilter)) return false;
+            string[] without = Array.FindAll(listedNow, f => !IsOwnFilter(f));
+            byte[] value = MultiSzToBytes(without);
+            int cr = CM_Set_DevNode_Registry_PropertyW(down, CM_DRP_UPPERFILTERS, without.Length == 0 ? null : value, without.Length == 0 ? 0u : (uint)value.Length, 0);
+            NoteHubFilterFailed();
+            DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: {id} listed the root hub filter and stayed down with problem {problem}: " +
+                $"unlisted (CR {cr}); this filter is not added again.");
+            if (cr == CR_SUCCESS) Restart(down, withFilter: false);
+            return true;
+        }
+
+        if (!IsStarted(hub))
+        {
+            if (UnlistFailed()) return HubFilterState.Failed;
+            if (CM_Get_Child(out uint up, controller, 0) != CR_SUCCESS || !IsStarted(up)) return HubFilterState.NotChecked;
+            hub = up;
+        }
+
         string[] stack = GetStackProperty(hub);
         string[] upper = GetMultiSz(hub, CM_DRP_UPPERFILTERS);
-        bool listed = Array.Exists(upper, f => f.Equals(HubFilterService, StringComparison.OrdinalIgnoreCase));
+        bool listed = Array.Exists(upper, IsOwnFilter);
         bool vendorLoaded = Array.Exists(stack, d => d.Equals(VendorHubFilterDriver, StringComparison.OrdinalIgnoreCase));
-        bool ownLoaded = Array.Exists(stack, d => d.Equals(OwnHubFilterDriver, StringComparison.OrdinalIgnoreCase));
-        var rest = Array.FindAll(upper, f => !f.Equals(HubFilterService, StringComparison.OrdinalIgnoreCase));
-        byte[] restValue = MultiSzToBytes(rest);
-
-        // A hub that lists HIDMaestro's filter and is not running: the filter
-        // is the suspect. It leaves the list, the hub starts without it, and
-        // no pass adds this pin again (HubFilterFailed).
-        if (listed && !IsStarted(hub))
-        {
-            int cr = CM_Set_DevNode_Registry_PropertyW(hub, CM_DRP_UPPERFILTERS, rest.Length == 0 ? null : restValue, rest.Length == 0 ? 0u : (uint)restValue.Length, 0);
-            int removed = CM_Query_And_Remove_SubTreeW(hub, out uint vetoed, IntPtr.Zero, 0, CM_REMOVE_UI_OK);
-            int setup = CM_Setup_DevNode(hub, CM_SETUP_DEVNODE_READY);
-            if (setup != CR_SUCCESS) CM_Reenumerate_DevNode(controller, 0);
-            NoteHubFilterFailed();
-            DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: {id} listed the root hub filter and was not running: unlisted (CR {cr}), " +
-                $"restarted (remove CR {removed}, veto {vetoed}, setup CR {setup}), running now {HubRunning(controller)}; this filter is not added again.");
-            return HubFilterState.NotChecked;
-        }
+        bool ownLoaded = Array.Exists(stack, IsOwnFilterDriver);
 
         if (vendorLoaded || HubFilterFailed())
         {
@@ -234,14 +341,16 @@ internal static partial class UsbipDriverInstaller
             // lets it go at its next start.
             if (listed)
             {
+                string[] rest = Array.FindAll(upper, f => !IsOwnFilter(f));
+                byte[] restValue = MultiSzToBytes(rest);
                 int cr = CM_Set_DevNode_Registry_PropertyW(hub, CM_DRP_UPPERFILTERS, rest.Length == 0 ? null : restValue, rest.Length == 0 ? 0u : (uint)restValue.Length, 0);
                 DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: {id} {(vendorLoaded ? "runs usbip-win2's own filter" : "had HIDMaestro's filter fail")}; HIDMaestro's left its UpperFilters (CR {cr}).");
             }
-            return vendorLoaded ? HubFilterState.Loaded : HubFilterState.NotChecked;
+            return vendorLoaded ? HubFilterState.Loaded : HubFilterState.Failed;
         }
 
         var service = EnsureHubFilterService();
-        if (service == HubFilterServiceState.Unavailable) return HubFilterState.NotChecked;
+        if (service == HubFilterServiceState.Unavailable) return HubFilterState.Unavailable;
         if (ownLoaded && service == HubFilterServiceState.Current && listed) return HubFilterState.Loaded;
 
         if (!listed)
@@ -268,45 +377,44 @@ internal static partial class UsbipDriverInstaller
             DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: {id} has devices attached ({imports} import(s)); the root hub filter loads at the hub's next start.");
             return HubFilterState.Waiting;
         }
-
-        var sw = Stopwatch.StartNew();
-        int remove = CM_Query_And_Remove_SubTreeW(hub, out uint veto, IntPtr.Zero, 0, CM_REMOVE_UI_OK);
-        int start = CM_Setup_DevNode(hub, CM_SETUP_DEVNODE_READY);
-        if (start != CR_SUCCESS)
+        if (HubRestartTried(id))
         {
-            // The hub's record may be gone with the removal. Its parent
-            // enumerates it again.
-            CM_Reenumerate_DevNode(controller, 0);
-        }
-        bool loaded = WaitForOwnFilter(controller, TimeoutScale.Apply(15_000));
-        bool running = HubRunning(controller);
-        DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: {id} restarted for the root hub filter (remove CR {remove}, veto {veto}, setup CR {start}): " +
-            $"{(loaded ? "loaded" : running ? "running without it" : "not running")} after {sw.ElapsedMilliseconds} ms.");
-        if (loaded)
-        {
-            DeleteOlderHubFilterImages();
-            return HubFilterState.Loaded;
-        }
-        if (running)
-        {
-            // Windows left the hub as it was, which it does with a hub that
-            // has to wait for the next Windows start. The filter loads then.
+            DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: {id} had its restart tried this Windows session; the root hub filter loads at the hub's next start.");
             return HubFilterState.Waiting;
         }
 
-        // The hub did not come back with the filter in its stack. It starts
-        // without it, and this pin is not added again.
-        CM_Get_Child(out uint again, controller, 0);
-        uint target = again != 0 ? again : hub;
-        int cr2 = CM_Set_DevNode_Registry_PropertyW(target, CM_DRP_UPPERFILTERS, rest.Length == 0 ? null : restValue, rest.Length == 0 ? 0u : (uint)restValue.Length, 0);
-        int remove2 = CM_Query_And_Remove_SubTreeW(target, out uint veto2, IntPtr.Zero, 0, CM_REMOVE_UI_OK);
-        int start2 = CM_Setup_DevNode(target, CM_SETUP_DEVNODE_READY);
-        if (start2 != CR_SUCCESS) CM_Reenumerate_DevNode(controller, 0);
-        NoteHubFilterFailed();
-        DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: {id} did not come back with the root hub filter: unlisted (CR {cr2}), " +
-            $"restarted (remove CR {remove2}, veto {veto2}, setup CR {start2}), running now {HubRunning(controller)}; this filter is not added again.");
-        return HubFilterState.NotChecked;
+        switch (Restart(hub, withFilter: true))
+        {
+            case HubRestart.Back:
+                DeleteOlderHubFilterImages();
+                return HubFilterState.Loaded;
+            case HubRestart.NotBack:
+                // Removed and not back with the filter. A hub down with a
+                // driver failure loses it.
+                if (UnlistFailed()) return HubFilterState.Failed;
+                return HubRunning(controller) ? HubFilterState.Waiting : HubFilterState.NotChecked;
+            default:
+                // Windows refused the removal and the hub runs as it was, or
+                // the restart still runs. The filter loads at the hub's next
+                // start.
+                return HubFilterState.Waiting;
+        }
     }
+
+    private static bool IsOwnFilter(string service) => service.Equals(HubFilterService, StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsOwnFilterDriver(string driver) => driver.Equals(OwnHubFilterDriver, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The problem codes a hub shows when a driver in its stack
+    /// failed: its image did not load, was blocked or is unsigned, its
+    /// DriverEntry or AddDevice failed, its service is disabled or
+    /// unreadable, or the stack failed the start or after it (cfg.h). A hub
+    /// that is disabled, held for eject, waiting on a driver's earlier
+    /// unload or on its own removal shows another.</summary>
+    private static bool FilterFailure(uint problem) => problem is
+        CM_PROB_FAILED_START or CM_PROB_FAILED_ADD or CM_PROB_DISABLED_SERVICE or CM_PROB_FAILED_DRIVER_ENTRY
+        or CM_PROB_DRIVER_FAILED_LOAD or CM_PROB_DRIVER_SERVICE_KEY_INVALID or CM_PROB_FAILED_POST_START
+        or CM_PROB_DRIVER_BLOCKED or CM_PROB_UNSIGNED_DRIVER;
 
     /// <summary>True when the devnode is started with no problem.</summary>
     private static bool IsStarted(uint devInst) =>
@@ -527,18 +635,20 @@ internal static partial class UsbipDriverInstaller
     }
 
     /// <summary>True once the controller's root hub, the same devnode or a
-    /// new one, is back with HIDMaestro's filter in its stack.</summary>
-    private static bool WaitForOwnFilter(uint controller, int budgetMs)
+    /// new one, is back within <paramref name="budgetMs"/>: with HIDMaestro's
+    /// filter in its stack when <paramref name="withFilter"/>, started
+    /// otherwise. Checked at least once.</summary>
+    private static bool HubBack(uint controller, bool withFilter, int budgetMs)
     {
         var sw = Stopwatch.StartNew();
-        while (sw.ElapsedMilliseconds < budgetMs)
+        while (true)
         {
             if (CM_Get_Child(out uint hub, controller, 0) == CR_SUCCESS
-                && Array.Exists(GetStackProperty(hub), d => d.Equals(OwnHubFilterDriver, StringComparison.OrdinalIgnoreCase)))
+                && (withFilter ? Array.Exists(GetStackProperty(hub), IsOwnFilterDriver) : IsStarted(hub)))
                 return true;
+            if (sw.ElapsedMilliseconds >= budgetMs) return false;
             Thread.Sleep(100);
         }
-        return false;
     }
 
     /// <summary>The devnode's instance id, or "?".</summary>
@@ -580,6 +690,17 @@ internal static partial class UsbipDriverInstaller
     private const int ERROR_SERVICE_EXISTS = 1073;         // winerror.h
     private const int ERROR_SERVICE_MARKED_FOR_DELETE = 1072; // winerror.h
     private const uint DN_STARTED = 0x00000008;            // cfgmgr32.h
+
+    // shared/cfg.h, the problem codes FilterFailure reads.
+    private const uint CM_PROB_FAILED_START = 0x0000000A;
+    private const uint CM_PROB_FAILED_ADD = 0x0000001F;
+    private const uint CM_PROB_DISABLED_SERVICE = 0x00000020;
+    private const uint CM_PROB_FAILED_DRIVER_ENTRY = 0x00000025;
+    private const uint CM_PROB_DRIVER_FAILED_LOAD = 0x00000027;
+    private const uint CM_PROB_DRIVER_SERVICE_KEY_INVALID = 0x00000028;
+    private const uint CM_PROB_FAILED_POST_START = 0x0000002B;
+    private const uint CM_PROB_DRIVER_BLOCKED = 0x00000030;
+    private const uint CM_PROB_UNSIGNED_DRIVER = 0x00000034;
 
     [LibraryImport("cfgmgr32.dll")]
     private static partial int CM_Set_DevNode_Registry_PropertyW(uint dnDevInst, uint ulProperty, byte[]? Buffer, uint ulLength, uint ulFlags);
