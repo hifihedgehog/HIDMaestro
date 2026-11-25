@@ -34,6 +34,7 @@ static class Program
     static extern int CM_Get_Device_Interface_List_SizeW(out uint len, ref Guid c, string? d, uint f);
     [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
     static extern int CM_Get_Device_Interface_ListW(ref Guid c, string? d, char[] b, uint bl, uint f);
+    [DllImport("cfgmgr32.dll")] static extern uint CMP_WaitNoPendingInstallEvents(uint timeoutMs);
     [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_GetAttributes(IntPtr h, byte[] a);
     [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_GetPreparsedData(IntPtr h, out IntPtr pp);
     [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_FreePreparsedData(IntPtr pp);
@@ -463,6 +464,14 @@ static class Program
             try
             {
                 c = ctx.CreateController(prof);
+                // The create returns once the HID collections run, and Windows
+                // goes on installing the composite's other functions. On the
+                // Surface on 2026-11-25 the readers' handles failed mid-check
+                // in the minute Windows finished installing usbser on the
+                // Steam Deck's serial function, and later runs passed. The
+                // checks start once no installation is pending.
+                uint settle = CMP_WaitNoPendingInstallEvents(300_000);
+                if (settle != 0) Console.WriteLine($"  [NOTE] device installation still pending after 300 s (0x{settle:X})");
                 string? path = null; int inLen = 0;
                 for (int i = 0; i < 120 && path == null; i++)
                 {
