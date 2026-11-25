@@ -66,6 +66,7 @@ internal static unsafe partial class Program
         if (args.Length > 0 && args[0] == "offline") return Offline();
         if (args.Length > 0 && args[0] == "catalog") return Catalog();
         if (args.Length > 1 && args[0] == "mixed") return Mixed(args[1]);
+        if (args.Length > 2 && args[0] == "observe" && Enum.TryParse<HMBackend>(args[1], true, out var observeOn)) return Observe(observeOn, args[2]);
         if (args.Length > 1 && args[0] == "kill" && Enum.TryParse<HMBackend>(args[1], true, out var killOn)) return Kill(killOn, args.Length > 2 && args[2] == "hover");
         if (args.Length > 3 && args[0] == "hold-touch" && Enum.TryParse<HMBackend>(args[1], true, out var holdOn))
             return HoldTouch(holdOn, args[2], int.Parse(args[3]), args.Length > 4 && args[4] == "hover");
