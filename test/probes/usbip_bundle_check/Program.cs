@@ -72,10 +72,14 @@ internal static class Program
         var udeRes = UsbipDriverInstaller.UdeResourcesFor(RuntimeInformation.OSArchitecture).ToList();
         foreach (string res in udeRes)
         {
-            string file = res[(res.LastIndexOf(".usbip2_ude", StringComparison.Ordinal) + 1)..];
+            // HIDMaestro.Usbip.<arch>.<file>: the host controller's three
+            // files, and the root hub filter's image, which has a pin of its
+            // own (UsbipDriverInstaller.PinnedHubFilterHash).
+            string file = res[(res.IndexOf('.', "HIDMaestro.Usbip.".Length) + 1)..];
             using var s = asm.GetManifestResourceStream(res);
             string hash = s == null ? "missing" : Convert.ToHexString(SHA256.HashData(s)).ToLowerInvariant();
-            Check($"{file} embedded and matches its pinned SHA-256 byte for byte", hash == UsbipDriverInstaller.PinnedUdeHash(file), hash);
+            string pinned = file == UsbipDriverInstaller.HubFilterFile ? UsbipDriverInstaller.PinnedHubFilterHash() : UsbipDriverInstaller.PinnedUdeHash(file);
+            Check($"{file} embedded and matches its pinned SHA-256 byte for byte", hash == pinned, hash);
         }
         Check("license notice embedded", names.Contains(NoticeRes));
         Check("usbip-win2's installer is not embedded",
