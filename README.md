@@ -27,7 +27,7 @@
 
 **Virtual game controllers, keyboards and mice that look like real hardware to Windows. No kernel driver of its own. No network. No reboot.**
 
-HIDMaestro creates virtual controllers that present the exact identity of real hardware across the whole Windows input stack at once. Pick from 344 built-in profiles, 103 of them keyboards and mice, or point it at a device you own and clone it. DirectInput, XInput, SDL3, the browser Gamepad API, and WGI/GameInput all see the VID/PID, product name, HID descriptor, axis and button layout, and bus type the profile defines. A virtual keyboard or mouse reaches Raw Input and the desktop as the device it copies.
+HIDMaestro creates virtual controllers that present the exact identity of real hardware across the whole Windows input stack at once. Pick from 344 built-in profiles, 103 of them keyboards and mice, or point it at a device you own and clone it. DirectInput, XInput, SDL3, the browser Gamepad API, and WGI/GameInput all see the VID/PID, product name, HID descriptor, axis and button layout, and bus type the profile defines. A virtual keyboard or mouse reaches Raw Input and the desktop as the device it copies. A touchscreen, precision touchpad or pen comes from the descriptor builder or a descriptor of your own, and Windows takes each as that kind of device.
 
 HIDMaestro has two drivers. On x64 the default is the UMDF2 driver, which runs entirely in user mode and is signed on the machine with a locally trusted self-signed certificate. No EV certificate, no `testsigning` boot mode, no kernel driver that can blue-screen the machine. Windows on ARM64 does not allow installing a self-signed UMDF2 driver, so there every controller runs on the USB/IP driver: a USB device that HIDMaestro's user-mode code serves through the usbip-win2 host controller, a kernel-mode driver from the usbip-win2 project that HIDMaestro carries and installs.
 
@@ -218,6 +218,34 @@ keyboard.SubmitKeyboard(HMKeyModifiers.None, ReadOnlySpan<HMKey>.Empty);
 - **Nothing stays held.** If the consuming process ends with a key or button down, however it ends, the driver lets go of it. Without that, Windows would repeat a held key until the device was removed. `Dispose` sends the same release first. A consumer that exits normally without disposing has its devices removed as it exits, and the next sweep of any program removes what a killed one left, keyboards included. On USB/IP the device runs in the consuming process and leaves with it, so a key a killed consumer held stays down in Windows, without repeating, until it is pressed and released again. `ReleasesOnConsumerExit` is false there.
 
 `HidDescriptorBuilder` builds them from scratch with the `Mouse`, `Keyboard`, `KeyboardNkro`, `ConsumerControl` and `VendorButtons` starters. Battery scenarios S69 and S70 check the descriptors and packers, then every catalog keyboard and mouse through Raw Input. [How this works](docs/INTERNALS.md#keyboards-and-mice).
+
+---
+
+## Touchscreens, touchpads and pens.
+
+As of v2.4.0 a profile can be a touchscreen, a precision touchpad or a pen. `SubmitTouch` and `SubmitPen` pack into the reports the profile's descriptor declares: each finger's contact ID, tip, position, size and pressure, with the Contact Count and the Scan Time, or the pen's tip, buttons, position, pressure and tilt.
+
+```csharp
+var screen = new HMProfileBuilder()
+    .Id("example-touchscreen").Name("Example Touchscreen").Vendor("Example")
+    .Vid(0x1209).Pid(0x0001).ProductString("Example Touchscreen").ManufacturerString("Example")
+    .Type("touchscreen").Connection("usb")
+    .FromDescriptorBuilder(new HidDescriptorBuilder().Touchscreen(contacts: 10))
+    .Build();
+using var touch = ctx.CreateController(screen);
+HMTouchLayout t = screen.Touch!;
+touch.SubmitTouch(new[] { new HMTouchContact { Id = 0, X = t.X.Maximum / 2, Y = t.Y.Maximum / 2 } });
+touch.SubmitTouch(ReadOnlySpan<HMTouchContact>.Empty);   // lifts the contact where it was
+```
+
+- `HidDescriptorBuilder.Touchscreen` builds a touchscreen of up to 20 contacts in one report, with its Contact Count Maximum report and the configuration collection Windows writes a Device Mode to. `Touchpad` builds a precision touchpad in the layout [mac-precision-touchpad](https://github.com/imbushuo/mac-precision-touchpad) gives Windows, Microsoft's default certification blob included. `Pen` builds Microsoft's sample pen. `HMProfileBuilder.FromDescriptorBuilder` puts the answers their feature reports need into the profile.
+- A profile whose own descriptor has a touchscreen, touchpad or pen collection works the same way. `HMProfile.Touch` and `HMProfile.Pen` describe what it carries: contacts per report, the most contacts, the contact ID range, the ranges of X, Y, width, height and pressure, a touchpad's buttons, and whether a contact can hover (`HasInRange`).
+- Windows writes Device Mode 2 to a touchscreen, and Input Mode 3 to a touchpad once its certification and capabilities pass, the step that makes it a precision touchpad. `TouchDeviceMode` holds the last value Windows wrote.
+- A submit with more contacts than one report carries goes in as many reports as it takes, the first with the whole Contact Count and the rest with 0, all with one Scan Time, as Windows reads hybrid mode.
+- A contact a submit leaves out is lifted where it was. If the consuming process ends with contacts down, however it ends, the UMDF2 driver lifts every one, in as many reports as they take, and lets go of a held touchpad button. `Dispose` sends the same lifts first. On USB/IP the device leaves with the process.
+- A report longer than the input section's 80-byte lane goes whole through a second shared section on both drivers. The Elan screen of the Dell XPS 13 9360 sends 116 bytes, and the ten-contact starter 104. A driver older than 2.4.0 cannot carry them, so the SDK refuses such a report there, and one longer than 1024 bytes anywhere, before any byte goes.
+
+[How this works](docs/INTERNALS.md#touchscreens-touchpads-and-pens).
 
 ---
 
@@ -577,6 +605,25 @@ VIIPER describes itself as running entirely in userspace. On Windows that holds 
 
 HIDMaestro is Windows optimized and focused on game controllers, keyboards, mice and other HID game devices. Within that scope it gives you exact hardware identity with no kernel driver, no network layer, and no per-device code. That combination is what HIDMaestro is built for, and nothing else on this list delivers it.
 
+### On Windows, beside libvirtualhid
+
+[libvirtualhid](https://github.com/LizardByte/libvirtualhid) is a C++ library for virtual input devices on Linux, FreeBSD, macOS and Windows. Its own comparison marks touchscreens, trackpads and pens as supported, which holds on Linux and FreeBSD. Each cell for it below comes from its [README](https://github.com/LizardByte/libvirtualhid/blob/45443d6/README.md), its [platform page](https://github.com/LizardByte/libvirtualhid/blob/45443d6/docs/platform-support.md) and its [Windows backend](https://github.com/LizardByte/libvirtualhid/blob/45443d6/src/platform/windows/windows_backend.cpp) at commit 45443d6.
+
+| On Windows | HIDMaestro 2.4.0 | libvirtualhid 45443d6 |
+|--|--|--|
+| Touchscreen | A HID touchscreen on both drivers. Windows writes its Device Mode as it does for hardware | Windows' synthetic pointer injection, with no HID device |
+| Precision touchpad | A HID touchpad Windows takes as a precision touchpad | None. The Windows backend refuses a trackpad |
+| Pen | A HID pen with pressure, tilt, barrel, eraser and hover | Windows' synthetic pointer injection, with no HID device |
+| DualSense | USB and Bluetooth forms. The composite persona adds the speaker, the voice-coil haptics stream and the microphone | HID reports in USB framing, even when a profile asks for Bluetooth. No audio |
+| Windows on ARM64 | Yes, on the USB/IP driver | None. The driver installer is AMD64 only |
+| Cost | Free, MIT | A paid machine license for driver-backed devices, yearly or lifetime. The library is MIT, the driver source-available |
+| Profiles | 344 built in, as JSON, or captured from a device you own | Built into the library's C++ |
+| Third-party kernel-mode driver | None for HID profiles on x64. usbip-win2's for the composite personas and on ARM64 | None |
+| Other platforms | None | Linux, FreeBSD and macOS |
+| API | C# on .NET 10, NativeAOT and trimming ready | One C++ API on every platform |
+
+On Linux and FreeBSD, libvirtualhid's touchscreens, trackpads and pen tablets are real `uinput` devices. HIDMaestro does not run there.
+
 ### What it replaces
 
 - **VIIPER**: needs a kernel-mode USB/IP driver on Windows despite the userspace billing, makes the user install it, and presents every controller as USB so Bluetooth devices report the wrong bus type. Its headline latency is localhost-only and already 4 to 5 times higher than HIDMaestro's even there. The network it is named for adds another 1 to 50 ms on top.
@@ -592,6 +639,8 @@ HIDMaestro is Windows optimized and focused on game controllers, keyboards, mice
 - **Output is delivered, not routed to hardware.** The driver accepts rumble/haptic/FFB writes and raises `OutputReceived` to the consumer. Sending those to a physical controller is the consumer's job (PadForge does this).
 - **Auth-chip controllers.** PS4/PS5 online and Nintendo Switch Online require cryptographic authentication from real controller hardware. HIDMaestro cannot replicate authentication chips.
 - **Vendor-specific feature reports.** LED control, calibration, and firmware-update reports vary per device. A profile answers the ones its answer table holds, and a report no table holds goes unanswered.
+- **Hover needs In Range.** A touch contact hovers only on a descriptor whose fingers declare In Range (`HMTouchLayout.HasInRange`). On one without it, such as the Elan screen of the Dell XPS 13 9360, a hovering contact reads as lifted.
+- **A release of 32 reports.** The driver keeps at most 32 reports to send when a consumer goes away, and each report's release goes whole or not at all. A touch release that needs more, as more than 32 contacts down on a one-contact-per-report descriptor would, is not kept, and those contacts stay down until the device is removed.
 - **One interface per keyboard or mouse.** A keyboard or mouse profile carries the descriptor of the real device's keyboard or mouse interface. Its other interfaces, including the ones vendor configuration tools use, are not emulated.
 - **Anti-cheat.** Virtual devices are detectable by kernel-level anti-cheat. HIDMaestro does not hide that it is virtual.
 - **Windows on ARM64.** Windows on ARM64 and Windows in S mode do not allow installing a self-signed UMDF2 driver, so every controller there runs on the USB/IP driver. The Xbox 360 profiles present the USB devices Windows' own xusb22 drives, the wired Xbox One and Series profiles present the wired GIP device Windows' own Xbox drivers bind, and a Bluetooth profile presents its own Bluetooth form: SDL reads it as Bluetooth, and Windows' xinputhid drives the Bluetooth Xbox pads as it drives real ones. A keyboard or mouse a killed consumer held a key on leaves that key down until it is pressed again: [Where the driver installs](#where-the-driver-installs).
