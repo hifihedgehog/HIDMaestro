@@ -543,15 +543,22 @@ internal static class Program
                     disposeMs = sw.ElapsedMilliseconds - at;
                 }
 
-                // The device arrived before Windows.Gaming.Input tracked
-                // this process: it lists a device it should and has listed
-                // none of this process yet. A check knows from the pins that
-                // it should, a record takes every profile but a keyboard or
-                // a mouse for one it lists.
-                if (got == null || got.Wgi.Count > 0 || wgiListed || attempt == 3) break;
+                // Windows.Gaming.Input listed nothing for a device it lists:
+                // the device arrived before it tracked this process, or it
+                // stayed silent through the whole read, as on the PCG02 GLE
+                // on 2026-11-25 for amazon-luna-usb, 16 s with nothing
+                // listed, right after amazon-luna-ble of the same VID and PID
+                // went, while every other reader read the device. A silent
+                // read says nothing about the identity, so the profile is
+                // created again, up to three times. A check knows from the
+                // pins that it lists the device, a record takes every
+                // profile but a keyboard or a mouse for one it lists.
+                if (got == null || got.Wgi.Count > 0 || attempt == 3) break;
                 bool listed = want != null ? OnThisMachine(want)[0]["wgi"].Count > 0 : p.Type is not ("keyboard" or "mouse");
                 if (!listed) break;
-                Console.WriteLine($"  [note] {p.Id}: Windows.Gaming.Input listed nothing for it in {readMs} ms and has listed no device of this process yet. The profile is created again.");
+                Console.WriteLine(wgiListed
+                    ? $"  [note] {p.Id}: Windows.Gaming.Input listed nothing for it in {readMs} ms. The profile is created again."
+                    : $"  [note] {p.Id}: Windows.Gaming.Input listed nothing for it in {readMs} ms and has listed no device of this process yet. The profile is created again.");
                 Readers.Dropped(before, (int)(8000 * Scale));
                 before = Readers.Take();
             }
