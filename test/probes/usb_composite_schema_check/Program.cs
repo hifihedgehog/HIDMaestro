@@ -123,11 +123,15 @@ internal static partial class Program
         var arch = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture;
         foreach (string res in UsbipDriverInstaller.UdeResourcesFor(arch))
         {
-            string file = res[(res.LastIndexOf(".usbip2_ude", StringComparison.Ordinal) + 1)..];
+            // HIDMaestro.Usbip.<arch>.<file>: the host controller's three
+            // files, and the root hub filter's image, which has a pin of its
+            // own (UsbipDriverInstaller.PinnedHubFilterHash).
+            string file = res[(res.IndexOf('.', "HIDMaestro.Usbip.".Length) + 1)..];
             using var s = asm.GetManifestResourceStream(res);
             if (s == null) { Check($"usbip-win2's {file} is embedded in HIDMaestro.Core.dll", false, res); continue; }
             string hex = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(s)).ToLowerInvariant();
-            Check($"usbip-win2's {file} is embedded at the pinned SHA-256", hex == UsbipDriverInstaller.PinnedUdeHash(file), hex);
+            string pinned = file == UsbipDriverInstaller.HubFilterFile ? UsbipDriverInstaller.PinnedHubFilterHash() : UsbipDriverInstaller.PinnedUdeHash(file);
+            Check($"usbip-win2's {file} is embedded at the pinned SHA-256", hex == pinned, hex);
         }
         Check("usbip-win2's installer is not embedded: the SDK never runs it",
               !resNames.Any(n => n.StartsWith("HIDMaestro.Resources.USBip-", StringComparison.OrdinalIgnoreCase)),
