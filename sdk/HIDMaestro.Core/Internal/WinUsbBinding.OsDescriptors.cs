@@ -46,6 +46,26 @@ internal static partial class WinUsbBinding
     internal static bool BindsByOsDescriptors() =>
         OsDescriptorsForProbe || (DriverDeploy.SigningStopsDeploy() && OurPackages().Count == 0);
 
+    /// <summary>The name, in <see cref="AdminNamespace"/>, of the machine-wide
+    /// lock one bind by Microsoft OS descriptors holds from its first look at
+    /// the devnode until WinUSB runs on it. Devices of one identity share a
+    /// serial, and Windows gives the serial's instance ID to the one that
+    /// arrives while no other of the identity is present and an ID by port
+    /// to the rest. Two re-plugs that overlap can come back in the other
+    /// order, each on the devnode the other flagged, and one device then
+    /// returns to a devnode that keeps its old driver.</summary>
+    internal const string OsBindMutexObject = "WinUsbOsBind";
+
+    /// <summary>The bind on a machine that refuses the package, one program's
+    /// at a time (<see cref="OsBindMutexObject"/>).</summary>
+    private static HMWinUsbBinding BindByOsDescriptors(HMController controller, Usbip.UsbipBackendHandle handle, Keeper keeper)
+    {
+        using var bind = AcquireUnlessStopped(OsBindMutexObject, 120_000, keeper,
+            "Another program's WinUSB bind held HIDMaestro's machine-wide bind lock for two minutes.");
+        try { return BindByOsDescriptorsLocked(controller, handle, keeper); }
+        finally { bind.ReleaseMutex(); }
+    }
+
     /// <summary>The bind on a machine that refuses the package. The devnode
     /// the device is on now is recorded in the ledger with its driver, as a
     /// package bind records it. Then the device serves the descriptors, the
@@ -53,7 +73,7 @@ internal static partial class WinUsbBinding
     /// devnode is flagged to install again once it has left, and the device
     /// is plugged in again. Bound once the devnode it comes back on runs
     /// WinUSB and is started.</summary>
-    private static HMWinUsbBinding BindByOsDescriptors(HMController controller, Usbip.UsbipBackendHandle handle, Keeper keeper)
+    private static HMWinUsbBinding BindByOsDescriptorsLocked(HMController controller, Usbip.UsbipBackendHandle handle, Keeper keeper)
     {
         var d = handle.Device.Descriptors;
         var package = PackageFor(controller.Profile.Inner, d, controller.Backend)
