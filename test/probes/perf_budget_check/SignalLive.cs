@@ -94,13 +94,27 @@ internal static partial class Program
             Action signaled = () =>
                 SharedMemoryIO.WriteInputFrame(view, input, ref seq, frame, dataLen, gipOrNull, companionEvent: companion);
             Measure($"a frame written and signaled, {id}", runs, 20_000, signaled, gate: false);
-            var gated = GatedWriter();
+            var gatedMethod = GatedWriter();
             IntPtr signal = IntPtr.Zero;
             Action submit = signaled;
-            if (gated != null)
+            if (gatedMethod != null)
             {
                 signal = (IntPtr)t.GetField("_signalView", Any)!.GetValue(c)!;
-                submit = () => gated(view, input, ref seq, frame, dataLen, gipOrNull, 0, default, 0, companion, signal);
+                // From 2.4.0 the writer takes the wide frame section's view
+                // last. A frame that fits the input section's lane gets none,
+                // as the SDK's own submit passes none for it
+                // (HMController.WideFor). Each shape is bound and called
+                // directly, so neither SDK's row pays a hop the other does not.
+                if (gatedMethod.GetParameters().Any(p => p.Name == "wideView"))
+                {
+                    var wide = gatedMethod.CreateDelegate<GatedWideWrite>();
+                    submit = () => wide(view, input, ref seq, frame, dataLen, gipOrNull, 0, default, 0, companion, signal, IntPtr.Zero);
+                }
+                else
+                {
+                    var gated = gatedMethod.CreateDelegate<GatedWrite>();
+                    submit = () => gated(view, input, ref seq, frame, dataLen, gipOrNull, 0, default, 0, companion, signal);
+                }
                 Measure($"a frame written and signaled through the signal gate, {id}", runs, 20_000, submit, gate: false);
             }
             PacedRows(id, submit, signaled, signal);
@@ -230,13 +244,33 @@ internal static partial class Program
     delegate void GatedWrite(IntPtr view, IntPtr eventHandle, ref uint seqNo, ReadOnlySpan<byte> data, int dataLen,
         byte[]? gipData, int dataOffset, ReadOnlySpan<byte> extendedData, int extendedLen, IntPtr companionEvent, IntPtr signalView);
 
+    /// <summary>2.4.0's frame writer: the signal gate's view, then the wide
+    /// frame section's view.</summary>
+    delegate void GatedWideWrite(IntPtr view, IntPtr eventHandle, ref uint seqNo, ReadOnlySpan<byte> data, int dataLen,
+        byte[]? gipData, int dataOffset, ReadOnlySpan<byte> extendedData, int extendedLen, IntPtr companionEvent, IntPtr signalView,
+        IntPtr wideView);
+
     /// <summary>The SDK's frame writer with its signal-gate argument
     /// (2.1.0), or null on an SDK without one, found by its signature so
-    /// this source builds against v2.0.3's SDK as it is.</summary>
-    static GatedWrite? GatedWriter()
-    {
-        var m = typeof(SharedMemoryIO).GetMethods(BindingFlags.Public | BindingFlags.Static)
+    /// this source builds against v2.0.3's SDK as it is. The caller binds
+    /// it as GatedWrite or, when it also takes wideView (2.4.0), as
+    /// GatedWideWrite.</summary>
+    static MethodInfo? GatedWriter() =>
+        typeof(SharedMemoryIO).GetMethods(BindingFlags.Public | BindingFlags.Static)
             .FirstOrDefault(x => x.Name == "WriteInputFrame" && x.GetParameters().Any(p => p.Name == "signalView"));
-        return m == null ? null : m.CreateDelegate<GatedWrite>();
+
+    /// <summary>The signal-gate writer in GatedWrite's shape, for gate-offline,
+    /// whose rows compare with each other within one SDK. On 2.4.0 a lambda
+    /// adds the wide view, zero, which is one call more than on an older SDK,
+    /// so its numbers do not compare across releases.</summary>
+    static GatedWrite? GatedWriterAsGated()
+    {
+        var m = GatedWriter();
+        if (m == null) return null;
+        if (!m.GetParameters().Any(p => p.Name == "wideView")) return m.CreateDelegate<GatedWrite>();
+        var wide = m.CreateDelegate<GatedWideWrite>();
+        return (IntPtr view, IntPtr eventHandle, ref uint seqNo, ReadOnlySpan<byte> data, int dataLen, byte[]? gipData,
+                int dataOffset, ReadOnlySpan<byte> extendedData, int extendedLen, IntPtr companionEvent, IntPtr signalView) =>
+            wide(view, eventHandle, ref seqNo, data, dataLen, gipData, dataOffset, extendedData, extendedLen, companionEvent, signalView, IntPtr.Zero);
     }
 }

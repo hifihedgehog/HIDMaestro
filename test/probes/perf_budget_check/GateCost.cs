@@ -41,7 +41,7 @@ internal static partial class Program
 
     static int GateOffline(int runs, int calls)
     {
-        var gated = GatedWriter();
+        var gated = GatedWriterAsGated();
         if (gated == null)
         {
             Console.WriteLine("gate-offline: this SDK's frame writer has no signal gate");
