@@ -1610,6 +1610,13 @@ public sealed partial class HMController : IDisposable
     /// byte, on the clock's next tick, which repeats it until the next
     /// submit.</para>
     /// </summary>
+    /// <exception cref="ArgumentException"><paramref name="report"/> is
+    /// empty, longer than 256 bytes, or a length this controller's raw frames
+    /// do not take.</exception>
+    /// <exception cref="NotSupportedException">The profile emits the frame
+    /// verbatim, and it is longer than the driver serving this controller
+    /// carries whole: 80 bytes on a UMDF2 driver older than 2.4.0. Nothing is
+    /// sent.</exception>
     public void SubmitRawReport(ReadOnlySpan<byte> report)
     {
         ThrowIfDisposed();
@@ -1754,6 +1761,12 @@ public sealed partial class HMController : IDisposable
     /// says.</para>
     /// </summary>
     /// <param name="report">The complete frame, report id included.</param>
+    /// <exception cref="ArgumentException"><paramref name="report"/> is
+    /// empty, longer than 1024 bytes, or a length this controller's raw
+    /// frames do not take.</exception>
+    /// <exception cref="NotSupportedException"><paramref name="report"/> is
+    /// longer than the driver serving this controller carries whole: 80 bytes
+    /// on a UMDF2 driver older than 2.4.0. Nothing is sent.</exception>
     public void SubmitRawExtendedReport(ReadOnlySpan<byte> report)
     {
         ThrowIfDisposed();
