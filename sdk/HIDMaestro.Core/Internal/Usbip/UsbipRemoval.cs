@@ -728,7 +728,9 @@ internal static partial class UsbipRemoval
         {
             foreach (var f in packages)
                 entries.Add(new("driver package", $"{f.PublishedName} ({FilterInf})", UninstallOutcome.WouldRemove, FilterRestart));
-            if (service) entries.Add(new("service", "usbip2_filter", UninstallOutcome.WouldRemove));
+            if (service) entries.Add(MarkedForDeletion(FilterServiceKey)
+                ? new("service", "usbip2_filter", UninstallOutcome.Kept, "marked for deletion, which Windows finishes when it next starts")
+                : new("service", "usbip2_filter", UninstallOutcome.WouldRemove));
             return;
         }
 
@@ -811,6 +813,12 @@ internal static partial class UsbipRemoval
         var images = UsbipDriverInstaller.HubFilterImages();
         bool restartNote = KeyExists(UsbipDriverInstaller.HubRestartKey);
         if (hubs.Count == 0 && !serviceExists && images.Count == 0 && !restartNote) return;
+        // An earlier removal this Windows session may have left the service
+        // marked for deletion and the images queued for the next start. A
+        // preview reports those as kept, with the reason, and a removal as
+        // removed at restart, queuing nothing twice.
+        bool serviceMarked = serviceExists && MarkedForDeletion(serviceKey);
+        var queued = images.Count > 0 ? QueuedAtRestart() : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         if (restartNote)
         {
@@ -840,7 +848,9 @@ internal static partial class UsbipRemoval
 
         if (serviceExists)
         {
-            if (preview) entries.Add(new("service", service, UninstallOutcome.WouldRemove));
+            if (preview) entries.Add(serviceMarked
+                ? new("service", service, UninstallOutcome.Kept, "marked for deletion, which Windows finishes when it next starts")
+                : new("service", service, UninstallOutcome.WouldRemove));
             else
             {
                 var (rc, output) = RunSystemTool("sc.exe", "delete " + service);
@@ -855,7 +865,19 @@ internal static partial class UsbipRemoval
 
         foreach (string image in images)
         {
-            if (preview) { entries.Add(new("file", image, UninstallOutcome.WouldRemove)); continue; }
+            bool waiting = queued.Contains(image);
+            if (preview)
+            {
+                entries.Add(waiting
+                    ? new("file", image, UninstallOutcome.Kept, "Windows deletes it when it next starts")
+                    : new("file", image, UninstallOutcome.WouldRemove));
+                continue;
+            }
+            if (waiting)
+            {
+                entries.Add(new("file", image, UninstallOutcome.RemovedAtRestart, "Windows deletes it when it next starts"));
+                continue;
+            }
             try
             {
                 File.Delete(image);
@@ -900,6 +922,30 @@ internal static partial class UsbipRemoval
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException) { return null; }
         return found;
+    }
+
+    /// <summary>The paths PendingFileRenameOperations names, the files
+    /// Windows renames or deletes when it next starts, without the \??\
+    /// prefix and the flag Windows 11 writes ahead of it (*1). Sources and
+    /// targets are not told apart: nothing renames a file onto a filter
+    /// image. Empty when the value cannot be read.</summary>
+    private static HashSet<string> QueuedAtRestart()
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var k = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Session Manager");
+            if (k?.GetValue("PendingFileRenameOperations") is not string[] ops) return set;
+            foreach (string raw in ops)
+            {
+                string op = raw;
+                if (op.StartsWith('*')) op = op.TrimStart('*').TrimStart("0123456789".ToCharArray());
+                if (op.StartsWith(@"\??\", StringComparison.Ordinal)) op = op[4..];
+                if (op.Length > 0) set.Add(op);
+            }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
+        return set;
     }
 
     /// <summary>Whether the service under <paramref name="serviceKey"/> is
