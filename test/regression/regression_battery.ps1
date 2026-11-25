@@ -3355,9 +3355,14 @@ function Scenario-Bluetooth-Xbox-Hid {
 # devnodes under the device are the same ones and started, the handles
 # opened on its HID collections at the return answer, a plain pad's read
 # keeps delivering reports, and an XInput pad holds its slot on every read.
-# S73's part F runs the same check with each profile as its Windows' first
-# game controller, the case where Windows restarts the collection at its
-# install. Exit 2 when another program that embeds HIDMaestro is running.
+# On UMDF2 a last part forces the software companion's race: an xinputhid
+# pad's ParentIdPrefix is written only once its HID child has arrived under
+# a prefix of Windows' own and XInput holds it, and the create must still
+# hand back a device whose child carries the identity's prefix and stays as
+# it is. S73's part F runs the same check with each profile as its Windows'
+# first game controller, the case where Windows restarts the collection at
+# its install. Exit 2 when another program that embeds HIDMaestro is
+# running.
 function Scenario-Create-Stands {
     $failed = @()
     $backends = if ((Get-MachineArch) -eq 'arm64' -or $env:HIDMAESTRO_BACKEND -eq 'usbip') { @('usbip') } else { @('umdf2', 'usbip') }

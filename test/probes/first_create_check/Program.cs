@@ -132,6 +132,7 @@ internal static partial class Program
             ctx.LoadDefaultProfiles();
             ctx.InstallDriver();
             for (int i = 0; i < ids.Length; i++) One(ctx, ids[i], backend, mustBeFirstInstall: first && i == 0);
+            if (backend == HMBackend.Umdf2 && named.Length == 0) Race(ctx);
         }
         finally { Volatile.Write(ref stop, true); }
 
@@ -140,7 +141,53 @@ internal static partial class Program
         return s_failures == 0 ? 0 : 1;
     }
 
-    static void One(HMContext ctx, string id, HMBackend backend, bool mustBeFirstInstall)
+    /// <summary>The software companion's race, forced. An xinputhid pad on
+    /// UMDF2 is a software device, and Windows names its HID child after the
+    /// parent's ParentIdPrefix, which the SDK writes once SwDeviceCreate has
+    /// returned. Windows can start the parent and the child first, under a
+    /// prefix of its own, and programs open the child at once: on the
+    /// development laptop on 2026-11-25, in S106, the child started 18 ms
+    /// before the write, and dwm, explorer, GameInputSvc and the probe
+    /// itself held it when the SDK went to restart it. The write is held
+    /// back here until the child has arrived and XInput, which the game
+    /// thread polls, holds it in a slot. The create must still hand back a
+    /// device whose child carries the identity's prefix, and that stays as
+    /// it is (One's checks). A fresh identity key each run, so no record of
+    /// an earlier run holds the prefix already.</summary>
+    static void Race(HMContext ctx)
+    {
+        const string id = "xbox-series-xs";
+        string key = $"first-create-race-{Guid.NewGuid():N}";
+        string prefix = DeviceIdentity.Resolve(key, 0).ParentIdPrefix;
+        string? early = null, handedBack = null;
+        bool held = false;
+        Console.WriteLine();
+        Console.WriteLine($"--- the companion's race: {id} on UMDF2, its ParentIdPrefix written once its HID child has arrived and XInput holds it ---");
+        uint before = ConnectedSlots();
+        DeviceOrchestrator.CompanionPrefixWriteHook = parent =>
+        {
+            if (WaitUntil(() => (early = DeviceManager.GetHidChildId(parent)) != null, 5_000))
+                held = WaitUntil(() => (ConnectedSlots() & ~before) != 0, 5_000);
+        };
+        try { One(ctx, id, HMBackend.Umdf2, mustBeFirstInstall: false, key, c => handedBack = DeviceManager.GetHidChildId(c.InstanceId ?? "")); }
+        finally { DeviceOrchestrator.CompanionPrefixWriteHook = null; }
+        Check($"race: the HID child arrived before the write, under a prefix other than the identity's {prefix}, and XInput held it",
+              early != null && !UnderPrefix(early, prefix) && held,
+              $"{early ?? "no child within 5 s"}, {(held ? "in a slot" : "no XInput slot within 5 s")}");
+        Check($"race: the create handed back a device whose HID child carries the identity's prefix {prefix}", handedBack != null && UnderPrefix(handedBack, prefix),
+              handedBack ?? "no child at the create's return");
+    }
+
+    /// <summary>Whether a HID child's instance id, HID\&lt;enumerator&gt;\&lt;prefix&gt;&amp;&lt;collection&gt;,
+    /// carries <paramref name="prefix"/>.</summary>
+    static bool UnderPrefix(string childId, string prefix)
+    {
+        string instance = childId[(childId.LastIndexOf('\\') + 1)..];
+        int collection = instance.LastIndexOf('&');
+        return collection > 0 && string.Equals(instance[..collection], prefix, StringComparison.OrdinalIgnoreCase);
+    }
+
+    static void One(HMContext ctx, string id, HMBackend backend, bool mustBeFirstInstall, string? identityKey = null, Action<HMController>? atReturn = null)
     {
         Console.WriteLine();
         Console.WriteLine($"--- {id} on {backend} ---");
@@ -153,13 +200,14 @@ internal static partial class Program
         DateTime began = DateTime.UtcNow.AddSeconds(-1);
         var clock = Stopwatch.StartNew();
         HMController c;
-        try { c = ctx.CreateController(profile, null, backend); }
+        try { c = ctx.CreateController(profile, identityKey, backend); }
         catch (Exception e)
         {
             Check($"{id}: the create returns a controller", false, $"{e.GetType().Name}: {e.Message}");
             return;
         }
         long createMs = clock.ElapsedMilliseconds;
+        atReturn?.Invoke(c);
         var handles = new List<(string Path, SafeFileHandle Handle)>();
         Reader? reader = null;
         try

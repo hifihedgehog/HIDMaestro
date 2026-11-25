@@ -1648,6 +1648,12 @@ internal static partial class DeviceOrchestrator
         return e;
     }
 
+    /// <summary>Runs between a gamepad companion's SwDeviceCreate and its
+    /// ParentIdPrefix write, with the parent's instance id. A check holds
+    /// the write back with it until the HID child has arrived, as a loaded
+    /// machine does. Null outside checks.</summary>
+    internal static Action<string>? CompanionPrefixWriteHook;
+
     private static string? CreateGamepadCompanion(int controllerIndex, ControllerProfile profile,
                                                   PresentationPlan plan, DeviceIdentity identity)
     {
@@ -1727,75 +1733,104 @@ internal static partial class DeviceOrchestrator
             // parent has a HID child, so the one-parent-per-prefix rule
             // applies to it exactly as it does to a ROOT parent.
             string gpSwdId = $@"SWD\{gpSwdEnumerator}\{instanceSuffix}";
-            SwdDeviceFactory.Result result;
-            using (var pnp = DeviceManager.EnterRegistrationGate(gpSwdId, DeviceManager.RegistrationKind.Software,
-                       () => DeviceManager.IsHidMaestroOwned(gpSwdId) ? DeviceManager.RemovePriorLife(gpSwdId, timeoutMs: 120_000) : null,
-                       remove => ClearGamepadParentRivals(gpSwdEnumerator, identity, remove),
-                       out _))
+            string? CreateParent()
             {
-                if (pnp == null)
-                    throw CompanionNotCreated("gamepad companion", gpSwdId, profile.Id, controllerIndex, null);
-
-                result = SwdDeviceFactory.Create(
-                    instanceSuffix,
-                    hardwareIds,
-                    compatIds,
-                    identity.ContainerId,
-                    companionDesc,
-                    enumeratorName: gpSwdEnumerator);
-            }
-
-            if (result.Success && result.InstanceId != null)
-            {
-                gpInstId = result.InstanceId;
-
-                // Write ControllerIndex so any downstream consumer that reads
-                // it (companion driver, future filters) can locate its shared
-                // memory. Matches pre-migration behavior.
-                try
+                SwdDeviceFactory.Result result;
+                using (var pnp = DeviceManager.EnterRegistrationGate(gpSwdId, DeviceManager.RegistrationKind.Software,
+                           () => DeviceManager.IsHidMaestroOwned(gpSwdId) ? DeviceManager.RemovePriorLife(gpSwdId, timeoutMs: 120_000) : null,
+                           remove => ClearGamepadParentRivals(gpSwdEnumerator, identity, remove),
+                           out _))
                 {
-                    string dpPath = $@"SYSTEM\CurrentControlSet\Enum\{gpInstId}\Device Parameters";
-                    using var dpKey = Registry.LocalMachine.CreateSubKey(dpPath);
-                    dpKey?.SetValue("ControllerIndex", controllerIndex, RegistryValueKind.DWord);
-                }
-                catch { }
-            }
-            else if (!result.Success)
-            {
-                try
-                {
-                    using var k = Registry.LocalMachine.CreateSubKey(RegPathForIndex(controllerIndex));
-                    k?.SetValue("LastSwdGamepadHResult", result.HResult, RegistryValueKind.DWord);
-                }
-                catch { }
-                throw CompanionNotCreated("gamepad companion", gpSwdId, profile.Id, controllerIndex, result);
-            }
-        }
+                    if (pnp == null)
+                        throw CompanionNotCreated("gamepad companion", gpSwdId, profile.Id, controllerIndex, null);
 
-        // 3. Restart so it picks up latest descriptor + VID/PID, then poll
-        //    for the HID child to appear (replaces a fixed 2000ms sleep).
-        if (gpInstId != null)
-        {
-            // Issue #60. SwDeviceCreate binds and starts the driver inside
-            // the call, so the HID child has already enumerated with
-            // whatever ParentIdPrefix the parent's key held: the retained
-            // value from the last life, or a fresh counter when the record
-            // was purged. Put the identity's value in now; the restart
-            // that follows re-enumerates the child under it. Measured on
-            // 26200: after a purge the child came back as 1&hash&N first,
-            // and as the identity's 1&hash&0 after this write + restart,
-            // three lives in a row. When the value already matches this
-            // is a no-op.
+                    result = SwdDeviceFactory.Create(
+                        instanceSuffix,
+                        hardwareIds,
+                        compatIds,
+                        identity.ContainerId,
+                        companionDesc,
+                        enumeratorName: gpSwdEnumerator);
+                }
+
+                if (result.Success && result.InstanceId != null)
+                {
+                    // Write ControllerIndex so any downstream consumer that reads
+                    // it (companion driver, future filters) can locate its shared
+                    // memory. Matches pre-migration behavior.
+                    try
+                    {
+                        string dpPath = $@"SYSTEM\CurrentControlSet\Enum\{result.InstanceId}\Device Parameters";
+                        using var dpKey = Registry.LocalMachine.CreateSubKey(dpPath);
+                        dpKey?.SetValue("ControllerIndex", controllerIndex, RegistryValueKind.DWord);
+                    }
+                    catch { }
+                    return result.InstanceId;
+                }
+                if (!result.Success)
+                {
+                    try
+                    {
+                        using var k = Registry.LocalMachine.CreateSubKey(RegPathForIndex(controllerIndex));
+                        k?.SetValue("LastSwdGamepadHResult", result.HResult, RegistryValueKind.DWord);
+                    }
+                    catch { }
+                    throw CompanionNotCreated("gamepad companion", gpSwdId, profile.Id, controllerIndex, result);
+                }
+                return null;
+            }
+
+            // A HID child's instance id is HID\<enumerator>\<prefix>&<collection>.
+            static bool CarriesPrefix(string childId, string prefix)
+            {
+                string instance = childId[(childId.LastIndexOf('\\') + 1)..];
+                int collection = instance.LastIndexOf('&');
+                return collection > 0 && string.Equals(instance[..collection], prefix, StringComparison.OrdinalIgnoreCase);
+            }
+
+            gpInstId = CreateParent();
+            if (gpInstId == null) return null;
+
+            // 3. The HID child, under the identity's ParentIdPrefix (issue
+            //    #60). Windows names the child after the parent record's
+            //    prefix as the child arrives: the identity's when the record
+            //    kept it from an earlier life, or when the write below lands
+            //    first. When Windows starts the parent before the write, the
+            //    child arrives under a prefix of Windows' own, as it did on
+            //    the development laptop on 2026-11-25, 18 ms before the
+            //    write. A restart cannot move it then. Programs open a game
+            //    controller's HID child as it arrives (dwm, explorer,
+            //    GameInputSvc, any program reading XInput), Windows refuses
+            //    the disable after about 5.5 s, and the child it leaves
+            //    fails its HID calls with ERROR_DEVICE_NOT_CONNECTED. So the
+            //    parent is removed, by a software device's close, which no
+            //    program refuses (RemoveDevice), and created again. Its record
+            //    keeps the identity's prefix through the removal, so the child
+            //    of the second create arrives under it. The wait polls for
+            //    the child (it replaced a fixed 2000 ms sleep), and a failed
+            //    start fails the create in step 4.
+            CompanionPrefixWriteHook?.Invoke(gpInstId);
             DeviceIdentity.ApplyParentIdPrefix(gpInstId, identity.ParentIdPrefix, createKey: false);
-            DeviceManager.RestartDevice(gpInstId);
-
-            // Poll for HID child PDO to be created by HIDClass below our parent.
-            // On fast machines this takes <100ms; the old Thread.Sleep(2000) was
-            // wasting 1900+ms on every creation. A failed start fails the
-            // create in step 4.
-            WaitForHidChild(gpInstId, controllerIndex, timeoutMs: 5000);
+            if (WaitForHidChild(gpInstId, controllerIndex, timeoutMs: 5000) == StartWait.Done
+                && HidChildOf(gpInstId) is string early && !CarriesPrefix(early, identity.ParentIdPrefix))
+            {
+                LogDiag($"      {early} arrived before {gpInstId}'s ParentIdPrefix was written: " +
+                        $"removing the parent and creating it again under {identity.ParentIdPrefix}");
+                DeviceManager.RemoveDevice(gpInstId, timeoutMs: 120_000, forceFallbacks: true);
+                gpInstId = CreateParent();
+                if (gpInstId == null) return null;
+                DeviceIdentity.ApplyParentIdPrefix(gpInstId, identity.ParentIdPrefix, createKey: false);
+                WaitForHidChild(gpInstId, controllerIndex, timeoutMs: 5000);
+            }
+            return gpInstId;
         }
 
+        // 3. An existing companion of this index, adopted: restart it so its
+        //    driver picks up the latest descriptor and VID/PID, then poll for
+        //    its HID child. A failed start fails the create in step 4.
+        DeviceIdentity.ApplyParentIdPrefix(gpInstId, identity.ParentIdPrefix, createKey: false);
+        DeviceManager.RestartDevice(gpInstId);
+        WaitForHidChild(gpInstId, controllerIndex, timeoutMs: 5000);
         return gpInstId;
     }
 
