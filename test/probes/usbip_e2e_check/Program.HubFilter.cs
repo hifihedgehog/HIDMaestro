@@ -22,7 +22,7 @@ using NAudio.CoreAudioApi;
 
 internal static partial class Program
 {
-    internal readonly record struct Drain(int Buffer, int Events, int Steady, int Full, string Histogram);
+    internal readonly record struct Drain(int Buffer, int Events, int Steady, int One, int Full, string Histogram);
 
     /// <summary>Render silence to <paramref name="render"/> for
     /// <paramref name="length"/> and read the padding at every event. The
@@ -58,7 +58,12 @@ internal static partial class Program
             int skip = Math.Min(100, padding.Count / 4);
             var steady = padding.Skip(skip).ToList();
             string hist = string.Join(", ", steady.GroupBy(p => p).OrderByDescending(g => g.Count()).Take(4).Select(g => $"{g.Key} x{g.Count()}"));
-            return new(buffer, padding.Count, steady.Count, steady.Count(p => p == buffer), hist);
+            // The frames the engine takes in one device period, a 10 ms event
+            // in shared mode. An event that took exactly one period reads the
+            // buffer less that, within an eighth of a period.
+            int period = (int)Math.Round(ac.DefaultDevicePeriod * ac.MixFormat.SampleRate / 10_000_000.0);
+            int one = steady.Count(p => Math.Abs(p - (buffer - period)) <= period / 8);
+            return new(buffer, padding.Count, steady.Count, one, steady.Count(p => p == buffer), hist);
         }
         finally { ac.Dispose(); }
     }

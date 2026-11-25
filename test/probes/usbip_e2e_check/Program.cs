@@ -406,12 +406,16 @@ internal static partial class Program
             if (render != null)
             {
                 // The reporter's measurement. A paired drain reads a full
-                // buffer at every other event, a steady one at none.
+                // buffer at every other event and almost never one period
+                // taken. A steady one takes one period at almost every event,
+                // and a busy machine that delays a period now and then still
+                // takes one at most, so the two counts are compared, not
+                // either one against a fixed share.
                 var drain = DrainCadence(render, TimeSpan.FromSeconds(8));
                 Console.WriteLine($"  [diag] drain: buffer {drain.Buffer} frames, {drain.Events} events, padding {drain.Histogram}");
                 Check("Windows takes the speaker stream one period at a time, not in 20 ms pairs",
-                      drain.Steady >= 200 && drain.Full * 20 <= drain.Steady,
-                      $"full buffer at {drain.Full} of {drain.Steady} events");
+                      drain.Steady >= 200 && drain.One > drain.Full,
+                      $"one period taken at {drain.One}, full buffer at {drain.Full}, of {drain.Steady} events");
             }
 
             // ── The USB/IP root hub filter (issue #76) ──────────────────
