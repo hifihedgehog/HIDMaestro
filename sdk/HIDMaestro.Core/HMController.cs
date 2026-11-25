@@ -1974,7 +1974,10 @@ public sealed partial class HMController : IDisposable
     }
 
     // The report that releases each input report this controller has sent,
-    // in the order the reports first appeared. Guarded by _submitLock.
+    // in the order the reports first appeared, and every lift frame of the
+    // touch report. All of them go out at Dispose. The driver keeps what its
+    // release slots hold (SharedMemoryIO.WriteReleaseFrames). Guarded by
+    // _submitLock.
     private readonly List<byte[]> _releaseFrames = new();
 
     /// <summary>Keep the release frame for the report just written, and hand
@@ -2009,15 +2012,14 @@ public sealed partial class HMController : IDisposable
         }
         else
         {
-            if (_releaseFrames.Count >= SharedMemoryIO.RELEASE_SLOTS) return;
             _releaseFrames.Add(release.ToArray());
         }
-        SharedMemoryIO.WriteReleaseFrames(Index, _releaseFrames);
+        SharedMemoryIO.WriteReleaseFrames(Index, _releaseFrames, withIds);
     }
 
     /// <summary>Make the touch report's release frames
     /// <paramref name="lifts"/>, in place of the ones kept for it, and hand
-    /// the set to the driver when it changed. None when no contact is down.
+    /// the set to the driver when it changed. None when nothing is down.
     /// Caller holds _submitLock.</summary>
     private void NoteTouchRelease(List<byte[]> lifts, byte reportId)
     {
@@ -2028,12 +2030,8 @@ public sealed partial class HMController : IDisposable
         for (int i = 0; same && i < kept.Count; i++) same = kept[i].AsSpan().SequenceEqual(lifts[i]);
         if (same) return;
         _releaseFrames.RemoveAll(Touch);
-        foreach (var lift in lifts)
-        {
-            if (_releaseFrames.Count >= SharedMemoryIO.RELEASE_SLOTS) break;
-            _releaseFrames.Add(lift);
-        }
-        SharedMemoryIO.WriteReleaseFrames(Index, _releaseFrames);
+        _releaseFrames.AddRange(lifts);
+        SharedMemoryIO.WriteReleaseFrames(Index, _releaseFrames, withIds);
     }
 
     /// <summary>Send every release frame, so a key or button the consumer

@@ -1193,32 +1193,77 @@ internal static partial class SharedMemoryIO
     }
 
     /// <summary>Store the frames the driver sends if this process goes
-    /// away with input held: one per input report, each the report that
-    /// lets go of everything. A seqlock write. The caller is the
-    /// controller's only writer (it holds its submit lock).</summary>
-    public static void WriteReleaseFrames(int controllerIndex, IReadOnlyList<byte[]> frames)
+    /// away with input held: per input report, the report that lets go of
+    /// everything, and every lift frame of a touch report. A seqlock write.
+    /// The caller is the controller's only writer (it holds its submit
+    /// lock).
+    ///
+    /// <para>Each report's frames go into the slots whole or not at all, in
+    /// the order its first frame appears in <paramref name="frames"/>. A
+    /// touch release in Windows' hybrid form with its last reports left out
+    /// names more contacts in its first report than follow, and a frame cut
+    /// to a slot's 80 bytes is a report of the wrong length, which the
+    /// driver does not send (driver.c ExtendedFrameDeclared). A report left
+    /// out is not released when the program goes away. Its frames are all
+    /// one report's when <paramref name="withIds"/> is false.</para></summary>
+    public static void WriteReleaseFrames(int controllerIndex, IReadOnlyList<byte[]> frames, bool withIds)
     {
         IntPtr view;
         lock (s_inputViews)
         {
             if (!s_inputAckViews.TryGetValue(controllerIndex, out view) || view == IntPtr.Zero) return;
         }
+        int n = frames.Count;
+        Span<bool> take = n <= 64 ? stackalloc bool[n] : new bool[n];
+        PickReleaseFrames(frames, withIds, RELEASE_SLOTS, RELEASE_FRAME_CAP, take);
         int seq = Marshal.ReadInt32(view, INPUT_ACK_OFFSET_RELEASE_SEQ);
         if ((seq & 1) == 0) seq++;
         Marshal.WriteInt32(view, INPUT_ACK_OFFSET_RELEASE_SEQ, seq);
         Thread.MemoryBarrier();
-        int count = Math.Min(frames.Count, RELEASE_SLOTS);
-        for (int i = 0; i < count; i++)
+        int count = 0;
+        for (int i = 0; i < n; i++)
         {
+            if (!take[i]) continue;
             byte[] f = frames[i];
-            int size = Math.Min(f.Length, RELEASE_FRAME_CAP);
-            int at = INPUT_ACK_OFFSET_RELEASE + i * RELEASE_SLOT_SIZE;
-            Marshal.WriteInt32(view, at, size);
-            Marshal.Copy(f, 0, view + at + 4, size);
+            int at = INPUT_ACK_OFFSET_RELEASE + count++ * RELEASE_SLOT_SIZE;
+            Marshal.WriteInt32(view, at, f.Length);
+            Marshal.Copy(f, 0, view + at + 4, f.Length);
         }
         Marshal.WriteInt32(view, INPUT_ACK_OFFSET_RELEASE_COUNT, count);
         Thread.MemoryBarrier();
         Marshal.WriteInt32(view, INPUT_ACK_OFFSET_RELEASE_SEQ, seq + 1);
+    }
+
+    /// <summary>Mark in <paramref name="take"/> the frames that go into
+    /// <paramref name="slots"/> release slots of <paramref name="cap"/>
+    /// bytes: each report's frames whole, when every one fits a slot and
+    /// slots remain for all of them, reports taken in the order their first
+    /// frames appear. A report is its frames' first byte when
+    /// <paramref name="withIds"/>, else every frame is one report's.</summary>
+    internal static void PickReleaseFrames(IReadOnlyList<byte[]> frames, bool withIds, int slots, int cap, Span<bool> take)
+    {
+        int n = frames.Count, used = 0;
+        take.Clear();
+        static int KeyOf(byte[] f, bool withIds) => withIds && f.Length > 0 ? f[0] : -1;
+        for (int i = 0; i < n; i++)
+        {
+            int key = KeyOf(frames[i], withIds);
+            bool first = true;
+            for (int j = 0; j < i && first; j++) first = KeyOf(frames[j], withIds) != key;
+            if (!first) continue;
+            int need = 0;
+            bool fits = true;
+            for (int j = i; j < n; j++)
+            {
+                if (KeyOf(frames[j], withIds) != key) continue;
+                need++;
+                if (frames[j].Length > cap || frames[j].Length == 0) fits = false;
+            }
+            if (!fits || used + need > slots) continue;
+            for (int j = i; j < n; j++)
+                if (KeyOf(frames[j], withIds) == key) take[j] = true;
+            used += need;
+        }
     }
 
     /// <summary>Wait until a READ_REPORT has carried the frame written with
@@ -1314,6 +1359,13 @@ internal static partial class SharedMemoryIO
     /// 18, and v1.12.0's Marshal calls, already compiled in CoreLib, 26. A
     /// program's first frames, and every frame while its tiering waits, ran
     /// that code.</para></summary>
+    /// <summary>The refusal of an extended frame longer than the lane.</summary>
+    [System.Diagnostics.CodeAnalysis.DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowExtendedTooLong(int length) =>
+        throw new NotSupportedException(
+            $"This input report is {length} bytes. The input lane to this controller's device carries a report of at most {EXTENDED_DATA_CAPACITY} bytes whole, and a longer one is refused, never cut.");
+
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static unsafe void WriteInputFrame(IntPtr view, IntPtr eventHandle, ref uint seqNo,
                                        ReadOnlySpan<byte> data, int dataLen, byte[]? gipData,
@@ -1322,6 +1374,11 @@ internal static partial class SharedMemoryIO
                                        IntPtr companionEvent = default, IntPtr signalView = default)
     {
         if (view == IntPtr.Zero) throw new AccessViolationException();
+        // An extended frame goes whole or not at all, refused before the
+        // section is touched. The writer used to cut a longer one to the
+        // lane without a word, and the driver drops a report of the wrong
+        // length (driver.c ExtendedFrameDeclared).
+        if (extendedLen > EXTENDED_DATA_CAPACITY && !extendedData.IsEmpty) ThrowExtendedTooLong(extendedLen);
         byte* v = (byte*)view;
 
         // 1. Mark write in progress (odd seqNo). The payload's stores must
@@ -1359,9 +1416,8 @@ internal static partial class SharedMemoryIO
             gipData.AsSpan(0, GIP_DATA_LENGTH).CopyTo(new Span<byte>(v + GIP_DATA_OFFSET, GIP_DATA_LENGTH));
         if (!extendedData.IsEmpty && extendedLen > 0)
         {
-            int copyLen = Math.Min(extendedLen, EXTENDED_DATA_CAPACITY);
-            extendedData.Slice(0, copyLen).CopyTo(new Span<byte>(v + EXTENDED_DATA_OFFSET, copyLen));
-            Unsafe.WriteUnaligned(v + EXTENDED_SIZE_OFFSET, copyLen);
+            extendedData.Slice(0, extendedLen).CopyTo(new Span<byte>(v + EXTENDED_DATA_OFFSET, extendedLen));
+            Unsafe.WriteUnaligned(v + EXTENDED_SIZE_OFFSET, extendedLen);
         }
         else
         {

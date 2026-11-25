@@ -76,6 +76,7 @@ internal static partial class Program
             foreach (var e in doc.RootElement.EnumerateArray())
                 list.Add((e.GetProperty("name").GetString()!, Convert.FromHexString(e.GetProperty("descriptor").GetString()!)));
         foreach (var (name, bytes) in list) OneOffline(name, bytes);
+        PickChecks();
         Console.WriteLine();
         Console.WriteLine($"=== {s_checks - s_fails}/{s_checks} checks passed ===");
         return s_fails == 0 ? 0 : 1;

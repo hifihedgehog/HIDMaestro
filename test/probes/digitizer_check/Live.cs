@@ -54,10 +54,11 @@ internal static unsafe partial class Program
         public readonly IntPtr Handle, Data;
         public readonly HIDP_CAPS Caps;
         public readonly HIDP_LINK_COLLECTION_NODE[] Links;
-        public readonly string How;
+        public readonly string How, Path;
 
         public Child(string path)
         {
+            Path = path;
             Handle = CreateFile(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
             How = "read/write";
             if (Handle == new IntPtr(-1))

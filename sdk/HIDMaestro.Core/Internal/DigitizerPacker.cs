@@ -15,6 +15,8 @@ internal sealed class DigitizerBuffers
     /// <summary>The contacts the last touch frame reported down or in
     /// range, by identifier.</summary>
     internal readonly Dictionary<int, HMTouchContact> Down = new();
+    /// <summary>The buttons the last touch frame reported pressed.</summary>
+    internal HMMouseButtons Buttons;
     internal readonly List<(HMTouchContact C, bool Lift)> Items = new();
     internal readonly HashSet<int> Seen = new();
     internal byte[]? Pen;
@@ -318,6 +320,7 @@ internal sealed class DigitizerPacker
 
         s.Down.Clear();
         foreach (var c in contacts) s.Down[c.Id] = c;
+        s.Buttons = buttons;
         return frames;
     }
 
@@ -406,16 +409,17 @@ internal sealed class DigitizerPacker
     // ── Release ──────────────────────────────────────────────────────────
 
     /// <summary>The frames that lift every contact the last touch submit left
-    /// down or in range, each where it was, in the hybrid form a frame of
-    /// that many contacts takes: the first report with the whole count, the
-    /// rest with 0, one Scan Time past the last. Empty when no contact is
-    /// down. A hybrid frame's last report carries Contact Count 0, so a
-    /// release built from that report alone would lift nothing
-    /// (<see cref="ReleaseOf"/>).</summary>
+    /// down or in range, each where it was, and let go of every button, in
+    /// the hybrid form a frame of that many contacts takes: the first report
+    /// with the whole count, the rest with 0, one Scan Time past the last.
+    /// A touchpad button pressed with no contact down takes one report with
+    /// none. Empty when nothing is down. A hybrid frame's last report
+    /// carries Contact Count 0, so a release built from that report alone
+    /// would lift nothing (<see cref="ReleaseOf"/>).</summary>
     public List<byte[]> LiftFrames(DigitizerBuffers s)
     {
         var frames = new List<byte[]>();
-        if (TouchReport == null || s.Down.Count == 0) return frames;
+        if (TouchReport == null || (s.Down.Count == 0 && s.Buttons == HMMouseButtons.None)) return frames;
         var r = TouchReport;
         int per = _fingers.Count;
         var down = new List<HMTouchContact>(s.Down.Values);
@@ -425,7 +429,8 @@ internal sealed class DigitizerPacker
             long modulus = (long)f.LogicalMax - f.LogicalMin + 1;
             scan = modulus > 1 ? (int)(f.LogicalMin + (s.LastScan + 1) % modulus) : f.LogicalMin;
         }
-        for (int n = 0; n * per < down.Count; n++)
+        int reports = Math.Max(1, (down.Count + per - 1) / per);
+        for (int n = 0; n < reports; n++)
         {
             var frame = new byte[r.FrameBytes];
             if (r.ReportId != 0) frame[0] = r.ReportId;
