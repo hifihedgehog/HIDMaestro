@@ -43,6 +43,19 @@ internal sealed class Inventory
     /// removal puts the entry back to.</summary>
     public SortedDictionary<string, string> LedgerPrior { get; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>The USB 3 root hub records, present or not, whose
+    /// UpperFilters name HIDMaestro's filter.</summary>
+    public SortedSet<string> FilterHubs { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>HIDMaestro's run of usbip-win2's filter on its own USB/IP
+    /// root hub (#76): the service a hub's UpperFilters names, and its
+    /// key.</summary>
+    internal const string HubFilterService = "HIDMaestroUsbipFilter";
+    internal const string HubFilterServiceKey = @"HKLM\SYSTEM\CurrentControlSet\Services\" + HubFilterService;
+    /// <summary>The volatile note of the hub restarts tried this Windows
+    /// session.</summary>
+    internal const string HubRestartKey = @"HKLM\SOFTWARE\HIDMaestroUsbipHubRestart";
+
     internal const string UsbFlagsKey = @"HKLM\SYSTEM\CurrentControlSet\Control\usbflags";
     internal const string LedgerUsbFlagsKey = @"HKLM\SOFTWARE\HIDMaestroRegistryLedger\UsbFlags";
 
@@ -113,6 +126,8 @@ internal sealed class Inventory
         @"HKLM\SOFTWARE\HIDMaestroOemOverrides",
         @"HKLM\SOFTWARE\HIDMaestroGameInputSvc",
         @"HKLM\SOFTWARE\HIDMaestroUsbRecords",
+        HubRestartKey,
+        HubFilterServiceKey,
         @"HKLM\SYSTEM\CurrentControlSet\Control\DeviceOverrides",
         @"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\WUDF\Services\HIDMaestro",
         @"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\WUDF\Services\HMXInput",
@@ -127,7 +142,9 @@ internal sealed class Inventory
     /// <summary>Whether a removal takes the watched key itself: HIDMaestro's
     /// own roots and its WUDF service keys. The others are Windows' keys
     /// that hold HIDMaestro's entries among others', read for their
-    /// contents.</summary>
+    /// contents, and the filter's service key, which a running hub can hold
+    /// until Windows next starts and which the removal checks on its
+    /// own.</summary>
     internal static bool GoesWithRemoval(string key) =>
         key.StartsWith(@"HKLM\SOFTWARE\HIDMaestro", StringComparison.OrdinalIgnoreCase)
         || key.StartsWith(@"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\WUDF\Services\", StringComparison.OrdinalIgnoreCase);
@@ -151,8 +168,10 @@ internal sealed class Inventory
         inv.ReadCertificates();
         foreach (string k in WatchedKeys) inv.Keys[k] = Dump(k);
         inv.ReadUsbFlags();
+        foreach (string h in HubsListingFilter()) inv.FilterHubs.Add(h);
         inv.ReadFiles(ProgramFilesFolder);
         inv.ReadFiles(ProgramDataFolder);
+        foreach (string f in HubFilterImages()) inv.ReadFiles(f);
         foreach (string temp in TempRoots())
         {
             try
@@ -182,6 +201,7 @@ internal sealed class Inventory
                  {
                      ("devnode", Devnodes, later.Devnodes), ("package", Packages, later.Packages),
                      ("certificate", Certificates, later.Certificates), ("file", Files, later.Files),
+                     ("hub listing the filter", FilterHubs, later.FilterHubs),
                  })
         {
             foreach (string x in a.Except(b, StringComparer.OrdinalIgnoreCase)) yield return $"{name} gone: {x}";
@@ -352,6 +372,55 @@ internal sealed class Inventory
         var (hive, sub) = Split(path);
         try { using var k = hive.OpenSubKey(sub); return k != null; }
         catch { return true; }
+    }
+
+    /// <summary>Whether the service control manager marked the service under
+    /// <paramref name="path"/> for deletion: its DeleteFlag value is set.</summary>
+    internal static bool MarkedForDeletion(string path)
+    {
+        var (hive, sub) = Split(path);
+        try { using var k = hive.OpenSubKey(sub); return k?.GetValue("DeleteFlag") is int flag && flag != 0; }
+        catch { return false; }
+    }
+
+    /// <summary>Each USB 3 root hub record, present or not, whose
+    /// UpperFilters value names HIDMaestro's filter, read from the
+    /// registry.</summary>
+    internal static List<string> HubsListingFilter()
+    {
+        var found = new List<string>();
+        try
+        {
+            using var hubs = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\USB\ROOT_HUB30");
+            if (hubs == null) return found;
+            foreach (string i in hubs.GetSubKeyNames())
+            {
+                try
+                {
+                    using var k = hubs.OpenSubKey(i);
+                    if (k?.GetValue("UpperFilters") is string[] upper
+                        && upper.Any(f => f.Equals(HubFilterService, StringComparison.OrdinalIgnoreCase)))
+                        found.Add($@"USB\ROOT_HUB30\{i}");
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return found;
+    }
+
+    /// <summary>Every image of HIDMaestro's filter in System32\drivers, of
+    /// any pin, and a partial write's file.</summary>
+    internal static List<string> HubFilterImages()
+    {
+        string dir = Path.Combine(Environment.SystemDirectory, "drivers");
+        var found = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string pattern in new[] { HubFilterService + "_*.sys", HubFilterService + "_*.sys.new" })
+        {
+            try { found.UnionWith(Directory.EnumerateFiles(dir, pattern)); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+        return found.ToList();
     }
 
     internal static (RegistryKey Hive, string Sub) Split(string path) =>

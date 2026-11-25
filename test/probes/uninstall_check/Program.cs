@@ -42,8 +42,13 @@
 // in its slot and sandbox beside the scenarios before it.
 //
 // The sandbox run creates a USB/IP composite too. The SDK installs
-// usbip-win2's host controller from its own package, with no root-hub
-// filter, so the sandbox has no filter before or after.
+// usbip-win2's host controller from its own package, without usbip-win2's
+// own root-hub filter, and runs that filter as a service of its own, listed
+// on the host controller's root hub alone (#76). A preview lists each hub
+// that lists it, the service and each image. After a removal no hub lists
+// it, and the service and images are gone, or held by a hub that keeps
+// running: the service is then marked for deletion and the images go when
+// Windows next starts, as the report says.
 //
 // Requires elevation. Exit 0 PASS, 1 FAIL, 2 when the part asked for cannot
 // run on this machine.
@@ -148,6 +153,20 @@ internal static partial class Program
             if (Directory.Exists(Inventory.ProgramFilesFolder))
                 Check("the preview lists %ProgramFiles%\\HIDMaestro",
                       tool.Entries.Any(e => e.Kind == "folder" && e.Location.StartsWith(Inventory.ProgramFilesFolder, StringComparison.OrdinalIgnoreCase)));
+            // HIDMaestro's USB/IP root hub filter, where the snapshot finds
+            // it: each hub that lists it, the service, each image and the
+            // note of this session's hub restarts.
+            var filterPieces = HubFilterPieces(before);
+            if (filterPieces.Count > 0)
+            {
+                var unlisted = filterPieces.Where(x => !tool.Entries.Any(e => e.Kind == x.Kind && e.Outcome == "WouldRemove"
+                    && (e.Location.Equals(x.Location, StringComparison.OrdinalIgnoreCase)
+                        || (x.Kind == "upper filter" && e.Location.StartsWith(x.Location + ",", StringComparison.OrdinalIgnoreCase))))).ToList();
+                Check("the preview lists HIDMaestro's USB/IP root hub filter: each hub that lists it, its service, each image and the restart note",
+                      unlisted.Count == 0, $"{filterPieces.Count - unlisted.Count} of {filterPieces.Count}" +
+                      (unlisted.Count > 0 ? $", not listed: {string.Join(", ", unlisted.Select(x => $"{x.Kind} {x.Location}"))}" : ""));
+            }
+            else Console.WriteLine("  [NOTE] HIDMaestro's USB/IP root hub filter is not on this machine");
             Console.WriteLine($"  [NOTE] the tool lists {tool.Entries.Count(e => e.Outcome == "WouldRemove")} item(s) to remove and keeps {tool.Entries.Count(e => e.Outcome == "Kept")}");
         }
 
@@ -196,6 +215,7 @@ internal static partial class Program
         var before = Inventory.Take();
         Check("the machine holds HIDMaestro's driver before the removal (positive control)", before.Packages.Count > 0,
               $"{before.Packages.Count} package(s)");
+        Console.WriteLine($"  [NOTE] before the removal, {HubFilterSummary(before)}");
         var hubs = Inventory.RootHubs();
         var (exit, output) = Run(ToolPath, 1_800_000, "--yes", "--json");
         var report = Report.Parse(output);
@@ -274,6 +294,26 @@ internal static partial class Program
                 : new List<string>();
             check($"{p}: {folder} is gone or left only to the next start", under.Count == 0 || kept, string.Join(", ", under.Take(5)));
         }
+        // HIDMaestro's USB/IP root hub filter. No hub lists it, so none
+        // starts with it again. A hub that keeps running holds the service
+        // and the image until its next start, so the service may stay marked
+        // for deletion and the image queued for Windows' next start, as the
+        // report says.
+        var listing = Inventory.HubsListingFilter();
+        check($"{p}: no USB 3 root hub lists HIDMaestro's filter in its UpperFilters", listing.Count == 0, string.Join(", ", listing.Take(5)));
+        var serviceEntry = report.Entries.FirstOrDefault(e => e.Kind == "service" && e.Location.Equals(Inventory.HubFilterService, StringComparison.OrdinalIgnoreCase));
+        bool serviceGone = !Inventory.KeyExists(Inventory.HubFilterServiceKey);
+        bool serviceMarked = Inventory.MarkedForDeletion(Inventory.HubFilterServiceKey);
+        check($"{p}: HIDMaestro's filter service is gone, or marked for deletion while a running hub holds it, as the report says",
+              serviceGone || (serviceMarked && serviceEntry?.Outcome == "RemovedAtRestart"),
+              serviceGone ? "" : $"{(serviceMarked ? "marked for deletion" : "not marked for deletion")}, report: {serviceEntry?.ToString() ?? "no entry for it"}");
+        var images = Inventory.HubFilterImages();
+        var imagesLeft = images.Where(f => !pending.Contains(f, StringComparer.OrdinalIgnoreCase)
+            || !report.Entries.Any(e => e.Kind == "file" && e.Outcome == "RemovedAtRestart" && e.Location.Equals(f, StringComparison.OrdinalIgnoreCase))).ToList();
+        check($"{p}: no image of HIDMaestro's filter is left, but one Windows deletes when it next starts, as the report says",
+              imagesLeft.Count == 0, string.Join(", ", imagesLeft));
+        if (images.Count > 0 || !serviceGone)
+            note($"{p}: left to Windows' next start: {(serviceGone ? "" : $"service {Inventory.HubFilterService}, ")}{images.Count} filter image(s)");
         var temps = Inventory.TempRoots().SelectMany(t =>
         {
             try { return Directory.EnumerateDirectories(t, "HIDMaestro*").Where(d => IsLegacyTemp(Path.GetFileName(d))).ToList(); }
@@ -311,6 +351,29 @@ internal static partial class Program
             check($"{p}: and keeps the host controller for the same reason, with the device records gone",
                   again != null && again.Entries.Any(e => e.Kind == "devnode" && e.Outcome == HMUninstallOutcome.Kept && (e.Reason ?? "").Contains(SinceBoot, StringComparison.Ordinal)),
                   again == null ? "" : string.Join("; ", again.Entries.Where(e => e.Kind == "devnode").Take(3)));
+    }
+
+    /// <summary>The pieces of HIDMaestro's USB/IP root hub filter on the
+    /// machine, by the kind and location a removal's report gives each: the
+    /// hubs that list it (snapshot <paramref name="inv"/>), its service, its
+    /// images and the restart note.</summary>
+    static List<(string Kind, string Location)> HubFilterPieces(Inventory inv)
+    {
+        var pieces = inv.FilterHubs.Select(h => ("upper filter", h)).ToList();
+        if (inv.Keys.TryGetValue(Inventory.HubFilterServiceKey, out var service) && service != "absent")
+            pieces.Add(("service", Inventory.HubFilterService));
+        pieces.AddRange(Inventory.HubFilterImages().Select(f => ("file", f)));
+        if (inv.Keys.TryGetValue(Inventory.HubRestartKey, out var note) && note != "absent")
+            pieces.Add(("registry key", Inventory.HubRestartKey));
+        return pieces;
+    }
+
+    static string HubFilterSummary(Inventory inv)
+    {
+        var pieces = HubFilterPieces(inv);
+        return pieces.Count == 0 ? "HIDMaestro's USB/IP root hub filter is not on this machine"
+            : "HIDMaestro's USB/IP root hub filter: " + string.Join(", ", pieces.Select(x => $"{x.Kind} {x.Location}"))
+              + (Inventory.MarkedForDeletion(Inventory.HubFilterServiceKey) ? " (the service is marked for deletion)" : "");
     }
 
     /// <summary>A package left after the removal is accepted only when the
@@ -543,6 +606,12 @@ internal static partial class Program
         Record("the machine holds HIDMaestro: devices, packages and the certificate (positive control)",
                before.HidMaestroDevnodes().Count > 0 && before.Packages.Count > 0 && before.Certificates.Count > 0,
                $"{before.HidMaestroDevnodes().Count} device record(s), {before.Packages.Count} package(s), {before.Certificates.Count} certificate(s)");
+        Note(HubFilterSummary(before));
+        // The first USB/IP create on a fresh machine finds the host
+        // controller's root hub empty, so the filter goes on it then.
+        if (ledgeredFlags.Count > 0)
+            Record("the USB/IP host controller's root hub lists HIDMaestro's filter (positive control)", before.FilterHubs.Count > 0,
+                   string.Join(", ", before.FilterHubs));
 
         // While the program runs, the removal refuses and changes nothing.
         var (bexit, bout) = Run(SandboxTool, 600_000, "--yes", "--json");
