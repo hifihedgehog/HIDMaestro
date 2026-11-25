@@ -267,14 +267,27 @@ internal static partial class UsbipDriverInstaller
 
     /// <summary>Hold the hub restart gate until the scope ends, waiting up to
     /// 30 s for a restart or another attach in any program to end. An
-    /// abandoned gate is taken. Throws when one holds it past that. Dispose
-    /// the scope on the thread that made it.</summary>
-    internal static IDisposable HoldHubRestartGate()
+    /// abandoned gate is taken. While another holds it,
+    /// <paramref name="whileWaiting"/> runs every 250 ms: a program killed
+    /// inside its attach holds the gate until its request returns, which an
+    /// attach's caller ends from here (VhciClient.Attach). Throws when one
+    /// holds it past the 30 s. Dispose the scope on the thread that made
+    /// it.</summary>
+    internal static IDisposable HoldHubRestartGate(Action? whileWaiting = null)
     {
         var m = new Mutex(false, AdminNamespace.Name(HubRestartGateObject));
+        int budget = TimeoutScale.Apply(30_000);
+        var sw = Stopwatch.StartNew();
         bool held;
-        try { held = m.WaitOne(TimeoutScale.Apply(30_000)); }
+        try { held = m.WaitOne(0); }
         catch (AbandonedMutexException) { held = true; }
+        while (!held && sw.ElapsedMilliseconds < budget)
+        {
+            whileWaiting?.Invoke();
+            long left = Math.Max(0, budget - sw.ElapsedMilliseconds);
+            try { held = m.WaitOne((int)(whileWaiting == null ? left : Math.Min(left, 250))); }
+            catch (AbandonedMutexException) { held = true; }
+        }
         if (held) return new GateHold(m);
         m.Dispose();
         throw new InvalidOperationException(

@@ -260,12 +260,15 @@ internal static partial class VhciClient
     public static int Attach(string host, int port, string busid)
     {
         // Never onto a root hub that a restart for its filter is taking away
-        // (UsbipDriverInstaller.HoldHubRestartGate).
-        using var gate = UsbipDriverInstaller.HoldHubRestartGate();
-        // A program killed inside an earlier attach's handshake holds the
-        // host controller's attach path until its connection ends, and this
-        // request would wait behind it (TcpConnectionOwner).
-        TcpConnectionOwner.EndConnectionsToExitedServers(UsbipBackend.IsOurPort);
+        // (UsbipDriverInstaller.HoldHubRestartGate). A program killed inside
+        // an earlier attach's handshake holds the host controller's attach
+        // path until its connection ends, and this request would wait behind
+        // it (TcpConnectionOwner). Its attach holds the gate as well, and
+        // lets it go only when that connection ends and its request returns,
+        // so the wait for the gate ends such connections as it goes.
+        using var gate = UsbipDriverInstaller.HoldHubRestartGate(EndAttachesOfExitedPrograms);
+        // A program on an SDK before 2.4.0 attaches without the gate.
+        EndAttachesOfExitedPrograms();
         using var h = Open();
         // The kept layout, which the create's census found, goes first. The
         // driver refuses a request of another layout's size before it acts
@@ -290,6 +293,13 @@ internal static partial class VhciClient
             throw new InvalidOperationException($"usbip-win2 attach of {busid} returned port {vhciPort}.");
         return vhciPort;
     }
+
+    /// <summary>End the host controller's connections to HIDMaestro ports of
+    /// programs that have exited, so their attach requests return
+    /// (TcpConnectionOwner.EndConnectionsToExitedServers). Never
+    /// throws.</summary>
+    private static void EndAttachesOfExitedPrograms() =>
+        TcpConnectionOwner.EndConnectionsToExitedServers(UsbipBackend.IsOurPort);
 
     /// <summary>One PLUGIN_HARDWARE_ONCE request on
     /// <paramref name="layout"/>. False when the driver refused it, with the
