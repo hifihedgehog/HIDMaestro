@@ -476,7 +476,6 @@ internal static class Program
             rec.UsbSerial = "n/a";
         }
 
-        rec.Container = ContainerIdOf(rec.Parent);
         rec.Children = Descendants(rec.Parent).Where(d => d.StartsWith(@"HID\", StringComparison.OrdinalIgnoreCase)).ToArray();
 
         // The HID interface takes a moment after the devnode. 30 s is the
@@ -494,8 +493,12 @@ internal static class Program
         // ntoskrnl/io/pnpmgr/pnpmgr.c, IopGetParentIdPrefix). A parent
         // created for the first time has none until then, and the composite
         // persona's interfaces arrive after CreateController returns, so the
-        // prefix is read once a HID child is published.
+        // prefix is read once a HID child is published. Its ContainerId comes
+        // later than the devnode too: on the Surface a parent Windows had
+        // never seen read it 14.8 ms after CM_Locate_DevNodeW first found the
+        // devnode, and the prefix 20.8 ms after, so both are read here.
         rec.Prefix = ReadRegString(rec.Parent, "ParentIdPrefix") ?? "";
+        rec.Container = ContainerIdOf(rec.Parent);
 
         if (fam.Id == "xbox-360-wired")
         {
