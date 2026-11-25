@@ -275,6 +275,19 @@ public sealed class HMProfileBuilder
         Descriptor(builder.Build());
         bool hasRid = builder.DescriptorContainsReportId();
         _inputReportSize = builder.InputReportByteSize + (hasRid ? 1 : 0);
+        // 2.4.0: the answers a touchscreen's or touchpad's feature reports
+        // need (HidDescriptorBuilder.Touchscreen, Touchpad), which
+        // FeatureAnswers called after this replaces.
+        if (builder.FeatureAnswers.Count > 0)
+        {
+            var spec = new FeatureStubSpec();
+            foreach (var (id, data, notify) in builder.FeatureAnswers)
+                spec.Reports.Add(new FeatureStubReport
+                {
+                    Id = $"0x{id:X2}", Size = data.Length, Data = Convert.ToHexString(data), Notify = notify ? true : null,
+                });
+            _featureStubs = spec;
+        }
         return this;
     }
 

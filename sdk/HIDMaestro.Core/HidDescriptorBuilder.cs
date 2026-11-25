@@ -315,6 +315,196 @@ public sealed class HidDescriptorBuilder
         return this;
     }
 
+    // ── Touchscreens, touchpads and pens (2.4.0) ─────────────────────────
+
+    // The answers the feature reports of a digitizer starter need: the most
+    // contacts, a touchpad's certification, the configuration collection's
+    // modes. HMProfileBuilder.FromDescriptorBuilder makes them the profile's
+    // feature answers.
+    private readonly List<(byte Id, byte[] Data, bool Notify)> _featureAnswers = new();
+
+    /// <summary>The feature answers the digitizer starters' reports need,
+    /// report ID first in each.</summary>
+    internal IReadOnlyList<(byte Id, byte[] Data, bool Notify)> FeatureAnswers => _featureAnswers;
+
+    private void ClaimIds(byte first, int count)
+    {
+        if (first == 0 || first + count - 1 > 0xFF)
+            throw new ArgumentOutOfRangeException(nameof(first), $"A digitizer takes report IDs {first} to {first + count - 1}, each 1 to 255.");
+        for (int i = 1; i < count; i++)
+            if (!_starterIds.Add((byte)(first + i)))
+                throw new ArgumentException($"Report ID {first + i} is already used.", nameof(first));
+    }
+
+    /// <summary>A complete touchscreen (Digitizer, Touch Screen) with the
+    /// configuration collection whose Device Mode Windows writes when the
+    /// device starts (Digitizer, Configuration).
+    ///
+    /// <para>Report <paramref name="reportId"/> carries
+    /// <paramref name="contacts"/> fingers, each with Tip Switch, In Range,
+    /// Confidence, an 8-bit Contact Identifier, and X, Y, Width and Height
+    /// from 0 to 32767 across the screen, then a Scan Time in 100 µs units
+    /// and the Contact Count. Feature report <paramref name="reportId"/> + 1
+    /// answers the Contact Count Maximum, and + 2 holds Device Mode and
+    /// Device Identifier. The finger is the one this release's touch tests
+    /// ran on all three of its test machines, Windows taking each screen as
+    /// a touchscreen.</para>
+    ///
+    /// <para>Ten contacts make a 104-byte report, which a driver of 2.4.0 or
+    /// later carries (the wide frames section). <see cref="HMController.SubmitTouch"/>
+    /// packs it.</para></summary>
+    public HidDescriptorBuilder Touchscreen(int contacts = 10, byte reportId = 1)
+    {
+        if (contacts < 1 || contacts > 20)
+            throw new ArgumentOutOfRangeException(nameof(contacts), "A touchscreen report carries 1 to 20 contacts.");
+        if (reportId == 0) throw new ArgumentException("A touchscreen takes report IDs: reportId must be 1 or more.", nameof(reportId));
+        BeginStarter(reportId);
+        ClaimIds(reportId, 3);
+        var b = new List<byte> { 0x05, 0x0D, 0x09, 0x04, 0xA1, 0x01, 0x85, reportId };   // Touch Screen, Application
+        for (int i = 0; i < contacts; i++)
+            b.AddRange(new byte[]
+            {
+                0x09, 0x22, 0xA1, 0x02,                                        // Finger, Logical
+                0x09, 0x42, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x01, 0x81, 0x02,   // Tip Switch
+                0x09, 0x32, 0x81, 0x02,                                        // In Range
+                0x09, 0x47, 0x81, 0x02,                                        // Confidence
+                0x95, 0x05, 0x81, 0x03,                                        // pad 5
+                0x75, 0x08, 0x26, 0xFF, 0x00, 0x09, 0x51, 0x95, 0x01, 0x81, 0x02,       // Contact Identifier 0-255
+                0x05, 0x01, 0x26, 0xFF, 0x7F, 0x75, 0x10, 0x55, 0x00, 0x65, 0x00, 0x35, 0x00, 0x46, 0x00, 0x00,
+                0x09, 0x30, 0x81, 0x02, 0x09, 0x31, 0x81, 0x02,                // X, Y
+                0x05, 0x0D, 0x09, 0x48, 0x81, 0x02, 0x09, 0x49, 0x81, 0x02,    // Width, Height
+                0xC0,
+            });
+        b.AddRange(new byte[]
+        {
+            0x55, 0x0C, 0x66, 0x01, 0x10, 0x47, 0xFF, 0xFF, 0x00, 0x00, 0x27, 0xFF, 0xFF, 0x00, 0x00,
+            0x75, 0x10, 0x95, 0x01, 0x09, 0x56, 0x81, 0x02,                    // Scan Time, 100 µs
+            0x55, 0x00, 0x65, 0x00, 0x35, 0x00, 0x45, 0x00,
+            0x09, 0x54, 0x15, 0x00, 0x25, (byte)contacts, 0x75, 0x08, 0x95, 0x01, 0x81, 0x02,   // Contact Count
+            0x85, (byte)(reportId + 1), 0x09, 0x55, 0xB1, 0x02,                // Contact Count Maximum
+            0xC0,
+            0x09, 0x0E, 0xA1, 0x01, 0x85, (byte)(reportId + 2),                // Configuration, Application
+            0x09, 0x23, 0xA1, 0x02, 0x09, 0x52, 0x09, 0x53, 0x15, 0x00, 0x25, 0x0A,
+            0x75, 0x08, 0x95, 0x02, 0xB1, 0x02, 0xC0,                           // Device Mode, Device Identifier
+            0xC0,
+        });
+        _bytes.AddRange(b);
+        _featureAnswers.Add(((byte)(reportId + 1), new[] { (byte)(reportId + 1), (byte)contacts }, false));
+        _featureAnswers.Add(((byte)(reportId + 2), new byte[] { (byte)(reportId + 2), 0, 0 }, true));
+        EndStarter(contacts * 80 + 24);
+        return this;
+    }
+
+    // Microsoft's default certification blob for a precision touchpad, as
+    // the Windows Precision Touchpad pages give it and mac-precision-touchpad
+    // carries it (AmtPtpDeviceUsbUm\include\Hid.h, DEFAULT_PTP_HQA_BLOB).
+    private static readonly byte[] PtpBlob = Convert.FromHexString(
+        "fc28fe8440cb9a870dbe573cb670098807972d2be33834b66cedb0f7e59cf6c22e841be8b45178431f284b7c2d53affc47701b596f7443c4f34718531aa2a171" +
+        "c7950e315521d3b51ee90cbaecb889193eb3af75819d53b94157f46d3925297c87d9b498457da7269c653b856889d73bbdff1467f22bf02a4154f0fd2c667cf8" +
+        "c08f331303f1d3c10b89d91b62cd51b780b8af3a10c18a5be88a56f08caafa35e942c4d855c338cc2b535c6952d5c87302387c73b641e7ff05d82b799ae23460" +
+        "8fa3321f097862bc80e30fbd65200813c1e2ee532d867ea75ac5d37d98be31481ffbdaafa2a86a89d6bff2d3322a9ae4cf17b7b8f4e13308248bc443a5e524c2");
+
+    /// <summary>A complete precision touchpad (Digitizer, Touch Pad) with its
+    /// configuration collection, in the layout mac-precision-touchpad gives
+    /// Windows (AmtPtpDeviceUsbUm\include\DeviceFamily\WellspringMt2.h and
+    /// Hid.h).
+    ///
+    /// <para>Report <paramref name="reportId"/> carries
+    /// <paramref name="contacts"/> fingers, each with Confidence, Tip Switch,
+    /// an 8-bit Contact Identifier, and X and Y from 0 to 4095 over
+    /// <paramref name="widthMm"/> by <paramref name="heightMm"/>
+    /// millimeters, then Scan Time, Contact Count and Button 1, the click.
+    /// Feature report + 1 answers the most contacts and the pad type, a click
+    /// pad, + 2 Microsoft's default certification blob, + 3 the Input Mode
+    /// Windows writes (3 once it takes the touchpad), and + 4 the button and
+    /// surface switches.</para>
+    ///
+    /// <para>Windows' hybrid mode carries more contacts than one report
+    /// holds: <see cref="HMController.SubmitTouch"/> sends them in as many
+    /// reports as they take, the first with the whole count.</para></summary>
+    public HidDescriptorBuilder Touchpad(int contacts = 5, int widthMm = 110, int heightMm = 70, byte reportId = 1)
+    {
+        if (contacts < 1 || contacts > 5)
+            throw new ArgumentOutOfRangeException(nameof(contacts), "A precision touchpad report carries 1 to 5 contacts.");
+        if (widthMm < 10 || widthMm > 300 || heightMm < 10 || heightMm > 300)
+            throw new ArgumentOutOfRangeException(nameof(widthMm), "A touchpad is 10 to 300 millimeters each way.");
+        if (reportId == 0) throw new ArgumentException("A touchpad takes report IDs: reportId must be 1 or more.", nameof(reportId));
+        BeginStarter(reportId);
+        ClaimIds(reportId, 5);
+        // Physical extents in units of 0.01 cm, a tenth of a millimeter.
+        ushort w = (ushort)(widthMm * 10), h = (ushort)(heightMm * 10);
+        var b = new List<byte> { 0x05, 0x0D, 0x09, 0x05, 0xA1, 0x01, 0x85, reportId };   // Touch Pad, Application
+        for (int i = 0; i < contacts; i++)
+            b.AddRange(new byte[]
+            {
+                0x05, 0x0D, 0x09, 0x22, 0xA1, 0x02,                            // Finger, Logical
+                0x15, 0x00, 0x25, 0x01, 0x09, 0x47, 0x09, 0x42, 0x95, 0x02, 0x75, 0x01, 0x81, 0x02,   // Confidence, Tip Switch
+                0x95, 0x06, 0x81, 0x03,                                        // pad 6
+                0x95, 0x01, 0x75, 0x08, 0x26, 0xFF, 0x00, 0x09, 0x51, 0x81, 0x02,       // Contact Identifier 0-255
+                0x05, 0x01, 0x26, 0xFF, 0x0F, 0x75, 0x10, 0x55, 0x0E, 0x65, 0x11,       // 0-4095, 0.01 cm
+                0x35, 0x00, 0x46, (byte)w, (byte)(w >> 8), 0x09, 0x30, 0x81, 0x02,     // X
+                0x46, (byte)h, (byte)(h >> 8), 0x09, 0x31, 0x81, 0x02,                 // Y
+                0x55, 0x00, 0x65, 0x00, 0x45, 0x00,
+                0xC0,
+            });
+        b.AddRange(new byte[]
+        {
+            0x05, 0x0D, 0x55, 0x0C, 0x66, 0x01, 0x10, 0x47, 0xFF, 0xFF, 0x00, 0x00, 0x27, 0xFF, 0xFF, 0x00, 0x00,
+            0x75, 0x10, 0x95, 0x01, 0x09, 0x56, 0x81, 0x02,                    // Scan Time, 100 µs
+            0x55, 0x00, 0x65, 0x00, 0x35, 0x00, 0x45, 0x00,
+            0x09, 0x54, 0x25, (byte)contacts, 0x75, 0x08, 0x81, 0x02,          // Contact Count, at most the contacts
+            0x05, 0x09, 0x09, 0x01, 0x25, 0x01, 0x75, 0x01, 0x81, 0x02, 0x95, 0x07, 0x81, 0x03,   // Button 1, pad 7
+            0x05, 0x0D, 0x85, (byte)(reportId + 1), 0x09, 0x55, 0x09, 0x59, 0x15, 0x00, 0x26, 0xFF, 0x00,
+            0x75, 0x08, 0x95, 0x02, 0xB1, 0x02,                                // Contact Count Maximum, Pad Type
+            0x06, 0x00, 0xFF, 0x85, (byte)(reportId + 2), 0x09, 0xC5, 0x15, 0x00, 0x26, 0xFF, 0x00,
+            0x75, 0x08, 0x96, 0x00, 0x01, 0xB1, 0x02,                          // certification, 256 bytes
+            0xC0,
+            0x05, 0x0D, 0x09, 0x0E, 0xA1, 0x01, 0x85, (byte)(reportId + 3),    // Configuration, Application
+            0x09, 0x22, 0xA1, 0x02, 0x09, 0x52, 0x15, 0x00, 0x25, 0x0A, 0x75, 0x08, 0x95, 0x01, 0xB1, 0x02, 0xC0,   // Input Mode
+            0xA1, 0x00, 0x85, (byte)(reportId + 4), 0x09, 0x57, 0x09, 0x58, 0x75, 0x01, 0x95, 0x02, 0x25, 0x01, 0xB1, 0x02,
+            0x95, 0x06, 0xB1, 0x03, 0xC0,                                      // Surface Switch, Button Switch
+            0xC0,
+        });
+        _bytes.AddRange(b);
+        _featureAnswers.Add(((byte)(reportId + 1), new byte[] { (byte)(reportId + 1), (byte)contacts, 0 }, false));
+        var cert = new byte[1 + PtpBlob.Length];
+        cert[0] = (byte)(reportId + 2);
+        PtpBlob.CopyTo(cert, 1);
+        _featureAnswers.Add(((byte)(reportId + 2), cert, false));
+        _featureAnswers.Add(((byte)(reportId + 3), new byte[] { (byte)(reportId + 3), 0 }, true));
+        _featureAnswers.Add(((byte)(reportId + 4), new byte[] { (byte)(reportId + 4), 0x03 }, true));
+        EndStarter(contacts * 48 + 32);
+        return this;
+    }
+
+    /// <summary>A complete pen (Digitizer, Pen) with one stylus, in the
+    /// layout of Microsoft's sample pen descriptor: Tip Switch, Barrel
+    /// Switch, Invert, Eraser and In Range, X from 0 to 21240 over 8.25
+    /// inches and Y from 0 to 15980 over 6.188, Tip Pressure 0 to 255, and X
+    /// and Y Tilt -127 to 127, 10 bytes with the report ID.
+    /// <see cref="HMController.SubmitPen"/> packs it.</summary>
+    public HidDescriptorBuilder Pen(byte reportId = 1)
+    {
+        if (reportId == 0) throw new ArgumentException("A pen takes a report ID: reportId must be 1 or more.", nameof(reportId));
+        BeginStarter(reportId);
+        _bytes.AddRange(new byte[]
+        {
+            0x05, 0x0D, 0x09, 0x02, 0xA1, 0x01, 0x85, reportId,               // Pen, Application
+            0x09, 0x20, 0xA1, 0x00,                                            // Stylus, Physical
+            0x09, 0x42, 0x09, 0x44, 0x09, 0x3C, 0x09, 0x45, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x04, 0x81, 0x02,
+            0x95, 0x01, 0x81, 0x03, 0x09, 0x32, 0x81, 0x02, 0x95, 0x02, 0x81, 0x03,   // In Range
+            0x05, 0x01, 0x09, 0x30, 0x75, 0x10, 0x95, 0x01, 0xA4, 0x55, 0x0D, 0x65, 0x13, 0x35, 0x00,
+            0x46, 0x3A, 0x20, 0x26, 0xF8, 0x52, 0x81, 0x02,                    // X
+            0x09, 0x31, 0x46, 0x2C, 0x18, 0x26, 0x6C, 0x3E, 0x81, 0x02, 0xB4,  // Y
+            0x05, 0x0D, 0x09, 0x30, 0x26, 0xFF, 0x00, 0x81, 0x02,              // Tip Pressure
+            0x75, 0x08, 0x09, 0x3D, 0x15, 0x81, 0x25, 0x7F, 0x81, 0x02,        // X Tilt
+            0x09, 0x3E, 0x15, 0x81, 0x25, 0x7F, 0x81, 0x02,                    // Y Tilt
+            0xC0, 0xC0,
+        });
+        EndStarter(72);
+        return this;
+    }
+
     /// <summary>Add a paired-axis stick inside a Physical collection. The Usage
     /// pair is drawn from the four-slot pool [X/Y, Z/Rz, Rx/Ry, Slider/Dial] in
     /// priority order; each call claims the next free pair so repeated

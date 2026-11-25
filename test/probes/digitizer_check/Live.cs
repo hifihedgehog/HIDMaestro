@@ -123,6 +123,7 @@ internal static unsafe partial class Program
         LiveTouch(ctx, backend, hover);
         LiveWide(ctx, backend, hover);
         LiveRaw(ctx, backend);
+        LiveBuilders(ctx, backend, hover);
         LivePen(ctx, backend, hover);
         LivePad(ctx, backend, hover);
         Metrics("after every dispose");
@@ -287,6 +288,76 @@ internal static unsafe partial class Program
         r = v.Input(1);
         Check("after the refusal the device still holds the 1024-byte report", r != null && r.AsSpan().SequenceEqual(frame),
               r == null ? "no read" : $"{r.Length} bytes");
+    }
+
+    /// <summary>The SDK's starters, through HMProfileBuilder: Windows takes
+    /// the touchscreen (Device Mode 2) and the touchpad (Input Mode 3 once
+    /// its certification and capabilities pass), and contacts and the pen
+    /// read back through HidP.</summary>
+    static void LiveBuilders(HMContext ctx, HMBackend backend, bool hover)
+    {
+        HMProfile Make(string id, ushort pid, string type, HidDescriptorBuilder d) =>
+            new HMProfileBuilder().Id(id).Name("HIDMaestro " + id).Vendor("HIDMaestro").Vid(0x1209).Pid(pid)
+                .ProductString("HIDMaestro " + id).ManufacturerString("HIDMaestro").Type(type).Connection("usb")
+                .FromDescriptorBuilder(d).Build();
+
+        var screenProfile = Make("builder-touchscreen", 0x0010, "touchscreen", new HidDescriptorBuilder().Touchscreen());
+        using (var c = ctx.CreateController(screenProfile, null, backend))
+        {
+            var waited = Stopwatch.StartNew();
+            while (c.TouchDeviceMode == null && waited.ElapsedMilliseconds < 5000) Thread.Sleep(20);
+            Check("Windows took the built touchscreen: it wrote Device Mode 2", c.TouchDeviceMode == 2,
+                  $"TouchDeviceMode {c.TouchDeviceMode?.ToString() ?? "never written"} after {waited.ElapsedMilliseconds} ms");
+            Thread.Sleep(500);
+            using var touch = OpenChild("VID_1209&PID_0010", "0004");
+            if (touch == null) { Check("the built touchscreen's collection opens", false); }
+            else
+            {
+                var t = screenProfile.Touch!;
+                ushort[] fingers = Enumerable.Range(0, touch.Links.Length).Where(i => touch.Links[i].LinkUsagePage == 0x0D && touch.Links[i].LinkUsage == 0x22)
+                                             .Select(i => (ushort)i).ToArray();
+                int y = t.Y.Minimum + (t.Y.Maximum - t.Y.Minimum) / 10, step = (t.X.Maximum - t.X.Minimum) / 40;
+                var contacts = Enumerable.Range(0, 3).Select(i => new HMTouchContact { Id = i, X = At(t.X, 2) + (i - 1) * step, Y = y, Hover = hover }).ToArray();
+                c.SubmitTouch(contacts);
+                Thread.Sleep(50);
+                var r = touch.Input((byte)1);
+                ushort key = hover ? (ushort)0x32 : (ushort)0x42;
+                Check($"three contacts {(hover ? "in range" : "down")} on the built touchscreen read back through HidP, Contact Count 3, a 104-byte report",
+                      r != null && r.Length == 104 && touch.Value(r, 0x0D, 0, 0x54) == 3
+                      && fingers.Take(3).Select(f => (touch.Value(r, 0x0D, f, 0x51), touch.Value(r, 0x01, f, 0x30), touch.On(r, 0x0D, f, key)))
+                                .SequenceEqual(contacts.Select(k => (k.Id, k.X, true))),
+                      r == null ? $"no read, Win32 {Marshal.GetLastPInvokeError()}" : $"count {touch.Value(r, 0x0D, 0, 0x54)}, {r.Length} bytes");
+                c.SubmitTouch(ReadOnlySpan<HMTouchContact>.Empty);
+            }
+        }
+
+        var padProfile = Make("builder-touchpad", 0x0011, "touchpad", new HidDescriptorBuilder().Touchpad());
+        using (var c = ctx.CreateController(padProfile, null, backend))
+        {
+            var waited = Stopwatch.StartNew();
+            while (c.TouchDeviceMode != 3 && waited.ElapsedMilliseconds < 8000) Thread.Sleep(20);
+            Check("Windows took the built touchpad for a precision touchpad: it wrote Input Mode 3", c.TouchDeviceMode == 3,
+                  $"TouchDeviceMode {c.TouchDeviceMode?.ToString() ?? "never written"} after {waited.ElapsedMilliseconds} ms");
+        }
+
+        var penProfile = Make("builder-pen", 0x0012, "pen", new HidDescriptorBuilder().Pen());
+        using (var c = ctx.CreateController(penProfile, null, backend))
+        {
+            Thread.Sleep(2000);
+            using var pen = OpenChild("VID_1209&PID_0012", "0002");
+            if (pen == null) { Check("the built pen's collection opens", false); return; }
+            var p = penProfile.Pen!;
+            ushort stylus = (ushort)Enumerable.Range(0, pen.Links.Length).FirstOrDefault(i => pen.Links[i].LinkUsagePage == 0x0D && pen.Links[i].LinkUsage == 0x20);
+            int x = At(p.X, 2), yy = p.Y.Minimum + (p.Y.Maximum - p.Y.Minimum) / 10;
+            c.SubmitPen(new HMPenState { InRange = true, Buttons = HMPenButtons.Barrel, X = x, Y = yy, TiltX = -15 });
+            Thread.Sleep(50);
+            var r = pen.Input(0x01);
+            Check("the built pen in range with its barrel button reads back through HidP: range on, tip off, its place, tilt -15",
+                  r != null && pen.On(r, 0x0D, stylus, 0x32) && !pen.On(r, 0x0D, stylus, 0x42) && pen.On(r, 0x0D, stylus, 0x44)
+                  && pen.Value(r, 0x01, stylus, 0x30) == x && (sbyte)pen.Value(r, 0x0D, stylus, 0x3D) == -15,
+                  r == null ? $"no read, Win32 {Marshal.GetLastPInvokeError()}" : $"{r.Length} bytes");
+            c.SubmitPen(new HMPenState { InRange = false });
+        }
     }
 
     static void LivePen(HMContext ctx, HMBackend backend, bool hover)

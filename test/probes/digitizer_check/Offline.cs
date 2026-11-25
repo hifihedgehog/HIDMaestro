@@ -37,6 +37,7 @@ internal static partial class Program
         ["Testsynaptics_06cb_ce08"] = "pad", ["Testelan_04f3_313a"] = "pad", ["Testdell_06cb_75db"] = "pad",
         ["TestXPPen_ArtistPro16Gen2_28bd_095b"] = "pen", ["TestXPPen_Artist24_28bd_093a"] = "pen",
         ["TestHuion_Kamvas_Pro_19_256c_006b"] = "screen+pen", ["TestWacom_2d1f_014b"] = "pen",
+        ["builder-touchscreen"] = "screen", ["builder-touchpad"] = "pad", ["builder-pen"] = "pen",
     };
 
     /// <summary>catalog: every shipped profile with a touch or pen
@@ -75,7 +76,12 @@ internal static partial class Program
         using (var doc = JsonDocument.Parse(File.ReadAllText(data)))
             foreach (var e in doc.RootElement.EnumerateArray())
                 list.Add((e.GetProperty("name").GetString()!, Convert.FromHexString(e.GetProperty("descriptor").GetString()!)));
+        // The SDK's own starters (HidDescriptorBuilder).
+        list.Add(("builder-touchscreen", new HidDescriptorBuilder().Touchscreen().Build()));
+        list.Add(("builder-touchpad", new HidDescriptorBuilder().Touchpad().Build()));
+        list.Add(("builder-pen", new HidDescriptorBuilder().Pen().Build()));
         foreach (var (name, bytes) in list) OneOffline(name, bytes);
+        BuilderChecks();
         PickChecks();
         Console.WriteLine();
         Console.WriteLine($"=== {s_checks - s_fails}/{s_checks} checks passed ===");
@@ -109,6 +115,49 @@ internal static partial class Program
     }
 
     static string Show(HMRange? r) => r is { } v ? $"{v.Minimum}..{v.Maximum}" : "none";
+
+    /// <summary>The starters' layouts and the feature answers a profile
+    /// built from them carries (HMProfileBuilder.FromDescriptorBuilder).</summary>
+    static void BuilderChecks()
+    {
+        Console.WriteLine("-- the SDK's touchscreen, touchpad and pen starters --");
+        HMProfile Make(string id, ushort pid, string type, HidDescriptorBuilder d) =>
+            new HMProfileBuilder().Id(id).Name("HIDMaestro " + id).Vendor("HIDMaestro").Vid(0x1209).Pid(pid)
+                .ProductString("HIDMaestro " + id).ManufacturerString("HIDMaestro").Type(type).Connection("usb")
+                .FromDescriptorBuilder(d).Build();
+        var screen = Make("builder-touchscreen", 0x0010, "touchscreen", new HidDescriptorBuilder().Touchscreen());
+        var t = screen.Touch;
+        Check("Touchscreen(): ten contacts a report, ten at most, ids to 255, In Range, 104 bytes",
+              t is { IsTouchpad: false, ContactsPerReport: 10, MaxContacts: 10, MaxContactId: 255, HasInRange: true }
+              && screen.Inner.GetOrBuildKeyboardMousePacker().Digitizer.TouchReport!.FrameBytes == 104,
+              t == null ? "no layout" : $"{t.ContactsPerReport} per report, {t.MaxContacts} at most, ids to {t.MaxContactId}, in range {t.HasInRange}, {screen.Inner.GetOrBuildKeyboardMousePacker().Digitizer.TouchReport!.FrameBytes} bytes");
+        string Answers(HMProfile p) => string.Join(" ", p.Inner.FeatureStubs?.Reports.Select(r => $"{r.Id}/{r.Size}{(r.Notify == true ? "n" : "")}") ?? Array.Empty<string>());
+        Check("Touchscreen() answers the Contact Count Maximum, 10, and holds Device Mode",
+              screen.Inner.FeatureStubs?.Reports is { Count: 2 } sr && sr[0].Data == "020A" && sr[1].Notify == true, Answers(screen));
+        var pad = Make("builder-touchpad", 0x0011, "touchpad", new HidDescriptorBuilder().Touchpad());
+        var tp = pad.Touch;
+        Check("Touchpad(): a touchpad, five contacts a report, five at most, Button 1",
+              tp is { IsTouchpad: true, ContactsPerReport: 5, MaxContacts: 5, Buttons: HMMouseButtons.Left },
+              tp == null ? "no layout" : $"{tp.ContactsPerReport} per report, {tp.MaxContacts} at most, buttons {tp.Buttons}");
+        Check("Touchpad() answers the device capabilities, the 257-byte certification report, Input Mode and the switches",
+              pad.Inner.FeatureStubs?.Reports is { Count: 4 } pr && pr[0].Data == "020500" && pr[1].Size == 257
+              && pr[1].Data!.StartsWith("03FC28FE84", StringComparison.Ordinal) && pr[2].Notify == true && pr[3].Data == "0503", Answers(pad));
+        var pen = Make("builder-pen", 0x0012, "pen", new HidDescriptorBuilder().Pen());
+        var p = pen.Pen;
+        Check("Pen(): pressure, both tilts, barrel, eraser, invert and In Range",
+              p is { Pressure: not null, TiltX: not null, TiltY: not null, HasInRange: true }
+              && p.Buttons == (HMPenButtons.Barrel | HMPenButtons.Eraser | HMPenButtons.Invert), p == null ? "no layout" : $"buttons {p.Buttons}");
+        bool refused = false;
+        try { new HidDescriptorBuilder().Touchscreen(reportId: 0); } catch (ArgumentException) { refused = true; }
+        Check("a touchscreen without report IDs is refused", refused);
+        refused = false;
+        try { new HidDescriptorBuilder().Touchscreen(reportId: 1).Pen(reportId: 2); } catch (ArgumentException) { refused = true; }
+        Check("a pen on a report ID the touchscreen took is refused", refused);
+        var both = new HidDescriptorBuilder().Touchscreen(reportId: 1).Pen(reportId: 4);
+        var map = HidReportMap.Parse(both.Build());
+        var d = new KeyboardMousePacker(map).Digitizer;
+        Check("a touchscreen and a pen in one descriptor: both found", d.HasTouch && d.HasPen, $"touch {d.HasTouch}, pen {d.HasPen}");
+    }
 
     // ── The probe's own reader ───────────────────────────────────────────
 
