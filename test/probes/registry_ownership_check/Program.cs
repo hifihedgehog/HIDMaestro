@@ -113,20 +113,34 @@ internal static partial class Program
         public string BackupPath = "";    // under the probe's own backup key
     }
 
-    const string BackupRoot = @"SOFTWARE\HIDMaestroProbeBackup\registry_ownership_check";
+    const string BackupArea = @"SOFTWARE\HIDMaestroProbeBackup";
+    const string BackupRoot = BackupArea + @"\registry_ownership_check";
 
     static void PlantKey(Plant p, int ordinal)
     {
-        // Keep whatever is there now.
         p.BackupPath = $@"{BackupRoot}\{ordinal}";
         Registry.LocalMachine.DeleteSubKeyTree(p.BackupPath, false);
+        // The plant as it reads once written, built in a scratch key.
+        string scratch = $@"{BackupRoot}\scratch";
+        Registry.LocalMachine.DeleteSubKeyTree(scratch, false);
+        using (var s = Registry.LocalMachine.CreateSubKey(scratch))
+            p.Fill(s);
+        string? planted = Dump(Registry.LocalMachine, scratch);
+        Registry.LocalMachine.DeleteSubKeyTree(scratch, false);
+        // Keep whatever is there now, unless it reads exactly as a plant that
+        // writes something: that is the plant of a run that ended before its
+        // cleanup, which goes with this run's. Kept as an original, every
+        // later run put it back, and on the desktop PC on 2026-11-25
+        // Windows.Gaming.Input named each DualShock 4 v2 after the planted
+        // GameInput mapping, which failed S115. A plant of an empty key
+        // matches any empty key, so an empty key stays an original.
         using (var existing = p.Hive.OpenSubKey(p.Path))
         {
-            p.HadOriginal = existing != null;
-            if (existing != null)
+            p.HadOriginal = existing != null && !(planted is { Length: > 0 } && Dump(p.Hive, p.Path) == planted);
+            if (p.HadOriginal)
             {
                 using var b = Registry.LocalMachine.CreateSubKey(p.BackupPath);
-                CopyTree(existing, b);
+                CopyTree(existing!, b);
             }
         }
         p.Hive.DeleteSubKeyTree(p.Path, false);
@@ -145,6 +159,22 @@ internal static partial class Program
             if (b != null) CopyTree(b, k);
         }
         Registry.LocalMachine.DeleteSubKeyTree(p.BackupPath, false);
+        DropEmptyBackupArea();
+    }
+
+    /// <summary>Removes the backup keys once they hold nothing, so a run
+    /// leaves no key of its own behind.</summary>
+    static void DropEmptyBackupArea()
+    {
+        foreach (string path in new[] { BackupRoot, BackupArea })
+        {
+            using (var k = Registry.LocalMachine.OpenSubKey(path))
+            {
+                if (k == null) continue;
+                if (k.SubKeyCount > 0 || k.ValueCount > 0) return;
+            }
+            Registry.LocalMachine.DeleteSubKey(path, false);
+        }
     }
 
     /// <summary>The GameInput override exactly as HIDMaestro wrote it
@@ -358,7 +388,7 @@ internal static partial class Program
         {
             foreach (var p in plants) { try { Unplant(p); } catch (Exception ex) { Console.WriteLine($"  unplant {p.Path}: {ex.Message}"); } }
             try { Unplant(legacy); } catch { }
-            try { Registry.LocalMachine.DeleteSubKeyTree(BackupRoot, false); } catch { }
+            try { Registry.LocalMachine.DeleteSubKeyTree(BackupRoot, false); DropEmptyBackupArea(); } catch { }
         }
         return true;
     }
