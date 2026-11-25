@@ -33,11 +33,11 @@ namespace HIDMaestro.Internal;
 /// <item><see cref="ParentIdPrefix"/> is the <c>1&amp;hash&amp;0</c>
 /// value Windows would otherwise mint per life. It is written into the
 /// parent's instance key before the HID child enumerates (ROOT parents)
-/// or reconciled and re-applied by a restart (SWD parents), so the child
-/// path and with it the HID interface path, the SDL joystick path and the
-/// RawInput device name stay put. Measured on 26200: PnP honors a value
-/// that is in the key when the child first arrives, and a
-/// disable/enable of the parent re-keys an already enumerated child.</item>
+/// or as soon as SwDeviceCreate returns (SWD parents, created a second
+/// time when the child arrived first), so the child path and with it the
+/// HID interface path, the SDL joystick path and the RawInput device name
+/// stay put. Measured on 26200: PnP honors a value that is in the key
+/// when the child arrives.</item>
 /// <item><see cref="ContainerId"/> groups the main devnode and any
 /// companion of one controller, and is what Windows.Gaming.Input and
 /// GameInput key on.</item>

@@ -1,6 +1,6 @@
 # regression_battery.ps1: the regression battery
 
-Runs 114 scenarios and verifies every one leaves zero HIDMaestro PnP
+Runs 115 scenarios and verifies every one leaves zero HIDMaestro PnP
 devnodes in the `PRESENT` state. S01 to S23 drive `HIDMaestroTest.exe`
 through single- and multi-controller create/swap/remove/force-kill
 sequences, and S24 and up run the probe programs under `test/probes`.
@@ -100,11 +100,11 @@ command, and the test app's exit after quit get 3600 s, S71 6300 s and S73
 still running then fails its scenario as a hang, with the probe's
 transcript, and its process tree is stopped.
 
-Total wall time at 2.3.0, with 114
-scenarios: 55 minutes for every scenario, every section and check, on the development laptop, a
-Lenovo Legion Pro 7 16AFR10H, 75 minutes on a MeLE PCG02 GLE stick PC at
-`HIDMAESTRO_TIMEOUT_SCALE=2`, 44 minutes there with every controller on USB/IP,
-and 28 minutes on an ARM64 Microsoft Surface Pro. Use `-Filter` to run one scenario when
+Total wall time at 2.4.0, with 115
+scenarios: 49 minutes for every scenario, every section and check, on the development laptop, a
+Lenovo Legion Pro 7 16AFR10H, 39 minutes on a desktop PC with an AMD Ryzen 9 9950X3D, 88 minutes on a
+MeLE PCG02 GLE stick PC at `HIDMAESTRO_TIMEOUT_SCALE=2`, and 27 minutes on an ARM64 Microsoft Surface
+Pro. Use `-Filter` to run one scenario when
 iterating.
 
 The battery runs the test app and the probes built for the machine's
@@ -300,6 +300,7 @@ not run elevated.
 | `S113_Bluetooth_Xbox_Hid`         | A Bluetooth Xbox pad on USB/IP is the HID device it is over Bluetooth | `offline`: each of the five profiles' `bluetoothHid` form, its version, and where each button, stick, trigger and hat direction lands in the report against SDL's and xpadneo's parsers. `live`: each on USB/IP with xinputhid on the device's node as Windows installs it for a real pad: the device tree, XInput control by control, what XInput and Windows.Gaming.Input report it as, the rumble packet, a second create and a plain profile on the same record. `hold` and `guide`: the Xbox button of `xbox-one-s-bt`, which sends it in a report of its own, held through a moved stick and pressed fifty times. Live, elevated |
 | `S114_Create_Stands`              | What a create hands back stays as it is | On each backend the machine runs, UMDF2 and USB/IP on x64 and USB/IP on ARM64, one profile of each way a controller reaches Windows is created while another thread reads XInput as a running game does. From the create's return and for four seconds the devnodes under the device are the same ones and started, the handles opened on its HID collections at the return answer, a plain pad's read keeps delivering reports, and an XInput pad holds its slot on every read. On UMDF2 a last part forces the software companion's race: an xinputhid pad's ParentIdPrefix is written only once its HID child has arrived under a prefix of Windows' own and XInput holds it, and the create must still hand back a device whose child carries the identity's prefix and stays as it is. S73's part F runs the same check with each profile as its Windows' first game controller. Live, elevated |
 | `S115_Identity_Fidelity`          | Every profile reads to the programs that name controllers as its pins say, on each backend | `offline`: `identity-pins.txt` covers every deployable profile, a line that holds for one backend only, or from one Windows build on, follows a comment that says why, no reader is pinned to another device's IDs without a reason, and the USB/IP pins read what the real devices on record read (`real-devices.txt`). `live`, on UMDF2 and USB/IP on x64 and on USB/IP on ARM64: each profile is created and read through the HID class with the bus hidapi's rule gives, XInput, Windows.Gaming.Input, SDL 3.4.18 with its default hints, and the id Chrome builds, computed with Chromium's own rules and tables. A profile whose device a driver package from outside Windows and HIDMaestro drives on the machine is named and not compared. Live, elevated |
+| `S116_Digitizer`                  | Touchscreens, touchpads and pens reach Windows as the devices they are | `offline`: the touch and pen packer over real touchscreen, touchpad and pen descriptors, read back by the probe's own walk of each descriptor, `HidDescriptorBuilder`'s three starters with their feature answers, and the release slots, which take each report whole or not at all. `live`, on each backend the machine runs: Windows writes Device Mode 2 to a touchscreen and Input Mode 3 to a precision touchpad, contacts and pen states read back through HidP, a 116-byte touch report goes whole, and a 1024-byte report reads back byte for byte while a 1025-byte one is refused. `kill`: on UMDF2 the contacts a killed consumer left down come up with their identifiers, and on USB/IP the device leaves with the consumer. A console session in use gets contacts in range only, with no tip and no click. Live, elevated |
 
 ## What "PASS" means
 
