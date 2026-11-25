@@ -337,10 +337,10 @@ internal static class Program
             },
             "extendedReport.ports: 1073741824 ports of 4 bytes from offset 1 do not fit a 37-byte report"),
 
-        // A report larger than the extended lane, or than what carries it.
-        ("a ports report larger than the extended lane",
-            j => In(j)["size"] = 81,
-            "extendedReport.size 81 is larger than the 80 bytes the extended report lane carries"),
+        // A report larger than the input report lane, or than what carries it.
+        ("a ports report larger than the input report lane",
+            j => In(j)["size"] = 1025,
+            "extendedReport.size 1025 is larger than the 1024 bytes the input report lane carries"),
         ("an output report whose ports pass the output ring's slot",
             j => { Out(j)["size"] = 300; OutPorts(j)["stride"] = 70; },
             "extendedOutputReport.ports end at byte 281. An output report reaches the SDK with at most 256 bytes after its report ID"),

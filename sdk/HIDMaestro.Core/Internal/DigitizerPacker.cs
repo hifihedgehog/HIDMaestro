@@ -194,6 +194,7 @@ internal sealed class DigitizerPacker
                     Pressure = RangeOf(first.First(U(PageDigitizer, TipPressure))),
                     Azimuth = RangeOf(first.First(U(PageDigitizer, Azimuth))),
                     Buttons = (HMMouseButtons)buttons,
+                    HasInRange = _fingers.TrueForAll(f => f.Has(U(PageDigitizer, InRange))),
                 };
             }
         }

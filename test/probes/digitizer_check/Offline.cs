@@ -94,7 +94,7 @@ internal static partial class Program
         if (d.HasTouch)
         {
             var t = d.TouchLayout!;
-            Console.WriteLine($"  touch: {(t.IsTouchpad ? "touchpad" : "touchscreen")}, {t.ContactsPerReport} per report, at most {t.MaxContacts}, ids to {t.MaxContactId}, " +
+            Console.WriteLine($"  touch: {(t.IsTouchpad ? "touchpad" : "touchscreen")}, {t.ContactsPerReport} per report, at most {t.MaxContacts}, ids to {t.MaxContactId}, in range {t.HasInRange}, " +
                               $"X {t.X.Minimum}..{t.X.Maximum}, Y {t.Y.Minimum}..{t.Y.Maximum}, buttons {t.Buttons}, report 0x{d.TouchReport!.ReportId:X2} {d.TouchReport.FrameBytes} bytes");
             Check($"{name}: a {(kind == "pad" ? "touchpad" : "touchscreen")}", t.IsTouchpad == (kind == "pad"));
             Touch(name, d, bytes);

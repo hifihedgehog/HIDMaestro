@@ -102,7 +102,7 @@ internal static partial class Program
         // ReadFile. A device whose protocol builds its reports sends its own.
         var map = p.Inner.GetOrBuildReportMap();
         var wide = map.Reports.Where(r => r.Kind == HidReportKind.Input).OrderByDescending(r => r.FrameBytes).First();
-        bool own = p.BuildsItsOwnReports || p.Inner.Protocol != null || wide.FrameBytes > SharedMemoryIO.EXTENDED_DATA_CAPACITY;
+        bool own = p.BuildsItsOwnReports || p.Inner.Protocol != null || wide.FrameBytes > SharedMemoryIO.WIDE_FRAME_CAP;
         int carried = wide.FrameBytes;
         byte dataId = wide.ReportId;
         using (var h = Hid.Open(widest.Path, 0xC0000000))

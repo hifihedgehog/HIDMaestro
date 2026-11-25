@@ -23,7 +23,9 @@ public struct HMTouchContact
     public int X;
     public int Y;
     /// <summary>In range of the surface without touching it: Tip Switch off,
-    /// In Range on, on a descriptor that declares In Range.</summary>
+    /// In Range on, on a descriptor that declares In Range
+    /// (<see cref="HMTouchLayout.HasInRange"/>). On one that does not, a
+    /// hovering contact reads as lifted.</summary>
     public bool Hover;
     /// <summary>A contact that is not a finger, such as a palm: Confidence
     /// off, on a descriptor that declares Confidence.</summary>
@@ -105,6 +107,12 @@ public sealed class HMTouchLayout
     /// <summary>The touchpad buttons the report carries, Button 1 first.
     /// None on a touchscreen.</summary>
     public HMMouseButtons Buttons { get; internal init; }
+
+    /// <summary>True when every finger declares In Range, so a contact can
+    /// hover (<see cref="HMTouchContact.Hover"/>). The Elan screen of the
+    /// Dell XPS 13 9360 declares none: a hovering contact there reads as
+    /// lifted.</summary>
+    public bool HasInRange { get; internal init; }
 }
 
 /// <summary>What a profile's pen collection carries, from its descriptor

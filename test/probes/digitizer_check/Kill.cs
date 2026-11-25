@@ -14,6 +14,11 @@
 // in order and at the report's full length, the first with the whole count,
 // and the touch report must read back lifted. On USB/IP the device goes
 // with the child's process.
+//
+// With "hover", for a machine whose desktop is in use, no tip goes down and
+// no button is pressed: the contacts are in range only, the checks read In
+// Range where they read Tip Switch, and the touchpad button's release is not
+// run.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -40,6 +45,9 @@ internal static unsafe partial class Program
     // more than the driver's eight release slots of 2.3.0.
     static readonly string Hybrid12Descriptor = HybridDescriptor.Replace("75081500250581028502", "75081500250c81028502");
 
+    // Vendor page 0xFF00, report 1: 1023 bytes of data, 1024 with the ID.
+    const string Wide1024Descriptor = "0600ff0901a1018501" + "0902150026ff00750896ff038102" + "c0";
+
     static string KillProfiles()
     {
         string dir = SpikeProfiles();
@@ -51,6 +59,10 @@ internal static unsafe partial class Program
         System.IO.File.WriteAllText(System.IO.Path.Combine(dir, "spike-touch-hybrid12.json"),
             Profile("spike-touch-hybrid12", "HIDMaestro spike hybrid touchscreen 12", "0x000C", Hybrid12Descriptor,
                     Stubs(("0x02", "020c"), ("0x03", "030000")), "touchscreen"));
+        // One vendor-defined input report of 1024 bytes with its ID, the
+        // longest the input report lane carries.
+        System.IO.File.WriteAllText(System.IO.Path.Combine(dir, "spike-wide1024.json"),
+            Profile("spike-wide1024", "HIDMaestro spike 1024-byte report", "0x000D", Wide1024Descriptor, null, "other"));
         // The Elan touchscreen (hid-tools tests_kernel test_multitouch.py):
         // Contact Count Maximum 10 on report 0x0A, Microsoft's default
         // certification blob on report 0x44.
@@ -68,7 +80,7 @@ internal static unsafe partial class Program
 
     /// <summary>The child: <paramref name="n"/> contacts down on
     /// <paramref name="profileId"/>, ids 0 up, until it is killed.</summary>
-    static int HoldTouch(HMBackend backend, string profileId, int n)
+    static int HoldTouch(HMBackend backend, string profileId, int n, bool hover)
     {
         using var ctx = new HMContext(backend);
         ctx.LoadProfilesFromDirectory(KillProfiles());
@@ -79,7 +91,7 @@ internal static unsafe partial class Program
         int y = t.Y.Minimum + (t.Y.Maximum - t.Y.Minimum) / 10;
         int step = Math.Max(1, (t.X.Maximum - t.X.Minimum) / 40);
         int x0 = At(t.X, 2) - step * (n / 2);
-        c.SubmitTouch(Enumerable.Range(0, n).Select(i => new HMTouchContact { Id = i, X = x0 + i * step, Y = y }).ToArray());
+        c.SubmitTouch(Enumerable.Range(0, n).Select(i => new HMTouchContact { Id = i, X = x0 + i * step, Y = y, Hover = hover }).ToArray());
         Thread.Sleep(300);
         Console.WriteLine($"HELD backend {c.Backend} release-on-exit {(c.ReleasesOnConsumerExit ? "on" : "off")} index {c.Index}");
         Console.Out.Flush();
@@ -87,17 +99,21 @@ internal static unsafe partial class Program
         return 0;
     }
 
-    static int Kill(HMBackend backend)
+    static int Kill(HMBackend backend, bool hover)
     {
-        Console.WriteLine($"=== Contacts down when a program goes away, on {backend} ===");
+        Console.WriteLine($"=== Contacts {(hover ? "in range" : "down")} when a program goes away, on {backend} ===");
         if (SdkConsumers.Find() is { } other) { Console.WriteLine($"  SKIP: {other} has HIDMaestro.Core.dll loaded."); return 2; }
         string dir = KillProfiles();
+        // Which cases' descriptors declare In Range, so a contact can hover.
+        var canHover = new Dictionary<string, bool>();
 
         // The hybrid release, in process.
         using (var ctx = new HMContext(backend))
         {
             ctx.InstallDriver();
             ctx.LoadProfilesFromDirectory(dir);
+            foreach (var id in new[] { "spike-touchscreen", "kill-elan-xps9360", "spike-touch-hybrid12" })
+                canHover[id] = ctx.GetProfile(id)!.Touch!.HasInRange;
             var profile = ctx.GetProfile("spike-touch-hybrid")!;
             var t = profile.Touch!;
             Check("the hybrid touchscreen: one contact a report, five at most", t is { ContactsPerReport: 1, MaxContacts: 5 },
@@ -105,36 +121,40 @@ internal static unsafe partial class Program
             using var c = ctx.CreateController(profile, null, backend);
             Thread.Sleep(1500);
             int y = t.Y.Minimum + (t.Y.Maximum - t.Y.Minimum) / 10;
-            c.SubmitTouch(new[] { 7, 8, 9 }.Select((id, i) => new HMTouchContact { Id = id, X = At(t.X, 2) + i * 300, Y = y }).ToArray());
+            c.SubmitTouch(new[] { 7, 8, 9 }.Select((id, i) => new HMTouchContact { Id = id, X = At(t.X, 2) + i * 300, Y = y, Hover = hover }).ToArray());
             var kept = (List<byte[]>)typeof(HMController).GetField("_releaseFrames", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(c)!;
             var frames = kept.Select(f => f.ToArray()).ToList();
             var desc = Convert.FromHexString(HybridDescriptor);
             var read = frames.Select(f => Read(f, desc)).ToList();
-            Check("three contacts in hybrid form leave three lift frames: Contact Count 3, then 0 and 0, ids 7, 8 and 9, every tip off",
+            Check("three contacts in hybrid form leave three lift frames: Contact Count 3, then 0 and 0, ids 7, 8 and 9, every tip and In Range off",
                   read.Count == 3 && read.Select(r => r.Count).SequenceEqual(new[] { 3, 0, 0 })
-                  && read.Select(r => r.Fingers[0].Id).SequenceEqual(new[] { 7, 8, 9 }) && read.All(r => r.Fingers[0].Tip == 0),
-                  string.Join(" | ", read.Select(r => $"count {r.Count} id {(r.Fingers.Count > 0 ? r.Fingers[0].Id : -1)} tip {(r.Fingers.Count > 0 ? r.Fingers[0].Tip : -1)}")));
+                  && read.Select(r => r.Fingers[0].Id).SequenceEqual(new[] { 7, 8, 9 }) && read.All(r => r.Fingers[0].Tip == 0 && r.Fingers[0].InRange == 0),
+                  string.Join(" | ", read.Select(r => $"count {r.Count} id {(r.Fingers.Count > 0 ? r.Fingers[0].Id : -1)} tip {(r.Fingers.Count > 0 ? r.Fingers[0].Tip : -1)} range {(r.Fingers.Count > 0 ? r.Fingers[0].InRange : -1)}")));
             c.SubmitTouch(ReadOnlySpan<HMTouchContact>.Empty);
             Check("once every contact lifts, no touch release frame is left", kept.Count == 0, $"{kept.Count} left");
 
-            // A touchpad button pressed with no contact down is let go too.
-            var padProfile = ctx.GetProfile("spike-touchpad")!;
-            using var pad = ctx.CreateController(padProfile, null, backend);
-            Thread.Sleep(1500);
-            pad.SubmitTouch(ReadOnlySpan<HMTouchContact>.Empty, HMMouseButtons.Left);
-            var padKept = (List<byte[]>)typeof(HMController).GetField("_releaseFrames", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(pad)!;
-            var padDesc = Convert.FromHexString(PadDescriptor);
-            const uint Button1 = 0x00090001;
-            string PadShow() => string.Join(" | ", padKept.Select(f => $"count {Read(f, padDesc).Count} button {UsageValue(f, padDesc, Button1)}"));
-            Check("a touchpad button pressed with no contact down leaves one release frame, no contact and the button up",
-                  padKept.Count == 1 && Read(padKept[0], padDesc).Count == 0 && UsageValue(padKept[0], padDesc, Button1) == 0, PadShow());
-            pad.SubmitTouch(ReadOnlySpan<HMTouchContact>.Empty);
-            Check("once the button is up, no touchpad release frame is left", padKept.Count == 0, $"{padKept.Count} left");
+            // A touchpad button pressed with no contact down is let go too:
+            // a click, so not on a desktop in use.
+            if (!hover)
+            {
+                var padProfile = ctx.GetProfile("spike-touchpad")!;
+                using var pad = ctx.CreateController(padProfile, null, backend);
+                Thread.Sleep(1500);
+                pad.SubmitTouch(ReadOnlySpan<HMTouchContact>.Empty, HMMouseButtons.Left);
+                var padKept = (List<byte[]>)typeof(HMController).GetField("_releaseFrames", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(pad)!;
+                var padDesc = Convert.FromHexString(PadDescriptor);
+                const uint Button1 = 0x00090001;
+                string PadShow() => string.Join(" | ", padKept.Select(f => $"count {Read(f, padDesc).Count} button {UsageValue(f, padDesc, Button1)}"));
+                Check("a touchpad button pressed with no contact down leaves one release frame, no contact and the button up",
+                      padKept.Count == 1 && Read(padKept[0], padDesc).Count == 0 && UsageValue(padKept[0], padDesc, Button1) == 0, PadShow());
+                pad.SubmitTouch(ReadOnlySpan<HMTouchContact>.Empty);
+                Check("once the button is up, no touchpad release frame is left", padKept.Count == 0, $"{padKept.Count} left");
+            }
         }
 
-        KillCase(backend, "spike-touchscreen", "0007", 2);
-        KillCase(backend, "kill-elan-xps9360", "000B", 3);
-        KillCase(backend, "spike-touch-hybrid12", "000C", 10);
+        KillCase(backend, "spike-touchscreen", "0007", 2, hover, canHover["spike-touchscreen"]);
+        KillCase(backend, "kill-elan-xps9360", "000B", 3, hover, canHover["kill-elan-xps9360"]);
+        KillCase(backend, "spike-touch-hybrid12", "000C", 10, hover, canHover["spike-touch-hybrid12"]);
         Console.WriteLine();
         Console.WriteLine($"=== {s_checks - s_fails}/{s_checks} checks passed ===");
         return s_fails == 0 ? 0 : 1;
@@ -143,16 +163,16 @@ internal static unsafe partial class Program
     /// <summary>A child killed with <paramref name="n"/> contacts down on
     /// <paramref name="profileId"/>, whose devices carry PID
     /// <paramref name="pid"/>.</summary>
-    static void KillCase(HMBackend backend, string profileId, string pid, int n)
+    static void KillCase(HMBackend backend, string profileId, string pid, int n, bool hover, bool canHover)
     {
-        Console.WriteLine($"-- {n} contacts down on {profileId} when its program is killed --");
+        Console.WriteLine($"-- {n} contacts {(hover ? "in range" : "down")} on {profileId} when its program is killed --");
         string vidPid = "VID_1209&PID_" + pid;
         // The child's errors come back here: inherited, a crash's text would
         // reach the run script's own error stream, which ends the run.
         var errors = new System.Text.StringBuilder();
         var child = new Process
         {
-            StartInfo = new ProcessStartInfo(Environment.ProcessPath!, $"hold-touch {backend} {profileId} {n}")
+            StartInfo = new ProcessStartInfo(Environment.ProcessPath!, $"hold-touch {backend} {profileId} {n}{(hover ? " hover" : "")}")
             {
                 RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true,
             },
@@ -162,7 +182,7 @@ internal static unsafe partial class Program
         child.BeginErrorReadLine();
         // The child holds contacts on the display, so it never outlives the
         // case, whatever this probe throws.
-        try { KillCaseWith(child, backend, profileId, vidPid, n, errors); }
+        try { KillCaseWith(child, backend, profileId, vidPid, n, hover, canHover, errors); }
         finally
         {
             if (!child.HasExited) { child.Kill(); child.WaitForExit(); }
@@ -175,8 +195,14 @@ internal static unsafe partial class Program
               $"{HidChildren(vidPid).Count} HID children left");
     }
 
-    static void KillCaseWith(Process child, HMBackend backend, string profileId, string vidPid, int n, System.Text.StringBuilder errors)
+    static void KillCaseWith(Process child, HMBackend backend, string profileId, string vidPid, int n, bool hover, bool canHover, System.Text.StringBuilder errors)
     {
+        // The switch a held contact has on: Tip Switch, or In Range alone.
+        // A descriptor without In Range carries a hovering contact as a
+        // lifted one, its id and the count, every tip off.
+        ushort key = hover ? (ushort)0x32 : (ushort)0x42;
+        bool asLifted = hover && !canHover;
+        string held = hover ? "in range" : "down", off = hover ? "every contact out of range" : "every tip off";
         string? line;
         while ((line = child.StandardOutput.ReadLine()) != null && !line.StartsWith("HELD")) { }
         if (line == null)
@@ -198,10 +224,14 @@ internal static unsafe partial class Program
                                          .Select(i => (ushort)i).ToArray();
             int per = fingers.Length, length = touch.Caps.InputReportByteLength;
             string Show(byte[]? rep) => rep == null ? "no read" : string.Join(", ", fingers.Take(Math.Min(per, 3)).Select(f =>
-                $"id {touch.Value(rep, 0x0D, f, 0x51)} tip {(touch.On(rep, 0x0D, f, 0x42) ? 1 : 0)}")) + $", count {touch.Value(rep, 0x0D, 0, 0x54)}, {rep.Length} bytes";
-            var held = touch.Input(0x01);
-            Check($"{profileId}: before the kill, the touch report reads a contact down (the control)",
-                  held != null && fingers.Any(f => touch.On(held, 0x0D, f, 0x42)), Show(held));
+                $"id {touch.Value(rep, 0x0D, f, 0x51)} tip {(touch.On(rep, 0x0D, f, 0x42) ? 1 : 0)} range {(touch.On(rep, 0x0D, f, 0x32) ? 1 : 0)}")) + $", count {touch.Value(rep, 0x0D, 0, 0x54)}, {rep.Length} bytes";
+            var before = touch.Input(0x01);
+            if (asLifted)
+                Check($"{profileId}: before the kill, the touch report carries the {n} contacts, every tip off: without In Range a hovering contact reads as lifted (the control)",
+                      before != null && touch.Value(before, 0x0D, 0, 0x54) == n && fingers.All(f => !touch.On(before, 0x0D, f, 0x42)), Show(before));
+            else
+                Check($"{profileId}: before the kill, the touch report reads a contact {held} (the control)",
+                      before != null && fingers.Any(f => touch.On(before, 0x0D, f, key)), Show(before));
             child.Kill();
             child.WaitForExit();
             Thread.Sleep(1000);
@@ -225,8 +255,8 @@ internal static unsafe partial class Program
                     for (int j = 0; j < per && k * per + j < n; j++) ids.Add(touch.Value(Full(lifts[k]), 0x0D, fingers[j], 0x51));
                 bool whole = lifts.Count == want && lifts.All(f => f.Length == length)
                              && counts.SequenceEqual(new[] { n }.Concat(Enumerable.Repeat(0, want - 1)))
-                             && ids.SequenceEqual(Enumerable.Range(0, n)) && lifts.All(f => fingers.All(fi => !touch.On(Full(f), 0x0D, fi, 0x42)));
-                Check($"{profileId}: the driver holds {want} lift frame{(want == 1 ? "" : "s")} for the touch report, each the full {length} bytes, Contact Count {n}{(want > 1 ? " then 0" : "")}, ids 0 to {n - 1} in order, every tip off",
+                             && ids.SequenceEqual(Enumerable.Range(0, n)) && lifts.All(f => fingers.All(fi => !touch.On(Full(f), 0x0D, fi, key)));
+                Check($"{profileId}: the driver holds {want} lift frame{(want == 1 ? "" : "s")} for the touch report, each the full {length} bytes, Contact Count {n}{(want > 1 ? " then 0" : "")}, ids 0 to {n - 1} in order, {off}",
                       whole, $"{set.Layout} layout, {set.Frames.Count} frames, {lifts.Count} of the touch report, sizes {string.Join(" ", lifts.Select(f => f.Length).Distinct())}, " +
                              $"counts {string.Join(" ", counts)}, ids {string.Join(" ", ids)}");
                 if (set.Served >= 0)
@@ -235,7 +265,7 @@ internal static unsafe partial class Program
                 else
                     Check($"{profileId}: the driver keeps its release frames in the wide section", false, "the classic section only, which carries no served count");
                 Check($"{profileId}: the touch report reads back lifted, the first lift frame's count kept",
-                      after != null && touch.Value(after, 0x0D, 0, 0x54) == n && fingers.All(f => !touch.On(after, 0x0D, f, 0x42)), Show(after));
+                      after != null && touch.Value(after, 0x0D, 0, 0x54) == n && fingers.All(f => !touch.On(after, 0x0D, f, key)), Show(after));
             }
         }
     }

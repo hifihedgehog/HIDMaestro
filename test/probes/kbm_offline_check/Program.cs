@@ -13,7 +13,7 @@
 //      does, carries a click and a movement it cannot express as no motion,
 //      and a long split lets its frames go once sent.
 //   4. Every keyboard and mouse in the catalog parses, packs and reads back,
-//      fits the 80-byte extended lane, and is the only catalog profile that
+//      fits the 1024-byte input report lane, and is the only catalog profile that
 //      delivers every report. Every profile with a mouse collection packs a
 //      click and a movement back in one pass, and a long movement ends.
 //
@@ -362,7 +362,7 @@ internal static class Program
             if (isMouse && !packer.HasMouse) problem = "no mouse collection";
             else if (!isMouse && !packer.HasKeyboard) problem = "no keyboard collection";
             foreach (var r in packer.Map.Reports)
-                if (r.Kind == HidReportKind.Input && r.FrameBytes > SharedMemoryIO.EXTENDED_DATA_CAPACITY)
+                if (r.Kind == HidReportKind.Input && r.FrameBytes > SharedMemoryIO.WIDE_FRAME_CAP)
                     problem ??= $"input report {r.ReportId} is {r.FrameBytes} bytes";
             if (problem == null)
             {

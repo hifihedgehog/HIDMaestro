@@ -122,6 +122,7 @@ internal static unsafe partial class Program
         ctx.LoadProfilesFromDirectory(dir);
         LiveTouch(ctx, backend, hover);
         LiveWide(ctx, backend, hover);
+        LiveRaw(ctx, backend);
         LivePen(ctx, backend, hover);
         LivePad(ctx, backend, hover);
         Metrics("after every dispose");
@@ -241,6 +242,51 @@ internal static unsafe partial class Program
               r != null && touch.Value(r, 0x0D, 0, 0x54) == 3 && fingers.Take(3).All(f => !touch.On(r, 0x0D, f, 0x42) && !touch.On(r, 0x0D, f, 0x32)),
               r == null ? "no read" : Show(r));
         Metrics("with the Elan touchscreen");
+    }
+
+    /// <summary>The input report lane at its limit: one 1024-byte report
+    /// through SubmitRawExtendedReport, read back byte for byte, and a
+    /// 1025-byte one refused. A vendor collection, so nothing reaches the
+    /// desktop.</summary>
+    static void LiveRaw(HMContext ctx, HMBackend backend)
+    {
+        var profile = ctx.GetProfile("spike-wide1024")!;
+        using var c = ctx.CreateController(profile, null, backend);
+        Thread.Sleep(2000);
+        using var v = OpenChildPage("VID_1209&PID_000D", "FF00", "0001");
+        Check("the 1024-byte vendor collection opens, a 1024-byte input report", v != null && v.Caps.InputReportByteLength == 1024,
+              v == null ? "none" : $"{v.How}, {v.Caps.InputReportByteLength} bytes");
+        if (v == null) return;
+        if (c.UsbipHandle is { } handle)
+        {
+            var device = handle.Device;
+            var type = device.GetType();
+            var lockObj = type.GetField("_hidLock", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(device)!;
+            var parked = (Dictionary<uint, int>)type.GetField("_parkedInLength", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(device)!;
+            int[] asked;
+            lock (lockObj) asked = parked.Values.ToArray();
+            Check("on USB/IP, HID class's parked interrupt reads ask for the whole 1024-byte report",
+                  asked.Length > 0 && asked.All(n => n >= 1024), asked.Length == 0 ? "no read parked" : $"asked {string.Join(" ", asked.Distinct())}");
+        }
+        var frame = new byte[1024];
+        frame[0] = 1;
+        for (int i = 1; i < frame.Length; i++) frame[i] = (byte)(i * 7 + 3);
+        var sw = Stopwatch.StartNew();
+        c.SubmitRawExtendedReport(frame);
+        long took = sw.ElapsedMilliseconds;
+        Thread.Sleep(50);
+        var r = v.Input(1);
+        int first = r == null ? -1 : Enumerable.Range(0, Math.Min(r.Length, frame.Length)).FirstOrDefault(i => r[i] != frame[i], -1);
+        Check($"a 1024-byte report through SubmitRawExtendedReport reads back byte for byte (submit {took} ms)",
+              r != null && r.Length == 1024 && r.AsSpan().SequenceEqual(frame),
+              r == null ? $"HidD_GetInputReport failed, Win32 {Marshal.GetLastPInvokeError()}" : first < 0 ? $"{r.Length} bytes" : $"{r.Length} bytes, first difference at {first}");
+        string? refusal = null;
+        try { c.SubmitRawExtendedReport(new byte[1025]); }
+        catch (ArgumentException e) { refusal = e.Message; }
+        Check("a 1025-byte report is refused before any byte goes", refusal != null && refusal.Contains("1024-byte"), refusal ?? "accepted");
+        r = v.Input(1);
+        Check("after the refusal the device still holds the 1024-byte report", r != null && r.AsSpan().SequenceEqual(frame),
+              r == null ? "no read" : $"{r.Length} bytes");
     }
 
     static void LivePen(HMContext ctx, HMBackend backend, bool hover)
