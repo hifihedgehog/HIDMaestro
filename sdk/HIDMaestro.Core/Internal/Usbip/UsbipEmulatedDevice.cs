@@ -179,6 +179,9 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
 
     private readonly HidReportBuilder _builder;
     private readonly IntPtr _inputView;
+    // 2.4.0: the wide frames section, which carries a frame longer than the
+    // input section's extended lane (SharedMemoryIO.WriteInputFrame).
+    private readonly IntPtr _wideView;
     private readonly IntPtr _outputView;
     private readonly IntPtr _outputEvent;
     private IntPtr _inputWaitEvent;
@@ -509,7 +512,11 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         int expectedSize = _ownReportSize > 0 ? _ownReportSize
             : _dataReportLength > 0 ? _dataReportLength
             : _builder.InputReportByteSize > 0 ? _builder.InputReportByteSize : 17;
-        _reportCapacity = Math.Max(expectedSize, SharedMemoryIO.EXTENDED_DATA_CAPACITY);
+        // 2.4.0: every declared input report whole, the widest of a
+        // touchscreen's included, which the wide frames section carries.
+        int widest = _ownReportSize;
+        foreach (var (_, size) in _builder.InputReports) widest = Math.Max(widest, size);
+        _reportCapacity = Math.Max(Math.Max(expectedSize, SharedMemoryIO.EXTENDED_DATA_CAPACITY), widest);
         _pumpReport = new byte[_reportCapacity];
         // One slot per declared input report, and one for the builder's
         // report when the descriptor declares none the parser read.
@@ -559,6 +566,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             // Sections and events first, so both this device and the
             // HMController constructed after it see the same objects.
             _inputView = SharedMemoryIO.EnsureInputMapping(index);
+            _wideView = SharedMemoryIO.WideView(index);
             _outputView = SharedMemoryIO.EnsureOutputMapping(index);
             SharedMemoryIO.MarkOutputStart(index);
             _outputEvent = SharedMemoryIO.EnsureOutputEvent(index);
@@ -933,13 +941,28 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 lane = Math.Clamp(lane, 0, SharedMemoryIO.DATA_CAPACITY);
                 new ReadOnlySpan<byte>((byte*)view + SharedMemoryIO.DATA_OFFSET, lane).CopyTo(_pumpFeature);
                 _pumpFeatureSize = lane;
-                _pumpExtended = extSize > 0 && extSize <= SharedMemoryIO.EXTENDED_DATA_CAPACITY;
+                _pumpExtended = extSize > 0 && extSize <= SharedMemoryIO.WIDE_FRAME_CAP;
             }
             if (extSize > 0 && extSize <= SharedMemoryIO.EXTENDED_DATA_CAPACITY)
             {
                 new ReadOnlySpan<byte>((byte*)view + SharedMemoryIO.EXTENDED_DATA_OFFSET, extSize).CopyTo(report);
                 length = extSize;
                 extended = true;
+            }
+            else if (extSize > SharedMemoryIO.EXTENDED_DATA_CAPACITY)
+            {
+                // 2.4.0: a frame longer than the extended lane, whole, from the
+                // wide frames section, inside the same check of the sequence
+                // number (driver.c CopyWideInput). One this pump cannot carry
+                // is no frame, never the data lane's report of zeros.
+                extended = true;
+                IntPtr wide = _wideView;
+                if (wide != IntPtr.Zero && extSize <= SharedMemoryIO.WIDE_FRAME_CAP && extSize <= report.Length)
+                {
+                    new ReadOnlySpan<byte>((byte*)wide + SharedMemoryIO.WIDE_OFFSET_INPUT, extSize).CopyTo(report);
+                    length = extSize;
+                }
+                else length = 0;
             }
             else
             {
@@ -969,6 +992,8 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         } while ((seq1 != seq2 || (seq1 & 1) != 0) && --retries > 0);
         if (seq1 != seq2 || (seq1 & 1) != 0) { length = 0; return false; }
         if (seq1 == _lastSharedSeqNo) { length = 0; return false; } // no new frame
+        // A wide frame this pump could not carry is seen and not sent.
+        if (extended && length == 0) { _lastSharedSeqNo = seq1; return false; }
         // The section holds one frame, so a frame written over before this
         // pump read it is gone. With the read diagnostic on, each one is
         // named: a writer adds 2 to the sequence number for each frame.

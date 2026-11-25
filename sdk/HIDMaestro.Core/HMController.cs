@@ -1210,7 +1210,8 @@ public sealed partial class HMController : IDisposable
                 _inputView, _inputEvent, ref _inputSeqNo,
                 Array.Empty<byte>(), 0, null,
                 dataOffset: 0,
-                extendedData: _stateBlockBuffer!, extendedLen: _stateBlockSpec.Size, signalView: _signalView);
+                extendedData: _stateBlockBuffer!, extendedLen: _stateBlockSpec.Size, signalView: _signalView,
+                wideView: WideFor(_stateBlockSpec.Size));
 
             return ElapsedMicros(startTicks);
         }
@@ -1333,7 +1334,7 @@ public sealed partial class HMController : IDisposable
                 _packsGipBuffer ? _gipBuf : null,
                 companionEvent: _companionInputEvent,
                 dataOffset: 0,
-                extendedData: report, extendedLen: extLen, signalView: _signalView);
+                extendedData: report, extendedLen: extLen, signalView: _signalView, wideView: WideFor(extLen));
         }
         else
         {
@@ -1759,10 +1760,12 @@ public sealed partial class HMController : IDisposable
         if (_rawFrameLength != 0 && report.Length != _rawFrameLength) ThrowRawFrameLength(report.Length);
         if (_otherFormRaw is { } other && (uint)report.Length < (uint)other.Length && other[report.Length]) ThrowIfOtherForm(report.Length);
         if (_stateBlockSpec != null && SubmitRawStateBlock(report)) return;
-        // The extended lane carries the whole frame in an 80-byte field. The
-        // writer used to cut a longer one there without a word.
-        if ((uint)(report.Length - 1) >= SharedMemoryIO.EXTENDED_DATA_CAPACITY)
-            ThrowReportLength(report.Length, SharedMemoryIO.EXTENDED_DATA_CAPACITY, "extended report field");
+        // The extended lane carries the whole frame in an 80-byte field, and
+        // from 2.4.0 the wide frames section one up to 1024 bytes, where the
+        // device's reader takes it (WideFor). The writer used to cut a
+        // longer one without a word. It refuses one now.
+        if ((uint)(report.Length - 1) >= SharedMemoryIO.WIDE_FRAME_CAP)
+            ThrowReportLength(report.Length, SharedMemoryIO.WIDE_FRAME_CAP, "input report lane");
 
         lock (_submitLock)
         {
@@ -2118,6 +2121,19 @@ public sealed partial class HMController : IDisposable
         _idleClock?.FrameSent(at);
     }
 
+    /// <summary>2.4.0: the wide frames section for an extended frame of
+    /// <paramref name="length"/> bytes, when that is longer than the
+    /// extended lane and the device's reader takes it: a USB/IP device's
+    /// pump always does, and a UMDF2 driver once its version handshake says
+    /// so (HIDMAESTRO_INPUT_ACK_CAP_WIDE). Zero otherwise, and
+    /// SharedMemoryIO.WriteInputFrame refuses a longer frame.</summary>
+    private IntPtr WideFor(int length) =>
+        length > SharedMemoryIO.EXTENDED_DATA_CAPACITY ? WideLane() : IntPtr.Zero;
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private IntPtr WideLane() =>
+        Backend == HMBackend.Usbip || SharedMemoryIO.DriverCarriesWideFrames(Index) ? SharedMemoryIO.WideView(Index) : IntPtr.Zero;
+
     private void SubmitRawExtendedReportCore(ReadOnlySpan<byte> report)
     {
         if (_host != null) AwaitHostReply();
@@ -2128,7 +2144,7 @@ public sealed partial class HMController : IDisposable
             _packsGipBuffer ? _gipBuf : null,
             companionEvent: _companionInputEvent,
             dataOffset: 0,
-            extendedData: report, extendedLen: report.Length, signalView: _signalView);
+            extendedData: report, extendedLen: report.Length, signalView: _signalView, wideView: WideFor(report.Length));
     }
 
     /// <summary>Emit through the extended path, prepending the declared
@@ -2155,7 +2171,7 @@ public sealed partial class HMController : IDisposable
             _packsGipBuffer ? _gipBuf : null,
             companionEvent: _companionInputEvent,
             dataOffset: 0,
-            extendedData: buffer, extendedLen: emitLen, signalView: _signalView);
+            extendedData: buffer, extendedLen: emitLen, signalView: _signalView, wideView: WideFor(emitLen));
     }
 
     /// <summary>v1.3.5: instance-level <see cref="HMOutputEncoder.Encode"/>
@@ -2673,7 +2689,8 @@ public sealed partial class HMController : IDisposable
         {
             if (_c._disposed) return _c._inputSeqNo;
             SharedMemoryIO.WriteInputFrame(_c._inputView, _c._inputEvent, ref _c._inputSeqNo,
-                data, dataLen, null, extendedData: extendedLen > 0 ? extended : null, extendedLen: extendedLen, signalView: _c._signalView);
+                data, dataLen, null, extendedData: extendedLen > 0 ? extended : null, extendedLen: extendedLen, signalView: _c._signalView,
+                wideView: _c.WideFor(extendedLen));
             return _c._inputSeqNo;
         }
 

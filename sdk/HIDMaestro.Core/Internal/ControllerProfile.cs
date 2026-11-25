@@ -581,18 +581,21 @@ public sealed class ControllerProfile
     /// <summary>v2.0.0: check the profile's vendor-blob reports, the top
     /// level of <see cref="ExtendedReport"/> and <see cref="ExtendedOutputReport"/>,
     /// with the field rules <see cref="VendorBlobProgram.Check"/> applies to
-    /// port blocks. An input report the SDK sends must fit the shared
-    /// section's extended lane, which carries it whole or not at all.</summary>
+    /// port blocks. An input report the SDK sends must fit the input report
+    /// lane, which carries it whole or not at all: the extended lane up to
+    /// 80 bytes, the wide frames section up to 1024.</summary>
     private void ValidateExtendedReports()
     {
         CheckExtendedReport(ExtendedReport, "extendedReport", output: false);
         CheckExtendedReport(ExtendedOutputReport, "extendedOutputReport", output: true);
         var input = ExtendedReport;
         bool sent = input != null && (input.AlwaysArmed || input.Ports != null || input.ArmOn is { Count: > 0 });
-        if (sent && input!.Size > SharedMemoryIO.EXTENDED_DATA_CAPACITY)
+        // 2.4.0: past the extended lane's 80 bytes, the wide frames section
+        // carries the report whole, where the device's reader takes it.
+        if (sent && input!.Size > SharedMemoryIO.WIDE_FRAME_CAP)
             throw new InvalidOperationException(
-                $"Profile '{Id}': extendedReport.size {input.Size} is larger than the {SharedMemoryIO.EXTENDED_DATA_CAPACITY} " +
-                "bytes the extended report lane carries.");
+                $"Profile '{Id}': extendedReport.size {input.Size} is larger than the {SharedMemoryIO.WIDE_FRAME_CAP} " +
+                "bytes the input report lane carries.");
         CheckSendRule();
     }
 

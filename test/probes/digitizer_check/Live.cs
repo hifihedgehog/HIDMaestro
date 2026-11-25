@@ -116,11 +116,12 @@ internal static unsafe partial class Program
         }
         if (SdkConsumers.Find() is { } other) { Console.WriteLine($"  SKIP: {other} has HIDMaestro.Core.dll loaded."); return 2; }
         Console.WriteLine($"=== touch and pen, live on {backend}{(hover ? ", hover only" : "")}: Windows {Environment.OSVersion.Version}, {RuntimeInformation.OSArchitecture}, session {Process.GetCurrentProcess().SessionId} ===");
-        string dir = SpikeProfiles();
+        string dir = KillProfiles();
         using var ctx = new HMContext(backend);
         ctx.InstallDriver();
         ctx.LoadProfilesFromDirectory(dir);
         LiveTouch(ctx, backend, hover);
+        LiveWide(ctx, backend, hover);
         LivePen(ctx, backend, hover);
         LivePad(ctx, backend, hover);
         Metrics("after every dispose");
@@ -183,6 +184,63 @@ internal static unsafe partial class Program
               && fingers.Select(f => touch.Value(r, 0x0D, f, 0x51)).SequenceEqual(new[] { 0, 1 }),
               r == null ? "no read" : Show(r));
         Metrics("with the touchscreen");
+    }
+
+    /// <summary>The Elan touchscreen of the Dell XPS 13 9360: ten contacts a
+    /// report, a 116-byte touch report, longer than the input section's
+    /// 80-byte extended lane, which the wide frames section carries
+    /// (SharedMemoryIO.WriteInputFrame). Three contacts read back whole
+    /// through HidP. On USB/IP the interrupt reads HID class parks must ask
+    /// for the whole report, or the device answers each with a cut one.</summary>
+    static void LiveWide(HMContext ctx, HMBackend backend, bool hover)
+    {
+        var profile = ctx.GetProfile("kill-elan-xps9360")!;
+        var t = profile.Touch;
+        Check("the Elan touchscreen's layout: ten contacts a report", t is { IsTouchpad: false, ContactsPerReport: 10 },
+              t == null ? "no touch layout" : $"{t.ContactsPerReport} per report");
+        if (t == null) return;
+        using var c = ctx.CreateController(profile, null, backend);
+        Thread.Sleep(2000);
+        using var touch = OpenChild("VID_1209&PID_000B", "0004");
+        Check("its touch screen collection opens, a 116-byte input report", touch != null && touch.Caps.InputReportByteLength == 116,
+              touch == null ? "none" : $"{touch.How}, {touch.Caps.InputReportByteLength} bytes");
+        if (touch == null) return;
+        if (c.UsbipHandle is { } handle)
+        {
+            var device = handle.Device;
+            var type = device.GetType();
+            var lockObj = type.GetField("_hidLock", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(device)!;
+            var parked = (Dictionary<uint, int>)type.GetField("_parkedInLength", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(device)!;
+            int[] asked;
+            lock (lockObj) asked = parked.Values.ToArray();
+            Check("on USB/IP, HID class's parked interrupt reads ask for the whole 116-byte report",
+                  asked.Length > 0 && asked.All(n => n >= 116), asked.Length == 0 ? "no read parked" : $"asked {string.Join(" ", asked.Distinct())}");
+        }
+        ushort[] fingers = Enumerable.Range(0, touch.Links.Length).Where(i => touch.Links[i].LinkUsagePage == 0x0D && touch.Links[i].LinkUsage == 0x22)
+                                     .Select(i => (ushort)i).ToArray();
+        int y = t.Y.Minimum + (t.Y.Maximum - t.Y.Minimum) / 10, step = (t.X.Maximum - t.X.Minimum) / 40;
+        var contacts = Enumerable.Range(0, 3).Select(i => new HMTouchContact { Id = i, X = At(t.X, 2) + (i - 1) * step, Y = y, Hover = hover }).ToArray();
+        var sw = Stopwatch.StartNew();
+        c.SubmitTouch(contacts);
+        long took = sw.ElapsedMilliseconds;
+        Thread.Sleep(50);
+        var r = touch.Input(0x01);
+        string Show(byte[] rep) => string.Join(", ", fingers.Take(3).Select(f =>
+            $"id {touch.Value(rep, 0x0D, f, 0x51)} tip {(touch.On(rep, 0x0D, f, 0x42) ? 1 : 0)} ({touch.Value(rep, 0x01, f, 0x30)},{touch.Value(rep, 0x01, f, 0x31)})"))
+            + $", count {touch.Value(rep, 0x0D, 0, 0x54)}, {rep.Length} bytes";
+        Check($"three contacts {(hover ? "in range" : "down")} in a 116-byte report read back whole through HidP, Contact Count 3 (submit {took} ms)",
+              r != null && r.Length == 116 && touch.Value(r, 0x0D, 0, 0x54) == 3
+              && fingers.Take(3).Select(f => (touch.Value(r, 0x0D, f, 0x51), touch.Value(r, 0x01, f, 0x30), touch.On(r, 0x0D, f, 0x42)))
+                        .SequenceEqual(contacts.Select(k => (k.Id, k.X, !hover))),
+              r == null ? $"HidD_GetInputReport failed, Win32 {Marshal.GetLastPInvokeError()}" : Show(r));
+        Check("the wide frame's submit waits for no delivery timeout", took < 500, $"{took} ms");
+        c.SubmitTouch(ReadOnlySpan<HMTouchContact>.Empty);
+        Thread.Sleep(50);
+        r = touch.Input(0x01);
+        Check("an empty submit lifts all three where they were, Contact Count 3",
+              r != null && touch.Value(r, 0x0D, 0, 0x54) == 3 && fingers.Take(3).All(f => !touch.On(r, 0x0D, f, 0x42) && !touch.On(r, 0x0D, f, 0x32)),
+              r == null ? "no read" : Show(r));
+        Metrics("with the Elan touchscreen");
     }
 
     static void LivePen(HMContext ctx, HMBackend backend, bool hover)

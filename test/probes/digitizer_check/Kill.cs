@@ -325,6 +325,11 @@ internal static unsafe partial class Program
             if (v == IntPtr.Zero) return ("unmapped", frames, -1);
             try
             {
+                // The driver's own rule (driver.c OwnerGone): the wide set
+                // when the program's SDK wrote it.
+                if ((Marshal.ReadInt32(v, SharedMemoryIO.INPUT_ACK_OFFSET_CAPS) & SharedMemoryIO.INPUT_ACK_SDK_WIDE) != 0
+                    && ReadWideRelease(index) is { } wide)
+                    return wide;
                 int count = Math.Min(Marshal.ReadInt32(v, SharedMemoryIO.INPUT_ACK_OFFSET_RELEASE_COUNT), SharedMemoryIO.RELEASE_SLOTS);
                 for (int i = 0; i < count; i++)
                 {
@@ -339,5 +344,34 @@ internal static unsafe partial class Program
         }
         finally { CloseHandle(h); }
         return ("classic", frames, -1);
+    }
+
+    /// <summary>The wide frames section's release set and the driver's count
+    /// of the frames served, or null when the index has no such section.</summary>
+    static (string Layout, List<byte[]> Frames, int Served)? ReadWideRelease(int index)
+    {
+        IntPtr h = OpenFileMapping(FILE_MAP_READ, false, $@"Global\HIDMaestroWideFrames{index}");
+        if (h == IntPtr.Zero) return null;
+        try
+        {
+            IntPtr v = MapViewOfFile(h, FILE_MAP_READ, 0, 0, (nuint)SharedMemoryIO.WIDE_SIZE);
+            if (v == IntPtr.Zero) return null;
+            try
+            {
+                var frames = new List<byte[]>();
+                int count = Math.Min(Marshal.ReadInt32(v, SharedMemoryIO.WIDE_OFFSET_RELEASE_COUNT), SharedMemoryIO.WIDE_RELEASE_SLOTS);
+                for (int i = 0; i < count; i++)
+                {
+                    int at = SharedMemoryIO.WIDE_OFFSET_RELEASE + i * SharedMemoryIO.WIDE_RELEASE_SLOT_SIZE;
+                    int size = Math.Clamp(Marshal.ReadInt32(v, at), 0, SharedMemoryIO.WIDE_FRAME_CAP);
+                    var f = new byte[size];
+                    Marshal.Copy(v + at + 4, f, 0, size);
+                    frames.Add(f);
+                }
+                return ("wide", frames, Marshal.ReadInt32(v, SharedMemoryIO.WIDE_OFFSET_RELEASE_SERVED));
+            }
+            finally { UnmapViewOfFile(v); }
+        }
+        finally { CloseHandle(h); }
     }
 }

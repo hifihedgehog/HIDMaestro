@@ -96,7 +96,8 @@ internal static class Contract
                  + (File.Exists(Path.Combine(dir, "hm_contract.h")) ? "\n" + File.ReadAllText(Path.Combine(dir, "hm_contract.h")) : "");
         long? Define(string name)
         {
-            var m = System.Text.RegularExpressions.Regex.Match(h, @"#define\s+" + name + @"\s+(0x[0-9A-Fa-f]+|\d+)\b");
+            // A C integer suffix, as the acknowledgement's bits carry (0x1u).
+            var m = System.Text.RegularExpressions.Regex.Match(h, @"#define\s+" + name + @"\s+(0x[0-9A-Fa-f]+|\d+)[uUlL]*\b");
             if (!m.Success) return null;
             string v = m.Groups[1].Value;
             return v.StartsWith("0x", StringComparison.Ordinal) ? Convert.ToInt64(v[2..], 16) : long.Parse(v);
@@ -118,6 +119,14 @@ internal static class Contract
             ("HIDMAESTRO_DRIVER_PROTOCOL", typeof(SharedMemoryIO), "DRIVER_PROTOCOL_REMOVE"),
             ("HIDMAESTRO_DRIVER_PROTOCOL_MIN", typeof(SharedMemoryIO), "SDK_PROTOCOL_MIN"),
             ("HIDMAESTRO_CONTRACT_PROTOCOL", typeof(SharedMemoryIO), "SDK_PROTOCOL"),
+            ("HIDMAESTRO_RELEASE_SLOTS", typeof(SharedMemoryIO), "RELEASE_SLOTS"),
+            ("HIDMAESTRO_RELEASE_FRAME_CAP", typeof(SharedMemoryIO), "RELEASE_FRAME_CAP"),
+            ("HIDMAESTRO_WIDE_RELEASE_SLOTS", typeof(SharedMemoryIO), "WIDE_RELEASE_SLOTS"),
+            ("HIDMAESTRO_MAX_REPORT_SIZE", typeof(SharedMemoryIO), "WIDE_FRAME_CAP"),
+            ("HIDMAESTRO_INPUT_ACK_CAP_DELIVERED", typeof(SharedMemoryIO), "INPUT_ACK_CAP_DELIVERED"),
+            ("HIDMAESTRO_INPUT_ACK_CAP_RELEASE", typeof(SharedMemoryIO), "INPUT_ACK_CAP_RELEASE"),
+            ("HIDMAESTRO_INPUT_ACK_CAP_WIDE", typeof(SharedMemoryIO), "INPUT_ACK_CAP_WIDE"),
+            ("HIDMAESTRO_INPUT_ACK_SDK_WIDE", typeof(SharedMemoryIO), "INPUT_ACK_SDK_WIDE"),
         };
         foreach (var (d, t, f) in pairs)
             c.Run($"driver.h's {d} equals the SDK's {t.Name}.{f}", () =>
@@ -132,6 +141,28 @@ internal static class Contract
             {
                 object? sv = Sdk(typeof(SharedMemoryIO), sdk);
                 bool ok = sv != null && h.Contains($"C_ASSERT(FIELD_OFFSET(HIDMAESTRO_VERSION_INFO, {field}) == {sv});", StringComparison.Ordinal);
+                return (ok, $"{sv ?? "absent"}");
+            });
+        // The acknowledgement and the wide frames section, by the offsets the
+        // SDK reads and writes (2.4.0).
+        foreach (var (structName, field, sdk) in new[]
+                 {
+                     ("HIDMAESTRO_INPUT_ACK", "Capabilities", "INPUT_ACK_OFFSET_CAPS"), ("HIDMAESTRO_INPUT_ACK", "ReleaseSeq", "INPUT_ACK_OFFSET_RELEASE_SEQ"),
+                     ("HIDMAESTRO_INPUT_ACK", "ReleaseCount", "INPUT_ACK_OFFSET_RELEASE_COUNT"), ("HIDMAESTRO_INPUT_ACK", "Release", "INPUT_ACK_OFFSET_RELEASE"),
+                     ("HIDMAESTRO_WIDE_FRAMES", "ReleaseSeq", "WIDE_OFFSET_RELEASE_SEQ"), ("HIDMAESTRO_WIDE_FRAMES", "ReleaseCount", "WIDE_OFFSET_RELEASE_COUNT"),
+                     ("HIDMAESTRO_WIDE_FRAMES", "ReleaseServed", "WIDE_OFFSET_RELEASE_SERVED"), ("HIDMAESTRO_WIDE_FRAMES", "Release", "WIDE_OFFSET_RELEASE"),
+                 })
+            c.Run($"driver.h holds {structName}.{field} at the SDK's {sdk}", () =>
+            {
+                object? sv = Sdk(typeof(SharedMemoryIO), sdk);
+                bool ok = sv != null && h.Contains($"C_ASSERT(FIELD_OFFSET({structName}, {field}) == {sv});", StringComparison.Ordinal);
+                return (ok, $"{sv ?? "absent"}");
+            });
+        foreach (var (structName, sdk) in new[] { ("HIDMAESTRO_INPUT_ACK", "INPUT_ACK_SIZE"), ("HIDMAESTRO_WIDE_FRAMES", "WIDE_SIZE") })
+            c.Run($"driver.h's {structName} is the SDK's {sdk} long", () =>
+            {
+                object? sv = Sdk(typeof(SharedMemoryIO), sdk);
+                bool ok = sv != null && h.Contains($"C_ASSERT(sizeof({structName}) == {sv});", StringComparison.Ordinal);
                 return (ok, $"{sv ?? "absent"}");
             });
         c.Run(@"driver.h's identity entry is the SDK's: SOFTWARE\HIDMaestro\Identity\<token>, value ControllerIndex", () =>

@@ -115,6 +115,12 @@ InitInstancePaths(
         AppendUlongDecimal(ctx->InputAckEventName, index, cap);
     }
     {
+        static const WCHAR prefix[] = L"Global\\HIDMaestroWideFrames";
+        SIZE_T cap = sizeof(ctx->WideMappingName) / sizeof(WCHAR);
+        RtlCopyMemory(ctx->WideMappingName, prefix, sizeof(prefix));
+        AppendUlongDecimal(ctx->WideMappingName, index, cap);
+    }
+    {
         static const WCHAR prefix[] = L"Global\\HIDMaestroRemoveEvent";
         SIZE_T cap = sizeof(ctx->RemoveEventName) / sizeof(WCHAR);
         RtlCopyMemory(ctx->RemoveEventName, prefix, sizeof(prefix));
@@ -1006,7 +1012,8 @@ AnnounceVersion(_In_ PDEVICE_CONTEXT ctx)
         info->DriverVersion[2] = HM_VER_PATCH;
         info->DriverVersion[3] = 0;
         InterlockedExchange(&info->DriverCapabilities,
-            (LONG)(HIDMAESTRO_INPUT_ACK_CAP_DELIVERED | HIDMAESTRO_INPUT_ACK_CAP_RELEASE));
+            (LONG)(HIDMAESTRO_INPUT_ACK_CAP_DELIVERED | HIDMAESTRO_INPUT_ACK_CAP_RELEASE
+                   | HIDMAESTRO_INPUT_ACK_CAP_WIDE));
         InterlockedExchange(&info->DriverProtocolMin, HIDMAESTRO_DRIVER_PROTOCOL_MIN);
         MemoryBarrier();
         InterlockedExchange(&info->DriverProtocol, HIDMAESTRO_DRIVER_PROTOCOL);
@@ -1028,16 +1035,24 @@ TryOpenInputAck(_In_ PDEVICE_CONTEXT ctx)
     PVOID view = MapViewOfFile(h, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(HIDMAESTRO_INPUT_ACK));
     if (view == NULL) { CloseHandle(h); return; }
     HANDLE ev = OpenEventW(EVENT_MODIFY_STATE, FALSE, ctx->InputAckEventName);
+    /* 2.4.0: the wide frames section, which an SDK before 2.4.0 does not
+     * create. */
+    HANDLE wh = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, ctx->WideMappingName);
+    PVOID wv = wh != NULL ? MapViewOfFile(wh, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(HIDMAESTRO_WIDE_FRAMES)) : NULL;
+    if (wh != NULL && wv == NULL) { CloseHandle(wh); wh = NULL; }
 
     AcquireSRWLockExclusive(&ctx->InputLock);
     CloseInputAckLocked(ctx);
     ctx->InputAckMemHandle = h;
     ctx->InputAckMemPtr = (volatile LONG *)view;
     ctx->InputAckEvent = ev;
+    ctx->WideMemHandle = wh;
+    ctx->WideMemPtr = wv;
     /* The release bit says the owner watch is connected. The watch stays
      * open across a reset of the worker's handles, which maps this section
      * again, so the bit is announced again with it. The ended marker is
-     * kept: only a program that zeroes the section clears it. */
+     * kept: only a program that zeroes the section clears it. So is the
+     * SDK's wide flag, which is the program's (HIDMAESTRO_INPUT_ACK_SDK_WIDE). */
     {
         volatile LONG *caps = &((PHIDMAESTRO_INPUT_ACK)view)->Capabilities;
         LONG old, want;
@@ -1045,7 +1060,8 @@ TryOpenInputAck(_In_ PDEVICE_CONTEXT ctx)
             old = *caps;
             want = (LONG)(HIDMAESTRO_INPUT_ACK_CAP_DELIVERED
                           | (ctx->OwnerPipe != NULL ? HIDMAESTRO_INPUT_ACK_CAP_RELEASE : 0)
-                          | ((ULONG)old & HIDMAESTRO_INPUT_ACK_WATCH_ENDED));
+                          | (wv != NULL ? HIDMAESTRO_INPUT_ACK_CAP_WIDE : 0)
+                          | ((ULONG)old & (HIDMAESTRO_INPUT_ACK_WATCH_ENDED | HIDMAESTRO_INPUT_ACK_SDK_WIDE)));
         } while (InterlockedCompareExchange(caps, want, old) != old);
     }
     ReleaseSRWLockExclusive(&ctx->InputLock);
@@ -1058,6 +1074,8 @@ CloseInputAckLocked(_In_ PDEVICE_CONTEXT ctx)
     if (ctx->InputAckMemPtr) { UnmapViewOfFile((PVOID)ctx->InputAckMemPtr); ctx->InputAckMemPtr = NULL; }
     if (ctx->InputAckMemHandle) { CloseHandle(ctx->InputAckMemHandle); ctx->InputAckMemHandle = NULL; }
     if (ctx->InputAckEvent) { CloseHandle(ctx->InputAckEvent); ctx->InputAckEvent = NULL; }
+    if (ctx->WideMemPtr) { UnmapViewOfFile(ctx->WideMemPtr); ctx->WideMemPtr = NULL; }
+    if (ctx->WideMemHandle) { CloseHandle(ctx->WideMemHandle); ctx->WideMemHandle = NULL; }
 }
 
 /* HID class holds the frame with this SeqNo. Caller holds InputLock. */
@@ -1125,6 +1143,10 @@ TakeReportLocked(_In_ PDEVICE_CONTEXT ctx,
         ULONG i = ctx->ReleaseNext++;
         *size = ctx->ReleaseSizes[i];
         RtlCopyMemory(report, ctx->ReleaseFrames[i], *size);
+        /* 2.4.0: the program's release frames from the wide section count
+         * there, the program's last frame put ahead of them aside. */
+        if (ctx->ReleaseFromWide && i >= ctx->ReleaseServedFrom && ctx->WideMemPtr != NULL)
+            InterlockedIncrement(&((PHIDMAESTRO_WIDE_FRAMES)ctx->WideMemPtr)->ReleaseServed);
         return TRUE;
     }
     if (ctx->InputReportPending) {
@@ -1423,8 +1445,32 @@ OwnerGone(_In_ PDEVICE_CONTEXT ctx)
 
     AcquireSRWLockExclusive(&ctx->InputLock);
     volatile HIDMAESTRO_INPUT_ACK *ack = (volatile HIDMAESTRO_INPUT_ACK *)ctx->InputAckMemPtr;
+    volatile HIDMAESTRO_WIDE_FRAMES *wide = (volatile HIDMAESTRO_WIDE_FRAMES *)ctx->WideMemPtr;
+    /* 2.4.0: the program's frames come from the wide section when its SDK
+     * writes it. A program before 2.4.0 zeroed the flag away with the
+     * acknowledgement, and what the wide section holds is an earlier
+     * program's. */
+    BOOLEAN fromWide = ack != NULL && wide != NULL
+        && (((ULONG)ack->Capabilities & HIDMAESTRO_INPUT_ACK_SDK_WIDE) != 0);
     ULONG count = 0;
-    if (ack != NULL) {
+    if (fromWide) {
+        /* The same seqlock read as the acknowledgement's below. */
+        for (int attempt = 0; attempt < 4; attempt++) {
+            LONG s1 = wide->ReleaseSeq;
+            MemoryBarrier();
+            count = (ULONG)wide->ReleaseCount;
+            if (count > HIDMAESTRO_WIDE_RELEASE_SLOTS) count = HIDMAESTRO_WIDE_RELEASE_SLOTS;
+            for (ULONG i = 0; i < count; i++) {
+                ULONG size = wide->Release[i].Size;
+                if (size > HIDMAESTRO_MAX_REPORT_SIZE) size = HIDMAESTRO_MAX_REPORT_SIZE;
+                ctx->ReleaseSizes[i] = size;
+                RtlCopyMemory(ctx->ReleaseFrames[i], (const void *)wide->Release[i].Data, size);
+            }
+            MemoryBarrier();
+            if ((s1 & 1) == 0 && s1 == wide->ReleaseSeq) break;
+        }
+        InterlockedExchange(&wide->ReleaseServed, 0);
+    } else if (ack != NULL) {
         /* Seqlock read. Every version the SDK writes is a set of release
          * frames, so after four torn reads the last copy is still safe to
          * send: at worst an absolute pointer keeps a slightly older
@@ -1447,6 +1493,8 @@ OwnerGone(_In_ PDEVICE_CONTEXT ctx)
     }
     ctx->ReleaseCount = count;
     ctx->ReleaseNext = 0;
+    ctx->ReleaseFromWide = fromWide;
+    ctx->ReleaseServedFrom = 0;
     /* The delivered gate goes with the SeqNo: kept, it parked a read the
      * next program's first frame in the cache could serve, until that
      * program's SeqNo passed this one's last. 2.1.0: the frame no read has
@@ -1459,11 +1507,12 @@ OwnerGone(_In_ PDEVICE_CONTEXT ctx)
      * everything, when it was read while the program ran. One read once
      * the pipe closed can be the next program's, which the release frames
      * must not follow: it goes as at v2.0.3. So does the first frame this
-     * device context read, which a context before it may have sent, and a
-     * frame wider than a release slot. */
+     * device context read, which a context before it may have sent. 2.4.0:
+     * a release slot holds a whole report, so a frame wider than the
+     * acknowledgement's slots stays too. */
     BOOLEAN pending = ctx->InputReportPending;
     BOOLEAN keep = pending && !ctx->InputReportFirstRead
-        && (count == 0 || (!ctx->InputReportAfterEnd && ctx->InputReportSize <= HIDMAESTRO_RELEASE_FRAME_CAP));
+        && (count == 0 || !ctx->InputReportAfterEnd);
     ULONG first = 0;
     if (keep && count > 0) {
         RtlMoveMemory(ctx->ReleaseFrames[1], ctx->ReleaseFrames[0], count * sizeof(ctx->ReleaseFrames[0]));
@@ -1471,6 +1520,7 @@ OwnerGone(_In_ PDEVICE_CONTEXT ctx)
         RtlCopyMemory(ctx->ReleaseFrames[0], ctx->InputReport, ctx->InputReportSize);
         ctx->ReleaseSizes[0] = ctx->InputReportSize;
         ctx->ReleaseCount = count + 1;
+        ctx->ReleaseServedFrom = 1;
         ctx->InputReportPending = FALSE;
         first = 1;
     }
@@ -1816,10 +1866,31 @@ PublishOutput(_In_ PDEVICE_CONTEXT ctx,
     if (ctx->OutputSignalEvent) SetEvent(ctx->OutputSignalEvent);
 }
 
+/* 2.4.0: the frame longer than ExtendedReportData that the input section's
+ * ExtendedReportSize names, whole, from the wide frames section into wide,
+ * the buffer paired with out. Inside ReadSharedInput's check of SeqNo, which
+ * catches a copy the SDK wrote over. Without the section, or past the
+ * longest report, ExtendedReportSize becomes HIDMAESTRO_WIDE_UNREAD, which
+ * no frame path sends. Out of line, so the read of an ordinary frame keeps
+ * its shape: one test of the size. Worker thread only. */
+#define HIDMAESTRO_WIDE_UNREAD 0xFFFFFFFFu
+static DECLSPEC_NOINLINE VOID
+CopyWideInput(_In_ PDEVICE_CONTEXT ctx, _Inout_ HIDMAESTRO_SHARED_INPUT *out,
+              _Out_writes_bytes_(HIDMAESTRO_MAX_REPORT_SIZE) UCHAR *wide)
+{
+    ULONG size = out->ExtendedReportSize;
+    if (ctx->WideMemPtr == NULL || size > HIDMAESTRO_MAX_REPORT_SIZE) {
+        out->ExtendedReportSize = HIDMAESTRO_WIDE_UNREAD;
+        return;
+    }
+    RtlCopyMemory(wide, (const void *)((volatile HIDMAESTRO_WIDE_FRAMES *)ctx->WideMemPtr)->Input, size);
+}
+
 /* Read shared input via memory mapping. RAM-only: no disk fallback.
  * Output: *out is filled with the shared struct on success. */
 static BOOLEAN
-ReadSharedInput(_In_ PDEVICE_CONTEXT ctx, _Out_ HIDMAESTRO_SHARED_INPUT *out)
+ReadSharedInput(_In_ PDEVICE_CONTEXT ctx, _Out_ HIDMAESTRO_SHARED_INPUT *out,
+                _Out_writes_bytes_(HIDMAESTRO_MAX_REPORT_SIZE) UCHAR *wide)
 {
     /* Lazy open: try the mapping on every tick until it succeeds.
      * The test app may create the section after the device starts. */
@@ -1827,7 +1898,9 @@ ReadSharedInput(_In_ PDEVICE_CONTEXT ctx, _Out_ HIDMAESTRO_SHARED_INPUT *out)
         return FALSE;
 
     /* Seqlock-style read: retry until SeqNo is stable across the copy.
-     * Single writer / many readers, lock-free. */
+     * Single writer / many readers, lock-free. 2.4.0: a frame longer than
+     * ExtendedReportData comes from the wide frames section inside the same
+     * check, so the one SeqNo covers it (CopyWideInput). */
     volatile HIDMAESTRO_SHARED_INPUT *src = (volatile HIDMAESTRO_SHARED_INPUT *)ctx->SharedMemPtr;
     ULONG seq1, seq2;
     int retries = 4;
@@ -1835,6 +1908,8 @@ ReadSharedInput(_In_ PDEVICE_CONTEXT ctx, _Out_ HIDMAESTRO_SHARED_INPUT *out)
         seq1 = src->SeqNo;
         MemoryBarrier();
         RtlCopyMemory(out, (const void *)src, sizeof(*out));
+        if (out->ExtendedReportSize > sizeof(out->ExtendedReportData))
+            CopyWideInput(ctx, out, wide);
         MemoryBarrier();
         seq2 = src->SeqNo;
     } while ((seq1 != seq2 || (seq1 & 1)) && --retries > 0);
@@ -1877,11 +1952,20 @@ SeenLength(_In_ ULONG size, _In_ ULONG cap)
  * forgot it. GipData is the companion's and no part of a HID report.
  * Worker thread only. */
 static BOOLEAN
-SameAsSeen(_In_ PDEVICE_CONTEXT ctx, _In_ const HIDMAESTRO_SHARED_INPUT *s)
+SameAsSeen(_In_ PDEVICE_CONTEXT ctx, _In_ const HIDMAESTRO_SHARED_INPUT *s,
+           _In_reads_bytes_(HIDMAESTRO_MAX_REPORT_SIZE) const UCHAR *wide)
 {
     ULONG n = SeenLength(s->DataSize, sizeof(s->Data));
-    ULONG x = SeenLength(s->ExtendedReportSize, sizeof(s->ExtendedReportData));
     const HIDMAESTRO_SHARED_INPUT *seen = &ctx->Frames[ctx->SeenFrame];
+    /* 2.4.0: a wide frame's bytes are in WideFrames, and one the driver
+     * could not read (HIDMAESTRO_WIDE_UNREAD) has none. */
+    if (s->ExtendedReportSize > sizeof(s->ExtendedReportData)) {
+        ULONG w = s->ExtendedReportSize;
+        return s->SeqNo == ctx->SeenSeqNo && n == ctx->SeenDataSize && w == ctx->SeenExtSize
+            && RtlEqualMemory(s->Data, seen->Data, n)
+            && (w > HIDMAESTRO_MAX_REPORT_SIZE || RtlEqualMemory(wide, ctx->WideFrames[ctx->SeenFrame], w));
+    }
+    ULONG x = SeenLength(s->ExtendedReportSize, sizeof(s->ExtendedReportData));
     return s->SeqNo == ctx->SeenSeqNo && n == ctx->SeenDataSize && x == ctx->SeenExtSize
         && RtlEqualMemory(s->Data, seen->Data, n)
         && RtlEqualMemory(s->ExtendedReportData, seen->ExtendedReportData, x);
@@ -1896,7 +1980,9 @@ KeepSeen(_In_ PDEVICE_CONTEXT ctx, _In_ const HIDMAESTRO_SHARED_INPUT *s)
     ctx->SeenSinceReset = TRUE;
     ctx->SeenSeqNo = s->SeqNo;
     ctx->SeenDataSize = SeenLength(s->DataSize, sizeof(s->Data));
-    ctx->SeenExtSize = SeenLength(s->ExtendedReportSize, sizeof(s->ExtendedReportData));
+    /* 2.4.0: a wide frame's whole length, as SameAsSeen compares it. */
+    ctx->SeenExtSize = s->ExtendedReportSize > sizeof(s->ExtendedReportData)
+        ? s->ExtendedReportSize : SeenLength(s->ExtendedReportSize, sizeof(s->ExtendedReportData));
     ctx->SeenFrame ^= 1;
 }
 
@@ -1944,7 +2030,8 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
     /* The section's one copy per frame goes into the buffer that does not
      * hold the frame read last (KeepSeen). */
     HIDMAESTRO_SHARED_INPUT *frame = &ctx->Frames[ctx->SeenFrame ^ 1];
-    if (!ReadSharedInput(ctx, frame)) return;
+    UCHAR *wide = ctx->WideFrames[ctx->SeenFrame ^ 1];
+    if (!ReadSharedInput(ctx, frame, wide)) return;
 
     ULONG seqNo = frame->SeqNo;
     /* A frame is new when it is not the last one read, whether a signal or
@@ -1960,7 +2047,7 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
      * frame, and so does this driver: a frame kept across the reset gives
      * way to it. The next wakeup that finds the other data reads a frame
      * skipped. */
-    if (SameAsSeen(ctx, frame)) return; /* No new data */
+    if (SameAsSeen(ctx, frame, wide)) return; /* No new data */
     /* 2.1.0: a device context's first read takes a frame on SeqNo 0, which
      * a program before 2.1.0 stores at its wrap, for no news, as v2.0.3's
      * SeenSeqNo, 0 from the add, took it: the context before this one may
@@ -2085,6 +2172,19 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
         RtlZeroMemory(inputReport, inputSize);
         RtlCopyMemory(inputReport, frame->ExtendedReportData, frame->ExtendedReportSize);
         inputSize = frame->ExtendedReportSize;
+    }
+    else if (frame->ExtendedReportSize > sizeof(frame->ExtendedReportData))
+    {
+        /* 2.4.0: a frame longer than ExtendedReportData, whole, from the
+         * wide frames section (CopyWideInput), only at its report's declared
+         * length. One the driver could not read is not sent either, and the
+         * last sent report stands: the data lane's report built above is
+         * the first input report, zero, and never goes out for it. */
+        ULONG size = frame->ExtendedReportSize;
+        if (size > sizeof(inputReport) || !ExtendedFrameDeclared(ctx, wide, size))
+            return;
+        RtlCopyMemory(inputReport, wide, size);
+        inputSize = size;
     }
 
     /* Complete exactly ONE pending READ_REPORT per shared-memory state

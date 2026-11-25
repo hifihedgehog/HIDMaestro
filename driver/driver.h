@@ -33,6 +33,10 @@
 #define HIDMAESTRO_RELEASE_SLOTS         8
 #define HIDMAESTRO_RELEASE_FRAME_CAP     80
 
+/* 2.4.0: release frames in the wide frames section (HIDMAESTRO_WIDE_FRAMES),
+ * each up to HIDMAESTRO_MAX_REPORT_SIZE bytes. */
+#define HIDMAESTRO_WIDE_RELEASE_SLOTS    32
+
 /* v2.0.0: FeatureAnswers, REG_BINARY in SOFTWARE\HIDMaestro\Controller<N>,
  * the answers to GET_FEATURE the SDK compiles for one controller (the design
  * note's mechanism 4, FeatureStubTable.ToBlob). Every value little-endian.
@@ -295,6 +299,10 @@ typedef struct _DEVICE_CONTEXT {
     ULONG   SeenExtSize;
     ULONG   SeenFrame;
     HIDMAESTRO_SHARED_INPUT Frames[2];
+    /* 2.4.0: a frame longer than ExtendedReportData, whole, read from the
+     * wide frames section with the Frames buffer of the same index
+     * (ReadSharedInput). Worker thread only. */
+    UCHAR   WideFrames[2][HIDMAESTRO_MAX_REPORT_SIZE];
 
     /* 2.1.0: the worker has read a frame since the device context's add, so
      * a frame read now was written after the context before it went
@@ -447,6 +455,12 @@ typedef struct _DEVICE_CONTEXT {
     volatile LONG *InputAckMemPtr;
     HANDLE  InputAckEvent;
     WCHAR   InputAckMappingName[64];  /* e.g. L"Global\\HIDMaestroInputAck0" */
+    /* 2.4.0: the wide frames section (HIDMAESTRO_WIDE_FRAMES), mapped and
+     * let go with the acknowledgement, under InputLock. The worker reads
+     * its input frame without the lock: the worker alone maps it. */
+    HANDLE  WideMemHandle;
+    PVOID   WideMemPtr;
+    WCHAR   WideMappingName[64];      /* e.g. L"Global\\HIDMaestroWideFrames0" */
     WCHAR   InputAckEventName[64];    /* e.g. L"Global\\HIDMaestroInputAckEvent0" */
     WCHAR   RemoveEventName[64];      /* e.g. L"Global\\HIDMaestroRemoveEvent0" */
     WCHAR   RemovedEventName[64];     /* e.g. L"Global\\HIDMaestroRemovedEvent0" */
@@ -498,11 +512,16 @@ typedef struct _DEVICE_CONTEXT {
 
     /* Release frames waiting for a READ_REPORT, under InputLock. 2.1.0: one
      * slot more, for the program's last frame no read carried, which
-     * OwnerGone puts ahead of them. */
-    UCHAR   ReleaseFrames[HIDMAESTRO_RELEASE_SLOTS + 1][HIDMAESTRO_RELEASE_FRAME_CAP];
-    ULONG   ReleaseSizes[HIDMAESTRO_RELEASE_SLOTS + 1];
+     * OwnerGone puts ahead of them. 2.4.0: as many as the wide frames
+     * section holds, each up to a whole report. ReleaseFromWide: they came
+     * from that section, which counts the ones a read carries
+     * (ReleaseServed), from ReleaseServedFrom on. */
+    UCHAR   ReleaseFrames[HIDMAESTRO_WIDE_RELEASE_SLOTS + 1][HIDMAESTRO_MAX_REPORT_SIZE];
+    ULONG   ReleaseSizes[HIDMAESTRO_WIDE_RELEASE_SLOTS + 1];
     ULONG   ReleaseCount;
     ULONG   ReleaseNext;
+    BOOLEAN ReleaseFromWide;
+    ULONG   ReleaseServedFrom;
 
     WCHAR   InputEventName[64];  /* e.g. L"Global\\HIDMaestroInputEvent0" */
     WCHAR   StopEventName[64];   /* e.g. L"Global\\HIDMaestroStopEvent0" */
@@ -558,6 +577,17 @@ typedef struct _DEVICE_CONTEXT {
  * seqlock, odd while the SDK rewrites the frames. */
 #define HIDMAESTRO_INPUT_ACK_CAP_DELIVERED  0x00000001u
 #define HIDMAESTRO_INPUT_ACK_CAP_RELEASE    0x00000002u  /* owner pipe is watched */
+/* 2.4.0: the driver has the wide frames section mapped (HIDMAESTRO_WIDE_FRAMES):
+ * it sends an input frame longer than ExtendedReportData and the release
+ * frames kept there. DriverCapabilities of the version section carries it
+ * from the add on. */
+#define HIDMAESTRO_INPUT_ACK_CAP_WIDE       0x00000004u
+/* 2.4.0: the SDK's, not the driver's. The program on this index writes the
+ * wide frames section. The SDK sets it once it has zeroed both sections,
+ * and the driver's rebuild of the word keeps it. A program before 2.4.0
+ * zeroes this section and never the wide one, so a driver that outlives a
+ * 2.4.0 program does not send that program's release frames for the next. */
+#define HIDMAESTRO_INPUT_ACK_SDK_WIDE       0x40000000u
 /* Driver state, not a capability. The driver sets it in Capabilities when
  * the owner watch it held ends (OwnerGone) and connects a watch only while
  * it is clear. A program that starts on the index creates this section and
@@ -578,6 +608,53 @@ typedef struct _HIDMAESTRO_INPUT_ACK {
     volatile LONG   ReleaseCount;    /* frames in Release, at most HIDMAESTRO_RELEASE_SLOTS */
     HIDMAESTRO_RELEASE_FRAME Release[HIDMAESTRO_RELEASE_SLOTS];
 } HIDMAESTRO_INPUT_ACK, *PHIDMAESTRO_INPUT_ACK;
+
+/* 2.4.0: frames longer than the input section's ExtendedReportData and than
+ * a release slot of the acknowledgement, Global\HIDMaestroWideFrames<N>. A
+ * separate section, as the acknowledgement is, so no layout before it
+ * changes. The SDK creates and zeroes it beside the acknowledgement, before
+ * the input event, and the driver maps it with the acknowledgement.
+ *
+ * Input: a frame longer than ExtendedReportData, whole, report ID first
+ * when used. The SDK writes it while the input section's SeqNo is odd and
+ * sets ExtendedReportSize to its length, and the driver copies it inside
+ * its read of the input section, so that one SeqNo covers both. A frame
+ * the driver cannot read here is not sent. It never falls back to the data
+ * lane, whose report would be the first input report, zero.
+ *
+ * Release: the frames HIDMAESTRO_INPUT_ACK keeps, at any length up to a
+ * whole report and up to HIDMAESTRO_WIDE_RELEASE_SLOTS of them, with the
+ * same seqlock. The SDK writes both sets. The driver sends these when the
+ * program set HIDMAESTRO_INPUT_ACK_SDK_WIDE and the acknowledgement's
+ * otherwise. ReleaseServed is the driver's: the release frames a
+ * READ_REPORT has carried since the program went away. */
+typedef struct _HIDMAESTRO_WIDE_FRAME {
+    ULONG           Size;
+    UCHAR           Data[HIDMAESTRO_MAX_REPORT_SIZE];   /* report ID first when used */
+} HIDMAESTRO_WIDE_FRAME;
+
+typedef struct _HIDMAESTRO_WIDE_FRAMES {
+    UCHAR           Input[HIDMAESTRO_MAX_REPORT_SIZE];
+    volatile LONG   ReleaseSeq;
+    volatile LONG   ReleaseCount;    /* frames in Release, at most HIDMAESTRO_WIDE_RELEASE_SLOTS */
+    volatile LONG   ReleaseServed;
+    LONG            Reserved;
+    HIDMAESTRO_WIDE_FRAME Release[HIDMAESTRO_WIDE_RELEASE_SLOTS];
+} HIDMAESTRO_WIDE_FRAMES, *PHIDMAESTRO_WIDE_FRAMES;
+
+/* The SDK reads and writes both sections by these offsets
+ * (SharedMemoryIO INPUT_ACK_* and WIDE_*), and profile_model_check holds the
+ * two sides to them. */
+C_ASSERT(sizeof(HIDMAESTRO_INPUT_ACK) == 688);
+C_ASSERT(FIELD_OFFSET(HIDMAESTRO_INPUT_ACK, Capabilities) == 4);
+C_ASSERT(FIELD_OFFSET(HIDMAESTRO_INPUT_ACK, ReleaseSeq) == 8);
+C_ASSERT(FIELD_OFFSET(HIDMAESTRO_INPUT_ACK, ReleaseCount) == 12);
+C_ASSERT(FIELD_OFFSET(HIDMAESTRO_INPUT_ACK, Release) == 16);
+C_ASSERT(sizeof(HIDMAESTRO_WIDE_FRAMES) == 33936);
+C_ASSERT(FIELD_OFFSET(HIDMAESTRO_WIDE_FRAMES, ReleaseSeq) == 1024);
+C_ASSERT(FIELD_OFFSET(HIDMAESTRO_WIDE_FRAMES, ReleaseCount) == 1028);
+C_ASSERT(FIELD_OFFSET(HIDMAESTRO_WIDE_FRAMES, ReleaseServed) == 1032);
+C_ASSERT(FIELD_OFFSET(HIDMAESTRO_WIDE_FRAMES, Release) == 1040);
 
 #pragma pack(pop)
 

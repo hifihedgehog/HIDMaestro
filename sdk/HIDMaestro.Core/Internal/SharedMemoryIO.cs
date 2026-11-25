@@ -160,6 +160,10 @@ internal static partial class SharedMemoryIO
     private static readonly Dictionary<int, IntPtr> s_inputAckHandles = new();
     private static readonly Dictionary<int, IntPtr> s_inputAckViews   = new();
     private static readonly Dictionary<int, IntPtr> s_inputAckEvents  = new();
+    // 2.4.0: the wide frames section, made and released with the
+    // acknowledgement. Same lock.
+    private static readonly Dictionary<int, IntPtr> s_wideHandles = new();
+    private static readonly Dictionary<int, IntPtr> s_wideViews   = new();
     // Which mapping of an index's acknowledgement section is current: each
     // new mapping takes the next number. Same lock.
     private static readonly Dictionary<int, long> s_inputAckGenerations = new();
@@ -405,6 +409,35 @@ internal static partial class SharedMemoryIO
     /// <summary>The driver watches this controller's owner pipe and sends
     /// the release frames when it closes.</summary>
     public const int INPUT_ACK_CAP_RELEASE = 0x2;
+    /// <summary>2.4.0: the driver has the wide frames section mapped, so it
+    /// sends an input frame longer than the extended lane and the release
+    /// frames kept there. The version section's DriverCapabilities carries
+    /// it from the device's add on.</summary>
+    public const int INPUT_ACK_CAP_WIDE = 0x4;
+    /// <summary>2.4.0: this SDK's bit, not the driver's. The program on the
+    /// index writes the wide frames section, set once both sections are
+    /// zeroed and kept by the driver's rebuild of the word. A program
+    /// before 2.4.0 zeroes the acknowledgement and never the wide section,
+    /// so a driver that outlives this program does not send its release
+    /// frames for that one.</summary>
+    public const int INPUT_ACK_SDK_WIDE = 0x40000000;
+
+    // HIDMAESTRO_WIDE_FRAMES (driver/driver.h), 2.4.0: an input frame longer
+    // than the extended lane, whole, at 0, written under the input
+    // section's sequence number, then the release frames as the
+    // acknowledgement keeps them, each up to a whole report: a seqlock
+    // word, a count, the driver's count of frames served, a reserved word,
+    // and WIDE_RELEASE_SLOTS frames of a 4-byte size and WIDE_FRAME_CAP
+    // bytes of report.
+    public const int WIDE_FRAME_CAP = 1024;
+    public const int WIDE_OFFSET_INPUT = 0;
+    public const int WIDE_OFFSET_RELEASE_SEQ = WIDE_FRAME_CAP;
+    public const int WIDE_OFFSET_RELEASE_COUNT = WIDE_OFFSET_RELEASE_SEQ + 4;
+    public const int WIDE_OFFSET_RELEASE_SERVED = WIDE_OFFSET_RELEASE_SEQ + 8;
+    public const int WIDE_OFFSET_RELEASE = WIDE_OFFSET_RELEASE_SEQ + 16;
+    public const int WIDE_RELEASE_SLOTS = 32;
+    public const int WIDE_RELEASE_SLOT_SIZE = 4 + WIDE_FRAME_CAP;
+    public const int WIDE_SIZE = WIDE_OFFSET_RELEASE + WIDE_RELEASE_SLOTS * WIDE_RELEASE_SLOT_SIZE;
     /// <summary>Bit 31 of the capability word is the driver's own: it
     /// marks an owner watch that has ended, and the zeroing at create clears
     /// it. An SDK never sets it and tests the capabilities one bit at a
@@ -525,6 +558,7 @@ internal static partial class SharedMemoryIO
         $@"Global\HIDMaestroCompanionInputEvent{controllerIndex}",
         $@"Global\HIDMaestroInputAck{controllerIndex}",
         $@"Global\HIDMaestroInputAckEvent{controllerIndex}",
+        $@"Global\HIDMaestroWideFrames{controllerIndex}",
         $@"Global\HIDMaestroRemoveEvent{controllerIndex}",
         $@"Global\HIDMaestroRemovedEvent{controllerIndex}",
         $@"Global\HIDMaestroOutput{controllerIndex}",
@@ -651,6 +685,16 @@ internal static partial class SharedMemoryIO
                 s_inputAckViews[controllerIndex] = av;
                 s_inputAckGenerations[controllerIndex] = ++s_lastAckGeneration;
                 s_inputAckEvents[controllerIndex] = CreateNamedEvent($@"Global\HIDMaestroInputAckEvent{controllerIndex}");
+                // 2.4.0: frames longer than the extended lane and than a
+                // release slot (HIDMAESTRO_WIDE_FRAMES), in a section of
+                // their own that the driver maps with the acknowledgement.
+                // The acknowledgement's flag says this program writes it,
+                // set once both are zeroed.
+                (IntPtr wh, IntPtr wv) = CreateSection($@"Global\HIDMaestroWideFrames{controllerIndex}", WIDE_SIZE);
+                new Span<byte>((void*)wv, WIDE_SIZE).Clear();
+                s_wideHandles[controllerIndex] = wh;
+                s_wideViews[controllerIndex] = wv;
+                Interlocked.Or(ref *(int*)((byte*)av + INPUT_ACK_OFFSET_CAPS), INPUT_ACK_SDK_WIDE);
                 // Before the input event, which the worker opens them with.
                 s_removeEvents[controllerIndex] = CreateNamedEvent($@"Global\HIDMaestroRemoveEvent{controllerIndex}");
                 s_removedEvents[controllerIndex] = CreateNamedEvent($@"Global\HIDMaestroRemovedEvent{controllerIndex}");
@@ -1181,6 +1225,28 @@ internal static partial class SharedMemoryIO
         }
     }
 
+    /// <summary>2.4.0: the controller's wide frames section, or zero when the
+    /// index has none.</summary>
+    public static IntPtr WideView(int controllerIndex)
+    {
+        lock (s_inputViews)
+        {
+            return s_wideViews.TryGetValue(controllerIndex, out IntPtr v) ? v : IntPtr.Zero;
+        }
+    }
+
+    /// <summary>2.4.0: the driver serving this controller says, in the
+    /// version handshake it writes at the device's add, that it reads the
+    /// wide frames section (HIDMAESTRO_INPUT_ACK_CAP_WIDE).</summary>
+    public static bool DriverCarriesWideFrames(int controllerIndex)
+    {
+        lock (s_inputViews)
+        {
+            return s_versionViews.TryGetValue(controllerIndex, out IntPtr v) && v != IntPtr.Zero
+                && (Marshal.ReadInt32(v, VERSION_OFFSET_DRIVER_CAPS) & INPUT_ACK_CAP_WIDE) != 0;
+        }
+    }
+
     /// <summary>Whether the driver watches this controller's owner pipe and
     /// will send the release frames when this process lets go of it.</summary>
     public static bool ReleaseOnExitSupported(int controllerIndex)
@@ -1205,33 +1271,50 @@ internal static partial class SharedMemoryIO
     /// to a slot's 80 bytes is a report of the wrong length, which the
     /// driver does not send (driver.c ExtendedFrameDeclared). A report left
     /// out is not released when the program goes away. Its frames are all
-    /// one report's when <paramref name="withIds"/> is false.</para></summary>
+    /// one report's when <paramref name="withIds"/> is false.</para>
+    ///
+    /// <para>2.4.0: the same frames go into the wide frames section too,
+    /// whose slots each hold a whole report, on every change. A driver of
+    /// 2.4.0 or later sends that set, and an earlier one the
+    /// acknowledgement's (driver.c OwnerGone).</para></summary>
     public static void WriteReleaseFrames(int controllerIndex, IReadOnlyList<byte[]> frames, bool withIds)
     {
-        IntPtr view;
+        IntPtr view, wide;
         lock (s_inputViews)
         {
             if (!s_inputAckViews.TryGetValue(controllerIndex, out view) || view == IntPtr.Zero) return;
+            s_wideViews.TryGetValue(controllerIndex, out wide);
         }
         int n = frames.Count;
         Span<bool> take = n <= 64 ? stackalloc bool[n] : new bool[n];
         PickReleaseFrames(frames, withIds, RELEASE_SLOTS, RELEASE_FRAME_CAP, take);
-        int seq = Marshal.ReadInt32(view, INPUT_ACK_OFFSET_RELEASE_SEQ);
+        WriteReleaseSet(view, INPUT_ACK_OFFSET_RELEASE_SEQ, INPUT_ACK_OFFSET_RELEASE_COUNT, INPUT_ACK_OFFSET_RELEASE, RELEASE_SLOT_SIZE, frames, take);
+        if (wide == IntPtr.Zero) return;
+        PickReleaseFrames(frames, withIds, WIDE_RELEASE_SLOTS, WIDE_FRAME_CAP, take);
+        WriteReleaseSet(wide, WIDE_OFFSET_RELEASE_SEQ, WIDE_OFFSET_RELEASE_COUNT, WIDE_OFFSET_RELEASE, WIDE_RELEASE_SLOT_SIZE, frames, take);
+    }
+
+    /// <summary>One set of release slots, a seqlock write: the frames
+    /// <paramref name="take"/> marks, in order.</summary>
+    private static void WriteReleaseSet(IntPtr view, int seqAt, int countAt, int slotsAt, int slotSize,
+                                        IReadOnlyList<byte[]> frames, ReadOnlySpan<bool> take)
+    {
+        int seq = Marshal.ReadInt32(view, seqAt);
         if ((seq & 1) == 0) seq++;
-        Marshal.WriteInt32(view, INPUT_ACK_OFFSET_RELEASE_SEQ, seq);
+        Marshal.WriteInt32(view, seqAt, seq);
         Thread.MemoryBarrier();
         int count = 0;
-        for (int i = 0; i < n; i++)
+        for (int i = 0; i < frames.Count; i++)
         {
             if (!take[i]) continue;
             byte[] f = frames[i];
-            int at = INPUT_ACK_OFFSET_RELEASE + count++ * RELEASE_SLOT_SIZE;
+            int at = slotsAt + count++ * slotSize;
             Marshal.WriteInt32(view, at, f.Length);
             Marshal.Copy(f, 0, view + at + 4, f.Length);
         }
-        Marshal.WriteInt32(view, INPUT_ACK_OFFSET_RELEASE_COUNT, count);
+        Marshal.WriteInt32(view, countAt, count);
         Thread.MemoryBarrier();
-        Marshal.WriteInt32(view, INPUT_ACK_OFFSET_RELEASE_SEQ, seq + 1);
+        Marshal.WriteInt32(view, seqAt, seq + 1);
     }
 
     /// <summary>Mark in <paramref name="take"/> the frames that go into
@@ -1362,23 +1445,37 @@ internal static partial class SharedMemoryIO
     /// <summary>The refusal of an extended frame longer than the lane.</summary>
     [System.Diagnostics.CodeAnalysis.DoesNotReturn]
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void ThrowExtendedTooLong(int length) =>
-        throw new NotSupportedException(
-            $"This input report is {length} bytes. The input lane to this controller's device carries a report of at most {EXTENDED_DATA_CAPACITY} bytes whole, and a longer one is refused, never cut.");
+    private static void ThrowExtendedTooLong(int length, bool wide) =>
+        throw new NotSupportedException(wide
+            ? $"This input report is {length} bytes. The input lane carries a report of at most {WIDE_FRAME_CAP} bytes."
+            : $"This input report is {length} bytes. The driver serving this controller carries a report of at most {EXTENDED_DATA_CAPACITY} bytes whole, and a longer one is refused, never cut. A driver of 2.4.0 or later carries up to {WIDE_FRAME_CAP}.");
+
+    /// <summary>2.4.0: a frame longer than the extended lane, whole, into the
+    /// wide frames section. Inside the input section's write, while its
+    /// sequence number is odd, so the reader's check covers it. Out of
+    /// line, so a frame of the extended lane keeps its code.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static unsafe void WriteWideInput(IntPtr wideView, ReadOnlySpan<byte> frame) =>
+        frame.CopyTo(new Span<byte>((byte*)wideView + WIDE_OFFSET_INPUT, frame.Length));
 
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static unsafe void WriteInputFrame(IntPtr view, IntPtr eventHandle, ref uint seqNo,
                                        ReadOnlySpan<byte> data, int dataLen, byte[]? gipData,
                                        int dataOffset = 0,
                                        ReadOnlySpan<byte> extendedData = default, int extendedLen = 0,
-                                       IntPtr companionEvent = default, IntPtr signalView = default)
+                                       IntPtr companionEvent = default, IntPtr signalView = default,
+                                       IntPtr wideView = default)
     {
         if (view == IntPtr.Zero) throw new AccessViolationException();
         // An extended frame goes whole or not at all, refused before the
         // section is touched. The writer used to cut a longer one to the
         // lane without a word, and the driver drops a report of the wrong
-        // length (driver.c ExtendedFrameDeclared).
-        if (extendedLen > EXTENDED_DATA_CAPACITY && !extendedData.IsEmpty) ThrowExtendedTooLong(extendedLen);
+        // length (driver.c ExtendedFrameDeclared). 2.4.0: a longer one goes
+        // whole into the wide frames section when the caller passes it,
+        // which it does when the device's reader takes it.
+        if (extendedLen > EXTENDED_DATA_CAPACITY && !extendedData.IsEmpty
+            && (wideView == IntPtr.Zero || extendedLen > WIDE_FRAME_CAP))
+            ThrowExtendedTooLong(extendedLen, wideView != IntPtr.Zero);
         byte* v = (byte*)view;
 
         // 1. Mark write in progress (odd seqNo). The payload's stores must
@@ -1416,7 +1513,10 @@ internal static partial class SharedMemoryIO
             gipData.AsSpan(0, GIP_DATA_LENGTH).CopyTo(new Span<byte>(v + GIP_DATA_OFFSET, GIP_DATA_LENGTH));
         if (!extendedData.IsEmpty && extendedLen > 0)
         {
-            extendedData.Slice(0, extendedLen).CopyTo(new Span<byte>(v + EXTENDED_DATA_OFFSET, extendedLen));
+            if (extendedLen <= EXTENDED_DATA_CAPACITY)
+                extendedData.Slice(0, extendedLen).CopyTo(new Span<byte>(v + EXTENDED_DATA_OFFSET, extendedLen));
+            else
+                WriteWideInput(wideView, extendedData.Slice(0, extendedLen));
             Unsafe.WriteUnaligned(v + EXTENDED_SIZE_OFFSET, extendedLen);
         }
         else
@@ -1644,6 +1744,10 @@ internal static partial class SharedMemoryIO
             CloseHandle(ah);
         if (s_inputAckEvents.Remove(controllerIndex, out IntPtr aev) && aev != IntPtr.Zero)
             CloseHandle(aev);
+        if (s_wideViews.Remove(controllerIndex, out IntPtr wv) && wv != IntPtr.Zero)
+            UnmapViewOfFile(wv);
+        if (s_wideHandles.Remove(controllerIndex, out IntPtr wh) && wh != IntPtr.Zero)
+            CloseHandle(wh);
         if (s_removeEvents.Remove(controllerIndex, out IntPtr rev) && rev != IntPtr.Zero)
             CloseHandle(rev);
         if (s_removedEvents.Remove(controllerIndex, out IntPtr rdev) && rdev != IntPtr.Zero)
@@ -1737,7 +1841,8 @@ internal static partial class SharedMemoryIO
         {
             foreach (int i in Indexes(s_inputViews.Keys, s_inputHandles.Keys, s_inputEvents.Keys,
                                       s_companionInputEvents.Keys, s_inputAckViews.Keys, s_inputAckHandles.Keys,
-                                      s_inputAckEvents.Keys, s_removeEvents.Keys, s_removedEvents.Keys,
+                                      s_inputAckEvents.Keys, s_wideViews.Keys, s_wideHandles.Keys,
+                                      s_removeEvents.Keys, s_removedEvents.Keys,
                                       s_ownerPipes.Keys, s_versionViews.Keys, s_versionHandles.Keys,
                                       s_signalViews.Keys, s_signalHandles.Keys))
                 if (!IsHeld(i)) ReleaseInputLocked(i);
@@ -1765,7 +1870,7 @@ internal static partial class SharedMemoryIO
     }
 
     /// <summary>For a held index whose device the sweep removed: the
-    /// delivery acknowledgement and release-on-exit bits of the
+    /// delivery acknowledgement, release-on-exit and wide frames bits of the
     /// acknowledgement's capability word, and the driver's protocol word of
     /// the version section, which marks its half written. Without them a
     /// keyboard or mouse frame waits for an acknowledgement no driver will
@@ -1780,7 +1885,7 @@ internal static partial class SharedMemoryIO
     private static unsafe void ForgetDriverLocked(int controllerIndex)
     {
         if (s_inputAckViews.TryGetValue(controllerIndex, out IntPtr av) && av != IntPtr.Zero)
-            Interlocked.And(ref *(int*)(av + INPUT_ACK_OFFSET_CAPS), ~(INPUT_ACK_CAP_DELIVERED | INPUT_ACK_CAP_RELEASE));
+            Interlocked.And(ref *(int*)(av + INPUT_ACK_OFFSET_CAPS), ~(INPUT_ACK_CAP_DELIVERED | INPUT_ACK_CAP_RELEASE | INPUT_ACK_CAP_WIDE));
         if (s_versionViews.TryGetValue(controllerIndex, out IntPtr vv) && vv != IntPtr.Zero)
             Interlocked.Exchange(ref *(int*)(vv + VERSION_OFFSET_DRIVER_PROTOCOL), 0);
         if (s_signalViews.TryGetValue(controllerIndex, out IntPtr sv) && sv != IntPtr.Zero)
