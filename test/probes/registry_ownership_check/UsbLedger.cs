@@ -897,10 +897,12 @@ internal static partial class Program
     }
 
     /// <summary>The removal a restart allows, through the probe's boot-time
-    /// seam: every arrival counts as before Windows started. Run only while
+    /// seam: every arrival counts as before Windows started. Run while
     /// another record of a device that arrived since Windows started, which
     /// the ledger does not name, stays below the host controller, so the
-    /// host controller's own since-boot test reads the same after.</summary>
+    /// host controller's own since-boot test reads the same after. Where the
+    /// machine has no such record, the probe takes one of this run's own
+    /// instances out of the ledger until the checks end.</summary>
     static void AfterRestart()
     {
         Console.WriteLine("\n-- The removal a restart allows (boot-time seam) --");
@@ -919,45 +921,71 @@ internal static partial class Program
         var hubKids = UsbRecords.AllDeviceIds().Where(IsUsbipRootHub).SelectMany(h => tree.Subtree(h).Skip(1)).ToList();
         string? witness = hubKids.FirstOrDefault(r => UsbRecords.IsUsbInstance(r) && !ledgered.Contains(r)
                                                       && !UsbRecords.Present(r) && UsbRecords.ArrivedSinceBoot(r));
+        // A machine whose history left no such record gets one from this
+        // run: an instance of its own on the host controller, out of the
+        // ledger for the removal and back in it once the checks have read
+        // the machine, so a later removal still takes it. The port-named
+        // record stays in, since a check below expects it removed.
+        string? lent = null;
         if (witness == null)
         {
-            Console.WriteLine("  [SKIP] no record the ledger does not name, of a device that arrived since Windows started, stays below the host controller");
-            return;
+            lent = caused.FirstOrDefault(r => UsbRecords.IsUsbInstance(r) && hubKids.Contains(r, StringComparer.OrdinalIgnoreCase)
+                                              && UsbRecords.ArrivedSinceBoot(r)
+                                              && !string.Equals(r, s_portNamed, StringComparison.OrdinalIgnoreCase));
+            if (lent == null || caused.Count < 2)
+            {
+                Check("this run has an instance of its own on the host controller to take out of the ledger", false,
+                      $"{caused.Count} ledgered record(s): {string.Join(" ; ", caused)}");
+                return;
+            }
+            UsbRecords.ForgetRemoved(lent);
+            witness = lent;
+            caused = UsbRecords.Caused().Where(id => UsbRecords.Exists(id) && !UsbRecords.Present(id)).ToList();
+            Console.WriteLine($"  no record the ledger does not name was on the host controller, so this run's {lent} is out of the ledger until the checks end");
         }
         Console.WriteLine($"  {caused.Count} ledgered record(s), witness {witness}");
         var subtrees = caused.SelectMany(id => tree.Subtree(id)).ToList();
-        UsbRecords.BootTimeForProbe = () => DateTime.UtcNow.AddMinutes(1);
         try
         {
-            // The removal takes about 0.2 s a record on the PCG02 GLE, over two
-            // minutes for a ledger of hundreds. A line each time the ledger has
-            // shrunk shows it moving. A removal that stops moving goes silent,
-            // as a hang must for the battery's watch. The wait on the handle
-            // leaves an exception from the removal to GetResult, as it was.
-            var removal = System.Threading.Tasks.Task.Run(() => HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall: true));
-            int shown = caused.Count;
-            while (!((IAsyncResult)removal).AsyncWaitHandle.WaitOne(TimeSpan.FromSeconds(30)))
+            UsbRecords.BootTimeForProbe = () => DateTime.UtcNow.AddMinutes(1);
+            try
             {
-                int now;
-                try { now = UsbRecords.Caused().Count; }
-                catch (Exception) { continue; }
-                if (now < shown)
+                // The removal takes about 0.2 s a record on the PCG02 GLE, over two
+                // minutes for a ledger of hundreds. A line each time the ledger has
+                // shrunk shows it moving. A removal that stops moving goes silent,
+                // as a hang must for the battery's watch. The wait on the handle
+                // leaves an exception from the removal to GetResult, as it was.
+                var removal = System.Threading.Tasks.Task.Run(() => HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall: true));
+                int shown = caused.Count;
+                while (!((IAsyncResult)removal).AsyncWaitHandle.WaitOne(TimeSpan.FromSeconds(30)))
                 {
-                    Console.WriteLine($"  the removal goes on: {now} ledgered record(s) left");
-                    shown = now;
+                    int now;
+                    try { now = UsbRecords.Caused().Count; }
+                    catch (Exception) { continue; }
+                    if (now < shown)
+                    {
+                        Console.WriteLine($"  the removal goes on: {now} ledgered record(s) left");
+                        shown = now;
+                    }
                 }
+                removal.GetAwaiter().GetResult();
             }
-            removal.GetAwaiter().GetResult();
+            finally { UsbRecords.BootTimeForProbe = null; }
+            var left = subtrees.Where(UsbRecords.Exists).ToList();
+            Check("after a restart, the full removal removes every record the ledger names", left.Count == 0, string.Join(" ; ", left));
+            if (s_portNamed != null)
+                Check("the port-named record the ledger took is among them", !UsbRecords.Exists(s_portNamed), s_portNamed);
+            Check("drops every entry", UsbRecords.Caused().Count == 0, string.Join(" ; ", UsbRecords.Caused()));
+            using (var k = Registry.LocalMachine.OpenSubKey(UsbRecords.LedgerRoot))
+                Check("and deletes the ledger's key", k == null);
+            Check("the host controller still reads as used since Windows started", UsbipDriverInstaller.UsedSinceBoot(out string why), why);
+            if (lent != null) Check($"the instance this run lent stayed through the removal ({lent})", UsbRecords.Exists(lent));
         }
-        finally { UsbRecords.BootTimeForProbe = null; }
-        var left = subtrees.Where(UsbRecords.Exists).ToList();
-        Check("after a restart, the full removal removes every record the ledger names", left.Count == 0, string.Join(" ; ", left));
-        if (s_portNamed != null)
-            Check("the port-named record the ledger took is among them", !UsbRecords.Exists(s_portNamed), s_portNamed);
-        Check("drops every entry", UsbRecords.Caused().Count == 0, string.Join(" ; ", UsbRecords.Caused()));
-        using (var k = Registry.LocalMachine.OpenSubKey(UsbRecords.LedgerRoot))
-            Check("and deletes the ledger's key", k == null);
-        Check("the host controller still reads as used since Windows started", UsbipDriverInstaller.UsedSinceBoot(out string why), why);
+        finally
+        {
+            if (lent != null) UsbRecords.NoteCaused(lent);
+        }
+        if (lent != null) Check($"and is back in the ledger, for a later removal to take", LedgerNames(lent));
     }
 }
 
