@@ -461,20 +461,10 @@ internal static class Program
     static int Live()
     {
         Console.WriteLine("=== XInputGetState and SetupDiGetClassDevsW callers, live ===");
-        foreach (var p in Process.GetProcesses())
+        if (SdkConsumers.Find() is { } other)
         {
-            try
-            {
-                if (p.Id == Environment.ProcessId) continue;
-                foreach (ProcessModule m in p.Modules)
-                    if (string.Equals(m.ModuleName, "HIDMaestro.Core.dll", StringComparison.OrdinalIgnoreCase))
-                    {
-                        Console.WriteLine($"  [SKIP] {p.ProcessName} is running and shares the SDK's devices.");
-                        return 2;
-                    }
-            }
-            catch { }
-            finally { p.Dispose(); }
+            Console.WriteLine($"  [SKIP] {other} is running and shares the SDK's devices.");
+            return 2;
         }
 
         DeviceManager.RemoveAccumulatedHmPhantoms();

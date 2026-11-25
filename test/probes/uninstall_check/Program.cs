@@ -486,8 +486,8 @@ internal static partial class Program
             }
             if (!lines.Contains("DONE")) Check("the run inside the sandbox finished", false, ran.Output.Trim());
             // The battery runs this part beside the scenarios after S73, whose
-            // probes skip while another program has HIDMaestro.Core.dll loaded,
-            // so the host side never loads it.
+            // probes stand aside while another program holds HIDMaestro state,
+            // so the host side never loads the SDK.
             Check("the host part ran without loading HIDMaestro.Core.dll",
                   !AppDomain.CurrentDomain.GetAssemblies().Any(a => a.GetName().Name == "HIDMaestro.Core"));
         }

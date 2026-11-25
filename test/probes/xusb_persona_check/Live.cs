@@ -27,7 +27,7 @@ internal static unsafe partial class Program
             }
         if (SdkConsumers.Find() is { } other)
         {
-            Console.WriteLine($"  SKIP: {other} has HIDMaestro.Core.dll loaded, and two programs that embed HIDMaestro never test at once.");
+            Console.WriteLine($"  SKIP: {other} holds HIDMaestro state on this machine, and two programs that embed HIDMaestro never test at once.");
             return 2;
         }
         Console.WriteLine($"  {RuntimeInformation.OSArchitecture}, Windows {Environment.OSVersion.Version}, MachineBackend {HMContext.MachineBackend}");

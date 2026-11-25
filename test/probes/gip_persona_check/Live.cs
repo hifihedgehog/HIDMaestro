@@ -26,7 +26,7 @@ internal static unsafe partial class Program
             }
         if (SdkConsumers.Find() is { } other)
         {
-            Console.WriteLine($"  SKIP: {other} has HIDMaestro.Core.dll loaded, and two programs that embed HIDMaestro never test at once.");
+            Console.WriteLine($"  SKIP: {other} holds HIDMaestro state on this machine, and two programs that embed HIDMaestro never test at once.");
             return 2;
         }
         Console.WriteLine($"  Windows {Environment.OSVersion.Version}, {RuntimeInformation.OSArchitecture}");
@@ -560,7 +560,7 @@ internal static unsafe partial class Program
         Console.WriteLine("\n=== umdf2: xbox-one-s on the UMDF2 driver, the vibration OutputReceived raises ===");
         if (SdkConsumers.Find() is { } other)
         {
-            Console.WriteLine($"  SKIP: {other} has HIDMaestro.Core.dll loaded.");
+            Console.WriteLine($"  SKIP: {other} holds HIDMaestro state on this machine.");
             return 2;
         }
         using var ctx = new HMContext();

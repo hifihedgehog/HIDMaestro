@@ -17,7 +17,7 @@
     <ProjectReference Include="..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
   </ItemGroup>
   <ItemGroup>
-    <!-- Another running program with HIDMaestro.Core.dll loaded. -->
+    <!-- Another running program that holds HIDMaestro state. -->
     <Compile Include="..\probe_common\SdkConsumers.cs" Link="SdkConsumers.cs" />
   </ItemGroup>
   <ItemGroup>

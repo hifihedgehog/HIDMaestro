@@ -15,4 +15,7 @@
     <!-- Steam's log read per device, and whether Steam holds it open. -->
     <Compile Include="..\probe_common\SteamDeviceLog.cs" Link="SteamDeviceLog.cs" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\probe_common\SdkConsumers.cs" Link="SdkConsumers.cs" />
+  </ItemGroup>
 </Project>

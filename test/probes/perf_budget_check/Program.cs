@@ -2519,23 +2519,9 @@ internal static partial class Program
 
     static bool OtherSdkRunning()
     {
-        foreach (var p in Process.GetProcesses())
-        {
-            try
-            {
-                if (p.Id == Environment.ProcessId || !ConsumerElevation.IsElevated(p.Id)) continue;
-                foreach (ProcessModule m in p.Modules)
-                    if (string.Equals(m.ModuleName, "HIDMaestro.Core.dll", StringComparison.OrdinalIgnoreCase))
-                    {
-                        Console.WriteLine($"  [SKIP] {p.ProcessName} ({p.Id}) is running and shares the SDK's devices.");
-                        return true;
-                    }
-            }
-            catch (System.ComponentModel.Win32Exception) { }
-            catch (InvalidOperationException) { }
-            finally { p.Dispose(); }
-        }
-        return false;
+        if (SdkConsumers.Find(ConsumerElevation.IsElevated) is not { } other) return false;
+        Console.WriteLine($"  [SKIP] {other} is running and shares the SDK's devices.");
+        return true;
     }
 
     const uint FILE_MAP_READ = 0x0004;

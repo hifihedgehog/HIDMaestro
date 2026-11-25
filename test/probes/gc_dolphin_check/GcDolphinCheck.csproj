@@ -17,4 +17,7 @@
   <Target Name="BuildGcHarnesses" AfterTargets="Build">
     <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\native\build.ps1&quot; -Arch $(HMTargetArchitecture) -Out &quot;$(MSBuildProjectDirectory)\$(OutDir)native&quot;" />
   </Target>
+  <ItemGroup>
+    <Compile Include="..\probe_common\SdkConsumers.cs" Link="SdkConsumers.cs" />
+  </ItemGroup>
 </Project>

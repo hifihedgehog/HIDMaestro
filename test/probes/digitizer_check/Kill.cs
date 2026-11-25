@@ -102,7 +102,7 @@ internal static unsafe partial class Program
     static int Kill(HMBackend backend, bool hover)
     {
         Console.WriteLine($"=== Contacts {(hover ? "in range" : "down")} when a program goes away, on {backend} ===");
-        if (SdkConsumers.Find() is { } other) { Console.WriteLine($"  SKIP: {other} has HIDMaestro.Core.dll loaded."); return 2; }
+        if (SdkConsumers.Find() is { } other) { Console.WriteLine($"  SKIP: {other} holds HIDMaestro state on this machine."); return 2; }
         string dir = KillProfiles();
         // Which cases' descriptors declare In Range, so a contact can hover.
         var canHover = new Dictionary<string, bool>();

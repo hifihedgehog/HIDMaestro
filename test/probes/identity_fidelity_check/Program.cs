@@ -93,14 +93,14 @@ internal static class Program
                 case "live" when args.Length >= 3 && ParseBackend(args[1]) is { } lb:
                 {
                     if (!Elevated()) { Console.WriteLine("  refused: live needs elevation"); return 3; }
-                    if (SdkConsumers.Find() is { } other) { Console.WriteLine($"  SKIP: {other} has HIDMaestro.Core.dll loaded."); return 2; }
+                    if (SdkConsumers.Find() is { } other) { Console.WriteLine($"  SKIP: {other} holds HIDMaestro state on this machine."); return 2; }
                     Live(lb, args[2], args.Skip(3).ToArray(), record: null);
                     break;
                 }
                 case "record" when args.Length >= 4 && ParseBackend(args[1]) is { } rb:
                 {
                     if (!Elevated()) { Console.WriteLine("  refused: record needs elevation"); return 3; }
-                    if (SdkConsumers.Find() is { } other) { Console.WriteLine($"  SKIP: {other} has HIDMaestro.Core.dll loaded."); return 2; }
+                    if (SdkConsumers.Find() is { } other) { Console.WriteLine($"  SKIP: {other} holds HIDMaestro state on this machine."); return 2; }
                     Live(rb, args[2], args.Skip(4).ToArray(), record: args[3]);
                     break;
                 }

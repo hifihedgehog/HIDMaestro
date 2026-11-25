@@ -251,12 +251,12 @@ internal static partial class Program
         }
 
         // The battery runs this host part beside the other scenarios, whose
-        // probes skip while another program has the SDK loaded. The SDK runs
-        // only inside the sandbox.
+        // probes stand aside while another program holds HIDMaestro state.
+        // The SDK runs only inside the sandbox.
         var loaded = AppDomain.CurrentDomain.GetAssemblies().FirstOrDefault(a => a.GetName().Name == "HIDMaestro.Core");
         Console.WriteLine();
-        Check("the host part never loaded HIDMaestro.Core.dll, so probes beside S73 do not skip", loaded == null,
-              loaded == null ? "" : $"the host part loaded HIDMaestro.Core.dll ({loaded.Location}), which makes probes beside S73 skip");
+        Check("the host part never loaded HIDMaestro.Core.dll", loaded == null,
+              loaded == null ? "" : $"the host part loaded HIDMaestro.Core.dll ({loaded.Location})");
 
         Console.WriteLine();
         Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");
@@ -722,8 +722,8 @@ internal static partial class Program
     /// <summary>Every static of an SDK type, kept out of Program's own
     /// statics: HMGamepadState is a struct, so a static field of it in
     /// Program loads HIDMaestro.Core.dll when Program's statics load, in the
-    /// host part too, and the battery's probes beside S73 then skip. Only the
-    /// code that runs inside the sandbox touches this class.</summary>
+    /// host part too, where the SDK must not run. Only the code that runs
+    /// inside the sandbox touches this class.</summary>
     static class Sdk
     {
         internal static readonly HMGamepadState Pressed = new()

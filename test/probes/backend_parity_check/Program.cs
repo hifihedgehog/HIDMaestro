@@ -118,7 +118,7 @@ internal static partial class Program
             }
         if (part is not ("child" or "firstone") && SdkConsumers.Find() is { } other)
         {
-            Console.WriteLine($"  [SKIP] {other} has HIDMaestro.Core.dll loaded, and two programs that embed HIDMaestro never test at once.");
+            Console.WriteLine($"  [SKIP] {other} holds HIDMaestro state on this machine, and two programs that embed HIDMaestro never test at once.");
             return 2;
         }
         Note($"{System.Runtime.InteropServices.RuntimeInformation.OSArchitecture}, Windows {Environment.OSVersion.Version}, " +

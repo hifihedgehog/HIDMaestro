@@ -222,31 +222,10 @@ internal static partial class Program
         }
     }
 
-    /// <summary>Another process that embeds the SDK: one with
-    /// HIDMaestro.Core.dll loaded, or one an owner record names.</summary>
-    static string? FindLiveSdkConsumer()
-    {
-        int self = Environment.ProcessId;
-        foreach (var p in Process.GetProcesses())
-        {
-            if (p.Id == self || !ConsumerElevation.IsElevated(p.Id)) { p.Dispose(); continue; }
-            try
-            {
-                foreach (ProcessModule m in p.Modules)
-                    if (string.Equals(m.ModuleName, "HIDMaestro.Core.dll", StringComparison.OrdinalIgnoreCase))
-                        return p.ProcessName;
-            }
-            catch { }
-            finally { p.Dispose(); }
-        }
-        foreach (var (_, pid) in Native.OwnerRecords())
-        {
-            if (pid == self) continue;
-            try { using var p = Process.GetProcessById(pid); return p.ProcessName; }
-            catch { }
-        }
-        return null;
-    }
+    /// <summary>Another process that holds machine-wide HIDMaestro state:
+    /// one a live owner record names, or one with a 1.x HIDMaestro.Core.dll
+    /// loaded (probe_common\SdkConsumers.cs).</summary>
+    static string? FindLiveSdkConsumer() => SdkConsumers.Find(ConsumerElevation.IsElevated);
 
     static int Main(string[] args)
     {

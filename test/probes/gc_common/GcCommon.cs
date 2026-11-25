@@ -111,37 +111,12 @@ internal static class Probe
         return s_failures == 0 ? 0 : 1;
     }
 
-    /// <summary>Another program that has HIDMaestro.Core.dll loaded shares the
-    /// machine-wide devices and would change what the probe reads. Each
-    /// process's module list is read on a thread of its own, since one read
-    /// at a time took about 5.5 s elevated: the same lists, read at
-    /// once.</summary>
+    /// <summary>Another program that holds machine-wide HIDMaestro state
+    /// (probe_common\SdkConsumers.cs) shares the machine-wide devices and
+    /// would change what the probe reads.</summary>
     public static bool OtherSdkRunning()
     {
-        var all = Process.GetProcesses();
-        string? found = null;
-        try
-        {
-            System.Threading.Tasks.Parallel.ForEach(all, (p, loop) =>
-            {
-                try
-                {
-                    if (p.Id == Environment.ProcessId) return;
-                    foreach (ProcessModule m in p.Modules)
-                        if (string.Equals(m.ModuleName, "HIDMaestro.Core.dll", StringComparison.OrdinalIgnoreCase))
-                        {
-                            Interlocked.CompareExchange(ref found, $"{p.ProcessName} ({p.Id})", null);
-                            loop.Stop();
-                            return;
-                        }
-                }
-                catch { }
-            });
-        }
-        finally
-        {
-            foreach (var p in all) p.Dispose();
-        }
+        string? found = SdkConsumers.Find();
         if (found == null) return false;
         Console.WriteLine($"  [SKIP] {found} is running and shares the SDK's devices.");
         return true;

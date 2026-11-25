@@ -84,7 +84,7 @@ internal static unsafe partial class Program
         }
         if (SdkConsumers.Find() is { } other)
         {
-            Console.WriteLine($"  SKIP: {other} has HIDMaestro.Core.dll loaded.");
+            Console.WriteLine($"  SKIP: {other} holds HIDMaestro state on this machine.");
             return 2;
         }
         Console.WriteLine($"=== digitizer spike on {backend}: Windows {Environment.OSVersion.Version}, {RuntimeInformation.OSArchitecture}, session {Process.GetCurrentProcess().SessionId} ===");

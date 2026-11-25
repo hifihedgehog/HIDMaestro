@@ -445,32 +445,9 @@ internal static class Program
         if (mode == "cost") return Cost.Run(args.Length > 1 ? int.Parse(args[1]) : 200);
 
         Console.WriteLine(mode is "measure" or "measure4" ? "=== Dispose timing ===" : "=== PnP notifications reach the SDK's waits ===");
-        // Each process's module list is read on a thread of its own, since
-        // one read at a time took about 5.5 s elevated.
-        var all = Process.GetProcesses();
-        string? sharing = null;
-        try
-        {
-            Parallel.ForEach(all, (p, loop) =>
-            {
-                try
-                {
-                    if (p.Id == Environment.ProcessId) return;
-                    foreach (ProcessModule m in p.Modules)
-                        if (string.Equals(m.ModuleName, "HIDMaestro.Core.dll", StringComparison.OrdinalIgnoreCase))
-                        {
-                            Interlocked.CompareExchange(ref sharing, p.ProcessName, null);
-                            loop.Stop();
-                            return;
-                        }
-                }
-                catch { }
-            });
-        }
-        finally
-        {
-            foreach (var p in all) p.Dispose();
-        }
+        // Another program that holds machine-wide HIDMaestro state
+        // (probe_common\SdkConsumers.cs).
+        string? sharing = SdkConsumers.Find();
         if (sharing != null)
         {
             Console.WriteLine($"  [SKIP] {sharing} is running and shares the SDK's devices.");

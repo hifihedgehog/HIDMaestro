@@ -12,4 +12,7 @@
     <PackageReference Include="NAudio.Wasapi" Version="2.2.1" />
     <PackageReference Include="NAudio.Core" Version="2.2.1" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\probe_common\SdkConsumers.cs" Link="SdkConsumers.cs" />
+  </ItemGroup>
 </Project>

@@ -65,23 +65,9 @@ internal static class Program
         Console.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] {name}{(detail.Length > 0 ? "  " + detail : "")}");
     }
 
-    static string? FindLiveSdkConsumer()
-    {
-        int self = Environment.ProcessId;
-        foreach (var p in Process.GetProcesses())
-        {
-            if (p.Id == self) { p.Dispose(); continue; }
-            try
-            {
-                foreach (ProcessModule m in p.Modules)
-                    if (string.Equals(m.ModuleName, "HIDMaestro.Core.dll", StringComparison.OrdinalIgnoreCase))
-                        return p.ProcessName;
-            }
-            catch { }
-            finally { p.Dispose(); }
-        }
-        return null;
-    }
+    /// <summary>Another program that holds machine-wide HIDMaestro state
+    /// (probe_common\SdkConsumers.cs).</summary>
+    static string? FindLiveSdkConsumer() => SdkConsumers.Find();
 
     static HMProfile Custom(ushort pid, string name, string type, HidDescriptorBuilder d) =>
         new HMProfileBuilder().Id($"kbm-live-{pid:x4}").Name(name).Vendor("HIDMaestro")
@@ -455,8 +441,8 @@ internal static class Program
         s_noise = Environment.GetCommandLineArgs().Contains("--noise");
         s_noiseAbs = Environment.GetCommandLineArgs().Contains("--noise-abs");
         bool fourOnly = Environment.GetCommandLineArgs().Contains("--four-mice");
-        // The --hold-diag child runs beside its own parent, which has the SDK
-        // loaded.
+        // The --hold-diag child runs beside its own parent, which holds
+        // HIDMaestro state.
         string[] argv = Environment.GetCommandLineArgs();
         string? consumer = argv.Contains("--hold-child") || argv.Contains("--held-shift-child") ? null : FindLiveSdkConsumer();
         if (consumer != null)

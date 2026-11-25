@@ -114,7 +114,7 @@ internal static unsafe partial class Program
             Console.WriteLine("  refused: live needs elevation");
             return 3;
         }
-        if (SdkConsumers.Find() is { } other) { Console.WriteLine($"  SKIP: {other} has HIDMaestro.Core.dll loaded."); return 2; }
+        if (SdkConsumers.Find() is { } other) { Console.WriteLine($"  SKIP: {other} holds HIDMaestro state on this machine."); return 2; }
         Console.WriteLine($"=== touch and pen, live on {backend}{(hover ? ", hover only" : "")}: Windows {Environment.OSVersion.Version}, {RuntimeInformation.OSArchitecture}, session {Process.GetCurrentProcess().SessionId} ===");
         string dir = KillProfiles();
         using var ctx = new HMContext(backend);

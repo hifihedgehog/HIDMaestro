@@ -304,22 +304,7 @@ internal static class Program
 
     static bool OtherConsumerRunning(out string? name)
     {
-        name = null;
-        foreach (var p in Process.GetProcesses())
-        {
-            try
-            {
-                if (p.Id == Environment.ProcessId) continue;
-                foreach (ProcessModule m in p.Modules)
-                    if (string.Equals(m.ModuleName, "HIDMaestro.Core.dll", StringComparison.OrdinalIgnoreCase))
-                    {
-                        name = p.ProcessName;
-                        return true;
-                    }
-            }
-            catch { }
-            finally { p.Dispose(); }
-        }
-        return false;
+        name = SdkConsumers.Find();
+        return name != null;
     }
 }

@@ -881,44 +881,14 @@ internal static partial class Program
     [DllImport("cfgmgr32.dll")]
     static extern int CM_Get_Parent(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
 
-    /// <summary>Name of another running process that has the SDK loaded, or
-    /// null when this probe has the sections to itself. Matching on the
-    /// loaded module, rather than a list of process names, catches every
-    /// consumer, including ones no list names.</summary>
+    /// <summary>Name of another program that holds machine-wide HIDMaestro
+    /// state, or null when this probe has the sections to itself.</summary>
     static string? FindLiveSdkConsumer()
     {
-        // Signal 1: a process with the SDK loaded. Misses a consumer that
-        // has not touched the DLL yet, which is why signal 2 exists. Each
-        // process's module list is read on a thread of its own, since one
-        // read at a time took about 5.5 s elevated.
-        int self = Environment.ProcessId;
-        var all = System.Diagnostics.Process.GetProcesses();
-        string? loaded = null;
-        try
-        {
-            System.Threading.Tasks.Parallel.ForEach(all, (p, loop) =>
-            {
-                if (p.Id == self) return;
-                try
-                {
-                    foreach (System.Diagnostics.ProcessModule m in p.Modules)
-                    {
-                        if (string.Equals(m.ModuleName, "HIDMaestro.Core.dll", StringComparison.OrdinalIgnoreCase))
-                        {
-                            Interlocked.CompareExchange(ref loaded, p.ProcessName, null);
-                            loop.Stop();
-                            return;
-                        }
-                    }
-                }
-                catch { /* protected, wrong bitness, or exited mid-enumeration */ }
-            });
-        }
-        finally
-        {
-            foreach (var p in all) p.Dispose();
-        }
-        if (loaded != null) return loaded;
+        // Signal 1: a program a live owner record names, or one with a 1.x
+        // HIDMaestro.Core.dll loaded (probe_common\SdkConsumers.cs). A
+        // process that only loaded a 2.x SDK writes nothing machine-wide.
+        if (SdkConsumers.Find() is { } loaded) return loaded;
 
         // Signal 2: the contended resource itself. The named input sections
         // are what a second consumer's controllers write through, so their

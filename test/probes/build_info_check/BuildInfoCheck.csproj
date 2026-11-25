@@ -51,4 +51,7 @@
     <Copy SourceFiles="$(_HMVariant)sdk\HIDMaestro.Core\bin\$(Configuration)\$(TargetFramework)\HIDMaestro.Core.dll;$(_HMVariant)sdk\HIDMaestro.Core\bin\$(Configuration)\$(TargetFramework)\HIDMaestro.Core.pdb"
           DestinationFolder="$(OutDir)variant\" />
   </Target>
+  <ItemGroup>
+    <Compile Include="..\probe_common\SdkConsumers.cs" Link="SdkConsumers.cs" />
+  </ItemGroup>
 </Project>

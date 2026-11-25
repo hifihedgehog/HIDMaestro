@@ -232,22 +232,9 @@ internal static class Program
         return v;
     }
 
-    /// <summary>Another running program that embeds HIDMaestro: one with
-    /// HIDMaestro.Core.dll loaded (SdkConsumers.Find), or one a v2.0.0 owner
-    /// record names. The record catches NativeAOT and single-file programs,
-    /// which load no such DLL.</summary>
-    static string? OtherSdkConsumer()
-    {
-        int self = Environment.ProcessId;
-        if (SdkConsumers.Find() is string loaded) return loaded;
-        using var owners = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestroOwners");
-        foreach (string id in owners?.GetSubKeyNames() ?? Array.Empty<string>())
-        {
-            using var rec = owners!.OpenSubKey(id);
-            if (rec?.GetValue("Pid") is not int pid || pid == self) continue;
-            try { using var p = Process.GetProcessById(pid); return p.ProcessName; }
-            catch { }
-        }
-        return null;
-    }
+    /// <summary>Another running program that holds machine-wide HIDMaestro
+    /// state (SdkConsumers.Find): one a live owner record names, which
+    /// catches NativeAOT and single-file programs that load no
+    /// HIDMaestro.Core.dll, or one with a 1.x DLL loaded.</summary>
+    static string? OtherSdkConsumer() => SdkConsumers.Find();
 }

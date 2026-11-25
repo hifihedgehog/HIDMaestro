@@ -25,19 +25,7 @@ internal static partial class Program
     /// test as usbip_e2e_check.</summary>
     static string? FindLiveSdkConsumer()
     {
-        int self = Environment.ProcessId;
-        foreach (var p in Process.GetProcesses())
-        {
-            if (p.Id == self) { p.Dispose(); continue; }
-            try
-            {
-                foreach (ProcessModule m in p.Modules)
-                    if (string.Equals(m.ModuleName, "HIDMaestro.Core.dll", StringComparison.OrdinalIgnoreCase))
-                        return p.ProcessName;
-            }
-            catch { /* protected, or exited mid-enumeration */ }
-            finally { p.Dispose(); }
-        }
+        if (SdkConsumers.Find() is { } other) return other;
         for (int i = 0; i < 16; i++)
         {
             IntPtr h = OpenFileMappingW(0x0004, false, $@"Global\HIDMaestroInput{i}");

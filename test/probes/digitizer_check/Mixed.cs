@@ -24,7 +24,7 @@ internal static unsafe partial class Program
     static int Mixed(string exe)
     {
         Console.WriteLine("=== A program on an earlier SDK, on this driver: its keyboard killed with Left Shift held ===");
-        if (SdkConsumers.Find() is { } other) { Console.WriteLine($"  SKIP: {other} has HIDMaestro.Core.dll loaded."); return 2; }
+        if (SdkConsumers.Find() is { } other) { Console.WriteLine($"  SKIP: {other} holds HIDMaestro state on this machine."); return 2; }
         var errors = new StringBuilder();
         var child = new Process
         {

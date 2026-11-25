@@ -34,7 +34,7 @@ internal static partial class Program
             }
         if (SdkConsumers.Find() is { } other)
         {
-            Console.WriteLine($"  SKIP: {other} has HIDMaestro.Core.dll loaded, and two programs that embed HIDMaestro never test at once.");
+            Console.WriteLine($"  SKIP: {other} holds HIDMaestro state on this machine, and two programs that embed HIDMaestro never test at once.");
             return 2;
         }
         Console.WriteLine($"  Windows {Environment.OSVersion.Version}, {RuntimeInformation.OSArchitecture}, session {Process.GetCurrentProcess().SessionId}");
@@ -81,7 +81,7 @@ internal static partial class Program
     {
         using (var who = WindowsIdentity.GetCurrent())
             if (!new WindowsPrincipal(who).IsInRole(WindowsBuiltInRole.Administrator)) { Console.WriteLine("  refused: guide needs elevation"); return 3; }
-        if (SdkConsumers.Find() is { } other) { Console.WriteLine($"  SKIP: {other} has HIDMaestro.Core.dll loaded."); return 2; }
+        if (SdkConsumers.Find() is { } other) { Console.WriteLine($"  SKIP: {other} holds HIDMaestro state on this machine."); return 2; }
         var pad = Pads.FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase));
         if (pad == null) { Console.WriteLine("  no such profile"); return 2; }
         using var ctx = new HMContext(HMBackend.Usbip);
@@ -118,7 +118,7 @@ internal static partial class Program
         Console.WriteLine($"=== hold: {id}, the Xbox button held ===");
         using (var who = WindowsIdentity.GetCurrent())
             if (!new WindowsPrincipal(who).IsInRole(WindowsBuiltInRole.Administrator)) { Console.WriteLine("  refused: hold needs elevation"); return 3; }
-        if (SdkConsumers.Find() is { } other) { Console.WriteLine($"  SKIP: {other} has HIDMaestro.Core.dll loaded."); return 2; }
+        if (SdkConsumers.Find() is { } other) { Console.WriteLine($"  SKIP: {other} holds HIDMaestro state on this machine."); return 2; }
         var pad = Pads.FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase));
         if (pad == null) { Console.WriteLine("  no such profile"); return 2; }
         using var ctx = new HMContext(HMBackend.Usbip);
