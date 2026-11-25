@@ -128,36 +128,41 @@ another architecture.
 
 A probe that leaves a part unrun prints `[SKIP]`, `[LIMIT]` or `SKIP:` and
 the condition in its own words. The battery judges every such line. A skip
-the table below names for its scenario is by design: it prints with its
-reason, and the summary lists it apart from the passes. Any other skip
-fails its scenario, as a failure does, since a part that did not run
-measured nothing.
+the tables below name for its scenario passes: it prints with its reason,
+and the summary lists it apart from the passes. Any other skip fails its
+scenario, as a failure does, since a part that did not run measured
+nothing.
 
-Before the first scenario, the battery checks what the selected scenarios
-need from the machine, each the way its probe looks for it, and starts
-nothing while one is missing:
+A part qualifies on a machine unless the machine lacks something the part
+needs that cannot be staged. Before the first scenario the battery reads
+those facts, each the way the part's probe reads it, and lists the parts
+that do not qualify there. Their skip lines pass only on a machine that
+lacks what they need.
 
-- Windows Sandbox (`wsb.exe`), with no sandbox server already running:
+| What the machine lacks | What does not qualify |
+|---|---|
+| Windows Sandbox (`wsb.exe`) | `S73_Usbip_Clean_Install`, and the sandbox part of `S101_Uninstall` |
+| The Steam client | `S54_Valve_Steam`, and the Steam part of `S65_Switch2_Composite` |
+| Steam's hardware updater | `S62_Valve_Firmware` |
+| SteamVR | phase 2 of `S50_Vr_Controller_Smoke`, and parts I11 and OF7 of `S72_Protected_Staging` |
+| A desktop session, since the battery runs in session 0, as over SSH | the two Raw Input checks of microsoft-designer-keyboard in `S37_Layout_Audit_Check`, the legacy reader app of `S50_Vr_Controller_Smoke`, WGI's readings of the XUSB pad in `S67_Wgi_Mapping`, `S70_Kbm_Raw_Input`, and sections C and Y of `S71_Coexistence` |
+| A driver package Windows installs, since Windows on ARM64 refuses HIDMaestro's, with which its signing certificate is made | the signing parts of `S61_Driver_Catalog` |
+
+What can be staged or set must be there, and the battery starts no
+scenario while one is missing:
+
+- No Windows Sandbox server already running, where Windows Sandbox is:
   `S73_Usbip_Clean_Install` and the sandbox part of `S101_Uninstall`.
-- A desktop session, since Raw Input lists no device in session 0, where a
-  battery started over SSH runs: the two Raw Input checks of
-  microsoft-designer-keyboard in `S37_Layout_Audit_Check`, the legacy
-  reader app of `S50_Vr_Controller_Smoke`, `S70_Kbm_Raw_Input`, and
-  sections C and Y of `S71_Coexistence`, whose section Y also needs a
-  signed-in user.
-- The Steam client, for `S54_Valve_Steam` and the Steam part of
-  `S65_Switch2_Composite`, and Steam's hardware updater, for
-  `S62_Valve_Firmware`.
-- SteamVR: phase 2 of `S50_Vr_Controller_Smoke` and part I11 of
-  `S72_Protected_Staging`.
-- HIDMaestro's signing certificate in `LocalMachine\My`, for the signing
-  parts of `S61_Driver_Catalog`.
+- `HIDMAESTRO_UNINSTALL_FIXTURE=1` where Windows Sandbox is not, so the
+  fixture part of `S101_Uninstall` runs the removal there.
+- HIDMaestro's signing certificate in `LocalMachine\My` on x64, for the
+  signing parts of `S61_Driver_Catalog`.
 - The SDL builds beside the repository: `SDL3-build` (S48, S100), its
   `build-stock` (S53, S55, S63, S64), `build-unfiltered` (S65) and
   `build-unfiltered-91e1a5a` (S103), and `SDL3-release-3.4.18`, with
   `-arm64` on ARM64 (S108, S112, S115).
 
-`-Filter` selects the scenarios a machine can run in full.
+`-Filter` selects the scenarios a machine can run.
 
 | By-design skip | What skips | Where |
 |---|---|---|

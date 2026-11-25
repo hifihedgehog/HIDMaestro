@@ -22,9 +22,11 @@
   appeared prints [RERUN] and runs again once it has gone
   (HMForeign.cs). Load and other programs never hold a scenario back.
 
-  A skip that test\regression\README.md does not list as by design
-  fails its scenario, and the battery starts no scenario while the
-  machine lacks what a selected one needs ("Expected skips").
+  A skip fails its scenario unless test\regression\README.md lists it as
+  by design, or as a part that does not qualify on a machine lacking
+  what it needs, which the battery reads and lists before the first
+  scenario. It starts no scenario while the machine lacks something a
+  selected scenario needs that can be staged or set ("Expected skips").
 
   Exit code: 0 if every scenario PASSED, 1 if any scenario FAILED, 2 if
   the machine lacks what a selected scenario needs and none ran.
@@ -1182,6 +1184,35 @@ $script:ByDesignSkips = @(
        Why = "the part for a machine whose Windows refuses HIDMaestro's driver package" }
     @{ Scenario = 'S104_Driver_Signing'; Pattern = 'The driver store holds no HIDMaestro catalog\.$'
        Why = "the part for a machine whose Windows installs HIDMaestro's driver package" }
+    # Parts that do not qualify on a machine without what they need. When
+    # names the fact (Get-MachineFacts), read before the first scenario, so
+    # the line passes only on a machine that lacks it.
+    @{ Scenario = 'S73_Usbip_Clean_Install'; Pattern = 'Windows Sandbox \(wsb\.exe\) is not available on this machine\.$'; When = 'NoSandbox'
+       Why = 'Windows Sandbox is not on this machine' }
+    @{ Scenario = 'S101_Uninstall'; Pattern = 'Windows Sandbox \(wsb\.exe\) is not available on this machine\.$'; When = 'NoSandbox'
+       Why = 'Windows Sandbox is not on this machine, so the fixture part runs the removal' }
+    @{ Scenario = 'S54_Valve_Steam'; Pattern = 'no Steam client installed on this machine\.$'; When = 'NoSteam'
+       Why = 'the Steam client is not on this machine' }
+    @{ Scenario = 'S65_Switch2_Composite'; Pattern = 'no Steam client installed on this machine\.$'; When = 'NoSteam'
+       Why = 'the Steam client is not on this machine' }
+    @{ Scenario = 'S62_Valve_Firmware'; Pattern = 'no Steam hardware updater on this machine\.$'; When = 'NoSteamUpdater'
+       Why = "Steam's hardware updater is not on this machine" }
+    @{ Scenario = 'S50_Vr_Controller_Smoke'; Pattern = 'SteamVR not installed on this machine; live phase requires it\.$'; When = 'NoSteamVR'
+       Why = 'SteamVR is not on this machine' }
+    @{ Scenario = 'S72_Protected_Staging'; Pattern = '(I11: SteamVR is not installed, so nothing registers the OpenVR driver$|OF7: no OpenVR folders on this machine \()'; When = 'NoSteamVR'
+       Why = 'SteamVR is not on this machine, and HIDMaestro makes its OpenVR folders only where it is' }
+    @{ Scenario = 'S37_Layout_Audit_Check'; Pattern = 'microsoft-designer-keyboard: .*not run here: this program runs in session 0,'; When = 'Session0'
+       Why = 'Raw Input lists no device in session 0' }
+    @{ Scenario = 'S50_Vr_Controller_Smoke'; Pattern = 'legacy reader app: not run here: this program runs in session 0,'; When = 'Session0'
+       Why = "session 0 has no display for SteamVR's compositor" }
+    @{ Scenario = 'S67_Wgi_Mapping'; Pattern = "WGI's readings of the XUSB pad: WGI gave this process no reading of the pad xusb22 drives"; When = 'Session0'
+       Why = "WGI gives a session 0 process no reading of a pad Windows' xusb22 drives" }
+    @{ Scenario = 'S70_Kbm_Raw_Input'; Pattern = 'not run here: this program runs in session 0,'; When = 'Session0'
+       Why = 'Raw Input lists no device in session 0' }
+    @{ Scenario = 'S71_Coexistence'; Pattern = '[CY]: .*not run here: this program runs in session 0,'; When = 'Session0'
+       Why = 'session 0 has no Raw Input device and no signed-in user' }
+    @{ Scenario = 'S61_Driver_Catalog'; Pattern = '(X64|Arm64)( WinUSB)? signing: no signing certificate on this machine'; When = 'Arm64'
+       Why = "Windows on ARM64 refuses HIDMaestro's driver package, with which its signing certificate is made" }
 )
 # The by-design skips this run took, for the summary.
 $script:ByDesignTaken = New-Object System.Collections.Generic.List[string]
@@ -1210,11 +1241,12 @@ function Assert-ProbeSkips {
     $skips = @(Get-ProbeSkips $Out)
     foreach ($s in $skips) {
         $entry = $script:ByDesignSkips | Where-Object {
-            $script:CurrentScenario -like $_.Scenario -and $s.Text -match ('^' + $_.Pattern)
+            $script:CurrentScenario -like $_.Scenario -and $s.Text -match ('^' + $_.Pattern) -and
+                (-not $_.When -or ($script:MachineFacts -and $script:MachineFacts[$_.When]))
         } | Select-Object -First 1
         if ($entry) {
             Write-Host ('      ' + $s.Line) -ForegroundColor DarkYellow
-            Write-Host ('        by design: ' + $entry.Why) -ForegroundColor DarkYellow
+            Write-Host ('        ' + $(if ($entry.When) { 'not qualifying here: ' } else { 'by design: ' }) + $entry.Why) -ForegroundColor DarkYellow
             $script:ByDesignTaken.Add($script:CurrentScenario + ': ' + $s.Line)
         } else {
             Write-Host ('      ' + $s.Line) -ForegroundColor Red
@@ -3585,11 +3617,68 @@ $scenarios = @(
     @{ Name = 'S116_Digitizer';                  Body = ${function:Scenario-Digitizer} }
 )
 
-# What the selected scenarios need from this machine, each read the way
-# its probe reads it. The battery starts no scenario while one is missing:
-# a part that cannot run measures nothing, and its skip would fail the
-# scenario anyway (Assert-ProbeSkips).
+# What this machine has that a scenario part cannot be given by staging
+# files, each read the way the part's probe reads it. A part that needs one
+# the machine lacks does not qualify here: the battery lists it before the
+# first scenario, and only then does its skip line pass (Assert-ProbeSkips).
+function Get-MachineFacts {
+    $facts = @{}
+    # usbip_install_check and uninstall_check find wsb.exe on PATH.
+    $facts.NoSandbox = -not (Get-Command wsb.exe -ErrorAction SilentlyContinue)
+    # Raw Input lists no device in session 0, where a battery started over
+    # SSH runs, and session 0 has no display for SteamVR's compositor, no
+    # explorer.exe to take a user's token from, and no WGI reading of a pad
+    # Windows' xusb22 drives.
+    $facts.Session0 = ((Get-Process -Id $PID).SessionId -eq 0)
+    # valve_steam_check and switch2_composite_check: steam.exe in either
+    # Program Files folder.
+    $facts.NoSteam = (@('C:\Program Files (x86)\Steam', 'C:\Program Files\Steam' | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'steam.exe') }).Count -eq 0)
+    # valve_firmware_check: hardwareupdater.exe beside the file the 2026
+    # Steam Controller's steamUpdater value source names, under the first of
+    # its roots that exists (ValueSources.Locate).
+    $roots = New-Object System.Collections.Generic.List[string]
+    foreach ($r in @(@('HKCU:\Software\Valve\Steam', 'SteamPath'), @('HKLM:\SOFTWARE\WOW6432Node\Valve\Steam', 'InstallPath'))) {
+        try {
+            $v = (Get-ItemProperty -LiteralPath $r[0] -Name $r[1] -ErrorAction Stop).($r[1])
+            if ($v -is [string] -and $v.Trim()) { $roots.Add([IO.Path]::GetFullPath($v)) }
+        } catch {}
+    }
+    $roots.Add((Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Steam'))
+    $root = $roots | Where-Object { Test-Path -LiteralPath $_ -PathType Container } | Select-Object -First 1
+    $facts.NoSteamUpdater = -not ($root -and (Test-Path -LiteralPath (Join-Path $root 'bin\hardwareupdater\hardwareupdater.exe')))
+    # HMVR.SteamVRPath (VrDriverBuilder.FindSteamVR): the first of these
+    # folders that holds bin\win64\vrpathreg.exe.
+    $vr = New-Object System.Collections.Generic.List[string]
+    foreach ($r in @(@('HKLM:\SOFTWARE\HIDMaestro', 'SteamVRPath', ''),
+                      @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Steam App 250820', 'InstallLocation', ''),
+                      @('HKLM:\SOFTWARE\WOW6432Node\Valve\Steam', 'InstallPath', 'steamapps\common\SteamVR'))) {
+        try {
+            $v = (Get-ItemProperty -LiteralPath $r[0] -Name $r[1] -ErrorAction Stop).($r[1])
+            if ($v -is [string] -and $v) { $vr.Add($(if ($r[2]) { Join-Path $v $r[2] } else { $v })) }
+        } catch {}
+    }
+    $vr.Add('C:\SteamVR')
+    $facts.NoSteamVR = -not ($vr | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'bin\win64\vrpathreg.exe') })
+    # Windows on ARM64 refuses HIDMaestro's driver package, and HIDMaestro
+    # makes its signing certificate with that package.
+    $facts.Arm64 = ((Get-MachineArch) -eq 'arm64')
+    return $facts
+}
+
+# The parts each fact takes out, for the list before the first scenario.
+$script:NotQualifyingParts = [ordered]@{
+    NoSandbox      = 'Windows Sandbox is not on this machine: S73, and the sandbox part of S101'
+    NoSteam        = 'the Steam client is not on this machine: S54, and the Steam part of S65'
+    NoSteamUpdater = "Steam's hardware updater is not on this machine: S62"
+    NoSteamVR      = 'SteamVR is not on this machine: phase 2 of S50, and parts I11 and OF7 of S72'
+    Session0       = "this battery runs in session 0: S37's Raw Input checks, S50's legacy reader app, S67's WGI readings of the XUSB pad, S70, and sections C and Y of S71"
+    Arm64          = "Windows on ARM64 refuses HIDMaestro's driver package, with which its signing certificate is made: the signing parts of S61"
+}
+
+# What the selected scenarios need that can be staged or set, read the
+# same way. The battery starts no scenario while one is missing.
 function Get-MissingPrerequisites {
+    param([hashtable]$Facts)
     $selected = @($scenarios | Where-Object { $_.Name -like $Filter } | ForEach-Object { $_.Name })
     function Wants([string[]]$Patterns) {
         foreach ($p in $Patterns) { if (@($selected | Where-Object { $_ -like $p }).Count -gt 0) { return $true } }
@@ -3598,78 +3687,28 @@ function Get-MissingPrerequisites {
     $missing = New-Object System.Collections.Generic.List[string]
     $parent = if ($repoRoot) { Split-Path $repoRoot } else { $null }
 
-    # usbip_install_check and uninstall_check find wsb.exe on PATH. A
-    # Windows Sandbox server already running, as an unelevated wsb call
+    # A Windows Sandbox server already running, as an unelevated wsb call
     # leaves one, makes every elevated sandbox start fail.
-    if (Wants 'S73_*', 'S101_*') {
-        if (-not (Get-Command wsb.exe -ErrorAction SilentlyContinue)) {
-            $missing.Add('Windows Sandbox (wsb.exe): S73, and the sandbox part of S101')
-        }
+    if ((Wants 'S73_*', 'S101_*') -and -not $Facts.NoSandbox) {
         foreach ($p in @(Get-Process WindowsSandboxServer -ErrorAction SilentlyContinue)) {
             $missing.Add(('no Windows Sandbox server running: WindowsSandboxServer ({0}) runs, and every elevated sandbox start fails beside an unelevated one: S73, S101' -f $p.Id))
         }
     }
 
-    # Raw Input lists no device in session 0, where a battery started over
-    # SSH runs, and session 0 has no display for SteamVR's compositor and
-    # no explorer.exe to take a user's token from.
-    $session = (Get-Process -Id $PID).SessionId
-    if ($session -eq 0) {
-        if (Wants 'S37_*', 'S50_*', 'S70_*', 'S71_*') {
-            $missing.Add("a desktop session: this battery runs in session 0: S37's Raw Input checks, S50's legacy reader app, S70, and sections C and Y of S71")
-        }
-    } elseif ((Wants 'S71_*') -and -not @(Get-Process explorer -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $session }).Count) {
-        $missing.Add("a signed-in user: no explorer.exe in this battery's session: section Y of S71")
-    }
-
-    # valve_steam_check and switch2_composite_check: steam.exe in either
-    # Program Files folder.
-    $steam = @('C:\Program Files (x86)\Steam', 'C:\Program Files\Steam' | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'steam.exe') })
-    if ((Wants 'S54_*', 'S65_*') -and $steam.Count -eq 0) {
-        $missing.Add('the Steam client (steam.exe under Program Files): S54, and the Steam part of S65')
-    }
-
-    # valve_firmware_check: hardwareupdater.exe beside the file the
-    # 2026 Steam Controller's steamUpdater value source names, under the
-    # first of its roots that exists (ValueSources.Locate).
-    if (Wants 'S62_*') {
-        $roots = New-Object System.Collections.Generic.List[string]
-        foreach ($r in @(@('HKCU:\Software\Valve\Steam', 'SteamPath'), @('HKLM:\SOFTWARE\WOW6432Node\Valve\Steam', 'InstallPath'))) {
-            try {
-                $v = (Get-ItemProperty -LiteralPath $r[0] -Name $r[1] -ErrorAction Stop).($r[1])
-                if ($v -is [string] -and $v.Trim()) { $roots.Add([IO.Path]::GetFullPath($v)) }
-            } catch {}
-        }
-        $roots.Add((Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Steam'))
-        $root = $roots | Where-Object { Test-Path -LiteralPath $_ -PathType Container } | Select-Object -First 1
-        if (-not $root -or -not (Test-Path -LiteralPath (Join-Path $root 'bin\hardwareupdater\hardwareupdater.exe'))) {
-            $missing.Add("Steam's hardware updater (bin\hardwareupdater\hardwareupdater.exe under Steam): S62")
-        }
-    }
-
-    # HMVR.SteamVRPath (VrDriverBuilder.FindSteamVR): the first of these
-    # folders that holds bin\win64\vrpathreg.exe.
-    if (Wants 'S50_*', 'S72_*') {
-        $vr = New-Object System.Collections.Generic.List[string]
-        foreach ($r in @(@('HKLM:\SOFTWARE\HIDMaestro', 'SteamVRPath', ''),
-                          @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Steam App 250820', 'InstallLocation', ''),
-                          @('HKLM:\SOFTWARE\WOW6432Node\Valve\Steam', 'InstallPath', 'steamapps\common\SteamVR'))) {
-            try {
-                $v = (Get-ItemProperty -LiteralPath $r[0] -Name $r[1] -ErrorAction Stop).($r[1])
-                if ($v -is [string] -and $v) { $vr.Add($(if ($r[2]) { Join-Path $v $r[2] } else { $v })) }
-            } catch {}
-        }
-        $vr.Add('C:\SteamVR')
-        if (-not ($vr | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'bin\win64\vrpathreg.exe') })) {
-            $missing.Add("SteamVR (bin\win64\vrpathreg.exe): phase 2 of S50, and part I11 of S72")
-        }
+    # Where Windows Sandbox is not, S101's removal runs as its fixture part,
+    # which removes HIDMaestro for real and installs it again, only when
+    # asked to.
+    if ((Wants 'S101_*') -and $Facts.NoSandbox -and $env:HIDMAESTRO_UNINSTALL_FIXTURE -ne '1') {
+        $missing.Add('HIDMAESTRO_UNINSTALL_FIXTURE=1, since this machine has no Windows Sandbox and the fixture part of S101 runs the removal here')
     }
 
     # driver_catalog_check signs with AuthenticodeSigner.SelectCertificate:
     # a certificate in LocalMachine\My whose subject is exactly
     # CN=HIDMaestroTestCert, with its private key, valid now, that allows
-    # code signing (no enhanced key usage, or one that names it).
-    if (Wants 'S61_*') {
+    # code signing (no enhanced key usage, or one that names it). HIDMaestro
+    # makes it when its driver package installs, which Windows on ARM64
+    # refuses.
+    if ((Wants 'S61_*') -and -not $Facts.Arm64) {
         $now = Get-Date
         $cert = @(Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue | Where-Object {
             $eku = @($_.Extensions | Where-Object { $_ -is [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension] } | Select-Object -First 1)
@@ -3677,14 +3716,14 @@ function Get-MissingPrerequisites {
                 ($eku.Count -eq 0 -or @($eku[0].EnhancedKeyUsages | Where-Object { $_.Value -eq '1.3.6.1.5.5.7.3.3' }).Count -gt 0)
         })
         if ($cert.Count -eq 0) {
-            $missing.Add("HIDMaestro's signing certificate (CN=HIDMaestroTestCert with its private key in LocalMachine\My): the signing parts of S61")
+            $missing.Add("HIDMaestro's signing certificate (CN=HIDMaestroTestCert with its private key in LocalMachine\My), made when its driver package installs: the signing parts of S61")
         }
     }
 
     # The SDL builds beside the repository, where each probe looks.
     if ($parent) {
         $sdl = Join-Path $parent 'SDL3-build'
-        $release = Join-Path $parent ('SDL3-release-3.4.18' + $(if ((Get-MachineArch) -eq 'arm64') { '-arm64' } else { '' }))
+        $release = Join-Path $parent ('SDL3-release-3.4.18' + $(if ($Facts.Arm64) { '-arm64' } else { '' }))
         # AnyOf: one of the paths is enough. AllOf: every path must be there.
         $needs = @(
             @{ Want = @('S48_*', 'S100_*'); AnyOf = @((Join-Path $sdl 'SDL3.dll'), (Join-Path $sdl 'build\Release\SDL3.dll')); AllOf = @()
@@ -3709,15 +3748,23 @@ function Get-MissingPrerequisites {
     return , $missing
 }
 
-$missingPrereqs = Get-MissingPrerequisites
+$script:MachineFacts = Get-MachineFacts
+$missingPrereqs = Get-MissingPrerequisites -Facts $script:MachineFacts
 if ($missingPrereqs.Count -gt 0) {
     Write-Host ''
     Write-Host 'This machine lacks what the selected scenarios need, so no scenario runs:' -ForegroundColor Red
     foreach ($m in $missingPrereqs) { Write-Host ('  - ' + $m) -ForegroundColor Red }
-    Write-Host '  Supply each one, or select only the scenarios this machine can run in full (-Filter).' -ForegroundColor Yellow
+    Write-Host '  Stage or set each one, or select only the scenarios this machine can run (-Filter).' -ForegroundColor Yellow
     exit 2
 }
 Write-Host 'Prerequisites: every selected scenario has what it needs on this machine.'
+$notHere = @($script:NotQualifyingParts.Keys | Where-Object { $script:MachineFacts[$_] })
+if ($notHere.Count -eq 0) {
+    Write-Host 'Qualifying: every scenario part qualifies on this machine.'
+} else {
+    Write-Host 'Not qualifying on this machine, so their skip lines pass and the summary lists them apart:'
+    foreach ($k in $notHere) { Write-Host ('  * ' + $script:NotQualifyingParts[$k]) }
+}
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
 
@@ -3795,7 +3842,7 @@ Write-Host ''
 Write-Host ('  {0}/{1} PASSED, {2} FAILED, {3:N1}s total' -f $passed.Count, $results.Count, $failed.Count, ($totalSw.Elapsed.TotalSeconds))
 Write-Host ''
 if ($script:ByDesignTaken.Count -gt 0) {
-    Write-Host ('  Skipped by design ({0}): parts for another backend, architecture or driver policy, or for a state the battery must not change' -f $script:ByDesignTaken.Count)
+    Write-Host ('  Not run ({0}): parts by design for another backend, architecture or driver policy or a state the battery must not change, and parts that do not qualify on this machine' -f $script:ByDesignTaken.Count)
     foreach ($t in $script:ByDesignTaken) { Write-Host ('    ' + $t) -ForegroundColor DarkYellow }
     Write-Host ''
 }
