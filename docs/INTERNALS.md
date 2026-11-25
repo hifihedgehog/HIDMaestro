@@ -291,6 +291,8 @@ The rest holds the release frames, as the acknowledgement keeps them but 32 of t
 
 On the Celeron, the Ryzen desktop and the Surface, a 1024-byte report reads back byte for byte on both backends and a 1025-byte one is refused, three contacts on the Elan screen read back in its full 116-byte report, and on USB/IP HID class's interrupt reads ask for the whole report. On the Celeron's UMDF2, the Elan screen's 116-byte release frame and a ten-contact hybrid release of ten frames were served, every one, and a keyboard program built on the 2.3.0 SDK holding Left Shift took the acknowledgement's release from this driver.
 
+The end of the path is Windows' pointer stack, which no reader of HID class shows. `digitizer_check observe` runs beside an observer in the signed-in user's session (`observer\observer.ps1`) that records the cursor every 10 ms and the pointer device list. On the Surface over USB/IP, the list gained the virtual pen 56 ms after it was created, the cursor went to the pen's place 16 ms after it went in range and followed its move 15 ms after, and the Elan screen appeared as a ten-contact touch device. One tap on bare desktop, at 80% and 40% of the screen, moved the cursor to that point 87 ms after the contact went down.
+
 ### Programs Side by Side
 
 Several programs that embed HIDMaestro share one machine. Through v1.12.0 every machine-wide name was keyed by a controller index that each program numbered for itself, so two programs that each created a first controller wrote the same sections and registry keys, and a driver deploy or sweep in one removed what the other used. The design note, [docs/design/coexistence.md](design/coexistence.md), has the measurements, the rejected alternatives and the sources behind each choice below.
