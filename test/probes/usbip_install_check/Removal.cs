@@ -401,10 +401,25 @@ internal static partial class Program
         Record("remove: with no record, the host controller, its package, the Apps entry and the folder are kept, and say why",
                Has(kept, "devnode", l => l.StartsWith(hc + " "), "Kept", "no install record") && Has(kept, "driver package", l => l.StartsWith(oem + " "), "Kept")
                && Has(kept, "Apps entry", _ => true, "Kept") && Has(kept, "folder", l => l.Equals(InstallDir, StringComparison.OrdinalIgnoreCase), "Kept"));
-        Record("remove: and the only change is HIDMaestro's stamp, taken off the host controller",
-               kept.All(e => e.Outcome is "Kept" || (e.Kind == "hardware id" && e.Outcome == "Removed") || (e.Kind == "folder" && e.Outcome == "Removed" && !e.Location.Equals(InstallDir, StringComparison.OrdinalIgnoreCase)))
-               && Pnp.HardwareIds(hc).SequenceEqual(new[] { UdeHardwareId }, StringComparer.OrdinalIgnoreCase),
-               string.Join(";", Pnp.HardwareIds(hc)));
+        // HIDMaestro's root hub filter is HIDMaestro's alone by its service
+        // name, so it goes although the host controller stays: its hub
+        // entry, its service and image (at the next start while the hub runs
+        // it) and the hub restart note.
+        bool OwnFilterEntry(Entry e) =>
+            (e.Kind == "registry key" && e.Location.Equals(@"HKLM\SOFTWARE\HIDMaestroUsbipHubRestart", StringComparison.OrdinalIgnoreCase) && e.Outcome == "Removed")
+            || (e.Kind == "upper filter" && e.Location.EndsWith(", UpperFilters " + OwnFilter, StringComparison.OrdinalIgnoreCase) && e.Outcome == "Removed")
+            || (e.Kind == "service" && e.Location.Equals(OwnFilter, StringComparison.OrdinalIgnoreCase) && e.Outcome is "Removed" or "RemovedAtRestart")
+            || (e.Kind == "file" && Path.GetFileName(e.Location).StartsWith(OwnFilter + "_", StringComparison.OrdinalIgnoreCase) && e.Outcome is "Removed" or "RemovedAtRestart");
+        var stray = kept.Where(e => e.Outcome != "Kept" && !OwnFilterEntry(e)
+                                    && !(e.Kind == "hardware id" && e.Outcome == "Removed")
+                                    && !(e.Kind == "folder" && e.Outcome == "Removed" && !e.Location.Equals(InstallDir, StringComparison.OrdinalIgnoreCase))).ToList();
+        Record("remove: and the only changes are HIDMaestro's own: its stamp, taken off the host controller, its staging folder and its root hub filter",
+               stray.Count == 0 && Pnp.HardwareIds(hc).SequenceEqual(new[] { UdeHardwareId }, StringComparer.OrdinalIgnoreCase),
+               string.Join(";", Pnp.HardwareIds(hc)) + (stray.Count == 0 ? "" : "; also " + string.Join("; ", stray)));
+        var listing = Pnp.RootHubs().Where(id => Pnp.UpperFilters(id).Contains(OwnFilter, StringComparer.OrdinalIgnoreCase)).ToList();
+        Record($"remove: and {OwnFilter} goes with it: no root hub record lists it, and its service is deleted or marked for deletion",
+               listing.Count == 0 && kept.Any(e => e.Kind == "service" && e.Location.Equals(OwnFilter, StringComparison.OrdinalIgnoreCase) && e.Outcome is "Removed" or "RemovedAtRestart"),
+               string.Join("; ", listing.Concat(kept.Where(e => e.Location.Contains(OwnFilter, StringComparison.OrdinalIgnoreCase)).Select(e => e.ToString()))));
         Record("remove: the host controller still answers", Answers());
         string afterKept = Snapshot();
         Record("remove: the host controller, package, Apps entry and folder are as they were, apart from the stamp",
