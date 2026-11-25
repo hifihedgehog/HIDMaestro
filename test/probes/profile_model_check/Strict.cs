@@ -747,7 +747,7 @@ internal static class Strict
         Create("no descriptor", Copy(p => p.Descriptor = null), "$.descriptor");
         Create("an extended report too large for the lane", Copy(p => p.ExtendedReport = new ExtendedReportSpec
         {
-            ReportId = "0x01", Size = 200, AlwaysArmed = true,
+            ReportId = "0x01", Size = SharedMemoryIO.WIDE_FRAME_CAP + 1, AlwaysArmed = true,
         }), "$.extendedReport");
 
         c.Run("HMProfileBuilder.Build on a descriptor that is not hex throws HMProfileException at $.descriptor", () =>
