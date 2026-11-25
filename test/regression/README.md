@@ -126,30 +126,48 @@ another architecture.
 
 ## Expected skips
 
-A scenario whose probe finds a condition missing prints `[SKIP]` and,
-under it, the probe's own line naming that condition. These are the
-conditions, the scenarios they skip, and the three machines the release
-gate runs on: a Lenovo Legion Pro 7 16AFR10H laptop (AMD Ryzen 9
-9955HX3D, Windows 11 IoT Enterprise LTSC, x64), a MeLE PCG02 GLE stick
-PC (Intel Celeron J4125, Windows 10 IoT Enterprise LTSC, x64) and a
-Microsoft Surface Pro for Business, 12-inch (2nd Edition) (Qualcomm
-Snapdragon X2 Plus, Windows 11 Pro, ARM64), the last two driven over
-SSH.
+A probe that leaves a part unrun prints `[SKIP]`, `[LIMIT]` or `SKIP:` and
+the condition in its own words. The battery judges every such line. A skip
+the table below names for its scenario is by design: it prints with its
+reason, and the summary lists it apart from the passes. Any other skip
+fails its scenario, as a failure does, since a part that did not run
+measured nothing.
 
-| Condition | What skips | Laptop | Celeron | Surface |
-|---|---|---|---|---|
-| No Steam client installed | `S54_Valve_Steam`, `S62_Valve_Firmware`, and the Steam part of `S65_Switch2_Composite` | runs | skips | skips |
-| Session 0, as over SSH, where Raw Input lists no device | `S70_Kbm_Raw_Input`, the two Raw Input checks of microsoft-designer-keyboard in `S37_Layout_Audit_Check`, and the legacy reader app of `S50_Vr_Controller_Smoke` | runs | skips | skips |
-| No user signed in | sections C and Y of `S71_Coexistence` | runs | skips | skips |
-| Windows Sandbox not available | `S73_Usbip_Clean_Install`, and the sandbox part of `S101_Uninstall` | runs | skips | skips |
-| Windows Sandbox available, or `HIDMAESTRO_UNINSTALL_FIXTURE` not 1 | the fixture part of `S101_Uninstall` | skips | runs with the variable set | skips |
-| SteamVR not installed | phase 2 of `S50_Vr_Controller_Smoke` | runs | runs | skips |
-| Windows installs HIDMaestro's driver package | the refusing-machine part of `S104_Driver_Signing` | skips | skips | runs |
-| The Xbox 360 pad runs on USB/IP, and WGI gives the probe's process no reading of the pad Windows' xusb22 drives, as over SSH on the Surface | WGI's readings of that pad in `S67_Wgi_Mapping` (its listing and an XInput read of the feed run) | runs | runs | skips |
-| The machine's backend is USB/IP, where this SDK installs no driver package (the Surface, or `-Backend Usbip`) | sections E, F, M, N, O, P, Q, R, S, T and Y and part W8 of `S71_Coexistence`, section I of `S72_Protected_Staging`, the UMDF2 removal checks of `S87_Interop_Decl`'s live run (its USB/IP checks run instead), and section J and parts W5, W6 and W11 to W13 of S71 where Windows refuses the package | runs | runs, skips with `-Backend Usbip` (J and the W parts run) | skips |
+Before the first scenario, the battery checks what the selected scenarios
+need from the machine, each the way its probe looks for it, and starts
+nothing while one is missing:
 
-Any other skip on these machines is a fault of the machine's setup or of
-the scenario, and is read and fixed like a failure.
+- Windows Sandbox (`wsb.exe`), with no sandbox server already running:
+  `S73_Usbip_Clean_Install` and the sandbox part of `S101_Uninstall`.
+- A desktop session, since Raw Input lists no device in session 0, where a
+  battery started over SSH runs: the two Raw Input checks of
+  microsoft-designer-keyboard in `S37_Layout_Audit_Check`, the legacy
+  reader app of `S50_Vr_Controller_Smoke`, `S70_Kbm_Raw_Input`, and
+  sections C and Y of `S71_Coexistence`, whose section Y also needs a
+  signed-in user.
+- The Steam client, for `S54_Valve_Steam` and the Steam part of
+  `S65_Switch2_Composite`, and Steam's hardware updater, for
+  `S62_Valve_Firmware`.
+- SteamVR: phase 2 of `S50_Vr_Controller_Smoke` and part I11 of
+  `S72_Protected_Staging`.
+- HIDMaestro's signing certificate in `LocalMachine\My`, for the signing
+  parts of `S61_Driver_Catalog`.
+- The SDL builds beside the repository: `SDL3-build` (S48, S100), its
+  `build-stock` (S53, S55, S63, S64), `build-unfiltered` (S65) and
+  `build-unfiltered-91e1a5a` (S103), and `SDL3-release-3.4.18`, with
+  `-arm64` on ARM64 (S108, S112, S115).
+
+`-Filter` selects the scenarios a machine can run in full.
+
+| By-design skip | What skips | Where |
+|---|---|---|
+| The part needs the UMDF2 backend or HIDMaestro's driver packages | sections E, F, M, N, O, P, Q, R, S, T, U, Y and Z2 and part W8 of `S71_Coexistence`, section I of `S72_Protected_Staging`, the removal checks of `S77_Pnp_Notify`, and the UMDF2 removal checks of `S87_Interop_Decl`'s live run (its USB/IP checks run instead) | a USB/IP backend: ARM64, or `-Backend Usbip` |
+| The part needs a package Windows on ARM64 refuses | section J, parts W5, W6 and W11 to W13, and parts Z9, Ze and Zf of `S71_Coexistence` | ARM64 |
+| The JIT on ARM64 shows a kernel or Run called from BuildNext only once that call has run | the `[LIMIT]` of `S94_Program_Equivalence`, whose NativeAOT part reads every path | ARM64 |
+| An unregister with no `HKLM\SOFTWARE\HIDMaestro` runs where HIDMaestro's driver never made the key | one check of `S68_Vr_Driver_Conflict` | x64 |
+| The part is for the other driver policy | `S104_Driver_Signing`: the refusing-machine part where Windows installs HIDMaestro's driver package, and the installed-catalog part where it refuses it | every machine, one part each |
+| Windows Sandbox is available, so the removal runs inside it | the fixture part of `S101_Uninstall` | machines with Windows Sandbox |
+| GameInput's key for 054C:0CE6 holds `HapticFeedback = DS5`, which the battery never edits | the two listing checks of `S67_Wgi_Mapping` | where GameInput wrote that value |
 
 ## Why elevated
 

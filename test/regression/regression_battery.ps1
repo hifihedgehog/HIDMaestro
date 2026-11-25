@@ -22,7 +22,12 @@
   appeared prints [RERUN] and runs again once it has gone
   (HMForeign.cs). Load and other programs never hold a scenario back.
 
-  Exit code: 0 if every scenario PASSED, 1 if any scenario FAILED.
+  A skip that test\regression\README.md does not list as by design
+  fails its scenario, and the battery starts no scenario while the
+  machine lacks what a selected one needs ("Expected skips").
+
+  Exit code: 0 if every scenario PASSED, 1 if any scenario FAILED, 2 if
+  the machine lacks what a selected scenario needs and none ran.
 
 .PARAMETER Exe
   Path to HIDMaestroTest.exe. Defaults to the Release build relative
@@ -983,6 +988,8 @@ function Test-Scenario {
 
     Write-Host ''
     Write-Host ('=== ' + $Name + ' ===') -ForegroundColor Cyan
+    # The scenario a probe's skip lines are judged against (Assert-ProbeSkips).
+    $script:CurrentScenario = $Name
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     [HMForeign]::Watch($PID)
 
@@ -1140,30 +1147,100 @@ function Wait-ProbeExit {
     }
 }
 
-# The probe's own [SKIP] lines, each the condition the probe found, so a
-# skip in the log reads as what this machine lacks, in the probe's words,
-# and its [LIMIT] lines, each a part that reads less on this machine than
-# on another, in the same words.
-function Write-ProbeSkips {
+# The skips a scenario takes by design: parts written for another backend,
+# architecture or driver policy, or for a state the battery must not change,
+# each named by the condition its probe prints. Pattern is matched from the
+# start of the line's text, after its [SKIP], [LIMIT] or SKIP: marker. Any
+# other skip fails its scenario, since a part that did not run measured
+# nothing (README.md, "Expected skips").
+$script:ByDesignSkips = @(
+    @{ Scenario = 'S67_Wgi_Mapping'; Pattern = "the listing checks: GameInput's key for 054C:0CE6 holds HapticFeedback = DS5,"
+       Why = "GameInput's own key, which the battery never edits" }
+    @{ Scenario = 'S68_Vr_Driver_Conflict'; Pattern = 'an unregister with no HKLM\\SOFTWARE\\HIDMaestro: the key is there$'
+       Why = "it runs where HIDMaestro's driver never made the key, as on ARM64" }
+    @{ Scenario = 'S71_Coexistence'; Pattern = "[A-Z][0-9a-z]?: .*this machine's backend is USB/IP, where this SDK installs no HIDMaestro driver package$"
+       Why = 'a part of the UMDF2 backend' }
+    @{ Scenario = 'S71_Coexistence'; Pattern = '(U: the v1\.12\.0 race|W8): the create runs on USB/IP, which maps its input section without passing the UMDF2 create'
+       Why = 'a part of the UMDF2 backend' }
+    @{ Scenario = 'S71_Coexistence'; Pattern = "(J|W5, W6|W11, W12, W13): the v1\.12\.0 and v1\.11\.0 programs run only on HIDMaestro's UMDF2 driver, which Windows on this machine does not install$"
+       Why = "a part of HIDMaestro's UMDF2 driver, which Windows on ARM64 refuses" }
+    @{ Scenario = 'S71_Coexistence'; Pattern = "Z2: the deploy gate is the one every UMDF2 create passes, and this machine's creates run on USB/IP$"
+       Why = 'a part of the UMDF2 backend' }
+    @{ Scenario = 'S71_Coexistence'; Pattern = "Z[9ef]: the part tests HIDMaestro's WinUSB package against input\.inf, and Windows on this machine refuses the package,"
+       Why = "a part of HIDMaestro's WinUSB package, which Windows on ARM64 refuses" }
+    @{ Scenario = 'S72_Protected_Staging'; Pattern = "I: a deploy stages HIDMaestro's driver payload and hmswd\.exe, and this machine's backend is USB/IP,"
+       Why = 'a part of the UMDF2 backend' }
+    @{ Scenario = 'S77_Pnp_Notify'; Pattern = "[a-z0-9-]+: (the SDK's removal test: on USB/IP the Dispose unplugs the device|a child's REMOVED before RemoveDevice let the PnP lock go: on USB/IP no RemoveDevice runs)"
+       Why = 'a part of the UMDF2 backend' }
+    @{ Scenario = 'S87_Interop_Decl'; Pattern = 'DifRemoveDevice and the record a UMDF2 dispose leaves: the controller ran on USB/IP$'
+       Why = 'a part of the UMDF2 backend' }
+    @{ Scenario = 'S94_Program_Equivalence'; Pattern = 'inline, JIT on ARM64:'
+       Why = 'what the JIT shows on ARM64. The NativeAOT part reads every path' }
+    @{ Scenario = 'S101_Uninstall'; Pattern = 'Windows Sandbox is available here, so the real removal runs only inside it\.$'
+       Why = 'the fixture part stands in for Windows Sandbox where there is none' }
+    @{ Scenario = 'S104_Driver_Signing'; Pattern = "Windows installs HIDMaestro's driver on this machine\.$"
+       Why = "the part for a machine whose Windows refuses HIDMaestro's driver package" }
+    @{ Scenario = 'S104_Driver_Signing'; Pattern = 'The driver store holds no HIDMaestro catalog\.$'
+       Why = "the part for a machine whose Windows installs HIDMaestro's driver package" }
+)
+# The by-design skips this run took, for the summary.
+$script:ByDesignTaken = New-Object System.Collections.Generic.List[string]
+$script:CurrentScenario = ''
+
+# Each line of a probe's transcript that starts with [SKIP], [LIMIT] or
+# SKIP:, the probe's own words for a part it did not run, or ran with less
+# than another machine gives it. A [NOTE] that quotes one, as S73 quotes
+# the probes it runs inside Windows Sandbox, is not one.
+function Get-ProbeSkips {
     param([string]$Out)
-    if (-not $Out -or -not (Test-Path $Out)) { return }
-    foreach ($l in @(Get-Content $Out -ErrorAction SilentlyContinue)) {
-        if ($l -match '\[SKIP\]|\[LIMIT\]') { Write-Host ('      ' + $l.Trim()) -ForegroundColor Yellow }
+    if (-not $Out -or -not (Test-Path $Out)) { return @() }
+    @(foreach ($l in @(Get-Content $Out -ErrorAction SilentlyContinue)) {
+        if ($l -match '^\s*(\[SKIP\]|\[LIMIT\]|SKIP:)\s*(.*)$') {
+            [PSCustomObject]@{ Line = $l.Trim(); Text = $Matches[2].Trim() }
+        }
+    })
+}
+
+# Prints each skip line a probe wrote, and fails the scenario on any that
+# the by-design list does not name for it. A skip exit with no skip line
+# fails it too, since nothing says what did not run.
+function Assert-ProbeSkips {
+    param([string]$Out, [string]$Exe, [bool]$SkipExit, [int]$ExitCode)
+    $unexpected = New-Object System.Collections.Generic.List[string]
+    $skips = @(Get-ProbeSkips $Out)
+    foreach ($s in $skips) {
+        $entry = $script:ByDesignSkips | Where-Object {
+            $script:CurrentScenario -like $_.Scenario -and $s.Text -match ('^' + $_.Pattern)
+        } | Select-Object -First 1
+        if ($entry) {
+            Write-Host ('      ' + $s.Line) -ForegroundColor DarkYellow
+            Write-Host ('        by design: ' + $entry.Why) -ForegroundColor DarkYellow
+            $script:ByDesignTaken.Add($script:CurrentScenario + ': ' + $s.Line)
+        } else {
+            Write-Host ('      ' + $s.Line) -ForegroundColor Red
+            $unexpected.Add($s.Line)
+        }
+    }
+    if ($SkipExit -and $skips.Count -eq 0) { $unexpected.Add('exit ' + $ExitCode + ' with no skip line') }
+    if ($unexpected.Count -gt 0) {
+        Write-Host ('    full transcript: ' + $Out) -ForegroundColor Yellow
+        throw ($Exe + ' did not run what this machine must run: ' + ($unexpected -join ' | '))
     }
 }
 
 # What Invoke-Probe does once the probe has exited: a skip code prints
-# [SKIP] and the probe's own skip lines, an exit of 0 prints the skip lines
-# of the parts the probe skipped, and any other exit prints the probe's
-# [FAIL] lines, or its tail, and throws.
+# [SKIP] and judges the probe's own skip lines, an exit of 0 judges the
+# skip lines of the parts the probe skipped, and any other exit prints the
+# probe's [FAIL] lines, or its tail, and throws. A skip the by-design list
+# does not name throws as a failure does.
 function Resolve-ProbeExit {
     param([int]$ExitCode, [string]$Out, [string]$Exe, [string]$Message, [int[]]$SkipCodes = @())
     if ($SkipCodes -contains $ExitCode) {
         Write-Host ('    [SKIP] probe reported exit ' + $ExitCode) -ForegroundColor Yellow
-        Write-ProbeSkips $Out
+        Assert-ProbeSkips -Out $Out -Exe $Exe -SkipExit $true -ExitCode $ExitCode
         return
     }
-    if ($ExitCode -eq 0) { Write-ProbeSkips $Out }
+    if ($ExitCode -eq 0) { Assert-ProbeSkips -Out $Out -Exe $Exe -SkipExit $false -ExitCode 0 }
     if ($ExitCode -ne 0) {
         if (Test-Path $Out) {
             $lines = @(Get-Content $Out -ErrorAction SilentlyContinue)
@@ -3508,6 +3585,140 @@ $scenarios = @(
     @{ Name = 'S116_Digitizer';                  Body = ${function:Scenario-Digitizer} }
 )
 
+# What the selected scenarios need from this machine, each read the way
+# its probe reads it. The battery starts no scenario while one is missing:
+# a part that cannot run measures nothing, and its skip would fail the
+# scenario anyway (Assert-ProbeSkips).
+function Get-MissingPrerequisites {
+    $selected = @($scenarios | Where-Object { $_.Name -like $Filter } | ForEach-Object { $_.Name })
+    function Wants([string[]]$Patterns) {
+        foreach ($p in $Patterns) { if (@($selected | Where-Object { $_ -like $p }).Count -gt 0) { return $true } }
+        return $false
+    }
+    $missing = New-Object System.Collections.Generic.List[string]
+    $parent = if ($repoRoot) { Split-Path $repoRoot } else { $null }
+
+    # usbip_install_check and uninstall_check find wsb.exe on PATH. A
+    # Windows Sandbox server already running, as an unelevated wsb call
+    # leaves one, makes every elevated sandbox start fail.
+    if (Wants 'S73_*', 'S101_*') {
+        if (-not (Get-Command wsb.exe -ErrorAction SilentlyContinue)) {
+            $missing.Add('Windows Sandbox (wsb.exe): S73, and the sandbox part of S101')
+        }
+        foreach ($p in @(Get-Process WindowsSandboxServer -ErrorAction SilentlyContinue)) {
+            $missing.Add(('no Windows Sandbox server running: WindowsSandboxServer ({0}) runs, and every elevated sandbox start fails beside an unelevated one: S73, S101' -f $p.Id))
+        }
+    }
+
+    # Raw Input lists no device in session 0, where a battery started over
+    # SSH runs, and session 0 has no display for SteamVR's compositor and
+    # no explorer.exe to take a user's token from.
+    $session = (Get-Process -Id $PID).SessionId
+    if ($session -eq 0) {
+        if (Wants 'S37_*', 'S50_*', 'S70_*', 'S71_*') {
+            $missing.Add("a desktop session: this battery runs in session 0: S37's Raw Input checks, S50's legacy reader app, S70, and sections C and Y of S71")
+        }
+    } elseif ((Wants 'S71_*') -and -not @(Get-Process explorer -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $session }).Count) {
+        $missing.Add("a signed-in user: no explorer.exe in this battery's session: section Y of S71")
+    }
+
+    # valve_steam_check and switch2_composite_check: steam.exe in either
+    # Program Files folder.
+    $steam = @('C:\Program Files (x86)\Steam', 'C:\Program Files\Steam' | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'steam.exe') })
+    if ((Wants 'S54_*', 'S65_*') -and $steam.Count -eq 0) {
+        $missing.Add('the Steam client (steam.exe under Program Files): S54, and the Steam part of S65')
+    }
+
+    # valve_firmware_check: hardwareupdater.exe beside the file the
+    # 2026 Steam Controller's steamUpdater value source names, under the
+    # first of its roots that exists (ValueSources.Locate).
+    if (Wants 'S62_*') {
+        $roots = New-Object System.Collections.Generic.List[string]
+        foreach ($r in @(@('HKCU:\Software\Valve\Steam', 'SteamPath'), @('HKLM:\SOFTWARE\WOW6432Node\Valve\Steam', 'InstallPath'))) {
+            try {
+                $v = (Get-ItemProperty -LiteralPath $r[0] -Name $r[1] -ErrorAction Stop).($r[1])
+                if ($v -is [string] -and $v.Trim()) { $roots.Add([IO.Path]::GetFullPath($v)) }
+            } catch {}
+        }
+        $roots.Add((Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Steam'))
+        $root = $roots | Where-Object { Test-Path -LiteralPath $_ -PathType Container } | Select-Object -First 1
+        if (-not $root -or -not (Test-Path -LiteralPath (Join-Path $root 'bin\hardwareupdater\hardwareupdater.exe'))) {
+            $missing.Add("Steam's hardware updater (bin\hardwareupdater\hardwareupdater.exe under Steam): S62")
+        }
+    }
+
+    # HMVR.SteamVRPath (VrDriverBuilder.FindSteamVR): the first of these
+    # folders that holds bin\win64\vrpathreg.exe.
+    if (Wants 'S50_*', 'S72_*') {
+        $vr = New-Object System.Collections.Generic.List[string]
+        foreach ($r in @(@('HKLM:\SOFTWARE\HIDMaestro', 'SteamVRPath', ''),
+                          @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Steam App 250820', 'InstallLocation', ''),
+                          @('HKLM:\SOFTWARE\WOW6432Node\Valve\Steam', 'InstallPath', 'steamapps\common\SteamVR'))) {
+            try {
+                $v = (Get-ItemProperty -LiteralPath $r[0] -Name $r[1] -ErrorAction Stop).($r[1])
+                if ($v -is [string] -and $v) { $vr.Add($(if ($r[2]) { Join-Path $v $r[2] } else { $v })) }
+            } catch {}
+        }
+        $vr.Add('C:\SteamVR')
+        if (-not ($vr | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'bin\win64\vrpathreg.exe') })) {
+            $missing.Add("SteamVR (bin\win64\vrpathreg.exe): phase 2 of S50, and part I11 of S72")
+        }
+    }
+
+    # driver_catalog_check signs with AuthenticodeSigner.SelectCertificate:
+    # a certificate in LocalMachine\My whose subject is exactly
+    # CN=HIDMaestroTestCert, with its private key, valid now, that allows
+    # code signing (no enhanced key usage, or one that names it).
+    if (Wants 'S61_*') {
+        $now = Get-Date
+        $cert = @(Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue | Where-Object {
+            $eku = @($_.Extensions | Where-Object { $_ -is [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension] } | Select-Object -First 1)
+            $_.Subject -ceq 'CN=HIDMaestroTestCert' -and $_.HasPrivateKey -and $_.NotBefore -le $now -and $now -le $_.NotAfter -and
+                ($eku.Count -eq 0 -or @($eku[0].EnhancedKeyUsages | Where-Object { $_.Value -eq '1.3.6.1.5.5.7.3.3' }).Count -gt 0)
+        })
+        if ($cert.Count -eq 0) {
+            $missing.Add("HIDMaestro's signing certificate (CN=HIDMaestroTestCert with its private key in LocalMachine\My): the signing parts of S61")
+        }
+    }
+
+    # The SDL builds beside the repository, where each probe looks.
+    if ($parent) {
+        $sdl = Join-Path $parent 'SDL3-build'
+        $release = Join-Path $parent ('SDL3-release-3.4.18' + $(if ((Get-MachineArch) -eq 'arm64') { '-arm64' } else { '' }))
+        # AnyOf: one of the paths is enough. AllOf: every path must be there.
+        $needs = @(
+            @{ Want = @('S48_*', 'S100_*'); AnyOf = @((Join-Path $sdl 'SDL3.dll'), (Join-Path $sdl 'build\Release\SDL3.dll')); AllOf = @()
+               What = 'SDL3-build\SDL3.dll or SDL3-build\build\Release\SDL3.dll: S48, S100' }
+            @{ Want = @('S53_*', 'S55_*', 'S63_*', 'S64_*'); AnyOf = @(); AllOf = @((Join-Path $sdl 'build-stock\Release\SDL3.dll'))
+               What = 'SDL3-build\build-stock\Release\SDL3.dll: S53, S55, S63, S64' }
+            @{ Want = @('S65_*'); AnyOf = @(); AllOf = @((Join-Path $sdl 'build-unfiltered\Release\SDL3.dll'), (Join-Path $sdl 'build-unfiltered\Release\libusb-1.0.dll'))
+               What = 'SDL3-build\build-unfiltered\Release with SDL3.dll and libusb-1.0.dll: S65' }
+            @{ Want = @('S103_*'); AnyOf = @(); AllOf = @((Join-Path $sdl 'build-unfiltered-91e1a5a\Release\SDL3.dll'))
+               What = 'SDL3-build\build-unfiltered-91e1a5a\Release\SDL3.dll: S103' }
+            @{ Want = @('S108_*', 'S112_*', 'S115_*'); AnyOf = @(); AllOf = @((Join-Path $release 'SDL3.dll'))
+               What = ((Split-Path $release -Leaf) + '\SDL3.dll: S108, S112, S115') }
+        )
+        foreach ($n in $needs) {
+            if (-not (Wants $n.Want)) { continue }
+            $met = $true
+            if ($n.AnyOf.Count -gt 0 -and @($n.AnyOf | Where-Object { Test-Path -LiteralPath $_ }).Count -eq 0) { $met = $false }
+            foreach ($f in $n.AllOf) { if (-not (Test-Path -LiteralPath $f)) { $met = $false } }
+            if (-not $met) { $missing.Add('the SDL build ' + $n.What + ' (beside ' + $parent + ')') }
+        }
+    }
+    return , $missing
+}
+
+$missingPrereqs = Get-MissingPrerequisites
+if ($missingPrereqs.Count -gt 0) {
+    Write-Host ''
+    Write-Host 'This machine lacks what the selected scenarios need, so no scenario runs:' -ForegroundColor Red
+    foreach ($m in $missingPrereqs) { Write-Host ('  - ' + $m) -ForegroundColor Red }
+    Write-Host '  Supply each one, or select only the scenarios this machine can run in full (-Filter).' -ForegroundColor Yellow
+    exit 2
+}
+Write-Host 'Prerequisites: every selected scenario has what it needs on this machine.'
+
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
 
 # S73 runs in Windows Sandbox, ten sandboxes one after the other, seven on
@@ -3583,6 +3794,11 @@ foreach ($r in $results) {
 Write-Host ''
 Write-Host ('  {0}/{1} PASSED, {2} FAILED, {3:N1}s total' -f $passed.Count, $results.Count, $failed.Count, ($totalSw.Elapsed.TotalSeconds))
 Write-Host ''
+if ($script:ByDesignTaken.Count -gt 0) {
+    Write-Host ('  Skipped by design ({0}): parts for another backend, architecture or driver policy, or for a state the battery must not change' -f $script:ByDesignTaken.Count)
+    foreach ($t in $script:ByDesignTaken) { Write-Host ('    ' + $t) -ForegroundColor DarkYellow }
+    Write-Host ''
+}
 if ($failed.Count -gt 0) {
     Write-Host '  Diag log: %TEMP%\HIDMaestro\teardown_diag.log' -ForegroundColor Yellow
     Write-Host ''
