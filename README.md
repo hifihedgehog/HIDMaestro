@@ -245,7 +245,7 @@ touch.SubmitTouch(ReadOnlySpan<HMTouchContact>.Empty);   // lifts the contact wh
 - A contact a submit leaves out is lifted where it was. If the consuming process ends with contacts down, however it ends, the UMDF2 driver lifts every one, in as many reports as they take, and lets go of a held touchpad button. `Dispose` sends the same lifts first. On USB/IP the device leaves with the process.
 - A report longer than the input section's 80-byte lane goes whole through a second shared section on both drivers. The Elan screen of the Dell XPS 13 9360 sends 116 bytes, and the ten-contact starter 104. A driver older than 2.4.0 cannot carry them, so the SDK refuses such a report there, and one longer than 1024 bytes anywhere, before any byte goes.
 
-[How this works](docs/INTERNALS.md#touchscreens-touchpads-and-pens).
+Battery scenario S116 packs real touchscreens', touchpads' and pens' descriptors offline, then creates each kind on both backends, reads its reports back through Windows' HID parser and kills a consumer with contacts down. [How this works](docs/INTERNALS.md#touchscreens-touchpads-and-pens).
 
 ---
 

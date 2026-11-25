@@ -3347,6 +3347,36 @@ function Scenario-Identity-Fidelity {
     if ($failed.Count -gt 0) { throw ($failed -join ' AND ') }
 }
 
+# 2.4.0: touchscreens, touchpads and pens (digitizer_check). Offline: the
+# packer over real descriptors read by the probe's own walk, the SDK's three
+# starters and their answers, and the release slots. Live, on each backend:
+# Windows' Device Mode and Input Mode writes, contacts and pen states read
+# back through HidP, a 116-byte report and the 1024-byte lane limit. Kill:
+# the release of contacts a killed consumer left down. A desktop someone is
+# signed in to and using gets contacts in range only, no tip and no click.
+function Scenario-Digitizer {
+    $failed = @()
+    try {
+        Invoke-Probe -Dir 'digitizer_check' -Exe 'DigitizerCheck.exe' -Arguments 'offline' -Tag 'offline' `
+                     -Message 'the touch or pen packer no longer packs a real descriptor as the probe reads it, a starter lost a field or an answer, or the release slots took part of a report (see probe stdout)'
+    } catch { $failed += $_.Exception.Message }
+    $inUse = [bool](query user 2>$null | Select-String -Pattern 'console\s+\d+\s+Active')
+    $hover = if ($inUse) { ' hover' } else { '' }
+    if ($inUse) { Write-Host '    a console session is active: contacts in range only' }
+    $backends = if ((Get-MachineArch) -eq 'arm64' -or $env:HIDMAESTRO_BACKEND -eq 'usbip') { @('usbip') } else { @('umdf2', 'usbip') }
+    foreach ($backend in $backends) {
+        try {
+            Invoke-Probe -Dir 'digitizer_check' -Exe 'DigitizerCheck.exe' -Arguments "live $backend$hover" -Tag "live-$backend" -SkipCodes @(2) `
+                         -Message "a touchscreen, touchpad or pen on $backend no longer reaches Windows as one, or its reports no longer read back whole (see probe stdout)"
+        } catch { $failed += $_.Exception.Message }
+        try {
+            Invoke-Probe -Dir 'digitizer_check' -Exe 'DigitizerCheck.exe' -Arguments "kill $backend$hover" -Tag "kill-$backend" -SkipCodes @(2) `
+                         -Message "contacts a killed consumer left down on $backend are no longer released whole, or its device stays (see probe stdout)"
+        } catch { $failed += $_.Exception.Message }
+    }
+    if ($failed.Count -gt 0) { throw ($failed -join ' AND ') }
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -3465,7 +3495,8 @@ $scenarios = @(
     @{ Name = 'S112_Standard_Axes';              Body = ${function:Scenario-Standard-Axes} },
     @{ Name = 'S113_Bluetooth_Xbox_Hid';         Body = ${function:Scenario-Bluetooth-Xbox-Hid} },
     @{ Name = 'S114_Create_Stands';              Body = ${function:Scenario-Create-Stands} },
-    @{ Name = 'S115_Identity_Fidelity';          Body = ${function:Scenario-Identity-Fidelity} }
+    @{ Name = 'S115_Identity_Fidelity';          Body = ${function:Scenario-Identity-Fidelity} },
+    @{ Name = 'S116_Digitizer';                  Body = ${function:Scenario-Digitizer} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
