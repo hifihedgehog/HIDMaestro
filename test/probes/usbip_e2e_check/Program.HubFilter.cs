@@ -22,7 +22,7 @@ using NAudio.CoreAudioApi;
 
 internal static partial class Program
 {
-    internal readonly record struct Drain(int Buffer, int Events, int Steady, int One, int Full, string Histogram);
+    internal readonly record struct Drain(int Buffer, int Period, int Events, int Steady, int One, int Full, string Histogram);
 
     /// <summary>Render silence to <paramref name="render"/> for
     /// <paramref name="length"/> and read the padding at every event. The
@@ -63,7 +63,7 @@ internal static partial class Program
             // buffer less that, within an eighth of a period.
             int period = (int)Math.Round(ac.DefaultDevicePeriod * ac.MixFormat.SampleRate / 10_000_000.0);
             int one = steady.Count(p => Math.Abs(p - (buffer - period)) <= period / 8);
-            return new(buffer, padding.Count, steady.Count, one, steady.Count(p => p == buffer), hist);
+            return new(buffer, period, padding.Count, steady.Count, one, steady.Count(p => p == buffer), hist);
         }
         finally { ac.Dispose(); }
     }

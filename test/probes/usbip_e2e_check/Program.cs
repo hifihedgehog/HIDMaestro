@@ -412,7 +412,7 @@ internal static partial class Program
                 // takes one at most, so the two counts are compared, not
                 // either one against a fixed share.
                 var drain = DrainCadence(render, TimeSpan.FromSeconds(8));
-                Console.WriteLine($"  [diag] drain: buffer {drain.Buffer} frames, {drain.Events} events, padding {drain.Histogram}");
+                Console.WriteLine($"  [diag] drain: buffer {drain.Buffer} frames, period {drain.Period} frames, {drain.Events} events, padding {drain.Histogram}");
                 Check("Windows takes the speaker stream one period at a time, not in 20 ms pairs",
                       drain.Steady >= 200 && drain.One > drain.Full,
                       $"one period taken at {drain.One}, full buffer at {drain.Full}, of {drain.Steady} events");
