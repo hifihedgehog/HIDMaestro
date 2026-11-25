@@ -177,6 +177,8 @@ internal static class Rules
     {
         new(new[] { "HatSwitch" }, new[] { @"sdk\HIDMaestro.Core\Internal\HidReportBuilder.cs" },
             "the HID usage Hat Switch (Generic Desktop 0x39), as linux-hid-ref drivers/hid/hid-bigbenff.c:136 names it"),
+        new(new[] { "TipSwitch", "BarrelSwitch" }, new[] { @"sdk\HIDMaestro.Core\Internal\DigitizerPacker.cs" },
+            "the HID usages Tip Switch and Barrel Switch (Digitizers 0x42 and 0x44), as linux-hid-ref drivers/hid/hid-multitouch.c:1796-1797 names them (HID_DG_TIPSWITCH, HID_DG_BARRELSWITCH)"),
         new(new[] { "SafetySwitch", "ActuatorOverrideSwitch" }, new[] { @"sdk\HIDMaestro.Core\HMPidState.cs" },
             "flags of the PID State report, named for their HID PID usages (HMPidState.cs:42, 45)"),
         new(new[] { "ProfileSwitch" }, new[] { @"sdk\HIDMaestro.Core\HMLayout.cs" },
