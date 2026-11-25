@@ -3360,7 +3360,16 @@ function Scenario-Digitizer {
         Invoke-Probe -Dir 'digitizer_check' -Exe 'DigitizerCheck.exe' -Arguments 'offline' -Tag 'offline' `
                      -Message 'the touch or pen packer no longer packs a real descriptor as the probe reads it, a starter lost a field or an answer, or the release slots took part of a report (see probe stdout)'
     } catch { $failed += $_.Exception.Message }
-    $inUse = [bool](query user 2>$null | Select-String -Pattern 'console\s+\d+\s+Active')
+    # With no one signed in, query user writes "No User exists for *" to
+    # stderr and exits 1, which the script's 'Stop' preference turns into a
+    # terminating error in Windows PowerShell 5.1. Nobody signed in means no
+    # console in use.
+    $inUse = $false
+    $eap = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $inUse = [bool](query user 2>$null | Select-String -Pattern 'console\s+\d+\s+Active')
+    } finally { $ErrorActionPreference = $eap }
     $hover = if ($inUse) { ' hover' } else { '' }
     if ($inUse) { Write-Host '    a console session is active: contacts in range only' }
     $backends = if ((Get-MachineArch) -eq 'arm64' -or $env:HIDMAESTRO_BACKEND -eq 'usbip') { @('usbip') } else { @('umdf2', 'usbip') }
