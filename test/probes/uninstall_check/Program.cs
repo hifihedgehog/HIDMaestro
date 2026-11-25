@@ -111,6 +111,10 @@ internal static partial class Program
 
     static string ToolPath => Path.Combine(AppContext.BaseDirectory, "tool", "HIDMaestroUninstall.exe");
 
+    /// <summary>The record of the USB/IP host controller HIDMaestro
+    /// installed.</summary>
+    const string UsbipInstallRecordKey = @"HKLM\SOFTWARE\HIDMaestroUsbip";
+
     // ── preview ────────────────────────────────────────────────────────
 
     static int PreviewPart()
@@ -155,11 +159,18 @@ internal static partial class Program
                       tool.Entries.Any(e => e.Kind == "folder" && e.Location.StartsWith(Inventory.ProgramFilesFolder, StringComparison.OrdinalIgnoreCase)));
             // HIDMaestro's USB/IP root hub filter, where the snapshot finds
             // it: each hub that lists it, the service, each image and the
-            // note of this session's hub restarts.
+            // note of this session's hub restarts. A service an earlier
+            // removal marked for deletion, and an image it queued for
+            // Windows' next start, are listed as kept.
             var filterPieces = HubFilterPieces(before);
             if (filterPieces.Count > 0)
             {
-                var unlisted = filterPieces.Where(x => !tool.Entries.Any(e => e.Kind == x.Kind && e.Outcome == "WouldRemove"
+                var queued = Inventory.PendingDeletes();
+                bool marked = Inventory.MarkedForDeletion(Inventory.HubFilterServiceKey);
+                bool Waiting((string Kind, string Location) x) =>
+                    (x.Kind == "service" && marked) || (x.Kind == "file" && queued.Contains(x.Location, StringComparer.OrdinalIgnoreCase));
+                var unlisted = filterPieces.Where(x => !tool.Entries.Any(e => e.Kind == x.Kind
+                    && (e.Outcome == "WouldRemove" || (e.Outcome == "Kept" && Waiting(x)))
                     && (e.Location.Equals(x.Location, StringComparison.OrdinalIgnoreCase)
                         || (x.Kind == "upper filter" && e.Location.StartsWith(x.Location + ",", StringComparison.OrdinalIgnoreCase))))).ToList();
                 Check("the preview lists HIDMaestro's USB/IP root hub filter: each hub that lists it, its service, each image and the restart note",
@@ -213,8 +224,16 @@ internal static partial class Program
         if (!File.Exists(ToolPath)) { Check("the tool was built beside the probe", false, ToolPath); return 1; }
 
         var before = Inventory.Take();
-        Check("the machine holds HIDMaestro's driver before the removal (positive control)", before.Packages.Count > 0,
-              $"{before.Packages.Count} package(s)");
+        // Where Windows does not install HIDMaestro's UMDF2 driver, as on
+        // ARM64, HIDMaestro's driver is the USB/IP host controller its install
+        // record names, and no package of HIDMaestro's is in the driver store.
+        bool usbipMachine = HMContext.MachineBackend == HMBackend.Usbip;
+        if (usbipMachine)
+            Check("the machine holds HIDMaestro's USB/IP install before the removal (positive control)",
+                  Inventory.KeyExists(UsbipInstallRecordKey), UsbipInstallRecordKey);
+        else
+            Check("the machine holds HIDMaestro's driver before the removal (positive control)", before.Packages.Count > 0,
+                  $"{before.Packages.Count} package(s)");
         Console.WriteLine($"  [NOTE] before the removal, {HubFilterSummary(before)}");
         var hubs = Inventory.RootHubs();
         var (exit, output) = Run(ToolPath, 1_800_000, "--yes", "--json");
@@ -230,7 +249,10 @@ internal static partial class Program
             ctx.InstallDriver();
             using (var c = ctx.CreateController(ctx.GetProfile("dualshock-4-v2")!, "uninstall-fixture"))
                 Check("after the removal the driver installs again and a controller creates", c != null);
-            Check("the driver packages are back", Inventory.Take().Packages.Count > 0);
+            if (usbipMachine)
+                Check("the USB/IP transport is installed again", ctx.IsDriverInstalled && Inventory.KeyExists(UsbipInstallRecordKey));
+            else
+                Check("the driver packages are back", Inventory.Take().Packages.Count > 0);
         }
         catch (Exception ex) { Check("after the removal the driver installs again and a controller creates", false, $"{ex.GetType().Name}: {ex.Message}"); }
         return s_failures == 0 ? 0 : 1;
