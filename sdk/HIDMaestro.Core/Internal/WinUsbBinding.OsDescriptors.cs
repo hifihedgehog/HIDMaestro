@@ -116,49 +116,63 @@ internal static partial class WinUsbBinding
             // and the devnode is flagged, since Windows installs a returning
             // devnode again only when asked to, so the arrival installs by
             // rank. A re-plug that fails puts the device back as it was.
+            // A device can come back on another devnode of its identity: one
+            // that arrives while a device of the same serial is present takes
+            // an ID by port (OsBindMutexObject). That devnode keeps the driver
+            // it had, so it is flagged in turn and the device plugged in once
+            // more. Under the bind lock the other devices stay as they are,
+            // and it comes back on the same devnode.
             string away = instanceId;
-            handle.Replug(away, waitMs, () =>
+            for (int replug = 1; ; replug++)
             {
-                StepForProbe?.Invoke("unplugged");
-                if (!RegistryLedger.ClearHeldUsbFlags(d.VendorId, d.ProductId, d.BcdDevice, controller.Index))
-                    throw new InvalidOperationException(
-                        $"The usbflags key {RegistryLedger.UsbFlagsName(d.VendorId, d.ProductId, d.BcdDevice)} is not this controller's to change: " +
-                        "its claim, taken at the create, is not in the registry ledger.");
-                StepForProbe?.Invoke("usbflags cleared");
-                var until = Environment.TickCount64 + waitMs;
-                while (!HasLeft(away) && Environment.TickCount64 < until) Thread.Sleep(20);
-                if (!FlagForNextArrival(away))
-                    DeviceOrchestrator.LogDiag($"    winusb: {away} was not flagged before its re-plug");
-            }, undo: () =>
-            {
-                d.StopServingWinUsb();
-                using var devnodes = AcquireDevnodeLock();
-                try { RegistryLedger.UnclaimWinUsb(away, controller.Index, ClaimTimeoutMs); }
-                finally { devnodes.ReleaseMutex(); }
-                lock (keeper.Gate) if (string.Equals(keeper.InstanceId, away, StringComparison.OrdinalIgnoreCase)) keeper.InstanceId = null;
-            });
-            string again = WaitForDevnode(handle, d.VendorId, d.ProductId, waitMs, keeper)
-                ?? throw new InvalidOperationException(
-                    $"The device at 127.0.0.1:{handle.ServerPort} bus id {handle.Device.BusId} did not come back within 10 s of its re-plug.");
-            handle.ResolveRecord(again);
-            if (!again.Equals(instanceId, StringComparison.OrdinalIgnoreCase))
-            {
-                using var devnodes = AcquireUnlessStopped(DevnodeMutexObject, 120_000, keeper,
-                    "Another program held HIDMaestro's machine-wide WinUSB lock for two minutes.");
-                try
+                handle.Replug(away, waitMs, () =>
                 {
-                    var (s2, i2) = DriverOf(again, phantom: false);
-                    lock (keeper.Gate)
+                    StepForProbe?.Invoke("unplugged");
+                    if (!RegistryLedger.ClearHeldUsbFlags(d.VendorId, d.ProductId, d.BcdDevice, controller.Index))
+                        throw new InvalidOperationException(
+                            $"The usbflags key {RegistryLedger.UsbFlagsName(d.VendorId, d.ProductId, d.BcdDevice)} is not this controller's to change: " +
+                            "its claim, taken at the create, is not in the registry ledger.");
+                    StepForProbe?.Invoke("usbflags cleared");
+                    var until = Environment.TickCount64 + waitMs;
+                    while (!HasLeft(away) && Environment.TickCount64 < until) Thread.Sleep(20);
+                    if (!FlagForNextArrival(away))
+                        DeviceOrchestrator.LogDiag($"    winusb: {away} was not flagged before its re-plug");
+                }, undo: () =>
+                {
+                    d.StopServingWinUsb();
+                    using var devnodes = AcquireDevnodeLock();
+                    try { RegistryLedger.UnclaimWinUsb(away, controller.Index, ClaimTimeoutMs); }
+                    finally { devnodes.ReleaseMutex(); }
+                    lock (keeper.Gate) if (string.Equals(keeper.InstanceId, away, StringComparison.OrdinalIgnoreCase)) keeper.InstanceId = null;
+                });
+                string again = WaitForDevnode(handle, d.VendorId, d.ProductId, waitMs, keeper)
+                    ?? throw new InvalidOperationException(
+                        $"The device at 127.0.0.1:{handle.ServerPort} bus id {handle.Device.BusId} did not come back within 10 s of its re-plug.");
+                handle.ResolveRecord(again);
+                if (!again.Equals(away, StringComparison.OrdinalIgnoreCase))
+                {
+                    using var devnodes = AcquireUnlessStopped(DevnodeMutexObject, 120_000, keeper,
+                        "Another program held HIDMaestro's machine-wide WinUSB lock for two minutes.");
+                    try
                     {
-                        ThrowIfStopped(keeper);
-                        RegistryLedger.ClaimWinUsb(again, s2, i2, controller.Index, ClaimTimeoutMs);
-                        keeper.InstanceId = again;
+                        var (s2, i2) = DriverOf(again, phantom: false);
+                        lock (keeper.Gate)
+                        {
+                            ThrowIfStopped(keeper);
+                            RegistryLedger.ClaimWinUsb(again, s2, i2, controller.Index, ClaimTimeoutMs);
+                            keeper.InstanceId = again;
+                        }
                     }
+                    finally { devnodes.ReleaseMutex(); }
+                    RegistryLedger.ReleaseWinUsb(away, controller.Index);
                 }
-                finally { devnodes.ReleaseMutex(); }
-                RegistryLedger.ReleaseWinUsb(instanceId, controller.Index);
+                DeviceOrchestrator.LogDiag($"    winusb: re-plug {replug} of {away} came back on {again}");
+                instanceId = again;
+                if (again.Equals(away, StringComparison.OrdinalIgnoreCase) || replug == 2) break;
+                WaitInstalled(again, waitMs, keeper);
+                if (string.Equals(DriverOf(again, phantom: false).Item1, "WINUSB", StringComparison.OrdinalIgnoreCase)) break;
+                away = again;
             }
-            instanceId = again;
         }
 
         var started = Environment.TickCount64 + waitMs;
