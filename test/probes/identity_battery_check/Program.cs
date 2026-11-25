@@ -476,7 +476,6 @@ internal static class Program
             rec.UsbSerial = "n/a";
         }
 
-        rec.Prefix = ReadRegString(rec.Parent, "ParentIdPrefix") ?? "";
         rec.Container = ContainerIdOf(rec.Parent);
         rec.Children = Descendants(rec.Parent).Where(d => d.StartsWith(@"HID\", StringComparison.OrdinalIgnoreCase)).ToArray();
 
@@ -489,6 +488,14 @@ internal static class Program
             Thread.Sleep(100);
             rec.Children = Descendants(rec.Parent).Where(d => d.StartsWith(@"HID\", StringComparison.OrdinalIgnoreCase)).ToArray();
         }
+
+        // Windows writes a parent's ParentIdPrefix when it names the
+        // parent's first child that has no unique ID (ReactOS
+        // ntoskrnl/io/pnpmgr/pnpmgr.c, IopGetParentIdPrefix). A parent
+        // created for the first time has none until then, and the composite
+        // persona's interfaces arrive after CreateController returns, so the
+        // prefix is read once a HID child is published.
+        rec.Prefix = ReadRegString(rec.Parent, "ParentIdPrefix") ?? "";
 
         if (fam.Id == "xbox-360-wired")
         {
