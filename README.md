@@ -586,44 +586,26 @@ The hands hold real SteamVR hand roles, serve SteamVR Input through a full input
 <details>
 <summary><b>Tool by tool</b></summary>
 
-| | HIDMaestro | VIIPER | ViGEmBus | vJoy | WinUHid |
-|--|--|--|--|--|--|
-| Kernel driver required | **No** on x64 (UMDF2 user mode), usbip-win2's on ARM64 | Yes (USBIP) | Yes | Yes | No (UMDF2 on VHF) |
-| Installs without test-signing mode | **Yes** | Yes | Yes | Yes | No (ships test-signed) |
-| EV certificate for new builds | **No** | No (uses signed usbip-win2) | Yes ($300+/yr) | Yes | No (OV cert for x64) |
-| Network play | **App layer via consumers (PadForge Remote Link), zero local penalty** | In the driver: +1-5 ms wired, +10-50 ms Wi-Fi | No | No | No |
-| Identity per controller | **Exact, 344 profiles** | 6 fixed device types | 2 fixed types | Fixed "vJoy Device" | 4 presets, or raw descriptor |
-| Bus type fidelity | **Per-profile, incl. Bluetooth** on UMDF2, USB on USB/IP | USB only (USBIP) | USB only | USB only | USB only |
-| Add a new device | **JSON file, or capture one you own** | Write Go (a few hundred lines/device) | N/A | N/A | Write C, or raw descriptor |
-| Local single-press latency | **~35 µs measured** | 168 µs published (localhost) | N/A | N/A | Not published |
-| Input update rate | Event-driven, no fixed cap | 1000 Hz (1 ms batching) | N/A | N/A | Event-driven |
-| License | MIT | GPL-3.0 (clients MIT) | N/A | N/A | MIT |
-| Status | **Active** | Active | Retired | Stale | Active |
+| | HIDMaestro | libvirtualhid | VIIPER | ViGEmBus | vJoy | WinUHid |
+|--|--|--|--|--|--|--|
+| Installs without test-signing mode | **Yes** | Yes, a signed MSI | Yes | Yes | Yes | No (ships test-signed) |
+| EV certificate for new builds | **No** | No | No (uses signed usbip-win2) | Yes ($300+/yr) | Yes | No (OV cert for x64) |
+| Identity per controller | **Exact, 344 profiles** | 7 built in | 6 fixed device types | 2 fixed types | Fixed "vJoy Device" | 4 presets, or raw descriptor |
+| Bus type fidelity | **Per-profile, incl. Bluetooth** on UMDF2, USB on USB/IP | PlayStation in USB framing, even for a Bluetooth profile | USB only (USBIP) | USB only | USB only | USB only |
+| Touchscreens, touchpads and pens | **HID devices on both drivers, the touchpad a precision touchpad** | Touch and pen by pointer injection, no HID device, no touchpad | None | None | None | Only from a raw descriptor you write |
+| DualSense speaker, haptics and microphone | **Yes, the composite persona** | No, HID only | No, HID only | No DualSense | No DualSense | No, HID only |
+| Windows on ARM64 | **Yes, every profile** | No, AMD64 only | Yes | Yes | No, x86 and x64 | Yes |
+| Add a new device | **JSON file, or capture one you own** | Write C++ with its descriptor | Write Go (a few hundred lines/device) | N/A | N/A | Write C, or raw descriptor |
+| Local single-press latency | **~35 µs measured** | Not published | 168 µs published (localhost) | N/A | N/A | Not published |
+| Input update rate | Event-driven, no fixed cap | Event-driven | 1000 Hz (1 ms batching) | N/A | N/A | Event-driven |
+| Price and license | **Free, MIT** | MIT library, source-available driver, a paid machine license for driver-backed devices | Free, GPL-3.0 (clients MIT) | Free, BSD-3-Clause | Free, MIT | Free, MIT |
+| Status | **Active** | Active | Active | Retired | Stale | Active |
 
 </details>
 
-VIIPER describes itself as running entirely in userspace. On Windows that holds only for its device code: the USB/IP transport is a third-party kernel-mode driver, and VIIPER makes you go install it. HIDMaestro's default driver on x64 is user-mode UMDF2, and it rides the host that already ships with Windows, so the "no kernel driver" row above is literal for everything the standard profiles do on x64. Two cases ride the same usbip-win2 transport VIIPER does. The composite USB personas need it, because a Windows audio endpoint requires a driver-backed USB device and no user-mode API can create one. Windows on ARM64 needs it for every controller, because it does not allow installing a self-signed UMDF2 driver. The difference is what the user has to do about it: HIDMaestro ships that transport inside its own DLL and deploys it on demand, so a composite persona is a profile you pick, not a prerequisite you chase, and an ARM64 PC needs no setup step. On x64, use any other profile on the default backend and no kernel-mode component is ever installed.
+VIIPER describes itself as running entirely in userspace. On Windows that holds only for its device code: the USB/IP transport is a third-party kernel-mode driver, and VIIPER makes you go install it. HIDMaestro's default driver on x64 is user-mode UMDF2, and it rides the host that already ships with Windows, so nothing the standard profiles do on x64 touches a kernel driver. Two cases ride the same usbip-win2 transport VIIPER does. The composite USB personas need it, because a Windows audio endpoint requires a driver-backed USB device and no user-mode API can create one. Windows on ARM64 needs it for every controller, because it does not allow installing a self-signed UMDF2 driver. The difference is what the user has to do about it: HIDMaestro ships that transport inside its own DLL and deploys it on demand, so a composite persona is a profile you pick, not a prerequisite you chase, and an ARM64 PC needs no setup step. On x64, use any other profile on the default backend and no kernel-mode component is ever installed.
 
 HIDMaestro is Windows optimized and focused on game controllers, keyboards, mice and other HID game devices. Within that scope it gives you exact hardware identity with no kernel driver, no network layer, and no per-device code. That combination is what HIDMaestro is built for, and nothing else on this list delivers it.
-
-### On Windows, beside libvirtualhid
-
-[libvirtualhid](https://github.com/LizardByte/libvirtualhid) is a C++ library for virtual input devices on Linux, FreeBSD, macOS and Windows. Its own comparison marks touchscreens, trackpads and pens as supported, which holds on Linux and FreeBSD. Each cell for it below comes from its [README](https://github.com/LizardByte/libvirtualhid/blob/45443d6/README.md), its [platform page](https://github.com/LizardByte/libvirtualhid/blob/45443d6/docs/platform-support.md) and its [Windows backend](https://github.com/LizardByte/libvirtualhid/blob/45443d6/src/platform/windows/windows_backend.cpp) at commit 45443d6.
-
-| On Windows | HIDMaestro 2.4.0 | libvirtualhid 45443d6 |
-|--|--|--|
-| Touchscreen | A HID touchscreen on both drivers. Windows writes its Device Mode as it does for hardware | Windows' synthetic pointer injection, with no HID device |
-| Precision touchpad | A HID touchpad Windows takes as a precision touchpad | None. The Windows backend refuses a trackpad |
-| Pen | A HID pen with pressure, tilt, barrel, eraser and hover | Windows' synthetic pointer injection, with no HID device |
-| DualSense | USB and Bluetooth forms. The composite persona adds the speaker, the voice-coil haptics stream and the microphone | HID reports in USB framing, even when a profile asks for Bluetooth. No audio |
-| Windows on ARM64 | Yes, on the USB/IP driver | None. The driver installer is AMD64 only |
-| Cost | Free, MIT | A paid machine license for driver-backed devices, yearly or lifetime. The library is MIT, the driver source-available |
-| Profiles | 344 built in, as JSON, or captured from a device you own | Built into the library's C++ |
-| Third-party kernel-mode driver | None for HID profiles on x64. usbip-win2's for the composite personas and on ARM64 | None |
-| Other platforms | None | Linux, FreeBSD and macOS |
-| API | C# on .NET 10, NativeAOT and trimming ready | One C++ API on every platform |
-
-On Linux and FreeBSD, libvirtualhid's touchscreens, trackpads and pen tablets are real `uinput` devices. HIDMaestro does not run there.
 
 ### What it replaces
 
