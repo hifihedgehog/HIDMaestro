@@ -15,7 +15,9 @@
 //
 // It also plants one GameInput override exactly as HIDMaestro wrote them
 // through v1.11.0, which the cleanup must now remove, and checks that no
-// override is left for a catalog identity after the run.
+// override is left for a catalog identity after the run. And it plants a
+// per-user joy.cpl name an earlier release wrote, which the create of a
+// profile that lists it in replacesJoystickNames deletes (Lifetime.cs).
 //
 // Everything planted is removed at the end, and anything that was there
 // before is put back from a copy taken first.
@@ -342,7 +344,7 @@ internal static partial class Program
                         // virtual's own name, which joy.cpl shows.
                         using var k = Registry.LocalMachine.OpenSubKey(plants[0].Path);
                         string? live = k?.GetValue("OEMName") as string;
-                        Check("while the DualSense lives, HKLM OEMName is its display name", live == profile.DisplayName, live ?? "(key gone)");
+                        Check("while the DualSense lives, HKLM OEMName is its joy.cpl name", live == (profile.Inner.JoystickName ?? profile.DisplayName), live ?? "(key gone)");
                         Check("while it lives, OEMData and Axes are the planted ones",
                               k?.GetValue("OEMData") is byte[] od && od.Length == 8 && od[4] == 0x0E && k.OpenSubKey(@"Axes\0") != null);
                     }
@@ -382,6 +384,7 @@ internal static partial class Program
 
             CodeBuiltPad();
             OverrideInterplay();
+            ReplacedJoystickNames();
             CrashRecovery();
         }
         finally

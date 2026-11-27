@@ -325,6 +325,12 @@ internal static class GipFunction
         };
         if (profile.SerialString != null) form["serialString"] = profile.SerialString;
         if (profile.Notes != null) form["notes"] = profile.Notes;
+        // The Game Controllers name the profile gives and the names it
+        // replaces, which the create writes and deletes on this backend as on
+        // UMDF2 (DeviceOrchestrator.PrepareUsbipController).
+        if (profile.JoystickName != null) form["joystickName"] = profile.JoystickName;
+        if (profile.ReplacesJoystickNames is { Length: > 0 } replaced)
+            form["replacesJoystickNames"] = new JsonArray(replaced.Select(n => (JsonNode?)n).ToArray());
         return form;
     }
 

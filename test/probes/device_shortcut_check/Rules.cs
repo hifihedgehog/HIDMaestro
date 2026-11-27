@@ -148,6 +148,10 @@ internal static class Rules
         {
             "usb", "hid", "bluetooth", "ble", "dinput", "rgb", "pid", "reportid", "windows", "ansi", "hotas", "ffb",
             "directinput", "4ghz", "type2", "rev1",
+            // XInput, the API every Xbox-style pad reaches, which xinputhid.inf
+            // writes in the names it gives a Bluetooth pad's node
+            // ("Bluetooth XINPUT compatible input device").
+            "xinput",
         }),
         new("an abbreviation or a roman numeral of a model name (Adv, Alt, III, Rev)", new[]
         {

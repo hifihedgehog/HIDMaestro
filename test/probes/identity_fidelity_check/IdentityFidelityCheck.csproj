@@ -4,9 +4,10 @@
        class and hidapi, XInput, Windows.Gaming.Input, SDL, and the id Chrome
        builds, computed with Chromium's own rules and tables
        (chromium-gamepad-ids.txt, written by make-chromium-tables.py).
-       offline: the pins cover every deployable profile, and the USB/IP
+       offline: the pins cover every deployable profile, the USB/IP
        pins read what the real devices on record read
-       (real-devices.txt). live <backend>
+       (real-devices.txt), and a profile whose IDs an inbox INF names
+       carries that INF's device node name (InboxNames.cs). live <backend>
        <SDL3 dir>: each profile created, read and compared. record: the same
        creates written as a pins file. -->
   <PropertyGroup>

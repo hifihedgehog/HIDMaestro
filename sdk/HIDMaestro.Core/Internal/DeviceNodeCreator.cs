@@ -398,10 +398,14 @@ internal static partial class DeviceNodeCreator
             // SWD\ + ROOT\ enumerator subtrees by ControllerIndex to find the
             // same devnode we already have: pure overhead. SetAllNamingProperties
             // is a strict superset (BusReportedDeviceDesc + FriendlyName +
-            // DeviceDesc on root + first HID child) and skips the walk.
+            // DeviceDesc on root + first HID child) and skips the walk. The
+            // root takes the device node's name, the HID child the HID
+            // device's, which is the device node's unless the profile names
+            // it (hidDeviceDescription).
             string displayName = profile.DeviceDescription ?? profile.ProductString;
+            string hidName = profile.HidDeviceDescription ?? displayName;
             if (devInstId != null)
-                try { DeviceProperties.SetAllNamingProperties(devInstId, displayName); }
+                try { DeviceProperties.SetAllNamingProperties(devInstId, displayName, hidName); }
                 catch { }
 
             return new Result(true, devInstId);

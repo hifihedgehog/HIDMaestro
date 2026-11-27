@@ -161,6 +161,128 @@ internal static partial class Program
         }
     }
 
+    /// <summary>A per-user joy.cpl name an earlier release wrote. Windows
+    /// copies HKLM's OEMName into the user's key the first time Game
+    /// Controllers shows a device the key names nothing for, and reads that
+    /// copy ahead of HKLM, so the create of a profile whose
+    /// replacesJoystickNames holds the copy's name deletes it, the OEMName
+    /// value alone. In the same window a user's name the list does not hold
+    /// stays, and so does a listed name an HMOemNameOverride holds, which
+    /// the override's record restores. Every key is a probe identity's
+    /// (BEEF), planted after a backup and put back in the finally, and the
+    /// pads' descriptor is one the GameInput table does not take, so the run
+    /// writes no GameInput key.</summary>
+    static void ReplacedJoystickNames()
+    {
+        Console.WriteLine("\n== Live: a per-user joy.cpl name an earlier release wrote goes at the create ==");
+        const ushort pid = 0xF0AB, controlPid = 0xF0AC, overridePid = 0xF0AD;
+        const string earlier = "RegOwn Earlier Name", current = "RegOwn Current Name";
+        static string Key(ushort p) => $@"{OemRel}\VID_BEEF&PID_{p:X4}";
+        static void Data(RegistryKey k) =>
+            k.SetValue("OEMData", new byte[] { 0x03, 0x00, 0x08, 0x10, 0x10, 0x00, 0x00, 0x00 }, RegistryValueKind.Binary);
+        var replaced = new Plant
+        {
+            Hive = Registry.CurrentUser, Path = Key(pid),
+            Fill = k => { k.SetValue("OEMName", earlier, RegistryValueKind.String); Data(k); },
+        };
+        var users = new Plant
+        {
+            Hive = Registry.CurrentUser, Path = Key(controlPid),
+            Fill = k => k.SetValue("OEMName", "RegOwn A Name Of The User's", RegistryValueKind.String),
+        };
+        static HMProfile Pad(ushort p) =>
+            new HMProfileBuilder().Id($"regown-{p:x4}").Name("RegOwn Renamed").Vendor("Custom")
+                .Vid(0xBEEF).Pid(p).ProductString("RegOwn Renamed").ManufacturerString("HIDMaestro")
+                .JoystickName(current).ReplacesJoystickNames(new[] { "RegOwn Older Name", earlier })
+                .Type("gamepad").Connection("usb").FromDescriptorBuilder(Canonical(16, 8, 8)).Build();
+        static string? Name(RegistryKey hive, string path)
+        {
+            using var k = hive.OpenSubKey(path);
+            return k?.GetValue("OEMName") as string;
+        }
+        try
+        {
+            // The create changes this plant and puts nothing back, so a run
+            // stopped after it left the key without its OEMName, or with the
+            // current name Windows copied in. Either is this run's own
+            // leftover and goes, rather than being kept as an original.
+            DropLeftover(Registry.CurrentUser, replaced.Path, Data, k => { k.SetValue("OEMName", current, RegistryValueKind.String); Data(k); });
+            PlantKey(replaced, 500);
+            PlantKey(users, 501);
+            Registry.CurrentUser.DeleteSubKeyTree(Key(overridePid), false);
+            using var ctx = new HMContext();
+            ctx.LoadDefaultProfiles();
+            var a = Pad(pid);
+            var b = Pad(controlPid);
+            using (var pad = ctx.CreateController(a))
+            using (var control = ctx.CreateController(b))
+            {
+                Feed(pad, a);
+                Feed(control, b);
+                // The create deleted the value before it returned. Windows
+                // may copy the current HKLM name in again at any time after.
+                string? left = Name(Registry.CurrentUser, replaced.Path);
+                using (var k = Registry.CurrentUser.OpenSubKey(replaced.Path))
+                {
+                    Check("the user's OEMName that is a replaced name is gone", k != null && (left == null || left == current), left ?? "(no value)");
+                    Check("and the key's other values stay", k?.GetValue("OEMData") is byte[] d && d.Length == 8 && d[4] == 0x10);
+                }
+                Check("HKLM OEMName is the profile's joystickName", Name(Registry.LocalMachine, replaced.Path) == current,
+                      Name(Registry.LocalMachine, replaced.Path) ?? "(no value)");
+                Check("a user's OEMName the list does not hold stays", Dump(users.Hive, users.Path) == users.Before,
+                      Dump(users.Hive, users.Path)?.Replace("\n", " / ").Trim() ?? "the key is gone");
+            }
+            Check("after the dispose the replaced name is not put back", Name(Registry.CurrentUser, replaced.Path) != earlier,
+                  Name(Registry.CurrentUser, replaced.Path) ?? "(no value)");
+            Check("the ledger has no entry for the identity", LedgerHolders("JoystickOem", $"VID_BEEF&PID_{pid:X4}") == -1);
+
+            HMOemNameOverride.Set(0xBEEF, overridePid, earlier);
+            var c = Pad(overridePid);
+            using (var pad = ctx.CreateController(c))
+            {
+                Feed(pad, c);
+                Check("a listed name an HMOemNameOverride holds stays", Name(Registry.CurrentUser, Key(overridePid)) == earlier,
+                      Name(Registry.CurrentUser, Key(overridePid)) ?? "(no value)");
+            }
+            HMOemNameOverride.Clear(0xBEEF, overridePid);
+            Check("the override's clear leaves no user key, as there was none", Dump(Registry.CurrentUser, Key(overridePid)) == null);
+        }
+        finally
+        {
+            try { HMOemNameOverride.Clear(0xBEEF, overridePid); } catch { }
+            try { Registry.CurrentUser.DeleteSubKeyTree(Key(overridePid), false); } catch { }
+            try { Unplant(replaced); } catch { }
+            try { Unplant(users); } catch { }
+        }
+    }
+
+    /// <summary>Deletes the key when it reads exactly as one of
+    /// <paramref name="states"/>, the states a run's plant is left in once
+    /// the run changed it, each built in a scratch key and compared as
+    /// <see cref="PlantKey"/> compares a plant.</summary>
+    static void DropLeftover(RegistryKey hive, string path, params Action<RegistryKey>[] states)
+    {
+        string? now = Dump(hive, path);
+        if (now == null) return;
+        string scratch = $@"{BackupRoot}\scratch";
+        try
+        {
+            foreach (var fill in states)
+            {
+                Registry.LocalMachine.DeleteSubKeyTree(scratch, false);
+                using (var s = Registry.LocalMachine.CreateSubKey(scratch)) fill(s);
+                if (Dump(Registry.LocalMachine, scratch) != now) continue;
+                hive.DeleteSubKeyTree(path, false);
+                return;
+            }
+        }
+        finally
+        {
+            Registry.LocalMachine.DeleteSubKeyTree(scratch, false);
+            DropEmptyBackupArea();
+        }
+    }
+
     static void CrashRecovery()
     {
         Console.WriteLine("\n== Live: a consumer that dies with its virtual alive ==");

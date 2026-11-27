@@ -105,7 +105,31 @@
         "string",
         "null"
       ],
-      "description": "Device Manager display name (from vendor INF or Windows HID class). Null means use productString. This is what FriendlyName gets set to on the device node."
+      "description": "Device Manager display name of the device node (from vendor INF or Windows HID class). Null means use productString. This is what FriendlyName gets set to on the device node: on UMDF2 the root devnode, the xinputhid path's SWD parent and the XUSB companion. hidDeviceDescription and joystickName default to it."
+    },
+    "hidDeviceDescription": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "The name the SDK gives the HID device node, the HID child under the device node and every node under it, which Windows.Gaming.Input reports for a UMDF2 controller. A profile whose real device's Windows.Gaming.Input name differs from its HID node's Device Manager name sets the Windows.Gaming.Input name. On USB/IP Windows names the HID node from its own INF. Null means deviceDescription, then productString."
+    },
+    "joystickName": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "The name Game Controllers (joy.cpl) shows for the device. On both backends the SDK writes it as OEMName under HKLM\\SYSTEM\\CurrentControlSet\\Control\\MediaProperties\\PrivateProperties\\Joystick\\OEM\\VID_xxxx&PID_xxxx while the virtual lives, where Windows writes the name of a real device of the identity, and puts back the value it found when the last virtual of the identity goes. Ignored for a keyboard, mouse or digitizer. Null means deviceDescription, then productString."
+    },
+    "replacesJoystickNames": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      },
+      "description": "The Game Controllers names earlier HIDMaestro releases wrote for this VID and PID. Windows copies the HKLM OEMName into the user's HKCU Joystick\\OEM\\VID_xxxx&PID_xxxx key the first time Game Controllers shows a device the user's key names nothing for, keeps the copy and reads it ahead of HKLM. A create of this profile, on either backend, deletes the user's OEMName for the VID and PID when it is exactly one of these names, the value alone, so Windows copies the current name again. A value that differs from every one, or one an active HMOemNameOverride holds, stays, and nothing is put back later. Ignored for a keyboard, mouse or digitizer. Null or empty means none."
     },
     "notes": {
       "type": [

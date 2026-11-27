@@ -2629,7 +2629,9 @@ function Scenario-Switch2-Composite {
 # virtuals of those identities, runs the full cleanup and a fresh context,
 # and diffs. It then follows the GameInput table a code-built game pad
 # holds, HMOemNameOverride against a live virtual in all four orders of
-# claim and release, and a consumer killed with its virtual alive. The
+# claim and release, a per-user joy.cpl name an earlier release wrote,
+# which the create of a profile that lists it in replacesJoystickNames
+# deletes, and a consumer killed with its virtual alive. The
 # probe exits 2, a skip, when another program that embeds HIDMaestro runs
 # or holds an input section open, since its live part would remove that
 # program's virtuals. A second run, --usb-ledger, follows what a USB/IP
@@ -2637,7 +2639,7 @@ function Scenario-Switch2-Composite {
 # back as it was, and the device records it caused, named and removed.
 function Scenario-Registry-Ownership {
     Invoke-Probe -Dir 'registry_ownership_check' -Exe 'RegistryOwnershipCheck.exe' `
-                 -Message 'a registry key a real device owns was changed, or a key HIDMaestro wrote outlived its virtual (see probe stdout)' `
+                 -Message 'a registry key a real device owns was changed, a key HIDMaestro wrote outlived its virtual, or a per-user joy.cpl name an earlier release wrote stayed (see probe stdout)' `
                  -SkipCodes 2
     Invoke-Probe -Dir 'registry_ownership_check' -Exe 'RegistryOwnershipCheck.exe' -Arguments '--usb-ledger' -Tag 'usb-ledger' `
                  -Message 'a USB/IP persona left a usbflags value or a device record HIDMaestro did not put back or name (see probe stdout)' `
@@ -3444,16 +3446,19 @@ function Scenario-Backend-Parity {
 # names either follows a comment that says why. A profile whose device a
 # driver package from outside Windows and HIDMaestro drives on the machine
 # is named and not compared. Offline: the pins cover every deployable
-# profile, no reader is pinned to another device's IDs without a reason, and
+# profile, no reader is pinned to another device's IDs without a reason,
 # the USB/IP pins read what the real devices on record read
-# (real-devices.txt). The SDL release is the official SDL3-3.4.18 zip beside
-# the tree, as S108 loads it.
+# (real-devices.txt), and every profile whose IDs and connection an inbox
+# INF of the machine names (xinputhid.inf, dc1-controller.inf, xusb22.inf)
+# carries that INF's name for the device node as its deviceDescription. An
+# ID the machine's INF does not name is not checked, by design. The SDL
+# release is the official SDL3-3.4.18 zip beside the tree, as S108 loads it.
 # Exit 2 when another program that embeds HIDMaestro is running.
 function Scenario-Identity-Fidelity {
     $failed = @()
     try {
         Invoke-Probe -Dir 'identity_fidelity_check' -Exe 'IdentityFidelityCheck.exe' -Arguments 'offline' -Tag 'offline' `
-                     -Message 'the identity pins no longer cover every deployable profile, a line that names a backend or a Windows build carries no reason, a reader is pinned to another device''s IDs without one, or the USB/IP pins differ from a real device''s reading (see probe stdout)'
+                     -Message 'the identity pins no longer cover every deployable profile, a line that names a backend or a Windows build carries no reason, a reader is pinned to another device''s IDs without one, the USB/IP pins differ from a real device''s reading, or a profile''s deviceDescription is not the name an inbox INF gives its device node (see probe stdout)'
     } catch { $failed += $_.Exception.Message }
     $backends = if ((Get-MachineArch) -eq 'arm64' -or $env:HIDMAESTRO_BACKEND -eq 'usbip') { @('usbip') } else { @('umdf2', 'usbip') }
     $sdl = Join-Path (Split-Path $repoRoot) ('SDL3-release-3.4.18' + $(if ((Get-MachineArch) -eq 'arm64') { '-arm64' } else { '' }))

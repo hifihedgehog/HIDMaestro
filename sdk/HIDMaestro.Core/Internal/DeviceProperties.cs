@@ -10,6 +10,11 @@ namespace HIDMaestro.Internal;
 /// device description. These are the names games and the OS show in joy.cpl,
 /// Device Manager, Settings, browser pickers, etc.
 ///
+/// <para>Each setter takes two names: one for the node it is given, the
+/// device node a create made, and one for the nodes under it, which are the
+/// device's HID device (a profile's deviceDescription and
+/// hidDeviceDescription).</para>
+///
 /// <para>The HID class driver tends to override <c>FriendlyName</c> and
 /// <c>DeviceDesc</c> after device install (it pulls them from the INF), so
 /// these helpers always set the property via <c>CM_Set_DevNode_PropertyW</c>
@@ -55,8 +60,9 @@ internal static partial class DeviceProperties
     // ── public helpers ───────────────────────────────────────────────────
 
     /// <summary>Set the bus-reported device description on the given device
-    /// instance and (if present) its first HID child.</summary>
-    public static void SetBusReportedDeviceDesc(string instanceId, string description)
+    /// instance to <paramref name="description"/> and on its first HID child
+    /// (if present) to <paramref name="hidDescription"/>.</summary>
+    public static void SetBusReportedDeviceDesc(string instanceId, string description, string hidDescription)
     {
         if (CM_Locate_DevNodeW(out uint devInst, instanceId, 0) != 0) return;
 
@@ -66,15 +72,17 @@ internal static partial class DeviceProperties
 
         if (CM_Get_Child(out uint childInst, devInst, 0) == 0)
         {
+            byte[] hidBytes = Encoding.Unicode.GetBytes(hidDescription + "\0");
             CM_Set_DevNode_PropertyW(childInst, ref DEVPKEY_BusReportedDeviceDesc,
-                DEVPROP_TYPE_STRING, strBytes, (uint)strBytes.Length, 0);
+                DEVPROP_TYPE_STRING, hidBytes, (uint)hidBytes.Length, 0);
         }
     }
 
     /// <summary>Set FriendlyName + DeviceDesc on the given root device instance
-    /// and on its first HID child. Returns false if the device couldn't be
+    /// to <paramref name="name"/> and on its first HID child to
+    /// <paramref name="hidName"/>. Returns false if the device couldn't be
     /// located.</summary>
-    public static bool SetDeviceFriendlyName(string rootInstanceId, string name)
+    public static bool SetDeviceFriendlyName(string rootInstanceId, string name, string hidName)
     {
         if (CM_Locate_DevNodeW(out uint devInst, rootInstanceId, 0) != 0)
             return false;
@@ -88,10 +96,11 @@ internal static partial class DeviceProperties
 
         if (CM_Get_Child(out uint childInst, devInst, 0) == 0)
         {
+            byte[] hidBytes = Encoding.Unicode.GetBytes(hidName + "\0");
             CM_Set_DevNode_PropertyW(childInst, ref DEVPKEY_FriendlyName,
-                DEVPROP_TYPE_STRING, strBytes, (uint)strBytes.Length, 0);
+                DEVPROP_TYPE_STRING, hidBytes, (uint)hidBytes.Length, 0);
             CM_Set_DevNode_PropertyW(childInst, ref DEVPKEY_DeviceDesc,
-                DEVPROP_TYPE_STRING, strBytes, (uint)strBytes.Length, 0);
+                DEVPROP_TYPE_STRING, hidBytes, (uint)hidBytes.Length, 0);
         }
         return true;
     }
@@ -101,8 +110,10 @@ internal static partial class DeviceProperties
     /// do back-to-back, but resolves the devnode + HID child once instead of
     /// twice. Saves 2 CM_Locate_DevNodeW + 2 CM_Get_Child kernel transitions
     /// per controller: small but called per-CreateController on the
-    /// critical path. Returns false if the root devnode wasn't located.</summary>
-    public static bool SetAllNamingProperties(string rootInstanceId, string name)
+    /// critical path. The root gets <paramref name="name"/> and its first HID
+    /// child <paramref name="hidName"/>. Returns false if the root devnode
+    /// wasn't located.</summary>
+    public static bool SetAllNamingProperties(string rootInstanceId, string name, string hidName)
     {
         if (CM_Locate_DevNodeW(out uint devInst, rootInstanceId, 0) != 0)
             return false;
@@ -118,32 +129,36 @@ internal static partial class DeviceProperties
         CM_Set_DevNode_PropertyW(devInst, ref DEVPKEY_DeviceDesc,
             DEVPROP_TYPE_STRING, strBytes, len, 0);
 
-        // HID child (if any): same triple
+        // HID child (if any): the same triple, with the HID device's name
         if (CM_Get_Child(out uint childInst, devInst, 0) == 0)
         {
+            byte[] hidBytes = Encoding.Unicode.GetBytes(hidName + "\0");
+            uint hidLen = (uint)hidBytes.Length;
             CM_Set_DevNode_PropertyW(childInst, ref DEVPKEY_BusReportedDeviceDesc,
-                DEVPROP_TYPE_STRING, strBytes, len, 0);
+                DEVPROP_TYPE_STRING, hidBytes, hidLen, 0);
             CM_Set_DevNode_PropertyW(childInst, ref DEVPKEY_FriendlyName,
-                DEVPROP_TYPE_STRING, strBytes, len, 0);
+                DEVPROP_TYPE_STRING, hidBytes, hidLen, 0);
             CM_Set_DevNode_PropertyW(childInst, ref DEVPKEY_DeviceDesc,
-                DEVPROP_TYPE_STRING, strBytes, len, 0);
+                DEVPROP_TYPE_STRING, hidBytes, hidLen, 0);
         }
         return true;
     }
 
     /// <summary>Sets FriendlyName + DeviceDesc on every <c>ROOT\VID_*</c>
     /// HIDMaestro root device whose <c>Device Parameters\ControllerIndex</c>
-    /// matches <paramref name="controllerIndex"/>, plus the device's first HID
-    /// child. With <paramref name="controllerIndex"/> = -1 (legacy single-
+    /// matches <paramref name="controllerIndex"/> to <paramref name="name"/>,
+    /// and on the device's first HID child to <paramref name="hidName"/>.
+    /// With <paramref name="controllerIndex"/> = -1 (legacy single-
     /// controller behavior) updates ALL HIDMaestro VID_ devices regardless
     /// of index: used only by paths that don't need filtering.
     ///
     /// <para>Multi-controller setups MUST pass an explicit index, otherwise
     /// naming controller N will clobber controller N-1's name.</para>
     /// </summary>
-    public static void FixHidChildNames(string name, int controllerIndex = -1)
+    public static void FixHidChildNames(string name, string hidName, int controllerIndex = -1)
     {
         byte[] strBytes = Encoding.Unicode.GetBytes(name + "\0");
+        byte[] hidBytes = Encoding.Unicode.GetBytes(hidName + "\0");
 
         // Sweep BOTH SWD\ (post-slot-1-skip-fix) and ROOT\ (legacy) enumerator
         // roots: multi-controller setups after the migration have HIDMAESTRO
@@ -190,9 +205,9 @@ internal static partial class DeviceProperties
                         if (CM_Get_Child(out uint childInst, devInst, 0) == 0)
                         {
                             CM_Set_DevNode_PropertyW(childInst, ref DEVPKEY_FriendlyName,
-                                DEVPROP_TYPE_STRING, strBytes, (uint)strBytes.Length, 0);
+                                DEVPROP_TYPE_STRING, hidBytes, (uint)hidBytes.Length, 0);
                             CM_Set_DevNode_PropertyW(childInst, ref DEVPKEY_DeviceDesc,
-                                DEVPROP_TYPE_STRING, strBytes, (uint)strBytes.Length, 0);
+                                DEVPROP_TYPE_STRING, hidBytes, (uint)hidBytes.Length, 0);
                         }
                     }
                 }
@@ -208,19 +223,21 @@ internal static partial class DeviceProperties
     /// classes (<c>VID_*&amp;IG_00</c>, <c>HIDMAESTRO</c>, <c>HIDClass</c>)
     /// and matches by <c>Device Parameters\ControllerIndex</c>, applying
     /// FriendlyName + DeviceDesc + BusReportedDeviceDesc to the root device
-    /// and every HID child/grandchild.</summary>
-    public static void ApplyFriendlyNameForController(int controllerIndex, string name)
+    /// as <paramref name="name"/> and to every HID child/grandchild as
+    /// <paramref name="hidName"/>.</summary>
+    public static void ApplyFriendlyNameForController(int controllerIndex, string name, string hidName)
     {
         byte[] strBytes = Encoding.Unicode.GetBytes(name + "\0");
+        byte[] hidBytes = Encoding.Unicode.GetBytes(hidName + "\0");
 
-        void Apply(uint inst)
+        void Apply(uint inst, byte[] bytes)
         {
             CM_Set_DevNode_PropertyW(inst, ref DEVPKEY_FriendlyName,
-                DEVPROP_TYPE_STRING, strBytes, (uint)strBytes.Length, 0);
+                DEVPROP_TYPE_STRING, bytes, (uint)bytes.Length, 0);
             CM_Set_DevNode_PropertyW(inst, ref DEVPKEY_DeviceDesc,
-                DEVPROP_TYPE_STRING, strBytes, (uint)strBytes.Length, 0);
+                DEVPROP_TYPE_STRING, bytes, (uint)bytes.Length, 0);
             CM_Set_DevNode_PropertyW(inst, ref DEVPKEY_BusReportedDeviceDesc,
-                DEVPROP_TYPE_STRING, strBytes, (uint)strBytes.Length, 0);
+                DEVPROP_TYPE_STRING, bytes, (uint)bytes.Length, 0);
         }
 
         // Sweep both SWD\ (new) and ROOT\ (legacy) enumerator roots.
@@ -259,13 +276,14 @@ internal static partial class DeviceProperties
                     // Require HardwareID proof before renaming.
                     if (!DeviceManager.IsHidMaestroOwned(instId)) continue;
 
-                    Apply(devInst);
+                    Apply(devInst, strBytes);
 
-                    // Walk children (HID grandchildren etc.) and apply to all
+                    // Walk children (HID grandchildren etc.) and apply the
+                    // HID device's name to all
                     if (CM_Get_Child(out uint child, devInst, 0) == 0)
                     {
                         uint cur = child;
-                        do { Apply(cur); }
+                        do { Apply(cur, hidBytes); }
                         while (CM_Get_Sibling(out cur, cur, 0) == 0);
                     }
                 }

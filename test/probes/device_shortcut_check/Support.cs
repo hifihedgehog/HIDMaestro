@@ -81,6 +81,10 @@ internal sealed class Catalog
             texts.Add((p.ProductString, "product string of " + p.Id));
             texts.Add((p.ManufacturerString ?? "", "manufacturer string of " + p.Id));
             texts.Add((p.DeviceDescription ?? "", "description of " + p.Id));
+            texts.Add((p.HidDeviceDescription ?? "", "HID device description of " + p.Id));
+            texts.Add((p.JoystickName ?? "", "joystick name of " + p.Id));
+            foreach (string replaced in p.ReplacesJoystickNames ?? Array.Empty<string>())
+                texts.Add((replaced, "replaced joystick name of " + p.Id));
         }
         c.Words = DeviceWords.Build(texts);
         var hy = c.Ids.Where(i => i.Contains('-')).OrderByDescending(i => i.Length).ThenBy(i => i, StringComparer.Ordinal).Select(Regex.Escape);

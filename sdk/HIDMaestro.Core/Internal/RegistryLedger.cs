@@ -485,8 +485,11 @@ internal static partial class RegistryLedger
     // ── joy.cpl OEM key ──────────────────────────────────────────────────
 
     /// <summary>Set the HKLM OEMName for the identity to the virtual's
-    /// display name, after recording the key's prior state.</summary>
-    internal static void ClaimJoystickOem(ushort vid, ushort pid, string label, int controllerIndex)
+    /// joy.cpl name, after recording the key's prior state. Then, under the
+    /// same lock, the user's per-identity OEMName goes when it is exactly one
+    /// of <paramref name="replaces"/>, names an earlier release wrote
+    /// (<see cref="DropReplacedUserName"/>).</summary>
+    internal static void ClaimJoystickOem(ushort vid, ushort pid, string label, int controllerIndex, IReadOnlyList<string>? replaces = null)
     {
         string vidPid = $"VID_{vid:X4}&PID_{pid:X4}";
         string target = $@"{JoystickOemRoot}\{vidPid}";
@@ -535,9 +538,37 @@ internal static partial class RegistryLedger
             }
             using var holders = Registry.LocalMachine.CreateSubKey($@"{entryPath}\{HoldersKey}");
             holders.SetValue(HolderName(controllerIndex), 1, RegistryValueKind.DWord);
+            DropReplacedUserName(target, vidPid, replaces);
         }
         catch { }
         finally { m.ReleaseMutex(); }
+    }
+
+    /// <summary>The user's per-identity joy.cpl name, when it is exactly a
+    /// name an earlier HIDMaestro release wrote for the profile
+    /// (<paramref name="replaces"/>, the profile's replacesJoystickNames).
+    /// Windows copied that release's HKLM OEMName into the user's key the
+    /// first time Game Controllers showed the device, and reads the copy
+    /// ahead of HKLM, so the old name stayed after the profile changed it.
+    /// The OEMName value goes, the key and its other values stay, and
+    /// Windows copies the current name again. Nothing is put back later: the
+    /// value was HIDMaestro's own name. A missing key, a value that differs
+    /// from every name, and a value an active HMOemNameOverride holds, whose
+    /// record restores it, stay as they are. The caller holds the ledger
+    /// lock.</summary>
+    private static void DropReplacedUserName(string target, string vidPid, IReadOnlyList<string>? replaces)
+    {
+        if (replaces == null || replaces.Count == 0) return;
+        if (OemNameOverrideStore.HasRecord(vidPid)) return;
+        try
+        {
+            using var user = Registry.CurrentUser.OpenSubKey(target, writable: true);
+            if (user == null) return;
+            if (user.GetValue(OemNameValue, null, RegistryValueOptions.DoNotExpandEnvironmentNames) is string name
+                && replaces.Contains(name, StringComparer.Ordinal))
+                user.DeleteValue(OemNameValue, throwOnMissingValue: false);
+        }
+        catch { }
     }
 
     // Builds before April 6, 2026 wrote OEMData = JOY_HWS 0x1017 + 10 buttons

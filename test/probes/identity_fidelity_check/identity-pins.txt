@@ -2342,10 +2342,7 @@ xbox-360-wired
   umdf2:xinput type 1 subtype 1 wired 045E:028E revision 0110
   # On USB/IP Windows' own xusb22 drives the pad and makes its HID device, as for a real pad: HID version 0000, the revision of the pad's own descriptor, and xusb22.inf's name. On UMDF2 the XUSB companion answers XInput and the HID device is HIDMaestro's own.
   usbip:xinput type 1 subtype 1 wired 045E:028E revision 0114
-  # On USB/IP Windows' own xusb22 drives the pad and makes its HID device, as for a real pad: HID version 0000, the revision of the pad's own descriptor, and xusb22.inf's name. On UMDF2 the XUSB companion answers XInput and the HID device is HIDMaestro's own.
-  umdf2:wgi "Controller (XBOX 360 For Windows)" 045E:028E wired gamepad yes buttons 14 axes 6 switches 0
-  # On USB/IP Windows' own xusb22 drives the pad and makes its HID device, as for a real pad: HID version 0000, the revision of the pad's own descriptor, and xusb22.inf's name. On UMDF2 the XUSB companion answers XInput and the HID device is HIDMaestro's own.
-  usbip:wgi "Xbox 360 Controller for Windows" 045E:028E wired gamepad yes buttons 14 axes 6 switches 0
+  wgi "Xbox 360 Controller for Windows" 045E:028E wired gamepad yes buttons 14 axes 6 switches 0
   # On USB/IP Windows' own xusb22 drives the pad and makes its HID device, as for a real pad: HID version 0000, the revision of the pad's own descriptor, and xusb22.inf's name. On UMDF2 the XUSB companion answers XInput and the HID device is HIDMaestro's own.
   umdf2:sdl "Xbox 360 Controller" 045E:028E version 0110 bus USB driver x type 1 gamepad xbox360/xbox360 connection unknown
   # On USB/IP Windows' own xusb22 drives the pad and makes its HID device, as for a real pad: HID version 0000, the revision of the pad's own descriptor, and xusb22.inf's name. On UMDF2 the XUSB companion answers XInput and the HID device is HIDMaestro's own.
@@ -2378,10 +2375,7 @@ xbox-adaptive
   umdf2:xinput type 1 subtype 1 wired 045E:0B0A revision 0100
   # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
   usbip:xinput type 1 subtype 1 wired 045E:02FF revision 0000
-  # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
-  umdf2:wgi "HID-compliant game controller" 045E:0B0A wired gamepad yes buttons 14 axes 6 switches 0
-  # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
-  usbip:wgi "Xbox One Game Controller" 045E:0B0A wired gamepad yes buttons 14 axes 6 switches 0
+  wgi "Xbox One Game Controller" 045E:0B0A wired gamepad yes buttons 14 axes 6 switches 0
   # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
   umdf2:sdl "Xbox Adaptive Controller" 045E:0B0A version 0100 bus USB driver x type 1 gamepad xboxone/xboxone connection unknown
   # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
@@ -2397,10 +2391,7 @@ xbox-elite-v1
   umdf2:xinput type 1 subtype 1 wired 045E:02E3 revision 0100
   # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
   usbip:xinput type 1 subtype 1 wired 045E:02FF revision 0000
-  # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
-  umdf2:wgi "Xbox One Elite Controller" 045E:02E3 wired gamepad yes buttons 14 axes 6 switches 0
-  # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
-  usbip:wgi "Xbox One Game Controller" 045E:02E3 wired gamepad yes buttons 14 axes 6 switches 0
+  wgi "Xbox One Game Controller" 045E:02E3 wired gamepad yes buttons 14 axes 6 switches 0
   # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
   umdf2:sdl "Xbox One Elite Controller" 045E:02E3 version 0100 bus USB driver x type 1 gamepad xboxone/xboxone connection unknown
   # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
@@ -2416,10 +2407,7 @@ xbox-elite-v2
   umdf2:xinput type 1 subtype 1 wired 045E:0B00 revision 0100
   # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
   usbip:xinput type 1 subtype 1 wired 045E:02FF revision 0000
-  # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
-  umdf2:wgi "HID-compliant game controller" 045E:0B00 wired gamepad yes buttons 14 axes 6 switches 0
-  # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
-  usbip:wgi "Xbox One Game Controller" 045E:0B00 wired gamepad yes buttons 14 axes 6 switches 0
+  wgi "Xbox One Game Controller" 045E:0B00 wired gamepad yes buttons 14 axes 6 switches 0
   # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
   umdf2:sdl "Xbox One Elite 2 Controller" 045E:0B00 version 0100 bus USB driver x type 1 gamepad xboxone/xboxone connection unknown
   # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
@@ -2436,14 +2424,11 @@ xbox-elite-v2-bt
   # On USB/IP xinputhid sits on the device's own node, as on a real Bluetooth pad's, and XInput and Windows.Gaming.Input report the pad wireless, with the pad's own descriptor and its collections. On UMDF2 xinputhid sits on the HID child, the arrangement of a pad on a cable, and they report it wired.
   usbip:xinput type 1 subtype 1 wireless 045E:0B05 revision 0100
   # On USB/IP xinputhid sits on the device's own node, as on a real Bluetooth pad's, and XInput and Windows.Gaming.Input report the pad wireless, with the pad's own descriptor and its collections. On UMDF2 xinputhid sits on the HID child, the arrangement of a pad on a cable, and they report it wired.
-  umdf2:wgi "Xbox Wireless Controller" 045E:0B05 wired gamepad yes buttons 14 axes 6 switches 0
+  umdf2:wgi "HID-compliant game controller" 045E:0B05 wired gamepad yes buttons 14 axes 6 switches 0
   # On USB/IP xinputhid sits on the device's own node, as on a real Bluetooth pad's, and XInput and Windows.Gaming.Input report the pad wireless, with the pad's own descriptor and its collections. On UMDF2 xinputhid sits on the HID child, the arrangement of a pad on a cable, and they report it wired.
   usbip:wgi "HID-compliant game controller" 045E:0B05 wireless gamepad yes buttons 14 axes 6 switches 0
   sdl "Xbox One Elite 2 Controller" 045E:0B05 version 0100 bus USB driver x type 1 gamepad xboxone/xboxone connection unknown
-  # On USB/IP xinputhid sits on the device's own node, as on a real Bluetooth pad's, and XInput and Windows.Gaming.Input report the pad wireless, with the pad's own descriptor and its collections. On UMDF2 xinputhid sits on the HID child, the arrangement of a pad on a cable, and they report it wired.
-  umdf2:chrome wgi: Xbox Wireless Controller (STANDARD GAMEPAD Vendor: 045e Product: 0b05)
-  # On USB/IP xinputhid sits on the device's own node, as on a real Bluetooth pad's, and XInput and Windows.Gaming.Input report the pad wireless, with the pad's own descriptor and its collections. On UMDF2 xinputhid sits on the HID child, the arrangement of a pad on a cable, and they report it wired.
-  usbip:chrome wgi: HID-compliant game controller (STANDARD GAMEPAD Vendor: 045e Product: 0b05)
+  chrome wgi: HID-compliant game controller (STANDARD GAMEPAD Vendor: 045e Product: 0b05)
 
 xbox-elite-v2-bt-v2
   hid 045E:0B22 version 0513 usage 0001:0005 product "Xbox Wireless Controller" bus Bluetooth LE IG_
@@ -2470,10 +2455,7 @@ xbox-one-original
   umdf2:xinput type 1 subtype 1 wired 045E:02D1 revision 0100
   # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
   usbip:xinput type 1 subtype 1 wired 045E:02FF revision 0000
-  # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
-  umdf2:wgi "HID-compliant game controller" 045E:02D1 wired gamepad yes buttons 14 axes 6 switches 0
-  # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
-  usbip:wgi "Xbox One Game Controller" 045E:02D1 wired gamepad yes buttons 14 axes 6 switches 0
+  wgi "Xbox One Game Controller" 045E:02D1 wired gamepad yes buttons 14 axes 6 switches 0
   # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
   umdf2:sdl "Xbox One Controller" 045E:02D1 version 0100 bus USB driver x type 1 gamepad xboxone/xboxone connection unknown
   # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
@@ -2489,10 +2471,7 @@ xbox-one-rev1
   umdf2:xinput type 1 subtype 1 wired 045E:02DD revision 0100
   # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
   usbip:xinput type 1 subtype 1 wired 045E:02FF revision 0000
-  # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
-  umdf2:wgi "Xbox One Controller" 045E:02DD wired gamepad yes buttons 14 axes 6 switches 0
-  # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
-  usbip:wgi "Xbox One Game Controller" 045E:02DD wired gamepad yes buttons 14 axes 6 switches 0
+  wgi "Xbox One Game Controller" 045E:02DD wired gamepad yes buttons 14 axes 6 switches 0
   # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
   umdf2:sdl "Xbox One Controller" 045E:02DD version 0100 bus USB driver x type 1 gamepad xboxone/xboxone connection unknown
   # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
@@ -2508,10 +2487,7 @@ xbox-one-s
   umdf2:xinput type 1 subtype 1 wired 045E:02EA revision 0100
   # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
   usbip:xinput type 1 subtype 1 wired 045E:02FF revision 0000
-  # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
-  umdf2:wgi "HID-compliant game controller" 045E:02EA wired gamepad yes buttons 14 axes 6 switches 0
-  # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
-  usbip:wgi "Xbox One Game Controller" 045E:02EA wired gamepad yes buttons 14 axes 6 switches 0
+  wgi "Xbox One Game Controller" 045E:02EA wired gamepad yes buttons 14 axes 6 switches 0
   # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
   umdf2:sdl "Xbox One S Controller" 045E:02EA version 0100 bus USB driver x type 1 gamepad xboxone/xboxone connection unknown
   # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
@@ -2525,14 +2501,11 @@ xbox-one-s-bt
   # On USB/IP xinputhid sits on the device's own node, as on a real Bluetooth pad's, and XInput and Windows.Gaming.Input report the pad wireless, with the pad's own descriptor and its collections. On UMDF2 xinputhid sits on the HID child, the arrangement of a pad on a cable, and they report it wired.
   usbip:xinput type 1 subtype 1 wireless 045E:02FD revision 0100
   # On USB/IP xinputhid sits on the device's own node, as on a real Bluetooth pad's, and XInput and Windows.Gaming.Input report the pad wireless, with the pad's own descriptor and its collections. On UMDF2 xinputhid sits on the HID child, the arrangement of a pad on a cable, and they report it wired.
-  umdf2:wgi "Xbox Wireless Controller" 045E:02FD wired gamepad yes buttons 14 axes 6 switches 0
+  umdf2:wgi "HID-compliant game controller" 045E:02FD wired gamepad yes buttons 14 axes 6 switches 0
   # On USB/IP xinputhid sits on the device's own node, as on a real Bluetooth pad's, and XInput and Windows.Gaming.Input report the pad wireless, with the pad's own descriptor and its collections. On UMDF2 xinputhid sits on the HID child, the arrangement of a pad on a cable, and they report it wired.
   usbip:wgi "HID-compliant game controller" 045E:02FD wireless gamepad yes buttons 14 axes 6 switches 0
   sdl "Xbox One S Controller" 045E:02FD version 0100 bus USB driver x type 1 gamepad xboxone/xboxone connection unknown
-  # On USB/IP xinputhid sits on the device's own node, as on a real Bluetooth pad's, and XInput and Windows.Gaming.Input report the pad wireless, with the pad's own descriptor and its collections. On UMDF2 xinputhid sits on the HID child, the arrangement of a pad on a cable, and they report it wired.
-  umdf2:chrome wgi: Xbox Wireless Controller (STANDARD GAMEPAD Vendor: 045e Product: 02fd)
-  # On USB/IP xinputhid sits on the device's own node, as on a real Bluetooth pad's, and XInput and Windows.Gaming.Input report the pad wireless, with the pad's own descriptor and its collections. On UMDF2 xinputhid sits on the HID child, the arrangement of a pad on a cable, and they report it wired.
-  usbip:chrome wgi: HID-compliant game controller (STANDARD GAMEPAD Vendor: 045e Product: 02fd)
+  chrome wgi: HID-compliant game controller (STANDARD GAMEPAD Vendor: 045e Product: 02fd)
 
 xbox-one-s-bt-full
   hid 045E:02FD version 0100 usage 0001:0005 product "Xbox Wireless Controller" bus Bluetooth IG_
@@ -2541,14 +2514,11 @@ xbox-one-s-bt-full
   # On USB/IP xinputhid sits on the device's own node, as on a real Bluetooth pad's, and XInput and Windows.Gaming.Input report the pad wireless, with the pad's own descriptor and its collections. On UMDF2 xinputhid sits on the HID child, the arrangement of a pad on a cable, and they report it wired.
   usbip:xinput type 1 subtype 1 wireless 045E:02FD revision 0100
   # On USB/IP xinputhid sits on the device's own node, as on a real Bluetooth pad's, and XInput and Windows.Gaming.Input report the pad wireless, with the pad's own descriptor and its collections. On UMDF2 xinputhid sits on the HID child, the arrangement of a pad on a cable, and they report it wired.
-  umdf2:wgi "Xbox Wireless Controller" 045E:02FD wired gamepad yes buttons 14 axes 6 switches 0
+  umdf2:wgi "HID-compliant game controller" 045E:02FD wired gamepad yes buttons 14 axes 6 switches 0
   # On USB/IP xinputhid sits on the device's own node, as on a real Bluetooth pad's, and XInput and Windows.Gaming.Input report the pad wireless, with the pad's own descriptor and its collections. On UMDF2 xinputhid sits on the HID child, the arrangement of a pad on a cable, and they report it wired.
   usbip:wgi "HID-compliant game controller" 045E:02FD wireless gamepad yes buttons 14 axes 6 switches 0
   sdl "Xbox One S Controller" 045E:02FD version 0100 bus USB driver x type 1 gamepad xboxone/xboxone connection unknown
-  # On USB/IP xinputhid sits on the device's own node, as on a real Bluetooth pad's, and XInput and Windows.Gaming.Input report the pad wireless, with the pad's own descriptor and its collections. On UMDF2 xinputhid sits on the HID child, the arrangement of a pad on a cable, and they report it wired.
-  umdf2:chrome wgi: Xbox Wireless Controller (STANDARD GAMEPAD Vendor: 045e Product: 02fd)
-  # On USB/IP xinputhid sits on the device's own node, as on a real Bluetooth pad's, and XInput and Windows.Gaming.Input report the pad wireless, with the pad's own descriptor and its collections. On UMDF2 xinputhid sits on the HID child, the arrangement of a pad on a cable, and they report it wired.
-  usbip:chrome wgi: HID-compliant game controller (STANDARD GAMEPAD Vendor: 045e Product: 02fd)
+  chrome wgi: HID-compliant game controller (STANDARD GAMEPAD Vendor: 045e Product: 02fd)
 
 xbox-one-s-full
   # Only the USB/IP backend presents this profile.
@@ -2571,10 +2541,7 @@ xbox-series-xs
   umdf2:xinput type 1 subtype 1 wired 045E:0B12 revision 0100
   # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
   usbip:xinput type 1 subtype 1 wired 045E:02FF revision 0000
-  # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
-  umdf2:wgi "Xbox Controller" 045E:0B12 wired gamepad yes buttons 14 axes 6 switches 0
-  # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
-  usbip:wgi "Xbox One Game Controller" 045E:0B12 wired gamepad yes buttons 14 axes 6 switches 0
+  wgi "Xbox One Game Controller" 045E:0B12 wired gamepad yes buttons 14 axes 6 switches 0
   # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
   umdf2:sdl "Xbox Series X Controller" 045E:0B12 version 0100 bus USB driver x type 1 gamepad xboxone/xboxone connection unknown
   # On USB/IP Windows' GIP driver makes the pad's HID device as 045E:02FF, as it does for a real pad on a cable, and names it. On UMDF2 the HID device carries the profile's own IDs and name.
