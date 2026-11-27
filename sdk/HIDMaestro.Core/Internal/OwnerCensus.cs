@@ -790,6 +790,10 @@ internal sealed partial class OwnerCensus
                 using var c = root!.OpenSubKey(name);
                 if (c == null) continue;   // deleted since the listing
                 accounted.Add(n);
+                // ProductId is the PID the controller's HID device reports,
+                // the profile's hidPid where it gives one, else its pid
+                // (DeviceOrchestrator.WriteInstanceConfig): the PID GameInput
+                // keys a table by, and the one ApplyGameInputMapping claims.
                 if (c.GetValue("VendorId") is int vid && c.GetValue("ProductId") is int pid)
                     keys.Add(GameInputMapping.KeyName((ushort)vid, (ushort)pid));
                 // Through v1.12.0 a create wrote DeviceInstanceId before

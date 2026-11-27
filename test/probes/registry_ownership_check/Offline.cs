@@ -73,11 +73,13 @@ internal static partial class Program
         // and PID writes as its own (joystickName, else deviceDescription,
         // else productString): that name can be a real device's too.
         Console.WriteLine("\n== Offline: the joy.cpl names a profile replaces ==");
-        var written = catalog.GroupBy(p => (p.VendorId, p.ProductId)).ToDictionary(g => g.Key,
+        // The key is the HID device's VID and PID (hidPid, else pid), the one
+        // ClaimJoystickOem writes and deletes under.
+        var written = catalog.GroupBy(p => (p.VendorId, p.HidProductId)).ToDictionary(g => g.Key,
             g => g.Select(p => p.Inner.JoystickName ?? p.DisplayName).ToHashSet(StringComparer.Ordinal));
         var listing = catalog.Where(p => p.Inner.ReplacesJoystickNames is { Length: > 0 }).ToList();
         var own = listing.SelectMany(p => p.Inner.ReplacesJoystickNames!
-            .Where(n => written[(p.VendorId, p.ProductId)].Contains(n)).Select(n => $"{p.Id}: \"{n}\"")).ToList();
+            .Where(n => written[(p.VendorId, p.HidProductId)].Contains(n)).Select(n => $"{p.Id}: \"{n}\"")).ToList();
         Check($"no replaced name is one a profile of the same VID and PID writes ({listing.Count} profiles list names)",
               listing.Count > 0 && own.Count == 0, string.Join("; ", own.Take(8)));
         var copy = new HMProfileBuilder().FromProfile(listing.Count > 0 ? listing[0] : ctx.GetProfile("dualsense")!).Build();

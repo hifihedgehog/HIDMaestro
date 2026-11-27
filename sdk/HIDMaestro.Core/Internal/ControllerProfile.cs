@@ -175,6 +175,38 @@ public sealed class ControllerProfile
     [JsonPropertyName("driverPid")]
     public string? DriverPid { get; set; }
 
+    /// <summary>The PID the device's HID device reports in its attributes,
+    /// hex as <c>pid</c>, when the HID device carries another PID than the
+    /// device. Windows' GIP driver makes the HID device of every wired Xbox
+    /// One and Series pad as 045E:02FF, whatever the pad's own PID, and
+    /// XInput, DirectInput, hidapi and SDL read that PID. On
+    /// UMDF2 the driver reports it to the HID class. On both backends the
+    /// Game Controllers name (<see cref="JoystickName"/>) and the GameInput
+    /// table are written under it, the key those programs read. The device
+    /// node's hardware ID keeps <c>pid</c> or <c>driverPid</c>, and xinputhid
+    /// binds there. Windows.Gaming.Input reads the HID device's IDs on
+    /// UMDF2, so it reports this PID there, where on USB/IP it reports the
+    /// GIP device's, the pad's own. Null means <c>pid</c>.</summary>
+    [JsonPropertyName("hidPid")]
+    public string? HidPid { get; set; }
+
+    /// <summary>The version the HID device reports in its attributes with
+    /// <see cref="HidPid"/>: 0 for the HID device Windows' GIP driver makes.
+    /// The UMDF2 driver reports it. On USB/IP Windows' own drivers make the
+    /// HID device and give it its version, so this key does nothing there.
+    /// Null means <c>versionNumber</c>.</summary>
+    [JsonPropertyName("hidVersionNumber")]
+    public ushort? HidVersionNumber { get; set; }
+
+    /// <summary>The product string the HID device reports with
+    /// <see cref="HidPid"/>: Windows names the HID device of every wired Xbox
+    /// One and Series pad "Controller (Xbox One For Windows)". The UMDF2
+    /// driver reports it. On USB/IP Windows' own drivers make the HID device
+    /// and name it, so this key does nothing there. Null means
+    /// <c>productString</c>.</summary>
+    [JsonPropertyName("hidProductString")]
+    public string? HidProductString { get; set; }
+
     [JsonPropertyName("notes")]
     public string? Notes { get; set; }
 
@@ -377,13 +409,17 @@ public sealed class ControllerProfile
         if (block.ProductString != null) p.ProductString = block.ProductString;
         // The form is the pad's HID device and nothing else: the size and
         // layout of the profile's own descriptor do not describe it, and the
-        // GIP identity and driver PID belong to presentations it is not.
+        // GIP identity, driver PID and the wired HID device's attributes
+        // belong to presentations it is not.
         p.InputReportSize = null;
         p.Layout = null;
         p.TriggerMode = null;
         p.NativeDescriptor = null;
         p.DriverMode = null;
         p.DriverPid = null;
+        p.HidPid = null;
+        p.HidVersionNumber = null;
+        p.HidProductString = null;
         p.Gip = null;
         p.BluetoothHid = null;
         p.XInput = new XInputSpec();
@@ -874,6 +910,9 @@ public sealed class ControllerProfile
         // The identity first: the identity defaults match on it below.
         CheckHexId(Vid, "$.vid");
         CheckHexId(Pid, "$.pid");
+        if (HidPid != null) CheckHexId(HidPid, "$.hidPid");
+        if (HidProductString is { Length: 0 })
+            throw new ProfileDefectException("$.hidProductString", "is empty. Leave the key out to report productString.");
         AnswerModels.Validate(this, global::HIDMaestro.Internal.DeviceModel.OwnOf(this), taken: false, new List<string>());
         if (DeviceModel != null && DeviceModel != "none")
             throw new ProfileDefectException("$.deviceModel", $"\"{DeviceModel}\" is not a value it takes. The one value is \"none\".");
@@ -1087,6 +1126,12 @@ public sealed class ControllerProfile
     /// <summary>Parsed PID as ushort.</summary>
     [JsonIgnore]
     public ushort ProductId => Convert.ToUInt16(Pid, 16);
+
+    /// <summary>The PID the HID device reports in its attributes:
+    /// <see cref="HidPid"/>, else <see cref="ProductId"/>. The key of the
+    /// Game Controllers name and the GameInput table.</summary>
+    [JsonIgnore]
+    internal ushort HidProductId => HidPid != null ? Convert.ToUInt16(HidPid, 16) : ProductId;
 
     /// <summary>Device Manager display name of the device node. Uses deviceDescription if set, otherwise productString.</summary>
     [JsonIgnore]

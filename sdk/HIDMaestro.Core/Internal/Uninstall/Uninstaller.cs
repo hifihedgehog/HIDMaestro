@@ -677,7 +677,11 @@ internal static partial class Uninstaller
 
     /// <summary>The DeviceOverrides key names of the catalog's ROOT parents:
     /// root#VID_xxxx&amp;PID_yyyy and root#VID_xxxx&amp;PID_yyyy&amp;IG_00 for
-    /// each profile's product ID and driver product ID.</summary>
+    /// each profile's product ID and driver product ID. A profile's hidPid
+    /// names no hardware ID: the parent's carries pid or driverPid, and its
+    /// HID child's is built from the parent's. The keys hidPid moves, the
+    /// Game Controllers name and the GameInput table, are the ledger's
+    /// records, which the cleanup reads by name.</summary>
     private static HashSet<string> CatalogRootHardwareIds()
     {
         var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

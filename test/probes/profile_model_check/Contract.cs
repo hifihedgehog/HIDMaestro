@@ -306,5 +306,63 @@ internal static class Contract
             DeviceOrchestrator.DeleteInstanceConfig(5);
             return (gone2 && kept5, $"index 2 {(gone2 ? "gone" : "left")}, index 5 {(kept5 ? "kept" : "missing")}");
         });
+        HidAttributes(c, ctx);
+    }
+
+    /// <summary>The HID device's attributes reach the values the driver
+    /// reads for IOCTL_HID_GET_DEVICE_ATTRIBUTES and IOCTL_HID_GET_STRING:
+    /// xbox-one-s's hidPid, hidVersionNumber and hidProductString, a profile
+    /// without them its pid, versionNumber and productString, and a builder
+    /// copy given another PID none of its source's.</summary>
+    static void HidAttributes(Checks c, HMContext ctx)
+    {
+        static (int? Vid, int? Pid, int? Version, string? Product) Read(int index)
+        {
+            using var k = Key($@"SOFTWARE\HIDMaestro\Controller{index}");
+            return (k?.GetValue("VendorId") as int?, k?.GetValue("ProductId") as int?,
+                    k?.GetValue("VersionNumber") as int?, k?.GetValue("ProductString") as string);
+        }
+        var pad = ctx.GetProfile("xbox-one-s")!;
+        c.Run("xbox-one-s at index 3: ProductId 0x02FF, VersionNumber 0 and ProductString \"Controller (Xbox One For Windows)\", the HID device Windows makes for a wired pad, with VendorId 0x045E", () =>
+        {
+            Write(pad.Inner, 3, DeviceIdentity.ForIndex(3));
+            var r = Read(3);
+            DeviceOrchestrator.DeleteInstanceConfig(3);
+            return (r == (0x045E, 0x02FF, 0, "Controller (Xbox One For Windows)") && pad.ProductId == 0x02EA && pad.HidProductId == 0x02FF,
+                    $"{r.Vid:X4}:{r.Pid:X4} version {r.Version:X4} \"{r.Product}\", profile pid {pad.ProductId:X4}");
+        });
+        c.Run("xbox-360-wired at index 3: its own pid, versionNumber and productString", () =>
+        {
+            var x = ctx.GetProfile("xbox-360-wired")!;
+            Write(x.Inner, 3, DeviceIdentity.ForIndex(3));
+            var r = Read(3);
+            DeviceOrchestrator.DeleteInstanceConfig(3);
+            return (x.Inner.HidPid == null && r == (x.VendorId, x.ProductId, x.Inner.VersionNumber ?? 0x0100, x.ProductString),
+                    $"{r.Vid:X4}:{r.Pid:X4} version {r.Version:X4} \"{r.Product}\"");
+        });
+        c.Run("a builder copy of xbox-one-s keeps the three, one given another PID drops them, and one that sets HidPid keeps its own", () =>
+        {
+            var same = new HMProfileBuilder().FromProfile(pad).Build().Inner;
+            var moved = new HMProfileBuilder().FromProfile(pad).Pid(0xF0B0).Build().Inner;
+            var set = new HMProfileBuilder().FromProfile(pad).Pid(0xF0B1).HidPid(0x02FF).Build().Inner;
+            bool ok = same.HidProductId == 0x02FF && same.HidVersionNumber == 0 && same.HidProductString == "Controller (Xbox One For Windows)"
+                   && moved.HidPid == null && moved.HidVersionNumber == null && moved.HidProductString == null && moved.HidProductId == 0xF0B0
+                   && set.HidProductId == 0x02FF && set.HidVersionNumber == 0 && set.HidProductString == "Controller (Xbox One For Windows)";
+            return (ok, $"same {same.HidPid}, moved {moved.HidPid ?? "none"}, set {set.HidPid}");
+        });
+        c.Run("its Bluetooth HID and GIP forms: the Bluetooth form drops the three, the GIP form keeps hidPid alone", () =>
+        {
+            var gip = HIDMaestro.Internal.Usbip.GipFunction.FormOf(pad.Inner);
+            bool gipOk = gip.HidPid == pad.Inner.HidPid && gip.HidVersionNumber == null && gip.HidProductString == null;
+            // A Bluetooth pad's profile given the three: its HID form, the
+            // pad's Bluetooth HID device, reports its own attributes.
+            var bt = ctx.GetProfile("xbox-one-s-bt")!.Inner.Clone();
+            bt.HidPid = "0x02FF";
+            bt.HidVersionNumber = 0;
+            bt.HidProductString = "Controller (Xbox One For Windows)";
+            var form = bt.BluetoothHidForm();
+            bool btOk = form.HidPid == null && form.HidVersionNumber == null && form.HidProductString == null && form.HidProductId == form.ProductId;
+            return (gipOk && btOk, $"GIP form hidPid {gip.HidPid ?? "none"}, version {gip.HidVersionNumber?.ToString() ?? "none"}, product {gip.HidProductString ?? "none"}; Bluetooth form hidPid {form.HidPid ?? "none"}");
+        });
     }
 }

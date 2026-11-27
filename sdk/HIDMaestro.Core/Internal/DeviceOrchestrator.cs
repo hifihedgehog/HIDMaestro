@@ -851,13 +851,15 @@ internal static partial class DeviceOrchestrator
     /// <see cref="RegistryLedger"/>). Every other profile gets none and
     /// reads through WGI as the real device does. A table an older build
     /// left under the identity goes first, or this virtual and any real pad
-    /// of the same identity would read through it.</summary>
+    /// of the same identity would read through it. GameInput keys a table by
+    /// the HID device's VID and PID, so the identity is the PID the HID
+    /// device reports (hidPid, else pid).</summary>
     internal static void ApplyGameInputMapping(int controllerIndex, ControllerProfile profile)
     {
         if (GameInputMapping.Applies(profile))
-            RegistryLedger.ClaimGameInput(profile.VendorId, profile.ProductId, controllerIndex);
+            RegistryLedger.ClaimGameInput(profile.VendorId, profile.HidProductId, controllerIndex);
         else
-            RegistryLedger.RemoveLegacyTable(profile.VendorId, profile.ProductId);
+            RegistryLedger.RemoveLegacyTable(profile.VendorId, profile.HidProductId);
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -880,9 +882,14 @@ internal static partial class DeviceOrchestrator
         using var key = Registry.LocalMachine.CreateSubKey(instancePath);
         // The identity first: another program's sweep reads VendorId and
         // ProductId from a configuration a create may still be writing
-        // (OwnerCensus.GameInputKeysInUse).
+        // (OwnerCensus.GameInputKeysInUse). ProductId, VersionNumber and
+        // ProductString are the HID device's: the driver reports them in its
+        // attributes and strings, and the sweep keys GameInput's tables by
+        // that PID. They are the profile's hidPid, hidVersionNumber and
+        // hidProductString where it gives them, else pid, versionNumber and
+        // productString.
         key.SetValue("VendorId", (int)profile.VendorId, RegistryValueKind.DWord);
-        key.SetValue("ProductId", (int)profile.ProductId, RegistryValueKind.DWord);
+        key.SetValue("ProductId", (int)profile.HidProductId, RegistryValueKind.DWord);
         key.SetValue("FunctionMode", plan.FunctionMode, RegistryValueKind.DWord);
         // The XUSB companion's answers and its rumble gate, from the
         // profile's xinput block (XusbAnswers), for a profile that makes a
@@ -900,7 +907,7 @@ internal static partial class DeviceOrchestrator
         // browser-driven vibration through SetVibrationBluetooth (Report
         // 0x11) instead of SetVibrationUsb (Report 0x05). Profiles can
         // override via the JSON `versionNumber` field.
-        key.SetValue("VersionNumber", (int)(profile.VersionNumber ?? 0x0100),
+        key.SetValue("VersionNumber", (int)(profile.HidVersionNumber ?? profile.VersionNumber ?? 0x0100),
                      RegistryValueKind.DWord);
         // v2.0.0: the answers to GET_FEATURE, compiled for this controller
         // (mechanism 4): the index and the serial the driver serves
@@ -927,8 +934,8 @@ internal static partial class DeviceOrchestrator
         // protocol host's reply wait. 0 lets the driver skip that SetEvent
         // on every delivered frame. It stores DeliveredSeqNo either way.
         key.SetValue("AckSignal", WaitsOnDelivery(profile) ? 1 : 0, RegistryValueKind.DWord);
-        if (profile.ProductString != null)
-            key.SetValue("ProductString", profile.ProductString, RegistryValueKind.String);
+        if ((profile.HidProductString ?? profile.ProductString) is { } productString)
+            key.SetValue("ProductString", productString, RegistryValueKind.String);
         // Both written or cleared every time, so an index another profile
         // used never keeps its report. The driver keeps its default length
         // for 0, and without InputReportId reads the ID from the descriptor
@@ -955,9 +962,11 @@ internal static partial class DeviceOrchestrator
         // ledger records it before the write and puts it back when the last
         // virtual holding it goes. OEMData and Axes belong to the device and
         // are no longer deleted. A keyboard, mouse or digitizer is no joystick
-        // and gets no joy.cpl entry (issue #67).
+        // and gets no joy.cpl entry (issue #67). The key is the HID device's
+        // VID and PID (hidPid, else pid), the one DirectInput and Game
+        // Controllers read.
         if (!profile.IsNoJoystick)
-            RegistryLedger.ClaimJoystickOem(profile.VendorId, profile.ProductId, profile.JoystickName ?? displayName, controllerIndex,
+            RegistryLedger.ClaimJoystickOem(profile.VendorId, profile.HidProductId, profile.JoystickName ?? displayName, controllerIndex,
                                             profile.ReplacesJoystickNames);
 
         WriteIdentityEntry(identity.Token, controllerIndex);
@@ -971,6 +980,9 @@ internal static partial class DeviceOrchestrator
     /// joystickName, else its device node's name), which the ledger
     /// records first and puts back when the last virtual holding it goes. A
     /// keyboard, mouse or digitizer is no joystick and takes no joy.cpl name.
+    /// Both are keyed by the HID device's VID and PID: Windows' own drivers
+    /// make the HID device on this backend, and the profile's hidPid names
+    /// the PID Windows' GIP driver gives a wired Xbox pad's, 02FF.
     /// <see cref="RegistryLedger.Release"/> of the index gives the holds
     /// back.</summary>
     internal static void PrepareUsbipController(int controllerIndex, ControllerProfile profile)
@@ -978,7 +990,7 @@ internal static partial class DeviceOrchestrator
         EnsureGameInputService();
         ApplyGameInputMapping(controllerIndex, profile);
         if (!profile.IsNoJoystick)
-            RegistryLedger.ClaimJoystickOem(profile.VendorId, profile.ProductId,
+            RegistryLedger.ClaimJoystickOem(profile.VendorId, profile.HidProductId,
                 profile.JoystickName ?? profile.DeviceDescription ?? profile.ProductString ?? "HIDMaestro Controller", controllerIndex,
                 profile.ReplacesJoystickNames);
     }

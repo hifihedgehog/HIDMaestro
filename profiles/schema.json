@@ -119,7 +119,7 @@
         "string",
         "null"
       ],
-      "description": "The name Game Controllers (joy.cpl) shows for the device. On both backends the SDK writes it as OEMName under HKLM\\SYSTEM\\CurrentControlSet\\Control\\MediaProperties\\PrivateProperties\\Joystick\\OEM\\VID_xxxx&PID_xxxx while the virtual lives, where Windows writes the name of a real device of the identity, and puts back the value it found when the last virtual of the identity goes. Ignored for a keyboard, mouse or digitizer. Null means deviceDescription, then productString."
+      "description": "The name Game Controllers (joy.cpl) shows for the device. On both backends the SDK writes it as OEMName under HKLM\\SYSTEM\\CurrentControlSet\\Control\\MediaProperties\\PrivateProperties\\Joystick\\OEM\\VID_xxxx&PID_xxxx, the HID device's VID and PID (hidPid, else pid), while the virtual lives, where Windows writes the name of a real device of the identity, and puts back the value it found when the last virtual of the identity goes. Ignored for a keyboard, mouse or digitizer. Null means deviceDescription, then productString."
     },
     "replacesJoystickNames": {
       "type": [
@@ -272,6 +272,30 @@
         "null"
       ],
       "description": "Override PID reported to the driver/companion when it must differ from the HID-attribute PID."
+    },
+    "hidPid": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "The PID the device's HID device reports in its attributes, hex as pid, when the HID device carries another PID than the device. Windows' GIP driver makes the HID device of every wired Xbox One and Series pad as 045E:02FF, whatever the pad's own PID, and XInput, DirectInput, hidapi and SDL read that PID. On UMDF2 the driver reports it. On both backends the joystickName and the GameInput table are written under it. The device node's hardware ID keeps pid or driverPid, and xinputhid binds there. Windows.Gaming.Input reads the HID device's IDs on UMDF2 and reports this PID there, where on USB/IP it reports the GIP device's, the pad's own. Null means pid."
+    },
+    "hidVersionNumber": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 65535,
+      "description": "The version the HID device reports in its attributes with hidPid, 0 for the HID device Windows' GIP driver makes. The UMDF2 driver reports it. On USB/IP Windows' own drivers make the HID device and give it its version, so the key does nothing there. Null means versionNumber."
+    },
+    "hidProductString": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "description": "The product string the HID device reports with hidPid. Windows names the HID device of every wired Xbox One and Series pad \"Controller (Xbox One For Windows)\". The UMDF2 driver reports it. On USB/IP Windows' own drivers make the HID device and name it, so the key does nothing there. Null means productString."
     },
     "versionNumber": {
       "type": [
