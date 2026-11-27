@@ -12,9 +12,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Runtime.InteropServices;
 using Microsoft.Win32;
-using Microsoft.Win32.SafeHandles;
 
 internal static class OemSnapshot
 {
@@ -26,13 +24,31 @@ internal static class OemSnapshot
     const string WholeValue = "Whole";
     static readonly string[] Prefixes = { "VID_045E", "VID_054C", "VID_0000" };
 
-    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
-    static extern int RegCopyTree(SafeRegistryHandle hKeySrc, string? lpSubKey, SafeRegistryHandle hKeyDest);
-
     static bool Swept(string name) => Prefixes.Any(p => name.StartsWith(p, StringComparison.OrdinalIgnoreCase));
 
     static (string Label, RegistryKey Hive)[] Hives() =>
         new[] { ("HKLM", Registry.LocalMachine), ("HKCU", Registry.CurrentUser) };
+
+    /// <summary>Copy <paramref name="src"/>'s values, each with its kind and
+    /// unexpanded, and its subkeys, whole, into <paramref name="dst"/>.
+    /// RegCopyTree is not used: on the desktop PC it refused the copy of a
+    /// key Administrators may read in full (error 5).</summary>
+    static void CopyTree(RegistryKey src, RegistryKey dst)
+    {
+        foreach (string v in src.GetValueNames())
+        {
+            var kind = src.GetValueKind(v);
+            if (kind == RegistryValueKind.Unknown)
+                throw new InvalidOperationException($"{src.Name}: the value {v} has a kind the copy cannot write");
+            dst.SetValue(v, src.GetValue(v, null, RegistryValueOptions.DoNotExpandEnvironmentNames)!, kind);
+        }
+        foreach (string s in src.GetSubKeyNames())
+        {
+            using var from = src.OpenSubKey(s) ?? throw new InvalidOperationException($@"{src.Name}\{s} cannot be opened");
+            using var to = dst.CreateSubKey(s);
+            CopyTree(from, to);
+        }
+    }
 
     /// <summary>Copy every key under the swept prefixes of both hives. A
     /// copy a stopped run left is put back first.</summary>
@@ -48,9 +64,9 @@ internal static class OemSnapshot
                 if (oem == null) continue;
                 foreach (string name in oem.GetSubKeyNames().Where(Swept))
                 {
+                    using var from = oem.OpenSubKey(name) ?? throw new InvalidOperationException($"{label} {name} cannot be opened");
                     using var d = dest.CreateSubKey(name);
-                    int rc = RegCopyTree(oem.Handle, name, d.Handle);
-                    if (rc != 0) throw new InvalidOperationException($"copying {label}\\...\\OEM\\{name} failed with error {rc}");
+                    CopyTree(from, d);
                 }
             }
             backup.SetValue(WholeValue, 1, RegistryValueKind.DWord);
@@ -81,9 +97,9 @@ internal static class OemSnapshot
                     {
                         bool had = oem.GetSubKeyNames().Contains(name, StringComparer.OrdinalIgnoreCase);
                         oem.DeleteSubKeyTree(name, throwOnMissingSubKey: false);
+                        using var from = saved!.OpenSubKey(name) ?? throw new InvalidOperationException($"the copy of {label} {name} cannot be opened");
                         using var d = oem.CreateSubKey(name);
-                        int rc = RegCopyTree(saved!.Handle, name, d.Handle);
-                        if (rc != 0) throw new InvalidOperationException($"writing {label}\\...\\OEM\\{name} back failed with error {rc}");
+                        CopyTree(from, d);
                         if (!had) changed.Add($"{label} {name} put back");
                     }
                 }
