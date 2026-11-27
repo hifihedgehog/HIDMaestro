@@ -331,6 +331,13 @@ internal static class GipFunction
         if (profile.JoystickName != null) form["joystickName"] = profile.JoystickName;
         if (profile.ReplacesJoystickNames is { Length: > 0 } replaced)
             form["replacesJoystickNames"] = new JsonArray(replaced.Select(n => (JsonNode?)n).ToArray());
+        // Windows' GIP driver makes the HID device on this backend, as
+        // 045E:02FF for a wired pad, with its own version and name. The
+        // profile's hidPid names that PID, and the create keys the Game
+        // Controllers name and the GameInput table by it, as on UMDF2.
+        // hidVersionNumber and hidProductString describe that device too,
+        // and nothing on this backend sends them, so the form drops them.
+        if (profile.HidPid != null) form["hidPid"] = profile.HidPid;
         return form;
     }
 

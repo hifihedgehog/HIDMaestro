@@ -42,6 +42,14 @@ public sealed class HMProfile
     /// <summary>USB Product ID as a 16-bit integer.</summary>
     public ushort ProductId => Inner.ProductId;
 
+    /// <summary>The product ID the controller's HID device reports, which
+    /// DirectInput, Game Controllers, XInput, hidapi and SDL read: the
+    /// profile's <c>hidPid</c>, else <see cref="ProductId"/>. 0x02FF for the
+    /// wired Xbox One and Series pads, whose HID device Windows makes as
+    /// 045E:02FF. A per-identity setting such as
+    /// <see cref="HMOemNameOverride"/> takes this PID.</summary>
+    public ushort HidProductId => Inner.HidProductId;
+
     /// <summary>The product string the device reports to the OS, e.g. "Wireless Controller".</summary>
     public string ProductString => Inner.ProductString;
 

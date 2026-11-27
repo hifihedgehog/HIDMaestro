@@ -64,6 +64,12 @@ public sealed class HMProfileBuilder
     private string? _deviceModelFrom;
     private string? _deviceModel;
     private string? _driverPid;
+    private ushort? _hidPid;
+    private ushort? _hidVersionNumber;
+    private string? _hidProductString;
+    // True once a caller sets one of the HID device's attributes here. A
+    // copy whose VID or PID changes keeps its source's only then.
+    private bool _hidAttributesSet;
     private FeatureStubSpec? _featureStubs;
     private Dictionary<string, ValueSourceSpec>? _valueSources;
     // FromProfile's copy of the whole source profile, read again from its
@@ -367,6 +373,31 @@ public sealed class HMProfileBuilder
     /// Hex, as the profile's <c>driverPid</c>. Null takes none.</summary>
     public HMProfileBuilder DriverPid(string? pid) { _driverPid = pid; return this; }
 
+    /// <summary>Set the PID the HID device reports in its attributes, as the
+    /// profile's <c>hidPid</c>, when it differs from <see cref="Pid"/>:
+    /// Windows' GIP driver makes every wired Xbox One and Series pad's HID
+    /// device as 045E:02FF. The Game Controllers name and the GameInput table
+    /// are keyed by it on both backends. Null reports the PID.
+    /// <para>A copy (<see cref="FromProfile"/>) keeps its source's HID
+    /// attributes (this, <see cref="HidVersionNumber"/> and
+    /// <see cref="HidProductString"/>) while its VID and PID stay the
+    /// source's. A copy given another VID or PID drops all three unless one
+    /// of them is set on this builder, since they describe the source
+    /// device's HID device.</para></summary>
+    public HMProfileBuilder HidPid(ushort? pid) { _hidPid = pid; _hidAttributesSet = true; return this; }
+
+    /// <summary>Set the version the HID device reports with
+    /// <see cref="HidPid"/>, as the profile's <c>hidVersionNumber</c>. Null
+    /// reports the profile's version. A copy keeps its source's as
+    /// <see cref="HidPid"/> describes.</summary>
+    public HMProfileBuilder HidVersionNumber(ushort? version) { _hidVersionNumber = version; _hidAttributesSet = true; return this; }
+
+    /// <summary>Set the product string the HID device reports with
+    /// <see cref="HidPid"/>, as the profile's <c>hidProductString</c>. Null
+    /// reports <see cref="ProductString"/>. A copy keeps its source's as
+    /// <see cref="HidPid"/> describes.</summary>
+    public HMProfileBuilder HidProductString(string? s) { _hidProductString = s; _hidAttributesSet = true; return this; }
+
     /// <summary>The answers the device gives to GET_REPORT(Feature): the
     /// JSON of the profile's <c>featureStubs</c> key (the design note's
     /// mechanism 4), read as a profile file's is. Null takes the answers
@@ -421,6 +452,10 @@ public sealed class HMProfileBuilder
         _deviceModelFrom = source.Inner.DeviceModelFrom;
         _deviceModel = source.Inner.DeviceModel;
         _driverPid = source.Inner.DriverPid;
+        _hidPid = source.Inner.HidPid != null ? source.Inner.HidProductId : null;
+        _hidVersionNumber = source.Inner.HidVersionNumber;
+        _hidProductString = source.Inner.HidProductString;
+        _hidAttributesSet = false;
         _featureStubs = _copy.FeatureStubs;
         _valueSources = _copy.ValueSources;
         _id = source.Id;
@@ -526,6 +561,14 @@ public sealed class HMProfileBuilder
         inner.DeviceModelFrom = _deviceModelFrom;
         inner.DeviceModel = _deviceModel;
         inner.DriverPid = _driverPid;
+        // The HID device's attributes describe the source device's HID
+        // device: a copy given another VID or PID keeps them only when this
+        // builder set one of them (HidPid).
+        bool otherIdentity = _copy != null && (_vid != _copy.VendorId || _pid != _copy.ProductId);
+        bool keepHid = _hidAttributesSet || !otherIdentity;
+        inner.HidPid = keepHid && _hidPid is { } hidPid ? $"0x{hidPid:X4}" : null;
+        inner.HidVersionNumber = keepHid ? _hidVersionNumber : null;
+        inner.HidProductString = keepHid ? _hidProductString : null;
         inner.FeatureStubs = _featureStubs == null ? null : CopyOf(_featureStubs);
         inner.ValueSources = _valueSources == null ? null : CopyOf(_valueSources);
         inner.SourceFile = null;

@@ -382,7 +382,7 @@ internal static partial class Program
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
         var p = ctx.GetProfile("dualshock-4-v2")!;
-        string key = $@"SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_{p.VendorId:X4}&PID_{p.ProductId:X4}";
+        string key = $@"SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_{p.VendorId:X4}&PID_{p.HidProductId:X4}";
         string? Read() { using var k = Registry.LocalMachine.OpenSubKey(key); return k?.GetValue("OEMName") as string ?? (k == null ? "(no key)" : "(no value)"); }
         string before = Read()!;
         string name = p.Inner.JoystickName ?? p.Inner.DeviceDescription ?? p.ProductString;
