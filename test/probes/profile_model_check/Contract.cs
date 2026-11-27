@@ -212,8 +212,30 @@ internal static class Contract
     static readonly IntPtr HKEY_LOCAL_MACHINE = unchecked((IntPtr)(int)0x80000002);
     const int KEY_ALL_ACCESS = 0xF003F;
 
+    /// <summary>Removes the folders earlier runs left. The hive stays loaded
+    /// until the process that loaded it exits, so a run's own delete in
+    /// InHive's finally fails and its folder outlives it. A folder whose
+    /// process id no longer runs is an earlier run's, and this one removes
+    /// it. A reused id that runs again keeps its folder until a later run.</summary>
+    static void RemoveEarlierHives()
+    {
+        const string prefix = "hm-contract-";
+        foreach (string d in Directory.GetDirectories(Path.GetTempPath(), prefix + "*"))
+        {
+            if (!int.TryParse(Path.GetFileName(d).Substring(prefix.Length), out int pid) || pid == Environment.ProcessId)
+                continue;
+            bool runs;
+            try { using var p = System.Diagnostics.Process.GetProcessById(pid); runs = !p.HasExited; }
+            catch (ArgumentException) { runs = false; }
+            catch (InvalidOperationException) { runs = false; }
+            if (runs) continue;
+            try { Directory.Delete(d, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        }
+    }
+
     static void InHive(Checks c, Action<Checks> body)
     {
+        RemoveEarlierHives();
         string dir = Path.Combine(Path.GetTempPath(), $"hm-contract-{Environment.ProcessId}");
         Directory.CreateDirectory(dir);
         string hive = Path.Combine(dir, "contract.hive");
