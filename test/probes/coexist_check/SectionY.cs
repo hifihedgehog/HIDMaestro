@@ -165,6 +165,15 @@ using Microsoft.Win32;
 
 internal static partial class Program
 {
+    /// <summary>The PID the HID child of the peer's xinputhid controller
+    /// reports, xbox-elite-v2's hidPid, read from the catalog the peer
+    /// creates it from.</summary>
+    static readonly System.Lazy<ushort> s_eliteHidPid = new(() =>
+    {
+        var elite = HIDMaestro.Internal.ProfileDatabase.LoadEmbedded().All.First(p => p.Id == "xbox-elite-v2");
+        return System.Convert.ToUInt16(elite.HidPid ?? elite.Pid, 16);
+    });
+
     /// <summary>A recorded observation: printed with what it found, never
     /// counted as a check or a failure. Section Y records this way whatever
     /// a v1.12.0 program's own controller, input or values do. The owner's
@@ -974,7 +983,10 @@ internal static partial class Program
             // (SDL_rawinputjoystick.c: "DirectInput does not get inputs from
             // XBox One controllers when not in the foreground", though
             // SDL_dinputjoystick.c asks for DISCL_BACKGROUND).
-            var path = WaitPaths(0x045E, 0x0B00, 1, 10_000);
+            // The child reports the HID device's IDs, xbox-elite-v2's hidPid,
+            // 045E:02FF as Windows makes a real wired pad's, where the device
+            // node keeps the pad's 0B00.
+            var path = WaitPaths(0x045E, s_eliteHidPid.Value, 1, 10_000);
             cap = path.Count == 1 ? HidCapture.Open(path[0]) : null;
             Check($"{y}: the probe holds the companion's HID child open", cap != null, string.Join(", ", path));
             // The driver's idle window counts from the last input, not from

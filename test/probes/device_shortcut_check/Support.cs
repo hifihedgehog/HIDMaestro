@@ -83,6 +83,7 @@ internal sealed class Catalog
             texts.Add((p.DeviceDescription ?? "", "description of " + p.Id));
             texts.Add((p.HidDeviceDescription ?? "", "HID device description of " + p.Id));
             texts.Add((p.JoystickName ?? "", "joystick name of " + p.Id));
+            texts.Add((p.HidProductString ?? "", "HID product string of " + p.Id));
             foreach (string replaced in p.ReplacesJoystickNames ?? Array.Empty<string>())
                 texts.Add((replaced, "replaced joystick name of " + p.Id));
         }

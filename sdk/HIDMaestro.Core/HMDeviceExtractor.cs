@@ -228,6 +228,12 @@ public static class HMDeviceExtractor
             AppendField(sb, "hidDeviceDescription", profile.Inner.HidDeviceDescription);
         if (profile.Inner.JoystickName != null)
             AppendField(sb, "joystickName", profile.Inner.JoystickName);
+        if (profile.Inner.HidPid != null)
+            AppendField(sb, "hidPid", $"0x{profile.Inner.HidProductId:X4}");
+        if (profile.Inner.HidVersionNumber is { } hidVersion)
+            AppendRawField(sb, "hidVersionNumber", hidVersion.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        if (profile.Inner.HidProductString != null)
+            AppendField(sb, "hidProductString", profile.Inner.HidProductString);
         AppendField(sb, "type", profile.Type);
         AppendField(sb, "connection", profile.Connection);
         if (profile.Inner.BluetoothTransport != null)

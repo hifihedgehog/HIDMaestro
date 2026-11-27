@@ -31,8 +31,8 @@
 //      vendor word. The words are the catalog's (Support.cs, DeviceWords):
 //      every vendor folder under profiles\ and every word of each profile's
 //      id, name, vendor, product, manufacturer and description strings
-//      (deviceDescription, hidDeviceDescription, joystickName and
-//      replacesJoystickNames),
+//      (deviceDescription, hidDeviceDescription, joystickName,
+//      replacesJoystickNames and hidProductString),
 //      less the generic words Rules.GenericWords lists with a reason, plus
 //      Rules.ExtraWords (the earlier list and the PS and NS families). A
 //      name is split into words at underscores and other
