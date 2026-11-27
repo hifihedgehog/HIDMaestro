@@ -74,12 +74,12 @@ var profile = ctx.GetProfile("generic-dinput-gamepad")!;
 using var ctrl = ctx.CreateController(profile);
 
 // Override joy.cpl / DirectInput label while the virtual is live
-HMOemNameOverride.Set(profile.VendorId, profile.ProductId, "My Custom Label");
+HMOemNameOverride.Set(profile.VendorId, profile.HidProductId, "My Custom Label");
 
 // ... run ...
 
 // Restore on clean teardown
-HMOemNameOverride.Clear(profile.VendorId, profile.ProductId);
+HMOemNameOverride.Clear(profile.VendorId, profile.HidProductId);
 ```
 
 If the process is force-killed before `Clear` runs, the next startup's `RecoverOrphans` call restores all three target paths to their pre-override state. Safe to call `RecoverOrphans` unconditionally at every startup.
@@ -88,7 +88,7 @@ If the process is force-killed before `Clear` runs, the next startup's `RecoverO
 
 When a virtual is created, `DeviceOrchestrator` writes **only** the HKLM Joystick\OEM path using the profile's `joystickName ?? deviceDescription ?? productString` as the label, under the VID:PID of the controller's HID device (`HMProfile.HidProductId`: the profile's `hidPid`, else its `pid`), the one DirectInput and Game Controllers read. The wired Xbox One and Series profiles set `hidPid` 0x02FF, as Windows makes a real pad's HID device, so their name goes under VID_045E&PID_02FF. An override for such a profile takes the same PID. It does NOT write HKCU, because that would destructively overwrite the Windows-shipped preload without the capture-and-restore machinery that this class provides: and there is no obvious lifecycle trigger for when to restore it (a virtual can be disposed without the consumer intending the joy.cpl label to revert).
 
-One HKCU change does happen. Windows copies the HKLM `OEMName` into the user's HKCU key the first time Game Controllers shows a device the user's key names nothing for, and keeps the copy, so a name an earlier release wrote outlives the profile change that fixed it. A profile lists those names in `replacesJoystickNames`. When a virtual of that profile is created, the user's HKCU `OEMName` for the same VID:PID is deleted if it is exactly one of them, the value alone, and Windows copies the current name again. A value that differs from every listed name stays, and so does one an active `HMOemNameOverride` holds. Nothing is put back afterwards.
+Two HKCU changes do happen, and each deletes only a name that is HIDMaestro's own. Windows copies the HKLM `OEMName` into the user's HKCU key the first time Game Controllers or DirectInput meets a device the user's key names nothing for, keeps the copy, and reads it ahead of HKLM. A profile lists the names earlier releases wrote in `replacesJoystickNames`, and the create of a virtual of that profile deletes the user's HKCU `OEMName` for the same VID:PID when it is exactly one of them. When the user's key held no `OEMName` at the create, the release deletes Windows' copy of the name the virtual wrote, so that name does not stay behind as the name of a real device with the same IDs. Each deletion removes the `OEMName` value alone, and Windows copies the name HKLM holds then. A value that differs, a name the user's key held before the create, and one an active `HMOemNameOverride` holds stay. Nothing is put back afterwards.
 
 The consequence: for any VID:PID where Windows has an HKCU preload (e.g. "PC TWIN SHOCK Gamepad" for VID_0079&PID_0006), the preload keeps winning for joy.cpl purposes unless the consumer calls `HMOemNameOverride.Set` explicitly. If the label your profile wants is different from the HKCU preload, `Set` is the mechanism.
 

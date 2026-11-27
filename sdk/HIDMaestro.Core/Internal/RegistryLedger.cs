@@ -81,6 +81,11 @@ internal static partial class RegistryLedger
     private const string V_OriginalName = "OriginalName";
     private const string V_OriginalKind = "OriginalKind";
     private const string V_WrittenName = "WrittenName";
+    // The account whose per-user joy.cpl name the entry recorded, and
+    // whether that account's key held an OEMName when the entry was made
+    // (2.4.1, RecordUserName).
+    private const string V_UserSid = "UserSid";
+    private const string V_UserNameExisted = "UserNameExisted";
 
     private static readonly long s_selfStart = ProcessStartFileTime(Environment.ProcessId) ?? 0;
 
@@ -488,7 +493,11 @@ internal static partial class RegistryLedger
     /// joy.cpl name, after recording the key's prior state. Then, under the
     /// same lock, the user's per-identity OEMName goes when it is exactly one
     /// of <paramref name="replaces"/>, names an earlier release wrote
-    /// (<see cref="DropReplacedUserName"/>).</summary>
+    /// (<see cref="DropReplacedUserName"/>). A new entry then records
+    /// whether the user's key holds a name (<see cref="RecordUserName"/>).
+    /// On an entry another claim made with a different name, the user's
+    /// copy of that name goes (<see cref="DropUserCopy"/>), so Windows
+    /// copies this one.</summary>
     internal static void ClaimJoystickOem(ushort vid, ushort pid, string label, int controllerIndex, IReadOnlyList<string>? replaces = null)
     {
         string vidPid = $"VID_{vid:X4}&PID_{pid:X4}";
@@ -498,7 +507,12 @@ internal static partial class RegistryLedger
         {
             string entryPath = $@"{Root}\{JoystickOemKind}\{vidPid}";
             bool held;
-            using (var e = Registry.LocalMachine.OpenSubKey(entryPath)) held = e != null;
+            string? previous;
+            using (var e = Registry.LocalMachine.OpenSubKey(entryPath))
+            {
+                held = e != null;
+                previous = e?.GetValue(V_WrittenName) as string;
+            }
             if (!held)
             {
                 bool keyExisted, nameExisted;
@@ -539,9 +553,59 @@ internal static partial class RegistryLedger
             using var holders = Registry.LocalMachine.CreateSubKey($@"{entryPath}\{HoldersKey}");
             holders.SetValue(HolderName(controllerIndex), 1, RegistryValueKind.DWord);
             DropReplacedUserName(target, vidPid, replaces);
+            using var recorded = Registry.LocalMachine.OpenSubKey(entryPath, writable: true);
+            if (recorded == null) return;
+            if (!held) RecordUserName(recorded, target);
+            else if (!string.Equals(previous, label, StringComparison.Ordinal)) DropUserCopy(recorded, target, vidPid, previous);
         }
         catch { }
         finally { m.ReleaseMutex(); }
+    }
+
+    /// <summary>Record, on a new entry, the account this process runs as and
+    /// whether that account's per-identity key holds an OEMName now, after
+    /// <see cref="DropReplacedUserName"/>. Windows copies HKLM's OEMName into
+    /// the user's key only while that key holds none, so a name the key holds
+    /// now is the user's own, and one that turns up later is a copy. The
+    /// claim writes HKLM before this reads, and Windows copies only once the
+    /// device is there, so the read sees the user's key as it was before the
+    /// claim. The caller holds the ledger lock.</summary>
+    private static void RecordUserName(RegistryKey entry, string target)
+    {
+        string? sid = OemNameOverrideStore.CurrentUserSid();
+        if (sid == null) return;
+        using (var user = Registry.CurrentUser.OpenSubKey(target))
+            entry.SetValue(V_UserNameExisted, user?.GetValue(OemNameValue) != null ? 1 : 0, RegistryValueKind.DWord);
+        entry.SetValue(V_UserSid, sid, RegistryValueKind.String);
+    }
+
+    /// <summary>The user's per-identity joy.cpl name, when it is exactly
+    /// <paramref name="name"/>, a name the entry wrote to HKLM, and the
+    /// user's key held no name when the entry was made
+    /// (<see cref="RecordUserName"/>). Windows copied HIDMaestro's HKLM name
+    /// into that key while the virtual was there, and reads the copy ahead
+    /// of HKLM, so without this the virtual's name stays after it goes and
+    /// names any device with those IDs, a real one included. The OEMName
+    /// value goes, the key and its other values stay, and Windows copies the
+    /// name HKLM holds then. A name the user's key held before, a value that
+    /// differs, an entry another account made, one made before 2.4.1, which
+    /// recorded no user name, and a value an active HMOemNameOverride holds,
+    /// whose record restores it, stay. The caller holds the ledger
+    /// lock.</summary>
+    private static void DropUserCopy(RegistryKey entry, string target, string vidPid, string? name)
+    {
+        if (string.IsNullOrEmpty(name)) return;
+        if (entry.GetValue(V_UserNameExisted) is not int existed || existed != 0) return;
+        if (!string.Equals(entry.GetValue(V_UserSid) as string, OemNameOverrideStore.CurrentUserSid(), StringComparison.OrdinalIgnoreCase)) return;
+        if (OemNameOverrideStore.HasRecord(vidPid)) return;
+        try
+        {
+            using var user = Registry.CurrentUser.OpenSubKey(target, writable: true);
+            if (user?.GetValue(OemNameValue, null, RegistryValueOptions.DoNotExpandEnvironmentNames) is string value
+                && string.Equals(value, name, StringComparison.Ordinal))
+                user.DeleteValue(OemNameValue, throwOnMissingValue: false);
+        }
+        catch { }
     }
 
     /// <summary>The user's per-identity joy.cpl name, when it is exactly a
@@ -609,9 +673,20 @@ internal static partial class RegistryLedger
         // the true original and restores it when it is cleared.
         if (OemNameOverrideStore.HasRecord(vidPid)) return;
 
+        string? written = entry.GetValue(V_WrittenName) as string;
+        RestoreMachineName(vidPid, target, entry, written);
+        // After HKLM holds its original again, so a copy Windows makes from
+        // then on is of that.
+        DropUserCopy(entry, target, vidPid, written);
+    }
+
+    /// <summary>Put the identity's HKLM OEMName back as the entry recorded
+    /// it, when it still holds <paramref name="written"/>, the name the entry
+    /// wrote.</summary>
+    private static void RestoreMachineName(string vidPid, string target, RegistryKey entry, string? written)
+    {
         bool keyExisted = entry.GetValue(V_KeyExisted) is int ke && ke == 1;
         bool nameExisted = entry.GetValue(V_NameExisted) is int ne && ne == 1;
-        string? written = entry.GetValue(V_WrittenName) as string;
         using var oem = Registry.LocalMachine.OpenSubKey(target, writable: true);
         if (oem == null) return;
         if (!string.Equals(oem.GetValue(OemNameValue) as string, written, StringComparison.Ordinal))

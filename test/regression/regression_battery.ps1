@@ -3333,7 +3333,8 @@ function Scenario-Xusb-Persona {
 # button, stick, trigger and hat positions against SDL's and xpadneo's
 # parsers. Live: the device tree, XInput control by control, what XInput and
 # Windows.Gaming.Input report the pad as, the rumble packet, a second create
-# and a plain profile on the same record. Then the Xbox button of a pad that
+# and a plain profile on the same record, whose name is left in neither the
+# user's nor the machine's joy.cpl key of the IDs. Then the Xbox button of a pad that
 # sends it in a report of its own, held through a moved stick and pressed
 # fifty times. Exit 2 when another program that embeds HIDMaestro is running.
 function Scenario-Bluetooth-Xbox-Hid {

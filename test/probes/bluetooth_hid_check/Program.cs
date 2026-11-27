@@ -24,7 +24,8 @@
 //                    control by control, what XInput and
 //                    Windows.Gaming.Input report it as, the rumble packet a
 //                    program receives, a second create on the same record,
-//                    and a plain profile on that record. Elevated.
+//                    and a plain profile on that record, whose name is
+//                    left in neither joy.cpl key of the IDs. Elevated.
 //
 // The parsers: SDL 3.4.18 src/joystick/hidapi/SDL_hidapi_xboxone.c
 // (HIDAPI_DriverXboxOneBluetooth_HandleButtons16 at 1252,

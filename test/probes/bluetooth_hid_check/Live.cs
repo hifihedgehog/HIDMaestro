@@ -233,6 +233,15 @@ internal static partial class Program
                     Tree(pad, usb, wantXinputhid: true, brief: true);
                     Check($"{pad.Id}: after the plain profile the pad takes an XInput slot again", Slot(pad, before, quiet: true) < 4);
                 }
+                // 5. The plain profile's name is left in neither joy.cpl
+                // key of the IDs, a real pad's. While the plain pad was
+                // there, Windows could copy its HKLM name into the user's
+                // key, which joy.cpl reads first, and the release drops that
+                // copy (RegistryLedger.DropUserCopy).
+                string oem = $@"System\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_045E&PID_{pad.Pid:X4}";
+                string? userName = OemName(Registry.CurrentUser, oem), machineName = OemName(Registry.LocalMachine, oem);
+                Check($"{pad.Id}: the plain profile's name is left in neither the user's nor the machine's joy.cpl key",
+                      userName != "Plain HID pad" && machineName != "Plain HID pad", $"user {userName ?? "(none)"}, machine {machineName ?? "(none)"}");
             }
         }
         catch (Exception e)
@@ -243,6 +252,14 @@ internal static partial class Program
         {
             if (plainDir != null) try { Directory.Delete(plainDir, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
         }
+    }
+
+    /// <summary>The joy.cpl name an OEM key of <paramref name="hive"/>
+    /// holds, or null.</summary>
+    static string? OemName(RegistryKey hive, string path)
+    {
+        using var k = hive.OpenSubKey(path);
+        return k?.GetValue("OEMName") as string;
     }
 
     // ── The device tree ──────────────────────────────────────────────────

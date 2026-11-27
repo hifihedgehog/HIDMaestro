@@ -120,7 +120,10 @@ internal static class OemNameOverrideStore
             && ReadOriginal(Registry.CurrentUser, $@"{JoystickRoot}\{vidPid}", JoystickOemNameValue).val == label;
     }
 
-    private static string? CurrentUserSid()
+    /// <summary>The SID of the account this process runs as, or null when
+    /// it cannot be read. RegistryLedger's joy.cpl entries record it the
+    /// same way.</summary>
+    internal static string? CurrentUserSid()
     {
         try
         {

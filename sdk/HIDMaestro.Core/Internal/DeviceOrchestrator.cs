@@ -954,9 +954,12 @@ internal static partial class DeviceOrchestrator
         // else the device node's name. HKCU Joystick\OEM\<VID&PID>
         // takes precedence over HKLM for joy.cpl, and Windows ships HKCU
         // preloaded for many common clone VID:PIDs, so HKCU is written only
-        // through HMOemNameOverride. The one HKCU change a create makes is
-        // the deletion of a per-user OEMName the profile's
-        // replacesJoystickNames lists (RegistryLedger.ClaimJoystickOem). The
+        // through HMOemNameOverride. A create and its release change HKCU
+        // only by deleting a per-user OEMName that is HIDMaestro's own name:
+        // one the profile's replacesJoystickNames lists
+        // (RegistryLedger.ClaimJoystickOem), and Windows' copy of the name
+        // the ledger wrote, where the user's key held none before
+        // (RegistryLedger.DropUserCopy). The
         // HKLM key is shared with every real device of the same identity
         // (foundation-sunshine #1138): the
         // ledger records it before the write and puts it back when the last
