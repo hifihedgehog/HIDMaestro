@@ -68,6 +68,22 @@ internal static partial class Program
         var clone = new HMProfileBuilder().FromProfile(ctx.GetProfile("dualsense")!).Pid(0xF0A8).Build();
         Check("a code-built clone of a catalog DualSense does not", !GameInputMapping.Applies(clone.Inner));
 
+        // A replaced joy.cpl name is deleted from the user's key of its VID
+        // and PID, so no profile may list a name a profile of the same VID
+        // and PID writes as its own (joystickName, else deviceDescription,
+        // else productString): that name can be a real device's too.
+        Console.WriteLine("\n== Offline: the joy.cpl names a profile replaces ==");
+        var written = catalog.GroupBy(p => (p.VendorId, p.ProductId)).ToDictionary(g => g.Key,
+            g => g.Select(p => p.Inner.JoystickName ?? p.DisplayName).ToHashSet(StringComparer.Ordinal));
+        var listing = catalog.Where(p => p.Inner.ReplacesJoystickNames is { Length: > 0 }).ToList();
+        var own = listing.SelectMany(p => p.Inner.ReplacesJoystickNames!
+            .Where(n => written[(p.VendorId, p.ProductId)].Contains(n)).Select(n => $"{p.Id}: \"{n}\"")).ToList();
+        Check($"no replaced name is one a profile of the same VID and PID writes ({listing.Count} profiles list names)",
+              listing.Count > 0 && own.Count == 0, string.Join("; ", own.Take(8)));
+        var copy = new HMProfileBuilder().FromProfile(listing.Count > 0 ? listing[0] : ctx.GetProfile("dualsense")!).Build();
+        Check("a copy keeps the names its source replaces",
+              listing.Count > 0 && copy.Inner.ReplacesJoystickNames is { } names && names.SequenceEqual(listing[0].Inner.ReplacesJoystickNames!));
+
         LegacyGiveUp();
         LegacyGiveUpCallSite();
         WinUsbPackageNote();

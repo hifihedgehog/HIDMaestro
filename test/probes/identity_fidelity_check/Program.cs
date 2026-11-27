@@ -43,9 +43,14 @@
 //   offline                       the pins cover every deployable profile,
 //                                 every line that names a backend carries a
 //                                 reason, no reader is pinned to IDs other
-//                                 than the profile's own without one, and
-//                                 the USB/IP pins read what the real devices
-//                                 on record read. No device.
+//                                 than the profile's own without one, the
+//                                 USB/IP pins read what the real devices
+//                                 on record read, and every profile whose
+//                                 IDs and connection an inbox INF names
+//                                 (xinputhid.inf, dc1-controller.inf,
+//                                 xusb22.inf) carries that INF's name as its
+//                                 deviceDescription (InboxNames.cs). No
+//                                 device.
 //   live <backend> <SDL3 dir> [ids]
 //                                 each profile (or the ids given) created on
 //                                 <backend> (umdf2, usbip, or auto for what
@@ -449,6 +454,10 @@ internal static class Program
             source = null;
         }
         Check("real-devices.txt holds a real device's reading", realLines > 0, $"{realLines} lines");
+
+        // The device node's name Windows' own INF gives a real device of a
+        // profile's IDs and connection (InboxNames.cs).
+        InboxNames.Run(ctx.AllProfiles, Check);
     }
 
     // ── live and record ──────────────────────────────────────────────────

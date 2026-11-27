@@ -54,6 +54,9 @@ public sealed class HMProfileBuilder
     private int? _inputReportSize;
     private string? _dataReportId;
     private string? _deviceDescription;
+    private string? _hidDeviceDescription;
+    private string? _joystickName;
+    private string[]? _replacesJoystickNames;
     private string? _notes;
     private int[]? _buttonMap;
     private int[]? _triggerButtons;
@@ -144,8 +147,32 @@ public sealed class HMProfileBuilder
     /// <summary>Set the trigger mode: "combined", "separate", or null.</summary>
     public HMProfileBuilder TriggerMode(string? mode) { _triggerMode = mode; return this; }
 
-    /// <summary>Set the Device Manager display name (falls back to ProductString if null).</summary>
+    /// <summary>Set the Device Manager display name of the device node (falls back to ProductString if null).</summary>
     public HMProfileBuilder DeviceDescription(string? desc) { _deviceDescription = desc; return this; }
+
+    /// <summary>Set the name the SDK gives the HID device node, the HID child
+    /// under the device node on UMDF2, which Windows.Gaming.Input reports for
+    /// the controller there. A device whose Windows.Gaming.Input name differs
+    /// from its HID node's Device Manager name takes the Windows.Gaming.Input
+    /// name (falls back to DeviceDescription, then ProductString, if
+    /// null).</summary>
+    public HMProfileBuilder HidDeviceDescription(string? desc) { _hidDeviceDescription = desc; return this; }
+
+    /// <summary>Set the name Game Controllers (joy.cpl) shows for the device,
+    /// which the SDK writes as the identity's HKLM Joystick OEMName while the
+    /// controller lives (falls back to DeviceDescription, then ProductString,
+    /// if null).</summary>
+    public HMProfileBuilder JoystickName(string? name) { _joystickName = name; return this; }
+
+    /// <summary>Set the Game Controllers names earlier releases wrote for
+    /// this profile's VID and PID. A create deletes the user's per-identity
+    /// OEMName when it is exactly one of them, so Windows copies the current
+    /// name again. Null means none.</summary>
+    public HMProfileBuilder ReplacesJoystickNames(IEnumerable<string>? names)
+    {
+        _replacesJoystickNames = names == null ? null : new List<string>(names).ToArray();
+        return this;
+    }
 
     /// <summary>Set the HID report descriptor from raw bytes.
     /// <para>Replacing a descriptor the builder already holds (from
@@ -414,6 +441,9 @@ public sealed class HMProfileBuilder
         _inputReportSize = source.InputReportSize > 0 ? source.InputReportSize : null;
         _dataReportId = source.Inner.DataReportId;
         _deviceDescription = source.Inner.DeviceDescription;
+        _hidDeviceDescription = source.Inner.HidDeviceDescription;
+        _joystickName = source.Inner.JoystickName;
+        _replacesJoystickNames = (string[]?)source.Inner.ReplacesJoystickNames?.Clone();
         _notes = source.Notes;
         _buttonMap = source.ButtonMap;
         _triggerButtons = source.Inner.TriggerButtons;
@@ -482,6 +512,9 @@ public sealed class HMProfileBuilder
         inner.InputReportSize = _inputReportSize;
         inner.DataReportId = _dataReportId;
         inner.DeviceDescription = _deviceDescription;
+        inner.HidDeviceDescription = _hidDeviceDescription;
+        inner.JoystickName = _joystickName;
+        inner.ReplacesJoystickNames = (string[]?)_replacesJoystickNames?.Clone();
         inner.Notes = _notes;
         // The values this builder holds are copied, so a caller that edits
         // the array or map it passed, or builds again, shares nothing with

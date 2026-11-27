@@ -385,7 +385,7 @@ internal static partial class Program
         string key = $@"SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_{p.VendorId:X4}&PID_{p.ProductId:X4}";
         string? Read() { using var k = Registry.LocalMachine.OpenSubKey(key); return k?.GetValue("OEMName") as string ?? (k == null ? "(no key)" : "(no value)"); }
         string before = Read()!;
-        string name = p.Inner.DeviceDescription ?? p.ProductString;
+        string name = p.Inner.JoystickName ?? p.Inner.DeviceDescription ?? p.ProductString;
         using (var c = ctx.CreateController(p, "oem:" + p.Id, HMBackend.Usbip))
         {
             s_usbIds.Add(ParentOf(c)!);

@@ -121,8 +121,49 @@ public sealed class ControllerProfile
     [JsonPropertyName("inputDefaults")]
     public List<InputBytePatch>? InputDefaults { get; set; }
 
+    /// <summary>The name of the device node: on UMDF2 the root devnode, the
+    /// xinputhid path's SWD parent and the XUSB companion, as Device Manager
+    /// shows them. Null means <see cref="ProductString"/>. The HID child and
+    /// the Game Controllers entry take this name too unless
+    /// <see cref="HidDeviceDescription"/> or <see cref="JoystickName"/> gives
+    /// another.</summary>
     [JsonPropertyName("deviceDescription")]
     public string? DeviceDescription { get; set; }
+
+    /// <summary>The name the SDK gives the HID device node: on UMDF2 the HID
+    /// child under the device node, and every node under it. One node serves
+    /// Device Manager and Windows.Gaming.Input there, and Windows.Gaming.Input
+    /// reports this name for the controller, so a profile whose real device's
+    /// Windows.Gaming.Input name differs from its HID node's Device Manager
+    /// name sets the Windows.Gaming.Input name. On USB/IP Windows names the
+    /// HID node from its own INF. Null means the device node's name
+    /// (<see cref="DisplayName"/>).</summary>
+    [JsonPropertyName("hidDeviceDescription")]
+    public string? HidDeviceDescription { get; set; }
+
+    /// <summary>The name Game Controllers (joy.cpl) shows for the device. On
+    /// both backends the SDK writes it as the identity's HKLM
+    /// Joystick\OEM\VID_xxxx&amp;PID_xxxx OEMName while the virtual lives
+    /// (<see cref="RegistryLedger.ClaimJoystickOem"/>), where Windows writes
+    /// the name of a real device of the identity. A keyboard, mouse or
+    /// digitizer gets no OEMName. Null means the device node's name
+    /// (<see cref="DisplayName"/>).</summary>
+    [JsonPropertyName("joystickName")]
+    public string? JoystickName { get; set; }
+
+    /// <summary>The Game Controllers names earlier HIDMaestro releases
+    /// wrote for the profile's VID and PID. Windows copies the HKLM OEMName
+    /// into the user's HKCU Joystick\OEM\VID_xxxx&amp;PID_xxxx key the first
+    /// time Game Controllers shows a device the user's key names nothing
+    /// for, keeps the copy, and reads it ahead of HKLM. So the create of a
+    /// controller of this profile deletes the user's OEMName for the VID and
+    /// PID when it is exactly one of these names, the value alone, and
+    /// Windows copies the current name again
+    /// (<see cref="RegistryLedger.ClaimJoystickOem"/>). A value that differs
+    /// from every one, or one an active HMOemNameOverride holds, stays, and
+    /// nothing is put back later. Null or empty means none.</summary>
+    [JsonPropertyName("replacesJoystickNames")]
+    public string[]? ReplacesJoystickNames { get; set; }
 
     [JsonPropertyName("triggerMode")]
     public string? TriggerMode { get; set; }
@@ -1047,7 +1088,7 @@ public sealed class ControllerProfile
     [JsonIgnore]
     public ushort ProductId => Convert.ToUInt16(Pid, 16);
 
-    /// <summary>Device Manager display name. Uses deviceDescription if set, otherwise productString.</summary>
+    /// <summary>Device Manager display name of the device node. Uses deviceDescription if set, otherwise productString.</summary>
     [JsonIgnore]
     public string DisplayName => DeviceDescription ?? ProductString;
 

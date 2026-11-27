@@ -6,6 +6,13 @@
   "pid": "0x02EA",
   "productString": "Controller",
   "manufacturerString": "Microsoft",
+  "deviceDescription": "Xbox One Controller",
+  "hidDeviceDescription": "Xbox One Game Controller",
+  "joystickName": "Controller (Xbox One For Windows)",
+  "replacesJoystickNames": [
+    "Controller",
+    "HID-compliant game controller"
+  ],
   "type": "gamepad",
   "connection": "usb",
   "backend": "usbip",

@@ -1239,10 +1239,13 @@ public sealed class HMContext : IDisposable
 
         foreach (var c in all)
         {
+            // The device node's name for the nodes a create made, the HID
+            // device's for every node under them.
             string name = c.Profile.Inner.DeviceDescription
                           ?? c.Profile.Inner.ProductString
                           ?? "Controller";
-            try { Internal.DeviceProperties.ApplyFriendlyNameForController(c.Index, name); }
+            string hidName = c.Profile.Inner.HidDeviceDescription ?? name;
+            try { Internal.DeviceProperties.ApplyFriendlyNameForController(c.Index, name, hidName); }
             catch { /* per-controller failure shouldn't break the whole pass */ }
         }
     }

@@ -939,10 +939,12 @@ internal static partial class DeviceOrchestrator
         else
             key.DeleteValue("InputReportId", throwOnMissingValue: false);
 
+        // The device node's name.
         string displayName = profile.DeviceDescription ?? profile.ProductString ?? "HIDMaestro Controller";
         key.SetValue("DeviceDescription", displayName, RegistryValueKind.String);
 
-        // Joystick OEM display name (HKLM only). HKCU Joystick\OEM\<VID&PID>
+        // Joystick OEM display name (HKLM only), the profile's joystickName,
+        // else the device node's name. HKCU Joystick\OEM\<VID&PID>
         // takes precedence over HKLM for joy.cpl, and Windows ships HKCU
         // preloaded for many common clone VID:PIDs, so HKCU is written only
         // through HMOemNameOverride. The HKLM key is shared with every real
@@ -952,7 +954,8 @@ internal static partial class DeviceOrchestrator
         // are no longer deleted. A keyboard, mouse or digitizer is no joystick
         // and gets no joy.cpl entry (issue #67).
         if (!profile.IsNoJoystick)
-            RegistryLedger.ClaimJoystickOem(profile.VendorId, profile.ProductId, displayName, controllerIndex);
+            RegistryLedger.ClaimJoystickOem(profile.VendorId, profile.ProductId, profile.JoystickName ?? displayName, controllerIndex,
+                                            profile.ReplacesJoystickNames);
 
         WriteIdentityEntry(identity.Token, controllerIndex);
     }
@@ -961,7 +964,8 @@ internal static partial class DeviceOrchestrator
     /// exists, the ones <see cref="SetupController"/> takes for a UMDF2
     /// create in its steps 0 and 1: GameInputSvc started, which serves WGI
     /// and GameInput their controllers, the GameInput table of a profile
-    /// built in code, and the joy.cpl name of the identity, which the ledger
+    /// built in code, and the joy.cpl name of the identity (the profile's
+    /// joystickName, else its device node's name), which the ledger
     /// records first and puts back when the last virtual holding it goes. A
     /// keyboard, mouse or digitizer is no joystick and takes no joy.cpl name.
     /// <see cref="RegistryLedger.Release"/> of the index gives the holds
@@ -972,7 +976,8 @@ internal static partial class DeviceOrchestrator
         ApplyGameInputMapping(controllerIndex, profile);
         if (!profile.IsNoJoystick)
             RegistryLedger.ClaimJoystickOem(profile.VendorId, profile.ProductId,
-                profile.DeviceDescription ?? profile.ProductString ?? "HIDMaestro Controller", controllerIndex);
+                profile.JoystickName ?? profile.DeviceDescription ?? profile.ProductString ?? "HIDMaestro Controller", controllerIndex,
+                profile.ReplacesJoystickNames);
     }
 
     /// <summary>The device on the USB/IP root hub port with the profile's
@@ -1719,6 +1724,8 @@ internal static partial class DeviceOrchestrator
             // (issue #60; see the note above CreateGamepadCompanion's
             // caller on why a fixed tuple is safe now).
             string instanceSuffix = identity.Token;
+            // The device node's name. The HID child under it takes the HID
+            // device's (SetupControllerCore's naming steps).
             string companionDesc = profile.DeviceDescription ?? profile.ProductString ?? "HIDMaestro Gamepad";
 
             // Through the registration gate (DeviceManager.EnterRegistrationGate),
@@ -1959,12 +1966,16 @@ internal static partial class DeviceOrchestrator
             DeviceManager.RestartDevice(xusbInstId!);
         }
 
-        // Set companion name to match the controller profile
+        // Set companion name to match the controller profile: the device
+        // node's name, as the XUSB device a real pad's xusb22 binds is its
+        // device node. The companion has no HID child, and a child would
+        // take the HID device's name.
         if (xusbInstId != null)
         {
             string companionName = profile.DeviceDescription ?? profile.ProductString ?? "Controller";
-            DeviceProperties.SetBusReportedDeviceDesc(xusbInstId, companionName);
-            DeviceProperties.SetDeviceFriendlyName(xusbInstId, companionName);
+            string hidName = profile.HidDeviceDescription ?? companionName;
+            DeviceProperties.SetBusReportedDeviceDesc(xusbInstId, companionName, hidName);
+            DeviceProperties.SetDeviceFriendlyName(xusbInstId, companionName, hidName);
         }
 
         return xusbInstId;
@@ -2311,7 +2322,15 @@ internal static partial class DeviceOrchestrator
                 childSeen = gotChild == StartWait.Done;
             }
         }
+        // The device node's name, which the parent and any XUSB companion
+        // take, and the HID device's, which the HID child takes: the
+        // profile's hidDeviceDescription, else the device node's. The HID
+        // child is the node Windows.Gaming.Input names the controller by.
+        // A real Bluetooth Xbox pad's node is xinputhid.inf's "Bluetooth
+        // XINPUT compatible input device" and its HID child input.inf's
+        // "HID-compliant game controller".
         string displayName = profile.DeviceDescription ?? profile.ProductString ?? "Controller";
+        string hidName = profile.HidDeviceDescription ?? displayName;
 
         // Apply names directly to the parent we just created. We already have
         // the instance ID from CreateDeviceNode/CreateGamepadCompanion, so the
@@ -2325,7 +2344,7 @@ internal static partial class DeviceOrchestrator
             using var _ts = new TimingScope(controllerIndex, profile.Id, "4.set_names_root");
             string? parentForNaming = mainInstanceId ?? companionId;
             if (parentForNaming != null)
-                try { DeviceProperties.SetAllNamingProperties(parentForNaming, displayName); }
+                try { DeviceProperties.SetAllNamingProperties(parentForNaming, displayName, hidName); }
                 catch { }
         }
 
@@ -2388,7 +2407,7 @@ internal static partial class DeviceOrchestrator
             using var _ts = new TimingScope(controllerIndex, profile.Id, "4.fix_hid_child_names_2");
             string? parentForRename = mainInstanceId ?? companionId;
             if (parentForRename != null)
-                try { DeviceProperties.SetAllNamingProperties(parentForRename, displayName); }
+                try { DeviceProperties.SetAllNamingProperties(parentForRename, displayName, hidName); }
                 catch { }
         }
 
@@ -2481,10 +2500,10 @@ internal static partial class DeviceOrchestrator
         {
             string? primaryId = mainInstanceId ?? companionId;
             if (primaryId != null)
-                try { DeviceProperties.SetAllNamingProperties(primaryId, displayName); }
+                try { DeviceProperties.SetAllNamingProperties(primaryId, displayName, hidName); }
                 catch { }
             if (xusbCompanionId != null && xusbCompanionId != primaryId)
-                try { DeviceProperties.SetAllNamingProperties(xusbCompanionId, displayName); }
+                try { DeviceProperties.SetAllNamingProperties(xusbCompanionId, displayName, hidName); }
                 catch { }
         }
 
