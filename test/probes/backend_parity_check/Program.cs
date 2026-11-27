@@ -177,12 +177,16 @@ internal static partial class Program
     /// the child Windows' GIP driver makes, which carries that driver's own
     /// VID, PID and version (the GIP model's hidChild) whatever the device
     /// announces, and a Bluetooth pad that reaches XInput through xinputhid
-    /// presents its Bluetooth HID form's version (bluetoothHid). Every other
-    /// device, on either backend, presents the profile's own VID, PID and
-    /// version.</summary>
+    /// presents its Bluetooth HID form's version (bluetoothHid). On UMDF2 a
+    /// profile's HID attribute fields (hidPid, hidVersionNumber), where it
+    /// sets them, are what the driver reports, as a wired Xbox pad's HID
+    /// device reads 045E:02FF version 0000 under Windows' GIP driver. Every
+    /// other device, on either backend, presents the profile's own VID, PID
+    /// and version.</summary>
     static (ushort Vid, ushort Pid, ushort Version) AttributesOf(HMController c, HMProfile p)
     {
-        if (c.Backend != HMBackend.Usbip) return (p.VendorId, p.ProductId, p.Inner.VersionNumber ?? 0x0100);
+        if (c.Backend != HMBackend.Usbip)
+            return (p.VendorId, p.Inner.HidProductId, p.Inner.HidVersionNumber ?? p.Inner.VersionNumber ?? 0x0100);
         if (c.Presented.Inner.ReportsOnGipInterface) return HIDMaestro.Internal.Usbip.GipFunction.HidChild;
         var form = p.FormOn(HMBackend.Usbip);
         return (form.VendorId, form.ProductId, form.Inner.VersionNumber ?? 0x0100);
@@ -191,10 +195,13 @@ internal static partial class Program
     /// <summary>The product string Windows gives the HID collection of a
     /// device whose presented form is a GIP device on USB/IP: the GIP
     /// driver's own (the GIP model's hidChild), whatever the device serves.
-    /// Null for every other device, whose product string is the one the
-    /// two backends compare.</summary>
+    /// On UMDF2, a profile's hidProductString where it sets one, which the
+    /// driver reports. Null for every other device, whose product string is
+    /// the one the two backends compare.</summary>
     static string? ProductOf(HMController c) =>
-        c.Backend == HMBackend.Usbip && c.Presented.Inner.ReportsOnGipInterface ? HIDMaestro.Internal.Usbip.GipFunction.HidChildProduct : null;
+        c.Backend == HMBackend.Usbip
+            ? (c.Presented.Inner.ReportsOnGipInterface ? HIDMaestro.Internal.Usbip.GipFunction.HidChildProduct : null)
+            : c.Presented.Inner.HidProductString;
 
     static Snapshot Take(HMContext ctx, HMProfile p, HMBackend backend, string key)
     {
