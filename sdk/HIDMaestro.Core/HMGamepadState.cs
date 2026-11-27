@@ -212,11 +212,12 @@ public struct HMGamepadState
     //
     // A DualShock 3 measures how hard ten of its buttons are pressed, 0
     // (released) to 255 (fully pressed). Its L2 and R2 pressures are the
-    // trigger axes. Profiles that carry pressure (the dualshock-3-full
-    // persona) send these. A pressure of 0 on a button that Buttons or Hat
-    // marks as pressed is sent as 255, so a consumer that only knows
-    // digital state still presses the button fully. A nonzero pressure is
-    // sent as given, whether or not the button is pressed.
+    // trigger axes. Profiles that carry pressure (dualshock-3 and the
+    // dualshock-3-full persona) send these. A pressure of 0 on a button
+    // that Buttons or Hat marks as pressed is sent as 255, so a consumer
+    // that only knows digital state still presses the button fully. A
+    // nonzero pressure is sent as given, whether or not the button is
+    // pressed.
 
     /// <summary>Cross (<see cref="HMButton.A"/>) pressure, 0..255.</summary>
     public byte PressureA;
@@ -305,9 +306,11 @@ public static class HMGamepadStateHelpers
         }
         // A trigger value never lands on an axis a stick holds: a profile
         // whose layout declares no triggers and whose right stick sits on
-        // the canonical trigger axes (switch-pro-usb, dualshock-3,
-        // logitech-f310: Z and Rz) keeps its right stick, and the trigger
-        // values go nowhere.
+        // the canonical trigger axes (switch-pro-usb, logitech-f310: Z and
+        // Rz) keeps its right stick, and the trigger values go nowhere.
+        // dualshock-3's axisMap names Rx and Ry for its triggers, axes no
+        // stick holds, so its trigger values go there and its report sends
+        // them as L2 and R2.
         void Trigger(HMAxis axis, float value)
         {
             if (axis != HMAxis.None) axes.TryAdd(axis, value);

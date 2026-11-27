@@ -45,7 +45,9 @@ internal static class Program
         "dualshock-3-full",
         // v1.10.1 (issue #65): the native-descriptor DualShock 3 decodes the
         // same output report with the same spec, so its output and decode
-        // goldens equal dualshock-3-full's.
+        // goldens equal dualshock-3-full's. Issue #78 gave it the same native
+        // input report 0x01 with the same fields, so its input goldens equal
+        // dualshock-3-full's too.
         "dualshock-3",
         // v2.0.0: the Valve and Nintendo personas, whose reports are the
         // codec's from the data-driven design on, a port block for the
@@ -149,6 +151,9 @@ internal static class Program
         "golden dualshock-3-full out 1 E39DCB23E21D2275F87D4B91219F8B4B9FA006CA0AC9F619F499BF6DF73DBB51",
         "golden dualshock-3-full out 2 3554DA9900A9966F77128BF999984D3012AF0A7C653AC6409522E69D63576FAC",
         "golden dualshock-3-full dec 0 C317D8EC38CC58B36E3AFA5C53AF37BF02C90C18CE30EF18E257E45874E08F09",
+        "golden dualshock-3 in 0 4B603F154EB5F63CF20156E9D652FC8A170A9C8580892337A8DE15CB4D0F8ADB",
+        "golden dualshock-3 in 1 66ECB0E68E87A9291D9FAF56DEE9F82A6543D042682B825AB130DE9323547375",
+        "golden dualshock-3 in 2 C6F4908783E37875FD85B6E1A69ED625916535676B94F9F5547EBBD77C5458A8",
         "golden dualshock-3 out 0 07FCEF7A57C97780DC992A36E93E835A7436DE9186DF30881AD49BD300CED7A5",
         "golden dualshock-3 out 1 E39DCB23E21D2275F87D4B91219F8B4B9FA006CA0AC9F619F499BF6DF73DBB51",
         "golden dualshock-3 out 2 3554DA9900A9966F77128BF999984D3012AF0A7C653AC6409522E69D63576FAC",

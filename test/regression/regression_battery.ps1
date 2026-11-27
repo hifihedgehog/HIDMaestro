@@ -2589,11 +2589,16 @@ function Scenario-Ds4-Report {
 # persona's joystick report and report 0 feature reply against DsHidMini's
 # conversions; RPCS3's read sequence and output reports; and stock SDL3
 # with PCSX2's sixaxis hint, which must see a PS3 controller with 16 axes
-# and 11 buttons and read every pressure axis. SKIPs only the SDL part when
-# the sibling SDL3-build/build-stock checkout is absent.
+# and 11 buttons and read every pressure axis. The native-descriptor
+# dualshock-3 must decode its output report 0x01 (issue #65) and send its
+# native input report 0x01 (issue #78): every HMButton bit alone, each hat
+# direction, the triggers at four values and the right stick at its corner,
+# encoded offline and read back live with ReadFile, byte for byte against
+# the offsets SDL's PS3 driver, hid-sony.c and DsHidMini read. SKIPs only
+# the SDL part when the sibling SDL3-build/build-stock checkout is absent.
 function Scenario-Ds3-Sixaxis {
     Invoke-Probe -Dir 'ds3_sixaxis_check' -Exe 'Ds3SixaxisCheck.exe' `
-                 -Message 'the DualShock 3 persona no longer reads as a sixaxis.sys DS3 with pressure, or the native one stopped decoding its output report (see probe stdout)' -SkipCodes 2
+                 -Message 'the DualShock 3 persona no longer reads as a sixaxis.sys DS3 with pressure, or the native one stopped decoding its output report or sending its native input report (see probe stdout)' -SkipCodes 2
 }
 
 # S65: the Switch 2 Pro Controller composite persona (issue #66). The pad

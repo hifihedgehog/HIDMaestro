@@ -26,9 +26,17 @@
 //    and SDL_hidapi_ps3.c send. Through WriteFile and HidD_SetOutputReport
 //    it reaches OutputDecoded with the motors and LEDs at hid-sony's
 //    offsets, the decode PadForge's DualShock 3 motor handler reads.
+// E. The native-descriptor dualshock-3's input report (issue #78). Offline,
+//    its report 0x01 for every HMButton bit alone, each hat direction, the
+//    triggers at four values and the right stick at its corner is encoded
+//    and compared byte for byte with the report SDL_hidapi_ps3.c, hid-sony.c
+//    and DsHidMini's DS3_RAW_INPUT_REPORT give, and its buttonMap puts each
+//    bit on the same button in a report built from the descriptor. Live, on
+//    part D's controller, each of those states is submitted and its input
+//    report read back with ReadFile.
 //
-// B, C and D need elevation. Exit 0 PASS, 1 FAIL, 2 when everything that ran
-// passed and C was skipped for want of a stock SDL3.dll.
+// B, C, D and E's live half need elevation. Exit 0 PASS, 1 FAIL, 2 when
+// everything that ran passed and C was skipped for want of a stock SDL3.dll.
 //
 // record <out dir> instead records part B's states, the report 0 feature and
 // the sixaxis.sys output commands for device_oracle_check's compare-live mode
@@ -859,12 +867,274 @@ internal static class Program
             Check("OutputDecoded reads both motors off",
                   d3 != null && F(d3, "rightMotorOn") == 0 && F(d3, "leftMotorForce") == 0,
                   d3 == null ? "nothing decoded" : $"on {F(d3, "rightMotorOn")}, force {F(d3, "leftMotorForce")}");
+
+            PartELive(c, prof, path);
         }
         catch (Exception ex) { Check("part D ran without throwing", false, ex.Message); }
         finally
         {
             c?.Dispose();
         }
+    }
+
+    // ── E. The native-descriptor DualShock 3's input report (issue #78) ──
+    //
+    // dualshock-3 sends the native report 0x01 its descriptor declares, whole
+    // from the first submit (extendedReport.alwaysArmed). Each case is one
+    // HMButton bit alone, one hat direction, one trigger value or the right
+    // stick at its corner. Its report is built here from the references, not
+    // from the profile:
+    //   SDL-3.4.18 (829a65d) SDL_hidapi_ps3.c HIDAPI_DriverPS3_HandleStatePacket,
+    //   423-521. Byte 2 is Select, L3, R3, Start, up, right, down and left
+    //   (431-450), byte 3 bits 2 to 7 L1, R1, triangle, circle, cross and
+    //   square (452-457), byte 4 bit 0 PS (461), the triggers bytes 18 and
+    //   19 and the sticks 6 to 9 (464-475), and the pressures 14 to 25
+    //   (button_axis_offsets, 479-495).
+    //   hid-sony.c sixaxis_keymap (414-432): button usages 9 and 10, byte 3
+    //   bits 0 and 1, are L2 and R2. sixaxis_mapping (864-883) reads the L2
+    //   and R2 values from elements 8 and 9 of the pointer field at byte 10,
+    //   bytes 18 and 19.
+    //   DsHidMini Ds3Types.h DS3_RAW_INPUT_REPORT (b9f9dcb, 11-114): the
+    //   same bits (31-47), pressures (78-92), battery (102) and motion
+    //   (109-112).
+    // Each case's left stick X is a byte of its own, so the report that
+    // matches it can only come from its own submit.
+
+    /// <summary>An HMButton bit, the byte and bit of the native report that
+    /// carries it, and its pressure byte, -1 for none.</summary>
+    static readonly (HMButton Button, int Byte, int Bit, int Pressure)[] NativeButtons =
+    {
+        (HMButton.Back,        2, 0, -1),
+        (HMButton.LeftStick,   2, 1, -1),
+        (HMButton.RightStick,  2, 2, -1),
+        (HMButton.Start,       2, 3, -1),
+        (HMButton.LeftBumper,  3, 2, 20),
+        (HMButton.RightBumper, 3, 3, 21),
+        (HMButton.Y,           3, 4, 22),
+        (HMButton.B,           3, 5, 23),
+        (HMButton.A,           3, 6, 24),
+        (HMButton.X,           3, 7, 25),
+        (HMButton.Guide,       4, 0, -1),
+    };
+
+    /// <summary>The D-pad's up, right, down and left: byte 2's bit and the
+    /// pressure byte of each.</summary>
+    static readonly (int Bit, int Pressure)[] NativeDpad = { (4, 14), (5, 15), (6, 16), (7, 17) };
+
+    static int[] HatDirections(HMHat h) => h switch
+    {
+        HMHat.North     => new[] { 0 },
+        HMHat.NorthEast => new[] { 0, 1 },
+        HMHat.East      => new[] { 1 },
+        HMHat.SouthEast => new[] { 1, 2 },
+        HMHat.South     => new[] { 2 },
+        HMHat.SouthWest => new[] { 2, 3 },
+        HMHat.West      => new[] { 3 },
+        HMHat.NorthWest => new[] { 3, 0 },
+        _               => Array.Empty<int>(),
+    };
+
+    /// <summary>The native report for the buttons, the hat and the two
+    /// trigger bytes, with the left stick X at <paramref name="lx"/>, the
+    /// right stick at <paramref name="rs"/> on both axes and the rest of the
+    /// pad at rest. A pressed button with no pressure reads 255 (HMGamepadState
+    /// Pressure*), and L2's and R2's buttons are set while their byte is
+    /// above zero.</summary>
+    static byte[] NativeReport(byte lx, HMButton buttons, HMHat hat, byte l2, byte r2, byte rs = 0x80)
+    {
+        var e = new byte[49];
+        e[0] = 0x01;
+        foreach (var (button, at, bit, pressure) in NativeButtons)
+        {
+            if ((buttons & button) == 0) continue;
+            e[at] |= (byte)(1 << bit);
+            if (pressure >= 0) e[pressure] = 0xFF;
+        }
+        foreach (int d in HatDirections(hat))
+        {
+            e[2] |= (byte)(1 << NativeDpad[d].Bit);
+            e[NativeDpad[d].Pressure] = 0xFF;
+        }
+        e[6] = lx; e[7] = 0x80; e[8] = rs; e[9] = rs;
+        e[18] = l2; e[19] = r2;
+        if (l2 != 0) e[3] |= 0x01;
+        if (r2 != 0) e[3] |= 0x02;
+        e[30] = 0xEE;                                   // charging, as a pad on USB reports
+        for (int at = 41; at <= 47; at += 2) e[at] = 0x02; // the motion sensors at rest, 512, high byte first
+        return e;
+    }
+
+    /// <summary>One case of part E: the state, the slot values the SDK
+    /// resolves its axes to, and the report the references give.</summary>
+    sealed record NativeCase(string Name, HMGamepadState State, float Lx, float Rs, float Lt, float Rt, byte[] Want);
+
+    static List<NativeCase> NativeCases(HMProfile prof)
+    {
+        var cases = new List<NativeCase>();
+        void Add(string name, HMButton buttons, HMHat hat, float lt, float rt, byte l2, byte r2, bool rightStickOut = false)
+        {
+            byte lxByte = (byte)(0x10 + cases.Count);
+            float lx = lxByte / 255f;
+            float rs = rightStickOut ? 1f : 0.5f;
+            var st = new HMGamepadState
+            {
+                Buttons = buttons,
+                Hat = hat,
+                Axes = HMGamepadStateHelpers.StandardAxes(prof, lx, 0.5f, rs, rs, lt, rt),
+            };
+            cases.Add(new NativeCase(name, st, lx, rs, lt, rt,
+                                     NativeReport(lxByte, buttons, hat, l2, r2, rightStickOut ? (byte)0xFF : (byte)0x80)));
+        }
+        for (int bit = 0; bit <= 24; bit++)
+            Add($"HMButton bit {bit} alone", (HMButton)(1u << bit), HMHat.None, 0f, 0f, 0, 0);
+        foreach (var hat in new[] { HMHat.North, HMHat.NorthEast, HMHat.East, HMHat.SouthEast,
+                                    HMHat.South, HMHat.SouthWest, HMHat.West, HMHat.NorthWest })
+            Add($"hat {hat}", HMButton.None, hat, 0f, 0f, 0, 0);
+        // Under half a count is byte 0 with the button clear, 1/255 the first
+        // count with it set (VendorBlobCodec.TriggerOn), then half and full.
+        foreach (var (v, b) in new (float, byte)[] { (0.001f, 0), (1f / 255f, 1), (0.5f, 128), (1f, 255) })
+        {
+            Add($"left trigger at {v}", HMButton.None, HMHat.None, v, 0f, b, 0);
+            Add($"right trigger at {v}", HMButton.None, HMHat.None, 0f, v, 0, b);
+        }
+        // The right stick is Z and Rz, the axes a profile with no axisMap
+        // takes its triggers from. At its corner it reaches no trigger byte.
+        Add("right stick at 1.0 on both axes, triggers released", HMButton.None, HMHat.None, 0f, 0f, 0, 0, rightStickOut: true);
+        return cases;
+    }
+
+    static string Diff(byte[] got, byte[] want) =>
+        got.Length != want.Length ? $"{got.Length} bytes, {BitConverter.ToString(got)}"
+            : string.Join(" ", Enumerable.Range(0, want.Length).Where(k => got[k] != want[k]).Select(k => $"{k}:{got[k]:X2}/{want[k]:X2}"));
+
+    static void PartE(HMContext ctx)
+    {
+        Console.WriteLine();
+        Console.WriteLine("--- E. The native-descriptor dualshock-3's input report, offline (issue #78) ---");
+        var prof = ctx.GetProfile("dualshock-3");
+        Check("dualshock-3 is in the catalog", prof != null);
+        if (prof == null) return;
+        var spec = prof.Inner.ExtendedReport;
+        Check("its extended report is the native report 0x01 its descriptor declares, 49 bytes, always armed",
+              spec != null && spec.ReportIdByte == 0x01 && spec.Size == 49 && spec.AlwaysArmed,
+              spec == null ? "none" : $"0x{spec.ReportIdByte:X2}, {spec.Size} bytes, always armed {spec.AlwaysArmed}");
+        if (spec == null) return;
+
+        // Part A's state gives part A's native report here too.
+        var st = TestState();
+        var a = new byte[49];
+        VendorBlobCodec.EncodeInput(spec, in st, LX, LY, RX, RY, LT, RT, a, new VendorBlobCodec.EncoderState());
+        Check("part A's state encodes to part A's native report", a.SequenceEqual(ExpectedNative()), Diff(a, ExpectedNative()));
+
+        // The triggers read the axes axisMap names. Without it they read Z
+        // and Rz (HMController.ResolveCanonicalAxis), the right stick here.
+        var lt = HMController.ResolveCanonicalAxis(prof.Inner.AxisMap, "lefttrigger", HMAxis.Z);
+        var rt = HMController.ResolveCanonicalAxis(prof.Inner.AxisMap, "righttrigger", HMAxis.Rz);
+        var sticks = prof.Sticks;
+        bool held = sticks.Any(s => s.XAxis == lt || s.YAxis == lt || s.XAxis == rt || s.YAxis == rt);
+        Check("its triggers read Rx and Ry, which no stick holds", lt == HMAxis.Rx && rt == HMAxis.Ry && !held,
+              $"{lt}/{rt}, sticks {string.Join(" ", sticks.Select(s => $"{s.XAxis}/{s.YAxis}"))}");
+        var axes = HMGamepadStateHelpers.StandardAxes(prof, 0.5f, 0.5f, 1f, 1f, 0.25f, 0.75f);
+        double lv = HMController.ResolveTrigger(axes, prof.Triggers, 0, lt);
+        double rv = HMController.ResolveTrigger(axes, prof.Triggers, 1, rt);
+        Check("StandardAxes' triggers reach the trigger slots, and the right stick does not",
+              lv == 0.25 && rv == 0.75 && axes.GetValueOrDefault(HMAxis.Z, -1f) == 1f && axes.GetValueOrDefault(HMAxis.Rz, -1f) == 1f,
+              $"slots {lv}/{rv}, {string.Join(" ", axes.Select(kv => $"{kv.Key}={kv.Value}"))}");
+        Check("its layout names the D-pad as buttons 4 to 7 (up, right, down, left)",
+              prof.Layout is HMGamepadLayout { Dpad: { Encoding: HMDpadEncoding.Buttons, UpButton: 4, RightButton: 5, DownButton: 6, LeftButton: 7 } });
+
+        var bad = new List<string>();
+        var cases = NativeCases(prof);
+        foreach (var k in cases)
+        {
+            var r = new byte[49];
+            var s = k.State;
+            VendorBlobCodec.EncodeInput(spec, in s, k.Lx, 0.5f, k.Rs, k.Rs, k.Lt, k.Rt, r, new VendorBlobCodec.EncoderState());
+            if (!r.SequenceEqual(k.Want)) bad.Add($"{k.Name}: {Diff(r, k.Want)}");
+        }
+        Check($"each of the {cases.Count} cases encodes to the report SDL, Linux and DsHidMini read",
+              bad.Count == 0, string.Join("; ", bad));
+
+        // A report built from the descriptor (HidReportBuilder.BuildReport)
+        // puts each bit on the same button, so both paths agree.
+        var rb = prof.Inner.GetOrBuildReportBuilder();
+        var apart = new List<string>();
+        for (int bit = 0; bit <= 24; bit++)
+        {
+            var d = rb.BuildReport(null, 0, 1u << bit);
+            var want = NativeReport(0x80, (HMButton)(1u << bit), HMHat.None, 0, 0);
+            for (int at = 2; at <= 5; at++)
+                if (d[at] != want[at]) { apart.Add($"bit {bit} byte {at}: {d[at]:X2}/{want[at]:X2}"); break; }
+        }
+        Check("its buttonMap puts every HMButton bit on the same button in a report built from the descriptor",
+              apart.Count == 0, string.Join("; ", apart));
+    }
+
+    /// <summary>Part E live: on part D's controller, each case's input
+    /// report read back off the HID interface, byte for byte.</summary>
+    static void PartELive(HMController c, HMProfile prof, string path)
+    {
+        Console.WriteLine();
+        Console.WriteLine("--- E. The native-descriptor dualshock-3's input report, live (issue #78) ---");
+        IntPtr ev = IntPtr.Zero;
+        try
+        {
+            using var hr = Open(path, overlapped: true);
+            Check("the HID interface opens for overlapped reads", !hr.IsInvalid, hr.IsInvalid ? $"error {Marshal.GetLastWin32Error()}" : "");
+            if (hr.IsInvalid) return;
+            ev = CreateEventW(IntPtr.Zero, true, false, IntPtr.Zero);
+            // One report's length, so a read returns one report. Pinned, and
+            // a canceled read waited out: the system writes the buffer and
+            // the OVERLAPPED when the read completes, canceled or not
+            // (CancelIoEx, Microsoft Learn).
+            var buf = GC.AllocateArray<byte>(49, pinned: true);
+            foreach (var k in NativeCases(prof))
+            {
+                // Drop what the HID class buffered for the case before, then
+                // submit this one. A report from before cannot match: its
+                // left stick X is another case's.
+                HidD_FlushQueue(hr);
+                c.SubmitState(k.State);
+                var got = AwaitReport(hr, ev, buf, c, k.State, k.Want);
+                Check($"{k.Name}: the input report is the native report",
+                      got != null && got.AsSpan().SequenceEqual(k.Want),
+                      got == null ? "no report" : got.AsSpan().SequenceEqual(k.Want) ? "" : Diff(got, k.Want));
+            }
+        }
+        catch (Exception ex) { Check("part E ran without throwing", false, ex.Message); }
+        finally
+        {
+            if (ev != IntPtr.Zero) CloseHandle(ev);
+        }
+    }
+
+    /// <summary>Reads input reports until one equals <paramref name="want"/>
+    /// or the scaled bound ends. Returns that report, else the last one read,
+    /// else null. A read that waits out its slice submits the state again,
+    /// so a frame no read was parked for goes out once more.</summary>
+    static byte[]? AwaitReport(SafeFileHandle h, IntPtr ev, byte[] buf, HMController c, HMGamepadState st, byte[] want)
+    {
+        int bound = TimeoutScale.Apply(5000);
+        uint slice = (uint)TimeoutScale.Apply(250);
+        byte[]? last = null;
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < bound)
+        {
+            Array.Clear(buf);
+            var ov = new NativeOverlapped { EventHandle = ev };
+            if (!ReadFileOverlapped(h, buf, (uint)buf.Length, IntPtr.Zero, ref ov) && Marshal.GetLastWin32Error() != 997)
+                throw new InvalidOperationException($"ReadFile failed, error {Marshal.GetLastWin32Error()}");
+            if (!GetOverlappedResultEx(h, ref ov, out uint n, slice, false))
+            {
+                CancelIoEx(h, IntPtr.Zero);
+                GetOverlappedResultEx(h, ref ov, out _, 0xFFFFFFFF /* INFINITE */, false);
+                c.SubmitState(st);
+                continue;
+            }
+            last = buf.AsSpan(0, (int)n).ToArray();
+            if (last.AsSpan().SequenceEqual(want)) return last;
+        }
+        return last;
     }
 
     static int Main(string[] args)
@@ -882,6 +1152,7 @@ internal static class Program
         ctx.LoadDefaultProfiles();
 
         PartA(ctx);
+        PartE(ctx);
 
         bool elevated;
         using (var id = System.Security.Principal.WindowsIdentity.GetCurrent())
@@ -891,7 +1162,7 @@ internal static class Program
         if (!elevated)
         {
             Console.WriteLine();
-            Console.WriteLine("  [SKIP] parts B, C and D create a controller and need elevation");
+            Console.WriteLine("  [SKIP] parts B, C, D and E's live half create a controller and need elevation");
         }
         else
         {
