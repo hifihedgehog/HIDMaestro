@@ -27,7 +27,10 @@
 //      same from its first create, beside a running v1.12.0 program's
 //      controller and once every v1.12.0 controller is gone, and its
 //      controllers work: input, a Sony feature answer, an XUSB interface
-//      (SectionECreate.cs).
+//      (SectionECreate.cs). The v1.11.0 program's cleanup deletes the
+//      joy.cpl keys under the Microsoft, Sony and VID 0000 prefixes, which
+//      go back as they were once it ends (OemSnapshot.cs), as they do
+//      after M's.
 //   F. Two programs call InstallDriver at the same moment on a machine
 //      without the driver. One deploys, the other finds it current, and
 //      both succeed.
@@ -300,6 +303,7 @@ internal static partial class Program
             Clean(startNext: false);
             return rc;
         }
+        OemSnapshot.RestoreLeft();
         Clean();
         ReadMachineBackend();
         var sections = new (char Id, string Title, Action Body)[]
@@ -922,8 +926,11 @@ internal static partial class Program
         }
 
         // E4. A live v1.11.0 program on its own driver, which predates the
-        // driver protocol this SDK needs.
+        // driver protocol this SDK needs. Its cleanup deletes the joy.cpl
+        // keys under the Microsoft, Sony and VID 0000 prefixes, which go back
+        // as they were after it (OemSnapshot).
         Uninstall();
+        using (OemSnapshot.Kept("E4"))
         using (var v11 = PeerProcess.Start("E4-v1.11.0", "v1.11.0"))
         {
             v11.Send("install");
@@ -1278,6 +1285,10 @@ internal static partial class Program
             Check("M: the v1.11.0 peer is built", false, "build CoexistCheck.csproj");
             return;
         }
+        // The v1.11.0 program's cleanup deletes the joy.cpl keys under the
+        // Microsoft, Sony and VID 0000 prefixes, which go back as they were
+        // after it (OemSnapshot).
+        using (OemSnapshot.Kept("M1"))
         using (var old = PeerProcess.Start("M1-v1.11.0", "v1.11.0"))
         {
             string co = old.Send("create xbox - coexist-m");
