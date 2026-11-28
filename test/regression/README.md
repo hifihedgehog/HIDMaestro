@@ -100,11 +100,10 @@ command, and the test app's exit after quit get 3600 s, S71 6300 s and S73
 still running then fails its scenario as a hang, with the probe's
 transcript, and its process tree is stopped.
 
-Total wall time at 2.4.0, with 115
-scenarios: 49 minutes for every scenario, every section and check, on the development laptop, a
-Lenovo Legion Pro 7 16AFR10H, 39 minutes on a desktop PC with an AMD Ryzen 9 9950X3D, 88 minutes on a
-MeLE PCG02 GLE stick PC at `HIDMAESTRO_TIMEOUT_SCALE=2`, and 27 minutes on an ARM64 Microsoft Surface
-Pro. Use `-Filter` to run one scenario when
+Total wall time at 2.4.1, with 115
+scenarios: 44 minutes on a desktop PC with an AMD Ryzen 9 9950X3D, 83 minutes on a MeLE PCG02
+GLE stick PC at `HIDMAESTRO_TIMEOUT_SCALE=2`, and 28 minutes on an ARM64 Microsoft Surface Pro,
+each without the scenarios its machine skips. Use `-Filter` to run one scenario when
 iterating.
 
 The battery runs the test app and the probes built for the machine's
