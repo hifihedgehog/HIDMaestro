@@ -418,13 +418,14 @@ public static partial class DeviceManager
     /// (<see cref="Usbip.VhciClient.HasPresentInterface"/>,
     /// CM_Get_Device_Interface_List with the device's instance ID). The
     /// class's key under DeviceClasses is no record of that. On a Windows 11
-    /// 25H2 test system (build 26200), once a full removal had deleted
-    /// HIDMaestro's entries there, Windows listed a companion's XUSB
-    /// interface 0.84 s into its create while no entry under the key named
-    /// it for the companion's whole life. Its arrival came before the wait's
-    /// notification was registered, so every Xbox 360 create waited out its
-    /// three 5 s waits (CreateXusbCompanion 31.6 s). An entry an earlier
-    /// life left names a device that may be gone.</summary>
+    /// 25H2 test system (build 26200), Windows listed a companion's XUSB
+    /// interface under a second into its create while no entry under the
+    /// key named it for the companion's whole life. Its arrival came before
+    /// the wait's notification was registered, so every Xbox 360 create
+    /// waited out its three 5 s waits (CreateXusbCompanion 31.6 s). What left
+    /// the key without the entry was not established: creates on the same
+    /// system had been fast after a removal earlier the same day. An entry
+    /// an earlier life left names a device that may be gone.</summary>
     static bool HasInterface(string instanceId, Guid interfaceGuid) =>
         Usbip.VhciClient.HasPresentInterface(instanceId, interfaceGuid);
 
