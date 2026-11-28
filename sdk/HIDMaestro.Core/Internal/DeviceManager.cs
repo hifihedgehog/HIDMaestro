@@ -365,8 +365,7 @@ public static partial class DeviceManager
     /// as on a timeout.</summary>
     public static bool WaitForDeviceInterface(string instanceId, Guid interfaceGuid, int timeoutMs, Func<bool>? failed)
     {
-        // Check if already present
-        // (CM_Locate + check interfaces via registry)
+        // Already present, as Windows lists it (HasInterface).
         if (HasInterface(instanceId, interfaceGuid))
             return true;
 
@@ -414,19 +413,20 @@ public static partial class DeviceManager
             () => WaitUntil(ready, signal, timeoutMs, 25));
     }
 
-    static bool HasInterface(string instanceId, Guid interfaceGuid)
-    {
-        // Quick check via registry
-        string regPath = $@"SYSTEM\CurrentControlSet\Control\DeviceClasses\{{{interfaceGuid}}}";
-        try
-        {
-            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(regPath);
-            if (key == null) return false;
-            string hash = instanceId.Replace('\\', '#').ToLowerInvariant();
-            return key.GetSubKeyNames().Any(s => s.ToLowerInvariant().Contains(hash));
-        }
-        catch { return false; }
-    }
+    /// <summary>Whether Windows lists an interface of the class on the device
+    /// as present, as a program that opens it sees it
+    /// (<see cref="Usbip.VhciClient.HasPresentInterface"/>,
+    /// CM_Get_Device_Interface_List with the device's instance ID). The
+    /// class's key under DeviceClasses is no record of that. On a Windows 11
+    /// 25H2 test system (build 26200), once a full removal had deleted
+    /// HIDMaestro's entries there, Windows listed a companion's XUSB
+    /// interface 0.84 s into its create while no entry under the key named
+    /// it for the companion's whole life. Its arrival came before the wait's
+    /// notification was registered, so every Xbox 360 create waited out its
+    /// three 5 s waits (CreateXusbCompanion 31.6 s). An entry an earlier
+    /// life left names a device that may be gone.</summary>
+    static bool HasInterface(string instanceId, Guid interfaceGuid) =>
+        Usbip.VhciClient.HasPresentInterface(instanceId, interfaceGuid);
 
     /// <summary>
     /// Waits for a HID device interface to appear for the given device instance ID.
